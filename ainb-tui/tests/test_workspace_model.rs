@@ -1,6 +1,6 @@
 // ABOUTME: Unit tests for Workspace model to ensure proper session management and operations
 
-use claude_box::models::{Session, SessionStatus, Workspace};
+use ainb::models::{Session, SessionStatus, Workspace};
 use std::path::PathBuf;
 
 #[test]

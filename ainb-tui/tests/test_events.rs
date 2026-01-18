@@ -1,6 +1,6 @@
 // ABOUTME: Unit tests for event handling to ensure keyboard inputs map to correct app actions
 
-use claude_box::app::{AppState, EventHandler};
+use ainb::app::{AppState, EventHandler};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 const fn create_key_event(code: KeyCode) -> KeyEvent {
@@ -51,7 +51,7 @@ fn test_navigation_key_events() {
 
 #[tokio::test]
 async fn test_n_key_triggers_new_session() {
-    use claude_box::app::state::{AsyncAction, View};
+    use ainb::app::state::{AsyncAction, View};
 
     let mut state = AppState::default();
 

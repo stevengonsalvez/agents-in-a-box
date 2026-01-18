@@ -5,12 +5,12 @@ use ratatui::{Terminal, backend::TestBackend};
 use std::time::Duration;
 use tokio::time::timeout;
 
-use agents_box::app::events::EventHandler;
-use agents_box::app::{
+use ainb::app::events::EventHandler;
+use ainb::app::{
     App,
     state::{NewSessionStep, View},
 };
-use agents_box::components::LayoutComponent;
+use ainb::components::LayoutComponent;
 
 pub struct UITestFramework {
     app: App,

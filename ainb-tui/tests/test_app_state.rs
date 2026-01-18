@@ -1,7 +1,7 @@
 // ABOUTME: Unit tests for AppState to ensure navigation and state management work correctly
 
-use agents_box::app::AppState;
-use agents_box::models::{Session, SessionStatus, Workspace};
+use ainb::app::AppState;
+use ainb::models::{Session, SessionStatus, Workspace};
 use std::path::PathBuf;
 
 fn create_test_state() -> AppState {
