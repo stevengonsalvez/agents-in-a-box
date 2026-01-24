@@ -6,10 +6,9 @@
 use anyhow::Result;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
-use uuid::Uuid;
 
+use super::util::find_session;
 use super::AttachArgs;
-use crate::interactive::session_manager::{SessionMetadata, SessionStore};
 
 /// Execute the attach command
 #[allow(clippy::unused_async)]
@@ -41,100 +40,9 @@ pub async fn execute(args: AttachArgs) -> Result<()> {
     Err(anyhow::anyhow!("Failed to attach: {err}"))
 }
 
-/// Find a session by ID (full or partial UUID) or workspace name prefix
-///
-/// Matching priority:
-/// 1. Exact UUID match
-/// 2. UUID prefix match (e.g., "abc" matches "abc12345-...")
-/// 3. Workspace name prefix match (case-insensitive)
-pub fn find_session(id_or_name: &str) -> Result<SessionMetadata> {
-    let store = SessionStore::load();
-
-    if store.sessions.is_empty() {
-        anyhow::bail!("No sessions found. Run 'ainb run' to create a session.");
-    }
-
-    // First, try exact UUID match
-    if let Ok(uuid) = Uuid::parse_str(id_or_name) {
-        for session in store.sessions.values() {
-            if session.session_id == uuid {
-                return Ok(session.clone());
-            }
-        }
-    }
-
-    // Try UUID prefix match
-    let id_lower = id_or_name.to_lowercase();
-    let mut uuid_matches: Vec<&SessionMetadata> = store
-        .sessions
-        .values()
-        .filter(|s| s.session_id.to_string().to_lowercase().starts_with(&id_lower))
-        .collect();
-
-    match uuid_matches.len() {
-        1 => return Ok(uuid_matches.remove(0).clone()),
-        n if n > 1 => {
-            let ids: Vec<String> = uuid_matches
-                .iter()
-                .map(|s| format!("  {} ({})", &s.session_id.to_string()[..8], s.workspace_name))
-                .collect();
-            anyhow::bail!(
-                "Ambiguous session ID prefix '{id_or_name}'. Matches:\n{}",
-                ids.join("\n")
-            );
-        }
-        _ => {}
-    }
-
-    // Try workspace name prefix match (case-insensitive)
-    let mut name_matches: Vec<&SessionMetadata> = store
-        .sessions
-        .values()
-        .filter(|s| s.workspace_name.to_lowercase().starts_with(&id_lower))
-        .collect();
-
-    match name_matches.len() {
-        1 => return Ok(name_matches.remove(0).clone()),
-        n if n > 1 => {
-            let names: Vec<String> = name_matches
-                .iter()
-                .map(|s| format!("  {} ({})", s.workspace_name, &s.session_id.to_string()[..8]))
-                .collect();
-            anyhow::bail!(
-                "Ambiguous session name prefix '{id_or_name}'. Matches:\n{}",
-                names.join("\n")
-            );
-        }
-        _ => {}
-    }
-
-    anyhow::bail!(
-        "No session found matching '{id_or_name}'. Use 'ainb list' to see available sessions."
-    );
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use chrono::Utc;
-    use std::path::PathBuf;
-
-    #[allow(dead_code)]
-    fn make_test_session(id: &str, workspace: &str) -> SessionMetadata {
-        SessionMetadata {
-            session_id: Uuid::parse_str(id).unwrap(),
-            tmux_session_name: format!("tmux_test_{workspace}"),
-            worktree_path: PathBuf::from("/tmp/test"),
-            workspace_name: workspace.to_string(),
-            created_at: Utc::now(),
-        }
-    }
-
-    #[test]
-    fn test_find_session_exact_uuid() {
-        // This test requires mocking SessionStore, which would need refactoring
-        // For now, we test the parsing logic indirectly through integration tests
-    }
+    use uuid::Uuid;
 
     #[test]
     fn test_uuid_prefix_matching_logic() {

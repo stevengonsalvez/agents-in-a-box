@@ -151,12 +151,17 @@ fn output_text(sessions: &[SessionInfo]) {
     }
 }
 
-/// Truncate a string to fit in the given width
+/// Truncate a string to fit in the given width (character-aware for UTF-8)
 fn truncate(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
+    if max_len <= 3 {
+        return ".".repeat(max_len);
+    }
+    let char_count = s.chars().count();
+    if char_count <= max_len {
         s.to_string()
     } else {
-        format!("{}...", &s[..max_len.saturating_sub(3)])
+        let truncated: String = s.chars().take(max_len.saturating_sub(3)).collect();
+        format!("{truncated}...")
     }
 }
 

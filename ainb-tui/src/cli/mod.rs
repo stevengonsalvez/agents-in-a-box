@@ -11,6 +11,7 @@ pub mod list;
 pub mod logs;
 pub mod attach;
 pub mod status;
+pub mod util;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;

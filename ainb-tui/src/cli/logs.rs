@@ -6,10 +6,9 @@
 use anyhow::{bail, Result};
 use std::time::Duration;
 use tokio::process::Command;
-use uuid::Uuid;
 
+use super::util::find_session;
 use super::LogsArgs;
-use crate::interactive::session_manager::{SessionMetadata, SessionStore};
 use crate::tmux::capture::{capture_pane, CaptureOptions};
 
 /// Execute the logs command
@@ -32,46 +31,6 @@ pub async fn execute(args: LogsArgs) -> Result<()> {
         follow_logs(&session.tmux_session_name).await
     } else {
         show_logs(&session.tmux_session_name, args.lines).await
-    }
-}
-
-/// Find a session by ID or name prefix
-///
-/// Searches the session store for a matching session:
-/// 1. First tries to parse as UUID and match by `session_id`
-/// 2. Then tries prefix matching on `workspace_name`, `tmux_session_name`, or `session_id` string
-///
-/// Returns an error if no match is found or if multiple sessions match.
-fn find_session(id_or_name: &str) -> Result<SessionMetadata> {
-    let store = SessionStore::load();
-
-    // Try UUID parse first for exact match
-    if let Ok(uuid) = Uuid::parse_str(id_or_name) {
-        if let Some(session) = store.sessions.values().find(|s| s.session_id == uuid) {
-            return Ok(session.clone());
-        }
-    }
-
-    // Try prefix match on workspace_name, tmux_session_name, or session_id string
-    let matches: Vec<_> = store
-        .sessions
-        .values()
-        .filter(|s| {
-            s.workspace_name.starts_with(id_or_name)
-                || s.tmux_session_name.starts_with(id_or_name)
-                || s.session_id.to_string().starts_with(id_or_name)
-        })
-        .collect();
-
-    match matches.len() {
-        0 => bail!("No session found matching '{id_or_name}'"),
-        1 => Ok(matches[0].clone()),
-        _ => {
-            let names: Vec<_> = matches.iter().map(|s| &s.workspace_name).collect();
-            bail!(
-                "Multiple sessions match '{id_or_name}': {names:?}. Please be more specific."
-            )
-        }
     }
 }
 
@@ -123,24 +82,7 @@ async fn show_logs(session_name: &str, lines: usize) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use chrono::Utc;
-    use std::path::PathBuf;
-
-    /// Create a test SessionMetadata for testing
-    fn create_test_session(
-        id: Uuid,
-        workspace_name: &str,
-        tmux_name: &str,
-    ) -> SessionMetadata {
-        SessionMetadata {
-            session_id: id,
-            tmux_session_name: tmux_name.to_string(),
-            worktree_path: PathBuf::from("/tmp/test"),
-            workspace_name: workspace_name.to_string(),
-            created_at: Utc::now(),
-        }
-    }
+    use uuid::Uuid;
 
     #[test]
     fn test_find_session_by_exact_uuid() {
@@ -161,16 +103,6 @@ mod tests {
 
         assert!(workspace.starts_with(prefix));
         assert!(!workspace.starts_with("other-"));
-    }
-
-    #[test]
-    fn test_session_metadata_creation() {
-        let id = Uuid::new_v4();
-        let session = create_test_session(id, "test-workspace", "tmux_test");
-
-        assert_eq!(session.session_id, id);
-        assert_eq!(session.workspace_name, "test-workspace");
-        assert_eq!(session.tmux_session_name, "tmux_test");
     }
 
     #[test]

@@ -151,7 +151,7 @@ impl CliProvider {
 }
 
 /// Authentication configuration
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthenticationConfig {
     /// Active CLI provider for agent sessions
     #[serde(default)]
@@ -168,6 +168,17 @@ pub struct AuthenticationConfig {
     /// GitHub authentication method (for future use)
     #[serde(default)]
     pub github_method: Option<String>,
+}
+
+impl Default for AuthenticationConfig {
+    fn default() -> Self {
+        Self {
+            cli_provider: CliProvider::default(),
+            claude_provider: ClaudeAuthProvider::default(),
+            default_model: default_claude_model(),
+            github_method: None,
+        }
+    }
 }
 
 fn default_claude_model() -> String {

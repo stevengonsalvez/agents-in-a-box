@@ -3,14 +3,14 @@
 // status: Show detailed session information (text/JSON output)
 // kill: Terminate a session and its tmux, with confirmation prompt
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use serde::Serialize;
 use std::io::{self, Write};
 use std::process::Command;
-use uuid::Uuid;
 
+use super::util::find_session;
 use super::{KillArgs, OutputFormat, StatusArgs};
-use crate::interactive::session_manager::{SessionMetadata, SessionStore};
+use crate::interactive::session_manager::SessionStore;
 use crate::tmux::ClaudeProcessDetector;
 
 /// JSON output structure for status command
@@ -23,94 +23,6 @@ pub struct StatusOutput {
     pub created_at: String,
     pub is_running: bool,
     pub claude_active: bool,
-}
-
-/// Find a session by ID (prefix match) or workspace name
-///
-/// Searches in order:
-/// 1. Full UUID match
-/// 2. UUID prefix match (allows short IDs like "f79e07da")
-/// 3. Workspace name match
-fn find_session(id_or_name: &str) -> Result<SessionMetadata> {
-    let store = SessionStore::load();
-
-    if store.sessions.is_empty() {
-        return Err(anyhow!("No sessions found. Use 'ainb run' to create one."));
-    }
-
-    // Try full UUID match first
-    if let Ok(uuid) = Uuid::parse_str(id_or_name) {
-        for session in store.sessions.values() {
-            if session.session_id == uuid {
-                return Ok(session.clone());
-            }
-        }
-    }
-
-    // Try UUID prefix match (e.g., "f79e07da" matches "f79e07da-774d-415c-aedf-a2acd0bee0d3")
-    let id_lower = id_or_name.to_lowercase();
-    let mut prefix_matches: Vec<_> = store
-        .sessions
-        .values()
-        .filter(|s| s.session_id.to_string().to_lowercase().starts_with(&id_lower))
-        .collect();
-
-    if prefix_matches.len() == 1 {
-        return Ok(prefix_matches.remove(0).clone());
-    }
-
-    if prefix_matches.len() > 1 {
-        let matches: Vec<_> = prefix_matches
-            .iter()
-            .map(|s| format!("  {} ({})", s.session_id, s.workspace_name))
-            .collect();
-        return Err(anyhow!(
-            "Ambiguous session ID '{}'. Matches:\n{}",
-            id_or_name,
-            matches.join("\n")
-        ));
-    }
-
-    // Try workspace name match (case-insensitive)
-    let name_lower = id_or_name.to_lowercase();
-    let mut name_matches: Vec<_> = store
-        .sessions
-        .values()
-        .filter(|s| s.workspace_name.to_lowercase() == name_lower)
-        .collect();
-
-    if name_matches.len() == 1 {
-        return Ok(name_matches.remove(0).clone());
-    }
-
-    if name_matches.len() > 1 {
-        let matches: Vec<_> = name_matches
-            .iter()
-            .map(|s| format!("  {} ({})", s.session_id, s.workspace_name))
-            .collect();
-        return Err(anyhow!(
-            "Multiple sessions with workspace '{}'. Specify by ID:\n{}",
-            id_or_name,
-            matches.join("\n")
-        ));
-    }
-
-    // No match found - provide helpful error message
-    let available: Vec<_> = store
-        .sessions
-        .values()
-        .map(|s| format!("  {} ({})", &s.session_id.to_string()[..8], s.workspace_name))
-        .collect();
-
-    if available.is_empty() {
-        Err(anyhow!("No sessions found. Use 'ainb run' to create one."))
-    } else {
-        Err(anyhow!(
-            "Session '{}' not found. Available sessions:\n{}",
-            id_or_name,
-            available.join("\n")
-        ))
-    }
 }
 
 /// Check if a tmux session exists
@@ -279,7 +191,9 @@ pub async fn kill(args: KillArgs) -> Result<()> {
 mod tests {
     use super::*;
     use chrono::Utc;
+    use crate::interactive::session_manager::SessionMetadata;
     use std::path::PathBuf;
+    use uuid::Uuid;
 
     fn create_test_session(id: Uuid, workspace: &str, tmux_name: &str) -> SessionMetadata {
         SessionMetadata {

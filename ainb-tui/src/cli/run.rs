@@ -171,12 +171,22 @@ async fn clone_remote_repo(remote: &str) -> Result<PathBuf> {
         format!("https://github.com/{}.git", remote)
     };
 
-    // Extract repo name for cache directory
+    // Extract repo name for cache directory (sanitized to prevent path traversal)
     let repo_name = url
         .trim_end_matches(".git")
         .rsplit('/')
         .next()
-        .unwrap_or("repo");
+        .unwrap_or("repo")
+        .replace("..", "")
+        .replace('/', "-")
+        .replace('\\', "-");
+
+    // Validate repo name is safe
+    let repo_name = if repo_name.is_empty() || repo_name == "." {
+        "repo".to_string()
+    } else {
+        repo_name
+    };
 
     let cache_dir = dirs::home_dir()
         .ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?
@@ -204,7 +214,9 @@ async fn clone_remote_repo(remote: &str) -> Result<PathBuf> {
     } else {
         println!("Cloning {}...", url);
         let output = Command::new("git")
-            .args(["clone", &url, repo_path.to_str().unwrap()])
+            .arg("clone")
+            .arg(&url)
+            .arg(&repo_path)
             .output()
             .await?;
 

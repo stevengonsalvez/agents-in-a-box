@@ -23,34 +23,49 @@ impl TestRepo {
         let path = dir.path().to_path_buf();
 
         // Initialize git repo
-        Command::new("git")
+        let output = Command::new("git")
             .args(["init"])
             .current_dir(&path)
             .output()?;
+        if !output.status.success() {
+            anyhow::bail!("git init failed: {}", String::from_utf8_lossy(&output.stderr));
+        }
 
         // Configure git user for commits
-        Command::new("git")
+        let output = Command::new("git")
             .args(["config", "user.email", "test@test.com"])
             .current_dir(&path)
             .output()?;
+        if !output.status.success() {
+            anyhow::bail!("git config email failed: {}", String::from_utf8_lossy(&output.stderr));
+        }
 
-        Command::new("git")
+        let output = Command::new("git")
             .args(["config", "user.name", "Test User"])
             .current_dir(&path)
             .output()?;
+        if !output.status.success() {
+            anyhow::bail!("git config name failed: {}", String::from_utf8_lossy(&output.stderr));
+        }
 
         // Create initial file and commit
         std::fs::write(path.join("README.md"), "# Test Repo\n")?;
 
-        Command::new("git")
+        let output = Command::new("git")
             .args(["add", "."])
             .current_dir(&path)
             .output()?;
+        if !output.status.success() {
+            anyhow::bail!("git add failed: {}", String::from_utf8_lossy(&output.stderr));
+        }
 
-        Command::new("git")
+        let output = Command::new("git")
             .args(["commit", "-m", "Initial commit"])
             .current_dir(&path)
             .output()?;
+        if !output.status.success() {
+            anyhow::bail!("git commit failed: {}", String::from_utf8_lossy(&output.stderr));
+        }
 
         Ok(Self { dir, path })
     }
@@ -64,15 +79,21 @@ impl TestRepo {
     pub fn add_commit(&self, filename: &str, content: &str, message: &str) -> Result<()> {
         std::fs::write(self.path.join(filename), content)?;
 
-        Command::new("git")
+        let output = Command::new("git")
             .args(["add", filename])
             .current_dir(&self.path)
             .output()?;
+        if !output.status.success() {
+            anyhow::bail!("git add failed: {}", String::from_utf8_lossy(&output.stderr));
+        }
 
-        Command::new("git")
+        let output = Command::new("git")
             .args(["commit", "-m", message])
             .current_dir(&self.path)
             .output()?;
+        if !output.status.success() {
+            anyhow::bail!("git commit failed: {}", String::from_utf8_lossy(&output.stderr));
+        }
 
         Ok(())
     }
@@ -84,24 +105,34 @@ impl TestRepo {
             .current_dir(&self.path)
             .output()?;
 
+        if !output.status.success() {
+            anyhow::bail!("git branch failed: {}", String::from_utf8_lossy(&output.stderr));
+        }
+
         Ok(String::from_utf8(output.stdout)?.trim().to_string())
     }
 
     /// Create and checkout a new branch
     pub fn create_branch(&self, branch_name: &str) -> Result<()> {
-        Command::new("git")
+        let output = Command::new("git")
             .args(["checkout", "-b", branch_name])
             .current_dir(&self.path)
             .output()?;
+        if !output.status.success() {
+            anyhow::bail!("git checkout -b failed: {}", String::from_utf8_lossy(&output.stderr));
+        }
         Ok(())
     }
 
     /// Checkout an existing branch
     pub fn checkout(&self, branch_name: &str) -> Result<()> {
-        Command::new("git")
+        let output = Command::new("git")
             .args(["checkout", branch_name])
             .current_dir(&self.path)
             .output()?;
+        if !output.status.success() {
+            anyhow::bail!("git checkout failed: {}", String::from_utf8_lossy(&output.stderr));
+        }
         Ok(())
     }
 }
