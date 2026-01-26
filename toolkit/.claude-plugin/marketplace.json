@@ -1,0 +1,22 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "agents-in-a-box",
+  "description": "Complete AI coding agent toolkit with skills, workflows, and agents for Claude Code",
+  "owner": {
+    "name": "Steven Gonsalvez",
+    "email": "your@email.com"
+  },
+  "plugins": [
+    {
+      "name": "reflect-learning",
+      "description": "Self-improvement through conversation analysis. Extracts learnings from corrections and success patterns, permanently encoding them into agent definitions. Philosophy: Correct once, never again.",
+      "version": "2.0.0",
+      "author": {
+        "name": "Steven Gonsalvez"
+      },
+      "source": "./plugins/reflect-learning",
+      "category": "development",
+      "homepage": "https://github.com/stevengonsalvez/agents-in-a-box"
+    }
+  ]
+}

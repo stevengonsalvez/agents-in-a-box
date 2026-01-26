@@ -1,0 +1,11 @@
+{
+  "name": "reflect-learning",
+  "version": "2.0.0",
+  "description": "Self-improvement through conversation analysis. Extracts learnings from corrections and success patterns, permanently encoding them into agent definitions. Philosophy: Correct once, never again.",
+  "author": {
+    "name": "Steven Gonsalvez",
+    "url": "https://github.com/stevengonsalvez"
+  },
+  "repository": "https://github.com/stevengonsalvez/agents-in-a-box",
+  "license": "Apache-2.0"
+}
