@@ -70,8 +70,8 @@ impl SessionListComponent {
                             Style::default().fg(if is_focused { CORNFLOWER_BLUE } else { MUTED_GRAY }).add_modifier(Modifier::BOLD)
                         ),
                     ]))
-                    .title_bottom(if state.other_tmux_rename_mode {
-                        // Rename mode help
+                    .title_bottom(if state.ssh_session_rename_mode || state.other_tmux_rename_mode {
+                        // Rename mode help (SSH or Other tmux)
                         Line::from(vec![
                             Span::styled(" Enter", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
                             Span::styled(" confirm ", Style::default().fg(MUTED_GRAY)),
@@ -79,8 +79,8 @@ impl SessionListComponent {
                             Span::styled(" Esc", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
                             Span::styled(" cancel ", Style::default().fg(MUTED_GRAY)),
                         ])
-                    } else if state.is_other_tmux_selected() {
-                        // Other tmux selected help
+                    } else if state.is_ssh_session_selected() || state.is_other_tmux_selected() {
+                        // SSH or Other tmux selected help
                         Line::from(vec![
                             Span::styled(" j/k", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
                             Span::styled(" nav ", Style::default().fg(MUTED_GRAY)),
@@ -296,15 +296,22 @@ impl SessionListComponent {
                 for (idx, ssh_session) in state.ssh_sessions.iter().enumerate() {
                     let is_selected = is_selected_ssh && state.selected_ssh_session_index == Some(idx);
                     let is_last = idx == session_len - 1;
+                    let is_being_renamed = is_selected && state.ssh_session_rename_mode;
 
                     let tree_prefix = if is_last { "└─" } else { "├─" };
 
-                    // Show SSH target info if available
-                    let target_info = if let Some(ref target) = ssh_session.ssh_target {
-                        let user = target.user.as_deref().unwrap_or("user");
-                        format!("{}@{}:{}", user, target.host, target.port)
+                    // Use display_name if set, otherwise fall back to ssh_target.display_name() or name
+                    let display_text = if is_being_renamed {
+                        // Show inline rename editor with cursor
+                        format!("✏️ {}_", state.ssh_session_rename_buffer)
                     } else {
-                        ssh_session.name.clone()
+                        ssh_session.display_name.clone().unwrap_or_else(|| {
+                            if let Some(ref target) = ssh_session.ssh_target {
+                                target.display_name()
+                            } else {
+                                ssh_session.name.clone()
+                            }
+                        })
                     };
 
                     let status_icon = match ssh_session.status {
@@ -314,7 +321,9 @@ impl SessionListComponent {
                         _ => "○",
                     };
 
-                    let name_color = if is_selected {
+                    let name_color = if is_being_renamed {
+                        GOLD // Gold for rename mode
+                    } else if is_selected {
                         SELECTION_GREEN
                     } else if ssh_session.status == SessionStatus::Running {
                         WARNING_ORANGE
@@ -327,10 +336,10 @@ impl SessionListComponent {
                         Span::styled(tree_prefix, Style::default().fg(SUBDUED_BORDER)),
                         Span::styled(format!(" {} ", status_icon), Style::default()),
                         Span::styled(
-                            target_info,
+                            display_text,
                             Style::default()
                                 .fg(name_color)
-                                .add_modifier(if is_selected { Modifier::BOLD } else { Modifier::empty() }),
+                                .add_modifier(if is_selected || is_being_renamed { Modifier::BOLD } else { Modifier::empty() }),
                         ),
                     ]);
 

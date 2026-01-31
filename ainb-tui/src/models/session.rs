@@ -275,6 +275,8 @@ pub struct Session {
     pub model: Option<ClaudeModel>, // Claude model for this session (only for Claude agent)
     #[serde(default)]
     pub ssh_target: Option<SshTarget>, // SSH connection target for SSH agent type
+    #[serde(default)]
+    pub display_name: Option<String>, // Custom display name (overrides auto-generated name in UI)
 
     // Tmux integration fields
     pub tmux_session_name: Option<String>, // Name of the tmux session if using tmux backend
@@ -505,6 +507,7 @@ impl Session {
             agent_type,
             model,
             ssh_target: None,
+            display_name: None,
             tmux_session_name: None,
             preview_content: None,
             is_attached: false,
@@ -531,6 +534,7 @@ impl Session {
             agent_type: SessionAgentType::Ssh,
             model: None,
             ssh_target: Some(ssh_target),
+            display_name: None,
             tmux_session_name: None,
             preview_content: None,
             is_attached: false,

@@ -190,6 +190,12 @@ pub enum AppEvent {
     OtherTmuxRenameBackspace,     // Backspace in rename
     OtherTmuxConfirmRename,       // Confirm rename (Enter)
     OtherTmuxCancelRename,        // Cancel rename (Escape)
+    // SSH session rename events
+    SshSessionStartRename,        // Start rename mode for selected SSH session
+    SshSessionRenameChar(char),   // Character input for SSH rename
+    SshSessionRenameBackspace,    // Backspace in SSH rename
+    SshSessionConfirmRename,      // Confirm SSH rename (Enter)
+    SshSessionCancelRename,       // Cancel SSH rename (Escape)
     // AINB 2.0: Home screen events
     HomeScreenSelectTile,        // Select current tile (Enter)
     HomeScreenNavigateUp,        // Navigate up in tile grid
@@ -417,6 +423,17 @@ impl EventHandler {
             }
         }
 
+        // Handle SSH session rename mode (high priority)
+        if state.ssh_session_rename_mode {
+            match key_event.code {
+                KeyCode::Enter => return Some(AppEvent::SshSessionConfirmRename),
+                KeyCode::Esc => return Some(AppEvent::SshSessionCancelRename),
+                KeyCode::Backspace => return Some(AppEvent::SshSessionRenameBackspace),
+                KeyCode::Char(c) => return Some(AppEvent::SshSessionRenameChar(c)),
+                _ => return None,
+            }
+        }
+
         // Handle onboarding wizard view FIRST (before any other handlers)
         // Onboarding is a modal experience that should not be interrupted by global keybinds
         if state.current_view == View::Onboarding {
@@ -561,11 +578,13 @@ impl EventHandler {
             }
             KeyCode::Char('r') => Some(AppEvent::ReauthenticateCredentials),
             KeyCode::F(2) => {
-                // F2 for rename - only works in "Other tmux" section
-                if state.is_other_tmux_selected() {
+                // F2 for rename - works in "SSH Sessions" and "Other tmux" sections
+                if state.is_ssh_session_selected() {
+                    Some(AppEvent::SshSessionStartRename)
+                } else if state.is_other_tmux_selected() {
                     Some(AppEvent::OtherTmuxStartRename)
                 } else {
-                    Some(AppEvent::ShowNotification("F2 rename only works on 'Other tmux' sessions".to_string()))
+                    Some(AppEvent::ShowNotification("F2 rename only works on SSH and 'Other tmux' sessions".to_string()))
                 }
             }
             KeyCode::Char('e') => Some(AppEvent::RestartSession),
@@ -1652,6 +1671,12 @@ impl EventHandler {
             AppEvent::OtherTmuxConfirmRename => {
                 state.pending_async_action = Some(AsyncAction::ConfirmOtherTmuxRename);
             }
+            // SSH session rename events
+            AppEvent::SshSessionStartRename => state.start_ssh_session_rename(),
+            AppEvent::SshSessionRenameChar(c) => state.ssh_session_rename_char(c),
+            AppEvent::SshSessionRenameBackspace => state.ssh_session_rename_backspace(),
+            AppEvent::SshSessionCancelRename => state.cancel_ssh_session_rename(),
+            AppEvent::SshSessionConfirmRename => state.confirm_ssh_session_rename(),
             AppEvent::RefreshWorkspaces => {
                 // Mark for async processing to reload workspace data
                 state.pending_async_action = Some(AsyncAction::RefreshWorkspaces);

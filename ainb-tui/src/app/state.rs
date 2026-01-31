@@ -1865,6 +1865,10 @@ pub struct AppState {
     pub ssh_sessions_expanded: bool,
     /// Currently selected SSH session index (within ssh_sessions vec)
     pub selected_ssh_session_index: Option<usize>,
+    /// Whether we're in rename mode for the selected SSH session
+    pub ssh_session_rename_mode: bool,
+    /// Buffer for the new display name being typed during rename
+    pub ssh_session_rename_buffer: String,
 
     // AINB 2.0: Home screen and agent selection
     pub home_screen_state: HomeScreenState,
@@ -2386,6 +2390,8 @@ impl Default for AppState {
             ssh_sessions: Vec::new(),
             ssh_sessions_expanded: true, // Default to expanded
             selected_ssh_session_index: None,
+            ssh_session_rename_mode: false,
+            ssh_session_rename_buffer: String::new(),
 
             // AINB 2.0: Home screen and agent selection
             home_screen_state: HomeScreenState::default(),
@@ -3970,6 +3976,62 @@ impl AppState {
         self.selected_ssh_session_index.is_some()
             && self.selected_workspace_index.is_none()
             && self.selected_other_tmux_index.is_none()
+    }
+
+    /// Start rename mode for the selected SSH session
+    pub fn start_ssh_session_rename(&mut self) {
+        if let Some(session) = self.selected_ssh_session() {
+            // Start with existing display_name or ssh_target display
+            self.ssh_session_rename_buffer = session.display_name.clone()
+                .unwrap_or_else(|| {
+                    session.ssh_target.as_ref()
+                        .map(|t| t.display_name())
+                        .unwrap_or_else(|| session.name.clone())
+                });
+            self.ssh_session_rename_mode = true;
+        }
+    }
+
+    /// Cancel SSH session rename mode
+    pub fn cancel_ssh_session_rename(&mut self) {
+        self.ssh_session_rename_mode = false;
+        self.ssh_session_rename_buffer.clear();
+    }
+
+    /// Add a character to the SSH session rename buffer
+    pub fn ssh_session_rename_char(&mut self, c: char) {
+        if self.ssh_session_rename_mode {
+            self.ssh_session_rename_buffer.push(c);
+        }
+    }
+
+    /// Remove a character from the SSH session rename buffer
+    pub fn ssh_session_rename_backspace(&mut self) {
+        if self.ssh_session_rename_mode {
+            self.ssh_session_rename_buffer.pop();
+        }
+    }
+
+    /// Confirm the SSH session rename (updates display_name in memory)
+    pub fn confirm_ssh_session_rename(&mut self) {
+        if !self.ssh_session_rename_mode {
+            return;
+        }
+
+        let new_name = self.ssh_session_rename_buffer.trim().to_string();
+        if let Some(idx) = self.selected_ssh_session_index {
+            if let Some(session) = self.ssh_sessions.get_mut(idx) {
+                if new_name.is_empty() {
+                    // Empty = clear custom name, revert to auto-generated
+                    session.display_name = None;
+                } else {
+                    session.display_name = Some(new_name);
+                }
+            }
+        }
+
+        self.ssh_session_rename_mode = false;
+        self.ssh_session_rename_buffer.clear();
     }
 
     pub fn toggle_claude_chat(&mut self) {
