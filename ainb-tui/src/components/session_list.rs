@@ -255,6 +255,90 @@ impl SessionListComponent {
             }
         }
 
+        // Add "SSH Sessions" section if there are SSH sessions
+        if !state.ssh_sessions.is_empty() {
+            // Add separator line
+            if !items.is_empty() {
+                items.push(ListItem::new(Line::from("")));
+            }
+
+            let session_count = state.ssh_sessions.len();
+            let is_selected_ssh = state.selected_workspace_index.is_none()
+                && state.selected_other_tmux_index.is_none()
+                && state.selected_ssh_session_index.is_some();
+
+            let ssh_symbol = if state.ssh_sessions_expanded { "▼" } else { "▶" };
+
+            // Orange color scheme for SSH section
+            let ssh_header_color = if is_selected_ssh || state.selected_ssh_session_index.is_some() {
+                WARNING_ORANGE
+            } else {
+                MUTED_GRAY
+            };
+
+            let ssh_header = Line::from(vec![
+                Span::styled(ssh_symbol, Style::default().fg(ssh_header_color)),
+                Span::styled(" 🔐 ", Style::default().fg(ssh_header_color)),
+                Span::styled(
+                    "SSH Sessions ",
+                    Style::default()
+                        .fg(ssh_header_color)
+                        .add_modifier(if is_selected_ssh { Modifier::BOLD } else { Modifier::empty() }),
+                ),
+                Span::styled(format!("({})", session_count), Style::default().fg(MUTED_GRAY)),
+            ]);
+
+            items.push(ListItem::new(ssh_header));
+
+            // Show SSH sessions if expanded
+            if state.ssh_sessions_expanded {
+                let session_len = state.ssh_sessions.len();
+                for (idx, ssh_session) in state.ssh_sessions.iter().enumerate() {
+                    let is_selected = is_selected_ssh && state.selected_ssh_session_index == Some(idx);
+                    let is_last = idx == session_len - 1;
+
+                    let tree_prefix = if is_last { "└─" } else { "├─" };
+
+                    // Show SSH target info if available
+                    let target_info = if let Some(ref target) = ssh_session.ssh_target {
+                        let user = target.user.as_deref().unwrap_or("user");
+                        format!("{}@{}:{}", user, target.host, target.port)
+                    } else {
+                        ssh_session.name.clone()
+                    };
+
+                    let status_icon = match ssh_session.status {
+                        SessionStatus::Running => "🟢",
+                        SessionStatus::Stopped => "⚫",
+                        SessionStatus::Error(_) => "🔴",
+                        _ => "○",
+                    };
+
+                    let name_color = if is_selected {
+                        SELECTION_GREEN
+                    } else if ssh_session.status == SessionStatus::Running {
+                        WARNING_ORANGE
+                    } else {
+                        MUTED_GRAY
+                    };
+
+                    let session_line = Line::from(vec![
+                        Span::styled("  ", Style::default()),
+                        Span::styled(tree_prefix, Style::default().fg(SUBDUED_BORDER)),
+                        Span::styled(format!(" {} ", status_icon), Style::default()),
+                        Span::styled(
+                            target_info,
+                            Style::default()
+                                .fg(name_color)
+                                .add_modifier(if is_selected { Modifier::BOLD } else { Modifier::empty() }),
+                        ),
+                    ]);
+
+                    items.push(ListItem::new(session_line));
+                }
+            }
+        }
+
         // Add "Other tmux" section if there are other tmux sessions
         if !state.other_tmux_sessions.is_empty() {
             // Add separator line
@@ -380,6 +464,33 @@ impl SessionListComponent {
             }
 
             self.list_state.select(Some(current_index));
+        } else if state.selected_ssh_session_index.is_some() {
+            // Selection is in "SSH Sessions" section
+            let mut current_index = 0;
+
+            // Count all workspace items first
+            for workspace in &state.workspaces {
+                current_index += 1; // Workspace header
+                if state.expand_all_workspaces {
+                    current_index += workspace.sessions.len();
+                    if workspace.shell_session.is_some() {
+                        current_index += 1;
+                    }
+                }
+            }
+
+            // Add separator + "SSH Sessions" header
+            if !state.workspaces.is_empty() && !state.ssh_sessions.is_empty() {
+                current_index += 1; // Empty separator line
+            }
+            current_index += 1; // "SSH Sessions" header
+
+            // Add offset for selected SSH session
+            if let Some(ssh_idx) = state.selected_ssh_session_index {
+                current_index += ssh_idx;
+            }
+
+            self.list_state.select(Some(current_index));
         } else if state.selected_other_tmux_index.is_some() {
             // Selection is in "Other tmux" section
             let mut current_index = 0;
@@ -395,8 +506,20 @@ impl SessionListComponent {
                 }
             }
 
+            // Add SSH Sessions section
+            if !state.ssh_sessions.is_empty() {
+                if !state.workspaces.is_empty() {
+                    current_index += 1; // Empty separator line
+                }
+                current_index += 1; // "SSH Sessions" header
+                if state.ssh_sessions_expanded {
+                    current_index += state.ssh_sessions.len();
+                }
+            }
+
             // Add separator + "Other tmux" header
-            if !state.workspaces.is_empty() && !state.other_tmux_sessions.is_empty() {
+            let has_items_above = !state.workspaces.is_empty() || !state.ssh_sessions.is_empty();
+            if has_items_above && !state.other_tmux_sessions.is_empty() {
                 current_index += 1; // Empty separator line
             }
             current_index += 1; // "Other tmux" header
@@ -427,9 +550,21 @@ impl SessionListComponent {
             }
         }
 
+        // Count "SSH Sessions" section items
+        if !state.ssh_sessions.is_empty() {
+            if !state.workspaces.is_empty() {
+                count += 1; // Empty separator line
+            }
+            count += 1; // "SSH Sessions" header
+            if state.ssh_sessions_expanded {
+                count += state.ssh_sessions.len();
+            }
+        }
+
         // Count "Other tmux" section items
         if !state.other_tmux_sessions.is_empty() {
-            if !state.workspaces.is_empty() {
+            let has_items_above = !state.workspaces.is_empty() || !state.ssh_sessions.is_empty();
+            if has_items_above {
                 count += 1; // Empty separator line
             }
             count += 1; // "Other tmux" header

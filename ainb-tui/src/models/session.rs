@@ -24,6 +24,7 @@ pub enum SessionAgentType {
     #[default]
     Claude,
     Shell,  // Plain shell, no AI agent
+    Ssh,    // SSH connection to remote server
     Codex,  // Coming soon
     Gemini, // Coming soon
     Kiro,   // Coming soon
@@ -34,6 +35,7 @@ impl SessionAgentType {
         match self {
             SessionAgentType::Claude => "🤖",
             SessionAgentType::Shell => "🐚",
+            SessionAgentType::Ssh => "🔐",
             SessionAgentType::Codex => "💻",
             SessionAgentType::Gemini => "✨",
             SessionAgentType::Kiro => "🔮",
@@ -44,6 +46,7 @@ impl SessionAgentType {
         match self {
             SessionAgentType::Claude => "Claude Code",
             SessionAgentType::Shell => "Shell Only",
+            SessionAgentType::Ssh => "SSH",
             SessionAgentType::Codex => "Codex CLI",
             SessionAgentType::Gemini => "Gemini CLI",
             SessionAgentType::Kiro => "Kiro",
@@ -54,6 +57,7 @@ impl SessionAgentType {
         match self {
             SessionAgentType::Claude => "AI coding assistant powered by Anthropic",
             SessionAgentType::Shell => "Plain terminal shell without AI agent",
+            SessionAgentType::Ssh => "SSH connection to remote server",
             SessionAgentType::Codex => "OpenAI's coding assistant",
             SessionAgentType::Gemini => "Google's AI assistant",
             SessionAgentType::Kiro => "AWS AI coding assistant",
@@ -62,7 +66,7 @@ impl SessionAgentType {
 
     pub fn is_available(&self) -> bool {
         match self {
-            SessionAgentType::Claude | SessionAgentType::Shell | SessionAgentType::Codex | SessionAgentType::Gemini => true,
+            SessionAgentType::Claude | SessionAgentType::Shell | SessionAgentType::Ssh | SessionAgentType::Codex | SessionAgentType::Gemini => true,
             SessionAgentType::Kiro => false,
         }
     }
@@ -120,6 +124,108 @@ impl ClaudeModel {
     }
 }
 
+// ============================================================================
+// SSH TARGET (Connection configuration for SSH sessions)
+// ============================================================================
+
+/// SSH connection target configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SshTarget {
+    pub host: String,
+    pub port: u16,
+    pub user: Option<String>,
+    pub identity_file: Option<std::path::PathBuf>,
+}
+
+impl SshTarget {
+    /// Create a new SSH target with just a hostname (default port 22)
+    pub fn new(host: String) -> Self {
+        Self {
+            host,
+            port: 22,
+            user: None,
+            identity_file: None,
+        }
+    }
+
+    /// Create with full configuration
+    pub fn with_config(
+        host: String,
+        port: u16,
+        user: Option<String>,
+        identity_file: Option<std::path::PathBuf>,
+    ) -> Self {
+        Self {
+            host,
+            port,
+            user,
+            identity_file,
+        }
+    }
+
+    /// Builder: set port
+    pub fn with_port(mut self, port: u16) -> Self {
+        self.port = port;
+        self
+    }
+
+    /// Builder: set user
+    pub fn with_user(mut self, user: String) -> Self {
+        self.user = Some(user);
+        self
+    }
+
+    /// Build the SSH command string
+    pub fn to_ssh_command(&self) -> String {
+        let mut cmd = String::from("ssh");
+
+        // Add port if non-default
+        if self.port != 22 {
+            cmd.push_str(&format!(" -p {}", self.port));
+        }
+
+        // Add identity file if specified
+        if let Some(ref identity) = self.identity_file {
+            cmd.push_str(&format!(" -i {}", identity.display()));
+        }
+
+        // Add user@host or just host
+        if let Some(ref user) = self.user {
+            cmd.push_str(&format!(" {}@{}", user, self.host));
+        } else {
+            cmd.push_str(&format!(" {}", self.host));
+        }
+
+        cmd
+    }
+
+    /// Display string for UI (e.g., "user@host:port" or "host")
+    pub fn display_name(&self) -> String {
+        if let Some(ref user) = self.user {
+            if self.port != 22 {
+                format!("{}@{}:{}", user, self.host, self.port)
+            } else {
+                format!("{}@{}", user, self.host)
+            }
+        } else if self.port != 22 {
+            format!("{}:{}", self.host, self.port)
+        } else {
+            self.host.clone()
+        }
+    }
+}
+
+impl Default for SshTarget {
+    fn default() -> Self {
+        Self {
+            host: String::new(),
+            port: 22,
+            user: None,
+            identity_file: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionStatus {
     Running,
@@ -167,6 +273,8 @@ pub struct Session {
     pub agent_type: SessionAgentType, // The AI agent or shell for this session
     #[serde(default)]
     pub model: Option<ClaudeModel>, // Claude model for this session (only for Claude agent)
+    #[serde(default)]
+    pub ssh_target: Option<SshTarget>, // SSH connection target for SSH agent type
 
     // Tmux integration fields
     pub tmux_session_name: Option<String>, // Name of the tmux session if using tmux backend
@@ -396,6 +504,33 @@ impl Session {
             boss_prompt,
             agent_type,
             model,
+            ssh_target: None,
+            tmux_session_name: None,
+            preview_content: None,
+            is_attached: false,
+        }
+    }
+
+    /// Create a new SSH session with a target configuration
+    pub fn new_ssh_session(name: String, ssh_target: SshTarget) -> Self {
+        let now = Utc::now();
+        Self {
+            id: Uuid::new_v4(),
+            name,
+            workspace_path: String::new(), // SSH sessions don't have a workspace
+            branch_name: String::new(),    // SSH sessions don't have a branch
+            container_id: None,
+            status: SessionStatus::Stopped,
+            created_at: now,
+            last_accessed: now,
+            git_changes: GitChanges::default(),
+            recent_logs: None,
+            skip_permissions: false,
+            mode: SessionMode::Interactive,
+            boss_prompt: None,
+            agent_type: SessionAgentType::Ssh,
+            model: None,
+            ssh_target: Some(ssh_target),
             tmux_session_name: None,
             preview_content: None,
             is_attached: false,

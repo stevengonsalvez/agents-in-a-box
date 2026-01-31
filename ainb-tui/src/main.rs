@@ -866,6 +866,106 @@ async fn run_tui_loop(
                         app.state.ui_needs_refresh = true;
                     }
 
+                    AsyncAction::CreateSshSession => {
+                        use crate::app::AttachHandler;
+                        use tokio::process::Command;
+
+                        info!("[ACTION] Creating SSH session");
+
+                        // Get SSH target from state
+                        let ssh_target = app.state.build_ssh_target();
+                        let repo_path = app.state.new_session_state.as_ref()
+                            .and_then(|s| s.get_selected_repo_path());
+
+                        // Clear new session state
+                        app.state.new_session_state = None;
+                        app.state.current_view = crate::app::state::View::SessionList;
+
+                        if let Some(target) = ssh_target {
+                            let ssh_cmd = target.to_ssh_command();
+                            let display_name = target.display_name();
+
+                            // Generate tmux session name for SSH
+                            let timestamp = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0);
+                            let sanitized_host = target.host
+                                .replace('.', "-")
+                                .replace(':', "-");
+                            let tmux_name = format!("ssh-{}-{}", sanitized_host, timestamp % 10000);
+
+                            // Determine working directory (use repo path if available, else home)
+                            let work_dir = repo_path
+                                .as_ref()
+                                .and_then(|p| p.to_str())
+                                .unwrap_or("~");
+
+                            // Create tmux session first (detached)
+                            let create_result = Command::new("tmux")
+                                .args([
+                                    "new-session",
+                                    "-d",
+                                    "-s", &tmux_name,
+                                    "-c", work_dir,
+                                ])
+                                .output()
+                                .await;
+
+                            match create_result {
+                                Ok(output) if output.status.success() => {
+                                    info!("[ACTION] Created tmux session for SSH: {}", tmux_name);
+
+                                    // Configure clipboard
+                                    if let Err(e) = crate::tmux::configure_clipboard(&tmux_name).await {
+                                        warn!("[ACTION] Failed to configure clipboard: {}", e);
+                                    }
+
+                                    // Send SSH command to the tmux session
+                                    let send_result = Command::new("tmux")
+                                        .args([
+                                            "send-keys",
+                                            "-t", &tmux_name,
+                                            &ssh_cmd,
+                                            "Enter",
+                                        ])
+                                        .output()
+                                        .await;
+
+                                    if let Err(e) = send_result {
+                                        warn!("[ACTION] Failed to send SSH command: {}", e);
+                                    }
+
+                                    // Attach to the SSH session
+                                    let mut attach_handler = AttachHandler::new_from_terminal(terminal)?;
+                                    match attach_handler.attach_to_session(&tmux_name).await {
+                                        Ok(()) => {
+                                            info!("[ACTION] Successfully attached to SSH session: {}", display_name);
+                                            app.state.add_success_notification(format!("SSH: {}", display_name));
+                                        }
+                                        Err(e) => {
+                                            error!("[ACTION] Failed to attach to SSH session: {}", e);
+                                            app.state.add_error_notification(format!("SSH attach failed: {}", e));
+                                        }
+                                    }
+                                }
+                                Ok(output) => {
+                                    let stderr = String::from_utf8_lossy(&output.stderr);
+                                    error!("[ACTION] SSH tmux session creation failed: {}", stderr);
+                                    app.state.add_error_notification(format!("SSH session failed: {}", stderr));
+                                }
+                                Err(e) => {
+                                    error!("[ACTION] tmux command error for SSH: {}", e);
+                                    app.state.add_error_notification(format!("SSH error: {}", e));
+                                }
+                            }
+                        } else {
+                            app.state.add_error_notification("SSH target not configured".to_string());
+                        }
+
+                        app.state.ui_needs_refresh = true;
+                    }
+
                     AsyncAction::KillWorkspaceShell(workspace_index) => {
                         use tokio::process::Command;
 

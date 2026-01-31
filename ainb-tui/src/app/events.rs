@@ -60,11 +60,13 @@ pub enum AppEvent {
     NewSessionInputChar(char),
     NewSessionBackspace,
     NewSessionBackspaceWord,  // Delete word backward (Shift+Backspace)
-    // Source selection events (Local vs Remote)
-    SourceSelectionToggle,       // Toggle between Local and Remote
-    SourceSelectionConfirm,      // Proceed with selected source
-    SourceQuickSelectLocal,      // Quick select Local and proceed
-    SourceQuickSelectRemote,     // Quick select Remote and proceed
+    // Source selection events (Local, Remote, SSH)
+    SourceSelectionToggle,        // Toggle forward: Local → Remote → SSH → Local
+    SourceSelectionToggleReverse, // Toggle backward: Local → SSH → Remote → Local
+    SourceSelectionConfirm,       // Proceed with selected source
+    SourceQuickSelectLocal,       // Quick select Local and proceed
+    SourceQuickSelectRemote,      // Quick select Remote and proceed
+    SourceQuickSelectSsh,         // Quick select SSH and proceed
     // Repo input events (URL or path)
     RepoInputChar(char),
     RepoInputBackspace,
@@ -105,6 +107,13 @@ pub enum AppEvent {
     NewSessionAgentPrev,
     NewSessionAgentSelect,
     NewSessionOpenShell,  // Open shell directly when Shell agent is selected
+    // SSH configuration events (new session flow - for SSH agent)
+    NewSessionSshNextField,      // Tab to next SSH input field
+    NewSessionSshPrevField,      // Shift+Tab to previous SSH input field
+    NewSessionSshInputChar(char), // Character input for SSH fields
+    NewSessionSshBackspace,       // Backspace in SSH fields
+    NewSessionSshConfirm,         // Confirm SSH configuration
+    NewSessionSshGoBack,          // Go back to agent selection
     // Model selection events (new session flow - for Claude agent)
     NewSessionModelNext,
     NewSessionModelPrev,
@@ -666,20 +675,29 @@ impl EventHandler {
         if let Some(ref session_state) = state.new_session_state {
             match session_state.step {
                 NewSessionStep::SelectSource => {
-                    // Source selection: Local or Remote
+                    // Source selection: Local, Remote, or SSH
                     match key_event.code {
                         KeyCode::Esc => Some(AppEvent::NewSessionCancel),
                         KeyCode::Enter => Some(AppEvent::SourceSelectionConfirm),
-                        KeyCode::Down | KeyCode::Up | KeyCode::Char('j') | KeyCode::Char('k') => {
+                        // Down/j cycles forward: Local → Remote → SSH → Local
+                        KeyCode::Down | KeyCode::Char('j') => {
                             Some(AppEvent::SourceSelectionToggle)
                         }
-                        KeyCode::Char('l') | KeyCode::Char('L') => {
+                        // Up/k cycles backward: Local → SSH → Remote → Local
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            Some(AppEvent::SourceSelectionToggleReverse)
+                        }
+                        KeyCode::Char('l' | 'L') => {
                             // Quick select Local - set to Local and proceed
                             Some(AppEvent::SourceQuickSelectLocal)
                         }
-                        KeyCode::Char('r') | KeyCode::Char('R') => {
+                        KeyCode::Char('r' | 'R') => {
                             // Quick select Remote - set to Remote and proceed
                             Some(AppEvent::SourceQuickSelectRemote)
+                        }
+                        KeyCode::Char('s' | 'S') => {
+                            // Quick select SSH - set to SSH and proceed
+                            Some(AppEvent::SourceQuickSelectSsh)
                         }
                         _ => None,
                     }
@@ -739,6 +757,23 @@ impl EventHandler {
                         KeyCode::Right | KeyCode::Char('l') if show_model => Some(AppEvent::NewSessionModelNext),
                         KeyCode::Left | KeyCode::Char('h') if show_model => Some(AppEvent::NewSessionModelPrev),
                         KeyCode::Enter => Some(AppEvent::NewSessionAgentSelect),
+                        _ => None,
+                    }
+                }
+                NewSessionStep::ConfigureSsh => {
+                    match key_event.code {
+                        KeyCode::Esc => Some(AppEvent::NewSessionSshGoBack),
+                        KeyCode::Tab => {
+                            if key_event.modifiers.contains(KeyModifiers::SHIFT) {
+                                Some(AppEvent::NewSessionSshPrevField)
+                            } else {
+                                Some(AppEvent::NewSessionSshNextField)
+                            }
+                        }
+                        KeyCode::BackTab => Some(AppEvent::NewSessionSshPrevField),
+                        KeyCode::Enter => Some(AppEvent::NewSessionSshConfirm),
+                        KeyCode::Backspace => Some(AppEvent::NewSessionSshBackspace),
+                        KeyCode::Char(ch) => Some(AppEvent::NewSessionSshInputChar(ch)),
                         _ => None,
                     }
                 }
@@ -1670,6 +1705,12 @@ impl EventHandler {
             AppEvent::SourceQuickSelectRemote => {
                 state.new_session_quick_select_remote();
             }
+            AppEvent::SourceQuickSelectSsh => {
+                state.new_session_quick_select_ssh();
+            }
+            AppEvent::SourceSelectionToggleReverse => {
+                state.new_session_toggle_source_reverse();
+            }
             // Repo input events
             AppEvent::RepoInputChar(ch) => {
                 state.repo_input_update(ch);
@@ -1816,6 +1857,36 @@ impl EventHandler {
                 state.new_session_state = None;
                 state.current_view = crate::app::state::View::SessionList;
             }
+            // SSH configuration events
+            AppEvent::NewSessionSshNextField => {
+                tracing::debug!("Event: NewSessionSshNextField");
+                state.new_session_ssh_next_field();
+            }
+            AppEvent::NewSessionSshPrevField => {
+                tracing::debug!("Event: NewSessionSshPrevField");
+                state.new_session_ssh_prev_field();
+            }
+            AppEvent::NewSessionSshInputChar(ch) => {
+                tracing::debug!("Event: NewSessionSshInputChar({})", ch);
+                state.new_session_ssh_input_char(ch);
+            }
+            AppEvent::NewSessionSshBackspace => {
+                tracing::debug!("Event: NewSessionSshBackspace");
+                state.new_session_ssh_backspace();
+            }
+            AppEvent::NewSessionSshConfirm => {
+                tracing::info!("Event: NewSessionSshConfirm");
+                let ready = state.new_session_ssh_confirm();
+                if ready {
+                    // SSH session ready to create - queue async action
+                    tracing::info!("SSH configuration confirmed, creating SSH session");
+                    state.pending_async_action = Some(AsyncAction::CreateSshSession);
+                }
+            }
+            AppEvent::NewSessionSshGoBack => {
+                tracing::debug!("Event: NewSessionSshGoBack");
+                state.new_session_ssh_go_back();
+            }
             AppEvent::ShowNotification(message) => {
                 tracing::info!("Event: ShowNotification - {}", message);
                 state.add_warning_notification(message);
@@ -1853,16 +1924,32 @@ impl EventHandler {
             AppEvent::AttachTmuxSession => {
                 tracing::info!("[ACTION] Processing AttachTmuxSession event");
                 tracing::debug!(
-                    "[ACTION] State: workspace_idx={:?}, session_idx={:?}, shell_selected={}, is_other_tmux={}, other_tmux_idx={:?}",
+                    "[ACTION] State: workspace_idx={:?}, session_idx={:?}, shell_selected={}, is_ssh={}, ssh_idx={:?}, is_other_tmux={}, other_tmux_idx={:?}",
                     state.selected_workspace_index,
                     state.selected_session_index,
                     state.shell_selected,
+                    state.is_ssh_session_selected(),
+                    state.selected_ssh_session_index,
                     state.is_other_tmux_selected(),
                     state.selected_other_tmux_index
                 );
 
+                // Check if we're in the "SSH Sessions" section
+                if state.is_ssh_session_selected() {
+                    if let Some(ssh_session) = state.selected_ssh_session() {
+                        if let Some(tmux_name) = &ssh_session.tmux_session_name {
+                            let session_name = tmux_name.clone();
+                            tracing::info!("[ACTION] Attaching to SSH session: {}", session_name);
+                            state.pending_async_action = Some(AsyncAction::AttachToOtherTmux(session_name));
+                        } else {
+                            tracing::warn!("[ACTION] SSH session has no tmux session name");
+                            state.add_error_notification("SSH session has no tmux session".to_string());
+                        }
+                    } else {
+                        tracing::warn!("[ACTION] SSH session selected but no session found");
+                    }
                 // Check if we're in the "Other tmux" section
-                if state.is_other_tmux_selected() {
+                } else if state.is_other_tmux_selected() {
                     if let Some(other_session) = state.selected_other_tmux_session() {
                         let session_name = other_session.name.clone();
                         tracing::info!("[ACTION] Attaching to other tmux session: {}", session_name);

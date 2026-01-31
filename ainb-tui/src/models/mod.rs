@@ -5,5 +5,5 @@ pub mod session;
 pub mod workspace;
 
 pub use other_tmux::OtherTmuxSession;
-pub use session::{ClaudeModel, GitChanges, Session, SessionAgentType, SessionMode, SessionStatus, ShellSession, ShellSessionStatus};
+pub use session::{ClaudeModel, GitChanges, Session, SessionAgentType, SessionMode, SessionStatus, ShellSession, ShellSessionStatus, SshTarget};
 pub use workspace::Workspace;

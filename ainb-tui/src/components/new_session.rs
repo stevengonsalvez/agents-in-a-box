@@ -8,7 +8,7 @@ use ratatui::{
 
 use crate::app::{
     AppState,
-    state::{BranchCheckoutMode, NewSessionState, NewSessionStep, RepoSourceChoice},
+    state::{BranchCheckoutMode, NewSessionState, NewSessionStep, RepoSourceChoice, SshInputFocus},
 };
 
 pub struct NewSessionComponent {
@@ -55,6 +55,9 @@ impl NewSessionComponent {
                 NewSessionStep::SelectAgent => {
                     self.render_agent_selection(frame, popup_area, session_state)
                 }
+                NewSessionStep::ConfigureSsh => {
+                    self.render_ssh_config(frame, popup_area, session_state)
+                }
                 NewSessionStep::InputBranch => {
                     self.render_branch_input(frame, popup_area, session_state)
                 }
@@ -72,7 +75,7 @@ impl NewSessionComponent {
         }
     }
 
-    /// Render the source selection screen (Local vs Remote)
+    /// Render the source selection screen (Local, Remote, or SSH)
     fn render_source_selection(
         &self,
         frame: &mut Frame,
@@ -85,7 +88,7 @@ impl NewSessionComponent {
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(Color::Rgb(100, 149, 237))) // Cornflower blue
             .title(Span::styled(
-                " 📂 Choose Repository Source ",
+                " 🚀 New Session ",
                 Style::default()
                     .fg(Color::Rgb(255, 215, 0)) // Gold
                     .add_modifier(Modifier::BOLD),
@@ -101,9 +104,11 @@ impl NewSessionComponent {
             .direction(Direction::Vertical)
             .margin(1)
             .constraints([
-                Constraint::Length(6), // Local option card
+                Constraint::Length(5), // Local option card
                 Constraint::Length(1), // Spacer
-                Constraint::Length(6), // Remote option card
+                Constraint::Length(5), // Remote option card
+                Constraint::Length(1), // Spacer
+                Constraint::Length(5), // SSH option card
                 Constraint::Length(1), // Spacer
                 Constraint::Length(2), // Instructions
             ])
@@ -111,6 +116,7 @@ impl NewSessionComponent {
 
         let is_local = session_state.source_choice == RepoSourceChoice::Local;
         let is_remote = session_state.source_choice == RepoSourceChoice::Remote;
+        let is_ssh = session_state.source_choice == RepoSourceChoice::Ssh;
 
         // Local option card
         let local_border_color = if is_local {
@@ -144,7 +150,6 @@ impl NewSessionComponent {
                     Span::raw("")
                 },
             ]),
-            Line::from(""),
             Line::from(vec![
                 Span::styled("      ", Style::default()),
                 Span::styled("Browse and select from local repositories", Style::default().fg(Color::Rgb(180, 180, 180))),
@@ -193,7 +198,6 @@ impl NewSessionComponent {
                     Span::raw("")
                 },
             ]),
-            Line::from(""),
             Line::from(vec![
                 Span::styled("      ", Style::default()),
                 Span::styled("Clone from GitHub, GitLab, or any Git URL", Style::default().fg(Color::Rgb(180, 180, 180))),
@@ -210,22 +214,73 @@ impl NewSessionComponent {
             );
         frame.render_widget(remote_para, chunks[2]);
 
+        // SSH option card
+        let ssh_border_color = if is_ssh {
+            Color::Rgb(200, 150, 100) // Warm orange when selected
+        } else {
+            Color::Rgb(70, 70, 90) // Gray when not
+        };
+
+        let ssh_bg = if is_ssh {
+            Color::Rgb(40, 35, 30) // Slightly warm tint
+        } else {
+            Color::Rgb(30, 30, 40)
+        };
+
+        let ssh_text = vec![
+            Line::from(vec![
+                Span::styled(
+                    if is_ssh { "  ▶ " } else { "    " },
+                    Style::default().fg(Color::Rgb(200, 150, 100)),
+                ),
+                Span::styled("🔐 ", Style::default()),
+                Span::styled(
+                    "[S] SSH Connection",
+                    Style::default()
+                        .fg(if is_ssh { Color::Rgb(200, 150, 100) } else { Color::Rgb(200, 200, 200) })
+                        .add_modifier(Modifier::BOLD),
+                ),
+                if is_ssh {
+                    Span::styled("  ✓", Style::default().fg(Color::Rgb(200, 150, 100)))
+                } else {
+                    Span::raw("")
+                },
+            ]),
+            Line::from(vec![
+                Span::styled("      ", Style::default()),
+                Span::styled("Connect to a remote server via SSH", Style::default().fg(Color::Rgb(180, 180, 180))),
+            ]),
+        ];
+
+        let ssh_para = Paragraph::new(ssh_text)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(ssh_border_color))
+                    .style(Style::default().bg(ssh_bg)),
+            );
+        frame.render_widget(ssh_para, chunks[4]);
+
         // Styled instructions footer
         let instructions = Line::from(vec![
-            Span::styled("  ↑↓/L/R ", Style::default().fg(Color::Rgb(255, 215, 0))),
-            Span::styled("Switch  ", Style::default().fg(Color::Rgb(128, 128, 128))),
+            Span::styled("  ↑↓ ", Style::default().fg(Color::Rgb(255, 215, 0))),
+            Span::styled("Navigate  ", Style::default().fg(Color::Rgb(128, 128, 128))),
+            Span::styled("│", Style::default().fg(Color::Rgb(70, 70, 90))),
+            Span::styled("  L/R/S ", Style::default().fg(Color::Rgb(255, 215, 0))),
+            Span::styled("Quick  ", Style::default().fg(Color::Rgb(128, 128, 128))),
             Span::styled("│", Style::default().fg(Color::Rgb(70, 70, 90))),
             Span::styled("  ⏎ ", Style::default().fg(Color::Rgb(100, 200, 100))),
             Span::styled("Select  ", Style::default().fg(Color::Rgb(128, 128, 128))),
             Span::styled("│", Style::default().fg(Color::Rgb(70, 70, 90))),
             Span::styled("  Esc ", Style::default().fg(Color::Rgb(255, 100, 100))),
-            Span::styled("Cancel  ", Style::default().fg(Color::Rgb(128, 128, 128))),
+            Span::styled("Cancel", Style::default().fg(Color::Rgb(128, 128, 128))),
         ]);
 
         let instructions_widget = Paragraph::new(instructions)
             .alignment(Alignment::Center)
             .style(Style::default().bg(Color::Rgb(25, 25, 35)));
-        frame.render_widget(instructions_widget, chunks[4]);
+        frame.render_widget(instructions_widget, chunks[6]);
     }
 
     /// Render the repo source input screen (URL or local path)
@@ -1212,6 +1267,216 @@ impl NewSessionComponent {
         let model_line = Paragraph::new(Line::from(spans))
             .alignment(Alignment::Center);
         frame.render_widget(model_line, area);
+    }
+
+    /// Render the SSH connection configuration screen
+    fn render_ssh_config(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        session_state: &NewSessionState,
+    ) {
+        // Modern color palette (from TUI style guide)
+        let cornflower_blue = Color::Rgb(100, 149, 237);
+        let dark_bg = Color::Rgb(25, 25, 35);
+        let gold = Color::Rgb(255, 215, 0);
+        let soft_white = Color::Rgb(220, 220, 230);
+        let muted_gray = Color::Rgb(120, 120, 140);
+        let selection_green = Color::Rgb(100, 200, 100);
+        let subdued_border = Color::Rgb(60, 60, 80);
+        let input_bg = Color::Rgb(35, 35, 50);
+        let focus_border = Color::Rgb(100, 200, 100);
+
+        // Draw outer border with modern styling
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(cornflower_blue))
+            .title(Span::styled(
+                " 🔐 SSH Connection ",
+                Style::default()
+                    .fg(gold)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .title_alignment(Alignment::Center)
+            .style(Style::default().bg(dark_bg));
+        frame.render_widget(block.clone(), area);
+
+        // Inner area for content
+        let inner = block.inner(area);
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .margin(1)
+            .constraints([
+                Constraint::Length(2), // Header text
+                Constraint::Length(1), // Spacer
+                Constraint::Length(3), // Host input
+                Constraint::Length(1), // Spacer
+                Constraint::Length(3), // Port input
+                Constraint::Length(1), // Spacer
+                Constraint::Length(3), // User input
+                Constraint::Length(1), // Spacer
+                Constraint::Length(3), // Identity file input
+                Constraint::Length(1), // Spacer
+                Constraint::Length(3), // Command preview
+                Constraint::Length(1), // Spacer
+                Constraint::Length(2), // Instructions
+            ])
+            .split(inner);
+
+        // Header text
+        let header = Paragraph::new(Line::from(vec![
+            Span::styled("Configure SSH connection details", Style::default().fg(soft_white)),
+        ]))
+        .alignment(Alignment::Center);
+        frame.render_widget(header, chunks[0]);
+
+        // Helper to create input field
+        let render_input_field = |frame: &mut Frame, area: Rect, label: &str, value: &str, is_focused: bool, is_required: bool| {
+            let border_color = if is_focused { focus_border } else { subdued_border };
+            let label_suffix = if is_required { " *" } else { "" };
+
+            let input_block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(border_color))
+                .title(Span::styled(
+                    format!(" {}{} ", label, label_suffix),
+                    Style::default().fg(if is_focused { selection_green } else { muted_gray }),
+                ))
+                .style(Style::default().bg(input_bg));
+
+            let display_value = if value.is_empty() && !is_focused {
+                match label {
+                    "Port" => "22".to_string(),
+                    "User" => "(optional)".to_string(),
+                    "Identity File" => "(optional, e.g., ~/.ssh/id_rsa)".to_string(),
+                    _ => String::new(),
+                }
+            } else {
+                value.to_string()
+            };
+
+            let text_style = if value.is_empty() && !is_focused {
+                Style::default().fg(muted_gray).add_modifier(Modifier::ITALIC)
+            } else {
+                Style::default().fg(soft_white)
+            };
+
+            // Add cursor if focused
+            let display_with_cursor = if is_focused {
+                format!("{}▎", display_value)
+            } else {
+                display_value
+            };
+
+            let input = Paragraph::new(display_with_cursor)
+                .style(text_style)
+                .block(input_block);
+
+            frame.render_widget(input, area);
+        };
+
+        // Host input (required)
+        render_input_field(
+            frame,
+            chunks[2],
+            "Host",
+            &session_state.ssh_host,
+            session_state.ssh_input_focus == SshInputFocus::Host,
+            true,
+        );
+
+        // Port input
+        render_input_field(
+            frame,
+            chunks[4],
+            "Port",
+            &session_state.ssh_port,
+            session_state.ssh_input_focus == SshInputFocus::Port,
+            false,
+        );
+
+        // User input
+        render_input_field(
+            frame,
+            chunks[6],
+            "User",
+            &session_state.ssh_user,
+            session_state.ssh_input_focus == SshInputFocus::User,
+            false,
+        );
+
+        // Identity file input
+        render_input_field(
+            frame,
+            chunks[8],
+            "Identity File",
+            &session_state.ssh_identity_file,
+            session_state.ssh_input_focus == SshInputFocus::IdentityFile,
+            false,
+        );
+
+        // Command preview
+        let preview_cmd = self.build_ssh_preview(session_state);
+        let preview_block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(subdued_border))
+            .title(Span::styled(
+                " Preview ",
+                Style::default().fg(muted_gray),
+            ))
+            .style(Style::default().bg(dark_bg));
+
+        let preview = Paragraph::new(preview_cmd)
+            .style(Style::default().fg(Color::Rgb(150, 200, 150)))
+            .block(preview_block);
+        frame.render_widget(preview, chunks[10]);
+
+        // Instructions
+        let instruction_spans = vec![
+            Span::styled(" Tab ", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+            Span::styled("Next field  ", Style::default().fg(muted_gray)),
+            Span::styled("│", Style::default().fg(subdued_border)),
+            Span::styled(" Enter ", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+            Span::styled("Connect  ", Style::default().fg(muted_gray)),
+            Span::styled("│", Style::default().fg(subdued_border)),
+            Span::styled(" Esc ", Style::default().fg(Color::Rgb(255, 100, 100))),
+            Span::styled("Back", Style::default().fg(muted_gray)),
+        ];
+
+        let instructions = Line::from(instruction_spans);
+        let instructions_widget = Paragraph::new(instructions)
+            .alignment(Alignment::Center)
+            .style(Style::default().bg(dark_bg));
+        frame.render_widget(instructions_widget, chunks[12]);
+    }
+
+    /// Build SSH command preview string for display
+    fn build_ssh_preview(&self, session_state: &NewSessionState) -> String {
+        let mut cmd = String::from("ssh");
+
+        let port: u16 = session_state.ssh_port.parse().unwrap_or(22);
+        if port != 22 && !session_state.ssh_port.is_empty() {
+            cmd.push_str(&format!(" -p {}", port));
+        }
+
+        if !session_state.ssh_identity_file.is_empty() {
+            cmd.push_str(&format!(" -i {}", session_state.ssh_identity_file));
+        }
+
+        if !session_state.ssh_user.is_empty() {
+            cmd.push_str(&format!(" {}@{}", session_state.ssh_user,
+                if session_state.ssh_host.is_empty() { "<host>" } else { &session_state.ssh_host }));
+        } else if !session_state.ssh_host.is_empty() {
+            cmd.push_str(&format!(" {}", session_state.ssh_host));
+        } else {
+            cmd.push_str(" <host>");
+        }
+
+        cmd
     }
 
     fn render_agent_selection(

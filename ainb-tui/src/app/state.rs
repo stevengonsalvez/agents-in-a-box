@@ -609,6 +609,7 @@ impl SessionAgentOption {
         vec![
             Self { agent_type: SessionAgentType::Claude, is_current: true },  // Claude is default
             Self { agent_type: SessionAgentType::Shell, is_current: false },
+            Self { agent_type: SessionAgentType::Ssh, is_current: false },    // SSH sessions
             Self { agent_type: SessionAgentType::Codex, is_current: false },
             Self { agent_type: SessionAgentType::Gemini, is_current: false },
             Self { agent_type: SessionAgentType::Kiro, is_current: false },
@@ -1857,6 +1858,14 @@ pub struct AppState {
     /// Buffer for the new name being typed during rename
     pub other_tmux_rename_buffer: String,
 
+    // SSH Sessions (Claude-managed sessions with agent_type=Ssh)
+    /// SSH sessions displayed in their own section
+    pub ssh_sessions: Vec<crate::models::Session>,
+    /// Whether the SSH sessions section is expanded
+    pub ssh_sessions_expanded: bool,
+    /// Currently selected SSH session index (within ssh_sessions vec)
+    pub selected_ssh_session_index: Option<usize>,
+
     // AINB 2.0: Home screen and agent selection
     pub home_screen_state: HomeScreenState,
     pub home_screen_v2_state: HomeScreenV2State,
@@ -2020,7 +2029,7 @@ pub struct NewSessionState {
     pub selected_model_index: usize,     // Index in model_options list
     pub agent_model_focus: AgentModelFocus, // Which panel has focus (Agent or Model)
 
-    // NEW: Remote repository support
+    // Remote repository support
     pub repo_input: String,                    // URL or path input from user
     pub repo_source: Option<RepoSource>,       // Parsed repo source
     pub remote_branches: Vec<RemoteBranch>,    // Available branches from remote
@@ -2033,6 +2042,13 @@ pub struct NewSessionState {
     pub is_validating: bool,                   // Show loading indicator
     pub recent_repos: Vec<ParsedRepo>,         // Recently used repos for suggestions
     pub branch_checkout_mode: BranchCheckoutMode, // Toggle: create new vs checkout existing
+
+    // SSH configuration (only used when agent_type == Ssh)
+    pub ssh_host: String,                      // SSH host (e.g., "server.example.com")
+    pub ssh_port: String,                      // SSH port (string for input, parsed to u16)
+    pub ssh_user: String,                      // SSH username (optional)
+    pub ssh_identity_file: String,             // Path to SSH identity file (optional)
+    pub ssh_input_focus: SshInputFocus,        // Which SSH field has focus
 }
 
 impl Default for NewSessionState {
@@ -2074,6 +2090,12 @@ impl Default for NewSessionState {
             is_validating: false,
             recent_repos: Vec::new(),
             branch_checkout_mode: BranchCheckoutMode::default(),
+            // SSH configuration defaults
+            ssh_host: String::new(),
+            ssh_port: "22".to_string(),
+            ssh_user: String::new(),
+            ssh_identity_file: String::new(),
+            ssh_input_focus: SshInputFocus::default(),
         }
     }
 }
@@ -2230,17 +2252,28 @@ impl NewSessionState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NewSessionStep {
-    SelectSource,      // NEW: Choose between Local repos or Remote URL
+    SelectSource,      // Choose between Local repos or Remote URL
     InputRepoSource,   // Enter URL for remote repos
     ValidatingRepo,    // Validating URL / cloning
     SelectBranch,      // Pick from remote branches
     SelectRepo,        // Browse/search local repos
-    SelectAgent,       // Choose agent (Claude, Shell, etc.)
+    SelectAgent,       // Choose agent (Claude, Shell, SSH, etc.)
+    ConfigureSsh,      // Configure SSH connection (host, port, user, key)
     InputBranch,       // Name the session branch (ainb/...)
     SelectMode,        // Choose between Interactive and Boss mode
     InputPrompt,       // Enter prompt for Boss mode
     ConfigurePermissions,
     Creating,
+}
+
+/// Which SSH input field has focus
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SshInputFocus {
+    #[default]
+    Host,
+    Port,
+    User,
+    IdentityFile,
 }
 
 /// Choice for repository source in new session flow
@@ -2249,6 +2282,7 @@ pub enum RepoSourceChoice {
     #[default]
     Local,  // Browse local repos
     Remote, // Clone from URL
+    Ssh,    // SSH connection to remote server
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2283,6 +2317,8 @@ pub enum AsyncAction {
     },
     OpenShellAtPath(std::path::PathBuf), // Open shell directly at a path (no workspace required)
     KillWorkspaceShell(usize), // Kill workspace shell by workspace index
+    // SSH session actions
+    CreateSshSession, // Create a new SSH session with configured target
     // Editor action
     OpenInEditor(std::path::PathBuf), // Open workspace in preferred editor
     // Onboarding actions
@@ -2345,6 +2381,11 @@ impl Default for AppState {
             selected_other_tmux_index: None,
             other_tmux_rename_mode: false,
             other_tmux_rename_buffer: String::new(),
+
+            // Initialize SSH sessions (separate section)
+            ssh_sessions: Vec::new(),
+            ssh_sessions_expanded: true, // Default to expanded
+            selected_ssh_session_index: None,
 
             // AINB 2.0: Home screen and agent selection
             home_screen_state: HomeScreenState::default(),
@@ -2964,6 +3005,7 @@ impl AppState {
         self.selected_workspace_index = None;
         self.selected_session_index = None;
         self.shell_selected = false;
+        self.selected_ssh_session_index = None;
         self.selected_other_tmux_index = None;
 
         // Set initial selection
@@ -2977,8 +3019,11 @@ impl AppState {
             }
             // If workspace has neither sessions nor shell, selection indices stay None
             // which is the correct state for an empty workspace
+        } else if !self.ssh_sessions.is_empty() {
+            // No workspaces but there are SSH sessions - select the first one
+            self.selected_ssh_session_index = Some(0);
         } else if !self.other_tmux_sessions.is_empty() {
-            // No workspaces but there are "Other tmux" sessions - select the first one
+            // No workspaces or SSH sessions but there are "Other tmux" sessions - select the first one
             self.selected_other_tmux_index = Some(0);
         } else {
             info!("No active sessions found. Use 'n' to create a new session.");
@@ -3013,15 +3058,38 @@ impl AppState {
                     self.workspace_load_receiver = None;
 
                     match result {
-                        WorkspaceLoadResult::Success(workspaces) => {
+                        WorkspaceLoadResult::Success(mut workspaces) => {
                             info!("Background workspace loading completed: {} workspaces", workspaces.len());
+
+                            // Extract SSH sessions from workspaces into their own section
+                            let mut ssh_sessions = Vec::new();
+                            for workspace in &mut workspaces {
+                                let (ssh, non_ssh): (Vec<_>, Vec<_>) = workspace
+                                    .sessions
+                                    .drain(..)
+                                    .partition(|s| s.agent_type == crate::models::SessionAgentType::Ssh);
+                                workspace.sessions = non_ssh;
+                                ssh_sessions.extend(ssh);
+                            }
+
+                            // Remove empty workspaces (those that only had SSH sessions)
+                            workspaces.retain(|w| !w.sessions.is_empty() || w.shell_session.is_some());
+
+                            info!(
+                                "Separated {} SSH sessions from {} workspaces",
+                                ssh_sessions.len(),
+                                workspaces.len()
+                            );
+
                             self.workspaces = workspaces;
+                            self.ssh_sessions = ssh_sessions;
                             self.workspace_load_error = None;
 
                             // Set initial selection
                             self.selected_workspace_index = None;
                             self.selected_session_index = None;
                             self.shell_selected = false;
+                            self.selected_ssh_session_index = None;
                             self.selected_other_tmux_index = None;
 
                             if !self.workspaces.is_empty() {
@@ -3031,8 +3099,11 @@ impl AppState {
                                 } else if self.workspaces[0].shell_session.is_some() {
                                     self.shell_selected = true;
                                 }
+                            } else if !self.ssh_sessions.is_empty() {
+                                // No workspaces but there are SSH sessions - select the first one
+                                self.selected_ssh_session_index = Some(0);
                             } else if !self.other_tmux_sessions.is_empty() {
-                                // No workspaces but there are "Other tmux" sessions - select the first one
+                                // No workspaces or SSH sessions but there are "Other tmux" sessions
                                 self.selected_other_tmux_index = Some(0);
                             }
 
@@ -3210,6 +3281,8 @@ impl AppState {
         let sessions_output = String::from_utf8_lossy(&output.stdout);
         let mut other_sessions = Vec::new();
 
+        let mut ssh_sessions = Vec::new();
+
         for line in sessions_output.lines() {
             let parts: Vec<&str> = line.split(':').collect();
             if parts.len() >= 3 {
@@ -3220,6 +3293,47 @@ impl AppState {
                 if name.starts_with("ainb-ws-")
                     || name.starts_with("ainb-sh-")
                     || name.starts_with("ainb-shell-") {
+                    continue;
+                }
+
+                let attached = parts[parts.len() - 2] == "1";
+                let windows = parts[parts.len() - 1].parse().unwrap_or_else(|e| {
+                    warn!("Failed to parse window count for tmux session '{}': {}. Defaulting to 1.", name, e);
+                    1
+                });
+
+                // SSH sessions (ssh-*) go to the SSH Sessions section
+                if name.starts_with("ssh-") {
+                    // Parse SSH session name to extract target info
+                    // Format: ssh-{host}-{port} or ssh-{host}-{user}-{port}
+                    let mut ssh_session = crate::models::Session::new_ssh_session(
+                        name.clone(),
+                        crate::models::SshTarget::default(),
+                    );
+                    ssh_session.tmux_session_name = Some(name.clone());
+                    ssh_session.is_attached = attached;
+                    ssh_session.status = if attached {
+                        crate::models::SessionStatus::Running
+                    } else {
+                        crate::models::SessionStatus::Idle
+                    };
+
+                    // Try to parse host info from session name
+                    // Expected format: ssh-{host}-{port} or ssh-{host}-{user}-{port}
+                    let parts: Vec<&str> = name.strip_prefix("ssh-").unwrap_or(&name).split('-').collect();
+                    if parts.len() >= 2 {
+                        // Last part should be port or timestamp
+                        if let Ok(port) = parts[parts.len() - 1].parse::<u16>() {
+                            let host = parts[..parts.len() - 1].join("-");
+                            ssh_session.ssh_target = Some(crate::models::SshTarget::new(host).with_port(port));
+                        } else {
+                            // Couldn't parse port, use name as-is
+                            let host = parts.join("-");
+                            ssh_session.ssh_target = Some(crate::models::SshTarget::new(host));
+                        }
+                    }
+
+                    ssh_sessions.push(ssh_session);
                     continue;
                 }
 
@@ -3245,18 +3359,13 @@ impl AppState {
                     // Fall through to add as "other" session
                 }
 
-                let attached = parts[parts.len() - 2] == "1";
-                let windows = parts[parts.len() - 1].parse().unwrap_or_else(|e| {
-                    warn!("Failed to parse window count for tmux session '{}': {}. Defaulting to 1.", name, e);
-                    1
-                });
-
                 other_sessions.push(OtherTmuxSession::new(name, attached, windows));
             }
         }
 
-        info!("Discovered {} other tmux sessions (including orphaned tmux_ sessions)", other_sessions.len());
+        info!("Discovered {} other tmux sessions and {} SSH sessions", other_sessions.len(), ssh_sessions.len());
         self.other_tmux_sessions = other_sessions;
+        self.ssh_sessions = ssh_sessions;
     }
 
     /// Auto-detect workspace shell sessions from tmux
@@ -3425,6 +3534,7 @@ impl AppState {
         self.selected_workspace_index = None;
         self.selected_session_index = None;
         self.shell_selected = false;
+        self.selected_ssh_session_index = None;
         self.selected_other_tmux_index = None;
 
         if !self.workspaces.is_empty() {
@@ -3488,10 +3598,30 @@ impl AppState {
             return;
         }
 
-        // If nothing is selected but "Other tmux" sessions exist, select the first one
-        if self.selected_workspace_index.is_none() && !self.other_tmux_sessions.is_empty() {
-            self.selected_other_tmux_index = Some(0);
+        // Check if we're in the "SSH Sessions" section
+        if self.selected_ssh_session_index.is_some() {
+            // Navigate within SSH sessions
+            let current = self.selected_ssh_session_index.unwrap_or(0);
+            if current + 1 < self.ssh_sessions.len() {
+                self.selected_ssh_session_index = Some(current + 1);
+            } else if !self.other_tmux_sessions.is_empty() {
+                // At end of SSH sessions - move to "Other tmux"
+                self.selected_ssh_session_index = None;
+                self.selected_other_tmux_index = Some(0);
+            }
+            // Else: stay at last SSH session (no wrap)
             return;
+        }
+
+        // If nothing is selected, try SSH sessions first, then "Other tmux"
+        if self.selected_workspace_index.is_none() {
+            if !self.ssh_sessions.is_empty() {
+                self.selected_ssh_session_index = Some(0);
+                return;
+            } else if !self.other_tmux_sessions.is_empty() {
+                self.selected_other_tmux_index = Some(0);
+                return;
+            }
         }
 
         if let Some(workspace_idx) = self.selected_workspace_index {
@@ -3530,7 +3660,7 @@ impl AppState {
         }
     }
 
-    /// Helper: Move to next workspace's first session/shell, or Other tmux if no more workspaces
+    /// Helper: Move to next workspace's first session/shell, or SSH sessions, or Other tmux
     fn move_to_next_workspace_first_item(&mut self, current_workspace_idx: usize) {
         // Try to find next workspace with content
         for next_idx in (current_workspace_idx + 1)..self.workspaces.len() {
@@ -3553,7 +3683,16 @@ impl AppState {
             }
         }
 
-        // No more workspaces with content - move to "Other tmux" if available
+        // No more workspaces - move to SSH sessions if available
+        if !self.ssh_sessions.is_empty() {
+            self.selected_workspace_index = None;
+            self.selected_session_index = None;
+            self.shell_selected = false;
+            self.selected_ssh_session_index = Some(0);
+            return;
+        }
+
+        // No SSH sessions - move to "Other tmux" if available
         if !self.other_tmux_sessions.is_empty() {
             self.selected_workspace_index = None;
             self.selected_session_index = None;
@@ -3570,12 +3709,15 @@ impl AppState {
                 // Move up within other tmux sessions
                 self.selected_other_tmux_index = Some(other_idx - 1);
             } else {
-                // At first other_tmux session - move back to workspaces
-                if !self.workspaces.is_empty() {
+                // At first other_tmux session - move to SSH sessions if available
+                self.selected_other_tmux_index = None;
+                if !self.ssh_sessions.is_empty() {
+                    self.selected_ssh_session_index = Some(self.ssh_sessions.len() - 1);
+                } else if !self.workspaces.is_empty() {
+                    // No SSH sessions - move back to workspaces
                     let last_workspace_idx = self.workspaces.len() - 1;
                     let workspace = &self.workspaces[last_workspace_idx];
                     self.selected_workspace_index = Some(last_workspace_idx);
-                    self.selected_other_tmux_index = None;
 
                     // Go to shell session if exists, else last regular session
                     if workspace.shell_session.is_some() {
@@ -3591,10 +3733,42 @@ impl AppState {
             return;
         }
 
-        // If nothing is selected but "Other tmux" sessions exist, select the last one
-        if self.selected_workspace_index.is_none() && !self.other_tmux_sessions.is_empty() {
-            self.selected_other_tmux_index = Some(self.other_tmux_sessions.len() - 1);
+        // Check if we're in the "SSH Sessions" section
+        if let Some(ssh_idx) = self.selected_ssh_session_index {
+            if ssh_idx > 0 {
+                // Move up within SSH sessions
+                self.selected_ssh_session_index = Some(ssh_idx - 1);
+            } else {
+                // At first SSH session - move back to workspaces
+                self.selected_ssh_session_index = None;
+                if !self.workspaces.is_empty() {
+                    let last_workspace_idx = self.workspaces.len() - 1;
+                    let workspace = &self.workspaces[last_workspace_idx];
+                    self.selected_workspace_index = Some(last_workspace_idx);
+
+                    // Go to shell session if exists, else last regular session
+                    if workspace.shell_session.is_some() {
+                        self.selected_session_index = None;
+                        self.shell_selected = true;
+                    } else if !workspace.sessions.is_empty() {
+                        self.selected_session_index = Some(workspace.sessions.len() - 1);
+                        self.shell_selected = false;
+                        self.queue_logs_fetch();
+                    }
+                }
+            }
             return;
+        }
+
+        // If nothing is selected, try SSH sessions, then "Other tmux"
+        if self.selected_workspace_index.is_none() {
+            if !self.ssh_sessions.is_empty() {
+                self.selected_ssh_session_index = Some(self.ssh_sessions.len() - 1);
+                return;
+            } else if !self.other_tmux_sessions.is_empty() {
+                self.selected_other_tmux_index = Some(self.other_tmux_sessions.len() - 1);
+                return;
+            }
         }
 
         if let Some(workspace_idx) = self.selected_workspace_index {
@@ -3776,6 +3950,26 @@ impl AppState {
         } else {
             Err("No session selected".to_string())
         }
+    }
+
+    // ==================== SSH Sessions Section Helpers ====================
+
+    /// Toggle the expand/collapse state of the "SSH Sessions" section
+    pub fn toggle_ssh_sessions_expanded(&mut self) {
+        self.ssh_sessions_expanded = !self.ssh_sessions_expanded;
+    }
+
+    /// Get the currently selected SSH session, if any
+    pub fn selected_ssh_session(&self) -> Option<&crate::models::Session> {
+        self.selected_ssh_session_index
+            .and_then(|idx| self.ssh_sessions.get(idx))
+    }
+
+    /// Check if the selection is in the "SSH Sessions" section
+    pub fn is_ssh_session_selected(&self) -> bool {
+        self.selected_ssh_session_index.is_some()
+            && self.selected_workspace_index.is_none()
+            && self.selected_other_tmux_index.is_none()
     }
 
     pub fn toggle_claude_chat(&mut self) {
@@ -4924,7 +5118,7 @@ impl AppState {
         }
     }
 
-    /// Select agent and proceed to next step (or create shell session)
+    /// Select agent and proceed to next step (or create shell/SSH session)
     /// Returns true if Shell was selected (needs async handling)
     pub fn new_session_select_agent(&mut self) -> bool {
         if let Some(ref mut state) = self.new_session_state {
@@ -4952,6 +5146,19 @@ impl AppState {
             if agent_type == SessionAgentType::Shell {
                 tracing::info!("Shell agent selected - will create shell session");
                 return true; // Signal that async shell creation is needed
+            }
+
+            // If SSH is selected, go to SSH configuration step
+            if agent_type == SessionAgentType::Ssh {
+                tracing::info!("SSH agent selected - transitioning to SSH configuration");
+                state.step = NewSessionStep::ConfigureSsh;
+                // Reset SSH fields to defaults
+                state.ssh_host.clear();
+                state.ssh_port = "22".to_string();
+                state.ssh_user.clear();
+                state.ssh_identity_file.clear();
+                state.ssh_input_focus = SshInputFocus::Host;
+                return false;
             }
 
             // For AI agents, check if we should skip branch input
@@ -5042,6 +5249,171 @@ impl AppState {
         }
     }
 
+    // ============================================================================
+    // SSH Configuration Methods
+    // ============================================================================
+
+    /// Navigate to next SSH input field (Tab)
+    pub fn new_session_ssh_next_field(&mut self) {
+        if let Some(ref mut state) = self.new_session_state {
+            if state.step == NewSessionStep::ConfigureSsh {
+                state.ssh_input_focus = match state.ssh_input_focus {
+                    SshInputFocus::Host => SshInputFocus::Port,
+                    SshInputFocus::Port => SshInputFocus::User,
+                    SshInputFocus::User => SshInputFocus::IdentityFile,
+                    SshInputFocus::IdentityFile => SshInputFocus::Host,
+                };
+            }
+        }
+    }
+
+    /// Navigate to previous SSH input field (Shift+Tab)
+    pub fn new_session_ssh_prev_field(&mut self) {
+        if let Some(ref mut state) = self.new_session_state {
+            if state.step == NewSessionStep::ConfigureSsh {
+                state.ssh_input_focus = match state.ssh_input_focus {
+                    SshInputFocus::Host => SshInputFocus::IdentityFile,
+                    SshInputFocus::Port => SshInputFocus::Host,
+                    SshInputFocus::User => SshInputFocus::Port,
+                    SshInputFocus::IdentityFile => SshInputFocus::User,
+                };
+            }
+        }
+    }
+
+    /// Handle character input for SSH configuration
+    pub fn new_session_ssh_input_char(&mut self, ch: char) {
+        if let Some(ref mut state) = self.new_session_state {
+            if state.step == NewSessionStep::ConfigureSsh {
+                match state.ssh_input_focus {
+                    SshInputFocus::Host => state.ssh_host.push(ch),
+                    SshInputFocus::Port => {
+                        // Only allow digits for port
+                        if ch.is_ascii_digit() {
+                            state.ssh_port.push(ch);
+                        }
+                    }
+                    SshInputFocus::User => state.ssh_user.push(ch),
+                    SshInputFocus::IdentityFile => state.ssh_identity_file.push(ch),
+                }
+            }
+        }
+    }
+
+    /// Handle backspace for SSH configuration
+    pub fn new_session_ssh_backspace(&mut self) {
+        if let Some(ref mut state) = self.new_session_state {
+            if state.step == NewSessionStep::ConfigureSsh {
+                match state.ssh_input_focus {
+                    SshInputFocus::Host => { state.ssh_host.pop(); }
+                    SshInputFocus::Port => { state.ssh_port.pop(); }
+                    SshInputFocus::User => { state.ssh_user.pop(); }
+                    SshInputFocus::IdentityFile => { state.ssh_identity_file.pop(); }
+                }
+            }
+        }
+    }
+
+    /// Validate and confirm SSH configuration, returns true if ready to create session
+    pub fn new_session_ssh_confirm(&mut self) -> bool {
+        if let Some(ref mut state) = self.new_session_state {
+            if state.step != NewSessionStep::ConfigureSsh {
+                return false;
+            }
+
+            // Validate host is not empty
+            if state.ssh_host.trim().is_empty() {
+                self.add_error_notification("SSH host is required".to_string());
+                return false;
+            }
+
+            // Validate port is a valid number
+            let port: u16 = state.ssh_port.parse().unwrap_or(22);
+            if port == 0 {
+                self.add_error_notification("Invalid port number".to_string());
+                return false;
+            }
+
+            tracing::info!(
+                "SSH configuration confirmed: {}@{}:{}",
+                if state.ssh_user.is_empty() { "(no user)" } else { &state.ssh_user },
+                state.ssh_host,
+                port
+            );
+
+            // SSH sessions go directly to Creating step (no branch/mode needed)
+            state.step = NewSessionStep::Creating;
+            return true;
+        }
+        false
+    }
+
+    /// Go back from SSH configuration to agent selection
+    pub fn new_session_ssh_go_back(&mut self) {
+        if let Some(ref mut state) = self.new_session_state {
+            if state.step == NewSessionStep::ConfigureSsh {
+                state.step = NewSessionStep::SelectAgent;
+                tracing::info!("Going back from SSH config to agent selection");
+            }
+        }
+    }
+
+    /// Build SSH command preview string
+    pub fn get_ssh_command_preview(&self) -> String {
+        if let Some(ref state) = self.new_session_state {
+            let mut cmd = String::from("ssh");
+
+            let port: u16 = state.ssh_port.parse().unwrap_or(22);
+            if port != 22 {
+                cmd.push_str(&format!(" -p {}", port));
+            }
+
+            if !state.ssh_identity_file.is_empty() {
+                cmd.push_str(&format!(" -i {}", state.ssh_identity_file));
+            }
+
+            if !state.ssh_user.is_empty() {
+                cmd.push_str(&format!(" {}@{}", state.ssh_user, state.ssh_host));
+            } else if !state.ssh_host.is_empty() {
+                cmd.push_str(&format!(" {}", state.ssh_host));
+            }
+
+            cmd
+        } else {
+            String::from("ssh")
+        }
+    }
+
+    /// Build SshTarget from current state
+    pub fn build_ssh_target(&self) -> Option<crate::models::SshTarget> {
+        if let Some(ref state) = self.new_session_state {
+            if state.ssh_host.trim().is_empty() {
+                return None;
+            }
+
+            let port: u16 = state.ssh_port.parse().unwrap_or(22);
+            let user = if state.ssh_user.is_empty() {
+                None
+            } else {
+                Some(state.ssh_user.clone())
+            };
+            let identity_file = if state.ssh_identity_file.is_empty() {
+                None
+            } else {
+                Some(std::path::PathBuf::from(&state.ssh_identity_file))
+            };
+
+            Some(crate::models::SshTarget::with_config(
+                state.ssh_host.clone(),
+                port,
+                user,
+                identity_file,
+            ))
+        } else {
+            None
+        }
+    }
+
     pub fn new_session_proceed_from_mode(&mut self) {
         if let Some(ref mut state) = self.new_session_state {
             if state.step == NewSessionStep::SelectMode {
@@ -5086,14 +5458,30 @@ impl AppState {
     }
 
     /// Toggle between Local and Remote source choice
+    /// Toggle source choice forward (↓ key): Local → Remote → Ssh → Local
     pub fn new_session_toggle_source(&mut self) {
         if let Some(ref mut state) = self.new_session_state {
             if state.step == NewSessionStep::SelectSource {
                 state.source_choice = match state.source_choice {
                     RepoSourceChoice::Local => RepoSourceChoice::Remote,
-                    RepoSourceChoice::Remote => RepoSourceChoice::Local,
+                    RepoSourceChoice::Remote => RepoSourceChoice::Ssh,
+                    RepoSourceChoice::Ssh => RepoSourceChoice::Local,
                 };
                 tracing::info!("Source choice toggled to: {:?}", state.source_choice);
+            }
+        }
+    }
+
+    /// Toggle source choice backward (↑ key): Local → Ssh → Remote → Local
+    pub fn new_session_toggle_source_reverse(&mut self) {
+        if let Some(ref mut state) = self.new_session_state {
+            if state.step == NewSessionStep::SelectSource {
+                state.source_choice = match state.source_choice {
+                    RepoSourceChoice::Local => RepoSourceChoice::Ssh,
+                    RepoSourceChoice::Remote => RepoSourceChoice::Local,
+                    RepoSourceChoice::Ssh => RepoSourceChoice::Remote,
+                };
+                tracing::info!("Source choice toggled (reverse) to: {:?}", state.source_choice);
             }
         }
     }
@@ -5114,6 +5502,18 @@ impl AppState {
                     RepoSourceChoice::Remote => {
                         tracing::info!("Proceeding with Remote source - showing URL input");
                         state.step = NewSessionStep::InputRepoSource;
+                    }
+                    RepoSourceChoice::Ssh => {
+                        tracing::info!("Proceeding with SSH source - showing SSH config");
+                        // Skip repo selection - go directly to SSH config
+                        state.step = NewSessionStep::ConfigureSsh;
+                        state.selected_agent = SessionAgentType::Ssh;
+                        // Reset SSH fields to defaults
+                        state.ssh_host.clear();
+                        state.ssh_port = "22".to_string();
+                        state.ssh_user.clear();
+                        state.ssh_identity_file.clear();
+                        state.ssh_input_focus = SshInputFocus::Host;
                     }
                 }
             }
@@ -5137,6 +5537,17 @@ impl AppState {
             if state.step == NewSessionStep::SelectSource {
                 state.source_choice = RepoSourceChoice::Remote;
                 tracing::info!("Quick select: Remote source");
+            }
+        }
+        self.new_session_proceed_from_source();
+    }
+
+    /// Quick select SSH source and proceed directly to SSH config
+    pub fn new_session_quick_select_ssh(&mut self) {
+        if let Some(ref mut state) = self.new_session_state {
+            if state.step == NewSessionStep::SelectSource {
+                state.source_choice = RepoSourceChoice::Ssh;
+                tracing::info!("Quick select: SSH source");
             }
         }
         self.new_session_proceed_from_source();
@@ -6725,6 +7136,10 @@ impl AppState {
                 }
                 action @ AsyncAction::OpenShellAtPath(_) => {
                     debug!("OpenShellAtPath action deferred to main loop");
+                    self.pending_async_action = Some(action);
+                }
+                action @ AsyncAction::CreateSshSession => {
+                    debug!("CreateSshSession action deferred to main loop");
                     self.pending_async_action = Some(action);
                 }
                 action @ AsyncAction::KillWorkspaceShell(_) => {
