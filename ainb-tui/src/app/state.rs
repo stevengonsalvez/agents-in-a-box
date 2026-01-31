@@ -3287,6 +3287,16 @@ impl AppState {
         let sessions_output = String::from_utf8_lossy(&output.stdout);
         let mut other_sessions = Vec::new();
 
+        // Preserve display_name from existing SSH sessions (keyed by tmux session name)
+        let existing_display_names: std::collections::HashMap<String, String> = self.ssh_sessions
+            .iter()
+            .filter_map(|s| {
+                s.tmux_session_name.as_ref().and_then(|tmux_name| {
+                    s.display_name.as_ref().map(|dn| (tmux_name.clone(), dn.clone()))
+                })
+            })
+            .collect();
+
         let mut ssh_sessions = Vec::new();
 
         for line in sessions_output.lines() {
@@ -3337,6 +3347,11 @@ impl AppState {
                             let host = parts.join("-");
                             ssh_session.ssh_target = Some(crate::models::SshTarget::new(host));
                         }
+                    }
+
+                    // Restore display_name if previously set
+                    if let Some(preserved_name) = existing_display_names.get(&name) {
+                        ssh_session.display_name = Some(preserved_name.clone());
                     }
 
                     ssh_sessions.push(ssh_session);
