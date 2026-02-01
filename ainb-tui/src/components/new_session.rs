@@ -1309,19 +1309,16 @@ impl NewSessionComponent {
             .direction(Direction::Vertical)
             .margin(1)
             .constraints([
-                Constraint::Length(2), // Header text
+                Constraint::Length(1), // Header text (reduced)
                 Constraint::Length(1), // Spacer
                 Constraint::Length(3), // Host input
-                Constraint::Length(1), // Spacer
-                Constraint::Length(3), // Port input
-                Constraint::Length(1), // Spacer
-                Constraint::Length(3), // User input
-                Constraint::Length(1), // Spacer
-                Constraint::Length(3), // Identity file input
+                Constraint::Length(3), // Port input (no spacer before)
+                Constraint::Length(3), // User input (no spacer before)
+                Constraint::Length(3), // Identity file input (no spacer before)
                 Constraint::Length(1), // Spacer
                 Constraint::Length(3), // Command preview
                 Constraint::Length(1), // Spacer
-                Constraint::Length(2), // Instructions
+                Constraint::Length(1), // Instructions (reduced)
             ])
             .split(inner);
 
@@ -1392,7 +1389,7 @@ impl NewSessionComponent {
         // Port input
         render_input_field(
             frame,
-            chunks[4],
+            chunks[3],
             "Port",
             &session_state.ssh_port,
             session_state.ssh_input_focus == SshInputFocus::Port,
@@ -1402,7 +1399,7 @@ impl NewSessionComponent {
         // User input
         render_input_field(
             frame,
-            chunks[6],
+            chunks[4],
             "User",
             &session_state.ssh_user,
             session_state.ssh_input_focus == SshInputFocus::User,
@@ -1412,7 +1409,7 @@ impl NewSessionComponent {
         // Identity file input
         render_input_field(
             frame,
-            chunks[8],
+            chunks[5],
             "Identity File",
             &session_state.ssh_identity_file,
             session_state.ssh_input_focus == SshInputFocus::IdentityFile,
@@ -1434,7 +1431,7 @@ impl NewSessionComponent {
         let preview = Paragraph::new(preview_cmd)
             .style(Style::default().fg(Color::Rgb(150, 200, 150)))
             .block(preview_block);
-        frame.render_widget(preview, chunks[10]);
+        frame.render_widget(preview, chunks[7]);
 
         // Instructions
         let instruction_spans = vec![
@@ -1452,7 +1449,7 @@ impl NewSessionComponent {
         let instructions_widget = Paragraph::new(instructions)
             .alignment(Alignment::Center)
             .style(Style::default().bg(dark_bg));
-        frame.render_widget(instructions_widget, chunks[12]);
+        frame.render_widget(instructions_widget, chunks[9]);
     }
 
     /// Build SSH command preview string for display
