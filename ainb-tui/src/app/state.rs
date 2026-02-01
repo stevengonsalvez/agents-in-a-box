@@ -4120,6 +4120,23 @@ impl AppState {
         });
     }
 
+    /// Show confirmation dialog for killing an SSH session (which is a tmux session)
+    pub fn show_kill_ssh_session_confirmation(&mut self, session_name: String) {
+        // Get the display name if available for a friendlier message
+        let display_text = self.selected_ssh_session()
+            .and_then(|s| s.display_name.clone())
+            .unwrap_or_else(|| session_name.clone());
+
+        info!("Showing kill confirmation for SSH session: {} (display: {})", session_name, display_text);
+        self.confirmation_dialog = Some(ConfirmationDialog {
+            title: "Kill SSH Session".to_string(),
+            message: format!("Are you sure you want to kill SSH session '{}'?", display_text),
+            confirm_action: ConfirmAction::KillOtherTmux(session_name), // Reuse KillOtherTmux since SSH sessions are tmux sessions
+            selected_option: false, // Default to "No"
+            warning: None,
+        });
+    }
+
     /// Show confirmation dialog for killing a workspace shell session
     pub fn show_kill_shell_confirmation(&mut self, workspace_index: usize) {
         let shell_name = self.workspaces

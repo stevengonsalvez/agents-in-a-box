@@ -2070,8 +2070,22 @@ impl EventHandler {
                     state.selected_other_tmux_index
                 );
 
+                // Check if we're in the SSH Sessions section
+                if state.is_ssh_session_selected() {
+                    if let Some(ssh_session) = state.selected_ssh_session() {
+                        // SSH sessions are tmux sessions - use the tmux session name for kill
+                        if let Some(tmux_name) = ssh_session.tmux_session_name.clone() {
+                            tracing::info!("[ACTION] Showing kill confirmation for SSH session: {}", tmux_name);
+                            state.show_kill_ssh_session_confirmation(tmux_name);
+                        } else {
+                            tracing::warn!("[ACTION] SSH session has no tmux_session_name");
+                            state.add_warning_notification("Cannot delete SSH session: no tmux session name".to_string());
+                        }
+                    } else {
+                        tracing::warn!("[ACTION] SSH session selected but no session found at index {:?}", state.selected_ssh_session_index);
+                    }
                 // Check if we're in the "Other tmux" section
-                if state.is_other_tmux_selected() {
+                } else if state.is_other_tmux_selected() {
                     if let Some(other_session) = state.selected_other_tmux_session() {
                         tracing::info!("[ACTION] Showing kill confirmation for other tmux session: {}", other_session.name);
                         state.show_kill_other_tmux_confirmation(other_session.name.clone());
