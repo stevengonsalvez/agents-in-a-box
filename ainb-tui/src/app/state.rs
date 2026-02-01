@@ -10,7 +10,7 @@ use crate::claude::{ClaudeApiClient, ClaudeMessage};
 use crate::components::fuzzy_file_finder::FuzzyFileFinderState;
 use crate::components::home_screen_v2::HomeScreenV2State;
 use crate::components::live_logs_stream::LogEntry;
-use crate::config::{AppConfig, WorktreeCollisionBehavior};
+use crate::config::{AppConfig, SshDisplayNameStore, WorktreeCollisionBehavior};
 use crate::credentials;
 use crate::editors;
 use crate::docker::LogStreamingCoordinator;
@@ -1869,6 +1869,8 @@ pub struct AppState {
     pub ssh_session_rename_mode: bool,
     /// Buffer for the new display name being typed during rename
     pub ssh_session_rename_buffer: String,
+    /// Persistent store for SSH session display names
+    pub ssh_display_name_store: SshDisplayNameStore,
 
     // AINB 2.0: Home screen and agent selection
     pub home_screen_state: HomeScreenState,
@@ -2392,6 +2394,7 @@ impl Default for AppState {
             selected_ssh_session_index: None,
             ssh_session_rename_mode: false,
             ssh_session_rename_buffer: String::new(),
+            ssh_display_name_store: SshDisplayNameStore::load(),
 
             // AINB 2.0: Home screen and agent selection
             home_screen_state: HomeScreenState::default(),
@@ -3286,17 +3289,6 @@ impl AppState {
 
         let sessions_output = String::from_utf8_lossy(&output.stdout);
         let mut other_sessions = Vec::new();
-
-        // Preserve display_name from existing SSH sessions (keyed by tmux session name)
-        let existing_display_names: std::collections::HashMap<String, String> = self.ssh_sessions
-            .iter()
-            .filter_map(|s| {
-                s.tmux_session_name.as_ref().and_then(|tmux_name| {
-                    s.display_name.as_ref().map(|dn| (tmux_name.clone(), dn.clone()))
-                })
-            })
-            .collect();
-
         let mut ssh_sessions = Vec::new();
 
         for line in sessions_output.lines() {
@@ -3349,8 +3341,8 @@ impl AppState {
                         }
                     }
 
-                    // Restore display_name if previously set
-                    if let Some(preserved_name) = existing_display_names.get(&name) {
+                    // Restore display_name from persistent store
+                    if let Some(preserved_name) = self.ssh_display_name_store.get(&name) {
                         ssh_session.display_name = Some(preserved_name.clone());
                     }
 
@@ -4036,11 +4028,22 @@ impl AppState {
         let new_name = self.ssh_session_rename_buffer.trim().to_string();
         if let Some(idx) = self.selected_ssh_session_index {
             if let Some(session) = self.ssh_sessions.get_mut(idx) {
+                // Get tmux session name for persistence key
+                let tmux_name = session.tmux_session_name.clone();
+
                 if new_name.is_empty() {
                     // Empty = clear custom name, revert to auto-generated
                     session.display_name = None;
                 } else {
-                    session.display_name = Some(new_name);
+                    session.display_name = Some(new_name.clone());
+                }
+
+                // Persist to disk
+                if let Some(key) = tmux_name {
+                    self.ssh_display_name_store.set(key, session.display_name.clone());
+                    if let Err(e) = self.ssh_display_name_store.save() {
+                        warn!("Failed to save SSH display names: {}", e);
+                    }
                 }
             }
         }

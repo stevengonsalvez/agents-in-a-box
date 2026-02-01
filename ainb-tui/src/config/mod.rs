@@ -16,12 +16,14 @@ pub mod mcp;
 pub mod mcp_init;
 pub mod onboarding;
 pub mod presets;
+pub mod ssh_display_names;
 
 pub use container::{ContainerTemplate, ContainerTemplateConfig};
 pub use mcp::{McpInitStrategy, McpServerConfig};
 pub use mcp_init::{McpInitResult, McpInitializer, apply_mcp_init_result};
 pub use onboarding::OnboardingConfig;
 pub use presets::{PermissionSet, PresetManager, RepositoryPreset, create_default_presets};
+pub use ssh_display_names::SshDisplayNameStore;
 
 /// Authentication provider for Claude API
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
