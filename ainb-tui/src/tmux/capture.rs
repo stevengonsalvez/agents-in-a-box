@@ -99,12 +99,14 @@ fn filter_claude_ui_noise(content: &str) -> String {
         let clean_line = strip_ansi_codes(original_line);
 
         // Skip permission dialog markers
+        // NOTE: Patterns must be SPECIFIC to Claude's permission dialogs.
+        // Generic words like "Security" or "details" will filter legitimate output!
         if clean_line.contains("Do you want to work in this folder?")
             || clean_line.contains("In order to work in this folder, we need your permission")
             || clean_line.contains("If this folder has malicious code")
             || clean_line.contains("Only continue if this is your code")
-            || clean_line.contains("Security")
-            || clean_line.contains("details")
+            || clean_line.contains("Security Information")
+            || clean_line.contains("View security details")
             || clean_line.contains("https://docs.claude.com/s/claude-code-security")
             || clean_line.contains("Yes, continue")
             || clean_line.contains("No, exit")
@@ -273,9 +275,9 @@ More output"#;
     fn test_filter_claude_ui_noise_with_ansi() {
         let input = "\x1b[38;5;123mColored\x1b[0m text\nDo you want to work in this folder?\n\nMore text";
         let result = filter_claude_ui_noise(input);
-        assert!(result.contains("Colored text"));
+        // ANSI codes are preserved (per function docstring)
+        assert!(result.contains("\x1b[38;5;123mColored\x1b[0m text"));
         assert!(result.contains("More text"));
-        assert!(!result.contains("\x1b["));
         assert!(!result.contains("Do you want to work"));
     }
 }
