@@ -1349,6 +1349,7 @@ impl NewSessionComponent {
 
             let display_value = if value.is_empty() && !is_focused {
                 match label {
+                    "Host" => "(e.g., server.example.com)".to_string(),
                     "Port" => "22".to_string(),
                     "User" => "(optional)".to_string(),
                     "Identity File" => "(optional, e.g., ~/.ssh/id_rsa)".to_string(),
