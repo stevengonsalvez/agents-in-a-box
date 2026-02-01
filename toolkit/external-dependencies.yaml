@@ -13,7 +13,7 @@
 # =============================================================================
 
 version: "1.0.0"
-updated: "2026-01-25"
+updated: "2026-01-31"
 
 # =============================================================================
 # BUNDLED SKILLS (included in toolkit/packages/skills/)
@@ -60,6 +60,24 @@ bundled-skills:
       - Professional PDF generation
       - LaTeX template support
       - Custom styling options
+
+  - name: interview
+    path: packages/skills/interview
+    purpose: "Plan interview and specification generation"
+    features:
+      - Systematic interviewing about plans
+      - Technical, UX, and business questioning
+      - Comprehensive specification output
+      - Works with Claude Code and Codex
+
+  - name: reflect
+    path: packages/skills/reflect
+    purpose: "Self-improvement through conversation analysis"
+    features:
+      - Extract learnings from corrections
+      - Detect success patterns
+      - Propose agent file updates
+      - Create new skills from learnings
 
 # =============================================================================
 # EXTERNAL PLUGINS (Claude Code marketplace)
@@ -117,17 +135,40 @@ claude-plugins:
       - Code quality checks
       - Review comment generation
 
+  - name: playground
+    marketplace: anthropics/claude-plugins-official
+    marketplace_id: claude-plugins-official
+    install: |
+      claude plugin marketplace add anthropics/claude-plugins-official
+      claude plugin install playground
+    purpose: "Interactive HTML playground generator for visual configuration"
+    features:
+      - Self-contained HTML playground files
+      - Interactive controls with live preview
+      - Prompt output generation with copy button
+      - Templates for common use cases
+    templates:
+      - design-playground: "Visual design decisions (components, layouts, spacing, color, typography)"
+      - data-explorer: "Data and query building (SQL, APIs, pipelines, regex)"
+      - concept-map: "Learning and exploration (concept maps, knowledge gaps, scope mapping)"
+      - document-critique: "Document review (suggestions with approve/reject/comment workflow)"
+    docs: "https://github.com/anthropics/claude-plugins-official/tree/main/plugins/playground"
+
   - name: dev-browser
     marketplace: sawyerhood/dev-browser
     marketplace_id: sawyerhood-dev-browser
     install: |
       claude plugin marketplace add sawyerhood/dev-browser
       claude plugin install dev-browser@sawyerhood/dev-browser
-    purpose: "Browser DevTools integration for debugging and inspection"
+    purpose: "Browser automation skill for web testing and verification"
     features:
-      - DevTools access
-      - DOM inspection
-      - Network monitoring
+      - Persistent Chromium browser control (maintains cookies, localStorage, page state)
+      - ARIA snapshot element discovery for complex web layouts
+      - Screenshot capture for visual feedback
+      - Two modes: fresh Chromium instance or Chrome extension for existing sessions
+      - Multi-step form filling and authenticated portal navigation
+      - Web scraping and data extraction
+    docs: "https://github.com/SawyerHood/dev-browser"
 
   - name: open-prose
     marketplace: anthropics/prose

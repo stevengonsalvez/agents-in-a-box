@@ -57,6 +57,14 @@
       {
         "name": "retro-pdf",
         "description": "Convert markdown to professional LaTeX-style PDFs"
+      },
+      {
+        "name": "interview",
+        "description": "Interview users about plans to generate comprehensive specifications"
+      },
+      {
+        "name": "reflect",
+        "description": "Self-improvement through conversation analysis and learning extraction"
       }
     ],
     "workflows": [

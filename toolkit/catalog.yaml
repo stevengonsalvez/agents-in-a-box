@@ -34,6 +34,16 @@ components:
       version: 1.0.0
       description: Convert markdown to professional LaTeX-style PDFs
 
+    - name: interview
+      path: packages/skills/interview
+      version: 1.0.0
+      description: Interview users about plans to generate comprehensive specifications
+
+    - name: reflect
+      path: packages/skills/reflect
+      version: 2.0.0
+      description: Self-improvement through conversation analysis and learning extraction
+
   workflows:
     - name: single-agent-workflow
       path: packages/workflows/single-agent
