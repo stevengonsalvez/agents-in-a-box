@@ -44,6 +44,12 @@ components:
       version: 2.0.0
       description: Self-improvement through conversation analysis and learning extraction
 
+    - name: oracle
+      path: packages/skills/oracle
+      version: 0.8.5
+      description: Bundle prompt + files for second-model review via API or browser (GPT-5.x, Gemini, Claude)
+      source: https://github.com/steipete/oracle
+
   workflows:
     - name: single-agent-workflow
       path: packages/workflows/single-agent
