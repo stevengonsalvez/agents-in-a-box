@@ -113,3 +113,45 @@ If you need to reproduce the same context later, re-run with the same prompt + `
 
 - Don't attach secrets by default (`.env`, key files, auth tokens). Redact aggressively; share only what's required.
 - Prefer "just enough context": fewer files + better prompt beats whole-repo dumps.
+
+## Troubleshooting
+
+### macOS Keychain blocks Gemini browser mode
+
+**Symptom**: `Failed to read macOS Keychain (Chrome Safe Storage): Timed out after 3000ms`
+
+Oracle times out (3s) before you can enter the Keychain password when prompted.
+
+**Fix**: Pre-authorize Keychain access before running Oracle:
+```bash
+# This triggers the Keychain prompt - enter password and click "Always Allow"
+security find-generic-password -s "Chrome Safe Storage" -w
+```
+
+Then run Oracle normally:
+```bash
+oracle --engine browser --model gemini-3-pro -p "your prompt" --file "src/**"
+```
+
+### Chrome cookies not found
+
+**Symptom**: `Gemini browser mode requires Chrome cookies for google.com (missing __Secure-1PSID/__Secure-1PSIDTS)`
+
+**Fixes**:
+1. Ensure you're logged into gemini.google.com in Chrome
+2. Try closing Chrome completely before running Oracle
+3. If using multiple Chrome profiles, specify the path:
+   ```bash
+   oracle --engine browser --model gemini-3-pro \
+     --browser-cookie-path ~/Library/Application\ Support/Google/Chrome/Default/Cookies \
+     -p "your prompt" --file "src/**"
+   ```
+
+### ChatGPT browser mode connection error
+
+**Symptom**: `Cannot GET /json/list` or DevTools connection errors
+
+**Fixes**:
+1. Close any existing Chrome instances
+2. Ensure Chrome is installed (not just Chromium)
+3. Try specifying Chrome path: `--browser-chrome-path /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome`
