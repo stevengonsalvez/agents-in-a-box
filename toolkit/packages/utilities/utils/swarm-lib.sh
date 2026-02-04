@@ -710,6 +710,64 @@ swarm_agent_commit() {
 # Shutdown & Cleanup Functions
 # ============================================================================
 
+# swarm_kill_session_processes <session_name>
+# Kills all child processes spawned by a tmux session
+# This prevents orphaned processes (like tsc, npm, node) after session is killed
+swarm_kill_session_processes() {
+    local session_name="$1"
+
+    if ! tmux has-session -t "$session_name" 2>/dev/null; then
+        return 0
+    fi
+
+    # Get the pane PIDs for this session
+    local pane_pids
+    pane_pids=$(tmux list-panes -t "$session_name" -F '#{pane_pid}' 2>/dev/null || true)
+
+    for pid in $pane_pids; do
+        if [[ -n "$pid" ]]; then
+            # Kill all child processes of the pane
+            # Using pkill with parent PID to get all descendants
+            pkill -9 -P "$pid" 2>/dev/null || true
+
+            # Also get grandchildren (processes spawned by children)
+            local children
+            children=$(pgrep -P "$pid" 2>/dev/null || true)
+            for child in $children; do
+                pkill -9 -P "$child" 2>/dev/null || true
+            done
+        fi
+    done
+}
+
+# swarm_cleanup_orphaned_processes
+# Cleans up common orphaned development processes
+# Call this after shutdown as a safety net
+swarm_cleanup_orphaned_processes() {
+    local patterns=("tsc --noEmit" "tsc -p" "vite" "esbuild" "webpack")
+    local killed_count=0
+
+    for pattern in "${patterns[@]}"; do
+        local pids
+        pids=$(pgrep -f "$pattern" 2>/dev/null || true)
+        if [[ -n "$pids" ]]; then
+            # Check if these are orphaned (no parent terminal)
+            for pid in $pids; do
+                local ppid
+                ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ' || true)
+                # If parent is init (1) or this shell, it's orphaned
+                if [[ "$ppid" == "1" ]] || [[ -z "$ppid" ]]; then
+                    kill -9 "$pid" 2>/dev/null && ((killed_count++)) || true
+                fi
+            done
+        fi
+    done
+
+    if [[ "$killed_count" -gt 0 ]]; then
+        echo "Cleaned up $killed_count orphaned development processes"
+    fi
+}
+
 # swarm_shutdown <team_id> [--force]
 # Gracefully shuts down a swarm team
 swarm_shutdown() {
@@ -732,26 +790,34 @@ swarm_shutdown() {
         sleep 10
     fi
 
-    # Kill leader session
+    # Kill leader session and its child processes
     local leader_session
     leader_session=$(jq -r '.leader.session' "$team_file")
     if tmux has-session -t "$leader_session" 2>/dev/null; then
+        echo "Killing child processes for leader: $leader_session"
+        swarm_kill_session_processes "$leader_session"
         tmux kill-session -t "$leader_session" 2>/dev/null || true
         echo "Killed leader session: $leader_session"
     fi
 
-    # Kill member sessions
+    # Kill member sessions and their child processes
     while IFS= read -r session; do
         if tmux has-session -t "$session" 2>/dev/null; then
+            echo "Killing child processes for agent: $session"
+            swarm_kill_session_processes "$session"
             tmux kill-session -t "$session" 2>/dev/null || true
             echo "Killed agent session: $session"
         fi
     done < <(jq -r '.members[].session' "$team_file")
 
+    # Final cleanup: kill any orphaned development processes
+    echo "Cleaning up orphaned processes..."
+    swarm_cleanup_orphaned_processes
+
     # Update team status
     swarm_update_team "$team_id" '{"status": "shutdown", "shutdown_at": "'"$(date -Iseconds)"'"}'
 
-    echo "Swarm $team_id shut down"
+    echo "Swarm $team_id shut down (including child processes)"
 }
 
 # swarm_archive <team_id>
@@ -818,6 +884,9 @@ case "${1:-}" in
     shutdown)
         swarm_shutdown "$2" "${3:-}"
         ;;
+    cleanup-orphans)
+        swarm_cleanup_orphaned_processes
+        ;;
     archive)
         swarm_archive "$2"
         ;;
@@ -862,7 +931,8 @@ Git Worktree (for worktree isolation mode):
 Status & Control:
   status <team_id>                       Get comprehensive team status
   update-member <team_id> <name> <status> [task_id]   Update member status
-  shutdown <team_id> [--force]           Gracefully shutdown team
+  shutdown <team_id> [--force]           Gracefully shutdown team (kills child processes)
+  cleanup-orphans                        Kill orphaned dev processes (tsc, vite, etc.)
   archive <team_id>                      Archive team to .archive/
 
 Isolation Modes:
