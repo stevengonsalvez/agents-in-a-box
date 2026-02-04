@@ -3094,6 +3094,25 @@ impl AppState {
                             self.ssh_sessions = ssh_sessions;
                             self.workspace_load_error = None;
 
+                            // Populate tmux_sessions HashMap for Interactive mode sessions
+                            // This is needed for update_tmux_previews() to capture pane content
+                            for workspace in &self.workspaces {
+                                for session in &workspace.sessions {
+                                    if session.mode == crate::models::SessionMode::Interactive {
+                                        // Use tmux_session_name if available, otherwise generate from session name
+                                        let tmux_name = session.tmux_session_name.clone()
+                                            .unwrap_or_else(|| session.get_tmux_name());
+                                        let tmux_session = crate::tmux::TmuxSession::new(
+                                            tmux_name,
+                                            "claude".to_string(),
+                                        );
+                                        self.tmux_sessions.insert(session.id, tmux_session);
+                                        debug!("Populated tmux_sessions for session {}: {}", session.id, session.name);
+                                    }
+                                }
+                            }
+                            info!("Populated tmux_sessions with {} entries", self.tmux_sessions.len());
+
                             // Set initial selection
                             self.selected_workspace_index = None;
                             self.selected_session_index = None;
@@ -3233,10 +3252,10 @@ impl AppState {
                     }
 
                     // Store tmux session for attach operations
-                    // Pass branch name (NOT tmux-prefixed name) to TmuxSession::new()
-                    // because TmuxSession::sanitize_name() will add the tmux_ prefix
+                    // Use the actual tmux session name from discovery to ensure captures work
+                    // (branch_name may differ from the actual tmux session name)
                     let tmux_session = crate::tmux::TmuxSession::new(
-                        interactive_session.branch_name.clone(),
+                        interactive_session.tmux_session_name.clone(),
                         "claude".to_string(),
                     );
                     self.tmux_sessions.insert(interactive_session.session_id, tmux_session);
@@ -7896,6 +7915,19 @@ impl AppState {
         let mut updates = Vec::new();
         let detector = ClaudeProcessDetector::new();
 
+        // Debug: Log tmux_sessions HashMap contents
+        debug!("update_tmux_previews: tmux_sessions has {} entries", self.tmux_sessions.len());
+        for (sid, ts) in &self.tmux_sessions {
+            debug!("  tmux_sessions entry: session_id={}, tmux_name={}", sid, ts.name());
+        }
+
+        // Debug: Log workspace sessions
+        let workspace_session_ids: Vec<_> = self.workspaces.iter()
+            .flat_map(|w| &w.sessions)
+            .map(|s| (s.id, s.name.clone(), s.tmux_session_name.clone()))
+            .collect();
+        debug!("update_tmux_previews: workspace sessions: {:?}", workspace_session_ids);
+
         for (session_id, tmux_session) in &self.tmux_sessions {
             // Check if session is attached (without mutable borrow)
             let should_update = self
@@ -7906,16 +7938,21 @@ impl AppState {
                 .map(|s| !s.is_attached)
                 .unwrap_or(false);
 
+            debug!("  Checking session_id={}: should_update={}", session_id, should_update);
+
             if should_update {
                 // Capture full scrollback history for preview (allows scrolling through history)
+                debug!("    Attempting capture from tmux session: {}", tmux_session.name());
                 match tmux_session.capture_full_history().await {
                     Ok(content) => {
                         // Check if Claude is running by analyzing the content
                         let claude_running = detector.has_claude_status_bar(&content);
+                        debug!("    Captured {} chars, claude_running={}", content.len(), claude_running);
                         updates.push((*session_id, content, claude_running));
                     }
                     Err(e) => {
-                        warn!("Failed to capture tmux pane content for session {}: {}", session_id, e);
+                        warn!("Failed to capture tmux pane content for session {} (tmux_name={}): {}",
+                              session_id, tmux_session.name(), e);
                     }
                 }
             }
