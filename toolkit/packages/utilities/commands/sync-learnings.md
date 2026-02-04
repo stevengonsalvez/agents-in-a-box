@@ -41,6 +41,7 @@ When working on projects, learnings get captured in user-level agent files via `
 | `~/.claude/agents/orchestrators/` | `packages/agents/orchestrators/` |
 | `~/.claude/agents/design/` | `packages/agents/design/` |
 | `~/.claude/agents/meta/` | `packages/agents/meta/` |
+| `~/.claude/agents/swarm/` | `packages/agents/swarm/` |
 | `~/.claude/agents/*.md` (root) | `packages/agents/` |
 
 ### Commands (routed by type)
@@ -50,8 +51,16 @@ Commands are routed based on their purpose:
 | Command Pattern | Target |
 |-----------------|--------|
 | `m-*` (m-plan, m-implement, m-monitor, m-workflow) | `packages/workflows/multi-agent/commands/` |
+| `swarm-*` (swarm-create, swarm-status, swarm-inbox, swarm-join, swarm-shutdown) | `packages/workflows/multi-agent/commands/` |
+| `spawn-agent`, `*-agent-worktree`, `merge-agent-work`, `recover-sessions` | `packages/workflows/multi-agent/commands/` |
 | `plan`, `implement`, `validate`, `research`, `workflow` | `packages/workflows/single-agent/commands/` |
 | All other commands | `packages/utilities/commands/` |
+
+### Utils (shell libraries)
+
+| Source (user-level) | Target (packages) |
+|---------------------|-------------------|
+| `~/.claude/utils/` | `packages/utilities/utils/` |
 
 ### Other Files
 
@@ -69,7 +78,10 @@ Commands are routed based on their purpose:
 route_command() {
   local cmd="$1"
   case "$cmd" in
-    m-*)
+    m-*|swarm-*)
+      echo "packages/workflows/multi-agent/commands/"
+      ;;
+    spawn-agent.md|*-agent-worktree.md|merge-agent-work.md|recover-sessions.md)
       echo "packages/workflows/multi-agent/commands/"
       ;;
     plan.md|implement.md|validate.md|research.md|workflow.md)
