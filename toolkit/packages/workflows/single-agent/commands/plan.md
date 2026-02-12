@@ -30,12 +30,19 @@ Then wait for the user's input.
 
 ### Step 1: Context Gathering & Initial Analysis
 
-1. **Check for existing research**:
+1. **Search past learnings FIRST**:
+   - Run `~/.claude/utils/search-learnings.sh "[task keywords]"` to find relevant past solutions
+   - Check `docs/solutions/` for any learnings related to this task
+   - If global learnings are available, also search: `~/.claude/global-learnings/cli/learnings search "[keywords]"`
+   - Check `docs/solutions/patterns/critical-patterns.md` for applicable patterns
+   - **Key insight from learnings should inform the plan**
+
+2. **Check for existing research**:
    - Look for relevant files in `research/` directory
    - If found, read them to understand what's already been discovered
    - Use this as foundation for the plan
 
-2. **Read all mentioned files immediately and FULLY**:
+4. **Read all mentioned files immediately and FULLY**:
    - Requirements documents
    - Research documents from `research/` directory
    - Related implementation plans from `plans/` directory
@@ -43,7 +50,7 @@ Then wait for the user's input.
    - **IMPORTANT**: Use the Read tool WITHOUT limit/offset parameters
    - **CRITICAL**: DO NOT spawn sub-tasks before reading these files yourself
 
-3. **Spawn initial research tasks to gather context**:
+5. **Spawn initial research tasks to gather context**:
    Before asking questions, use agents to research in parallel:
    
    - Use **general-purpose** agents to find all files related to the task

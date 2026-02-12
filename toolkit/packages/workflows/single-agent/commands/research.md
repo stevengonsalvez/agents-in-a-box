@@ -41,6 +41,57 @@ Create multiple Task agents to research different aspects concurrently. Think de
 
 **Research Types to Consider:**
 
+**E. Learnings Research (ALWAYS do this FIRST):**
+
+Before diving into codebase research, check if we've solved similar problems before.
+
+```bash
+# Search local docs/solutions/ for relevant past learnings
+~/.claude/utils/search-learnings.sh "[query keywords]"
+
+# Search with category filter
+~/.claude/utils/search-learnings.sh -c build-errors "[error keywords]"
+
+# Search with tag filter
+~/.claude/utils/search-learnings.sh -t rust -t async "[query]"
+```
+
+**What to Search:**
+- Error messages (exact or partial)
+- Technology/framework names
+- Problem descriptions
+- Symptom keywords
+
+**What to Extract:**
+- `key_insight`: THE ONE THING that fixes the problem
+- `root_cause`: Understanding why it happened
+- `solution`: Steps to resolve
+- Related learnings for broader context
+
+**Critical Patterns:**
+Always check `docs/solutions/patterns/critical-patterns.md` for patterns that apply to the current task. These are "Required Reading" that prevent common mistakes.
+
+```
+Task: "Search past learnings for [topic]"
+- Run search-learnings.sh with relevant keywords
+- Search by symptoms, tags, category
+- Return key_insight field prominently
+- Local results take priority over global
+- Check critical-patterns.md for applicable patterns
+```
+
+**If Global Learnings Available:**
+When a `global-learnings` repository is cloned (usually at `~/.claude/global-learnings/`):
+```bash
+# Search global GraphRAG index
+learnings search "[query]"
+
+# Get critical patterns for language/domain
+learnings critical-patterns --language rust --domain backend
+```
+
+---
+
 **A. Codebase Research (always do this):**
 ```
 Task: "Find all files related to [topic]"
@@ -350,6 +401,24 @@ Create a document with the following structure:
 - [Most important discovery]
 - [Second key insight]
 - [Third major finding]
+
+## Prior Learnings (if found)
+
+> **Note**: These learnings are from past solved problems. They may directly answer your question or provide crucial context.
+
+### Relevant Past Solutions
+| Learning | Key Insight | Confidence |
+|----------|-------------|------------|
+| [Title of learning] | [The one thing that fixes it] | high/medium/low |
+
+### Critical Patterns Applied
+- [Pattern from critical-patterns.md that applies]
+- [Another relevant pattern]
+
+### How Prior Learnings Inform This Research
+[Explanation of how past solutions relate to current question]
+
+---
 
 ## Detailed Findings
 

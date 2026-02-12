@@ -1,0 +1,21 @@
+# Global Learnings CLI Dependencies
+
+# GraphRAG
+nano-graphrag>=0.1.0
+
+# Embeddings (local model)
+sentence-transformers>=2.2.0
+
+# CLI framework
+click>=8.0
+rich>=13.0
+
+# YAML parsing
+pyyaml>=6.0
+
+# Data handling
+numpy>=1.24.0
+pandas>=2.0.0
+
+# For Parquet files (GraphRAG uses these)
+pyarrow>=14.0.0

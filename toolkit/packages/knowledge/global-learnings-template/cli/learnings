@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# learnings - Global Learnings CLI wrapper
+#
+# This script wraps the Python CLI for the global learnings knowledge base.
+# It ensures the correct Python environment is used.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CLI_SCRIPT="$SCRIPT_DIR/learnings_cli.py"
+
+# Check if Python is available
+if ! command -v python3 &> /dev/null; then
+    echo "Error: python3 is required but not found."
+    exit 1
+fi
+
+# Check if required packages are installed
+check_deps() {
+    python3 -c "import click; import rich; import yaml" 2>/dev/null
+    return $?
+}
+
+# Install dependencies if needed
+if ! check_deps; then
+    echo "Installing dependencies..."
+    pip3 install click rich pyyaml sentence-transformers numpy --quiet
+fi
+
+# Run the CLI
+exec python3 "$CLI_SCRIPT" "$@"

@@ -137,6 +137,31 @@ If requested or if issues found:
    The implementation is ready for review.
    ```
 
+### Phase 5: Knowledge Capture (Suggested)
+
+After successful implementation, offer to capture learnings:
+
+```
+## Capture Learnings?
+
+This task is complete. If you encountered any problems worth documenting
+for future reference, consider running:
+
+   /compound
+
+This will:
+- Capture the solution as a searchable learning
+- Save it to docs/solutions/ for future sessions
+- Make it discoverable via /research
+
+Useful when:
+- You debugged a tricky issue
+- You found a non-obvious solution
+- You want to remember "the fix" for next time
+
+Skip this if the work was straightforward with no notable discoveries.
+```
+
 ## Workflow Commands
 
 The user can control the workflow with these commands:
