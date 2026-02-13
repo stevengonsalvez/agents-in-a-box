@@ -12,6 +12,12 @@ AGENTS_DIR="${HOME}/.claude/agents"
 REGISTRY_FILE="${AGENTS_DIR}/registry.jsonl"
 ARCHIVED_DIR="${AGENTS_DIR}/archived"
 
+# Check if already running inside a Claude Code session
+# This prevents nested session errors when spawning agents
+is_inside_claude_session() {
+    [ -n "${CLAUDECODE:-}" ]
+}
+
 # Ensure directories exist
 ensure_agent_dirs() {
     mkdir -p "$AGENTS_DIR"
@@ -246,7 +252,13 @@ spawn_agent_tmux() {
         return 1
     fi
 
-    # Start Claude Code in the session
+    # Start Claude Code in the session (only if not already in a Claude session)
+    if is_inside_claude_session; then
+        echo "⚠️  Warning: Already inside Claude Code session, cannot spawn nested agent" >&2
+        echo "   Unset CLAUDECODE env var to bypass this check" >&2
+        tmux kill-session -t "$SESSION" 2>/dev/null || true
+        return 1
+    fi
     tmux send-keys -t "$SESSION" "claude --dangerously-skip-permissions" C-m
 
     # Wait for Claude to be ready
