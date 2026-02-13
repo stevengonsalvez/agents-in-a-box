@@ -18,6 +18,12 @@ if [[ -f "$SPAWN_AGENT_LIB" ]]; then
     source "$SPAWN_AGENT_LIB"
 fi
 
+# Check if already running inside a Claude Code session
+# This prevents nested session errors when spawning agents
+is_inside_claude_session() {
+    [ -n "${CLAUDECODE:-}" ]
+}
+
 # Ensure jq is available
 if ! command -v jq &> /dev/null; then
     echo "Error: jq is required but not installed. Install with: brew install jq"
@@ -185,6 +191,13 @@ Start by reading your team.json and checking for ready work."
 ${custom_prompt}"
     fi
 
+    # Prevent nested session errors
+    if is_inside_claude_session; then
+        echo "⚠️  Cannot spawn swarm leader from inside Claude Code session" >&2
+        echo "   Unset CLAUDECODE env var to bypass this check" >&2
+        return 1
+    fi
+
     # Spawn using spawn-agent-lib if available, otherwise direct tmux
     if type spawn_agent_tmux &>/dev/null; then
         spawn_agent_tmux "$session_name" "$PWD" "$leader_prompt"
@@ -288,6 +301,13 @@ Start by checking your inbox for task assignments."
 
 ## Additional Instructions:
 ${custom_prompt}"
+    fi
+
+    # Prevent nested session errors
+    if is_inside_claude_session; then
+        echo "⚠️  Cannot spawn swarm agent from inside Claude Code session" >&2
+        echo "   Unset CLAUDECODE env var to bypass this check" >&2
+        return 1
     fi
 
     # Spawn agent in appropriate directory
