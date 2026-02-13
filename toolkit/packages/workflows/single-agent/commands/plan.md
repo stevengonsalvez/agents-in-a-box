@@ -30,19 +30,13 @@ Then wait for the user's input.
 
 ### Step 1: Context Gathering & Initial Analysis
 
-1. **Search past learnings FIRST**:
-   - Run `~/.claude/utils/search-learnings.sh "[task keywords]"` to find relevant past solutions
-   - Check `docs/solutions/` for any learnings related to this task
-   - If global learnings are available, also search: `~/.claude/global-learnings/cli/learnings search "[keywords]"`
-   - Check `docs/solutions/patterns/critical-patterns.md` for applicable patterns
-   - **Key insight from learnings should inform the plan**
-
-2. **Check for existing research**:
+1. **Check for existing research**:
    - Look for relevant files in `research/` directory
    - If found, read them to understand what's already been discovered
+   - If NOT found, run `/research` which will search learnings first
    - Use this as foundation for the plan
 
-4. **Read all mentioned files immediately and FULLY**:
+2. **Read all mentioned files immediately and FULLY**:
    - Requirements documents
    - Research documents from `research/` directory
    - Related implementation plans from `plans/` directory
@@ -50,7 +44,7 @@ Then wait for the user's input.
    - **IMPORTANT**: Use the Read tool WITHOUT limit/offset parameters
    - **CRITICAL**: DO NOT spawn sub-tasks before reading these files yourself
 
-5. **Spawn initial research tasks to gather context**:
+3. **Spawn initial research tasks to gather context**:
    Before asking questions, use agents to research in parallel:
    
    - Use **general-purpose** agents to find all files related to the task
@@ -62,17 +56,17 @@ Then wait for the user's input.
    - Trace data flow and key functions
    - Return detailed explanations with file:line references
 
-3. **Read all files identified by research tasks**:
+4. **Read all files identified by research tasks**:
    - After research completes, read ALL identified files FULLY
    - This ensures complete understanding before proceeding
 
-4. **Analyze and verify understanding**:
+5. **Analyze and verify understanding**:
    - Cross-reference requirements with actual code
    - Identify any discrepancies or misunderstandings
    - Note assumptions that need verification
    - Determine true scope based on codebase reality
 
-5. **Present informed understanding and focused questions**:
+6. **Present informed understanding and focused questions**:
    ```
    Based on my research of the codebase, I understand we need to [accurate summary].
    
