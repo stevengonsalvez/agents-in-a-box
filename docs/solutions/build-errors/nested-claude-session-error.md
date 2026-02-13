@@ -24,7 +24,22 @@ To bypass this check, unset the CLAUDECODE environment variable
 
 ## Common Causes
 
-### 1. Existing tmux sessions with Claude running
+### 1. CLAUDECODE in tmux global environment (MOST COMMON)
+
+**This is the most common cause.** When Claude Code runs, it sets `CLAUDECODE=1`. If tmux captures this in its global environment, ALL new tmux sessions inherit it.
+
+Check:
+```bash
+tmux show-environment -g | grep CLAUDECODE
+```
+
+Fix:
+```bash
+tmux set-environment -gu CLAUDECODE
+tmux set-environment -gu CLAUDE_CODE_ENTRYPOINT
+```
+
+### 2. Existing tmux sessions with Claude running
 
 Check for existing Claude instances:
 ```bash
@@ -99,7 +114,18 @@ cat ~/.claude/settings.json | grep -A2 -B2 "claude "
 | `~/.claude/utils/spawn-agent-lib.sh` | Agent spawning without guard |
 | `~/.claude/utils/swarm-lib.sh` | Swarm spawning without guard |
 
+## Prevention
+
+Add to your `~/.tmux.conf` to prevent tmux from capturing CLAUDECODE:
+```bash
+# Don't let tmux capture Claude session variables
+set-option -g update-environment "CLAUDECODE CLAUDE_CODE_ENTRYPOINT"
+```
+
+This tells tmux to update these variables from the environment when attaching, rather than preserving old values.
+
 ## Related
 
 - CLAUDECODE environment variable is set by Claude Code on startup
 - Used to detect nested invocations and prevent resource conflicts
+- tmux's `update-environment` option controls which vars are refreshed on attach
