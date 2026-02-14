@@ -186,3 +186,5 @@ components:
         - action-summary
       notification:
         - notification
+      usage:
+        - usage_sync  # openclaw-agents (opt-in, requires Convex deployment)

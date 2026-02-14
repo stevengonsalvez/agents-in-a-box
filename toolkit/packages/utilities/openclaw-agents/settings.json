@@ -1,0 +1,27 @@
+{
+  "_description": "Merge these hook entries into your ~/.claude/settings.json to enable real-time session usage tracking to Convex. Chain these after existing Stop/SubagentStop hooks.",
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run ~/.claude/hooks/usage_sync.py"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run ~/.claude/hooks/usage_sync.py --subagent"
+          }
+        ]
+      }
+    ]
+  }
+}
