@@ -60,6 +60,24 @@ When you receive a research query, you will:
 - Find benchmarks and performance comparisons
 - Search for decision matrices or evaluation criteria
 
+## Web Page Fetching
+
+When fetching web pages for content extraction, prefer using markdown.new for cleaner, token-efficient results:
+
+- **Instead of**: `WebFetch(url: "https://example.com/article")`
+- **Use**: `WebFetch(url: "https://markdown.new/https://example.com/article")`
+
+This uses Cloudflare's markdown.new service which:
+- Produces 80% fewer tokens than raw HTML conversion
+- Handles JavaScript-rendered pages via browser fallback
+- Returns clean, structured markdown
+
+**When NOT to use markdown.new**:
+- API endpoints returning JSON (fetch directly)
+- URLs that need auth headers (WebFetch directly)
+- GitHub URLs (use `gh` CLI instead)
+- When the prompt needs to analyze HTML structure specifically
+
 ## Output Format
 
 Structure your findings as:

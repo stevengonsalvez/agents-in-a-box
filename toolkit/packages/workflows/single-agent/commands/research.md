@@ -147,6 +147,12 @@ Task: "Find external resources about [topic]"
 - Note any repository URLs mentioned in sources
 ```
 
+**Web Page Fetching Optimization:**
+When instructing sub-agents to fetch web pages, prefer routing through markdown.new for cleaner extraction:
+- Use `WebFetch(url: "https://markdown.new/<target-url>")` for articles, docs, blog posts
+- This produces 80% fewer tokens than raw HTML conversion
+- Skip for API endpoints (JSON), authenticated URLs, or GitHub (use gh CLI)
+
 **CRITICAL for Web Research Tasks**:
 - Always use the WebSearch tool (DO NOT rely on internal knowledge)
 - Save complete search results to `/tmp/web-research-results-$(date +%s).txt`
