@@ -1,4 +1,7 @@
 {
+  "env": {
+    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "80"
+  },
   "permissions": {
     "allow": [
       "Bash(mkdir:*)",
@@ -69,7 +72,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "claude handover;uv run ~/.claude/hooks/pre_compact.py --handover --backup --verbose"
+            "command": "uv run ~/.claude/hooks/pre_compact.py --handover --backup --verbose"
           }
         ]
       }
