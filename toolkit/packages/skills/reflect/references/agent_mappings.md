@@ -6,6 +6,7 @@ Maps learning categories to target agent files for updating.
 
 ```
 ~/.claude/agents/
+├── web-search-researcher.md    # Root-level agents (not in subdirectory)
 ├── universal/
 │   ├── backend-developer.md
 │   ├── frontend-developer.md

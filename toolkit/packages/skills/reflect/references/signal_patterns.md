@@ -226,6 +226,22 @@ Examples:
 - "Configure ESLint with these rules"
 - "Run Docker in production"
 
+### Security
+
+Patterns indicating security-related learnings:
+
+```regex
+\b(security|vulnerability|exploit|injection|xss|csrf|auth)\b
+\b(password|secret|credential|token|key)\s+(expos|leak|hardcod)
+\b(validation|sanitiz|escap|encrypt|hash)\b
+\b(OWASP|CVE|RLS|row.level.security)\b
+```
+
+Examples:
+- "Always validate inputs on the server"
+- "Use RLS policies with RESTRICTIVE mode"
+- "Never hardcode credentials"
+
 ### New Skill
 
 Patterns indicating skill-worthy discoveries:

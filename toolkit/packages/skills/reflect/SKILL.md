@@ -266,6 +266,20 @@ python scripts/metrics_updater.py --accepted 3 --rejected 1 --confidence high:2,
 - `~/.claude/reflections/by-agent/{agent}/learnings.md` - Per-agent
 - `~/.claude/reflections/index.md` - Global summary
 
+## Memory Integration
+
+Some learnings belong in **auto-memory** (`~/.claude/projects/*/memory/MEMORY.md`) rather than agent files:
+
+| Learning Type | Best Target |
+|---------------|-------------|
+| Behavioral correction ("always do X") | Agent file |
+| Project-specific pattern | MEMORY.md |
+| Recurring bug/workaround | New skill OR MEMORY.md |
+| Tool preference | CLAUDE.md |
+| Domain knowledge | MEMORY.md or compound-docs |
+
+When a signal is LOW confidence and project-specific, prefer writing to MEMORY.md over modifying agents.
+
 ## Safety Guardrails
 
 ### Human-in-the-Loop

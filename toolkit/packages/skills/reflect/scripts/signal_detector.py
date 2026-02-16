@@ -29,6 +29,7 @@ class Category(Enum):
     PROCESS = "Process"
     DOMAIN = "Domain"
     TOOLS = "Tools"
+    SECURITY = "Security"
     NEW_SKILL = "New Skill"
     UNKNOWN = "Unknown"
 
@@ -94,6 +95,12 @@ CATEGORY_PATTERNS = {
     Category.TOOLS: [
         r"\b(tool|cli|command|terminal|shell|git|npm|docker)\b",
         r"\b(config|setting|environment|variable)\b",
+    ],
+    Category.SECURITY: [
+        r"\b(security|vulnerability|exploit|injection|xss|csrf)\b",
+        r"\b(password|secret|credential|token|key)\s+(expos|leak|hardcod)",
+        r"\b(validation|sanitiz|escap|encrypt|hash)\b",
+        r"\b(OWASP|CVE|RLS|row.level.security)\b",
     ],
     Category.NEW_SKILL: [
         r"\b(workaround|trick|hack|solution|fix|debug)\b",
