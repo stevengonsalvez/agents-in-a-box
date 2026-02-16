@@ -4972,116 +4972,134 @@ impl AppState {
             self.current_view = View::SessionList;
         }
 
-        match SessionLoader::new().await {
-            Ok(loader) => {
-                match loader.get_available_repositories().await {
-                    Ok(repos) => {
-                        if repos.is_empty() {
-                            warn!("No repositories found in default search paths");
-                            // Even with no repos, show the search interface with empty list
-                            // User can type to search or we can show helpful message
-                            info!("Showing empty search interface - user can type to add paths");
-                        }
+        // Scan for repositories directly without Docker dependency.
+        // SessionLoader::new() requires Docker (ContainerManager), but repository
+        // discovery only needs filesystem scanning via WorkspaceScanner + AppConfig.
+        use crate::git::WorkspaceScanner;
 
-                        // Generate branch name with UUID
-                        let branch_base = format!(
-                            "ainb/{}",
-                            uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("session")
-                        );
+        let repos = match AppConfig::load() {
+            Ok(config) => {
+                let scanner = WorkspaceScanner::with_additional_paths(
+                    config.workspace_defaults.workspace_scan_paths.clone(),
+                )
+                .with_exclude_paths(config.workspace_defaults.exclude_paths.clone());
 
-                        // Initialize filtered repos with all repos (even if empty)
-                        let filtered_repos: Vec<(usize, std::path::PathBuf)> = repos
-                            .iter()
-                            .enumerate()
-                            .map(|(idx, path)| (idx, path.clone()))
+                match scanner.scan() {
+                    Ok(scan_result) => {
+                        let max_repos = config.workspace_defaults.max_repositories;
+                        let total_found = scan_result.workspaces.len();
+                        let repos: Vec<std::path::PathBuf> = scan_result
+                            .workspaces
+                            .into_iter()
+                            .map(|w| w.path)
+                            .take(max_repos)
                             .collect();
-
-                        // Check if user has already cancelled (e.g., pressed escape while loading)
-                        if self.async_operation_cancelled {
-                            info!("Operation was cancelled by user");
-                            return;
-                        }
-
-                        let has_repos = !filtered_repos.is_empty();
-                        self.new_session_state = Some(NewSessionState {
-                            available_repos: repos,
-                            filtered_repos,
-                            selected_repo_index: if has_repos { Some(0) } else { None },
-                            branch_name: branch_base,
-                            step: NewSessionStep::SelectRepo, // Explicitly set for local repo search
-                            source_choice: RepoSourceChoice::Local,
-                            ..Default::default()
-                        });
-
-                        self.current_view = View::SearchWorkspace;
-                        info!("Successfully transitioned to SearchWorkspace view");
+                        info!(
+                            "Found {} repositories (showing {} of {}, limit: {})",
+                            total_found,
+                            repos.len(),
+                            total_found,
+                            max_repos
+                        );
+                        repos
                     }
                     Err(e) => {
-                        warn!("Failed to load repositories: {}", e);
-                        // Still transition to search view with empty state
-                        self.new_session_state = Some(NewSessionState {
-                            branch_name: format!(
-                                "ainb/{}",
-                                uuid::Uuid::new_v4()
-                                    .to_string()
-                                    .split('-')
-                                    .next()
-                                    .unwrap_or("session")
-                            ),
-                            step: NewSessionStep::SelectRepo,
-                            source_choice: RepoSourceChoice::Local,
-                            ..Default::default()
-                        });
-                        self.current_view = View::SearchWorkspace;
-                        info!("Transitioned to SearchWorkspace view with empty state due to error");
+                        warn!("Failed to scan for repositories: {}", e);
+                        vec![]
                     }
                 }
             }
             Err(e) => {
-                warn!("Failed to create session loader: {}", e);
-                // Still transition to search view with empty state
-                self.new_session_state = Some(NewSessionState {
-                    branch_name: format!(
-                        "ainb/{}",
-                        uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("session")
-                    ),
-                    step: NewSessionStep::SelectRepo,
-                    source_choice: RepoSourceChoice::Local,
-                    ..Default::default()
-                });
-                self.current_view = View::SearchWorkspace;
-                info!("Transitioned to SearchWorkspace view with empty state due to loader error");
+                warn!("Failed to load config for workspace search: {}", e);
+                vec![]
             }
+        };
+
+        if repos.is_empty() {
+            warn!("No repositories found in default search paths");
+            info!("Showing empty search interface - user can type to add paths");
         }
+
+        // Generate branch name with UUID
+        let branch_base = format!(
+            "ainb/{}",
+            uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("session")
+        );
+
+        // Initialize filtered repos with all repos (even if empty)
+        let filtered_repos: Vec<(usize, std::path::PathBuf)> = repos
+            .iter()
+            .enumerate()
+            .map(|(idx, path)| (idx, path.clone()))
+            .collect();
+
+        // Check if user has already cancelled (e.g., pressed escape while loading)
+        if self.async_operation_cancelled {
+            info!("Operation was cancelled by user");
+            return;
+        }
+
+        let has_repos = !filtered_repos.is_empty();
+        self.new_session_state = Some(NewSessionState {
+            available_repos: repos,
+            filtered_repos,
+            selected_repo_index: if has_repos { Some(0) } else { None },
+            branch_name: branch_base,
+            step: NewSessionStep::SelectRepo,
+            source_choice: RepoSourceChoice::Local,
+            ..Default::default()
+        });
+
+        self.current_view = View::SearchWorkspace;
+        info!("Successfully transitioned to SearchWorkspace view");
     }
 
     pub async fn start_new_session(&mut self) {
         info!("Starting new session creation");
 
-        // Get available repositories
-        match SessionLoader::new().await {
-            Ok(loader) => match loader.get_available_repositories().await {
-                Ok(repos) => {
-                    let has_repos = !repos.is_empty();
-                    let filtered_repos: Vec<(usize, std::path::PathBuf)> =
-                        repos.iter().enumerate().map(|(idx, path)| (idx, path.clone())).collect();
+        // Scan for repositories directly without Docker dependency.
+        use crate::git::WorkspaceScanner;
 
-                    self.new_session_state = Some(NewSessionState {
-                        available_repos: repos,
-                        filtered_repos,
-                        selected_repo_index: if has_repos { Some(0) } else { None },
-                        ..Default::default()
-                    });
-                    self.current_view = View::NewSession;
+        let repos = match AppConfig::load() {
+            Ok(config) => {
+                let scanner = WorkspaceScanner::with_additional_paths(
+                    config.workspace_defaults.workspace_scan_paths.clone(),
+                )
+                .with_exclude_paths(config.workspace_defaults.exclude_paths.clone());
+
+                match scanner.scan() {
+                    Ok(scan_result) => {
+                        let max_repos = config.workspace_defaults.max_repositories;
+                        scan_result
+                            .workspaces
+                            .into_iter()
+                            .map(|w| w.path)
+                            .take(max_repos)
+                            .collect()
+                    }
+                    Err(e) => {
+                        warn!("Failed to scan for repositories: {}", e);
+                        vec![]
+                    }
                 }
-                Err(e) => {
-                    warn!("Failed to get available repositories: {}", e);
-                }
-            },
-            Err(e) => {
-                warn!("Failed to create session loader: {}", e);
             }
-        }
+            Err(e) => {
+                warn!("Failed to load config: {}", e);
+                vec![]
+            }
+        };
+
+        let has_repos = !repos.is_empty();
+        let filtered_repos: Vec<(usize, std::path::PathBuf)> =
+            repos.iter().enumerate().map(|(idx, path)| (idx, path.clone())).collect();
+
+        self.new_session_state = Some(NewSessionState {
+            available_repos: repos,
+            filtered_repos,
+            selected_repo_index: if has_repos { Some(0) } else { None },
+            ..Default::default()
+        });
+        self.current_view = View::NewSession;
     }
 
     pub fn cancel_new_session(&mut self) {
