@@ -29,6 +29,7 @@ I verify protection against:
 - Verify `USING` and `WITH CHECK` clauses are correct
 - Watch for `true` policies that bypass all security
 - Ensure RLS applies to realtime subscriptions
+- **RESTRICTIVE vs PERMISSIVE**: When a policy is meant to DENY access (e.g., hide blocked users), it MUST use `AS RESTRICTIVE`. Default `PERMISSIVE` policies OR together, so a "deny" policy has no effect if any other permissive SELECT policy allows the row. RESTRICTIVE policies AND with permissive policies, creating an effective filter.
 
 ### Service Role Key
 - NEVER in client-side code (browser, mobile app)

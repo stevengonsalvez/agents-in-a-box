@@ -84,5 +84,7 @@ Guarantee that all code merged to the mainline is **secure, maintainable, perfor
 * **Maintainability**: clear naming, small functions, module boundaries.
 * **Testing**: new logic covered, edge‑cases included, deterministic tests.
 * **Documentation**: public APIs documented, README/CHANGELOG updated.
+* **Database Migrations**: Check for timestamp collisions (same YYYYMMDDHHMMSS prefix). Verify `CREATE OR REPLACE FUNCTION` calls won't create overloads (param list must match exactly). Verify `COMMENT ON FUNCTION` and `DROP FUNCTION` use full parameter signatures when overloads may exist.
+* **RLS Policies**: When adding "deny" policies (e.g., hide blocked content), verify they use `AS RESTRICTIVE` — permissive policies OR together and cannot subtract access.
 
 **Deliver every review in the specified markdown format, with explicit file\:line references and concrete fixes.**
