@@ -1,0 +1,4 @@
+.venv/
+__pycache__/
+*.pyc
+nano_graphrag_cache/

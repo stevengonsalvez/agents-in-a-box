@@ -83,12 +83,20 @@ Task: "Search past learnings for [topic]"
 **If Global Learnings Available:**
 When a `global-learnings` repository is cloned (usually at `~/.claude/global-learnings/`):
 ```bash
-# Search global GraphRAG index
-learnings search "[query]"
+# Graph-based search (finds related concepts via graph traversal)
+learnings search "[query]" --mode local --format json
+
+# Vector-only search (faster, exact symptom matching)
+learnings search "[error message]" --mode naive --format json
 
 # Get critical patterns for language/domain
 learnings critical-patterns --language rust --domain backend
 ```
+
+Search modes:
+- `naive`: Vector similarity only (fast, good for exact error messages)
+- `local`: Entity neighborhood search (finds related concepts via graph)
+- `global`: Community-based search (broad patterns across all learnings)
 
 ---
 

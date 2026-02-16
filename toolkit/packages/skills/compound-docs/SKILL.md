@@ -89,27 +89,60 @@ Collect information about the problem and solution:
 
 ### Step 3: Extract Entities & Relationships
 
-Ask Claude to structure the learning:
+Extract structured entities for GraphRAG indexing. These power graph-based
+search in the global knowledge base.
 
-```markdown
-## Extraction Prompt
+**Entity Types:**
 
-Based on the conversation, extract:
+| Type | Description | Examples |
+|------|-------------|----------|
+| `technology` | Languages, frameworks, runtimes | tokio, react, postgresql |
+| `error` | Error types, messages, exceptions | nested runtime panic, n+1 query |
+| `pattern` | Design patterns, anti-patterns | eager loading, spawn_blocking |
+| `function` | Specific functions, methods, APIs | block_on, prefetch_related |
+| `concept` | Abstract concepts, principles | async context, connection pooling |
+| `tool` | CLI tools, dev tools, services | cargo, webpack, docker |
 
-### Entities
-- **Concepts**: Technologies, libraries, frameworks involved
-- **Errors**: Error types, messages, exceptions
-- **Patterns**: Design patterns, anti-patterns identified
-- **Tools**: CLI tools, commands used
+**Relationship Types:**
 
-### Relationships
-- `caused_by`: What caused the error
-- `solves`: What solves the error
-- `relates_to`: Related concepts
-- `requires`: Prerequisites or dependencies
+| Type | Description | Example |
+|------|-------------|---------|
+| `caused_by` | What caused the error | block_on -> nested runtime panic |
+| `solves` | What fixes the error | spawn_blocking -> nested runtime panic |
+| `requires` | Prerequisites | spawn_blocking -> tokio runtime |
+| `relates_to` | Related concepts | tokio -> async context |
 
-### Summary
-Generate a one-line summary for embedding/search.
+**Extraction Guidelines:**
+- Extract 3-8 entities per learning (focused, not exhaustive)
+- Always include at least one `solves` relationship
+- Strength: 9-10 direct/causal, 5-7 moderate, 1-4 weak
+- Entity names normalized to lowercase canonical form
+- Use the most specific entity type available
+
+**Output Format (YAML block in your response):**
+
+```yaml
+entities:
+  - name: "tokio"
+    type: technology
+    description: "Async runtime for Rust"
+  - name: "nested runtime panic"
+    type: error
+    description: "Cannot start a runtime from within a runtime"
+  - name: "spawn_blocking"
+    type: function
+    description: "Tokio function to run sync code within async context"
+relationships:
+  - source: "block_on"
+    target: "nested runtime panic"
+    type: caused_by
+    description: "Calling block_on inside async context causes nested runtime panic"
+    strength: 9
+  - source: "spawn_blocking"
+    target: "nested runtime panic"
+    type: solves
+    description: "Use spawn_blocking instead of block_on for sync code in async context"
+    strength: 10
 ```
 
 ### Step 4: Determine Category
@@ -182,9 +215,41 @@ FILENAME="[descriptive-name].md"
 # Location: docs/solutions/[category]/[filename].md
 ```
 
-### Step 7: Offer Global Promotion (Optional)
+### Step 6.5: Generate Entity Sidecar (for --global)
 
-If the learning is universally useful:
+When `--global` is specified, save the entities from Step 3 as a sidecar YAML file
+alongside the learning document:
+
+```bash
+# Sidecar file: same name as doc, with .entities.yaml extension
+# docs/solutions/build-errors/tokio-runtime-panic.entities.yaml
+```
+
+**Sidecar format:**
+
+```yaml
+document_id: tokio-runtime-panic-abc123
+extracted_at: "2026-02-16T10:00:00"
+entities:
+  - name: "tokio"
+    type: technology
+    description: "Async runtime for Rust"
+  # ... entities from Step 3
+relationships:
+  - source: "block_on"
+    target: "nested runtime panic"
+    type: caused_by
+    description: "Calling block_on inside async context causes nested runtime panic"
+    strength: 9
+  # ... relationships from Step 3
+```
+
+The `document_id` is generated from the learning document filename, and `extracted_at`
+is the current ISO timestamp.
+
+### Step 7: Promote to Global Knowledge Base (Optional)
+
+If the learning is universally useful (or `--global` was specified):
 
 ```markdown
 This learning seems universally useful. Would you like to promote it to the global knowledge base?
@@ -198,9 +263,18 @@ Options:
 
 If promoting:
 ```bash
-# Uses the global learnings CLI
-learnings promote docs/solutions/[category]/[filename].md
+# Check global learnings CLI exists
+LEARNINGS_CLI="$HOME/.claude/global-learnings/cli/learnings"
+
+if [[ -x "$LEARNINGS_CLI" ]]; then
+    # Add document with pre-extracted entities
+    "$LEARNINGS_CLI" add docs/solutions/[category]/[filename].md \
+        --entities docs/solutions/[category]/[filename].entities.yaml
+fi
 ```
+
+The `--entities` flag passes the pre-extracted entity sidecar so the graph
+engine can index entities without calling an external LLM.
 
 ## Output Format
 
@@ -298,8 +372,9 @@ At workflow completion, /workflow suggests running /compound to capture learning
 
 If global-learnings repo is configured:
 ```bash
-learnings search "[query]"  # Search global
-learnings promote [file]    # Promote local to global
+learnings search "[query]" --mode local    # Graph-based search (related concepts)
+learnings search "[query]" --mode naive    # Vector-only search (exact symptom matching)
+learnings add [file] --entities [sidecar]  # Add with pre-extracted entities
 ```
 
 ## Checklist

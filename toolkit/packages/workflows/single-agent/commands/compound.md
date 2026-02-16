@@ -100,8 +100,43 @@ User: "The tokio runtime panic is fixed!"
 → Saves to docs/solutions/performance-issues/
 ```
 
+## Global Promotion Flow
+
+When `--global` is specified, after saving locally:
+
+1. **Entity sidecar saved alongside document** (Step 6.5 in compound-docs skill)
+   - File: `docs/solutions/[category]/[filename].entities.yaml`
+   - Contains pre-extracted entities and relationships from the learning
+
+2. **Check global learnings CLI exists**
+   ```bash
+   LEARNINGS_CLI="$HOME/.claude/global-learnings/cli/learnings"
+   if [[ ! -x "$LEARNINGS_CLI" ]]; then
+       echo "Global learnings CLI not found. Run: learnings init"
+       # Fall back to local-only save
+   fi
+   ```
+
+3. **Add to global knowledge base with entities**
+   ```bash
+   "$LEARNINGS_CLI" add docs/solutions/[category]/[filename].md \
+       --entities docs/solutions/[category]/[filename].entities.yaml
+   ```
+
+4. **Show confirmation with entity/relationship counts**
+   ```markdown
+   ## Promoted to Global Knowledge Base
+
+   **Entities**: 5 extracted (tokio, spawn_blocking, ...)
+   **Relationships**: 3 mapped (caused_by, solves, requires)
+   **Graph**: Updated in ~/.claude/global-learnings/
+
+   This learning will surface in `/research` queries across all projects.
+   ```
+
 ## Integration
 
 - Learnings are searchable via `/research`
 - `/workflow` suggests `/compound` on completion
 - Global learnings accessible via `learnings` CLI
+- Global search uses GraphRAG: `learnings search "[query]" --mode local`

@@ -335,18 +335,23 @@ main() {
 
     # Also search global learnings if CLI is available
     local GLOBAL_CLI="${HOME}/.claude/global-learnings/cli/learnings"
-    if [[ -x "$GLOBAL_CLI" ]] && command -v python3 &>/dev/null; then
+    if [[ -x "$GLOBAL_CLI" ]]; then
         if [[ "$FORMAT" != "json" ]]; then
             echo ""
-            echo -e "${BOLD}Searching global learnings...${RESET}"
+            echo -e "${BOLD}Searching global learnings (GraphRAG)...${RESET}"
         fi
 
-        # Try to search global (may fail if dependencies not installed)
-        if "$GLOBAL_CLI" search "$QUERY" --format simple 2>/dev/null; then
-            : # Success
+        # Try graph-based search first, fall back to vector-only
+        local global_format="simple"
+        [[ "$FORMAT" == "json" ]] && global_format="json"
+
+        if "$GLOBAL_CLI" search "$QUERY" --mode local --format "$global_format" 2>/dev/null; then
+            : # Success with graph search
+        elif "$GLOBAL_CLI" search "$QUERY" --mode naive --format "$global_format" 2>/dev/null; then
+            : # Fallback to vector-only search
         else
             if [[ "$FORMAT" != "json" ]]; then
-                echo -e "${YELLOW}(Global search requires: pip install sentence-transformers)${RESET}"
+                echo -e "${YELLOW}(Global search unavailable - run 'learnings reindex' to initialize)${RESET}"
             fi
         fi
     fi
