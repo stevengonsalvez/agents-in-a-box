@@ -1,7 +1,6 @@
 ---
 name: gatekeeper
 description: "Elite quality assurance lead with zero tolerance for defects. Final authority on merge decisions based on all quality gates. Use PROACTIVELY before ANY merge or deployment to ensure standards are met."
-model: opus
 tools:
   - Read
   - Grep

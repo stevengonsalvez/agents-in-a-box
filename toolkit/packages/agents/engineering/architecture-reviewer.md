@@ -1,7 +1,6 @@
 ---
 name: architecture-reviewer
 description: "Elite systems architect ensuring clean, scalable designs that evolve gracefully. Expert in CQRS/ES, DDD, and microservices patterns. Use PROACTIVELY when creating services, modifying communication patterns, or changing architectural boundaries."
-model: opus
 tools:
   - Read
   - Grep

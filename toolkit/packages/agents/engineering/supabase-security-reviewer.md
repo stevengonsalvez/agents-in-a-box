@@ -1,7 +1,6 @@
 ---
 name: supabase-security-reviewer
 description: "Security specialist with deep Supabase expertise. MUST BE USED for any Supabase-based project security review. Combines OWASP security fundamentals with Supabase-specific patterns (RLS, Edge Functions, Storage, Realtime)."
-model: opus
 tools: Read, Grep, Glob, Bash, WebFetch
 ---
 

@@ -77,7 +77,63 @@ For each phase in the plan:
    - Were error conditions handled?
    - Are there missing validations?
    - Could the implementation break existing functionality?
-   
+
+### Step 2.5: Goal-Backward Verification
+
+Go beyond task completion — verify the codebase actually delivers what was promised.
+
+1. **Extract must-haves from the plan**:
+   - Read each phase's "Success Criteria" and "Overview"
+   - Identify observable truths: what must be TRUE from a user's perspective
+   - Map each truth to required artifacts (files) and key links (connections)
+
+2. **Three-level artifact analysis** for each required artifact:
+
+   | Level | Check | Question |
+   |-------|-------|----------|
+   | **Exists** | File/function present | `Does the file exist? Is the function defined?` |
+   | **Substantive** | Real code, not stub | `Is this actual implementation or placeholder?` |
+   | **Wired** | Connected and used | `Is this imported, called, routed, rendered?` |
+
+3. **Stub detection** — flag these patterns as NOT substantive:
+   - `return null`, `return {}`, `return undefined`
+   - `// TODO`, `// FIXME`, `// placeholder`
+   - `throw new Error("Not implemented")`
+   - Empty function bodies, `pass` in Python
+   - `onClick={() => {}}`, empty event handlers
+   - `Response.json({ message: "Not implemented" })`
+   - Functions defined but never imported/called
+
+4. **Produce verification matrix**:
+
+   ```markdown
+   ## Goal-Backward Verification
+
+   | Truth | Artifact | Exists | Substantive | Wired | Status |
+   |-------|----------|--------|-------------|-------|--------|
+   | User can login | src/auth/login.ts | Y | Y | Y | VERIFIED |
+   | Session persists | src/auth/session.ts | Y | Y | N | ORPHANED |
+   | Errors display | src/components/Error.tsx | Y | N | - | STUB |
+   | Rate limited | src/middleware/rate.ts | N | - | - | MISSING |
+   ```
+
+5. **Gap structuring** — for any non-VERIFIED items:
+   ```markdown
+   ### Gaps Found
+
+   #### Gap 1: Session persistence (ORPHANED)
+   - **Truth**: "Session persists across page reloads"
+   - **Issue**: session.ts exists and is substantive but never imported in app routes
+   - **Fix**: Import and wire session middleware in src/app.ts
+
+   #### Gap 2: Error display (STUB)
+   - **Truth**: "Errors display to user"
+   - **Issue**: Error.tsx returns null — placeholder component
+   - **Fix**: Implement error rendering with message prop
+   ```
+
+6. **Include in validation report** (Step 4) under a "Goal-Backward Verification" section
+
 ### Step 3: Code Quality Review
 
 Spawn parallel Task agents for thorough review:

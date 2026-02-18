@@ -25,6 +25,7 @@ assistant: "I'll analyze your test coverage to find gaps. Let me use the test-re
 Coverage gaps are where bugs love to hide.
 </commentary>
 </example>
+model: sonnet
 color: yellow
 tools: Read, Write, Grep, Bash, MultiEdit, TodoWrite
 ---

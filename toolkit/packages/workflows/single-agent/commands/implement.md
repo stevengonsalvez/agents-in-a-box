@@ -12,6 +12,64 @@ When given a plan path:
 - Create a todo list to track your progress
 - Start implementing if you understand what needs to be done
 
+## Execution Mode Detection
+
+After reading the plan, check for wave metadata:
+
+1. **Scan all `## Phase` sections** for `<!-- wave:` comments
+2. **If wave metadata found** → enter Wave Execution Mode
+3. **If no wave metadata** → enter Sequential Execution Mode (current behavior)
+
+## Wave Execution Mode
+
+Execute phases grouped by wave number:
+
+### For each wave (Wave 1, Wave 2, ...):
+
+**Single-phase wave**: Execute inline (same as sequential — avoids spawn overhead).
+
+**Multi-phase wave**: Spawn parallel Task agents:
+
+```
+For each phase in this wave, spawn:
+
+Task(
+  prompt: "Implement Phase {N}: {title}
+
+  Plan: {plan_path}
+  Phase: {N} only
+
+  Read the plan and implement ONLY Phase {N}.
+  Follow Changes Required exactly.
+  Run Success Criteria checks.
+  Update plan checkboxes when done.
+
+  Files you own (ONLY modify these): {files from wave comment}
+
+  Report: what was implemented, tests passing, any deviations.",
+
+  subagent_type: "general-purpose"
+)
+```
+
+**Wait for ALL agents** in the wave before starting next wave.
+
+**On failure**: Stop and report:
+```
+Wave {N} execution:
+  Succeeded: Phase {X}, Phase {Y}
+  Failed: Phase {Z} — {reason}
+
+Options:
+1. Retry failed phase only
+2. Continue to next wave (skip failed)
+3. Fall back to sequential for remaining phases
+```
+
+**After each wave**: Verify no file ownership conflicts via `git diff --name-only`.
+
+## Sequential Execution Mode
+
 If no plan path provided, ask for one.
 
 ## Implementation Philosophy
@@ -63,6 +121,11 @@ For each phase in the plan:
    - Update your TodoWrite list
    - Document any deviations from the plan
 
+5. **Update project state** (if `.planning/` exists):
+   - After completing each phase: Update `.planning/STATE.md` with progress
+   - Record deviations in `.planning/phases/{phase}/SUMMARY.md` if it exists
+   - Mark completed requirements in `.planning/REQUIREMENTS.md`
+
 ### Verification Approach
 
 After implementing a phase:
@@ -72,6 +135,30 @@ After implementing a phase:
 - Check off completed items in the plan file itself using Edit
 
 Don't let verification interrupt your flow - batch it at natural stopping points.
+
+### Checkpoint Handling
+
+When you encounter a checkpoint marker in the plan:
+
+**`[CHECKPOINT:human-verify]`**:
+1. Present what was built and verification steps
+2. Wait for user approval
+3. On "approved": continue to next phase
+4. On issues reported: fix and re-present
+
+**`[CHECKPOINT:decision]`**:
+1. Present the options with trade-offs from the plan
+2. Wait for user to choose
+3. Document the decision in plan file
+4. Continue with chosen path
+
+**`[CHECKPOINT:human-action]`**:
+1. Clearly state what the user needs to do
+2. Wait for confirmation that it's done
+3. Verify the action took effect (if possible)
+4. Continue implementation
+
+**Automation-first rule**: Before creating any checkpoint, verify Claude cannot perform the action itself via CLI, API, or file operations. Checkpoints verify after automation, never replace it.
 
 ### Testing Strategy
 

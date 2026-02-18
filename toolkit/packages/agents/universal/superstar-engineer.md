@@ -1,7 +1,6 @@
 ---
 name: superstar-engineer
 description: Elite implementation specialist who produces exceptional quality code through meticulous planning, deep technical thinking, and aggressive collaboration with all specialized agents. Use for ANY implementation task requiring the highest quality standards.
-model: opus
 tools: Read, Write, Edit, MultiEdit, Grep, Glob, Bash, TodoWrite, Task
 ---
 

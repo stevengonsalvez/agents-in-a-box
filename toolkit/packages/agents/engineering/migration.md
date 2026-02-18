@@ -1,7 +1,6 @@
 ---
 name: migration
 description: "Elite database migration architect ensuring zero-downtime schema changes. Masters Flyway migrations, PostgreSQL optimization, and event-sourced system constraints."
-model: opus
 tools:
   - Read
   - Write

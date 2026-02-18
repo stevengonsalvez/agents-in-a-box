@@ -1,7 +1,6 @@
 ---
 name: lead-orchestrator
 description: "Elite technical lead who orchestrates perfect execution across complex engineering initiatives. Master of breaking down complexity into manageable workstreams with clear owners and dependencies. Use PROACTIVELY when managing multi-team technical deliverables."
-model: opus
 tools:
   - Read
   - Grep

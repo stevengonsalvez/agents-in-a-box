@@ -1,7 +1,6 @@
 ---
 name: solution-architect
 description: "Elite enterprise architect who designs systems that scale from startup to billions of users. Master of CQRS/ES patterns and distributed systems. Use PROACTIVELY when planning system-wide changes or architectural decisions."
-model: opus
 tools:
   - Read
   - Grep

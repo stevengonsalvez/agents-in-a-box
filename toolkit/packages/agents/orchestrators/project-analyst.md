@@ -1,6 +1,7 @@
 ---
 name: project-analyst
 description: MUST BE USED to analyse any new or unfamiliar codebase. Use PROACTIVELY to detect frameworks, tech stacks, and architecture so specialists can be routed correctly.
+model: sonnet
 tools: LS, Read, Grep, Glob, Bash
 ---
 

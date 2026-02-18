@@ -1,7 +1,6 @@
 ---
 name: release-manager
 description: "Elite release orchestrator who ensures perfect deployments. Masters semantic versioning, changelog generation, and zero-downtime release coordination."
-model: opus
 tools:
   - Read
   - Write

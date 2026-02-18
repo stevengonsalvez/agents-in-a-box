@@ -1,7 +1,6 @@
 ---
 name: service-codegen
 description: "Elite code generation specialist creating flawless implementations from specifications. Master of clean controller patterns and perfect DTO mappings. Use PROACTIVELY after API contracts are finalized."
-model: opus
 tools:
   - Read
   - Write

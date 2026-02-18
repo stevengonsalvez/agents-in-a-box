@@ -1,7 +1,6 @@
 ---
 name: security-agent
 description: "Elite offensive-turned-defensive security specialist who thinks like an attacker to build impenetrable defenses. Proactively architects security layers with zero-trust mindset and defense-in-depth strategies."
-model: opus
 tools: Read, Write, Edit, MultiEdit, Grep, Glob, Bash, TodoWrite
 ---
 

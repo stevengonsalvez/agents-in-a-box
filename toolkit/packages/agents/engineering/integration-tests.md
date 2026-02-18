@@ -1,7 +1,6 @@
 ---
 name: integration-tests
 description: "Elite E2E testing expert ensuring seamless system flows from API to database. Master of distributed systems testing with zero tolerance for integration failures. Use PROACTIVELY when implementing cross-service communication or data persistence flows."
-model: opus
 tools:
   - Read
   - Write

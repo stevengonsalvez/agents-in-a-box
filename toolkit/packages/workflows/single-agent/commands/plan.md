@@ -36,7 +36,13 @@ Then wait for the user's input.
    - If NOT found, run `/research` which will search learnings first
    - Use this as foundation for the plan
 
-2. **Read all mentioned files immediately and FULLY**:
+2. **Check for project state** (`.planning/` directory):
+   - If `.planning/ROADMAP.md` exists: Read it to understand phase structure
+   - If `.planning/STATE.md` exists: Read current position and blockers
+   - If phase-specific `CONTEXT.md` exists: Read locked decisions — plan MUST honor these
+   - Use roadmap phases as the plan's phase structure when available
+
+3. **Read all mentioned files immediately and FULLY**:
    - Requirements documents
    - Research documents from `research/` directory
    - Related implementation plans from `plans/` directory
@@ -146,6 +152,27 @@ Once aligned on approach:
    Does this phasing make sense? Should I adjust the order or granularity?
    ```
 
+3. **Analyze phase dependencies**:
+   For each phase, determine:
+   - Which other phases must complete before this one can start
+   - Which files this phase will modify (for ownership validation)
+   - Whether phases could run in parallel
+
+   Rules:
+   - Phase with no dependencies = Wave 1
+   - Phase depending on Wave N = Wave N+1
+   - A file MUST NOT appear in multiple phases of the same wave
+   - If file overlap within a wave: add artificial dependency to serialize
+
+   Present the dependency graph:
+   ```
+   Dependency Analysis:
+   Phase 1: No dependencies (Wave 1)
+   Phase 2: Depends on Phase 1 (Wave 2)
+   Phase 3: No dependencies (Wave 1) -- parallel with Phase 1
+   Phase 4: Depends on Phase 2, Phase 3 (Wave 3)
+   ```
+
 2. **Get feedback on structure** before writing details
 
 ### Step 4: Detailed Plan Writing
@@ -176,6 +203,7 @@ After structure approval, write the plan to `plans/{descriptive_name}.md`:
 [High-level strategy and reasoning]
 
 ## Phase 1: [Descriptive Name]
+<!-- wave: 1 | depends_on: [] | files: [path/to/file1.ext, path/to/file2.ext] -->
 
 ### Overview
 [What this phase accomplishes]
@@ -203,6 +231,29 @@ After structure approval, write the plan to `plans/{descriptive_name}.md`:
 - [ ] Performance is acceptable
 - [ ] Edge cases handled correctly
 - [ ] No regressions in related features
+
+### Checkpoints (if applicable):
+
+Mark any stopping points with their type:
+
+- **`[CHECKPOINT:human-verify]`**: Review automated work before continuing
+  - What was built: [description]
+  - How to verify: [numbered steps with expected outcomes]
+  - Resume: Type "approved" or describe issues
+
+- **`[CHECKPOINT:decision]`**: Choose between options
+  - Options: [A vs B with trade-offs]
+  - Impact: [what changes based on choice]
+
+- **`[CHECKPOINT:human-action]`**: Non-automatable step required
+  - What's needed: [specific action only a human can take]
+  - Example: "Click email verification link", "Approve OAuth app in dashboard"
+
+**Checkpoint rules**:
+- If Claude CAN do it via CLI/API/Bash, it MUST NOT be a checkpoint
+- Maximum 1 checkpoint per phase (prevents fatigue)
+- `human-verify` is most common (~90%) — use for visual/UX review
+- `human-action` is rare (~1%) — only for things Claude literally cannot do
 
 ---
 
@@ -236,6 +287,8 @@ After structure approval, write the plan to `plans/{descriptive_name}.md`:
 - Related research: `research/[relevant].md`
 - Similar implementation: `[file:line]`
 ```
+
+**File Ownership Rule**: Each file may only be modified in ONE phase per wave. If two phases in the same wave need the same file, add a dependency between them. List all files each phase touches in the wave comment.
 
 ### Step 5: Review and Iterate
 

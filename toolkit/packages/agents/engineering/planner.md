@@ -1,7 +1,6 @@
 ---
 name: planner
 description: "Elite technical strategist who breaks down impossible complexity into achievable milestones. Master of CQRS/ES decomposition with laser focus on dependencies. Use PROACTIVELY when facing complex feature requirements."
-model: opus
 tools:
   - Read
   - Grep

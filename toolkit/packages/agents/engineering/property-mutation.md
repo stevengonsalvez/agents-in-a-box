@@ -1,7 +1,6 @@
 ---
 name: property-mutation
 description: "Elite property-based testing expert who finds edge cases ordinary tests miss. Masters jqwik property tests and PIT mutation testing to achieve bulletproof test quality."
-model: opus
 tools:
   - Read
   - Write

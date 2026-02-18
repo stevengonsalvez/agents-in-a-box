@@ -23,6 +23,31 @@ You can also say "workflow continue" if you have existing research or plans.
 
 Then wait for the user's input.
 
+### Phase 0: Project State Check
+
+Before starting any workflow phase, check for persistent project state:
+
+1. **Check for `.planning/` directory**:
+   - If exists: Read `.planning/STATE.md` to understand current position
+   - Load `.planning/ROADMAP.md` for phase context
+   - Resume from where STATE.md indicates
+
+2. **If `.planning/` does NOT exist**:
+   - Ask: "Would you like to set up persistent project state? This tracks requirements, roadmap, and decisions across sessions."
+   - If yes: Initialize from templates
+     ```bash
+     mkdir -p .planning/phases .planning/todos
+     ```
+   - Copy templates from `~/.claude/templates/planning/` to `.planning/`
+   - Guide user through filling in PROJECT.md (vision + constraints)
+   - If no: Continue with standard workflow (backward compatible)
+
+3. **If `.planning/` exists and has ROADMAP.md**:
+   - Identify current phase from STATE.md
+   - Check if current phase has CONTEXT.md (decisions captured)
+   - If no CONTEXT.md: Suggest running `/discuss` before planning
+   - Load phase context for downstream commands
+
 ## Workflow Phases
 
 ### Phase 1: Research
@@ -161,6 +186,14 @@ Useful when:
 
 Skip this if the work was straightforward with no notable discoveries.
 ```
+
+### .planning/ State Updates
+
+After each major phase transition, update `.planning/STATE.md`:
+- After Research: Update "Last activity", add key findings to "Recent Decisions"
+- After Plan: Update phase status, link to plan file
+- After Implement: Update progress, mark completed requirements
+- After Validate: Record validation status, update blockers if any
 
 ## Workflow Commands
 

@@ -1,6 +1,7 @@
 ---
 name: focused-repository-analyzer
 description: MUST BE USED to analyze external repositories with focus on specific research queries. Unlike code-archaeologist which provides comprehensive audits, this agent delivers targeted analysis aligned with research objectives. Use when external repositories are discovered during web research.
+model: sonnet
 tools: LS, Read, Grep, Glob, Bash
 ---
 
