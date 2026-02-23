@@ -1,0 +1,285 @@
+---
+name: sync-learnings
+description: Sync user-level Claude config changes back to toolkit repository
+user-invocable: true
+---
+
+# Sync Learnings
+
+Bidirectional sync between `{{HOME_TOOL_DIR}}/` (user-level) and toolkit `packages/` (canonical source).
+
+## Purpose
+
+When working on projects, learnings get captured in user-level agent files via `/reflect`. This command syncs improvements bidirectionally:
+- **TO_REPO**: New/updated files in {{HOME_TOOL_DIR}} -> packages/ (canonical)
+- **TO_HOME**: Newer files in packages/ -> {{HOME_TOOL_DIR}}
+
+## Architecture
+
+```
+{{HOME_TOOL_DIR}}/  <--sync-->  packages/  --generates-->  claude-code-4.5/ (thin layer)
+                             |
+                    create-rule.js installs
+```
+
+**packages/** is the canonical source. **claude-code-4.5/** only contains tool-specific files (CLAUDE.md, settings.json).
+
+## Workflow
+
+1. **Assess**: Compare directories and categorize differences
+2. **Route**: Determine target package directory for each file
+3. **Plan**: Generate sync plan table with actions and rationale
+4. **Execute**: Copy files in parallel where possible
+5. **Commit**: Single commit for TO_REPO changes
+
+## Directory Mappings
+
+### Agents (direct mapping)
+
+| Source (user-level) | Target (packages) |
+|---------------------|-------------------|
+| `{{HOME_TOOL_DIR}}/agents/engineering/` | `packages/agents/engineering/` |
+| `{{HOME_TOOL_DIR}}/agents/universal/` | `packages/agents/universal/` |
+| `{{HOME_TOOL_DIR}}/agents/orchestrators/` | `packages/agents/orchestrators/` |
+| `{{HOME_TOOL_DIR}}/agents/design/` | `packages/agents/design/` |
+| `{{HOME_TOOL_DIR}}/agents/meta/` | `packages/agents/meta/` |
+| `{{HOME_TOOL_DIR}}/agents/swarm/` | `packages/agents/swarm/` |
+| `{{HOME_TOOL_DIR}}/agents/*.md` (root) | `packages/agents/` |
+
+### Commands (routed by type)
+
+Commands are routed based on their purpose:
+
+| Command Pattern | Target |
+|-----------------|--------|
+| `m-*` (m-plan, m-implement, m-monitor, m-workflow) | `packages/workflows/multi-agent/commands/` |
+| `swarm-*` (swarm-create, swarm-status, swarm-inbox, swarm-join, swarm-shutdown) | `packages/workflows/multi-agent/commands/` |
+| `spawn-agent`, `*-agent-worktree`, `merge-agent-work`, `recover-sessions` | `packages/workflows/multi-agent/commands/` |
+| `plan`, `implement`, `validate`, `research`, `workflow` | `packages/workflows/single-agent/commands/` |
+| All other commands | `packages/utilities/commands/` |
+
+### Utils (shell libraries)
+
+| Source (user-level) | Target (packages) |
+|---------------------|-------------------|
+| `{{HOME_TOOL_DIR}}/utils/` | `packages/utilities/utils/` |
+
+### Other Files
+
+| Source (user-level) | Target (packages) |
+|---------------------|-------------------|
+| `{{HOME_TOOL_DIR}}/skills/` | `packages/skills/` |
+| `{{HOME_TOOL_DIR}}/templates/` | `packages/utilities/templates/` |
+| `{{HOME_TOOL_DIR}}/hooks/` | `packages/utilities/hooks/` |
+| `{{HOME_TOOL_DIR}}/output-styles/` | `packages/utilities/output-styles/` |
+
+## Command Routing Logic
+
+```bash
+# Determine target directory for a command
+route_command() {
+  local cmd="$1"
+  case "$cmd" in
+    m-*|swarm-*)
+      echo "packages/workflows/multi-agent/commands/"
+      ;;
+    spawn-agent.md|*-agent-worktree.md|merge-agent-work.md|recover-sessions.md)
+      echo "packages/workflows/multi-agent/commands/"
+      ;;
+    plan.md|implement.md|validate.md|research.md|workflow.md)
+      echo "packages/workflows/single-agent/commands/"
+      ;;
+    *)
+      echo "packages/utilities/commands/"
+      ;;
+  esac
+}
+```
+
+## Exclusion Categories (Never Sync)
+
+### Category 1: Personal Instrumentation
+Files with personal/optional integrations:
+- `hooks/*.py` with Langfuse, telemetry, or personal API integrations
+- Keep separate - don't pollute shared repo with personal tooling
+
+### Category 2: Project-Specific Commands
+Commands for specific private projects:
+- `commands/data-setup-*.md` - Project-specific data setup
+- `commands/load-frameworks.md` - Project-specific framework loading
+
+### Category 3: Session/Ephemeral Data
+Runtime state:
+- `session/` - Session state files
+- `reflections/` - Reflection logs
+- `plans/` - Temporary plan files
+- `*.json` session files
+
+### Category 4: User Settings
+Personal configuration:
+- `settings.json`, `settings.local.json`
+
+## Assessment Phase
+
+Before syncing, generate an assessment table:
+
+```markdown
+# Sync Assessment: {{HOME_TOOL_DIR}} <-> packages/
+
+## Summary
+
+| Action | Files | Reason |
+|--------|-------|--------|
+| **SYNC TO REPO** | N files | Useful generic additions |
+| **SYNC TO {{HOME_TOOL_DIR}}** | N files | Repo has newer versions |
+| **DON'T SYNC** | Multiple | Project-specific or session data |
+
+---
+
+## SYNC TO REPO (from {{HOME_TOOL_DIR}})
+
+### 1. `path/to/file.md` (NEW|UPDATED)
+- **Purpose**: [what this file does]
+- **Target**: `packages/[routed-path]/`
+- **Assessment**: Valuable addition
+
+---
+
+## SYNC TO {{HOME_TOOL_DIR}} (from packages/)
+
+### 1. `packages/path/to/file.md`
+- **Status**: Packages version is NEWER
+- **What's new**: [description of changes]
+- **Assessment**: Copy to {{HOME_TOOL_DIR}}
+
+---
+
+## DON'T SYNC
+
+### [Category Name]
+- `file1.md` - [reason]
+```
+
+## Execution
+
+### Shell Alias Workaround
+
+Many shells alias `cp` to `cp -i`. Always use `\cp` to bypass:
+
+```bash
+# Bypasses alias
+\cp source dest
+```
+
+### Example Sync Operations
+
+```bash
+# Agent sync (direct)
+\cp {{HOME_TOOL_DIR}}/agents/engineering/new-agent.md packages/agents/engineering/
+
+# Command sync (routed)
+\cp {{HOME_TOOL_DIR}}/commands/m-plan.md packages/workflows/multi-agent/commands/
+\cp {{HOME_TOOL_DIR}}/commands/plan.md packages/workflows/single-agent/commands/
+\cp {{HOME_TOOL_DIR}}/commands/session-info.md packages/utilities/commands/
+
+# Skill sync
+\cp -R {{HOME_TOOL_DIR}}/skills/new-skill/ packages/skills/
+
+# Template sync
+\cp {{HOME_TOOL_DIR}}/templates/new-template.md packages/utilities/templates/
+```
+
+### Commit Format
+
+```
+chore: sync learnings to packages
+
+- Add [new-file]: [brief description]
+- Update [updated-file]: [what changed]
+```
+
+## Quick Diff Commands
+
+```bash
+# Find all differences (agents)
+diff -rq {{HOME_TOOL_DIR}}/agents/ packages/agents/ 2>/dev/null
+
+# Find all differences (commands - check all locations)
+for dir in packages/utilities/commands packages/workflows/*/commands; do
+  diff -rq {{HOME_TOOL_DIR}}/commands/ "$dir" 2>/dev/null | head -5
+done
+
+# Find files only in {{HOME_TOOL_DIR}} (candidates for TO_REPO)
+diff -rq {{HOME_TOOL_DIR}}/agents/ packages/agents/ 2>/dev/null | grep "Only in /Users"
+
+# Show actual diff for a specific file
+diff {{HOME_TOOL_DIR}}/agents/engineering/example.md packages/agents/engineering/example.md
+```
+
+## Safety Checks
+
+- **Never overwrite** without assessment first
+- **Check modification times** when both versions exist - sync newer to older
+- **Skip binaries** and non-text files
+- **Validate** markdown frontmatter before copying agent files
+- **Route commands** to correct package directory
+- **Exclude** files matching exclusion categories
+
+## Example Session
+
+```
+User: /sync-learnings
+
+Claude: # Sync Assessment: {{HOME_TOOL_DIR}} <-> packages/
+
+## Summary
+
+| Action | Files | Reason |
+|--------|-------|--------|
+| **SYNC TO REPO** | 3 files | Useful generic additions |
+| **SYNC TO {{HOME_TOOL_DIR}}** | 1 file | Packages has newer version |
+| **DON'T SYNC** | Multiple | Project-specific or session data |
+
+## SYNC TO REPO
+
+### 1. `agents/engineering/new-validator.md` (NEW)
+- **Purpose**: Custom validation agent
+- **Target**: `packages/agents/engineering/`
+- **Assessment**: Generic utility
+
+### 2. `commands/custom-workflow.md` (NEW)
+- **Purpose**: New workflow command
+- **Target**: `packages/utilities/commands/` (routed)
+- **Assessment**: Generic utility
+
+## SYNC TO {{HOME_TOOL_DIR}}
+
+### 1. `packages/utilities/commands/sync-learnings.md`
+- **Status**: Packages version is NEWER
+- **What's new**: Added command routing logic
+- **Assessment**: Copy to {{HOME_TOOL_DIR}}
+
+Proceed with sync? [Y/n]
+
+User: Y
+
+Claude: Executing sync...
+
+new-validator.md -> packages/agents/engineering/
+custom-workflow.md -> packages/utilities/commands/
+sync-learnings.md -> {{HOME_TOOL_DIR}}/commands/
+
+Committed: chore: sync learnings to packages
+```
+
+## Automation Tip
+
+Add to session start hook for automatic detection:
+
+```bash
+# In hooks/session-start
+DIFF_COUNT=$(diff -rq {{HOME_TOOL_DIR}}/agents/ packages/agents/ 2>/dev/null | grep "differ" | wc -l)
+if [ "$DIFF_COUNT" -gt 0 ]; then
+  echo "  $DIFF_COUNT agent files differ from packages. Run /sync-learnings to sync."
+fi
+```

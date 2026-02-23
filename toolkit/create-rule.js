@@ -39,13 +39,9 @@ const TOOL_CONFIG = {
         packageMappings: {
             'skills': 'skills',
             'agents': 'agents',
-            'workflows/single-agent/commands': 'commands',
-            'workflows/multi-agent/commands': 'commands',
             'workflows/multi-agent/utils': 'utils',
             'workflows/multi-agent/orchestration': 'orchestration',
-            'utilities/commands': 'commands',
             'utilities/hooks': 'hooks',
-            'utilities/templates': 'templates',
             'utilities/output-styles': 'output-styles',
             'utilities/reflections': 'reflections'
         },
@@ -101,13 +97,8 @@ const TOOL_CONFIG = {
         forceHomeInstall: true,
         copyClaudeMd: false,
         copySettings: false,
-        generatePromptsFromCommands: true,
         packageMappings: {
             'skills': 'skills',
-            'workflows/single-agent/commands': 'commands',
-            'workflows/multi-agent/commands': 'commands',
-            'utilities/commands': 'commands',
-            'utilities/templates': 'templates',
             'utilities/reflections': 'reflections'
         },
         projectRootCopies: ['AGENTS.md'],
@@ -159,13 +150,9 @@ const TOOL_CONFIG = {
         packageMappings: {
             'skills': 'skills',
             'agents': 'agents',
-            'workflows/single-agent/commands': 'commands',
-            'workflows/multi-agent/commands': 'commands',
             'workflows/multi-agent/utils': 'utils',
             'workflows/multi-agent/orchestration': 'orchestration',
-            'utilities/commands': 'commands',
             'utilities/hooks': 'hooks',
-            'utilities/templates': 'templates',
             'utilities/output-styles': 'output-styles',
             'utilities/reflections': 'reflections'
         },
@@ -217,11 +204,7 @@ const TOOL_CONFIG = {
         packageMappings: {
             'skills': 'skills',
             'agents': 'agents',
-            'workflows/single-agent/commands': 'commands',
-            'workflows/multi-agent/commands': 'commands',
-            'utilities/commands': 'commands',
             'utilities/hooks': 'hooks',
-            'utilities/templates': 'templates',
             'utilities/output-styles': 'output-styles',
             'utilities/reflections': 'reflections'
         },
@@ -252,11 +235,7 @@ const TOOL_CONFIG = {
         packageMappings: {
             'skills': 'skills',
             'agents': 'agents',
-            'workflows/single-agent/commands': 'commands',
-            'workflows/multi-agent/commands': 'commands',
-            'utilities/commands': 'commands',
             'utilities/hooks': 'hooks',
-            'utilities/templates': 'templates',
             'utilities/output-styles': 'output-styles',
             'utilities/reflections': 'reflections'
         },
@@ -314,7 +293,6 @@ function discoverPackages(packagesDir) {
     const packages = {
         skills: [],
         agentCategories: [],
-        commandGroups: [],
         utilities: [],
         externalPlugins: [],
         npxSkills: []
@@ -393,28 +371,8 @@ function discoverPackages(packagesDir) {
         }
     }
 
-    // Discover command groups
-    const commandLocations = [
-        { name: 'utilities', path: 'utilities/commands', label: 'Utility Commands' },
-        { name: 'single-agent', path: 'workflows/single-agent/commands', label: 'Single-Agent Workflow Commands' },
-        { name: 'multi-agent', path: 'workflows/multi-agent/commands', label: 'Multi-Agent Workflow Commands' }
-    ];
-    for (const loc of commandLocations) {
-        const cmdDir = path.join(packagesDir, loc.path);
-        if (fs.existsSync(cmdDir)) {
-            const cmdFiles = readdirSync(cmdDir).filter(f => f.endsWith('.md'));
-            packages.commandGroups.push({
-                name: loc.name,
-                path: loc.path,
-                label: loc.label,
-                count: cmdFiles.length,
-                commands: cmdFiles.map(f => f.replace('.md', ''))
-            });
-        }
-    }
-
     // Discover other utilities
-    const utilityDirs = ['hooks', 'templates', 'output-styles', 'reflections'];
+    const utilityDirs = ['hooks', 'output-styles', 'reflections'];
     for (const util of utilityDirs) {
         const utilDir = path.join(packagesDir, 'utilities', util);
         if (fs.existsSync(utilDir)) {
@@ -449,18 +407,6 @@ function buildPackageChoices(packages) {
             choices.push({
                 name: `${cat.name} (${cat.count} agents: ${cat.agents.slice(0, 3).join(', ')}${cat.count > 3 ? '...' : ''})`,
                 value: { type: 'agents', name: cat.name, path: cat.path },
-                checked: true
-            });
-        }
-    }
-
-    // Command groups section
-    if (packages.commandGroups.length > 0) {
-        choices.push(new inquirer.Separator('─── Commands ───'));
-        for (const grp of packages.commandGroups) {
-            choices.push({
-                name: `${grp.label} (${grp.count} commands)`,
-                value: { type: 'commands', name: grp.name, path: grp.path },
                 checked: true
             });
         }
@@ -560,72 +506,6 @@ function validateSkillFrontmatter(skillsDir) {
         const errorMessage = `Invalid SKILL.md YAML frontmatter:\n- ${errors.join('\n- ')}`;
         throw new Error(errorMessage);
     }
-}
-
-function getPromptDescription(content, fallbackName) {
-    const headingMatch = content.match(/^#\s+(.+)$/m);
-    if (headingMatch) {
-        return headingMatch[1].trim();
-    }
-    return fallbackName.replace(/[-_]+/g, ' ').trim();
-}
-
-function buildPromptFrontmatter(description) {
-    const safeDescription = description.replace(/"/g, '\\"');
-    return `---\ndescription: \"${safeDescription}\"\n---\n\n`;
-}
-
-function createCodexPromptsFromCommands(commandsDir, promptsDir) {
-    if (!fs.existsSync(commandsDir)) {
-        return 0;
-    }
-
-    fs.mkdirSync(promptsDir, { recursive: true });
-    const files = readdirSync(commandsDir).filter((f) => f.endsWith('.md'));
-    let created = 0;
-
-    for (const file of files) {
-        const sourcePath = path.join(commandsDir, file);
-        const destPath = path.join(promptsDir, file);
-        const content = fs.readFileSync(sourcePath, 'utf8');
-
-        let frontmatter = '';
-        let body = content;
-
-        const frontmatterMatch = content.match(/^---\s*\n[\s\S]*?\n---\s*\n/);
-        if (frontmatterMatch) {
-            frontmatter = frontmatterMatch[0]
-                .split('\n')
-                .filter((line) => !/^argument-hint\s*:/.test(line) && !/^args\s*:/.test(line))
-                .join('\n');
-            if (!frontmatter.endsWith('\n')) {
-                frontmatter += '\n';
-            }
-            body = content.slice(frontmatterMatch[0].length);
-        } else {
-            const baseName = path.basename(file, '.md');
-            const description = getPromptDescription(content, baseName);
-            frontmatter = buildPromptFrontmatter(description);
-        }
-
-        const sanitized = body
-            .replace(/\$\{?ARGUMENTS\}?/g, 'the user request (ask in chat if missing)')
-            .replace(/\$\{?ARG\}?/g, 'a user-provided value (ask in chat if missing)')
-            .replace(/\$[A-Z_][A-Z0-9_]*/g, '<VAR>');
-
-        const preamble = [
-            'IMPORTANT:',
-            '- Do not rely on slash-command arguments for this prompt.',
-            '- Always ask the user for any required inputs in chat, then proceed.',
-            '',
-            '',
-        ].join('\n');
-        const promptBody = `${frontmatter}${preamble}${sanitized}`;
-        fs.writeFileSync(destPath, promptBody);
-        created++;
-    }
-
-    return created;
 }
 
 function showProgress(message, isComplete = false) {
@@ -929,8 +809,6 @@ async function handlePackagesStructureCopy(tool, config, overrideHomeDir = null,
                 selectedPackagePaths.add(pkg.path);
             } else if (pkg.type === 'agents') {
                 selectedPackagePaths.add(pkg.path);
-            } else if (pkg.type === 'commands') {
-                selectedPackagePaths.add(pkg.path);
             } else if (pkg.type === 'utility') {
                 selectedPackagePaths.add(pkg.path);
             } else if (pkg.type === 'external-plugin' || pkg.type === 'npx-skill') {
@@ -1093,13 +971,15 @@ async function handlePackagesStructureCopy(tool, config, overrideHomeDir = null,
         }
     }
 
-    if (config.generatePromptsFromCommands) {
-        const commandsDir = path.join(destDir, 'commands');
-        const promptsDir = path.join(destDir, 'prompts');
-        showProgress('Generating Codex prompts from commands');
-        const promptsCreated = createCodexPromptsFromCommands(commandsDir, promptsDir);
-        completeProgress(`Generated ${promptsCreated} prompts`);
-        totalFilesCopied += promptsCreated;
+    // Clean up stale commands and templates directories (deprecated - now skills)
+    const staleCommandsDir = path.join(destDir, 'commands');
+    const staleTemplatesDir = path.join(destDir, 'templates');
+    const stalePromptsDir = path.join(destDir, 'prompts');
+    for (const staleDir of [staleCommandsDir, staleTemplatesDir, stalePromptsDir]) {
+        if (fs.existsSync(staleDir)) {
+            fs.rmSync(staleDir, { recursive: true });
+            console.log(`  Removed deprecated ${path.basename(staleDir)}/ directory`);
+        }
     }
 
     // Copy CLAUDE.md from claude-code-4.5 if it exists
@@ -1202,7 +1082,6 @@ async function handlePackagesStructureCopy(tool, config, overrideHomeDir = null,
     console.log(`\nPackages structure installed. Components available:`);
     console.log(`  - Skills: ${destDir}/skills/`);
     console.log(`  - Agents: ${destDir}/agents/`);
-    console.log(`  - Commands: ${destDir}/commands/`);
     console.log(`  - Hooks: ${destDir}/hooks/`);
     console.log(`  - Utils: ${destDir}/utils/`);
 

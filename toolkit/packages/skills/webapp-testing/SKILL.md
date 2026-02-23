@@ -15,43 +15,43 @@ To test local web applications, write native Python Playwright scripts.
 
 ## Browser Tools (Direct Chrome DevTools Control)
 
-The `~/.claude/skills/webapp-testing/bin/browser-tools` utility provides lightweight, context-rot-proof browser automation using the Chrome DevTools Protocol directly (no MCP overhead).
+The `{{HOME_TOOL_DIR}}/skills/webapp-testing/bin/browser-tools` utility provides lightweight, context-rot-proof browser automation using the Chrome DevTools Protocol directly (no MCP overhead).
 
 **Available Commands**:
 
 ```bash
 # Launch browser and get connection details
-~/.claude/skills/webapp-testing/bin/browser-tools start [--port PORT] [--headless]
+{{HOME_TOOL_DIR}}/skills/webapp-testing/bin/browser-tools start [--port PORT] [--headless]
 
 # Navigate to URL
-~/.claude/skills/webapp-testing/bin/browser-tools nav <url> [--wait-for {load|networkidle|domcontentloaded}]
+{{HOME_TOOL_DIR}}/skills/webapp-testing/bin/browser-tools nav <url> [--wait-for {load|networkidle|domcontentloaded}]
 
 # Evaluate JavaScript
-~/.claude/skills/webapp-testing/bin/browser-tools eval "<javascript code>"
+{{HOME_TOOL_DIR}}/skills/webapp-testing/bin/browser-tools eval "<javascript code>"
 
 # Take screenshot
-~/.claude/skills/webapp-testing/bin/browser-tools screenshot <output.png> [--full-page] [--selector CSS_SELECTOR]
+{{HOME_TOOL_DIR}}/skills/webapp-testing/bin/browser-tools screenshot <output.png> [--full-page] [--selector CSS_SELECTOR]
 
 # Interactive element picker (returns selectors)
-~/.claude/skills/webapp-testing/bin/browser-tools pick
+{{HOME_TOOL_DIR}}/skills/webapp-testing/bin/browser-tools pick
 
 # Get console logs
-~/.claude/skills/webapp-testing/bin/browser-tools console [--level {log|warn|error|all}]
+{{HOME_TOOL_DIR}}/skills/webapp-testing/bin/browser-tools console [--level {log|warn|error|all}]
 
 # Search page content
-~/.claude/skills/webapp-testing/bin/browser-tools search "<query>" [--case-sensitive]
+{{HOME_TOOL_DIR}}/skills/webapp-testing/bin/browser-tools search "<query>" [--case-sensitive]
 
 # Extract page content (markdown, links, text)
-~/.claude/skills/webapp-testing/bin/browser-tools content [--format {markdown|links|text}]
+{{HOME_TOOL_DIR}}/skills/webapp-testing/bin/browser-tools content [--format {markdown|links|text}]
 
 # Get/set cookies
-~/.claude/skills/webapp-testing/bin/browser-tools cookies [--set NAME=VALUE] [--domain DOMAIN]
+{{HOME_TOOL_DIR}}/skills/webapp-testing/bin/browser-tools cookies [--set NAME=VALUE] [--domain DOMAIN]
 
 # Inspect element details
-~/.claude/skills/webapp-testing/bin/browser-tools inspect <css-selector>
+{{HOME_TOOL_DIR}}/skills/webapp-testing/bin/browser-tools inspect <css-selector>
 
 # Terminate browser session
-~/.claude/skills/webapp-testing/bin/browser-tools kill
+{{HOME_TOOL_DIR}}/skills/webapp-testing/bin/browser-tools kill
 ```
 
 **When to Use Browser-Tools vs Playwright**:
@@ -76,26 +76,26 @@ The `~/.claude/skills/webapp-testing/bin/browser-tools` utility provides lightwe
 
 ```bash
 # 1. Start browser pointed at your app
-~/.claude/skills/webapp-testing/bin/browser-tools start --port 9222
+{{HOME_TOOL_DIR}}/skills/webapp-testing/bin/browser-tools start --port 9222
 
 # 2. Navigate to the page
-~/.claude/skills/webapp-testing/bin/browser-tools nav http://localhost:3000
+{{HOME_TOOL_DIR}}/skills/webapp-testing/bin/browser-tools nav http://localhost:3000
 
 # 3. Use interactive picker to find selectors
-~/.claude/skills/webapp-testing/bin/browser-tools pick
+{{HOME_TOOL_DIR}}/skills/webapp-testing/bin/browser-tools pick
 # Click on elements in the browser, get their selectors
 
 # 4. Inspect specific elements
-~/.claude/skills/webapp-testing/bin/browser-tools inspect "button.submit"
+{{HOME_TOOL_DIR}}/skills/webapp-testing/bin/browser-tools inspect "button.submit"
 
 # 5. Take screenshot for documentation
-~/.claude/skills/webapp-testing/bin/browser-tools screenshot /tmp/page.png --full-page
+{{HOME_TOOL_DIR}}/skills/webapp-testing/bin/browser-tools screenshot /tmp/page.png --full-page
 
 # 6. Check console for errors
-~/.claude/skills/webapp-testing/bin/browser-tools console --level error
+{{HOME_TOOL_DIR}}/skills/webapp-testing/bin/browser-tools console --level error
 
 # 7. Clean up
-~/.claude/skills/webapp-testing/bin/browser-tools kill
+{{HOME_TOOL_DIR}}/skills/webapp-testing/bin/browser-tools kill
 ```
 
 **Benefits**:

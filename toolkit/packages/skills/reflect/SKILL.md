@@ -49,7 +49,7 @@ Check and initialize state files using the state manager:
 python scripts/state_manager.py init
 
 # State directory is configurable via REFLECT_STATE_DIR env var
-# Default: ~/.reflect/ (portable) or ~/.claude/session/ (Claude Code)
+# Default: ~/.reflect/ (portable) or {{HOME_TOOL_DIR}}/session/ (Claude Code)
 ```
 
 State includes:
@@ -262,13 +262,13 @@ python scripts/metrics_updater.py --accepted 3 --rejected 1 --confidence high:2,
 - `.claude/skills/{name}/SKILL.md` - New skills
 
 **Global (user-level):**
-- `~/.claude/reflections/by-project/{project}/` - Cross-project
-- `~/.claude/reflections/by-agent/{agent}/learnings.md` - Per-agent
-- `~/.claude/reflections/index.md` - Global summary
+- `{{HOME_TOOL_DIR}}/reflections/by-project/{project}/` - Cross-project
+- `{{HOME_TOOL_DIR}}/reflections/by-agent/{agent}/learnings.md` - Per-agent
+- `{{HOME_TOOL_DIR}}/reflections/index.md` - Global summary
 
 ## Memory Integration
 
-Some learnings belong in **auto-memory** (`~/.claude/projects/*/memory/MEMORY.md`) rather than agent files:
+Some learnings belong in **auto-memory** (`{{HOME_TOOL_DIR}}/projects/*/memory/MEMORY.md`) rather than agent files:
 
 | Learning Type | Best Target |
 |---------------|-------------|
@@ -316,10 +316,10 @@ The skill includes hook scripts for automatic integration:
 
 ```bash
 # Install hook to your Claude hooks directory
-cp hooks/precompact_reflect.py ~/.claude/hooks/
+cp hooks/precompact_reflect.py {{HOME_TOOL_DIR}}/hooks/
 ```
 
-Configure in `~/.claude/settings.json`:
+Configure in `{{HOME_TOOL_DIR}}/settings.json`:
 
 ```json
 {
@@ -329,7 +329,7 @@ Configure in `~/.claude/settings.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "uv run ~/.claude/hooks/precompact_reflect.py --auto"
+            "command": "uv run {{HOME_TOOL_DIR}}/hooks/precompact_reflect.py --auto"
           }
         ]
       }
@@ -355,7 +355,7 @@ export REFLECT_STATE_DIR=/path/to/state
 
 # Or use default
 # ~/.reflect/ (portable default)
-# ~/.claude/session/ (Claude Code default)
+# {{HOME_TOOL_DIR}}/session/ (Claude Code default)
 ```
 
 ### No Task Tool Dependency

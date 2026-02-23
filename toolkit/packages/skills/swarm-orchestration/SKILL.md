@@ -1,3 +1,9 @@
+---
+name: swarm-orchestration
+description: A tmux-based persistent multi-agent swarm system with file-based inter-agent messaging
+user-invocable: true
+---
+
 # Swarm Orchestration Skill
 
 A tmux-based persistent multi-agent swarm system with file-based inter-agent messaging, leveraging Beads for task coordination.

@@ -580,7 +580,7 @@ When health reaches 🟡, proactively:
    - ⁠ meta/ ⁠
      - agentmaker – Create and refine new agents
 
-2.⁠ ⁠*Use custom commands for structured workflows* - Commands in ⁠ ~/.claude/commands/ ⁠ (available in this repo under `claude-code-4.5/commands`):
+2.⁠ ⁠*Use skills for structured workflows* - Skills in ⁠ ~/.claude/skills/ ⁠ (available in this repo under `toolkit/packages/skills/`):
    - ⁠ /prime ⁠ - Prime session with working context
    - ⁠ /health-check ⁠ - Run session health check
    - ⁠ /session-metrics ⁠ - Show session metrics

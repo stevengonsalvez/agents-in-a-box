@@ -1,5 +1,5 @@
 # Learnings Schema
-# Defines the structure of ~/.claude/session/learnings.yaml
+# Defines the structure of {{HOME_TOOL_DIR}}/session/learnings.yaml
 # Used to track all applied learnings from reflection
 
 $schema: "http://json-schema.org/draft-07/schema#"
@@ -96,7 +96,7 @@ properties:
 #     confidence: high
 #     source: explicit_correction
 #     source_quote: "never use var, always use const or let"
-#     target: ~/.claude/agents/universal/frontend-developer.md
+#     target: {{HOME_TOOL_DIR}}/agents/universal/frontend-developer.md
 #     section: Style Guidelines
 #     status: applied
 #     session_id: abc123

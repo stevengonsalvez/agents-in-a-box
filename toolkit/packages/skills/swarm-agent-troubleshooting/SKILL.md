@@ -1,3 +1,9 @@
+---
+name: swarm-agent-troubleshooting
+description: Diagnose and fix swarm agent spawn failures when agents don't start processing tasks
+user-invocable: true
+---
+
 # Swarm Agent Troubleshooting
 
 Diagnose and fix swarm agent spawn failures when agents don't start processing tasks.

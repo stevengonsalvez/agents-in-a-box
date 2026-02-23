@@ -8,7 +8,7 @@ Manages state files for reflection tracking including:
 - learnings.yaml: Log of applied learnings
 
 State directory is configurable via REFLECT_STATE_DIR env var.
-Defaults to ~/.reflect/ for portability or ~/.claude/session/ for Claude Code.
+Defaults to ~/.reflect/ for portability or ~/{{TOOL_DIR}}/session/ for Claude Code.
 """
 
 import os
@@ -31,7 +31,7 @@ def get_state_dir() -> Path:
         return Path(custom_dir).expanduser()
 
     # Check for Claude Code installation
-    claude_session = Path.home() / '.claude' / 'session'
+    claude_session = Path.home() / '{{TOOL_DIR}}' / 'session'
     if claude_session.exists():
         return claude_session
 

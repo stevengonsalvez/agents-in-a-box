@@ -177,3 +177,11 @@ For detailed information, see:
 ## Version History
 
 - v1.0.0 (2025-01): Initial skill creation from command refactoring
+
+## Invocation Modes
+
+This skill can be invoked in several modes:
+
+- **Full Research** (`/crypto_research`): Comprehensive multi-agent research with all analysis types. See `references/full-mode.md`.
+- **Haiku Mode** (`/crypto_research_haiku`): Lightweight research using haiku-model agents for faster, cheaper results. See `references/haiku-mode.md`.
+- **Cook Only** (`/cook_crypto_research_only`): Output-only mode that runs all research agents in parallel. See `references/cook-only-mode.md`.

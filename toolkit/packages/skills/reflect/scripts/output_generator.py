@@ -3,11 +3,11 @@
 Output Generator for Reflect Skill
 
 Generates reflection output files and manages indexes:
-- Project reflections: .claude/reflections/YYYY-MM-DD_HH-MM-SS.md
-- Project index: .claude/reflections/index.md
-- Global index: ~/.claude/reflections/index.md
-- Per-agent learnings: ~/.claude/reflections/by-agent/{agent}/learnings.md
-- Cross-project: ~/.claude/reflections/by-project/{project}/
+- Project reflections: {{TOOL_DIR}}/reflections/YYYY-MM-DD_HH-MM-SS.md
+- Project index: {{TOOL_DIR}}/reflections/index.md
+- Global index: ~/{{TOOL_DIR}}/reflections/index.md
+- Per-agent learnings: ~/{{TOOL_DIR}}/reflections/by-agent/{agent}/learnings.md
+- Cross-project: ~/{{TOOL_DIR}}/reflections/by-project/{project}/
 
 Usage:
     python output_generator.py --reflection-data '{"signals": [...], "changes": [...]}'
@@ -52,17 +52,17 @@ def get_project_name() -> str:
 
 def get_global_reflections_dir() -> Path:
     """Get the global reflections directory."""
-    return Path.home() / '.claude' / 'reflections'
+    return Path.home() / '{{TOOL_DIR}}' / 'reflections'
 
 
 def get_project_reflections_dir() -> Path:
     """Get the project reflections directory."""
-    return get_project_dir() / '.claude' / 'reflections'
+    return get_project_dir() / '{{TOOL_DIR}}' / 'reflections'
 
 
 def get_project_skills_dir() -> Path:
     """Get the project skills directory."""
-    return get_project_dir() / '.claude' / 'skills'
+    return get_project_dir() / '{{TOOL_DIR}}' / 'skills'
 
 
 def ensure_directories():
@@ -91,7 +91,7 @@ def create_reflection_file(
     session_context: Optional[dict] = None
 ) -> Path:
     """
-    Create a reflection output file in the project's .claude/reflections/ directory.
+    Create a reflection output file in the project's {{TOOL_DIR}}/reflections/ directory.
 
     Returns the path to the created file.
     """
@@ -156,7 +156,7 @@ def create_reflection_file(
 - [{'x' if skill.get('verified') else ' '}] Verified: {skill.get('verified_reason', '')}
 - [{'x' if skill.get('no_duplication') else ' '}] No duplication: {skill.get('nodupe_reason', '')}
 
-**Will create**: `.claude/skills/{skill.get('name', 'unknown')}/SKILL.md`
+**Will create**: `{{TOOL_DIR}}/skills/{skill.get('name', 'unknown')}/SKILL.md`
 
 """
 
@@ -246,7 +246,7 @@ This file tracks all reflection analyses across all projects.
     entry = f"""## {timestamp} - {project_name}
 
 - **Project Path**: `{project_path}`
-- **Reflection**: `{project_path}/.claude/reflections/{reflection_file.name}`
+- **Reflection**: `{project_path}/{{TOOL_DIR}}/reflections/{reflection_file.name}`
 - **Signals**: {len(signals)} detected
 - **New Skills**: {', '.join(skill_names) if skill_names else 'None'}
 
@@ -308,7 +308,7 @@ def copy_to_by_project(reflection_file: Path):
 
 
 def create_skill_file(skill_name: str, skill_content: str) -> Path:
-    """Create a new skill file in the project's .claude/skills/ directory."""
+    """Create a new skill file in the project's {{TOOL_DIR}}/skills/ directory."""
     ensure_directories()
 
     skill_dir = get_project_skills_dir() / skill_name

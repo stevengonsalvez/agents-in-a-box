@@ -51,7 +51,7 @@ Combine with your existing hook using shell chaining:
         "hooks": [
           {
             "type": "command",
-            "command": "uv run ~/.claude/hooks/pre_compact.py --backup && uv run /path/to/precompact_reflect.py --remind"
+            "command": "uv run {{HOME_TOOL_DIR}}/hooks/pre_compact.py --backup && uv run /path/to/precompact_reflect.py --remind"
           }
         ]
       }
@@ -60,13 +60,13 @@ Combine with your existing hook using shell chaining:
 }
 ```
 
-### Option 3: Copy to ~/.claude/hooks/
+### Option 3: Copy to {{HOME_TOOL_DIR}}/hooks/
 
 Copy the script to your hooks directory for easier access:
 
 ```bash
-cp precompact_reflect.py ~/.claude/hooks/
-chmod +x ~/.claude/hooks/precompact_reflect.py
+cp precompact_reflect.py {{HOME_TOOL_DIR}}/hooks/
+chmod +x {{HOME_TOOL_DIR}}/hooks/precompact_reflect.py
 ```
 
 Then configure:
@@ -79,7 +79,7 @@ Then configure:
         "hooks": [
           {
             "type": "command",
-            "command": "uv run ~/.claude/hooks/precompact_reflect.py --auto"
+            "command": "uv run {{HOME_TOOL_DIR}}/hooks/precompact_reflect.py --auto"
           }
         ]
       }
@@ -105,7 +105,7 @@ This configuration:
         "hooks": [
           {
             "type": "command",
-            "command": "claude handover && uv run ~/.claude/hooks/pre_compact.py --backup && uv run ~/.claude/hooks/precompact_reflect.py --auto --verbose"
+            "command": "claude handover && uv run {{HOME_TOOL_DIR}}/hooks/pre_compact.py --backup && uv run {{HOME_TOOL_DIR}}/hooks/precompact_reflect.py --auto --verbose"
           }
         ]
       }
@@ -208,7 +208,7 @@ This sets `auto_reflect: true` in the state file. When PreCompact triggers:
 
 ## Logs
 
-The hook logs events to `~/.claude/logs/reflect_precompact.log`:
+The hook logs events to `{{HOME_TOOL_DIR}}/logs/reflect_precompact.log`:
 
 ```
 [2026-01-24T10:30:00] session=abc123 trigger=auto mode=remind
@@ -227,14 +227,14 @@ The hook logs events to `~/.claude/logs/reflect_precompact.log`:
 ### No output from hook
 
 1. Run with `--verbose` flag for debugging
-2. Check `~/.claude/logs/reflect_precompact.log` for events
+2. Check `{{HOME_TOOL_DIR}}/logs/reflect_precompact.log` for events
 3. Test script directly: `echo '{"trigger":"manual"}' | python precompact_reflect.py --remind`
 
 ### State not found
 
 The hook looks for state in:
 1. `$REFLECT_STATE_DIR` (if set)
-2. `~/.claude/session/` (if exists)
+2. `{{HOME_TOOL_DIR}}/session/` (if exists)
 3. `~/.reflect/` (fallback)
 
 Run `/reflect status` to verify state location.
@@ -253,7 +253,7 @@ You can also add reflection status to SessionStart:
         "hooks": [
           {
             "type": "command",
-            "command": "python -c \"import json; print(json.dumps({'additionalContext': 'Auto-reflect: ' + ('enabled' if open(os.path.expanduser('~/.claude/session/reflect-state.yaml')).read().find('auto_reflect: true') >= 0 else 'disabled')}))\""
+            "command": "python -c \"import json; print(json.dumps({'additionalContext': 'Auto-reflect: ' + ('enabled' if open(os.path.expanduser('{{HOME_TOOL_DIR}}/session/reflect-state.yaml')).read().find('auto_reflect: true') >= 0 else 'disabled')}))\""
           }
         ]
       }
