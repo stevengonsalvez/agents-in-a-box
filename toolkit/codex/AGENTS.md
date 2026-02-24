@@ -544,8 +544,8 @@ When health reaches 🟡, proactively:
 
 # Templates
 
-@{{HOME_TOOL_DIR}}/templates/codereview-checklist-template.md
-@{{HOME_TOOL_DIR}}/templates/handover-template.md
+@{{HOME_TOOL_DIR}}/skills/commit/assets/codereview-checklist.md
+@{{HOME_TOOL_DIR}}/skills/handover/assets/template.md
 
 
 
@@ -557,7 +557,7 @@ When health reaches 🟡, proactively:
 
 0.⁠ ⁠*Always run multiple Task invocations in a SINGLE message when sensible* - Maximize parallelism for better performance.
 
-1.⁠ ⁠*Aggressively use specialized agents* - Custom agent definitions in ⁠ {{HOME_TOOL_DIR}}/agents/ ⁠ (available in this repo under `claude-code-4.5/agents`):
+1.⁠ ⁠*Aggressively use specialized agents* - Custom agent definitions in ⁠ {{HOME_TOOL_DIR}}/agents/ ⁠ (available in this repo under `toolkit/packages/agents/`):
    - ⁠ distinguished-engineer ⁠ - Drive system design and high‑leverage tradeoffs
    - ⁠ web-search-researcher ⁠ - Research modern information from the web
    - ⁠ universal/ ⁠
@@ -601,9 +601,7 @@ When health reaches 🟡, proactively:
    - ⁠ /critique ⁠ - Provide critical review of approach or code
    - ⁠ /expose ⁠ - Expose assumptions, risks, unknowns
    - ⁠ /do-issues ⁠ - Execute a queue of issues
-   - ⁠ /crypto_research ⁠ - Research crypto topics
-   - ⁠ /crypto_research_haiku ⁠ - Research crypto topics (haiku style)
-   - ⁠ /cook_crypto_research_only ⁠ - Output-only crypto research
+   - ⁠ /crypto-research ⠀ - Comprehensive crypto market research and analysis
 
 3.⁠ ⁠*Testing Philosophy*:
    - Favour high-level and behavioural tests over unit tests
