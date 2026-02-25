@@ -85,7 +85,7 @@ Maps learning categories to target agent files for updating.
 
 | Learning Type | Primary Target | Notes |
 |--------------|----------------|-------|
-| Business rules | Project `.claude/agents/` | Domain-specific agent |
+| Business rules | Project `{{TOOL_DIR}}/agents/` | Domain-specific agent |
 | Terminology | `CLAUDE.md` | Glossary section |
 | Constraints | Project-specific agent | Validation rules |
 | User requirements | `CLAUDE.md` | User preferences section |
@@ -209,7 +209,7 @@ Before adding a new rule, check for conflicts:
 ### Project Agents (Project-level)
 
 ```
-.claude/agents/{name}.md
+{{TOOL_DIR}}/agents/{name}.md
 ```
 
 ### Global Instructions
@@ -221,9 +221,40 @@ Before adding a new rule, check for conflicts:
 ### Project Instructions
 
 ```
-.claude/CLAUDE.md
+{{TOOL_DIR}}/CLAUDE.md
 CLAUDE.md
 ```
+
+## Project Memory
+
+Project-specific learnings that don't belong in agent files should be written to `.agents/MEMORY.md` in the repo root (git-tracked, 200-line max).
+
+### Project Memory Mapping
+
+| Learning Type | Primary Target | Notes |
+|--------------|----------------|-------|
+| Project-specific patterns | `.agents/MEMORY.md` | Architecture, conventions |
+| Environment gotchas | `.agents/MEMORY.md` | Config, deploy quirks |
+| Build/test insights | `.agents/MEMORY.md` | CI, toolchain issues |
+| Domain knowledge | `.agents/MEMORY.md` | Business rules, terminology |
+
+### `.agents/MEMORY.md` Sections
+
+- Architecture & Patterns
+- Build & Deploy
+- Gotchas & Workarounds
+- Testing
+- Environment & Config
+- [Dynamic sections based on project needs]
+
+### Decision Flow — Agent File vs `.agents/MEMORY.md`
+
+| Signal | Target |
+|--------|--------|
+| Behavioral ("always do X") | Agent file |
+| Project-specific architecture, gotcha, env quirk | `.agents/MEMORY.md` |
+| Recurring bug with reusable fix | New skill |
+| Domain term / business rule | `.agents/MEMORY.md` |
 
 ## Skill Creation vs Agent Update
 
@@ -282,5 +313,5 @@ Decide whether to create a new skill or update an agent:
 **Category**: New Skill
 
 **Mapping**:
-- Create: `.claude/skills/react-hydration-mismatch-fix/SKILL.md`
+- Create: `{{TOOL_DIR}}/skills/react-hydration-mismatch-fix/SKILL.md`
 - Include: Error message, symptoms, step-by-step fix, verification

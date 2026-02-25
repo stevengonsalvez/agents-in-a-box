@@ -5,9 +5,9 @@ Output Generator for Reflect Skill
 Generates reflection output files and manages indexes:
 - Project reflections: {{TOOL_DIR}}/reflections/YYYY-MM-DD_HH-MM-SS.md
 - Project index: {{TOOL_DIR}}/reflections/index.md
-- Global index: ~/{{TOOL_DIR}}/reflections/index.md
-- Per-agent learnings: ~/{{TOOL_DIR}}/reflections/by-agent/{agent}/learnings.md
-- Cross-project: ~/{{TOOL_DIR}}/reflections/by-project/{project}/
+- Global index: {{HOME_TOOL_DIR}}/reflections/index.md
+- Per-agent learnings: {{HOME_TOOL_DIR}}/reflections/by-agent/{agent}/learnings.md
+- Cross-project: {{HOME_TOOL_DIR}}/reflections/by-project/{project}/
 
 Usage:
     python output_generator.py --reflection-data '{"signals": [...], "changes": [...]}'
@@ -52,17 +52,17 @@ def get_project_name() -> str:
 
 def get_global_reflections_dir() -> Path:
     """Get the global reflections directory."""
-    return Path.home() / '{{TOOL_DIR}}' / 'reflections'
+    return Path.home() / '.claude' / 'reflections'
 
 
 def get_project_reflections_dir() -> Path:
     """Get the project reflections directory."""
-    return get_project_dir() / '{{TOOL_DIR}}' / 'reflections'
+    return get_project_dir() / '.claude' / 'reflections'
 
 
 def get_project_skills_dir() -> Path:
     """Get the project skills directory."""
-    return get_project_dir() / '{{TOOL_DIR}}' / 'skills'
+    return get_project_dir() / '.claude' / 'skills'
 
 
 def ensure_directories():

@@ -31,6 +31,7 @@ allowed-tools:
 | `/reflect status` | Show state and metrics |
 | `/reflect review` | Review low-confidence learnings |
 | `/reflect [agent]` | Focus on specific agent |
+| `/reflect consolidate` | Bulk-merge orphaned worktree memories into project memory |
 
 ## Core Philosophy
 
@@ -88,7 +89,7 @@ Map each signal to the appropriate target:
 | Process | `CLAUDE.md`, orchestrator agents |
 | Domain | Domain-specific agents, `CLAUDE.md` |
 | Tools | `CLAUDE.md`, relevant specialists |
-| New Skill | `.claude/skills/{name}/SKILL.md` |
+| New Skill | `{{TOOL_DIR}}/skills/{name}/SKILL.md` |
 
 See [agent_mappings.md](references/agent_mappings.md) for mapping rules.
 
@@ -161,7 +162,7 @@ Produce output in this format:
 - [x] Verified: [how verified]
 - [x] No duplication: [checked against]
 
-**Will create**: `.claude/skills/[skill-name]/SKILL.md`
+**Will create**: `{{TOOL_DIR}}/skills/[skill-name]/SKILL.md`
 
 ## Conflict Check
 
@@ -217,6 +218,27 @@ Apply these changes?
 2. Log partial acceptance
 3. Commit only applied changes
 
+### Step 6.5: Consolidate to Project Memory
+
+When approved learnings include **project-specific items** (not agent updates or new skills),
+write them to `.agents/MEMORY.md` in the repo root:
+
+1. Read `.agents/MEMORY.md` (create from template if it doesn't exist — see Project Memory section)
+2. Classify each approved learning into a category section
+3. Deduplicate against existing lines (fuzzy match — same concept = skip)
+4. Append to the appropriate section
+5. If file exceeds 200 lines: warn user, suggest routing verbose items to skills
+6. Stage `.agents/MEMORY.md` alongside other reflect changes in the commit
+
+**Decision flow — Agent File vs `.agents/MEMORY.md`:**
+
+| Signal | Target |
+|--------|--------|
+| Behavioral ("always do X") | Agent file |
+| Project-specific architecture, gotcha, env quirk | `.agents/MEMORY.md` |
+| Recurring bug with reusable fix | New skill |
+| Domain term / business rule | `.agents/MEMORY.md` |
+
 ### Step 7: Update Metrics
 
 ```bash
@@ -254,12 +276,81 @@ python scripts/metrics_updater.py --accepted 3 --rejected 1 --confidence high:2,
 # Shows low-confidence learnings awaiting validation
 ```
 
+## Project Memory (`/reflect consolidate`)
+
+Bulk-merge orphaned worktree memory directories into a git-tracked `.agents/MEMORY.md` in the repo root.
+
+**When to use:** After deleting git worktrees, or periodically to consolidate scattered learnings.
+
+### Workflow
+
+1. **Discover project identity**:
+   ```bash
+   bash {{HOME_TOOL_DIR}}/skills/reflect/scripts/memory_discovery.sh project-id
+   # → e.g. "shotclubhouse"
+   ```
+
+2. **Find orphaned memory dirs**:
+   ```bash
+   bash {{HOME_TOOL_DIR}}/skills/reflect/scripts/memory_discovery.sh discover
+   # Lists all {{HOME_TOOL_DIR}}/projects/*<repo-name>*/memory/MEMORY.md files
+   # (excludes current session's memory dir)
+   ```
+
+3. **Read all MEMORY.md files** from matched directories
+
+4. **Deduplicate and categorize**: Group by section, remove redundant entries (fuzzy — same concept = skip)
+
+5. **Route skill-worthy content**: For entries that match existing skill topics (check `{{TOOL_DIR}}/skills/` and `{{HOME_TOOL_DIR}}/skills/`), propose adding them to those skills (same approval flow as Step 5-6)
+
+6. **Write `.agents/MEMORY.md`**: Consolidated, deduped, within 200-line limit. Create from template if it doesn't exist:
+   ```markdown
+   # Project Memory
+
+   > Auto-consolidated by /reflect. 200-line max. Detailed learnings route to skills.
+
+   ## Architecture & Patterns
+
+   ## Build & Deploy
+
+   ## Gotchas & Workarounds
+
+   ## Testing
+
+   ## Environment & Config
+   ```
+   Sections are dynamic — empty sections get removed. New sections are created as needed.
+
+7. **Ensure CLAUDE.md reference**: Check if `{{TOOL_DIR}}/CLAUDE.md` contains `@.agents/MEMORY.md` — if not, add it at the top
+
+8. **Propose orphaned dir cleanup**: Show list and ask user to confirm deletion
+   ```bash
+   # After approval:
+   bash {{HOME_TOOL_DIR}}/skills/reflect/scripts/memory_discovery.sh cleanup /tmp/reflect-cleanup-dirs.txt
+   ```
+
+9. **Report**: Show summary of what was consolidated, deleted, and routed to skills
+
+### Stats
+
+Check orphaned memory status without making changes:
+
+```bash
+bash {{HOME_TOOL_DIR}}/skills/reflect/scripts/memory_discovery.sh stats
+# → Repo: shotclubhouse
+# → Orphaned memory dirs: 7
+# → Total lines across all: 283
+```
+
 ## Output Locations
 
+**Project memory (git-tracked):**
+- `.agents/MEMORY.md` - Consolidated project memory (200 lines max)
+
 **Project-level (versioned with repo):**
-- `.claude/reflections/YYYY-MM-DD_HH-MM-SS.md` - Full reflection
-- `.claude/reflections/index.md` - Project summary
-- `.claude/skills/{name}/SKILL.md` - New skills
+- `{{TOOL_DIR}}/reflections/YYYY-MM-DD_HH-MM-SS.md` - Full reflection
+- `{{TOOL_DIR}}/reflections/index.md` - Project summary
+- `{{TOOL_DIR}}/skills/{name}/SKILL.md` - New skills
 
 **Global (user-level):**
 - `{{HOME_TOOL_DIR}}/reflections/by-project/{project}/` - Cross-project
@@ -273,10 +364,10 @@ Some learnings belong in **auto-memory** (`{{HOME_TOOL_DIR}}/projects/*/memory/M
 | Learning Type | Best Target |
 |---------------|-------------|
 | Behavioral correction ("always do X") | Agent file |
-| Project-specific pattern | MEMORY.md |
-| Recurring bug/workaround | New skill OR MEMORY.md |
+| Project-specific pattern | `.agents/MEMORY.md` |
+| Recurring bug/workaround | New skill OR `.agents/MEMORY.md` |
 | Tool preference | CLAUDE.md |
-| Domain knowledge | MEMORY.md or compound-docs |
+| Domain knowledge | `.agents/MEMORY.md` or compound-docs |
 
 When a signal is LOW confidence and project-specific, prefer writing to MEMORY.md over modifying agents.
 
@@ -391,7 +482,8 @@ reflect/
 │   ├── state_manager.py          # State file CRUD
 │   ├── signal_detector.py        # Pattern matching
 │   ├── metrics_updater.py        # Metrics aggregation
-│   └── output_generator.py       # Reflection file & index generation
+│   ├── output_generator.py       # Reflection file & index generation
+│   └── memory_discovery.sh       # Project memory discovery & cleanup
 ├── hooks/
 │   ├── precompact_reflect.py     # PreCompact hook integration
 │   ├── settings-snippet.json     # Settings.json examples

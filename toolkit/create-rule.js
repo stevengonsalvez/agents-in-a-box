@@ -39,8 +39,7 @@ const TOOL_CONFIG = {
         packageMappings: {
             'skills': 'skills',
             'agents': 'agents',
-            'workflows/multi-agent/utils': 'utils',
-            'workflows/multi-agent/orchestration': 'orchestration',
+            'utilities/utils': 'utils',
             'utilities/hooks': 'hooks',
             'utilities/output-styles': 'output-styles',
             'utilities/reflections': 'reflections'
@@ -150,8 +149,7 @@ const TOOL_CONFIG = {
         packageMappings: {
             'skills': 'skills',
             'agents': 'agents',
-            'workflows/multi-agent/utils': 'utils',
-            'workflows/multi-agent/orchestration': 'orchestration',
+            'utilities/utils': 'utils',
             'utilities/hooks': 'hooks',
             'utilities/output-styles': 'output-styles',
             'utilities/reflections': 'reflections'
