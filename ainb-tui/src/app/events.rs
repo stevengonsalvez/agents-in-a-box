@@ -72,6 +72,12 @@ pub enum AppEvent {
     RepoInputBackspace,
     RepoInputBackspaceWord,
     RepoInputSubmit,
+    RepoInputFavoriteNext,     // Navigate to next favorite in inline list
+    RepoInputFavoritePrev,     // Navigate to previous favorite in inline list
+    RepoInputSelectFavorite,   // Use selected favorite
+    RepoInputToggleFavorite,   // Star/unstar current input as favorite
+    // Local repo selection events
+    LocalRepoToggleFavorite,   // Star/unstar currently selected local repo
     // Branch selection events
     BranchSelectNext,
     BranchSelectPrev,
@@ -296,6 +302,7 @@ pub enum AppEvent {
     OnboardingEditorUp,          // Move editor selection up
     OnboardingEditorDown,        // Move editor selection down
     OnboardingFinish,            // Complete onboarding
+    OnboardingInstallConfig,     // Install recommended config (I key)
     // Setup menu events
     SetupMenuBack,               // Return to home screen (Esc)
     SetupMenuSelect,             // Select menu item (Enter)
@@ -724,7 +731,22 @@ impl EventHandler {
                 NewSessionStep::InputRepoSource => {
                     match key_event.code {
                         KeyCode::Esc => Some(AppEvent::NewSessionCancel),
-                        KeyCode::Enter => Some(AppEvent::RepoInputSubmit),
+                        KeyCode::Enter => {
+                            // If a favorite is selected, use it; otherwise submit input
+                            if state.new_session_state.as_ref()
+                                .map(|s| s.selected_favorite_index.is_some())
+                                .unwrap_or(false)
+                            {
+                                Some(AppEvent::RepoInputSelectFavorite)
+                            } else {
+                                Some(AppEvent::RepoInputSubmit)
+                            }
+                        }
+                        KeyCode::Down => Some(AppEvent::RepoInputFavoriteNext),
+                        KeyCode::Up => Some(AppEvent::RepoInputFavoritePrev),
+                        KeyCode::Char('f') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                            Some(AppEvent::RepoInputToggleFavorite)
+                        }
                         KeyCode::Backspace
                             if key_event.modifiers.contains(KeyModifiers::SHIFT) =>
                         {
@@ -760,6 +782,10 @@ impl EventHandler {
                         KeyCode::Down => Some(AppEvent::NewSessionNextRepo),
                         KeyCode::Up => Some(AppEvent::NewSessionPrevRepo),
                         KeyCode::Enter => Some(AppEvent::NewSessionConfirmRepo),
+                        // Ctrl+F to toggle favorite for selected repo
+                        KeyCode::Char('f') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                            Some(AppEvent::LocalRepoToggleFavorite)
+                        }
                         _ => None,
                     }
                 }
@@ -1189,6 +1215,7 @@ impl EventHandler {
                             Some(AppEvent::OnboardingBack)
                         }
                         KeyCode::Char('r') => Some(AppEvent::OnboardingCheckDeps), // Re-check
+                        KeyCode::Char('i') | KeyCode::Char('I') => Some(AppEvent::OnboardingInstallConfig), // Install config
                         _ => None,
                     }
                 }
@@ -1732,6 +1759,22 @@ impl EventHandler {
             }
             AppEvent::SourceQuickSelectSsh => {
                 state.new_session_quick_select_ssh();
+            }
+            // Inline favorites events (in InputRepoSource)
+            AppEvent::RepoInputFavoriteNext => {
+                state.repo_input_favorite_next();
+            }
+            AppEvent::RepoInputFavoritePrev => {
+                state.repo_input_favorite_prev();
+            }
+            AppEvent::RepoInputSelectFavorite => {
+                state.repo_input_select_favorite();
+            }
+            AppEvent::RepoInputToggleFavorite => {
+                state.repo_input_toggle_favorite();
+            }
+            AppEvent::LocalRepoToggleFavorite => {
+                state.local_repo_toggle_favorite();
             }
             AppEvent::SourceSelectionToggleReverse => {
                 state.new_session_toggle_source_reverse();
@@ -3480,6 +3523,26 @@ impl EventHandler {
                     let max_idx = onboarding_state.available_editors.len().saturating_sub(1);
                     if onboarding_state.selected_editor_index < max_idx {
                         onboarding_state.selected_editor_index += 1;
+                    }
+                }
+            }
+            AppEvent::OnboardingInstallConfig => {
+                use crate::components::onboarding::dependency_checker::DependencyChecker;
+                tracing::debug!("Installing recommended tmux config");
+                match DependencyChecker::install_tmux_config() {
+                    Ok(()) => {
+                        tracing::info!("Successfully installed tmux.conf");
+                        // Re-run dependency check to update status
+                        if let Some(ref mut onboarding_state) = state.onboarding_state {
+                            onboarding_state.dependency_check_running = true;
+                        }
+                        state.pending_async_action = Some(AsyncAction::OnboardingCheckDeps);
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to install tmux.conf: {}", e);
+                        if let Some(ref mut onboarding_state) = state.onboarding_state {
+                            onboarding_state.error_message = Some(format!("Install failed: {}", e));
+                        }
                     }
                 }
             }

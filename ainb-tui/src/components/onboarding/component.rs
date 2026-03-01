@@ -352,9 +352,20 @@ impl OnboardingComponent {
         let list = List::new(items).style(Style::default().bg(PANEL_BG));
         frame.render_widget(list, content_layout[1]);
 
-        // Instructions
+        // Instructions - show "I" for install if tmux config is missing
+        let has_missing_config = status.checks.iter().any(|c| {
+            c.dependency.category == super::dependency_checker::DependencyCategory::Configuration
+                && !c.is_installed
+        });
+
         let instructions = if status.mandatory_met {
-            "Press Enter to continue"
+            if has_missing_config {
+                "Press Enter to continue • I to install tmux config • R to re-check"
+            } else {
+                "Press Enter to continue"
+            }
+        } else if has_missing_config {
+            "Install required dependencies • I to install tmux config • R to re-check"
         } else {
             "Install required dependencies and press R to re-check"
         };

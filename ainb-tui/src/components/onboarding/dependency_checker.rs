@@ -2,6 +2,7 @@
 // Checks for required and optional dependencies with install suggestions
 
 use std::process::Command;
+use std::fs;
 
 /// Categories of dependencies
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -236,13 +237,13 @@ impl DependencyChecker {
             },
             // Configuration (recommended for best experience)
             Dependency {
-                name: "tmux anti-flicker config",
+                name: "tmux optimized config",
                 check_cmd: "sh",
-                check_args: &["-c", "grep -q 'escape-time 0' ~/.tmux.conf 2>/dev/null"],
-                install_hint: "See config/tmux.conf in this repo",
+                check_args: &["-c", "grep -q 'set-clipboard on' ~/.tmux.conf 2>/dev/null && grep -q 'escape-time 0' ~/.tmux.conf 2>/dev/null"],
+                install_hint: "Press 'I' to install recommended tmux.conf",
                 is_mandatory: false,
                 category: DependencyCategory::Configuration,
-                description: "Reduces screen flicker with Claude Code",
+                description: "Anti-flicker + clipboard integration for tmux",
             },
         ]
     }
@@ -361,6 +362,47 @@ impl DependencyChecker {
             DependencyCategory::AiCli,
             DependencyCategory::Configuration,
         ]
+    }
+
+    /// Install the recommended tmux configuration
+    /// Returns Ok(()) on success, Err with message on failure
+    pub fn install_tmux_config() -> Result<(), String> {
+        let home = dirs::home_dir().ok_or("Could not determine home directory")?;
+        let tmux_conf_path = home.join(".tmux.conf");
+
+        // Embedded tmux config content (from ainb-tui/config/tmux.conf)
+        let tmux_config = include_str!("../../../config/tmux.conf");
+
+        // Backup existing config if it exists
+        if tmux_conf_path.exists() {
+            let backup_path = home.join(".tmux.conf.backup");
+            fs::copy(&tmux_conf_path, &backup_path)
+                .map_err(|e| format!("Failed to backup existing config: {}", e))?;
+        }
+
+        // Write new config
+        fs::write(&tmux_conf_path, tmux_config)
+            .map_err(|e| format!("Failed to write tmux.conf: {}", e))?;
+
+        // Try to reload tmux config if tmux is running
+        let _ = Command::new("tmux")
+            .args(["source-file", &tmux_conf_path.to_string_lossy()])
+            .output();
+
+        Ok(())
+    }
+
+    /// Check if a dependency can be auto-installed
+    pub fn can_auto_install(dep_name: &str) -> bool {
+        matches!(dep_name, "tmux optimized config")
+    }
+
+    /// Auto-install a dependency by name
+    pub fn auto_install(dep_name: &str) -> Result<(), String> {
+        match dep_name {
+            "tmux optimized config" => Self::install_tmux_config(),
+            _ => Err(format!("No auto-install available for: {}", dep_name)),
+        }
     }
 }
 
