@@ -50,7 +50,7 @@ Check and initialize state files using the state manager:
 python scripts/state_manager.py init
 
 # State directory is configurable via REFLECT_STATE_DIR env var
-# Default: ~/.reflect/ (portable) or {{HOME_TOOL_DIR}}/session/ (Claude Code)
+# Default: ~/.reflect/ (portable) or ~/.claude/session/ (Claude Code)
 ```
 
 State includes:
@@ -89,7 +89,7 @@ Map each signal to the appropriate target:
 | Process | `CLAUDE.md`, orchestrator agents |
 | Domain | Domain-specific agents, `CLAUDE.md` |
 | Tools | `CLAUDE.md`, relevant specialists |
-| New Skill | `{{TOOL_DIR}}/skills/{name}/SKILL.md` |
+| New Skill | `.claude/skills/{name}/SKILL.md` |
 
 See [agent_mappings.md](references/agent_mappings.md) for mapping rules.
 
@@ -162,7 +162,7 @@ Produce output in this format:
 - [x] Verified: [how verified]
 - [x] No duplication: [checked against]
 
-**Will create**: `{{TOOL_DIR}}/skills/[skill-name]/SKILL.md`
+**Will create**: `.claude/skills/[skill-name]/SKILL.md`
 
 ## Conflict Check
 
@@ -286,14 +286,14 @@ Bulk-merge orphaned worktree memory directories into a git-tracked `.agents/MEMO
 
 1. **Discover project identity**:
    ```bash
-   bash {{HOME_TOOL_DIR}}/skills/reflect/scripts/memory_discovery.sh project-id
+   bash ~/.claude/skills/reflect/scripts/memory_discovery.sh project-id
    # → e.g. "shotclubhouse"
    ```
 
 2. **Find orphaned memory dirs**:
    ```bash
-   bash {{HOME_TOOL_DIR}}/skills/reflect/scripts/memory_discovery.sh discover
-   # Lists all {{HOME_TOOL_DIR}}/projects/*<repo-name>*/memory/MEMORY.md files
+   bash ~/.claude/skills/reflect/scripts/memory_discovery.sh discover
+   # Lists all ~/.claude/projects/*<repo-name>*/memory/MEMORY.md files
    # (excludes current session's memory dir)
    ```
 
@@ -301,7 +301,7 @@ Bulk-merge orphaned worktree memory directories into a git-tracked `.agents/MEMO
 
 4. **Deduplicate and categorize**: Group by section, remove redundant entries (fuzzy — same concept = skip)
 
-5. **Route skill-worthy content**: For entries that match existing skill topics (check `{{TOOL_DIR}}/skills/` and `{{HOME_TOOL_DIR}}/skills/`), propose adding them to those skills (same approval flow as Step 5-6)
+5. **Route skill-worthy content**: For entries that match existing skill topics (check `.claude/skills/` and `~/.claude/skills/`), propose adding them to those skills (same approval flow as Step 5-6)
 
 6. **Write `.agents/MEMORY.md`**: Consolidated, deduped, within 200-line limit. Create from template if it doesn't exist:
    ```markdown
@@ -321,12 +321,12 @@ Bulk-merge orphaned worktree memory directories into a git-tracked `.agents/MEMO
    ```
    Sections are dynamic — empty sections get removed. New sections are created as needed.
 
-7. **Ensure CLAUDE.md reference**: Check if `{{TOOL_DIR}}/CLAUDE.md` contains `@.agents/MEMORY.md` — if not, add it at the top
+7. **Ensure CLAUDE.md reference**: Check if `.claude/CLAUDE.md` contains `@.agents/MEMORY.md` — if not, add it at the top
 
 8. **Propose orphaned dir cleanup**: Show list and ask user to confirm deletion
    ```bash
    # After approval:
-   bash {{HOME_TOOL_DIR}}/skills/reflect/scripts/memory_discovery.sh cleanup /tmp/reflect-cleanup-dirs.txt
+   bash ~/.claude/skills/reflect/scripts/memory_discovery.sh cleanup /tmp/reflect-cleanup-dirs.txt
    ```
 
 9. **Report**: Show summary of what was consolidated, deleted, and routed to skills
@@ -336,7 +336,7 @@ Bulk-merge orphaned worktree memory directories into a git-tracked `.agents/MEMO
 Check orphaned memory status without making changes:
 
 ```bash
-bash {{HOME_TOOL_DIR}}/skills/reflect/scripts/memory_discovery.sh stats
+bash ~/.claude/skills/reflect/scripts/memory_discovery.sh stats
 # → Repo: shotclubhouse
 # → Orphaned memory dirs: 7
 # → Total lines across all: 283
@@ -348,18 +348,18 @@ bash {{HOME_TOOL_DIR}}/skills/reflect/scripts/memory_discovery.sh stats
 - `.agents/MEMORY.md` - Consolidated project memory (200 lines max)
 
 **Project-level (versioned with repo):**
-- `{{TOOL_DIR}}/reflections/YYYY-MM-DD_HH-MM-SS.md` - Full reflection
-- `{{TOOL_DIR}}/reflections/index.md` - Project summary
-- `{{TOOL_DIR}}/skills/{name}/SKILL.md` - New skills
+- `.claude/reflections/YYYY-MM-DD_HH-MM-SS.md` - Full reflection
+- `.claude/reflections/index.md` - Project summary
+- `.claude/skills/{name}/SKILL.md` - New skills
 
 **Global (user-level):**
-- `{{HOME_TOOL_DIR}}/reflections/by-project/{project}/` - Cross-project
-- `{{HOME_TOOL_DIR}}/reflections/by-agent/{agent}/learnings.md` - Per-agent
-- `{{HOME_TOOL_DIR}}/reflections/index.md` - Global summary
+- `~/.claude/reflections/by-project/{project}/` - Cross-project
+- `~/.claude/reflections/by-agent/{agent}/learnings.md` - Per-agent
+- `~/.claude/reflections/index.md` - Global summary
 
 ## Memory Integration
 
-Some learnings belong in **auto-memory** (`{{HOME_TOOL_DIR}}/projects/*/memory/MEMORY.md`) rather than agent files:
+Some learnings belong in **auto-memory** (`~/.claude/projects/*/memory/MEMORY.md`) rather than agent files:
 
 | Learning Type | Best Target |
 |---------------|-------------|
@@ -407,10 +407,10 @@ The skill includes hook scripts for automatic integration:
 
 ```bash
 # Install hook to your Claude hooks directory
-cp hooks/precompact_reflect.py {{HOME_TOOL_DIR}}/hooks/
+cp hooks/precompact_reflect.py ~/.claude/hooks/
 ```
 
-Configure in `{{HOME_TOOL_DIR}}/settings.json`:
+Configure in `~/.claude/settings.json`:
 
 ```json
 {
@@ -420,7 +420,7 @@ Configure in `{{HOME_TOOL_DIR}}/settings.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "uv run {{HOME_TOOL_DIR}}/hooks/precompact_reflect.py --auto"
+            "command": "uv run ~/.claude/hooks/precompact_reflect.py --auto"
           }
         ]
       }
@@ -446,7 +446,7 @@ export REFLECT_STATE_DIR=/path/to/state
 
 # Or use default
 # ~/.reflect/ (portable default)
-# {{HOME_TOOL_DIR}}/session/ (Claude Code default)
+# ~/.claude/session/ (Claude Code default)
 ```
 
 ### No Task Tool Dependency

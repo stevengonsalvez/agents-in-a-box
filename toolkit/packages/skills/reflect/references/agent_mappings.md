@@ -5,7 +5,7 @@ Maps learning categories to target agent files for updating.
 ## Agent Directory Structure
 
 ```
-{{HOME_TOOL_DIR}}/agents/
+~/.claude/agents/
 ├── web-search-researcher.md    # Root-level agents (not in subdirectory)
 ├── universal/
 │   ├── backend-developer.md
@@ -85,7 +85,7 @@ Maps learning categories to target agent files for updating.
 
 | Learning Type | Primary Target | Notes |
 |--------------|----------------|-------|
-| Business rules | Project `{{TOOL_DIR}}/agents/` | Domain-specific agent |
+| Business rules | Project `.claude/agents/` | Domain-specific agent |
 | Terminology | `CLAUDE.md` | Glossary section |
 | Constraints | Project-specific agent | Validation rules |
 | User requirements | `CLAUDE.md` | User preferences section |
@@ -196,32 +196,32 @@ Before adding a new rule, check for conflicts:
 ### Global Agents (User-level)
 
 ```
-{{HOME_TOOL_DIR}}/agents/universal/backend-developer.md
-{{HOME_TOOL_DIR}}/agents/universal/frontend-developer.md
-{{HOME_TOOL_DIR}}/agents/engineering/code-reviewer.md
-{{HOME_TOOL_DIR}}/agents/engineering/api-architect.md
-{{HOME_TOOL_DIR}}/agents/engineering/solution-architect.md
-{{HOME_TOOL_DIR}}/agents/engineering/security-agent.md
-{{HOME_TOOL_DIR}}/agents/engineering/test-writer-fixer.md
-{{HOME_TOOL_DIR}}/agents/design/ui-designer.md
+~/.claude/agents/universal/backend-developer.md
+~/.claude/agents/universal/frontend-developer.md
+~/.claude/agents/engineering/code-reviewer.md
+~/.claude/agents/engineering/api-architect.md
+~/.claude/agents/engineering/solution-architect.md
+~/.claude/agents/engineering/security-agent.md
+~/.claude/agents/engineering/test-writer-fixer.md
+~/.claude/agents/design/ui-designer.md
 ```
 
 ### Project Agents (Project-level)
 
 ```
-{{TOOL_DIR}}/agents/{name}.md
+.claude/agents/{name}.md
 ```
 
 ### Global Instructions
 
 ```
-{{HOME_TOOL_DIR}}/CLAUDE.md
+~/.claude/CLAUDE.md
 ```
 
 ### Project Instructions
 
 ```
-{{TOOL_DIR}}/CLAUDE.md
+.claude/CLAUDE.md
 CLAUDE.md
 ```
 
@@ -278,7 +278,7 @@ Decide whether to create a new skill or update an agent:
 **Category**: Code Style
 
 **Mapping**:
-- Primary: `{{HOME_TOOL_DIR}}/agents/universal/frontend-developer.md`
+- Primary: `~/.claude/agents/universal/frontend-developer.md`
 - Section: `## Style Guidelines`
 - Addition: `* Use \`const\` or \`let\` instead of \`var\` in TypeScript`
 
@@ -289,7 +289,7 @@ Decide whether to create a new skill or update an agent:
 **Category**: Architecture
 
 **Mapping**:
-- Primary: `{{HOME_TOOL_DIR}}/agents/engineering/api-architect.md`
+- Primary: `~/.claude/agents/engineering/api-architect.md`
 - Section: `## Design Patterns`
 - Addition: `* Prefer cursor-based pagination over offset-based for large datasets`
 
@@ -300,10 +300,10 @@ Decide whether to create a new skill or update an agent:
 **Category**: Security
 
 **Mapping**:
-- Primary: `{{HOME_TOOL_DIR}}/agents/engineering/security-agent.md`
+- Primary: `~/.claude/agents/engineering/security-agent.md`
 - Section: `## Validation Rules`
 - Addition: `* Always validate inputs server-side; client validation is for UX only`
-- Secondary: `{{HOME_TOOL_DIR}}/agents/engineering/code-reviewer.md`
+- Secondary: `~/.claude/agents/engineering/code-reviewer.md`
 - Section: `## Review Heuristics > Security`
 
 ### Example 4: New Skill
@@ -313,5 +313,5 @@ Decide whether to create a new skill or update an agent:
 **Category**: New Skill
 
 **Mapping**:
-- Create: `{{TOOL_DIR}}/skills/react-hydration-mismatch-fix/SKILL.md`
+- Create: `.claude/skills/react-hydration-mismatch-fix/SKILL.md`
 - Include: Error message, symptoms, step-by-step fix, verification

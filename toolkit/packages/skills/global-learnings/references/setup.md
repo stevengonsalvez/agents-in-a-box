@@ -36,11 +36,11 @@ global-learnings/
 # It uses uv to manage a virtualenv and install dependencies.
 
 # First run:
-{{HOME_TOOL_DIR}}/global-learnings/cli/learnings --help
+~/.claude/global-learnings/cli/learnings --help
 # -> Creates .venv/, installs deps, shows help
 
 # Or initialize explicitly:
-{{HOME_TOOL_DIR}}/global-learnings/cli/learnings init
+~/.claude/global-learnings/cli/learnings init
 ```
 
 Prerequisites: `uv` (install via `curl -LsSf https://astral.sh/uv/install.sh | sh` or `brew install uv`)

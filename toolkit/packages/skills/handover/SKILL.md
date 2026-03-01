@@ -56,10 +56,10 @@ fi
 TIMESTAMP=$(date +"%Y-%m-%d-%H-%M-%S")
 DISPLAY_TIME=$(date +"%Y-%m-%d %H:%M:%S")
 FILENAME="handover-${TIMESTAMP}.md"
-PRIMARY_LOCATION="{{TOOL_DIR}}/session/${FILENAME}"
+PRIMARY_LOCATION=".claude/session/${FILENAME}"
 BACKUP_LOCATION="./${FILENAME}"
 
-mkdir -p "{{TOOL_DIR}}/session"
+mkdir -p ".claude/session"
 ```
 
 ### Standard Handover Content
@@ -172,7 +172,7 @@ echo ""
 
 ## Output Location
 
-**Primary**: `{{TOOL_DIR}}/session/handover-{timestamp}.md`
+**Primary**: `.claude/session/handover-{timestamp}.md`
 **Backup**: `./handover-{timestamp}.md`
 
 ## Integration with spawn-agent

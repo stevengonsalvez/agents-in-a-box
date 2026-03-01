@@ -13,7 +13,7 @@ This skill provides the global learnings knowledge base infrastructure.
 
 ## CLI Usage
 
-The learnings CLI is located at `{{HOME_TOOL_DIR}}/global-learnings/cli/learnings`.
+The learnings CLI is located at `~/.claude/global-learnings/cli/learnings`.
 
 ### Common Commands
 

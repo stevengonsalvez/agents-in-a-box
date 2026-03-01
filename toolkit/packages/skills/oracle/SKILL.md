@@ -18,10 +18,12 @@ Most reliable browser mode. Uses cookie-based HTTP client (no Chrome automation 
 security find-generic-password -s "Chrome Safe Storage" -w
 
 # Run with Gemini
-oracle --engine browser --model gemini-3-pro -p "<task>" --file "src/**"
+oracle --engine browser --model gemini-3-pro --browser-inline-files -p "<task>" --file "src/**"
 ```
 
 **Requirements**: Logged into gemini.google.com in Chrome. Close Chrome before first run.
+
+**CRITICAL**: Always use `--browser-inline-files` flag. Without it, payloads >60k chars are sent as attachments which Gemini's cookie-based client silently drops (model sees `[NO CONTENT FOUND]`).
 
 ### Option 2: ChatGPT Manual Paste
 
@@ -56,7 +58,7 @@ oracle --engine api --model claude-4.5-sonnet -p "<task>" --file "src/**"
 
 | Model | Mode | Command |
 |-------|------|---------|
-| Gemini 3 Pro | Browser | `oracle --engine browser --model gemini-3-pro -p "..." --file "..."` |
+| Gemini 3 Pro | Browser | `oracle --engine browser --model gemini-3-pro --browser-inline-files -p "..." --file "..."` |
 | GPT-5.2 Pro | Manual | `oracle --render --copy -p "..." --file "..."` → paste in ChatGPT |
 | Any model | API | `oracle --engine api --model <model> -p "..." --file "..."` |
 
@@ -70,7 +72,7 @@ oracle --dry-run summary -p "<task>" --file "src/**"
 oracle --dry-run summary --files-report -p "<task>" --file "src/**"
 
 # Gemini browser (recommended)
-oracle --engine browser --model gemini-3-pro -p "<task>" --file "src/**"
+oracle --engine browser --model gemini-3-pro --browser-inline-files -p "<task>" --file "src/**"
 
 # Manual paste for ChatGPT
 oracle --render --copy -p "<task>" --file "src/**"
@@ -153,6 +155,30 @@ security find-generic-password -s "Chrome Safe Storage" -w
    oracle --engine browser --model gemini-3-pro \
      --browser-cookie-path ~/Library/Application\ Support/Google/Chrome/Profile\ 2/Cookies \
      -p "..." --file "..."
+   ```
+
+### `--render --copy` fails in tmux (clipboard empty)
+
+**Symptom**: `--render --copy` completes but clipboard is empty. `pbcopy`/`pbpaste` return stale content.
+
+**Cause**: tmux has its own buffer that doesn't sync with macOS system clipboard by default.
+
+**Workarounds**:
+1. Capture to file instead of clipboard:
+   ```bash
+   oracle --render -p "..." --file "..." > /tmp/oracle-output.txt
+   # Then outside tmux: cat /tmp/oracle-output.txt | pbcopy
+   # Or: open /tmp/oracle-output.txt (Cmd+A, Cmd+C)
+   ```
+2. Add clipboard sync to `~/.tmux.conf`:
+   ```
+   set -g set-clipboard on
+   bind -T copy-mode-vi y send-keys -X copy-pipe-and-cancel "pbcopy"
+   ```
+3. Use `reattach-to-user-namespace` (older macOS):
+   ```bash
+   brew install reattach-to-user-namespace
+   # Add to ~/.tmux.conf: set -g default-command "reattach-to-user-namespace -l zsh"
    ```
 
 ### ChatGPT browser mode not working

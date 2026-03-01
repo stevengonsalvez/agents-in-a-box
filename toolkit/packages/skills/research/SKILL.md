@@ -56,13 +56,13 @@ Before diving into codebase research, check if we've solved similar problems bef
 
 ```bash
 # Search local docs/solutions/ for relevant past learnings
-{{HOME_TOOL_DIR}}/utils/search-learnings.sh "[query keywords]"
+~/.claude/utils/search-learnings.sh "[query keywords]"
 
 # Search with category filter
-{{HOME_TOOL_DIR}}/utils/search-learnings.sh -c build-errors "[error keywords]"
+~/.claude/utils/search-learnings.sh -c build-errors "[error keywords]"
 
 # Search with tag filter
-{{HOME_TOOL_DIR}}/utils/search-learnings.sh -t rust -t async "[query]"
+~/.claude/utils/search-learnings.sh -t rust -t async "[query]"
 ```
 
 **What to Search:**
@@ -90,7 +90,7 @@ Task: "Search past learnings for [topic]"
 ```
 
 **If Global Learnings Available:**
-When a `global-learnings` repository is cloned (usually at `{{HOME_TOOL_DIR}}/global-learnings/`):
+When a `global-learnings` repository is cloned (usually at `~/.claude/global-learnings/`):
 ```bash
 # Graph-based search (finds related concepts via graph traversal)
 learnings search "[query]" --mode local --format json
@@ -203,7 +203,7 @@ After web research completes, execute a bash script to scan ALL web research res
 # Detect repository URLs from all web research results
 REPO_URLS=""
 find /tmp -name "web-research-results-*.txt" -mmin -60 2>/dev/null | while IFS= read -r file; do
-    URLS=$(bash {{HOME_TOOL_DIR}}/utils/detect-repo-urls.sh "$file")
+    URLS=$(bash ~/.claude/utils/detect-repo-urls.sh "$file")
     if [ -n "$URLS" ]; then
         REPO_URLS+="${URLS}"$'\n'
     fi

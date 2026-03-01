@@ -330,7 +330,7 @@ def reindex(force: bool):
 def init():
     """Initialize the global learnings repository.
 
-    Creates the directory structure at {{HOME_TOOL_DIR}}/global-learnings/
+    Creates the directory structure at ~/.claude/global-learnings/
     and initializes a git repository.
     """
     repo = get_repo_path()

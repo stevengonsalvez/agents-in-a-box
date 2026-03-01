@@ -8,7 +8,7 @@ Manages state files for reflection tracking including:
 - learnings.yaml: Log of applied learnings
 
 State directory is configurable via REFLECT_STATE_DIR env var.
-Defaults to ~/.reflect/ for portability or {{HOME_TOOL_DIR}}/session/ for Claude Code.
+Defaults to ~/.reflect/ for portability or ~/.claude/session/ for Claude Code.
 """
 
 import os

@@ -19,8 +19,8 @@ Unified view and management of all external dependencies across the toolkit ecos
 
 | Source | Location | Format |
 |--------|----------|--------|
-| Claude Plugins | `{{HOME_TOOL_DIR}}/plugins/installed_plugins.json` | JSON |
-| Marketplaces | `{{HOME_TOOL_DIR}}/plugins/known_marketplaces.json` | JSON |
+| Claude Plugins | `~/.claude/plugins/installed_plugins.json` | JSON |
+| Marketplaces | `~/.claude/plugins/known_marketplaces.json` | JSON |
 | Bundled Skills | `packages/skills/*/SKILL.md` | Markdown |
 | Unified Manifest | `toolkit/external-dependencies.yaml` | YAML |
 
@@ -67,11 +67,11 @@ None installed
 ```bash
 # Read Claude plugins
 jq -r '.plugins | to_entries[] | "\(.key): \(.value[0].version)"' \
-  {{HOME_TOOL_DIR}}/plugins/installed_plugins.json
+  ~/.claude/plugins/installed_plugins.json
 
 # Read marketplaces
 jq -r 'to_entries[] | "\(.key): \(.value.source.repo)"' \
-  {{HOME_TOOL_DIR}}/plugins/known_marketplaces.json
+  ~/.claude/plugins/known_marketplaces.json
 
 # Read bundled skills
 for skill in packages/skills/*/SKILL.md; do
@@ -86,8 +86,8 @@ Update `toolkit/external-dependencies.yaml` from current installed state.
 ### Workflow
 
 1. **Read Current State**
-   - Parse `{{HOME_TOOL_DIR}}/plugins/installed_plugins.json`
-   - Parse `{{HOME_TOOL_DIR}}/plugins/known_marketplaces.json`
+   - Parse `~/.claude/plugins/installed_plugins.json`
+   - Parse `~/.claude/plugins/known_marketplaces.json`
    - Scan `packages/skills/*/SKILL.md`
 
 2. **Compare with Manifest**
@@ -218,7 +218,7 @@ All extensions are in sync.
 yq '.claude-plugins[] | "\(.name)=\(.version)"' toolkit/external-dependencies.yaml > /tmp/manifest_versions
 
 jq -r '.plugins | to_entries[] | "\(.key | split("@")[0])=\(.value[0].version)"' \
-  {{HOME_TOOL_DIR}}/plugins/installed_plugins.json > /tmp/installed_versions
+  ~/.claude/plugins/installed_plugins.json > /tmp/installed_versions
 
 diff /tmp/manifest_versions /tmp/installed_versions
 ```
@@ -241,8 +241,8 @@ If plugin changes detected:
 | File | Purpose |
 |------|---------|
 | `toolkit/external-dependencies.yaml` | Unified manifest (versioned) |
-| `{{HOME_TOOL_DIR}}/plugins/installed_plugins.json` | Claude's plugin state |
-| `{{HOME_TOOL_DIR}}/plugins/known_marketplaces.json` | Registered marketplaces |
+| `~/.claude/plugins/installed_plugins.json` | Claude's plugin state |
+| `~/.claude/plugins/known_marketplaces.json` | Registered marketplaces |
 | `packages/skills/*/SKILL.md` | Bundled skill definitions |
 
 ## Best Practices

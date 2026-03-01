@@ -40,13 +40,13 @@ Before creating a skill, verify ALL gates pass:
 - [ ] Not theoretical or untested
 
 ### 5. No Duplication
-- [ ] Checked existing skills in `{{HOME_TOOL_DIR}}/skills/`
-- [ ] Checked existing skills in `{{TOOL_DIR}}/skills/`
+- [ ] Checked existing skills in `~/.claude/skills/`
+- [ ] Checked existing skills in `.claude/skills/`
 - [ ] Not covered by existing documentation
 
 ## Skill File Structure
 
-Create at `{{TOOL_DIR}}/skills/{skill-name}/SKILL.md`:
+Create at `.claude/skills/{skill-name}/SKILL.md`:
 
 ```markdown
 ---
@@ -194,14 +194,14 @@ description: |
 
 ### Project-Level (Default)
 
-Create in `{{TOOL_DIR}}/skills/{name}/SKILL.md`:
+Create in `.claude/skills/{name}/SKILL.md`:
 - Can be reviewed before committing
 - Versioned with the project
 - Can be moved to global if broadly applicable
 
 ### Global-Level
 
-If the skill applies across projects, move to `{{HOME_TOOL_DIR}}/skills/{name}/SKILL.md`:
+If the skill applies across projects, move to `~/.claude/skills/{name}/SKILL.md`:
 - Available in all projects
 - User-level persistence
 - Not project-versioned
@@ -315,4 +315,4 @@ Before finalizing a skill:
 - [ ] Solution is step-by-step with code
 - [ ] Verification steps included
 - [ ] Notes cover edge cases
-- [ ] Created in `{{TOOL_DIR}}/skills/` for review
+- [ ] Created in `.claude/skills/` for review

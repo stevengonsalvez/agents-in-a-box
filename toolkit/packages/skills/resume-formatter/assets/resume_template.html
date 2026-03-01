@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{NAME}} - {{TITLE}}</title>
+    <style>
+        /* CSS Reset and Base */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        /* Font Import */
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+        /* Color Variables - Professional Theme */
+        :root {
+            --primary: #1a1a1a;
+            --accent: #0066cc;
+            --success: #10b981;
+            --highlight: #0ea5e9;
+            --neutral-dark: #374151;
+            --neutral-medium: #6b7280;
+            --neutral-light: #e5e7eb;
+            --background: #ffffff;
+            --section-bg: #eff6ff;
+            --border-accent: #0066cc;
+        }
+
+        /* Base Typography */
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif;
+            font-size: 11px;
+            line-height: 1.3;
+            color: var(--primary);
+            background: var(--background);
+        }
+
+        /* Container */
+        .container {
+            max-width: 850px;
+            margin: 0 auto;
+            padding: 24px 32px;
+        }
+
+        /* Header Section */
+        .header {
+            text-align: center;
+            padding-bottom: 12px;
+            border-bottom: 1px solid var(--neutral-light);
+            margin-bottom: 16px;
+        }
+
+        .header h1 {
+            font-size: 24px;
+            font-weight: 700;
+            letter-spacing: -0.5px;
+            color: var(--primary);
+            margin-bottom: 4px;
+        }
+
+        .contact-info {
+            font-size: 11px;
+            color: var(--neutral-medium);
+        }
+
+        .contact-info span {
+            margin: 0 6px;
+        }
+
+        /* Section Headers */
+        .section {
+            margin-bottom: 12px;
+        }
+
+        .section-header {
+            background: var(--section-bg);
+            border-left: 3px solid var(--accent);
+            padding: 6px 12px;
+            margin-bottom: 10px;
+        }
+
+        .section-header h2 {
+            font-size: 13px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: var(--primary);
+        }
+
+        /* Profile Section */
+        .profile {
+            font-size: 11px;
+            line-height: 1.4;
+            color: var(--neutral-dark);
+            padding: 0 2px;
+        }
+
+        /* Experience Cards */
+        .role-card {
+            border-left: 3px solid var(--border-accent);
+            padding: 10px 12px;
+            margin-bottom: 12px;
+            background: var(--background);
+            box-shadow: 0 1px 2px rgba(0, 102, 204, 0.08);
+            transition: box-shadow 0.2s;
+        }
+
+        .role-card:hover {
+            box-shadow: 0 2px 6px rgba(0, 102, 204, 0.15);
+        }
+
+        /* Job Header */
+        .job-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            margin-bottom: 6px;
+            flex-wrap: wrap;
+        }
+
+        .job-title-company {
+            flex: 1;
+            min-width: 400px;
+        }
+
+        .job-title {
+            font-size: 13px;
+            font-weight: 700;
+            color: var(--accent);
+            display: inline;
+        }
+
+        .company-name {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--neutral-dark);
+            display: inline;
+            margin-left: 6px;
+        }
+
+        .location-date {
+            font-size: 10px;
+            font-weight: 500;
+            color: var(--neutral-medium);
+            text-align: right;
+        }
+
+        /* Bullet Points */
+        .achievements {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .achievements li {
+            padding-left: 14px;
+            margin-bottom: 3px;
+            position: relative;
+            font-size: 10.5px;
+            line-height: 1.35;
+            color: var(--neutral-dark);
+        }
+
+        .achievements li:before {
+            content: "▸";
+            position: absolute;
+            left: 0;
+            color: var(--accent);
+            font-weight: bold;
+        }
+
+        .achievements strong {
+            font-weight: 600;
+            color: var(--primary);
+        }
+
+        /* Scale Snapshot Box */
+        .scale-snapshot {
+            background: linear-gradient(135deg, rgba(0, 102, 204, 0.05), rgba(14, 165, 233, 0.05));
+            border-left: 2px solid var(--highlight);
+            padding: 6px 10px;
+            margin-top: 6px;
+            font-size: 10px;
+            font-weight: 600;
+            color: var(--neutral-dark);
+        }
+
+        /* Skills Section */
+        .skills-grid {
+            display: grid;
+            gap: 6px;
+        }
+
+        .skill-category {
+            padding: 4px 0;
+            border-bottom: 1px solid var(--neutral-light);
+        }
+
+        .skill-category:last-child {
+            border-bottom: none;
+        }
+
+        .skill-label {
+            font-weight: 600;
+            color: var(--primary);
+            margin-bottom: 2px;
+            display: inline-block;
+            min-width: 200px;
+            font-size: 10.5px;
+        }
+
+        .skill-items {
+            display: inline;
+            color: var(--neutral-dark);
+            font-size: 10px;
+        }
+
+        /* Education Section */
+        .education-entry {
+            padding: 6px 0;
+        }
+
+        .degree {
+            font-weight: 600;
+            color: var(--primary);
+            font-size: 11px;
+        }
+
+        .university {
+            color: var(--neutral-dark);
+            font-size: 10.5px;
+        }
+
+        .years {
+            color: var(--neutral-medium);
+            font-size: 10px;
+            margin-top: 2px;
+        }
+
+        /* Print Styles */
+        @media print {
+            .container {
+                padding: 20px;
+            }
+
+            .role-card {
+                page-break-inside: auto;
+                box-shadow: none;
+                border-left-width: 3px;
+            }
+
+            .section {
+                page-break-inside: auto;
+                page-break-before: auto;
+            }
+
+            .section-header {
+                background: #eff6ff;
+                -webkit-print-color-adjust: exact;
+                print-color-adjust: exact;
+                page-break-after: auto;
+            }
+
+            .scale-snapshot {
+                -webkit-print-color-adjust: exact;
+                print-color-adjust: exact;
+            }
+
+            h1, h2, h3, h4 {
+                page-break-after: auto;
+                page-break-before: auto;
+            }
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .container {
+                padding: 16px;
+            }
+
+            .job-header {
+                flex-direction: column;
+            }
+
+            .location-date {
+                text-align: left;
+                margin-top: 4px;
+            }
+
+            .job-title-company {
+                min-width: 100%;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <h1>{{NAME}}</h1>
+            <div class="contact-info">
+                {{LOCATION}} <span>•</span> {{EMAIL}} <span>•</span> {{PHONE}}
+            </div>
+        </header>
+
+        <!-- Profile Section -->
+        <section class="section">
+            <div class="section-header">
+                <h2>Profile</h2>
+            </div>
+            <div class="profile">
+                {{PROFILE_TEXT}}
+            </div>
+        </section>
+
+        <!-- Experience Section -->
+        <section class="section">
+            <div class="section-header">
+                <h2>Experience</h2>
+            </div>
+
+            <!-- Role Card Template -->
+            <!--
+            <div class="role-card">
+                <div class="job-header">
+                    <div class="job-title-company">
+                        <h3 class="job-title">Job Title</h3>
+                        <span class="company-name">Company Name</span>
+                    </div>
+                    <div class="location-date">Location • Date Range</div>
+                </div>
+                <ul class="achievements">
+                    <li><strong>Achievement headline</strong>: Description of the achievement with metrics and impact.</li>
+                </ul>
+                <div class="scale-snapshot">
+                    Scale snapshot: Key metrics and numbers
+                </div>
+            </div>
+            -->
+
+            {{EXPERIENCE_CARDS}}
+
+        </section>
+
+        <!-- Skills Section -->
+        <section class="section">
+            <div class="section-header">
+                <h2>Skills</h2>
+            </div>
+            <div class="skills-grid">
+                <!--
+                <div class="skill-category">
+                    <span class="skill-label">Category Name:</span>
+                    <span class="skill-items">Skill 1, Skill 2, Skill 3</span>
+                </div>
+                -->
+                {{SKILLS_GRID}}
+            </div>
+        </section>
+
+        <!-- Education Section -->
+        <section class="section">
+            <div class="section-header">
+                <h2>Education</h2>
+            </div>
+            <!--
+            <div class="education-entry">
+                <div class="degree">Degree Name</div>
+                <div class="university">University Name</div>
+                <div class="years">Year Range</div>
+            </div>
+            -->
+            {{EDUCATION_ENTRIES}}
+        </section>
+    </div>
+</body>
+</html>
