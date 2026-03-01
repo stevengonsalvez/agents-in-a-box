@@ -191,19 +191,13 @@ Start by reading your team.json and checking for ready work."
 ${custom_prompt}"
     fi
 
-    # Prevent nested session errors
-    if is_inside_claude_session; then
-        echo "⚠️  Cannot spawn swarm leader from inside Claude Code session" >&2
-        echo "   Unset CLAUDECODE env var to bypass this check" >&2
-        return 1
-    fi
-
     # Spawn using spawn-agent-lib if available, otherwise direct tmux
+    # Note: We unset CLAUDECODE in the spawned session so claude doesn't think it's nested
     if type spawn_agent_tmux &>/dev/null; then
         spawn_agent_tmux "$session_name" "$PWD" "$leader_prompt"
     else
         tmux new-session -d -s "$session_name" -c "$PWD"
-        tmux send-keys -t "$session_name" "claude --dangerously-skip-permissions" C-m
+        tmux send-keys -t "$session_name" "env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT claude --dangerously-skip-permissions" C-m
         sleep 3
         tmux send-keys -t "$session_name" -l "$leader_prompt"
         tmux send-keys -t "$session_name" C-m
@@ -303,19 +297,13 @@ Start by checking your inbox for task assignments."
 ${custom_prompt}"
     fi
 
-    # Prevent nested session errors
-    if is_inside_claude_session; then
-        echo "⚠️  Cannot spawn swarm agent from inside Claude Code session" >&2
-        echo "   Unset CLAUDECODE env var to bypass this check" >&2
-        return 1
-    fi
-
     # Spawn agent in appropriate directory
+    # Note: We unset CLAUDECODE in the spawned session so claude doesn't think it's nested
     if type spawn_agent_tmux &>/dev/null; then
         spawn_agent_tmux "$session_name" "$working_dir" "$agent_prompt"
     else
         tmux new-session -d -s "$session_name" -c "$working_dir"
-        tmux send-keys -t "$session_name" "claude --dangerously-skip-permissions" C-m
+        tmux send-keys -t "$session_name" "env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT claude --dangerously-skip-permissions" C-m
         sleep 3
         tmux send-keys -t "$session_name" -l "$agent_prompt"
         tmux send-keys -t "$session_name" C-m

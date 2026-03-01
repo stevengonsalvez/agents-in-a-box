@@ -252,14 +252,9 @@ spawn_agent_tmux() {
         return 1
     fi
 
-    # Start Claude Code in the session (only if not already in a Claude session)
-    if is_inside_claude_session; then
-        echo "⚠️  Warning: Already inside Claude Code session, cannot spawn nested agent" >&2
-        echo "   Unset CLAUDECODE env var to bypass this check" >&2
-        tmux kill-session -t "$SESSION" 2>/dev/null || true
-        return 1
-    fi
-    tmux send-keys -t "$SESSION" "claude --dangerously-skip-permissions" C-m
+    # Start Claude Code in the tmux session
+    # Use env -u to unset CLAUDECODE so the spawned claude doesn't think it's nested
+    tmux send-keys -t "$SESSION" "env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT claude --dangerously-skip-permissions" C-m
 
     # Wait for Claude to be ready
     if ! wait_for_claude_ready "$SESSION" 30; then
