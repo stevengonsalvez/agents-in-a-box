@@ -4,6 +4,7 @@
 
 use anyhow::{Context, Result};
 use git2::{BranchType, Repository};
+use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use thiserror::Error;
@@ -130,11 +131,62 @@ impl WorktreeManager {
             commit_hash,
         };
 
+        // Auto-trust the worktree in Claude Code's claude.json
+        if let Err(e) = self.add_claude_trust(&worktree_info.path) {
+            warn!("Failed to add Claude trust for worktree: {}", e);
+            // Don't fail worktree creation if trust addition fails
+        }
+
         info!(
             "Successfully created worktree at: {}",
             worktree_info.path.display()
         );
         Ok(worktree_info)
+    }
+
+    /// Add a directory to Claude Code's trusted projects in ~/.claude/claude.json
+    /// This prevents the "trust this folder" dialog for new worktrees
+    fn add_claude_trust(&self, worktree_path: &Path) -> Result<(), WorktreeError> {
+        let home_dir = dirs::home_dir()
+            .ok_or_else(|| WorktreeError::CommandFailed("Failed to get home directory".into()))?;
+        let claude_json_path = home_dir.join(".claude").join("claude.json");
+
+        // Read existing claude.json or create default structure
+        let mut config: Value = if claude_json_path.exists() {
+            let content = std::fs::read_to_string(&claude_json_path)
+                .map_err(|e| WorktreeError::Io(e))?;
+            serde_json::from_str(&content)
+                .map_err(|e| WorktreeError::CommandFailed(format!("Invalid JSON in claude.json: {}", e)))?
+        } else {
+            json!({ "projects": {} })
+        };
+
+        // Ensure projects object exists
+        if config.get("projects").is_none() {
+            config["projects"] = json!({});
+        }
+
+        // Add trust entry for this worktree path
+        let path_str = worktree_path.to_string_lossy().to_string();
+        config["projects"][&path_str] = json!({
+            "hasTrustDialogAccepted": true,
+            "hasTrustDialogHooksAccepted": true
+        });
+
+        // Write back to claude.json
+        let content = serde_json::to_string_pretty(&config)
+            .map_err(|e| WorktreeError::CommandFailed(format!("Failed to serialize JSON: {}", e)))?;
+
+        // Ensure .claude directory exists
+        if let Some(parent) = claude_json_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        std::fs::write(&claude_json_path, content)
+            .map_err(|e| WorktreeError::Io(e))?;
+
+        info!("Added Claude trust for worktree: {}", path_str);
+        Ok(())
     }
 
     pub fn remove_worktree(&self, session_id: Uuid) -> Result<(), WorktreeError> {
