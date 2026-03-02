@@ -2265,11 +2265,12 @@ impl NewSessionState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NewSessionStep {
-    SelectSource,    // Choose between Local repos, Remote URL, or SSH
+    SelectSource,    // Choose between Local repos, Remote URL, SSH, or Favorites
     InputRepoSource, // Enter URL for remote repos (shows favorites as suggestions)
     ValidatingRepo,  // Validating URL / cloning
     SelectBranch,    // Pick from remote branches
     SelectRepo,      // Browse/search local repos
+    SelectFavorite,  // Pick from saved favorites
     SelectAgent,     // Choose agent (Claude, Shell, SSH, etc.)
     ConfigureSsh,    // Configure SSH connection (host, port, user, key)
     InputBranch,     // Name the session branch (ainb/...)
