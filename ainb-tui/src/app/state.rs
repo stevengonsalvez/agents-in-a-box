@@ -2293,9 +2293,10 @@ pub enum SshInputFocus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RepoSourceChoice {
     #[default]
-    Local,  // Browse local repos
-    Remote, // Clone from URL
-    Ssh,    // SSH connection to remote server
+    Local,     // Browse local repos
+    Remote,    // Clone from URL
+    Ssh,       // SSH connection to remote server
+    Favorites, // Quick access to saved favorites
 }
 
 #[derive(Debug, Clone, PartialEq)]
