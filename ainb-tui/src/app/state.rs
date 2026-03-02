@@ -5607,21 +5607,23 @@ impl AppState {
                 state.source_choice = match state.source_choice {
                     RepoSourceChoice::Local => RepoSourceChoice::Remote,
                     RepoSourceChoice::Remote => RepoSourceChoice::Ssh,
-                    RepoSourceChoice::Ssh => RepoSourceChoice::Local,
+                    RepoSourceChoice::Ssh => RepoSourceChoice::Favorites,
+                    RepoSourceChoice::Favorites => RepoSourceChoice::Local,
                 };
                 tracing::info!("Source choice toggled to: {:?}", state.source_choice);
             }
         }
     }
 
-    /// Toggle source choice backward (↑ key): Local → Ssh → Remote → Local
+    /// Toggle source choice backward (↑ key): Local → Favorites → Ssh → Remote → Local
     pub fn new_session_toggle_source_reverse(&mut self) {
         if let Some(ref mut state) = self.new_session_state {
             if state.step == NewSessionStep::SelectSource {
                 state.source_choice = match state.source_choice {
-                    RepoSourceChoice::Local => RepoSourceChoice::Ssh,
+                    RepoSourceChoice::Local => RepoSourceChoice::Favorites,
                     RepoSourceChoice::Remote => RepoSourceChoice::Local,
                     RepoSourceChoice::Ssh => RepoSourceChoice::Remote,
+                    RepoSourceChoice::Favorites => RepoSourceChoice::Ssh,
                 };
                 tracing::info!("Source choice toggled (reverse) to: {:?}", state.source_choice);
             }
