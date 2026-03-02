@@ -2055,6 +2055,10 @@ pub struct NewSessionState {
     pub ssh_user: String,                      // SSH username (optional)
     pub ssh_identity_file: String,             // Path to SSH identity file (optional)
     pub ssh_input_focus: SshInputFocus,        // Which SSH field has focus
+
+    // Favorites (shown inline in InputRepoSource for quick selection)
+    pub favorites_store: crate::config::FavoritesStore, // Cached favorites
+    pub selected_favorite_index: Option<usize>,         // Selected favorite (None = typing URL)
 }
 
 impl Default for NewSessionState {
@@ -2102,6 +2106,9 @@ impl Default for NewSessionState {
             ssh_user: String::new(),
             ssh_identity_file: String::new(),
             ssh_input_focus: SshInputFocus::default(),
+            // Favorites defaults (shown inline in InputRepoSource)
+            favorites_store: crate::config::FavoritesStore::default(),
+            selected_favorite_index: None,
         }
     }
 }
@@ -2258,16 +2265,16 @@ impl NewSessionState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NewSessionStep {
-    SelectSource,      // Choose between Local repos or Remote URL
-    InputRepoSource,   // Enter URL for remote repos
-    ValidatingRepo,    // Validating URL / cloning
-    SelectBranch,      // Pick from remote branches
-    SelectRepo,        // Browse/search local repos
-    SelectAgent,       // Choose agent (Claude, Shell, SSH, etc.)
-    ConfigureSsh,      // Configure SSH connection (host, port, user, key)
-    InputBranch,       // Name the session branch (ainb/...)
-    SelectMode,        // Choose between Interactive and Boss mode
-    InputPrompt,       // Enter prompt for Boss mode
+    SelectSource,    // Choose between Local repos, Remote URL, or SSH
+    InputRepoSource, // Enter URL for remote repos (shows favorites as suggestions)
+    ValidatingRepo,  // Validating URL / cloning
+    SelectBranch,    // Pick from remote branches
+    SelectRepo,      // Browse/search local repos
+    SelectAgent,     // Choose agent (Claude, Shell, SSH, etc.)
+    ConfigureSsh,    // Configure SSH connection (host, port, user, key)
+    InputBranch,     // Name the session branch (ainb/...)
+    SelectMode,      // Choose between Interactive and Boss mode
+    InputPrompt,     // Enter prompt for Boss mode
     ConfigurePermissions,
     Creating,
 }
@@ -5592,7 +5599,7 @@ impl AppState {
     }
 
     /// Toggle between Local and Remote source choice
-    /// Toggle source choice forward (↓ key): Local → Remote → Ssh → Local
+    /// Toggle source choice forward (↓ key): Local → Remote → Ssh → Favorites → Local
     pub fn new_session_toggle_source(&mut self) {
         if let Some(ref mut state) = self.new_session_state {
             if state.step == NewSessionStep::SelectSource {
@@ -5634,7 +5641,10 @@ impl AppState {
                         self.pending_async_action = Some(AsyncAction::StartWorkspaceSearch);
                     }
                     RepoSourceChoice::Remote => {
-                        tracing::info!("Proceeding with Remote source - showing URL input");
+                        tracing::info!("Proceeding with Remote source - showing URL input with favorites");
+                        // Load favorites for quick selection in InputRepoSource
+                        state.favorites_store = crate::config::FavoritesStore::load();
+                        state.selected_favorite_index = None; // Start with URL input focused
                         state.step = NewSessionStep::InputRepoSource;
                     }
                     RepoSourceChoice::Ssh => {
@@ -5685,6 +5695,155 @@ impl AppState {
             }
         }
         self.new_session_proceed_from_source();
+    }
+
+    // === Inline favorites methods (used in InputRepoSource) ===
+
+    /// Move focus to next favorite in inline list
+    pub fn repo_input_favorite_next(&mut self) {
+        if let Some(ref mut state) = self.new_session_state {
+            if state.step == NewSessionStep::InputRepoSource && !state.favorites_store.is_empty() {
+                let count = state.favorites_store.len();
+                state.selected_favorite_index = match state.selected_favorite_index {
+                    None => Some(0), // Move from input to first favorite
+                    Some(idx) if idx + 1 < count => Some(idx + 1),
+                    Some(_) => None, // Wrap back to input
+                };
+            }
+        }
+    }
+
+    /// Move focus to previous favorite in inline list
+    pub fn repo_input_favorite_prev(&mut self) {
+        if let Some(ref mut state) = self.new_session_state {
+            if state.step == NewSessionStep::InputRepoSource && !state.favorites_store.is_empty() {
+                let count = state.favorites_store.len();
+                state.selected_favorite_index = match state.selected_favorite_index {
+                    None => Some(count - 1), // Move from input to last favorite
+                    Some(0) => None,         // Move back to input
+                    Some(idx) => Some(idx - 1),
+                };
+            }
+        }
+    }
+
+    /// Select a favorite and fill in the repo input
+    pub fn repo_input_select_favorite(&mut self) {
+        if let Some(ref mut state) = self.new_session_state {
+            if state.step == NewSessionStep::InputRepoSource {
+                if let Some(idx) = state.selected_favorite_index {
+                    let sorted = state.favorites_store.sorted_by_usage();
+                    if let Some(favorite) = sorted.get(idx) {
+                        // Fill repo input with favorite's source
+                        state.repo_input = favorite.source.clone();
+                        // Record usage
+                        let alias = favorite.alias.clone();
+                        state.favorites_store.record_use(&alias);
+                        let _ = state.favorites_store.save();
+                        // Move focus back to input
+                        state.selected_favorite_index = None;
+                        tracing::info!("Selected favorite: {} -> {}", alias, state.repo_input);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Toggle favorite status for current repo_input
+    pub fn repo_input_toggle_favorite(&mut self) {
+        if let Some(ref mut state) = self.new_session_state {
+            if !state.repo_input.is_empty() {
+                let source = state.repo_input.clone();
+                // Check if already a favorite
+                if let Some(existing) = state.favorites_store.favorites.iter().find(|f| f.source == source) {
+                    let alias = existing.alias.clone();
+                    state.favorites_store.remove(&alias);
+                    tracing::info!("Removed from favorites: {}", source);
+                } else {
+                    // Add as new favorite with auto-generated alias
+                    let alias = Self::generate_favorite_alias(&source);
+                    let source_type = Self::detect_source_type(&source);
+                    let favorite = crate::config::Favorite::new(alias.clone(), source.clone(), source_type);
+                    let _ = state.favorites_store.add(favorite);
+                    tracing::info!("Added to favorites: {} as {}", source, alias);
+                }
+                let _ = state.favorites_store.save();
+            }
+        }
+    }
+
+    /// Generate an alias from a repo URL/path
+    fn generate_favorite_alias(source: &str) -> String {
+        // Extract repo name from URL or path
+        let name = source
+            .trim_end_matches('/')
+            .split('/')
+            .last()
+            .unwrap_or("repo")
+            .trim_end_matches(".git");
+        name.to_string()
+    }
+
+    /// Detect source type from URL/path
+    fn detect_source_type(source: &str) -> crate::config::FavoriteSourceType {
+        if source.starts_with("https://") || source.starts_with("http://") {
+            crate::config::FavoriteSourceType::HttpsUrl
+        } else if source.starts_with("git@") || source.contains("@") && source.contains(":") {
+            crate::config::FavoriteSourceType::SshUrl
+        } else if source.starts_with('/') || source.starts_with('~') || source.starts_with('.') {
+            crate::config::FavoriteSourceType::LocalPath
+        } else if source.contains('/') && !source.contains(':') {
+            // owner/repo format
+            crate::config::FavoriteSourceType::GithubShorthand
+        } else {
+            crate::config::FavoriteSourceType::HttpsUrl
+        }
+    }
+
+    /// Check if current repo_input is a favorite
+    pub fn is_repo_input_favorite(&self) -> bool {
+        if let Some(ref state) = self.new_session_state {
+            if !state.repo_input.is_empty() {
+                return state.favorites_store.favorites.iter().any(|f| f.source == state.repo_input);
+            }
+        }
+        false
+    }
+
+    /// Toggle favorite status for currently selected local repo
+    pub fn local_repo_toggle_favorite(&mut self) {
+        if let Some(ref mut state) = self.new_session_state {
+            // Get the selected repo from filtered_repos
+            if let Some(idx) = state.selected_repo_index {
+                if let Some((_, repo_path)) = state.filtered_repos.get(idx) {
+                    let source = repo_path.display().to_string();
+
+                    // Check if already a favorite
+                    if let Some(existing) = state.favorites_store.favorites.iter().find(|f| f.source == source) {
+                        let alias = existing.alias.clone();
+                        state.favorites_store.remove(&alias);
+                        tracing::info!("Removed local repo from favorites: {}", source);
+                    } else {
+                        // Add as new favorite with auto-generated alias
+                        let alias = Self::generate_favorite_alias(&source);
+                        let source_type = crate::config::FavoriteSourceType::LocalPath;
+                        let favorite = crate::config::Favorite::new(alias.clone(), source.clone(), source_type);
+                        let _ = state.favorites_store.add(favorite);
+                        tracing::info!("Added local repo to favorites: {} as {}", source, alias);
+                    }
+                    let _ = state.favorites_store.save();
+                }
+            }
+        }
+    }
+
+    /// Check if a local repo path is a favorite
+    pub fn is_local_repo_favorite(&self, path: &std::path::Path) -> bool {
+        if let Some(ref state) = self.new_session_state {
+            let path_str = path.display().to_string();
+            return state.favorites_store.favorites.iter().any(|f| f.source == path_str);
+        }
+        false
     }
 
     pub fn new_session_toggle_mode(&mut self) {

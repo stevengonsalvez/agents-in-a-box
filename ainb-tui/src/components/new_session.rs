@@ -438,46 +438,92 @@ impl NewSessionComponent {
             .wrap(Wrap { trim: false });
         frame.render_widget(examples, chunks[4]);
 
-        // Recent repos section (if any)
-        if !session_state.recent_repos.is_empty() {
-            let recent_items: Vec<Line> = session_state
-                .recent_repos
+        // Favorites section (if any)
+        let sorted_favorites = session_state.favorites_store.sorted_by_usage();
+        if !sorted_favorites.is_empty() {
+            let favorite_items: Vec<Line> = sorted_favorites
                 .iter()
                 .take(5)
                 .enumerate()
-                .map(|(idx, repo)| {
+                .map(|(idx, fav)| {
+                    let is_selected = session_state.selected_favorite_index == Some(idx);
+                    let indicator = if is_selected { "▶ " } else { "  " };
+                    let indicator_style = if is_selected {
+                        Style::default().fg(selection_green)
+                    } else {
+                        Style::default().fg(muted_gray)
+                    };
+                    let text_style = if is_selected {
+                        Style::default().fg(soft_white).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(muted_gray)
+                    };
+
                     Line::from(vec![
-                        Span::styled(format!("  {} ", idx + 1), Style::default().fg(muted_gray)),
-                        Span::styled(&repo.owner, Style::default().fg(soft_white)),
-                        Span::styled("/", Style::default().fg(muted_gray)),
-                        Span::styled(&repo.repo_name, Style::default().fg(cornflower_blue)),
+                        Span::styled(indicator, indicator_style),
+                        Span::styled("⭐ ", Style::default().fg(gold)),
+                        Span::styled(&fav.alias, text_style),
+                        Span::styled(" → ", Style::default().fg(muted_gray)),
+                        Span::styled(
+                            truncate_string(&fav.source, 30),
+                            if is_selected {
+                                Style::default().fg(cornflower_blue)
+                            } else {
+                                Style::default().fg(muted_gray)
+                            },
+                        ),
                     ])
                 })
                 .collect();
 
-            let recent_para = Paragraph::new(recent_items)
+            let favorites_border = if session_state.selected_favorite_index.is_some() {
+                selection_green
+            } else {
+                subdued_border
+            };
+
+            let favorites_para = Paragraph::new(favorite_items)
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
                         .border_type(BorderType::Rounded)
-                        .border_style(Style::default().fg(subdued_border))
-                        .title(Span::styled(" 📜 Recent Repos ", Style::default().fg(muted_gray)))
+                        .border_style(Style::default().fg(favorites_border))
+                        .title(Span::styled(" ⭐ Favorites ", Style::default().fg(gold)))
                         .style(Style::default().bg(dark_bg)),
                 );
-            frame.render_widget(recent_para, chunks[6]);
+            frame.render_widget(favorites_para, chunks[6]);
         }
 
-        // Footer
-        let footer_spans = vec![
-            Span::styled("Type", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
-            Span::styled(" Input", Style::default().fg(muted_gray)),
-            Span::styled("  │  ", Style::default().fg(subdued_border)),
-            Span::styled("Enter", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
-            Span::styled(" Submit", Style::default().fg(muted_gray)),
-            Span::styled("  │  ", Style::default().fg(subdued_border)),
-            Span::styled("Esc", Style::default().fg(Color::Rgb(255, 100, 100))),
-            Span::styled(" Cancel", Style::default().fg(muted_gray)),
-        ];
+        // Footer - show different hints based on whether favorites exist
+        let footer_spans = if sorted_favorites.is_empty() {
+            vec![
+                Span::styled("Type", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+                Span::styled(" Input", Style::default().fg(muted_gray)),
+                Span::styled("  │  ", Style::default().fg(subdued_border)),
+                Span::styled("Enter", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+                Span::styled(" Submit", Style::default().fg(muted_gray)),
+                Span::styled("  │  ", Style::default().fg(subdued_border)),
+                Span::styled("Ctrl+F", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+                Span::styled(" Star", Style::default().fg(muted_gray)),
+                Span::styled("  │  ", Style::default().fg(subdued_border)),
+                Span::styled("Esc", Style::default().fg(Color::Rgb(255, 100, 100))),
+                Span::styled(" Cancel", Style::default().fg(muted_gray)),
+            ]
+        } else {
+            vec![
+                Span::styled("↑↓", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+                Span::styled(" Favorites", Style::default().fg(muted_gray)),
+                Span::styled("  │  ", Style::default().fg(subdued_border)),
+                Span::styled("Enter", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+                Span::styled(" Select", Style::default().fg(muted_gray)),
+                Span::styled("  │  ", Style::default().fg(subdued_border)),
+                Span::styled("Ctrl+F", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+                Span::styled(" Star/Unstar", Style::default().fg(muted_gray)),
+                Span::styled("  │  ", Style::default().fg(subdued_border)),
+                Span::styled("Esc", Style::default().fg(Color::Rgb(255, 100, 100))),
+                Span::styled(" Cancel", Style::default().fg(muted_gray)),
+            ]
+        };
 
         let footer = Paragraph::new(Line::from(footer_spans))
             .alignment(Alignment::Center);
@@ -917,15 +963,27 @@ impl NewSessionComponent {
                 .enumerate()
                 .map(|(display_idx, (_, repo))| {
                     let repo_name = repo.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
+                    let repo_path_str = repo.display().to_string();
+
+                    // Check if this repo is a favorite
+                    let is_favorite = session_state
+                        .favorites_store
+                        .favorites
+                        .iter()
+                        .any(|f| f.source == repo_path_str);
+
+                    let star = if is_favorite { "⭐ " } else { "   " };
 
                     if Some(display_idx) == session_state.selected_repo_index {
                         ListItem::new(Line::from(vec![
-                            Span::styled("  ▶ ", Style::default().fg(selection_green)),
+                            Span::styled("▶ ", Style::default().fg(selection_green)),
+                            Span::styled(star, Style::default().fg(gold)),
                             Span::styled(repo_name, Style::default().fg(selection_green).add_modifier(Modifier::BOLD)),
                         ]))
                     } else {
                         ListItem::new(Line::from(vec![
-                            Span::styled("    ", Style::default()),
+                            Span::styled("  ", Style::default()),
+                            Span::styled(star, Style::default().fg(gold)),
                             Span::styled(repo_name, Style::default().fg(soft_white)),
                         ]))
                     }
@@ -960,6 +1018,9 @@ impl NewSessionComponent {
             Span::styled("  │  ", Style::default().fg(subdued_border)),
             Span::styled("Enter", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
             Span::styled(" Select", Style::default().fg(muted_gray)),
+            Span::styled("  │  ", Style::default().fg(subdued_border)),
+            Span::styled("Ctrl+F", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+            Span::styled(" Star", Style::default().fg(muted_gray)),
             Span::styled("  │  ", Style::default().fg(subdued_border)),
             Span::styled("Esc", Style::default().fg(Color::Rgb(255, 100, 100))),
             Span::styled(" Cancel", Style::default().fg(muted_gray)),
@@ -2805,5 +2866,17 @@ impl NewSessionComponent {
 impl Default for NewSessionComponent {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Truncate a string to max_len characters, adding "..." if truncated
+fn truncate_string(s: &str, max_len: usize) -> String {
+    if s.chars().count() <= max_len {
+        s.to_string()
+    } else if max_len <= 3 {
+        "...".to_string()
+    } else {
+        let truncated: String = s.chars().take(max_len - 3).collect();
+        format!("{truncated}...")
     }
 }

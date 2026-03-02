@@ -12,6 +12,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub mod container;
+pub mod favorites_store;
 pub mod mcp;
 pub mod mcp_init;
 pub mod onboarding;
@@ -19,6 +20,7 @@ pub mod presets;
 pub mod ssh_display_names;
 
 pub use container::{ContainerTemplate, ContainerTemplateConfig};
+pub use favorites_store::{Favorite, FavoritesStore, SourceType as FavoriteSourceType};
 pub use mcp::{McpInitStrategy, McpServerConfig};
 pub use mcp_init::{McpInitResult, McpInitializer, apply_mcp_init_result};
 pub use onboarding::OnboardingConfig;
