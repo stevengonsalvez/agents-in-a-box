@@ -165,8 +165,9 @@ Task: "Find external resources about [topic]"
 ```
 
 **Web Page Fetching Optimization:**
-When instructing sub-agents to fetch web pages, prefer routing through markdown.new for cleaner extraction:
-- Use `WebFetch(url: "https://markdown.new/<target-url>")` for articles, docs, blog posts
+When instructing sub-agents to fetch web pages, route through a markdown converter for cleaner extraction:
+- **Primary**: `WebFetch(url: "https://markdown.new/<target-url>")`
+- **Fallback** (if primary fails or returns empty): `WebFetch(url: "https://r.jina.ai/<target-url>")`
 - Example: `WebFetch(url: "https://markdown.new/https://docs.example.com/guide")`
 - This produces 80% fewer tokens than raw HTML conversion by returning clean markdown
 - Skip for API endpoints (JSON), authenticated URLs, or GitHub (use gh CLI instead)
