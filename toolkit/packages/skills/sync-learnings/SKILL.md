@@ -1,6 +1,6 @@
 ---
 name: sync-learnings
-description: Sync user-level Claude config changes back to toolkit repository
+description: Sync user-level agent config changes back to toolkit repository (works for Claude, Codex, Copilot)
 user-invocable: true
 ---
 
@@ -22,7 +22,7 @@ When working on projects, learnings get captured in user-level agent files via `
                     create-rule.js installs
 ```
 
-**packages/** is the canonical source. **claude-code-4.5/** only contains tool-specific files (CLAUDE.md, settings.json).
+**packages/** is the canonical source. **claude-code-4.5/CLAUDE.md** is the canonical agent instructions file; codex and copilot symlink their AGENTS.md to it.
 
 ## Workflow
 
