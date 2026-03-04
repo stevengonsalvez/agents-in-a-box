@@ -100,11 +100,11 @@ impl SessionListComponent {
                             Span::styled(" Enter", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
                             Span::styled(" select ", Style::default().fg(MUTED_GRAY)),
                             Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
+                            Span::styled(" s", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                            Span::styled(" ⭐ ", Style::default().fg(MUTED_GRAY)),
+                            Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
                             Span::styled(" $", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
                             Span::styled(" shell ", Style::default().fg(MUTED_GRAY)),
-                            Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
-                            Span::styled(" x", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
-                            Span::styled(" cleanup ", Style::default().fg(MUTED_GRAY)),
                         ])
                     }),
             )
@@ -116,6 +116,9 @@ impl SessionListComponent {
 
     fn build_list_items_static(state: &AppState) -> Vec<ListItem<'static>> {
         let mut items = Vec::new();
+
+        // Load favorites to check which workspaces are starred
+        let favorites = crate::config::FavoritesStore::load();
 
         for (workspace_idx, workspace) in state.workspaces.iter().enumerate() {
             let is_selected_workspace = state.selected_workspace_index == Some(workspace_idx);
@@ -147,9 +150,15 @@ impl SessionListComponent {
                 String::new()
             };
 
+            // Check if this workspace is a favorite
+            let workspace_path_str = workspace.path.display().to_string();
+            let is_favorite = favorites.favorites.iter().any(|f| f.source == workspace_path_str);
+            let star_indicator = if is_favorite { "⭐ " } else { "" };
+
             let workspace_line = Line::from(vec![
                 Span::styled(workspace_symbol, Style::default().fg(symbol_color)),
                 Span::styled(" 📁 ", Style::default().fg(if is_selected_workspace { GOLD } else { CORNFLOWER_BLUE })),
+                Span::styled(star_indicator, Style::default().fg(GOLD)),
                 Span::styled(workspace.name.clone(), Style::default().fg(name_color).add_modifier(if is_selected_workspace { Modifier::BOLD } else { Modifier::empty() })),
                 Span::styled(count_display, Style::default().fg(MUTED_GRAY)),
             ]);

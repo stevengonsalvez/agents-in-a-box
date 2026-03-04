@@ -52,6 +52,9 @@ impl NewSessionComponent {
                         self.render_repo_selection(frame, popup_area, session_state)
                     }
                 }
+                NewSessionStep::SelectFavorite => {
+                    self.render_favorites_picker(frame, popup_area, session_state)
+                }
                 NewSessionStep::SelectAgent => {
                     self.render_agent_selection(frame, popup_area, session_state)
                 }
@@ -110,6 +113,8 @@ impl NewSessionComponent {
                 Constraint::Length(1), // Spacer
                 Constraint::Length(5), // SSH option card
                 Constraint::Length(1), // Spacer
+                Constraint::Length(5), // Favorites option card
+                Constraint::Length(1), // Spacer
                 Constraint::Length(2), // Instructions
             ])
             .split(inner);
@@ -117,6 +122,7 @@ impl NewSessionComponent {
         let is_local = session_state.source_choice == RepoSourceChoice::Local;
         let is_remote = session_state.source_choice == RepoSourceChoice::Remote;
         let is_ssh = session_state.source_choice == RepoSourceChoice::Ssh;
+        let is_favorites = session_state.source_choice == RepoSourceChoice::Favorites;
 
         // Local option card
         let local_border_color = if is_local {
@@ -262,12 +268,60 @@ impl NewSessionComponent {
             );
         frame.render_widget(ssh_para, chunks[4]);
 
+        // Favorites option card
+        let favorites_border_color = if is_favorites {
+            Color::Rgb(255, 215, 0) // Gold when selected
+        } else {
+            Color::Rgb(70, 70, 90) // Gray when not
+        };
+
+        let favorites_bg = if is_favorites {
+            Color::Rgb(40, 38, 30) // Slightly gold tint
+        } else {
+            Color::Rgb(30, 30, 40)
+        };
+
+        let favorites_text = vec![
+            Line::from(vec![
+                Span::styled(
+                    if is_favorites { "  ▶ " } else { "    " },
+                    Style::default().fg(Color::Rgb(255, 215, 0)),
+                ),
+                Span::styled("⭐ ", Style::default()),
+                Span::styled(
+                    "[F] Favorites",
+                    Style::default()
+                        .fg(if is_favorites { Color::Rgb(255, 215, 0) } else { Color::Rgb(200, 200, 200) })
+                        .add_modifier(Modifier::BOLD),
+                ),
+                if is_favorites {
+                    Span::styled("  ✓", Style::default().fg(Color::Rgb(255, 215, 0)))
+                } else {
+                    Span::raw("")
+                },
+            ]),
+            Line::from(vec![
+                Span::styled("      ", Style::default()),
+                Span::styled("Quick access to saved repositories", Style::default().fg(Color::Rgb(180, 180, 180))),
+            ]),
+        ];
+
+        let favorites_para = Paragraph::new(favorites_text)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(favorites_border_color))
+                    .style(Style::default().bg(favorites_bg)),
+            );
+        frame.render_widget(favorites_para, chunks[6]);
+
         // Styled instructions footer
         let instructions = Line::from(vec![
             Span::styled("  ↑↓ ", Style::default().fg(Color::Rgb(255, 215, 0))),
             Span::styled("Navigate  ", Style::default().fg(Color::Rgb(128, 128, 128))),
             Span::styled("│", Style::default().fg(Color::Rgb(70, 70, 90))),
-            Span::styled("  L/R/S ", Style::default().fg(Color::Rgb(255, 215, 0))),
+            Span::styled("  L/R/S/F ", Style::default().fg(Color::Rgb(255, 215, 0))),
             Span::styled("Quick  ", Style::default().fg(Color::Rgb(128, 128, 128))),
             Span::styled("│", Style::default().fg(Color::Rgb(70, 70, 90))),
             Span::styled("  ⏎ ", Style::default().fg(Color::Rgb(100, 200, 100))),
@@ -280,7 +334,7 @@ impl NewSessionComponent {
         let instructions_widget = Paragraph::new(instructions)
             .alignment(Alignment::Center)
             .style(Style::default().bg(Color::Rgb(25, 25, 35)));
-        frame.render_widget(instructions_widget, chunks[6]);
+        frame.render_widget(instructions_widget, chunks[8]);
     }
 
     /// Render the repo source input screen (URL or local path)
@@ -503,8 +557,8 @@ impl NewSessionComponent {
                 Span::styled("Enter", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
                 Span::styled(" Submit", Style::default().fg(muted_gray)),
                 Span::styled("  │  ", Style::default().fg(subdued_border)),
-                Span::styled("Ctrl+F", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
-                Span::styled(" Star", Style::default().fg(muted_gray)),
+                Span::styled("^S", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+                Span::styled(" ⭐ Star", Style::default().fg(muted_gray)),
                 Span::styled("  │  ", Style::default().fg(subdued_border)),
                 Span::styled("Esc", Style::default().fg(Color::Rgb(255, 100, 100))),
                 Span::styled(" Cancel", Style::default().fg(muted_gray)),
@@ -517,8 +571,8 @@ impl NewSessionComponent {
                 Span::styled("Enter", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
                 Span::styled(" Select", Style::default().fg(muted_gray)),
                 Span::styled("  │  ", Style::default().fg(subdued_border)),
-                Span::styled("Ctrl+F", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
-                Span::styled(" Star/Unstar", Style::default().fg(muted_gray)),
+                Span::styled("^S", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+                Span::styled(" ⭐ Star", Style::default().fg(muted_gray)),
                 Span::styled("  │  ", Style::default().fg(subdued_border)),
                 Span::styled("Esc", Style::default().fg(Color::Rgb(255, 100, 100))),
                 Span::styled(" Cancel", Style::default().fg(muted_gray)),
@@ -1012,6 +1066,18 @@ impl NewSessionComponent {
         frame.render_widget(repo_list, chunks[1]);
 
         // Modern footer with keyboard hints (simplified - no agent/model here)
+        // Check if selected repo is already a favorite to show appropriate action
+        let is_selected_favorite = session_state
+            .selected_repo_index
+            .and_then(|idx| session_state.filtered_repos.get(idx))
+            .map(|(_, repo)| {
+                let repo_path_str = repo.display().to_string();
+                session_state.favorites_store.favorites.iter().any(|f| f.source == repo_path_str)
+            })
+            .unwrap_or(false);
+
+        let star_action = if is_selected_favorite { " ★ Unstar" } else { " ☆ Star" };
+
         let footer_spans = vec![
             Span::styled("↑↓", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
             Span::styled(" Repos", Style::default().fg(muted_gray)),
@@ -1019,11 +1085,173 @@ impl NewSessionComponent {
             Span::styled("Enter", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
             Span::styled(" Select", Style::default().fg(muted_gray)),
             Span::styled("  │  ", Style::default().fg(subdued_border)),
-            Span::styled("Ctrl+F", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
-            Span::styled(" Star", Style::default().fg(muted_gray)),
+            Span::styled("s", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+            Span::styled(star_action, Style::default().fg(muted_gray)),
             Span::styled("  │  ", Style::default().fg(subdued_border)),
             Span::styled("Esc", Style::default().fg(Color::Rgb(255, 100, 100))),
             Span::styled(" Cancel", Style::default().fg(muted_gray)),
+        ];
+
+        let footer = Paragraph::new(Line::from(footer_spans))
+            .alignment(Alignment::Center);
+        frame.render_widget(footer, chunks[3]);
+    }
+
+    /// Render the favorites picker screen
+    fn render_favorites_picker(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        session_state: &NewSessionState,
+    ) {
+        // Modern color palette
+        let cornflower_blue = Color::Rgb(100, 149, 237);
+        let dark_bg = Color::Rgb(25, 25, 35);
+        let gold = Color::Rgb(255, 215, 0);
+        let soft_white = Color::Rgb(220, 220, 230);
+        let muted_gray = Color::Rgb(120, 120, 140);
+        let selection_green = Color::Rgb(100, 200, 100);
+        let subdued_border = Color::Rgb(60, 60, 80);
+        let list_highlight_bg = Color::Rgb(40, 40, 60);
+
+        // Clear background
+        let background = Block::default().style(Style::default().bg(dark_bg));
+        frame.render_widget(background, area);
+
+        // Main dialog with rounded border
+        let title_line = Line::from(vec![
+            Span::styled(" ⭐ ", Style::default().fg(gold)),
+            Span::styled("Favorites", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+            Span::styled(" ", Style::default()),
+        ]);
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(cornflower_blue))
+            .title(title_line)
+            .title_alignment(Alignment::Center)
+            .style(Style::default().bg(dark_bg));
+        frame.render_widget(block.clone(), area);
+
+        // Inner area for content
+        let inner = block.inner(area);
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .margin(1)
+            .constraints(vec![
+                Constraint::Length(2), // Subtitle
+                Constraint::Min(0),    // Favorites list
+                Constraint::Length(1), // Spacer
+                Constraint::Length(2), // Footer
+            ])
+            .split(inner);
+
+        // Subtitle
+        let subtitle = Paragraph::new(Line::from(vec![
+            Span::styled("Select a saved repository", Style::default().fg(muted_gray)),
+        ]))
+        .alignment(Alignment::Center);
+        frame.render_widget(subtitle, chunks[0]);
+
+        // Favorites list
+        let sorted_favorites = session_state.favorites_store.sorted_by_usage();
+
+        let favorites: Vec<ListItem> = if sorted_favorites.is_empty() {
+            vec![
+                ListItem::new(Line::from(vec![
+                    Span::styled("  ⚠️  ", Style::default().fg(gold)),
+                    Span::styled("No favorites saved yet", Style::default().fg(muted_gray)),
+                ])),
+                ListItem::new(Line::from(vec![
+                    Span::styled("     ", Style::default()),
+                    Span::styled("Mark repos with ", Style::default().fg(muted_gray)),
+                    Span::styled("Ctrl+F", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+                    Span::styled(" in Remote or Local views", Style::default().fg(muted_gray)),
+                ])),
+            ]
+        } else {
+            sorted_favorites
+                .iter()
+                .enumerate()
+                .map(|(idx, fav)| {
+                    let is_selected = session_state.selected_favorite_index == Some(idx);
+                    let type_icon = match fav.source_type {
+                        crate::config::FavoriteSourceType::HttpsUrl => "🌐",
+                        crate::config::FavoriteSourceType::SshUrl => "🔐",
+                        crate::config::FavoriteSourceType::GithubShorthand => "🐙",
+                        crate::config::FavoriteSourceType::LocalPath => "📁",
+                    };
+
+                    if is_selected {
+                        ListItem::new(Line::from(vec![
+                            Span::styled("▶ ", Style::default().fg(selection_green)),
+                            Span::styled(format!("{} ", type_icon), Style::default()),
+                            Span::styled(&fav.alias, Style::default().fg(selection_green).add_modifier(Modifier::BOLD)),
+                            Span::styled(" → ", Style::default().fg(muted_gray)),
+                            Span::styled(
+                                truncate_string(&fav.source, 40),
+                                Style::default().fg(cornflower_blue),
+                            ),
+                            Span::styled(
+                                format!("  ({}x)", fav.stats.use_count),
+                                Style::default().fg(muted_gray),
+                            ),
+                        ]))
+                    } else {
+                        ListItem::new(Line::from(vec![
+                            Span::styled("  ", Style::default()),
+                            Span::styled(format!("{} ", type_icon), Style::default()),
+                            Span::styled(&fav.alias, Style::default().fg(soft_white)),
+                            Span::styled(" → ", Style::default().fg(muted_gray)),
+                            Span::styled(
+                                truncate_string(&fav.source, 40),
+                                Style::default().fg(muted_gray),
+                            ),
+                            Span::styled(
+                                format!("  ({}x)", fav.stats.use_count),
+                                Style::default().fg(muted_gray),
+                            ),
+                        ]))
+                    }
+                })
+                .collect()
+        };
+
+        let favorites_count = sorted_favorites.len();
+        let list_title = Line::from(vec![
+            Span::styled(" ", Style::default()),
+            Span::styled(format!("Saved Repositories ({})", favorites_count), Style::default().fg(cornflower_blue)),
+            Span::styled(" ", Style::default()),
+        ]);
+
+        let favorites_list = List::new(favorites)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(subdued_border))
+                    .title(list_title)
+                    .style(Style::default().bg(dark_bg)),
+            )
+            .highlight_style(Style::default().bg(list_highlight_bg));
+
+        frame.render_widget(favorites_list, chunks[1]);
+
+        // Footer with keyboard hints
+        let footer_spans = vec![
+            Span::styled("↑↓", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+            Span::styled(" Navigate", Style::default().fg(muted_gray)),
+            Span::styled("  │  ", Style::default().fg(subdued_border)),
+            Span::styled("Enter", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+            Span::styled(" Select", Style::default().fg(muted_gray)),
+            Span::styled("  │  ", Style::default().fg(subdued_border)),
+            Span::styled("d", Style::default().fg(Color::Rgb(255, 100, 100)).add_modifier(Modifier::BOLD)),
+            Span::styled(" Delete", Style::default().fg(muted_gray)),
+            Span::styled("  │  ", Style::default().fg(subdued_border)),
+            Span::styled("Esc", Style::default().fg(Color::Rgb(255, 100, 100))),
+            Span::styled(" Back", Style::default().fg(muted_gray)),
         ];
 
         let footer = Paragraph::new(Line::from(footer_spans))

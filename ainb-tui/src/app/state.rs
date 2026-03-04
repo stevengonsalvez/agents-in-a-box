@@ -5663,6 +5663,17 @@ impl AppState {
                         state.ssh_identity_file.clear();
                         state.ssh_input_focus = SshInputFocus::Host;
                     }
+                    RepoSourceChoice::Favorites => {
+                        tracing::info!("Proceeding with Favorites source - showing favorites picker");
+                        // Load favorites and go to favorites picker
+                        state.favorites_store = crate::config::FavoritesStore::load();
+                        state.selected_favorite_index = if state.favorites_store.is_empty() {
+                            None
+                        } else {
+                            Some(0)
+                        };
+                        state.step = NewSessionStep::SelectFavorite;
+                    }
                 }
             }
         }
@@ -5699,6 +5710,109 @@ impl AppState {
             }
         }
         self.new_session_proceed_from_source();
+    }
+
+    /// Quick select Favorites source and proceed to favorites picker
+    pub fn new_session_quick_select_favorites(&mut self) {
+        if let Some(ref mut state) = self.new_session_state {
+            if state.step == NewSessionStep::SelectSource {
+                state.source_choice = RepoSourceChoice::Favorites;
+                tracing::info!("Quick select: Favorites source");
+            }
+        }
+        self.new_session_proceed_from_source();
+    }
+
+    // === Favorites picker methods (used in SelectFavorite step) ===
+
+    /// Move to next favorite in picker
+    pub fn favorite_select_next(&mut self) {
+        if let Some(ref mut state) = self.new_session_state {
+            if state.step == NewSessionStep::SelectFavorite && !state.favorites_store.is_empty() {
+                let count = state.favorites_store.len();
+                state.selected_favorite_index = match state.selected_favorite_index {
+                    None => Some(0),
+                    Some(idx) if idx + 1 < count => Some(idx + 1),
+                    Some(idx) => Some(idx), // Stay at last
+                };
+            }
+        }
+    }
+
+    /// Move to previous favorite in picker
+    pub fn favorite_select_prev(&mut self) {
+        if let Some(ref mut state) = self.new_session_state {
+            if state.step == NewSessionStep::SelectFavorite && !state.favorites_store.is_empty() {
+                state.selected_favorite_index = match state.selected_favorite_index {
+                    None => Some(0),
+                    Some(0) => Some(0), // Stay at first
+                    Some(idx) => Some(idx - 1),
+                };
+            }
+        }
+    }
+
+    /// Confirm selected favorite and proceed
+    pub fn favorite_select_confirm(&mut self) {
+        if let Some(ref mut state) = self.new_session_state {
+            if state.step == NewSessionStep::SelectFavorite {
+                if let Some(idx) = state.selected_favorite_index {
+                    let sorted = state.favorites_store.sorted_by_usage();
+                    if let Some(favorite) = sorted.get(idx) {
+                        // Copy favorite data before mutating
+                        let alias = favorite.alias.clone();
+                        let source = favorite.source.clone();
+
+                        // Record usage
+                        state.favorites_store.record_use(&alias);
+                        let _ = state.favorites_store.save();
+
+                        // Set the repo input and trigger validation
+                        // ValidateRepoSource handles both local paths and remote URLs
+                        state.repo_input = source.clone();
+                        state.step = NewSessionStep::ValidatingRepo;
+                        self.pending_async_action = Some(AsyncAction::ValidateRepoSource);
+
+                        tracing::info!("Selected favorite: {} -> {}", alias, source);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Go back from favorites picker to source selection
+    pub fn favorite_go_back(&mut self) {
+        if let Some(ref mut state) = self.new_session_state {
+            if state.step == NewSessionStep::SelectFavorite {
+                state.step = NewSessionStep::SelectSource;
+                state.selected_favorite_index = None;
+            }
+        }
+    }
+
+    /// Delete selected favorite
+    pub fn favorite_delete(&mut self) {
+        if let Some(ref mut state) = self.new_session_state {
+            if state.step == NewSessionStep::SelectFavorite {
+                if let Some(idx) = state.selected_favorite_index {
+                    let sorted = state.favorites_store.sorted_by_usage();
+                    if let Some(favorite) = sorted.get(idx) {
+                        let alias = favorite.alias.clone();
+                        state.favorites_store.remove(&alias);
+                        let _ = state.favorites_store.save();
+                        tracing::info!("Deleted favorite: {}", alias);
+
+                        // Adjust selection index
+                        let new_count = state.favorites_store.len();
+                        if new_count == 0 {
+                            state.selected_favorite_index = None;
+                        } else if idx >= new_count {
+                            state.selected_favorite_index = Some(new_count - 1);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // === Inline favorites methods (used in InputRepoSource) ===

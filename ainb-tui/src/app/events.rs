@@ -60,13 +60,20 @@ pub enum AppEvent {
     NewSessionInputChar(char),
     NewSessionBackspace,
     NewSessionBackspaceWord,  // Delete word backward (Shift+Backspace)
-    // Source selection events (Local, Remote, SSH)
-    SourceSelectionToggle,        // Toggle forward: Local → Remote → SSH → Local
-    SourceSelectionToggleReverse, // Toggle backward: Local → SSH → Remote → Local
+    // Source selection events (Local, Remote, SSH, Favorites)
+    SourceSelectionToggle,        // Toggle forward: Local → Remote → SSH → Favorites → Local
+    SourceSelectionToggleReverse, // Toggle backward: Local → Favorites → SSH → Remote → Local
     SourceSelectionConfirm,       // Proceed with selected source
     SourceQuickSelectLocal,       // Quick select Local and proceed
     SourceQuickSelectRemote,      // Quick select Remote and proceed
     SourceQuickSelectSsh,         // Quick select SSH and proceed
+    SourceQuickSelectFavorites,   // Quick select Favorites and proceed
+    // Favorites picker events (SelectFavorite step)
+    FavoriteSelectNext,           // Navigate to next favorite
+    FavoriteSelectPrev,           // Navigate to previous favorite
+    FavoriteSelectConfirm,        // Confirm selection
+    FavoriteGoBack,               // Go back to source selection
+    FavoriteDelete,               // Delete selected favorite
     // Repo input events (URL or path)
     RepoInputChar(char),
     RepoInputBackspace,
@@ -213,6 +220,7 @@ pub enum AppEvent {
     HomeScreenSidebarDown,       // Navigate down in sidebar
     HomeScreenSidebarSelect,     // Select current sidebar item (Enter)
     HomeScreenToggleFocus,       // Toggle focus between sidebar and content panel (Tab)
+    StarSelectedWorkspace,        // Star/unstar the currently selected workspace
     // AINB 2.0: Home screen V2 welcome panel events
     WelcomePanelScrollUp,        // Scroll welcome panel up
     WelcomePanelScrollDown,      // Scroll welcome panel down
@@ -578,7 +586,14 @@ impl EventHandler {
             KeyCode::Char('c') => Some(AppEvent::ToggleClaudeChat),
             KeyCode::Char('f') => Some(AppEvent::RefreshWorkspaces), // Manual refresh
             KeyCode::Char('n') => Some(AppEvent::NewSession),
-            // 's' key removed - use 'n' to access local repo search via source selection
+            KeyCode::Char('s') => {
+                // Star/unstar the selected workspace (only if a workspace is selected)
+                if state.selected_workspace_index.is_some() {
+                    Some(AppEvent::StarSelectedWorkspace)
+                } else {
+                    Some(AppEvent::ShowNotification("Select a workspace first to star it".to_string()))
+                }
+            }
             KeyCode::Char('a') => {
                 tracing::info!("[ACTION] 'a' key pressed - AttachTmuxSession requested");
                 Some(AppEvent::AttachTmuxSession)
@@ -701,15 +716,15 @@ impl EventHandler {
         if let Some(ref session_state) = state.new_session_state {
             match session_state.step {
                 NewSessionStep::SelectSource => {
-                    // Source selection: Local, Remote, or SSH
+                    // Source selection: Local, Remote, SSH, or Favorites
                     match key_event.code {
                         KeyCode::Esc => Some(AppEvent::NewSessionCancel),
                         KeyCode::Enter => Some(AppEvent::SourceSelectionConfirm),
-                        // Down/j cycles forward: Local → Remote → SSH → Local
+                        // Down/j cycles forward: Local → Remote → SSH → Favorites → Local
                         KeyCode::Down | KeyCode::Char('j') => {
                             Some(AppEvent::SourceSelectionToggle)
                         }
-                        // Up/k cycles backward: Local → SSH → Remote → Local
+                        // Up/k cycles backward: Local → Favorites → SSH → Remote → Local
                         KeyCode::Up | KeyCode::Char('k') => {
                             Some(AppEvent::SourceSelectionToggleReverse)
                         }
@@ -725,6 +740,21 @@ impl EventHandler {
                             // Quick select SSH - set to SSH and proceed
                             Some(AppEvent::SourceQuickSelectSsh)
                         }
+                        KeyCode::Char('f' | 'F') => {
+                            // Quick select Favorites - set to Favorites and proceed
+                            Some(AppEvent::SourceQuickSelectFavorites)
+                        }
+                        _ => None,
+                    }
+                }
+                NewSessionStep::SelectFavorite => {
+                    // Favorites picker
+                    match key_event.code {
+                        KeyCode::Esc => Some(AppEvent::FavoriteGoBack),
+                        KeyCode::Enter => Some(AppEvent::FavoriteSelectConfirm),
+                        KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::FavoriteSelectNext),
+                        KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::FavoriteSelectPrev),
+                        KeyCode::Char('d') | KeyCode::Delete => Some(AppEvent::FavoriteDelete),
                         _ => None,
                     }
                 }
@@ -744,7 +774,7 @@ impl EventHandler {
                         }
                         KeyCode::Down => Some(AppEvent::RepoInputFavoriteNext),
                         KeyCode::Up => Some(AppEvent::RepoInputFavoritePrev),
-                        KeyCode::Char('f') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                        KeyCode::Char('s') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
                             Some(AppEvent::RepoInputToggleFavorite)
                         }
                         KeyCode::Backspace
@@ -782,8 +812,8 @@ impl EventHandler {
                         KeyCode::Down => Some(AppEvent::NewSessionNextRepo),
                         KeyCode::Up => Some(AppEvent::NewSessionPrevRepo),
                         KeyCode::Enter => Some(AppEvent::NewSessionConfirmRepo),
-                        // Ctrl+F to toggle favorite for selected repo
-                        KeyCode::Char('f') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                        // 's' key to star/unstar selected repo
+                        KeyCode::Char('s') => {
                             Some(AppEvent::LocalRepoToggleFavorite)
                         }
                         _ => None,
@@ -1760,6 +1790,25 @@ impl EventHandler {
             AppEvent::SourceQuickSelectSsh => {
                 state.new_session_quick_select_ssh();
             }
+            AppEvent::SourceQuickSelectFavorites => {
+                state.new_session_quick_select_favorites();
+            }
+            // Favorites picker events (SelectFavorite step)
+            AppEvent::FavoriteSelectNext => {
+                state.favorite_select_next();
+            }
+            AppEvent::FavoriteSelectPrev => {
+                state.favorite_select_prev();
+            }
+            AppEvent::FavoriteSelectConfirm => {
+                state.favorite_select_confirm();
+            }
+            AppEvent::FavoriteGoBack => {
+                state.favorite_go_back();
+            }
+            AppEvent::FavoriteDelete => {
+                state.favorite_delete();
+            }
             // Inline favorites events (in InputRepoSource)
             AppEvent::RepoInputFavoriteNext => {
                 state.repo_input_favorite_next();
@@ -2692,6 +2741,58 @@ impl EventHandler {
             AppEvent::HomeScreenToggleFocus => {
                 tracing::debug!("HomeScreen V2 toggle focus");
                 state.home_screen_v2_state.toggle_focus();
+            }
+            AppEvent::StarSelectedWorkspace => {
+                tracing::info!("StarSelectedWorkspace event triggered");
+                if let Some(workspace_idx) = state.selected_workspace_index {
+                    if let Some(workspace) = state.workspaces.get(workspace_idx) {
+                        let path_str = workspace.path.display().to_string();
+                        let workspace_name = workspace.name.clone();
+
+                        // Load favorites store
+                        let mut favorites_store = crate::config::FavoritesStore::load();
+
+                        // Toggle: remove if exists, add if not
+                        if let Some(existing) = favorites_store.favorites.iter().find(|f| f.source == path_str) {
+                            let alias = existing.alias.clone();
+                            favorites_store.remove(&alias);
+                            if let Err(e) = favorites_store.save() {
+                                tracing::error!("Failed to save favorites: {}", e);
+                            }
+                            tracing::info!("Removed from favorites: {}", path_str);
+                            state.add_success_notification(format!("★ Removed '{}' from favorites", workspace_name));
+                        } else {
+                            // Generate alias from workspace name
+                            let alias = workspace_name.to_lowercase().replace(' ', "-");
+                            let favorite = crate::config::Favorite::new(
+                                alias.clone(),
+                                path_str.clone(),
+                                crate::config::FavoriteSourceType::LocalPath,
+                            );
+                            if favorites_store.add(favorite).is_ok() {
+                                if let Err(e) = favorites_store.save() {
+                                    tracing::error!("Failed to save favorites: {}", e);
+                                }
+                                tracing::info!("Added to favorites: {} as {}", path_str, alias);
+                                state.add_success_notification(format!("⭐ Added '{}' to favorites", workspace_name));
+                            } else {
+                                // Alias already exists, try with a suffix
+                                let alias_with_suffix = format!("{}-{}", alias, chrono::Utc::now().timestamp() % 1000);
+                                let favorite = crate::config::Favorite::new(
+                                    alias_with_suffix.clone(),
+                                    path_str.clone(),
+                                    crate::config::FavoriteSourceType::LocalPath,
+                                );
+                                let _ = favorites_store.add(favorite);
+                                if let Err(e) = favorites_store.save() {
+                                    tracing::error!("Failed to save favorites: {}", e);
+                                }
+                                tracing::info!("Added to favorites: {} as {}", path_str, alias_with_suffix);
+                                state.add_success_notification(format!("⭐ Added '{}' to favorites", workspace_name));
+                            }
+                        }
+                    }
+                }
             }
             AppEvent::WelcomePanelScrollUp => {
                 tracing::debug!("Welcome panel scroll up");
