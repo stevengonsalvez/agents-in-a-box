@@ -170,6 +170,10 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-latest
             ext: ""
+          # macOS Intel (native build on Intel runner)
+          - target: x86_64-apple-darwin
+            os: macos-13
+            ext: ""
           # Linux glibc (works on most distributions)
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
@@ -258,10 +262,9 @@ jobs:
             ```
 
             ## Supported Platforms
-            - macOS Apple Silicon (M1/M2/M3)
+            - macOS Apple Silicon (M1/M2/M3/M4)
+            - macOS Intel (x86_64)
             - Linux x86_64
-
-            *Intel Mac users: Use `cargo install` or run the Linux binary via Rosetta 2*
 
   homebrew:
     name: Update Homebrew Formula
@@ -294,6 +297,9 @@ jobs:
           # Calculate SHA256 for macOS ARM binary
           MAC_SHA=$(cat artifacts/aarch64-apple-darwin/*.sha256 | awk '{print $1}')
 
+          # Calculate SHA256 for macOS Intel binary
+          INTEL_MAC_SHA=$(cat artifacts/x86_64-apple-darwin/*.sha256 | awk '{print $1}')
+
           # Calculate SHA256 for Linux binary
           LINUX_SHA=$(cat artifacts/x86_64-unknown-linux-gnu/*.sha256 | awk '{print $1}')
 
@@ -309,6 +315,9 @@ jobs:
               if Hardware::CPU.arm?
                 url "https://github.com/stevengonsalvez/agents-in-a-box/releases/download/vVERSION_PLACEHOLDER/agents-box-VERSION_PLACEHOLDER-aarch64-apple-darwin.tar.gz"
                 sha256 "MAC_SHA_PLACEHOLDER"
+              elsif Hardware::CPU.intel?
+                url "https://github.com/stevengonsalvez/agents-in-a-box/releases/download/vVERSION_PLACEHOLDER/agents-box-VERSION_PLACEHOLDER-x86_64-apple-darwin.tar.gz"
+                sha256 "INTEL_MAC_SHA_PLACEHOLDER"
               end
             end
 
@@ -332,6 +341,7 @@ jobs:
           # Replace placeholders
           sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" Formula/ainb.rb
           sed -i "s/MAC_SHA_PLACEHOLDER/${MAC_SHA}/g" Formula/ainb.rb
+          sed -i "s/INTEL_MAC_SHA_PLACEHOLDER/${INTEL_MAC_SHA}/g" Formula/ainb.rb
           sed -i "s/LINUX_SHA_PLACEHOLDER/${LINUX_SHA}/g" Formula/ainb.rb
 
           echo "Updated Formula/ainb.rb to version ${VERSION}"
