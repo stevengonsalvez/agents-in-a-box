@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3-beta1] - 2026-03-04
+### Added
+- **ainb-tui**: add Favorites source choice in new session
+- **ainb-tui**: add SelectFavorite step to new session flow
+- **ainb-tui**: add display name renaming for SSH sessions
+- **ainb-tui**: add repository favorites store
+- **ainb-tui**: add star workspace from sessions screen
+- **ainb-tui**: add tmux config auto-install in onboarding
+- **ainb-tui**: auto-trust worktrees in Claude Code
+- **ainb-tui**: improve SSH session UX with dedicated source option and display section
+- **config**: add tmux.conf with Claude Code optimizations
+- **knowledge**: add distributed knowledge capture system
+- **knowledge**: implement global learnings GraphRAG system
+- **marketplace**: add Claude plugin marketplace with reflect-learning
+- **research**: integrate markdown.new for token-efficient web fetching
+- **settings**: upgrade default model to claude-opus-4-6
+- **skills**: add interview skill for plan specifications
+- **skills**: add nano-banana-pro image generation skill
+- **skills**: add oracle skill for multi-model code review
+- **toolkit**: adopt GSD patterns — model routing, .planning/, checkpoints, waves
+- **toolkit**: unify commands into skills architecture
+- **utilities**: add openclaw-agents usage tracking hook
+- persist SSH session display names across TUI restarts
+
+### Fixed
+- **ainb-tui**: add placeholder text for SSH Host input field
+- **ainb-tui**: populate tmux_sessions HashMap for session previews
+- **ainb-tui**: preserve SSH session display_name across reloads
+- **homebrew**: add ainb symlink for expected command name
+- **hooks**: prevent nested Claude Code session errors
+- **nested-session**: disable action-summary claude invocation + guard swarm-lib
+- **plan**: remove redundant learnings search step
+- **settings**: add compaction threshold override and fix PreCompact hook
+- **settings**: add permissionMode to bypass workspace trust prompt
+- **settings**: use ccstatusline package instead of local script
+- **swarm**: add orphaned process cleanup to prevent CPU hogs
+- **swarm**: allow spawning agents from within Claude Code session
+- **tui**: decouple local repo discovery from Docker dependency
+- compact SSH config modal layout to prevent field cutoff
+- enable delete (d) key for SSH sessions
+- make tmux capture filter patterns more specific
+
+### Documentation
+- **learning**: add tmux global env as root cause of nested session error
+- **oracle**: rewrite skill with working mode recommendations
+- add learning for nested Claude session error
+- add skills migration plan and agent teams research
+
+### Other
+- **beads**: migrate config to metadata.json
+- **homebrew**: update formula to v0.5.2-beta1
+- **toolkit**: add missing swarm commands and utils
+- **toolkit**: sync learnings from ~/.claude
+- **toolkit**: sync learnings to packages
+- **toolkit**: sync learnings, restructure utils, cleanup orchestration
+- **toolkit**: update catalog with new skills and plugins
+- **workflows**: remove deprecated m-workflow orchestration
+- sync agent learnings to packages
+- **toolkit**: unify CLAUDE.md and AGENTS.md into single source
+
+
 ## [0.5.2-beta1] - 2026-01-29
 ### Added
 - **ainb-tui**: add session recovery tile to home screen

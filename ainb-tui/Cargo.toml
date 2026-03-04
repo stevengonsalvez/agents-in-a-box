@@ -1,6 +1,6 @@
 [package]
 name = "agents-box"
-version = "0.5.2-beta1"
+version = "0.5.3-beta1"
 edition = "2021"
 authors = ["Agents-in-a-Box Team"]
 description = "Terminal-based development environment manager for Claude Code containers"
