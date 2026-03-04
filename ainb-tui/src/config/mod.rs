@@ -145,7 +145,7 @@ impl CliProvider {
             CliProvider::Claude => "--dangerously-skip-permissions",
             CliProvider::Codex => "--dangerously-bypass-approvals-and-sandbox",
             CliProvider::Gemini => "-y",
-            CliProvider::Copilot => "--allow-all-tools",
+            CliProvider::Copilot => "--allow-all",
         }
     }
 }

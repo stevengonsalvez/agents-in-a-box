@@ -693,10 +693,13 @@ impl AgentProvider {
             name: "GitHub Copilot".to_string(),
             vendor: "GitHub".to_string(),
             models: vec![
-                AgentModel::new("claude-sonnet-4-5", "Claude Sonnet 4.5 (default)", CostTier::High, true),
-                AgentModel::new("gpt-4o", "GPT-4o", CostTier::High, false),
-                AgentModel::new("o3", "OpenAI o3 reasoning", CostTier::Premium, false),
-                AgentModel::new("gemini-2.5-pro", "Gemini 2.5 Pro", CostTier::High, false),
+                AgentModel::new("claude-sonnet-4.6", "Claude Sonnet 4.6 (default)", CostTier::High, true),
+                AgentModel::new("claude-opus-4.6", "Claude Opus 4.6 (premium)", CostTier::Premium, false),
+                AgentModel::new("claude-haiku-4.5", "Claude Haiku 4.5 (fast)", CostTier::Low, false),
+                AgentModel::new("gpt-5.2", "GPT-5.2", CostTier::High, false),
+                AgentModel::new("gpt-5.1-codex", "GPT-5.1 Codex (coding)", CostTier::High, false),
+                AgentModel::new("gpt-4.1", "GPT-4.1 (stable)", CostTier::Medium, false),
+                AgentModel::new("gemini-3-pro-preview", "Gemini 3 Pro (preview)", CostTier::High, false),
             ],
             status: ProviderStatus::Available,
         }

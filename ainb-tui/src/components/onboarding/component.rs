@@ -516,7 +516,7 @@ impl OnboardingComponent {
                     Span::styled("  Gemini  ", Style::default().fg(GOLD)),
                     Span::styled("GEMINI_API_KEY  ", Style::default().fg(MUTED_GRAY)),
                     Span::styled("Copilot  ", Style::default().fg(GOLD)),
-                    Span::styled("gh auth login", Style::default().fg(MUTED_GRAY)),
+                    Span::styled("copilot login", Style::default().fg(MUTED_GRAY)),
                 ]),
                 Line::from(""),
                 Line::from(Span::styled("Configure auth per-agent before first use.", Style::default().fg(MUTED_GRAY))),
