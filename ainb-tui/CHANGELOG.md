@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.4-beta1] - 2026-03-04
+### Added
+- **release**: add Intel Mac (x86_64-apple-darwin) build target
+
+### Other
+- **homebrew**: update formula to v0.5.3-beta1
+
+
 ## [0.5.3-beta1] - 2026-03-04
 ### Added
 - **ainb-tui**: add Favorites source choice in new session
