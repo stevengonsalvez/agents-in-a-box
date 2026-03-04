@@ -167,6 +167,14 @@ If agents fail or timeout:
 4. **Check Timestamps**: Results include generation time for data freshness
 5. **Review All Outputs**: Different agents may catch different insights
 
+## Web Page Fetching
+
+When agents need to fetch specific web pages (articles, news, docs), route through a markdown converter:
+- **Primary**: `WebFetch(url: "https://markdown.new/<target-url>")`
+- **Fallback** (if primary fails or returns empty): `WebFetch(url: "https://r.jina.ai/<target-url>")`
+- Example: `WebFetch(url: "https://markdown.new/https://coindesk.com/article/...")`
+- Produces 80% fewer tokens than raw HTML; skip for JSON API endpoints
+
 ## Progressive Disclosure
 
 For detailed information, see:
