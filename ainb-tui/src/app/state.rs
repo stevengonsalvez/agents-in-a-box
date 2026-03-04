@@ -612,6 +612,7 @@ impl SessionAgentOption {
             Self { agent_type: SessionAgentType::Ssh, is_current: false },    // SSH sessions
             Self { agent_type: SessionAgentType::Codex, is_current: false },
             Self { agent_type: SessionAgentType::Gemini, is_current: false },
+            Self { agent_type: SessionAgentType::Copilot, is_current: false },
             Self { agent_type: SessionAgentType::Kiro, is_current: false },
         ]
     }
@@ -687,6 +688,20 @@ impl AgentProvider {
         }
     }
 
+    pub fn copilot() -> Self {
+        Self {
+            name: "GitHub Copilot".to_string(),
+            vendor: "GitHub".to_string(),
+            models: vec![
+                AgentModel::new("claude-sonnet-4-5", "Claude Sonnet 4.5 (default)", CostTier::High, true),
+                AgentModel::new("gpt-4o", "GPT-4o", CostTier::High, false),
+                AgentModel::new("o3", "OpenAI o3 reasoning", CostTier::Premium, false),
+                AgentModel::new("gemini-2.5-pro", "Gemini 2.5 Pro", CostTier::High, false),
+            ],
+            status: ProviderStatus::Available,
+        }
+    }
+
     pub fn local() -> Self {
         Self {
             name: "Local Models".to_string(),
@@ -703,6 +718,7 @@ impl AgentProvider {
             Self::claude(),
             Self::codex(),
             Self::gemini(),
+            Self::copilot(),
             Self::local(),
         ]
     }

@@ -141,6 +141,57 @@ const TOOL_CONFIG = {
             }
         }
     },
+    copilot: {
+        ruleDir: 'copilot',
+        targetSubdir: '.copilot',
+        usePackagesStructure: true,
+        forceHomeInstall: true,
+        copyClaudeMd: false,
+        copySettings: false,
+        packageMappings: {
+            'skills': 'skills',
+            'utilities/reflections': 'reflections'
+        },
+        projectRootCopies: ['.github/copilot-instructions.md'],
+        templateSubstitutions: {
+            '**/*.md': {
+                'TOOL_DIR': '.copilot',
+                'HOME_TOOL_DIR': '~/.copilot'
+            },
+            '**/*.sh': {
+                'TOOL_DIR': '.copilot',
+                'HOME_TOOL_DIR': '~/.copilot'
+            },
+            '**/*.py': {
+                'TOOL_DIR': '.copilot',
+                'HOME_TOOL_DIR': '~/.copilot'
+            },
+            '**/*.js': {
+                'TOOL_DIR': '.copilot',
+                'HOME_TOOL_DIR': '~/.copilot'
+            },
+            '**/*.ts': {
+                'TOOL_DIR': '.copilot',
+                'HOME_TOOL_DIR': '~/.copilot'
+            },
+            '**/*.json': {
+                'TOOL_DIR': '.copilot',
+                'HOME_TOOL_DIR': '~/.copilot'
+            },
+            '**/*.yaml': {
+                'TOOL_DIR': '.copilot',
+                'HOME_TOOL_DIR': '~/.copilot'
+            },
+            '**/*.yml': {
+                'TOOL_DIR': '.copilot',
+                'HOME_TOOL_DIR': '~/.copilot'
+            },
+            '**/*.toml': {
+                'TOOL_DIR': '.copilot',
+                'HOME_TOOL_DIR': '~/.copilot'
+            }
+        }
+    },
     'packages': {
         ruleDir: 'packages',
         targetSubdir: '.claude',
@@ -1050,6 +1101,9 @@ async function handlePackagesStructureCopy(tool, config, overrideHomeDir = null,
                 continue;
             }
             const destPath = path.join(rootTarget, fileName);
+
+            // Ensure parent directory exists (supports subdirectory paths like .github/copilot-instructions.md)
+            fs.mkdirSync(path.dirname(destPath), { recursive: true });
 
             const substitutions = (config.templateSubstitutions || {})[fileName] ||
                 (fileName.endsWith('.md') ? (config.templateSubstitutions || {})['**/*.md'] : null);

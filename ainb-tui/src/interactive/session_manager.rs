@@ -232,7 +232,7 @@ impl InteractiveSessionManager {
 
         // Step 4: Start CLI in tmux session (for AI agent types)
         match agent_type {
-            SessionAgentType::Claude | SessionAgentType::Codex | SessionAgentType::Gemini => {
+            SessionAgentType::Claude | SessionAgentType::Codex | SessionAgentType::Gemini | SessionAgentType::Copilot => {
                 info!("Starting {:?} CLI in tmux session (model={:?}, skip_permissions={})", agent_type, model, skip_permissions);
                 self.start_cli_in_tmux(&tmux_session_name, skip_permissions, model, agent_type).await?;
             }
@@ -354,7 +354,7 @@ impl InteractiveSessionManager {
 
         // Step 3: Start CLI in tmux session (for AI agent types)
         match agent_type {
-            SessionAgentType::Claude | SessionAgentType::Codex | SessionAgentType::Gemini => {
+            SessionAgentType::Claude | SessionAgentType::Codex | SessionAgentType::Gemini | SessionAgentType::Copilot => {
                 info!("Starting {:?} CLI in tmux session (model={:?}, skip_permissions={})", agent_type, model, skip_permissions);
                 self.start_cli_in_tmux(&tmux_session_name, skip_permissions, model, agent_type).await?;
             }
@@ -884,6 +884,7 @@ impl InteractiveSessionManager {
             SessionAgentType::Claude => CliProvider::Claude,
             SessionAgentType::Codex => CliProvider::Codex,
             SessionAgentType::Gemini => CliProvider::Gemini,
+            SessionAgentType::Copilot => CliProvider::Copilot,
             _ => return Ok(()), // Shell and other types don't need CLI
         };
 
@@ -979,6 +980,11 @@ impl InteractiveSessionManager {
                     info!("Injecting GEMINI_API_KEY for Gemini CLI");
                     return format!("export GEMINI_API_KEY='{}' && ", api_key);
                 }
+                String::new()
+            }
+            SessionAgentType::Copilot => {
+                // Copilot uses gh OAuth — no API key injection needed
+                // gh auth handles authentication transparently
                 String::new()
             }
             _ => String::new(),

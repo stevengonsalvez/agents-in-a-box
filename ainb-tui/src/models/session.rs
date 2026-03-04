@@ -23,11 +23,12 @@ impl Default for SessionMode {
 pub enum SessionAgentType {
     #[default]
     Claude,
-    Shell,  // Plain shell, no AI agent
-    Ssh,    // SSH connection to remote server
-    Codex,  // Coming soon
-    Gemini, // Coming soon
-    Kiro,   // Coming soon
+    Shell,   // Plain shell, no AI agent
+    Ssh,     // SSH connection to remote server
+    Codex,   // OpenAI Codex CLI
+    Gemini,  // Google Gemini CLI
+    Copilot, // GitHub Copilot CLI
+    Kiro,    // AWS Kiro (disabled)
 }
 
 impl SessionAgentType {
@@ -38,6 +39,7 @@ impl SessionAgentType {
             SessionAgentType::Ssh => "🔐",
             SessionAgentType::Codex => "💻",
             SessionAgentType::Gemini => "✨",
+            SessionAgentType::Copilot => "🐙",
             SessionAgentType::Kiro => "🔮",
         }
     }
@@ -49,6 +51,7 @@ impl SessionAgentType {
             SessionAgentType::Ssh => "SSH",
             SessionAgentType::Codex => "Codex CLI",
             SessionAgentType::Gemini => "Gemini CLI",
+            SessionAgentType::Copilot => "GitHub Copilot",
             SessionAgentType::Kiro => "Kiro",
         }
     }
@@ -60,13 +63,19 @@ impl SessionAgentType {
             SessionAgentType::Ssh => "SSH connection to remote server",
             SessionAgentType::Codex => "OpenAI's coding assistant",
             SessionAgentType::Gemini => "Google's AI assistant",
+            SessionAgentType::Copilot => "GitHub Copilot CLI — AI coding agent by GitHub",
             SessionAgentType::Kiro => "AWS AI coding assistant",
         }
     }
 
     pub fn is_available(&self) -> bool {
         match self {
-            SessionAgentType::Claude | SessionAgentType::Shell | SessionAgentType::Ssh | SessionAgentType::Codex | SessionAgentType::Gemini => true,
+            SessionAgentType::Claude
+            | SessionAgentType::Shell
+            | SessionAgentType::Ssh
+            | SessionAgentType::Codex
+            | SessionAgentType::Gemini
+            | SessionAgentType::Copilot => true,
             SessionAgentType::Kiro => false,
         }
     }

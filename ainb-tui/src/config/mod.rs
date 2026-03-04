@@ -86,6 +86,8 @@ pub enum CliProvider {
     Codex,
     /// Google Gemini CLI
     Gemini,
+    /// GitHub Copilot CLI
+    Copilot,
 }
 
 impl CliProvider {
@@ -95,6 +97,7 @@ impl CliProvider {
             CliProvider::Claude => "claude",
             CliProvider::Codex => "codex",
             CliProvider::Gemini => "gemini",
+            CliProvider::Copilot => "copilot",
         }
     }
 
@@ -104,6 +107,7 @@ impl CliProvider {
             CliProvider::Claude => "ANTHROPIC_API_KEY",
             CliProvider::Codex => "OPENAI_API_KEY",
             CliProvider::Gemini => "GEMINI_API_KEY",
+            CliProvider::Copilot => "GITHUB_TOKEN", // Uses gh OAuth, token optional
         }
     }
 
@@ -113,6 +117,7 @@ impl CliProvider {
             CliProvider::Claude => "Claude Code",
             CliProvider::Codex => "OpenAI Codex",
             CliProvider::Gemini => "Google Gemini",
+            CliProvider::Copilot => "GitHub Copilot",
         }
     }
 
@@ -121,6 +126,7 @@ impl CliProvider {
             CliProvider::Claude => "claude",
             CliProvider::Codex => "codex",
             CliProvider::Gemini => "gemini",
+            CliProvider::Copilot => "copilot",
         }
     }
 
@@ -128,6 +134,7 @@ impl CliProvider {
         match s.to_lowercase().as_str() {
             "codex" | "openai" => CliProvider::Codex,
             "gemini" | "google" => CliProvider::Gemini,
+            "copilot" | "github" => CliProvider::Copilot,
             _ => CliProvider::Claude,
         }
     }
@@ -138,6 +145,7 @@ impl CliProvider {
             CliProvider::Claude => "--dangerously-skip-permissions",
             CliProvider::Codex => "--dangerously-bypass-approvals-and-sandbox",
             CliProvider::Gemini => "-y",
+            CliProvider::Copilot => "--allow-all-tools",
         }
     }
 }
@@ -550,6 +558,7 @@ pub fn load_from_env() -> HashMap<String, String> {
                 || k.starts_with("CODEX_")
                 || k.starts_with("GEMINI_")
                 || k.starts_with("GOOGLE_API_")
+                || k.starts_with("GITHUB_")
         })
         .collect()
 }
