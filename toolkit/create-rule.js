@@ -152,7 +152,7 @@ const TOOL_CONFIG = {
             'skills': 'skills',
             'utilities/reflections': 'reflections'
         },
-        projectRootCopies: ['.github/copilot-instructions.md'],
+        projectRootCopies: ['AGENTS.md'],
         templateSubstitutions: {
             '**/*.md': {
                 'TOOL_DIR': '.copilot',
