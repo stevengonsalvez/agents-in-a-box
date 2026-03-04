@@ -75,7 +75,7 @@ impl OnboardingStep {
             Self::Welcome => "Let's get you set up with AINB",
             Self::DependencyCheck => "Checking required tools",
             Self::GitDirectories => "Where are your projects?",
-            Self::Authentication => "Set up Claude authentication",
+            Self::Authentication => "Set up AI agent authentication",
             Self::EditorSelection => "Choose your preferred editor",
             Self::Summary => "You're all set!",
         }

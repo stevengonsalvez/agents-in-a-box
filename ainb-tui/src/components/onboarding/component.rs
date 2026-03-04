@@ -502,17 +502,29 @@ impl OnboardingComponent {
         } else {
             vec![
                 Line::from(""),
-                Line::from(Span::styled("Set up Claude authentication", Style::default().fg(SOFT_WHITE))),
+                Line::from(Span::styled("AI agent authentication", Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD))),
                 Line::from(""),
-                Line::from(Span::styled("This step will be handled by the existing auth flow.", Style::default().fg(MUTED_GRAY))),
-                Line::from(Span::styled("You can skip this and configure later.", Style::default().fg(MUTED_GRAY))),
+                Line::from(Span::styled("Each agent uses its own auth method:", Style::default().fg(MUTED_GRAY))),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("  Claude  ", Style::default().fg(GOLD)),
+                    Span::styled("claude auth  ", Style::default().fg(MUTED_GRAY)),
+                    Span::styled("Codex  ", Style::default().fg(GOLD)),
+                    Span::styled("OPENAI_API_KEY", Style::default().fg(MUTED_GRAY)),
+                ]),
+                Line::from(vec![
+                    Span::styled("  Gemini  ", Style::default().fg(GOLD)),
+                    Span::styled("GEMINI_API_KEY  ", Style::default().fg(MUTED_GRAY)),
+                    Span::styled("Copilot  ", Style::default().fg(GOLD)),
+                    Span::styled("gh auth login", Style::default().fg(MUTED_GRAY)),
+                ]),
+                Line::from(""),
+                Line::from(Span::styled("Configure auth per-agent before first use.", Style::default().fg(MUTED_GRAY))),
                 Line::from(""),
                 Line::from(vec![
                     Span::styled("Press ", Style::default().fg(MUTED_GRAY)),
-                    Span::styled("Enter", Style::default().fg(GOLD)),
-                    Span::styled(" to configure auth, or ", Style::default().fg(MUTED_GRAY)),
                     Span::styled("S", Style::default().fg(GOLD)),
-                    Span::styled(" to skip", Style::default().fg(MUTED_GRAY)),
+                    Span::styled(" to skip (configure later)", Style::default().fg(MUTED_GRAY)),
                 ]),
             ]
         };

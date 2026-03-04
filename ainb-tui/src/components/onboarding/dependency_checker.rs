@@ -235,6 +235,15 @@ impl DependencyChecker {
                 category: DependencyCategory::AiCli,
                 description: "OpenAI's Codex CLI",
             },
+            Dependency {
+                name: "GitHub Copilot CLI",
+                check_cmd: "copilot",
+                check_args: &["--version"],
+                install_hint: "npm install -g @github/copilot-cli",
+                is_mandatory: false,
+                category: DependencyCategory::AiCli,
+                description: "GitHub's AI coding agent (uses gh OAuth auth)",
+            },
             // Configuration (recommended for best experience)
             Dependency {
                 name: "tmux optimized config",
