@@ -1088,6 +1088,9 @@ impl NewSessionComponent {
             Span::styled("s", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
             Span::styled(star_action, Style::default().fg(muted_gray)),
             Span::styled("  │  ", Style::default().fg(subdued_border)),
+            Span::styled("$", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+            Span::styled(" Shell", Style::default().fg(muted_gray)),
+            Span::styled("  │  ", Style::default().fg(subdued_border)),
             Span::styled("Esc", Style::default().fg(Color::Rgb(255, 100, 100))),
             Span::styled(" Cancel", Style::default().fg(muted_gray)),
         ];

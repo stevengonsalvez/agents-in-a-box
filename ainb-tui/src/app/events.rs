@@ -816,6 +816,8 @@ impl EventHandler {
                         KeyCode::Char('s') => {
                             Some(AppEvent::LocalRepoToggleFavorite)
                         }
+                        // '$' key to open shell directly at repo (no branch/worktree prompt)
+                        KeyCode::Char('$') => Some(AppEvent::NewSessionOpenShell),
                         _ => None,
                     }
                 }
