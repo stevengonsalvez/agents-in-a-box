@@ -215,11 +215,14 @@ impl SessionListComponent {
                         }
                     };
 
+                    let agent_icon = session.agent_type.icon();
+
                     let session_line = Line::from(vec![
                         Span::styled("  ", Style::default()),
                         Span::styled(tree_prefix, Style::default().fg(SUBDUED_BORDER)),
                         Span::styled(format!(" {} ", status_indicator), Style::default()),
                         Span::styled(mode_indicator.to_string(), Style::default()),
+                        Span::styled(format!("{} ", agent_icon), Style::default()),
                         Span::styled(format!("{} ", tmux_indicator), Style::default().fg(tmux_color)),
                         Span::styled(session.branch_name.clone(), Style::default().fg(branch_color).add_modifier(if is_selected_session { Modifier::BOLD } else { Modifier::empty() })),
                         Span::styled(changes_text, Style::default().fg(WARNING_ORANGE)),
