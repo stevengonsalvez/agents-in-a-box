@@ -75,6 +75,8 @@ pub struct SessionMetadata {
     pub worktree_path: PathBuf,
     pub workspace_name: String,
     pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub agent_type: SessionAgentType,
 }
 
 /// Storage for all persisted session metadata
@@ -264,6 +266,7 @@ impl InteractiveSessionManager {
             worktree_path: worktree_info.path.clone(),
             workspace_name: workspace_name.clone(),
             created_at,
+            agent_type,
         };
         let mut store = SessionStore::load();
         store.upsert(metadata);
@@ -387,6 +390,7 @@ impl InteractiveSessionManager {
             worktree_path: worktree_path_clone,
             workspace_name: workspace_name.clone(),
             created_at,
+            agent_type,
         };
         let mut store = SessionStore::load();
         store.upsert(metadata);
@@ -474,6 +478,14 @@ impl InteractiveSessionManager {
                 let source_repository = self.get_source_repository(&metadata.worktree_path)
                     .unwrap_or_else(|| metadata.worktree_path.clone());
 
+                // Use persisted agent_type, fall back to tmux process detection
+                let agent_type = if metadata.agent_type == SessionAgentType::Claude {
+                    // Could be a real Claude session or a legacy default — try detecting from tmux
+                    Self::detect_agent_from_tmux(tmux_name).await.unwrap_or(metadata.agent_type)
+                } else {
+                    metadata.agent_type
+                };
+
                 return Ok(InteractiveSession {
                     session_id: metadata.session_id,
                     worktree_path: metadata.worktree_path.clone(),
@@ -482,7 +494,7 @@ impl InteractiveSessionManager {
                     branch_name,
                     workspace_name: metadata.workspace_name.clone(),
                     created_at: metadata.created_at,
-                    agent_type: SessionAgentType::Claude,
+                    agent_type,
                     model: None,
                 });
             } else {
@@ -529,16 +541,20 @@ impl InteractiveSessionManager {
                     })
                     .to_string();
 
+                // Try to detect agent from tmux process, default to Claude
+                let agent_type = Self::detect_agent_from_tmux(tmux_name).await
+                    .unwrap_or(SessionAgentType::Claude);
+
                 return Ok(InteractiveSession {
-                    session_id, // Use the session_id from the symlink directory
+                    session_id,
                     worktree_path: worktree.path,
                     source_repository: worktree.source_repository,
                     tmux_session_name: tmux_name.to_string(),
                     branch_name: worktree.branch_name,
                     workspace_name,
-                    created_at: Utc::now(), // We don't persist creation time
-                    agent_type: SessionAgentType::Claude, // Discovered sessions are assumed to be Claude
-                    model: None, // Model not tracked for discovered sessions
+                    created_at: Utc::now(),
+                    agent_type,
+                    model: None,
                 });
             }
         }
@@ -546,6 +562,38 @@ impl InteractiveSessionManager {
         Err(InteractiveSessionError::InvalidState(
             format!("No matching worktree found for tmux session {}", tmux_name)
         ))
+    }
+
+    /// Detect agent type by inspecting the running process in a tmux session
+    ///
+    /// Runs `tmux list-panes -t <session> -F '#{pane_current_command}'` to get the
+    /// active process, then matches it against known CLI commands.
+    async fn detect_agent_from_tmux(tmux_name: &str) -> Option<SessionAgentType> {
+        let output = Command::new("tmux")
+            .args(["list-panes", "-t", tmux_name, "-F", "#{pane_current_command}"])
+            .output()
+            .await
+            .ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        let commands = String::from_utf8_lossy(&output.stdout);
+        for line in commands.lines() {
+            let cmd = line.trim().to_lowercase();
+            if cmd.contains("claude") {
+                return Some(SessionAgentType::Claude);
+            } else if cmd.contains("codex") {
+                return Some(SessionAgentType::Codex);
+            } else if cmd.contains("gemini") {
+                return Some(SessionAgentType::Gemini);
+            } else if cmd.contains("copilot") {
+                return Some(SessionAgentType::Copilot);
+            }
+        }
+
+        None
     }
 
     /// Get the current branch name from a worktree path

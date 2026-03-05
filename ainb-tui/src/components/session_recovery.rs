@@ -15,6 +15,7 @@ use std::process::Command;
 use uuid::Uuid;
 
 use crate::interactive::session_manager::{SessionMetadata, SessionStore};
+use crate::models::SessionAgentType;
 
 
 // Color palette (matching TUI style guide)
@@ -799,6 +800,7 @@ impl SessionRecoveryState {
             workspace_name: worktree.source_repo.clone()
                 .unwrap_or_else(|| worktree.name.clone()),
             created_at: chrono::Utc::now(),
+            agent_type: SessionAgentType::default(),
         };
 
         let mut store = SessionStore::load();
