@@ -34,10 +34,10 @@ pub enum SessionAgentType {
 impl SessionAgentType {
     pub fn icon(&self) -> &'static str {
         match self {
-            SessionAgentType::Claude => "🤖",
+            SessionAgentType::Claude => "✻",   // Claude's own starburst/pinwheel from its spinner
             SessionAgentType::Shell => "🐚",
             SessionAgentType::Ssh => "🔐",
-            SessionAgentType::Codex => "💻",
+            SessionAgentType::Codex => "✦",    // OpenAI geometric 4-pointed star
             SessionAgentType::Gemini => "✨",
             SessionAgentType::Copilot => "🐙",
             SessionAgentType::Kiro => "🔮",
