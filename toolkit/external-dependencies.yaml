@@ -13,7 +13,7 @@
 # =============================================================================
 
 version: "1.0.0"
-updated: "2026-01-31"
+updated: "2026-03-06"
 
 # =============================================================================
 # BUNDLED SKILLS (included in toolkit/packages/skills/)
@@ -79,6 +79,16 @@ bundled-skills:
       - Propose agent file updates
       - Create new skills from learnings
 
+  - name: remotion-best-practices
+    path: packages/skills/remotion-best-practices
+    purpose: "Best practices for Remotion - Video creation in React"
+    features:
+      - 3D content with Three.js and React Three Fiber
+      - Animation patterns and timeline composition
+      - Asset management (images, video, audio, fonts)
+      - Caption display and TikTok-style text overlays
+      - Chart and data visualization patterns
+
 # =============================================================================
 # AGENT SKILLS (cross-agent git repos — agentskills.io standard)
 # =============================================================================
@@ -135,7 +145,7 @@ claude-plugins:
   - name: ralph-loop
     marketplace: anthropics/claude-plugins-official
     marketplace_id: claude-plugins-official
-    version: "e30768372b41"
+    version: "55b58ec6e564"
     install: |
       claude plugin marketplace add anthropics/claude-plugins-official
       claude plugin install ralph-loop
@@ -147,7 +157,7 @@ claude-plugins:
   - name: code-review
     marketplace: anthropics/claude-plugins-official
     marketplace_id: claude-plugins-official
-    version: "e30768372b41"
+    version: "55b58ec6e564"
     install: |
       claude plugin marketplace add anthropics/claude-plugins-official
       claude plugin install code-review
@@ -179,6 +189,7 @@ claude-plugins:
   - name: dev-browser
     marketplace: sawyerhood/dev-browser
     marketplace_id: sawyerhood-dev-browser
+    version: "66682fb0513a"
     install: |
       claude plugin marketplace add sawyerhood/dev-browser
       claude plugin install dev-browser@sawyerhood/dev-browser
@@ -191,6 +202,20 @@ claude-plugins:
       - Multi-step form filling and authenticated portal navigation
       - Web scraping and data extraction
     docs: "https://github.com/SawyerHood/dev-browser"
+
+  - name: skill-creator
+    marketplace: anthropics/claude-plugins-official
+    marketplace_id: claude-plugins-official
+    version: "205b6e0b3036"
+    install: |
+      claude plugin marketplace add anthropics/claude-plugins-official
+      claude plugin install skill-creator
+    purpose: "Create new skills, modify existing skills, and measure skill performance"
+    features:
+      - Create skills from scratch
+      - Update and optimize existing skills
+      - Skill performance benchmarking
+      - Eval-driven skill improvement
 
   - name: open-prose
     marketplace: anthropics/prose
@@ -264,12 +289,20 @@ copilot-skills: []
 # Model Context Protocol servers configured in claude_desktop_config.json
 mcp-servers:
   - name: context7
-    config_location: "claude_desktop_config.json"
+    config_location: "~/.claude/settings.json"
     purpose: "Documentation lookup for programming libraries"
     features:
       - Up-to-date library docs
       - Code example retrieval
       - API reference lookup
+
+  - name: mcporter
+    config_location: "~/Library/Application Support/Claude/claude_desktop_config.json"
+    install: "npx -y mcporter@latest stdio"
+    purpose: "MCP server for port forwarding and local service exposure"
+    features:
+      - Local port forwarding
+      - Service tunneling for Claude Desktop
 
 # =============================================================================
 # KNOWN MARKETPLACES
