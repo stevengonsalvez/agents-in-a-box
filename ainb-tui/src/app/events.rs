@@ -2748,49 +2748,137 @@ impl EventHandler {
                 tracing::info!("StarSelectedWorkspace event triggered");
                 if let Some(workspace_idx) = state.selected_workspace_index {
                     if let Some(workspace) = state.workspaces.get(workspace_idx) {
-                        let path_str = workspace.path.display().to_string();
                         let workspace_name = workspace.name.clone();
 
                         // Load favorites store
                         let mut favorites_store = crate::config::FavoritesStore::load();
 
+                        // Try to get the remote URL from the git repository
+                        // This allows favoriting the REMOTE repo, not just the local path
+                        let (source, source_type, display_source) =
+                            if let Ok(git_repo) = crate::git::RepositoryManager::open(&workspace.path) {
+                                if let Ok(Some(remote_url)) = git_repo.get_remote_url() {
+                                    // Parse the remote URL to get owner/repo
+                                    if let Ok(repo_source) =
+                                        crate::git::RepoSource::from_input(&remote_url)
+                                    {
+                                        if let Ok(parsed) = repo_source.parse_components() {
+                                            // Use GitHub shorthand if it's a GitHub repo
+                                            if parsed.host == "github.com" {
+                                                let shorthand =
+                                                    format!("{}/{}", parsed.owner, parsed.repo_name);
+                                                (
+                                                    shorthand.clone(),
+                                                    crate::config::FavoriteSourceType::GithubShorthand,
+                                                    shorthand,
+                                                )
+                                            } else {
+                                                // For other hosts, use the full URL
+                                                let source_type = if remote_url.starts_with("git@") {
+                                                    crate::config::FavoriteSourceType::SshUrl
+                                                } else {
+                                                    crate::config::FavoriteSourceType::HttpsUrl
+                                                };
+                                                let display =
+                                                    format!("{}/{}", parsed.owner, parsed.repo_name);
+                                                (remote_url, source_type, display)
+                                            }
+                                        } else {
+                                            // Couldn't parse, use raw URL
+                                            let source_type = if remote_url.starts_with("git@") {
+                                                crate::config::FavoriteSourceType::SshUrl
+                                            } else {
+                                                crate::config::FavoriteSourceType::HttpsUrl
+                                            };
+                                            (remote_url.clone(), source_type, remote_url)
+                                        }
+                                    } else {
+                                        // Fallback to local path
+                                        let path_str = workspace.path.display().to_string();
+                                        (
+                                            path_str.clone(),
+                                            crate::config::FavoriteSourceType::LocalPath,
+                                            path_str,
+                                        )
+                                    }
+                                } else {
+                                    // No remote, use local path
+                                    let path_str = workspace.path.display().to_string();
+                                    (
+                                        path_str.clone(),
+                                        crate::config::FavoriteSourceType::LocalPath,
+                                        path_str,
+                                    )
+                                }
+                            } else {
+                                // Not a git repo, use local path
+                                let path_str = workspace.path.display().to_string();
+                                (
+                                    path_str.clone(),
+                                    crate::config::FavoriteSourceType::LocalPath,
+                                    path_str,
+                                )
+                            };
+
                         // Toggle: remove if exists, add if not
-                        if let Some(existing) = favorites_store.favorites.iter().find(|f| f.source == path_str) {
+                        // Check both source and local path for existing favorites
+                        let local_path_str = workspace.path.display().to_string();
+                        let existing = favorites_store
+                            .favorites
+                            .iter()
+                            .find(|f| f.source == source || f.source == local_path_str);
+
+                        if let Some(existing) = existing {
                             let alias = existing.alias.clone();
+                            let removed_source = existing.source.clone();
                             favorites_store.remove(&alias);
                             if let Err(e) = favorites_store.save() {
                                 tracing::error!("Failed to save favorites: {}", e);
                             }
-                            tracing::info!("Removed from favorites: {}", path_str);
-                            state.add_success_notification(format!("★ Removed '{}' from favorites", workspace_name));
+                            tracing::info!("Removed from favorites: {}", removed_source);
+                            state.add_success_notification(format!(
+                                "★ Removed '{}' from favorites",
+                                workspace_name
+                            ));
                         } else {
                             // Generate alias from workspace name
                             let alias = workspace_name.to_lowercase().replace(' ', "-");
                             let favorite = crate::config::Favorite::new(
                                 alias.clone(),
-                                path_str.clone(),
-                                crate::config::FavoriteSourceType::LocalPath,
+                                source.clone(),
+                                source_type.clone(),
                             );
                             if favorites_store.add(favorite).is_ok() {
                                 if let Err(e) = favorites_store.save() {
                                     tracing::error!("Failed to save favorites: {}", e);
                                 }
-                                tracing::info!("Added to favorites: {} as {}", path_str, alias);
-                                state.add_success_notification(format!("⭐ Added '{}' to favorites", workspace_name));
+                                tracing::info!("Added to favorites: {} as {}", source, alias);
+                                state.add_success_notification(format!(
+                                    "⭐ Added '{}' to favorites",
+                                    display_source
+                                ));
                             } else {
                                 // Alias already exists, try with a suffix
-                                let alias_with_suffix = format!("{}-{}", alias, chrono::Utc::now().timestamp() % 1000);
+                                let alias_with_suffix =
+                                    format!("{}-{}", alias, chrono::Utc::now().timestamp() % 1000);
                                 let favorite = crate::config::Favorite::new(
                                     alias_with_suffix.clone(),
-                                    path_str.clone(),
-                                    crate::config::FavoriteSourceType::LocalPath,
+                                    source.clone(),
+                                    source_type,
                                 );
                                 let _ = favorites_store.add(favorite);
                                 if let Err(e) = favorites_store.save() {
                                     tracing::error!("Failed to save favorites: {}", e);
                                 }
-                                tracing::info!("Added to favorites: {} as {}", path_str, alias_with_suffix);
-                                state.add_success_notification(format!("⭐ Added '{}' to favorites", workspace_name));
+                                tracing::info!(
+                                    "Added to favorites: {} as {}",
+                                    source,
+                                    alias_with_suffix
+                                );
+                                state.add_success_notification(format!(
+                                    "⭐ Added '{}' to favorites",
+                                    display_source
+                                ));
                             }
                         }
                     }

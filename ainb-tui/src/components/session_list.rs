@@ -150,9 +150,43 @@ impl SessionListComponent {
                 String::new()
             };
 
-            // Check if this workspace is a favorite
+            // Check if this workspace is a favorite (by local path OR remote URL)
             let workspace_path_str = workspace.path.display().to_string();
-            let is_favorite = favorites.favorites.iter().any(|f| f.source == workspace_path_str);
+            let is_favorite = {
+                // First check local path
+                let by_path = favorites
+                    .favorites
+                    .iter()
+                    .any(|f| f.source == workspace_path_str);
+                if by_path {
+                    true
+                } else {
+                    // Also check by remote URL (owner/repo format)
+                    if let Ok(git_repo) = crate::git::RepositoryManager::open(&workspace.path) {
+                        if let Ok(Some(remote_url)) = git_repo.get_remote_url() {
+                            if let Ok(repo_source) =
+                                crate::git::RepoSource::from_input(&remote_url)
+                            {
+                                if let Ok(parsed) = repo_source.parse_components() {
+                                    let shorthand =
+                                        format!("{}/{}", parsed.owner, parsed.repo_name);
+                                    favorites.favorites.iter().any(|f| {
+                                        f.source == shorthand || f.source == remote_url
+                                    })
+                                } else {
+                                    favorites.favorites.iter().any(|f| f.source == remote_url)
+                                }
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                }
+            };
             let star_indicator = if is_favorite { "⭐ " } else { "" };
 
             let workspace_line = Line::from(vec![
