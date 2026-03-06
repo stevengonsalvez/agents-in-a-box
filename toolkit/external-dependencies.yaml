@@ -89,6 +89,18 @@ bundled-skills:
       - Caption display and TikTok-style text overlays
       - Chart and data visualization patterns
 
+  - name: media-processing
+    path: packages/skills/media-processing
+    source: "https://github.com/mrgoonie/claudekit-skills/tree/main/.claude/skills/media-processing"
+    purpose: "FFmpeg and ImageMagick multimedia processing"
+    features:
+      - Video encoding/conversion (H.264, H.265, VP9, AV1)
+      - Audio extraction and transcoding
+      - Image manipulation and batch processing
+      - HLS/DASH streaming manifest generation
+      - Hardware acceleration (NVENC, QuickSync)
+      - Python scripts for batch resize, convert, and optimize
+
 # =============================================================================
 # AGENT SKILLS (cross-agent git repos — agentskills.io standard)
 # =============================================================================
