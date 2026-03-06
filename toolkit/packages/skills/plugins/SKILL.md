@@ -11,9 +11,93 @@ Unified view and management of all external dependencies across the toolkit ecos
 ## Subcommands
 
 - `/plugins` or `/plugins list` - Show all installed extensions
+- `/plugins add <name>` - Add a new skill to the ecosystem
 - `/plugins sync` - Update manifest from current installed state
 - `/plugins export` - Generate reproducible install script
 - `/plugins status` - Check versions against manifest
+
+## Universal Skill Lifecycle
+
+Skills follow a single universal format (SKILL.md) across all agents. The toolkit provides
+a closed-loop system: skills enter from any tool, get canonicalized, and deploy everywhere.
+
+```
+                        SKILL ENTRY POINTS
+                        ==================
+
+    Claude Code              Codex CLI              Copilot CLI
+    ───────────              ─────────              ───────────
+    claude plugin install    $skill-installer       npx add-skill
+    npx add-skill            npx add-skill          gh copilot skill
+    manual copy              manual copy             manual copy
+         │                       │                       │
+         ▼                       ▼                       ▼
+    ~/.claude/skills/       ~/.codex/skills/       ~/.copilot/skills/
+         │                       │                       │
+         └───────────┬───────────┘───────────────────────┘
+                     │
+                     ▼
+              /sync-learnings          ◄── syncs new skills TO toolkit
+                     │
+                     ▼
+         ┌───────────────────────┐
+         │   packages/skills/    │     ◄── CANONICAL SOURCE (git-tracked)
+         │   (toolkit repo)      │
+         └───────────┬───────────┘
+                     │
+                     ▼
+         ┌───────────────────────┐
+         │ external-dependencies │     ◄── /plugins add or /plugins sync
+         │       .yaml           │         updates the manifest
+         └───────────┬───────────┘
+                     │
+                     ▼
+              bootstrap.js             ◄── generates tool-specific output
+                     │
+          ┌──────────┼──────────┐
+          ▼          ▼          ▼
+     ~/.claude/  ~/.codex/  ~/.copilot/
+      skills/     skills/     skills/     ◄── ALL tools get ALL skills
+          │          │          │
+          ▼          ▼          ▼
+    setup-external.sh          ◄── git clone for agent-skills (external repos)
+
+
+                     SKILL TYPES
+                     ===========
+
+    ┌─────────────────┬────────────────────┬──────────────────────┐
+    │ Bundled          │ Agent-Skill         │ External (plugins)   │
+    │ (we own it)      │ (3rd-party git repo)│ (tool-native)        │
+    ├─────────────────┼────────────────────┼──────────────────────┤
+    │ Lives in         │ SKILL.md stub in   │ Tracked in manifest  │
+    │ packages/skills/ │ packages/skills/   │ only (not in repo)   │
+    │                  │ + external-source  │                      │
+    │ Deployed by      │ Deployed by        │ Installed by         │
+    │ bootstrap copy   │ setup-external.sh  │ tool-native command  │
+    │                  │ (git clone)        │                      │
+    └─────────────────┴────────────────────┴──────────────────────┘
+
+
+                     CLOSED LOOP
+                     ===========
+
+    1. Install skill via ANY tool ──► lands in ~/.{tool}/skills/
+    2. /sync-learnings ──────────────► copies to packages/skills/ (canonical)
+    3. /plugins sync ────────────────► updates external-dependencies.yaml
+    4. bootstrap.js ─────────────────► deploys to ALL tools universally
+    5. Repeat from any tool
+```
+
+### Skill Type Decision
+
+When adding a new skill, determine its type:
+
+| Question | If YES | If NO |
+|----------|--------|-------|
+| Do we own/maintain the source? | **Bundled** | next question |
+| Is it a public git repo with SKILL.md? | **Agent-skill** | next question |
+| Installed via tool-native command? | **External** (manifest-only) | copy as bundled |
 
 ## Data Sources
 
@@ -77,6 +161,102 @@ jq -r 'to_entries[] | "\(.key): \(.value.source.repo)"' \
 for skill in packages/skills/*/SKILL.md; do
   dirname "$skill" | xargs basename
 done
+```
+
+## /plugins add
+
+Add a new skill to the toolkit ecosystem. Handles all three skill types.
+
+### Usage
+
+```
+/plugins add <name>                     # interactive — detects source
+/plugins add <name> --from ~/.claude/skills/<name>   # from installed skill
+/plugins add <name> --from https://github.com/org/repo  # from git repo
+```
+
+### Workflow
+
+#### Step 1: Detect Source and Type
+
+```
+Source provided?
+  ├─ Local path (~/.*skills/<name>/) ──► check for .git/
+  │    ├─ Has .git/ ──► Agent-skill (external repo)
+  │    └─ No .git/  ──► Bundled (copy to packages/)
+  │
+  ├─ Git URL ──► Agent-skill
+  │
+  └─ No source ──► Scan all tool skill dirs for <name>:
+       ~/.claude/skills/<name>/
+       ~/.codex/skills/<name>/
+       ~/.copilot/skills/<name>/
+       If found: use that path and re-enter detection
+       If not found: error — provide --from
+```
+
+#### Step 2: Validate SKILL.md
+
+```bash
+# Must have valid SKILL.md with frontmatter
+SKILL_FILE="<source>/SKILL.md"
+# Check: name and description fields present
+# Check: no syntax errors in YAML frontmatter
+# Extract: name, description, features for manifest entry
+```
+
+#### Step 3: Execute by Type
+
+**Bundled skill** (we own it — copy into repo):
+
+1. Copy skill directory to `packages/skills/<name>/`
+2. Add entry to `external-dependencies.yaml` under `bundled-skills`
+3. Re-run `node toolkit/bootstrap.js` for each tool
+4. Verify skill appears in `~/.{tool}/skills/<name>/`
+
+**Agent-skill** (external git repo):
+
+1. Create stub `packages/skills/<name>/SKILL.md` with `external-source:` frontmatter
+2. Add entry to `external-dependencies.yaml` under `agent-skills` with repo URL
+3. Re-run `node toolkit/bootstrap.js` for each tool
+4. Run `setup-external.sh` for each tool (or just git clone directly)
+5. Verify skill cloned into `~/.{tool}/skills/<name>/`
+
+**External plugin/tool-native** (already installed via tool command):
+
+1. Add entry to appropriate manifest section (`claude-plugins`, `codex-skills`, `copilot-skills`)
+2. Record version and install command
+3. No bootstrap needed — already installed by tool
+
+#### Step 4: Report
+
+```markdown
+# Skill Added: <name>
+
+| Field | Value |
+|-------|-------|
+| Type | Bundled / Agent-skill / External |
+| Source | <path or URL> |
+| Manifest | external-dependencies.yaml updated |
+| Deployed to | claude, codex, copilot |
+
+Run `/plugins status` to verify.
+```
+
+### Examples
+
+```bash
+# Skill discovered in ~/.claude/skills/ during /plugins list drift check
+/plugins add remotion-best-practices
+# → Detects in ~/.claude/skills/, no .git → copies to packages/skills/ as bundled
+
+# Skill from a public git repo
+/plugins add ui-ux-pro-max --from https://github.com/nextlevelbuilder/ui-ux-pro-max-skill
+# → Creates stub SKILL.md with external-source, adds to agent-skills manifest
+
+# Skill just installed via claude plugin install
+/plugins add code-review --type external
+# → Reads installed_plugins.json for version, adds to claude-plugins manifest
 ```
 
 ## /plugins sync
