@@ -3,9 +3,9 @@
     "version": "1.0.0",
     "description": "CLI tool for copying rule files for various AI coding tools.",
     "type": "module",
-    "main": "create-rule.js",
+    "main": "bootstrap.js",
     "scripts": {
-        "start": "node create-rule.js",
+        "start": "node bootstrap.js",
         "test": "jest"
     },
     "dependencies": {

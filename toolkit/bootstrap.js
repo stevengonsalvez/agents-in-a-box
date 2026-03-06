@@ -36,7 +36,7 @@ const TOOL_CONFIG = {
         ruleDir: 'packages',
         targetSubdir: '.claude',
         usePackagesStructure: true,
-        externalDepTypes: ['claude-plugins', 'npx-skills'],
+        externalDepTypes: ['claude-plugins', 'npx-skills', 'agent-skills'],
         packageMappings: {
             'skills': 'skills',
             'agents': 'agents',
@@ -97,7 +97,7 @@ const TOOL_CONFIG = {
         forceHomeInstall: true,
         copyClaudeMd: false,
         copySettings: false,
-        externalDepTypes: ['npx-skills', 'codex-skills'],
+        externalDepTypes: ['npx-skills', 'codex-skills', 'agent-skills'],
         packageMappings: {
             'skills': 'skills',
             'utilities/reflections': 'reflections'
@@ -150,7 +150,7 @@ const TOOL_CONFIG = {
         forceHomeInstall: true,
         copyClaudeMd: false,
         copySettings: false,
-        externalDepTypes: ['npx-skills', 'copilot-skills'],
+        externalDepTypes: ['npx-skills', 'copilot-skills', 'agent-skills'],
         packageMappings: {
             'skills': 'skills',
             'utilities/reflections': 'reflections'
@@ -332,6 +332,11 @@ const TOOL_CONFIG = {
             }
         }
     },
+};
+
+// Maps internal tool IDs to canonical names used in applies-to fields of the manifest
+const TOOL_CANONICAL_NAMES = {
+    'claude-code-4.5': 'claude',
 };
 
 const GENERAL_RULES_DIR = path.join(__dirname, 'general-rules');
@@ -518,6 +523,18 @@ function parseFrontMatter(filePath) {
     } catch {
         return {};
     }
+}
+
+function isExternalSourcedSkill(skillDir) {
+    const skillMd = path.join(skillDir, 'SKILL.md');
+    if (!fs.existsSync(skillMd)) return false;
+    const content = fs.readFileSync(skillMd, 'utf8');
+    const match = content.match(/^---([\s\S]*?)---/);
+    if (!match) return false;
+    try {
+        const fm = yaml.load(match[1]);
+        return !!(fm && fm['external-source']);
+    } catch { return false; }
 }
 
 function validateSkillFrontmatter(skillsDir) {
@@ -967,7 +984,8 @@ async function handlePackagesStructureCopy(tool, config, overrideHomeDir = null,
 
                     const claudePlugins = applicableDeps.filter(d => d._depType === 'claude-plugins');
                     const npxSkills = applicableDeps.filter(d => d._depType === 'npx-skills');
-                    const otherSkills = applicableDeps.filter(d => d._depType !== 'claude-plugins' && d._depType !== 'npx-skills');
+                    const agentSkills = applicableDeps.filter(d => d._depType === 'agent-skills');
+                    const otherSkills = applicableDeps.filter(d => d._depType !== 'claude-plugins' && d._depType !== 'npx-skills' && d._depType !== 'agent-skills');
 
                     if (claudePlugins.length > 0) {
                         scriptLines.push('echo "Installing Claude plugins..."');
@@ -990,6 +1008,32 @@ async function handlePackagesStructureCopy(tool, config, overrideHomeDir = null,
                             scriptLines.push(s.install || `npx add-skill ${s.repo}`);
                         }
                         scriptLines.push('');
+                    }
+
+                    // Filter agent-skills by applies-to field
+                    // Use canonical name so e.g. 'claude-code-4.5' matches 'claude' in applies-to
+                    const canonicalToolName = TOOL_CANONICAL_NAMES[toolName] || toolName;
+                    const relevantAgentSkills = agentSkills.filter(skill => {
+                        if (!skill['applies-to']) return true;
+                        return skill['applies-to'].includes(toolName) || skill['applies-to'].includes(canonicalToolName);
+                    });
+
+                    if (relevantAgentSkills.length > 0) {
+                        scriptLines.push('echo "Installing agent skills (git repos)..."');
+                        scriptLines.push('');
+                        for (const skill of relevantAgentSkills) {
+                            const skillDir = `"\${HOME}/${config.targetSubdir}/skills/${skill.name}"`;
+                            scriptLines.push(`# ${skill.name}${skill.purpose ? ' - ' + skill.purpose : ''}`);
+                            scriptLines.push(`SKILL_DIR=${skillDir}`);
+                            scriptLines.push(`if [ -d "\${SKILL_DIR}/.git" ]; then`);
+                            scriptLines.push(`  echo "  Updating ${skill.name}..."`);
+                            scriptLines.push(`  git -C "\${SKILL_DIR}" pull --ff-only`);
+                            scriptLines.push(`else`);
+                            scriptLines.push(`  echo "  Installing ${skill.name}..."`);
+                            scriptLines.push(`  git clone ${skill.repo} "\${SKILL_DIR}"`);
+                            scriptLines.push(`fi`);
+                            scriptLines.push('');
+                        }
                     }
 
                     if (otherSkills.length > 0) {
@@ -1047,6 +1091,9 @@ async function handlePackagesStructureCopy(tool, config, overrideHomeDir = null,
                     for (const skillPath of skillsSelected) {
                         const sourceDir = path.join(packagesDir, skillPath);
                         const skillName = skillPath.split('/')[1];
+                        if (isExternalSourcedSkill(sourceDir)) {
+                            continue; // Handled by setup-external.sh git clone
+                        }
                         const targetDir = path.join(destDir, 'skills', skillName);
                         if (fs.existsSync(sourceDir)) {
                             showProgress(`Copying skill: ${skillName}`);
@@ -1089,11 +1136,31 @@ async function handlePackagesStructureCopy(tool, config, overrideHomeDir = null,
         const targetDir = path.join(destDir, target);
 
         if (fs.existsSync(sourceDir)) {
-            showProgress(`Copying ${source} to ${target}`);
-            fs.mkdirSync(targetDir, { recursive: true });
-            const filesCopied = copyDirectoryRecursive(sourceDir, targetDir, config.excludeFiles || [], config.templateSubstitutions || {});
-            totalFilesCopied += filesCopied;
-            completeProgress(`Copied ${filesCopied} files from ${source}`);
+            // For skills, copy individually so external-sourced skills can be skipped
+            if (source === 'skills') {
+                fs.mkdirSync(targetDir, { recursive: true });
+                const skillDirs = readdirSync(sourceDir).filter(f =>
+                    statSync(path.join(sourceDir, f)).isDirectory()
+                );
+                for (const skillName of skillDirs) {
+                    const skillSrcDir = path.join(sourceDir, skillName);
+                    if (isExternalSourcedSkill(skillSrcDir)) {
+                        continue; // Handled by setup-external.sh git clone
+                    }
+                    showProgress(`Copying skill: ${skillName}`);
+                    const skillDestDir = path.join(targetDir, skillName);
+                    fs.mkdirSync(skillDestDir, { recursive: true });
+                    const filesCopied = copyDirectoryRecursive(skillSrcDir, skillDestDir, config.excludeFiles || [], config.templateSubstitutions || {});
+                    totalFilesCopied += filesCopied;
+                    completeProgress(`Copied ${filesCopied} files from skills/${skillName}`);
+                }
+            } else {
+                showProgress(`Copying ${source} to ${target}`);
+                fs.mkdirSync(targetDir, { recursive: true });
+                const filesCopied = copyDirectoryRecursive(sourceDir, targetDir, config.excludeFiles || [], config.templateSubstitutions || {});
+                totalFilesCopied += filesCopied;
+                completeProgress(`Copied ${filesCopied} files from ${source}`);
+            }
         }
     }
 

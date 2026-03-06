@@ -80,6 +80,28 @@ bundled-skills:
       - Create new skills from learnings
 
 # =============================================================================
+# AGENT SKILLS (cross-agent git repos — agentskills.io standard)
+# =============================================================================
+# Installed by bootstrap via git clone to ~/.{tool}/skills/{name}/
+# These follow the SKILL.md standard and work across Claude, Codex, Copilot.
+# Reference is committed here; actual files pulled at bootstrap time.
+agent-skills:
+  - name: ui-ux-pro-max
+    repo: https://github.com/nextlevelbuilder/ui-ux-pro-max-skill
+    version: "2.2.1"
+    applies-to: [claude, codex, copilot]
+    purpose: "UI/UX design intelligence with searchable database of styles, palettes, fonts, and UX guidelines"
+    features:
+      - 67 UI styles (glassmorphism, claymorphism, brutalism, neumorphism, etc.)
+      - 96 color palettes organized by industry
+      - 57 font pairings with Google Fonts integration
+      - 99 UX guidelines with priority ranking
+      - 25 chart types for data visualization
+      - 13 stack guidelines (React, Next.js, Vue, Svelte, Astro, Nuxt, SwiftUI, Flutter, etc.)
+      - Python search engine with --design-system flag for complete recommendations
+      - --persist flag to save hierarchical design system (MASTER.md + page overrides)
+
+# =============================================================================
 # EXTERNAL PLUGINS (Claude Code marketplace)
 # =============================================================================
 # Installed via `claude plugin install`. Tracked in ~/.claude/plugins/

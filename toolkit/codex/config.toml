@@ -7,7 +7,3 @@ project_doc_fallback_filenames = ["CLAUDE.md", "TEAM_GUIDE.md", ".agents.md"]
 # Allow larger combined guidance before truncation.
 project_doc_max_bytes = 65536
 
-# Optional: disable a skill without deleting it.
-# [[skills.config]]
-# path = "/path/to/skill"
-# enabled = false
