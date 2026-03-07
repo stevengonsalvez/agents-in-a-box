@@ -275,6 +275,63 @@ fi
 exit 0
 ```
 
+## Multi-Tool Fallback
+
+Don't waste time debugging tool limits — switch immediately.
+
+```
+Claude Code (primary)
+    ↓ capped / erroring / stuck after 3 retries
+Codex CLI (secondary)
+    ↓ erroring / unavailable
+Manual intervention
+```
+
+### Pre-Spawn Availability Check
+
+```bash
+# Check Claude Code
+claude --print "reply with OK" --dangerously-skip-permissions 2>&1 | \
+  grep -qi "rate.limit\|capped\|exceeded\|429" && echo "CC_CAPPED" || echo "CC_OK"
+
+# Check Codex
+codex --help &>/dev/null && echo "CODEX_OK" || echo "CODEX_MISSING"
+```
+
+### Fallback Spawning
+
+If Claude Code is unavailable, spawn with Codex instead:
+
+```bash
+# Instead of: claude --dangerously-skip-permissions
+# Use:        codex --yolo -m gpt-5.3-codex
+
+tmux new-session -d -s "$SESSION" -c "$WORK_DIR"
+tmux send-keys -t "$SESSION" "codex --yolo -m gpt-5.3-codex" C-m
+sleep 2
+tmux send-keys -t "$SESSION" -l "$TASK"
+tmux send-keys -t "$SESSION" C-m
+```
+
+### Mid-Session Fallback
+
+If Claude Code hits rate limits during a session:
+
+```bash
+# Kill the stuck session
+tmux kill-session -t "$SESSION"
+
+# Respawn with Codex, same worktree
+SESSION="codex-${SESSION#agent-}"  # rename prefix to match spawn convention
+tmux new-session -d -s "$SESSION" -c "$WORK_DIR"
+tmux send-keys -t "$SESSION" "codex --yolo -m gpt-5.3-codex" C-m
+sleep 2
+tmux send-keys -t "$SESSION" -l "$TASK"
+tmux send-keys -t "$SESSION" C-m
+```
+
+---
+
 ## Notes
 
 - Default agent is Claude Code with `--dangerously-skip-permissions`

@@ -361,9 +361,105 @@ This skill is used by:
 - `/spawn-agent` - Creates sessions that this skill monitors
 - `/start-local`, `/start-ios`, `/start-android` - Create dev environments
 
+---
+
+## Steering Protocol
+
+Beyond monitoring, use these patterns to actively manage coding sessions.
+
+### Session Naming Convention
+
+Use consistent names so sessions are self-documenting and parseable:
+
+```
+{tool}-{scope}-{id}[-{desc}]
+```
+
+| Segment | Values | Example |
+|---------|--------|---------|
+| `tool` | `cc` (Claude Code), `codex`, `pi` | `cc` |
+| `scope` | `issue`, `fix`, `pr`, `feature`, `task` | `issue` |
+| `id` | Issue number, PR number, or short identifier | `174` |
+| `desc` | Optional short slug | `auth-refactor` |
+
+**Examples:** `cc-issue-174-auth-refactor`, `codex-fix-1520`, `cc-pr-186`
+
+### Monitoring Signals
+
+When monitoring a coding session, look for these signals:
+
+| Signal | Action |
+|--------|--------|
+| Model is generating code | Let it work |
+| "I'll now..." planning text | Verify approach is correct |
+| Error/stack trace repeating | Intervene (steer) |
+| Idle / waiting for input | Check if stuck or done |
+| "I've completed..." summary | Move to verify phase |
+| Session has exited | Check output / PR status |
+
+### Steering (when intervention is needed)
+
+```bash
+# Correct course
+tmux send-keys -t "${SESSION}" \
+  "STOP. You're going the wrong direction. <specific correction>" Enter
+
+# Unstick
+tmux send-keys -t "${SESSION}" \
+  "You seem stuck. Try: <specific suggestion>" Enter
+
+# Add context
+tmux send-keys -t "${SESSION}" \
+  "Additional context: <file path, pattern, constraint>" Enter
+
+# Abort
+tmux send-keys -t "${SESSION}" "/exit" Enter
+```
+
+### Steering Rules
+1. **Be specific.** "Fix the types" is bad. "Change `costTotal` to `v.optional(v.float64())`" is good.
+2. **Don't over-steer.** Interruptions reset context. If on track, let it work.
+3. **One correction at a time.** Multiple simultaneous corrections confuse the model.
+4. **Stuck 3+ times on same issue?** Kill session, rethink approach, respawn with better prompt.
+
+### Completion Detection
+
+Detect session state from `capture-pane` output:
+
+```bash
+OUTPUT=$(tmux capture-pane -t "$SESSION" -p | tail -30)
+
+# Completion signals
+echo "$OUTPUT" | grep -qE "I've completed|changes have been|PR.*created|committed.*pushed" && echo "DONE"
+
+# Error signals
+echo "$OUTPUT" | grep -qE "Error:|FATAL|panic|OOM|killed|context.*exhausted" && echo "ERROR"
+
+# Stuck signals (same error repeating 3+ times)
+echo "$OUTPUT" | grep -iE "error|fail|fatal|panic" | sort | uniq -c | sort -rn | head -1 | awk '$1 >= 3 {print "STUCK"}'
+```
+
+### Session Health Check
+
+Periodically check for stale sessions:
+
+```bash
+tmux list-sessions -F '#{session_name}' 2>/dev/null | while IFS= read -r s; do
+  [ -z "$s" ] && continue
+  LAST_ACTIVITY=$(tmux display -t "$s" -p '#{session_activity}')
+  IDLE_SECS=$(( $(date +%s) - LAST_ACTIVITY ))
+  if [ $IDLE_SECS -gt 3600 ]; then
+    echo "⚠️ $s idle for ${IDLE_SECS}s — consider cleanup"
+  fi
+done
+```
+
+---
+
 ## Notes
 
-- This skill is read-only, never modifies sessions
+- This skill is read-only (monitoring/discovery), never modifies sessions
+- Steering commands above are for manual intervention when needed
 - Safe to run anytime without side effects
 - Provides snapshot of current state
 - Can be cached for performance (TTL: 10 seconds)
