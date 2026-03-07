@@ -322,7 +322,7 @@ If Claude Code hits rate limits during a session:
 tmux kill-session -t "$SESSION"
 
 # Respawn with Codex, same worktree
-SESSION="codex-${SESSION#cc-}"  # rename prefix
+SESSION="codex-${SESSION#agent-}"  # rename prefix to match spawn convention
 tmux new-session -d -s "$SESSION" -c "$WORK_DIR"
 tmux send-keys -t "$SESSION" "codex --yolo -m gpt-5.3-codex" C-m
 sleep 2
