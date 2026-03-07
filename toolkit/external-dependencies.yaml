@@ -13,7 +13,7 @@
 # =============================================================================
 
 version: "1.0.0"
-updated: "2026-03-06"
+updated: "2026-03-07"
 
 # =============================================================================
 # BUNDLED SKILLS (included in toolkit/packages/skills/)
@@ -122,6 +122,18 @@ agent-skills:
       - 13 stack guidelines (React, Next.js, Vue, Svelte, Astro, Nuxt, SwiftUI, Flutter, etc.)
       - Python search engine with --design-system flag for complete recommendations
       - --persist flag to save hierarchical design system (MASTER.md + page overrides)
+
+  - name: notebooklm
+    repo: https://github.com/PleasePrompto/notebooklm-skill
+    applies-to: [claude]
+    purpose: "Query Google NotebookLM notebooks for source-grounded, citation-backed answers via browser automation"
+    features:
+      - Browser automation with Patchright for NotebookLM interaction
+      - Persistent Google authentication
+      - Notebook library management with metadata and topic search
+      - Stateless query model (fresh browser session per question)
+      - Follow-up question mechanism for comprehensive answers
+      - Python scripts with auto-managed .venv environment
 
 # =============================================================================
 # EXTERNAL PLUGINS (Claude Code marketplace)
