@@ -8,9 +8,12 @@ For search queries, uses only_need_context=True so the calling Claude
 session can synthesize results itself.
 """
 
+import fcntl
 import logging
 import shutil
+import time
 from collections import deque
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional, List, Tuple
 
@@ -23,6 +26,25 @@ _install_graspologic_shim()
 from entity_store import COMPLETION_DELIMITER
 
 logger = logging.getLogger(__name__)
+
+LOCK_TIMEOUT_SECS = 300  # 5 min max wait (reindex can be slow)
+
+
+def _flock_with_timeout(fd, mode, timeout):
+    """Acquire an fcntl.flock with a polling timeout."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            fcntl.flock(fd, mode | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise GraphEngineError(
+                    f"Could not acquire lock within {timeout}s. "
+                    "Another learnings process may be running (reindex?)."
+                )
+            time.sleep(0.2)
+
 
 # Minimal placeholder entity for docs without sidecars.
 # Ensures nano-graphrag's insert() doesn't abort before persisting
@@ -48,6 +70,25 @@ class LearningsGraphEngine:
         self._model = None
         self._pending_entities: Optional[str] = None
         self._entity_queue: deque = deque()
+
+    @contextmanager
+    def _locked(self, exclusive=True):
+        """Advisory file lock around GraphRAG operations.
+
+        Exclusive (LOCK_EX) for writes, shared (LOCK_SH) for reads.
+        Forces graph reload from disk so we pick up changes from other processes.
+        Lock is auto-released by the OS if the process exits or crashes.
+        """
+        lock_path = self._cache_dir / ".graphrag.lock"
+        lock_fd = open(lock_path, "w")
+        mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+        try:
+            _flock_with_timeout(lock_fd, mode, timeout=LOCK_TIMEOUT_SECS)
+            self._graph = None  # Force reload — another process may have written
+            yield
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            lock_fd.close()
 
     def _load_embedding_model(self):
         """Lazy-load the sentence transformer model."""
@@ -170,13 +211,14 @@ class LearningsGraphEngine:
                 If provided, the passthrough LLM returns these instead of
                 calling an external API.
         """
-        self._init_graph()
-        self._pending_entities = entities_formatted
-        try:
-            self._graph.insert(text)
-        finally:
-            self._pending_entities = None
-            self._entity_queue.clear()
+        with self._locked(exclusive=True):
+            self._init_graph()
+            self._pending_entities = entities_formatted
+            try:
+                self._graph.insert(text)
+            finally:
+                self._pending_entities = None
+                self._entity_queue.clear()
 
     def insert_documents_batch(
         self,
@@ -195,22 +237,23 @@ class LearningsGraphEngine:
         if not docs_with_entities:
             return
 
-        self._init_graph()
+        with self._locked(exclusive=True):
+            self._init_graph()
 
-        # Build entity queue - one entry per document, in order.
-        # nano-graphrag processes chunks in document order, so the
-        # passthrough LLM pops from this queue on each extraction call.
-        self._entity_queue = deque(
-            entities for _, entities in docs_with_entities
-        )
+            # Build entity queue - one entry per document, in order.
+            # nano-graphrag processes chunks in document order, so the
+            # passthrough LLM pops from this queue on each extraction call.
+            self._entity_queue = deque(
+                entities for _, entities in docs_with_entities
+            )
 
-        texts = [text for text, _ in docs_with_entities]
+            texts = [text for text, _ in docs_with_entities]
 
-        try:
-            self._graph.insert(texts)
-        finally:
-            self._entity_queue.clear()
-            self._pending_entities = None
+            try:
+                self._graph.insert(texts)
+            finally:
+                self._entity_queue.clear()
+                self._pending_entities = None
 
     def search(
         self,
@@ -230,43 +273,46 @@ class LearningsGraphEngine:
         Returns:
             Search results as a string.
         """
-        self._init_graph()
+        with self._locked(exclusive=False):
+            self._init_graph()
 
-        from nano_graphrag import QueryParam
+            from nano_graphrag import QueryParam
 
-        param = QueryParam(mode=mode, only_need_context=only_context)
-        result = self._graph.query(query, param=param)
-        return result if result else ""
+            param = QueryParam(mode=mode, only_need_context=only_context)
+            result = self._graph.query(query, param=param)
+            return result if result else ""
 
     def clear_cache(self):
         """Clear the graph cache for full rebuild."""
-        if self._cache_dir.exists():
-            shutil.rmtree(self._cache_dir)
-            self._cache_dir.mkdir(parents=True, exist_ok=True)
-        self._graph = None
+        with self._locked(exclusive=True):
+            if self._cache_dir.exists():
+                shutil.rmtree(self._cache_dir)
+                self._cache_dir.mkdir(parents=True, exist_ok=True)
+            self._graph = None
 
     def get_stats(self) -> dict:
         """Get graph statistics."""
-        stats = {
-            "cache_dir": str(self._cache_dir),
-            "cache_exists": self._cache_dir.exists(),
-            "entity_count": 0,
-            "relationship_count": 0,
-        }
+        with self._locked(exclusive=False):
+            stats = {
+                "cache_dir": str(self._cache_dir),
+                "cache_exists": self._cache_dir.exists(),
+                "entity_count": 0,
+                "relationship_count": 0,
+            }
 
-        if not self._cache_dir.exists():
+            if not self._cache_dir.exists():
+                return stats
+
+            # Try to get graph-level stats from the stored graph
+            graph_file = self._cache_dir / "graph_chunk_entity_relation.graphml"
+            if graph_file.exists():
+                try:
+                    import networkx as nx
+
+                    G = nx.read_graphml(str(graph_file))
+                    stats["entity_count"] = G.number_of_nodes()
+                    stats["relationship_count"] = G.number_of_edges()
+                except Exception as e:
+                    logger.debug(f"Could not read graph stats: {e}")
+
             return stats
-
-        # Try to get graph-level stats from the stored graph
-        graph_file = self._cache_dir / "graph_chunk_entity_relation.graphml"
-        if graph_file.exists():
-            try:
-                import networkx as nx
-
-                G = nx.read_graphml(str(graph_file))
-                stats["entity_count"] = G.number_of_nodes()
-                stats["relationship_count"] = G.number_of_edges()
-            except Exception as e:
-                logger.debug(f"Could not read graph stats: {e}")
-
-        return stats
