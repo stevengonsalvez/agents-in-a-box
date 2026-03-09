@@ -23,13 +23,13 @@ from rich.panel import Panel
 
 console = Console(stderr=True)
 
-DEFAULT_REPO_PATH = Path.home() / ".claude" / "global-learnings"
+DEFAULT_REPO_PATH = Path.home() / ".learnings"
 DOCUMENTS_DIR = "documents"
 CACHE_DIR = "nano_graphrag_cache"
 
 
 def get_repo_path() -> Path:
-    env_path = os.environ.get("GLOBAL_LEARNINGS_PATH")
+    env_path = os.environ.get("LEARNINGS_HOME")
     if env_path:
         return Path(env_path)
     return DEFAULT_REPO_PATH
@@ -37,7 +37,9 @@ def get_repo_path() -> Path:
 
 def ensure_repo_exists():
     repo = get_repo_path()
-    (repo / DOCUMENTS_DIR).mkdir(parents=True, exist_ok=True)
+    (repo / DOCUMENTS_DIR / "learnings").mkdir(parents=True, exist_ok=True)
+    (repo / DOCUMENTS_DIR / "episodes").mkdir(parents=True, exist_ok=True)
+    (repo / DOCUMENTS_DIR / "clusters").mkdir(parents=True, exist_ok=True)
     (repo / CACHE_DIR).mkdir(parents=True, exist_ok=True)
 
 
@@ -70,7 +72,7 @@ def get_all_documents() -> List[Dict[str, Any]]:
     docs_dir = repo / DOCUMENTS_DIR
     documents = []
 
-    for doc_path in sorted(docs_dir.glob("*.md")):
+    for doc_path in sorted(docs_dir.rglob("*.md")):
         try:
             content = doc_path.read_text()
             frontmatter, body = parse_frontmatter(content)
@@ -95,7 +97,7 @@ def _get_graph_engine():
 
 
 @click.group()
-@click.version_option(version="2.0.0")
+@click.version_option(version="3.0.0")
 def cli():
     """Global Learnings CLI - Knowledge base with GraphRAG search."""
     ensure_repo_exists()
@@ -213,7 +215,7 @@ def add(file_path: str, entities: Optional[str]):
     # Generate document ID and copy to repo
     doc_id = generate_document_id(frontmatter["title"])
     repo = get_repo_path()
-    dest = repo / DOCUMENTS_DIR / f"{doc_id}.md"
+    dest = repo / DOCUMENTS_DIR / "learnings" / f"{doc_id}.md"
 
     if dest.exists():
         if not click.confirm(f"Document {dest.name} exists. Overwrite?"):
@@ -248,6 +250,29 @@ def add(file_path: str, entities: Optional[str]):
     except Exception as e:
         console.print(f"[yellow]Warning: Graph indexing failed: {e}[/yellow]")
         console.print("[dim]Document saved. Run 'learnings reindex' to retry.[/dim]")
+
+    # Trigger QMD re-embedding (graceful if qmd not installed)
+    if shutil.which("qmd"):
+        try:
+            import subprocess
+
+            subprocess.run(["qmd", "embed"], capture_output=True)
+            console.print("[green]QMD embeddings updated[/green]")
+        except Exception as e:
+            console.print(f"[yellow]Warning: QMD embed failed: {e}[/yellow]")
+
+    # Auto-commit to git
+    try:
+        import subprocess
+
+        subprocess.run(["git", "-C", str(repo), "add", "-A"], capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "commit", "-m", f"Add learning: {frontmatter['title']}", "--quiet"],
+            capture_output=True,
+        )
+        console.print("[green]Changes committed to git[/green]")
+    except Exception as e:
+        console.print(f"[yellow]Warning: Git commit failed: {e}[/yellow]")
 
     console.print(f"[green]Added:[/green] {dest}")
     console.print(f"[dim]Title: {frontmatter['title']}[/dim]")
@@ -330,14 +355,16 @@ def reindex(force: bool):
 def init():
     """Initialize the global learnings repository.
 
-    Creates the directory structure at ~/.claude/global-learnings/
+    Creates the directory structure at ~/.learnings/ (or LEARNINGS_HOME)
     and initializes a git repository.
     """
     repo = get_repo_path()
 
     console.print(f"[bold]Initializing global learnings at {repo}[/bold]")
 
-    (repo / DOCUMENTS_DIR).mkdir(parents=True, exist_ok=True)
+    (repo / DOCUMENTS_DIR / "learnings").mkdir(parents=True, exist_ok=True)
+    (repo / DOCUMENTS_DIR / "episodes").mkdir(parents=True, exist_ok=True)
+    (repo / DOCUMENTS_DIR / "clusters").mkdir(parents=True, exist_ok=True)
     (repo / CACHE_DIR).mkdir(parents=True, exist_ok=True)
 
     # Initialize git if not already a repo
@@ -366,6 +393,9 @@ def init():
 
     console.print(f"[green]Ready.[/green]")
     console.print(f"[dim]Documents: {repo / DOCUMENTS_DIR}[/dim]")
+    console.print(f"[dim]  learnings/: Learning documents[/dim]")
+    console.print(f"[dim]  episodes/:  Session episodes[/dim]")
+    console.print(f"[dim]  clusters/:  Clustered patterns[/dim]")
     console.print(f"[dim]Graph cache: {repo / CACHE_DIR}[/dim]")
 
 
@@ -483,6 +513,86 @@ def stats():
         conf_table.add_row(conf, str(count))
 
     console.print(conf_table)
+
+
+@cli.command()
+@click.option("--output", "-o", default=None, help="Output HTML file path (default: graph_viz.html in repo)")
+@click.option("--no-open", is_flag=True, help="Don't auto-open in browser")
+def visualize(output, no_open):
+    """Generate an interactive visualization of the knowledge graph."""
+    import networkx as nx
+
+    repo = get_repo_path()
+    graph_file = repo / CACHE_DIR / "graph_chunk_entity_relation.graphml"
+
+    if not graph_file.exists():
+        console.print("[red]No graph found.[/red] Run 'learnings reindex' first.")
+        raise SystemExit(1)
+
+    try:
+        from pyvis.network import Network
+    except ImportError:
+        console.print("[red]pyvis not installed.[/red] Run: pip install pyvis")
+        raise SystemExit(1)
+
+    G = nx.read_graphml(str(graph_file))
+    console.print(f"Graph loaded: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
+
+    if G.number_of_nodes() == 0:
+        console.print("[yellow]Graph is empty — nothing to visualize.[/yellow]")
+        return
+
+    TYPE_COLORS = {
+        "technology": "#4a90d9",
+        "pattern": "#50c878",
+        "function": "#f5a623",
+        "concept": "#9b59b6",
+        "tool": "#e74c3c",
+    }
+    DEFAULT_COLOR = "#888888"
+
+    net = Network(
+        height="950px",
+        width="100%",
+        bgcolor="#1a1a2e",
+        font_color="#e0e0e0",
+        notebook=False,
+        directed=G.is_directed(),
+    )
+
+    for node_id, attrs in G.nodes(data=True):
+        label = attrs.get("entity_id", str(node_id))[:40]
+        description = attrs.get("description", "")[:300]
+        entity_type = attrs.get("entity_type", "unknown").lower()
+        color = TYPE_COLORS.get(entity_type, DEFAULT_COLOR)
+        net.add_node(
+            node_id,
+            label=label,
+            title=f"{label}\nType: {entity_type}\n{description}",
+            color=color,
+        )
+
+    for u, v, attrs in G.edges(data=True):
+        weight = float(attrs.get("weight", 1.0))
+        keywords = attrs.get("keywords", attrs.get("relation_type", ""))
+        net.add_edge(u, v, title=keywords, width=max(0.5, weight * 0.5))
+
+    net.set_options("""{
+      "physics": {
+        "forceAtlas2Based": { "gravitationalConstant": -50, "springLength": 150 },
+        "solver": "forceAtlas2Based"
+      },
+      "nodes": { "shape": "dot", "size": 14 },
+      "edges": { "smooth": { "type": "continuous" } }
+    }""")
+
+    output_path = Path(output) if output else repo / "graph_viz.html"
+    net.show(str(output_path), notebook=False)
+    console.print(f"[green]Saved to {output_path}[/green]")
+
+    if not no_open:
+        import webbrowser
+        webbrowser.open(f"file://{output_path.resolve()}")
 
 
 if __name__ == "__main__":

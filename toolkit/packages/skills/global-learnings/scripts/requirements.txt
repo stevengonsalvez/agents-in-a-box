@@ -35,3 +35,6 @@ tenacity>=8.0
 hnswlib>=0.7.0
 xxhash>=3.0
 neo4j>=5.0
+
+# Interactive graph visualization (lazy-loaded by `learnings visualize`)
+pyvis>=0.3.0

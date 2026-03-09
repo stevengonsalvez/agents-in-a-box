@@ -25,6 +25,7 @@ setup(
         "hnswlib>=0.7.0",
         "xxhash>=3.0",
         "neo4j>=5.0",
+        "pyvis>=0.3.0",
     ],
     entry_points={
         "console_scripts": [
