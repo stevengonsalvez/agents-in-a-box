@@ -1,0 +1,5 @@
+pytest>=7.0
+pyyaml>=6.0
+networkx>=3.0
+click>=8.0
+rich>=12.0

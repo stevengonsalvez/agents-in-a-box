@@ -6,8 +6,9 @@
 
 set -euo pipefail
 
+LEARNINGS_HOME="${LEARNINGS_HOME:-$HOME/.learnings}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(dirname "$SCRIPT_DIR")"
+REPO_DIR="$LEARNINGS_HOME"
 VENV_DIR="$REPO_DIR/.venv"
 CLI_SCRIPT="$SCRIPT_DIR/learnings_cli.py"
 REQUIREMENTS="$SCRIPT_DIR/requirements.txt"
@@ -67,7 +68,10 @@ ensure_model() {
 auto_init() {
     # Create repo directory structure if missing
     if [[ ! -d "$REPO_DIR/documents" ]]; then
-        mkdir -p "$REPO_DIR/documents" "$REPO_DIR/nano_graphrag_cache"
+        mkdir -p "$REPO_DIR/documents/learnings" \
+                 "$REPO_DIR/documents/episodes" \
+                 "$REPO_DIR/documents/clusters" \
+                 "$REPO_DIR/nano_graphrag_cache"
     fi
     # Initialize git repo if missing
     if [[ ! -d "$REPO_DIR/.git" ]]; then
@@ -99,4 +103,5 @@ case "${1:-}" in
         ;;
 esac
 
+export LEARNINGS_HOME
 exec "$VENV_DIR/bin/python" "$CLI_SCRIPT" "$@"

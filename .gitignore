@@ -50,3 +50,5 @@ worktrees/
 #   node_modules/
 #   .turbo/
 .codex/session/current-session.yaml
+__pycache__/
+*.pyc

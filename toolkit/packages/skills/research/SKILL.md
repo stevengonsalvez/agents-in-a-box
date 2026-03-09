@@ -53,16 +53,21 @@ Create multiple Task agents to research different aspects concurrently. Think de
 **E. Learnings Research (ALWAYS do this FIRST):**
 
 Before diving into codebase research, check if we've solved similar problems before.
+Use CLI tools (no MCP required -- works with any AI coding agent).
+
+**Priority order (all via CLI):**
 
 ```bash
-# Search local docs/solutions/ for relevant past learnings
-~/.claude/utils/search-learnings.sh "[query keywords]"
+LEARNINGS_HOME="${LEARNINGS_HOME:-$HOME/.learnings}"
 
-# Search with category filter
-~/.claude/utils/search-learnings.sh -c build-errors "[error keywords]"
+# 1. QMD hybrid search (best quality - BM25 + vector + LLM reranking)
+qmd query --collection learnings --json "[query keywords]"
 
-# Search with tag filter
-~/.claude/utils/search-learnings.sh -t rust -t async "[query]"
+# 2. GraphRAG entity traversal (finds related concepts via graph)
+"$LEARNINGS_HOME/cli/learnings" search "[query]" --mode local --format json
+
+# 3. Fallback text matching (grep-based, always available)
+bash "$(dirname "$0")/../scripts/search-learnings.sh" "[query keywords]"
 ```
 
 **What to Search:**
@@ -82,30 +87,13 @@ Always check `docs/solutions/patterns/critical-patterns.md` for patterns that ap
 
 ```
 Task: "Search past learnings for [topic]"
-- Run search-learnings.sh with relevant keywords
-- Search by symptoms, tags, category
+- Run QMD query first for best hybrid search
+- Fall back to GraphRAG CLI for entity graph traversal
+- Fall back to search-learnings.sh for text matching
 - Return key_insight field prominently
 - Local results take priority over global
 - Check critical-patterns.md for applicable patterns
 ```
-
-**If Global Learnings Available:**
-When a `global-learnings` repository is cloned (usually at `~/.claude/global-learnings/`):
-```bash
-# Graph-based search (finds related concepts via graph traversal)
-learnings search "[query]" --mode local --format json
-
-# Vector-only search (faster, exact symptom matching)
-learnings search "[error message]" --mode naive --format json
-
-# Get critical patterns for language/domain
-learnings critical-patterns --language rust --domain backend
-```
-
-Search modes:
-- `naive`: Vector similarity only (fast, good for exact error messages)
-- `local`: Entity neighborhood search (finds related concepts via graph)
-- `global`: Community-based search (broad patterns across all learnings)
 
 ---
 
