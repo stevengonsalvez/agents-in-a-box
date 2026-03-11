@@ -28,6 +28,26 @@
 
 {{/each}}
 
+## Proposed Knowledge Notes
+
+{{#each KNOWLEDGE_NOTES}}
+### Knowledge {{index}}: {{title}}
+
+**Category**: {{category}}
+**Confidence**: {{confidence}}
+**Scope**: {{scope}}
+**Key Insight**: {{key_insight}}
+
+**Will create**:
+- `docs/solutions/{{category}}/{{filename}}.md`
+- `docs/solutions/{{category}}/{{filename}}.entities.yaml`
+- Indexed globally via `learnings add` → immediately searchable
+
+**Entities** ({{entity_count}} entities, {{relationship_count}} relationships):
+{{entity_preview}}
+
+{{/each}}
+
 ## Proposed New Skills
 
 {{#each NEW_SKILLS}}
@@ -78,11 +98,22 @@ Agent updates:
 {{/each}}
 {{/if}}
 
+{{#if KNOWLEDGE_NOTES}}
+Knowledge notes:
+{{#each KNOWLEDGE_NOTES}}
+- {{title}} ({{category}})
+{{/each}}
+{{/if}}
+
 {{#if NEW_SKILLS}}
 New skills:
 {{#each NEW_SKILLS}}
 - {{skill_name}}: {{brief_description}}
 {{/each}}
+{{/if}}
+
+{{#if EPISODE_NOTE}}
+Episode: {{EPISODE_ID}}
 {{/if}}
 
 Extracted: {{TOTAL_SIGNALS}} signals ({{HIGH_COUNT}} high, {{MEDIUM_COUNT}} medium, {{LOW_COUNT}} low confidence)
@@ -95,5 +126,7 @@ Apply these changes?
 - `N` - Discard all changes
 - `modify` - Let me adjust specific changes
 - `1,3` - Apply only agent changes 1 and 3
+- `k1,k2` - Apply only knowledge notes 1 and 2
 - `s1,s2` - Apply only skills 1 and 2
+- `all-knowledge` - Apply all knowledge notes, skip others
 - `all-skills` - Apply all skills, skip agent updates

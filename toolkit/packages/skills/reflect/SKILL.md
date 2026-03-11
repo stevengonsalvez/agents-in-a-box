@@ -120,6 +120,28 @@ See [classification_rules.md](references/classification_rules.md) for full table
 - Scope auto-detection (project/domain/universal)
 - Skill-worthy check criteria
 
+**Route each signal to the correct output:**
+
+| Signal characteristic | Route to | Why |
+|-----------------------|----------|-----|
+| Behavioral correction ("always do X", "never Y") | Agent file diff | Permanent rule change |
+| Reusable fix, workaround, pattern, technique | Knowledge note | Needs semantic search for future discovery |
+| Project-specific config, path, convention | `.agents/MEMORY.md` | Quick-reference, no search needed |
+| Non-trivial debugging insight with error messages | Knowledge note | Others will search for those errors |
+| Domain term, business rule | `.agents/MEMORY.md` | Project context |
+| Recurring bug with generalizable fix | Knowledge note + possibly new skill | Broadest reuse |
+
+**Knowledge Note criteria** (creates searchable docs/solutions/ + global index):
+- Reusable beyond this specific project
+- Non-obvious fix, workaround, or pattern
+- Has identifiable entities (technologies, errors, functions)
+- Someone searching for the error/symptom should find this
+
+**Memory-only criteria** (.agents/MEMORY.md):
+- Project-specific config, paths, conventions
+- Quick-reference facts that don't need semantic search
+- Low confidence signals awaiting validation
+
 ### Step 3: CHECK for Existing Learnings (De-duplication)
 
 Before generating new content, check for duplicates:
@@ -189,7 +211,22 @@ types, extraction guidelines, and sidecar format.
 #### Episode Note (Auto-created, No Approval Needed)
 
 Auto-create an episode note using [assets/episode_template.md](assets/episode_template.md).
-These are raw session snapshots providing provenance — no user approval needed.
+
+**Write to `$LEARNINGS_HOME/documents/episodes/{YYYY-MM-DD}/ep-{YYYYMMDD}-{hash6}.md`**
+
+Do NOT write to `{{TOOL_DIR}}/reflections/` — that was a dead-end location.
+Episodes go directly to the global knowledge base where they are searchable.
+
+The episode must include required frontmatter fields (`title`, `category: session-reflections`,
+`key_insight`) so it passes `get_all_documents()` frontmatter validation.
+
+Index immediately for search:
+```bash
+LEARNINGS_CLI="$LEARNINGS_HOME/cli/learnings"
+if [[ -x "$LEARNINGS_CLI" ]]; then
+    "$LEARNINGS_CLI" add "$LEARNINGS_HOME/documents/episodes/{date}/ep-{date}-{hash}.md"
+fi
+```
 
 #### Project-Scoped Output
 
@@ -332,18 +369,20 @@ See [consolidate_workflow.md](references/consolidate_workflow.md) for the full 9
 |-------|----------|
 | Project memory | `.agents/MEMORY.md` (200 lines max) |
 | Project knowledge | `docs/solutions/{category}/{name}.md` + `.entities.yaml` |
-| Project reflections | `{{TOOL_DIR}}/reflections/` |
-| Global knowledge | `$LEARNINGS_HOME/documents/learnings/` |
-| Global episodes | `$LEARNINGS_HOME/documents/episodes/` |
+| Global knowledge | `$LEARNINGS_HOME/documents/learnings/` (via `learnings add`) |
+| Global episodes | `$LEARNINGS_HOME/documents/episodes/` (via `learnings add`) |
 | Global metrics | `$LEARNINGS_HOME/metrics.yaml` |
 
 ## Memory Routing
 
-- **Behavioral corrections** → Agent file
-- **Solved problems** → Knowledge note (`docs/solutions/`) + global KB
-- **Project-specific gotchas** → `.agents/MEMORY.md` + knowledge note
-- **Recurring bugs** → New skill OR knowledge note
-- **LOW confidence + project-specific** → prefer MEMORY.md over agent files
+| Signal | Target | Immediately searchable? |
+|--------|--------|------------------------|
+| Behavioral corrections | Agent file | N/A (loaded as rules) |
+| Reusable knowledge (fix, pattern, technique) | Knowledge note → `docs/solutions/` + `learnings add` | YES |
+| Session context & provenance | Episode → `$LEARNINGS_HOME/documents/episodes/` + `learnings add` | YES |
+| Project-specific gotchas | `.agents/MEMORY.md` + knowledge note | Partial (memory: context window, note: full search) |
+| Recurring bugs | New skill OR knowledge note | YES |
+| LOW confidence + project-specific | `.agents/MEMORY.md` only | No (context window only) |
 
 ## Safety Guardrails
 
