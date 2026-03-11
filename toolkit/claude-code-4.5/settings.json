@@ -1,7 +1,8 @@
 {
   "env": {
     "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "80",
-    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+    "ECC_HOOK_PROFILE": "standard"
   },
   "permissions": {
     "allow": [
@@ -35,6 +36,46 @@
         ]
       }
     ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run ~/.claude/hooks/dev_server_tmux.py"
+          }
+        ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run ~/.claude/hooks/pre_tool_use.py"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run ~/.claude/hooks/ts_check.py"
+          }
+        ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run ~/.claude/hooks/post_tool_use.py"
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "matcher": "",
@@ -42,6 +83,17 @@
           {
             "type": "command",
             "command": "uv run ~/.claude/hooks/stop.py --chat"
+          }
+        ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run ~/.claude/hooks/cost_tracker.py",
+            "async": true,
+            "timeout": 10
           }
         ]
       }
