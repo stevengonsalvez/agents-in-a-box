@@ -253,9 +253,14 @@ const TOOL_CONFIG = {
         ruleDir: 'gemini',
         targetSubdir: '.gemini',
         usePackagesStructure: true,
+        forceHomeInstall: true,
+        copyClaudeMd: false,
+        copySettings: false,
+        externalDepTypes: ['npx-skills', 'agent-skills'],
         packageMappings: {
             'skills': 'skills',
             'agents': 'agents',
+            'utilities/utils': 'utils',
             'utilities/hooks': 'hooks',
             'utilities/output-styles': 'output-styles',
             'utilities/reflections': 'reflections'
@@ -265,15 +270,39 @@ const TOOL_CONFIG = {
         templateSubstitutions: {
             '**/*.md': {
                 'TOOL_DIR': '.gemini',
-                'HOME_TOOL_DIR': '.gemini'
+                'HOME_TOOL_DIR': '~/.gemini'
             },
             '**/*.sh': {
                 'TOOL_DIR': '.gemini',
-                'HOME_TOOL_DIR': '.gemini'
+                'HOME_TOOL_DIR': '~/.gemini'
             },
             '**/*.py': {
                 'TOOL_DIR': '.gemini',
-                'HOME_TOOL_DIR': '.gemini'
+                'HOME_TOOL_DIR': '~/.gemini'
+            },
+            '**/*.js': {
+                'TOOL_DIR': '.gemini',
+                'HOME_TOOL_DIR': '~/.gemini'
+            },
+            '**/*.ts': {
+                'TOOL_DIR': '.gemini',
+                'HOME_TOOL_DIR': '~/.gemini'
+            },
+            '**/*.json': {
+                'TOOL_DIR': '.gemini',
+                'HOME_TOOL_DIR': '~/.gemini'
+            },
+            '**/*.yaml': {
+                'TOOL_DIR': '.gemini',
+                'HOME_TOOL_DIR': '~/.gemini'
+            },
+            '**/*.yml': {
+                'TOOL_DIR': '.gemini',
+                'HOME_TOOL_DIR': '~/.gemini'
+            },
+            '**/*.toml': {
+                'TOOL_DIR': '.gemini',
+                'HOME_TOOL_DIR': '~/.gemini'
             }
         }
     },

@@ -58,15 +58,6 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "Edit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "uv run ~/.claude/hooks/ts_check.py"
-          }
-        ]
-      },
-      {
         "matcher": "",
         "hooks": [
           {

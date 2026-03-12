@@ -111,7 +111,7 @@ agent-skills:
   - name: ui-ux-pro-max
     repo: https://github.com/nextlevelbuilder/ui-ux-pro-max-skill
     version: "2.2.1"
-    applies-to: [claude, codex, copilot]
+    applies-to: [claude, codex, copilot, gemini]
     purpose: "UI/UX design intelligence with searchable database of styles, palettes, fonts, and UX guidelines"
     features:
       - 67 UI styles (glassmorphism, claymorphism, brutalism, neumorphism, etc.)
@@ -125,7 +125,7 @@ agent-skills:
 
   - name: notebooklm
     repo: https://github.com/PleasePrompto/notebooklm-skill
-    applies-to: [claude, codex, copilot]
+    applies-to: [claude, codex, copilot, gemini]
     purpose: "Query Google NotebookLM notebooks for source-grounded, citation-backed answers via browser automation"
     features:
       - Browser automation with Patchright for NotebookLM interaction
