@@ -259,7 +259,7 @@ const TOOL_CONFIG = {
         externalDepTypes: ['npx-skills', 'agent-skills'],
         packageMappings: {
             'skills': 'skills',
-            'agents': 'agents',
+            '../gemini/agents': 'agents',
             'utilities/utils': 'utils',
             'utilities/hooks': 'hooks',
             'utilities/output-styles': 'output-styles',
