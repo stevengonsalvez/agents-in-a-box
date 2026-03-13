@@ -25,6 +25,7 @@ A comprehensive toolkit for AI coding agents - featuring a terminal UI for manag
 |-----------|-------------|
 | **[ainb-tui](#ainb---terminal-ui)** | Terminal UI for managing Claude Code development sessions |
 | **[toolkit](toolkit/README.md)** | AI agent skills, rules, commands, and multi-tool configurations |
+| **[Knowledge System](docs/how-reflection-works.md)** | How `/reflect` and `/research` capture and retrieve learnings (GraphRAG, QMD, two-tier storage) |
 
 ---
 
