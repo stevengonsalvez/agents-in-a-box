@@ -1,14 +1,50 @@
-# Agents in a Box
+<p align="center">
 
-A comprehensive toolkit for AI coding agents - featuring a terminal UI for managing Claude Code sessions and a complete rules/skills system for AI coding assistants.
+```
+   ╔═══════════════════════════════════════════════════════════════╗
+   ║                                                               ║
+   ║     █████╗  ██████╗ ███████╗███╗   ██╗████████╗███████╗       ║
+   ║    ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝██╔════╝       ║
+   ║    ███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║   ███████╗       ║
+   ║    ██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║   ╚════██║       ║
+   ║    ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║   ███████║       ║
+   ║    ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝   ╚══════╝       ║
+   ║              ██╗███╗   ██╗    █████╗                              ║
+   ║              ██║████╗  ██║   ██╔══██╗                             ║
+   ║              ██║██╔██╗ ██║   ███████║                             ║
+   ║              ██║██║╚██╗██║   ██╔══██║                             ║
+   ║              ██║██║ ╚████║   ██║  ██║                             ║
+   ║              ╚═╝╚═╝  ╚═══╝   ╚═╝  ╚═╝                             ║
+   ║            ██████╗  ██████╗ ██╗  ██╗                              ║
+   ║            ██╔══██╗██╔═══██╗╚██╗██╔╝                              ║
+   ║            ██████╔╝██║   ██║ ╚███╔╝                               ║
+   ║            ██╔══██╗██║   ██║ ██╔██╗                               ║
+   ║            ██████╔╝╚██████╔╝██╔╝ ██╗                              ║
+   ║            ╚═════╝  ╚═════╝ ╚═╝  ╚═╝                              ║
+   ║                                                               ║
+   ╚═══════════════════════════════════════════════════════════════╝
+```
+
+**A complete ecosystem for AI-assisted development**
+
+</p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Platform-macOS%20%7C%20Linux%20%7C%20WSL-blue" alt="Platform">
-  <img src="https://img.shields.io/badge/License-MIT-green" alt="License">
-  <img src="https://img.shields.io/github/v/release/stevengonsalvez/agents-in-a-box" alt="Release">
+  <a href="https://github.com/stevengonsalvez/agents-in-a-box/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/stevengonsalvez/agents-in-a-box/ci.yml?branch=main&style=flat-square&label=CI&logo=github" alt="CI"></a>
+  <a href="https://github.com/stevengonsalvez/agents-in-a-box/actions/workflows/toolkit-validation.yml"><img src="https://img.shields.io/github/actions/workflow/status/stevengonsalvez/agents-in-a-box/toolkit-validation.yml?branch=main&style=flat-square&label=Toolkit&logo=github" alt="Toolkit Validation"></a>
+  <a href="https://github.com/stevengonsalvez/agents-in-a-box/releases"><img src="https://img.shields.io/github/v/release/stevengonsalvez/agents-in-a-box?style=flat-square&logo=github" alt="Release"></a>
+  <img src="https://img.shields.io/badge/rust-2021_edition-orange?style=flat-square&logo=rust" alt="Rust">
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20WSL-blue?style=flat-square" alt="Platform">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="License"></a>
+</p>
+
+<p align="center">
+  <code>115 Rust Modules</code> · <code>71 Skills</code> · <code>37 Agents</code> · <code>9 AI Tools</code> · <code>Knowledge Graph</code>
 </p>
 
 ---
+
+A terminal-native ecosystem for managing AI coding agents. Built around a Rust TUI that orchestrates Claude Code sessions with git worktree isolation, and a portable toolkit of skills, agents, and workflows that plug into 9 different AI coding tools.
 
 <!-- TODO: Add demo GIF - see https://github.com/stevengonsalvez/agents-in-a-box/issues/20 -->
 <p align="center">
@@ -21,139 +57,111 @@ A comprehensive toolkit for AI coding agents - featuring a terminal UI for manag
 
 ## What's Inside
 
-| Component | Description |
-|-----------|-------------|
-| **[ainb-tui](#ainb---terminal-ui)** | Terminal UI for managing Claude Code development sessions |
-| **[toolkit](toolkit/README.md)** | AI agent skills, rules, commands, and multi-tool configurations |
-| **[Knowledge System](docs/how-reflection-works.md)** | How `/reflect` and `/research` capture and retrieve learnings (GraphRAG, QMD, two-tier storage) |
+| Component | What it does | Scale |
+|-----------|-------------|-------|
+| **[ainb TUI](#ainb--terminal-ui)** | Rust terminal app for managing Claude Code sessions | 115 modules |
+| **[Toolkit](#toolkit)** | Portable skills, agents, and workflows for AI coding tools | 71 skills, 37 agents |
+| **[Knowledge System](#knowledge-system)** | GraphRAG + QMD learning capture and retrieval | [Architecture docs](docs/how-reflection-works.md) |
 
 ---
 
-## ainb - Terminal UI
+## Why agents-in-a-box?
+
+Most AI coding setups are a loose collection of dotfiles. This project treats the problem as an engineering system:
+
+- **One toolkit, many tools** — Write a skill once, deploy it to Claude Code, Codex, Gemini, Cursor, Copilot, Amazon Q, Cline, Roo, or Clawdhub
+- **Session isolation** — Each coding session gets its own git worktree and tmux session. No cross-contamination
+- **Agents that compose** — 37 specialized agents (backend-developer, security-agent, architecture-reviewer, etc.) that can be orchestrated into swarms
+- **Memory that persists** — A two-tier knowledge system (GraphRAG + QMD) that captures learnings and retrieves them across sessions and projects
+- **Production Rust** — The TUI isn't a shell script. It's 115 modules of typed, tested, async Rust with clippy pedantic/nursery lints
+
+---
+
+## Quick Start
+
+```bash
+# Install the TUI
+brew tap stevengonsalvez/ainb && brew install ainb
+
+# Install the toolkit for your AI tool
+cd toolkit && npm install && node create-rule.js --tool=claude-code-4.5
+
+# Launch
+ainb
+```
+
+---
+
+## ainb — Terminal UI
 
 A Rust-based terminal application for managing Claude Code development sessions with git worktree isolation, model selection, and persistent tmux sessions.
 
 ### Features
 
-- **Session Management** - Create, monitor, and switch between Claude Code sessions
-- **Git Worktree Isolation** - Each session gets its own isolated git worktree
-- **Model Selection** - Choose between Sonnet, Opus, and Haiku models per session
-- **Live Log Streaming** - Real-time log viewer with filtering and search
-- **tmux Integration** - Persistent sessions that survive disconnects
-- **Keyboard-Driven** - Fast navigation with vim-style keybindings
+- **Session management** — Create, monitor, switch between isolated Claude Code sessions
+- **Git worktree isolation** — Each session gets its own branch and working directory
+- **Model selection** — Choose Sonnet, Opus, or Haiku per session
+- **Live log streaming** — Real-time log viewer with level filtering and search
+- **tmux integration** — Persistent sessions that survive disconnects
+- **Keyboard-driven** — Vim-style navigation throughout
 
-### Quick Start
+<details>
+<summary><b>Screenshots</b></summary>
+<br>
+<table>
+<tr>
+<td><img src="docs/assets/screenshots/home.png" alt="Home screen" width="400"><br><em>Main dashboard with active sessions</em></td>
+<td><img src="docs/assets/screenshots/new-session.png" alt="New session" width="400"><br><em>Session creation with model selection</em></td>
+</tr>
+<tr>
+<td><img src="docs/assets/screenshots/logs.png" alt="Live logs" width="400"><br><em>Real-time log streaming</em></td>
+<td><img src="docs/assets/screenshots/session.png" alt="Session view" width="400"><br><em>Attached Claude Code session</em></td>
+</tr>
+</table>
+</details>
 
-#### Installation
+### Installation
 
-**Homebrew (macOS/Linux)**
+<details>
+<summary><b>Homebrew (macOS / Linux)</b></summary>
+
 ```bash
 brew tap stevengonsalvez/ainb
 brew install ainb
 ```
+</details>
 
-**One-liner Install**
+<details>
+<summary><b>One-liner install</b></summary>
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/stevengonsalvez/agents-in-a-box/v2/ainb-tui/install.sh | bash
 ```
+</details>
 
-**Cargo (any platform)**
+<details>
+<summary><b>Cargo (any platform)</b></summary>
+
 ```bash
 cargo install --git https://github.com/stevengonsalvez/agents-in-a-box --branch v2 agents-box
-# The binary will be named 'agents-box'. You may want to alias it to 'ainb':
-# alias ainb="agents-box"  # Add to ~/.bashrc or ~/.zshrc
+# Optionally alias: alias ainb="agents-box"
 ```
+</details>
 
-#### Usage
-
-```bash
-# Launch the TUI
-ainb
-
-# Set up Claude authentication
-ainb auth
-```
-
-### Platform Support
-
-| Platform | Status | Method |
-|----------|--------|--------|
-| macOS Apple Silicon (M1/M2/M3) | ✅ Full Support | Pre-built binary |
-| macOS Intel | ✅ Full Support | Build from source |
-| Linux x86_64 | ✅ Full Support | Pre-built binary |
-| Linux ARM64 | ✅ Full Support | Build from source |
-| Windows (WSL) | ✅ Full Support | See [WSL Setup](#windows-wsl-setup) |
-| Windows (Native) | ❌ Not Supported | Use WSL |
-
-### Windows (WSL) Setup
-
-ainb works great on Windows through WSL2:
+<details>
+<summary><b>Windows (WSL)</b></summary>
 
 ```powershell
-# 1. Install WSL2 (if not already installed)
+# 1. Install WSL2
 wsl --install
 
-# 2. Open Ubuntu/Debian terminal and install
+# 2. Inside Ubuntu/Debian
 curl -fsSL https://raw.githubusercontent.com/stevengonsalvez/agents-in-a-box/v2/ainb-tui/install.sh | bash
-
-# 3. Install tmux (required)
 sudo apt update && sudo apt install -y tmux
-
-# 4. Run ainb
 ainb
 ```
 
-**Why not native Windows?**
-ainb relies on tmux for persistent terminal sessions, which is Unix-only. WSL provides the best Windows experience.
-
-### Requirements
-
-- **tmux** - Required for session management
-- **git** - For worktree operations
-- **Claude Code CLI** - The `claude` command must be available
-
-```bash
-# Install tmux
-# macOS
-brew install tmux
-
-# Ubuntu/Debian
-sudo apt install tmux
-
-# Verify Claude CLI
-claude --version
-```
-
-### Screenshots
-
-<!-- TODO: Add screenshots - see https://github.com/stevengonsalvez/agents-in-a-box/issues/20 -->
-
-<details>
-<summary><b>Home Screen</b></summary>
-<br>
-<img src="docs/assets/screenshots/home.png" alt="Home screen with session list" width="700">
-<p><em>Main dashboard showing active sessions with status indicators</em></p>
-</details>
-
-<details>
-<summary><b>New Session</b></summary>
-<br>
-<img src="docs/assets/screenshots/new-session.png" alt="New session creation" width="700">
-<p><em>Creating a new session with repository, branch, agent, and model selection</em></p>
-</details>
-
-<details>
-<summary><b>Live Logs</b></summary>
-<br>
-<img src="docs/assets/screenshots/logs.png" alt="Live log viewer" width="700">
-<p><em>Real-time log streaming with level filtering and search</em></p>
-</details>
-
-<details>
-<summary><b>Session View</b></summary>
-<br>
-<img src="docs/assets/screenshots/session.png" alt="Active session" width="700">
-<p><em>Attached to a Claude Code session with tmux integration</em></p>
+> ainb requires tmux for persistent sessions, which is Unix-only. WSL provides the best Windows experience.
 </details>
 
 ### Keyboard Shortcuts
@@ -168,64 +176,205 @@ claude --version
 | `l` | View logs |
 | `q` | Quit |
 
+### Platform Support
+
+| Platform | Status | Method |
+|----------|--------|--------|
+| macOS Apple Silicon | ✅ | Pre-built binary |
+| macOS Intel | ✅ | Build from source |
+| Linux x86_64 | ✅ | Pre-built binary |
+| Linux ARM64 | ✅ | Build from source |
+| Windows (WSL2) | ✅ | Install script |
+| Windows (Native) | ❌ | Use WSL |
+
+### Requirements
+
+- **tmux** — persistent session management
+- **git** — worktree operations
+- **Claude Code CLI** — the `claude` command
+
 ---
 
 ## Toolkit
 
-A complete AI coding agent toolkit with skills, rules, commands, and configurations for multiple AI coding assistants.
+A portable AI coding agent toolkit: skills, agents, workflows, and configurations that deploy to 9 different AI coding tools from a single source.
 
-**[→ Full Toolkit Documentation](toolkit/README.md)**
+**[Full toolkit documentation →](toolkit/README.md)**
 
-### Highlights
+### Supported AI Tools
 
-- **Skills** - Reusable capabilities (webapp-testing, crypto-research, tmux-monitor, etc.)
-- **Agents** - Specialized AI agent definitions (backend-developer, frontend-developer, tech-lead-orchestrator, etc.)
-- **Commands** - Slash commands for structured workflows (`/plan`, `/implement`, `/validate`, etc.)
-- **Multi-Tool Support** - Configurations for Claude Code, Cursor, Amazon Q, Gemini, and more
+| Tool | Deploy target | Method |
+|------|--------------|--------|
+| **Claude Code** | `~/.claude/` | Home directory |
+| **Codex** | `~/.codex/` | Home directory |
+| **GitHub Copilot** | `~/.copilot/` | Home directory |
+| **Gemini CLI** | `.gemini/` | Project directory |
+| **Amazon Q** | `.amazonq/rules/` | Project directory |
+| **Cursor** | Project root | Project directory |
+| **Cline** | Project root | Project directory |
+| **Roo** | Project root | Project directory |
+| **Clawdhub** | Project root | Project directory |
 
-### Quick Setup
+### Skills (71)
 
-```bash
-cd toolkit
-npm install
-node create-rule.js --tool=claude-code
-```
+Skills are reusable capabilities that any supported AI tool can invoke.
 
-This copies the complete toolkit to `~/.claude/` for use with Claude Code.
+<details>
+<summary><b>Workflow & Planning</b></summary>
 
-### Supported Tools
+`plan` · `plan-tdd` · `plan-gh` · `implement` · `validate` · `workflow` · `brainstorm` · `critique` · `discuss` · `expose` · `interview`
+</details>
 
-| Tool | Installation Type |
-|------|-------------------|
-| Claude Code | Home directory (`~/.claude/`) |
-| Gemini CLI | Project directory (`.gemini/`) |
-| Amazon Q | Project directory (`.amazonq/rules/`) |
-| Cursor | Project directory |
-| Cline/Roo | Project directory |
+<details>
+<summary><b>Code Quality & Testing</b></summary>
+
+`commit` · `find-missing-tests` · `webapp-testing` · `security-audit` · `security-scan` · `simplify`
+</details>
+
+<details>
+<summary><b>DevOps & Infrastructure</b></summary>
+
+`start-local` · `start-ios` · `start-android` · `spawn-agent` · `tmux-monitor` · `tmux-status` · `expose` · `debug-bridge`
+</details>
+
+<details>
+<summary><b>Knowledge & Learning</b></summary>
+
+`reflect` · `global-learnings` · `research` · `research-cache` · `instincts` · `compound-docs` · `prime`
+</details>
+
+<details>
+<summary><b>Session Management</b></summary>
+
+`health-check` · `session-info` · `session-metrics` · `session-summary` · `handover` · `recover-sessions` · `plugins`
+</details>
+
+<details>
+<summary><b>Swarm Orchestration</b></summary>
+
+`swarm-create` · `swarm-join` · `swarm-inbox` · `swarm-status` · `swarm-shutdown` · `swarm-orchestration` · `swarm-agent-troubleshooting`
+</details>
+
+<details>
+<summary><b>GitHub & Issues</b></summary>
+
+`gh-issue` · `make-github-issues` · `do-issues` · `merge-agent-work` · `list-agent-worktrees` · `attach-agent-worktree` · `cleanup-agent-worktree`
+</details>
+
+<details>
+<summary><b>Design & Frontend</b></summary>
+
+`ui-ux-pro-max` · `frontend-design` · `frontend-slides` · `tui-style-guide` · `tui-screen` · `liquid-glass` · `remotion-best-practices`
+</details>
+
+<details>
+<summary><b>Research & Analysis</b></summary>
+
+`crypto-research` · `oracle` · `notebooklm` · `sentry-cli` · `ats-resume-matcher` · `resume-formatter` · `retro-pdf`
+</details>
+
+<details>
+<summary><b>Agent Architecture</b></summary>
+
+`skill-creator` · `agent-ops` · `autonomous-loops` · `cost-aware-pipeline` · `media-processing` · `nano-banana-pro` · `sync-learnings` · `claude-developer-platform`
+</details>
+
+### Agents (37)
+
+Specialized AI agents organized by domain. Each agent has a defined persona, tool access, and area of expertise.
+
+| Category | Agents |
+|----------|--------|
+| **Universal** | `backend-developer` · `frontend-developer` · `superstar-engineer` |
+| **Orchestrators** | `tech-lead-orchestrator` · `project-analyst` · `team-configurator` |
+| **Engineering** | `api-architect` · `architecture-reviewer` · `code-archaeologist` · `code-reviewer` · `dev-cleanup-wizard` · `devops-automator` · `documentation-specialist` · `gatekeeper` · `integration-tests` · `lead-orchestrator` · `migration` · `performance-optimizer` · `planner` · `playwright-test-validator` · `property-mutation` · `release-manager` · `security-agent` · `service-codegen` · `solution-architect` · `tailwind-css-expert` · `test-writer-fixer` |
+| **Design** | `ui-designer` |
+| **Swarm** | `swarm-leader` · `swarm-worker` |
+| **Meta** | `agentmaker` · `reflect` |
+| **Root** | `distinguished-engineer` · `web-search-researcher` |
 
 ---
 
-## Repository Structure
+## Knowledge System
+
+A two-tier learning system that captures insights during development and retrieves them across sessions and projects.
+
+| Layer | Technology | Purpose |
+|-------|-----------|---------|
+| **Fast local** | QMD (Quick Markdown Documents) | Semantic search over structured learning notes |
+| **Deep graph** | GraphRAG (nano-graphrag) | Entity-relationship graph with community detection for cross-project knowledge retrieval |
+
+The `/reflect` skill captures learnings. The `/research` and `/prime` skills retrieve them. The `/global-learnings` skill manages the knowledge base directly.
+
+**[How the knowledge system works →](docs/how-reflection-works.md)**
+
+---
+
+## Architecture
 
 ```
 agents-in-a-box/
-├── ainb-tui/           # Terminal UI application (Rust)
-│   ├── src/            # Source code
-│   ├── Formula/        # Homebrew formula
-│   └── install.sh      # Installer script
-├── toolkit/            # AI agent toolkit
-│   ├── claude-code/    # Claude Code configurations
-│   ├── agents/         # Agent definitions
-│   ├── commands/       # Slash commands
-│   └── skills/         # Reusable skills
-└── .github/            # CI/CD workflows
+│
+├── ainb-tui/                   # Rust TUI application
+│   ├── src/                    # 115 modules
+│   │   ├── app/                #   State machine & event handling
+│   │   ├── components/         #   TUI screen components
+│   │   ├── widgets/            #   Reusable UI widgets
+│   │   ├── docker/             #   Container management
+│   │   ├── tmux/               #   Session & PTY integration
+│   │   ├── git/                #   Worktree operations
+│   │   ├── claude/             #   Claude API client
+│   │   ├── models/             #   Data models
+│   │   └── config/             #   Configuration handling
+│   ├── deny.toml               #   License & security policy
+│   ├── Formula/                #   Homebrew formula
+│   └── install.sh              #   One-liner installer
+│
+├── toolkit/                    # Portable AI agent toolkit
+│   ├── packages/
+│   │   ├── skills/             #   71 reusable skills
+│   │   ├── agents/             #   37 agent definitions
+│   │   │   ├── universal/      #     Cross-stack specialists
+│   │   │   ├── engineering/    #     Backend & infra agents
+│   │   │   ├── orchestrators/  #     Team coordination
+│   │   │   ├── design/         #     UI/UX specialists
+│   │   │   ├── swarm/          #     Multi-agent coordination
+│   │   │   └── meta/           #     Agent creation & reflection
+│   │   ├── workflows/          #   Structured delivery workflows
+│   │   └── utilities/          #   Shared utilities
+│   ├── bootstrap.js            #   Multi-tool deployment engine
+│   └── create-rule.js          #   CLI installer
+│
+├── docs/                       # Documentation
+│   └── how-reflection-works.md #   Knowledge system architecture
+│
+└── .github/workflows/
+    ├── ci.yml                  #   Rust CI (fmt, clippy, test, deny, machete)
+    ├── toolkit-validation.yml  #   Toolkit structure & install validation
+    └── release.yml             #   Cross-platform binary releases
 ```
+
+---
+
+## CI/CD & Quality
+
+| Check | Tool | What it catches |
+|-------|------|-----------------|
+| Format | `rustfmt` | Style inconsistencies |
+| Lint | `clippy` (pedantic + nursery) | Logic errors, anti-patterns, code smells |
+| Test | `cargo-nextest` (Ubuntu + macOS) | Regressions across platforms |
+| Security | `cargo-deny` (RustSec) | Known vulnerabilities in dependencies |
+| Licenses | `cargo-deny` | Non-compliant dependency licenses |
+| Dead deps | `cargo-machete` | Unused crate declarations |
+| Toolkit structure | Custom validation | Package counts, template substitution, install verification |
+
+The Rust codebase enforces `unsafe_code = "forbid"` and runs clippy with `pedantic`, `nursery`, and `cargo` lint groups enabled.
 
 ---
 
 ## Development
 
-### Building ainb from source
+### Building from source
 
 ```bash
 cd ainb-tui
@@ -237,7 +386,29 @@ cargo build --release
 
 ```bash
 cd ainb-tui
-cargo test
+cargo test                              # Unit tests
+cargo test --features visual-debug      # With terminal output
+cargo test --features vt100-tests       # VT100 screen verification
+cargo nextest run                       # With nextest (parallel)
+```
+
+### Linting & checks
+
+```bash
+cd ainb-tui
+cargo fmt --check                       # Format check
+cargo clippy --all-targets              # Lint
+cargo deny check                        # Security + licenses
+```
+
+### Installing the toolkit
+
+```bash
+cd toolkit
+npm install
+node create-rule.js --tool=claude-code-4.5    # Deploy to ~/.claude/
+node create-rule.js --tool=gemini             # Deploy to .gemini/
+node create-rule.js --tool=codex              # Deploy to ~/.codex/
 ```
 
 ### Contributing
@@ -255,9 +426,11 @@ cargo test
 - [Releases](https://github.com/stevengonsalvez/agents-in-a-box/releases)
 - [Homebrew Tap](https://github.com/stevengonsalvez/homebrew-ainb)
 - [Issues](https://github.com/stevengonsalvez/agents-in-a-box/issues)
+- [Knowledge System Architecture](docs/how-reflection-works.md)
+- [Toolkit Documentation](toolkit/README.md)
 
 ---
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+MIT — see [LICENSE](LICENSE) for details.

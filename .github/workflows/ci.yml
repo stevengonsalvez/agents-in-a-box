@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: [main, v2]
+    paths:
+      - "ainb-tui/**"
+      - "Cargo.*"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    branches: [main, v2]
+    paths:
+      - "ainb-tui/**"
+      - "Cargo.*"
+      - ".github/workflows/ci.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-Dwarnings"
+  WORKING_DIR: ainb-tui
+
+jobs:
+  # ────────────────────────────────────────────────────────────────────────────
+  # Format check
+  # ────────────────────────────────────────────────────────────────────────────
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+        working-directory: ${{ env.WORKING_DIR }}
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Lint
+  # ────────────────────────────────────────────────────────────────────────────
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "ainb-tui -> target"
+      - run: cargo clippy --all-targets --all-features
+        working-directory: ${{ env.WORKING_DIR }}
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Tests — cross-platform with nextest
+  # ────────────────────────────────────────────────────────────────────────────
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "ainb-tui -> target"
+      - uses: taiki-e/install-action@nextest
+      - run: cargo nextest run --all-features
+        working-directory: ${{ env.WORKING_DIR }}
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Security advisories + license compliance
+  # ────────────────────────────────────────────────────────────────────────────
+  deny:
+    name: Cargo Deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: ainb-tui/Cargo.toml
+          arguments: --all-features
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Unused dependency detection
+  # ────────────────────────────────────────────────────────────────────────────
+  machete:
+    name: Cargo Machete
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: bnjbvr/cargo-machete@main
+        with:
+          manifest-path: ainb-tui/Cargo.toml
