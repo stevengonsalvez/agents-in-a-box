@@ -198,9 +198,16 @@ ${custom_prompt}"
     else
         tmux new-session -d -s "$session_name" -c "$PWD"
         tmux send-keys -t "$session_name" "env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT claude --dangerously-skip-permissions" C-m
-        sleep 3
+        sleep 5
         tmux send-keys -t "$session_name" -l "$leader_prompt"
         tmux send-keys -t "$session_name" C-m
+        sleep 2
+        # Verify prompt was submitted, retry Enter if stuck
+        local _pane=$(tmux capture-pane -t "$session_name" -p 2>/dev/null || echo "")
+        if echo "$_pane" | grep -qE "bypass permissions|⏵⏵" && ! echo "$_pane" | grep -qE "Thought for|Forming|Creating|⏳|✽|∴|Reading"; then
+            sleep 1
+            tmux send-keys -t "$session_name" C-m
+        fi
     fi
 
     # Update team.json
@@ -304,9 +311,16 @@ ${custom_prompt}"
     else
         tmux new-session -d -s "$session_name" -c "$working_dir"
         tmux send-keys -t "$session_name" "env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT claude --dangerously-skip-permissions" C-m
-        sleep 3
+        sleep 5
         tmux send-keys -t "$session_name" -l "$agent_prompt"
         tmux send-keys -t "$session_name" C-m
+        sleep 2
+        # Verify prompt was submitted, retry Enter if stuck
+        local _pane=$(tmux capture-pane -t "$session_name" -p 2>/dev/null || echo "")
+        if echo "$_pane" | grep -qE "bypass permissions|⏵⏵" && ! echo "$_pane" | grep -qE "Thought for|Forming|Creating|⏳|✽|∴|Reading"; then
+            sleep 1
+            tmux send-keys -t "$session_name" C-m
+        fi
     fi
 
     # Add to team members (include worktree path if applicable)

@@ -263,15 +263,24 @@ spawn_agent_tmux() {
         return 1
     fi
 
-    # Additional small delay for UI stabilization
-    sleep 0.5
+    # Wait for REPL to be fully ready (large projects need more time)
+    sleep 3
 
     # Send the task (use literal mode for safety with special characters)
     tmux send-keys -t "$SESSION" -l "$TASK"
     tmux send-keys -t "$SESSION" C-m
 
-    # Small delay for Claude to start processing
-    sleep 1
+    # Wait and verify the prompt was actually submitted
+    sleep 2
+
+    # Check if prompt is still sitting in input (not submitted)
+    local PANE_CHECK=$(tmux capture-pane -t "$SESSION" -p 2>/dev/null || echo "")
+    if echo "$PANE_CHECK" | grep -qE "bypass permissions|⏵⏵" && ! echo "$PANE_CHECK" | grep -qE "Thought for|Forming|Creating|⏳|✽|∴|Reading|Searching"; then
+        # Prompt may not have been submitted - retry Enter
+        sleep 1
+        tmux send-keys -t "$SESSION" C-m
+        sleep 2
+    fi
 
     # Save enhanced metadata with transcript path support
     save_agent_metadata "$SESSION" "$TASK" "$WORK_DIR" "$WITH_HANDOVER" "$WITH_WORKTREE" "$WORKTREE_BRANCH" "$ORCHESTRATION"
