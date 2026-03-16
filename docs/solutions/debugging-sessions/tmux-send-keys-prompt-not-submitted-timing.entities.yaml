@@ -1,0 +1,37 @@
+document_id: tmux-send-keys-prompt-not-submitted-timing
+extracted_at: "2026-03-16T10:00:00"
+entities:
+  - name: "tmux send-keys"
+    type: function
+    description: "Tmux command to send keystrokes to a session"
+  - name: "Claude REPL"
+    type: technology
+    description: "Claude Code's interactive command-line interface"
+  - name: "prompt submission failure"
+    type: error
+    description: "Enter key swallowed because REPL not ready to accept input"
+  - name: "capture-pane verification"
+    type: pattern
+    description: "Capture tmux pane content and grep for indicators to verify state"
+  - name: "spawn_agent_tmux"
+    type: function
+    description: "Function in spawn-agent-lib.sh that creates Claude sessions in tmux"
+  - name: "swarm-lib.sh"
+    type: function
+    description: "Shell library for swarm orchestration agent spawning"
+relationships:
+  - source: "tmux send-keys"
+    target: "prompt submission failure"
+    type: caused_by
+    description: "Keystrokes delivered before REPL input handler is ready"
+    strength: 9
+  - source: "capture-pane verification"
+    target: "prompt submission failure"
+    type: solves
+    description: "Retry loop detects stuck state and re-sends Enter"
+    strength: 10
+  - source: "spawn_agent_tmux"
+    target: "tmux send-keys"
+    type: requires
+    description: "Agent spawning relies on send-keys to deliver prompts"
+    strength: 7
