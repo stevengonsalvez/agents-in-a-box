@@ -1,9 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = [
-#     "langfuse>=2.44.0,<3.0.0",
-# ]
+# dependencies = []
 # ///
 
 import json
@@ -13,12 +11,6 @@ import logging
 import hashlib
 from pathlib import Path
 from datetime import datetime
-
-# Langfuse integration (optional - no-op if not configured)
-try:
-    from utils.langfuse import get_tracer
-except ImportError:
-    get_tracer = lambda: None  # Fallback if module not found
 
 # --- Session-specific file paths ---
 def get_session_specific_paths():
@@ -180,12 +172,6 @@ def main():
 
         # Always log to JSON file (original functionality)
         log_to_json_file(input_data)
-
-        # Log to Langfuse (no-op if not configured)
-        tracer = get_tracer()
-        if tracer:
-            tool_result = input_data.get("tool_response", {})
-            tracer.end_tool_span(tool_name, tool_result)
 
         # Check if this is a TodoWrite tool call
         if tool_name == "TodoWrite":
