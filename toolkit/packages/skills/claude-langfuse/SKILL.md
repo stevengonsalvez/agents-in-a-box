@@ -74,7 +74,7 @@ When this skill is invoked, execute the appropriate sub-command:
 3. Show summary statistics
 
 ```bash
-source ~/.secrets && python3 toolkit/claude-code-4.5/skills/claude-langfuse/utils/status.py
+source ~/.secrets && python3 {{HOME_TOOL_DIR}}/skills/claude-langfuse/utils/status.py
 ```
 
 ### For `/claude-langfuse:reflect`:
@@ -87,13 +87,13 @@ source ~/.secrets && python3 toolkit/claude-code-4.5/skills/claude-langfuse/util
 6. Present for user approval
 
 ```bash
-source ~/.secrets && python3 toolkit/claude-code-4.5/skills/claude-langfuse/utils/reflect.py $ARGUMENTS
+source ~/.secrets && python3 {{HOME_TOOL_DIR}}/skills/claude-langfuse/utils/reflect.py $ARGUMENTS
 ```
 
 ### For `/claude-langfuse:insights <trace_id>`:
 
 ```bash
-source ~/.secrets && python3 toolkit/claude-code-4.5/skills/claude-langfuse/utils/insights.py $ARGUMENTS
+source ~/.secrets && python3 {{HOME_TOOL_DIR}}/skills/claude-langfuse/utils/insights.py $ARGUMENTS
 ```
 
 ## Signal Detection Patterns
