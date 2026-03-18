@@ -148,10 +148,12 @@ claude-plugins:
       claude plugin marketplace add steveyegge/beads
       claude plugin install beads
     purpose: "Git-backed issue tracking for multi-session work"
+    has_skills: true  # Plugin includes skills/ dir that bootstrap copies to ~/.claude/skills/
     features:
       - Persistent issue tracking across sessions
       - Dependency management between issues
       - Context recovery after conversation compaction
+      - /beads slash command with bd vs TodoWrite decision framework
 
   - name: debug-bridge
     marketplace: stevengonsalvez/agent-bridge

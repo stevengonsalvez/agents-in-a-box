@@ -27,10 +27,12 @@ When working on projects, learnings get captured in user-level agent files via `
 ## Workflow
 
 1. **Assess**: Compare directories and categorize differences
-2. **Route**: Determine target package directory for each file
-3. **Plan**: Generate sync plan table with actions and rationale
-4. **Execute**: Copy files in parallel where possible
-5. **Commit**: Single commit for TO_REPO changes
+2. **Reverse Scan**: Enumerate all items in {{HOME_TOOL_DIR}}/ and flag orphans missing from packages/
+3. **Plugin Audit**: Cross-check installed plugins against external-dependencies.yaml manifest
+4. **Route**: Determine target package directory for each file
+5. **Plan**: Generate sync plan table with actions and rationale
+6. **Execute**: Copy files in parallel where possible
+7. **Commit**: Single commit for TO_REPO changes
 
 ## Directory Mappings
 
@@ -119,6 +121,89 @@ Runtime state:
 Personal configuration:
 - `settings.json`, `settings.local.json`
 
+### Category 5: Plugin-Managed Content
+Content managed by external plugins (installed via `claude plugin install`):
+- `plugins/` - Plugin cache and state
+- Skills/commands provided by plugins (e.g., Beads provides its own skill in `plugins/cache/`)
+- These are tracked in `external-dependencies.yaml`, NOT in `packages/`
+
+## Reverse Scan Phase (Orphan Detection)
+
+CRITICAL: Before comparing files, enumerate ALL items in {{HOME_TOOL_DIR}}/ and check each one has a counterpart in packages/. This catches skills/agents that were created directly in {{HOME_TOOL_DIR}}/ but never added to the toolkit.
+
+```bash
+# Reverse scan: find skills in {{HOME_TOOL_DIR}} with no packages/ counterpart
+echo "=== Orphan Detection: Skills ==="
+for skill_dir in {{HOME_TOOL_DIR}}/skills/*/; do
+  skill_name=$(basename "$skill_dir")
+  if [ ! -d "packages/skills/$skill_name" ]; then
+    echo "ORPHAN: skills/$skill_name (in {{HOME_TOOL_DIR}} only, missing from packages/)"
+  fi
+done
+
+echo "=== Orphan Detection: Agents ==="
+for agent_file in {{HOME_TOOL_DIR}}/agents/**/*.md; do
+  rel_path="${agent_file#{{HOME_TOOL_DIR}}/}"
+  if [ ! -f "packages/$rel_path" ]; then
+    echo "ORPHAN: $rel_path (in {{HOME_TOOL_DIR}} only, missing from packages/)"
+  fi
+done
+```
+
+Orphans should be classified as:
+- **SYNC TO REPO** — Generic, reusable skill/agent → copy to packages/
+- **EXTERNAL** — Installed by plugin/npx → verify in external-dependencies.yaml
+- **PERSONAL** — User-specific, project-specific → add to exclusion list
+- **DEPRECATED** — No longer needed → candidate for removal
+
+## Plugin & External Dependency Audit
+
+Cross-check installed plugins and external skills against `external-dependencies.yaml`:
+
+```bash
+MANIFEST="toolkit/external-dependencies.yaml"
+
+# 1. Check installed claude plugins vs manifest
+echo "=== Plugin Audit ==="
+for plugin_dir in {{HOME_TOOL_DIR}}/plugins/cache/*/; do
+  plugin_name=$(basename "$plugin_dir" | sed 's/-marketplace$//')
+  if ! grep -q "name: $plugin_name" "$MANIFEST" 2>/dev/null; then
+    echo "UNTRACKED PLUGIN: $plugin_name (installed but not in manifest)"
+  fi
+done
+
+# 2. Check manifest plugins are actually installed
+# (Parse claude-plugins entries from YAML and verify each exists)
+
+# 3. Check skills that reference external CLIs
+echo "=== Dependency Cross-Check ==="
+for skill_dir in packages/skills/*/; do
+  skill_file="$skill_dir/SKILL.md"
+  [ -f "$skill_file" ] || continue
+
+  # Look for references to external CLIs (bd, npx, brew, etc.)
+  if grep -qE '\bbd\b.*show|bd\b.*ready|bd\b.*create|bd\b.*swarm' "$skill_file"; then
+    echo "EXTERNAL DEP: $(basename $skill_dir) → requires 'bd' CLI (Beads)"
+    if ! grep -q "name: beads" "$MANIFEST" 2>/dev/null; then
+      echo "  WARNING: beads not tracked in external-dependencies.yaml"
+    fi
+  fi
+done
+```
+
+The audit report should include:
+
+```markdown
+## Plugin & External Dependency Audit
+
+| Item | Status | Action |
+|------|--------|--------|
+| beads plugin | Installed v0.49.0, tracked in manifest | OK |
+| debug-bridge plugin | Installed v0.2.0, tracked in manifest | OK |
+| swarm-create skill | References `bd` CLI → beads tracked | OK |
+| mystery-skill | In {{HOME_TOOL_DIR}} only, not in packages | SYNC or EXCLUDE |
+```
+
 ## Assessment Phase
 
 Before syncing, generate an assessment table:
@@ -132,7 +217,35 @@ Before syncing, generate an assessment table:
 |--------|-------|--------|
 | **SYNC TO REPO** | N files | Useful generic additions |
 | **SYNC TO {{HOME_TOOL_DIR}}** | N files | Repo has newer versions |
+| **ORPHANS** | N items | In {{HOME_TOOL_DIR}} only, need classification |
+| **PLUGIN AUDIT** | N plugins | Cross-check with manifest |
 | **DON'T SYNC** | Multiple | Project-specific or session data |
+
+---
+
+## ORPHANS (in {{HOME_TOOL_DIR}} only)
+
+### 1. `skills/mystery-skill/` (ORPHAN)
+- **Source**: {{HOME_TOOL_DIR}}/skills/mystery-skill/
+- **Classification**: [SYNC TO REPO | EXTERNAL | PERSONAL | DEPRECATED]
+- **Action**: [Copy to packages/ | Verify in manifest | Add to exclusions | Remove]
+
+---
+
+## PLUGIN & EXTERNAL DEPENDENCY AUDIT
+
+| Plugin/Dep | Installed | In Manifest | Status |
+|------------|-----------|-------------|--------|
+| beads | v0.49.0 | Yes | OK |
+| debug-bridge | v0.2.0 | Yes | OK |
+| untracked-plugin | v1.0.0 | No | ADD TO MANIFEST |
+
+### Skills with External Dependencies
+
+| Skill | Requires | Dependency Tracked | Status |
+|-------|----------|-------------------|--------|
+| swarm-create | bd (Beads) | Yes | OK |
+| [skill] | [cli] | No | NEEDS TRACKING |
 
 ---
 
@@ -214,6 +327,25 @@ diff -rq {{HOME_TOOL_DIR}}/agents/ packages/agents/ 2>/dev/null | grep "Only in 
 
 # Show actual diff for a specific file
 diff {{HOME_TOOL_DIR}}/agents/engineering/example.md packages/agents/engineering/example.md
+
+# REVERSE SCAN: Find orphaned skills (in {{HOME_TOOL_DIR}} but not in packages)
+comm -23 \
+  <(ls -1 {{HOME_TOOL_DIR}}/skills/ 2>/dev/null | sort) \
+  <(ls -1 packages/skills/ 2>/dev/null | sort)
+
+# REVERSE SCAN: Find orphaned agents
+comm -23 \
+  <(find {{HOME_TOOL_DIR}}/agents/ -name '*.md' -exec basename {} \; 2>/dev/null | sort) \
+  <(find packages/agents/ -name '*.md' -exec basename {} \; 2>/dev/null | sort)
+
+# PLUGIN AUDIT: List installed plugins not in manifest
+for d in {{HOME_TOOL_DIR}}/plugins/cache/*/; do
+  name=$(basename "$d" | sed 's/-marketplace$//')
+  grep -q "name: $name" toolkit/external-dependencies.yaml 2>/dev/null || echo "UNTRACKED: $name"
+done
+
+# DEPENDENCY CHECK: Skills that reference 'bd' (Beads)
+grep -rl '\bbd\b' packages/skills/*/SKILL.md 2>/dev/null
 ```
 
 ## Safety Checks
@@ -238,7 +370,29 @@ Claude: # Sync Assessment: {{HOME_TOOL_DIR}} <-> packages/
 |--------|-------|--------|
 | **SYNC TO REPO** | 3 files | Useful generic additions |
 | **SYNC TO {{HOME_TOOL_DIR}}** | 1 file | Packages has newer version |
+| **ORPHANS** | 0 items | All skills/agents accounted for |
+| **PLUGIN AUDIT** | 6 plugins | All tracked in manifest |
 | **DON'T SYNC** | Multiple | Project-specific or session data |
+
+## ORPHANS
+
+No orphaned skills or agents detected. All items in {{HOME_TOOL_DIR}}/ have
+counterparts in packages/ or are tracked in external-dependencies.yaml.
+
+## PLUGIN & EXTERNAL DEPENDENCY AUDIT
+
+| Plugin | Installed | In Manifest | Status |
+|--------|-----------|-------------|--------|
+| beads | v0.49.0 | Yes | OK |
+| debug-bridge | v0.2.0 | Yes | OK |
+| ralph-loop | v55b58ec | Yes | OK |
+| code-review | v55b58ec | Yes | OK |
+| playground | latest | Yes | OK |
+| dev-browser | v66682fb | Yes | OK |
+
+| Skill | Requires | Tracked | Status |
+|-------|----------|---------|--------|
+| swarm-create | bd (Beads) | Yes | OK |
 
 ## SYNC TO REPO
 

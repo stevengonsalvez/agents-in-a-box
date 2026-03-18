@@ -1028,6 +1028,23 @@ async function handlePackagesStructureCopy(tool, config, overrideHomeDir = null,
                             scriptLines.push(`claude plugin install ${p.name}`);
                         }
                         scriptLines.push('');
+                        // Copy plugin skills into ~/.claude/skills/ so they're discoverable as slash commands
+                        // Plugin installs put skills in ~/.claude/plugins/cache/<marketplace_id>/<name>/<version>/skills/
+                        // but Claude Code only looks in ~/.claude/skills/ for user-invocable skills
+                        scriptLines.push('echo "Copying plugin skills to skills directory..."');
+                        for (const p of claudePlugins) {
+                            const marketplaceId = p.marketplace_id || `${p.name}-marketplace`;
+                            scriptLines.push(`for skill_dir in "\${HOME}/.claude/plugins/cache/${marketplaceId}/${p.name}"/*/skills/*/; do`);
+                            scriptLines.push(`  if [ -d "$skill_dir" ] && [ -f "$skill_dir/SKILL.md" ]; then`);
+                            scriptLines.push(`    skill_name=$(basename "$skill_dir")`);
+                            scriptLines.push(`    if [ ! -d "\${HOME}/${config.targetSubdir}/skills/$skill_name" ]; then`);
+                            scriptLines.push(`      cp -R "$skill_dir" "\${HOME}/${config.targetSubdir}/skills/$skill_name"`);
+                            scriptLines.push(`      echo "  Copied plugin skill: $skill_name"`);
+                            scriptLines.push(`    fi`);
+                            scriptLines.push(`  fi`);
+                            scriptLines.push(`done`);
+                        }
+                        scriptLines.push('');
                     }
 
                     if (npxSkills.length > 0) {
