@@ -6,52 +6,11 @@ the Langfuse SDK, ensuring zero overhead when not configured.
 """
 
 import os
-import re
 import logging
-from pathlib import Path
 from typing import Optional
 
 # Set up logging
 logger = logging.getLogger(__name__)
-
-
-def _load_secrets_file():
-    """
-    Load secrets from ~/.secrets file if env vars not set.
-
-    Parses shell export statements like:
-        export LANGFUSE_PUBLIC_KEY="value"
-        export LANGFUSE_SECRET_KEY='value'
-
-    Only loads LANGFUSE_* variables to avoid side effects.
-    """
-    secrets_file = Path.home() / '.secrets'
-    if not secrets_file.exists():
-        return
-
-    # Only load if LANGFUSE keys aren't already set
-    if os.getenv('LANGFUSE_PUBLIC_KEY') and os.getenv('LANGFUSE_SECRET_KEY'):
-        return
-
-    try:
-        with open(secrets_file, 'r') as f:
-            content = f.read()
-
-        # Pattern matches: export VAR="value" or export VAR='value' or export VAR=value
-        pattern = r'^export\s+(LANGFUSE_\w+)=["\']?([^"\'#\n]+)["\']?\s*(?:#.*)?$'
-
-        for match in re.finditer(pattern, content, re.MULTILINE):
-            key, value = match.groups()
-            value = value.strip()
-            if not os.getenv(key):  # Don't override existing env vars
-                os.environ[key] = value
-    except Exception as e:
-        # Log at debug level - secrets file is optional, so this is not an error
-        logger.debug(f"Failed to load secrets from ~/.secrets: {e}")
-
-
-# Load secrets on module import
-_load_secrets_file()
 
 
 class LangfuseConfig:
