@@ -22,10 +22,15 @@ except ImportError:
     pass  # dotenv is optional
 
 # Langfuse integration (optional - no-op if not configured)
-try:
-    from utils.langfuse import get_tracer
-except ImportError:
-    get_tracer = lambda: None  # Fallback if module not found
+_langfuse_enabled = os.getenv('LANGFUSE_ENABLED', 'false').lower() == 'true'
+if _langfuse_enabled:
+    try:
+        from utils.langfuse import get_tracer
+    except ImportError:
+        _langfuse_enabled = False
+        get_tracer = lambda: None
+else:
+    get_tracer = lambda: None
 
 
 def log_session_start(input_data):
