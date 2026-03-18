@@ -21,7 +21,7 @@ class LangfuseConfig:
     - LANGFUSE_PUBLIC_KEY: Required to enable Langfuse
     - LANGFUSE_SECRET_KEY: Required to enable Langfuse
     - LANGFUSE_HOST: Custom Langfuse host (default: https://cloud.langfuse.com)
-    - LANGFUSE_ENABLED: Explicit enable/disable flag (default: true)
+    - LANGFUSE_ENABLED: Explicit enable/disable flag (default: false)
     - LANGFUSE_ENVIRONMENT: Environment tag (default: development)
     - LANGFUSE_RELEASE: Release version tag
     - LANGFUSE_DEBUG: Enable debug logging (default: false)
@@ -31,7 +31,7 @@ class LangfuseConfig:
         self.public_key: Optional[str] = os.getenv('LANGFUSE_PUBLIC_KEY')
         self.secret_key: Optional[str] = os.getenv('LANGFUSE_SECRET_KEY')
         self.host: str = os.getenv('LANGFUSE_HOST', 'https://cloud.langfuse.com')
-        self.enabled: bool = os.getenv('LANGFUSE_ENABLED', 'true').lower() == 'true'
+        self.enabled: bool = os.getenv('LANGFUSE_ENABLED', 'false').lower() == 'true'
         self.environment: str = os.getenv('LANGFUSE_ENVIRONMENT', 'development')
         self.release: Optional[str] = os.getenv('LANGFUSE_RELEASE', 'claude-code-hooks-v1')
         self.debug: bool = os.getenv('LANGFUSE_DEBUG', 'false').lower() == 'true'
