@@ -128,7 +128,7 @@ impl SessionStore {
     }
 
     /// Get the storage file path
-    fn storage_path() -> PathBuf {
+    pub fn storage_path() -> PathBuf {
         dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join(".agents-in-a-box")
@@ -153,6 +153,11 @@ impl SessionStore {
     /// Find session by tmux name
     pub fn find_by_tmux_name(&self, tmux_name: &str) -> Option<&SessionMetadata> {
         self.sessions.get(tmux_name)
+    }
+
+    /// Get an iterator over all tracked sessions (tmux_name -> metadata)
+    pub fn sessions(&self) -> &HashMap<String, SessionMetadata> {
+        &self.sessions
     }
 
     /// Get all tmux session names that are tracked

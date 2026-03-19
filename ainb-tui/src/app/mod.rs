@@ -3,6 +3,7 @@
 pub mod attach_handler;
 pub mod events;
 pub mod session_loader;
+pub mod snapshot;
 pub mod state;
 
 pub use attach_handler::AttachHandler;

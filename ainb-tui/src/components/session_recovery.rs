@@ -100,6 +100,12 @@ pub struct OrphanedWorktree {
     pub time_ago: String,
 }
 
+/// Result of a bulk recovery operation
+pub struct BulkRecoveryResult {
+    pub succeeded: Vec<String>,
+    pub failed: Vec<(String, String)>,
+}
+
 impl Default for OrphanedWorktree {
     fn default() -> Self {
         Self {
@@ -736,11 +742,10 @@ impl SessionRecoveryState {
         format!("tmux_{}_{}", sanitized_folder, sanitized_branch)
     }
 
-    /// Resume an orphaned worktree by creating a new tmux session and starting Claude
-    /// The session is registered in sessions.json so it appears as a proper Workspace
-    pub fn resume_worktree(&mut self) -> Result<String, String> {
-        let worktree = self.selected_worktree().ok_or("No worktree selected")?.clone();
-
+    /// Resume a single orphaned worktree by creating a new tmux session and starting Claude.
+    /// This is a static method with no `&mut self` dependency, enabling bulk recovery.
+    /// The session is registered in sessions.json so it appears as a proper Workspace.
+    fn resume_single_worktree(worktree: &OrphanedWorktree) -> Result<String, String> {
         // Can't resume broken symlinks (directory doesn't exist)
         if worktree.orphan_type == OrphanType::BrokenSymlink {
             return Err("Cannot resume: worktree directory no longer exists".to_string());
@@ -827,7 +832,7 @@ impl SessionRecoveryState {
         }
 
         // Try to find a transcript to resume from
-        let transcript_path = Self::find_transcript_for_worktree(&worktree);
+        let transcript_path = Self::find_transcript_for_worktree(worktree);
 
         // Build claude command
         let claude_cmd = if let Some(transcript) = transcript_path {
@@ -850,10 +855,33 @@ impl SessionRecoveryState {
             ));
         }
 
-        self.action_result = Some(format!("Resumed as: {}", new_session));
-        self.refresh();
-
         Ok(new_session)
+    }
+
+    /// Resume the currently selected orphaned worktree
+    pub fn resume_worktree(&mut self) -> Result<String, String> {
+        let worktree = self.selected_worktree().ok_or("No worktree selected")?.clone();
+        let result = Self::resume_single_worktree(&worktree)?;
+        self.action_result = Some(format!("Resumed as: {}", result));
+        self.refresh();
+        Ok(result)
+    }
+
+    /// Recover all orphaned worktrees in bulk (skipping broken symlinks)
+    pub fn recover_all_worktrees(&mut self) -> BulkRecoveryResult {
+        let mut result = BulkRecoveryResult { succeeded: vec![], failed: vec![] };
+        let worktrees: Vec<_> = self.orphaned_worktrees.clone();
+        for worktree in &worktrees {
+            if worktree.orphan_type == OrphanType::BrokenSymlink {
+                continue;
+            }
+            match Self::resume_single_worktree(worktree) {
+                Ok(name) => result.succeeded.push(name),
+                Err(e) => result.failed.push((worktree.name.clone(), e)),
+            }
+        }
+        self.refresh();
+        result
     }
 
     /// Try to find a transcript file associated with this worktree
@@ -1064,6 +1092,9 @@ impl SessionRecovery {
                 Span::styled("|", Style::default().fg(SUBDUED_BORDER)),
                 Span::styled(" R", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
                 Span::styled(" refresh ", Style::default().fg(MUTED_GRAY)),
+                Span::styled("|", Style::default().fg(SUBDUED_BORDER)),
+                Span::styled(" A", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                Span::styled(" recover all ", Style::default().fg(MUTED_GRAY)),
             ]));
 
         let inner = block.inner(area);

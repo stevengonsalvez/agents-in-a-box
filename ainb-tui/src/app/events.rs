@@ -335,6 +335,7 @@ pub enum AppEvent {
     SessionRecoveryArchive,      // Archive/delete selected item (d)
     SessionRecoveryRefresh,      // Refresh session list (R)
     SessionRecoveryToggleView,   // Toggle view mode: Sessions/Worktrees/All (Tab)
+    SessionRecoveryRecoverAll,   // Recover all orphaned worktrees (Shift+A)
 }
 
 pub struct EventHandler;
@@ -1514,6 +1515,7 @@ impl EventHandler {
             KeyCode::Char('d') => Some(AppEvent::SessionRecoveryArchive),
             KeyCode::Char('R') => Some(AppEvent::SessionRecoveryRefresh),
             KeyCode::Tab => Some(AppEvent::SessionRecoveryToggleView),
+            KeyCode::Char('A') => Some(AppEvent::SessionRecoveryRecoverAll),
             _ => None,
         }
     }
@@ -3608,6 +3610,22 @@ impl EventHandler {
             AppEvent::SessionRecoveryToggleView => {
                 tracing::debug!("Session recovery toggle view");
                 state.session_recovery_state.toggle_view_mode();
+            }
+            AppEvent::SessionRecoveryRecoverAll => {
+                tracing::info!("Session recovery: recovering all worktrees");
+                let result = state.session_recovery_state.recover_all_worktrees();
+                let total = result.succeeded.len() + result.failed.len();
+                if result.failed.is_empty() {
+                    state.add_info_notification(format!(
+                        "Recovered all {} sessions successfully",
+                        result.succeeded.len()
+                    ));
+                } else {
+                    state.add_info_notification(format!(
+                        "Recovered {}/{} sessions ({} failed)",
+                        result.succeeded.len(), total, result.failed.len()
+                    ));
+                }
             }
             // Onboarding wizard events
             AppEvent::OnboardingNext => {

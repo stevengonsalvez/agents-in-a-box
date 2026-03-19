@@ -1918,6 +1918,9 @@ pub struct AppState {
     // Session recovery state (for orphaned agent sessions)
     pub session_recovery_state: crate::components::SessionRecoveryState,
 
+    // Periodic session snapshot tracking
+    pub last_snapshot_time: Option<Instant>,
+
     // Background workspace loading state
     pub is_loading_workspaces: bool,
     pub workspace_load_error: Option<String>,
@@ -2449,6 +2452,9 @@ impl Default for AppState {
 
             // Session recovery state (lazy-load when entering view)
             session_recovery_state: crate::components::SessionRecoveryState::default(),
+
+            // Periodic session snapshot tracking
+            last_snapshot_time: None,
 
             // Background workspace loading state
             is_loading_workspaces: false,
@@ -8638,6 +8644,31 @@ impl App {
                     }
                 }
             }
+        }
+
+        // Periodic session snapshot (every 30 minutes)
+        let should_snapshot = self
+            .state
+            .last_snapshot_time
+            .map(|last| now.duration_since(last).as_secs() >= 1800)
+            .unwrap_or(true);
+
+        if should_snapshot {
+            self.state.last_snapshot_time = Some(now);
+            tokio::spawn(async {
+                match crate::app::snapshot::SnapshotManager::take_snapshot().await {
+                    Ok(snapshot) => {
+                        if let Err(e) = crate::app::snapshot::SnapshotManager::save_snapshot(&snapshot).await {
+                            tracing::warn!("Failed to save session snapshot: {}", e);
+                        } else if let Err(e) = crate::app::snapshot::SnapshotManager::prune_snapshots(48).await {
+                            tracing::warn!("Failed to prune old snapshots: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to take session snapshot: {}", e);
+                    }
+                }
+            });
         }
 
         // Process incoming log entries (non-blocking)
