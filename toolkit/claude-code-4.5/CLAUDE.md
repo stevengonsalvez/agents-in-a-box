@@ -215,6 +215,9 @@ CRITICAL: When starting any long-running server process (web servers, developmen
 
 6. **Safe Process Management**
    - NEVER kill by process name (`pkill node`, `pkill vite`, `pkill uv`) - affects other sessions
+   - NEVER use `tmux kill-server` — this kills ALL tmux sessions across ALL users/projects
+   - NEVER use `pkill tmux`, `killall tmux`, or any wildcard tmux kill command
+   - ONLY use `tmux kill-session -t {specific-session-name}` to kill a SPECIFIC session you own
    - ALWAYS kill by port to target specific server: `lsof -ti:${PORT} | xargs kill -9`
    - Alternative: Kill entire tmux session: `tmux kill-session -t {session-name}`
    - Check what's running on port: `lsof -i :${PORT}`
@@ -226,6 +229,15 @@ npm run dev
 
 # ❌ WRONG - Killing by process name affects other sessions
 pkill node
+
+# ❌ CATASTROPHIC - Kills ALL tmux sessions (other agents, dev servers, everything)
+tmux kill-server
+pkill tmux
+killall tmux
+
+# ❌ WRONG - Wildcard session killing
+tmux kill-session -t swarm-*
+for s in $(tmux list-sessions -F '#{session_name}'); do tmux kill-session -t "$s"; done
 
 # ❌ DEPRECATED - Using & background jobs (no persistence)
 PORT=$(shuf -i 3000-9999 -n 1)
