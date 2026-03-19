@@ -490,6 +490,7 @@ impl SessionListComponent {
     fn update_selection(&mut self, state: &AppState) {
         if let Some(workspace_idx) = state.selected_workspace_index {
             let mut current_index = 0;
+            let mut workspace_header_index = 0;
 
             // When expand_all is true, we need to count items from all workspaces
             for (idx, workspace) in state.workspaces.iter().enumerate() {
@@ -507,6 +508,9 @@ impl SessionListComponent {
                         }
                     }
 
+                    // Remember the workspace header position before adding session offset
+                    workspace_header_index = current_index;
+
                     // Add session offset if a regular session is selected
                     if let Some(session_idx) = state.selected_session_index {
                         current_index += session_idx + 1;
@@ -519,6 +523,17 @@ impl SessionListComponent {
             }
 
             self.list_state.select(Some(current_index));
+
+            // Ensure the parent workspace header stays visible when a child session is selected.
+            // ratatui auto-scrolls to show the selected item, but this can push the parent
+            // folder line off the top of the viewport. Clamp the scroll offset so the
+            // workspace header is always the topmost visible item (at minimum).
+            if state.selected_session_index.is_some() || state.shell_selected {
+                let current_offset = self.list_state.offset();
+                if current_offset > workspace_header_index {
+                    *self.list_state.offset_mut() = workspace_header_index;
+                }
+            }
         } else if state.selected_ssh_session_index.is_some() {
             // Selection is in "SSH Sessions" section
             let mut current_index = 0;
