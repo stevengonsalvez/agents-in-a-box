@@ -135,6 +135,26 @@ agent-skills:
       - Follow-up question mechanism for comprehensive answers
       - Python scripts with auto-managed .venv environment
 
+  - name: stitch-skills
+    repo: https://github.com/google-labs-code/stitch-skills
+    applies-to: [claude]
+    purpose: "Google Stitch design-to-code skills for UI generation, React components, and video walkthroughs"
+    multi-skill: true
+    skills:
+      - design-md: "Synthesize semantic design systems into DESIGN.md"
+      - enhance-prompt: "Transform vague UI ideas into Stitch-optimized prompts"
+      - react-components: "Convert Stitch designs into modular Vite/React components"
+      - remotion: "Generate walkthrough videos from Stitch projects"
+      - shadcn-ui: "shadcn/ui component integration and best practices"
+      - stitch-design: "Unified Stitch design entry point with prompt enhancement"
+      - stitch-loop: "Autonomous baton-passing loop for iterative website building"
+    features:
+      - Stitch MCP integration for AI-powered UI generation
+      - Design system synthesis from visual designs
+      - React component extraction with AST validation
+      - Remotion video walkthrough generation
+      - shadcn/ui component discovery and customization
+
 # =============================================================================
 # EXTERNAL PLUGINS (Claude Code marketplace)
 # =============================================================================
