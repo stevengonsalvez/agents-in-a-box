@@ -98,6 +98,8 @@ pub struct OrphanedWorktree {
     pub size_mb: Option<u64>,
     /// Time since last modification
     pub time_ago: String,
+    /// Agent type from sessions.json (if known)
+    pub agent_type: Option<SessionAgentType>,
 }
 
 /// Result of a bulk recovery operation
@@ -118,6 +120,7 @@ impl Default for OrphanedWorktree {
             orphan_type: OrphanType::NoMetadata,
             size_mb: None,
             time_ago: String::new(),
+            agent_type: None,
         }
     }
 }
@@ -472,6 +475,18 @@ impl SessionRecoveryState {
             }
         }
 
+        // Enrich orphaned worktrees with agent_type from sessions.json
+        let store = SessionStore::load();
+        for worktree in &mut orphaned {
+            // Try to find matching session by worktree path
+            for (_, metadata) in store.sessions() {
+                if metadata.worktree_path == worktree.path {
+                    worktree.agent_type = Some(metadata.agent_type);
+                    break;
+                }
+            }
+        }
+
         // Sort by time_ago (most recent first based on directory mtime)
         orphaned.sort_by(|a, b| {
             let a_mtime = std::fs::metadata(&a.path)
@@ -579,6 +594,7 @@ impl SessionRecoveryState {
             orphan_type,
             size_mb,
             time_ago,
+            agent_type: None, // Enriched later from sessions.json
         })
     }
 
@@ -798,6 +814,8 @@ impl SessionRecoveryState {
             .unwrap_or_else(Uuid::new_v4);
 
         // Register session in sessions.json so it appears as a Workspace
+        // Preserve the original agent_type if known (e.g., Copilot, Codex), otherwise default to Claude
+        let agent_type = worktree.agent_type.unwrap_or_default();
         let metadata = SessionMetadata {
             session_id,
             tmux_session_name: new_session.clone(),
@@ -805,7 +823,7 @@ impl SessionRecoveryState {
             workspace_name: worktree.source_repo.clone()
                 .unwrap_or_else(|| worktree.name.clone()),
             created_at: chrono::Utc::now(),
-            agent_type: SessionAgentType::default(),
+            agent_type,
         };
 
         let mut store = SessionStore::load();
@@ -831,28 +849,43 @@ impl SessionRecoveryState {
             }
         }
 
-        // Try to find a transcript to resume from
-        let transcript_path = Self::find_transcript_for_worktree(worktree);
-
-        // Build claude command
-        let claude_cmd = if let Some(transcript) = transcript_path {
-            format!("claude --dangerously-skip-permissions --resume \"{}\"", transcript)
+        // Try to find a transcript to resume from (only for Claude sessions)
+        let transcript_path = if agent_type == SessionAgentType::Claude {
+            Self::find_transcript_for_worktree(worktree)
         } else {
-            // No transcript - just start claude in the directory
-            "claude --dangerously-skip-permissions".to_string()
+            None
         };
 
-        // Send command to tmux
-        let send_result = Command::new("tmux")
-            .args(["send-keys", "-t", &new_session, &claude_cmd, "C-m"])
-            .output()
-            .map_err(|e| e.to_string())?;
+        // Build agent command based on agent_type
+        let agent_cmd = match agent_type {
+            SessionAgentType::Copilot => "github-copilot-cli".to_string(),
+            SessionAgentType::Codex => "codex --dangerously-skip-permissions".to_string(),
+            SessionAgentType::Gemini => "gemini".to_string(),
+            SessionAgentType::Shell => String::new(), // Just open a shell, no command
+            _ => {
+                // Claude (default)
+                if let Some(transcript) = transcript_path {
+                    format!("claude --dangerously-skip-permissions --resume \"{}\"", transcript)
+                } else {
+                    "claude --dangerously-skip-permissions".to_string()
+                }
+            }
+        };
 
-        if !send_result.status.success() {
-            return Err(format!(
-                "Failed to start Claude: {}",
-                String::from_utf8_lossy(&send_result.stderr)
-            ));
+        // Send command to tmux (skip for Shell sessions — just leave the shell open)
+        if !agent_cmd.is_empty() {
+            let send_result = Command::new("tmux")
+                .args(["send-keys", "-t", &new_session, &agent_cmd, "C-m"])
+                .output()
+                .map_err(|e| e.to_string())?;
+
+            if !send_result.status.success() {
+                return Err(format!(
+                    "Failed to start {}: {}",
+                    agent_type.name(),
+                    String::from_utf8_lossy(&send_result.stderr)
+                ));
+            }
         }
 
         Ok(new_session)
