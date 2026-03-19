@@ -10,6 +10,7 @@ use ratatui::{
     Frame,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Command;
 use uuid::Uuid;
@@ -166,6 +167,8 @@ pub struct SessionRecoveryState {
     pub view_mode: RecoveryViewMode,
     /// Selected index in current view
     pub selected_index: usize,
+    /// Multi-select: indices of items marked for bulk operations
+    pub selected_items: HashSet<usize>,
     /// List state for rendering
     pub list_state: ListState,
     /// Whether data is being loaded
@@ -189,6 +192,7 @@ impl SessionRecoveryState {
             orphaned_worktrees: Vec::new(),
             view_mode: RecoveryViewMode::default(),
             selected_index: 0,
+            selected_items: HashSet::new(),
             list_state: ListState::default(),
             loading: true,
             last_error: None,
@@ -241,6 +245,7 @@ impl SessionRecoveryState {
         self.loading = true;
         self.last_error = None;
         self.action_result = None;
+        self.selected_items.clear();
 
         // Load orphaned sessions
         match Self::load_orphaned_sessions() {
@@ -1048,6 +1053,157 @@ impl SessionRecoveryState {
             self.archive_selected()
         }
     }
+
+    /// Toggle multi-select for the current item
+    pub fn toggle_select(&mut self) {
+        let idx = self.selected_index;
+        if self.selected_items.contains(&idx) {
+            self.selected_items.remove(&idx);
+        } else {
+            self.selected_items.insert(idx);
+        }
+    }
+
+    /// Check if any items are multi-selected
+    pub fn has_multi_selection(&self) -> bool {
+        !self.selected_items.is_empty()
+    }
+
+    /// Delete all multi-selected items
+    pub fn delete_multi_selected(&mut self) -> (usize, usize) {
+        // Collect items to delete in reverse order (so indices stay valid)
+        let mut indices: Vec<usize> = self.selected_items.iter().copied().collect();
+        indices.sort_unstable();
+        indices.reverse();
+
+        let mut deleted = 0;
+        let mut failed = 0;
+
+        for idx in indices {
+            match self.view_mode {
+                RecoveryViewMode::Sessions => {
+                    if idx < self.orphaned_sessions.len() {
+                        // Archive the session
+                        let session = self.orphaned_sessions[idx].clone();
+                        if Self::archive_session_by_name(&session.session).is_ok() {
+                            deleted += 1;
+                        } else {
+                            failed += 1;
+                        }
+                    }
+                }
+                RecoveryViewMode::Worktrees => {
+                    if idx < self.orphaned_worktrees.len() {
+                        let worktree = self.orphaned_worktrees[idx].clone();
+                        if Self::cleanup_single_worktree(&worktree).is_ok() {
+                            deleted += 1;
+                        } else {
+                            failed += 1;
+                        }
+                    }
+                }
+                RecoveryViewMode::All => {
+                    let session_count = self.orphaned_sessions.len();
+                    if idx < session_count {
+                        let session = self.orphaned_sessions[idx].clone();
+                        if Self::archive_session_by_name(&session.session).is_ok() {
+                            deleted += 1;
+                        } else {
+                            failed += 1;
+                        }
+                    } else {
+                        let worktree_idx = idx - session_count;
+                        if worktree_idx < self.orphaned_worktrees.len() {
+                            let worktree = self.orphaned_worktrees[worktree_idx].clone();
+                            if Self::cleanup_single_worktree(&worktree).is_ok() {
+                                deleted += 1;
+                            } else {
+                                failed += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        self.refresh();
+        (deleted, failed)
+    }
+
+    /// Archive a single session by name (static, no &mut self)
+    fn archive_session_by_name(session_name: &str) -> Result<(), String> {
+        let agents_dir = dirs::home_dir()
+            .ok_or("Could not find home directory")?
+            .join(".claude")
+            .join("agents");
+
+        let archived_dir = agents_dir.join("archived");
+        std::fs::create_dir_all(&archived_dir).map_err(|e| e.to_string())?;
+
+        let meta_file = agents_dir.join(format!("{}.json", session_name));
+        let archived_file = archived_dir.join(format!("{}.json", session_name));
+
+        if meta_file.exists() {
+            if let Ok(content) = std::fs::read_to_string(&meta_file) {
+                if let Ok(mut meta) = serde_json::from_str::<serde_json::Value>(&content) {
+                    meta["status"] = serde_json::Value::String("archived".to_string());
+                    meta["archived_at"] =
+                        serde_json::Value::String(chrono::Utc::now().to_rfc3339());
+                    std::fs::write(&archived_file, serde_json::to_string_pretty(&meta).unwrap())
+                        .map_err(|e| e.to_string())?;
+                    std::fs::remove_file(&meta_file).map_err(|e| e.to_string())?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Cleanup a single worktree (static, no &mut self)
+    fn cleanup_single_worktree(worktree: &OrphanedWorktree) -> Result<(), String> {
+        let worktrees_base = dirs::home_dir()
+            .ok_or("Could not find home directory")?
+            .join(".agents-in-a-box")
+            .join("worktrees");
+
+        // Remove the worktree directory
+        if worktree.path.exists() && worktree.orphan_type != OrphanType::BrokenSymlink {
+            std::fs::remove_dir_all(&worktree.path)
+                .map_err(|e| format!("Failed to remove worktree: {}", e))?;
+        }
+
+        // Remove symlink in by-session/
+        if let Some(ref id) = worktree.id {
+            let symlink_path = worktrees_base.join("by-session").join(id);
+            if symlink_path.symlink_metadata().is_ok() {
+                std::fs::remove_file(&symlink_path).ok();
+            }
+        }
+
+        // Remove by-name/ entry
+        let by_name_path = worktrees_base.join("by-name").join(&worktree.name);
+        if by_name_path.exists() || by_name_path.symlink_metadata().is_ok() {
+            if by_name_path.is_dir() {
+                std::fs::remove_dir_all(&by_name_path).ok();
+            } else {
+                std::fs::remove_file(&by_name_path).ok();
+            }
+        }
+
+        // Remove from sessions.json
+        let mut store = SessionStore::load();
+        // Find and remove by worktree path
+        let keys_to_remove: Vec<String> = store.sessions()
+            .iter()
+            .filter(|(_, m)| m.worktree_path == worktree.path)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in &keys_to_remove {
+            store.remove_by_tmux_name(key);
+        }
+        store.save().ok();
+
+        Ok(())
+    }
 }
 
 /// Session recovery component renderer
@@ -1128,6 +1284,12 @@ impl SessionRecovery {
                 Span::styled("|", Style::default().fg(SUBDUED_BORDER)),
                 Span::styled(" A", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
                 Span::styled(" recover all ", Style::default().fg(MUTED_GRAY)),
+                Span::styled("|", Style::default().fg(SUBDUED_BORDER)),
+                Span::styled(" Space", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                Span::styled(" select ", Style::default().fg(MUTED_GRAY)),
+                Span::styled("|", Style::default().fg(SUBDUED_BORDER)),
+                Span::styled(" D", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                Span::styled(" del selected ", Style::default().fg(MUTED_GRAY)),
             ]));
 
         let inner = block.inner(area);
@@ -1220,7 +1382,8 @@ impl SessionRecovery {
         if matches!(state.view_mode, RecoveryViewMode::Sessions | RecoveryViewMode::All) {
             for session in &state.orphaned_sessions {
                 let is_selected = current_idx == state.selected_index;
-                items.push(Self::render_session_item(session, is_selected));
+                let is_marked = state.selected_items.contains(&current_idx);
+                items.push(Self::render_session_item(session, is_selected, is_marked));
                 current_idx += 1;
             }
         }
@@ -1239,7 +1402,8 @@ impl SessionRecovery {
 
             for worktree in &state.orphaned_worktrees {
                 let is_selected = current_idx == state.selected_index;
-                items.push(Self::render_worktree_item(worktree, is_selected));
+                let is_marked = state.selected_items.contains(&current_idx);
+                items.push(Self::render_worktree_item(worktree, is_selected, is_marked));
                 current_idx += 1;
             }
         }
@@ -1248,7 +1412,7 @@ impl SessionRecovery {
     }
 
     /// Render a single session list item
-    fn render_session_item(session: &OrphanedSession, is_selected: bool) -> ListItem<'static> {
+    fn render_session_item(session: &OrphanedSession, is_selected: bool, is_marked: bool) -> ListItem<'static> {
         let resume_indicator = if session.can_resume { "📄" } else { "⚠" };
         let time_indicator = if session.time_ago.is_empty() {
             String::new()
@@ -1264,7 +1428,10 @@ impl SessionRecovery {
             .replace('\n', " ");
 
         let mut spans = vec![];
-        if is_selected {
+        // Multi-select checkbox
+        if is_marked {
+            spans.push(Span::styled("◉ ", Style::default().fg(WARNING_ORANGE)));
+        } else if is_selected {
             spans.push(Span::styled("▶ ", Style::default().fg(SELECTION_GREEN)));
         } else {
             spans.push(Span::raw("  "));
@@ -1313,7 +1480,7 @@ impl SessionRecovery {
     }
 
     /// Render a single worktree list item
-    fn render_worktree_item(worktree: &OrphanedWorktree, is_selected: bool) -> ListItem<'static> {
+    fn render_worktree_item(worktree: &OrphanedWorktree, is_selected: bool, is_marked: bool) -> ListItem<'static> {
         // Determine if worktree is resumable (not a broken symlink)
         let can_resume = worktree.orphan_type != OrphanType::BrokenSymlink;
         let resume_indicator = if can_resume { "▶" } else { "✗" };
@@ -1324,7 +1491,10 @@ impl SessionRecovery {
         };
 
         let mut spans = vec![];
-        if is_selected {
+        // Multi-select checkbox
+        if is_marked {
+            spans.push(Span::styled("◉ ", Style::default().fg(WARNING_ORANGE)));
+        } else if is_selected {
             spans.push(Span::styled("▶ ", Style::default().fg(SELECTION_GREEN)));
         } else {
             spans.push(Span::raw("  "));

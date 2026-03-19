@@ -336,6 +336,8 @@ pub enum AppEvent {
     SessionRecoveryRefresh,      // Refresh session list (R)
     SessionRecoveryToggleView,   // Toggle view mode: Sessions/Worktrees/All (Tab)
     SessionRecoveryRecoverAll,   // Recover all orphaned worktrees (Shift+A)
+    SessionRecoveryToggleSelect, // Toggle multi-select on current item (Space)
+    SessionRecoveryDeleteSelected, // Delete all multi-selected items (Shift+D)
 }
 
 pub struct EventHandler;
@@ -1516,6 +1518,8 @@ impl EventHandler {
             KeyCode::Char('R') => Some(AppEvent::SessionRecoveryRefresh),
             KeyCode::Tab => Some(AppEvent::SessionRecoveryToggleView),
             KeyCode::Char('A') => Some(AppEvent::SessionRecoveryRecoverAll),
+            KeyCode::Char(' ') => Some(AppEvent::SessionRecoveryToggleSelect),
+            KeyCode::Char('D') => Some(AppEvent::SessionRecoveryDeleteSelected),
             _ => None,
         }
     }
@@ -3625,6 +3629,30 @@ impl EventHandler {
                         "Recovered {}/{} sessions ({} failed)",
                         result.succeeded.len(), total, result.failed.len()
                     ));
+                }
+            }
+            AppEvent::SessionRecoveryToggleSelect => {
+                state.session_recovery_state.toggle_select();
+                let count = state.session_recovery_state.selected_items.len();
+                if count > 0 {
+                    state.add_info_notification(format!("{} items selected", count));
+                }
+            }
+            AppEvent::SessionRecoveryDeleteSelected => {
+                let count = state.session_recovery_state.selected_items.len();
+                if count == 0 {
+                    state.add_info_notification("No items selected. Use Space to select items first.".to_string());
+                } else {
+                    tracing::info!("Session recovery: deleting {} selected items", count);
+                    let (deleted, failed) = state.session_recovery_state.delete_multi_selected();
+                    if failed == 0 {
+                        state.add_info_notification(format!("Deleted {} items", deleted));
+                    } else {
+                        state.add_info_notification(format!(
+                            "Deleted {}/{} items ({} failed)",
+                            deleted, deleted + failed, failed
+                        ));
+                    }
                 }
             }
             // Onboarding wizard events
