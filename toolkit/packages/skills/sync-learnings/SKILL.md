@@ -260,10 +260,13 @@ Before syncing, generate an assessment table:
 
 ## SYNC TO {{HOME_TOOL_DIR}} (from packages/)
 
+**⚠️ Always interpolate templates after copying** — see Template Interpolation section above.
+
 ### 1. `packages/path/to/file.md`
 - **Status**: Packages version is NEWER
 - **What's new**: [description of changes]
 - **Assessment**: Copy to {{HOME_TOOL_DIR}}
+- **Action**: Copy then interpolate `{{HOME_TOOL_DIR}}` → `~/.claude/`
 
 ---
 
@@ -274,6 +277,30 @@ Before syncing, generate an assessment table:
 ```
 
 ## Execution
+
+### Template Interpolation (CRITICAL)
+
+**Packages files use `{{HOME_TOOL_DIR}}` as a cross-tool placeholder.** When syncing
+TO `~/.claude` (or any tool's home dir), these MUST be substituted before the file is
+written — never leave them as literal strings.
+
+| Template | Claude Code | Codex | Copilot |
+|----------|-------------|-------|---------|
+| `{{HOME_TOOL_DIR}}` | `~/.claude/` | `~/.codex/` | `~/.copilot/` |
+| `{{TOOL_DIR}}` | `.claude` | `.codex` | `.copilot` |
+
+Use `perl` for safe substitution (avoids shell expansion issues with `~`):
+
+```bash
+# After copying FROM packages TO ~/.claude, interpolate templates:
+perl -pi -e 's/\{\{HOME_TOOL_DIR\}\}/$ENV{HOME}\/.claude/g; s/\{\{TOOL_DIR\}\}/.claude/g' ~/.claude/path/to/SKILL.md
+
+# Or with explicit paths:
+perl -pe 's/\{\{HOME_TOOL_DIR\}\}/\/Users\/stevengonsalvez\/.claude/g; s/\{\{TOOL_DIR\}\}/.claude/g' \
+  /tmp/SKILL.md > ~/.claude/path/to/SKILL.md
+```
+
+**Always verify** after substitution — `grep -n "HOME_TOOL_DIR\|TOOL_DIR" ~/.claude/...` should return nothing.
 
 ### Shell Alias Workaround
 
