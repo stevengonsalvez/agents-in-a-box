@@ -2,6 +2,7 @@
 name: session-summary
 description: Generate a comprehensive session summary
 user-invocable: true
+argument-hint: [slug]
 ---
 
 Generate a comprehensive session summary: $ARGUMENTS

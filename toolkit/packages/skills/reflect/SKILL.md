@@ -19,6 +19,7 @@ allowed-tools:
   - Grep
   - Glob
   - Bash
+argument-hint: [--behavioral|--knowledge|--review|--status|--consolidate]
 ---
 
 # Reflect - Unified Learning Capture Skill

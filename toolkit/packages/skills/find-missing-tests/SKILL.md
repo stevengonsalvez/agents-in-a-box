@@ -2,6 +2,7 @@
 name: find-missing-tests
 description: Analyze codebase and identify missing test cases, then create GitHub issues for each gap
 user-invocable: true
+argument-hint: [files...]
 ---
 
 Analyze codebase and identify missing test cases, then create GitHub issues for each gap: $ARGUMENTS

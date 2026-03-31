@@ -2,6 +2,7 @@
 name: swarm-create
 description: Create a new swarm team from a Beads epic with N worker agents
 user-invocable: true
+argument-hint: [epic-id]
 ---
 
 # /swarm-create
