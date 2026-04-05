@@ -19,7 +19,7 @@ allowed-tools:
   - Grep
   - Glob
   - Bash
-argument-hint: [--behavioral|--knowledge|--review|--status|--consolidate]
+argument-hint: [--behavioral|--knowledge|--review|--status|--consolidate|--ingest-memories]
 ---
 
 # Reflect - Unified Learning Capture Skill
@@ -34,6 +34,7 @@ argument-hint: [--behavioral|--knowledge|--review|--status|--consolidate]
 | `/reflect --review` | Review pending low-confidence learnings |
 | `/reflect --status` | Show metrics and KB stats |
 | `/reflect --consolidate` | Merge orphaned worktree memories |
+| `/reflect --ingest-memories` | Ingest project memory files into QMD + GraphRAG |
 | `/reflect on` | Enable auto-reflection |
 | `/reflect off` | Disable auto-reflection |
 | `/reflect [agent]` | Focus on specific agent (behavioral only) |
@@ -364,12 +365,281 @@ Also update `$LEARNINGS_HOME/metrics.yaml` with:
 Bulk-merge orphaned worktree memories into `.agents/MEMORY.md`.
 See [consolidate_workflow.md](references/consolidate_workflow.md) for the full 9-step workflow.
 
+## Ingest Project Memories (`/reflect --ingest-memories`)
+
+Harvest Claude Code's auto-memory files from `~/.claude/projects/*/memory/` into the
+git-backed global knowledge base (`$LEARNINGS_HOME`) with QMD + GraphRAG indexing.
+
+Memory files are ephemeral — Claude Code's dream cycles can prune them, and deleting a
+project wipes its `~/.claude/projects/<slug>/memory/` directory entirely. This command
+archives the originals into `$LEARNINGS_HOME/documents/memories/{project}/` (git-tracked),
+converts them to searchable knowledge learnings, and indexes into QMD + GraphRAG.
+
+**When to use:** Periodically, or when you notice memory files accumulating across projects.
+Run before deleting projects or cleaning up `~/.claude/projects/`.
+
+### Workflow
+
+#### Step 1: DISCOVER all project memory files
+
+```bash
+MEMORY_BASE="$HOME/.claude/projects"
+echo "=== Scanning project memory directories ==="
+TOTAL=0
+for dir in "$MEMORY_BASE"/*/memory/; do
+  [ -d "$dir" ] || continue
+  count=$(find "$dir" -name "*.md" -not -name "MEMORY.md" -type f 2>/dev/null | wc -l)
+  if [ "$count" -gt 0 ]; then
+    project=$(basename "$(dirname "$dir")")
+    echo "  $project: $count files"
+    TOTAL=$((TOTAL + count))
+  fi
+done
+echo "Total: $TOTAL memory files"
+```
+
+#### Step 2: READ and CLASSIFY each memory file
+
+For each `.md` file (excluding `MEMORY.md` index files):
+
+1. Read the file fully
+2. Extract frontmatter fields: `name`, `description`, `type`
+3. Classify by memory type → learning route:
+
+| Memory Type | Learning Type | Scope | Route |
+|-------------|---------------|-------|-------|
+| `feedback` | `correction` or `pattern` | universal (if general) or project | Knowledge note |
+| `user` | `preference` | universal | Knowledge note (user profile) |
+| `project` | `decision` or `pattern` | project | Knowledge note |
+| `reference` | `reference` | project or domain | Knowledge note |
+
+4. Extract the project name from the directory path (decode the slug):
+   ```
+   -Users-stevengonsalvez-d-git-shotclubhouse → shotclubhouse
+   ```
+
+#### Step 3: DEDUP against existing knowledge base
+
+For each memory file, check if it already exists in the knowledge base:
+
+```bash
+LEARNINGS_CLI="$LEARNINGS_HOME/cli/learnings"
+
+# Check QMD first (fastest)
+qmd query --collection learnings --json "{key_insight from memory}" 2>/dev/null
+
+# Fall back to GraphRAG
+if [[ -x "$LEARNINGS_CLI" ]]; then
+    "$LEARNINGS_CLI" search "{key terms}" --mode local --format json
+fi
+```
+
+**Skip** if high-similarity match exists. **Update** if partial match found and memory has newer info.
+
+#### Step 4: CONVERT to knowledge learnings
+
+For each non-duplicate memory, generate:
+
+**A. Learning note** (using [assets/learning_template.md](assets/learning_template.md)):
+
+- `id`: `lrn-mem-{project_slug}-{filename_slug}-{hash6}`
+- `scope`: Derived from content (universal for user/feedback, project for project/reference)
+- `confidence`: HIGH for feedback (user explicitly stated), MEDIUM for project/reference
+- `learning_type`: Mapped from memory type (see table above)
+- `key_insight`: The `description` field from frontmatter, or first substantive line
+- `title`: The `name` field from frontmatter
+- `tags`: Include project name, memory type, and content-derived tags
+- `symptoms`: Extract "Why:" and "How to apply:" sections if present
+
+Content sections:
+- **Problem**: Context from the memory (what situation triggered this)
+- **Solution**: The actionable guidance from the memory body
+- **Context**: Project name, source path, original creation context
+
+**B. Entity sidecar** (`.entities.yaml`):
+
+Extract entities from the memory content:
+- Tools, frameworks, libraries → `technology`
+- People, roles → `concept`
+- Projects, repos → `tool`
+- Patterns, anti-patterns → `pattern`
+- Errors, gotchas → `error`
+
+Include relationships:
+- feedback type: `solves` or `relates_to` relationships
+- project type: `requires` or `relates_to` relationships
+- reference type: `relates_to` relationships pointing to external resources
+
+#### Step 5: PRESENT summary for approval
+
+```markdown
+## Memory Ingestion Plan
+
+| # | Project | Memory File | Type | Action | Learning ID |
+|---|---------|-------------|------|--------|-------------|
+| 1 | shotclubhouse | feedback_tui_bulk_delete.md | feedback | NEW | lrn-mem-shot-tui-bulk-abc123 |
+| 2 | github-io | user_stevie_tools.md | user | SKIP (exists) | — |
+| 3 | github-io | feedback_no_emdashes.md | feedback | NEW | lrn-mem-ghio-emdash-def456 |
+...
+
+**New learnings**: N
+**Skipped (duplicates)**: M
+**Updated**: K
+
+Proceed? [Y/n/select by number]
+```
+
+**NEVER auto-index without user approval.**
+
+#### Step 6: ARCHIVE originals and INDEX approved learnings
+
+For each approved memory file, first archive the original, then index the learning.
+
+**A. Archive original memory files** (preserves raw content in git):
+
+```bash
+LEARNINGS_HOME="${LEARNINGS_HOME:-$HOME/.learnings}"
+
+# Decode project slug: -Users-stevengonsalvez-d-git-shotclubhouse → shotclubhouse
+# Take the last meaningful segment after -d-git- or last path component
+decode_project() {
+  local slug="$1"
+  echo "$slug" | sed 's/.*-d-git-//' | sed 's/.*-d-//' | sed 's/^-//'
+}
+
+PROJECT_NAME=$(decode_project "$PROJECT_SLUG")
+ARCHIVE_DIR="$LEARNINGS_HOME/documents/memories/$PROJECT_NAME"
+mkdir -p "$ARCHIVE_DIR"
+
+# Copy original memory file with metadata header prepended
+for memory_file in $APPROVED_FILES; do
+  BASENAME=$(basename "$memory_file")
+  # Prepend archive metadata to the copy
+  {
+    echo "<!-- archived: $(date -Iseconds) -->"
+    echo "<!-- source: $memory_file -->"
+    echo ""
+    cat "$memory_file"
+  } > "$ARCHIVE_DIR/$BASENAME"
+done
+```
+
+The `documents/memories/` directory structure:
+```
+$LEARNINGS_HOME/documents/memories/
+├── shotclubhouse/
+│   ├── feedback_tui_bulk_delete.md
+│   ├── project_auth_migration.md
+│   └── reference_supabase_config.md
+├── stevengonsalvez-github-io/
+│   ├── feedback_no_emdashes.md
+│   ├── user_stevie_tools_and_opinions.md
+│   └── project_blog_architecture.md
+├── ai-coder-rules/
+│   └── feedback_verify_before_claiming.md
+└── _index.yaml          # tracks all ingested files
+```
+
+**B. Write structured learning notes** (for QMD + GraphRAG):
+
+```bash
+LEARNINGS_CLI="$LEARNINGS_HOME/cli/learnings"
+
+# Derive category from memory type
+# feedback → "preferences", user → "user-profile", project → "architecture", reference → "references"
+CATEGORY="memories"
+mkdir -p "$LEARNINGS_HOME/documents/learnings/$CATEGORY"
+
+# Write {learning_id}.md to $LEARNINGS_HOME/documents/learnings/$CATEGORY/
+# Write {learning_id}.entities.yaml alongside it
+```
+
+**C. Index into QMD + GraphRAG:**
+
+```bash
+if [[ -x "$LEARNINGS_CLI" ]]; then
+    "$LEARNINGS_CLI" add "$LEARNINGS_HOME/documents/learnings/$CATEGORY/{learning_id}.md" \
+        --entities "$LEARNINGS_HOME/documents/learnings/$CATEGORY/{learning_id}.entities.yaml"
+fi
+```
+
+**D. Git commit the archive + learnings:**
+
+```bash
+cd "$LEARNINGS_HOME"
+git add "documents/memories/" "documents/learnings/$CATEGORY/" ".memory-ingest-log.yaml"
+git commit -m "reflect: ingest $COUNT memories from $PROJECT_COUNT projects
+
+Archived: $COUNT original memory files
+Indexed: $INDEXED learnings into QMD + GraphRAG
+Projects: $(echo $PROJECTS | tr ' ' ', ')"
+```
+
+#### Step 7: MARK as ingested (prevent re-processing)
+
+After successful indexing, create a tracking file so already-ingested memories aren't reprocessed:
+
+```bash
+INGEST_LOG="$LEARNINGS_HOME/.memory-ingest-log.yaml"
+# Append entry:
+# - file: {full path}
+#   ingested_at: {ISO timestamp}
+#   learning_id: {learning_id}
+```
+
+On subsequent runs, check this log before processing each memory file.
+
+#### Step 8: REPORT
+
+```markdown
+## Memory Ingestion Complete
+
+- **Scanned**: N projects, M memory files
+- **Archived**: K files to $LEARNINGS_HOME/documents/memories/
+- **Indexed**: K new learnings (QMD + GraphRAG)
+- **Skipped**: J (already in KB or duplicate)
+- **Updated**: L (merged newer info)
+- **Git committed**: Yes (to $LEARNINGS_HOME local repo)
+
+Archived originals:
+- $LEARNINGS_HOME/documents/memories/{project}/*.md
+
+Indexed learnings:
+- QMD: K documents embedded
+- GraphRAG: K documents + P entities + Q relationships
+```
+
+If `$LEARNINGS_HOME` has no git remote configured, warn:
+
+```
+⚠️  Your knowledge base ($LEARNINGS_HOME) has no git remote.
+    Archives are git-tracked locally but NOT backed up.
+    To add a remote: cd $LEARNINGS_HOME && git remote add origin <your-repo-url> && git push -u origin main
+```
+
+### Stale Memory Cleanup (Optional)
+
+After ingestion, offer to flag memory files that have been successfully ingested:
+
+```
+The following memory files have been archived to $LEARNINGS_HOME
+and indexed into QMD + GraphRAG. They are now searchable via /research
+and will survive dream pruning or project deletion.
+
+Would you like to keep the originals in ~/.claude/projects/? [Y/n]
+```
+
+**Default: keep originals** — Claude Code's auto-memory system still reads them for
+context window injection. Only delete if the user explicitly requests cleanup.
+Archived copies in `$LEARNINGS_HOME/documents/memories/` are the durable backup.
+
 ## Output Locations
 
 | Scope | Location |
 |-------|----------|
 | Project memory | `.agents/MEMORY.md` (200 lines max) |
 | Project knowledge | `docs/solutions/{category}/{name}.md` + `.entities.yaml` |
+| Memory archive | `$LEARNINGS_HOME/documents/memories/{project}/` (git-tracked originals) |
 | Global knowledge | `$LEARNINGS_HOME/documents/learnings/` (via `learnings add`) |
 | Global episodes | `$LEARNINGS_HOME/documents/episodes/` (via `learnings add`) |
 | Global metrics | `$LEARNINGS_HOME/metrics.yaml` |
