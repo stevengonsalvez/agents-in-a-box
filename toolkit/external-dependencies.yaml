@@ -135,6 +135,22 @@ agent-skills:
       - Follow-up question mechanism for comprehensive answers
       - Python scripts with auto-managed .venv environment
 
+  - name: scrapling-official
+    source: "https://clawhub.ai/d4vinci/scrapling-official"
+    version: "0.4.3"
+    applies-to: [claude, codex, copilot]
+    purpose: "Adaptive web scraping with anti-bot bypass, stealth browsing, and spider framework"
+    features:
+      - Anti-bot bypass (Cloudflare Turnstile, etc.)
+      - Stealth headless browsing with fingerprint spoofing
+      - Spider framework for concurrent multi-session crawls
+      - Adaptive parsing that learns from website changes
+      - CLI extraction commands (get, fetch, stealthy-fetch)
+    requires:
+      - "python3 (3.10+)"
+      - "pip install 'scrapling[all]>=0.4.3'"
+      - "scrapling install --force"
+
   - name: stitch-skills
     repo: https://github.com/google-labs-code/stitch-skills
     applies-to: [claude]
@@ -305,6 +321,53 @@ npx-skills:
       - Next.js optimization rules
       - Performance patterns
     docs: "https://github.com/vercel-labs/agent-skills"
+
+  - name: browserbase-skills
+    source: "npx add-skill (Browserbase)"
+    purpose: "Browserbase browser automation skill family"
+    multi-skill: true
+    skills:
+      - browser: "Interactive web browsing with anti-bot and CAPTCHA solving"
+      - fetch: "HTTP fetch without browser (status codes, headers, redirects)"
+      - search: "Web search returning structured results"
+      - functions: "Deploy serverless browser automation as cloud functions"
+      - cookie-sync: "Sync Chrome cookies to Browserbase persistent context"
+      - browserbase-cli: "Browserbase CLI (bb) for Functions and platform API"
+
+  - name: gws-skills
+    source: "npx add-skill (Google Workspace)"
+    purpose: "Google Workspace CLI skill family (requires gws CLI)"
+    multi-skill: true
+    skills:
+      - gws-shared: "Shared auth patterns and output formatting"
+      - gws-gmail: "Gmail send, read, and manage"
+      - gws-calendar: "Calendar event management"
+      - gws-drive: "Drive file and folder management"
+      - gws-docs: "Google Docs read/write"
+      - gws-sheets: "Sheets read/write"
+      - gws-slides: "Slides read/write"
+      - gws-chat: "Chat spaces and messages"
+      - gws-meet: "Meet conference management"
+      - gws-tasks: "Task lists and tasks"
+      - gws-forms: "Forms read/write"
+      - gws-keep: "Keep notes management"
+      - gws-people: "Contacts and profiles"
+      - gws-classroom: "Classroom management"
+      - gws-events: "Workspace event subscriptions"
+      - gws-modelarmor: "Model Armor content filtering"
+      - gws-workflow: "Cross-service productivity workflows"
+    includes_personas: true
+    persona_count: 10
+    includes_recipes: true
+    recipe_count: 41
+
+  - name: here-now
+    source: "npx add-skill"
+    purpose: "Instant static hosting for files, HTML sites, and API proxy routes"
+
+  - name: find-skills
+    source: "npx add-skill"
+    purpose: "Discover and install agent skills from registries"
 
 # =============================================================================
 # CODEX SKILLS (from developers.openai.com/codex/skills)
