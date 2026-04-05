@@ -72,41 +72,33 @@ When you receive this command:
    bd show "$EPIC_ID" --json || echo "Epic not found"
    ```
 
-4. **Create Beads Swarm** (if not dry-run)
+4. **Initialize Team Directory**
    ```bash
-   # Create swarm structure from epic
-   bd swarm create "$EPIC_ID" --json
+   # Use bash invocation — the script exposes subcommands, not exported shell functions
+   bash ~/.claude/utils/swarm-lib.sh create-team "$EPIC_ID" "$AGENT_COUNT" "$ISOLATION_MODE" 2>&1
    ```
+   Output is the team ID (e.g. `swarm-1774612409`).
 
-5. **Initialize Team Directory**
+5. **Spawn Leader**
    ```bash
-   source ~/.claude/utils/swarm-lib.sh
-
-   # Create team with isolation mode
-   TEAM_ID=$(swarm_create_team "$EPIC_ID" "$AGENT_COUNT" "$ISOLATION_MODE")
-   echo "Created team: $TEAM_ID"
+   TEAM_ID="swarm-XXXXXX"  # from step 4
+   bash ~/.claude/utils/swarm-lib.sh spawn-leader "$TEAM_ID" "optional-lead-prompt" 2>&1
    ```
+   Output is the tmux session name (e.g. `swarm-XXXXXX-leader`).
 
-6. **Spawn Leader**
-   ```bash
-   # Start leader in tmux
-   LEADER_SESSION=$(swarm_spawn_leader "$TEAM_ID")
-   echo "Leader spawned: $LEADER_SESSION"
-   ```
-
-7. **Spawn Worker Agents**
+6. **Spawn Worker Agents**
    ```bash
    for i in $(seq 1 $AGENT_COUNT); do
-     AGENT_SESSION=$(swarm_spawn_agent "$TEAM_ID" "agent-$i")
-     echo "Agent spawned: $AGENT_SESSION"
+     bash ~/.claude/utils/swarm-lib.sh spawn-agent "$TEAM_ID" "agent-$i" "optional-prompt" 2>&1
      sleep 2  # Stagger spawning
    done
    ```
+   Output is the tmux session name for each agent.
 
-8. **Verify & Report**
+7. **Verify & Report**
    ```bash
    # Get status
-   swarm_get_status "$TEAM_ID" | jq .
+   bash ~/.claude/utils/swarm-lib.sh status "$TEAM_ID"
 
    echo ""
    echo "========================================"
@@ -121,7 +113,7 @@ When you receive this command:
    echo "  Attach to leader: tmux attach -t ${TEAM_ID}-leader"
    echo "  Check status:     /swarm-status $TEAM_ID"
    if [[ "$ISOLATION_MODE" == "worktree" ]]; then
-     echo "  Merge worktrees:  swarm-lib.sh merge-worktrees $TEAM_ID"
+     echo "  Merge worktrees:  bash ~/.claude/utils/swarm-lib.sh merge-worktrees $TEAM_ID"
    fi
    echo "  Shutdown:         /swarm-shutdown $TEAM_ID"
    echo "========================================"
@@ -208,6 +200,7 @@ The swarm integrates with Beads task tracking:
 
 | Error | Resolution |
 |-------|------------|
+| `swarm_create_team: not found` | Use `bash ~/.claude/utils/swarm-lib.sh create-team` — the script exposes subcommands, not shell functions |
 | Epic not found | Verify epic ID exists: `bd show <epic-id>` |
 | tmux not available | Install tmux: `brew install tmux` |
 | jq not available | Install jq: `brew install jq` |

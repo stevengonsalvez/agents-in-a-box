@@ -26,7 +26,7 @@ When you receive this command:
 
 1. **Load Team Data**
    ```bash
-   source {{HOME_TOOL_DIR}}/utils/swarm-lib.sh
+   source ~/.claude/utils/swarm-lib.sh
 
    if [ -n "$TEAM_ID" ]; then
      STATUS=$(swarm_get_status "$TEAM_ID")
@@ -120,7 +120,7 @@ COMMANDS
 ```bash
 get_full_status() {
   local team_id="$1"
-  local team_dir="{{HOME_TOOL_DIR}}/swarm/$team_id"
+  local team_dir="~/.claude/swarm/$team_id"
 
   # Basic team info
   local team_json=$(cat "$team_dir/team.json")

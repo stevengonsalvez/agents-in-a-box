@@ -44,7 +44,7 @@ Rules for classifying signals by type, scope, and learning type.
 | Process | agent config file, orchestrator agents |
 | Domain | Domain-specific agents, agent config file |
 | Tools | agent config file, relevant specialists |
-| New Skill | `{{TOOL_DIR}}/skills/{name}/SKILL.md` |
+| New Skill | `.claude/skills/{name}/SKILL.md` |
 
 See [agent_mappings.md](agent_mappings.md) for detailed mapping rules.
 

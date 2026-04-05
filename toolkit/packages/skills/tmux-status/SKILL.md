@@ -22,7 +22,7 @@ Invokes the `tmux-monitor` skill to discover and report on all active tmux sessi
 
 ```bash
 # Get path to monitor script
-MONITOR_SCRIPT="{{TOOL_DIR}}/skills/tmux-monitor/scripts/monitor.sh"
+MONITOR_SCRIPT=".claude/skills/tmux-monitor/scripts/monitor.sh"
 
 [ ! -f "$MONITOR_SCRIPT" ] && echo "❌ tmux-monitor skill not found at $MONITOR_SCRIPT" && exit 1
 
@@ -131,4 +131,4 @@ Recommendation: Review and clean up unused sessions
 - Read-only, never modifies sessions
 - Uses tmux-monitor skill for discovery
 - Integrates with tmuxwatch if available
-- Detects metadata from `.tmux-dev-session.json` and `{{HOME_TOOL_DIR}}/agents/*.json`
+- Detects metadata from `.tmux-dev-session.json` and `~/.claude/agents/*.json`
