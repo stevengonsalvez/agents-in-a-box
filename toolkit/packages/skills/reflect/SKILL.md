@@ -109,8 +109,22 @@ See [signal_patterns.md](references/signal_patterns.md) for full detection rules
 
 #### Knowledge Signal Detection
 
-Scan for solved problems, discovered patterns, and decisions (trigger phrases like
-"fixed by", "root cause was", "that worked", "the issue was", "chose X over Y").
+Scan for solved problems, discovered patterns, decisions, and insights.
+See [signal_patterns.md](references/signal_patterns.md) **Knowledge Signal Patterns** section for
+the full detection reference (HIGH/MEDIUM/LOW confidence with regex patterns).
+
+**HIGH confidence** — explicit resolution: root cause identified, fix confirmed, explicit decisions,
+breakthrough moments ("turns out", "figured out", "the fix was").
+
+**MEDIUM confidence** — implicit knowledge: debugging effort (time invested = value), docs-vs-reality
+gaps, environment/config gotchas, performance insights, integration issues, failed approaches,
+architecture insights.
+
+**LOW confidence** — observations: implicit success ("seems to work"), library discoveries,
+security findings needing validation.
+
+**Structural signals** (non-phrase): error→investigation→fix arcs, config changes that resolved
+issues, multiple approaches tried before settling on one.
 
 ### Step 2: CLASSIFY Each Signal
 
