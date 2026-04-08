@@ -1,6 +1,7 @@
 ---
 name: expect-test
 description: AI-powered browser testing using expect-cli. Auto-detects dev server, reads git diff, generates and executes browser tests via Playwright. Use when you need to verify UI changes in a real browser, test user flows, or validate fixes visually. Trigger on "test this in the browser", "verify the UI", "run expect", "browser test", or after completing UI fixes.
+argument-hint: "[-m message] [--headed] [-y]"
 user-invocable: true
 ---
 
@@ -149,7 +150,128 @@ open "$LATEST"
 cp /tmp/expect-replays/*.webm ./test-evidence/
 ```
 
-**Note:** Screenshots are NOT saved to disk (base64 in AI context only). Use the `.webm` video or HTML replay for visual evidence.
+**Note:** Screenshots are NOT saved to disk (base64 in AI context only). Use the `.webm` video for evidence extraction (see below).
+
+## Publishing Interactive Replay (Recommended)
+
+The HTML replay is the best evidence format — reviewers can scrub through the entire session interactively. Publish via `/here-now`:
+
+```bash
+SESSION_ID=$(ls -t /tmp/expect-replays/*.html | head -1 | xargs basename .html)
+mkdir -p /tmp/replay
+cp /tmp/expect-replays/${SESSION_ID}.html /tmp/replay/
+cp /tmp/expect-replays/${SESSION_ID}.ndjson.js /tmp/replay/
+cp /tmp/expect-replays/${SESSION_ID}.ndjson /tmp/replay/
+
+# Publish (3 files: HTML shell + ndjson.js recording + ndjson raw data)
+{{HOME_TOOL_DIR}}/skills/here-now/scripts/publish.sh /tmp/replay/ --client claude
+
+# The replay URL is: https://{slug}.here.now/{SESSION_ID}.html
+# Post to PR comment with the direct link
+```
+
+**Important**: The HTML file loads the `.ndjson.js` by deriving the filename from its own name. All 3 files must be published together, and the HTML must be accessed by its original filename (not as `index.html`).
+
+**Expiry**: Anonymous publishes expire in 24h. Include the claim URL in the PR comment so the user can make it permanent.
+
+## Extracting Screenshots from Recordings
+
+Since expect-cli doesn't save per-step screenshots to disk, extract key frames from the `.webm` video using ffmpeg. This produces shareable PNG evidence for PR comments.
+
+```bash
+WEBM=$(ls -t /tmp/expect-replays/*.webm | head -1)
+mkdir -p /tmp/screenshots
+
+# Extract frames at key timestamps (adjust based on test step timing from logs)
+# Timing guide: step 1 finish ≈ step1_duration, step 2 ≈ step1 + step2, etc.
+ffmpeg -i "$WEBM" -ss 25 -frames:v 1 /tmp/screenshots/01-login.png -y 2>/dev/null
+ffmpeg -i "$WEBM" -ss 50 -frames:v 1 /tmp/screenshots/02-home.png -y 2>/dev/null
+ffmpeg -i "$WEBM" -ss 80 -frames:v 1 /tmp/screenshots/03-feature.png -y 2>/dev/null
+
+# Validate screenshots show real content (not splash/blank)
+for f in /tmp/screenshots/*.png; do
+  dims=$(magick identify -format "%wx%h" "$f" 2>/dev/null)
+  echo "$(basename $f): $dims ($(wc -c < "$f") bytes)"
+done
+```
+
+**Timestamp estimation**: Sum step durations from the test log. If step 1 took 25s and step 2 took 17s, the step 2 completion frame is at ~42s.
+
+## Uploading Evidence for PR Comments
+
+### Option 1: imgbb (preferred for small batches)
+
+```bash
+IMGBB_API_KEY="${IMGBB_API_KEY:-006dfde8d5037a1e366db2bb24e915d3}"
+for file in /tmp/screenshots/*.png; do
+  sleep 3  # Rate limit
+  url=$(curl -s -X POST "https://api.imgbb.com/1/upload?key=${IMGBB_API_KEY}" \
+    --form "image=@${file}" | jq -r '.data.url // empty')
+  echo "$(basename $file) → $url"
+done
+```
+
+### Option 2: GitHub Draft Release (when imgbb rate-limits)
+
+```bash
+gh release create pr${PR}-evidence --repo OWNER/REPO \
+  --title "PR #${PR} Evidence" --notes "Browser test screenshots" \
+  --draft /tmp/screenshots/*.png
+
+# Get download URLs
+gh release view pr${PR}-evidence --repo OWNER/REPO --json assets \
+  --jq '.assets[] | "\(.name) → \(.url)"'
+```
+
+### Posting to PR
+
+```bash
+BASE="https://github.com/OWNER/REPO/releases/download/TAG"
+gh pr comment $PR --repo OWNER/REPO --body "$(cat <<EOF
+## ✅ Browser Test Evidence
+
+![login](${BASE}/01-login.png)
+![feature](${BASE}/02-feature.png)
+
+<details><summary>All screenshots</summary>
+
+![step3](${BASE}/03-step.png)
+
+</details>
+EOF
+)"
+```
+
+## Full Evidence Workflow (end-to-end)
+
+```bash
+# 1. Run test
+SESSION="expect-$(date +%s)"
+tmux new-session -d -s "$SESSION"
+tmux send-keys -t "$SESSION" "EXPECT_REPLAY_OUTPUT_PATH=/tmp/expect-replays expect-cli -m 'test description' --headed -y --verbose 2>&1 | tee /tmp/expect.log" C-m
+
+# 2. Wait for completion
+sleep 120 && tmux capture-pane -t "$SESSION" -p | tail -20
+
+# 3. Extract frames
+WEBM=$(ls -t /tmp/expect-replays/*.webm | head -1)
+ffmpeg -i "$WEBM" -ss 30 -frames:v 1 /tmp/screenshots/step1.png -y 2>/dev/null
+ffmpeg -i "$WEBM" -ss 60 -frames:v 1 /tmp/screenshots/step2.png -y 2>/dev/null
+
+# 4. Validate (read with Claude to verify content)
+# Use Read tool on each PNG to verify it shows the expected UI state
+
+# 5a. Publish interactive replay (PREFERRED)
+SESSION_ID=$(ls -t /tmp/expect-replays/*.html | head -1 | xargs basename .html)
+mkdir -p /tmp/replay
+cp /tmp/expect-replays/${SESSION_ID}.{html,ndjson.js,ndjson} /tmp/replay/
+{{HOME_TOOL_DIR}}/skills/here-now/scripts/publish.sh /tmp/replay/ --client claude
+# Post the replay URL to PR
+
+# 5b. Upload static screenshots (FALLBACK if replay not suitable)
+gh release create prN-evidence --draft /tmp/screenshots/*.png
+gh pr comment N --body "## Evidence\n![step1](url)\n![step2](url)"
+```
 
 ## Integration with /validate
 
