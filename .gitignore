@@ -26,6 +26,16 @@ logs/
 # Claude local state
 .claude/
 
+# Agent tool local state (npx skills add artifacts)
+.agents/
+.continue/
+.goose/
+.kiro/
+.trae/
+.windsurf/
+skills-lock.json
+skills/
+
 # Bun build artifacts
 *.bun-build
 toolkit/packages/utilities/hooks/*.bun-build

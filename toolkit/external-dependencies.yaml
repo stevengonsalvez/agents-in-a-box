@@ -369,6 +369,20 @@ npx-skills:
     source: "npx add-skill"
     purpose: "Discover and install agent skills from registries"
 
+  - name: caveman
+    repo: JuliusBrussee/caveman
+    install: "npx skills add JuliusBrussee/caveman --yes"
+    purpose: "Token-efficient caveman-speak response mode (~75% token reduction)"
+    multi-skill: true
+    skills:
+      - caveman: "Ultra-compressed communication dropping articles, filler, pleasantries"
+      - compress: "Compress memory/CLAUDE.md files into caveman format to save input tokens"
+    features:
+      - Drops articles, filler words, hedging while preserving technical accuracy
+      - Code blocks, git commits, and PR descriptions remain unchanged
+      - Companion compress tool for memory file token optimization
+      - Backup original files as FILE.original.md before compression
+
 # =============================================================================
 # CODEX SKILLS (from developers.openai.com/codex/skills)
 # =============================================================================
