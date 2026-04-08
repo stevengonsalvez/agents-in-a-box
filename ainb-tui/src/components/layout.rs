@@ -190,6 +190,18 @@ impl LayoutComponent {
             return;
         }
 
+        // Usage analytics view (full screen)
+        if state.current_view == View::Analytics {
+            tracing::debug!("Rendering Usage Analytics view");
+            crate::components::usage::render(frame, frame.size(), &state.usage_state);
+            // Render help overlay on top if visible
+            if state.help_visible {
+                tracing::debug!("Rendering help overlay on Analytics");
+                self.help.render(frame, frame.size());
+            }
+            return;
+        }
+
         // Session recovery view (full screen)
         if state.current_view == View::SessionRecovery {
             tracing::debug!("Rendering SessionRecovery view");

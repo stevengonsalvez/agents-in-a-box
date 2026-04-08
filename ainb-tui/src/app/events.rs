@@ -327,6 +327,17 @@ pub enum AppEvent {
     ChangelogPageDown,           // Page down
     ChangelogToTop,              // Jump to top (g)
     ChangelogToBottom,           // Jump to bottom (G)
+    // Usage analytics events
+    UsageBack,                   // Return to home screen (Esc)
+    UsageNextTab,                // Next sub-tab (Tab)
+    UsagePrevTab,                // Previous sub-tab (Shift+Tab)
+    UsageScrollUp,               // Scroll up (k)
+    UsageScrollDown,             // Scroll down (j)
+    UsagePageUp,                 // Page up
+    UsagePageDown,               // Page down
+    UsageToTop,                  // Jump to top (g)
+    UsageToBottom,               // Jump to bottom (G)
+    UsageRefresh,                // Reload data (r)
     // Session recovery events
     SessionRecoveryBack,         // Return to home screen (Esc)
     SessionRecoveryNext,         // Navigate to next session (Down/j)
@@ -338,6 +349,8 @@ pub enum AppEvent {
     SessionRecoveryRecoverAll,   // Recover all orphaned worktrees (Shift+A)
     SessionRecoveryToggleSelect, // Toggle multi-select on current item (Space)
     SessionRecoveryDeleteSelected, // Delete all multi-selected items (Shift+D)
+    ToggleSelectSession,           // Toggle multi-select on current session (Space)
+    DeleteSelectedSessions,        // Bulk delete all multi-selected sessions (Shift+D)
 }
 
 pub struct EventHandler;
@@ -564,6 +577,12 @@ impl EventHandler {
             return Self::handle_changelog_keys(key_event, state);
         }
 
+        // Handle usage analytics view
+        if state.current_view == View::Analytics {
+            tracing::debug!("In usage analytics view, handling usage keys");
+            return Self::handle_usage_keys(key_event, state);
+        }
+
         // Handle session recovery view
         if state.current_view == View::SessionRecovery {
             tracing::debug!("In session recovery view, handling session recovery keys");
@@ -613,6 +632,8 @@ impl EventHandler {
                 }
             }
             KeyCode::Char('e') => Some(AppEvent::RestartSession),
+            KeyCode::Char(' ') => Some(AppEvent::ToggleSelectSession),
+            KeyCode::Char('D') => Some(AppEvent::DeleteSelectedSessions),
             KeyCode::Char('d') => Some(AppEvent::DeleteSession),
             KeyCode::Char('x') => Some(AppEvent::CleanupOrphaned),
             KeyCode::Char('g') => Some(AppEvent::ShowGitView), // Show git view
@@ -1489,6 +1510,25 @@ impl EventHandler {
         }
     }
 
+    // Usage analytics key handling
+    fn handle_usage_keys(key_event: KeyEvent, _state: &AppState) -> Option<AppEvent> {
+        tracing::debug!("Usage key handler: {:?}", key_event.code);
+
+        match key_event.code {
+            KeyCode::Esc => Some(AppEvent::UsageBack),
+            KeyCode::Tab => Some(AppEvent::UsageNextTab),
+            KeyCode::BackTab => Some(AppEvent::UsagePrevTab),
+            KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::UsageScrollUp),
+            KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::UsageScrollDown),
+            KeyCode::PageUp => Some(AppEvent::UsagePageUp),
+            KeyCode::PageDown => Some(AppEvent::UsagePageDown),
+            KeyCode::Char('g') => Some(AppEvent::UsageToTop),
+            KeyCode::Char('G') => Some(AppEvent::UsageToBottom),
+            KeyCode::Char('r') => Some(AppEvent::UsageRefresh),
+            _ => None,
+        }
+    }
+
     // Changelog viewer key handling
     fn handle_changelog_keys(key_event: KeyEvent, _state: &AppState) -> Option<AppEvent> {
         tracing::debug!("Changelog key handler: {:?}", key_event.code);
@@ -2213,6 +2253,24 @@ impl EventHandler {
                     state.add_warning_notification("No session selected to delete".to_string());
                 }
             }
+            AppEvent::ToggleSelectSession => {
+                state.toggle_select_session();
+                let count = state.selected_sessions.len();
+                if count > 0 {
+                    state.add_success_notification(format!("{} session(s) selected — Shift+D to delete", count));
+                }
+            }
+            AppEvent::DeleteSelectedSessions => {
+                let count = state.selected_sessions.len();
+                if count == 0 {
+                    state.add_warning_notification("No sessions selected. Use Space to select sessions first.".to_string());
+                } else {
+                    let ids: Vec<uuid::Uuid> = state.selected_sessions.iter().copied().collect();
+                    state.add_success_notification(format!("Deleting {} selected session(s)...", count));
+                    state.pending_async_action = Some(AsyncAction::BulkDeleteSessions(ids));
+                    state.selected_sessions.clear();
+                }
+            }
             AppEvent::OpenInEditor => {
                 // Open session's workspace in preferred editor
                 if let Some(session) = state.selected_session() {
@@ -2733,7 +2791,12 @@ impl EventHandler {
                         state.current_view = View::LogHistory;
                     }
                     SidebarItem::Stats => {
-                        state.add_info_notification("Usage & Analytics coming soon!".to_string());
+                        tracing::info!("Navigating to Usage Analytics from sidebar");
+                        state.usage_state.loading = true;
+                        state.current_view = View::Analytics;
+                        let data = crate::models::usage::parse_usage();
+                        state.usage_state.data = Some(data);
+                        state.usage_state.loading = false;
                     }
                     SidebarItem::Changelog => {
                         state.current_view = View::Changelog;
@@ -2933,7 +2996,13 @@ impl EventHandler {
                 state.current_view = View::SessionList;
             }
             AppEvent::GoToStats => {
-                state.add_info_notification("Usage & Analytics coming soon!".to_string());
+                tracing::info!("Navigating to Usage Analytics");
+                state.usage_state.loading = true;
+                state.current_view = View::Analytics;
+                // Load usage data in background
+                let data = crate::models::usage::parse_usage();
+                state.usage_state.data = Some(data);
+                state.usage_state.loading = false;
             }
             // AINB 2.0: Agent selection events
             AppEvent::AgentSelectionBack => {
@@ -3542,6 +3611,46 @@ impl EventHandler {
             AppEvent::ChangelogToBottom => {
                 tracing::debug!("Changelog scroll to bottom");
                 state.changelog_state.scroll_to_bottom(30);
+            }
+            // Usage analytics events
+            AppEvent::UsageBack => {
+                tracing::debug!("Usage analytics back");
+                state.current_view = View::HomeScreen;
+            }
+            AppEvent::UsageNextTab => {
+                state.usage_state.next_tab();
+            }
+            AppEvent::UsagePrevTab => {
+                state.usage_state.prev_tab();
+            }
+            AppEvent::UsageScrollUp => {
+                state.usage_state.scroll_up();
+            }
+            AppEvent::UsageScrollDown => {
+                let max = state.usage_state.row_count();
+                state.usage_state.scroll_down(max);
+            }
+            AppEvent::UsagePageUp => {
+                state.usage_state.page_up(20);
+            }
+            AppEvent::UsagePageDown => {
+                let max = state.usage_state.row_count();
+                state.usage_state.page_down(max, 20);
+            }
+            AppEvent::UsageToTop => {
+                state.usage_state.scroll_to_top();
+            }
+            AppEvent::UsageToBottom => {
+                let max = state.usage_state.row_count();
+                state.usage_state.scroll_to_bottom(max);
+            }
+            AppEvent::UsageRefresh => {
+                tracing::info!("Refreshing usage data");
+                state.usage_state.loading = true;
+                let data = crate::models::usage::parse_usage();
+                state.usage_state.data = Some(data);
+                state.usage_state.loading = false;
+                state.add_success_notification("Usage data refreshed".to_string());
             }
             // Session recovery events
             AppEvent::SessionRecoveryBack => {

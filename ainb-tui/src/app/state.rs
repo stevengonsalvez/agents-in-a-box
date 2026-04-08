@@ -16,7 +16,7 @@ use crate::editors;
 use crate::docker::LogStreamingCoordinator;
 use crate::git::{ParsedRepo, RemoteBranch, RepoSource};
 use crate::models::{ClaudeModel, Session, SessionAgentType, Workspace};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -1806,6 +1806,7 @@ pub struct AppState {
     pub selected_workspace_index: Option<usize>,
     pub selected_session_index: Option<usize>,
     pub shell_selected: bool, // Whether the workspace shell is currently selected
+    pub selected_sessions: HashSet<Uuid>, // Multi-selected session IDs for bulk operations
     pub expand_all_workspaces: bool, // When true, show all sessions across all workspaces
     pub current_view: View,
     pub should_quit: bool,
@@ -1917,6 +1918,9 @@ pub struct AppState {
 
     // Session recovery state (for orphaned agent sessions)
     pub session_recovery_state: crate::components::SessionRecoveryState,
+
+    // Usage analytics state
+    pub usage_state: crate::components::usage::UsageViewState,
 
     // Periodic session snapshot tracking
     pub last_snapshot_time: Option<Instant>,
@@ -2334,6 +2338,7 @@ pub enum AsyncAction {
     FetchRemoteBranches,     // NEW: Get branch list from remote
     CreateNewSession,
     DeleteSession(Uuid),       // New - delete session with container cleanup
+    BulkDeleteSessions(Vec<Uuid>), // Bulk delete multiple sessions
     RefreshWorkspaces,         // Manual refresh of workspace data
     FetchContainerLogs(Uuid),  // Fetch container logs for a session
     AttachToContainer(Uuid),   // Attach to a container session
@@ -2375,6 +2380,7 @@ impl Default for AppState {
             selected_workspace_index: None,
             selected_session_index: None,
             shell_selected: false,
+            selected_sessions: HashSet::new(),
             expand_all_workspaces: true, // Default to expanded view
             current_view: View::HomeScreen,
             should_quit: false,
@@ -2452,6 +2458,9 @@ impl Default for AppState {
 
             // Session recovery state (lazy-load when entering view)
             session_recovery_state: crate::components::SessionRecoveryState::default(),
+
+            // Usage analytics state
+            usage_state: crate::components::usage::UsageViewState::default(),
 
             // Periodic session snapshot tracking
             last_snapshot_time: None,
@@ -3637,6 +3646,18 @@ impl AppState {
         let workspace_idx = self.selected_workspace_index?;
         let session_idx = self.selected_session_index?;
         self.workspaces.get(workspace_idx)?.sessions.get(session_idx)
+    }
+
+    /// Toggle multi-select for the currently highlighted session
+    pub fn toggle_select_session(&mut self) {
+        if let Some(session) = self.selected_session() {
+            let id = session.id;
+            if self.selected_sessions.contains(&id) {
+                self.selected_sessions.remove(&id);
+            } else {
+                self.selected_sessions.insert(id);
+            }
+        }
     }
 
     pub fn selected_shell_session(&self) -> Option<&crate::models::ShellSession> {
@@ -7242,8 +7263,9 @@ impl AppState {
         killed_count
     }
 
-    async fn delete_session(&mut self, session_id: Uuid) -> anyhow::Result<()> {
-        info!("Deleting session: {}", session_id);
+    /// Core deletion logic without workspace refresh — used by bulk delete
+    async fn delete_session_core(&mut self, session_id: Uuid) -> anyhow::Result<()> {
+        info!("Deleting session (core): {}", session_id);
 
         // Capture session details for audit logging BEFORE deletion
         let session_details = self.find_session(session_id).map(|s| {
@@ -7258,7 +7280,6 @@ impl AppState {
         let session_mode = session_details.as_ref().map(|(mode, _, _)| mode.clone());
 
         // Track deletion result but don't early-return on error
-        // We want to always refresh the workspace list regardless of deletion outcome
         let deletion_result: anyhow::Result<()> = if let Some(mode) = session_mode {
             match mode {
                 crate::models::SessionMode::Interactive => {
@@ -7286,22 +7307,15 @@ impl AppState {
             Ok(())
         };
 
-        // ALWAYS reload workspaces to ensure UI reflects the actual state
-        // This is critical - even if deletion failed, we need to refresh to show current state
-        self.load_real_workspaces().await;
-        // Force UI refresh to show updated session list immediately
-        self.ui_needs_refresh = true;
-
-        // Now check if deletion had an error and report it
+        // Audit log the deletion
         let audit_result = if let Err(e) = &deletion_result {
-            error!("Session deletion encountered error (but UI was refreshed): {}", e);
+            error!("Session deletion encountered error: {}", e);
             AuditResult::Failed(e.to_string())
         } else {
             info!("Successfully deleted session: {}", session_id);
             AuditResult::Success
         };
 
-        // Audit log the deletion
         let (tmux_session, worktree_path) = session_details
             .map(|(_, tmux, path)| (tmux, Some(path)))
             .unwrap_or((None, None));
@@ -7315,6 +7329,16 @@ impl AppState {
         );
 
         deletion_result
+    }
+
+    async fn delete_session(&mut self, session_id: Uuid) -> anyhow::Result<()> {
+        let result = self.delete_session_core(session_id).await;
+
+        // ALWAYS reload workspaces to ensure UI reflects the actual state
+        self.load_real_workspaces().await;
+        self.ui_needs_refresh = true;
+
+        result
     }
 
     /// Delete an Interactive mode session
@@ -7460,6 +7484,27 @@ impl AppState {
                     if let Err(e) = self.delete_session(session_id).await {
                         error!("Failed to delete session {}: {}", session_id, e);
                     }
+                }
+                AsyncAction::BulkDeleteSessions(session_ids) => {
+                    let total = session_ids.len();
+                    let mut deleted = 0;
+                    let mut failed = 0;
+                    for id in session_ids {
+                        if let Err(e) = self.delete_session_core(id).await {
+                            error!("Failed to delete session {}: {}", id, e);
+                            failed += 1;
+                        } else {
+                            deleted += 1;
+                        }
+                    }
+                    // Refresh once after all deletions
+                    self.load_real_workspaces().await;
+                    if failed > 0 {
+                        self.add_warning_notification(format!("Deleted {}/{} sessions ({} failed)", deleted, total, failed));
+                    } else {
+                        self.add_success_notification(format!("Deleted {} session(s)", deleted));
+                    }
+                    self.ui_needs_refresh = true;
                 }
                 AsyncAction::RefreshWorkspaces => {
                     info!("Manual refresh triggered");
