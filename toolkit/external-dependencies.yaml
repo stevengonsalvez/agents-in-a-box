@@ -383,6 +383,172 @@ npx-skills:
       - Companion compress tool for memory file token optimization
       - Backup original files as FILE.original.md before compression
 
+  - name: impeccable
+    repo: pbakaus/impeccable
+    install: "npx skills add pbakaus/impeccable --yes"
+    purpose: "Design excellence toolkit — 20 skills for UI polish, accessibility, animation, and brand consistency"
+    multi-skill: true
+    skills:
+      - teach-impeccable: "One-time setup gathering design context for persistent guidelines"
+      - adapt: "Adapt designs across screen sizes, devices, and platforms"
+      - animate: "Add purposeful animations and micro-interactions"
+      - arrange: "Improve layout, spacing, and visual rhythm"
+      - audit: "Comprehensive interface quality audit (a11y, perf, theming, responsive)"
+      - bolder: "Amplify safe designs to be more visually stimulating"
+      - clarify: "Improve UX copy, error messages, and microcopy"
+      - colorize: "Add strategic color to monochromatic interfaces"
+      - delight: "Add moments of joy and personality to interfaces"
+      - distill: "Strip designs to their essence"
+      - extract: "Extract reusable components and design tokens"
+      - harden: "Improve resilience with error handling, i18n, and edge cases"
+      - normalize: "Normalize design to match design system consistency"
+      - onboard: "Design onboarding flows and first-time user experiences"
+      - optimize: "Improve interface performance (loading, rendering, bundle size)"
+      - overdrive: "Push interfaces with technically ambitious implementations"
+      - peekaboo: "Capture and automate macOS UI via Peekaboo CLI"
+      - polish: "Final quality pass fixing alignment, spacing, consistency"
+      - quieter: "Tone down overly bold or aggressive designs"
+      - typeset: "Improve typography (fonts, hierarchy, sizing, readability)"
+    features:
+      - Project-level design context via teach-impeccable setup
+      - Works across any frontend framework
+      - Accessibility and WCAG compliance auditing
+      - Design system extraction and normalization
+
+  - name: summarize
+    source: "npx add-skill"
+    homepage: "https://summarize.sh"
+    purpose: "Summarize or extract text/transcripts from URLs, podcasts, and local files"
+
+# =============================================================================
+# OPENCLAW SKILLS (OpenClaw/NanoClaw ecosystem)
+# =============================================================================
+# Skills from the OpenClaw ecosystem. CLI-driven, installed to ~/.claude/skills/.
+openclaw-skills:
+  - name: apple-notes
+    homepage: "https://github.com/antoniorodr/memo"
+    purpose: "Manage Apple Notes via memo CLI (create, view, edit, delete, search)"
+
+  - name: bear-notes
+    homepage: "https://bear.app"
+    purpose: "Create, search, and manage Bear notes via grizzly CLI"
+
+  - name: bird
+    homepage: "https://bird.fast"
+    purpose: "X/Twitter CLI for reading, searching, and posting"
+
+  - name: bitwarden
+    homepage: "https://bitwarden.com/help/cli/"
+    purpose: "Manage secrets via Bitwarden CLI (bw) — load into memory, never to disk"
+
+  - name: blogwatcher
+    homepage: "https://github.com/Hyaxia/blogwatcher"
+    purpose: "Monitor blogs and RSS/Atom feeds for updates"
+
+  - name: build-tracker
+    purpose: "Recurring build tracker cron for stale PRs, issues, and phase progress via Discord"
+
+  - name: camsnap
+    homepage: "https://camsnap.ai"
+    purpose: "Capture frames or clips from RTSP/ONVIF cameras"
+
+  - name: capabilities
+    purpose: "Show installed skills, available tools, and system info"
+
+  - name: cloud-coding-agent
+    purpose: "Run long-running coding tasks in cloud environments with session teleporting and auto PR creation"
+
+  - name: coding-agent
+    purpose: "Delegate coding tasks to subagents or run Claude Code/Codex in tmux sessions"
+
+  - name: eightctl
+    homepage: "https://eightctl.sh"
+    purpose: "Control Eight Sleep pods (status, temperature, alarms, schedules)"
+
+  - name: gh-issues
+    purpose: "Fetch GitHub issues, spawn sub-agents to implement fixes and open PRs"
+
+  - name: gifgrep
+    homepage: "https://gifgrep.com"
+    purpose: "Search GIF providers with CLI/TUI, download results, extract stills"
+
+  - name: github
+    purpose: "GitHub operations via gh CLI (issues, PRs, CI runs, code review, API queries)"
+
+  - name: gog
+    homepage: "https://gogcli.sh"
+    purpose: "Google Workspace CLI for Gmail, Calendar, Drive, Contacts, Sheets, Docs"
+
+  - name: healthcheck
+    purpose: "Host security hardening and risk-tolerance configuration for OpenClaw deployments"
+
+  - name: obsidian
+    homepage: "https://help.obsidian.md"
+    purpose: "Work with Obsidian vaults and automate via obsidian-cli"
+
+  - name: openhue
+    homepage: "https://www.openhue.io/cli"
+    purpose: "Control Philips Hue lights and scenes via OpenHue CLI"
+
+  - name: self-improving
+    homepage: "https://clawic.com/skills/self-improving"
+    purpose: "Catches mistakes, learns corrections, remembers everything"
+
+  - name: self-reflection
+    purpose: "Continuous self-improvement through structured reflection and memory"
+
+  - name: session-logs
+    purpose: "Search and analyze session logs (older/parent conversations) using jq"
+
+  - name: slack
+    purpose: "Control Slack from OpenClaw (react, pin/unpin, send messages)"
+
+  - name: slack-formatting
+    purpose: "Format messages for Slack using mrkdwn syntax"
+
+  - name: spotify-player
+    homepage: "https://www.spotify.com"
+    purpose: "Terminal Spotify playback/search via spogo or spotify_player"
+
+  - name: status
+    purpose: "Quick read-only health check — session context, workspace, tools, tasks"
+
+  - name: video-frames
+    homepage: "https://ffmpeg.org"
+    purpose: "Extract frames or short clips from videos using ffmpeg"
+
+  - name: wacli
+    homepage: "https://wacli.sh"
+    purpose: "Send WhatsApp messages or search/sync WhatsApp history via wacli CLI"
+
+# =============================================================================
+# SECURITY SKILLS (pentesting and reconnaissance)
+# =============================================================================
+# Specialized security assessment and penetration testing skills.
+security-skills:
+  - name: argus
+    version: "2.0.0"
+    purpose: "All-in-one info gathering and recon toolkit — 135 modules covering network, web, and threat intelligence"
+    features:
+      - Domain recon and subdomain enumeration
+      - SSL analysis and tech stack detection
+      - Vulnerability scanning and OSINT
+
+  - name: pentagi
+    homepage: "https://github.com/vxcontrol/pentagi"
+    purpose: "Fully autonomous AI pentest system with sandboxed Docker execution and 20+ security tools"
+
+  - name: shannon
+    homepage: "https://github.com/keygraph/shannon"
+    purpose: "Autonomous AI pentest framework for web apps and APIs"
+
+  - name: webcopilot
+    version: "2.0.0"
+    purpose: "Automated web security recon and vulnerability scanning (subdomains, XSS, SQLi, SSRF, LFI)"
+
+  - name: supabase-sentinel
+    purpose: "Audit Supabase projects for security vulnerabilities and performance issues (RLS, auth, storage, N+1)"
+
 # =============================================================================
 # CODEX SKILLS (from developers.openai.com/codex/skills)
 # =============================================================================
