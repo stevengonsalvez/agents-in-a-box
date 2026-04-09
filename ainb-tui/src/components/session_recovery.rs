@@ -177,6 +177,23 @@ pub struct SessionRecoveryState {
     pub last_error: Option<String>,
     /// Last action result message
     pub action_result: Option<String>,
+    /// Bulk recovery result overlay (shown after multi-resume)
+    pub recovery_overlay: Option<RecoveryOverlay>,
+}
+
+/// Overlay showing results of a bulk recovery operation
+#[derive(Debug, Clone)]
+pub struct RecoveryOverlay {
+    pub title: String,
+    pub results: Vec<RecoveryResultLine>,
+    pub scroll_offset: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct RecoveryResultLine {
+    pub name: String,
+    pub success: bool,
+    pub detail: String,
 }
 
 impl Default for SessionRecoveryState {
@@ -197,18 +214,38 @@ impl SessionRecoveryState {
             loading: true,
             last_error: None,
             action_result: None,
+            recovery_overlay: None,
         };
         state.refresh();
         state
     }
 
-    /// Get the total count of items in current view
+    /// Get the total count of items in current view (includes separator in All view)
     pub fn current_view_count(&self) -> usize {
         match self.view_mode {
             RecoveryViewMode::Sessions => self.orphaned_sessions.len(),
             RecoveryViewMode::Worktrees => self.orphaned_worktrees.len(),
-            RecoveryViewMode::All => self.orphaned_sessions.len() + self.orphaned_worktrees.len(),
+            RecoveryViewMode::All => self.orphaned_sessions.len() + self.orphaned_worktrees.len() + self.separator_offset(),
         }
+    }
+
+    /// Returns 1 if a separator exists in All view (both sessions and worktrees present), 0 otherwise
+    fn separator_offset(&self) -> usize {
+        if self.view_mode == RecoveryViewMode::All && !self.orphaned_sessions.is_empty() && !self.orphaned_worktrees.is_empty() {
+            1
+        } else {
+            0
+        }
+    }
+
+    /// The list index where the separator lives (only valid when separator_offset() == 1)
+    fn separator_index(&self) -> usize {
+        self.orphaned_sessions.len()
+    }
+
+    /// Check if current selection is on the separator row
+    fn is_on_separator(&self) -> bool {
+        self.separator_offset() == 1 && self.selected_index == self.separator_index()
     }
 
     /// Check if current selection is in the worktrees section (for All view)
@@ -216,7 +253,7 @@ impl SessionRecoveryState {
         match self.view_mode {
             RecoveryViewMode::Sessions => false,
             RecoveryViewMode::Worktrees => true,
-            RecoveryViewMode::All => self.selected_index >= self.orphaned_sessions.len(),
+            RecoveryViewMode::All => self.selected_index > self.orphaned_sessions.len() + self.separator_offset() - 1,
         }
     }
 
@@ -227,7 +264,7 @@ impl SessionRecoveryState {
         }
         match self.view_mode {
             RecoveryViewMode::Worktrees => Some(self.selected_index),
-            RecoveryViewMode::All => Some(self.selected_index - self.orphaned_sessions.len()),
+            RecoveryViewMode::All => Some(self.selected_index - self.orphaned_sessions.len() - self.separator_offset()),
             RecoveryViewMode::Sessions => None,
         }
     }
@@ -236,6 +273,7 @@ impl SessionRecoveryState {
     pub fn toggle_view_mode(&mut self) {
         self.view_mode = self.view_mode.next();
         self.selected_index = 0;
+        self.selected_items.clear();
         let count = self.current_view_count();
         self.list_state.select(if count == 0 { None } else { Some(0) });
     }
@@ -666,6 +704,10 @@ impl SessionRecoveryState {
             return;
         }
         self.selected_index = (self.selected_index + 1) % count;
+        // Skip separator row in All view
+        if self.is_on_separator() {
+            self.selected_index = (self.selected_index + 1) % count;
+        }
         self.list_state.select(Some(self.selected_index));
     }
 
@@ -678,6 +720,14 @@ impl SessionRecoveryState {
             self.selected_index = count - 1;
         } else {
             self.selected_index -= 1;
+        }
+        // Skip separator row in All view
+        if self.is_on_separator() {
+            if self.selected_index == 0 {
+                self.selected_index = count - 1;
+            } else {
+                self.selected_index -= 1;
+            }
         }
         self.list_state.select(Some(self.selected_index));
     }
@@ -697,54 +747,11 @@ impl SessionRecoveryState {
 
     /// Resume the selected session
     pub fn resume_selected(&mut self) -> Result<String, String> {
-        let session = self.selected().ok_or("No session selected")?;
-
-        if !session.can_resume {
-            return Err("Cannot resume: no transcript found".to_string());
-        }
-
-        let transcript = session
-            .transcript_path
-            .as_ref()
-            .ok_or("No transcript path")?;
-
-        let new_session = format!("{}-resumed-{}", session.session, chrono::Utc::now().timestamp());
-        let directory = &session.directory;
-
-        // Create new tmux session
-        let create_result = Command::new("tmux")
-            .args(["new-session", "-d", "-s", &new_session, "-c", directory])
-            .output()
-            .map_err(|e| e.to_string())?;
-
-        if !create_result.status.success() {
-            return Err(format!(
-                "Failed to create tmux session: {}",
-                String::from_utf8_lossy(&create_result.stderr)
-            ));
-        }
-
-        // Start Claude with --resume
-        let claude_cmd = format!(
-            "claude --dangerously-skip-permissions --resume \"{}\"",
-            transcript
-        );
-        let send_result = Command::new("tmux")
-            .args(["send-keys", "-t", &new_session, &claude_cmd, "C-m"])
-            .output()
-            .map_err(|e| e.to_string())?;
-
-        if !send_result.status.success() {
-            return Err(format!(
-                "Failed to start Claude: {}",
-                String::from_utf8_lossy(&send_result.stderr)
-            ));
-        }
-
-        self.action_result = Some(format!("Resumed as: {}", new_session));
+        let session = self.selected().ok_or("No session selected")?.clone();
+        let result = Self::resume_single_session(&session)?;
+        self.action_result = Some(format!("Resumed as: {}", result));
         self.refresh();
-
-        Ok(new_session)
+        Ok(result)
     }
 
     /// Generate a tmux-compatible session name from folder and branch
@@ -1056,6 +1063,10 @@ impl SessionRecoveryState {
 
     /// Toggle multi-select for the current item
     pub fn toggle_select(&mut self) {
+        // Don't allow selecting the separator
+        if self.is_on_separator() {
+            return;
+        }
         let idx = self.selected_index;
         if self.selected_items.contains(&idx) {
             self.selected_items.remove(&idx);
@@ -1067,6 +1078,168 @@ impl SessionRecoveryState {
     /// Check if any items are multi-selected
     pub fn has_multi_selection(&self) -> bool {
         !self.selected_items.is_empty()
+    }
+
+    /// Resume a single orphaned session by creating a tmux session and starting Claude with --resume.
+    /// Static method to enable bulk recovery.
+    fn resume_single_session(session: &OrphanedSession) -> Result<String, String> {
+        if !session.can_resume {
+            return Err("Cannot resume: no transcript found".to_string());
+        }
+
+        let transcript = session
+            .transcript_path
+            .as_ref()
+            .ok_or("No transcript path")?;
+
+        let new_session = format!("{}-resumed-{}", session.session, chrono::Utc::now().timestamp());
+        let directory = &session.directory;
+
+        let create_result = Command::new("tmux")
+            .args(["new-session", "-d", "-s", &new_session, "-c", directory])
+            .output()
+            .map_err(|e| e.to_string())?;
+
+        if !create_result.status.success() {
+            return Err(format!(
+                "Failed to create tmux session: {}",
+                String::from_utf8_lossy(&create_result.stderr)
+            ));
+        }
+
+        let claude_cmd = format!(
+            "claude --dangerously-skip-permissions --resume \"{}\"",
+            transcript
+        );
+        let send_result = Command::new("tmux")
+            .args(["send-keys", "-t", &new_session, &claude_cmd, "C-m"])
+            .output()
+            .map_err(|e| e.to_string())?;
+
+        if !send_result.status.success() {
+            return Err(format!(
+                "Failed to start Claude: {}",
+                String::from_utf8_lossy(&send_result.stderr)
+            ));
+        }
+
+        Ok(new_session)
+    }
+
+    /// Resume all multi-selected items, showing results in an overlay
+    pub fn resume_multi_selected(&mut self) -> (usize, usize) {
+        let mut indices: Vec<usize> = self.selected_items.iter().copied().collect();
+        indices.sort_unstable();
+
+        let mut resumed = 0;
+        let mut failed = 0;
+        let mut results = Vec::new();
+
+        for idx in indices {
+            match self.view_mode {
+                RecoveryViewMode::Sessions => {
+                    if let Some(session) = self.orphaned_sessions.get(idx) {
+                        let session = session.clone();
+                        let name = session.session.clone();
+                        match Self::resume_single_session(&session) {
+                            Ok(tmux_name) => {
+                                resumed += 1;
+                                results.push(RecoveryResultLine {
+                                    name, success: true,
+                                    detail: format!("→ {}", tmux_name),
+                                });
+                            }
+                            Err(e) => {
+                                failed += 1;
+                                results.push(RecoveryResultLine {
+                                    name, success: false, detail: e,
+                                });
+                            }
+                        }
+                    }
+                }
+                RecoveryViewMode::Worktrees => {
+                    if let Some(worktree) = self.orphaned_worktrees.get(idx) {
+                        let worktree = worktree.clone();
+                        let name = worktree.name.clone();
+                        match Self::resume_single_worktree(&worktree) {
+                            Ok(tmux_name) => {
+                                resumed += 1;
+                                results.push(RecoveryResultLine {
+                                    name, success: true,
+                                    detail: format!("→ {}", tmux_name),
+                                });
+                            }
+                            Err(e) => {
+                                failed += 1;
+                                results.push(RecoveryResultLine {
+                                    name, success: false, detail: e,
+                                });
+                            }
+                        }
+                    }
+                }
+                RecoveryViewMode::All => {
+                    let session_count = self.orphaned_sessions.len();
+                    let sep = self.separator_offset();
+                    if idx < session_count {
+                        let session = self.orphaned_sessions[idx].clone();
+                        let name = session.session.clone();
+                        match Self::resume_single_session(&session) {
+                            Ok(tmux_name) => {
+                                resumed += 1;
+                                results.push(RecoveryResultLine {
+                                    name, success: true,
+                                    detail: format!("→ {}", tmux_name),
+                                });
+                            }
+                            Err(e) => {
+                                failed += 1;
+                                results.push(RecoveryResultLine {
+                                    name, success: false, detail: e,
+                                });
+                            }
+                        }
+                    } else if idx >= session_count + sep {
+                        let worktree_idx = idx - session_count - sep;
+                        if let Some(worktree) = self.orphaned_worktrees.get(worktree_idx) {
+                            let worktree = worktree.clone();
+                            let name = worktree.name.clone();
+                            match Self::resume_single_worktree(&worktree) {
+                                Ok(tmux_name) => {
+                                    resumed += 1;
+                                    results.push(RecoveryResultLine {
+                                        name, success: true,
+                                        detail: format!("→ {}", tmux_name),
+                                    });
+                                }
+                                Err(e) => {
+                                    failed += 1;
+                                    results.push(RecoveryResultLine {
+                                        name, success: false, detail: e,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        self.recovery_overlay = Some(RecoveryOverlay {
+            title: format!("Recovery Results — {} resumed, {} failed", resumed, failed),
+            results,
+            scroll_offset: 0,
+        });
+
+        self.selected_items.clear();
+        self.refresh();
+        (resumed, failed)
+    }
+
+    /// Dismiss the recovery overlay
+    pub fn dismiss_overlay(&mut self) {
+        self.recovery_overlay = None;
     }
 
     /// Delete all multi-selected items
@@ -1104,15 +1277,18 @@ impl SessionRecoveryState {
                 }
                 RecoveryViewMode::All => {
                     let session_count = self.orphaned_sessions.len();
+                    let sep = self.separator_offset();
                     if idx < session_count {
+                        // Session item
                         let session = self.orphaned_sessions[idx].clone();
                         if Self::archive_session_by_name(&session.session).is_ok() {
                             deleted += 1;
                         } else {
                             failed += 1;
                         }
-                    } else {
-                        let worktree_idx = idx - session_count;
+                    } else if idx >= session_count + sep {
+                        // Worktree item (skip separator)
+                        let worktree_idx = idx - session_count - sep;
                         if worktree_idx < self.orphaned_worktrees.len() {
                             let worktree = self.orphaned_worktrees[worktree_idx].clone();
                             if Self::cleanup_single_worktree(&worktree).is_ok() {
@@ -1122,6 +1298,7 @@ impl SessionRecoveryState {
                             }
                         }
                     }
+                    // idx == separator_index is skipped (can't be selected)
                 }
             }
         }
@@ -1340,6 +1517,86 @@ impl SessionRecovery {
         let list = List::new(items);
 
         frame.render_stateful_widget(list, layout[1], &mut state.list_state);
+
+        // Render recovery overlay on top if present
+        if let Some(ref overlay) = state.recovery_overlay {
+            Self::render_recovery_overlay(frame, area, overlay);
+        }
+    }
+
+    /// Render the recovery results overlay as a centered popup
+    fn render_recovery_overlay(frame: &mut Frame, area: Rect, overlay: &RecoveryOverlay) {
+        // Size the popup
+        let popup_width = (area.width * 70 / 100).min(80).max(40);
+        let popup_height = (overlay.results.len() as u16 + 6).min(area.height * 70 / 100).max(8);
+        let x = (area.width.saturating_sub(popup_width)) / 2 + area.x;
+        let y = (area.height.saturating_sub(popup_height)) / 2 + area.y;
+        let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+        // Clear background
+        frame.render_widget(ratatui::widgets::Clear, popup_area);
+
+        let has_failures = overlay.results.iter().any(|r| !r.success);
+        let border_color = if has_failures { WARNING_ORANGE } else { SELECTION_GREEN };
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(border_color))
+            .style(Style::default().bg(PANEL_BG))
+            .title(Line::from(vec![
+                Span::styled(" ", Style::default()),
+                Span::styled(&overlay.title, Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                Span::styled(" ", Style::default()),
+            ]))
+            .title_bottom(Line::from(vec![
+                Span::styled(" Esc", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                Span::styled(" dismiss ", Style::default().fg(MUTED_GRAY)),
+            ]));
+
+        let inner = block.inner(popup_area);
+        frame.render_widget(block, popup_area);
+
+        let mut lines = Vec::new();
+        lines.push(Line::from(""));
+
+        for result in &overlay.results {
+            let (icon, color) = if result.success {
+                ("✓", SELECTION_GREEN)
+            } else {
+                ("✗", WARNING_ORANGE)
+            };
+
+            // Truncate name to fit
+            let max_name = (inner.width as usize).saturating_sub(6);
+            let display_name = if result.name.len() > max_name {
+                format!("{}…", &result.name[..max_name.saturating_sub(1)])
+            } else {
+                result.name.clone()
+            };
+
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {} ", icon), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                Span::styled(display_name, Style::default().fg(SOFT_WHITE)),
+            ]));
+
+            // Show detail on next line for failures
+            if !result.success {
+                let detail_max = (inner.width as usize).saturating_sub(8);
+                let detail = if result.detail.len() > detail_max {
+                    format!("{}…", &result.detail[..detail_max.saturating_sub(1)])
+                } else {
+                    result.detail.clone()
+                };
+                lines.push(Line::from(vec![
+                    Span::styled("      ", Style::default()),
+                    Span::styled(detail, Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC)),
+                ]));
+            }
+        }
+
+        let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+        frame.render_widget(paragraph, inner);
     }
 
     /// Render the view mode tabs
@@ -1397,7 +1654,7 @@ impl SessionRecovery {
                     Span::styled("Worktrees ", Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC)),
                     Span::styled("──────────────────", Style::default().fg(SUBDUED_BORDER)),
                 ])));
-                // Don't increment current_idx for separator
+                current_idx += 1; // Separator occupies a list position
             }
 
             for worktree in &state.orphaned_worktrees {
@@ -1428,13 +1685,17 @@ impl SessionRecovery {
             .replace('\n', " ");
 
         let mut spans = vec![];
-        // Multi-select checkbox
-        if is_marked {
-            spans.push(Span::styled("◉ ", Style::default().fg(WARNING_ORANGE)));
-        } else if is_selected {
+        // Cursor indicator
+        if is_selected {
             spans.push(Span::styled("▶ ", Style::default().fg(SELECTION_GREEN)));
         } else {
             spans.push(Span::raw("  "));
+        }
+        // Multi-select checkbox
+        if is_marked {
+            spans.push(Span::styled("[x] ", Style::default().fg(WARNING_ORANGE).add_modifier(Modifier::BOLD)));
+        } else {
+            spans.push(Span::styled("[ ] ", Style::default().fg(MUTED_GRAY)));
         }
 
         spans.push(Span::styled(
@@ -1491,13 +1752,17 @@ impl SessionRecovery {
         };
 
         let mut spans = vec![];
-        // Multi-select checkbox
-        if is_marked {
-            spans.push(Span::styled("◉ ", Style::default().fg(WARNING_ORANGE)));
-        } else if is_selected {
+        // Cursor indicator
+        if is_selected {
             spans.push(Span::styled("▶ ", Style::default().fg(SELECTION_GREEN)));
         } else {
             spans.push(Span::raw("  "));
+        }
+        // Multi-select checkbox
+        if is_marked {
+            spans.push(Span::styled("[x] ", Style::default().fg(WARNING_ORANGE).add_modifier(Modifier::BOLD)));
+        } else {
+            spans.push(Span::styled("[ ] ", Style::default().fg(MUTED_GRAY)));
         }
 
         // Show resume indicator

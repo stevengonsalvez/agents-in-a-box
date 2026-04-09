@@ -231,7 +231,8 @@ pub enum AppEvent {
     GoToCatalog,                 // Navigate to catalog view (coming soon)
     GoToConfig,                  // Navigate to config view
     GoToSessionList,             // Navigate to session list view
-    GoToStats,                   // Navigate to stats view (coming soon)
+    GoToStats,                   // Navigate to stats view
+    GoToRecovery,                // Navigate to session recovery view
     // AINB 2.0: Agent selection events
     AgentSelectionBack,          // Return to home screen (Esc)
     AgentSelectionNextProvider,  // Navigate to next provider
@@ -329,6 +330,8 @@ pub enum AppEvent {
     ChangelogToBottom,           // Jump to bottom (G)
     // Usage analytics events
     UsageBack,                   // Return to home screen (Esc)
+    UsageNextProvider,           // Next provider (Right arrow)
+    UsagePrevProvider,           // Previous provider (Left arrow)
     UsageNextTab,                // Next sub-tab (Tab)
     UsagePrevTab,                // Previous sub-tab (Shift+Tab)
     UsageScrollUp,               // Scroll up (k)
@@ -1516,6 +1519,8 @@ impl EventHandler {
 
         match key_event.code {
             KeyCode::Esc => Some(AppEvent::UsageBack),
+            KeyCode::Right | KeyCode::Char('l') => Some(AppEvent::UsageNextProvider),
+            KeyCode::Left | KeyCode::Char('h') => Some(AppEvent::UsagePrevProvider),
             KeyCode::Tab => Some(AppEvent::UsageNextTab),
             KeyCode::BackTab => Some(AppEvent::UsagePrevTab),
             KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::UsageScrollUp),
@@ -1546,8 +1551,16 @@ impl EventHandler {
     }
 
     // Session recovery key handling
-    fn handle_session_recovery_keys(key_event: KeyEvent, _state: &AppState) -> Option<AppEvent> {
+    fn handle_session_recovery_keys(key_event: KeyEvent, state: &AppState) -> Option<AppEvent> {
         tracing::debug!("Session recovery key handler: {:?}", key_event.code);
+
+        // If overlay is showing, Esc dismisses it; all other keys ignored
+        if state.session_recovery_state.recovery_overlay.is_some() {
+            return match key_event.code {
+                KeyCode::Esc | KeyCode::Enter => Some(AppEvent::SessionRecoveryBack), // reused to dismiss
+                _ => None,
+            };
+        }
 
         match key_event.code {
             KeyCode::Esc => Some(AppEvent::SessionRecoveryBack),
@@ -1577,6 +1590,7 @@ impl EventHandler {
             KeyCode::Char('C') => return Some(AppEvent::GoToConfig),
             KeyCode::Char('s') => return Some(AppEvent::GoToSessionList),
             KeyCode::Char('i') => return Some(AppEvent::GoToStats),
+            KeyCode::Char('R') => return Some(AppEvent::GoToRecovery),
             KeyCode::Char('v') => return Some(AppEvent::ShowChangelog),
             KeyCode::Char('?') => return Some(AppEvent::ToggleHelp),
             KeyCode::Char('q') => return Some(AppEvent::Quit),
@@ -3004,6 +3018,11 @@ impl EventHandler {
                 state.usage_state.data = Some(data);
                 state.usage_state.loading = false;
             }
+            AppEvent::GoToRecovery => {
+                tracing::info!("Navigating to Session Recovery");
+                state.session_recovery_state.refresh();
+                state.current_view = View::SessionRecovery;
+            }
             // AINB 2.0: Agent selection events
             AppEvent::AgentSelectionBack => {
                 state.current_view = View::HomeScreen;
@@ -3617,6 +3636,21 @@ impl EventHandler {
                 tracing::debug!("Usage analytics back");
                 state.current_view = View::HomeScreen;
             }
+            AppEvent::UsageNextProvider => {
+                state.usage_state.next_provider();
+                // Auto-load data if switching to Claude
+                if state.usage_state.provider.has_data() && state.usage_state.data.is_none() {
+                    let data = crate::models::usage::parse_usage();
+                    state.usage_state.data = Some(data);
+                }
+            }
+            AppEvent::UsagePrevProvider => {
+                state.usage_state.prev_provider();
+                if state.usage_state.provider.has_data() && state.usage_state.data.is_none() {
+                    let data = crate::models::usage::parse_usage();
+                    state.usage_state.data = Some(data);
+                }
+            }
             AppEvent::UsageNextTab => {
                 state.usage_state.next_tab();
             }
@@ -3654,8 +3688,14 @@ impl EventHandler {
             }
             // Session recovery events
             AppEvent::SessionRecoveryBack => {
-                tracing::debug!("Session recovery back");
-                state.current_view = View::HomeScreen;
+                // If overlay is showing, dismiss it first
+                if state.session_recovery_state.recovery_overlay.is_some() {
+                    tracing::debug!("Dismissing recovery overlay");
+                    state.session_recovery_state.dismiss_overlay();
+                } else {
+                    tracing::debug!("Session recovery back");
+                    state.current_view = View::HomeScreen;
+                }
             }
             AppEvent::SessionRecoveryNext => {
                 tracing::debug!("Session recovery next");
@@ -3667,31 +3707,54 @@ impl EventHandler {
             }
             AppEvent::SessionRecoveryResume => {
                 tracing::debug!("Session recovery resume");
-                if state.session_recovery_state.is_worktree_selected() {
-                    // Resume worktree - create tmux session and start Claude
-                    match state.session_recovery_state.resume_worktree() {
-                        Ok(new_session) => {
-                            state.add_info_notification(format!(
-                                "Worktree resumed: {}. Use 'tmux attach -t {}' to connect.",
-                                new_session, new_session
-                            ));
-                        }
-                        Err(e) => {
-                            state.add_error_notification(format!("Failed to resume worktree: {}", e));
-                        }
+                if state.session_recovery_state.has_multi_selection() {
+                    // Bulk resume all multi-selected items
+                    let (resumed, failed) = state.session_recovery_state.resume_multi_selected();
+                    if failed == 0 {
+                        state.add_success_notification(format!("Resumed {} sessions", resumed));
+                    } else {
+                        state.add_info_notification(format!(
+                            "Resumed {}, failed {}", resumed, failed
+                        ));
                     }
                 } else {
-                    // Resume session with transcript
-                    match state.session_recovery_state.resume_selected() {
-                        Ok(new_session) => {
-                            state.add_info_notification(format!(
-                                "Session resumed: {}. Use 'tmux attach -t {}' to connect.",
-                                new_session, new_session
-                            ));
+                    // Single item resume (worktree or session)
+                    let (name, result) = if state.session_recovery_state.is_worktree_selected() {
+                        let name = state.session_recovery_state.selected_worktree()
+                            .map(|w| w.name.clone()).unwrap_or_default();
+                        (name, state.session_recovery_state.resume_worktree())
+                    } else {
+                        let name = state.session_recovery_state.selected()
+                            .map(|s| s.session.clone()).unwrap_or_default();
+                        (name, state.session_recovery_state.resume_selected())
+                    };
+
+                    let overlay_result = match result {
+                        Ok(ref tmux_name) => crate::components::session_recovery::RecoveryResultLine {
+                            name: name.clone(), success: true,
+                            detail: format!("→ {}", tmux_name),
+                        },
+                        Err(ref e) => crate::components::session_recovery::RecoveryResultLine {
+                            name: name.clone(), success: false,
+                            detail: e.clone(),
+                        },
+                    };
+
+                    let (title, succeeded) = match &result {
+                        Ok(_) => (format!("Resumed: {}", name), true),
+                        Err(e) => (format!("Failed: {}", e), false),
+                    };
+
+                    state.session_recovery_state.recovery_overlay = Some(
+                        crate::components::session_recovery::RecoveryOverlay {
+                            title,
+                            results: vec![overlay_result],
+                            scroll_offset: 0,
                         }
-                        Err(e) => {
-                            state.add_error_notification(format!("Failed to resume: {}", e));
-                        }
+                    );
+
+                    if succeeded {
+                        state.add_success_notification("Session resumed".to_string());
                     }
                 }
             }

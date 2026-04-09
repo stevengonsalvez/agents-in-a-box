@@ -105,6 +105,12 @@ impl SessionListComponent {
                             Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
                             Span::styled(" $", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
                             Span::styled(" shell ", Style::default().fg(MUTED_GRAY)),
+                            Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
+                            Span::styled(" Space", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                            Span::styled(" mark ", Style::default().fg(MUTED_GRAY)),
+                            Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
+                            Span::styled(" D", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                            Span::styled(" del marked ", Style::default().fg(MUTED_GRAY)),
                         ])
                     }),
             )
@@ -250,9 +256,17 @@ impl SessionListComponent {
                     };
 
                     let agent_icon = session.agent_type.icon();
+                    let is_multi_selected = state.selected_sessions.contains(&session.id);
+
+                    let checkbox = if is_multi_selected {
+                        Span::styled("[x]", Style::default().fg(WARNING_ORANGE).add_modifier(Modifier::BOLD))
+                    } else {
+                        Span::styled("[ ]", Style::default().fg(MUTED_GRAY))
+                    };
 
                     let session_line = Line::from(vec![
-                        Span::styled("  ", Style::default()),
+                        Span::styled(" ", Style::default()),
+                        checkbox,
                         Span::styled(tree_prefix, Style::default().fg(SUBDUED_BORDER)),
                         Span::styled(format!(" {} ", status_indicator), Style::default()),
                         Span::styled(mode_indicator.to_string(), Style::default()),

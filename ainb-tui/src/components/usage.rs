@@ -23,6 +23,62 @@ const BAR_COLOR: Color = Color::Rgb(80, 160, 230);
 const BAR_HIGH: Color = Color::Rgb(230, 120, 80);
 const BAR_MED: Color = Color::Rgb(200, 180, 80);
 
+/// Which agent provider's usage to show
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UsageProvider {
+    #[default]
+    Claude,
+    Codex,
+    Gemini,
+    Copilot,
+}
+
+impl UsageProvider {
+    fn all() -> &'static [UsageProvider] {
+        &[UsageProvider::Claude, UsageProvider::Codex, UsageProvider::Gemini, UsageProvider::Copilot]
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            UsageProvider::Claude => "✻ Claude Code",
+            UsageProvider::Codex => "✦ Codex CLI",
+            UsageProvider::Gemini => "✨ Gemini CLI",
+            UsageProvider::Copilot => "🐙 Copilot",
+        }
+    }
+
+    fn short_label(&self) -> &'static str {
+        match self {
+            UsageProvider::Claude => "Claude",
+            UsageProvider::Codex => "Codex",
+            UsageProvider::Gemini => "Gemini",
+            UsageProvider::Copilot => "Copilot",
+        }
+    }
+
+    pub fn has_data(&self) -> bool {
+        matches!(self, UsageProvider::Claude)
+    }
+
+    fn next(&self) -> Self {
+        match self {
+            UsageProvider::Claude => UsageProvider::Codex,
+            UsageProvider::Codex => UsageProvider::Gemini,
+            UsageProvider::Gemini => UsageProvider::Copilot,
+            UsageProvider::Copilot => UsageProvider::Claude,
+        }
+    }
+
+    fn prev(&self) -> Self {
+        match self {
+            UsageProvider::Claude => UsageProvider::Copilot,
+            UsageProvider::Codex => UsageProvider::Claude,
+            UsageProvider::Gemini => UsageProvider::Codex,
+            UsageProvider::Copilot => UsageProvider::Gemini,
+        }
+    }
+}
+
 /// Which sub-tab is active in the usage view
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UsageTab {
@@ -65,6 +121,7 @@ impl UsageTab {
 /// View state for the usage analytics screen
 #[derive(Debug, Clone)]
 pub struct UsageViewState {
+    pub provider: UsageProvider,
     pub active_tab: UsageTab,
     pub data: Option<UsageData>,
     pub loading: bool,
@@ -74,6 +131,7 @@ pub struct UsageViewState {
 impl Default for UsageViewState {
     fn default() -> Self {
         Self {
+            provider: UsageProvider::Claude,
             active_tab: UsageTab::Daily,
             data: None,
             loading: false,
@@ -83,6 +141,23 @@ impl Default for UsageViewState {
 }
 
 impl UsageViewState {
+    pub fn next_provider(&mut self) {
+        self.provider = self.provider.next();
+        self.scroll_offset = 0;
+        // Clear data when switching to unsupported provider
+        if !self.provider.has_data() {
+            self.data = None;
+        }
+    }
+
+    pub fn prev_provider(&mut self) {
+        self.provider = self.provider.prev();
+        self.scroll_offset = 0;
+        if !self.provider.has_data() {
+            self.data = None;
+        }
+    }
+
     pub fn next_tab(&mut self) {
         self.active_tab = self.active_tab.next();
         self.scroll_offset = 0;
@@ -133,11 +208,12 @@ impl UsageViewState {
 
 /// Render the usage analytics screen
 pub fn render(frame: &mut Frame, area: Rect, state: &UsageViewState) {
-    // Main layout: header + tabs + content + help bar
+    // Main layout: header + provider selector + tabs + content + help bar
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // Summary bar
+            Constraint::Length(3), // Provider selector
             Constraint::Length(3), // Tab bar
             Constraint::Min(0),   // Table content
             Constraint::Length(2), // Help bar
@@ -145,28 +221,34 @@ pub fn render(frame: &mut Frame, area: Rect, state: &UsageViewState) {
         .split(area);
 
     render_summary_bar(frame, layout[0], state);
-    render_tab_bar(frame, layout[1], state);
+    render_provider_bar(frame, layout[1], state);
+    render_tab_bar(frame, layout[2], state);
 
-    if state.loading || state.data.is_none() {
-        render_loading(frame, layout[2]);
+    if !state.provider.has_data() {
+        render_no_data(frame, layout[3], state);
+    } else if state.loading || state.data.is_none() {
+        render_loading(frame, layout[3]);
     } else {
         let data = state.data.as_ref().unwrap();
         match state.active_tab {
-            UsageTab::Daily => render_daily(frame, layout[2], data, state.scroll_offset),
-            UsageTab::Weekly => render_weekly(frame, layout[2], data, state.scroll_offset),
-            UsageTab::Projects => render_projects(frame, layout[2], data, state.scroll_offset),
+            UsageTab::Daily => render_daily(frame, layout[3], data, state.scroll_offset),
+            UsageTab::Weekly => render_weekly(frame, layout[3], data, state.scroll_offset),
+            UsageTab::Projects => render_projects(frame, layout[3], data, state.scroll_offset),
         }
     }
 
-    render_help_bar(frame, layout[3]);
+    render_help_bar(frame, layout[4]);
 }
 
 fn render_summary_bar(frame: &mut Frame, area: Rect, state: &UsageViewState) {
-    let spans = if let Some(data) = &state.data {
+    let mut spans = vec![
+        Span::styled("📊 ", Style::default().fg(GOLD)),
+        Span::styled("Usage Analytics", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+    ];
+
+    if let Some(data) = &state.data {
         let gt = &data.grand_total;
-        vec![
-            Span::styled("📊 ", Style::default().fg(GOLD)),
-            Span::styled("Usage Analytics", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+        spans.extend_from_slice(&[
             Span::styled("  │  ", Style::default().fg(MUTED_GRAY)),
             Span::styled("Total: ", Style::default().fg(MUTED_GRAY)),
             Span::styled(format_tokens_short(gt.total()), Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD)),
@@ -178,14 +260,10 @@ fn render_summary_bar(frame: &mut Frame, area: Rect, state: &UsageViewState) {
             Span::styled(" projects  ", Style::default().fg(MUTED_GRAY)),
             Span::styled(format!("{}", gt.session_count), Style::default().fg(SOFT_WHITE)),
             Span::styled(" sessions", Style::default().fg(MUTED_GRAY)),
-        ]
-    } else {
-        vec![
-            Span::styled("📊 ", Style::default().fg(GOLD)),
-            Span::styled("Usage Analytics", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
-            Span::styled("  │  Loading...", Style::default().fg(MUTED_GRAY)),
-        ]
-    };
+        ]);
+    } else if state.provider.has_data() {
+        spans.push(Span::styled("  │  Loading...", Style::default().fg(MUTED_GRAY)));
+    }
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -195,6 +273,73 @@ fn render_summary_bar(frame: &mut Frame, area: Rect, state: &UsageViewState) {
 
     let paragraph = Paragraph::new(Line::from(spans)).block(block);
     frame.render_widget(paragraph, area);
+}
+
+fn render_provider_bar(frame: &mut Frame, area: Rect, state: &UsageViewState) {
+    let mut spans: Vec<Span> = vec![Span::styled("  Provider: ", Style::default().fg(MUTED_GRAY))];
+
+    for (i, provider) in UsageProvider::all().iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("  │  ", Style::default().fg(MUTED_GRAY)));
+        }
+
+        let is_active = *provider == state.provider;
+        let style = if is_active {
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+        } else if provider.has_data() {
+            Style::default().fg(SOFT_WHITE)
+        } else {
+            Style::default().fg(MUTED_GRAY)
+        };
+
+        spans.push(Span::styled(provider.label(), style));
+    }
+
+    spans.push(Span::styled("    ", Style::default()));
+    spans.push(Span::styled("◀/▶", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)));
+    spans.push(Span::styled(" switch", Style::default().fg(MUTED_GRAY)));
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(CORNFLOWER_BLUE))
+        .style(Style::default().bg(DARK_BG));
+
+    let paragraph = Paragraph::new(Line::from(spans)).block(block);
+    frame.render_widget(paragraph, area);
+}
+
+fn render_no_data(frame: &mut Frame, area: Rect, state: &UsageViewState) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(CORNFLOWER_BLUE))
+        .style(Style::default().bg(DARK_BG));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(state.provider.label(), Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD)),
+            Span::styled(" usage tracking is not yet available.", Style::default().fg(MUTED_GRAY)),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Usage data parsing is currently supported for Claude Code only.",
+            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+        )),
+        Line::from(Span::styled(
+            "  Other providers will be added as they expose session-level usage data.",
+            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+        )),
+    ];
+
+    let paragraph = Paragraph::new(lines);
+    frame.render_widget(paragraph, inner);
 }
 
 fn render_tab_bar(frame: &mut Frame, area: Rect, state: &UsageViewState) {
@@ -497,8 +642,10 @@ fn render_bar_chart(frame: &mut Frame, area: Rect, data: &UsageData) {
 
 fn render_help_bar(frame: &mut Frame, area: Rect) {
     let spans = vec![
-        Span::styled(" Tab", Style::default().fg(GOLD)),
-        Span::styled(" switch view  ", Style::default().fg(MUTED_GRAY)),
+        Span::styled(" ◀/▶", Style::default().fg(GOLD)),
+        Span::styled(" provider  ", Style::default().fg(MUTED_GRAY)),
+        Span::styled("Tab", Style::default().fg(GOLD)),
+        Span::styled(" view  ", Style::default().fg(MUTED_GRAY)),
         Span::styled("j/k", Style::default().fg(GOLD)),
         Span::styled(" scroll  ", Style::default().fg(MUTED_GRAY)),
         Span::styled("g/G", Style::default().fg(GOLD)),
