@@ -7801,33 +7801,75 @@ impl AppState {
     pub fn is_docker_available_sync() -> bool {
         use std::process::{Command, Stdio};
 
+        // Spawn the process and wait with a timeout to avoid hanging
+        // when Docker Desktop is installed but not running
         match Command::new("docker")
             .arg("info")
-            .stdout(Stdio::null())  // Suppress stdout
-            .stderr(Stdio::null())  // Suppress stderr
-            .status()
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
         {
-            Ok(status) => status.success(),
+            Ok(mut child) => {
+                // Wait up to 3 seconds for docker info to respond
+                let start = std::time::Instant::now();
+                let timeout = std::time::Duration::from_secs(3);
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(status)) => return status.success(),
+                        Ok(None) => {
+                            if start.elapsed() > timeout {
+                                let _ = child.kill();
+                                warn!("docker info timed out after 3s - Docker not available");
+                                return false;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(50));
+                        }
+                        Err(_) => return false,
+                    }
+                }
+            }
             Err(_) => false,
         }
     }
 
     /// Check if Docker is available and running
     async fn is_docker_available(&self) -> bool {
-        // Try to run a simple docker command to check if Docker is available
+        // Use spawn + timeout to avoid hanging when Docker daemon isn't responding
         match std::process::Command::new("docker")
             .args(["version", "--format", "{{.Server.Version}}"])
-            .output()
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
         {
-            Ok(output) => {
-                if output.status.success() {
-                    let version = String::from_utf8_lossy(&output.stdout);
-                    info!("Docker is available, version: {}", version.trim());
-                    true
-                } else {
-                    let error = String::from_utf8_lossy(&output.stderr);
-                    warn!("Docker command failed: {}", error);
-                    false
+            Ok(child) => {
+                // Wrap in tokio timeout
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    tokio::task::spawn_blocking(move || child.wait_with_output())
+                ).await {
+                    Ok(Ok(Ok(output))) => {
+                        if output.status.success() {
+                            let version = String::from_utf8_lossy(&output.stdout);
+                            info!("Docker is available, version: {}", version.trim());
+                            true
+                        } else {
+                            let error = String::from_utf8_lossy(&output.stderr);
+                            warn!("Docker command failed: {}", error);
+                            false
+                        }
+                    }
+                    Ok(Ok(Err(e))) => {
+                        warn!("Docker command error: {}", e);
+                        false
+                    }
+                    Ok(Err(e)) => {
+                        warn!("Docker task join error: {}", e);
+                        false
+                    }
+                    Err(_) => {
+                        warn!("Docker version timed out after 3s - Docker not available");
+                        false
+                    }
                 }
             }
             Err(e) => {
@@ -8508,7 +8550,7 @@ impl App {
             // Only attempt refresh if we have OAuth credentials that need refreshing
             // AND Docker is available (token refresh requires Docker for Boss mode)
             if credentials_path.exists() && AppState::oauth_token_needs_refresh(&credentials_path) {
-                if self.state.is_docker_available().await {
+                if AppState::is_docker_available_sync() {
                     info!("Docker available - attempting OAuth token refresh on startup");
                     match self.state.refresh_oauth_tokens().await {
                         Ok(()) => info!("OAuth tokens refreshed successfully on startup"),
