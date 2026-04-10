@@ -434,8 +434,9 @@ npx-skills:
 #   2. Set RUNTIME_MODE=native in .env
 #   3. Run any agent (first run copies container/skills/* → ~/.claude/skills/*)
 #
-# See docs/nanoclaw-migration.md for the full migration guide including the
-# native runner restoration (d59f74a) and skills auto-sync fix (16fef7c).
+# Full migration guide (OpenClaw → NanoClaw, both runtime modes, native-runner
+# restoration, skills auto-sync fix) lives in the fork itself:
+#   https://github.com/stevengonsalvez/nanoclaw/blob/main-a9b9f9f8/docs/MIGRATION-OPENCLAW-TO-NANOCLAW.md
 #
 # Many skills here are NanoClaw-native (no upstream repo). Skills with an
 # upstream source (e.g., pbakaus/impeccable family) are tracked under
