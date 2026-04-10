@@ -21,6 +21,17 @@ updated: "2026-03-07"
 # These are built-in skills that come with the toolkit. No installation needed.
 # They are automatically available when the toolkit is installed.
 bundled-skills:
+  - name: coding-agent
+    path: packages/skills/coding-agent
+    purpose: "Delegate coding tasks to Codex, Claude Code, OpenCode, Pi, or GitHub Copilot via tmux sessions"
+    features:
+      - Pure tmux execution model (PTY automatic, one lifecycle)
+      - 5 agent providers with Claude Code as primary, fallback chain to Codex/Copilot
+      - Temp-dir / worktree isolation for PR reviews
+      - Parallel issue fixing across worktrees
+      - ACP/Discord auto-notify patterns for completion tracking
+      - References /cloud-coding-agent for long-running cloud tasks
+
   - name: webapp-testing
     path: packages/skills/webapp-testing
     purpose: "Playwright-based web app testing and browser automation"
@@ -469,8 +480,6 @@ nanoclaw-skills:
       purpose: "Recurring build tracker cron for stale PRs, issues, and phase progress (Discord notifications)"
 
     # --- Coding agents (NanoClaw-native Task-vs-tmux delegation patterns) ---
-    - name: coding-agent
-      purpose: "Delegate coding tasks to subagents or run Claude Code/Codex in tmux sessions locally"
     - name: cloud-coding-agent
       purpose: "Run long-running coding tasks in cloud environments (Claude Code or Codex), with session teleporting and automatic PR creation"
     - name: oracle
