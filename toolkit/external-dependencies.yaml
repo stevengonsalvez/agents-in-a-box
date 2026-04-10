@@ -421,133 +421,188 @@ npx-skills:
     purpose: "Summarize or extract text/transcripts from URLs, podcasts, and local files"
 
 # =============================================================================
-# OPENCLAW SKILLS (OpenClaw/NanoClaw ecosystem)
+# NANOCLAW SKILLS (qwibitai/nanoclaw container/skills/)
 # =============================================================================
-# Skills from the OpenClaw ecosystem. CLI-driven, installed to ~/.claude/skills/.
-openclaw-skills:
-  - name: apple-notes
-    homepage: "https://github.com/antoniorodr/memo"
-    purpose: "Manage Apple Notes via memo CLI (create, view, edit, delete, search)"
+# Skills sourced from the NanoClaw repo (our fork: stevengonsalvez/nanoclaw,
+# branch main-a9b9f9f8). These live in container/skills/ in the nanoclaw repo
+# and get auto-synced to ~/.claude/skills/ on every agent run by the native
+# runner (src/native-runner.ts) when RUNTIME_MODE=native.
+#
+# Source of truth: container/skills/<skill-name>/SKILL.md in the nanoclaw repo.
+# Install mechanism:
+#   1. Clone the nanoclaw fork: gh repo clone stevengonsalvez/nanoclaw
+#   2. Set RUNTIME_MODE=native in .env
+#   3. Run any agent (first run copies container/skills/* → ~/.claude/skills/*)
+#
+# See docs/nanoclaw-migration.md for the full migration guide including the
+# native runner restoration (d59f74a) and skills auto-sync fix (16fef7c).
+#
+# Many skills here are NanoClaw-native (no upstream repo). Skills with an
+# upstream source (e.g., pbakaus/impeccable family) are tracked under
+# npx-skills above, not duplicated here.
+nanoclaw-skills:
+  source-repo: "qwibitai/nanoclaw"
+  fork: "stevengonsalvez/nanoclaw"
+  branch: "main-a9b9f9f8"
+  source-path: "container/skills/"
+  sync-mechanism: "native-runner auto-copy to ~/.claude/skills/ when RUNTIME_MODE=native"
+  sync-implementation: "src/native-runner.ts (cpSync on every agent spawn)"
+  local-runner-commits:
+    - "d59f74a: feat: restore native runner mode and discord reply-to-bot trigger"
+    - "16fef7c: fix(native-runner): sync container/skills to ~/.claude/skills not per-group dir"
 
-  - name: bear-notes
-    homepage: "https://bear.app"
-    purpose: "Create, search, and manage Bear notes via grizzly CLI"
+  skills:
+    # --- NanoClaw meta & status (NanoClaw-native) ---
+    - name: capabilities
+      purpose: "Show installed skills, available tools, and system info (read-only)"
+    - name: status
+      purpose: "Quick read-only health check — session context, workspace, tools, task snapshot"
+    - name: session-logs
+      purpose: "Search and analyze own session logs (older/parent conversations) using jq"
+    - name: healthcheck
+      purpose: "Host security hardening and risk-tolerance config for NanoClaw deployments"
+    - name: self-improving
+      upstream: "https://clawic.com/skills/self-improving"
+      purpose: "Catches mistakes, learns corrections, remembers everything"
+    - name: self-reflection
+      purpose: "Continuous self-improvement through structured reflection and memory"
+    - name: build-tracker
+      purpose: "Recurring build tracker cron for stale PRs, issues, and phase progress (Discord notifications)"
 
-  - name: bird
-    homepage: "https://bird.fast"
-    purpose: "X/Twitter CLI for reading, searching, and posting"
+    # --- Coding agents (NanoClaw-native Task-vs-tmux delegation patterns) ---
+    - name: coding-agent
+      purpose: "Delegate coding tasks to subagents or run Claude Code/Codex in tmux sessions locally"
+    - name: cloud-coding-agent
+      purpose: "Run long-running coding tasks in cloud environments (Claude Code or Codex), with session teleporting and automatic PR creation"
+    - name: oracle
+      purpose: "Best practices for the oracle CLI (prompt + file bundling, engines, sessions, attachments)"
 
-  - name: bitwarden
-    homepage: "https://bitwarden.com/help/cli/"
-    purpose: "Manage secrets via Bitwarden CLI (bw) — load into memory, never to disk"
+    # --- Notes & productivity ---
+    - name: apple-notes
+      upstream: "https://github.com/antoniorodr/memo"
+      purpose: "Manage Apple Notes via memo CLI (create, view, edit, delete, search, move, export)"
+    - name: bear-notes
+      homepage: "https://bear.app"
+      purpose: "Create, search, and manage Bear notes via grizzly CLI"
+    - name: obsidian
+      homepage: "https://help.obsidian.md"
+      purpose: "Work with Obsidian vaults (plain Markdown notes) and automate via obsidian-cli"
+    - name: blogwatcher
+      upstream: "https://github.com/Hyaxia/blogwatcher"
+      purpose: "Monitor blogs and RSS/Atom feeds for updates"
 
-  - name: blogwatcher
-    homepage: "https://github.com/Hyaxia/blogwatcher"
-    purpose: "Monitor blogs and RSS/Atom feeds for updates"
+    # --- Messaging & social ---
+    - name: slack
+      purpose: "Control Slack from NanoClaw via slack tool (react, pin/unpin messages)"
+    - name: slack-formatting
+      purpose: "Format messages for Slack using mrkdwn syntax"
+    - name: bird
+      homepage: "https://bird.fast"
+      purpose: "X/Twitter CLI for reading, searching, and posting (via cookies or Sweetistics)"
+    - name: wacli
+      homepage: "https://wacli.sh"
+      purpose: "Send WhatsApp messages or search/sync WhatsApp history via wacli CLI"
+    - name: gog
+      homepage: "https://gogcli.sh"
+      purpose: "Google Workspace CLI for Gmail, Calendar, Drive, Contacts, Sheets, Docs"
 
-  - name: build-tracker
-    purpose: "Recurring build tracker cron for stale PRs, issues, and phase progress via Discord"
+    # --- GitHub operations ---
+    - name: github
+      purpose: "GitHub operations via gh CLI (issues, PRs, CI runs, code review, API queries)"
+    - name: gh-issues
+      purpose: "Fetch GitHub issues, spawn sub-agents to implement fixes and open PRs, monitor PR reviews"
 
-  - name: camsnap
-    homepage: "https://camsnap.ai"
-    purpose: "Capture frames or clips from RTSP/ONVIF cameras"
+    # --- Credentials ---
+    - name: bitwarden
+      homepage: "https://bitwarden.com/help/cli/"
+      purpose: "Manage secrets via Bitwarden CLI (bw) — load into memory on demand, die with shell session"
 
-  - name: capabilities
-    purpose: "Show installed skills, available tools, and system info"
+    # --- Media ---
+    - name: video-frames
+      homepage: "https://ffmpeg.org"
+      purpose: "Extract frames or short clips from videos using ffmpeg"
+    - name: camsnap
+      homepage: "https://camsnap.ai"
+      purpose: "Capture frames or clips from RTSP/ONVIF cameras"
+    - name: gifgrep
+      homepage: "https://gifgrep.com"
+      purpose: "Search GIF providers with CLI/TUI, download results, extract stills/sheets"
+    - name: spotify-player
+      homepage: "https://www.spotify.com"
+      purpose: "Terminal Spotify playback/search via spogo (preferred) or spotify_player"
 
-  - name: cloud-coding-agent
-    purpose: "Run long-running coding tasks in cloud environments with session teleporting and auto PR creation"
+    # --- IoT / hardware ---
+    - name: eightctl
+      homepage: "https://eightctl.sh"
+      purpose: "Control Eight Sleep pods (status, temperature, alarms, schedules)"
+    - name: openhue
+      homepage: "https://www.openhue.io/cli"
+      purpose: "Control Philips Hue lights and scenes via OpenHue CLI"
+    - name: peekaboo
+      homepage: "https://peekaboo.boo"
+      purpose: "Capture and automate macOS UI with the Peekaboo CLI"
 
-  - name: coding-agent
-    purpose: "Delegate coding tasks to subagents or run Claude Code/Codex in tmux sessions"
-
-  - name: eightctl
-    homepage: "https://eightctl.sh"
-    purpose: "Control Eight Sleep pods (status, temperature, alarms, schedules)"
-
-  - name: gh-issues
-    purpose: "Fetch GitHub issues, spawn sub-agents to implement fixes and open PRs"
-
-  - name: gifgrep
-    homepage: "https://gifgrep.com"
-    purpose: "Search GIF providers with CLI/TUI, download results, extract stills"
-
-  - name: github
-    purpose: "GitHub operations via gh CLI (issues, PRs, CI runs, code review, API queries)"
-
-  - name: gog
-    homepage: "https://gogcli.sh"
-    purpose: "Google Workspace CLI for Gmail, Calendar, Drive, Contacts, Sheets, Docs"
-
-  - name: healthcheck
-    purpose: "Host security hardening and risk-tolerance configuration for OpenClaw deployments"
-
-  - name: obsidian
-    homepage: "https://help.obsidian.md"
-    purpose: "Work with Obsidian vaults and automate via obsidian-cli"
-
-  - name: openhue
-    homepage: "https://www.openhue.io/cli"
-    purpose: "Control Philips Hue lights and scenes via OpenHue CLI"
-
-  - name: self-improving
-    homepage: "https://clawic.com/skills/self-improving"
-    purpose: "Catches mistakes, learns corrections, remembers everything"
-
-  - name: self-reflection
-    purpose: "Continuous self-improvement through structured reflection and memory"
-
-  - name: session-logs
-    purpose: "Search and analyze session logs (older/parent conversations) using jq"
-
-  - name: slack
-    purpose: "Control Slack from OpenClaw (react, pin/unpin, send messages)"
-
-  - name: slack-formatting
-    purpose: "Format messages for Slack using mrkdwn syntax"
-
-  - name: spotify-player
-    homepage: "https://www.spotify.com"
-    purpose: "Terminal Spotify playback/search via spogo or spotify_player"
-
-  - name: status
-    purpose: "Quick read-only health check — session context, workspace, tools, tasks"
-
-  - name: video-frames
-    homepage: "https://ffmpeg.org"
-    purpose: "Extract frames or short clips from videos using ffmpeg"
-
-  - name: wacli
-    homepage: "https://wacli.sh"
-    purpose: "Send WhatsApp messages or search/sync WhatsApp history via wacli CLI"
+    # --- Swarm orchestration (tmux-based multi-agent swarm) ---
+    - name: swarm-create
+      purpose: "Create a new swarm team from a Beads epic with N worker agents"
+    - name: swarm-join
+      purpose: "Join an existing swarm team as a worker agent"
+    - name: swarm-inbox
+      purpose: "Read and send inter-agent messages within a swarm team"
+    - name: swarm-status
+      purpose: "Display comprehensive status dashboard for a swarm team"
+    - name: swarm-orchestration
+      purpose: "tmux-based persistent multi-agent swarm system with file-based inter-agent messaging"
+    - name: swarm-shutdown
+      purpose: "Gracefully shutdown a swarm team"
+    - name: swarm-agent-troubleshooting
+      purpose: "Diagnose and fix swarm agent spawn failures"
+    - name: spawn-agent
+      purpose: "Spawn Claude Agent in tmux Session"
+    - name: attach-agent-worktree
+      purpose: "Attach to Agent Session"
+    - name: list-agent-worktrees
+      purpose: "List All Agent Worktrees"
+    - name: cleanup-agent-worktree
+      purpose: "Remove Agent Worktree"
+    - name: merge-agent-work
+      purpose: "Merge Agent Branch"
 
 # =============================================================================
 # SECURITY SKILLS (pentesting and reconnaissance)
 # =============================================================================
-# Specialized security assessment and penetration testing skills.
+# Specialized security/pentest skills. Bundled via NanoClaw container/skills/
+# and synced to ~/.claude/skills/ in native mode. See nanoclaw-skills above
+# for the sync mechanism.
 security-skills:
-  - name: argus
-    version: "2.0.0"
-    purpose: "All-in-one info gathering and recon toolkit — 135 modules covering network, web, and threat intelligence"
-    features:
-      - Domain recon and subdomain enumeration
-      - SSL analysis and tech stack detection
-      - Vulnerability scanning and OSINT
+  sourced-via: "nanoclaw-skills (container/skills/)"
 
-  - name: pentagi
-    homepage: "https://github.com/vxcontrol/pentagi"
-    purpose: "Fully autonomous AI pentest system with sandboxed Docker execution and 20+ security tools"
+  skills:
+    - name: argus
+      version: "2.0.0"
+      purpose: "All-in-one info gathering and recon toolkit — 135 modules covering network, web, and threat intelligence"
+      features:
+        - Domain recon and subdomain enumeration
+        - SSL analysis and tech stack detection
+        - Vulnerability scanning and OSINT
 
-  - name: shannon
-    homepage: "https://github.com/keygraph/shannon"
-    purpose: "Autonomous AI pentest framework for web apps and APIs"
+    - name: pentagi
+      homepage: "https://github.com/vxcontrol/pentagi"
+      purpose: "Fully autonomous AI pentest system with sandboxed Docker execution and 20+ security tools"
 
-  - name: webcopilot
-    version: "2.0.0"
-    purpose: "Automated web security recon and vulnerability scanning (subdomains, XSS, SQLi, SSRF, LFI)"
+    - name: shannon
+      homepage: "https://github.com/keygraph/shannon"
+      purpose: "Autonomous AI pentest framework for web apps and APIs"
 
-  - name: supabase-sentinel
-    purpose: "Audit Supabase projects for security vulnerabilities and performance issues (RLS, auth, storage, N+1)"
+    - name: webcopilot
+      version: "2.0.0"
+      purpose: "Automated web security recon and vulnerability scanning (subdomains, XSS, SQLi, SSRF, LFI, RCE, Open Redirect)"
+
+    - name: supabase-sentinel
+      purpose: "Audit Supabase projects for security vulnerabilities and performance issues (RLS, auth, storage, N+1 queries)"
+
+    - name: sentry-cli
+      purpose: "Sentry CLI for viewing issues, events, projects, and making API calls from the command line"
 
 # =============================================================================
 # CODEX SKILLS (from developers.openai.com/codex/skills)
