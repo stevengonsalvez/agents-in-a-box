@@ -423,10 +423,10 @@ npx-skills:
 # =============================================================================
 # NANOCLAW SKILLS (qwibitai/nanoclaw container/skills/)
 # =============================================================================
-# Skills sourced from the NanoClaw repo (our fork: stevengonsalvez/nanoclaw,
-# branch main-a9b9f9f8). These live in container/skills/ in the nanoclaw repo
-# and get auto-synced to ~/.claude/skills/ on every agent run by the native
-# runner (src/native-runner.ts) when RUNTIME_MODE=native.
+# Skills sourced from the NanoClaw repo (our public fork:
+# stevengonsalvez/nanoclaw, branch main). These live in container/skills/ in
+# the nanoclaw repo and get auto-synced to ~/.claude/skills/ on every agent
+# run by the native runner (src/native-runner.ts) when RUNTIME_MODE=native.
 #
 # Source of truth: container/skills/<skill-name>/SKILL.md in the nanoclaw repo.
 # Install mechanism:
@@ -436,21 +436,19 @@ npx-skills:
 #
 # Full migration guide (OpenClaw → NanoClaw, both runtime modes, native-runner
 # restoration, skills auto-sync fix) lives in the fork itself:
-#   https://github.com/stevengonsalvez/nanoclaw/blob/main-a9b9f9f8/docs/MIGRATION-OPENCLAW-TO-NANOCLAW.md
+#   https://github.com/stevengonsalvez/nanoclaw/blob/main/docs/MIGRATION-OPENCLAW-TO-NANOCLAW.md
 #
 # Many skills here are NanoClaw-native (no upstream repo). Skills with an
 # upstream source (e.g., pbakaus/impeccable family) are tracked under
 # npx-skills above, not duplicated here.
 nanoclaw-skills:
-  source-repo: "qwibitai/nanoclaw"
+  upstream: "qwibitai/nanoclaw"
   fork: "stevengonsalvez/nanoclaw"
-  branch: "main-a9b9f9f8"
+  branch: "main"
   source-path: "container/skills/"
   sync-mechanism: "native-runner auto-copy to ~/.claude/skills/ when RUNTIME_MODE=native"
   sync-implementation: "src/native-runner.ts (cpSync on every agent spawn)"
-  local-runner-commits:
-    - "d59f74a: feat: restore native runner mode and discord reply-to-bot trigger"
-    - "16fef7c: fix(native-runner): sync container/skills to ~/.claude/skills not per-group dir"
+  note: "Fork was squashed to a single clean commit on 2026-04-10 to remove leaked secrets from prior history"
 
   skills:
     # --- NanoClaw meta & status (NanoClaw-native) ---
