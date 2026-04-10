@@ -195,6 +195,57 @@ const TOOL_CONFIG = {
             }
         }
     },
+    'hermes-agent': {
+        ruleDir: 'packages',
+        targetSubdir: '.hermes',
+        usePackagesStructure: true,
+        forceHomeInstall: true,
+        copyClaudeMd: false,
+        copySettings: false,
+        externalDepTypes: ['npx-skills', 'agent-skills'],
+        packageMappings: {
+            // Skills-only — hermes manages its own config.yaml, memory, sessions
+            'skills': 'skills'
+        },
+        templateSubstitutions: {
+            '**/*.md':   { 'TOOL_DIR': '.hermes', 'HOME_TOOL_DIR': '~/.hermes' },
+            '**/*.sh':   { 'TOOL_DIR': '.hermes', 'HOME_TOOL_DIR': '~/.hermes' },
+            '**/*.py':   { 'TOOL_DIR': '.hermes', 'HOME_TOOL_DIR': '~/.hermes' },
+            '**/*.js':   { 'TOOL_DIR': '.hermes', 'HOME_TOOL_DIR': '~/.hermes' },
+            '**/*.ts':   { 'TOOL_DIR': '.hermes', 'HOME_TOOL_DIR': '~/.hermes' },
+            '**/*.json': { 'TOOL_DIR': '.hermes', 'HOME_TOOL_DIR': '~/.hermes' },
+            '**/*.yaml': { 'TOOL_DIR': '.hermes', 'HOME_TOOL_DIR': '~/.hermes' },
+            '**/*.yml':  { 'TOOL_DIR': '.hermes', 'HOME_TOOL_DIR': '~/.hermes' },
+            '**/*.toml': { 'TOOL_DIR': '.hermes', 'HOME_TOOL_DIR': '~/.hermes' }
+        }
+    },
+    nanoclaw: {
+        ruleDir: 'packages',
+        targetSubdir: '.claude',  // SHARED target with claude-code-4.5 (nanoclaw is a claude-code fork)
+        usePackagesStructure: true,
+        forceHomeInstall: true,
+        // nanoclaw uses the same directory as claude-code-4.5, so copy the same stuff
+        externalDepTypes: ['npx-skills', 'agent-skills'],  // skip claude-plugins (nanoclaw syncs from container/)
+        packageMappings: {
+            'skills': 'skills',
+            'agents': 'agents',
+            'utilities/utils': 'utils',
+            'utilities/hooks': 'hooks',
+            'utilities/output-styles': 'output-styles',
+            'utilities/reflections': 'reflections'
+        },
+        templateSubstitutions: {
+            '**/*.md':   { 'TOOL_DIR': '.claude', 'HOME_TOOL_DIR': '~/.claude' },
+            '**/*.sh':   { 'TOOL_DIR': '.claude', 'HOME_TOOL_DIR': '~/.claude' },
+            '**/*.py':   { 'TOOL_DIR': '.claude', 'HOME_TOOL_DIR': '~/.claude' },
+            '**/*.js':   { 'TOOL_DIR': '.claude', 'HOME_TOOL_DIR': '~/.claude' },
+            '**/*.ts':   { 'TOOL_DIR': '.claude', 'HOME_TOOL_DIR': '~/.claude' },
+            '**/*.json': { 'TOOL_DIR': '.claude', 'HOME_TOOL_DIR': '~/.claude' },
+            '**/*.yaml': { 'TOOL_DIR': '.claude', 'HOME_TOOL_DIR': '~/.claude' },
+            '**/*.yml':  { 'TOOL_DIR': '.claude', 'HOME_TOOL_DIR': '~/.claude' },
+            '**/*.toml': { 'TOOL_DIR': '.claude', 'HOME_TOOL_DIR': '~/.claude' }
+        }
+    },
     'packages': {
         ruleDir: 'packages',
         targetSubdir: '.claude',
