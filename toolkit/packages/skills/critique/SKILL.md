@@ -83,7 +83,7 @@ When this command is invoked:
    - Alternative recommendations table
    - Action items
 
-5. **Save the critique** to `~/.claude/critiques/critique_[TIMESTAMP]_[TYPE].json`
+5. **Save the critique** to `{{HOME_TOOL_DIR}}/critiques/critique_[TIMESTAMP]_[TYPE].json`
 
 ## Critique Perspective
 

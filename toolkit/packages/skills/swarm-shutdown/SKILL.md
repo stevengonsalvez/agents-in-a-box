@@ -29,7 +29,7 @@ When you receive this command:
 
 1. **Broadcast Shutdown Message**
    ```bash
-   source ~/.claude/utils/swarm-lib.sh
+   source $HOME/{{TOOL_DIR}}/utils/swarm-lib.sh
 
    echo "Initiating graceful shutdown of $TEAM_ID..."
 
@@ -49,7 +49,7 @@ When you receive this command:
 3. **Verify Agent Status**
    ```bash
    # Check if agents have acknowledged
-   TEAM_DIR="~/.claude/swarm/$TEAM_ID"
+   TEAM_DIR="$HOME/{{TOOL_DIR}}/swarm/$TEAM_ID"
 
    for inbox in "$TEAM_DIR"/inbox/*.jsonl; do
      AGENT=$(basename "$inbox" .jsonl)
@@ -152,11 +152,11 @@ Phase 5: Updating team state...
   SHUTDOWN COMPLETE
 ================================================================
 
-  Team data preserved at: ~/.claude/swarm/swarm-1738585396/
+  Team data preserved at: {{HOME_TOOL_DIR}}/swarm/swarm-1738585396/
 
   Options:
     Archive team:    swarm-lib.sh archive swarm-1738585396
-    View final state: cat ~/.claude/swarm/swarm-1738585396/team.json
+    View final state: cat {{HOME_TOOL_DIR}}/swarm/swarm-1738585396/team.json
     Restart:         /swarm-create --epic bd-epic-123
 
 ================================================================
@@ -213,7 +213,7 @@ swarm-lib.sh archive swarm-1738585396
 ### Delete Team
 ```bash
 # Permanently remove team data
-rm -rf ~/.claude/swarm/swarm-1738585396
+rm -rf $HOME/{{TOOL_DIR}}/swarm/swarm-1738585396
 ```
 
 ### Restart Team

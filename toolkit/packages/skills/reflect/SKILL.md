@@ -81,7 +81,7 @@ Check and initialize state files, then scan the conversation for both signal typ
 python scripts/state_manager.py init
 
 # State directory is configurable via REFLECT_STATE_DIR env var
-# Default: ~/.reflect/ (portable) or {{HOME_TOOL_DIR}}/session/ (Claude Code)
+# Default: ~/.reflect/ (portable) or $HOME/{{TOOL_DIR}}/session/ (Claude Code)
 ```
 
 State includes:
@@ -381,23 +381,23 @@ See [consolidate_workflow.md](references/consolidate_workflow.md) for the full 9
 
 ## Ingest Project Memories (`/reflect --ingest-memories`)
 
-Harvest Claude Code's auto-memory files from `~/.claude/projects/*/memory/` into the
+Harvest Claude Code's auto-memory files from `{{HOME_TOOL_DIR}}/projects/*/memory/` into the
 git-backed global knowledge base (`$LEARNINGS_HOME`) with QMD + GraphRAG indexing.
 
 Memory files are ephemeral — Claude Code's dream cycles can prune them, and deleting a
-project wipes its `~/.claude/projects/<slug>/memory/` directory entirely. This command
+project wipes its `{{HOME_TOOL_DIR}}/projects/<slug>/memory/` directory entirely. This command
 archives the originals into `$LEARNINGS_HOME/documents/memories/{project}/` (git-tracked),
 converts them to searchable knowledge learnings, and indexes into QMD + GraphRAG.
 
 **When to use:** Periodically, or when you notice memory files accumulating across projects.
-Run before deleting projects or cleaning up `~/.claude/projects/`.
+Run before deleting projects or cleaning up `{{HOME_TOOL_DIR}}/projects/`.
 
 ### Workflow
 
 #### Step 1: DISCOVER all project memory files
 
 ```bash
-MEMORY_BASE="$HOME/.claude/projects"
+MEMORY_BASE="$HOME/{{TOOL_DIR}}/projects"
 echo "=== Scanning project memory directories ==="
 TOTAL=0
 for dir in "$MEMORY_BASE"/*/memory/; do
@@ -640,7 +640,7 @@ The following memory files have been archived to $LEARNINGS_HOME
 and indexed into QMD + GraphRAG. They are now searchable via /research
 and will survive dream pruning or project deletion.
 
-Would you like to keep the originals in ~/.claude/projects/? [Y/n]
+Would you like to keep the originals in {{HOME_TOOL_DIR}}/projects/? [Y/n]
 ```
 
 **Default: keep originals** — Claude Code's auto-memory system still reads them for
@@ -732,7 +732,7 @@ export LEARNINGS_HOME=/path/to/learnings
 
 # Reflect state directory
 export REFLECT_STATE_DIR=/path/to/state
-# Default: ~/.reflect/ (portable) or {{HOME_TOOL_DIR}}/session/ (Claude Code)
+# Default: ~/.reflect/ (portable) or $HOME/{{TOOL_DIR}}/session/ (Claude Code)
 ```
 
 ### No Task Tool Dependency

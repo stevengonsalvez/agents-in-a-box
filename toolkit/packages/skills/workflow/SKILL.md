@@ -44,7 +44,7 @@ Before starting any workflow phase, check for persistent project state:
      ```bash
      mkdir -p .planning/phases .planning/todos
      ```
-   - Copy templates from `~/.claude/templates/planning/` to `.planning/`
+   - Copy templates from `{{HOME_TOOL_DIR}}/templates/planning/` to `.planning/`
    - Guide user through filling in PROJECT.md (vision + constraints)
    - If no: Continue with standard workflow (backward compatible)
 

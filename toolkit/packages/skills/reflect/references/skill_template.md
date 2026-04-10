@@ -40,7 +40,7 @@ Before creating a skill, verify ALL gates pass:
 - [ ] Not theoretical or untested
 
 ### 5. No Duplication
-- [ ] Checked existing skills in `~/.claude/skills/`
+- [ ] Checked existing skills in `{{HOME_TOOL_DIR}}/skills/`
 - [ ] Checked existing skills in `.claude/skills/`
 - [ ] Not covered by existing documentation
 
@@ -201,7 +201,7 @@ Create in `.claude/skills/{name}/SKILL.md`:
 
 ### Global-Level
 
-If the skill applies across projects, move to `~/.claude/skills/{name}/SKILL.md`:
+If the skill applies across projects, move to `{{HOME_TOOL_DIR}}/skills/{name}/SKILL.md`:
 - Available in all projects
 - User-level persistence
 - Not project-versioned

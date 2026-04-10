@@ -6,7 +6,7 @@
 set -euo pipefail
 
 LEARNINGS_HOME="${LEARNINGS_HOME:-$HOME/.learnings}"
-OLD_HOME="$HOME/.claude/global-learnings"
+OLD_HOME="$HOME/{{TOOL_DIR}}/global-learnings"
 
 log() { echo "[setup-learnings-home] $*"; }
 

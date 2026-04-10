@@ -249,7 +249,7 @@ After web research completes, execute a bash script to scan ALL web research res
 # Detect repository URLs from all web research results
 REPO_URLS=""
 find /tmp -name "web-research-results-*.txt" -mmin -60 2>/dev/null | while IFS= read -r file; do
-    URLS=$(bash ~/.claude/utils/detect-repo-urls.sh "$file")
+    URLS=$(bash $HOME/{{TOOL_DIR}}/utils/detect-repo-urls.sh "$file")
     if [ -n "$URLS" ]; then
         REPO_URLS+="${URLS}"$'\n'
     fi

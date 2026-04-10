@@ -164,7 +164,7 @@ cp /tmp/expect-replays/${SESSION_ID}.ndjson.js /tmp/replay/
 cp /tmp/expect-replays/${SESSION_ID}.ndjson /tmp/replay/
 
 # Publish (3 files: HTML shell + ndjson.js recording + ndjson raw data)
-{{HOME_TOOL_DIR}}/skills/here-now/scripts/publish.sh /tmp/replay/ --client claude
+$HOME/{{TOOL_DIR}}/skills/here-now/scripts/publish.sh /tmp/replay/ --client claude
 
 # The replay URL is: https://{slug}.here.now/{SESSION_ID}.html
 # Post to PR comment with the direct link
@@ -265,7 +265,7 @@ ffmpeg -i "$WEBM" -ss 60 -frames:v 1 /tmp/screenshots/step2.png -y 2>/dev/null
 SESSION_ID=$(ls -t /tmp/expect-replays/*.html | head -1 | xargs basename .html)
 mkdir -p /tmp/replay
 cp /tmp/expect-replays/${SESSION_ID}.{html,ndjson.js,ndjson} /tmp/replay/
-{{HOME_TOOL_DIR}}/skills/here-now/scripts/publish.sh /tmp/replay/ --client claude
+$HOME/{{TOOL_DIR}}/skills/here-now/scripts/publish.sh /tmp/replay/ --client claude
 # Post the replay URL to PR
 
 # 5b. Upload static screenshots (FALLBACK if replay not suitable)

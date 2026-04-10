@@ -94,7 +94,7 @@ metadata:
       bins: ["python3"]
     config:
       requiredEnv: []
-      stateDirs: ["~/.reflect", "~/.claude/session"]
+      stateDirs: ["~/.reflect", "{{HOME_TOOL_DIR}}/session"]
 hooks:
   Stop:
     - hooks:

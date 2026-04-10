@@ -8,14 +8,14 @@ Bulk-merge orphaned worktree memory directories into a git-tracked `.agents/MEMO
 
 1. **Discover project identity**:
    ```bash
-   bash ~/.claude/skills/reflect/scripts/memory_discovery.sh project-id
+   bash $HOME/{{TOOL_DIR}}/skills/reflect/scripts/memory_discovery.sh project-id
    # -> e.g. "shotclubhouse"
    ```
 
 2. **Find orphaned memory dirs**:
    ```bash
-   bash ~/.claude/skills/reflect/scripts/memory_discovery.sh discover
-   # Lists all ~/.claude/projects/*<repo-name>*/memory/MEMORY.md files
+   bash $HOME/{{TOOL_DIR}}/skills/reflect/scripts/memory_discovery.sh discover
+   # Lists all $HOME/{{TOOL_DIR}}/projects/*<repo-name>*/memory/MEMORY.md files
    # (excludes current session's memory dir)
    ```
 
@@ -23,7 +23,7 @@ Bulk-merge orphaned worktree memory directories into a git-tracked `.agents/MEMO
 
 4. **Deduplicate and categorize**: Group by section, remove redundant entries (fuzzy — same concept = skip)
 
-5. **Route skill-worthy content**: For entries that match existing skill topics (check `.claude/skills/` and `~/.claude/skills/`), propose adding them to those skills (same approval flow as Step 5-6)
+5. **Route skill-worthy content**: For entries that match existing skill topics (check `.claude/skills/` and `{{HOME_TOOL_DIR}}/skills/`), propose adding them to those skills (same approval flow as Step 5-6)
 
 6. **Write `.agents/MEMORY.md`**: Consolidated, deduped, within 200-line limit. Create from template if it doesn't exist:
    ```markdown
@@ -48,7 +48,7 @@ Bulk-merge orphaned worktree memory directories into a git-tracked `.agents/MEMO
 8. **Propose orphaned dir cleanup**: Show list and ask user to confirm deletion
    ```bash
    # After approval:
-   bash ~/.claude/skills/reflect/scripts/memory_discovery.sh cleanup /tmp/reflect-cleanup-dirs.txt
+   bash $HOME/{{TOOL_DIR}}/skills/reflect/scripts/memory_discovery.sh cleanup /tmp/reflect-cleanup-dirs.txt
    ```
 
 9. **Report**: Show summary of what was consolidated, deleted, and routed to skills
@@ -58,7 +58,7 @@ Bulk-merge orphaned worktree memory directories into a git-tracked `.agents/MEMO
 Check orphaned memory status without making changes:
 
 ```bash
-bash ~/.claude/skills/reflect/scripts/memory_discovery.sh stats
+bash $HOME/{{TOOL_DIR}}/skills/reflect/scripts/memory_discovery.sh stats
 # -> Repo: shotclubhouse
 # -> Orphaned memory dirs: 7
 # -> Total lines across all: 283

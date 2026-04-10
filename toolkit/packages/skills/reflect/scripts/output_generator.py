@@ -5,9 +5,9 @@ Output Generator for Reflect Skill
 Generates reflection output files and manages indexes:
 - Project reflections: .claude/reflections/YYYY-MM-DD_HH-MM-SS.md
 - Project index: .claude/reflections/index.md
-- Global index: ~/.claude/reflections/index.md
-- Per-agent learnings: ~/.claude/reflections/by-agent/{agent}/learnings.md
-- Cross-project: ~/.claude/reflections/by-project/{project}/
+- Global index: $HOME/{{TOOL_DIR}}/reflections/index.md
+- Per-agent learnings: $HOME/{{TOOL_DIR}}/reflections/by-agent/{agent}/learnings.md
+- Cross-project: $HOME/{{TOOL_DIR}}/reflections/by-project/{project}/
 
 Usage:
     python output_generator.py --reflection-data '{"signals": [...], "changes": [...]}'

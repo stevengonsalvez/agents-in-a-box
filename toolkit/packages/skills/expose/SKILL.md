@@ -199,7 +199,7 @@ expose_service() {
     tailscale serve --set-path ${PATH_NAME} --bg http://localhost:${PORT}
 
     # Save to tracking file
-    SERVICES_FILE="$HOME/.claude/tailscale-services.json"
+    SERVICES_FILE="$HOME/{{TOOL_DIR}}/tailscale-services.json"
 
     # Create file if doesn't exist
     if [ ! -f "$SERVICES_FILE" ]; then
@@ -238,10 +238,10 @@ list_services() {
     tailscale serve status
 
     # Show tracked services
-    if [ -f "$HOME/.claude/tailscale-services.json" ]; then
+    if [ -f "$HOME/{{TOOL_DIR}}/tailscale-services.json" ]; then
         echo ""
         echo "📋 Service Registry:"
-        jq -r '.services[] | "  \(.name): \(.direct) (path: \(.path))"' "$HOME/.claude/tailscale-services.json"
+        jq -r '.services[] | "  \(.name): \(.direct) (path: \(.path))"' "$HOME/{{TOOL_DIR}}/tailscale-services.json"
     fi
 }
 
@@ -251,7 +251,7 @@ unexpose_service() {
 
     if [[ "$PATH_OR_PORT" =~ ^[0-9]+$ ]]; then
         # It's a port, find the path
-        PATH_NAME=$(jq -r ".services[] | select(.port == \"$PATH_OR_PORT\") | .path" "$HOME/.claude/tailscale-services.json")
+        PATH_NAME=$(jq -r ".services[] | select(.port == \"$PATH_OR_PORT\") | .path" "$HOME/{{TOOL_DIR}}/tailscale-services.json")
     else
         PATH_NAME="$PATH_OR_PORT"
     fi
@@ -265,7 +265,7 @@ unexpose_service() {
     tailscale serve clear ${PATH_NAME}
 
     # Remove from tracking
-    jq "del(.services[] | select(.path == \"$PATH_NAME\"))" "$HOME/.claude/tailscale-services.json" > "${SERVICES_FILE}.tmp" && mv "${SERVICES_FILE}.tmp" "$SERVICES_FILE"
+    jq "del(.services[] | select(.path == \"$PATH_NAME\"))" "$HOME/{{TOOL_DIR}}/tailscale-services.json" > "${SERVICES_FILE}.tmp" && mv "${SERVICES_FILE}.tmp" "$SERVICES_FILE"
 
     echo "✅ Service removed from ${PATH_NAME}"
 }

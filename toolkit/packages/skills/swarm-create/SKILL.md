@@ -75,21 +75,21 @@ When you receive this command:
 4. **Initialize Team Directory**
    ```bash
    # Use bash invocation — the script exposes subcommands, not exported shell functions
-   bash ~/.claude/utils/swarm-lib.sh create-team "$EPIC_ID" "$AGENT_COUNT" "$ISOLATION_MODE" 2>&1
+   bash $HOME/{{TOOL_DIR}}/utils/swarm-lib.sh create-team "$EPIC_ID" "$AGENT_COUNT" "$ISOLATION_MODE" 2>&1
    ```
    Output is the team ID (e.g. `swarm-1774612409`).
 
 5. **Spawn Leader**
    ```bash
    TEAM_ID="swarm-XXXXXX"  # from step 4
-   bash ~/.claude/utils/swarm-lib.sh spawn-leader "$TEAM_ID" "optional-lead-prompt" 2>&1
+   bash $HOME/{{TOOL_DIR}}/utils/swarm-lib.sh spawn-leader "$TEAM_ID" "optional-lead-prompt" 2>&1
    ```
    Output is the tmux session name (e.g. `swarm-XXXXXX-leader`).
 
 6. **Spawn Worker Agents**
    ```bash
    for i in $(seq 1 $AGENT_COUNT); do
-     bash ~/.claude/utils/swarm-lib.sh spawn-agent "$TEAM_ID" "agent-$i" "optional-prompt" 2>&1
+     bash $HOME/{{TOOL_DIR}}/utils/swarm-lib.sh spawn-agent "$TEAM_ID" "agent-$i" "optional-prompt" 2>&1
      sleep 2  # Stagger spawning
    done
    ```
@@ -98,7 +98,7 @@ When you receive this command:
 7. **Verify & Report**
    ```bash
    # Get status
-   bash ~/.claude/utils/swarm-lib.sh status "$TEAM_ID"
+   bash $HOME/{{TOOL_DIR}}/utils/swarm-lib.sh status "$TEAM_ID"
 
    echo ""
    echo "========================================"
@@ -113,7 +113,7 @@ When you receive this command:
    echo "  Attach to leader: tmux attach -t ${TEAM_ID}-leader"
    echo "  Check status:     /swarm-status $TEAM_ID"
    if [[ "$ISOLATION_MODE" == "worktree" ]]; then
-     echo "  Merge worktrees:  bash ~/.claude/utils/swarm-lib.sh merge-worktrees $TEAM_ID"
+     echo "  Merge worktrees:  bash $HOME/{{TOOL_DIR}}/utils/swarm-lib.sh merge-worktrees $TEAM_ID"
    fi
    echo "  Shutdown:         /swarm-shutdown $TEAM_ID"
    echo "========================================"
@@ -129,13 +129,13 @@ DRY RUN: Would create swarm from epic: bd-epic-123
 Isolation Mode: worktree
 
 Would create:
-  - Team directory: ~/.claude/swarm/swarm-XXXXXXXXXX/
-  - Team file: ~/.claude/swarm/swarm-XXXXXXXXXX/team.json
+  - Team directory: {{HOME_TOOL_DIR}}/swarm/swarm-XXXXXXXXXX/
+  - Team file: {{HOME_TOOL_DIR}}/swarm/swarm-XXXXXXXXXX/team.json
   - Inbox files:
     - inbox/leader.jsonl
     - inbox/agent-1.jsonl
     - inbox/agent-2.jsonl
-  - Shared directory: ~/.claude/swarm/swarm-XXXXXXXXXX/shared/
+  - Shared directory: {{HOME_TOOL_DIR}}/swarm/swarm-XXXXXXXXXX/shared/
   - Worktrees (if worktree mode):
     - worktrees/agent-1/ (branch: swarm-XXXXXXXXXX-agent-1)
     - worktrees/agent-2/ (branch: swarm-XXXXXXXXXX-agent-2)
@@ -176,7 +176,7 @@ When using worktree isolation, after the swarm completes:
 /swarm-shutdown $TEAM_ID
 
 # 2. Merge all agent branches back to main
-bash ~/.claude/utils/swarm-lib.sh merge-worktrees $TEAM_ID
+bash $HOME/{{TOOL_DIR}}/utils/swarm-lib.sh merge-worktrees $TEAM_ID
 
 # 3. Review the merged changes
 git log --oneline -10
@@ -200,7 +200,7 @@ The swarm integrates with Beads task tracking:
 
 | Error | Resolution |
 |-------|------------|
-| `swarm_create_team: not found` | Use `bash ~/.claude/utils/swarm-lib.sh create-team` — the script exposes subcommands, not shell functions |
+| `swarm_create_team: not found` | Use `bash {{HOME_TOOL_DIR}}/utils/swarm-lib.sh create-team` — the script exposes subcommands, not shell functions |
 | Epic not found | Verify epic ID exists: `bd show <epic-id>` |
 | tmux not available | Install tmux: `brew install tmux` |
 | jq not available | Install jq: `brew install jq` |
@@ -213,7 +213,7 @@ The swarm integrates with Beads task tracking:
 
 ### Shared Mode
 ```
-~/.claude/swarm/{team-id}/
+{{HOME_TOOL_DIR}}/swarm/{team-id}/
 +-- team.json           # Team metadata (isolation_mode: "shared")
 +-- inbox/
 |   +-- leader.jsonl    # Leader's message inbox
@@ -225,7 +225,7 @@ The swarm integrates with Beads task tracking:
 
 ### Worktree Mode
 ```
-~/.claude/swarm/{team-id}/
+{{HOME_TOOL_DIR}}/swarm/{team-id}/
 +-- team.json           # Team metadata (isolation_mode: "worktree")
 +-- inbox/
 |   +-- leader.jsonl

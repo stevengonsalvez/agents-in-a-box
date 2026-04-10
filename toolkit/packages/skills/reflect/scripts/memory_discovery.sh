@@ -144,7 +144,7 @@ action_cleanup() {
     local memory_dir
     memory_dir=$(dirname "$dir_path")
 
-    # Safety: only delete under ~/.claude/projects/
+    # Safety: only delete under $HOME/{{TOOL_DIR}}/projects/
     if [[ "$memory_dir" != "${CLAUDE_PROJECTS_DIR}"/* ]]; then
       echo "SKIP (outside projects dir): $memory_dir" >&2
       skipped=$((skipped + 1))

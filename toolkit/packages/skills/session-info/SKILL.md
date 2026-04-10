@@ -23,8 +23,8 @@ Immediately show:
    - Recent commits (last 3)
 
 3. **Context Files** (if they exist)
-   - `~/.claude/CLAUDE.md` summary
-   - `~/.claude/TODO.md` items
+   - `{{HOME_TOOL_DIR}}/CLAUDE.md` summary
+   - `{{HOME_TOOL_DIR}}/TODO.md` items
    - `TODO.md` items
 
 4. **Recent GitHub Issues** (if `gh` available)
