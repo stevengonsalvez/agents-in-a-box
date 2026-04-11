@@ -2,7 +2,6 @@
 name: gh-issue
 description: Analyze and fix the specified GitHub issue
 user-invocable: true
-argument-hint: <issue>
 ---
 
 Analyze and fix the specified GitHub issue: $ARGUMENTS

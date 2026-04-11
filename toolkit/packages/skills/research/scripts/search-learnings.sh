@@ -19,9 +19,6 @@
 
 set -euo pipefail
 
-# Learnings home (overridable via env)
-LEARNINGS_HOME="${LEARNINGS_HOME:-$HOME/.learnings}"
-
 # Defaults
 SEARCH_DIR="./docs/solutions"
 CATEGORY=""
@@ -336,22 +333,8 @@ main() {
         fi
     fi
 
-    # Try QMD first (best quality hybrid search)
-    if command -v qmd &>/dev/null; then
-        if [[ "$FORMAT" != "json" ]]; then
-            echo ""
-            echo -e "${BOLD}Searching via QMD (hybrid search)...${RESET}"
-        fi
-        local qmd_format="simple"
-        [[ "$FORMAT" == "json" ]] && qmd_format="json"
-
-        if qmd query --collection learnings --format "$qmd_format" "$QUERY" 2>/dev/null; then
-            : # Success with QMD
-        fi
-    fi
-
     # Also search global learnings if CLI is available
-    local GLOBAL_CLI="${LEARNINGS_HOME}/cli/learnings"
+    local GLOBAL_CLI="${HOME}/.claude/global-learnings/cli/learnings"
     if [[ -x "$GLOBAL_CLI" ]]; then
         if [[ "$FORMAT" != "json" ]]; then
             echo ""

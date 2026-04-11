@@ -2,7 +2,6 @@
 name: do-issues
 description: Work on GitHub issues systematically with proper development workflow
 user-invocable: true
-argument-hint: [issue]
 ---
 
 Work on GitHub issues systematically with proper development workflow: $ARGUMENTS

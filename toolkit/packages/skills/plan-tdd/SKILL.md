@@ -2,7 +2,6 @@
 name: plan-tdd
 description: Create a test-driven development plan for the project
 user-invocable: true
-argument-hint: [spec-file]
 ---
 
 Create a test-driven development plan for the project: $ARGUMENTS

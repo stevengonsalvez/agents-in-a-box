@@ -2,7 +2,6 @@
 name: make-github-issues
 description: Review codebase and create GitHub issues for identified problems
 user-invocable: true
-argument-hint: [files...]
 ---
 
 Review codebase and create GitHub issues for identified problems: $ARGUMENTS

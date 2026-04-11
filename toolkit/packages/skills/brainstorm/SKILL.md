@@ -2,7 +2,6 @@
 name: brainstorm
 description: Develop a thorough, step-by-step specification for a given idea
 user-invocable: true
-argument-hint: [topic]
 ---
 
 Develop a thorough, step-by-step specification for the provided idea: $ARGUMENTS

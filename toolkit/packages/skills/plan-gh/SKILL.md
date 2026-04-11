@@ -2,7 +2,6 @@
 name: plan-gh
 description: Create a detailed development plan and corresponding GitHub issues
 user-invocable: true
-argument-hint: [spec-file]
 ---
 
 Create a detailed development plan and corresponding GitHub issues for the project: $ARGUMENTS

@@ -1,193 +1,125 @@
 ---
 name: oracle
-description: Use the @steipete/oracle CLI to bundle a prompt plus the right files and get a second-model review (API or browser) for debugging, refactors, design checks, or cross-validation.
+description: Best practices for using the oracle CLI (prompt + file bundling, engines, sessions, and file attachment patterns).
+homepage: https://askoracle.dev
+metadata:
+  {
+    "openclaw":
+      {
+        "emoji": "🧿",
+        "requires": { "bins": ["oracle"] },
+        "install":
+          [
+            {
+              "id": "node",
+              "kind": "node",
+              "package": "@steipete/oracle",
+              "bins": ["oracle"],
+              "label": "Install oracle (node)",
+            },
+          ],
+      },
+  }
 ---
 
-# Oracle (CLI) — best use
+# oracle — best use
 
-Oracle bundles your prompt + selected files into one "one-shot" request so another model can answer with real repo context (API or browser automation). Treat outputs as advisory: verify against the codebase + tests.
+Oracle bundles your prompt + selected files into one “one-shot” request so another model can answer with real repo context (API or browser automation). Treat output as advisory: verify against code + tests.
 
-## Recommended Modes (in order of preference)
+## Main use case (browser, GPT‑5.2 Pro)
 
-### Option 1: Gemini Browser Mode (RECOMMENDED)
+Default workflow here: `--engine browser` with GPT‑5.2 Pro in ChatGPT. This is the common “long think” path: ~10 minutes to ~1 hour is normal; expect a stored session you can reattach to.
 
-Most reliable browser mode. Uses cookie-based HTTP client (no Chrome automation needed).
+Recommended defaults:
 
-```bash
-# Pre-authorize Keychain first (one-time, enter password and click "Always Allow")
-security find-generic-password -s "Chrome Safe Storage" -w
+- Engine: browser (`--engine browser`)
+- Model: GPT‑5.2 Pro (`--model gpt-5.2-pro` or `--model "5.2 Pro"`)
 
-# Run with Gemini
-oracle --engine browser --model gemini-3-pro --browser-inline-files -p "<task>" --file "src/**"
-```
+## Golden path
 
-**Requirements**: Logged into gemini.google.com in Chrome. Close Chrome before first run.
+1. Pick a tight file set (fewest files that still contain the truth).
+2. Preview payload + token spend (`--dry-run` + `--files-report`).
+3. Use browser mode for the usual GPT‑5.2 Pro workflow; use API only when you explicitly want it.
+4. If the run detaches/timeouts: reattach to the stored session (don’t re-run).
 
-**CRITICAL**: Always use `--browser-inline-files` flag. Without it, payloads >60k chars are sent as attachments which Gemini's cookie-based client silently drops (model sees `[NO CONTENT FOUND]`).
+## Commands (preferred)
 
-### Option 2: ChatGPT Manual Paste
+- Help:
+  - `oracle --help`
+  - If the binary isn’t installed: `npx -y @steipete/oracle --help` (avoid `pnpx` here; sqlite bindings).
 
-**ChatGPT browser automation is unreliable** (DevTools connection issues, session token problems). Use `--render --copy` instead:
+- Preview (no tokens):
+  - `oracle --dry-run summary -p "<task>" --file "src/**" --file "!**/*.test.*"`
+  - `oracle --dry-run full -p "<task>" --file "src/**"`
 
-```bash
-# Bundle and copy to clipboard
-oracle --render --copy -p "<task>" --file "src/**"
-```
+- Token sanity:
+  - `oracle --dry-run summary --files-report -p "<task>" --file "src/**"`
 
-Then manually paste into ChatGPT. This bypasses all browser automation issues.
+- Browser run (main path; long-running is normal):
+  - `oracle --engine browser --model gpt-5.2-pro -p "<task>" --file "src/**"`
 
-### Option 3: API Mode
-
-Requires API keys but most reliable for programmatic use:
-
-```bash
-# Set API keys
-export OPENAI_API_KEY="your-key"      # For GPT-5.x
-export GEMINI_API_KEY="your-key"      # For Gemini
-export ANTHROPIC_API_KEY="your-key"   # For Claude
-
-# Run with API
-oracle --engine api --model gpt-5.2-pro -p "<task>" --file "src/**"
-oracle --engine api --model gemini-3-pro -p "<task>" --file "src/**"
-oracle --engine api --model claude-4.5-sonnet -p "<task>" --file "src/**"
-```
-
-**Note**: API runs require explicit user consent due to usage costs.
-
-## Quick Reference
-
-| Model | Mode | Command |
-|-------|------|---------|
-| Gemini 3 Pro | Browser | `oracle --engine browser --model gemini-3-pro --browser-inline-files -p "..." --file "..."` |
-| GPT-5.2 Pro | Manual | `oracle --render --copy -p "..." --file "..."` → paste in ChatGPT |
-| Any model | API | `oracle --engine api --model <model> -p "..." --file "..."` |
-
-## Commands
-
-```bash
-# Preview (no tokens spent)
-oracle --dry-run summary -p "<task>" --file "src/**"
-
-# Token/cost check
-oracle --dry-run summary --files-report -p "<task>" --file "src/**"
-
-# Gemini browser (recommended)
-oracle --engine browser --model gemini-3-pro --browser-inline-files -p "<task>" --file "src/**"
-
-# Manual paste for ChatGPT
-oracle --render --copy -p "<task>" --file "src/**"
-
-# API mode
-oracle --engine api -p "<task>" --file "src/**"
-```
+- Manual paste fallback:
+  - `oracle --render --copy -p "<task>" --file "src/**"`
+  - Note: `--copy` is a hidden alias for `--copy-markdown`.
 
 ## Attaching files (`--file`)
 
-`--file` accepts files, directories, and globs. Pass multiple times; comma-separated also works.
+`--file` accepts files, directories, and globs. You can pass it multiple times; entries can be comma-separated.
 
-**Include**:
-```bash
---file "src/**"           # directory glob
---file src/index.ts       # literal file
---file docs --file README.md
-```
+- Include:
+  - `--file "src/**"`
+  - `--file src/index.ts`
+  - `--file docs --file README.md`
 
-**Exclude** (prefix with negation):
-```bash
---file "src/**" --file '!src/**/*.test.ts' --file '!**/*.snap'
-```
+- Exclude:
+  - `--file "src/**" --file "!src/**/*.test.ts" --file "!**/*.snap"`
 
-**Defaults**:
-- Ignores: `node_modules`, `dist`, `coverage`, `.git`, `.turbo`, `.next`, `build`, `tmp`
-- Honors `.gitignore`
-- Files > 1 MB rejected
+- Defaults (implementation behavior):
+  - Default-ignored dirs: `node_modules`, `dist`, `coverage`, `.git`, `.turbo`, `.next`, `build`, `tmp` (skipped unless explicitly passed as literal dirs/files).
+  - Honors `.gitignore` when expanding globs.
+  - Does not follow symlinks.
+  - Dotfiles filtered unless opted in via pattern (e.g. `--file ".github/**"`).
+  - Files > 1 MB rejected.
 
-## Budget
+## Engines (API vs browser)
 
-- Target: keep total input under ~196k tokens
-- Use `--files-report` to spot token hogs
+- Auto-pick: `api` when `OPENAI_API_KEY` is set; otherwise `browser`.
+- Browser supports GPT + Gemini only; use `--engine api` for Claude/Grok/Codex or multi-model runs.
+- Browser attachments:
+  - `--browser-attachments auto|never|always` (auto pastes inline up to ~60k chars then uploads).
+- Remote browser host:
+  - Host: `oracle serve --host 0.0.0.0 --port 9473 --token <secret>`
+  - Client: `oracle --engine browser --remote-host <host:port> --remote-token <secret> -p "<task>" --file "src/**"`
 
-## Sessions
+## Sessions + slugs
 
-Sessions stored under `~/.oracle/sessions`. If a run detaches:
-```bash
-oracle status --hours 72        # List sessions
-oracle session <id> --render    # Reattach
-```
+- Stored under `~/.oracle/sessions` (override with `ORACLE_HOME_DIR`).
+- Runs may detach or take a long time (browser + GPT‑5.2 Pro often does). If the CLI times out: don’t re-run; reattach.
+  - List: `oracle status --hours 72`
+  - Attach: `oracle session <id> --render`
+- Use `--slug "<3-5 words>"` to keep session IDs readable.
+- Duplicate prompt guard exists; use `--force` only when you truly want a fresh run.
 
-Use `--slug "<3-5 words>"` for readable session IDs.
+## Prompt template (high signal)
 
-## Prompt Tips
+Oracle starts with **zero** project knowledge. Assume the model cannot infer your stack, build tooling, conventions, or “obvious” paths. Include:
 
-Oracle starts with **zero** project knowledge. Include:
-- Project briefing (stack, build/test commands)
-- Key directories and entrypoints
-- Exact error text (verbatim)
-- Constraints ("don't change X", "must keep public API")
-- Desired output format
+- Project briefing (stack + build/test commands + platform constraints).
+- “Where things live” (key directories, entrypoints, config files, boundaries).
+- Exact question + what you tried + the error text (verbatim).
+- Constraints (“don’t change X”, “must keep public API”, etc).
+- Desired output (“return patch plan + tests”, “give 3 options with tradeoffs”).
 
 ## Safety
 
-- Don't attach secrets (`.env`, credentials, auth tokens)
-- Prefer minimal context: fewer files + better prompt beats whole-repo dumps
+- Don’t attach secrets by default (`.env`, key files, auth tokens). Redact aggressively; share only what’s required.
 
-## Troubleshooting
+## “Exhaustive prompt” restoration pattern
 
-### macOS Keychain blocks Gemini browser mode
+For long investigations, write a standalone prompt + file set so you can rerun days later:
 
-**Symptom**: `Failed to read macOS Keychain (Chrome Safe Storage): Timed out after 3000ms`
+- 6–30 sentence project briefing + the goal.
+- Repro steps + exact errors + what you tried.
+- Attach all context files needed (entrypoints, configs, key modules, docs).
 
-**Fix**: Pre-authorize Keychain:
-```bash
-security find-generic-password -s "Chrome Safe Storage" -w
-# Enter password, click "Always Allow"
-```
-
-### Chrome cookies not found (Gemini)
-
-**Symptom**: `missing __Secure-1PSID/__Secure-1PSIDTS`
-
-**Fixes**:
-1. Log into gemini.google.com in Chrome
-2. Close Chrome completely before running Oracle
-3. Specify profile path if using multiple profiles:
-   ```bash
-   oracle --engine browser --model gemini-3-pro \
-     --browser-cookie-path ~/Library/Application\ Support/Google/Chrome/Profile\ 2/Cookies \
-     -p "..." --file "..."
-   ```
-
-### `--render --copy` fails in tmux (clipboard empty)
-
-**Symptom**: `--render --copy` completes but clipboard is empty. `pbcopy`/`pbpaste` return stale content.
-
-**Cause**: tmux has its own buffer that doesn't sync with macOS system clipboard by default.
-
-**Workarounds**:
-1. Capture to file instead of clipboard:
-   ```bash
-   oracle --render -p "..." --file "..." > /tmp/oracle-output.txt
-   # Then outside tmux: cat /tmp/oracle-output.txt | pbcopy
-   # Or: open /tmp/oracle-output.txt (Cmd+A, Cmd+C)
-   ```
-2. Add clipboard sync to `~/.tmux.conf`:
-   ```
-   set -g set-clipboard on
-   bind -T copy-mode-vi y send-keys -X copy-pipe-and-cancel "pbcopy"
-   ```
-3. Use `reattach-to-user-namespace` (older macOS):
-   ```bash
-   brew install reattach-to-user-namespace
-   # Add to ~/.tmux.conf: set -g default-command "reattach-to-user-namespace -l zsh"
-   ```
-
-### ChatGPT browser mode not working
-
-**Symptom**: `Cannot GET /json/list`, `Inspected target navigated or closed`, DevTools errors
-
-**Cause**: ChatGPT browser automation uses Chrome DevTools Protocol which is unreliable. It launches a new Chrome instance with a temp profile, and session tokens often don't transfer properly.
-
-**Solution**: Don't use ChatGPT browser mode. Use one of:
-1. `--render --copy` then manually paste into ChatGPT
-2. API mode with `OPENAI_API_KEY`
-3. Gemini browser mode instead
+Oracle runs are one-shot; the model doesn’t remember prior runs. “Restoring context” means re-running with the same prompt + `--file …` set (or reattaching a still-running stored session).
