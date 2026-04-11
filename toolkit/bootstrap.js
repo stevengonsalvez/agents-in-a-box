@@ -204,8 +204,11 @@ const TOOL_CONFIG = {
         copySettings: false,
         externalDepTypes: ['npx-skills', 'agent-skills'],
         packageMappings: {
-            // Skills-only — hermes manages its own config.yaml, memory, sessions
-            'skills': 'skills'
+            // Hermes uses nested skills/{category}/{skill-name}/SKILL.md layout.
+            // Install toolkit skills under a 'toolkit/' category to avoid
+            // collisions with hermes's native categories (apple, research, etc.)
+            // and to clearly identify toolkit-owned skills.
+            'skills': 'skills/toolkit'
         },
         templateSubstitutions: {
             '**/*.md':   { 'TOOL_DIR': '.hermes', 'HOME_TOOL_DIR': '~/.hermes' },
