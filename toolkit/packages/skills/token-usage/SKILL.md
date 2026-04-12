@@ -1,0 +1,76 @@
+---
+name: token-usage
+description: 'Show Claude Code token usage across sessions — daily, weekly, per-project, and per-session breakdowns. Parses ~/.claude/projects/**/*.jsonl for consumption data. Use when the user asks about token usage, costs, how many tokens were used, session statistics, or wants a usage report.'
+user-invocable: true
+argument-hint: "[--days N] [--since YYYY-MM-DD] [--project NAME] [--format text|markdown|json]"
+---
+
+# Token Usage
+
+Analyze Claude Code token consumption across all sessions.
+
+## Quick Start
+
+Run the analyzer script via Bash:
+
+```bash
+# All time usage
+python3 {{HOME_TOOL_DIR}}/skills/token-usage/scripts/token_usage.py
+
+# Last 7 days
+python3 {{HOME_TOOL_DIR}}/skills/token-usage/scripts/token_usage.py --days 7
+
+# Since a specific date
+python3 {{HOME_TOOL_DIR}}/skills/token-usage/scripts/token_usage.py --since 2026-04-01
+
+# Filter to a specific project
+python3 {{HOME_TOOL_DIR}}/skills/token-usage/scripts/token_usage.py --project shotclubhouse
+
+# Markdown output (good for sharing)
+python3 {{HOME_TOOL_DIR}}/skills/token-usage/scripts/token_usage.py --days 30 --format markdown
+
+# JSON output (good for piping to jq)
+python3 {{HOME_TOOL_DIR}}/skills/token-usage/scripts/token_usage.py --format json | jq '.grand_total'
+
+# Top 20 costliest sessions
+python3 {{HOME_TOOL_DIR}}/skills/token-usage/scripts/token_usage.py --top-sessions 20
+```
+
+## What It Reports
+
+### Daily Breakdown
+Per-day totals: input tokens, cache creation, cache read, output tokens, session count.
+
+### Weekly Summary
+Aggregated by ISO week: total tokens, sessions, projects, average per day.
+
+### Per-Project
+Top 20 projects by total token consumption, with session count.
+
+### Top Sessions
+Most expensive sessions across all projects, showing date, project, token count, and first user prompt.
+
+## CLI Flags
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--days N` | Only include last N days | All time |
+| `--since YYYY-MM-DD` | Only include since this date | All time |
+| `--project NAME` | Filter to project (substring match) | All projects |
+| `--top-sessions N` | Number of top sessions to show | 10 |
+| `--format text\|markdown\|json` | Output format | text |
+| `--projects-dir PATH` | Override projects directory | `~/.claude/projects` |
+
+## Data Source
+
+Parses `~/.claude/projects/**/*.jsonl` — Claude Code's session transcript files. Each `assistant` message contains a `usage` block with `input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`, and `output_tokens`.
+
+## Integration with ainb-tui
+
+The ainb-tui has a built-in Usage Analytics screen (press `i` from home screen or select "Stats" in the sidebar) that provides the same data with a visual bar chart and provider selector. This skill is the CLI-only alternative for when you want usage data without launching the TUI.
+
+## Notes
+
+- Token counts are RAW — they don't map directly to cost since cache reads are heavily discounted and different models have different pricing
+- The script is pure Python 3 with no external dependencies (uses only stdlib)
+- For cost estimates, multiply by model-specific per-token pricing from Anthropic's pricing page
