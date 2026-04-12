@@ -1,3 +1,9 @@
+# Critical Safety Rules
+
+<tmux_protection>
+NEVER delete tmux sockets, kill tmux server, or destroy all tmux sessions. NEVER use `tmux kill-server`, `pkill tmux`, `killall tmux`, or any wildcard/bulk tmux kill command. ALWAYS kill sessions by exact session name only: `tmux kill-session -t {specific-session-name}`. You must know exactly what you are deleting before you delete it. Violating this rule destroys other agents' sessions, dev environments, and running processes irreversibly.
+</tmux_protection>
+
 # Task Management Protocol
 
 <todo_list_requirement>
