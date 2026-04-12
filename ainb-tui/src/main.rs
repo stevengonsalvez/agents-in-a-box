@@ -82,6 +82,12 @@ async fn main() -> Result<()> {
         Some(cli::Commands::Status(status_args)) => cli::status::execute(status_args, args.format).await,
         Some(cli::Commands::Kill(kill_args)) => cli::status::kill(kill_args).await,
         Some(cli::Commands::Auth) => run_auth_setup().await,
+        Some(cli::Commands::Recover { command }) => cli::recover::execute(command, args.format).await,
+        Some(cli::Commands::Config { command }) => cli::config_cmd::execute(command, args.format).await,
+        Some(cli::Commands::Git { command }) => cli::git_cmd::execute(command, args.format).await,
+        Some(cli::Commands::Favorites { command }) => cli::favorites::execute(command, args.format).await,
+        Some(cli::Commands::Init(init_args)) => cli::init::execute(init_args, args.format).await,
+        Some(cli::Commands::Presets { command }) => cli::presets::execute(command, args.format).await,
 
         // TUI mode (explicit or default)
         Some(cli::Commands::Tui) | None => {

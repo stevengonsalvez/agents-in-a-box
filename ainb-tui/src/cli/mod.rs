@@ -12,6 +12,12 @@ pub mod logs;
 pub mod attach;
 pub mod status;
 pub mod util;
+pub mod recover;
+pub mod config_cmd;
+pub mod git_cmd;
+pub mod favorites;
+pub mod init;
+pub mod presets;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
@@ -63,6 +69,39 @@ pub enum Commands {
 
     /// Set up authentication
     Auth,
+
+    /// Recover orphaned or crashed sessions
+    Recover {
+        #[command(subcommand)]
+        command: recover::RecoverCommands,
+    },
+
+    /// Manage configuration
+    Config {
+        #[command(subcommand)]
+        command: config_cmd::ConfigCommands,
+    },
+
+    /// Git worktree operations
+    Git {
+        #[command(subcommand)]
+        command: git_cmd::GitCommands,
+    },
+
+    /// Manage favorite repositories
+    Favorites {
+        #[command(subcommand)]
+        command: favorites::FavoritesCommands,
+    },
+
+    /// First-time setup and prerequisite checking
+    Init(init::InitArgs),
+
+    /// Manage session presets
+    Presets {
+        #[command(subcommand)]
+        command: presets::PresetsCommands,
+    },
 }
 
 /// Arguments for the run command
