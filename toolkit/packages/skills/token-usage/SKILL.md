@@ -2,53 +2,54 @@
 name: token-usage
 description: 'Show Claude Code token usage across sessions — daily, weekly, per-project, and per-session breakdowns. Parses ~/.claude/projects/**/*.jsonl for consumption data. Use when the user asks about token usage, costs, how many tokens were used, session statistics, or wants a usage report.'
 user-invocable: true
-argument-hint: "[--days N] [--since YYYY-MM-DD] [--project NAME] [--format text|markdown|json]"
+argument-hint: "[--days N] [--since YYYY-MM-DD] [--project NAME]"
 ---
 
 # Token Usage
 
 Analyze Claude Code token consumption across all sessions.
 
-## Quick Start
+## How to Run
 
-Run the analyzer script via Bash:
+**IMPORTANT: Always use `--format markdown` and display the full output directly to the user as markdown tables. Do NOT summarize or truncate.**
+
+Run the script and display the FULL output as-is:
+
+```bash
+python3 {{HOME_TOOL_DIR}}/skills/token-usage/scripts/token_usage.py --format markdown [ARGS]
+```
+
+Pass through any user-provided arguments (--days, --since, --project, --top-sessions).
+
+### Examples
 
 ```bash
 # All time usage
-python3 {{HOME_TOOL_DIR}}/skills/token-usage/scripts/token_usage.py
+python3 {{HOME_TOOL_DIR}}/skills/token-usage/scripts/token_usage.py --format markdown
 
 # Last 7 days
-python3 {{HOME_TOOL_DIR}}/skills/token-usage/scripts/token_usage.py --days 7
+python3 {{HOME_TOOL_DIR}}/skills/token-usage/scripts/token_usage.py --days 7 --format markdown
 
 # Since a specific date
-python3 {{HOME_TOOL_DIR}}/skills/token-usage/scripts/token_usage.py --since 2026-04-01
+python3 {{HOME_TOOL_DIR}}/skills/token-usage/scripts/token_usage.py --since 2026-04-01 --format markdown
 
 # Filter to a specific project
-python3 {{HOME_TOOL_DIR}}/skills/token-usage/scripts/token_usage.py --project shotclubhouse
-
-# Markdown output (good for sharing)
-python3 {{HOME_TOOL_DIR}}/skills/token-usage/scripts/token_usage.py --days 30 --format markdown
-
-# JSON output (good for piping to jq)
-python3 {{HOME_TOOL_DIR}}/skills/token-usage/scripts/token_usage.py --format json | jq '.grand_total'
+python3 {{HOME_TOOL_DIR}}/skills/token-usage/scripts/token_usage.py --project shotclubhouse --format markdown
 
 # Top 20 costliest sessions
-python3 {{HOME_TOOL_DIR}}/skills/token-usage/scripts/token_usage.py --top-sessions 20
+python3 {{HOME_TOOL_DIR}}/skills/token-usage/scripts/token_usage.py --days 30 --top-sessions 20 --format markdown
+
+# JSON output (for piping to jq)
+python3 {{HOME_TOOL_DIR}}/skills/token-usage/scripts/token_usage.py --format json | jq '.grand_total'
 ```
 
-## What It Reports
+## Display Instructions
 
-### Daily Breakdown
-Per-day totals: input tokens, cache creation, cache read, output tokens, session count.
-
-### Weekly Summary
-Aggregated by ISO week: total tokens, sessions, projects, average per day.
-
-### Per-Project
-Top 20 projects by total token consumption, with session count.
-
-### Top Sessions
-Most expensive sessions across all projects, showing date, project, token count, and first user prompt.
+After running the script:
+1. **Show the ENTIRE markdown output** directly in your response — do not hide it behind a Bash tool call
+2. The output is already formatted as markdown tables — just paste it verbatim
+3. Do NOT add your own summary or interpretation unless the user asks for one
+4. If the output is long, show all of it — the user wants to see the full report
 
 ## CLI Flags
 
@@ -67,7 +68,7 @@ Parses `~/.claude/projects/**/*.jsonl` — Claude Code's session transcript file
 
 ## Integration with ainb-tui
 
-The ainb-tui has a built-in Usage Analytics screen (press `i` from home screen or select "Stats" in the sidebar) that provides the same data with a visual bar chart and provider selector. This skill is the CLI-only alternative for when you want usage data without launching the TUI.
+The ainb-tui has a built-in Usage Analytics screen (press `i` from home screen or select "Stats" in the sidebar) that provides the same data with a visual bar chart and provider selector. This skill is the CLI-only alternative.
 
 ## Notes
 
