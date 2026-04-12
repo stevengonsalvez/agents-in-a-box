@@ -66,6 +66,20 @@ Commands are routed based on their purpose:
 |---------------------|-------------------|
 | `{{HOME_TOOL_DIR}}/utils/` | `packages/utilities/utils/` |
 
+### Tool-Specific Config Files
+
+These are NOT in `packages/` — they live in per-tool directories:
+
+| Source (user-level) | Target (toolkit source) |
+|---------------------|------------------------|
+| `{{HOME_TOOL_DIR}}/CLAUDE.md` | `toolkit/claude-code-4.5/CLAUDE.md` |
+| `{{HOME_TOOL_DIR}}/settings.json` | `toolkit/claude-code-4.5/settings.json` |
+
+**CLAUDE.md sync requires reverse template interpolation** — when copying TO_REPO,
+replace interpolated paths back to template placeholders:
+- `~/.claude/` or `$HOME/.claude/` → `{{HOME_TOOL_DIR}}/`
+- `.claude/` (in path context) → `{{TOOL_DIR}}/`
+
 ### Other Files
 
 | Source (user-level) | Target (packages) |
@@ -278,7 +292,40 @@ Before syncing, generate an assessment table:
 
 ## Execution
 
-### Template Interpolation (CRITICAL)
+### Reverse Template Interpolation (TO_REPO direction — CRITICAL)
+
+**When copying FROM user-level TO packages/toolkit, REVERSE the interpolation.**
+User-level files have resolved paths (`~/.claude/`, `$HOME/.claude/`, `.claude/`).
+These MUST be converted back to template placeholders before writing to the repo.
+
+```bash
+# Reverse interpolation: user-level → packages/toolkit source
+# For .md files (documentation references use ~/ form):
+perl -pe 's|~/\.claude|{{HOME_TOOL_DIR}}|g' ~/.claude/CLAUDE.md > toolkit/claude-code-4.5/CLAUDE.md
+
+# For .sh/.py files (bash code uses $HOME form):
+perl -pe 's|\$HOME/\.claude|\$HOME/{{TOOL_DIR}}|g; s|~/\.claude|{{HOME_TOOL_DIR}}|g' \
+  ~/.claude/skills/some-skill/scripts/script.sh > toolkit/packages/skills/some-skill/scripts/script.sh
+
+# For mixed files (both doc text AND bash code blocks — like CLAUDE.md):
+# Step 1: Replace $HOME/.claude → $HOME/{{TOOL_DIR}} (bash-safe form)
+# Step 2: Replace ~/.claude → {{HOME_TOOL_DIR}} (doc-safe form)
+# Order matters: $HOME first (more specific), then ~/
+perl -pe 's|\$HOME/\.claude|\$HOME/{{TOOL_DIR}}|g; s|~/\.claude|{{HOME_TOOL_DIR}}|g; s|"\.claude/|"{{TOOL_DIR}}/|g' \
+  SOURCE > DEST
+```
+
+**Always verify** after reverse interpolation:
+```bash
+# Should find ZERO literal .claude references (except in comments/descriptions):
+grep -n '~/\.claude\|\$HOME/\.claude' toolkit/claude-code-4.5/CLAUDE.md
+```
+
+**Do NOT reverse-interpolate**:
+- The string `.claude` when it's a directory name in a path context (e.g., `Check .claude/session/`) — this should become `{{TOOL_DIR}}/session/`
+- But `.claude` as part of a domain name or unrelated word — leave alone
+
+### Template Interpolation (TO_HOME direction — CRITICAL)
 
 **Packages files use `{{HOME_TOOL_DIR}}` as a cross-tool placeholder.** When syncing
 TO `{{HOME_TOOL_DIR}}` (or any tool's home dir), these MUST be substituted before the file is
@@ -341,6 +388,11 @@ chore: sync learnings to packages
 ## Quick Diff Commands
 
 ```bash
+# CLAUDE.md diff (tool-specific config file)
+# Normalize template vars before comparing to avoid false positives
+diff <(perl -pe 's|\{\{TOOL_DIR\}\}|.claude|g; s|\{\{HOME_TOOL_DIR\}\}|~/.claude|g' \
+  toolkit/claude-code-4.5/CLAUDE.md) $HOME/{{TOOL_DIR}}/CLAUDE.md
+
 # Find all differences (agents)
 diff -rq $HOME/{{TOOL_DIR}}/agents/ packages/agents/ 2>/dev/null
 
