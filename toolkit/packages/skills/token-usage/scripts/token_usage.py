@@ -224,12 +224,11 @@ def print_text(daily, projects, sessions, top_n):
         print(f"{ws:<12} {fmt(w['total']):>12} {len(w['sessions']):>8} {len(w['projects']):>8} {fmt(avg):>12}")
 
     # Projects
-    print(f"\n{'#':>3} {'Project':<45} {'Total':>12} {'Sessions':>8}")
-    print("-" * 72)
+    print(f"\n{'#':>3} {'Project':<55} {'Total':>12} {'Sessions':>8}")
+    print("-" * 82)
     sorted_projects = sorted(projects.items(), key=lambda x: total_tokens(x[1]), reverse=True)
-    for i, (name, p) in enumerate(sorted_projects[:20], 1):
-        display = name[:44]
-        print(f"{i:>3} {display:<45} {fmt(total_tokens(p)):>12} {len(p['sessions']):>8}")
+    for i, (name, p) in enumerate(sorted_projects, 1):
+        print(f"{i:>3} {name:<55} {fmt(total_tokens(p)):>12} {len(p['sessions']):>8}")
 
     # Top sessions
     print(f"\nTop {top_n} Costliest Sessions:")
@@ -275,8 +274,8 @@ def print_markdown(daily, projects, sessions, top_n):
     print(f"| # | Project | Total | Sessions |")
     print(f"|---|---------|-------|----------|")
     sorted_projects = sorted(projects.items(), key=lambda x: total_tokens(x[1]), reverse=True)
-    for i, (name, p) in enumerate(sorted_projects[:20], 1):
-        print(f"| {i} | {name[:40]} | {fmt(total_tokens(p))} | {len(p['sessions'])} |")
+    for i, (name, p) in enumerate(sorted_projects, 1):
+        print(f"| {i} | {name} | {fmt(total_tokens(p))} | {len(p['sessions'])} |")
 
     print(f"\n## Top {top_n} Costliest Sessions\n")
     sorted_sessions = sorted(sessions.items(), key=lambda x: total_tokens(x[1]), reverse=True)
