@@ -413,7 +413,7 @@ impl AppConfig {
     }
 
     /// Get configuration file paths in order of precedence
-    fn get_config_paths() -> Vec<PathBuf> {
+    pub fn get_config_paths() -> Vec<PathBuf> {
         let mut paths = vec![];
 
         // 1. Local project config
@@ -433,7 +433,7 @@ impl AppConfig {
     }
 
     /// Get user configuration directory
-    fn get_user_config_dir() -> Result<PathBuf> {
+    pub fn get_user_config_dir() -> Result<PathBuf> {
         let home_dir = dirs::home_dir().context("Failed to get home directory")?;
         let config_dir = home_dir.join(".agents-in-a-box").join("config");
         Ok(config_dir)

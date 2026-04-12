@@ -104,6 +104,7 @@ pub fn find_session_in_store(id_or_name: &str, store: &SessionStore) -> Result<S
 mod tests {
     use super::*;
     use chrono::Utc;
+    use crate::models::session::SessionAgentType;
     use std::path::PathBuf;
 
     fn create_test_store() -> SessionStore {
@@ -115,6 +116,7 @@ mod tests {
             worktree_path: PathBuf::from("/tmp/project-a"),
             workspace_name: "project-alpha".to_string(),
             created_at: Utc::now(),
+            agent_type: SessionAgentType::default(),
         };
 
         let session2 = SessionMetadata {
@@ -123,6 +125,7 @@ mod tests {
             worktree_path: PathBuf::from("/tmp/project-b"),
             workspace_name: "project-beta".to_string(),
             created_at: Utc::now(),
+            agent_type: SessionAgentType::default(),
         };
 
         store.sessions.insert(session1.tmux_session_name.clone(), session1);

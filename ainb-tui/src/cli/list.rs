@@ -168,6 +168,7 @@ fn truncate(s: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::session::SessionAgentType;
     use std::path::PathBuf;
     use uuid::Uuid;
 
@@ -186,6 +187,7 @@ mod tests {
             worktree_path: PathBuf::from("/tmp/test"),
             workspace_name: "test-workspace".to_string(),
             created_at: Utc::now(),
+            agent_type: SessionAgentType::default(),
         };
 
         let info = SessionInfo::from_metadata(&metadata, true, true);
@@ -200,6 +202,7 @@ mod tests {
             worktree_path: PathBuf::from("/tmp/test"),
             workspace_name: "test-workspace".to_string(),
             created_at: Utc::now(),
+            agent_type: SessionAgentType::default(),
         };
 
         let info = SessionInfo::from_metadata(&metadata, true, false);
@@ -214,6 +217,7 @@ mod tests {
             worktree_path: PathBuf::from("/tmp/test"),
             workspace_name: "test-workspace".to_string(),
             created_at: Utc::now(),
+            agent_type: SessionAgentType::default(),
         };
 
         let info = SessionInfo::from_metadata(&metadata, false, false);
@@ -243,6 +247,7 @@ mod tests {
             worktree_path: PathBuf::from("/tmp/test"),
             workspace_name: "my-workspace".to_string(),
             created_at: Utc::now(),
+            agent_type: SessionAgentType::default(),
         };
 
         let info = SessionInfo::from_metadata(&metadata, true, true);

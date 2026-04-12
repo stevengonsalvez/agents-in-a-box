@@ -118,7 +118,7 @@ fn test_session_serialization_roundtrip_preserves_all_fields() {
 /// while Codex, Gemini, and Kiro are marked as coming soon.
 #[test]
 fn test_session_agent_type_availability() {
-    // Assert: Available agents
+    // Assert: Available agents (including multi-provider support)
     assert!(
         SessionAgentType::Claude.is_available(),
         "Claude should be available"
@@ -127,16 +127,24 @@ fn test_session_agent_type_availability() {
         SessionAgentType::Shell.is_available(),
         "Shell should be available"
     );
+    assert!(
+        SessionAgentType::Ssh.is_available(),
+        "Ssh should be available"
+    );
+    assert!(
+        SessionAgentType::Codex.is_available(),
+        "Codex should be available"
+    );
+    assert!(
+        SessionAgentType::Gemini.is_available(),
+        "Gemini should be available"
+    );
+    assert!(
+        SessionAgentType::Copilot.is_available(),
+        "Copilot should be available"
+    );
 
-    // Assert: Coming soon agents
-    assert!(
-        !SessionAgentType::Codex.is_available(),
-        "Codex should not yet be available"
-    );
-    assert!(
-        !SessionAgentType::Gemini.is_available(),
-        "Gemini should not yet be available"
-    );
+    // Assert: Still coming soon
     assert!(
         !SessionAgentType::Kiro.is_available(),
         "Kiro should not yet be available"

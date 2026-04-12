@@ -192,6 +192,7 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use crate::interactive::session_manager::SessionMetadata;
+    use crate::models::session::SessionAgentType;
     use std::path::PathBuf;
     use uuid::Uuid;
 
@@ -202,6 +203,7 @@ mod tests {
             worktree_path: PathBuf::from(format!("/tmp/test-worktree-{}", id)),
             workspace_name: workspace.to_string(),
             created_at: Utc::now(),
+            agent_type: SessionAgentType::default(),
         }
     }
 

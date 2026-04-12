@@ -3,6 +3,7 @@
 // Verifies JSON format, round-trip persistence, and keyed operations by tmux session name.
 
 use ainb::interactive::session_manager::{SessionMetadata, SessionStore};
+use ainb::models::session::SessionAgentType;
 use chrono::{Datelike, Utc};
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -19,6 +20,7 @@ fn create_session_metadata(
         worktree_path: PathBuf::from(worktree_path),
         workspace_name: workspace_name.to_string(),
         created_at: Utc::now(),
+        agent_type: SessionAgentType::default(),
     }
 }
 
@@ -35,6 +37,7 @@ fn create_session_metadata_with_id(
         worktree_path: PathBuf::from(worktree_path),
         workspace_name: workspace_name.to_string(),
         created_at: Utc::now(),
+        agent_type: SessionAgentType::default(),
     }
 }
 
