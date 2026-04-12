@@ -310,8 +310,9 @@ perl -pe 's|\$HOME/\.claude|\$HOME/{{TOOL_DIR}}|g; s|~/\.claude|{{HOME_TOOL_DIR}
 # For mixed files (both doc text AND bash code blocks — like CLAUDE.md):
 # Step 1: Replace $HOME/.claude → $HOME/{{TOOL_DIR}} (bash-safe form)
 # Step 2: Replace ~/.claude → {{HOME_TOOL_DIR}} (doc-safe form)
-# Order matters: $HOME first (more specific), then ~/
-perl -pe 's|\$HOME/\.claude|\$HOME/{{TOOL_DIR}}|g; s|~/\.claude|{{HOME_TOOL_DIR}}|g; s|"\.claude/|"{{TOOL_DIR}}/|g' \
+# Step 3: Replace quoted `.claude/` and "\.claude/" → {{TOOL_DIR}}/ (backtick and double-quote contexts)
+# Order matters: $HOME first (most specific), then ~/, then bare .claude/
+perl -pe 's|\$HOME/\.claude|\$HOME/{{TOOL_DIR}}|g; s|~/\.claude|{{HOME_TOOL_DIR}}|g; s|`\.claude/|`{{TOOL_DIR}}/|g; s|"\.claude/|"{{TOOL_DIR}}/|g' \
   SOURCE > DEST
 ```
 
