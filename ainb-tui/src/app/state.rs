@@ -1925,6 +1925,9 @@ pub struct AppState {
     // Periodic session snapshot tracking
     pub last_snapshot_time: Option<Instant>,
 
+    // Throttled tmux preview updates (avoid spawning subprocesses every 250ms tick)
+    pub last_preview_update: Option<Instant>,
+
     // Background workspace loading state
     pub is_loading_workspaces: bool,
     pub workspace_load_error: Option<String>,
@@ -2464,6 +2467,9 @@ impl Default for AppState {
 
             // Periodic session snapshot tracking
             last_snapshot_time: None,
+
+            // Throttled tmux preview updates
+            last_preview_update: None,
 
             // Background workspace loading state
             is_loading_workspaces: false,
@@ -8318,25 +8324,28 @@ impl AppState {
         use crate::tmux::ClaudeProcessDetector;
         use crate::tmux::capture::{capture_pane, CaptureOptions};
 
-        // Collect session IDs, preview content, and health status to avoid borrowing conflicts
+        // THROTTLE: Only update previews every 5 seconds (not every 250ms tick)
+        // This prevents spawning N tmux capture-pane subprocesses per tick
+        const PREVIEW_INTERVAL_SECS: u64 = 5;
+        let now = std::time::Instant::now();
+        if let Some(last) = self.last_preview_update {
+            if now.duration_since(last).as_secs() < PREVIEW_INTERVAL_SECS {
+                return Ok(());
+            }
+        }
+        self.last_preview_update = Some(now);
+
+        // updates: (session_id, content, claude_running) for the selected session
         let mut updates = Vec::new();
+        // status_updates: (session_id, claude_running) for non-selected sessions (status only)
+        let mut status_updates = Vec::new();
         let detector = ClaudeProcessDetector::new();
 
-        // Debug: Log tmux_sessions HashMap contents
-        debug!("update_tmux_previews: tmux_sessions has {} entries", self.tmux_sessions.len());
-        for (sid, ts) in &self.tmux_sessions {
-            debug!("  tmux_sessions entry: session_id={}, tmux_name={}", sid, ts.name());
-        }
-
-        // Debug: Log workspace sessions
-        let workspace_session_ids: Vec<_> = self.workspaces.iter()
-            .flat_map(|w| &w.sessions)
-            .map(|s| (s.id, s.name.clone(), s.tmux_session_name.clone()))
-            .collect();
-        debug!("update_tmux_previews: workspace sessions: {:?}", workspace_session_ids);
+        // OPTIMIZATION: Only capture the SELECTED session's full preview.
+        // For all other sessions, just do a quick status check (visible area only).
+        let selected_session_id = self.get_selected_session_id();
 
         for (session_id, tmux_session) in &self.tmux_sessions {
-            // Check if session is attached (without mutable borrow)
             let should_update = self
                 .workspaces
                 .iter()
@@ -8345,32 +8354,64 @@ impl AppState {
                 .map(|s| !s.is_attached)
                 .unwrap_or(false);
 
-            debug!("  Checking session_id={}: should_update={}", session_id, should_update);
+            if !should_update {
+                continue;
+            }
 
-            if should_update {
-                // Capture full scrollback history for preview (allows scrolling through history)
-                debug!("    Attempting capture from tmux session: {}", tmux_session.name());
-                match tmux_session.capture_full_history().await {
+            let is_selected = selected_session_id == Some(*session_id);
+
+            if is_selected {
+                // Selected session: capture last 200 lines (not full history)
+                // Full history can be megabytes for long-running sessions
+                let opts = CaptureOptions {
+                    start_line: Some("-200".to_string()),
+                    end_line: Some("-".to_string()),
+                    include_escape_sequences: true,
+                    join_wrapped_lines: true,
+                };
+                match capture_pane(tmux_session.name(), opts).await {
                     Ok(content) => {
-                        // Check if Claude is running by analyzing the content
                         let claude_running = detector.has_claude_status_bar(&content);
-                        debug!("    Captured {} chars, claude_running={}", content.len(), claude_running);
                         updates.push((*session_id, content, claude_running));
                     }
                     Err(e) => {
-                        warn!("Failed to capture tmux pane content for session {} (tmux_name={}): {}",
-                              session_id, tmux_session.name(), e);
+                        debug!("Failed to capture selected session {}: {}", session_id, e);
                     }
+                }
+            } else {
+                // Non-selected sessions: only capture visible area for status detection
+                // Much cheaper — just the last screenful (~50 lines)
+                match tmux_session.capture_pane_content().await {
+                    Ok(content) => {
+                        let claude_running = detector.has_claude_status_bar(&content);
+                        status_updates.push((*session_id, claude_running));
+                    }
+                    Err(_) => {}
                 }
             }
         }
 
-        // Apply updates for regular sessions
+        // Apply status-only updates for non-selected sessions
+        for (session_id, claude_running) in status_updates {
+            if let Some(session) = self.find_session_mut(session_id) {
+                use crate::models::SessionStatus;
+                let new_status = if claude_running {
+                    SessionStatus::Running
+                } else {
+                    SessionStatus::Idle
+                };
+                if session.status != new_status {
+                    session.set_status(new_status);
+                    self.ui_needs_refresh = true;
+                }
+            }
+        }
+
+        // Apply updates for the selected session
         for (session_id, content, claude_running) in updates {
             if let Some(session) = self.find_session_mut(session_id) {
                 session.set_preview(content);
 
-                // Update session status based on Claude health
                 use crate::models::SessionStatus;
                 let new_status = if claude_running {
                     SessionStatus::Running
@@ -8378,47 +8419,39 @@ impl AppState {
                     SessionStatus::Idle
                 };
 
-                // Only update if status changed to avoid unnecessary refreshes
                 if session.status != new_status {
                     session.set_status(new_status);
-                    info!(
-                        "Session {} status updated to: {}",
-                        session_id,
-                        if claude_running { "Running" } else { "Idle" }
-                    );
                 }
 
                 self.ui_needs_refresh = true;
             }
         }
 
-        // Update shell session previews
-        // Collect shell session info to avoid borrowing conflicts
-        let shell_sessions_info: Vec<(usize, String)> = self
-            .workspaces
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, w)| {
-                w.shell_session
-                    .as_ref()
-                    .map(|s| (idx, s.tmux_session_name.clone()))
-            })
-            .collect();
-
-        for (workspace_idx, tmux_name) in shell_sessions_info {
-            // Capture content for shell session
-            match capture_pane(&tmux_name, CaptureOptions::full_history()).await {
-                Ok(content) => {
-                    if let Some(workspace) = self.workspaces.get_mut(workspace_idx) {
-                        if let Some(shell) = workspace.shell_session.as_mut() {
-                            shell.preview_content = Some(content);
-                            self.ui_needs_refresh = true;
+        // Update shell session preview (only the selected workspace's shell)
+        let selected_workspace_idx = self.selected_workspace_index;
+        if let Some(ws_idx) = selected_workspace_idx {
+            if let Some(tmux_name) = self.workspaces.get(ws_idx)
+                .and_then(|w| w.shell_session.as_ref())
+                .map(|s| s.tmux_session_name.clone())
+            {
+                let opts = CaptureOptions {
+                    start_line: Some("-100".to_string()),
+                    end_line: Some("-".to_string()),
+                    include_escape_sequences: true,
+                    join_wrapped_lines: true,
+                };
+                match capture_pane(&tmux_name, opts).await {
+                    Ok(content) => {
+                        if let Some(workspace) = self.workspaces.get_mut(ws_idx) {
+                            if let Some(shell) = workspace.shell_session.as_mut() {
+                                shell.preview_content = Some(content);
+                                self.ui_needs_refresh = true;
+                            }
                         }
                     }
-                }
-                Err(e) => {
-                    // Shell session might not exist yet, that's okay
-                    debug!("Failed to capture shell session content for {}: {}", tmux_name, e);
+                    Err(e) => {
+                        debug!("Failed to capture shell session content for {}: {}", tmux_name, e);
+                    }
                 }
             }
         }
