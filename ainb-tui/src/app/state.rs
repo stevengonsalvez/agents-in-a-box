@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use chrono;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
 /// Text editor with cursor support for boss mode prompts
@@ -8386,7 +8386,9 @@ impl AppState {
                         let claude_running = detector.has_claude_status_bar(&content);
                         status_updates.push((*session_id, claude_running));
                     }
-                    Err(_) => {}
+                    Err(e) => {
+                        trace!("Non-selected session {} capture skipped: {}", session_id, e);
+                    }
                 }
             }
         }

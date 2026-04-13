@@ -1800,10 +1800,10 @@ impl EventHandler {
                 // Mark for async processing to reload workspace data
                 state.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
             }
-            AppEvent::NextSession => state.next_session(),
-            AppEvent::PreviousSession => state.previous_session(),
-            AppEvent::NextWorkspace => state.next_workspace(),
-            AppEvent::PreviousWorkspace => state.previous_workspace(),
+            AppEvent::NextSession => { state.next_session(); state.last_preview_update = None; },
+            AppEvent::PreviousSession => { state.previous_session(); state.last_preview_update = None; },
+            AppEvent::NextWorkspace => { state.next_workspace(); state.last_preview_update = None; },
+            AppEvent::PreviousWorkspace => { state.previous_workspace(); state.last_preview_update = None; },
             AppEvent::GoToTop => {
                 if state.selected_workspace_index.is_some() {
                     state.selected_session_index = Some(0);
