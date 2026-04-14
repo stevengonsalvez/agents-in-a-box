@@ -221,14 +221,15 @@ def add(file_path: str, entities: Optional[str]):
 
     shutil.copy(source, dest)
 
-    # Copy entity sidecar if provided
+    # Load or auto-generate entity sidecar
     entities_formatted = None
     entity_count = 0
     rel_count = 0
 
-    if entities:
-        from entity_store import DocumentEntities, find_sidecar
+    from entity_store import DocumentEntities, find_sidecar, auto_extract_entities, write_sidecar
 
+    if entities:
+        # Explicit sidecar provided — use it as-is
         entities_path = Path(entities)
         doc_entities = DocumentEntities.from_yaml_file(entities_path)
         entities_formatted = doc_entities.to_graphrag_format()
@@ -238,6 +239,21 @@ def add(file_path: str, entities: Optional[str]):
         # Save sidecar alongside document
         sidecar_dest = dest.with_suffix(".entities.yaml")
         shutil.copy(entities_path, sidecar_dest)
+    else:
+        # Auto-generate entities from document content (heuristic, no LLM)
+        try:
+            doc_entities = auto_extract_entities(content, frontmatter)
+            if doc_entities.entity_count > 0:
+                entities_formatted = doc_entities.to_graphrag_format()
+                entity_count = doc_entities.entity_count
+                rel_count = doc_entities.relationship_count
+
+                write_sidecar(dest, doc_entities)
+                console.print(f"[dim]Auto-generated sidecar: {entity_count} entities, {rel_count} relationships[/dim]")
+            else:
+                console.print("[dim]No entities extracted (document too short or generic)[/dim]")
+        except Exception as e:
+            console.print(f"[yellow]Warning: Auto-extraction failed: {e}[/yellow]")
 
     # Insert into graph
     try:
@@ -283,7 +299,25 @@ def reindex(force: bool):
 
     console.print(f"[bold]Reindexing {len(documents)} documents...[/bold]")
 
-    from entity_store import DocumentEntities, find_sidecar
+    from entity_store import DocumentEntities, find_sidecar, auto_extract_entities, write_sidecar
+
+    # Auto-generate missing sidecars before batch indexing
+    generated_count = 0
+    for doc in documents:
+        doc_path = Path(doc["_path"])
+        if not find_sidecar(doc_path):
+            try:
+                fm = {k: v for k, v in doc.items() if not k.startswith("_")}
+                doc_entities = auto_extract_entities(doc["_full_content"], fm)
+                if doc_entities.entity_count > 0:
+                    write_sidecar(doc_path, doc_entities)
+                    generated_count += 1
+            except Exception as e:
+                title = doc.get("title", doc.get("name", doc_path.name))
+                console.print(f"  [yellow]Warning: Auto-extract failed for {title}: {e}[/yellow]")
+
+    if generated_count:
+        console.print(f"[green]Auto-generated {generated_count} missing sidecars[/green]")
 
     # Build batch: list of (text, entities_formatted) tuples.
     # Batching avoids nano-graphrag state issues with sequential inserts
@@ -294,7 +328,7 @@ def reindex(force: bool):
 
     for doc in documents:
         doc_path = Path(doc["_path"])
-        title = doc.get("title", doc_path.name)
+        title = doc.get("title", doc.get("name", doc_path.name))
 
         entities_formatted = None
         sidecar_path = find_sidecar(doc_path)
@@ -326,11 +360,76 @@ def reindex(force: bool):
         console.print(f"[dim]Entities: {entity_total}, Relationships: {rel_total}[/dim]")
 
 
+@cli.command("generate-sidecars")
+@click.option("--force", is_flag=True, help="Regenerate all sidecars, even existing ones")
+def generate_sidecars(force: bool):
+    """Generate entity sidecars for documents missing them.
+
+    Uses heuristic extraction (no LLM required) to create .entities.yaml
+    sidecar files from document content. This ensures every document
+    contributes entities and relationships to the knowledge graph.
+
+    Use --force to regenerate all sidecars, replacing existing ones.
+
+    Examples:
+        learnings generate-sidecars
+        learnings generate-sidecars --force
+    """
+    documents = get_all_documents()
+
+    if not documents:
+        console.print("[yellow]No documents found.[/yellow]")
+        return
+
+    from entity_store import find_sidecar, auto_extract_entities, write_sidecar
+
+    generated = 0
+    skipped = 0
+    failed = 0
+
+    for doc in documents:
+        doc_path = Path(doc["_path"])
+        title = doc.get("title", doc.get("name", doc_path.name))
+
+        existing_sidecar = find_sidecar(doc_path)
+        if existing_sidecar and not force:
+            skipped += 1
+            continue
+
+        try:
+            fm = {k: v for k, v in doc.items() if not k.startswith("_")}
+            doc_entities = auto_extract_entities(doc["_full_content"], fm)
+
+            if doc_entities.entity_count > 0:
+                write_sidecar(doc_path, doc_entities)
+                generated += 1
+                console.print(
+                    f"  [green]{title}[/green] - "
+                    f"{doc_entities.entity_count} entities, "
+                    f"{doc_entities.relationship_count} relationships"
+                )
+            else:
+                skipped += 1
+                console.print(f"  [dim]{title} - no entities extracted[/dim]")
+        except Exception as e:
+            failed += 1
+            console.print(f"  [yellow]{title} - failed: {e}[/yellow]")
+
+    console.print(f"\n[bold]Results:[/bold]")
+    console.print(f"  Generated: {generated}")
+    console.print(f"  Skipped:   {skipped}")
+    if failed:
+        console.print(f"  Failed:    {failed}")
+    console.print(
+        f"\n[dim]Run 'learnings reindex --force' to rebuild the graph with new sidecars.[/dim]"
+    )
+
+
 @cli.command()
 def init():
     """Initialize the global learnings repository.
 
-    Creates the directory structure at ~/.claude/global-learnings/
+    Creates the directory structure at {{HOME_TOOL_DIR}}/global-learnings/
     and initializes a git repository.
     """
     repo = get_repo_path()
