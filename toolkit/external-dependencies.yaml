@@ -306,6 +306,22 @@ claude-plugins:
       - Skills and imports composition
     docs: "https://github.com/anthropics/prose"
 
+  - name: codex
+    marketplace: openai/codex-plugin-cc
+    marketplace_id: openai-codex
+    version: "1.0.3"
+    install: |
+      claude plugin marketplace add openai/codex-plugin-cc
+      claude plugin install codex
+    purpose: "Delegate tasks to OpenAI Codex CLI from Claude Code"
+    has_skills: true
+    features:
+      - Codex CLI companion runtime integration
+      - GPT-5.4 prompt optimization for coding, review, diagnosis, and research
+      - Codex rescue subagent for investigation and follow-up work
+      - Result handling and presentation patterns
+    docs: "https://github.com/openai/codex-plugin-cc"
+
 # =============================================================================
 # NPX SKILLS (agent skills from npm/GitHub)
 # =============================================================================
@@ -688,3 +704,7 @@ marketplaces:
   - id: prose
     repo: anthropics/prose
     description: "OpenProse AI workflow language"
+
+  - id: openai-codex
+    repo: openai/codex-plugin-cc
+    description: "OpenAI Codex CLI integration for Claude Code"
