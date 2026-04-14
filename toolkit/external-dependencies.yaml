@@ -652,25 +652,76 @@ copilot-skills: []
   #   purpose: "Description of what this skill does"
 
 # =============================================================================
-# MCP SERVERS
+# MCP SERVERS (loaded into Claude Code context)
 # =============================================================================
-# Model Context Protocol servers configured in claude_desktop_config.json
+# These are registered via `claude mcp add` and their tool schemas are injected
+# into every turn's system prompt (~cached after first turn). Keep this list
+# minimal — each tool adds ~150 tokens to context.
 mcp-servers:
   - name: context7
-    config_location: "~/.claude/settings.json"
+    config_location: "~/.claude.json (user scope)"
+    install: "claude mcp add --scope user --transport stdio context7 -- npx -y @upstash/context7-mcp"
     purpose: "Documentation lookup for programming libraries"
+    tools: 2
+    token_overhead: "~230 tokens/turn (cached)"
     features:
       - Up-to-date library docs
       - Code example retrieval
       - API reference lookup
 
-  - name: mcporter
-    config_location: "~/Library/Application Support/Claude/claude_desktop_config.json"
-    install: "npx -y mcporter@latest stdio"
-    purpose: "MCP server for port forwarding and local service exposure"
+  - name: claude-peers
+    config_location: "~/.claude.json (user scope)"
+    repo: https://github.com/louislva/claude-peers-mcp
+    clone_path: "~/d/git/claude-peers-mcp"
+    install: |
+      git clone https://github.com/louislva/claude-peers-mcp.git ~/d/git/claude-peers-mcp
+      cd ~/d/git/claude-peers-mcp && bun install
+      claude mcp add --scope user --transport stdio claude-peers -- bun ~/d/git/claude-peers-mcp/server.ts
+    purpose: "Cross-instance Claude Code peer discovery and messaging"
+    tools: 4
+    token_overhead: "~595 tokens/turn (cached)"
+    requires: bun
     features:
-      - Local port forwarding
-      - Service tunneling for Claude Desktop
+      - Peer discovery (machine/directory/repo scope)
+      - Inter-session messaging via channel push
+      - Working summary broadcast
+    note: "For instant message push, launch with: claude --dangerously-load-development-channels server:claude-peers"
+
+# =============================================================================
+# MCPORTER SERVERS (CLI-only, no context overhead)
+# =============================================================================
+# These run via `mcporter call <server>.<tool>` and do NOT inject tool schemas
+# into the LLM context. Use for heavy/infrequent MCP servers to avoid token bloat.
+# Config: ~/.mcporter/mcporter.json
+mcporter-servers:
+  - name: oracle
+    command: "oracle-mcp"
+    purpose: "Second-model code review via GPT-5.x, Gemini, Claude"
+    tools: 2
+    features:
+      - Multi-model code review
+      - Cross-LLM comparison
+
+  - name: mobile
+    command: "npx -y claude-in-mobile@latest"
+    repo: https://github.com/AlexGladkov/claude-in-mobile
+    purpose: "Mobile, desktop, and browser automation (Android ADB, iOS simctl, Desktop, Browser CDP)"
+    tools: 81
+    token_overhead_if_mcp: "~6,500 tokens/turn — too heavy for always-on MCP"
+    features:
+      - Android emulator/device control via ADB
+      - iOS Simulator control via simctl
+      - Desktop app automation
+      - Browser automation via CDP
+      - App store management (Google Play, Huawei, RuStore)
+      - UI tree inspection, screenshots, tap/swipe/text input
+
+  - name: claude-peers
+    command: "bun"
+    args: "/Users/stevengonsalvez/d/git/claude-peers-mcp/server.ts"
+    purpose: "Cross-instance peer discovery and messaging (CLI fallback)"
+    tools: 4
+    note: "Also registered as MCP server for channel push. mcporter entry is for CLI-only usage."
 
 # =============================================================================
 # KNOWN MARKETPLACES
