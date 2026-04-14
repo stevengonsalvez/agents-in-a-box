@@ -1,0 +1,8 @@
+{
+  "name": "reflect",
+  "version": "3.0.0",
+  "description": "Agent self-improvement through conversation analysis. Extracts behavioral corrections, knowledge learnings, and success patterns. Permanently encodes them into agent definitions and a searchable GraphRAG knowledge base. Philosophy: Correct once, never again.",
+  "author": {
+    "name": "stevengonsalvez"
+  }
+}
