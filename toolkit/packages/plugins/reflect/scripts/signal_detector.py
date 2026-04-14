@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
 """
 Signal Detector for Reflect Skill
 
@@ -14,7 +18,15 @@ import re
 import sys
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from typing import Optional
+
+# Ensure sibling imports work when run standalone
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from reflect_config import get_config
 
 
 class Confidence(Enum):
@@ -119,6 +131,12 @@ CATEGORY_PATTERNS = {
         r"(took|spent)\s+\d+\s*(min|hour|day)",  # Time investment indicates non-trivial
     ],
 }
+
+
+def _get_auto_approve_threshold() -> float:
+    """Read the auto-approve threshold from config."""
+    cfg = get_config()
+    return float(cfg.get("policies", {}).get("auto_approve_threshold", 0.8))
 
 
 def detect_confidence(text: str) -> tuple[Confidence, str]:

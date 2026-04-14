@@ -1,37 +1,49 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
 """
-State Manager for Reflect Skill
+State Manager for Reflect Skill — SQLite-backed thin wrapper.
 
-Manages state files for reflection tracking including:
-- reflect-state.yaml: Toggle state, pending reviews
-- reflect-metrics.yaml: Aggregate metrics
-- learnings.yaml: Log of applied learnings
-
-State directory is configurable via REFLECT_STATE_DIR env var.
-Defaults to ~/.reflect/ for portability.
+Preserves the original CLI interface (init / status / on / off / pending)
+and function signatures for backwards compatibility while delegating all
+persistence to ``reflect_db.py``.
 """
 
-import os
 import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-try:
-    import yaml
-except ImportError:
-    print("PyYAML required. Install with: pip install pyyaml")
-    sys.exit(1)
+# Ensure sibling imports work when run standalone
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from reflect_config import get_config, resolve_path
+from reflect_db import (
+    init_db,
+    get_metric,
+    get_metrics,
+    set_metric,
+    increment_metric,
+    add_learning as db_add_learning,
+    get_pending_learnings as db_get_pending,
+    update_learning_status,
+    add_event,
+)
+
+# ---------------------------------------------------------------------------
+# State directory (for display / legacy compatibility)
+# ---------------------------------------------------------------------------
 
 
 def get_state_dir() -> Path:
-    """Return state directory, configurable via env or default."""
-    custom_dir = os.environ.get('REFLECT_STATE_DIR')
-    if custom_dir:
-        return Path(custom_dir).expanduser()
-
-    # Portable default
-    return Path.home() / '.reflect'
+    """Return the state directory (now derived from config db_path)."""
+    cfg = get_config()
+    db_raw = cfg.get("storage", {}).get("db_path", "~/.reflect/reflect.db")
+    return resolve_path(db_raw).parent
 
 
 def ensure_state_dir() -> Path:
@@ -41,155 +53,166 @@ def ensure_state_dir() -> Path:
     return state_dir
 
 
+# Legacy path helpers (no longer produce YAML — kept for anything that
+# checks their existence)
+
+
 def get_state_file() -> Path:
-    """Return path to reflect-state.yaml."""
-    return get_state_dir() / 'reflect-state.yaml'
+    return get_state_dir() / "reflect-state.yaml"
 
 
 def get_metrics_file() -> Path:
-    """Return path to reflect-metrics.yaml."""
-    return get_state_dir() / 'reflect-metrics.yaml'
+    return get_state_dir() / "reflect-metrics.yaml"
 
 
 def get_learnings_file() -> Path:
-    """Return path to learnings.yaml."""
-    return get_state_dir() / 'learnings.yaml'
+    return get_state_dir() / "learnings.yaml"
 
 
-def load_yaml(path: Path) -> dict:
-    """Load YAML file, return empty dict if not found."""
-    if not path.exists():
-        return {}
-    with open(path, 'r') as f:
-        return yaml.safe_load(f) or {}
-
-
-def save_yaml(path: Path, data: dict) -> None:
-    """Save data to YAML file."""
-    ensure_state_dir()
-    with open(path, 'w') as f:
-        yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+# ---------------------------------------------------------------------------
+# State operations — now backed by SQLite metrics table
+# ---------------------------------------------------------------------------
 
 
 def init_state() -> dict:
-    """Initialize or load state from state directory."""
-    state_file = get_state_file()
+    """Initialize or load state from the database."""
+    conn = init_db()
 
-    if state_file.exists():
-        state = load_yaml(state_file)
-        print(f"Loaded existing state from {state_file}")
-        return state
+    # Seed defaults if not yet present
+    if get_metric("auto_reflect", conn=conn) is None:
+        set_metric("auto_reflect", False, conn=conn)
+    if get_metric("last_reflection", conn=conn) is None:
+        set_metric("last_reflection", "", conn=conn)
 
-    # Create default state
-    default_state = {
-        'auto_reflect': False,
-        'last_reflection': None,
-        'pending_low_confidence': []
+    state = {
+        "auto_reflect": get_metric("auto_reflect", False, conn=conn),
+        "last_reflection": get_metric("last_reflection", None, conn=conn) or None,
+        "pending_low_confidence": [
+            _learning_to_pending_dict(l) for l in db_get_pending(conn=conn)
+        ],
     }
-    save_yaml(state_file, default_state)
-    print(f"Initialized new state at {state_file}")
-    return default_state
+
+    db_path = resolve_path(
+        get_config().get("storage", {}).get("db_path", "~/.reflect/reflect.db")
+    )
+    print(f"State backed by {db_path}")
+    return state
 
 
 def get_state() -> dict:
     """Get current state without modifying."""
-    return load_yaml(get_state_file())
+    conn = init_db()
+    return {
+        "auto_reflect": get_metric("auto_reflect", False, conn=conn),
+        "last_reflection": get_metric("last_reflection", None, conn=conn) or None,
+        "pending_low_confidence": [
+            _learning_to_pending_dict(l) for l in db_get_pending(conn=conn)
+        ],
+    }
 
 
 def set_auto_reflect(enabled: bool) -> None:
     """Enable or disable auto-reflection."""
-    state = get_state()
-    state['auto_reflect'] = enabled
-    save_yaml(get_state_file(), state)
+    conn = init_db()
+    set_metric("auto_reflect", enabled, conn=conn)
     status = "enabled" if enabled else "disabled"
     print(f"Auto-reflection {status}")
 
 
 def update_last_reflection() -> None:
     """Update last_reflection timestamp."""
-    state = get_state()
-    state['last_reflection'] = datetime.now().isoformat()
-    save_yaml(get_state_file(), state)
+    conn = init_db()
+    set_metric("last_reflection", datetime.now().isoformat(), conn=conn)
 
 
 def add_pending_low_confidence(signal: dict) -> None:
-    """Add signal to pending review queue."""
-    state = get_state()
-    pending = state.get('pending_low_confidence', [])
-    pending.append({
-        'signal': signal.get('signal', ''),
-        'detected': datetime.now().isoformat(),
-        'awaiting_validation': True,
-        'source_quote': signal.get('source_quote', ''),
-        'category': signal.get('category', 'Unknown')
-    })
-    state['pending_low_confidence'] = pending
-    save_yaml(get_state_file(), state)
+    """Add signal to pending review queue (stored as a pending learning)."""
+    conn = init_db()
+    db_add_learning(
+        title=signal.get("signal", ""),
+        category=signal.get("category", "Unknown"),
+        confidence="LOW",
+        source_tool=signal.get("source_tool", ""),
+        source_path=signal.get("source_path", ""),
+        conn=conn,
+    )
 
 
-def get_pending_reviews() -> list:
+def get_pending_reviews() -> list[dict]:
     """Get all pending low-confidence learnings."""
-    state = get_state()
-    return state.get('pending_low_confidence', [])
+    conn = init_db()
+    return [_learning_to_pending_dict(l) for l in db_get_pending(conn=conn)]
 
 
 def clear_pending_review(index: int) -> bool:
-    """Remove a pending review by index."""
-    state = get_state()
-    pending = state.get('pending_low_confidence', [])
+    """Remove a pending review by index (reject it)."""
+    conn = init_db()
+    pending = db_get_pending(conn=conn)
     if 0 <= index < len(pending):
-        pending.pop(index)
-        state['pending_low_confidence'] = pending
-        save_yaml(get_state_file(), state)
+        update_learning_status(pending[index]["id"], "rejected", conn=conn)
         return True
     return False
 
 
 def add_learning(learning: dict) -> None:
     """Add a learning to the learnings log."""
-    learnings_file = get_learnings_file()
-    learnings = load_yaml(learnings_file)
-
-    if 'entries' not in learnings:
-        learnings['entries'] = []
-
-    learnings['entries'].append({
-        'timestamp': datetime.now().isoformat(),
-        'signal': learning.get('signal', ''),
-        'confidence': learning.get('confidence', 'unknown'),
-        'source': learning.get('source', ''),
-        'target': learning.get('target', ''),
-        'status': learning.get('status', 'applied'),
-        'session_id': learning.get('session_id', '')
-    })
-
-    save_yaml(learnings_file, learnings)
+    conn = init_db()
+    db_add_learning(
+        title=learning.get("signal", ""),
+        category=learning.get("category", "Unknown"),
+        confidence=learning.get("confidence", "LOW"),
+        source_tool=learning.get("source", ""),
+        source_path=learning.get("target", ""),
+        conn=conn,
+    )
 
 
 def show_status() -> None:
     """Print current state and metrics."""
+    conn = init_db()
     state = get_state()
-    metrics = load_yaml(get_metrics_file())
+    m = get_metrics(conn=conn)
 
     print("\n=== Reflect Status ===\n")
     print(f"State Directory: {get_state_dir()}")
     print(f"Auto-Reflect: {'Enabled' if state.get('auto_reflect') else 'Disabled'}")
-    print(f"Last Reflection: {state.get('last_reflection', 'Never')}")
+    print(f"Last Reflection: {state.get('last_reflection', 'Never') or 'Never'}")
 
-    pending = state.get('pending_low_confidence', [])
+    pending = state.get("pending_low_confidence", [])
     print(f"Pending Reviews: {len(pending)}")
 
-    if metrics:
+    if m:
         print(f"\n=== Metrics ===\n")
-        print(f"Total Sessions: {metrics.get('total_sessions_analyzed', 0)}")
-        print(f"Signals Detected: {metrics.get('total_signals_detected', 0)}")
-        print(f"Changes Proposed: {metrics.get('total_changes_proposed', 0)}")
-        print(f"Changes Accepted: {metrics.get('total_changes_accepted', 0)}")
-        print(f"Acceptance Rate: {metrics.get('acceptance_rate', 0)}%")
+        print(f"Total Sessions: {m.get('total_sessions_analyzed', 0)}")
+        print(f"Signals Detected: {m.get('total_signals_detected', 0)}")
+        print(f"Changes Proposed: {m.get('total_changes_proposed', 0)}")
+        print(f"Changes Accepted: {m.get('total_changes_accepted', 0)}")
+        print(f"Acceptance Rate: {m.get('acceptance_rate', 0)}%")
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+
+def _learning_to_pending_dict(learning: dict) -> dict:
+    """Convert a DB learning row to the legacy pending-review dict shape."""
+    return {
+        "signal": learning.get("title", ""),
+        "detected": learning.get("created_at", ""),
+        "awaiting_validation": True,
+        "source_quote": "",
+        "category": learning.get("category", "Unknown"),
+        "id": learning.get("id", ""),
+    }
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
 
 
 def main():
-    """CLI entry point."""
     import argparse
 
     parser = argparse.ArgumentParser(description='Reflect State Manager')

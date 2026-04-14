@@ -1,0 +1,33 @@
+[storage]
+db_path = "~/.reflect/reflect.db"
+artifacts_dir = "docs/solutions"
+
+[discovery]
+enabled_providers = ["claude", "codex", "gemini"]
+staleness_days = 30
+
+[providers.claude]
+projects_dir = "~/.claude/projects"
+memory_pattern = "*/memory/MEMORY.md"
+
+[providers.codex]
+home_dir = "~/.codex"
+memories_dir = "~/.codex/memories"
+agents_md = "~/.codex/AGENTS.md"
+
+[providers.gemini]
+home_dir = "~/.gemini"
+global_md = "~/.gemini/GEMINI.md"
+
+[indexers.graphrag]
+cli_path = "~/.learnings/cli/learnings"
+auto_sidecar = true
+
+[policies]
+auto_approve_threshold = 0.8
+retention_days = 90
+max_memory_lines = 200
+
+[telemetry]
+enabled = true
+log_level = "info"

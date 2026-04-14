@@ -10,15 +10,15 @@ knowledge base.
 
 1. **Discover project identity**:
    ```bash
-   bash {{HOME_TOOL_DIR}}/skills/reflect/scripts/memory_discovery.sh project-id
+   python3 {{HOME_TOOL_DIR}}/skills/reflect/scripts/memory_discovery.py project-id
    # -> e.g. "shotclubhouse"
    ```
 
 2. **Find orphaned memory dirs**:
    ```bash
-   bash {{HOME_TOOL_DIR}}/skills/reflect/scripts/memory_discovery.sh discover
-   # Lists all $HOME/.claude/projects/*<repo-name>*/memory/MEMORY.md files
-   # (excludes current session's memory dir)
+   python3 {{HOME_TOOL_DIR}}/skills/reflect/scripts/memory_discovery.py discover
+   # Discovers memories across all enabled providers (Claude, Codex, Gemini)
+   # Excludes current session's memory dir
    ```
 
 3. **Read all MEMORY.md files** from matched directories
@@ -50,7 +50,7 @@ knowledge base.
 8. **Propose orphaned dir cleanup**: Show list and ask user to confirm deletion
    ```bash
    # After approval:
-   bash {{HOME_TOOL_DIR}}/skills/reflect/scripts/memory_discovery.sh cleanup /tmp/reflect-cleanup-dirs.txt
+   python3 {{HOME_TOOL_DIR}}/skills/reflect/scripts/memory_discovery.py cleanup /tmp/reflect-cleanup-dirs.txt
    ```
 
 9. **Report**: Show summary of what was consolidated, deleted, and routed to skills
@@ -60,7 +60,7 @@ knowledge base.
 Check orphaned memory status without making changes:
 
 ```bash
-bash {{HOME_TOOL_DIR}}/skills/reflect/scripts/memory_discovery.sh stats
+python3 {{HOME_TOOL_DIR}}/skills/reflect/scripts/memory_discovery.py stats
 # -> Repo: shotclubhouse
 # -> Orphaned memory dirs: 7
 # -> Total lines across all: 283

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
 """
 Output Generator for Reflect Skill
 
@@ -7,6 +11,8 @@ Generates reflection output files and manages indexes:
 - Entity sidecars: docs/solutions/{category}/{name}.entities.yaml
 - Episode notes: ~/.reflect/episodes/ep-{date}-{hash}.md
 - Project skills: .claude/skills/{name}/SKILL.md
+
+All output now includes provenance metadata for traceability.
 
 Note: v1/v2 .claude/reflections/ paths are deprecated. All knowledge output
 now routes through docs/solutions/ (project-scoped) and the learnings CLI
@@ -25,10 +31,43 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+# Ensure sibling imports work when run standalone
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from reflect_config import get_config
+
 try:
     import yaml
 except ImportError:
     yaml = None
+
+
+# ---------------------------------------------------------------------------
+# Provenance
+# ---------------------------------------------------------------------------
+
+
+def _build_provenance(
+    source_tool: str = "",
+    source_path: str = "",
+    session_id: str = "",
+    content_hash: str = "",
+) -> dict:
+    """Build a provenance metadata block for output traceability."""
+    return {
+        "source_tool": source_tool or "reflect",
+        "source_path": source_path,
+        "session_id": session_id or os.environ.get("REFLECT_SESSION_ID", ""),
+        "content_hash": content_hash,
+        "detected_at": datetime.now().isoformat(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Path helpers
+# ---------------------------------------------------------------------------
 
 
 def get_project_dir() -> Path:
@@ -51,7 +90,9 @@ def get_project_name() -> str:
 
 def get_solutions_dir() -> Path:
     """Get the project's docs/solutions directory."""
-    return get_project_dir() / 'docs' / 'solutions'
+    cfg = get_config()
+    artifacts = cfg.get("storage", {}).get("artifacts_dir", "docs/solutions")
+    return get_project_dir() / artifacts
 
 
 def get_project_skills_dir() -> Path:
@@ -70,6 +111,11 @@ def ensure_directories(*dirs: Path):
         d.mkdir(parents=True, exist_ok=True)
 
 
+# ---------------------------------------------------------------------------
+# Knowledge notes
+# ---------------------------------------------------------------------------
+
+
 def create_knowledge_note(
     title: str,
     category: str,
@@ -83,6 +129,10 @@ def create_knowledge_note(
     confidence: str = "high",
     language: str = "",
     framework: str = "",
+    source_tool: str = "",
+    source_path: str = "",
+    session_id: str = "",
+    content_hash: str = "",
 ) -> tuple[Path, str]:
     """
     Create a knowledge note in docs/solutions/{category}/.
@@ -102,7 +152,7 @@ def create_knowledge_note(
     filepath = category_dir / f"{slug}.md"
 
     # Build frontmatter
-    frontmatter = {
+    frontmatter: dict = {
         'title': title,
         'category': category,
         'tags': tags,
@@ -117,6 +167,14 @@ def create_knowledge_note(
     if framework:
         frontmatter['framework'] = framework
 
+    # Provenance block
+    frontmatter['provenance'] = _build_provenance(
+        source_tool=source_tool,
+        source_path=source_path,
+        session_id=session_id,
+        content_hash=content_hash,
+    )
+
     if yaml:
         fm_str = yaml.dump(frontmatter, default_flow_style=False, sort_keys=False)
     else:
@@ -125,6 +183,10 @@ def create_knowledge_note(
         for k, v in frontmatter.items():
             if isinstance(v, list):
                 fm_lines.append(f"{k}: [{', '.join(str(i) for i in v)}]")
+            elif isinstance(v, dict):
+                fm_lines.append(f"{k}:")
+                for dk, dv in v.items():
+                    fm_lines.append(f'  {dk}: "{dv}"' if isinstance(dv, str) else f"  {dk}: {dv}")
             else:
                 fm_lines.append(f'{k}: "{v}"' if isinstance(v, str) else f"{k}: {v}")
         fm_str = '\n'.join(fm_lines)
@@ -137,10 +199,18 @@ def create_knowledge_note(
     return filepath, slug
 
 
+# ---------------------------------------------------------------------------
+# Episode notes
+# ---------------------------------------------------------------------------
+
+
 def create_episode_note(
     signals: list,
     learnings: list,
     session_narrative: str = "",
+    source_tool: str = "",
+    source_path: str = "",
+    session_id: str = "",
 ) -> Path:
     """Create an episode note in ~/.reflect/episodes/."""
     episodes_dir = get_episodes_dir()
@@ -153,6 +223,15 @@ def create_episode_note(
 
     learning_ids = [l.get('id', 'unknown') for l in learnings]
 
+    provenance = _build_provenance(
+        source_tool=source_tool,
+        source_path=source_path,
+        session_id=session_id,
+    )
+
+    # Format provenance as YAML-ish block
+    prov_lines = "\n".join(f"  {k}: {v}" for k, v in provenance.items())
+
     content = f"""---
 type: episode
 id: {episode_id}
@@ -160,6 +239,8 @@ created: {datetime.now().isoformat()}
 project: {get_project_name()}
 tags: []
 extracted_learnings: {learning_ids}
+provenance:
+{prov_lines}
 ---
 
 ## Session Context
@@ -169,7 +250,7 @@ extracted_learnings: {learning_ids}
 ## Signals Detected
 
 """
-    for i, signal in enumerate(signals, 1):
+    for signal in signals:
         content += f"- [{signal.get('confidence', 'LOW')}] {signal.get('signal', '')}\n"
 
     content += "\n## Learnings Extracted\n\n"
@@ -178,6 +259,11 @@ extracted_learnings: {learning_ids}
 
     filepath.write_text(content)
     return filepath
+
+
+# ---------------------------------------------------------------------------
+# Skills
+# ---------------------------------------------------------------------------
 
 
 def create_skill_file(skill_name: str, skill_content: str) -> Path:
@@ -189,6 +275,11 @@ def create_skill_file(skill_name: str, skill_content: str) -> Path:
     skill_path.write_text(skill_content)
 
     return skill_path
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
 
 def main():
@@ -240,11 +331,17 @@ def main():
             print(f"Error parsing JSON: {e}", file=sys.stderr)
             sys.exit(1)
 
+        # Extract provenance fields from input data
+        prov = data.get("provenance", {})
+
         # Create episode note
         episode_path = create_episode_note(
             signals=data.get('signals', []),
             learnings=data.get('learnings', []),
             session_narrative=data.get('session_narrative', ''),
+            source_tool=prov.get("source_tool", ""),
+            source_path=prov.get("source_path", ""),
+            session_id=prov.get("session_id", ""),
         )
 
         result = {

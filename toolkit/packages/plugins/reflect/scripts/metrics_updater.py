@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
 """
-Metrics Updater for Reflect Skill
+Metrics Updater for Reflect Skill — SQLite edition.
 
 Tracks and aggregates reflection metrics including:
 - Sessions analyzed
@@ -8,78 +12,74 @@ Tracks and aggregates reflection metrics including:
 - Changes proposed vs accepted
 - Most frequently updated agents
 
+Backed by the ``reflect_db`` SQLite store.  The CLI interface is unchanged
+from the YAML-based version for backwards compatibility.
+
 Usage:
     python metrics_updater.py --accepted 3 --rejected 1 --confidence high:2,medium:1
     python metrics_updater.py --show
+    python metrics_updater.py --reset
+    python metrics_updater.py --action record --accepted 2
+    python metrics_updater.py --action get --key total_sessions_analyzed
+    python metrics_updater.py --action summary
 """
 
-import os
+import json
 import sys
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-try:
-    import yaml
-except ImportError:
-    print("PyYAML required. Install with: pip install pyyaml")
-    sys.exit(1)
+# Ensure sibling imports work when run standalone
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from reflect_db import (
+    init_db,
+    get_metric,
+    get_metrics,
+    increment_metric,
+    set_metric,
+)
+
+# ---------------------------------------------------------------------------
+# Metric keys (mirror the old YAML structure)
+# ---------------------------------------------------------------------------
+
+_METRIC_KEYS = [
+    "last_reflection",
+    "total_sessions_analyzed",
+    "total_signals_detected",
+    "total_changes_proposed",
+    "total_changes_accepted",
+    "acceptance_rate",
+    "confidence_high",
+    "confidence_medium",
+    "confidence_low",
+    "skills_created",
+    "knowledge_notes_created",
+    "sidecars_generated",
+    "estimated_time_saved",
+    "most_updated_agents",
+]
 
 
-def get_state_dir() -> Path:
-    """Return state directory, configurable via env or default."""
-    custom_dir = os.environ.get('REFLECT_STATE_DIR')
-    if custom_dir:
-        return Path(custom_dir).expanduser()
-
-    return Path.home() / '.reflect'
-
-
-def get_metrics_file() -> Path:
-    """Return path to reflect-metrics.yaml."""
-    return get_state_dir() / 'reflect-metrics.yaml'
-
-
-def load_metrics() -> dict:
-    """Load metrics from file or return defaults."""
-    metrics_file = get_metrics_file()
-
-    if not metrics_file.exists():
-        return get_default_metrics()
-
-    with open(metrics_file, 'r') as f:
-        return yaml.safe_load(f) or get_default_metrics()
+def _ensure_defaults() -> None:
+    """Seed default metric rows if the database is fresh."""
+    conn = init_db()
+    for key in _METRIC_KEYS:
+        if get_metric(key, conn=conn) is None:
+            default = {} if key == "most_updated_agents" else 0
+            if key == "last_reflection":
+                default = ""
+            elif key == "estimated_time_saved":
+                default = "~0 hours"
+            set_metric(key, default, conn=conn)
 
 
-def save_metrics(metrics: dict) -> None:
-    """Save metrics to file."""
-    metrics_file = get_metrics_file()
-    metrics_file.parent.mkdir(parents=True, exist_ok=True)
-
-    with open(metrics_file, 'w') as f:
-        yaml.dump(metrics, f, default_flow_style=False, sort_keys=False)
-
-
-def get_default_metrics() -> dict:
-    """Return default metrics structure."""
-    return {
-        'last_reflection': None,
-        'total_sessions_analyzed': 0,
-        'total_signals_detected': 0,
-        'total_changes_proposed': 0,
-        'total_changes_accepted': 0,
-        'acceptance_rate': 0,
-        'most_updated_agents': {},
-        'confidence_breakdown': {
-            'high': 0,
-            'medium': 0,
-            'low': 0
-        },
-        'skills_created': 0,
-        'knowledge_notes_created': 0,
-        'sidecars_generated': 0,
-        'estimated_time_saved': '~0 hours'
-    }
+# ---------------------------------------------------------------------------
+# Core update logic
+# ---------------------------------------------------------------------------
 
 
 def update_metrics(
@@ -91,162 +91,218 @@ def update_metrics(
     agents: Optional[list[str]] = None,
     skills: int = 0,
     knowledge_notes: int = 0,
-    sidecars: int = 0
+    sidecars: int = 0,
 ) -> dict:
     """
     Update metrics with new reflection results.
 
-    Args:
-        accepted: Number of accepted changes
-        rejected: Number of rejected changes
-        high: Number of high-confidence signals
-        medium: Number of medium-confidence signals
-        low: Number of low-confidence signals
-        agents: List of agent names that were updated
-        skills: Number of new skills created
-        knowledge_notes: Number of knowledge notes created
-        sidecars: Number of entity sidecars generated
-
-    Returns:
-        Updated metrics dict
+    Returns a dict of all current metric values.
     """
-    metrics = load_metrics()
+    from datetime import datetime
 
-    # Update timestamp
-    metrics['last_reflection'] = datetime.now().isoformat()
+    conn = init_db()
+    _ensure_defaults()
 
-    # Increment session count
-    metrics['total_sessions_analyzed'] = metrics.get('total_sessions_analyzed', 0) + 1
+    # Timestamp
+    set_metric("last_reflection", datetime.now().isoformat(), conn=conn)
 
-    # Update signal counts
+    # Session
+    increment_metric("total_sessions_analyzed", 1, conn=conn)
+
+    # Signals
     total_signals = high + medium + low
-    metrics['total_signals_detected'] = metrics.get('total_signals_detected', 0) + total_signals
+    if total_signals > 0:
+        increment_metric("total_signals_detected", total_signals, conn=conn)
 
-    # Update change counts
+    # Confidence breakdown
+    if high:
+        increment_metric("confidence_high", high, conn=conn)
+    if medium:
+        increment_metric("confidence_medium", medium, conn=conn)
+    if low:
+        increment_metric("confidence_low", low, conn=conn)
+
+    # Changes
     proposed = accepted + rejected
-    metrics['total_changes_proposed'] = metrics.get('total_changes_proposed', 0) + proposed
-    metrics['total_changes_accepted'] = metrics.get('total_changes_accepted', 0) + accepted
+    if proposed:
+        increment_metric("total_changes_proposed", proposed, conn=conn)
+    if accepted:
+        increment_metric("total_changes_accepted", accepted, conn=conn)
 
-    # Calculate acceptance rate
-    total_proposed = metrics['total_changes_proposed']
-    total_accepted = metrics['total_changes_accepted']
-    if total_proposed > 0:
-        metrics['acceptance_rate'] = round((total_accepted / total_proposed) * 100)
+    # Acceptance rate
+    total_proposed = get_metric("total_changes_proposed", 0, conn=conn)
+    total_accepted = get_metric("total_changes_accepted", 0, conn=conn)
+    rate = round((total_accepted / total_proposed) * 100) if total_proposed else 0
+    set_metric("acceptance_rate", rate, conn=conn)
 
-    # Update confidence breakdown
-    breakdown = metrics.get('confidence_breakdown', {'high': 0, 'medium': 0, 'low': 0})
-    breakdown['high'] = breakdown.get('high', 0) + high
-    breakdown['medium'] = breakdown.get('medium', 0) + medium
-    breakdown['low'] = breakdown.get('low', 0) + low
-    metrics['confidence_breakdown'] = breakdown
-
-    # Update agent counts
+    # Agent update counts
     if agents:
-        agent_counts = metrics.get('most_updated_agents', {})
+        agent_counts = get_metric("most_updated_agents", {}, conn=conn)
+        if not isinstance(agent_counts, dict):
+            agent_counts = {}
         for agent in agents:
             agent_counts[agent] = agent_counts.get(agent, 0) + 1
-        # Sort by count and keep top 10
+        # Keep top 10
         sorted_agents = dict(sorted(agent_counts.items(), key=lambda x: -x[1])[:10])
-        metrics['most_updated_agents'] = sorted_agents
+        set_metric("most_updated_agents", sorted_agents, conn=conn)
 
-    # Update skills count
-    metrics['skills_created'] = metrics.get('skills_created', 0) + skills
+    # Artefact counts
+    if skills:
+        increment_metric("skills_created", skills, conn=conn)
+    if knowledge_notes:
+        increment_metric("knowledge_notes_created", knowledge_notes, conn=conn)
+    if sidecars:
+        increment_metric("sidecars_generated", sidecars, conn=conn)
 
-    # Update knowledge notes count
-    metrics['knowledge_notes_created'] = metrics.get('knowledge_notes_created', 0) + knowledge_notes
+    # Estimated time saved (5 min per accepted learning)
+    all_accepted = get_metric("total_changes_accepted", 0, conn=conn)
+    hours_saved = round(int(all_accepted) * 5 / 60, 1)
+    set_metric("estimated_time_saved", f"~{hours_saved} hours", conn=conn)
 
-    # Update sidecars count
-    metrics['sidecars_generated'] = metrics.get('sidecars_generated', 0) + sidecars
+    return get_metrics(conn=conn)
 
-    # Estimate time saved (rough heuristic: 5 min per accepted learning)
-    total_accepted = metrics['total_changes_accepted']
-    hours_saved = round(total_accepted * 5 / 60, 1)
-    metrics['estimated_time_saved'] = f"~{hours_saved} hours"
 
-    save_metrics(metrics)
-    return metrics
+# ---------------------------------------------------------------------------
+# Display
+# ---------------------------------------------------------------------------
 
 
 def show_metrics() -> None:
     """Display current metrics."""
-    metrics = load_metrics()
+    conn = init_db()
+    _ensure_defaults()
+    m = get_metrics(conn=conn)
 
     print("\n=== Reflect Metrics ===\n")
-    print(f"Last Reflection: {metrics.get('last_reflection', 'Never')}")
-    print(f"Sessions Analyzed: {metrics.get('total_sessions_analyzed', 0)}")
-    print(f"Total Signals: {metrics.get('total_signals_detected', 0)}")
-    print(f"Changes Proposed: {metrics.get('total_changes_proposed', 0)}")
-    print(f"Changes Accepted: {metrics.get('total_changes_accepted', 0)}")
-    print(f"Acceptance Rate: {metrics.get('acceptance_rate', 0)}%")
-    print(f"Skills Created: {metrics.get('skills_created', 0)}")
-    print(f"Knowledge Notes: {metrics.get('knowledge_notes_created', 0)}")
-    print(f"Sidecars Generated: {metrics.get('sidecars_generated', 0)}")
-    print(f"Estimated Time Saved: {metrics.get('estimated_time_saved', '~0 hours')}")
+    print(f"Last Reflection: {m.get('last_reflection', 'Never') or 'Never'}")
+    print(f"Sessions Analyzed: {m.get('total_sessions_analyzed', 0)}")
+    print(f"Total Signals: {m.get('total_signals_detected', 0)}")
+    print(f"Changes Proposed: {m.get('total_changes_proposed', 0)}")
+    print(f"Changes Accepted: {m.get('total_changes_accepted', 0)}")
+    print(f"Acceptance Rate: {m.get('acceptance_rate', 0)}%")
+    print(f"Skills Created: {m.get('skills_created', 0)}")
+    print(f"Knowledge Notes: {m.get('knowledge_notes_created', 0)}")
+    print(f"Sidecars Generated: {m.get('sidecars_generated', 0)}")
+    print(f"Estimated Time Saved: {m.get('estimated_time_saved', '~0 hours')}")
 
-    breakdown = metrics.get('confidence_breakdown', {})
     print(f"\nConfidence Breakdown:")
-    print(f"  High: {breakdown.get('high', 0)}")
-    print(f"  Medium: {breakdown.get('medium', 0)}")
-    print(f"  Low: {breakdown.get('low', 0)}")
+    print(f"  High: {m.get('confidence_high', 0)}")
+    print(f"  Medium: {m.get('confidence_medium', 0)}")
+    print(f"  Low: {m.get('confidence_low', 0)}")
 
-    agents = metrics.get('most_updated_agents', {})
-    if agents:
+    agents = m.get("most_updated_agents", {})
+    if isinstance(agents, dict) and agents:
         print(f"\nMost Updated Agents:")
         for agent, count in list(agents.items())[:5]:
             print(f"  {agent}: {count}")
 
 
+def reset_metrics() -> None:
+    """Reset all metrics to defaults."""
+    conn = init_db()
+    for key in _METRIC_KEYS:
+        default = {} if key == "most_updated_agents" else 0
+        if key == "last_reflection":
+            default = ""
+        elif key == "estimated_time_saved":
+            default = "~0 hours"
+        set_metric(key, default, conn=conn)
+    print("Metrics reset to defaults.")
+
+
+# ---------------------------------------------------------------------------
+# Confidence string parser
+# ---------------------------------------------------------------------------
+
+
 def parse_confidence(conf_str: str) -> tuple[int, int, int]:
     """Parse confidence string like 'high:2,medium:1,low:3'."""
     high = medium = low = 0
-
-    for part in conf_str.split(','):
-        if ':' in part:
-            level, count = part.split(':')
-            count = int(count)
-            if level.lower() == 'high':
-                high = count
-            elif level.lower() == 'medium':
-                medium = count
-            elif level.lower() == 'low':
-                low = count
-
+    for part in conf_str.split(","):
+        if ":" in part:
+            level, count = part.split(":")
+            count_int = int(count)
+            level_lower = level.strip().lower()
+            if level_lower == "high":
+                high = count_int
+            elif level_lower == "medium":
+                medium = count_int
+            elif level_lower == "low":
+                low = count_int
     return high, medium, low
 
 
-def main():
-    """CLI entry point."""
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def main() -> None:
     import argparse
 
-    parser = argparse.ArgumentParser(description='Update reflection metrics')
-    parser.add_argument('--accepted', type=int, default=0, help='Number of accepted changes')
-    parser.add_argument('--rejected', type=int, default=0, help='Number of rejected changes')
-    parser.add_argument('--confidence', type=str, help='Confidence breakdown (e.g., high:2,medium:1)')
-    parser.add_argument('--agents', type=str, help='Comma-separated list of updated agents')
-    parser.add_argument('--skills', type=int, default=0, help='Number of skills created')
-    parser.add_argument('--knowledge-notes', type=int, default=0, help='Number of knowledge notes created')
-    parser.add_argument('--sidecars', type=int, default=0, help='Number of sidecars generated')
-    parser.add_argument('--show', action='store_true', help='Show current metrics')
-    parser.add_argument('--reset', action='store_true', help='Reset all metrics')
+    parser = argparse.ArgumentParser(description="Update reflection metrics")
+
+    # Legacy positional --action interface
+    parser.add_argument("--action", type=str, choices=["record", "get", "summary"],
+                        help="Action mode (record / get / summary)")
+    parser.add_argument("--key", type=str, help="Metric key for --action get")
+
+    # Direct flags
+    parser.add_argument("--accepted", type=int, default=0,
+                        help="Number of accepted changes")
+    parser.add_argument("--rejected", type=int, default=0,
+                        help="Number of rejected changes")
+    parser.add_argument("--confidence", type=str,
+                        help="Confidence breakdown (e.g., high:2,medium:1)")
+    parser.add_argument("--agents", type=str,
+                        help="Comma-separated list of updated agents")
+    parser.add_argument("--skills", type=int, default=0,
+                        help="Number of skills created")
+    parser.add_argument("--knowledge-notes", type=int, default=0,
+                        help="Number of knowledge notes created")
+    parser.add_argument("--sidecars", type=int, default=0,
+                        help="Number of sidecars generated")
+    parser.add_argument("--show", action="store_true", help="Show current metrics")
+    parser.add_argument("--reset", action="store_true", help="Reset all metrics")
+    parser.add_argument("--json", action="store_true", help="Output as JSON")
 
     args = parser.parse_args()
 
-    if args.show:
-        show_metrics()
+    # Handle --action interface for backwards compat
+    if args.action == "summary" or args.show:
+        if args.json:
+            conn = init_db()
+            _ensure_defaults()
+            print(json.dumps(get_metrics(conn=conn), indent=2, default=str))
+        else:
+            show_metrics()
+        return
+
+    if args.action == "get":
+        if not args.key:
+            print("ERROR: --key required with --action get", file=sys.stderr)
+            sys.exit(1)
+        conn = init_db()
+        _ensure_defaults()
+        val = get_metric(args.key, conn=conn)
+        if args.json:
+            print(json.dumps({"key": args.key, "value": val}, default=str))
+        else:
+            print(f"{args.key}: {val}")
         return
 
     if args.reset:
-        save_metrics(get_default_metrics())
-        print("Metrics reset to defaults.")
+        reset_metrics()
         return
 
+    # Default: record mode
     high = medium = low = 0
     if args.confidence:
         high, medium, low = parse_confidence(args.confidence)
 
     agents = None
     if args.agents:
-        agents = [a.strip() for a in args.agents.split(',')]
+        agents = [a.strip() for a in args.agents.split(",")]
 
     metrics = update_metrics(
         accepted=args.accepted,
@@ -257,11 +313,14 @@ def main():
         agents=agents,
         skills=args.skills,
         knowledge_notes=args.knowledge_notes,
-        sidecars=args.sidecars
+        sidecars=args.sidecars,
     )
 
-    print(f"Metrics updated. Acceptance rate: {metrics['acceptance_rate']}%")
+    if args.json:
+        print(json.dumps(metrics, indent=2, default=str))
+    else:
+        print(f"Metrics updated. Acceptance rate: {metrics.get('acceptance_rate', 0)}%")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
