@@ -3,7 +3,7 @@ db_path = "~/.reflect/reflect.db"
 artifacts_dir = "docs/solutions"
 
 [discovery]
-enabled_providers = ["claude", "codex", "gemini"]
+enabled_providers = ["claude", "codex", "copilot", "gemini"]
 staleness_days = 30
 
 [providers.claude]
@@ -14,6 +14,10 @@ memory_pattern = "*/memory/MEMORY.md"
 home_dir = "~/.codex"
 memories_dir = "~/.codex/memories"
 agents_md = "~/.codex/AGENTS.md"
+
+[providers.copilot]
+home_dir = "~/.copilot"
+agents_md = "~/.copilot/AGENTS.md"
 
 [providers.gemini]
 home_dir = "~/.gemini"

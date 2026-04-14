@@ -7,7 +7,7 @@
 Multi-tool Memory Discovery CLI.
 
 Replaces memory_discovery.sh with a Python implementation that uses the
-provider abstraction to discover memories across Claude, Codex, and Gemini.
+provider abstraction to discover memories across Claude, Codex, Gemini, and Copilot.
 
 Usage:
     python memory_discovery.py discover              List all memories
@@ -34,6 +34,7 @@ from reflect_config import get_config
 from providers import DiscoveredMemory, BaseProvider
 from providers.claude import ClaudeProvider
 from providers.codex import CodexProvider
+from providers.copilot import CopilotProvider
 from providers.gemini import GeminiProvider
 
 # ---------------------------------------------------------------------------
@@ -43,6 +44,7 @@ from providers.gemini import GeminiProvider
 _PROVIDER_MAP: dict[str, type[BaseProvider]] = {
     "claude": ClaudeProvider,
     "codex": CodexProvider,
+    "copilot": CopilotProvider,
     "gemini": GeminiProvider,
 }
 
