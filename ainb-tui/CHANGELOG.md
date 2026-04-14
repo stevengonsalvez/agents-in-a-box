@@ -7,6 +7,97 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.5-beta1] - 2026-04-14
+### Added
+- **ainb-tui**: favorite remote repositories instead of local paths
+- **ainb-tui**: open shell directly from repo picker with $ key
+- **ainb-tui**: persist agent_type in session metadata and detect from tmux
+- **ainb-tui**: show agent type icon in session list
+- **bootstrap**: add hermes-agent and nanoclaw tool configs
+- **bootstrap**: copy plugin skills to skills dir and enhance sync-learnings
+- **bootstrap**: manifest-driven agent-skills with DRY git-clone installation
+- **bootstrap**: namespace hermes-agent skills under toolkit/ category
+- **copilot**: add GitHub Copilot CLI as first-class agent
+- **create-rule**: generate setup-external.sh for codex and copilot home installs
+- **crypto-research**: add markdown.new/r.jina.ai web page fetching guidance
+- **gemini**: support native sub-agents and tool-translated agents
+- **global-learnings**: add file-lock concurrency guard for GraphRAG
+- **global-learnings**: add learnings visualize command
+- **learnings**: auto-generate entity sidecars in add and reindex
+- **onboarding**: add GitHub Copilot CLI to dependency checker and generalize auth step
+- **plugins**: add /plugins add subcommand and universal skill lifecycle flow
+- **reflect**: add --ingest-memories for project memory archival
+- **reflect**: expand knowledge signal detection patterns
+- **reflect**: rework as plugin with colon-namespaced sub-skills
+- **research**: add r.jina.ai as fallback for webpage markdown conversion
+- **skill**: add CLAUDE.md sync and reverse template interpolation to sync-learnings
+- **skill**: add test-driven-development skill
+- **skill**: add tmux-based coding-agent skill
+- **skill**: add token-usage skill for CLI usage analytics
+- **skills**: add Google Stitch design-to-code skills
+- **skills**: add argument-hint to skills that take arguments
+- **skills**: add caveman token-compression skill to external dependencies
+- **skills**: add media-processing skill (FFmpeg + ImageMagick)
+- **skills**: add notebooklm agent-skill for NotebookLM integration
+- **skills**: add prompt injection guardrails and mandatory WebFetch converters
+- **skills**: add scrapling skill and research fallback for antibot bypass
+- **skills**: track all untracked external skills in dependencies manifest
+- **toolkit**: add skills, hooks, and config from everything-claude-code research
+- **tui**: add bulk session recovery and periodic snapshots
+- **tui**: add multi-select and bulk delete in recovery screen
+- **tui**: add usage analytics screen with daily/weekly/project views
+- **tui**: multi-select recovery resume, provider selector, R shortcut
+- add flake.nix exposing skills, agents, and toolkit as Nix packages (#38)
+- add gemini to toolkit installer & remove unused ts_check hook
+- add showcase README, Rust CI pipeline, and cargo-deny config
+- steering protocol + multi-tool fallback for tmux/spawn skills (#39)
+
+### Fixed
+- **ainb-tui**: correct Copilot CLI configuration from actual --help output
+- **ainb-tui**: use --yolo flag for Copilot skip-permissions
+- **ainb-tui**: use brand-accurate icons for Claude and Codex sessions
+- **research**: revert to markdown.new - confirmed it works as URL-to-markdown converter
+- **research**: use correct Jina.ai Reader URL for webpage fetching
+- **rules**: ban tmux kill-server and wildcard tmux kill commands
+- **skill**: add backtick-quoted path matching to reverse interpolation
+- **skill**: show all projects without truncation in token-usage
+- **skill**: token-usage always outputs markdown tables directly
+- **skills**: connect reflect output to global learnings search
+- **skills**: notebooklm applies to all tools, not just claude
+- **skills**: replace hardcoded ~/.claude paths with template placeholders
+- **swarm**: increase post-ready delay and add tmux prompt verification
+- **sync-learnings**: generalize description to cover codex and copilot, update architecture comment
+- **tui**: add 3s timeout to Docker availability checks
+- **tui**: force preview refresh on session/workspace switch
+- **tui**: preserve agent_type during session recovery
+- **tui**: prevent workspace header from scrolling off-screen
+- enforce template interpolation in sync-learnings skill
+
+### Documentation
+- **nanoclaw**: add OpenClaw→NanoClaw migration guide + manifest fix
+- **nanoclaw**: move migration guide to the nanoclaw fork
+- add knowledge notes from reflect session
+- add knowledge system architecture documentation
+- comprehensive knowledge and memory system documentation
+
+### Other
+- **deps**: add OpenAI Codex plugin to external dependencies manifest
+- **homebrew**: update formula to v0.5.4-beta1
+- **manifest**: sync extension manifest with installed state
+- **nanoclaw**: point at public fork main branch
+- **toolkit**: add test-bootstrap-parity.sh for regression testing
+- remove plans/ and research/ output dirs from tracking
+- sync expect-test skill with replay publishing and evidence extraction
+- sync learnings to packages
+- sync tmux_protection safety rule to CLAUDE.md source
+- untrack pycache and runtime log debris
+- **tui**: throttle tmux preview updates to fix UI sluggishness
+- **copilot**: switch from .github/copilot-instructions.md to AGENTS.md
+- **deps**: update MCP/mcporter sections, remove stale reflect-learning
+- **skills**: update skill metadata, reflect internals, and test scaffolding
+- **toolkit**: single CLAUDE.md source of truth with symlinks + fix reflect paths
+
+
 ## [0.5.4-beta1] - 2026-03-04
 ### Added
 - **release**: add Intel Mac (x86_64-apple-darwin) build target
