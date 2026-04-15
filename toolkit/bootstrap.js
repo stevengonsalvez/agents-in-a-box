@@ -1722,6 +1722,321 @@ async function handleClawdhubSkillsCopy(tool, config, targetFolder = null, isNon
     console.log(`\\nTo publish to ClawdHub, run: clawdhub publish ${destDir}/<skill-name>`);
 }
 
+// ---------------------------------------------------------------------------
+// Verify mode: read-only integrity check of installed external skills.
+// Compares manifest expectations against what's actually on disk in
+// ~/.{tool}/skills/ (and configured external subpath). Never mutates.
+// ---------------------------------------------------------------------------
+function loadManifest() {
+    const manifestPath = path.join(__dirname, 'external-dependencies.yaml');
+    if (!fs.existsSync(manifestPath)) return null;
+    try {
+        return yaml.load(fs.readFileSync(manifestPath, 'utf8'));
+    } catch {
+        return null;
+    }
+}
+
+function hasSkillMd(dir) {
+    return fs.existsSync(path.join(dir, 'SKILL.md'));
+}
+
+function findNestedSkills(root) {
+    // Walk subdirs up to reasonable depth to locate any SKILL.md locations.
+    // Returns array of relative paths (relative to `root`) where SKILL.md exists.
+    const results = [];
+    function walk(dir, rel, depth) {
+        if (depth > 4) return;
+        let items;
+        try { items = readdirSync(dir); } catch { return; }
+        for (const item of items) {
+            if (item === 'node_modules' || item === '.git') continue;
+            const full = path.join(dir, item);
+            let st;
+            try { st = statSync(full); } catch { continue; }
+            if (!st.isDirectory()) continue;
+            if (hasSkillMd(full)) {
+                results.push(path.join(rel, item));
+            }
+            walk(full, path.join(rel, item), depth + 1);
+        }
+    }
+    if (fs.existsSync(root)) walk(root, '', 0);
+    return results;
+}
+
+async function handleVerify(tool, overrideHomeDir) {
+    const config = TOOL_CONFIG[tool];
+    if (!config) {
+        console.error(`Unknown tool: ${tool}`);
+        process.exit(2);
+    }
+
+    const manifest = loadManifest();
+    if (!manifest) {
+        console.error('Could not load external-dependencies.yaml');
+        process.exit(2);
+    }
+
+    const homeDir = overrideHomeDir || os.homedir();
+    const toolHome = path.join(homeDir, config.targetSubdir);
+    const canonicalToolName = TOOL_CANONICAL_NAMES[tool] || tool;
+    const externalSkillsPath = config.externalSkillsSubpath || 'skills';
+    const externalSkillsDir = path.join(toolHome, externalSkillsPath);
+    const flatSkillsDir = path.join(toolHome, 'skills');
+
+    const RESET = '\x1b[0m';
+    const GREEN = '\x1b[32m';
+    const RED = '\x1b[31m';
+    const YELLOW = '\x1b[33m';
+    const DIM = '\x1b[2m';
+    const BOLD = '\x1b[1m';
+    const ok = (s) => `${GREEN}✓${RESET} ${s}`;
+    const bad = (s) => `${RED}✗${RESET} ${s}`;
+    const warn = (s) => `${YELLOW}⚠${RESET} ${s}`;
+
+    console.log(`${BOLD}Verifying ${tool}${RESET} (home: ${toolHome})`);
+    console.log(`${DIM}canonical-name=${canonicalToolName}  external-skills-dir=${externalSkillsDir}${RESET}\n`);
+
+    const expectedSkillDirs = new Set();
+    let present = 0;
+    let missing = 0;
+    let partial = 0;
+
+    // Determine which dep types this tool configures. If the tool has no
+    // externalDepTypes configured, nothing is applicable.
+    const depTypes = config.externalDepTypes || [];
+
+    // ------ agent-skills ------
+    const agentSkillsApplicable = [];
+    if (depTypes.includes('agent-skills') && Array.isArray(manifest['agent-skills'])) {
+        for (const skill of manifest['agent-skills']) {
+            if (skill['catalog-only']) continue;
+            if (!skill.repo) continue;
+            const appliesTo = skill['applies-to'];
+            if (appliesTo && !appliesTo.includes(tool) && !appliesTo.includes(canonicalToolName)) continue;
+            agentSkillsApplicable.push(skill);
+        }
+    }
+
+    if (agentSkillsApplicable.length > 0) {
+        console.log(`${BOLD}agent-skills${RESET} (external git repos → ${externalSkillsPath}/)`);
+        for (const skill of agentSkillsApplicable) {
+            if (skill['multi-subpath']) {
+                // Multi-skill bundle: expect sibling dirs in externalSkillsDir.
+                // Each declared sub-skill name comes from manifest `skills:` list if
+                // present; otherwise we probe for any SKILL.md-bearing siblings.
+                const declaredSubs = Array.isArray(skill.skills)
+                    ? skill.skills.map(s => typeof s === 'string' ? s : Object.keys(s)[0])
+                    : null;
+                const bundleTop = path.join(externalSkillsDir, skill.name);
+                // Check if sibling-flattened layout is present
+                let siblingHits = [];
+                let siblingMissing = [];
+                if (declaredSubs) {
+                    for (const sub of declaredSubs) {
+                        const d = path.join(externalSkillsDir, sub);
+                        expectedSkillDirs.add(sub);
+                        if (hasSkillMd(d)) siblingHits.push(sub);
+                        else siblingMissing.push(sub);
+                    }
+                } else {
+                    // Fallback: scan externalSkillsDir for SKILL.md siblings produced by this bundle
+                    // We can't reliably attribute siblings to bundles here; just check bundleTop.
+                }
+                expectedSkillDirs.add(skill.name);
+                if (declaredSubs) {
+                    if (siblingMissing.length === 0) {
+                        console.log('  ' + ok(`${skill.name} (multi-subpath, ${siblingHits.length} sub-skills)`));
+                        present++;
+                    } else if (siblingHits.length > 0) {
+                        console.log('  ' + warn(`${skill.name} partial: have ${siblingHits.length}/${declaredSubs.length}, missing: ${siblingMissing.join(', ')}`));
+                        partial++;
+                        missing++;
+                    } else {
+                        // Nothing flat. Check if raw nested layout exists (pre-fix state).
+                        if (fs.existsSync(bundleTop)) {
+                            const nested = findNestedSkills(bundleTop);
+                            if (nested.length > 0) {
+                                console.log('  ' + warn(`${skill.name} partial: raw-clone present, SKILL.md nested at ${nested.map(n => n).slice(0, 3).join(', ')}${nested.length > 3 ? '…' : ''} (multi-subpath flatten not applied)`));
+                                partial++;
+                                missing++;
+                            } else {
+                                console.log('  ' + bad(`${skill.name} MISSING: no sub-skills flat, no SKILL.md nested under ${bundleTop}`));
+                                missing++;
+                            }
+                        } else {
+                            console.log('  ' + bad(`${skill.name} MISSING: ${bundleTop} not found, no sub-skills flat`));
+                            missing++;
+                        }
+                    }
+                } else {
+                    // No declared sub-skills — fall back to presence check at bundleTop
+                    if (hasSkillMd(bundleTop)) {
+                        console.log('  ' + ok(`${skill.name} (multi-subpath, root SKILL.md)`));
+                        present++;
+                    } else {
+                        console.log('  ' + bad(`${skill.name} MISSING (no declared sub-skills, no root SKILL.md at ${bundleTop})`));
+                        missing++;
+                    }
+                }
+            } else {
+                // Single-skill git clone: expect SKILL.md at externalSkillsDir/<name>/
+                // For `subpath:` entries, the install copies <subpath>/. into <name>/ so
+                // SKILL.md should still be at the root of <name>/.
+                const skillDir = path.join(externalSkillsDir, skill.name);
+                expectedSkillDirs.add(skill.name);
+                if (hasSkillMd(skillDir)) {
+                    console.log('  ' + ok(`${skill.name}`));
+                    present++;
+                } else if (fs.existsSync(skillDir)) {
+                    // Present but no SKILL.md at root — likely packaging quirk
+                    const nested = findNestedSkills(skillDir);
+                    if (nested.length > 0) {
+                        console.log('  ' + warn(`${skill.name} partial: dir exists but no root SKILL.md; nested SKILL.md at ${nested.slice(0, 3).join(', ')}${nested.length > 3 ? '…' : ''}`));
+                        partial++;
+                        missing++;
+                    } else {
+                        console.log('  ' + bad(`${skill.name} MISSING: ${skillDir} exists but has no SKILL.md anywhere`));
+                        missing++;
+                    }
+                } else {
+                    console.log('  ' + bad(`${skill.name} MISSING: ${skillDir} does not exist`));
+                    missing++;
+                }
+            }
+        }
+        console.log('');
+    }
+
+    // ------ npx-skills ------
+    // Expected post-mirror location: flatSkillsDir/<name>/SKILL.md
+    // (Pre-mirror, they live at ~/.agents/skills/<N>/ or cwd/.agents/skills/)
+    const npxApplicable = [];
+    if (depTypes.includes('npx-skills') && Array.isArray(manifest['npx-skills'])) {
+        for (const s of manifest['npx-skills']) {
+            if (s['catalog-only']) continue;
+            if (!s.install && !s.repo) continue; // skip pure-catalog entries
+            npxApplicable.push(s);
+        }
+    }
+
+    if (npxApplicable.length > 0) {
+        console.log(`${BOLD}npx-skills${RESET} (mirrored into ${config.targetSubdir}/skills/)`);
+        for (const s of npxApplicable) {
+            // Collect expected sub-skill names: manifest may declare them in `skills:`
+            const declaredSubs = Array.isArray(s.skills)
+                ? s.skills.map(x => typeof x === 'string' ? x : Object.keys(x)[0])
+                : null;
+            if (declaredSubs && declaredSubs.length > 0) {
+                const hits = [];
+                const misses = [];
+                for (const sub of declaredSubs) {
+                    expectedSkillDirs.add(sub);
+                    if (hasSkillMd(path.join(flatSkillsDir, sub))) hits.push(sub);
+                    else misses.push(sub);
+                }
+                expectedSkillDirs.add(s.name);
+                if (misses.length === 0) {
+                    console.log('  ' + ok(`${s.name} bundle (${hits.length} sub-skills)`));
+                    present++;
+                } else if (hits.length > 0) {
+                    console.log('  ' + warn(`${s.name} bundle partial: have ${hits.length}/${declaredSubs.length}, missing: ${misses.slice(0, 5).join(', ')}${misses.length > 5 ? '…' : ''}`));
+                    partial++;
+                    missing++;
+                } else {
+                    console.log('  ' + bad(`${s.name} bundle MISSING: none of ${declaredSubs.length} sub-skills mirrored to ${flatSkillsDir}/`));
+                    missing++;
+                }
+            } else {
+                expectedSkillDirs.add(s.name);
+                if (hasSkillMd(path.join(flatSkillsDir, s.name))) {
+                    console.log('  ' + ok(`${s.name}`));
+                    present++;
+                } else {
+                    console.log('  ' + bad(`${s.name} MISSING: ${path.join(flatSkillsDir, s.name)}/SKILL.md not found`));
+                    missing++;
+                }
+            }
+        }
+        console.log('');
+    }
+
+    // ------ orphan detection (warnings only) ------
+    const orphans = [];
+    function scanForOrphans(dir, labelPrefix) {
+        if (!fs.existsSync(dir)) return;
+        let entries;
+        try { entries = readdirSync(dir); } catch { return; }
+        for (const entry of entries) {
+            const full = path.join(dir, entry);
+            let st;
+            try { st = statSync(full); } catch { continue; }
+            if (!st.isDirectory()) continue;
+            if (expectedSkillDirs.has(entry)) continue;
+            if (!hasSkillMd(full)) continue; // only flag things that actually look like skills
+            orphans.push(`${labelPrefix}${entry}`);
+        }
+    }
+    scanForOrphans(externalSkillsDir, externalSkillsPath + '/');
+    if (externalSkillsDir !== flatSkillsDir) {
+        scanForOrphans(flatSkillsDir, 'skills/');
+    }
+    if (orphans.length > 0) {
+        console.log(`${BOLD}orphans${RESET} (skill dirs not tracked by manifest — may be intentional)`);
+        for (const o of orphans.slice(0, 25)) {
+            console.log('  ' + warn(o));
+        }
+        if (orphans.length > 25) {
+            console.log(`  ${DIM}… and ${orphans.length - 25} more${RESET}`);
+        }
+        console.log('');
+    }
+
+    // ------ cross-tool parity ------
+    // For each manifest skill, list which of its applies-to tools have it on disk.
+    console.log(`${BOLD}cross-tool parity${RESET} (${DIM}applies-to vs on-disk at default ~/.TOOL homes${RESET})`);
+    function parityCheck(entries, sectionLabel, getTargetPath) {
+        for (const entry of entries) {
+            if (entry['catalog-only']) continue;
+            const appliesTo = entry['applies-to'];
+            if (!appliesTo || !Array.isArray(appliesTo)) continue;
+            const hits = [];
+            const miss = [];
+            for (const at of appliesTo) {
+                // Resolve canonical tool name back to internal config key where applicable
+                let toolKey = at;
+                if (at === 'claude') toolKey = 'claude-code-4.5';
+                const cfg = TOOL_CONFIG[toolKey];
+                if (!cfg) continue;
+                const p = getTargetPath(homeDir, cfg, entry);
+                if (hasSkillMd(p)) hits.push(at);
+                else miss.push(at);
+            }
+            if (miss.length === 0) {
+                console.log('  ' + ok(`${sectionLabel} ${entry.name}: all ${hits.length} tools`));
+            } else if (hits.length === 0) {
+                console.log('  ' + bad(`${sectionLabel} ${entry.name}: none of ${appliesTo.length} tools (expected: ${appliesTo.join(',')})`));
+            } else {
+                console.log('  ' + warn(`${sectionLabel} ${entry.name}: ${hits.join(',')} ✓  |  ${miss.join(',')} ✗`));
+            }
+        }
+    }
+    const agentSkillsForParity = (manifest['agent-skills'] || []).filter(s => !s['catalog-only'] && s.repo && !s['multi-subpath']);
+    parityCheck(agentSkillsForParity, '[agent-skill]', (home, cfg, entry) => {
+        const ext = cfg.externalSkillsSubpath || 'skills';
+        return path.join(home, cfg.targetSubdir, ext, entry.name);
+    });
+    console.log('');
+
+    // ------ summary ------
+    const total = present + missing;
+    const colourForSummary = missing === 0 ? GREEN : RED;
+    console.log(`${BOLD}summary:${RESET} ${colourForSummary}${present}/${total}${RESET} skills present · ${missing} missing · ${orphans.length} orphans${partial ? ` · ${partial} partial` : ''}`);
+
+    process.exit(missing === 0 ? 0 : 1);
+}
+
 async function main() {
     const args = process.argv.slice(2);
     const toolArg = args.find(arg => arg.startsWith('--tool='));
@@ -1729,6 +2044,7 @@ async function main() {
     const homeDirArg = args.find(arg => arg.startsWith('--homeDir='));
     const packagesArg = args.find(arg => arg.startsWith('--packages='));
     const selectPackagesFlag = args.includes('--selectPackages');
+    const verifyFlag = args.includes('--verify');
     const sddShortcut = args.includes('--sdd');
     // If --selectPackages is passed, we want interactive package selection
     const isNonInteractive = (!!toolArg || sddShortcut) && !selectPackagesFlag;
@@ -1758,6 +2074,12 @@ async function main() {
             },
         ]);
         tool = answers.tool;
+    }
+
+    // Verify mode: read-only integrity check, never mutates filesystem.
+    if (verifyFlag) {
+        await handleVerify(tool, overrideHomeDir);
+        return;
     }
 
     // Handle SDD-only installation mode (no rules), copying assets from spec-kit into a project
