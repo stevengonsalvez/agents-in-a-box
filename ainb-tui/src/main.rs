@@ -73,6 +73,11 @@ async fn main() -> Result<()> {
 
     let args = cli::Cli::parse();
 
+    // Track whether we entered TUI mode so we only clean up terminal in that case.
+    // CLI commands never touch the alternate screen; emitting LeaveAlternateScreen
+    // would leak raw escape codes into the user's terminal.
+    let mut entered_tui = false;
+
     let result = match args.command {
         // CLI commands
         Some(cli::Commands::Run(run_args)) => cli::run::execute(run_args).await,
@@ -88,9 +93,17 @@ async fn main() -> Result<()> {
         Some(cli::Commands::Favorites { command }) => cli::favorites::execute(command, args.format).await,
         Some(cli::Commands::Init(init_args)) => cli::init::execute(init_args, args.format).await,
         Some(cli::Commands::Presets { command }) => cli::presets::execute(command, args.format).await,
+        Some(cli::Commands::Completion { shell }) => {
+            use clap::CommandFactory;
+            let mut cmd = cli::Cli::command();
+            let name = cmd.get_name().to_string();
+            clap_complete::generate(shell, &mut cmd, name, &mut std::io::stdout());
+            Ok(())
+        }
 
         // TUI mode (explicit or default)
         Some(cli::Commands::Tui) | None => {
+            entered_tui = true;
             let mut app = App::new();
             app.init().await;
             let mut layout = LayoutComponent::new();
@@ -114,8 +127,10 @@ async fn main() -> Result<()> {
         }
     };
 
-    // Ensure terminal is cleaned up on any error
-    if result.is_err() {
+    // Only clean up terminal if we entered TUI mode. For CLI commands, calling
+    // cleanup_terminal() would emit terminal escape sequences into the user's
+    // shell, corrupting agent-captured output.
+    if result.is_err() && entered_tui {
         cleanup_terminal();
     }
 

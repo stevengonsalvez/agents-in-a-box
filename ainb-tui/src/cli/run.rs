@@ -24,7 +24,7 @@ use crate::tmux::TmuxSession;
 /// Execute the run command
 pub async fn execute(args: RunArgs) -> Result<()> {
     // Step 0: Validate provider CLI is installed
-    let provider = CliProvider::from_str(&args.tool);
+    let provider = args.tool.to_cli_provider();
     validate_provider_installed(&provider)?;
 
     // Step 1: Resolve repository path
@@ -93,7 +93,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
     }
 
     // Step 9: Save session to SessionStore (TUI-compatible format)
-    let agent_type = match CliProvider::from_str(&args.tool) {
+    let agent_type = match args.tool.to_cli_provider() {
         CliProvider::Claude => SessionAgentType::Claude,
         CliProvider::Codex => SessionAgentType::Codex,
         CliProvider::Gemini => SessionAgentType::Gemini,
@@ -289,7 +289,7 @@ fn validate_provider_installed(provider: &CliProvider) -> Result<()> {
 
 /// Build the agent CLI command with appropriate flags for the selected provider
 fn build_agent_command(args: &RunArgs, model: Option<ClaudeModel>) -> String {
-    let provider = CliProvider::from_str(&args.tool);
+    let provider = args.tool.to_cli_provider();
     let mut cmd_parts = vec![provider.command().to_string()];
 
     // Add model flag (Claude-only)
@@ -347,6 +347,7 @@ fn attach_to_session(session_name: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::Tool;
 
     #[test]
     fn test_parse_model() {
@@ -365,7 +366,7 @@ mod tests {
             repo: None,
             create_branch: None,
             worktree: false,
-            tool: "claude".to_string(),
+            tool: Tool::Claude,
             model: "sonnet".to_string(),
             prompt: None,
             attach: false,
@@ -387,7 +388,7 @@ mod tests {
             repo: None,
             create_branch: None,
             worktree: false,
-            tool: "claude".to_string(),
+            tool: Tool::Claude,
             model: "opus".to_string(),
             prompt: None,
             attach: false,
@@ -409,7 +410,7 @@ mod tests {
             repo: None,
             create_branch: None,
             worktree: false,
-            tool: "codex".to_string(),
+            tool: Tool::Codex,
             model: "sonnet".to_string(),
             prompt: None,
             attach: false,
@@ -430,7 +431,7 @@ mod tests {
             repo: None,
             create_branch: None,
             worktree: false,
-            tool: "codex".to_string(),
+            tool: Tool::Codex,
             model: "sonnet".to_string(),
             prompt: None,
             attach: false,
@@ -459,7 +460,7 @@ mod tests {
             repo: None,
             create_branch: None,
             worktree: false,
-            tool: "gemini".to_string(),
+            tool: Tool::Gemini,
             model: "sonnet".to_string(),
             prompt: None,
             attach: false,
@@ -480,7 +481,7 @@ mod tests {
             repo: None,
             create_branch: None,
             worktree: false,
-            tool: "copilot".to_string(),
+            tool: Tool::Copilot,
             model: "sonnet".to_string(),
             prompt: None,
             attach: false,
@@ -500,7 +501,7 @@ mod tests {
             repo: None,
             create_branch: None,
             worktree: false,
-            tool: "copilot".to_string(),
+            tool: Tool::Copilot,
             model: "sonnet".to_string(),
             prompt: None,
             attach: false,

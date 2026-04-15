@@ -22,10 +22,23 @@ pub mod presets;
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
+const EXAMPLES: &str = "\
+EXAMPLES:
+  ainb                            Launch the TUI
+  ainb run --repo . --worktree    Start a session in the current repo
+  ainb run --tool codex --repo .  Use Codex instead of Claude
+  ainb list --format json         List all sessions as JSON
+  ainb status my-project          Inspect a session by workspace name
+  ainb attach my-project          Drop into a running session
+  ainb config get authentication.default_model
+  ainb recover list               Find orphaned sessions
+  ainb completion zsh > _ainb     Generate zsh completions";
+
 /// AI agents in a box - spawn and manage AI coding sessions
 #[derive(Parser)]
 #[command(name = "ainb")]
 #[command(author, version, about, long_about = None)]
+#[command(after_help = EXAMPLES)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
@@ -33,6 +46,29 @@ pub struct Cli {
     /// Output format
     #[arg(long, global = true, default_value = "text")]
     pub format: OutputFormat,
+}
+
+/// AI CLI provider to use for a session
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+#[clap(rename_all = "lowercase")]
+pub enum Tool {
+    #[default]
+    Claude,
+    Codex,
+    Gemini,
+    Copilot,
+}
+
+impl Tool {
+    /// Convert to the internal CliProvider type
+    pub fn to_cli_provider(self) -> crate::config::CliProvider {
+        match self {
+            Tool::Claude => crate::config::CliProvider::Claude,
+            Tool::Codex => crate::config::CliProvider::Codex,
+            Tool::Gemini => crate::config::CliProvider::Gemini,
+            Tool::Copilot => crate::config::CliProvider::Copilot,
+        }
+    }
 }
 
 /// Output format for commands
@@ -102,10 +138,25 @@ pub enum Commands {
         #[command(subcommand)]
         command: presets::PresetsCommands,
     },
+
+    /// Generate shell completions (bash, zsh, fish, powershell, elvish)
+    Completion {
+        /// Shell to generate completions for
+        shell: clap_complete::Shell,
+    },
 }
 
 /// Arguments for the run command
 #[derive(clap::Args)]
+#[command(after_help = "\
+EXAMPLES:
+  ainb run --repo .                                 Use current directory
+  ainb run --repo . --worktree                      Isolate in a new worktree
+  ainb run --repo . --create-branch feat/new        Create a branch + worktree
+  ainb run --remote-repo owner/repo                 Clone GitHub repo first
+  ainb run --tool codex --repo .                    Use Codex instead of Claude
+  ainb run --repo . -p \"fix the failing tests\"    Send an initial prompt
+  ainb run --repo . --attach                        Drop into tmux after creating")]
 pub struct RunArgs {
     /// Remote repository (e.g., username/repo or full URL)
     #[arg(long)]
@@ -123,9 +174,9 @@ pub struct RunArgs {
     #[arg(long)]
     pub worktree: bool,
 
-    /// AI tool to use (claude, codex, gemini)
-    #[arg(long, default_value = "claude")]
-    pub tool: String,
+    /// AI tool to use
+    #[arg(long, value_enum, default_value_t = Tool::Claude)]
+    pub tool: Tool,
 
     /// Model to use (sonnet, opus, haiku)
     #[arg(long, default_value = "sonnet")]
