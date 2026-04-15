@@ -177,6 +177,26 @@ agent-skills:
       - "rsvg-convert (librsvg) for PNG export — `brew install librsvg`"
     docs: "https://github.com/yizhiyanhua-ai/fireworks-tech-graph"
 
+  # ---------------------------------------------------------------------------
+  # Catalog-only entries below — listed for discoverability / alternatives
+  # consideration but NOT installed by bootstrap. Flip `catalog-only: true` to
+  # a proper `applies-to` list if you want to start installing one.
+  # ---------------------------------------------------------------------------
+  - name: architecture-diagram
+    repo: https://github.com/Cocoon-AI/architecture-diagram-generator
+    subpath: architecture-diagram
+    catalog-only: true
+    purpose: "(alternative to fireworks-tech-graph) Dark-themed HTML+SVG architecture diagrams with summary cards"
+    features:
+      - Self-contained HTML with inline SVG and CSS
+      - Semantic color palette by component type (frontend, backend, db, cloud, security)
+      - JetBrains Mono typography with technical aesthetic
+      - Security group and region boundary visual primitives
+      - Summary cards + pulsing dot indicator baked into layout
+      - MIT licensed
+    docs: "https://github.com/Cocoon-AI/architecture-diagram-generator"
+    notes: "Single-style, architecture-only. fireworks-tech-graph chosen as primary for broader diagram-type coverage."
+
   - name: stitch-skills
     repo: https://github.com/google-labs-code/stitch-skills
     applies-to: [claude]
