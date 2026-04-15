@@ -1150,7 +1150,32 @@ async function handlePackagesStructureCopy(tool, config, overrideHomeDir = null,
                             const skillDir = `"\${HOME}/${config.targetSubdir}/${externalSkillsPath}/${skill.name}"`;
                             scriptLines.push(`# ${skill.name}${skill.purpose ? ' - ' + skill.purpose : ''}`);
                             scriptLines.push(`SKILL_DIR=${skillDir}`);
-                            if (skill.subpath) {
+                            if (skill['multi-subpath']) {
+                                // Repo bundles multiple sibling skills under <multi-subpath>/.
+                                // Clone repo to a temp dir, then for each subdir under
+                                // <multi-subpath>/ that contains SKILL.md, copy the whole
+                                // subdir into externalSkillsDir/<subdir-name>/ as a flat
+                                // sibling. Idempotent: skip any target that already has
+                                // SKILL.md.
+                                const extBase = `"\${HOME}/${config.targetSubdir}/${externalSkillsPath}"`;
+                                scriptLines.push(`echo "  Installing ${skill.name} bundle (multi-subpath: ${skill['multi-subpath']})..."`);
+                                scriptLines.push(`TMP_CLONE=$(mktemp -d)`);
+                                scriptLines.push(`git clone --depth 1 ${skill.repo} "$TMP_CLONE/repo"`);
+                                scriptLines.push(`mkdir -p ${extBase}`);
+                                scriptLines.push(`for sub in "$TMP_CLONE/repo/${skill['multi-subpath']}"/*/; do`);
+                                scriptLines.push(`  sub_name=$(basename "$sub")`);
+                                scriptLines.push(`  if [ -f "$sub/SKILL.md" ]; then`);
+                                scriptLines.push(`    if [ -f ${extBase}/"$sub_name"/SKILL.md ]; then`);
+                                scriptLines.push(`      echo "    $sub_name already installed (skipping)"`);
+                                scriptLines.push(`    else`);
+                                scriptLines.push(`      mkdir -p ${extBase}/"$sub_name"`);
+                                scriptLines.push(`      cp -R "$sub"/. ${extBase}/"$sub_name"/`);
+                                scriptLines.push(`      echo "    Installed $sub_name"`);
+                                scriptLines.push(`    fi`);
+                                scriptLines.push(`  fi`);
+                                scriptLines.push(`done`);
+                                scriptLines.push(`rm -rf "$TMP_CLONE"`);
+                            } else if (skill.subpath) {
                                 // Repo contains the skill under a subdirectory. Clone to a temp
                                 // location and copy just the subpath into the skill dir so the
                                 // target ends up with SKILL.md at its root.
