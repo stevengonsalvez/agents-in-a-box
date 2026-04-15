@@ -202,11 +202,13 @@ const TOOL_CONFIG = {
         forceHomeInstall: true,
         copyClaudeMd: false,
         copySettings: false,
-        externalDepTypes: ['npx-skills', 'agent-skills'],
-        // External git-cloned agent-skills also nest under `toolkit/` to avoid
-        // colliding with hermes native categories — and under `external/` to
-        // distinguish them from the toolkit-owned skills copied in.
-        externalSkillsSubpath: 'skills/toolkit/external',
+        // Hermes reads skills from `~/.claude/skills/` via its own
+        // `skills.external_dirs` config (see ~/.hermes/config.yaml), so any
+        // skill installed for claude-code-4.5 is automatically discoverable
+        // by hermes. To avoid redundant double-installs we keep
+        // externalDepTypes empty here — entries that should reach hermes
+        // simply need to apply to `claude`.
+        externalDepTypes: [],
         packageMappings: {
             // Hermes uses nested skills/{category}/{skill-name}/SKILL.md layout.
             // Install toolkit skills under a 'toolkit/' category to avoid
