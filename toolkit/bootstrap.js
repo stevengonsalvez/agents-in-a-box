@@ -1102,12 +1102,21 @@ async function handlePackagesStructureCopy(tool, config, overrideHomeDir = null,
                     }
 
                     if (npxSkills.length > 0) {
-                        scriptLines.push('echo "Installing npx agent skills..."');
-                        scriptLines.push('');
-                        for (const s of npxSkills) {
-                            scriptLines.push(s.install || `npx add-skill ${s.repo}`);
+                        // Filter out catalog-only entries (aggregate bundles with
+                        // no install command or repo — e.g. gws-skills, browserbase-skills).
+                        // These live in the manifest for discoverability only.
+                        const installable = npxSkills.filter(s => s.install || s.repo);
+                        if (installable.length > 0) {
+                            scriptLines.push('echo "Installing npx agent skills..."');
+                            scriptLines.push('');
+                            for (const s of installable) {
+                                // Prefer explicit install command; fall back to modern
+                                // `npx skills add ... --yes` (non-interactive) rather than
+                                // the deprecated interactive `npx add-skill`.
+                                scriptLines.push(s.install || `npx skills add ${s.repo} --yes`);
+                            }
+                            scriptLines.push('');
                         }
-                        scriptLines.push('');
                     }
 
                     // Filter agent-skills by applies-to field
