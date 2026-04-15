@@ -1125,13 +1125,29 @@ async function handlePackagesStructureCopy(tool, config, overrideHomeDir = null,
                             const skillDir = `"\${HOME}/${config.targetSubdir}/skills/${skill.name}"`;
                             scriptLines.push(`# ${skill.name}${skill.purpose ? ' - ' + skill.purpose : ''}`);
                             scriptLines.push(`SKILL_DIR=${skillDir}`);
-                            scriptLines.push(`if [ -d "\${SKILL_DIR}/.git" ]; then`);
-                            scriptLines.push(`  echo "  Updating ${skill.name}..."`);
-                            scriptLines.push(`  git -C "\${SKILL_DIR}" pull --ff-only`);
-                            scriptLines.push(`else`);
-                            scriptLines.push(`  echo "  Installing ${skill.name}..."`);
-                            scriptLines.push(`  git clone ${skill.repo} "\${SKILL_DIR}"`);
-                            scriptLines.push(`fi`);
+                            if (skill.subpath) {
+                                // Repo contains the skill under a subdirectory. Clone to a temp
+                                // location and copy just the subpath into the skill dir so the
+                                // target ends up with SKILL.md at its root.
+                                scriptLines.push(`if [ -d "\${SKILL_DIR}" ] && [ -f "\${SKILL_DIR}/SKILL.md" ]; then`);
+                                scriptLines.push(`  echo "  ${skill.name} already installed (skipping)"`);
+                                scriptLines.push(`else`);
+                                scriptLines.push(`  echo "  Installing ${skill.name} (subpath: ${skill.subpath})..."`);
+                                scriptLines.push(`  TMP_CLONE=$(mktemp -d)`);
+                                scriptLines.push(`  git clone --depth 1 ${skill.repo} "$TMP_CLONE/repo"`);
+                                scriptLines.push(`  mkdir -p "\${SKILL_DIR}"`);
+                                scriptLines.push(`  cp -R "$TMP_CLONE/repo/${skill.subpath}/." "\${SKILL_DIR}/"`);
+                                scriptLines.push(`  rm -rf "$TMP_CLONE"`);
+                                scriptLines.push(`fi`);
+                            } else {
+                                scriptLines.push(`if [ -d "\${SKILL_DIR}/.git" ]; then`);
+                                scriptLines.push(`  echo "  Updating ${skill.name}..."`);
+                                scriptLines.push(`  git -C "\${SKILL_DIR}" pull --ff-only`);
+                                scriptLines.push(`else`);
+                                scriptLines.push(`  echo "  Installing ${skill.name}..."`);
+                                scriptLines.push(`  git clone ${skill.repo} "\${SKILL_DIR}"`);
+                                scriptLines.push(`fi`);
+                            }
                             scriptLines.push('');
                         }
                     }
