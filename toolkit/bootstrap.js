@@ -1117,6 +1117,10 @@ async function handlePackagesStructureCopy(tool, config, overrideHomeDir = null,
                     const canonicalToolName = TOOL_CANONICAL_NAMES[toolName] || toolName;
                     const relevantAgentSkills = agentSkills.filter(skill => {
                         if (skill['catalog-only']) return false;
+                        // Safety: skip entries without a clone source (git repo).
+                        // Some entries (e.g. clawhub/pip distributions) list only
+                        // `source:` for documentation — they can't be git-cloned.
+                        if (!skill.repo) return false;
                         if (!skill['applies-to']) return true;
                         return skill['applies-to'].includes(toolName) || skill['applies-to'].includes(canonicalToolName);
                     });
