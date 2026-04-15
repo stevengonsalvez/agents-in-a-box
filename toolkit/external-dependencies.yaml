@@ -365,7 +365,7 @@ claude-plugins:
 npx-skills:
   - name: agent-browser
     repo: vercel-labs/agent-browser
-    install: "npx add-skill vercel-labs/agent-browser"
+    install: "npx skills add vercel-labs/agent-browser --yes"
     purpose: "Browser automation CLI for AI agents"
     features:
       - Navigate to URLs (agent-browser open <url>)
@@ -376,7 +376,7 @@ npx-skills:
 
   - name: agent-skills
     repo: vercel-labs/agent-skills
-    install: "npx add-skill vercel-labs/agent-skills"
+    install: "npx skills add vercel-labs/agent-skills --yes"
     purpose: "React and Next.js optimization patterns (10+ years of best practices)"
     features:
       - React best practices
