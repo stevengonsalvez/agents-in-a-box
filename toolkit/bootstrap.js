@@ -203,6 +203,10 @@ const TOOL_CONFIG = {
         copyClaudeMd: false,
         copySettings: false,
         externalDepTypes: ['npx-skills', 'agent-skills'],
+        // External git-cloned agent-skills also nest under `toolkit/` to avoid
+        // colliding with hermes native categories — and under `external/` to
+        // distinguish them from the toolkit-owned skills copied in.
+        externalSkillsSubpath: 'skills/toolkit/external',
         packageMappings: {
             // Hermes uses nested skills/{category}/{skill-name}/SKILL.md layout.
             // Install toolkit skills under a 'toolkit/' category to avoid
@@ -1137,8 +1141,11 @@ async function handlePackagesStructureCopy(tool, config, overrideHomeDir = null,
                     if (relevantAgentSkills.length > 0) {
                         scriptLines.push('echo "Installing agent skills (git repos)..."');
                         scriptLines.push('');
+                        // Tools can override where external agent-skills are
+                        // installed relative to targetSubdir. Default: `skills/`.
+                        const externalSkillsPath = config.externalSkillsSubpath || 'skills';
                         for (const skill of relevantAgentSkills) {
-                            const skillDir = `"\${HOME}/${config.targetSubdir}/skills/${skill.name}"`;
+                            const skillDir = `"\${HOME}/${config.targetSubdir}/${externalSkillsPath}/${skill.name}"`;
                             scriptLines.push(`# ${skill.name}${skill.purpose ? ' - ' + skill.purpose : ''}`);
                             scriptLines.push(`SKILL_DIR=${skillDir}`);
                             if (skill.subpath) {
@@ -1161,6 +1168,7 @@ async function handlePackagesStructureCopy(tool, config, overrideHomeDir = null,
                                 scriptLines.push(`  git -C "\${SKILL_DIR}" pull --ff-only`);
                                 scriptLines.push(`else`);
                                 scriptLines.push(`  echo "  Installing ${skill.name}..."`);
+                                scriptLines.push(`  mkdir -p "$(dirname "\${SKILL_DIR}")"`);
                                 scriptLines.push(`  git clone ${skill.repo} "\${SKILL_DIR}"`);
                                 scriptLines.push(`fi`);
                             }
