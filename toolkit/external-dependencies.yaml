@@ -162,6 +162,21 @@ agent-skills:
       - "pip install 'scrapling[all]>=0.4.3'"
       - "scrapling install --force"
 
+  - name: fireworks-tech-graph
+    repo: https://github.com/yizhiyanhua-ai/fireworks-tech-graph
+    applies-to: [claude, codex, copilot, gemini, hermes-agent, nanoclaw]
+    purpose: "Generate publication-quality SVG+PNG technical diagrams across 14 diagram types and 7 visual styles"
+    features:
+      - 14 diagram types (architecture, flowchart, sequence, UML class, ER, use-case, timeline, mind map, data flow, memory arch, state machine, concept map, comparison matrix, agent architecture)
+      - 7 visual styles (Flat Icon, Dark Terminal, Blueprint, Notion Clean, Glassmorphism, Claude Official, OpenAI Official)
+      - Reusable SVG templates + JSON-driven generation
+      - Helper scripts for validation (scripts/validate-svg.sh) and PNG export
+      - Chinese + English trigger phrases
+      - MIT licensed
+    requires:
+      - "rsvg-convert (librsvg) for PNG export — `brew install librsvg`"
+    docs: "https://github.com/yizhiyanhua-ai/fireworks-tech-graph"
+
   - name: stitch-skills
     repo: https://github.com/google-labs-code/stitch-skills
     applies-to: [claude]
