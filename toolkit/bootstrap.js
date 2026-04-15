@@ -1112,8 +1112,11 @@ async function handlePackagesStructureCopy(tool, config, overrideHomeDir = null,
 
                     // Filter agent-skills by applies-to field
                     // Use canonical name so e.g. 'claude-code-4.5' matches 'claude' in applies-to
+                    // Skills with `catalog-only: true` are listed in the manifest for discoverability
+                    // but never installed by bootstrap.
                     const canonicalToolName = TOOL_CANONICAL_NAMES[toolName] || toolName;
                     const relevantAgentSkills = agentSkills.filter(skill => {
+                        if (skill['catalog-only']) return false;
                         if (!skill['applies-to']) return true;
                         return skill['applies-to'].includes(toolName) || skill['applies-to'].includes(canonicalToolName);
                     });
