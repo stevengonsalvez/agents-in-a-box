@@ -120,6 +120,7 @@ Shows:
 - Total lines across all orphaned dirs
 
 **If orphaned dirs > 0**: Suggest running `/reflect:consolidate` to merge them.
+**If unindexed memories found**: Suggest running `/reflect:ingest` to index into GraphRAG + QMD.
 
 ### 6. Project Memory Health
 
