@@ -155,6 +155,12 @@ For each non-duplicate memory, generate:
 
 **A. Learning note** (`~/.learnings/documents/learnings/{id}.md`):
 
+Use the template at `assets/learning_template.md` for the note structure.
+Fields preserved: `id`, `scope`, `confidence`, `learning_type`, `source_episodes`,
+`superseded_by` (for revisions), `provenance` (source_tool/path/hash), plus
+Problem / Solution / Anti-Pattern / Context sections.
+
+
 ```yaml
 ---
 title: "{descriptive title}"

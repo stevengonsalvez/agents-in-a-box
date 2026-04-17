@@ -144,6 +144,10 @@ See `references/skill_template.md` for skill creation guidelines.
 ### Step 4: Generate Proposals
 
 Present findings using the reflection template at `assets/reflection_template.md`.
+For each knowledge note, use `assets/learning_template.md` to structure the
+individual `.md` file (fields: `id`, `scope`, `confidence`, `learning_type`,
+`source_episodes`, `superseded_by`, `provenance`, plus Problem/Solution/
+Anti-Pattern/Context sections).
 
 The output must include:
 
