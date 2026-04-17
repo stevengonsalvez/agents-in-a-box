@@ -32,13 +32,16 @@ CREATE TABLE IF NOT EXISTS learnings (
     category        TEXT NOT NULL DEFAULT 'Unknown',
     confidence      TEXT NOT NULL DEFAULT 'LOW',
     status          TEXT NOT NULL DEFAULT 'pending'
-                    CHECK (status IN ('pending', 'approved', 'rejected', 'indexed')),
+                    CHECK (status IN ('pending', 'approved', 'rejected', 'indexed', 'reverted')),
     source_tool     TEXT NOT NULL DEFAULT '',
     source_path     TEXT NOT NULL DEFAULT '',
     content_hash    TEXT NOT NULL DEFAULT '',
+    commit_hash     TEXT,
     created_at      TEXT NOT NULL,
     approved_at     TEXT,
-    indexed_at      TEXT
+    indexed_at      TEXT,
+    reverted_at     TEXT,
+    revert_reason   TEXT
 );
 
 CREATE TABLE IF NOT EXISTS proposals (
@@ -124,9 +127,36 @@ def init_db(path: Optional[Path] = None) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(_SCHEMA_SQL)
+    _migrate_schema(conn)
 
     _CONN_CACHE[key] = conn
     return conn
+
+
+def _migrate_schema(conn: sqlite3.Connection) -> None:
+    """Additive migrations for existing DBs. Idempotent.
+
+    Adds columns that earlier versions of the schema did not have:
+    - learnings.commit_hash  (git commit where learning was applied or reverted)
+    - learnings.reverted_at
+    - learnings.revert_reason
+
+    The CHECK constraint update (adding 'reverted' to status) does not
+    require a rebuild — SQLite allows inserts with new values once the
+    schema is re-run, but existing rows won't have constraint re-checked.
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(learnings)").fetchall()}
+    alters = []
+    if "commit_hash" not in cols:
+        alters.append("ALTER TABLE learnings ADD COLUMN commit_hash TEXT")
+    if "reverted_at" not in cols:
+        alters.append("ALTER TABLE learnings ADD COLUMN reverted_at TEXT")
+    if "revert_reason" not in cols:
+        alters.append("ALTER TABLE learnings ADD COLUMN revert_reason TEXT")
+    if alters:
+        with conn:
+            for sql in alters:
+                conn.execute(sql)
 
 
 def get_conn(path: Optional[Path] = None) -> sqlite3.Connection:
@@ -169,9 +199,17 @@ def update_learning_status(
     learning_id: str,
     status: str,
     *,
+    revert_reason: Optional[str] = None,
+    commit_hash: Optional[str] = None,
     conn: Optional[sqlite3.Connection] = None,
 ) -> None:
-    """Transition a learning to *status* (pending/approved/rejected/indexed)."""
+    """Transition a learning to *status*.
+
+    Valid statuses: pending, approved, rejected, indexed, reverted.
+
+    For status='reverted', pass *revert_reason* (short explanation) and
+    optionally *commit_hash* (the commit where the learning was backed out).
+    """
     conn = conn or get_conn()
     now = _now_iso()
     extras: dict[str, Any] = {}
@@ -179,6 +217,12 @@ def update_learning_status(
         extras["approved_at"] = now
     elif status == "indexed":
         extras["indexed_at"] = now
+    elif status == "reverted":
+        extras["reverted_at"] = now
+        if revert_reason is not None:
+            extras["revert_reason"] = revert_reason
+    if commit_hash is not None:
+        extras["commit_hash"] = commit_hash
 
     set_parts = ["status = ?"]
     params: list[Any] = [status]
@@ -192,7 +236,12 @@ def update_learning_status(
             f"UPDATE learnings SET {', '.join(set_parts)} WHERE id = ?",
             params,
         )
-    add_event("status_change", learning_id, {"new_status": status}, conn=conn)
+    details: dict[str, Any] = {"new_status": status}
+    if revert_reason:
+        details["revert_reason"] = revert_reason
+    if commit_hash:
+        details["commit_hash"] = commit_hash
+    add_event("status_change", learning_id, details, conn=conn)
 
 
 def get_pending_learnings(
