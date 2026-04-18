@@ -113,6 +113,10 @@ def init_db(path: Optional[Path] = None) -> sqlite3.Connection:
 
     The connection is cached per path so callers can simply call
     ``init_db()`` repeatedly without opening duplicate handles.
+
+    On first DB creation we also scan for legacy v2 YAML state and print a
+    one-line reminder pointing users at ``migrate_v2.py``. The scan is a
+    cheap ``Path.is_file`` check and is skipped once the DB exists.
     """
     if path is None:
         path = _db_path()
@@ -120,6 +124,8 @@ def init_db(path: Optional[Path] = None) -> sqlite3.Connection:
     key = str(path)
     if key in _CONN_CACHE:
         return _CONN_CACHE[key]
+
+    fresh_db = not path.is_file()
 
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path))
@@ -130,7 +136,52 @@ def init_db(path: Optional[Path] = None) -> sqlite3.Connection:
     _migrate_schema(conn)
 
     _CONN_CACHE[key] = conn
+
+    if fresh_db:
+        _warn_if_legacy_state_exists()
+
     return conn
+
+
+def _warn_if_legacy_state_exists() -> None:
+    """
+    Print a reminder if v2 YAML state is still on disk.
+
+    Deliberately best-effort: any import/IO error is swallowed so DB init
+    never fails because of warning logic. We don't auto-migrate — requiring
+    an explicit ``migrate_v2.py --execute`` keeps user state safe.
+    """
+    try:
+        home = Path.home()
+        candidates = (
+            home / ".claude" / "session" / "reflect-state.yaml",
+            home / ".claude" / "session" / "reflect-metrics.yaml",
+            home / ".claude" / "session" / "learnings.yaml",
+            home / ".reflect" / "reflect-state.yaml",
+            home / ".reflect" / "reflect-metrics.yaml",
+            home / ".reflect" / "learnings.yaml",
+        )
+        found = [c for c in candidates if c.is_file()]
+        # Also flag a non-empty legacy reflections dir.
+        refl_dir = home / ".claude" / "reflections"
+        legacy_reflections = (
+            refl_dir.is_dir()
+            and any(refl_dir.rglob("*.md"))
+        )
+        if not found and not legacy_reflections:
+            return
+        script = Path(__file__).resolve().parent / "migrate_v2.py"
+        import sys as _sys
+        msg = (
+            "[reflect] Legacy v2 state detected ("
+            f"{len(found)} YAML file(s)"
+            + (", reflections/ present" if legacy_reflections else "")
+            + "). "
+            "Run: python3 " + str(script) + " --execute"
+        )
+        print(msg, file=_sys.stderr)
+    except Exception:  # noqa: BLE001 - warnings must never raise
+        return
 
 
 def _migrate_schema(conn: sqlite3.Connection) -> None:
