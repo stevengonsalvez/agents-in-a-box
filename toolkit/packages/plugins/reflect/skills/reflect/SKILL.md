@@ -121,6 +121,14 @@ See `references/classification_rules.md` for behavioral vs knowledge routing.
 | `ui-patterns` | Frontend patterns, CSS |
 | `tooling-setup` | Dev environment, configs |
 
+**Knowledge note references** (absorbed from compound-docs):
+- `references/docs-solutions-template.md` -- template for project-local
+  `docs/solutions/{category}/{filename}.md` notes with YAML frontmatter
+- `references/critical-patterns.md` -- check for critical patterns that
+  must always be flagged (auth, data integrity, security)
+- `references/schema.yaml` -- JSON-schema describing valid knowledge notes
+- `assets/learning_template.md` -- canonical template for new learnings
+
 ### Step 3: Check for Skill-Worthy Signals
 
 Some learnings should become new skills rather than agent updates or notes.
