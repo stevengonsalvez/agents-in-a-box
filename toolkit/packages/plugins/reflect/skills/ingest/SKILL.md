@@ -189,19 +189,43 @@ provenance:
 
 **B. Entity sidecar** (`~/.learnings/documents/learnings/{id}.entities.yaml`):
 
-Extract entities from the content:
+Required schema — every field below is mandatory except `strength` (defaults to 5).
+The `learnings add --entities` CLI enforces this via `entity_store.Entity` and will
+raise `KeyError` if any required key is missing.
+
+```yaml
+document_id: lrn-{slug}-{hash6}
+extracted_at: "{ISO-8601 timestamp}"
+entities:
+  - name: "{canonical lowercase name}"
+    type: technology | error | pattern | function | concept | tool
+    description: "{brief one-line description}"      # REQUIRED
+relationships:
+  - source: "{entity A name}"                        # NOT 'from'
+    target: "{entity B name}"                        # NOT 'to'
+    type: caused_by | solves | requires | relates_to
+    description: "{how they relate}"                 # REQUIRED
+    strength: 1-10                                   # optional, default 5
+```
+
+Entity type hints by memory kind:
 - Tools, frameworks, libraries → `technology`
 - Patterns, anti-patterns → `pattern`
 - Errors, gotchas → `error`
 - Functions, APIs → `function`
 - Concepts → `concept`
 
-Include relationships:
+Relationship hints by memory kind:
 - feedback: `solves` or `relates_to`
 - project: `requires` or `relates_to`
 - reference: `relates_to` to external resources
 
-See `references/knowledge_format.md` for full entity/relationship types.
+Validate before writing:
+```bash
+python3 {{HOME_TOOL_DIR}}/skills/reflect/scripts/validate_sidecar.py "$SIDECAR_PATH"
+```
+
+See `references/knowledge_format.md` for the full entity/relationship type reference.
 
 ### Step 5: Present Summary for Approval
 

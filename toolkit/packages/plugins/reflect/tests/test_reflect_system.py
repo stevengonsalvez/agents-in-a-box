@@ -482,6 +482,55 @@ class ReflectSystemTest(unittest.TestCase):
         self.assertIn("qmd", help_out.stdout.lower() + help_out.stderr.lower())
 
     # ---------------------------------------------------------------
+    # 13. Sidecar validator catches the exact contract breaks that
+    #     would make `learnings add` fail. This guards issue #41.
+    # ---------------------------------------------------------------
+    def test_13_validate_sidecar_enforces_cli_contract(self) -> None:
+        # pyyaml is not in this test script's deps, so import lazily and
+        # skip if unavailable. The validator script itself declares the dep.
+        try:
+            import yaml  # noqa: F401
+        except ImportError:
+            self.skipTest("pyyaml not available in the test interpreter")
+
+        from validate_sidecar import validate
+
+        good = self.sandbox / "good.entities.yaml"
+        good.write_text(
+            "document_id: lrn-x\n"
+            "extracted_at: '2026-04-20T12:00:00Z'\n"
+            "entities:\n"
+            "  - name: uv\n"
+            "    type: tool\n"
+            "    description: fast python installer\n"
+            "relationships:\n"
+            "  - source: uv\n"
+            "    target: pip\n"
+            "    type: relates_to\n"
+            "    description: uv replaces pip\n"
+        )
+        self.assertEqual(validate(good), [], "valid sidecar must pass")
+
+        bad = self.sandbox / "bad.entities.yaml"
+        bad.write_text(
+            "entities:\n"
+            "  - name: uv\n"
+            "    type: tool\n"              # missing description
+            "relationships:\n"
+            "  - from: uv\n"                # wrong key
+            "    to: pip\n"                 # wrong key
+            "    type: relates_to\n"
+        )
+        errs = validate(bad)
+        self.assertTrue(errs, "broken sidecar must fail")
+        joined = "\n".join(errs)
+        self.assertIn("description", joined, "must flag missing description")
+        self.assertIn("source", joined.lower(),
+                      "must flag missing source or mention source/target fix")
+        self.assertIn("`from`/`to`", joined,
+                      "must detect the from/to mistake specifically")
+
+    # ---------------------------------------------------------------
     # 10. migrate_v2: synthesize v2 state -> import -> verify
     # ---------------------------------------------------------------
     def test_10_migrate_v2_imports_legacy_state(self) -> None:

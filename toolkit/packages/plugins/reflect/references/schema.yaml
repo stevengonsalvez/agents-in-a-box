@@ -134,3 +134,57 @@ properties:
       - high      # Significant impact
       - medium    # Noticeable but workable
       - low       # Minor inconvenience
+
+# ---------------------------------------------------------------------------
+# Entity Sidecar Schema (.entities.yaml)
+# ---------------------------------------------------------------------------
+# Companion to the learning .md note. Mirrors the contract enforced by
+# ~/.learnings/cli/entity_store.py::DocumentEntities.from_yaml. Use
+# scripts/validate_sidecar.py to check a sidecar before indexing.
+sidecar_schema:
+  type: object
+  properties:
+    document_id:
+      type: string
+      description: "Learning id, typically lrn-{slug}-{hash6}"
+    extracted_at:
+      type: string
+      format: date-time
+    entities:
+      type: array
+      items:
+        type: object
+        required: [name, type, description]
+        properties:
+          name:
+            type: string
+            description: "Canonical lowercase entity name"
+          type:
+            type: string
+            enum: [technology, error, pattern, function, concept, tool]
+          description:
+            type: string
+            description: "Brief one-line description of the entity"
+    relationships:
+      type: array
+      items:
+        type: object
+        required: [source, target, type, description]
+        properties:
+          source:
+            type: string
+            description: "Entity name on the 'from' side of the relationship"
+          target:
+            type: string
+            description: "Entity name on the 'to' side of the relationship"
+          type:
+            type: string
+            enum: [caused_by, solves, requires, relates_to]
+          description:
+            type: string
+            description: "How the two entities relate"
+          strength:
+            type: integer
+            minimum: 1
+            maximum: 10
+            default: 5
