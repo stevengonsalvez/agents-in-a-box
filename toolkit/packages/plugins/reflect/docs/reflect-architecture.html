@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Reflect Plugin v3.0 — Architecture</title>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'JetBrains Mono', monospace; background: #020617; min-height: 100vh; padding: 1.5rem; color: white; }
+    .container { max-width: 1600px; margin: 0 auto; }
+    .header { margin-bottom: 1.5rem; }
+    .header-row { display: flex; align-items: center; gap: 1rem; margin-bottom: 0.5rem; }
+    .pulse-dot { width: 12px; height: 12px; background: #22d3ee; border-radius: 50%; animation: pulse 2s infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+    h1 { font-size: 1.4rem; font-weight: 700; letter-spacing: -0.025em; }
+    .subtitle { color: #94a3b8; font-size: 0.8rem; margin-left: 1.75rem; }
+    .diagram-container { background: rgba(15, 23, 42, 0.5); border-radius: 1rem; border: 1px solid #1e293b; padding: 1rem; overflow-x: auto; margin-bottom: 1.5rem; }
+    svg { width: 100%; min-width: 1200px; display: block; }
+    .section-title { margin: 2rem 0 1rem; font-size: 1rem; font-weight: 700; color: #e2e8f0; border-bottom: 1px solid #1e293b; padding-bottom: 0.5rem; }
+    .footer { text-align: center; margin-top: 1.5rem; color: #475569; font-size: 0.7rem; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="header-row">
+        <div class="pulse-dot"></div>
+        <h1>Reflect Plugin v3.0 — System Architecture</h1>
+      </div>
+      <p class="subtitle">Plugin source: toolkit/packages/plugins/reflect/ &nbsp;|&nbsp; State: ~/.reflect/ &nbsp;|&nbsp; Index: ~/.learnings/</p>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- DIAGRAM 1: Command Overview + Data Flow                      -->
+    <!-- ============================================================ -->
+    <div class="diagram-container">
+      <svg viewBox="0 0 1400 520">
+        <defs>
+          <marker id="a1" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#64748b"/></marker>
+          <marker id="a-cyan" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#22d3ee"/></marker>
+          <marker id="a-green" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#34d399"/></marker>
+          <marker id="a-violet" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#a78bfa"/></marker>
+          <marker id="a-orange" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#fb923c"/></marker>
+          <marker id="a-rose" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#fb7185"/></marker>
+          <marker id="a-amber" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#fbbf24"/></marker>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M 40 0 L 0 0 0 40" fill="none" stroke="#0f172a" stroke-width="0.5"/></pattern>
+        </defs>
+        <rect width="100%" height="100%" fill="url(#grid)"/>
+
+        <!-- Title -->
+        <text x="20" y="28" fill="#e2e8f0" font-size="13" font-weight="700" font-family="JetBrains Mono">THREE COMMANDS — WHAT EACH DOES</text>
+        <line x1="20" y1="36" x2="1380" y2="36" stroke="#1e293b" stroke-width="1"/>
+
+        <!-- ====== ROW 1: /reflect ====== -->
+        <!-- Command label -->
+        <rect x="20" y="52" width="120" height="40" rx="6" fill="#0f172a"/>
+        <rect x="20" y="52" width="120" height="40" rx="6" fill="rgba(8, 51, 68, 0.6)" stroke="#22d3ee" stroke-width="2"/>
+        <text x="80" y="76" fill="#22d3ee" font-size="13" font-weight="700" text-anchor="middle" font-family="JetBrains Mono">/reflect</text>
+
+        <!-- Arrow -->
+        <line x1="145" y1="72" x2="175" y2="72" stroke="#22d3ee" stroke-width="2" marker-end="url(#a-cyan)"/>
+
+        <!-- Step 1: Scan -->
+        <rect x="180" y="50" width="180" height="44" rx="6" fill="#0f172a"/>
+        <rect x="180" y="50" width="180" height="44" rx="6" fill="rgba(30, 41, 59, 0.5)" stroke="#475569" stroke-width="1.5"/>
+        <text x="270" y="68" fill="white" font-size="10" font-weight="600" text-anchor="middle" font-family="JetBrains Mono">Scan Conversation</text>
+        <text x="270" y="84" fill="#94a3b8" font-size="8" text-anchor="middle" font-family="JetBrains Mono">signal_detector.py • HIGH/MED/LOW</text>
+
+        <line x1="365" y1="72" x2="395" y2="72" stroke="#475569" stroke-width="1.5" marker-end="url(#a1)"/>
+
+        <!-- Step 2: Classify -->
+        <rect x="400" y="50" width="180" height="44" rx="6" fill="#0f172a"/>
+        <rect x="400" y="50" width="180" height="44" rx="6" fill="rgba(30, 41, 59, 0.5)" stroke="#475569" stroke-width="1.5"/>
+        <text x="490" y="68" fill="white" font-size="10" font-weight="600" text-anchor="middle" font-family="JetBrains Mono">Classify + Route</text>
+        <text x="490" y="84" fill="#94a3b8" font-size="8" text-anchor="middle" font-family="JetBrains Mono">classification_rules.md</text>
+
+        <!-- Branch to two outputs -->
+        <line x1="585" y1="62" x2="640" y2="62" stroke="#34d399" stroke-width="1.5" marker-end="url(#a-green)"/>
+        <line x1="585" y1="82" x2="640" y2="82" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#a-violet)"/>
+
+        <!-- Output A: Agent Updates -->
+        <rect x="645" y="42" width="300" height="30" rx="5" fill="#0f172a"/>
+        <rect x="645" y="42" width="300" height="30" rx="5" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="655" y="62" fill="#34d399" font-size="9" font-weight="600" font-family="JetBrains Mono">Behavioral →</text>
+        <text x="745" y="62" fill="white" font-size="9" font-family="JetBrains Mono">propose diffs to agent .md files</text>
+
+        <!-- Output B: Knowledge Notes -->
+        <rect x="645" y="76" width="300" height="30" rx="5" fill="#0f172a"/>
+        <rect x="645" y="76" width="300" height="30" rx="5" fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="655" y="96" fill="#a78bfa" font-size="9" font-weight="600" font-family="JetBrains Mono">Knowledge →</text>
+        <text x="745" y="96" fill="white" font-size="9" font-family="JetBrains Mono">.md + .entities.yaml → learnings add</text>
+
+        <!-- Destinations -->
+        <line x1="950" y1="57" x2="1010" y2="57" stroke="#34d399" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#a-green)"/>
+        <rect x="1015" y="42" width="360" height="30" rx="5" fill="rgba(6, 78, 59, 0.15)" stroke="#34d399" stroke-width="1" stroke-dasharray="3,3"/>
+        <text x="1025" y="62" fill="#34d399" font-size="9" font-family="JetBrains Mono">~/.claude/agents/backend-developer.md, code-reviewer.md ...</text>
+
+        <line x1="950" y1="91" x2="1010" y2="91" stroke="#a78bfa" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#a-violet)"/>
+        <rect x="1015" y="76" width="360" height="30" rx="5" fill="rgba(76, 29, 149, 0.15)" stroke="#a78bfa" stroke-width="1" stroke-dasharray="3,3"/>
+        <text x="1025" y="96" fill="#a78bfa" font-size="9" font-family="JetBrains Mono">~/.learnings/documents/learnings/*.md + *.entities.yaml</text>
+
+        <!-- ====== ROW 2: /reflect:consolidate ====== -->
+        <rect x="20" y="140" width="120" height="58" rx="6" fill="#0f172a"/>
+        <rect x="20" y="140" width="120" height="58" rx="6" fill="rgba(251, 146, 60, 0.4)" stroke="#fb923c" stroke-width="2"/>
+        <text x="80" y="162" fill="#fb923c" font-size="11" font-weight="700" text-anchor="middle" font-family="JetBrains Mono">/reflect:</text>
+        <text x="80" y="178" fill="#fb923c" font-size="11" font-weight="700" text-anchor="middle" font-family="JetBrains Mono">consolidate</text>
+
+        <line x1="145" y1="169" x2="175" y2="169" stroke="#fb923c" stroke-width="2" marker-end="url(#a-orange)"/>
+
+        <!-- Step 1: Discover -->
+        <rect x="180" y="130" width="180" height="80" rx="6" fill="#0f172a"/>
+        <rect x="180" y="130" width="180" height="80" rx="6" fill="rgba(251, 146, 60, 0.2)" stroke="#fb923c" stroke-width="1.5"/>
+        <text x="270" y="150" fill="white" font-size="10" font-weight="600" text-anchor="middle" font-family="JetBrains Mono">memory_discovery.py</text>
+        <text x="270" y="166" fill="#fb923c" font-size="8" text-anchor="middle" font-family="JetBrains Mono">4 providers auto-detect</text>
+        <text x="270" y="180" fill="#94a3b8" font-size="8" text-anchor="middle" font-family="JetBrains Mono">discover | stats | cleanup</text>
+        <text x="270" y="198" fill="#94a3b8" font-size="7" text-anchor="middle" font-family="JetBrains Mono">→ DiscoveredMemory objects</text>
+
+        <line x1="365" y1="169" x2="395" y2="169" stroke="#fb923c" stroke-width="1.5" marker-end="url(#a-orange)"/>
+
+        <!-- Step 2: Dedup -->
+        <rect x="400" y="140" width="180" height="60" rx="6" fill="#0f172a"/>
+        <rect x="400" y="140" width="180" height="60" rx="6" fill="rgba(30, 41, 59, 0.5)" stroke="#475569" stroke-width="1.5"/>
+        <text x="490" y="160" fill="white" font-size="10" font-weight="600" text-anchor="middle" font-family="JetBrains Mono">Dedup + Classify</text>
+        <text x="490" y="176" fill="#94a3b8" font-size="8" text-anchor="middle" font-family="JetBrains Mono">content_hash check vs DB</text>
+        <text x="490" y="192" fill="#94a3b8" font-size="8" text-anchor="middle" font-family="JetBrains Mono">provenance: tool, path, hash</text>
+
+        <line x1="585" y1="158" x2="640" y2="158" stroke="#fb923c" stroke-width="1.5" marker-end="url(#a-orange)"/>
+        <line x1="585" y1="178" x2="640" y2="178" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#a-violet)"/>
+
+        <!-- Output A: Project memory -->
+        <rect x="645" y="140" width="300" height="30" rx="5" fill="#0f172a"/>
+        <rect x="645" y="140" width="300" height="30" rx="5" fill="rgba(251, 146, 60, 0.2)" stroke="#fb923c" stroke-width="1.5"/>
+        <text x="655" y="160" fill="#fb923c" font-size="9" font-weight="600" font-family="JetBrains Mono">Project →</text>
+        <text x="725" y="160" fill="white" font-size="9" font-family="JetBrains Mono">.agents/MEMORY.md (git-tracked, 200 lines)</text>
+
+        <!-- Output B: Global index -->
+        <rect x="645" y="174" width="300" height="30" rx="5" fill="#0f172a"/>
+        <rect x="645" y="174" width="300" height="30" rx="5" fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="655" y="194" fill="#a78bfa" font-size="9" font-weight="600" font-family="JetBrains Mono">Global →</text>
+        <text x="715" y="194" fill="white" font-size="9" font-family="JetBrains Mono">learnings add → GraphRAG + QMD index</text>
+
+        <!-- Destination paths -->
+        <line x1="950" y1="155" x2="1010" y2="155" stroke="#fb923c" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#a-orange)"/>
+        <rect x="1015" y="140" width="360" height="30" rx="5" fill="rgba(251, 146, 60, 0.1)" stroke="#fb923c" stroke-width="1" stroke-dasharray="3,3"/>
+        <text x="1025" y="160" fill="#fb923c" font-size="9" font-family="JetBrains Mono">&lt;repo&gt;/.agents/MEMORY.md (per project, in git)</text>
+
+        <line x1="950" y1="189" x2="1010" y2="189" stroke="#a78bfa" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#a-violet)"/>
+        <rect x="1015" y="174" width="360" height="30" rx="5" fill="rgba(76, 29, 149, 0.1)" stroke="#a78bfa" stroke-width="1" stroke-dasharray="3,3"/>
+        <text x="1025" y="194" fill="#a78bfa" font-size="9" font-family="JetBrains Mono">~/.learnings/nano_graphrag_cache/ + ~/.cache/qmd/</text>
+
+        <!-- ====== ROW 3: /reflect:status ====== -->
+        <rect x="20" y="240" width="120" height="50" rx="6" fill="#0f172a"/>
+        <rect x="20" y="240" width="120" height="50" rx="6" fill="rgba(136, 19, 55, 0.5)" stroke="#fb7185" stroke-width="2"/>
+        <text x="80" y="260" fill="#fb7185" font-size="11" font-weight="700" text-anchor="middle" font-family="JetBrains Mono">/reflect:</text>
+        <text x="80" y="276" fill="#fb7185" font-size="11" font-weight="700" text-anchor="middle" font-family="JetBrains Mono">status</text>
+
+        <line x1="145" y1="265" x2="175" y2="265" stroke="#fb7185" stroke-width="2" marker-end="url(#a-rose)"/>
+
+        <!-- Step 1: Read DB -->
+        <rect x="180" y="240" width="180" height="50" rx="6" fill="#0f172a"/>
+        <rect x="180" y="240" width="180" height="50" rx="6" fill="rgba(136, 19, 55, 0.2)" stroke="#fb7185" stroke-width="1.5"/>
+        <text x="270" y="260" fill="white" font-size="10" font-weight="600" text-anchor="middle" font-family="JetBrains Mono">Read reflect.db</text>
+        <text x="270" y="278" fill="#fb7185" font-size="8" text-anchor="middle" font-family="JetBrains Mono">~/.reflect/reflect.db (SQLite)</text>
+
+        <line x1="365" y1="265" x2="395" y2="265" stroke="#fb7185" stroke-width="1.5" marker-end="url(#a-rose)"/>
+
+        <!-- Step 2: Display -->
+        <rect x="400" y="235" width="540" height="60" rx="6" fill="#0f172a"/>
+        <rect x="400" y="235" width="540" height="60" rx="6" fill="rgba(30, 41, 59, 0.5)" stroke="#475569" stroke-width="1.5"/>
+        <text x="410" y="255" fill="white" font-size="10" font-weight="600" font-family="JetBrains Mono">Dashboard Output:</text>
+        <text x="410" y="272" fill="#94a3b8" font-size="9" font-family="JetBrains Mono">Pending reviews: 3 &nbsp;|&nbsp; Sidecar coverage: 222/222 (100%) &nbsp;|&nbsp; Approve / Reject pending</text>
+        <text x="410" y="288" fill="#94a3b8" font-size="9" font-family="JetBrains Mono">GraphRAG: 347 nodes, 368 edges, 10 communities &nbsp;|&nbsp; QMD: 1486 files, 4680 vectors</text>
+
+        <!-- ================================================================= -->
+        <!-- STORAGE MAP - Where everything lives on disk                      -->
+        <!-- ================================================================= -->
+        <text x="20" y="340" fill="#e2e8f0" font-size="13" font-weight="700" font-family="JetBrains Mono">WHERE EVERYTHING LIVES</text>
+        <line x1="20" y1="348" x2="1380" y2="348" stroke="#1e293b" stroke-width="1"/>
+
+        <!-- Column 1: Plugin Source -->
+        <rect x="20" y="360" width="320" height="145" rx="8" fill="#0f172a"/>
+        <rect x="20" y="360" width="320" height="145" rx="8" fill="rgba(8, 51, 68, 0.15)" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="35" y="382" fill="#22d3ee" font-size="10" font-weight="700" font-family="JetBrains Mono">PLUGIN SOURCE</text>
+        <text x="35" y="400" fill="#94a3b8" font-size="8" font-family="JetBrains Mono">toolkit/packages/plugins/reflect/</text>
+        <text x="45" y="418" fill="#64748b" font-size="8" font-family="JetBrains Mono">├── .claude-plugin/plugin.json</text>
+        <text x="45" y="432" fill="#22d3ee" font-size="8" font-family="JetBrains Mono">├── skills/reflect/SKILL.md</text>
+        <text x="45" y="446" fill="#fb923c" font-size="8" font-family="JetBrains Mono">├── skills/consolidate/SKILL.md</text>
+        <text x="45" y="460" fill="#fb7185" font-size="8" font-family="JetBrains Mono">├── skills/status/SKILL.md</text>
+        <text x="45" y="474" fill="#34d399" font-size="8" font-family="JetBrains Mono">├── scripts/*.py  providers/*.py</text>
+        <text x="45" y="488" fill="#fbbf24" font-size="8" font-family="JetBrains Mono">├── reflect.toml  references/</text>
+        <text x="45" y="500" fill="#64748b" font-size="8" font-family="JetBrains Mono">└── hooks/  assets/  data/</text>
+
+        <!-- Column 2: Runtime State -->
+        <rect x="360" y="360" width="320" height="145" rx="8" fill="#0f172a"/>
+        <rect x="360" y="360" width="320" height="145" rx="8" fill="rgba(76, 29, 149, 0.15)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="375" y="382" fill="#a78bfa" font-size="10" font-weight="700" font-family="JetBrains Mono">RUNTIME STATE + INDEX</text>
+        <text x="375" y="400" fill="#a78bfa" font-size="8" font-weight="600" font-family="JetBrains Mono">~/.reflect/</text>
+        <text x="385" y="418" fill="#94a3b8" font-size="8" font-family="JetBrains Mono">├── reflect.db          SQLite (WAL)</text>
+        <text x="385" y="432" fill="#94a3b8" font-size="8" font-family="JetBrains Mono">├── reflect.toml        user overrides</text>
+        <text x="385" y="446" fill="#94a3b8" font-size="8" font-family="JetBrains Mono">└── episodes/           episode notes</text>
+        <text x="375" y="466" fill="#a78bfa" font-size="8" font-weight="600" font-family="JetBrains Mono">~/.learnings/</text>
+        <text x="385" y="484" fill="#94a3b8" font-size="8" font-family="JetBrains Mono">├── documents/          222 .md + .yaml</text>
+        <text x="385" y="498" fill="#94a3b8" font-size="8" font-family="JetBrains Mono">├── nano_graphrag_cache/ 347n/368e</text>
+        <text x="375" y="512" fill="#a78bfa" font-size="8" font-weight="600" font-family="JetBrains Mono">~/.cache/qmd/           1486 files</text>
+
+        <!-- Column 3: Memory Sources (what providers read) -->
+        <rect x="700" y="360" width="330" height="145" rx="8" fill="#0f172a"/>
+        <rect x="700" y="360" width="330" height="145" rx="8" fill="rgba(251, 146, 60, 0.12)" stroke="#fb923c" stroke-width="1.5"/>
+        <text x="715" y="382" fill="#fb923c" font-size="10" font-weight="700" font-family="JetBrains Mono">MEMORY SOURCES (4 providers read)</text>
+        <text x="725" y="400" fill="#22d3ee" font-size="8" font-family="JetBrains Mono">Claude  ~/.claude/projects/*/memory/MEMORY.md</text>
+        <text x="725" y="418" fill="#34d399" font-size="8" font-family="JetBrains Mono">Codex   ~/.codex/memories/*.md</text>
+        <text x="725" y="432" fill="#34d399" font-size="8" font-family="JetBrains Mono">        ~/.codex/AGENTS.md</text>
+        <text x="725" y="450" fill="#fb7185" font-size="8" font-family="JetBrains Mono">Copilot ~/.copilot/AGENTS.md</text>
+        <text x="725" y="464" fill="#fb7185" font-size="8" font-family="JetBrains Mono">        (cloud memory: server-side only)</text>
+        <text x="725" y="482" fill="#fbbf24" font-size="8" font-family="JetBrains Mono">Gemini  ~/.gemini/GEMINI.md</text>
+        <text x="725" y="496" fill="#fbbf24" font-size="8" font-family="JetBrains Mono">        &lt;project&gt;/GEMINI.md</text>
+
+        <!-- Column 4: Output Destinations -->
+        <rect x="1050" y="360" width="330" height="145" rx="8" fill="#0f172a"/>
+        <rect x="1050" y="360" width="330" height="145" rx="8" fill="rgba(6, 78, 59, 0.12)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="1065" y="382" fill="#34d399" font-size="10" font-weight="700" font-family="JetBrains Mono">OUTPUT DESTINATIONS</text>
+        <text x="1075" y="400" fill="#34d399" font-size="8" font-family="JetBrains Mono">Agent diffs:</text>
+        <text x="1085" y="414" fill="#94a3b8" font-size="8" font-family="JetBrains Mono">~/.claude/agents/*.md</text>
+        <text x="1075" y="434" fill="#a78bfa" font-size="8" font-family="JetBrains Mono">Knowledge notes:</text>
+        <text x="1085" y="448" fill="#94a3b8" font-size="8" font-family="JetBrains Mono">~/.learnings/documents/learnings/</text>
+        <text x="1085" y="462" fill="#94a3b8" font-size="8" font-family="JetBrains Mono">+ .entities.yaml sidecars</text>
+        <text x="1075" y="482" fill="#fb923c" font-size="8" font-family="JetBrains Mono">Project memory:</text>
+        <text x="1085" y="496" fill="#94a3b8" font-size="8" font-family="JetBrains Mono">&lt;repo&gt;/.agents/MEMORY.md</text>
+        <text x="1085" y="510" fill="#94a3b8" font-size="7" font-family="JetBrains Mono">(git-tracked, 200-line max)</text>
+      </svg>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- DIAGRAM 2: Internal Architecture                             -->
+    <!-- ============================================================ -->
+    <div class="diagram-container">
+      <svg viewBox="0 0 1400 440">
+        <defs>
+          <pattern id="grid2" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M 40 0 L 0 0 0 40" fill="none" stroke="#0f172a" stroke-width="0.5"/></pattern>
+        </defs>
+        <rect width="100%" height="100%" fill="url(#grid2)"/>
+
+        <text x="20" y="28" fill="#e2e8f0" font-size="13" font-weight="700" font-family="JetBrains Mono">INTERNAL ARCHITECTURE — scripts/ directory</text>
+        <line x1="20" y1="36" x2="1380" y2="36" stroke="#1e293b" stroke-width="1"/>
+
+        <!-- Config layer -->
+        <rect x="20" y="52" width="660" height="75" rx="8" fill="rgba(251, 191, 36, 0.06)" stroke="#fbbf24" stroke-width="1" stroke-dasharray="5,3"/>
+        <text x="30" y="47" fill="#fbbf24" font-size="9" font-weight="700" font-family="JetBrains Mono">CONFIG LAYER</text>
+
+        <rect x="35" y="65" width="300" height="50" rx="6" fill="#0f172a"/>
+        <rect x="35" y="65" width="300" height="50" rx="6" fill="rgba(251, 191, 36, 0.15)" stroke="#fbbf24" stroke-width="1.5"/>
+        <text x="185" y="83" fill="white" font-size="10" font-weight="600" text-anchor="middle" font-family="JetBrains Mono">reflect_config.py</text>
+        <text x="185" y="100" fill="#fbbf24" font-size="8" text-anchor="middle" font-family="JetBrains Mono">plugin.toml → ~/.reflect/reflect.toml → ./.reflect.toml → REFLECT_* env</text>
+
+        <rect x="355" y="65" width="310" height="50" rx="6" fill="#0f172a"/>
+        <rect x="355" y="65" width="310" height="50" rx="6" fill="rgba(251, 191, 36, 0.1)" stroke="#fbbf24" stroke-width="1"/>
+        <text x="510" y="80" fill="#fbbf24" font-size="9" font-weight="600" text-anchor="middle" font-family="JetBrains Mono">reflect.toml sections</text>
+        <text x="510" y="97" fill="#94a3b8" font-size="8" text-anchor="middle" font-family="JetBrains Mono">[storage] [discovery] [providers.*] [indexers] [policies] [telemetry]</text>
+
+        <!-- State layer -->
+        <rect x="20" y="145" width="660" height="75" rx="8" fill="rgba(76, 29, 149, 0.06)" stroke="#a78bfa" stroke-width="1" stroke-dasharray="5,3"/>
+        <text x="30" y="140" fill="#a78bfa" font-size="9" font-weight="700" font-family="JetBrains Mono">STATE LAYER — ~/.reflect/reflect.db</text>
+
+        <rect x="35" y="158" width="200" height="50" rx="6" fill="#0f172a"/>
+        <rect x="35" y="158" width="200" height="50" rx="6" fill="rgba(76, 29, 149, 0.3)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="135" y="176" fill="white" font-size="10" font-weight="600" text-anchor="middle" font-family="JetBrains Mono">reflect_db.py</text>
+        <text x="135" y="196" fill="#a78bfa" font-size="8" text-anchor="middle" font-family="JetBrains Mono">SQLite • WAL • transactional</text>
+
+        <rect x="255" y="158" width="410" height="50" rx="6" fill="#0f172a"/>
+        <rect x="255" y="158" width="410" height="50" rx="6" fill="rgba(76, 29, 149, 0.15)" stroke="#a78bfa" stroke-width="1"/>
+        <text x="460" y="173" fill="#a78bfa" font-size="9" font-weight="600" text-anchor="middle" font-family="JetBrains Mono">5 tables</text>
+        <text x="460" y="192" fill="#94a3b8" font-size="9" text-anchor="middle" font-family="JetBrains Mono">learnings | proposals | metrics | events | sources</text>
+
+        <!-- Processing layer -->
+        <rect x="20" y="238" width="660" height="75" rx="8" fill="rgba(6, 78, 59, 0.06)" stroke="#34d399" stroke-width="1" stroke-dasharray="5,3"/>
+        <text x="30" y="233" fill="#34d399" font-size="9" font-weight="700" font-family="JetBrains Mono">PROCESSING LAYER</text>
+
+        <rect x="35" y="252" width="150" height="50" rx="6" fill="#0f172a"/>
+        <rect x="35" y="252" width="150" height="50" rx="6" fill="rgba(6, 78, 59, 0.3)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="110" y="272" fill="white" font-size="9" font-weight="600" text-anchor="middle" font-family="JetBrains Mono">signal_detector</text>
+        <text x="110" y="290" fill="#34d399" font-size="7" text-anchor="middle" font-family="JetBrains Mono">pattern matching</text>
+
+        <rect x="200" y="252" width="150" height="50" rx="6" fill="#0f172a"/>
+        <rect x="200" y="252" width="150" height="50" rx="6" fill="rgba(6, 78, 59, 0.3)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="275" y="272" fill="white" font-size="9" font-weight="600" text-anchor="middle" font-family="JetBrains Mono">output_generator</text>
+        <text x="275" y="290" fill="#34d399" font-size="7" text-anchor="middle" font-family="JetBrains Mono">notes + provenance</text>
+
+        <rect x="365" y="252" width="150" height="50" rx="6" fill="#0f172a"/>
+        <rect x="365" y="252" width="150" height="50" rx="6" fill="rgba(6, 78, 59, 0.3)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="440" y="272" fill="white" font-size="9" font-weight="600" text-anchor="middle" font-family="JetBrains Mono">metrics_updater</text>
+        <text x="440" y="290" fill="#34d399" font-size="7" text-anchor="middle" font-family="JetBrains Mono">SQLite counters</text>
+
+        <rect x="530" y="252" width="140" height="50" rx="6" fill="#0f172a"/>
+        <rect x="530" y="252" width="140" height="50" rx="6" fill="rgba(6, 78, 59, 0.3)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="600" y="272" fill="white" font-size="9" font-weight="600" text-anchor="middle" font-family="JetBrains Mono">state_manager</text>
+        <text x="600" y="290" fill="#34d399" font-size="7" text-anchor="middle" font-family="JetBrains Mono">thin DB wrapper</text>
+
+        <!-- Provider layer -->
+        <rect x="20" y="332" width="660" height="95" rx="8" fill="rgba(251, 146, 60, 0.06)" stroke="#fb923c" stroke-width="1" stroke-dasharray="5,3"/>
+        <text x="30" y="327" fill="#fb923c" font-size="9" font-weight="700" font-family="JetBrains Mono">PROVIDER LAYER — scripts/providers/</text>
+
+        <rect x="35" y="345" width="140" height="70" rx="6" fill="#0f172a"/>
+        <rect x="35" y="345" width="140" height="70" rx="6" fill="rgba(251, 146, 60, 0.2)" stroke="#fb923c" stroke-width="1.5"/>
+        <text x="105" y="365" fill="white" font-size="9" font-weight="600" text-anchor="middle" font-family="JetBrains Mono">BaseProvider</text>
+        <text x="105" y="382" fill="#fb923c" font-size="7" text-anchor="middle" font-family="JetBrains Mono">ABC</text>
+        <text x="105" y="396" fill="#94a3b8" font-size="7" text-anchor="middle" font-family="JetBrains Mono">discover()</text>
+        <text x="105" y="408" fill="#94a3b8" font-size="7" text-anchor="middle" font-family="JetBrains Mono">is_available() cleanup()</text>
+
+        <rect x="195" y="348" width="112" height="64" rx="6" fill="#0f172a"/>
+        <rect x="195" y="348" width="112" height="64" rx="6" fill="rgba(8, 51, 68, 0.3)" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="251" y="368" fill="#22d3ee" font-size="9" font-weight="600" text-anchor="middle" font-family="JetBrains Mono">claude.py</text>
+        <text x="251" y="384" fill="#94a3b8" font-size="7" text-anchor="middle" font-family="JetBrains Mono">~/.claude/</text>
+        <text x="251" y="396" fill="#94a3b8" font-size="7" text-anchor="middle" font-family="JetBrains Mono">projects/*/</text>
+        <text x="251" y="408" fill="#94a3b8" font-size="7" text-anchor="middle" font-family="JetBrains Mono">memory/MEMORY.md</text>
+
+        <rect x="322" y="348" width="112" height="64" rx="6" fill="#0f172a"/>
+        <rect x="322" y="348" width="112" height="64" rx="6" fill="rgba(6, 78, 59, 0.3)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="378" y="368" fill="#34d399" font-size="9" font-weight="600" text-anchor="middle" font-family="JetBrains Mono">codex.py</text>
+        <text x="378" y="384" fill="#94a3b8" font-size="7" text-anchor="middle" font-family="JetBrains Mono">~/.codex/</text>
+        <text x="378" y="396" fill="#94a3b8" font-size="7" text-anchor="middle" font-family="JetBrains Mono">memories/*.md</text>
+        <text x="378" y="408" fill="#94a3b8" font-size="7" text-anchor="middle" font-family="JetBrains Mono">AGENTS.md</text>
+
+        <rect x="449" y="348" width="112" height="64" rx="6" fill="#0f172a"/>
+        <rect x="449" y="348" width="112" height="64" rx="6" fill="rgba(136, 19, 55, 0.3)" stroke="#fb7185" stroke-width="1.5"/>
+        <text x="505" y="368" fill="#fb7185" font-size="9" font-weight="600" text-anchor="middle" font-family="JetBrains Mono">copilot.py</text>
+        <text x="505" y="384" fill="#94a3b8" font-size="7" text-anchor="middle" font-family="JetBrains Mono">~/.copilot/</text>
+        <text x="505" y="396" fill="#94a3b8" font-size="7" text-anchor="middle" font-family="JetBrains Mono">AGENTS.md</text>
+        <text x="505" y="408" fill="#64748b" font-size="6" text-anchor="middle" font-family="JetBrains Mono">(cloud: server-side)</text>
+
+        <rect x="576" y="348" width="96" height="64" rx="6" fill="#0f172a"/>
+        <rect x="576" y="348" width="96" height="64" rx="6" fill="rgba(251, 191, 36, 0.2)" stroke="#fbbf24" stroke-width="1.5"/>
+        <text x="624" y="368" fill="#fbbf24" font-size="9" font-weight="600" text-anchor="middle" font-family="JetBrains Mono">gemini.py</text>
+        <text x="624" y="384" fill="#94a3b8" font-size="7" text-anchor="middle" font-family="JetBrains Mono">~/.gemini/</text>
+        <text x="624" y="396" fill="#94a3b8" font-size="7" text-anchor="middle" font-family="JetBrains Mono">GEMINI.md</text>
+        <text x="624" y="408" fill="#94a3b8" font-size="7" text-anchor="middle" font-family="JetBrains Mono">&lt;proj&gt;/GEMINI.md</text>
+
+        <!-- Right side: External indexing systems with paths -->
+        <rect x="720" y="52" width="660" height="375" rx="10" fill="rgba(76, 29, 149, 0.04)" stroke="#a78bfa" stroke-width="1" stroke-dasharray="5,3"/>
+        <text x="730" y="47" fill="#a78bfa" font-size="9" font-weight="700" font-family="JetBrains Mono">INDEXING BACKENDS — where knowledge is stored and searched</text>
+
+        <!-- GraphRAG -->
+        <rect x="740" y="70" width="310" height="130" rx="8" fill="#0f172a"/>
+        <rect x="740" y="70" width="310" height="130" rx="8" fill="rgba(76, 29, 149, 0.25)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="895" y="92" fill="white" font-size="12" font-weight="700" text-anchor="middle" font-family="JetBrains Mono">GraphRAG</text>
+        <text x="895" y="110" fill="#a78bfa" font-size="9" text-anchor="middle" font-family="JetBrains Mono">nano-graphrag (sentence-transformers)</text>
+        <line x1="760" y1="120" x2="1030" y2="120" stroke="#334155" stroke-width="0.5"/>
+        <text x="760" y="138" fill="#94a3b8" font-size="8" font-family="JetBrains Mono">Path: ~/.learnings/nano_graphrag_cache/</text>
+        <text x="760" y="154" fill="#94a3b8" font-size="8" font-family="JetBrains Mono">  graph_chunk_entity_relation.graphml</text>
+        <text x="760" y="168" fill="#94a3b8" font-size="8" font-family="JetBrains Mono">  vdb_entities.json   vdb_chunks.json</text>
+        <text x="760" y="186" fill="#a78bfa" font-size="9" font-weight="600" font-family="JetBrains Mono">  347 nodes • 368 edges • 10 communities</text>
+
+        <!-- QMD -->
+        <rect x="1070" y="70" width="290" height="130" rx="8" fill="#0f172a"/>
+        <rect x="1070" y="70" width="290" height="130" rx="8" fill="rgba(8, 51, 68, 0.25)" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="1215" y="92" fill="white" font-size="12" font-weight="700" text-anchor="middle" font-family="JetBrains Mono">QMD</text>
+        <text x="1215" y="110" fill="#22d3ee" font-size="9" text-anchor="middle" font-family="JetBrains Mono">BM25 + vector + reranker (GGUF)</text>
+        <line x1="1090" y1="120" x2="1340" y2="120" stroke="#334155" stroke-width="0.5"/>
+        <text x="1090" y="138" fill="#94a3b8" font-size="8" font-family="JetBrains Mono">Path: ~/.cache/qmd/index.sqlite</text>
+        <text x="1090" y="154" fill="#94a3b8" font-size="8" font-family="JetBrains Mono">Collections: learnings, obsidian,</text>
+        <text x="1090" y="168" fill="#94a3b8" font-size="8" font-family="JetBrains Mono">             blog, writing</text>
+        <text x="1090" y="186" fill="#22d3ee" font-size="9" font-weight="600" font-family="JetBrains Mono">  1486 files • 4680 vectors</text>
+
+        <!-- learnings CLI -->
+        <rect x="740" y="220" width="620" height="90" rx="8" fill="#0f172a"/>
+        <rect x="740" y="220" width="620" height="90" rx="8" fill="rgba(30, 41, 59, 0.4)" stroke="#94a3b8" stroke-width="1.5"/>
+        <text x="1050" y="244" fill="white" font-size="12" font-weight="700" text-anchor="middle" font-family="JetBrains Mono">learnings CLI</text>
+        <text x="760" y="264" fill="#94a3b8" font-size="9" font-family="JetBrains Mono">Path: ~/.learnings/cli/learnings  (Python)</text>
+        <line x1="760" y1="274" x2="1340" y2="274" stroke="#334155" stroke-width="0.5"/>
+        <text x="760" y="292" fill="#94a3b8" font-size="9" font-family="JetBrains Mono">learnings add file.md --entities file.entities.yaml    Index a learning with sidecar</text>
+        <text x="760" y="306" fill="#94a3b8" font-size="9" font-family="JetBrains Mono">learnings search "query"                               Search via GraphRAG</text>
+        <text x="760" y="320" fill="#94a3b8" font-size="9" font-family="JetBrains Mono">learnings reindex --force                              Rebuild graph from all docs</text>
+        <text x="760" y="334" fill="#94a3b8" font-size="9" font-family="JetBrains Mono">learnings generate-sidecars                            Backfill missing .entities.yaml</text>
+
+        <!-- Documents -->
+        <rect x="740" y="330" width="620" height="85" rx="8" fill="#0f172a"/>
+        <rect x="740" y="330" width="620" height="85" rx="8" fill="rgba(76, 29, 149, 0.12)" stroke="#a78bfa" stroke-width="1"/>
+        <text x="760" y="352" fill="#a78bfa" font-size="10" font-weight="700" font-family="JetBrains Mono">Document Store: ~/.learnings/documents/</text>
+        <text x="770" y="370" fill="#94a3b8" font-size="8" font-family="JetBrains Mono">├── learnings/     95 .md + 95 .entities.yaml   (bug fixes, patterns, discoveries)</text>
+        <text x="770" y="384" fill="#94a3b8" font-size="8" font-family="JetBrains Mono">├── memories/      74 .md + 74 .entities.yaml   (project-specific context)</text>
+        <text x="770" y="398" fill="#94a3b8" font-size="8" font-family="JetBrains Mono">├── episodes/       9 .md +  9 .entities.yaml   (session summaries)</text>
+        <text x="770" y="412" fill="#a78bfa" font-size="8" font-weight="600" font-family="JetBrains Mono">└── Total: 222 documents, 222 entity sidecars (100% coverage)</text>
+
+      </svg>
+    </div>
+
+    <p class="footer">
+      reflect v3.0.0 &nbsp;|&nbsp; Source: toolkit/packages/plugins/reflect/ &nbsp;|&nbsp; State: ~/.reflect/reflect.db &nbsp;|&nbsp; Index: ~/.learnings/ + ~/.cache/qmd/ &nbsp;|&nbsp; 4 providers &nbsp;|&nbsp; 0 external deps (stdlib only)
+    </p>
+  </div>
+</body>
+</html>
