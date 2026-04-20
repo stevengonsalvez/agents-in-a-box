@@ -1,7 +1,7 @@
 // ABOUTME: Test specifically for session creation UI refresh bug fix
 
-use claude_box::app::events::EventHandler;
-use claude_box::app::{
+use agents_box::app::events::EventHandler;
+use agents_box::app::{
     App,
     state::{NewSessionStep, View},
 };
