@@ -1,202 +1,236 @@
-# AI Coder Rules CLI
+# Toolkit — Portable AI-Agent Skills & Configs
 
-## CLI Usage
+One canonical source. Many AI tools. Write a skill once, install it into Claude Code, Codex, Copilot, Gemini, Hermes, nanoclaw, Amazon Q, Cursor, Cline, Roo, or Clawdhub.
 
-This project provides a CLI tool to help you set up and manage rule files for various AI coding tools (AmazonQ, Cline, Roo, Cursor, Claude Desktop, etc.).
-
-### How to Use
-
-1. **Install dependencies:**
-   ```sh
-   npm install
-   ```
-
-2. **Run the CLI (Interactive - Recommended):**
-   ```sh
-   node create-rule.js
-   ```
-   Then select your tool from the dropdown menu.
-
-3. **Or run non-interactively (for automation):**
-   ```sh
-   node create-rule.js --tool=gemini
-   node create-rule.js --tool=amazonq
-   node create-rule.js --tool=claude-code
-   node create-rule.js --tool=codex
-   ```
-
-4. **Follow the prompts:**
-   - For project-specific tools, enter the target project folder
-   - Select any additional general rules you want to include
-
-### What the CLI Does
-
-**For claude-code (Home Directory Installation):**
-- Copies complete tool setup to your home directory (`~/.claude`)
-- No project folder required - installs globally for the tool
-
-**For codex (Home Directory Installation):**
-- Copies codex configuration and skills to your home directory (`~/.codex`)
-- Optional: pass `--targetFolder=<project>` to add `AGENTS.md` to a project
-
-**For gemini/amazonq (Project-Specific Installation):**
-- Prompts for target project folder
-- Creates workspace-relative directories for tool configuration
-- Generates a `rule-registry.json` describing all copied rules and their metadata
-
-**For other tools (Project-Specific Installation):**
-- Copies the tool's rulestore rule, `rule-interpreter-rule.md`, and `rulestyle-rule.md` to your project's rules directory
-- Prompts for target project folder
-- Generates a `rule-registry.json` describing all copied rules and their metadata
-
-### Tool-Specific Behavior
-
-**claude-code**: 
-- Copies entire `claude-code/` directory to `~/.claude/`
-- Includes: commands, guides, templates, docs, and main CLAUDE.md
-- Status line uses Bun runtime for ultra-fast JS execution with built-in caching
-
-**codex**:
-- Copies codex setup to `~/.codex/` (config + skills/commands/templates/reflections via packages)
-- Writes `AGENTS.md` into `~/.codex/` by default; pass `--targetFolder` to drop it into a project root
-- Generates Codex prompts from commands at `~/.codex/prompts/` (invoke as `/prompts:<name>`)
-- Designed to mirror the claude-code workflow while honoring Codex CLI conventions
-
-**gemini**: 
-- Copies all shared content from `claude-code/` to `PROJECT/.gemini/`
-- Adds tool-specific `GEMINI.md` file
-- Result: Same functionality as claude-code but project-specific
-- Aligns with Gemini CLI's workspace-relative configuration
-
-**amazonq**:
-- Copies rule files to `PROJECT/.amazonq/rules/` (follows AmazonQ's rules pattern)
-- Adds `AmazonQ.md` to project root
-- Includes: `q-rulestore-rule.md`, `rule-interpreter-rule.md`, `rulestyle-rule.md`
-- Follows AmazonQ's workspace-relative `.amazonq/rules/**/*.md` pattern
-
-**Other tools**: Project-specific installation to your chosen directory
+> **← [Back to main README](../README.md)**
 
 ---
 
-## Why This Rule File Structure?
+## Quick start
 
-While plain markdown can be used for rules, this project adopts a more structured approach:
+```bash
+cd toolkit
+npm install
 
-- **XML-like <rule> tags** clearly partition each rule, making it easy for both humans and LLMs to identify the start and end of a rule, even if multiple rules exist in a single file.
-- **Schematic, objective structure** (with required fields like name, description, filters, actions, etc.) ensures every rule is concrete, machine-readable, and less prone to ambiguity or accidental omission.
-- **Frontmatter** provides a consistent place for metadata, making it easy to parse and index rules.
-- **Reduced verbosity and ambiguity:** Markdown alone can become verbose and inconsistent, especially as rules grow in complexity. The enforced structure keeps rules concise, focused, and easy to interpret.
-- **Better for LLMs and automation:** The explicit structure and partitioning make it easier for LLMs and agentic tools to reliably extract, interpret, and apply rules, compared to freeform markdown which may require complex parsing and is more error-prone.
+# Interactive (picks tool from menu)
+node bootstrap.js
 
-This approach balances human readability with machine-actionability, ensuring rules are both easy to write and robust for automated enforcement.
+# Non-interactive (one tool)
+node bootstrap.js --tool=claude-code-4.5
+node bootstrap.js --tool=codex
+node bootstrap.js --tool=copilot
+node bootstrap.js --tool=gemini
+node bootstrap.js --tool=hermes-agent
+node bootstrap.js --tool=nanoclaw
 
----
+# Verify everything landed (read-only)
+node bootstrap.js --tool=claude-code-4.5 --verify
 
-## Rule Structure
-
-Rules in this project follow a standardized format to ensure consistency and compatibility across tools and agentic IDEs.
-
-### Key Rule Files
-
-- **@rulestyle-rule.md**: Defines the required structure and formatting standards for all rule files. Ensures every rule includes a name, description, filters, actions, and (optionally) examples and metadata.
-- **@rule-interpreter-rule.md**: Provides a guide for interpreting the rule schema format, explaining each field and how rules are structured.
-- **@rulestore-rule.md**: Each tool (e.g., AmazonQ, Cline, Roo, Cursor, Claude Desktop) has its own rulestore rule, which defines where rule files for that tool should be placed and how they should be named.
-- **@rule-registry.json**: An auto-generated registry file that lists all rules present in the rules directory, including their paths, globs, and alwaysApply status (parsed from each rule's frontmatter).
-
-### Example Rule File Structure
-
-```markdown
----
-description: Brief rule purpose
-globs: Pattern of files this applies to
-alwaysApply: true/false
----
-# Title
-
-<rule>
-name: unique_rule_name
-description: Detailed explanation of the rule
-filters:
-  - type: [file_extension|content|event]
-    pattern: "regex_pattern"
-actions:
-  - type: [reject|suggest]
-    conditions:
-      - pattern: "regex_pattern"
-        message: "Error or suggestion message"
-examples:
-  - input: |
-      Sample input
-    output: "Expected result"
-metadata:
-  priority: [low|medium|high]
-  version: x.y
-</rule>
+# Install external deps (git-cloned skills, npx-skills, claude plugins)
+bash ~/.claude/setup-external.sh
 ```
 
+**Repeat for each target tool.** Each tool gets its own home directory population (`~/.claude/`, `~/.codex/`, …). Hermes is special — it reads from `~/.claude/skills/` via `skills.external_dirs`, so installing for Claude transitively covers Hermes.
+
 ---
 
-## The Rules Registry
+## What's in `packages/`
 
-The `rule-registry.json` is generated automatically by the CLI. It contains an entry for each rule file in the rules directory, with metadata extracted from the rule's frontmatter. Example:
+The canonical source tree. Everything under `packages/` gets distributed to tool home dirs on `bootstrap`.
 
-```json
-{
-    "rulestore-rule": {
-        "path": ".amazonq/rules/rulestore-rule.md",
-        "globs": ["*-rule.md"],
-        "alwaysApply": true
-    },
-    "rule-interpreter-rule": {
-        "path": ".amazonq/rules/rule-interpreter-rule.md",
-        "globs": ["*-rule.md"],
-        "alwaysApply": true
-    },
-    ...
-}
+```
+packages/
+├── skills/              86 skills — agent-invokable SKILL.md bundles
+├── agents/              37 agents across 6 categories
+│   ├── design/          UI/UX designers
+│   ├── engineering/     backend, frontend, security, perf, code-review
+│   ├── meta/            agentmaker (create new agents)
+│   ├── orchestrators/   tech-lead, project-analyst, team-configurator
+│   ├── swarm/           worker/leader primitives for multi-agent work
+│   └── universal/       backend-developer, frontend-developer, superstar-engineer
+├── utilities/
+│   ├── config/          Shared tool config templates
+│   ├── hooks/           Event hooks (session-start, pre-commit, etc.)
+│   ├── output-styles/   Custom output formatters
+│   ├── reflections/     Session reflection templates
+│   └── utils/           Shell utility libraries
+├── workflows/
+│   └── single-agent/    Guided plan → implement → validate flows
+├── plugins/
+│   └── reflect/         Learning-capture plugin (reflect:capture, reflect:ingest)
+└── knowledge/
+    ├── docs-solutions-template/
+    └── global-learnings-template/
 ```
 
-### Why a Rules Registry?
+### Skills at a glance (86 total, grouped by purpose)
 
-Some agentic IDEs (like Cursor, AmazonQ, etc.) can parse rule files directly using their frontmatter. However, other tools (such as Claude Desktop, Goose, and similar LLM-based tools) cannot natively parse frontmatter or discover rules automatically.
+<details>
+<summary><b>Planning & Workflow</b> (14)</summary>
 
-The `rule-registry.json` provides a machine-readable index of all rules, making it easy for these tools to:
-- Load all available rules into context
-- Reference the correct globs and application logic
-- Prompt the agent to check the relevant rule(s) on every file edit or action
+`plan` · `plan-gh` · `plan-tdd` · `implement` · `validate` · `workflow` · `discuss` · `brainstorm` · `interview` · `critique` · `research` · `handover` · `prime` · `recover-sessions`
+</details>
 
-This ensures consistent rule enforcement and discoverability, regardless of the capabilities of the underlying tool or IDE.
+<details>
+<summary><b>Coding & GitHub</b> (12)</summary>
+
+`coding-agent` · `spawn-agent` · `attach-agent-worktree` · `list-agent-worktrees` · `cleanup-agent-worktree` · `merge-agent-work` · `do-issues` · `gh-issue` · `make-github-issues` · `find-missing-tests` · `commit` · `sync-learnings`
+</details>
+
+<details>
+<summary><b>Multi-agent / Swarm</b> (7)</summary>
+
+`swarm-create` · `swarm-join` · `swarm-status` · `swarm-inbox` · `swarm-shutdown` · `swarm-orchestration` · `swarm-agent-troubleshooting`
+</details>
+
+<details>
+<summary><b>Session & Learning</b> (9)</summary>
+
+`session-info` · `session-metrics` · `session-summary` · `health-check` · `instincts` · `reflect` · `compound-docs` · `global-learnings` · `research-cache`
+</details>
+
+<details>
+<summary><b>Testing</b> (5)</summary>
+
+`expect-test` · `webapp-testing` · `browser-verify` · `test-driven-development` · `mobile-e2e-mcp`
+</details>
+
+<details>
+<summary><b>Design & UI</b> (12)</summary>
+
+`frontend-design` · `frontend-slides` · `liquid-glass` · `tui-style-guide` · `ui-ux-pro-max` · `react-components` · `stitch-design` · `stitch-loop` · `shadcn-ui` · `design-md` · `enhance-prompt` · `remotion` · `remotion-best-practices`
+</details>
+
+<details>
+<summary><b>Dev infra & tooling</b> (10)</summary>
+
+`tmux-monitor` · `tmux-status` · `start-local` · `start-ios` · `start-android` · `expose` · `plugins` · `oracle` · `debug-bridge` · `media-processing`
+</details>
+
+<details>
+<summary><b>Security & Observability</b> (4)</summary>
+
+`security-audit` · `security-scan` · `sentry-cli` · `posthog-replay-analysis`
+</details>
+
+<details>
+<summary><b>Research & Knowledge</b> (3)</summary>
+
+`crypto-research` · `nano-banana-pro` · `notebooklm`
+</details>
+
+<details>
+<summary><b>Productivity</b> (5)</summary>
+
+`resume-formatter` · `ats-resume-matcher` · `retro-pdf` · `skill-creator` · `token-usage`
+</details>
+
+<details>
+<summary><b>Meta / autonomous patterns</b> (5)</summary>
+
+`autonomous-loops` · `agent-ops` · `cost-aware-pipeline` · `scrapling-official` · `fireworks-tech-graph`
+</details>
 
 ---
 
-## Summary
+## External dependencies (`external-dependencies.yaml`)
 
-- Use the CLI to quickly scaffold and manage rules for your AI coding tools.
-- All rules follow a strict, documented structure for maximum compatibility.
-- The rules registry bridges the gap for tools that can't parse frontmatter, ensuring all rules are discoverable and actionable.
+Skills and plugins authored elsewhere, installed by bootstrap into each tool's home dir. Sections in the manifest:
+
+| Section | Install mechanism | Target |
+|---|---|---|
+| `bundled-skills` | (included in `packages/skills/`) | copied by bootstrap |
+| `agent-skills` | `git clone <repo>` | `~/.TOOL/skills/<name>/` |
+| `claude-plugins` | `claude plugin marketplace install` | Claude plugin cache |
+| `npx-skills` | `npx skills add <pkg> --yes` | `~/.agents/skills/` (then symlinked into tool dirs) |
+| `nanoclaw-skills` | Synced from `stevengonsalvez/nanoclaw` container/skills/ | `~/.claude/skills/` (shared with claude-code-4.5) |
+| `security-skills` | Installed into security-focused agents | tool-specific |
+| `mcp-servers` | `claude mcp add` (user scope) | `~/.claude.json` |
+| `mcporter-servers` | `mcporter.json` | `~/.mcporter/` |
+| `marketplaces` | `claude plugin marketplace add` | Claude plugin cache |
+
+### Key manifest flags
+
+- **`applies-to: [claude, codex, copilot, gemini, hermes-agent, nanoclaw]`** — controls which tools install this entry
+- **`catalog-only: true`** — listed for discoverability, never installed (useful for documenting alternatives)
+- **`subpath: <dir>`** — repo has `SKILL.md` under a subdirectory; bootstrap extracts just that
+- **`multi-subpath: <dir>`** — repo bundles multiple skills under `<dir>/<name>/SKILL.md`; bootstrap flattens each as a sibling install
+
+### How bootstrap uses it
+
+1. `node bootstrap.js --tool=X` — writes tool-specific files to `~/.TOOL/` and generates `~/.TOOL/setup-external.sh`
+2. `bash ~/.TOOL/setup-external.sh` — executes the external-install commands (git clones, npx installs, plugin marketplace adds)
+3. `--verify` — checks every applicable manifest entry has its `SKILL.md` at the expected path, reports per-tool parity and orphans
+
+---
+
+## Supported tools
+
+Run `bootstrap.js` with `--tool=<X>`:
+
+| Tool key | Home dir | Notes |
+|---|---|---|
+| `claude-code-4.5` | `~/.claude/` | Primary. Plugins + npx-skills + agent-skills |
+| `codex` | `~/.codex/` | AGENTS.md symlinked to claude-code-4.5/CLAUDE.md |
+| `copilot` | `~/.copilot/` | GitHub Copilot CLI |
+| `gemini` | `~/.gemini/` | Gemini CLI, project-scoped |
+| `hermes-agent` | `~/.hermes/` | Reads from `~/.claude/skills/` via `external_dirs` — no direct external installs needed |
+| `nanoclaw` | `~/.claude/` (shared) | Successor to OpenClaw, uses same Claude dir |
+| `amazonq` | `PROJECT/.amazonq/rules/` | Project-scoped |
+| `cursor` `cline` `roo` | `PROJECT/.<tool>/rules/` | Project-scoped rule files |
+| `clawdhub` | workspace/skills/ | Clawdhub skill format |
+
+---
+
+## Workflow: add a new skill end-to-end
+
+1. **Author** — create `packages/skills/<name>/SKILL.md` with frontmatter `name`, `description`, and a matching body.
+2. **Test locally** — copy to `~/.claude/skills/<name>/` and invoke via the skill harness. (Or just run `node bootstrap.js --tool=claude-code-4.5 --homeDir=$HOME` to reinstall.)
+3. **Propagate** — `node bootstrap.js --tool=<each-target>` for every tool you care about. Or drive all of them in a loop.
+4. **Verify** — `node bootstrap.js --tool=<X> --verify` should report the skill present on every tool in its applies-to.
+5. **Commit** — canonical changes go in `toolkit/packages/skills/<name>/` (note: `.gitignore` has a broad `skills/` rule — use `git add -f` for new skill dirs).
+
+For **externally-authored** skills (git clones), add an entry to `external-dependencies.yaml` under `agent-skills:` and set `applies-to` appropriately. Bootstrap will generate the `git clone` in each tool's `setup-external.sh`.
 
 ---
 
 ## Spec-Driven Development (SDD)
 
-Use the Spec Kit workflow to drive a spec → plan → tasks process via slash commands (Claude Code) or manual scripts.
+Spec Kit integration — drives a spec → plan → tasks workflow via slash commands in Claude Code.
 
-Quickstart (simple):
-- Ensure Git and bash are available (macOS/Linux/WSL). Initialize a repo in your project if needed.
-- Install SDD assets into a project (clones Spec Kit automatically to a temp folder):
-  - `node create-rule.js --sdd --targetFolder=<project>`
-  - Optional: set `SPEC_KIT_REPO` (and `SPEC_KIT_REF`) to point to a fork/branch.
-- Claude Code users: open the project and run `/specify "Your feature"`. Commands are installed at `.claude/commands`.
-- Or run manually:
-  - `bash scripts/create-new-feature.sh --json "Your feature"`
-  - `bash scripts/setup-plan.sh --json` (must be on `^[0-9]{3}-` feature branch)
-  - `bash scripts/check-task-prerequisites.sh --json`
+```bash
+# Install SDD assets into a project (clones Spec Kit to a temp folder)
+node bootstrap.js --sdd --targetFolder=<project>
 
-Artifacts are created under `specs/<feature-branch>/`:
-- `spec.md`, `plan.md`, `research.md`, `data-model.md`, `contracts/`, `quickstart.md`, and `tasks.md`.
+# Then in Claude Code within the project:
+/specify "Your feature"
+/plan
+/tasks
+```
 
-Troubleshooting:
-- Not on feature branch: `/plan` and `/tasks` require a `^[0-9]{3}-` branch (the scripts will error clearly).
-- Scripts not found: Ensure you ran `--sdd` and that `scripts/` exists in your project.
-- Templates missing: Re-run `--sdd`. Existing files with different content are backed up as `.bak`.
-- JSON outputs: All SDD scripts support `--json` and print stable JSON with key paths for automation.
+- `SPEC_KIT_REPO` / `SPEC_KIT_REF` env vars point to a fork/branch
+- Artifacts land under `specs/<feature-branch>/` (spec.md, plan.md, research.md, data-model.md, contracts/, quickstart.md, tasks.md)
+- Works on any `^[0-9]{3}-` feature branch
+
+---
+
+## Rule registry (legacy, for non-frontmatter-aware tools)
+
+For tools that can't parse frontmatter (Claude Desktop, Goose, etc.), bootstrap generates a `rule-registry.json` listing each rule's path, globs, and `alwaysApply` status.
+
+```json
+{
+  "rulestore-rule": { "path": ".amazonq/rules/rulestore-rule.md", "globs": ["*-rule.md"], "alwaysApply": true }
+}
+```
+
+Frontmatter-native tools (Cursor, AmazonQ, Claude Code) use the frontmatter directly and ignore the registry.
+
+---
+
+## References
+
+- **Manifest**: [`external-dependencies.yaml`](external-dependencies.yaml)
+- **Bootstrap source**: [`bootstrap.js`](bootstrap.js)
+- **Parity regression test**: [`test-bootstrap-parity.sh`](test-bootstrap-parity.sh)
+- **Main project README**: [`../README.md`](../README.md)

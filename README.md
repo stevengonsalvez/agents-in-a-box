@@ -84,7 +84,7 @@ Most AI coding setups are a loose collection of dotfiles. This project treats th
 brew tap stevengonsalvez/ainb && brew install ainb
 
 # Install the toolkit for your AI tool
-cd toolkit && npm install && node create-rule.js --tool=claude-code-4.5
+cd toolkit && npm install && node bootstrap.js --tool=claude-code-4.5
 
 # Launch
 ainb
