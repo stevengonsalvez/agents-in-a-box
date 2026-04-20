@@ -357,6 +357,131 @@ class ReflectSystemTest(unittest.TestCase):
             self.assertEqual(len(r["content_hash"]), 16)
 
     # ---------------------------------------------------------------
+    # 11. End-to-end: real `learnings add` into a sandbox LEARNINGS_HOME
+    #     Verifies the capture-side contract with the actual indexer CLI,
+    #     without reindexing (skip GraphRAG embedding to avoid LLM cost).
+    # ---------------------------------------------------------------
+    def test_11_learnings_cli_add_roundtrip(self) -> None:
+        learnings_cli = Path.home() / ".learnings" / "cli" / "learnings"
+        if not learnings_cli.exists():
+            self.skipTest("learnings CLI not installed — skipping integration")
+
+        sb = self.sandbox / "learnings_home"
+        sb.mkdir(parents=True, exist_ok=True)
+        env = {**os.environ, "LEARNINGS_HOME": str(sb)}
+
+        init = subprocess.run(
+            [str(learnings_cli), "init"],
+            capture_output=True, text=True, env=env, cwd=self.sandbox,
+        )
+        self.assertEqual(init.returncode, 0,
+                         f"learnings init failed: {init.stderr}")
+        self.assertTrue(
+            (sb / "documents").exists(),
+            "init must create documents/ root",
+        )
+
+        # Write a synthetic learning note in the format reflect would produce
+        note = self.sandbox / "lrn-test-abc123.md"
+        note.write_text(
+            "---\n"
+            "title: \"Prefer uv over pip for Python deps\"\n"
+            "category: \"tooling\"\n"
+            "type: LEARNING\n"
+            "scope: \"universal\"\n"
+            "confidence: 0.9\n"
+            "key_insight: \"uv resolves 10-100x faster than pip\"\n"
+            "tags: [\"python\", \"tooling\"]\n"
+            "provenance:\n"
+            "  source_tool: \"claude\"\n"
+            "  source_path: \"/fake/mem.md\"\n"
+            "  content_hash: \"abc123def456\"\n"
+            "  ingested_at: \"2026-04-20T12:00:00Z\"\n"
+            "---\n\n"
+            "## Problem\nSlow pip installs.\n\n"
+            "## Solution\nUse `uv pip install`.\n"
+        )
+        sidecar = self.sandbox / "lrn-test-abc123.entities.yaml"
+        # The learnings CLI (entity_store.py) requires a strict schema that
+        # reflect's references/knowledge_format.md documents INCORRECTLY:
+        #   - entities need `description` (docs omit it)
+        #   - relationships use `source`/`target`, NOT `from`/`to` (docs say `from`/`to`)
+        #   - relationships need `description` (docs omit it)
+        # Filing these gaps separately; test uses the real/correct schema.
+        sidecar.write_text(
+            "document_id: lrn-test-abc123\n"
+            "extracted_at: \"2026-04-20T12:00:00Z\"\n"
+            "entities:\n"
+            "  - name: \"uv\"\n"
+            "    type: \"tool\"\n"
+            "    description: \"Fast Python package installer\"\n"
+            "  - name: \"pip\"\n"
+            "    type: \"tool\"\n"
+            "    description: \"Standard Python package installer\"\n"
+            "relationships:\n"
+            "  - source: \"uv\"\n"
+            "    target: \"pip\"\n"
+            "    type: \"relates_to\"\n"
+            "    description: \"uv is a faster drop-in replacement for pip\"\n"
+            "    strength: 8\n"
+        )
+
+        add = subprocess.run(
+            [str(learnings_cli), "add", str(note),
+             "--entities", str(sidecar)],
+            capture_output=True, text=True, env=env, cwd=self.sandbox,
+        )
+        self.assertEqual(add.returncode, 0,
+                         f"learnings add failed: stdout={add.stdout!r} "
+                         f"stderr={add.stderr!r}")
+
+        # Verify the note landed in the sandbox's learnings documents dir
+        landed = list((sb / "documents" / "learnings").glob("*.md"))
+        self.assertTrue(landed, "learnings add must copy note into sandbox")
+
+        # Verify the sidecar also copied next to the note (GraphRAG will consume it
+        # on the next reindex; we skip reindex to avoid requiring OpenAI creds).
+        landed_sidecars = list(
+            (sb / "documents" / "learnings").glob("*.entities.yaml")
+        )
+        self.assertTrue(
+            landed_sidecars,
+            "entity sidecar must land alongside the note for GraphRAG to consume",
+        )
+
+    # ---------------------------------------------------------------
+    # 12. Data-contract: our generated note has the fields qmd expects.
+    #     Does NOT touch the real ~/.cache/qmd/ index (2.1GB) — pure format check.
+    # ---------------------------------------------------------------
+    def test_12_qmd_data_contract(self) -> None:
+        qmd_bin = shutil.which("qmd")
+        if not qmd_bin:
+            self.skipTest("qmd CLI not installed — skipping data-contract check")
+
+        # Parse a learning-template note + sidecar like the one reflect emits.
+        # qmd reads raw .md — it needs YAML frontmatter + plain body. We assert
+        # both survive a frontmatter parse and the body is non-empty, which is
+        # what qmd's full-text indexer consumes.
+        template = PLUGIN_DIR / "assets" / "learning_template.md"
+        self.assertTrue(template.exists(), "learning_template.md must exist")
+        body = template.read_text()
+        self.assertTrue(body.startswith("---"),
+                        "template must start with YAML frontmatter")
+        self.assertIn("title:", body)
+        self.assertIn("tags:", body)
+        self.assertIn("key_insight:", body)
+        # Body below frontmatter must be non-empty (qmd needs text to index)
+        _, after = body.split("---", 2)[1:]
+        self.assertTrue(after.strip(),
+                        "learning note body must be non-empty for qmd BM25 + vectors")
+
+        # Smoke-check that qmd binary is callable
+        help_out = subprocess.run(
+            [qmd_bin], capture_output=True, text=True,
+        )
+        self.assertIn("qmd", help_out.stdout.lower() + help_out.stderr.lower())
+
+    # ---------------------------------------------------------------
     # 10. migrate_v2: synthesize v2 state -> import -> verify
     # ---------------------------------------------------------------
     def test_10_migrate_v2_imports_legacy_state(self) -> None:
