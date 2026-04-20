@@ -90,7 +90,8 @@ fn test_previous_session() {
     assert_eq!(state.selected_session_index, Some(0));
 
     state.previous_session();
-    assert_eq!(state.selected_session_index, Some(1)); // wraps around
+    // At first workspace + first session, stays put (no wrap — see state.rs:3907)
+    assert_eq!(state.selected_session_index, Some(0));
 }
 
 #[test]
