@@ -48,7 +48,8 @@ const TOOL_CONFIG = {
         // Tool-specific files still come from claude-code-4.5/
         toolSpecificFiles: [
             'claude-code-4.5/CLAUDE.md',
-            'claude-code-4.5/settings.json'
+            'claude-code-4.5/settings.json',
+            'claude-code-4.5/statusline.sh'
         ],
         excludeFiles: ['settings.local.json'],
         templateSubstitutions: {

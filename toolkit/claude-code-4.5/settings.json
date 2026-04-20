@@ -135,7 +135,7 @@
   },
   "statusLine": {
     "type": "command",
-    "command": "bunx -y ccstatusline@latest",
+    "command": "~/.claude/statusline.sh",
     "padding": 0
   },
   "permissionMode": "bypassPermissions"
