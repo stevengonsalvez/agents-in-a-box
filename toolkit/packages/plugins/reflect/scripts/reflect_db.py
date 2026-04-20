@@ -12,6 +12,7 @@ replaces the previous YAML-based state, metrics, and learnings files.
 All public write functions use ``with conn:`` for transactional safety.
 """
 
+import hashlib
 import json
 import sqlite3
 import uuid
@@ -25,7 +26,9 @@ from reflect_config import get_config, resolve_path
 # Schema
 # ---------------------------------------------------------------------------
 
-_SCHEMA_SQL = """
+# DDL for the learnings table kept as a constant so the CHECK-constraint
+# rebuild migration can recreate it identically without duplicating the SQL.
+_LEARNINGS_DDL = """
 CREATE TABLE IF NOT EXISTS learnings (
     id              TEXT PRIMARY KEY,
     title           TEXT NOT NULL,
@@ -43,7 +46,9 @@ CREATE TABLE IF NOT EXISTS learnings (
     reverted_at     TEXT,
     revert_reason   TEXT
 );
+"""
 
+_SCHEMA_SQL = _LEARNINGS_DDL + """
 CREATE TABLE IF NOT EXISTS proposals (
     id              TEXT PRIMARY KEY,
     learning_id     TEXT NOT NULL REFERENCES learnings(id),
@@ -87,6 +92,70 @@ CREATE INDEX IF NOT EXISTS idx_sources_status ON sources(status);
 """
 
 # ---------------------------------------------------------------------------
+# Legacy v2 state paths (relative to Path.home())
+# ---------------------------------------------------------------------------
+
+# Exposed so migrate_v2 and the doctor CLI agree on the canonical list.
+LEGACY_V2_PATHS: tuple[Path, ...] = (
+    Path(".claude") / "session" / "reflect-state.yaml",
+    Path(".claude") / "session" / "reflect-metrics.yaml",
+    Path(".claude") / "session" / "learnings.yaml",
+    Path(".reflect") / "reflect-state.yaml",
+    Path(".reflect") / "reflect-metrics.yaml",
+    Path(".reflect") / "learnings.yaml",
+    Path(".claude") / "reflections",
+)
+
+
+def has_legacy_state() -> bool:
+    """Return True if any legacy v2 YAML state or a non-empty reflections dir exists.
+
+    Shallow-only: we don't rglob the reflections directory because a legacy
+    tree with thousands of nested files would make this O(files) on every
+    call; a top-level iterdir is enough to answer "is there anything here".
+    """
+    home = Path.home()
+    for rel in LEGACY_V2_PATHS:
+        p = home / rel
+        if p.is_file():
+            return True
+        if p.is_dir():
+            try:
+                if any(p.iterdir()):
+                    return True
+            except OSError:
+                continue
+    return False
+
+
+def get_legacy_state_summary() -> Optional[str]:
+    """Return the one-line doctor message, or None when nothing is found."""
+    home = Path.home()
+    yaml_found: list[Path] = []
+    reflections_present = False
+    for rel in LEGACY_V2_PATHS:
+        p = home / rel
+        if p.is_file():
+            yaml_found.append(p)
+        elif p.is_dir():
+            try:
+                if any(p.iterdir()):
+                    reflections_present = True
+            except OSError:
+                continue
+    if not yaml_found and not reflections_present:
+        return None
+    script = Path(__file__).resolve().parent / "migrate_v2.py"
+    return (
+        "[reflect] Legacy v2 state detected ("
+        f"{len(yaml_found)} YAML file(s)"
+        + (", reflections/ present" if reflections_present else "")
+        + "). "
+        "Run: python3 " + str(script) + " --execute"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Connection management
 # ---------------------------------------------------------------------------
 
@@ -107,16 +176,18 @@ def _db_path() -> Path:
     return resolve_path(raw)
 
 
+def db_path() -> Path:
+    """Public accessor for the resolved DB path."""
+    return _db_path()
+
+
 def init_db(path: Optional[Path] = None) -> sqlite3.Connection:
-    """
-    Create tables if they don't exist and return a connection.
+    """Create tables if they don't exist and return a connection.
 
-    The connection is cached per path so callers can simply call
-    ``init_db()`` repeatedly without opening duplicate handles.
-
-    On first DB creation we also scan for legacy v2 YAML state and print a
-    one-line reminder pointing users at ``migrate_v2.py``. The scan is a
-    cheap ``Path.is_file`` check and is skipped once the DB exists.
+    The connection is cached per path so callers can call ``init_db()``
+    repeatedly without opening duplicate handles. Legacy-state warning
+    logic lives in the CLI doctor command; keeping init_db free of IO
+    beyond the DB itself avoids per-call home-dir scans.
     """
     if path is None:
         path = _db_path()
@@ -124,8 +195,6 @@ def init_db(path: Optional[Path] = None) -> sqlite3.Connection:
     key = str(path)
     if key in _CONN_CACHE:
         return _CONN_CACHE[key]
-
-    fresh_db = not path.is_file()
 
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path))
@@ -136,65 +205,37 @@ def init_db(path: Optional[Path] = None) -> sqlite3.Connection:
     _migrate_schema(conn)
 
     _CONN_CACHE[key] = conn
-
-    if fresh_db:
-        _warn_if_legacy_state_exists()
-
     return conn
 
 
 def _warn_if_legacy_state_exists() -> None:
-    """
-    Print a reminder if v2 YAML state is still on disk.
+    """Print the legacy-state reminder to stderr, if any is found.
 
-    Deliberately best-effort: any import/IO error is swallowed so DB init
-    never fails because of warning logic. We don't auto-migrate — requiring
-    an explicit ``migrate_v2.py --execute`` keeps user state safe.
+    Callable only from the CLI doctor command; no longer invoked from
+    init_db. Any IO error is swallowed because warning logic must never
+    escalate into a user-facing failure.
     """
     try:
-        home = Path.home()
-        candidates = (
-            home / ".claude" / "session" / "reflect-state.yaml",
-            home / ".claude" / "session" / "reflect-metrics.yaml",
-            home / ".claude" / "session" / "learnings.yaml",
-            home / ".reflect" / "reflect-state.yaml",
-            home / ".reflect" / "reflect-metrics.yaml",
-            home / ".reflect" / "learnings.yaml",
-        )
-        found = [c for c in candidates if c.is_file()]
-        # Also flag a non-empty legacy reflections dir.
-        refl_dir = home / ".claude" / "reflections"
-        legacy_reflections = (
-            refl_dir.is_dir()
-            and any(refl_dir.rglob("*.md"))
-        )
-        if not found and not legacy_reflections:
+        msg = get_legacy_state_summary()
+        if msg is None:
             return
-        script = Path(__file__).resolve().parent / "migrate_v2.py"
         import sys as _sys
-        msg = (
-            "[reflect] Legacy v2 state detected ("
-            f"{len(found)} YAML file(s)"
-            + (", reflections/ present" if legacy_reflections else "")
-            + "). "
-            "Run: python3 " + str(script) + " --execute"
-        )
         print(msg, file=_sys.stderr)
     except Exception:  # noqa: BLE001 - warnings must never raise
         return
 
 
 def _migrate_schema(conn: sqlite3.Connection) -> None:
-    """Additive migrations for existing DBs. Idempotent.
+    """Idempotent migrations for existing DBs.
 
-    Adds columns that earlier versions of the schema did not have:
-    - learnings.commit_hash  (git commit where learning was applied or reverted)
-    - learnings.reverted_at
-    - learnings.revert_reason
+    Two phases:
 
-    The CHECK constraint update (adding 'reverted' to status) does not
-    require a rebuild — SQLite allows inserts with new values once the
-    schema is re-run, but existing rows won't have constraint re-checked.
+    1. Additive ALTERs for columns added after v3.0: ``commit_hash``,
+       ``reverted_at``, ``revert_reason``.
+    2. CHECK-constraint rebuild when the existing ``learnings`` table was
+       created before ``'reverted'`` was added to the status CHECK. SQLite's
+       ``CREATE TABLE IF NOT EXISTS`` is a no-op for existing tables, so
+       without this rebuild an old DB will reject UPDATE status='reverted'.
     """
     cols = {row[1] for row in conn.execute("PRAGMA table_info(learnings)").fetchall()}
     alters = []
@@ -209,10 +250,76 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             for sql in alters:
                 conn.execute(sql)
 
+    # CHECK-constraint rebuild: detect a stale CHECK that predates 'reverted'.
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='learnings'"
+    ).fetchone()
+    table_sql = row[0] if row else ""
+    if table_sql and "'reverted'" not in table_sql:
+        # Indexes reference the table name, so SQLite drops them automatically
+        # on rename. We re-create them via _SCHEMA_SQL after the rebuild.
+        with conn:
+            conn.execute("DROP INDEX IF EXISTS idx_learnings_status")
+            conn.execute("DROP INDEX IF EXISTS idx_learnings_source_tool")
+            conn.execute("ALTER TABLE learnings RENAME TO learnings_old")
+            conn.executescript(_LEARNINGS_DDL)
+            # Column set is stable between old and new — additive ALTERs above
+            # already brought pre-rebuild DBs up to the current column set.
+            conn.execute(
+                "INSERT INTO learnings SELECT "
+                "id, title, category, confidence, status, source_tool, "
+                "source_path, content_hash, commit_hash, created_at, "
+                "approved_at, indexed_at, reverted_at, revert_reason "
+                "FROM learnings_old"
+            )
+            conn.execute("DROP TABLE learnings_old")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_learnings_status ON learnings(status)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_learnings_source_tool ON learnings(source_tool)"
+            )
+
 
 def get_conn(path: Optional[Path] = None) -> sqlite3.Connection:
     """Return (and lazily create) the database connection."""
     return init_db(path)
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers (used by reflect_db and migrate_v2)
+# ---------------------------------------------------------------------------
+
+
+def compute_content_hash(payload: dict[str, Any]) -> str:
+    """Stable 16-hex-char SHA-256 prefix over canonical JSON of *payload*.
+
+    Pure: performs no DB access. The 16-char prefix matches the width used
+    by other ids in this module and keeps content_hash small in the row.
+    """
+    blob = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()[:16]
+
+
+def get_known_content_hashes(
+    *, conn: Optional[sqlite3.Connection] = None,
+) -> set[str]:
+    """Return the set of distinct non-empty content_hash values in learnings."""
+    conn = conn or get_conn()
+    rows = conn.execute(
+        "SELECT DISTINCT content_hash FROM learnings WHERE content_hash != ''"
+    ).fetchall()
+    return {r["content_hash"] for r in rows}
+
+
+def get_events_by_type(
+    event_type: str,
+    *,
+    limit: int = 10_000,
+    conn: Optional[sqlite3.Connection] = None,
+) -> list[dict[str, Any]]:
+    """Thin wrapper around ``get_events`` scoped to a single event type."""
+    return get_events(event_type=event_type, limit=limit, conn=conn)
 
 
 # ---------------------------------------------------------------------------
@@ -230,7 +337,12 @@ def add_learning(
     *,
     conn: Optional[sqlite3.Connection] = None,
 ) -> str:
-    """Insert a new learning row. Returns the generated id."""
+    """Insert a new learning row. Returns the generated id.
+
+    The insert and the accompanying ``learning_added`` audit event are
+    written in a single transaction so a crash between them cannot leave
+    an un-audited row.
+    """
     conn = conn or get_conn()
     lid = _new_id()
     with conn:
@@ -242,7 +354,10 @@ def add_learning(
             (lid, title, category, confidence, source_tool,
              source_path, content_hash, _now_iso()),
         )
-    add_event("learning_added", lid, {"title": title}, conn=conn)
+        add_event(
+            "learning_added", lid, {"title": title},
+            conn=conn, autocommit=False,
+        )
     return lid
 
 
@@ -260,6 +375,8 @@ def update_learning_status(
 
     For status='reverted', pass *revert_reason* (short explanation) and
     optionally *commit_hash* (the commit where the learning was backed out).
+
+    The UPDATE and the ``status_change`` audit event commit atomically.
     """
     conn = conn or get_conn()
     now = _now_iso()
@@ -282,17 +399,21 @@ def update_learning_status(
         params.append(val)
     params.append(learning_id)
 
-    with conn:
-        conn.execute(
-            f"UPDATE learnings SET {', '.join(set_parts)} WHERE id = ?",
-            params,
-        )
     details: dict[str, Any] = {"new_status": status}
     if revert_reason:
         details["revert_reason"] = revert_reason
     if commit_hash:
         details["commit_hash"] = commit_hash
-    add_event("status_change", learning_id, details, conn=conn)
+
+    with conn:
+        conn.execute(
+            f"UPDATE learnings SET {', '.join(set_parts)} WHERE id = ?",
+            params,
+        )
+        add_event(
+            "status_change", learning_id, details,
+            conn=conn, autocommit=False,
+        )
 
 
 def get_pending_learnings(
@@ -428,17 +549,27 @@ def add_event(
     details: Optional[dict[str, Any]] = None,
     *,
     conn: Optional[sqlite3.Connection] = None,
+    autocommit: bool = True,
 ) -> str:
-    """Insert an audit event. Returns the event id."""
+    """Insert an audit event. Returns the event id.
+
+    ``autocommit=False`` lets callers nest the insert inside an outer
+    ``with conn:`` so the event commits atomically with the row that
+    produced it. Default behaviour is unchanged for external callers.
+    """
     conn = conn or get_conn()
     eid = _new_id()
-    with conn:
-        conn.execute(
-            """INSERT INTO events (id, type, learning_id, details_json, created_at)
-               VALUES (?, ?, ?, ?, ?)""",
-            (eid, event_type, learning_id,
-             json.dumps(details or {}), _now_iso()),
-        )
+    sql = """INSERT INTO events (id, type, learning_id, details_json, created_at)
+             VALUES (?, ?, ?, ?, ?)"""
+    params = (
+        eid, event_type, learning_id,
+        json.dumps(details or {}), _now_iso(),
+    )
+    if autocommit:
+        with conn:
+            conn.execute(sql, params)
+    else:
+        conn.execute(sql, params)
     return eid
 
 
@@ -550,8 +681,11 @@ def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(description="Reflect SQLite manager")
-    parser.add_argument("command", choices=["init", "stats", "events"],
-                        help="Action to perform")
+    parser.add_argument(
+        "command",
+        choices=["init", "stats", "events", "doctor"],
+        help="Action to perform",
+    )
     parser.add_argument("--limit", type=int, default=20)
     args = parser.parse_args()
 
@@ -570,6 +704,13 @@ def main() -> None:
             print(f"  [{ev['created_at']}] {ev['type']}  "
                   f"learning={ev['learning_id'] or '-'}  "
                   f"{ev['details_json']}")
+
+    elif args.command == "doctor":
+        msg = get_legacy_state_summary()
+        if msg is None:
+            print("[reflect] no legacy v2 state found")
+        else:
+            print(msg)
 
 
 if __name__ == "__main__":
