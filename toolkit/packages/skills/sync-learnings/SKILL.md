@@ -74,6 +74,7 @@ These are NOT in `packages/` — they live in per-tool directories:
 |---------------------|------------------------|
 | `{{HOME_TOOL_DIR}}/CLAUDE.md` | `toolkit/claude-code-4.5/CLAUDE.md` |
 | `{{HOME_TOOL_DIR}}/settings.json` | `toolkit/claude-code-4.5/settings.json` |
+| `{{HOME_TOOL_DIR}}/statusline.sh` | `toolkit/claude-code-4.5/statusline.sh` (+x preserved) |
 
 **CLAUDE.md sync requires reverse template interpolation** — when copying TO_REPO,
 replace interpolated paths back to template placeholders:
@@ -131,9 +132,12 @@ Runtime state:
 - `plans/` - Temporary plan files
 - `*.json` session files
 
-### Category 4: User Settings
-Personal configuration:
-- `settings.json`, `settings.local.json`
+### Category 4: Machine-Local Settings Overrides
+Per-host user overrides (not shared):
+- `settings.local.json` — NEVER sync (machine-specific permission prompts, etc.)
+
+NOTE: `settings.json` IS synced — it's the canonical shared config. Reverse-
+interpolate paths when copying TO repo. See "Tool-Specific Config Files" above.
 
 ### Category 5: Plugin-Managed Content
 Content managed by external plugins (installed via `claude plugin install`):
@@ -393,6 +397,13 @@ chore: sync learnings to packages
 # Normalize template vars before comparing to avoid false positives
 diff <(perl -pe 's|\{\{TOOL_DIR\}\}|.claude|g; s|\{\{HOME_TOOL_DIR\}\}|~/.claude|g' \
   toolkit/claude-code-4.5/CLAUDE.md) $HOME/{{TOOL_DIR}}/CLAUDE.md
+
+# settings.json diff (Claude Code harness config)
+# Fails if repo has drifted from $HOME/{{TOOL_DIR}} — sync TO_REPO if live has newer keys
+diff toolkit/claude-code-4.5/settings.json $HOME/{{TOOL_DIR}}/settings.json
+
+# statusline.sh diff (rich statusline script shipped as tool-specific file)
+diff toolkit/claude-code-4.5/statusline.sh $HOME/{{TOOL_DIR}}/statusline.sh
 
 # Find all differences (agents)
 diff -rq $HOME/{{TOOL_DIR}}/agents/ packages/agents/ 2>/dev/null
