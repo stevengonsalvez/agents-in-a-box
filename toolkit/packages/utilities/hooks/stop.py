@@ -3,6 +3,7 @@
 # requires-python = ">=3.11"
 # dependencies = [
 #     "python-dotenv",
+#     "langfuse>=2.44.0,<3.0.0",
 # ]
 # ///
 
@@ -20,6 +21,17 @@ try:
     load_dotenv()
 except ImportError:
     pass  # dotenv is optional
+
+# Langfuse integration (optional - no-op if not configured)
+_langfuse_enabled = os.getenv('LANGFUSE_ENABLED', 'false').lower() == 'true'
+if _langfuse_enabled:
+    try:
+        from utils.langfuse import get_tracer
+    except ImportError:
+        _langfuse_enabled = False
+        get_tracer = lambda: None
+else:
+    get_tracer = lambda: None
 
 
 def get_completion_messages():
@@ -201,6 +213,11 @@ def main():
                         json.dump(chat_data, f, indent=2)
                 except Exception:
                     pass  # Fail silently
+
+        # End Langfuse session trace (no-op if not configured)
+        tracer = get_tracer()
+        if tracer:
+            tracer.end_session_trace(session_id)
 
         # Announce completion via TTS
         announce_completion()

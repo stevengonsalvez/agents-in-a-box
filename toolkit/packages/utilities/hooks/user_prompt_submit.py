@@ -3,6 +3,7 @@
 # requires-python = ">=3.11"
 # dependencies = [
 #     "python-dotenv",
+#     "langfuse>=2.44.0,<3.0.0",
 # ]
 # ///
 
@@ -18,6 +19,17 @@ try:
     load_dotenv()
 except ImportError:
     pass  # dotenv is optional
+
+# Langfuse integration (optional - no-op if not configured)
+_langfuse_enabled = os.getenv('LANGFUSE_ENABLED', 'false').lower() == 'true'
+if _langfuse_enabled:
+    try:
+        from utils.langfuse import get_tracer
+    except ImportError:
+        _langfuse_enabled = False
+        get_tracer = lambda: None
+else:
+    get_tracer = lambda: None
 
 
 def log_user_prompt(session_id, input_data):
@@ -84,7 +96,12 @@ def main():
         
         # Log the user prompt
         log_user_prompt(session_id, input_data)
-        
+
+        # Log to Langfuse (no-op if not configured)
+        tracer = get_tracer()
+        if tracer:
+            tracer.log_user_prompt(session_id, prompt)
+
         # Validate prompt if requested and not in log-only mode
         if args.validate and not args.log_only:
             is_valid, reason = validate_prompt(prompt)

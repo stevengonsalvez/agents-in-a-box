@@ -1,12 +1,27 @@
 #!/usr/bin/env -S uv run --script
 # /// script
-# requires-python = ">=3.8"
+# requires-python = ">=3.11"
+# dependencies = [
+#     "langfuse>=2.44.0,<3.0.0",
+# ]
 # ///
 
 import json
+import os
 import sys
 import re
 from pathlib import Path
+
+# Langfuse integration (optional - no-op if not configured)
+_langfuse_enabled = os.getenv('LANGFUSE_ENABLED', 'false').lower() == 'true'
+if _langfuse_enabled:
+    try:
+        from utils.langfuse import get_tracer
+    except ImportError:
+        _langfuse_enabled = False
+        get_tracer = lambda: None
+else:
+    get_tracer = lambda: None
 
 def is_dangerous_rm_command(command):
     """
@@ -125,7 +140,12 @@ def main():
         # Write back to file with formatting
         with open(log_path, 'w') as f:
             json.dump(log_data, f, indent=2)
-        
+
+        # Log to Langfuse (no-op if not configured)
+        tracer = get_tracer()
+        if tracer:
+            tracer.start_tool_span(tool_name, tool_input)
+
         sys.exit(0)
         
     except json.JSONDecodeError:

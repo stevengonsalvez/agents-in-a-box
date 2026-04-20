@@ -3,6 +3,7 @@
 # requires-python = ">=3.11"
 # dependencies = [
 #     "python-dotenv",
+#     "langfuse>=2.44.0,<3.0.0",
 # ]
 # ///
 
@@ -20,6 +21,17 @@ try:
     load_dotenv()
 except ImportError:
     pass  # dotenv is optional
+
+# Langfuse integration (optional - no-op if not configured)
+_langfuse_enabled = os.getenv('LANGFUSE_ENABLED', 'false').lower() == 'true'
+if _langfuse_enabled:
+    try:
+        from utils.langfuse import get_tracer
+    except ImportError:
+        _langfuse_enabled = False
+        get_tracer = lambda: None
+else:
+    get_tracer = lambda: None
 
 
 def check_orphaned_agent_sessions() -> List[Dict]:
@@ -345,7 +357,18 @@ def main():
         
         # Log the session start event
         log_session_start(input_data)
-        
+
+        # Start Langfuse trace (no-op if not configured)
+        tracer = get_tracer()
+        if tracer:
+            branch, changes = get_git_status()
+            tracer.start_session_trace(
+                session_id=session_id,
+                source=source,
+                git_branch=branch,
+                uncommitted_changes=changes
+            )
+
         # Run git status if requested
         if args.git_status:
             git_status_info = []
