@@ -97,9 +97,9 @@ ainb
 
 ---
 
-## ainb — Terminal UI
+## ainb — Terminal UI + CLI
 
-A Rust-based terminal application for managing Claude Code development sessions with git worktree isolation, model selection, and persistent tmux sessions.
+A Rust-based terminal application for managing AI coding sessions with git worktree isolation, model selection, and persistent tmux sessions. Every operation is **available as both an interactive TUI view and a scriptable CLI subcommand** with JSON output — so humans drive it from a dashboard and agents drive it from shell scripts.
 
 ### Features
 
