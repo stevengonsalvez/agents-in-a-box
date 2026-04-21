@@ -44,13 +44,12 @@
 
 ---
 
-A terminal-native ecosystem for managing AI coding agents. Built around a Rust TUI that orchestrates Claude Code sessions with git worktree isolation, and a portable toolkit of skills, agents, and workflows that plug into 9 different AI coding tools.
+A terminal-native ecosystem for managing AI coding agents. Built around a Rust TUI that orchestrates Claude Code, Codex, Gemini, and Copilot sessions with git worktree isolation, and a portable toolkit of skills, agents, and workflows that plug into 9 different AI coding tools.
 
-<!-- TODO: Add demo GIF - see https://github.com/stevengonsalvez/agents-in-a-box/issues/20 -->
 <p align="center">
-  <img src="docs/assets/demo.gif" alt="ainb demo" width="800">
+  <img src="docs/assets/screenshots/dashboard-session.png" alt="ainb TUI — live session dashboard with multi-workspace sidebar" width="900">
   <br>
-  <em>Creating a new Claude Code session with model selection</em>
+  <em>Live dashboard: multi-workspace sidebar, session preview pane, and tmux-backed persistent sessions</em>
 </p>
 
 ---
