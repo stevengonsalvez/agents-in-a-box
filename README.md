@@ -84,7 +84,7 @@ Most AI coding setups are a loose collection of dotfiles. This project treats th
 brew tap stevengonsalvez/ainb && brew install ainb
 
 # Install the toolkit for your AI tool
-cd toolkit && npm install && node bootstrap.js --tool=claude-code-4.5
+cd toolkit && npm install && node create-rule.js --tool=claude-code-4.5
 
 # Launch
 ainb
@@ -101,9 +101,11 @@ A Rust-based terminal application for managing Claude Code development sessions 
 - **Session management** — Create, monitor, switch between isolated Claude Code sessions
 - **Git worktree isolation** — Each session gets its own branch and working directory
 - **Model selection** — Choose Sonnet, Opus, or Haiku per session
+- **Multi-provider** — Claude, Codex, Gemini, Copilot via `--tool`
 - **Live log streaming** — Real-time log viewer with level filtering and search
 - **tmux integration** — Persistent sessions that survive disconnects
 - **Keyboard-driven** — Vim-style navigation throughout
+- **Scriptable CLI** — Every TUI operation also exposed as a subcommand with `--format json` output. **[Full CLI reference →](ainb-tui/docs/CLI.md)**
 
 <details>
 <summary><b>Screenshots</b></summary>
