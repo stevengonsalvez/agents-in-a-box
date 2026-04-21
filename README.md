@@ -101,16 +101,15 @@ ainb
 
 A Rust-based terminal application for managing AI coding sessions with git worktree isolation, model selection, and persistent tmux sessions. Every operation is **available as both an interactive TUI view and a scriptable CLI subcommand** with JSON output — so humans drive it from a dashboard and agents drive it from shell scripts.
 
-### Features
+### Feature Highlights
 
-- **Session management** — Create, monitor, switch between isolated Claude Code sessions
-- **Git worktree isolation** — Each session gets its own branch and working directory
-- **Model selection** — Choose Sonnet, Opus, or Haiku per session
-- **Multi-provider** — Claude, Codex, Gemini, Copilot via `--tool`
-- **Live log streaming** — Real-time log viewer with level filtering and search
-- **tmux integration** — Persistent sessions that survive disconnects
-- **Keyboard-driven** — Vim-style navigation throughout
-- **Scriptable CLI** — Every TUI operation also exposed as a subcommand with `--format json` output. **[Full CLI reference →](ainb-tui/docs/CLI.md)**
+- **Multi-provider** — Run Claude Code, Codex CLI, Gemini CLI, or GitHub Copilot in the same workflow, with Sonnet / Opus / Haiku selection per session
+- **Git worktree isolation** — Each session runs in its own branch and working directory. No cross-contamination, no stash dance
+- **tmux persistence** — Sessions survive terminal disconnects, SSH drops, and laptop sleep. Reattach any time
+- **Usage analytics** — Built-in token + session tracking by day, week, provider, and project. Know where your budget went
+- **Easy onboarding** — First-run setup wizard checks dependencies, configures auth, and gets you creating sessions in minutes
+- **Live log streaming** — Real-time viewer with level filtering and search across all running sessions
+- **Scriptable CLI** — 15 commands with `--format json` output for every piece of state. **[📘 Full CLI reference →](ainb-tui/docs/CLI.md)**
 
 <details>
 <summary><b>Screenshots</b></summary>
