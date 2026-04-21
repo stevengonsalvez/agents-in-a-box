@@ -152,6 +152,24 @@ A Rust-based terminal application for managing AI coding sessions with git workt
   </tr>
 </table>
 
+### CLI — Scriptable Equivalent of Every TUI Feature
+
+For agents, automation, and scripts, `ainb` ships a full CLI. Every command supports `--format json` for piping to `jq`.
+
+```bash
+ainb --help                             # Top-level overview
+ainb run --repo . --worktree --tool claude --model sonnet
+ainb list --format json | jq .
+ainb logs my-session --follow
+ainb recover list                       # Find orphaned sessions
+ainb config set authentication.default_model opus
+ainb completion zsh > ~/.zsh/completions/_ainb
+```
+
+**15 top-level commands** — `run`, `list`, `logs`, `attach`, `status`, `kill`, `auth`, `recover`, `config`, `git`, `favorites`, `init`, `presets`, `completion`, `tui` — with nested subcommands for recover / config / git / favorites / presets.
+
+**[📘 Full CLI reference → ainb-tui/docs/CLI.md](ainb-tui/docs/CLI.md)**
+
 ### Installation
 
 <details>
