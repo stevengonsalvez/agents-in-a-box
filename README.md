@@ -52,6 +52,12 @@ A terminal-native ecosystem for managing AI coding agents. Built around a Rust T
   <em>Live dashboard: multi-workspace sidebar, session preview pane, and tmux-backed persistent sessions</em>
 </p>
 
+<p align="center">
+  <img src="docs/assets/screenshots/stats-daily.png" alt="ainb usage analytics — daily token usage chart" width="900">
+  <br>
+  <em>Built-in usage analytics: 11.9B tokens tracked across 45 projects and 487 sessions, by provider and by day</em>
+</p>
+
 ---
 
 ## What's Inside
