@@ -1,6 +1,6 @@
 // ABOUTME: Unit tests for Session and related models to ensure data integrity and behavior
 
-use agents_box::models::{GitChanges, Session, SessionStatus};
+use ainb::models::{GitChanges, Session, SessionStatus};
 // Tests don't need chrono::Utc directly
 
 #[test]

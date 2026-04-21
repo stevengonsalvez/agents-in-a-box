@@ -1,7 +1,7 @@
 // ABOUTME: Test manual refresh functionality using 'f' key
 
-use claude_box::app::events::{AppEvent, EventHandler};
-use claude_box::app::{
+use ainb::app::events::{AppEvent, EventHandler};
+use ainb::app::{
     App,
     state::{AsyncAction, View},
 };

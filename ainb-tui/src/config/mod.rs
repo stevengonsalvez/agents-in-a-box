@@ -151,7 +151,7 @@ impl CliProvider {
 }
 
 /// Authentication configuration
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthenticationConfig {
     /// Active CLI provider for agent sessions
     #[serde(default)]
@@ -168,6 +168,17 @@ pub struct AuthenticationConfig {
     /// GitHub authentication method (for future use)
     #[serde(default)]
     pub github_method: Option<String>,
+}
+
+impl Default for AuthenticationConfig {
+    fn default() -> Self {
+        Self {
+            cli_provider: CliProvider::default(),
+            claude_provider: ClaudeAuthProvider::default(),
+            default_model: default_claude_model(),
+            github_method: None,
+        }
+    }
 }
 
 fn default_claude_model() -> String {
@@ -402,7 +413,7 @@ impl AppConfig {
     }
 
     /// Get configuration file paths in order of precedence
-    fn get_config_paths() -> Vec<PathBuf> {
+    pub fn get_config_paths() -> Vec<PathBuf> {
         let mut paths = vec![];
 
         // 1. Local project config
@@ -422,7 +433,7 @@ impl AppConfig {
     }
 
     /// Get user configuration directory
-    fn get_user_config_dir() -> Result<PathBuf> {
+    pub fn get_user_config_dir() -> Result<PathBuf> {
         let home_dir = dirs::home_dir().context("Failed to get home directory")?;
         let config_dir = home_dir.join(".agents-in-a-box").join("config");
         Ok(config_dir)

@@ -1,9 +1,20 @@
 // ABOUTME: Main entry point for Agents-in-a-Box with TUI and CLI support
+//
+// Binary: ainb
+// Usage: ainb [COMMAND]
+// - No command: launches TUI
+// - run: spawn new AI coding session
+// - list: show all sessions
+// - attach: attach to session's tmux
+// - logs: view session output
+// - status: check session status
+// - kill: terminate session
+// - auth: set up authentication
 
 #![allow(missing_docs)]
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event},
     execute,
@@ -19,6 +30,7 @@ mod agent_parsers;
 mod app;
 mod audit;
 mod claude;
+mod cli;
 mod components;
 mod config;
 mod credentials;
@@ -54,31 +66,44 @@ fn cleanup_terminal_with_instance<B: Backend + std::io::Write>(
     Ok(())
 }
 
-#[derive(Parser)]
-#[command(name = "agents-box")]
-#[command(about = "Terminal-based development environment manager for Claude Code containers")]
-pub struct Cli {
-    #[command(subcommand)]
-    pub command: Option<Commands>,
-}
-
-#[derive(Subcommand)]
-pub enum Commands {
-    /// Set up Claude authentication for containers
-    Auth,
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     setup_logging();
     setup_panic_handler();
 
-    let cli = Cli::parse();
+    let args = cli::Cli::parse();
 
-    let result = match cli.command {
-        Some(Commands::Auth) => run_auth_setup().await,
-        None => {
-            // No command specified, run TUI
+    // Track whether we entered TUI mode so we only clean up terminal in that case.
+    // CLI commands never touch the alternate screen; emitting LeaveAlternateScreen
+    // would leak raw escape codes into the user's terminal.
+    let mut entered_tui = false;
+
+    let result = match args.command {
+        // CLI commands
+        Some(cli::Commands::Run(run_args)) => cli::run::execute(run_args).await,
+        Some(cli::Commands::List(list_args)) => cli::list::execute(list_args, args.format).await,
+        Some(cli::Commands::Logs(logs_args)) => cli::logs::execute(logs_args).await,
+        Some(cli::Commands::Attach(attach_args)) => cli::attach::execute(attach_args).await,
+        Some(cli::Commands::Status(status_args)) => cli::status::execute(status_args, args.format).await,
+        Some(cli::Commands::Kill(kill_args)) => cli::status::kill(kill_args).await,
+        Some(cli::Commands::Auth) => run_auth_setup().await,
+        Some(cli::Commands::Recover { command }) => cli::recover::execute(command, args.format).await,
+        Some(cli::Commands::Config { command }) => cli::config_cmd::execute(command, args.format).await,
+        Some(cli::Commands::Git { command }) => cli::git_cmd::execute(command, args.format).await,
+        Some(cli::Commands::Favorites { command }) => cli::favorites::execute(command, args.format).await,
+        Some(cli::Commands::Init(init_args)) => cli::init::execute(init_args, args.format).await,
+        Some(cli::Commands::Presets { command }) => cli::presets::execute(command, args.format).await,
+        Some(cli::Commands::Completion { shell }) => {
+            use clap::CommandFactory;
+            let mut cmd = cli::Cli::command();
+            let name = cmd.get_name().to_string();
+            clap_complete::generate(shell, &mut cmd, name, &mut std::io::stdout());
+            Ok(())
+        }
+
+        // TUI mode (explicit or default)
+        Some(cli::Commands::Tui) | None => {
+            entered_tui = true;
             let mut app = App::new();
             app.init().await;
             let mut layout = LayoutComponent::new();
@@ -102,8 +127,10 @@ async fn main() -> Result<()> {
         }
     };
 
-    // Ensure terminal is cleaned up on any error
-    if result.is_err() {
+    // Only clean up terminal if we entered TUI mode. For CLI commands, calling
+    // cleanup_terminal() would emit terminal escape sequences into the user's
+    // shell, corrupting agent-captured output.
+    if result.is_err() && entered_tui {
         cleanup_terminal();
     }
 
