@@ -111,20 +111,46 @@ A Rust-based terminal application for managing AI coding sessions with git workt
 - **Live log streaming** — Real-time viewer with level filtering and search across all running sessions
 - **Scriptable CLI** — 15 commands with `--format json` output for every piece of state. **[📘 Full CLI reference →](ainb-tui/docs/CLI.md)**
 
-<details>
-<summary><b>Screenshots</b></summary>
-<br>
+### Feature Showcase
+
 <table>
-<tr>
-<td><img src="docs/assets/screenshots/home.png" alt="Home screen" width="400"><br><em>Main dashboard with active sessions</em></td>
-<td><img src="docs/assets/screenshots/new-session.png" alt="New session" width="400"><br><em>Session creation with model selection</em></td>
-</tr>
-<tr>
-<td><img src="docs/assets/screenshots/logs.png" alt="Live logs" width="400"><br><em>Real-time log streaming</em></td>
-<td><img src="docs/assets/screenshots/session.png" alt="Session view" width="400"><br><em>Attached Claude Code session</em></td>
-</tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/assets/screenshots/welcome.png" alt="Main dashboard with sidebar navigation" width="100%"><br>
+      <strong>📊 Unified dashboard</strong><br>
+      <em>Sidebar navigation across Agents, Catalog, Sessions, Recovery, Logs, Stats, Changelog, and Setup. Keyboard-driven throughout.</em>
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/assets/screenshots/agent-picker.png" alt="AI agent picker with model selection" width="100%"><br>
+      <strong>🤖 Pick your agent, pick your model</strong><br>
+      <em>Choose between Claude Code, Shell Only, SSH, Codex CLI, Gemini CLI, GitHub Copilot, or Kiro. Model toggle — Sonnet · Opus · Haiku — right below.</em>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/assets/screenshots/new-session.png" alt="New session flow — local, remote, SSH, favorites" width="100%"><br>
+      <strong>🚀 Start a session any way you want</strong><br>
+      <em>Local repo, clone from GitHub/GitLab, SSH into a remote box, or pull from your Favorites. One-key shortcuts: L / R / S / F.</em>
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/assets/screenshots/setup.png" alt="Setup wizard with dependency checks" width="100%"><br>
+      <strong>🛠️ Guided first-time setup</strong><br>
+      <em>Re-run the wizard, verify dependencies, configure git paths, set auth, pick your editor — or factory-reset in one click.</em>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/assets/screenshots/stats-daily.png" alt="Daily usage analytics with bar chart" width="100%"><br>
+      <strong>📈 Usage analytics, built in</strong><br>
+      <em>Daily / weekly / by-project views across all providers. Understand your token burn at a glance.</em>
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/assets/screenshots/stats-projects.png" alt="Per-project token usage breakdown" width="100%"><br>
+      <strong>🎯 Per-project attribution</strong><br>
+      <em>See exactly which repos and worktrees consume your context budget. Input, cache, output, and session counts per project.</em>
+    </td>
+  </tr>
 </table>
-</details>
 
 ### Installation
 
