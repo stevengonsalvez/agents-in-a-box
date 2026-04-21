@@ -1,5 +1,5 @@
 ---
-name: reflect:status
+name: reflect-status
 description: |
   Show reflection metrics, pending reviews, sidecar coverage, and GraphRAG health.
   Read-only views into the reflect system state. Can also approve/reject pending
@@ -7,7 +7,7 @@ description: |
 version: "3.0.0"
 user-invocable: true
 triggers:
-  - reflect:status
+  - reflect-status
   - reflect status
   - reflect review
   - reflection metrics

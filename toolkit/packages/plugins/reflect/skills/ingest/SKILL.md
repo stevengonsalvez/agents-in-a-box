@@ -37,7 +37,7 @@ one place. If it exists in a memory file somewhere, it should be in the global i
 - Periodically (weekly recommended) to keep the knowledge base current
 - Before deleting projects or cleaning up `~/.claude/projects/`
 - After heavy multi-project work across different tools
-- When `reflect:status` shows low sidecar coverage or stale sources
+- When `reflect-status` shows low sidecar coverage or stale sources
 - After running `reflect:consolidate` (to index what it produced)
 
 ## What Gets Indexed

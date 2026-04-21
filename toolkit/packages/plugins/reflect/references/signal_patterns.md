@@ -341,7 +341,7 @@ These indicate knowledge worth capturing but require more context to confirm val
 
 ## LOW Confidence (Observations)
 
-These suggest something was learned but need validation. Captured as LOW confidence, promoted via `/reflect:status` review.
+These suggest something was learned but need validation. Captured as LOW confidence, promoted via `/reflect-status` review.
 
 ### Implicit Success
 

@@ -38,8 +38,8 @@ redirect the user to the appropriate sub-skill:
 |------|----------|
 | `--consolidate` | "Use `/reflect:consolidate` instead." |
 | `--ingest-memories` | "Use `/reflect:ingest` instead." |
-| `--status` | "Use `/reflect:status` instead." |
-| `--review` | "Use `/reflect:status` instead (status includes review)." |
+| `--status` | "Use `/reflect-status` instead." |
+| `--review` | "Use `/reflect-status` instead (status includes review)." |
 | `--behavioral` | Proceed normally -- behavioral-only scan (skip knowledge extraction). |
 | `--knowledge` | Proceed normally -- knowledge-only scan (skip behavioral). |
 
@@ -58,7 +58,7 @@ For `reflect [agent-name]`, run behavioral scan scoped to that agent file only.
 | `/reflect off` | Disable auto-reflection |
 | `/reflect:consolidate` | Merge orphaned worktree memories → .agents/MEMORY.md |
 | `/reflect:ingest` | Global indexer: sweep ALL sources → GraphRAG + QMD |
-| `/reflect:status` | Dashboard: metrics, pending reviews, coverage, health |
+| `/reflect-status` | Dashboard: metrics, pending reviews, coverage, health |
 
 ## When to Use
 
