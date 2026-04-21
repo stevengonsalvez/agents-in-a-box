@@ -2806,11 +2806,8 @@ impl EventHandler {
                     }
                     SidebarItem::Stats => {
                         tracing::info!("Navigating to Usage Analytics from sidebar");
-                        state.usage_state.loading = true;
                         state.current_view = View::Analytics;
-                        let data = crate::models::usage::parse_usage();
-                        state.usage_state.data = Some(data);
-                        state.usage_state.loading = false;
+                        state.start_background_usage_load(false);
                     }
                     SidebarItem::Changelog => {
                         state.current_view = View::Changelog;
@@ -3011,12 +3008,8 @@ impl EventHandler {
             }
             AppEvent::GoToStats => {
                 tracing::info!("Navigating to Usage Analytics");
-                state.usage_state.loading = true;
                 state.current_view = View::Analytics;
-                // Load usage data in background
-                let data = crate::models::usage::parse_usage();
-                state.usage_state.data = Some(data);
-                state.usage_state.loading = false;
+                state.start_background_usage_load(false);
             }
             AppEvent::GoToRecovery => {
                 tracing::info!("Navigating to Session Recovery");
@@ -3638,17 +3631,16 @@ impl EventHandler {
             }
             AppEvent::UsageNextProvider => {
                 state.usage_state.next_provider();
-                // Auto-load data if switching to Claude
-                if state.usage_state.provider.has_data() && state.usage_state.data.is_none() {
-                    let data = crate::models::usage::parse_usage();
-                    state.usage_state.data = Some(data);
+                // Data is cached across provider switches; only trigger a load
+                // if we returned to Claude and nothing has been parsed yet.
+                if state.usage_state.provider.has_data() {
+                    state.start_background_usage_load(false);
                 }
             }
             AppEvent::UsagePrevProvider => {
                 state.usage_state.prev_provider();
-                if state.usage_state.provider.has_data() && state.usage_state.data.is_none() {
-                    let data = crate::models::usage::parse_usage();
-                    state.usage_state.data = Some(data);
+                if state.usage_state.provider.has_data() {
+                    state.start_background_usage_load(false);
                 }
             }
             AppEvent::UsageNextTab => {
@@ -3680,11 +3672,8 @@ impl EventHandler {
             }
             AppEvent::UsageRefresh => {
                 tracing::info!("Refreshing usage data");
-                state.usage_state.loading = true;
-                let data = crate::models::usage::parse_usage();
-                state.usage_state.data = Some(data);
-                state.usage_state.loading = false;
-                state.add_success_notification("Usage data refreshed".to_string());
+                state.start_background_usage_load(true);
+                state.add_success_notification("Refreshing usage data…".to_string());
             }
             // Session recovery events
             AppEvent::SessionRecoveryBack => {

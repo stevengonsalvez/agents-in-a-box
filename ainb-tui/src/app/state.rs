@@ -1921,6 +1921,9 @@ pub struct AppState {
 
     // Usage analytics state
     pub usage_state: crate::components::usage::UsageViewState,
+    /// Channel receiver for background usage-data parsing.
+    /// Present only while a parse is in flight; `tick()` drains it.
+    pub usage_load_receiver: Option<mpsc::UnboundedReceiver<crate::models::UsageData>>,
 
     // Periodic session snapshot tracking
     pub last_snapshot_time: Option<Instant>,
@@ -2464,6 +2467,7 @@ impl Default for AppState {
 
             // Usage analytics state
             usage_state: crate::components::usage::UsageViewState::default(),
+            usage_load_receiver: None,
 
             // Periodic session snapshot tracking
             last_snapshot_time: None,
@@ -3225,6 +3229,50 @@ impl AppState {
             }
         }
         false
+    }
+
+    /// Kick off a background parse of ~/.claude/projects/**/*.jsonl.
+    /// Skipped if already in-flight, or data is cached and `force` is false.
+    /// The parse walks ~1GB of jsonl files; keeping it off the event thread
+    /// is what prevents the Stats/Usage screen from hanging on provider switch.
+    pub fn start_background_usage_load(&mut self, force: bool) {
+        if self.usage_load_receiver.is_some() {
+            return;
+        }
+        if !force && self.usage_state.data.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.usage_load_receiver = Some(rx);
+        self.usage_state.loading = true;
+        tokio::spawn(async move {
+            let data = tokio::task::spawn_blocking(crate::models::usage::parse_usage)
+                .await
+                .unwrap_or_default();
+            let _ = tx.send(data);
+        });
+    }
+
+    /// Poll the background parse. Returns true if data was applied this tick.
+    pub fn check_usage_load_complete(&mut self) -> bool {
+        if let Some(ref mut receiver) = self.usage_load_receiver {
+            match receiver.try_recv() {
+                Ok(data) => {
+                    self.usage_state.data = Some(data);
+                    self.usage_state.loading = false;
+                    self.usage_load_receiver = None;
+                    true
+                }
+                Err(mpsc::error::TryRecvError::Empty) => false,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    self.usage_state.loading = false;
+                    self.usage_load_receiver = None;
+                    true
+                }
+            }
+        } else {
+            false
+        }
     }
 
     /// Load Boss mode sessions from Docker containers
@@ -8711,6 +8759,11 @@ impl App {
             }
             // Also load other tmux sessions (quick operation)
             self.state.load_other_tmux_sessions().await;
+            self.state.ui_needs_refresh = true;
+        }
+
+        // Check for completed background usage-data parsing
+        if self.state.check_usage_load_complete() {
             self.state.ui_needs_refresh = true;
         }
 

@@ -144,18 +144,11 @@ impl UsageViewState {
     pub fn next_provider(&mut self) {
         self.provider = self.provider.next();
         self.scroll_offset = 0;
-        // Clear data when switching to unsupported provider
-        if !self.provider.has_data() {
-            self.data = None;
-        }
     }
 
     pub fn prev_provider(&mut self) {
         self.provider = self.provider.prev();
         self.scroll_offset = 0;
-        if !self.provider.has_data() {
-            self.data = None;
-        }
     }
 
     pub fn next_tab(&mut self) {
