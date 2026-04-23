@@ -265,13 +265,14 @@ fn split_frontmatter(content: &str) -> (HashMap<String, String>, String) {
 
     match end_idx {
         Some(idx) => {
-            // Compute byte offset of body (line idx+1 and onward).
+            // Compute byte offset of body (line idx+1 and onward) using
+            // split_inclusive so CRLF line endings are counted in full.
             let mut seen = 0usize;
-            for (i, l) in content.lines().enumerate() {
+            for (i, l) in content.split_inclusive('\n').enumerate() {
                 if i == idx + 1 {
                     break;
                 }
-                seen += l.len() + 1; // +1 for the newline
+                seen += l.len();
             }
             body_start = seen.min(content.len());
         }
