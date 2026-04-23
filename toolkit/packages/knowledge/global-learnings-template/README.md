@@ -2,6 +2,13 @@
 
 This repository stores learnings that are useful across multiple projects. It uses nano-graphrag for semantic search and graph-based retrieval with local embeddings (no API key required).
 
+## Source-of-truth split
+
+- **This toolkit** (ai-coder-rules) is the canonical source for the **CLI** (`cli/*.py`, `cli/learnings`). `bootstrap.js` deploys it to `~/.learnings/cli/` on every tool install and prunes any stale orphan files.
+- **learnings-kb repo** is the canonical source for **content only** — `documents/`, entity sidecars, GraphRAG cache, QMD indexes. It no longer carries a CLI copy.
+
+Fixes to the CLI land here; content changes land in learnings-kb. Never edit `~/.learnings/cli/` directly — it will be overwritten on next bootstrap.
+
 ## Philosophy
 
 > "Each solved problem makes future work easier - across ALL projects."
