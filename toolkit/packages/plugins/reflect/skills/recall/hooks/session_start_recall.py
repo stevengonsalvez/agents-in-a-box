@@ -32,9 +32,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import NoReturn
 
 
 # D2: conservative caps for auto-inject
@@ -144,8 +146,12 @@ def find_recall_script() -> Path | None:
     return None
 
 
-def emit(additional_context: str) -> None:
-    """Always exit 0 with valid JSON."""
+def emit(additional_context: str) -> NoReturn:
+    """Always exit 0 with valid JSON.
+
+    Typed NoReturn so callers (and linters) know execution stops here —
+    no need for a `return` after `emit(...)` at the call site.
+    """
     print(
         json.dumps(
             {
@@ -159,7 +165,13 @@ def emit(additional_context: str) -> None:
     sys.exit(0)
 
 
-def main() -> None:
+# Resolve `uv` once at module load. SessionStart hooks often run with a
+# trimmed PATH (launchd, IDE subprocesses), so a late lookup can fail even
+# when `uv` is installed. None → fall through to empty emit.
+UV_BIN = shutil.which("uv")
+
+
+def main() -> NoReturn:
     # Hooks receive JSON on stdin but we don't need it for cwd derivation
     try:
         _ = sys.stdin.read()
@@ -177,13 +189,17 @@ def main() -> None:
         emit("")
 
     recall = find_recall_script()
-    if not recall:
+    if not recall or not UV_BIN:
         emit("")
 
+    # D9: SessionStart must feel instant. 10s cap — if recall is slower
+    # than that, prefer empty context over a stalled session boot. The
+    # recall cache makes repeat sessions fast; the first call absorbs
+    # the miss silently.
     try:
         r = subprocess.run(
             [
-                "uv", "run", "--quiet", str(recall),
+                UV_BIN, "run", "--quiet", str(recall),
                 query,
                 "--limit", str(SESSION_START_LIMIT),
                 "--confidence", SESSION_START_CONFIDENCE,
@@ -193,20 +209,16 @@ def main() -> None:
             ],
             capture_output=True,
             text=True,
-            timeout=45,
+            timeout=10,
             check=False,
         )
     except (subprocess.TimeoutExpired, OSError):
-        # OSError covers FileNotFoundError (uv missing), PermissionError, etc.
         emit("")
-        return
 
     if r.returncode != 0:
         emit("")
-        return
 
-    out = (r.stdout or "").strip()
-    emit(out)
+    emit((r.stdout or "").strip())
 
 
 if __name__ == "__main__":
