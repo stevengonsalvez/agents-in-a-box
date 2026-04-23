@@ -360,31 +360,75 @@ fn split_frontmatter(content: &str) -> (HashMap<String, String>, String) {
             continue;
         }
 
-        // Case 2: value on following lines — collect dash-list or nested keys.
-        // For `tools:` style lists we join entries with commas.
-        let mut collected: Vec<String> = Vec::new();
+        // Case 2: value on following lines.
+        // Peek at the first non-blank indented follow-up line. Only enter
+        // list-collection mode if it starts with `- ` (or bare `-`). Otherwise
+        // the bare key points at a nested map / JSON block (see bitwarden's
+        // `metadata:` block), so skip the whole indented region and resume
+        // at the next column-0 key.
         i += 1;
-        while i < fm_lines.len() {
-            let l = fm_lines[i];
-            let li = l.len() - l.trim_start().len();
-            if li == 0 && !l.trim().is_empty() {
-                break;
-            }
-            let t = l.trim();
-            if t.is_empty() {
-                i += 1;
+        let mut first_non_blank: Option<&str> = None;
+        let mut scan = i;
+        while scan < fm_lines.len() {
+            let l = fm_lines[scan];
+            if l.trim().is_empty() {
+                scan += 1;
                 continue;
             }
-            if let Some(item) = t.strip_prefix('-') {
-                collected.push(strip_quotes(item.trim()));
-            } else {
-                // Some other nested structure — bail out.
+            let li = l.len() - l.trim_start().len();
+            if li == 0 {
                 break;
             }
-            i += 1;
+            first_non_blank = Some(l);
+            break;
         }
-        if !collected.is_empty() {
-            map.insert(key, collected.join(", "));
+
+        let is_list = first_non_blank
+            .map(|l| {
+                let t = l.trim_start();
+                t == "-" || t.starts_with("- ")
+            })
+            .unwrap_or(false);
+
+        if is_list {
+            let mut collected: Vec<String> = Vec::new();
+            while i < fm_lines.len() {
+                let l = fm_lines[i];
+                let li = l.len() - l.trim_start().len();
+                if li == 0 && !l.trim().is_empty() {
+                    break;
+                }
+                let t = l.trim();
+                if t.is_empty() {
+                    i += 1;
+                    continue;
+                }
+                if let Some(item) = t.strip_prefix('-') {
+                    collected.push(strip_quotes(item.trim()));
+                    i += 1;
+                } else {
+                    // Nested descendant of a list item — don't absorb.
+                    break;
+                }
+            }
+            if !collected.is_empty() {
+                map.insert(key, collected.join(", "));
+            }
+        } else {
+            // Nested map / JSON / other block — skip all blank + indented
+            // lines until the next column-0 non-blank line.
+            while i < fm_lines.len() {
+                let l = fm_lines[i];
+                if l.trim().is_empty() {
+                    i += 1;
+                    continue;
+                }
+                let li = l.len() - l.trim_start().len();
+                if li == 0 {
+                    break;
+                }
+                i += 1;
+            }
         }
     }
 
