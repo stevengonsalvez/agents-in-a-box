@@ -210,32 +210,24 @@ impl SidebarComponent {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        // Layout: title + items + flexible space
-        // Using 2 lines per item to fit 11 items in typical terminal heights
+        // Layout: title + spacer + one row per SidebarItem + flexible space.
+        // Constraints are derived from SidebarItem::all() so adding a new
+        // entry to the enum automatically reserves a layout slot (instead of
+        // silently rendering into a zero-height row).
+        let items = SidebarItem::all();
+        let mut constraints: Vec<Constraint> = Vec::with_capacity(items.len() + 3);
+        constraints.push(Constraint::Length(2)); // Title area
+        constraints.push(Constraint::Length(1)); // Spacer
+        constraints.extend(items.iter().map(|_| Constraint::Length(2)));
+        constraints.push(Constraint::Min(0)); // Flexible space
+
         let layout = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(2),  // Title area
-                Constraint::Length(1),  // Spacer
-                Constraint::Length(2),  // Agents
-                Constraint::Length(2),  // Catalog
-                Constraint::Length(2),  // Config
-                Constraint::Length(2),  // Sessions
-                Constraint::Length(2),  // Recovery
-                Constraint::Length(2),  // Logs
-                Constraint::Length(2),  // Stats
-                Constraint::Length(2),  // Skills
-                Constraint::Length(2),  // Changelog
-                Constraint::Length(2),  // Setup
-                Constraint::Length(2),  // Help
-                Constraint::Min(0),     // Flexible space
-            ])
+            .constraints(constraints)
             .split(inner);
 
         // Render title
         self.render_title(frame, layout[0], state);
-
-        let items = SidebarItem::all();
 
         // Render all items with premium styling
         for (idx, item) in items.iter().enumerate() {
