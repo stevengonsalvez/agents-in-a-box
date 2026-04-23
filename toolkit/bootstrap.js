@@ -781,6 +781,34 @@ function copyDirectoryRecursive(source, destination, excludeFiles = [], template
     return files.length;
 }
 
+// Deploy the global-learnings CLI to ~/.learnings/cli/ so every tool
+// install (claude, codex, copilot, …) picks up the current CLI from
+// ai-coder-rules. The content repo (learnings-kb) still carries its own
+// CLI copy today, but bootstrap runs after any such clone and wins last
+// — overwriting stale files without touching data dirs (documents/,
+// nano_graphrag_cache/, .venv/). Silent no-op if the toolkit template is
+// missing. Returns number of files copied.
+function installLearningsCli() {
+    const srcDir = path.join(__dirname, 'packages', 'knowledge', 'global-learnings-template', 'cli');
+    if (!fs.existsSync(srcDir)) return 0;
+
+    const destDir = path.join(os.homedir(), '.learnings', 'cli');
+    fs.mkdirSync(destDir, { recursive: true });
+
+    let copied = 0;
+    for (const entry of readdirSync(srcDir)) {
+        const src = path.join(srcDir, entry);
+        // Skip subdirs (__pycache__, etc.) — the wrapper regenerates them.
+        if (statSync(src).isDirectory()) continue;
+        const dst = path.join(destDir, entry);
+        fs.copyFileSync(src, dst);
+        // Preserve executability for the bash wrapper.
+        if (entry === 'learnings') fs.chmodSync(dst, 0o755);
+        copied++;
+    }
+    return copied;
+}
+
 async function handleSharedContentCopy(tool, config, targetFolder) {
     if (!targetFolder) {
         const answers = await inquirer.prompt([
@@ -1439,6 +1467,19 @@ async function handlePackagesStructureCopy(tool, config, overrideHomeDir = null,
         fs.writeFileSync(scriptPath, config._externalDepsScript);
         fs.chmodSync(scriptPath, 0o755);
         completeProgress(`Generated setup-external.sh (${config._externalDepsCount} external deps)`);
+    }
+
+    // Deploy the learnings CLI so ai-coder-rules is the single source of
+    // truth for the tool, even though the KB content lives in a separate
+    // repo (learnings-kb). Runs on every tool install; cheap and idempotent.
+    if (shouldUseHome) {
+        showProgress('Installing learnings CLI to ~/.learnings/cli/');
+        const cliCount = installLearningsCli();
+        if (cliCount > 0) {
+            completeProgress(`Installed learnings CLI (${cliCount} files) to ~/.learnings/cli/`);
+        } else {
+            completeProgress('learnings CLI template not found — skipped');
+        }
     }
 
     console.log(`\n\x1b[32m🎉 packages setup complete!\x1b[0m`);
