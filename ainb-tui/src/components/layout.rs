@@ -202,6 +202,17 @@ impl LayoutComponent {
             return;
         }
 
+        // Skills browser view (full screen)
+        if state.current_view == View::Skills {
+            tracing::debug!("Rendering Skills view");
+            crate::components::skills::render(frame, frame.size(), &state.skills_state);
+            if state.help_visible {
+                tracing::debug!("Rendering help overlay on Skills");
+                self.help.render(frame, frame.size());
+            }
+            return;
+        }
+
         // Session recovery view (full screen)
         if state.current_view == View::SessionRecovery {
             tracing::debug!("Rendering SessionRecovery view");

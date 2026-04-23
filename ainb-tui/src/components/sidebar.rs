@@ -34,6 +34,7 @@ pub enum SidebarItem {
     Recovery,  // Recover orphaned sessions
     Logs,      // Log history viewer
     Stats,     // Analytics & usage
+    Skills,    // Browse per-agent skills
     Changelog, // Version history
     Setup,     // Setup wizard & factory reset
     Help,      // Docs & guides
@@ -50,6 +51,7 @@ impl SidebarItem {
             Self::Recovery => "🔄",
             Self::Logs => "📋",
             Self::Stats => "📊",
+            Self::Skills => "🧠",
             Self::Changelog => "📝",
             Self::Setup => "🛠️",
             Self::Help => "❓",
@@ -66,6 +68,7 @@ impl SidebarItem {
             Self::Recovery => "Recovery",
             Self::Logs => "Logs",
             Self::Stats => "Stats",
+            Self::Skills => "Skills",
             Self::Changelog => "Changelog",
             Self::Setup => "Setup",
             Self::Help => "Help",
@@ -82,6 +85,7 @@ impl SidebarItem {
             Self::Recovery => "Resume Orphaned",
             Self::Logs => "View Log History",
             Self::Stats => "Usage & Analytics",
+            Self::Skills => "Per-Agent Skills",
             Self::Changelog => "Version History",
             Self::Setup => "Setup & Reset",
             Self::Help => "Docs & Guides",
@@ -98,6 +102,7 @@ impl SidebarItem {
             Self::Recovery => "R",
             Self::Logs => "l",
             Self::Stats => "i",
+            Self::Skills => "k",
             Self::Changelog => "v",
             Self::Setup => "S",
             Self::Help => "?",
@@ -114,6 +119,7 @@ impl SidebarItem {
             Self::Recovery,
             Self::Logs,
             Self::Stats,
+            Self::Skills,
             Self::Changelog,
             Self::Setup,
             Self::Help,
@@ -205,7 +211,7 @@ impl SidebarComponent {
         frame.render_widget(block, area);
 
         // Layout: title + items + flexible space
-        // Using 2 lines per item to fit 10 items in typical terminal heights
+        // Using 2 lines per item to fit 11 items in typical terminal heights
         let layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -218,6 +224,7 @@ impl SidebarComponent {
                 Constraint::Length(2),  // Recovery
                 Constraint::Length(2),  // Logs
                 Constraint::Length(2),  // Stats
+                Constraint::Length(2),  // Skills
                 Constraint::Length(2),  // Changelog
                 Constraint::Length(2),  // Setup
                 Constraint::Length(2),  // Help
@@ -230,7 +237,7 @@ impl SidebarComponent {
 
         let items = SidebarItem::all();
 
-        // Render all 10 items with premium styling
+        // Render all items with premium styling
         for (idx, item) in items.iter().enumerate() {
             let is_selected = state.selected_index == idx;
             let badge = if *item == SidebarItem::Sessions && state.active_sessions_count > 0 {
