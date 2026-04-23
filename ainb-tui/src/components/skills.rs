@@ -199,14 +199,6 @@ impl SkillsViewState {
         self.selected_index = (self.selected_index + page_size).min(max_rows - 1);
     }
 
-    pub fn toggle_search(&mut self) {
-        self.search_active = !self.search_active;
-        if !self.search_active {
-            self.search_query.clear();
-        }
-        self.selected_index = 0;
-    }
-
     pub fn search_push(&mut self, c: char) {
         self.search_query.push(c);
         self.selected_index = 0;
@@ -214,12 +206,6 @@ impl SkillsViewState {
 
     pub fn search_pop(&mut self) {
         self.search_query.pop();
-        self.selected_index = 0;
-    }
-
-    pub fn search_clear(&mut self) {
-        self.search_active = false;
-        self.search_query.clear();
         self.selected_index = 0;
     }
 
