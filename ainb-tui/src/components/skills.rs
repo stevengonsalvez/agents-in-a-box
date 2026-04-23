@@ -119,7 +119,6 @@ pub struct SkillsViewState {
     pub active_tab: SkillsTab,
     pub data: Option<SkillsData>,
     pub loading: bool,
-    pub scroll_offset: usize,
     pub selected_index: usize,
     pub search_active: bool,
     pub search_query: String,
@@ -132,7 +131,6 @@ impl Default for SkillsViewState {
             active_tab: SkillsTab::Skills,
             data: None,
             loading: false,
-            scroll_offset: 0,
             selected_index: 0,
             search_active: false,
             search_query: String::new(),
@@ -145,34 +143,27 @@ impl SkillsViewState {
     // mirroring the fix in UsageViewState.
     pub fn next_provider(&mut self) {
         self.provider = self.provider.next();
-        self.scroll_offset = 0;
         self.selected_index = 0;
     }
 
     pub fn prev_provider(&mut self) {
         self.provider = self.provider.prev();
-        self.scroll_offset = 0;
         self.selected_index = 0;
     }
 
     pub fn next_tab(&mut self) {
         self.active_tab = self.active_tab.next();
-        self.scroll_offset = 0;
         self.selected_index = 0;
     }
 
     pub fn prev_tab(&mut self) {
         self.active_tab = self.active_tab.prev();
-        self.scroll_offset = 0;
         self.selected_index = 0;
     }
 
     pub fn scroll_up(&mut self) {
         if self.selected_index > 0 {
             self.selected_index -= 1;
-        }
-        if self.scroll_offset > self.selected_index {
-            self.scroll_offset = self.selected_index;
         }
     }
 
@@ -186,14 +177,12 @@ impl SkillsViewState {
     }
 
     pub fn scroll_to_top(&mut self) {
-        self.scroll_offset = 0;
         self.selected_index = 0;
     }
 
     pub fn scroll_to_bottom(&mut self, max_rows: usize) {
         if max_rows == 0 {
             self.selected_index = 0;
-            self.scroll_offset = 0;
             return;
         }
         self.selected_index = max_rows - 1;
@@ -201,7 +190,6 @@ impl SkillsViewState {
 
     pub fn page_up(&mut self, page_size: usize) {
         self.selected_index = self.selected_index.saturating_sub(page_size);
-        self.scroll_offset = self.scroll_offset.saturating_sub(page_size);
     }
 
     pub fn page_down(&mut self, max_rows: usize, page_size: usize) {
@@ -216,27 +204,33 @@ impl SkillsViewState {
         if !self.search_active {
             self.search_query.clear();
         }
-        self.scroll_offset = 0;
         self.selected_index = 0;
     }
 
     pub fn search_push(&mut self, c: char) {
         self.search_query.push(c);
-        self.scroll_offset = 0;
         self.selected_index = 0;
     }
 
     pub fn search_pop(&mut self) {
         self.search_query.pop();
-        self.scroll_offset = 0;
         self.selected_index = 0;
     }
 
     pub fn search_clear(&mut self) {
         self.search_active = false;
         self.search_query.clear();
-        self.scroll_offset = 0;
         self.selected_index = 0;
+    }
+
+    /// Clamp `selected_index` to a shrinking row set (e.g. after a filter
+    /// narrows results or the active provider/tab swaps).
+    pub fn clamp_selection(&mut self, row_count: usize) {
+        if row_count == 0 {
+            self.selected_index = 0;
+        } else if self.selected_index >= row_count {
+            self.selected_index = row_count - 1;
+        }
     }
 
     pub fn row_count(&self) -> usize {

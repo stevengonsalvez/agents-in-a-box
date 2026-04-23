@@ -3803,14 +3803,17 @@ impl EventHandler {
             AppEvent::SkillsSearchStart => {
                 state.skills_state.search_active = true;
                 state.skills_state.search_query.clear();
-                state.skills_state.scroll_offset = 0;
                 state.skills_state.selected_index = 0;
             }
             AppEvent::SkillsSearchChar(c) => {
                 state.skills_state.search_push(c);
+                let max = state.skills_state.row_count();
+                state.skills_state.clamp_selection(max);
             }
             AppEvent::SkillsSearchBackspace => {
                 state.skills_state.search_pop();
+                let max = state.skills_state.row_count();
+                state.skills_state.clamp_selection(max);
             }
             AppEvent::SkillsSearchClose => {
                 state.skills_state.search_active = false;
