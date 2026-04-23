@@ -1,13 +1,26 @@
 {
-  "_comment": "Copy the relevant sections to your ~/.claude/settings.json",
+  "_comment": "Reflect plugin hook snippets. Copy relevant sections into ~/.claude/settings.json hooks block.",
 
   "hooks": {
+    "SessionStart": [
+      {
+        "_comment": "Phase 2: inject top-3 relevant learnings into new session context",
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run {{HOME_TOOL_DIR}}/skills/recall/hooks/session_start_recall.py"
+          }
+        ]
+      }
+    ],
+
     "PreCompact": [
       {
         "matcher": "",
         "hooks": [
           {
-            "_comment": "Option 1: Just add reminder to run /reflect",
+            "_comment": "Option 1: reminder-only (non-blocking nudge)",
             "type": "command",
             "command": "uv run {{HOME_TOOL_DIR}}/skills/reflect/hooks/precompact_reflect.py --remind"
           }
@@ -20,7 +33,7 @@
         "matcher": "",
         "hooks": [
           {
-            "_comment": "Option 2: Auto-reflect if enabled via /reflect on",
+            "_comment": "Option 2: auto-reflect if /reflect on has been invoked",
             "type": "command",
             "command": "uv run {{HOME_TOOL_DIR}}/skills/reflect/hooks/precompact_reflect.py --auto --verbose"
           }
@@ -33,7 +46,7 @@
         "matcher": "",
         "hooks": [
           {
-            "_comment": "Option 3: Full integration with handover + backup + reflect",
+            "_comment": "Option 3: handover + backup + reflect",
             "type": "command",
             "command": "claude handover && uv run {{HOME_TOOL_DIR}}/hooks/pre_compact.py --backup && uv run {{HOME_TOOL_DIR}}/skills/reflect/hooks/precompact_reflect.py --auto"
           }
