@@ -3672,8 +3672,12 @@ impl EventHandler {
             }
             AppEvent::UsageRefresh => {
                 tracing::info!("Refreshing usage data");
-                state.start_background_usage_load(true);
-                state.add_success_notification("Refreshing usage data…".to_string());
+                let msg = if state.start_background_usage_load(true) {
+                    "Refreshing usage data…"
+                } else {
+                    "Refresh already in progress"
+                };
+                state.add_success_notification(msg.to_string());
             }
             // Session recovery events
             AppEvent::SessionRecoveryBack => {
