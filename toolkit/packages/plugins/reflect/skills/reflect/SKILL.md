@@ -87,7 +87,13 @@ Analyze the conversation for **two types** of signals:
 
 See `references/signal_patterns.md` for full detection rules.
 
-### Step 2: Classify & Match to Targets
+### Step 2: Classify & Match to Targets (MANDATORY)
+
+**CRITICAL**: Every detected signal MUST be routed to at least one of:
+(a) an existing agent/CLAUDE.md file edit, (b) a new skill proposal, or
+(c) a knowledge note. Knowledge notes are the **fallback**, not the default.
+If a signal has clear behavioral implications, you MUST propose an edit to an
+existing agent target — do not skip straight to knowledge-note output.
 
 **Behavioral signals** map to agent files:
 
@@ -205,14 +211,26 @@ relationships:
 1. Apply each behavioral change using Edit tool
 2. Write knowledge notes to `docs/solutions/{category}/`
 3. Write entity sidecar alongside each knowledge note
-4. Index globally:
+4. Index globally (validates sidecar first to catch schema errors early):
    ```bash
-   LEARNINGS_CLI="$HOME/.claude/global-learnings/cli/learnings"
+   LEARNINGS_CLI="$HOME/.learnings/cli/learnings"
+   SIDECAR="docs/solutions/{category}/{filename}.entities.yaml"
+   DOC="docs/solutions/{category}/{filename}.md"
+   VALIDATE="{{HOME_TOOL_DIR}}/skills/reflect/scripts/validate_sidecar.py"
+
    if [[ -x "$LEARNINGS_CLI" ]]; then
-       "$LEARNINGS_CLI" add docs/solutions/{category}/{filename}.md \
-           --entities docs/solutions/{category}/{filename}.entities.yaml
+       # Validate before ingest — malformed sidecars fail loudly here, not
+       # silently at GraphRAG time
+       uv run "$VALIDATE" --strict "$SIDECAR" || {
+           echo "ERROR: sidecar validation failed for $SIDECAR" >&2
+           exit 1
+       }
+       "$LEARNINGS_CLI" add "$DOC" --entities "$SIDECAR"
    fi
    ```
+   Capture → index is now closed: every accepted learning flows into GraphRAG
+   + QMD immediately, so the next session's SessionStart recall will surface
+   it via the retrieval hook.
 5. Create episode note (auto, no approval needed)
 6. Update metrics:
    ```bash

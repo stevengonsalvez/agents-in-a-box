@@ -41,10 +41,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-try:
-    import yaml
-except ImportError:
-    yaml = None  # graceful degrade; we can still parse most frontmatter
+import yaml  # declared in PEP 723 header; uv run --script always installs
 
 
 # --- Config --------------------------------------------------------------
@@ -154,11 +151,21 @@ def cache_path(query: str, mode: str) -> Path:
     return cache_dir / f"{digest}.json"
 
 
+def kb_last_modified() -> float:
+    """mtime of the GraphRAG cache dir — proxy for last KB write."""
+    kb = Path.home() / ".learnings" / "nano_graphrag_cache"
+    try:
+        return kb.stat().st_mtime if kb.exists() else 0.0
+    except OSError:
+        return 0.0
+
+
 def read_cache(path: Path, ttl: int) -> dict | None:
     if not path.exists():
         return None
-    age = time.time() - path.stat().st_mtime
-    if age > ttl:
+    cache_mtime = path.stat().st_mtime
+    # Invalidate on TTL or when KB has been written since the cache was created
+    if time.time() - cache_mtime > ttl or kb_last_modified() > cache_mtime:
         return None
     try:
         return json.loads(path.read_text())
@@ -182,14 +189,6 @@ def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
         return {}, text
     header = text[3:end].strip()
     body = text[end + 4 :].lstrip("\n")
-    if yaml is None:
-        # fallback: line-by-line k: v (no lists)
-        data: dict[str, Any] = {}
-        for line in header.splitlines():
-            if ":" in line:
-                k, _, v = line.partition(":")
-                data[k.strip()] = v.strip().strip('"')
-        return data, body
     try:
         data = yaml.safe_load(header) or {}
         return (data if isinstance(data, dict) else {}), body
