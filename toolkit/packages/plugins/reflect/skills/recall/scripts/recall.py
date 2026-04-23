@@ -150,7 +150,16 @@ class RecallResult:
 # --- Helpers -------------------------------------------------------------
 
 def find_learnings_cli() -> Path | None:
-    """Locate the learnings CLI. D1: subprocess wrapper."""
+    """Locate the learnings CLI. D1: subprocess wrapper.
+
+    Trust boundary: absolute candidates under `~/.learnings/cli/` are
+    tried first (installed by bootstrap.js from the toolkit template),
+    so the canonical install always wins. Only if those are absent do
+    we fall back to `shutil.which("learnings")` — which resolves via
+    `$PATH` and is therefore only as trustworthy as the caller's
+    environment. In practice this only runs as the user in their own
+    session; a hostile `$PATH` would already compromise their shell.
+    """
     for candidate in LEARNINGS_CLI_CANDIDATES:
         if candidate.exists() and os.access(candidate, os.X_OK):
             return candidate
@@ -167,6 +176,11 @@ def cache_path(query: str, mode: str, limit: int) -> Path:
     Limit is part of the key so a small-limit fetch can't poison a
     subsequent large-limit read with a truncated result set. Version tag
     invalidates old caches when the fusion pipeline changes.
+
+    `query_tags` is intentionally NOT part of the key: tags only affect
+    rerank ordering (applied after cache read) and the fetched raw set
+    is tag-independent, so two calls with same (query, mode, limit) but
+    different tags correctly share a cached fetch.
     """
     digest = hashlib.sha1(
         f"{CACHE_VERSION}|{query}|{mode}|{limit}".encode()
@@ -202,8 +216,12 @@ def read_cache(path: Path, ttl: int) -> dict | None:
 def write_cache(path: Path, payload: dict) -> None:
     try:
         path.write_text(json.dumps(payload, default=str))
-    except OSError:
-        pass  # non-fatal
+    except OSError as e:
+        # Disk full / permission / path too long — non-fatal, but surface
+        # in debug mode so silent cache-write failures don't hide real
+        # issues (e.g. $HOME on a read-only volume).
+        if os.environ.get("REFLECT_RECALL_DEBUG"):
+            print(f"recall: cache write failed: {e}", file=sys.stderr)
 
 
 def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
@@ -305,8 +323,8 @@ def rrf_fuse(result_lists: list[list[Learning]], k: int = RRF_K) -> list[Learnin
             # over file-read from qmd when both are present)
             if key not in first_seen:
                 first_seen[key] = learning
-    ordered_keys = sorted(scores, key=lambda k: scores[k], reverse=True)
-    return [first_seen[k] for k in ordered_keys]
+    ordered_keys = sorted(scores, key=lambda key: scores[key], reverse=True)
+    return [first_seen[key] for key in ordered_keys]
 
 
 def parse_learnings_output(json_blob: str) -> list[Learning]:
@@ -356,7 +374,11 @@ def rerank(
                 ts = datetime.fromisoformat(lrn.archived_at.rstrip("Z"))
                 age_days = max(0.0, (now - ts).days)
                 recency = math.exp(-age_days / 90.0)
-            except ValueError:
+            except (ValueError, TypeError):
+                # TypeError: aware-vs-naive datetime subtraction (one side
+                # has +00:00 offset). ValueError: malformed ISO string.
+                # Either way, fall back to neutral recency rather than
+                # crashing the entire rerank over one bad archive header.
                 pass
         lt = set(t.lower() for t in lrn.tags)
         bonus = 0.1 * len(qt & lt) if qt else 0.0
@@ -372,7 +394,7 @@ def filter_by_confidence(learnings: list[Learning], threshold: str) -> list[Lear
         return learnings
     rank = {"HIGH": 3, "MEDIUM": 2, "LOW": 1}
     min_rank = rank.get(threshold, 0)
-    return [l for l in learnings if rank.get(l.confidence, 0) >= min_rank]
+    return [lrn for lrn in learnings if rank.get(lrn.confidence, 0) >= min_rank]
 
 
 def render_markdown(
@@ -403,15 +425,15 @@ def render_json(learnings: list[Learning], query: str, mode: str) -> str:
             "count": len(learnings),
             "results": [
                 {
-                    "id": l.id,
-                    "title": l.title,
-                    "key_insight": l.key_insight,
-                    "confidence": l.confidence,
-                    "tags": l.tags,
-                    "how_to_apply": l.how_to_apply,
-                    "archived_at": l.archived_at,
+                    "id": lrn.id,
+                    "title": lrn.title,
+                    "key_insight": lrn.key_insight,
+                    "confidence": lrn.confidence,
+                    "tags": lrn.tags,
+                    "how_to_apply": lrn.how_to_apply,
+                    "archived_at": lrn.archived_at,
                 }
-                for l in learnings
+                for lrn in learnings
             ],
         },
         indent=2,

@@ -9,6 +9,16 @@ This repository stores learnings that are useful across multiple projects. It us
 
 Fixes to the CLI land here; content changes land in learnings-kb. Never edit `~/.learnings/cli/` directly — it will be overwritten on next bootstrap.
 
+### Migrating from old install paths
+
+Pre-v3.1 installs placed the CLI at `~/.claude/global-learnings/cli/` (Claude-specific). That path is deprecated — the canonical install is now `~/.learnings/cli/` for all tools. If you have the old path, it's safe to delete:
+
+```bash
+rm -rf ~/.claude/global-learnings
+```
+
+New installs (via `bootstrap.js` for any tool) write only to `~/.learnings/`.
+
 ## Philosophy
 
 > "Each solved problem makes future work easier - across ALL projects."

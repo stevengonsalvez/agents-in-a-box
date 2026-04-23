@@ -54,7 +54,6 @@ def build_block(skill: str, tier: int, query_hint: str) -> str:
         "gh-issue": "fixing the issue",
         "find-missing-tests": "identifying test gaps",
         "validate": "validating",
-        "review": "reviewing",
     }[skill]
     return f"""{BEGIN_MARK}
 

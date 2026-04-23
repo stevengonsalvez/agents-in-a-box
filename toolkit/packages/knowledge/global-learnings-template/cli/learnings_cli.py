@@ -269,11 +269,17 @@ def add(file_path: str, entities: Optional[str]):
     # already tracks, so we MUST run `qmd update` first to rescan the
     # collection for the newly-added file — otherwise new docs are visible
     # to GraphRAG but silently missing from QMD. Graceful if qmd absent.
+    #
+    # Both subprocesses are synchronous and can take ~10s-2min on large
+    # KBs. Echo progress so a user running `learnings add` isn't staring
+    # at a silent terminal.
     if shutil.which("qmd"):
         try:
             import subprocess
 
+            console.print("[dim]QMD: rescanning collection…[/dim]")
             subprocess.run(["qmd", "update"], capture_output=True, timeout=30)
+            console.print("[dim]QMD: embedding new docs (up to 2 min on large KBs)…[/dim]")
             subprocess.run(["qmd", "embed"], capture_output=True, timeout=120)
             console.print("[green]QMD index + embeddings updated[/green]")
         except Exception as e:
