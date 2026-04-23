@@ -3337,6 +3337,12 @@ impl AppState {
                 Err(mpsc::error::TryRecvError::Disconnected) => {
                     self.skills_state.loading = false;
                     self.skills_load_receiver = None;
+                    warn!(
+                        "Skills parse task dropped its sender without delivering data"
+                    );
+                    self.add_warning_notification(
+                        "Failed to parse skills; keeping cached data".to_string(),
+                    );
                     true
                 }
             }
