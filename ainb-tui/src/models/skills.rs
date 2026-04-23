@@ -22,8 +22,16 @@ pub struct AgentDef {
     pub description: String,
     pub tools: Vec<String>,
     pub source_path: PathBuf,
-    /// Body text (post-frontmatter) retained for association scanning.
-    pub body: String,
+}
+
+/// Scanner-internal view of an agent that caches pre-lowercased strings used
+/// during association building. Kept separate from [`AgentDef`] so the public
+/// type stays lean (body text is only needed for matching, never rendered).
+struct ScannedAgent {
+    agent: AgentDef,
+    desc_lower: String,
+    body_lower: String,
+    tools_lower: Vec<String>,
 }
 
 /// Complete parsed skills + agents snapshot.
@@ -47,8 +55,9 @@ pub fn parse_skills() -> SkillsData {
     };
 
     let skills = scan_skills(&home.join(".claude").join("skills"));
-    let agents = scan_agents(&home.join(".claude").join("agents"));
-    let associations = build_associations(&skills, &agents);
+    let scanned = scan_agents(&home.join(".claude").join("agents"));
+    let associations = build_associations(&skills, &scanned);
+    let agents: Vec<AgentDef> = scanned.into_iter().map(|s| s.agent).collect();
 
     debug!(
         "Parsed {} skills, {} agents, {} skill-associations",
@@ -124,8 +133,8 @@ fn scan_skills(root: &Path) -> Vec<Skill> {
     out
 }
 
-fn scan_agents(root: &Path) -> Vec<AgentDef> {
-    let mut out: Vec<AgentDef> = Vec::new();
+fn scan_agents(root: &Path) -> Vec<ScannedAgent> {
+    let mut out: Vec<ScannedAgent> = Vec::new();
     if !root.is_dir() {
         return out;
     }
@@ -155,16 +164,24 @@ fn scan_agents(root: &Path) -> Vec<AgentDef> {
         let description = fm.get("description").cloned().unwrap_or_default();
         let tools = parse_tools(fm.get("tools").map(String::as_str).unwrap_or(""));
 
-        out.push(AgentDef {
-            name,
-            description,
-            tools,
-            source_path: path,
-            body,
+        let desc_lower = description.to_lowercase();
+        let body_lower = body.to_lowercase();
+        let tools_lower = tools.iter().map(|t| t.to_lowercase()).collect();
+
+        out.push(ScannedAgent {
+            agent: AgentDef {
+                name,
+                description,
+                tools,
+                source_path: path,
+            },
+            desc_lower,
+            body_lower,
+            tools_lower,
         });
     }
 
-    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    out.sort_by(|a, b| a.agent.name.to_lowercase().cmp(&b.agent.name.to_lowercase()));
     out
 }
 
@@ -201,7 +218,7 @@ fn collect_agent_files(dir: &Path, out: &mut Vec<PathBuf>) {
 
 fn build_associations(
     skills: &[Skill],
-    agents: &[AgentDef],
+    agents: &[ScannedAgent],
 ) -> HashMap<String, Vec<String>> {
     let mut map: HashMap<String, Vec<String>> = HashMap::new();
 
@@ -211,17 +228,14 @@ fn build_associations(
 
         for agent in agents {
             // Tool list match: exact case-insensitive match.
-            let tool_hit = agent
-                .tools
-                .iter()
-                .any(|t| t.to_lowercase() == skill_name_lower);
+            let tool_hit = agent.tools_lower.iter().any(|t| t == &skill_name_lower);
 
             // Text match: whole-word case-insensitive match in description or body.
-            let text_hit = contains_word(&agent.description, &skill_name_lower)
-                || contains_word(&agent.body, &skill_name_lower);
+            let text_hit = contains_word(&agent.desc_lower, &skill_name_lower)
+                || contains_word(&agent.body_lower, &skill_name_lower);
 
             if tool_hit || text_hit {
-                matches.push(agent.name.clone());
+                matches.push(agent.agent.name.clone());
             }
         }
 
@@ -470,13 +484,15 @@ fn parse_tools(s: &str) -> Vec<String> {
         .collect()
 }
 
-fn contains_word(haystack: &str, needle_lower: &str) -> bool {
+/// Whole-word substring match. Caller must pass a pre-lowercased haystack
+/// and pre-lowercased needle; this avoids redundant per-call normalization
+/// when the same haystack is scanned against many needles.
+fn contains_word(haystack_lower: &str, needle_lower: &str) -> bool {
     if needle_lower.is_empty() {
         return false;
     }
-    let hay = haystack.to_lowercase();
     let needle_bytes = needle_lower.as_bytes();
-    let hay_bytes = hay.as_bytes();
+    let hay_bytes = haystack_lower.as_bytes();
     let mut i = 0usize;
     while i + needle_bytes.len() <= hay_bytes.len() {
         if &hay_bytes[i..i + needle_bytes.len()] == needle_bytes {
