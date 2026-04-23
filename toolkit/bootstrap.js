@@ -793,42 +793,61 @@ function copyDirectoryRecursive(source, destination, excludeFiles = [], template
 // dirs (documents/, nano_graphrag_cache/, .venv/) — those live one
 // level up at ~/.learnings/. Silent no-op if the template is missing.
 //
-// Returns {copied, pruned} counts.
+// Safety: uses lstatSync (not statSync) so we never chase a symlink
+// into user data, and skips non-regular files during prune. Each copy
+// and unlink is guarded — a single permission error warns and moves on
+// rather than aborting bootstrap mid-migration.
+//
+// Returns {copied, pruned, prunedNames, errors} — prunedNames is
+// surfaced in the install log so silent $HOME deletions stay visible.
 function installLearningsCli() {
+    const result = { copied: 0, pruned: 0, prunedNames: [], errors: [] };
     const srcDir = path.join(__dirname, 'packages', 'knowledge', 'global-learnings-template', 'cli');
-    if (!fs.existsSync(srcDir)) return { copied: 0, pruned: 0 };
+    if (!fs.existsSync(srcDir)) return result;
 
     const destDir = path.join(os.homedir(), '.learnings', 'cli');
     fs.mkdirSync(destDir, { recursive: true });
 
-    // Canonical fileset from the template — top-level files only.
-    const templateFiles = new Set(
-        readdirSync(srcDir).filter(e => !statSync(path.join(srcDir, e)).isDirectory())
-    );
-
-    // Copy canonical files.
-    let copied = 0;
-    for (const entry of templateFiles) {
+    // Canonical fileset from the template — top-level regular files only.
+    const templateFiles = new Map();
+    for (const entry of readdirSync(srcDir)) {
         const src = path.join(srcDir, entry);
-        const dst = path.join(destDir, entry);
-        fs.copyFileSync(src, dst);
-        if (entry === 'learnings') fs.chmodSync(dst, 0o755);
-        copied++;
+        const st = fs.lstatSync(src);
+        if (!st.isFile()) continue;
+        templateFiles.set(entry, st.mode & 0o777);
     }
 
-    // Prune orphan files — anything in destDir not in templateFiles.
-    // Keep subdirectories (__pycache__, etc.) alone; the wrapper
-    // regenerates them.
-    let pruned = 0;
+    // Copy canonical files, mirroring each one's source mode bits so any
+    // executable added to the template (not just `learnings`) stays +x.
+    for (const [entry, mode] of templateFiles) {
+        try {
+            const src = path.join(srcDir, entry);
+            const dst = path.join(destDir, entry);
+            fs.copyFileSync(src, dst);
+            fs.chmodSync(dst, mode);
+            result.copied++;
+        } catch (err) {
+            result.errors.push(`copy ${entry}: ${err.message}`);
+        }
+    }
+
+    // Prune orphans — anything in destDir not in templateFiles. Symlinks
+    // and non-regular files (sockets, FIFOs) are left alone so a dev's
+    // symlink to a local checkout doesn't get silently deleted.
     for (const entry of readdirSync(destDir)) {
         if (templateFiles.has(entry)) continue;
         const victim = path.join(destDir, entry);
-        if (statSync(victim).isDirectory()) continue;
-        fs.unlinkSync(victim);
-        pruned++;
+        try {
+            if (!fs.lstatSync(victim).isFile()) continue;
+            fs.unlinkSync(victim);
+            result.pruned++;
+            result.prunedNames.push(entry);
+        } catch (err) {
+            result.errors.push(`prune ${entry}: ${err.message}`);
+        }
     }
 
-    return { copied, pruned };
+    return result;
 }
 
 async function handleSharedContentCopy(tool, config, targetFolder) {
@@ -1496,12 +1515,17 @@ async function handlePackagesStructureCopy(tool, config, overrideHomeDir = null,
     // repo (learnings-kb). Runs on every tool install; cheap and idempotent.
     if (shouldUseHome) {
         showProgress('Installing learnings CLI to ~/.learnings/cli/');
-        const { copied, pruned } = installLearningsCli();
+        const { copied, pruned, prunedNames, errors } = installLearningsCli();
         if (copied > 0) {
-            const prunedMsg = pruned > 0 ? `, pruned ${pruned} stale` : '';
+            const prunedMsg = pruned > 0 ? `, pruned ${pruned} stale (${prunedNames.join(', ')})` : '';
             completeProgress(`Installed learnings CLI (${copied} files${prunedMsg}) to ~/.learnings/cli/`);
         } else {
             completeProgress('learnings CLI template not found — skipped');
+        }
+        // Warn-continue: don't abort the whole install on a single copy/prune
+        // failure, but surface it so the user knows something is off.
+        for (const msg of errors) {
+            console.log(`  ⚠ learnings CLI: ${msg}`);
         }
     }
 
