@@ -8,6 +8,28 @@ Analyze codebase and identify missing test cases, then create GitHub issues for 
 
 Follow these steps:
 
+<!-- recall:begin -->
+
+## Step 0: Prior-art check (RECOMMENDED)
+
+Before identifying test gaps, recall prior learnings from the global knowledge base so we don't re-learn or re-decide something already captured:
+
+```bash
+uv run "{{HOME_TOOL_DIR}}/skills/recall/scripts/recall.py" \
+  "<QUERY>" \
+  --limit 5 --format markdown
+```
+
+**Query construction for `/find-missing-tests`**: target module/package name + `"testing"` (e.g. `"payment webhook handler testing"`).
+
+**What to do with results:**
+
+- If a returned learning names a constraint, anti-pattern, or prior decision directly relevant to the task — surface it to the user BEFORE proceeding with this skill's main flow.
+- If nothing relevant returns — proceed silently, no need to mention the check.
+- Never block on recall failure. Empty output / non-zero exit is expected when the KB is absent or the subprocess errors — treat it as "no prior art found", not as an error.
+
+<!-- recall:end -->
+
 1. **Analyze the codebase**:
    - If $ARGUMENTS specifies files/directories, focus on those areas
    - Otherwise, scan the entire codebase for test coverage gaps

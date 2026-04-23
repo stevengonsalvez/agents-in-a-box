@@ -8,6 +8,28 @@ user-invocable: true
 
 You are tasked with implementing an approved technical plan from `plans/`. These plans contain phases with specific changes and success criteria.
 
+<!-- recall:begin -->
+
+## Step 0: Prior-art check (RECOMMENDED)
+
+Before implementing, recall prior learnings from the global knowledge base so we don't re-learn or re-decide something already captured:
+
+```bash
+uv run "{{HOME_TOOL_DIR}}/skills/recall/scripts/recall.py" \
+  "<QUERY>" \
+  --limit 5 --format markdown
+```
+
+**Query construction for `/implement`**: the plan's current phase name + touched module names (e.g. `"auth middleware session token storage"`). Skip if the calling /plan already ran recall and surfaced findings..
+
+**What to do with results:**
+
+- If a returned learning names a constraint, anti-pattern, or prior decision directly relevant to the task — surface it to the user BEFORE proceeding with this skill's main flow.
+- If nothing relevant returns — proceed silently, no need to mention the check.
+- Never block on recall failure. Empty output / non-zero exit is expected when the KB is absent or the subprocess errors — treat it as "no prior art found", not as an error.
+
+<!-- recall:end -->
+
 ## Getting Started
 
 When given a plan path:
