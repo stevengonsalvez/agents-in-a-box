@@ -11,7 +11,6 @@ import json
 import os
 import sys
 import subprocess
-import random
 from pathlib import Path
 
 try:
@@ -19,6 +18,12 @@ try:
     load_dotenv()
 except ImportError:
     pass  # dotenv is optional
+
+from utils.hook_context import (
+    build_session_label,
+    extract_latest_todo_snapshot,
+    summarize_todos,
+)
 
 
 def get_tts_script_path():
@@ -55,22 +60,42 @@ def get_tts_script_path():
     return None
 
 
-def announce_notification():
+def build_notification_message(input_data):
+    """Build a context-aware notification message."""
+    label = build_session_label(input_data.get("cwd", os.getcwd()))
+    notification_type = input_data.get("notification_type", "")
+    engineer_name = os.getenv('ENGINEER_NAME', '').strip()
+    prefix = f"{engineer_name}, " if engineer_name else ""
+
+    transcript_path = input_data.get("agent_transcript_path") or input_data.get("transcript_path", "")
+    summary = summarize_todos(extract_latest_todo_snapshot(transcript_path))
+
+    if notification_type == "idle_prompt" or input_data.get("message") == "Claude is waiting for your input":
+        message = f"{prefix}{label} is waiting for input"
+        if summary:
+            message = f"{message}. {summary}"
+        return message
+
+    if notification_type == "permission_prompt":
+        return f"{prefix}{label} needs permission"
+
+    title = (input_data.get("title") or "").strip()
+    message = (input_data.get("message") or "").strip()
+    if title:
+        return f"{prefix}{label}: {title}"
+    if message:
+        return f"{prefix}{label}: {message}"
+
+    return f"{prefix}{label} needs attention"
+
+
+def announce_notification(notification_message):
     """Announce that the agent needs user input."""
     try:
         tts_script = get_tts_script_path()
         if not tts_script:
             return  # No TTS scripts available
-        
-        # Get engineer name if available
-        engineer_name = os.getenv('ENGINEER_NAME', '').strip()
-        
-        # Create notification message with 30% chance to include name
-        if engineer_name and random.random() < 0.3:
-            notification_message = f"{engineer_name}, your agent needs your input"
-        else:
-            notification_message = "Your agent needs your input"
-        
+
         # Call the TTS script with the notification message
         subprocess.run([
             "uv", "run", tts_script, notification_message
@@ -121,9 +146,8 @@ def main():
             json.dump(log_data, f, indent=2)
         
         # Announce notification via TTS only if --notify flag is set
-        # Skip TTS for the generic "Claude is waiting for your input" message
-        if args.notify and input_data.get('message') != 'Claude is waiting for your input':
-            announce_notification()
+        if args.notify:
+            announce_notification(build_notification_message(input_data))
         
         sys.exit(0)
         

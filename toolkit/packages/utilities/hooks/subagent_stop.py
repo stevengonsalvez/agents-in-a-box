@@ -12,13 +12,18 @@ import os
 import sys
 import subprocess
 from pathlib import Path
-from datetime import datetime
 
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
     pass  # dotenv is optional
+
+from utils.hook_context import (
+    build_session_label,
+    extract_latest_todo_snapshot,
+    summarize_todos,
+)
 
 
 def get_tts_script_path():
@@ -50,16 +55,28 @@ def get_tts_script_path():
     return None
 
 
-def announce_subagent_completion():
+def build_subagent_completion_message(input_data):
+    """Build a subagent completion message with context."""
+    label = build_session_label(input_data.get("cwd", os.getcwd()))
+    agent_type = input_data.get("agent_type", "").strip()
+    transcript_path = input_data.get("agent_transcript_path") or input_data.get("transcript_path", "")
+    summary = summarize_todos(extract_latest_todo_snapshot(transcript_path))
+
+    subject = f"{agent_type} complete" if agent_type else "subagent complete"
+    message = f"{subject} in {label}"
+    if summary:
+        message = f"{message}. {summary}"
+
+    return message
+
+
+def announce_subagent_completion(completion_message):
     """Announce subagent completion using the best available TTS service."""
     try:
         tts_script = get_tts_script_path()
         if not tts_script:
             return  # No TTS scripts available
-        
-        # Use fixed message for subagent completion
-        completion_message = "Subagent Complete"
-        
+
         # Call the TTS script with the completion message
         subprocess.run([
             "uv", "run", tts_script, completion_message
@@ -136,7 +153,7 @@ def main():
                     pass  # Fail silently
 
         # Announce subagent completion via TTS
-        announce_subagent_completion()
+        announce_subagent_completion(build_subagent_completion_message(input_data))
 
         sys.exit(0)
 
