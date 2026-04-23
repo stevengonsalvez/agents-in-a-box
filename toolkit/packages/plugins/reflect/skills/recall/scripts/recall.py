@@ -212,8 +212,13 @@ def parse_learnings_output(json_blob: str) -> list[Learning]:
         envelope = json.loads(json_blob)
     except json.JSONDecodeError:
         return []
+    # Expected shape is {"context": "...chunks...--New Chunk--..."}.
+    # Guard against list/string/other shapes so a CLI format change can't
+    # crash us — it should just return zero results.
+    if not isinstance(envelope, dict):
+        return []
     context = envelope.get("context", "")
-    if not context:
+    if not isinstance(context, str) or not context:
         return []
     chunks = [c.strip() for c in context.split(CHUNK_SEPARATOR) if c.strip()]
     results: list[Learning] = []
