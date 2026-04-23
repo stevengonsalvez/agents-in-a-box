@@ -478,7 +478,33 @@ fn parse_tools(s: &str) -> Vec<String> {
     if s.trim().is_empty() {
         return Vec::new();
     }
-    s.split(|c: char| c == ',' || c == '\n')
+    // Quote-aware split: commas and newlines only split entries when we are
+    // NOT inside a single- or double-quoted region. Handles entries like
+    // `"Read,Bash(bd:*)"` where a literal comma lives inside the quotes.
+    let mut parts: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    for ch in s.chars() {
+        match ch {
+            '\'' if !in_double => {
+                in_single = !in_single;
+                current.push(ch);
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+                current.push(ch);
+            }
+            ',' | '\n' if !in_single && !in_double => {
+                parts.push(std::mem::take(&mut current));
+            }
+            _ => current.push(ch),
+        }
+    }
+    parts.push(current);
+
+    parts
+        .into_iter()
         .map(|t| strip_quotes(t.trim().trim_start_matches('-').trim()))
         .filter(|t| !t.is_empty())
         .collect()
