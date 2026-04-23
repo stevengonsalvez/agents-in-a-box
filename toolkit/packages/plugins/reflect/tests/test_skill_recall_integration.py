@@ -3,6 +3,7 @@
 # requires-python = ">=3.11"
 # dependencies = [
 #     "pytest",
+#     "pyyaml",
 # ]
 # ///
 """
@@ -176,14 +177,11 @@ def test_recall_returns_seeded_learning(sandbox_kb):
 
 def test_recall_graceful_on_missing_kb(tmp_path):
     """D9: when KB is absent, recall exits 0 with no output."""
-    # Isolate PATH to a dir that ONLY contains uv — no `learnings` binary.
-    isolated_bin = tmp_path / "bin"
-    isolated_bin.mkdir()
-    (isolated_bin / "uv").symlink_to(UV)
-
+    # HOME-empty hides ~/.learnings; PATH=/bin:/usr/bin hides `qmd`. uv is
+    # invoked by full path so PATH stripping is safe.
     env = os.environ.copy()
     env["HOME"] = str(tmp_path)  # empty — no ~/.learnings
-    env["PATH"] = str(isolated_bin)
+    env["PATH"] = "/bin:/usr/bin"
 
     result = subprocess.run(
         [UV, "run", "--quiet", str(RECALL), "anything",
@@ -193,6 +191,140 @@ def test_recall_graceful_on_missing_kb(tmp_path):
     assert result.returncode == 0, f"should exit 0, got {result.returncode}"
     # Output should be empty-ish when KB absent (no "[lrn-...]" entries)
     assert "[lrn-" not in result.stdout
+
+
+# ─── Layer 3: sandbox e2e — fusion with BOTH stubs ─────────────────────
+# (RRF + QMD parse + parallel fan-out are all exercised by this e2e test —
+# separate unit tests would just be importlib-fragile duplication.)
+
+@pytest.fixture
+def dual_stub_kb(tmp_path):
+    """Install stubs for BOTH `learnings` and `qmd` + seed docs for both.
+
+    learnings stub returns lrn-graph-X (distinct from lrn-qmd-X in QMD).
+    This lets us verify fusion: the output should contain IDs from BOTH.
+    """
+    home = tmp_path / "home"
+    (home / ".learnings" / "cli").mkdir(parents=True)
+    (home / ".learnings" / "nano_graphrag_cache").mkdir(parents=True)
+    docs_root = home / ".learnings" / "documents"
+    (docs_root / "learnings").mkdir(parents=True)
+
+    # Seed docs on disk so QMD stub can point at real files for parsing.
+    for lid in ["lrn-qmd-x", "lrn-qmd-y"]:
+        (docs_root / "learnings" / f"{lid}.md").write_text(
+            f"---\nid: {lid}\ntitle: {lid}\nconfidence: HIGH\n"
+            f"tags: [sandbox]\n---\n\n**How to apply:** qmd hit\n"
+        )
+
+    # learnings stub — emits envelope JSON with 2 distinct chunks.
+    graph_chunks = []
+    for lid in ["lrn-graph-a", "lrn-graph-b"]:
+        graph_chunks.append(
+            f"---\nid: {lid}\ntitle: {lid}\nconfidence: HIGH\n"
+            f"tags: [sandbox]\n---\n\n**How to apply:** graph hit\n"
+        )
+    graph_context = "\n--New Chunk--\n".join(graph_chunks)
+    graph_envelope = json.dumps({"context": graph_context})
+
+    learnings_stub = home / ".learnings" / "cli" / "learnings"
+    learnings_stub.write_text(
+        f"#!/usr/bin/env bash\ncat <<'EOF'\n{graph_envelope}\nEOF\n"
+    )
+    learnings_stub.chmod(0o755)
+
+    # qmd stub — emits text output with paths pointing at our seeded docs.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "uv").symlink_to(UV)
+    qmd_stub = bin_dir / "qmd"
+    qmd_stub.write_text(
+        "#!/usr/bin/env bash\n"
+        "cat <<'EOF'\n"
+        "qmd://learnings/learnings/lrn-qmd-x.md:1 #aaa\n"
+        "Title: lrn-qmd-x\n\n"
+        "qmd://learnings/learnings/lrn-qmd-y.md:1 #bbb\n"
+        "Title: lrn-qmd-y\n"
+        "EOF\n"
+    )
+    qmd_stub.chmod(0o755)
+
+    yield {
+        "home": home,
+        "bin": bin_dir,
+        "reflect_state": tmp_path / "reflect_state",
+    }
+
+
+def test_fusion_includes_both_backends(dual_stub_kb):
+    """With both backends stubbed, fused output must contain IDs from EACH."""
+    env = os.environ.copy()
+    env["HOME"] = str(dual_stub_kb["home"])
+    env["REFLECT_STATE_DIR"] = str(dual_stub_kb["reflect_state"])
+    # Prepend stub bin so our qmd stub wins lookup; keep system PATH so uv
+    # can still find bash/coreutils when running the stubs.
+    env["PATH"] = f"{dual_stub_kb['bin']}:{env.get('PATH', '')}"
+
+    result = subprocess.run(
+        [UV, "run", "--quiet", str(RECALL), "sandbox",
+         "--limit", "10", "--format", "markdown", "--no-cache"],
+        capture_output=True, text=True, timeout=60, env=env,
+    )
+    assert result.returncode == 0, f"recall failed: {result.stderr}"
+    # Must see at least one ID from each backend → fusion is happening
+    assert "lrn-graph-" in result.stdout, (
+        f"graph backend results missing — recall isn't calling learnings CLI.\n"
+        f"stdout: {result.stdout}"
+    )
+    assert "lrn-qmd-" in result.stdout, (
+        f"qmd backend results missing — fusion isn't happening.\n"
+        f"stdout: {result.stdout}"
+    )
+
+
+# ─── Layer 6: REAL CLI smoke tests (skipped if KB absent) ──────────────
+
+def _real_learnings_available() -> bool:
+    return (Path.home() / ".learnings" / "cli" / "learnings").exists()
+
+
+def _real_qmd_available() -> bool:
+    return shutil.which("qmd") is not None
+
+
+@pytest.mark.skipif(not _real_learnings_available(),
+                    reason="no real ~/.learnings KB on this host")
+def test_real_learnings_cli_returns_results():
+    """Smoke test: the real learnings CLI actually returns something for a
+    generic query. Catches if the local KB is empty or broken."""
+    result = subprocess.run(
+        [str(Path.home() / ".learnings" / "cli" / "learnings"),
+         "search", "the", "--mode", "naive", "--format", "json", "--limit", "3"],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, (
+        f"learnings CLI failed: {result.stderr[:500]}"
+    )
+    payload = json.loads(result.stdout)
+    assert isinstance(payload, dict), f"expected envelope dict, got {type(payload)}"
+    context = payload.get("context", "")
+    assert context, "empty context — either KB is empty or CLI is broken"
+
+
+@pytest.mark.skipif(not _real_qmd_available(),
+                    reason="qmd CLI not installed on this host")
+def test_real_qmd_cli_returns_results():
+    """Smoke test: the real qmd CLI actually returns something for a
+    generic keyword against the learnings collection."""
+    result = subprocess.run(
+        ["qmd", "search", "the", "-c", "learnings", "--limit", "3"],
+        capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode == 0, f"qmd failed: {result.stderr[:500]}"
+    # QMD search emits qmd:// path lines for hits, or "No results found." for empty
+    assert "qmd://learnings/" in result.stdout or "No results" in result.stdout, (
+        f"unexpected qmd output: {result.stdout[:500]}"
+    )
 
 
 if __name__ == "__main__":
