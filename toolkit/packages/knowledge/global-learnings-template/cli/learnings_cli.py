@@ -265,6 +265,20 @@ def add(file_path: str, entities: Optional[str]):
         console.print(f"[yellow]Warning: Graph indexing failed: {e}[/yellow]")
         console.print("[dim]Document saved. Run 'learnings reindex' to retry.[/dim]")
 
+    # Keep QMD in sync (if installed). `qmd embed` only embeds files QMD
+    # already tracks, so we MUST run `qmd update` first to rescan the
+    # collection for the newly-added file — otherwise new docs are visible
+    # to GraphRAG but silently missing from QMD. Graceful if qmd absent.
+    if shutil.which("qmd"):
+        try:
+            import subprocess
+
+            subprocess.run(["qmd", "update"], capture_output=True, timeout=30)
+            subprocess.run(["qmd", "embed"], capture_output=True, timeout=120)
+            console.print("[green]QMD index + embeddings updated[/green]")
+        except Exception as e:
+            console.print(f"[yellow]Warning: QMD sync failed: {e}[/yellow]")
+
     console.print(f"[green]Added:[/green] {dest}")
     console.print(f"[dim]Title: {frontmatter['title']}[/dim]")
     console.print(f"[dim]Category: {frontmatter['category']}[/dim]")
