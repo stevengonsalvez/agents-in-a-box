@@ -416,6 +416,7 @@ pub enum View {
     SetupMenu,        // Setup menu with factory reset option
     Changelog,        // Version history viewer
     SessionRecovery,  // Recover orphaned agent sessions after crash/shutdown
+    Skills,           // Per-agent skills + agents browser
 }
 
 #[derive(Debug, Clone)]
@@ -1925,6 +1926,12 @@ pub struct AppState {
     /// Present only while a parse is in flight; `tick()` drains it.
     pub usage_load_receiver: Option<mpsc::UnboundedReceiver<crate::models::UsageData>>,
 
+    // Skills browser state
+    pub skills_state: crate::components::skills::SkillsViewState,
+    /// Channel receiver for background skills+agents scan.
+    /// Present only while a scan is in flight; `tick()` drains it.
+    pub skills_load_receiver: Option<mpsc::UnboundedReceiver<crate::models::SkillsData>>,
+
     // Periodic session snapshot tracking
     pub last_snapshot_time: Option<Instant>,
 
@@ -2468,6 +2475,10 @@ impl Default for AppState {
             // Usage analytics state
             usage_state: crate::components::usage::UsageViewState::default(),
             usage_load_receiver: None,
+
+            // Skills browser state
+            skills_state: crate::components::skills::SkillsViewState::default(),
+            skills_load_receiver: None,
 
             // Periodic session snapshot tracking
             last_snapshot_time: None,
@@ -3276,6 +3287,56 @@ impl AppState {
                 Err(mpsc::error::TryRecvError::Disconnected) => {
                     self.usage_state.loading = false;
                     self.usage_load_receiver = None;
+                    true
+                }
+            }
+        } else {
+            false
+        }
+    }
+
+    /// Kick off a background scan of ~/.claude/skills and ~/.claude/agents.
+    /// Skipped if already in-flight, or data is cached and `force` is false.
+    /// Returns true if a new scan was spawned, false if coalesced.
+    /// Mirrors `start_background_usage_load` so Skills screen navigation
+    /// never blocks the event thread.
+    pub fn start_background_skills_load(&mut self, force: bool) -> bool {
+        if self.skills_load_receiver.is_some() {
+            return false;
+        }
+        if !force && self.skills_state.data.is_some() {
+            return false;
+        }
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.skills_load_receiver = Some(rx);
+        self.skills_state.loading = true;
+        tokio::spawn(async move {
+            match tokio::task::spawn_blocking(crate::models::skills::parse_skills).await {
+                Ok(data) => {
+                    let _ = tx.send(data);
+                }
+                Err(e) => {
+                    warn!("Skills parse task failed: {}", e);
+                }
+            }
+        });
+        true
+    }
+
+    /// Poll the background scan. Returns true if data was applied this tick.
+    pub fn check_skills_load_complete(&mut self) -> bool {
+        if let Some(ref mut receiver) = self.skills_load_receiver {
+            match receiver.try_recv() {
+                Ok(data) => {
+                    self.skills_state.data = Some(data);
+                    self.skills_state.loading = false;
+                    self.skills_load_receiver = None;
+                    true
+                }
+                Err(mpsc::error::TryRecvError::Empty) => false,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    self.skills_state.loading = false;
+                    self.skills_load_receiver = None;
                     true
                 }
             }
@@ -8773,6 +8834,11 @@ impl App {
 
         // Check for completed background usage-data parsing
         if self.state.check_usage_load_complete() {
+            self.state.ui_needs_refresh = true;
+        }
+
+        // Check for completed background skills scan
+        if self.state.check_skills_load_complete() {
             self.state.ui_needs_refresh = true;
         }
 

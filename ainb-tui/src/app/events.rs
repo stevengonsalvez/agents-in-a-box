@@ -232,6 +232,7 @@ pub enum AppEvent {
     GoToConfig,                  // Navigate to config view
     GoToSessionList,             // Navigate to session list view
     GoToStats,                   // Navigate to stats view
+    GoToSkills,                  // Navigate to skills view
     GoToRecovery,                // Navigate to session recovery view
     // AINB 2.0: Agent selection events
     AgentSelectionBack,          // Return to home screen (Esc)
@@ -341,6 +342,23 @@ pub enum AppEvent {
     UsageToTop,                  // Jump to top (g)
     UsageToBottom,               // Jump to bottom (G)
     UsageRefresh,                // Reload data (r)
+    // Skills browser events
+    SkillsBack,                  // Return to home screen (Esc)
+    SkillsNextProvider,          // Next provider (Right arrow)
+    SkillsPrevProvider,          // Previous provider (Left arrow)
+    SkillsNextTab,               // Next sub-tab (Tab)
+    SkillsPrevTab,               // Previous sub-tab (Shift+Tab)
+    SkillsScrollUp,              // Move selection up (k/Up)
+    SkillsScrollDown,            // Move selection down (j/Down)
+    SkillsPageUp,                // Page up
+    SkillsPageDown,              // Page down
+    SkillsToTop,                 // Jump to top (g)
+    SkillsToBottom,              // Jump to bottom (G)
+    SkillsRefresh,               // Reload data (r)
+    SkillsSearchStart,           // Enter search mode (/)
+    SkillsSearchChar(char),      // Append char to search query
+    SkillsSearchBackspace,       // Remove last char from search query
+    SkillsSearchClose,           // Exit search mode (Esc)
     // Session recovery events
     SessionRecoveryBack,         // Return to home screen (Esc)
     SessionRecoveryNext,         // Navigate to next session (Down/j)
@@ -584,6 +602,12 @@ impl EventHandler {
         if state.current_view == View::Analytics {
             tracing::debug!("In usage analytics view, handling usage keys");
             return Self::handle_usage_keys(key_event, state);
+        }
+
+        // Handle skills browser view
+        if state.current_view == View::Skills {
+            tracing::debug!("In skills view, handling skills keys");
+            return Self::handle_skills_keys(key_event, state);
         }
 
         // Handle session recovery view
@@ -1534,6 +1558,39 @@ impl EventHandler {
         }
     }
 
+    // Skills browser key handling
+    fn handle_skills_keys(key_event: KeyEvent, state: &AppState) -> Option<AppEvent> {
+        tracing::debug!("Skills key handler: {:?}", key_event.code);
+
+        // Search mode eats most keys: typing feeds the query, Esc exits.
+        if state.skills_state.search_active {
+            return match key_event.code {
+                KeyCode::Esc => Some(AppEvent::SkillsSearchClose),
+                KeyCode::Enter => Some(AppEvent::SkillsSearchClose),
+                KeyCode::Backspace => Some(AppEvent::SkillsSearchBackspace),
+                KeyCode::Char(c) => Some(AppEvent::SkillsSearchChar(c)),
+                _ => None,
+            };
+        }
+
+        match key_event.code {
+            KeyCode::Esc => Some(AppEvent::SkillsBack),
+            KeyCode::Right | KeyCode::Char('l') => Some(AppEvent::SkillsNextProvider),
+            KeyCode::Left | KeyCode::Char('h') => Some(AppEvent::SkillsPrevProvider),
+            KeyCode::Tab => Some(AppEvent::SkillsNextTab),
+            KeyCode::BackTab => Some(AppEvent::SkillsPrevTab),
+            KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::SkillsScrollUp),
+            KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::SkillsScrollDown),
+            KeyCode::PageUp => Some(AppEvent::SkillsPageUp),
+            KeyCode::PageDown => Some(AppEvent::SkillsPageDown),
+            KeyCode::Char('g') => Some(AppEvent::SkillsToTop),
+            KeyCode::Char('G') => Some(AppEvent::SkillsToBottom),
+            KeyCode::Char('r') => Some(AppEvent::SkillsRefresh),
+            KeyCode::Char('/') => Some(AppEvent::SkillsSearchStart),
+            _ => None,
+        }
+    }
+
     // Changelog viewer key handling
     fn handle_changelog_keys(key_event: KeyEvent, _state: &AppState) -> Option<AppEvent> {
         tracing::debug!("Changelog key handler: {:?}", key_event.code);
@@ -1590,6 +1647,7 @@ impl EventHandler {
             KeyCode::Char('C') => return Some(AppEvent::GoToConfig),
             KeyCode::Char('s') => return Some(AppEvent::GoToSessionList),
             KeyCode::Char('i') => return Some(AppEvent::GoToStats),
+            KeyCode::Char('k') => return Some(AppEvent::GoToSkills),
             KeyCode::Char('R') => return Some(AppEvent::GoToRecovery),
             KeyCode::Char('v') => return Some(AppEvent::ShowChangelog),
             KeyCode::Char('?') => return Some(AppEvent::ToggleHelp),
@@ -2809,6 +2867,11 @@ impl EventHandler {
                         state.current_view = View::Analytics;
                         state.start_background_usage_load(false);
                     }
+                    SidebarItem::Skills => {
+                        tracing::info!("Navigating to Skills from sidebar");
+                        state.current_view = View::Skills;
+                        state.start_background_skills_load(false);
+                    }
                     SidebarItem::Changelog => {
                         state.current_view = View::Changelog;
                     }
@@ -3010,6 +3073,11 @@ impl EventHandler {
                 tracing::info!("Navigating to Usage Analytics");
                 state.current_view = View::Analytics;
                 state.start_background_usage_load(false);
+            }
+            AppEvent::GoToSkills => {
+                tracing::info!("Navigating to Skills");
+                state.current_view = View::Skills;
+                state.start_background_skills_load(false);
             }
             AppEvent::GoToRecovery => {
                 tracing::info!("Navigating to Session Recovery");
@@ -3678,6 +3746,75 @@ impl EventHandler {
                     "Refresh already in progress"
                 };
                 state.add_success_notification(msg.to_string());
+            }
+            // Skills browser events
+            AppEvent::SkillsBack => {
+                tracing::debug!("Skills back");
+                state.current_view = View::HomeScreen;
+            }
+            AppEvent::SkillsNextProvider => {
+                state.skills_state.next_provider();
+                if state.skills_state.provider.has_data() {
+                    state.start_background_skills_load(false);
+                }
+            }
+            AppEvent::SkillsPrevProvider => {
+                state.skills_state.prev_provider();
+                if state.skills_state.provider.has_data() {
+                    state.start_background_skills_load(false);
+                }
+            }
+            AppEvent::SkillsNextTab => {
+                state.skills_state.next_tab();
+            }
+            AppEvent::SkillsPrevTab => {
+                state.skills_state.prev_tab();
+            }
+            AppEvent::SkillsScrollUp => {
+                state.skills_state.scroll_up();
+            }
+            AppEvent::SkillsScrollDown => {
+                let max = state.skills_state.row_count();
+                state.skills_state.scroll_down(max);
+            }
+            AppEvent::SkillsPageUp => {
+                state.skills_state.page_up(20);
+            }
+            AppEvent::SkillsPageDown => {
+                let max = state.skills_state.row_count();
+                state.skills_state.page_down(max, 20);
+            }
+            AppEvent::SkillsToTop => {
+                state.skills_state.scroll_to_top();
+            }
+            AppEvent::SkillsToBottom => {
+                let max = state.skills_state.row_count();
+                state.skills_state.scroll_to_bottom(max);
+            }
+            AppEvent::SkillsRefresh => {
+                tracing::info!("Refreshing skills data");
+                let msg = if state.start_background_skills_load(true) {
+                    "Refreshing skills data…"
+                } else {
+                    "Refresh already in progress"
+                };
+                state.add_success_notification(msg.to_string());
+            }
+            AppEvent::SkillsSearchStart => {
+                state.skills_state.search_active = true;
+                state.skills_state.search_query.clear();
+                state.skills_state.scroll_offset = 0;
+                state.skills_state.selected_index = 0;
+            }
+            AppEvent::SkillsSearchChar(c) => {
+                state.skills_state.search_push(c);
+            }
+            AppEvent::SkillsSearchBackspace => {
+                state.skills_state.search_pop();
+            }
+            AppEvent::SkillsSearchClose => {
+                state.skills_state.search_active = false;
+                // Query is preserved so the filter stays applied after exit.
             }
             // Session recovery events
             AppEvent::SessionRecoveryBack => {
