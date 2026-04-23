@@ -783,30 +783,52 @@ function copyDirectoryRecursive(source, destination, excludeFiles = [], template
 
 // Deploy the global-learnings CLI to ~/.learnings/cli/ so every tool
 // install (claude, codex, copilot, …) picks up the current CLI from
-// ai-coder-rules. The content repo (learnings-kb) still carries its own
-// CLI copy today, but bootstrap runs after any such clone and wins last
-// — overwriting stale files without touching data dirs (documents/,
-// nano_graphrag_cache/, .venv/). Silent no-op if the toolkit template is
-// missing. Returns number of files copied.
+// ai-coder-rules — the single source of truth. The content repo
+// (learnings-kb) holds only documents/indexes; its cli/ folder is
+// deprecated and being removed.
+//
+// Strategy: copy every file from the template, then prune any file in
+// the destination that isn't in the template. This removes stale CLI
+// files from old learnings-kb clones without touching sibling data
+// dirs (documents/, nano_graphrag_cache/, .venv/) — those live one
+// level up at ~/.learnings/. Silent no-op if the template is missing.
+//
+// Returns {copied, pruned} counts.
 function installLearningsCli() {
     const srcDir = path.join(__dirname, 'packages', 'knowledge', 'global-learnings-template', 'cli');
-    if (!fs.existsSync(srcDir)) return 0;
+    if (!fs.existsSync(srcDir)) return { copied: 0, pruned: 0 };
 
     const destDir = path.join(os.homedir(), '.learnings', 'cli');
     fs.mkdirSync(destDir, { recursive: true });
 
+    // Canonical fileset from the template — top-level files only.
+    const templateFiles = new Set(
+        readdirSync(srcDir).filter(e => !statSync(path.join(srcDir, e)).isDirectory())
+    );
+
+    // Copy canonical files.
     let copied = 0;
-    for (const entry of readdirSync(srcDir)) {
+    for (const entry of templateFiles) {
         const src = path.join(srcDir, entry);
-        // Skip subdirs (__pycache__, etc.) — the wrapper regenerates them.
-        if (statSync(src).isDirectory()) continue;
         const dst = path.join(destDir, entry);
         fs.copyFileSync(src, dst);
-        // Preserve executability for the bash wrapper.
         if (entry === 'learnings') fs.chmodSync(dst, 0o755);
         copied++;
     }
-    return copied;
+
+    // Prune orphan files — anything in destDir not in templateFiles.
+    // Keep subdirectories (__pycache__, etc.) alone; the wrapper
+    // regenerates them.
+    let pruned = 0;
+    for (const entry of readdirSync(destDir)) {
+        if (templateFiles.has(entry)) continue;
+        const victim = path.join(destDir, entry);
+        if (statSync(victim).isDirectory()) continue;
+        fs.unlinkSync(victim);
+        pruned++;
+    }
+
+    return { copied, pruned };
 }
 
 async function handleSharedContentCopy(tool, config, targetFolder) {
@@ -1474,9 +1496,10 @@ async function handlePackagesStructureCopy(tool, config, overrideHomeDir = null,
     // repo (learnings-kb). Runs on every tool install; cheap and idempotent.
     if (shouldUseHome) {
         showProgress('Installing learnings CLI to ~/.learnings/cli/');
-        const cliCount = installLearningsCli();
-        if (cliCount > 0) {
-            completeProgress(`Installed learnings CLI (${cliCount} files) to ~/.learnings/cli/`);
+        const { copied, pruned } = installLearningsCli();
+        if (copied > 0) {
+            const prunedMsg = pruned > 0 ? `, pruned ${pruned} stale` : '';
+            completeProgress(`Installed learnings CLI (${copied} files${prunedMsg}) to ~/.learnings/cli/`);
         } else {
             completeProgress('learnings CLI template not found — skipped');
         }
