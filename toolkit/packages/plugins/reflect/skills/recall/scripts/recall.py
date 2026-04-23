@@ -27,6 +27,7 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import hashlib
 import json
 import math
@@ -58,6 +59,15 @@ LEARNINGS_CLI_CANDIDATES = [
 CONFIDENCE_WEIGHTS = {"HIGH": 1.0, "MEDIUM": 0.7, "LOW": 0.4}
 CHUNK_SEPARATOR = "--New Chunk--"
 ARCHIVE_HEADER_RE = re.compile(r"<!--\s*archived:\s*([0-9T:.+\-Z]+)\s*-->")
+
+# --- QMD fusion config ---------------------------------------------------
+# QMD provides BM25 lexical search (fast, ~0.5s) as a complement to
+# GraphRAG's vector path. Fusing the two via RRF gives hybrid lex+vec
+# retrieval without changing the learnings CLI.
+QMD_COLLECTION = "learnings"
+QMD_DOCS_ROOT = Path.home() / ".learnings" / "documents"
+QMD_PATH_RE = re.compile(r"qmd://" + re.escape(QMD_COLLECTION) + r"/(\S+?\.md)")
+RRF_K = 60  # standard reciprocal-rank-fusion constant
 
 
 # --- Data models ---------------------------------------------------------
@@ -148,13 +158,19 @@ def find_learnings_cli() -> Path | None:
     return Path(cli_on_path) if cli_on_path else None
 
 
+CACHE_VERSION = "v2-hybrid"  # bump when fusion semantics change
+
+
 def cache_path(query: str, mode: str, limit: int) -> Path:
     """Per-query cache file. D4: 1-hour TTL.
 
     Limit is part of the key so a small-limit fetch can't poison a
-    subsequent large-limit read with a truncated result set.
+    subsequent large-limit read with a truncated result set. Version tag
+    invalidates old caches when the fusion pipeline changes.
     """
-    digest = hashlib.sha1(f"{query}|{mode}|{limit}".encode()).hexdigest()[:16]
+    digest = hashlib.sha1(
+        f"{CACHE_VERSION}|{query}|{mode}|{limit}".encode()
+    ).hexdigest()[:16]
     base = Path(os.environ.get("REFLECT_STATE_DIR", Path.home() / ".reflect"))
     cache_dir = base / "recall_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -204,6 +220,93 @@ def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
         return (data if isinstance(data, dict) else {}), body
     except yaml.YAMLError:
         return {}, body
+
+
+def find_qmd_cli() -> Path | None:
+    """Locate the `qmd` binary. Returns None if not installed."""
+    cli_on_path = shutil.which("qmd")
+    return Path(cli_on_path) if cli_on_path else None
+
+
+def fetch_qmd(query: str, limit: int, timeout: int = 10) -> list[Learning]:
+    """Fast BM25 retrieval via qmd. Complement to GraphRAG's vector path.
+
+    Returns empty list on any failure (missing CLI, timeout, empty KB) — QMD
+    is strictly a booster, never a blocker.
+    """
+    qmd = find_qmd_cli()
+    if not qmd:
+        return []
+    try:
+        proc = subprocess.run(
+            [str(qmd), "search", query, "-c", QMD_COLLECTION,
+             "--limit", str(limit)],
+            capture_output=True, text=True, timeout=timeout, check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+    if proc.returncode != 0 or not proc.stdout:
+        return []
+    return parse_qmd_output(proc.stdout)
+
+
+def parse_qmd_output(text: str) -> list[Learning]:
+    """Convert qmd's text output to Learning objects by reading each hit's file.
+
+    qmd emits lines like `qmd://learnings/learnings/<file>.md:<line> #hash`
+    for each result. We extract the relative path, resolve it under the QMD
+    collection root, and parse frontmatter + body.
+    """
+    seen: set[str] = set()
+    learnings: list[Learning] = []
+    for m in QMD_PATH_RE.finditer(text):
+        rel = m.group(1)
+        if rel in seen:  # qmd can emit multiple line hits per file
+            continue
+        seen.add(rel)
+        path = QMD_DOCS_ROOT / rel
+        try:
+            content = path.read_text()
+        except OSError:
+            continue
+        fm, body = parse_frontmatter(content)
+        archived = None
+        am = ARCHIVE_HEADER_RE.search(body)
+        if am:
+            archived = am.group(1)
+        learnings.append(Learning(chunk_text=content, frontmatter=fm, archived_at=archived))
+    return learnings
+
+
+def _learning_key(learning: Learning) -> str:
+    """Dedup key stable across backends. Prefers frontmatter id, falls back to
+    a hash of the chunk so distinct chunks don't collapse."""
+    fid = learning.frontmatter.get("id") or learning.frontmatter.get("name")
+    if fid:
+        return str(fid)
+    return hashlib.sha1(learning.chunk_text[:256].encode()).hexdigest()[:12]
+
+
+def rrf_fuse(result_lists: list[list[Learning]], k: int = RRF_K) -> list[Learning]:
+    """Reciprocal Rank Fusion. Standard hybrid-search technique.
+
+    score(doc) = Σ 1 / (k + rank_in_each_source)
+
+    Source-agnostic — doesn't need score normalization across backends.
+    Docs appearing in both get summed scores → fused ranking.
+    """
+    scores: dict[str, float] = {}
+    first_seen: dict[str, Learning] = {}
+    for results in result_lists:
+        for rank, learning in enumerate(results, start=1):
+            key = _learning_key(learning)
+            scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank)
+            # Keep the first occurrence (prefer full-chunk from learnings search
+            # over file-read from qmd when both are present)
+            if key not in first_seen:
+                first_seen[key] = learning
+    ordered_keys = sorted(scores, key=lambda k: scores[k], reverse=True)
+    return [first_seen[k] for k in ordered_keys]
 
 
 def parse_learnings_output(json_blob: str) -> list[Learning]:
@@ -374,22 +477,33 @@ def recall(
             log_recall(query, mode, len(learnings), cached=True)
             return RecallResult(learnings, query, mode, cache_hit=True)
 
-    try:
-        proc = subprocess.run(
-            [str(cli), "search", query, "--mode", mode, "--format", "json",
-             "--limit", str(fetched_limit)],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
-        return RecallResult([], query, mode, error=f"subprocess failed: {e}")
+    # Fan out GraphRAG (via learnings CLI) and QMD (BM25) in parallel.
+    # QMD contributes lexical recall that pure vector search misses; it's a
+    # booster, not a blocker — returns [] on any failure and fusion still works.
+    def _fetch_learnings() -> tuple[list[Learning], str | None]:
+        try:
+            proc = subprocess.run(
+                [str(cli), "search", query, "--mode", mode, "--format", "json",
+                 "--limit", str(fetched_limit)],
+                capture_output=True, text=True, timeout=30, check=False,
+            )
+        except (subprocess.TimeoutExpired, OSError) as e:
+            return [], f"subprocess failed: {e}"
+        if proc.returncode != 0:
+            return [], f"learnings exit {proc.returncode}"
+        return parse_learnings_output(proc.stdout), None
 
-    if proc.returncode != 0:
-        return RecallResult([], query, mode, error=f"learnings exit {proc.returncode}")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        learnings_future = pool.submit(_fetch_learnings)
+        qmd_future = pool.submit(fetch_qmd, query, fetched_limit)
+        graph_results, graph_err = learnings_future.result()
+        qmd_results = qmd_future.result()
 
-    learnings = parse_learnings_output(proc.stdout)
+    # If graph path failed but QMD returned results, keep going — still useful.
+    if graph_err and not qmd_results:
+        return RecallResult([], query, mode, error=graph_err)
+
+    learnings = rrf_fuse([graph_results, qmd_results])
     # persist raw results to cache before filtering (so different confidence/limit
     # combinations can reuse the same fetch)
     if use_cache:
