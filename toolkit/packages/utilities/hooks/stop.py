@@ -11,10 +11,8 @@ import argparse
 import json
 import os
 import sys
-import random
 import subprocess
 from pathlib import Path
-from datetime import datetime
 
 try:
     from dotenv import load_dotenv
@@ -33,16 +31,11 @@ if _langfuse_enabled:
 else:
     get_tracer = lambda: None
 
-
-def get_completion_messages():
-    """Return list of friendly completion messages."""
-    return [
-        "Work complete!",
-        "All done!",
-        "Task finished!",
-        "Job complete!",
-        "Ready for next task!"
-    ]
+from utils.hook_context import (
+    build_session_label,
+    extract_latest_todo_snapshot,
+    summarize_todos,
+)
 
 
 def get_tts_script_path():
@@ -79,66 +72,27 @@ def get_tts_script_path():
     return None
 
 
-def get_llm_completion_message():
-    """
-    Generate completion message using available LLM services.
-    Priority order: OpenAI > Anthropic > fallback to random message
-    
-    Returns:
-        str: Generated or fallback completion message
-    """
-    # Get current script directory and construct utils/llm path
-    script_dir = Path(__file__).parent
-    llm_dir = script_dir / "utils" / "llm"
-    
-    # Try OpenAI first (highest priority)
-    if os.getenv('OPENAI_API_KEY'):
-        oai_script = llm_dir / "oai.py"
-        if oai_script.exists():
-            try:
-                result = subprocess.run([
-                    "uv", "run", str(oai_script), "--completion"
-                ], 
-                capture_output=True,
-                text=True,
-                timeout=10
-                )
-                if result.returncode == 0 and result.stdout.strip():
-                    return result.stdout.strip()
-            except (subprocess.TimeoutExpired, subprocess.SubprocessError):
-                pass
-    
-    # Try Anthropic second
-    if os.getenv('ANTHROPIC_API_KEY'):
-        anth_script = llm_dir / "anth.py"
-        if anth_script.exists():
-            try:
-                result = subprocess.run([
-                    "uv", "run", str(anth_script), "--completion"
-                ], 
-                capture_output=True,
-                text=True,
-                timeout=10
-                )
-                if result.returncode == 0 and result.stdout.strip():
-                    return result.stdout.strip()
-            except (subprocess.TimeoutExpired, subprocess.SubprocessError):
-                pass
-    
-    # Fallback to random predefined message
-    messages = get_completion_messages()
-    return random.choice(messages)
+def build_completion_message(input_data):
+    """Build a deterministic completion message with context."""
+    label = build_session_label(input_data.get("cwd", os.getcwd()))
+    summary = summarize_todos(
+        extract_latest_todo_snapshot(input_data.get("transcript_path", ""))
+    )
 
-def announce_completion():
+    message = f"{label} complete"
+    if summary:
+        message = f"{message}. {summary}"
+
+    return message
+
+
+def announce_completion(completion_message):
     """Announce completion using the best available TTS service."""
     try:
         tts_script = get_tts_script_path()
         if not tts_script:
             return  # No TTS scripts available
-        
-        # Get completion message (LLM-generated or fallback)
-        completion_message = get_llm_completion_message()
-        
+
         # Call the TTS script with the completion message
         subprocess.run([
             "uv", "run", tts_script, completion_message
@@ -220,7 +174,7 @@ def main():
             tracer.end_session_trace(session_id)
 
         # Announce completion via TTS
-        announce_completion()
+        announce_completion(build_completion_message(input_data))
 
         sys.exit(0)
 

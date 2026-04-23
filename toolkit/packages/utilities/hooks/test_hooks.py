@@ -12,11 +12,23 @@
 
 import json
 import subprocess
-import tempfile
 import os
 import pytest
+import importlib.util
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+
+
+def load_module(module_name: str, path: Path):
+    """Load a hook script as a module for direct unit testing."""
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+HOOKS_DIR = Path(__file__).parent
+UTILS_DIR = HOOKS_DIR / "utils"
 
 
 class TestPreCompactHook:
@@ -160,6 +172,211 @@ class TestHooksIntegration:
         # Assert both work independently
         assert pre_compact_result.returncode == 0
         assert session_start_result.returncode == 0
+
+
+class TestHookContextHelpers:
+    """Test shared hook context helpers."""
+
+    def test_extract_latest_todo_snapshot_uses_latest_snapshot(self, tmp_path):
+        helper = load_module("hook_context", UTILS_DIR / "hook_context.py")
+        transcript = tmp_path / "transcript.jsonl"
+        transcript.write_text(
+            "\n".join(
+                [
+                    json.dumps({
+                        "type": "assistant",
+                        "message": {
+                            "content": [{
+                                "type": "tool_use",
+                                "name": "TodoWrite",
+                                "input": {
+                                    "todos": [
+                                        {"content": "Task one", "status": "pending"},
+                                        {"content": "Task two", "status": "active"},
+                                    ]
+                                },
+                            }]
+                        },
+                    }),
+                    json.dumps({
+                        "type": "assistant",
+                        "message": {
+                            "content": [{
+                                "type": "tool_use",
+                                "name": "TodoWrite",
+                                "input": {
+                                    "todos": [
+                                        {"content": "Task one", "status": "completed"},
+                                        {"content": "Task three", "status": "in_progress"},
+                                        {"content": "Task four", "status": "pending"},
+                                    ]
+                                },
+                            }]
+                        },
+                    }),
+                ]
+            )
+        )
+
+        snapshot = helper.extract_latest_todo_snapshot(str(transcript))
+
+        assert snapshot is not None
+        assert snapshot["done"] == 1
+        assert snapshot["in_progress"] == 1
+        assert snapshot["pending"] == 1
+        assert helper.summarize_todos(snapshot) == "1 pending, 1 in progress"
+
+    def test_extract_latest_todo_snapshot_scans_past_large_trailing_output(self, tmp_path):
+        helper = load_module("hook_context_large_tail", UTILS_DIR / "hook_context.py")
+        transcript = tmp_path / "large-tail.jsonl"
+        large_output = "x" * 120000
+        transcript.write_text(
+            "\n".join(
+                [
+                    json.dumps({
+                        "type": "assistant",
+                        "message": {
+                            "content": [{
+                                "type": "tool_use",
+                                "name": "TodoWrite",
+                                "input": {
+                                    "todos": [
+                                        {"content": "Review logs", "status": "pending"},
+                                        {"content": "Patch fix", "status": "active"},
+                                    ]
+                                },
+                            }]
+                        },
+                    }),
+                    json.dumps({
+                        "type": "assistant",
+                        "message": {
+                            "content": [{
+                                "type": "text",
+                                "text": large_output,
+                            }]
+                        },
+                    }),
+                ]
+            )
+        )
+
+        snapshot = helper.extract_latest_todo_snapshot(str(transcript))
+
+        assert snapshot is not None
+        assert snapshot["pending"] == 1
+        assert snapshot["in_progress"] == 1
+
+    def test_build_session_label_falls_back_without_git(self, tmp_path):
+        helper = load_module("hook_context_label", UTILS_DIR / "hook_context.py")
+        workspace = tmp_path / "my_test-worktree"
+        workspace.mkdir()
+
+        assert helper.build_session_label(str(workspace)) == "my test worktree"
+
+
+class TestContextAwareMessages:
+    """Test deterministic message builders for TTS hooks."""
+
+    def test_notification_message_uses_idle_prompt_and_todo_summary(self, tmp_path, monkeypatch):
+        helper = load_module("hook_context_notification", UTILS_DIR / "hook_context.py")
+        monkeypatch.setenv("ENGINEER_NAME", "Stevie")
+
+        transcript = tmp_path / "notification.jsonl"
+        transcript.write_text(
+            json.dumps({
+                "type": "assistant",
+                "message": {
+                    "content": [{
+                        "type": "tool_use",
+                        "name": "TodoWrite",
+                        "input": {
+                            "todos": [
+                                {"content": "Review code", "status": "pending"},
+                                {"content": "Implement fix", "status": "in_progress"},
+                            ]
+                        },
+                    }]
+                },
+            })
+        )
+
+        notification = load_module("notification_hook", HOOKS_DIR / "notification.py")
+        monkeypatch.setattr(notification, "build_session_label", helper.build_session_label)
+        monkeypatch.setattr(notification, "extract_latest_todo_snapshot", helper.extract_latest_todo_snapshot)
+        monkeypatch.setattr(notification, "summarize_todos", helper.summarize_todos)
+
+        message = notification.build_notification_message({
+            "cwd": str(tmp_path / "fix_post-hook"),
+            "notification_type": "idle_prompt",
+            "message": "Claude is waiting for your input",
+            "transcript_path": str(transcript),
+        })
+
+        assert "Stevie" in message
+        assert "waiting for input" in message
+        assert "1 pending, 1 in progress" in message
+
+    def test_stop_message_uses_label_and_summary(self, tmp_path, monkeypatch):
+        transcript = tmp_path / "stop.jsonl"
+        transcript.write_text(
+            json.dumps({
+                "type": "assistant",
+                "message": {
+                    "content": [{
+                        "type": "tool_use",
+                        "name": "TodoWrite",
+                        "input": {
+                            "todos": [
+                                {"content": "Ship it", "status": "pending"},
+                            ]
+                        },
+                    }]
+                },
+            })
+        )
+
+        stop_module = load_module("stop_hook", HOOKS_DIR / "stop.py")
+        message = stop_module.build_completion_message({
+            "cwd": str(tmp_path / "feature-demo"),
+            "transcript_path": str(transcript),
+        })
+
+        assert "complete" in message
+        assert "feature demo" in message
+        assert "1 pending" in message
+
+    def test_subagent_message_prefers_agent_transcript_and_agent_type(self, tmp_path):
+        main_transcript = tmp_path / "main.jsonl"
+        main_transcript.write_text("")
+        agent_transcript = tmp_path / "agent.jsonl"
+        agent_transcript.write_text(
+            json.dumps({
+                "type": "assistant",
+                "message": {
+                    "content": [{
+                        "type": "tool_use",
+                        "name": "TodoWrite",
+                        "input": {
+                            "todos": [
+                                {"content": "Investigate", "status": "active"},
+                            ]
+                        },
+                    }]
+                },
+            })
+        )
+
+        subagent_module = load_module("subagent_stop_hook", HOOKS_DIR / "subagent_stop.py")
+        message = subagent_module.build_subagent_completion_message({
+            "cwd": str(tmp_path / "agent-worktree"),
+            "agent_type": "explorer",
+            "transcript_path": str(main_transcript),
+            "agent_transcript_path": str(agent_transcript),
+        })
+
+        assert message.startswith("explorer complete in")
+        assert "1 in progress" in message
 
 
 if __name__ == "__main__":
