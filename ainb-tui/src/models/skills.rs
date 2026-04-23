@@ -449,5 +449,5 @@ fn contains_word(haystack: &str, needle_lower: &str) -> bool {
 }
 
 fn is_word_char(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
+    b.is_ascii_alphanumeric() || b == b'_'
 }
