@@ -33,8 +33,9 @@ and tag overlap.
 - When the user references past work ("like we did in Y")
 
 **Also fires automatically** via the SessionStart hook (see
-`hooks/session_start_recall.py`) with a 3-result cap, HIGH confidence only.
-This skill is the explicit, higher-limit path.
+`hooks/session_start_recall.py`) with a 3-result cap, any confidence
+(reranked by confidence/recency/tag-overlap). This skill is the
+explicit, higher-limit path.
 
 ## Quick reference
 
@@ -79,5 +80,5 @@ This skill is the explicit, higher-limit path.
 ## Related
 
 - `/reflect:ingest` — populate the KB
-- `/reflect:status` — KB health, coverage, pending reviews
+- `/reflect-status` — KB health, coverage, pending reviews
 - SessionStart hook — auto-recall on project entry (see `hooks/settings-snippet.json`)

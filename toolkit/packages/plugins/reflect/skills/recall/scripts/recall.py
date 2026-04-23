@@ -57,7 +57,7 @@ LEARNINGS_CLI_CANDIDATES = [
 
 CONFIDENCE_WEIGHTS = {"HIGH": 1.0, "MEDIUM": 0.7, "LOW": 0.4}
 CHUNK_SEPARATOR = "--New Chunk--"
-ARCHIVE_HEADER_RE = re.compile(r"<!--\s*archived:\s*([0-9T:\-Z]+)\s*-->")
+ARCHIVE_HEADER_RE = re.compile(r"<!--\s*archived:\s*([0-9T:.+\-Z]+)\s*-->")
 
 
 # --- Data models ---------------------------------------------------------
@@ -88,8 +88,14 @@ class Learning:
 
     @property
     def confidence(self) -> str:
-        raw = self.frontmatter.get("confidence") or "MEDIUM"
-        # Coerce numeric confidence (instinct-style 0.0-1.0) to tier
+        raw = self.frontmatter.get("confidence")
+        if raw is None:
+            return "MEDIUM"
+        # Coerce numeric confidence (instinct-style 0.0-1.0) to tier.
+        # Explicit None check above so `0`/`0.0` reach this branch, not the default.
+        if isinstance(raw, bool):
+            # bool is a subclass of int — treat as a tier string via str().upper()
+            return str(raw).upper()
         if isinstance(raw, (int, float)):
             if raw >= 0.8:
                 return "HIGH"
@@ -100,7 +106,7 @@ class Learning:
 
     @property
     def tags(self) -> list[str]:
-        raw = self.frontmatter.get("tags", [])
+        raw = self.frontmatter.get("tags") or []
         if isinstance(raw, str):
             # yaml sometimes leaves unquoted lists as strings; split tolerantly
             raw = [t.strip() for t in re.split(r"[\[\],]", raw) if t.strip()]
@@ -142,9 +148,13 @@ def find_learnings_cli() -> Path | None:
     return Path(cli_on_path) if cli_on_path else None
 
 
-def cache_path(query: str, mode: str) -> Path:
-    """Per-query cache file. D4: 1-hour TTL."""
-    digest = hashlib.sha1(f"{query}|{mode}".encode()).hexdigest()[:16]
+def cache_path(query: str, mode: str, limit: int) -> Path:
+    """Per-query cache file. D4: 1-hour TTL.
+
+    Limit is part of the key so a small-limit fetch can't poison a
+    subsequent large-limit read with a truncated result set.
+    """
+    digest = hashlib.sha1(f"{query}|{mode}|{limit}".encode()).hexdigest()[:16]
     base = Path(os.environ.get("REFLECT_STATE_DIR", Path.home() / ".reflect"))
     cache_dir = base / "recall_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -341,7 +351,8 @@ def recall(
     if not cli:
         return RecallResult([], query, mode, error="learnings CLI not found")
 
-    cache_file = cache_path(query, mode)
+    fetched_limit = max(limit * 2, 10)
+    cache_file = cache_path(query, mode, fetched_limit)
     if use_cache:
         cached = read_cache(cache_file, cache_ttl)
         if cached:
@@ -361,7 +372,7 @@ def recall(
     try:
         proc = subprocess.run(
             [str(cli), "search", query, "--mode", mode, "--format", "json",
-             "--limit", str(max(limit * 2, 10))],
+             "--limit", str(fetched_limit)],
             capture_output=True,
             text=True,
             timeout=30,

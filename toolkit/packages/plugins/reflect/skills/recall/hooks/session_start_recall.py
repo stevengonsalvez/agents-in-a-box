@@ -1,14 +1,14 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["pyyaml"]
+# dependencies = []
 # ///
 """
 SessionStart Recall Hook (Phase 2 of reflect retrieval).
 
 Fires on SessionStart. Builds a query from the current project context
-(cwd, git branch, recent commits) and injects top-3 HIGH-confidence
-learnings into the agent's context via additionalContext.
+(cwd, git branch, recent commits) and injects the top-3 learnings
+(any confidence; reranked) into the agent's context via additionalContext.
 
 Usage in settings.json:
 {
@@ -64,7 +64,9 @@ def git_capture(args: list[str], cwd: Path) -> str:
         )
         if r.returncode == 0:
             return r.stdout.strip()
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (subprocess.TimeoutExpired, OSError):
+        # OSError subsumes FileNotFoundError / PermissionError — never let the
+        # hook crash the session start just because git is missing or blocked.
         pass
     return ""
 
@@ -194,7 +196,8 @@ def main() -> None:
             timeout=45,
             check=False,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (subprocess.TimeoutExpired, OSError):
+        # OSError covers FileNotFoundError (uv missing), PermissionError, etc.
         emit("")
         return
 
