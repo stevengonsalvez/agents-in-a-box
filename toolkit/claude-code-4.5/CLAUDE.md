@@ -514,7 +514,7 @@ RATIONALE: Long scrolled webpage screenshots contain too much information for ef
 
 <health_check_protocol>
 When starting ANY conversation, immediately perform a health check to establish session state:
-1. Check for existing session state in `{{TOOL_DIR}}/session/current-session.yaml`
+1. Check for existing session state in `.claude/session/current-session.yaml`
 2. Initialize or update session health tracking
 3. Set appropriate mode based on task type
 4. Track scope of work (MICRO/SMALL/MEDIUM/LARGE/EPIC)
@@ -544,7 +544,7 @@ When starting ANY conversation, immediately perform a health check to establish 
 </automatic_behaviours>
 
 <session_state_management>
-Session state is stored in `{{TOOL_DIR}}/session/current-session.yaml` and includes:
+Session state is stored in `.claude/session/current-session.yaml` and includes:
 - Health status and message count
 - Current mode and scope
 - Active task (reference ID, phase, progress)
@@ -562,8 +562,8 @@ When health reaches 🟡, proactively:
 
 # Templates
 
-@{{HOME_TOOL_DIR}}/skills/commit/assets/codereview-checklist.md
-@{{HOME_TOOL_DIR}}/skills/handover/assets/template.md
+@~/.claude/skills/commit/assets/codereview-checklist.md
+@~/.claude/skills/handover/assets/template.md
 
 
 
@@ -575,7 +575,7 @@ When health reaches 🟡, proactively:
 
 0.⁠ ⁠*Always run multiple Task invocations in a SINGLE message when sensible* - Maximize parallelism for better performance.
 
-1.⁠ ⁠*Aggressively use specialized agents* - Custom agent definitions in ⁠ {{HOME_TOOL_DIR}}/agents/ ⁠ (available in this repo under `toolkit/packages/agents/`):
+1.⁠ ⁠*Aggressively use specialized agents* - Custom agent definitions in ⁠ ~/.claude/agents/ ⁠ (available in this repo under `toolkit/packages/agents/`):
    - ⁠ distinguished-engineer ⁠ - Drive system design and high‑leverage tradeoffs
    - ⁠ web-search-researcher ⁠ - Research modern information from the web
    - ⁠ universal/ ⁠
@@ -598,7 +598,7 @@ When health reaches 🟡, proactively:
    - ⁠ meta/ ⁠
      - agentmaker – Create and refine new agents
 
-2.⁠ ⁠*Use skills for structured workflows* - Skills in ⁠ {{HOME_TOOL_DIR}}/skills/ ⁠ (available in this repo under `toolkit/packages/skills/`):
+2.⁠ ⁠*Use skills for structured workflows* - Skills in ⁠ ~/.claude/skills/ ⁠ (available in this repo under `toolkit/packages/skills/`):
    - ⁠ /prime ⁠ - Prime session with working context
    - ⁠ /health-check ⁠ - Run session health check
    - ⁠ /session-metrics ⁠ - Show session metrics
@@ -635,6 +635,10 @@ When health reaches 🟡, proactively:
    - Never mention Claude, AI, or assistance in commit messages
    - Write commits as if authored by a human developer
    - Follow conventional commit format without attribution
+   - Default to many small single-concern commits; never bulk-commit. If already bulked, rebase into smaller commits before pushing (`git reset --soft HEAD~N` + rebuild, or `git rebase -i` to split)
+   - Apply the atomic rule to docs/README work too: one commit per *visual/structural concern* (hero image, section rename, bullet rewrite, showcase, callout — not a single "docs: update README"). Before writing the commit message, count the distinct intents; if there's more than one, split.
+   - Before recommending a merge, run `/review` proactively on the PR — don't wait to be asked
+   - If CI fails: diagnose root cause first. If failures are pre-existing drift unrelated to the PR's code (provable via git history + clean local tests), offer merge options honestly rather than forcing a massive cleanup commit
 
 
 
