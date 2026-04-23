@@ -3233,24 +3233,33 @@ impl AppState {
 
     /// Kick off a background parse of ~/.claude/projects/**/*.jsonl.
     /// Skipped if already in-flight, or data is cached and `force` is false.
+    /// Returns true if a new parse was spawned, false if a call was coalesced.
     /// The parse walks ~1GB of jsonl files; keeping it off the event thread
     /// is what prevents the Stats/Usage screen from hanging on provider switch.
-    pub fn start_background_usage_load(&mut self, force: bool) {
+    pub fn start_background_usage_load(&mut self, force: bool) -> bool {
         if self.usage_load_receiver.is_some() {
-            return;
+            return false;
         }
         if !force && self.usage_state.data.is_some() {
-            return;
+            return false;
         }
         let (tx, rx) = mpsc::unbounded_channel();
         self.usage_load_receiver = Some(rx);
         self.usage_state.loading = true;
         tokio::spawn(async move {
-            let data = tokio::task::spawn_blocking(crate::models::usage::parse_usage)
-                .await
-                .unwrap_or_default();
-            let _ = tx.send(data);
+            match tokio::task::spawn_blocking(crate::models::usage::parse_usage).await {
+                Ok(data) => {
+                    let _ = tx.send(data);
+                }
+                Err(e) => {
+                    // Dropping tx lets check_usage_load_complete observe
+                    // TryRecvError::Disconnected, which clears `loading`
+                    // without overwriting any cached data.
+                    warn!("Usage parse task failed: {}", e);
+                }
+            }
         });
+        true
     }
 
     /// Poll the background parse. Returns true if data was applied this tick.
