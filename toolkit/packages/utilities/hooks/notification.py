@@ -91,6 +91,9 @@ def build_notification_message(input_data):
 
 def announce_notification(notification_message):
     """Announce that the agent needs user input."""
+    # TTS opt-in: stay silent unless ~/.claude/.tts-on exists.
+    if not (Path.home() / ".claude" / ".tts-on").exists():
+        return
     try:
         tts_script = get_tts_script_path()
         if not tts_script:
