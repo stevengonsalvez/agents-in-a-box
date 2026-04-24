@@ -16,7 +16,10 @@
 use anyhow::Result;
 use clap::Parser;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event},
+    event::{
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -49,7 +52,12 @@ use components::LayoutComponent;
 fn cleanup_terminal() {
     let _ = disable_raw_mode();
     // Use stdout for cleanup since that's where we enabled mouse capture
-    let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+    let _ = execute!(
+        io::stdout(),
+        LeaveAlternateScreen,
+        DisableMouseCapture,
+        DisableBracketedPaste
+    );
 }
 
 /// Unified terminal cleanup that works with a terminal instance
@@ -60,7 +68,8 @@ fn cleanup_terminal_with_instance<B: Backend + std::io::Write>(
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
-        DisableMouseCapture
+        DisableMouseCapture,
+        DisableBracketedPaste
     )?;
     terminal.show_cursor()?;
     Ok(())
@@ -263,7 +272,12 @@ async fn run_tui(app: &mut App, layout: &mut LayoutComponent) -> Result<()> {
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -544,7 +558,11 @@ async fn run_tui_loop(
                 }
                 Event::FocusGained => {}
                 Event::FocusLost => {}
-                Event::Paste(_) => {}
+                Event::Paste(text) => {
+                    if let Some(app_event) = EventHandler::handle_paste_event(text, &app.state) {
+                        EventHandler::process_event(app_event, &mut app.state);
+                    }
+                }
             }
         }
 

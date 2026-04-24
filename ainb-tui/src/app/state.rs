@@ -6305,6 +6305,50 @@ impl AppState {
         }
     }
 
+    /// Paste text into the remote-repo URL input. URLs are single-line, so
+    /// CR/LF are stripped rather than splitting the field.
+    pub fn repo_input_paste_text(&mut self, text: &str) {
+        if let Some(ref mut state) = self.new_session_state {
+            if state.step == NewSessionStep::InputRepoSource {
+                for ch in text.chars().filter(|c| *c != '\r' && *c != '\n') {
+                    state.repo_input.push(ch);
+                }
+                state.repo_validation_error = None;
+            }
+        }
+    }
+
+    /// Paste text into the currently-focused SSH field. CR/LF are stripped
+    /// because each SSH field is a single-line value; for the port field we
+    /// additionally drop non-digit characters.
+    pub fn new_session_ssh_paste_text(&mut self, text: &str) {
+        if let Some(ref mut state) = self.new_session_state {
+            if state.step == NewSessionStep::ConfigureSsh {
+                let filtered = text.chars().filter(|c| *c != '\r' && *c != '\n');
+                match state.ssh_input_focus {
+                    SshInputFocus::Host => state.ssh_host.extend(filtered),
+                    SshInputFocus::Port => {
+                        state.ssh_port.extend(filtered.filter(char::is_ascii_digit));
+                    }
+                    SshInputFocus::User => state.ssh_user.extend(filtered),
+                    SshInputFocus::IdentityFile => state.ssh_identity_file.extend(filtered),
+                }
+            }
+        }
+    }
+
+    /// Paste text into the branch-name input. Branch names are single-line,
+    /// so CR/LF are stripped.
+    pub fn new_session_input_paste_text(&mut self, text: &str) {
+        if let Some(ref mut state) = self.new_session_state {
+            if state.step == NewSessionStep::InputBranch {
+                for ch in text.chars().filter(|c| *c != '\r' && *c != '\n') {
+                    state.branch_name.push(ch);
+                }
+            }
+        }
+    }
+
     pub fn new_session_toggle_permissions(&mut self) {
         if let Some(ref mut state) = self.new_session_state {
             if state.step == NewSessionStep::ConfigurePermissions {
