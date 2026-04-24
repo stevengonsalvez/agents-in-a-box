@@ -184,10 +184,17 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-latest
             ext: ""
+            archive: tar.gz
           # Linux glibc (works on most distributions)
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             ext: ""
+            archive: tar.gz
+          # Windows x64 (Scoop / WinGet / direct)
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            ext: .exe
+            archive: zip
 
     steps:
       - uses: actions/checkout@v4
@@ -211,8 +218,14 @@ jobs:
           mkdir -p dist
           cp target/${{ matrix.target }}/release/${BINARY_NAME}${{ matrix.ext }} dist/
           cd dist
-          tar -czf "${ARCHIVE}.tar.gz" "${BINARY_NAME}${{ matrix.ext }}"
-          shasum -a 256 "${ARCHIVE}.tar.gz" > "${ARCHIVE}.tar.gz.sha256"
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            # 7z is preinstalled on windows-latest; Scoop/WinGet expect .zip
+            7z a "${ARCHIVE}.zip" "${BINARY_NAME}${{ matrix.ext }}" > /dev/null
+            shasum -a 256 "${ARCHIVE}.zip" > "${ARCHIVE}.zip.sha256"
+          else
+            tar -czf "${ARCHIVE}.tar.gz" "${BINARY_NAME}${{ matrix.ext }}"
+            shasum -a 256 "${ARCHIVE}.tar.gz" > "${ARCHIVE}.tar.gz.sha256"
+          fi
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -220,6 +233,7 @@ jobs:
           name: ${{ matrix.target }}
           path: |
             ${{ env.WORKING_DIR }}/dist/*.tar.gz
+            ${{ env.WORKING_DIR }}/dist/*.zip
             ${{ env.WORKING_DIR }}/dist/*.sha256
 
   release:
@@ -274,6 +288,7 @@ jobs:
             ## Supported Platforms
             - macOS Apple Silicon (M1/M2/M3)
             - Linux x86_64
+            - Windows x86_64 (native + WSL)
 
             *Intel Mac users: Use `cargo install` or run the Linux binary via Rosetta 2*
 
