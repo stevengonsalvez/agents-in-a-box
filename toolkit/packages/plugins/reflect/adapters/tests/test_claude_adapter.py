@@ -1,0 +1,190 @@
+"""Tests for the Claude Code adapter (toolkit/packages/plugins/reflect/adapters/claude).
+
+The test runs the adapter against a temp HOME so it exercises the real
+install path without touching the invoking user's ~/.claude.
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+HERE = Path(__file__).resolve().parent
+ADAPTER_DIR = HERE.parent / "claude"
+ADAPTER = ADAPTER_DIR / "claude_adapter.py"
+
+# Make ``claude_adapter`` importable regardless of where pytest runs from.
+sys.path.insert(0, str(ADAPTER_DIR))
+
+import claude_adapter  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _sanity():
+    assert ADAPTER.exists(), f"missing adapter script at {ADAPTER}"
+
+
+def test_find_plugin_root_resolves_to_reflect_dir():
+    root = claude_adapter.find_plugin_root()
+    assert (root / "skills").is_dir()
+    assert (root / "adapters").is_dir()
+    assert root.name == "reflect"
+
+
+def test_dry_run_reports_actions_without_touching_home(tmp_path):
+    result = subprocess.run(
+        [sys.executable, str(ADAPTER), "install", "--dry-run", "--home", str(tmp_path)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "dry-run" in result.stdout
+    assert "pointer:" in result.stdout
+    assert "recall" in result.stdout
+    # HOME must remain untouched
+    assert not (tmp_path / ".claude").exists()
+
+
+def test_install_writes_pointer_files_and_hook(tmp_path):
+    result = subprocess.run(
+        [sys.executable, str(ADAPTER), "install", "--home", str(tmp_path)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+    skills_root = tmp_path / ".claude" / "skills"
+    assert skills_root.is_dir()
+
+    # recall + reflect must both land (they're the headline skills).
+    recall = skills_root / "recall" / "SKILL.md"
+    reflect = skills_root / "reflect" / "SKILL.md"
+    assert recall.exists()
+    assert reflect.exists()
+
+    recall_body = recall.read_text(encoding="utf-8")
+    assert claude_adapter.POINTER_MANAGED_BY in recall_body
+    assert "source:" in recall_body
+    # Name preserved from upstream frontmatter (reflect:recall).
+    assert "name: reflect:recall" in recall_body
+
+    # Hook merged into settings.json
+    settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+    commands = [
+        h["command"]
+        for entry in settings["hooks"]["SessionStart"]
+        for h in entry["hooks"]
+    ]
+    assert claude_adapter.SESSION_START_HOOK_COMMAND in commands
+
+
+def test_install_is_idempotent_and_preserves_existing_hooks(tmp_path):
+    # Pre-seed settings with an unrelated existing hook — adapter must not
+    # clobber it.
+    claude_dir = tmp_path / ".claude"
+    claude_dir.mkdir()
+    existing = {
+        "hooks": {
+            "SessionStart": [
+                {
+                    "matcher": "",
+                    "hooks": [{"type": "command", "command": "echo existing"}],
+                }
+            ]
+        }
+    }
+    (claude_dir / "settings.json").write_text(json.dumps(existing))
+
+    for _ in range(2):  # Run twice; second run is a no-op
+        subprocess.run(
+            [sys.executable, str(ADAPTER), "install", "--home", str(tmp_path)],
+            check=True, capture_output=True,
+        )
+
+    settings = json.loads((claude_dir / "settings.json").read_text())
+    commands = [
+        h["command"]
+        for entry in settings["hooks"]["SessionStart"]
+        for h in entry["hooks"]
+    ]
+    # Existing hook survived, adapter hook was added exactly once
+    assert "echo existing" in commands
+    assert commands.count(claude_adapter.SESSION_START_HOOK_COMMAND) == 1
+
+
+def test_install_no_hooks_flag_leaves_settings_alone(tmp_path):
+    subprocess.run(
+        [sys.executable, str(ADAPTER), "install",
+         "--home", str(tmp_path), "--no-hooks"],
+        check=True, capture_output=True,
+    )
+    assert (tmp_path / ".claude" / "skills" / "recall" / "SKILL.md").exists()
+    assert not (tmp_path / ".claude" / "settings.json").exists()
+
+
+def test_uninstall_removes_only_managed_pointers(tmp_path):
+    # First install, then drop an unmanaged user file into the same dir.
+    subprocess.run(
+        [sys.executable, str(ADAPTER), "install", "--home", str(tmp_path)],
+        check=True, capture_output=True,
+    )
+    user_file = tmp_path / ".claude" / "skills" / "recall" / "user-note.md"
+    user_file.write_text("hand-written", encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, str(ADAPTER), "uninstall", "--home", str(tmp_path)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+    # Our pointer gone, user's file preserved
+    assert not (tmp_path / ".claude" / "skills" / "recall" / "SKILL.md").exists()
+    assert user_file.exists()
+
+    # Hook block cleaned up (no reflect hook remaining)
+    settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+    commands = [
+        h["command"]
+        for entry in settings.get("hooks", {}).get("SessionStart", [])
+        for h in entry["hooks"]
+    ]
+    assert claude_adapter.SESSION_START_HOOK_COMMAND not in commands
+
+
+def test_install_refuses_to_overwrite_non_pointer_skill_marker(tmp_path):
+    """A hand-written SKILL.md that lacks our managed_by marker still gets
+    replaced (the adapter treats the slot as owned), but the action is
+    reported so the user sees it happened."""
+    claude_dir = tmp_path / ".claude"
+    (claude_dir / "skills" / "recall").mkdir(parents=True)
+    (claude_dir / "skills" / "recall" / "SKILL.md").write_text(
+        "---\nname: user-handwritten\n---\nbody\n", encoding="utf-8"
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(ADAPTER), "install",
+         "--home", str(tmp_path), "--no-hooks"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "replaced non-pointer file" in result.stdout
+
+    body = (claude_dir / "skills" / "recall" / "SKILL.md").read_text()
+    assert claude_adapter.POINTER_MANAGED_BY in body
+
+
+def test_install_errors_on_corrupt_settings_json(tmp_path):
+    claude_dir = tmp_path / ".claude"
+    claude_dir.mkdir()
+    (claude_dir / "settings.json").write_text("{this is not json")
+
+    result = subprocess.run(
+        [sys.executable, str(ADAPTER), "install", "--home", str(tmp_path)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    # Error surfaces as an unhandled exception from _merge_session_start_hook;
+    # users shouldn't lose their hand-edited settings.
+    assert "settings.json" in result.stderr.lower()
