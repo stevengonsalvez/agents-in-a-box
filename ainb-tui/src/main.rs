@@ -18,7 +18,7 @@ use clap::Parser;
 use crossterm::{
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event,
+        Event, KeyEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -319,6 +319,12 @@ async fn run_tui_loop(
         if crossterm::event::poll(timeout)? {
             match event::read()? {
                 Event::Key(key_event) => {
+                    // Windows fires Press + Release for every key; macOS/Linux fire only Press.
+                    // Drop Release so Enter doesn't immediately re-trigger and close popups.
+                    if key_event.kind == KeyEventKind::Release {
+                        continue;
+                    }
+
                     // Startup guard: Ignore key events during startup period
                     if startup_time.elapsed() < Duration::from_millis(STARTUP_GUARD_MS) {
                         tracing::debug!(
