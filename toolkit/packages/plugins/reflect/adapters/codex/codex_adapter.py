@@ -17,198 +17,81 @@ The pointer files reference the canonical ``SKILL.md`` under the reflect
 plugin source so upstream edits propagate without reinstalling. A
 ``managed_by: reflect-kb/adapters/codex`` sentinel keeps uninstall safe
 against hand-written sibling files.
+
+Most of the install/uninstall mechanics live on :class:`AdapterBase` —
+this module just supplies the harness-specific constants and pointer
+body. Compare with ``claude_adapter.py`` which adds a SessionStart hook
+merge step on top of the same base.
 """
 
 from __future__ import annotations
 
-import argparse
-import os
 import sys
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-PLUGIN_SKILLS: tuple[str, ...] = (
-    "reflect",
-    "recall",
-    "reflect-status",
-    "consolidate",
-    "ingest",
+# Make the shared base importable whether the script is invoked directly
+# or through pytest. See claude_adapter.py for the same pattern.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from base import (  # noqa: E402
+    AdapterBase,
+    InstallPlan,
+    PLUGIN_SKILLS,  # re-exported for backwards-compat with tests
+    find_plugin_root as _shared_find_plugin_root,
+    run_cli,
 )
 
 POINTER_MANAGED_BY = "reflect-kb/adapters/codex"
 HARNESS_DIR = ".codex"
 
 
-@dataclass
-class InstallPlan:
-    source_skills_dir: Path
-    target_harness_dir: Path
-    pointers: list[tuple[Path, Path]] = field(default_factory=list)
+class CodexAdapter(AdapterBase):
+    """Codex harness: pointer install only (no hook system to wire into)."""
 
-    def describe(self) -> list[str]:
-        return [f"pointer: {src} → {dst}" for src, dst in self.pointers]
+    POINTER_MANAGED_BY = POINTER_MANAGED_BY
+    HARNESS_DIR = HARNESS_DIR
+    HARNESS_LABEL = "Codex"
 
-
-def find_plugin_root(script_path: Path | None = None) -> Path:
-    """Walk up from this script to ``.../reflect/`` (the plugin root)."""
-    here = (script_path or Path(__file__)).resolve()
-    for parent in here.parents:
-        if (parent / "skills").is_dir() and (parent / "adapters").is_dir():
-            return parent
-    raise RuntimeError(
-        f"could not find reflect plugin root walking up from {here!r}; "
-        "expected a parent containing both skills/ and adapters/"
+    POINTER_BODY_TEMPLATE = (
+        "---\n"
+        "name: {name}\n"
+        "description: {description}\n"
+        "managed_by: {managed_by}\n"
+        "source: {source}\n"
+        "---\n\n"
+        "Pointer skill installed by the reflect-kb {harness_label} adapter.\n\n"
+        "Codex has no SessionStart hook parity with Claude Code, so this\n"
+        "skill is invocation-only — call `/recall`, `/reflect`, etc.\n"
+        "manually. The canonical definition lives at `{source}`.\n"
     )
 
 
-def _resolve_home(home: Optional[Path]) -> Path:
-    if home is not None:
-        return home
-    env = os.environ.get("HOME")
-    return Path(env) if env else Path.home()
+# --- backwards-compatible module-level API ------------------------------
+
+_DEFAULT_ADAPTER = CodexAdapter(__file__)
+
+
+def find_plugin_root(script_path: Path | None = None) -> Path:
+    return _shared_find_plugin_root(script_path or Path(__file__))
 
 
 def build_plan(
     *, home: Optional[Path] = None, plugin_root: Optional[Path] = None,
 ) -> InstallPlan:
-    resolved_home = _resolve_home(home)
-    root = plugin_root or find_plugin_root()
-    src_skills = root / "skills"
-    harness_dir = resolved_home / HARNESS_DIR
-
-    pointers: list[tuple[Path, Path]] = []
-    for name in PLUGIN_SKILLS:
-        src_skill = src_skills / name / "SKILL.md"
-        if not src_skill.exists():
-            continue
-        dst_skill = harness_dir / "skills" / name / "SKILL.md"
-        pointers.append((src_skill, dst_skill))
-
-    return InstallPlan(
-        source_skills_dir=src_skills,
-        target_harness_dir=harness_dir,
-        pointers=pointers,
-    )
-
-
-def _pointer_body(source_skill: Path) -> str:
-    """Minimal SKILL.md pointer; preserve upstream name/description so the
-    harness's skill discovery still surfaces the right metadata.
-    """
-    name = source_skill.parent.name
-    description = "Installed by reflect-kb adapter; see source for details."
-    try:
-        text = source_skill.read_text(encoding="utf-8")
-        if text.startswith("---"):
-            _, fm_block, _ = text.split("---", 2)
-            for line in fm_block.splitlines():
-                line = line.strip()
-                if line.startswith("name:"):
-                    name = line.split(":", 1)[1].strip().strip("\"'")
-                elif line.startswith("description:") and ":" in line:
-                    rest = line.split(":", 1)[1].strip().strip("\"'")
-                    if rest and not rest.startswith("|"):
-                        description = rest
-    except OSError:
-        pass
-
-    return (
-        "---\n"
-        f"name: {name}\n"
-        f"description: {description}\n"
-        f"managed_by: {POINTER_MANAGED_BY}\n"
-        f"source: {source_skill}\n"
-        "---\n\n"
-        f"Pointer skill installed by the reflect-kb Codex adapter.\n\n"
-        f"Codex has no SessionStart hook parity with Claude Code, so this\n"
-        f"skill is invocation-only — call `/recall`, `/reflect`, etc.\n"
-        f"manually. The canonical definition lives at `{source_skill}`.\n"
-    )
-
-
-def _write_pointer(src: Path, dst: Path) -> None:
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    dst.write_text(_pointer_body(src), encoding="utf-8")
+    return _DEFAULT_ADAPTER.build_plan(home=home, plugin_root=plugin_root)
 
 
 def execute(plan: InstallPlan) -> list[str]:
-    actions: list[str] = []
-    for src, dst in plan.pointers:
-        existing = None
-        if dst.exists():
-            try:
-                existing = dst.read_text(encoding="utf-8")
-            except OSError:
-                existing = None
-        _write_pointer(src, dst)
-        if existing is not None and POINTER_MANAGED_BY not in existing:
-            actions.append(f"replaced non-pointer file at {dst}")
-        else:
-            actions.append(f"wrote pointer {dst}")
+    actions, _ = _DEFAULT_ADAPTER.execute(plan)
     return actions
 
 
 def uninstall(*, home: Optional[Path] = None) -> list[str]:
-    actions: list[str] = []
-    resolved_home = _resolve_home(home)
-    skills_dir = resolved_home / HARNESS_DIR / "skills"
-    for name in PLUGIN_SKILLS:
-        pointer = skills_dir / name / "SKILL.md"
-        if not pointer.exists():
-            continue
-        try:
-            content = pointer.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        if POINTER_MANAGED_BY not in content:
-            actions.append(f"left foreign file untouched: {pointer}")
-            continue
-        pointer.unlink()
-        try:
-            pointer.parent.rmdir()
-        except OSError:
-            pass
-        actions.append(f"removed pointer {pointer}")
-    return actions
+    return _DEFAULT_ADAPTER.uninstall(home=home)
 
 
 def _cli() -> int:
-    parser = argparse.ArgumentParser(
-        prog="codex-adapter",
-        description="Install the reflect-kb skill set into ~/.codex/.",
-    )
-    sub = parser.add_subparsers(dest="command", required=True)
-
-    install = sub.add_parser("install", help="Write pointer skills into ~/.codex/.")
-    install.add_argument("--dry-run", action="store_true")
-    install.add_argument("--home", type=Path, default=None)
-
-    uninst = sub.add_parser("uninstall", help="Remove adapter-managed pointers.")
-    uninst.add_argument("--home", type=Path, default=None)
-
-    args = parser.parse_args()
-
-    if args.command == "install":
-        plan = build_plan(home=args.home)
-        if args.dry_run:
-            print("[dry-run] would perform the following actions:")
-            for line in plan.describe():
-                print(f"  {line}")
-            if not plan.describe():
-                print("  (nothing to do)")
-            return 0
-        for line in execute(plan):
-            print(line)
-        return 0
-
-    if args.command == "uninstall":
-        for line in uninstall(home=args.home):
-            print(line)
-        return 0
-
-    parser.error(f"unknown command: {args.command}")
-    return 2
+    return run_cli(_DEFAULT_ADAPTER)
 
 
 if __name__ == "__main__":
