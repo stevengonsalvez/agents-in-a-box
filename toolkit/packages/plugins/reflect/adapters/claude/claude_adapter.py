@@ -292,10 +292,11 @@ def build_plan(
     )
 
 
-def execute(plan: InstallPlan) -> list[str]:
+def execute(plan: InstallPlan, *, force: bool = False) -> list[str]:
     """Apply an :class:`InstallPlan`. Returns human-readable actions."""
     actions, _ = _DEFAULT_ADAPTER.execute(
         plan,
+        force=force,
         with_hooks=plan.extras.get("with_hooks", True),
     )
     return actions

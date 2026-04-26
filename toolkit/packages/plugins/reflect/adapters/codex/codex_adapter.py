@@ -81,8 +81,8 @@ def build_plan(
     return _DEFAULT_ADAPTER.build_plan(home=home, plugin_root=plugin_root)
 
 
-def execute(plan: InstallPlan) -> list[str]:
-    actions, _ = _DEFAULT_ADAPTER.execute(plan)
+def execute(plan: InstallPlan, *, force: bool = False) -> list[str]:
+    actions, _ = _DEFAULT_ADAPTER.execute(plan, force=force)
     return actions
 
 

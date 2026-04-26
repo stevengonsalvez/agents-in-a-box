@@ -276,30 +276,48 @@ class AdapterBase:
     ) -> tuple[bool, str]:
         """Write the pointer at ``dst``. Returns ``(written, action_msg)``.
 
-        ``force`` is reserved for sentinel-aware skip support added in a
-        follow-up commit; right now the adapter always overwrites.
+        Sentinel-aware skip: refuses to overwrite a pre-existing file
+        that lacks the harness's ``managed_by`` sentinel unless
+        ``force=True``. This protects hand-written ``SKILL.md`` files
+        from being silently clobbered when the user happens to have
+        named one ``recall`` (etc).
+
+        The previous behaviour silently overwrote anything in the slot,
+        which made the install destructive against existing user state.
         """
-        del force  # unused at this layer; kept for forward-compat signature
         existing = None
         if dst.exists():
             try:
                 existing = dst.read_text(encoding="utf-8")
             except OSError:
                 existing = None
+        is_foreign = (
+            existing is not None and self.POINTER_MANAGED_BY not in existing
+        )
+        if is_foreign and not force:
+            return False, (
+                f"refused to overwrite non-pointer file at {dst} "
+                f"(use --force to replace)"
+            )
         dst.parent.mkdir(parents=True, exist_ok=True)
         dst.write_text(self._pointer_body(src), encoding="utf-8")
-        if existing is not None and self.POINTER_MANAGED_BY not in existing:
+        if is_foreign:
             return True, f"replaced non-pointer file at {dst}"
         return True, f"wrote pointer {dst}"
 
     def execute(
-        self, plan: InstallPlan, **kwargs: Any,
+        self, plan: InstallPlan, *, force: bool = False, **kwargs: Any,
     ) -> tuple[list[str], int]:
-        """Apply ``plan``. Returns ``(actions, exit_code)``."""
+        """Apply ``plan``. Returns ``(actions, exit_code)``.
+
+        Exit code is non-zero if any pointer was refused due to a
+        foreign sibling. Refused pointers still appear in ``actions`` so
+        the user sees the warning before re-running with ``--force``.
+        """
         actions: list[str] = []
         exit_code = 0
         for src, dst in plan.pointers:
-            written, msg = self._write_pointer(src, dst)
+            written, msg = self._write_pointer(src, dst, force=force)
             actions.append(msg)
             if not written:
                 exit_code = 1
@@ -387,6 +405,11 @@ class AdapterBase:
                              help="Report without changing files.")
         install.add_argument("--home", type=Path, default=None,
                              help="Override HOME (testing).")
+        install.add_argument(
+            "--force", action="store_true",
+            help="Overwrite hand-written SKILL.md files that lack our "
+                 "managed_by sentinel. Off by default to protect user files.",
+        )
         self.configure_install_parser(install)
 
         uninst = sub.add_parser(
@@ -408,7 +431,9 @@ class AdapterBase:
                 for line in lines:
                     print(f"  {line}")
                 return 0
-            actions, exit_code = self.execute(plan, **install_kwargs)
+            actions, exit_code = self.execute(
+                plan, force=args.force, **install_kwargs,
+            )
             for line in actions:
                 print(line)
             return exit_code

@@ -171,24 +171,46 @@ def test_uninstall_removes_only_managed_pointers(tmp_path):
 
 
 def test_install_refuses_to_overwrite_non_pointer_skill_marker(tmp_path):
-    """A hand-written SKILL.md that lacks our managed_by marker still gets
-    replaced (the adapter treats the slot as owned), but the action is
-    reported so the user sees it happened."""
+    """A hand-written SKILL.md that lacks the managed_by sentinel must be
+    LEFT ALONE. The previous behaviour silently replaced these files,
+    which silently destroyed user state. Default install now refuses; the
+    user needs ``--force`` to opt into clobbering."""
     claude_dir = tmp_path / ".claude"
     (claude_dir / "skills" / "recall").mkdir(parents=True)
-    (claude_dir / "skills" / "recall" / "SKILL.md").write_text(
-        "---\nname: user-handwritten\n---\nbody\n", encoding="utf-8"
-    )
+    handwritten = "---\nname: user-handwritten\n---\nbody\n"
+    target = claude_dir / "skills" / "recall" / "SKILL.md"
+    target.write_text(handwritten, encoding="utf-8")
 
     result = subprocess.run(
         [sys.executable, str(ADAPTER), "install",
          "--home", str(tmp_path), "--no-hooks"],
         capture_output=True, text=True,
     )
+    # Refusal exits non-zero so CI / scripts can detect it.
+    assert result.returncode != 0, result.stdout
+    assert "refused to overwrite non-pointer file" in result.stdout
+    # Hand-written file untouched.
+    assert target.read_text(encoding="utf-8") == handwritten
+
+
+def test_install_force_replaces_non_pointer_skill_marker(tmp_path):
+    """With ``--force`` the adapter explicitly replaces the foreign file,
+    reports the replacement, and exits cleanly."""
+    claude_dir = tmp_path / ".claude"
+    (claude_dir / "skills" / "recall").mkdir(parents=True)
+    target = claude_dir / "skills" / "recall" / "SKILL.md"
+    target.write_text(
+        "---\nname: user-handwritten\n---\nbody\n", encoding="utf-8"
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(ADAPTER), "install",
+         "--home", str(tmp_path), "--no-hooks", "--force"],
+        capture_output=True, text=True,
+    )
     assert result.returncode == 0, result.stderr
     assert "replaced non-pointer file" in result.stdout
-
-    body = (claude_dir / "skills" / "recall" / "SKILL.md").read_text()
+    body = target.read_text(encoding="utf-8")
     assert claude_adapter.POINTER_MANAGED_BY in body
 
 

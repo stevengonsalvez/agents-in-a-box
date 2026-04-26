@@ -92,18 +92,39 @@ def test_uninstall_removes_only_managed_pointers(tmp_path):
     assert user_file.exists()
 
 
-def test_install_replaces_non_pointer_skill_marker(tmp_path):
+def test_install_refuses_to_overwrite_non_pointer_skill_marker(tmp_path):
+    """Sentinel-aware skip: hand-written SKILL.md siblings must NOT be
+    silently replaced. Default install refuses and exits non-zero."""
     copilot_dir = tmp_path / ".copilot"
     (copilot_dir / "skills" / "recall").mkdir(parents=True)
-    (copilot_dir / "skills" / "recall" / "SKILL.md").write_text(
-        "---\nname: user-handwritten\n---\nbody\n", encoding="utf-8"
-    )
+    handwritten = "---\nname: user-handwritten\n---\nbody\n"
+    target = copilot_dir / "skills" / "recall" / "SKILL.md"
+    target.write_text(handwritten, encoding="utf-8")
 
     result = subprocess.run(
         [sys.executable, str(ADAPTER), "install", "--home", str(tmp_path)],
         capture_output=True, text=True,
     )
+    assert result.returncode != 0, result.stdout
+    assert "refused to overwrite non-pointer file" in result.stdout
+    assert target.read_text(encoding="utf-8") == handwritten
+
+
+def test_install_force_replaces_non_pointer_skill_marker(tmp_path):
+    """With ``--force`` the adapter explicitly replaces the foreign file."""
+    copilot_dir = tmp_path / ".copilot"
+    (copilot_dir / "skills" / "recall").mkdir(parents=True)
+    target = copilot_dir / "skills" / "recall" / "SKILL.md"
+    target.write_text(
+        "---\nname: user-handwritten\n---\nbody\n", encoding="utf-8"
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(ADAPTER), "install",
+         "--home", str(tmp_path), "--force"],
+        capture_output=True, text=True,
+    )
     assert result.returncode == 0, result.stderr
     assert "replaced non-pointer file" in result.stdout
-    body = (copilot_dir / "skills" / "recall" / "SKILL.md").read_text()
+    body = target.read_text(encoding="utf-8")
     assert copilot_adapter.POINTER_MANAGED_BY in body
