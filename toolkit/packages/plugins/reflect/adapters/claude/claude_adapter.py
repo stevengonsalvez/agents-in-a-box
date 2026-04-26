@@ -44,9 +44,26 @@ PLUGIN_SKILLS: tuple[str, ...] = (
     "ingest",
 )
 
-SESSION_START_HOOK_COMMAND = (
-    "uv run {{HOME_TOOL_DIR}}/skills/recall/hooks/session_start_recall.py"
+# Template for the SessionStart hook command. ``{{HOME_TOOL_DIR}}`` gets
+# substituted at runtime with the resolved Claude home (e.g. ``~/.claude``)
+# rather than at toolkit-bootstrap time, so the adapter is safe to invoke
+# directly (e.g. ``python claude_adapter.py install``) without going through
+# bootstrap.js's template-substitution pass.
+SESSION_START_HOOK_COMMAND_TEMPLATE = (
+    "uv run {home_tool_dir}/skills/recall/hooks/session_start_recall.py"
 )
+
+
+def _render_session_start_hook_command(claude_dir: Path) -> str:
+    """Substitute the resolved Claude home into the hook command template.
+
+    ``claude_dir`` is the *target* Claude directory (typically ``~/.claude``
+    or, in tests, ``<tmp>/.claude``). We render the absolute path so that
+    even when the adapter runs against a non-standard HOME the resulting
+    settings.json is self-consistent.
+    """
+    return SESSION_START_HOOK_COMMAND_TEMPLATE.format(home_tool_dir=str(claude_dir))
+
 
 # Sentinel written into the pointer file's "managed_by" field so subsequent
 # runs (or uninstall) can tell the file belongs to us and is safe to replace.
@@ -195,12 +212,37 @@ def _merge_session_start_hook(settings_path: Path) -> bool:
     hooks = current.setdefault("hooks", {})
     session_start = hooks.setdefault("SessionStart", [])
 
-    wanted_command = SESSION_START_HOOK_COMMAND
+    wanted_command = _render_session_start_hook_command(settings_path.parent)
     # Idempotency: skip if any hook command already matches our sentinel.
+    # We also strip out any *legacy* unsubstituted entries left behind by an
+    # earlier buggy install — see the v3.2 review fix.
+    legacy_command = SESSION_START_HOOK_COMMAND_TEMPLATE.replace(
+        "{home_tool_dir}", "{{HOME_TOOL_DIR}}"
+    )
+    cleaned_any = False
+    for entry in session_start:
+        original = entry.get("hooks", [])
+        kept = [
+            hook for hook in original
+            if hook.get("command") != legacy_command
+        ]
+        if kept != original:
+            entry["hooks"] = kept
+            cleaned_any = True
+    # Drop entries that lost all of their hooks during cleanup.
+    session_start[:] = [e for e in session_start if e.get("hooks")]
+
     for entry in session_start:
         for hook in entry.get("hooks", []):
             if hook.get("command") == wanted_command:
-                return False
+                # Existing matching entry — only persist if we cleaned legacy.
+                if cleaned_any:
+                    settings_path.parent.mkdir(parents=True, exist_ok=True)
+                    settings_path.write_text(
+                        json.dumps(current, indent=2, sort_keys=False) + "\n",
+                        encoding="utf-8",
+                    )
+                return cleaned_any
 
     session_start.append({
         "matcher": "",
@@ -281,11 +323,20 @@ def uninstall(
             changed = False
             hooks = cfg.get("hooks", {})
             ss = hooks.get("SessionStart", [])
+            # Match both the rendered command (current installs) and the
+            # legacy unsubstituted template (broken-by-bootstrap installs).
+            wanted_command = _render_session_start_hook_command(
+                settings_path.parent
+            )
+            legacy_command = SESSION_START_HOOK_COMMAND_TEMPLATE.replace(
+                "{home_tool_dir}", "{{HOME_TOOL_DIR}}"
+            )
+            removable = {wanted_command, legacy_command}
             filtered: list = []
             for entry in ss:
                 kept_hooks = [
                     h for h in entry.get("hooks", [])
-                    if h.get("command") != SESSION_START_HOOK_COMMAND
+                    if h.get("command") not in removable
                 ]
                 if kept_hooks != entry.get("hooks", []):
                     changed = True

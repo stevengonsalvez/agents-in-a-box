@@ -71,13 +71,26 @@ def test_install_writes_pointer_files_and_hook(tmp_path):
     assert "name: reflect:recall" in recall_body
 
     # Hook merged into settings.json
-    settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+    settings_text = (tmp_path / ".claude" / "settings.json").read_text()
+    settings = json.loads(settings_text)
     commands = [
         h["command"]
         for entry in settings["hooks"]["SessionStart"]
         for h in entry["hooks"]
     ]
-    assert claude_adapter.SESSION_START_HOOK_COMMAND in commands
+    expected = claude_adapter._render_session_start_hook_command(
+        tmp_path / ".claude"
+    )
+    assert expected in commands
+
+    # Critical: the {{HOME_TOOL_DIR}} placeholder MUST be substituted at
+    # adapter-install time. If it survives into settings.json the recall
+    # hook becomes a literal "uv run {{HOME_TOOL_DIR}}/..." command which
+    # silently fails on every session start.
+    assert "{{HOME_TOOL_DIR}}" not in settings_text
+    assert "{{" not in settings_text
+    # Body of the rendered command must reference the resolved Claude home.
+    assert str(tmp_path / ".claude") in expected
 
 
 def test_install_is_idempotent_and_preserves_existing_hooks(tmp_path):
@@ -111,7 +124,8 @@ def test_install_is_idempotent_and_preserves_existing_hooks(tmp_path):
     ]
     # Existing hook survived, adapter hook was added exactly once
     assert "echo existing" in commands
-    assert commands.count(claude_adapter.SESSION_START_HOOK_COMMAND) == 1
+    expected = claude_adapter._render_session_start_hook_command(claude_dir)
+    assert commands.count(expected) == 1
 
 
 def test_install_no_hooks_flag_leaves_settings_alone(tmp_path):
@@ -150,7 +164,10 @@ def test_uninstall_removes_only_managed_pointers(tmp_path):
         for entry in settings.get("hooks", {}).get("SessionStart", [])
         for h in entry["hooks"]
     ]
-    assert claude_adapter.SESSION_START_HOOK_COMMAND not in commands
+    expected = claude_adapter._render_session_start_hook_command(
+        tmp_path / ".claude"
+    )
+    assert expected not in commands
 
 
 def test_install_refuses_to_overwrite_non_pointer_skill_marker(tmp_path):
@@ -173,6 +190,70 @@ def test_install_refuses_to_overwrite_non_pointer_skill_marker(tmp_path):
 
     body = (claude_dir / "skills" / "recall" / "SKILL.md").read_text()
     assert claude_adapter.POINTER_MANAGED_BY in body
+
+
+def test_install_substitutes_home_tool_dir_placeholder(tmp_path):
+    """Regression: the {{HOME_TOOL_DIR}} marker is a *bootstrap-time* template
+    placeholder, but the adapter runs at install time. It must substitute the
+    resolved Claude home itself rather than persisting the literal token."""
+    subprocess.run(
+        [sys.executable, str(ADAPTER), "install", "--home", str(tmp_path)],
+        check=True, capture_output=True,
+    )
+
+    settings_text = (tmp_path / ".claude" / "settings.json").read_text()
+    assert "{{HOME_TOOL_DIR}}" not in settings_text
+    assert "{{" not in settings_text  # No surviving curly templates of any kind
+
+    settings = json.loads(settings_text)
+    commands = [
+        h["command"]
+        for entry in settings["hooks"]["SessionStart"]
+        for h in entry["hooks"]
+    ]
+    rendered = claude_adapter._render_session_start_hook_command(
+        tmp_path / ".claude"
+    )
+    assert rendered in commands
+    # The rendered command must point at the *resolved* claude home, not at
+    # the user's actual ~/.claude — otherwise tests would taint real state.
+    assert str(tmp_path / ".claude") in rendered
+
+
+def test_install_cleans_up_legacy_unsubstituted_hook(tmp_path):
+    """If a previous (buggy) install left a literal {{HOME_TOOL_DIR}} entry in
+    settings.json, the adapter should remove it during the next install and
+    replace it with the correctly-rendered command."""
+    claude_dir = tmp_path / ".claude"
+    claude_dir.mkdir()
+    legacy = "uv run {{HOME_TOOL_DIR}}/skills/recall/hooks/session_start_recall.py"
+    (claude_dir / "settings.json").write_text(json.dumps({
+        "hooks": {
+            "SessionStart": [
+                {
+                    "matcher": "",
+                    "hooks": [{"type": "command", "command": legacy}],
+                }
+            ]
+        }
+    }))
+
+    subprocess.run(
+        [sys.executable, str(ADAPTER), "install", "--home", str(tmp_path)],
+        check=True, capture_output=True,
+    )
+
+    settings_text = (claude_dir / "settings.json").read_text()
+    assert "{{HOME_TOOL_DIR}}" not in settings_text
+    settings = json.loads(settings_text)
+    commands = [
+        h["command"]
+        for entry in settings["hooks"]["SessionStart"]
+        for h in entry["hooks"]
+    ]
+    assert legacy not in commands
+    rendered = claude_adapter._render_session_start_hook_command(claude_dir)
+    assert commands.count(rendered) == 1
 
 
 def test_install_errors_on_corrupt_settings_json(tmp_path):
