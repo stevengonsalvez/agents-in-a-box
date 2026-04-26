@@ -76,6 +76,34 @@ def test_install_is_idempotent(tmp_path):
     assert len(pointers) >= 2  # recall + reflect at minimum
 
 
+def test_install_is_idempotent_and_preserves_pre_seeded_user_files(tmp_path):
+    """Re-running install must not destroy pre-existing user state under
+    ~/.codex/skills/. Codex has no hook system to test the
+    "preserve existing hooks" half (Claude does), so we cover the
+    sibling-file half: a hand-written file inside an *adapter-managed*
+    skill dir must survive multiple install cycles."""
+    # First install creates the managed pointer + dir.
+    subprocess.run(
+        [sys.executable, str(ADAPTER), "install", "--home", str(tmp_path)],
+        check=True, capture_output=True,
+    )
+    user_sibling = tmp_path / ".codex" / "skills" / "recall" / "user-note.md"
+    user_sibling.write_text("hand-written sibling", encoding="utf-8")
+
+    # Second install must be a no-op for user state.
+    result = subprocess.run(
+        [sys.executable, str(ADAPTER), "install", "--home", str(tmp_path)],
+        check=True, capture_output=True, text=True,
+    )
+    # Still exactly one managed pointer per skill, no duplicates created.
+    pointers = list((tmp_path / ".codex" / "skills").rglob("SKILL.md"))
+    assert len(pointers) >= 2
+    # User's sibling file untouched.
+    assert user_sibling.read_text(encoding="utf-8") == "hand-written sibling"
+    # Adapter reported writing/keeping pointers — never anything destructive.
+    assert "refused to overwrite" not in result.stdout
+
+
 def test_uninstall_removes_only_managed_pointers(tmp_path):
     subprocess.run(
         [sys.executable, str(ADAPTER), "install", "--home", str(tmp_path)],

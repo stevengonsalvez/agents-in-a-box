@@ -74,6 +74,29 @@ def test_install_is_idempotent(tmp_path):
     assert len(pointers) >= 2  # recall + reflect at minimum
 
 
+def test_install_is_idempotent_and_preserves_pre_seeded_user_files(tmp_path):
+    """Re-running install must not destroy pre-existing user state under
+    ~/.copilot/skills/. Copilot has no hook system to test the
+    "preserve existing hooks" half (Claude does), so we cover the
+    sibling-file half: a hand-written file inside an *adapter-managed*
+    skill dir must survive multiple install cycles."""
+    subprocess.run(
+        [sys.executable, str(ADAPTER), "install", "--home", str(tmp_path)],
+        check=True, capture_output=True,
+    )
+    user_sibling = tmp_path / ".copilot" / "skills" / "recall" / "user-note.md"
+    user_sibling.write_text("hand-written sibling", encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, str(ADAPTER), "install", "--home", str(tmp_path)],
+        check=True, capture_output=True, text=True,
+    )
+    pointers = list((tmp_path / ".copilot" / "skills").rglob("SKILL.md"))
+    assert len(pointers) >= 2
+    assert user_sibling.read_text(encoding="utf-8") == "hand-written sibling"
+    assert "refused to overwrite" not in result.stdout
+
+
 def test_uninstall_removes_only_managed_pointers(tmp_path):
     subprocess.run(
         [sys.executable, str(ADAPTER), "install", "--home", str(tmp_path)],
