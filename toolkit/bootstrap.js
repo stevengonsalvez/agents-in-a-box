@@ -850,6 +850,221 @@ function installLearningsCli() {
     return result;
 }
 
+// =============================================================================
+// reflect-kb installer — replaces the legacy installLearningsCli flow.
+// =============================================================================
+//
+// Strategy: install the reflect-kb Python package (separate repo) globally via
+// `uv tool install`, then run the per-harness adapter under
+// toolkit/packages/plugins/reflect/adapters/<tool>/ to wire pointer SKILL.md
+// files (and, for Claude only, a SessionStart hook) into the user's harness
+// home dir.
+//
+// Source resolution (in priority order):
+//   1. REFLECT_KB_SOURCE env var — local path or git URL (for dev iteration)
+//   2. Clone github.com/stevengonsalvez/reflect-kb to a managed cache dir
+//      under ~/.cache/ai-coder-rules/reflect-kb (created on first run, fast-
+//      forwarded with `git pull` on subsequent runs)
+//
+// Idempotency: if `reflect --version` already reports the same version the
+// source pyproject.toml advertises (and --force isn't set), the package
+// install is skipped. The adapter is always run — it's cheap and idempotent
+// itself, with a managed_by sentinel that refuses to clobber hand-edited
+// pointer files.
+//
+// Failure modes:
+//   - uv not on PATH: hard error with remediation message (don't silently
+//     fall back; the toolkit doesn't have a pipx pattern elsewhere to mimic)
+//   - uv tool install fails: hard error, surfacing stderr
+//   - reflect --version smoke test fails: hard error
+//   - adapter run fails: warn-and-continue — the package is installed and
+//     usable from the CLI even if the harness wiring needs manual repair
+//
+// Returns {installed, skippedReason, adapter, version, errors, warnings} so
+// the caller can render a single completeProgress line.
+
+const REFLECT_KB_REPO = 'https://github.com/stevengonsalvez/reflect-kb.git';
+const REFLECT_KB_CACHE_DIR = path.join(os.homedir(), '.cache', 'ai-coder-rules', 'reflect-kb');
+
+// Map bootstrap tool slugs to the adapter directory under
+// toolkit/packages/plugins/reflect/adapters/. Tools not in this map skip the
+// adapter step (the package install still proceeds — the CLI works regardless).
+const REFLECT_ADAPTER_BY_TOOL = {
+    'claude-code-4.5': 'claude',
+    'nanoclaw': 'claude', // nanoclaw shares the .claude home with claude-code-4.5
+    'codex': 'codex',
+    'copilot': 'copilot',
+};
+
+function findUv() {
+    try {
+        const out = execSync('command -v uv', { stdio: ['ignore', 'pipe', 'ignore'] });
+        return out.toString().trim() || null;
+    } catch (_) {
+        return null;
+    }
+}
+
+function getReflectInstalledVersion() {
+    try {
+        const out = execSync('reflect --version', { stdio: ['ignore', 'pipe', 'ignore'] });
+        // Format: "reflect, version 2.0.0"
+        const match = out.toString().match(/version\s+(\S+)/i);
+        return match ? match[1] : out.toString().trim();
+    } catch (_) {
+        return null;
+    }
+}
+
+// Read [project].version from pyproject.toml without a TOML parser dep —
+// the file is small and the field shape is stable. Returns null if the file
+// is missing or the field can't be located.
+function readPyprojectVersion(sourceDir) {
+    const pyproject = path.join(sourceDir, 'pyproject.toml');
+    if (!fs.existsSync(pyproject)) return null;
+    const text = fs.readFileSync(pyproject, 'utf8');
+    // Match the first `version = "..."` after [project]; tolerate whitespace.
+    const projectIdx = text.indexOf('[project]');
+    if (projectIdx === -1) return null;
+    const after = text.slice(projectIdx);
+    const match = after.match(/^\s*version\s*=\s*["']([^"']+)["']/m);
+    return match ? match[1] : null;
+}
+
+// Resolve the reflect-kb source. Returns {source, dir, kind} where kind is
+// 'env-path' | 'env-git' | 'cache'. For git/cache sources, `dir` is a local
+// path that's safe to read pyproject.toml from; for env-git URLs we still
+// clone to the cache dir.
+function resolveReflectKbSource() {
+    const envSource = process.env.REFLECT_KB_SOURCE;
+    if (envSource) {
+        // Local path → use directly. Anything else → treat as git URL.
+        if (envSource.startsWith('/') || envSource.startsWith('~') || envSource.startsWith('.')) {
+            const expanded = envSource.replace(/^~/, os.homedir());
+            return { source: expanded, dir: expanded, kind: 'env-path' };
+        }
+        // git URL — clone into cache, but to a separate subdir so it doesn't
+        // collide with the default repo cache.
+        const cacheDir = path.join(os.homedir(), '.cache', 'ai-coder-rules', 'reflect-kb-env');
+        cloneOrUpdateGit(envSource, cacheDir);
+        return { source: cacheDir, dir: cacheDir, kind: 'env-git' };
+    }
+    cloneOrUpdateGit(REFLECT_KB_REPO, REFLECT_KB_CACHE_DIR);
+    return { source: REFLECT_KB_CACHE_DIR, dir: REFLECT_KB_CACHE_DIR, kind: 'cache' };
+}
+
+function cloneOrUpdateGit(repoUrl, cloneDir) {
+    fs.mkdirSync(path.dirname(cloneDir), { recursive: true });
+    if (fs.existsSync(path.join(cloneDir, '.git'))) {
+        // Fast-forward; tolerate offline failures (we still have a usable tree).
+        try {
+            execSync(`git -C ${JSON.stringify(cloneDir)} pull --ff-only`, { stdio: 'pipe' });
+        } catch (err) {
+            // Surface but don't abort — the existing checkout is still valid.
+            console.log(`  ⚠ reflect-kb: git pull failed (${err.message.split('\n')[0]}); using existing checkout`);
+        }
+        return;
+    }
+    execSync(`git clone --depth 1 ${JSON.stringify(repoUrl)} ${JSON.stringify(cloneDir)}`, { stdio: 'pipe' });
+}
+
+async function installReflectKb(tool, options = {}) {
+    const result = {
+        installed: false,
+        skippedReason: null,
+        adapter: null,
+        version: null,
+        errors: [],
+        warnings: [],
+    };
+    const force = !!options.force;
+
+    // 1. uv must be on PATH. No silent fallback.
+    const uvPath = findUv();
+    if (!uvPath) {
+        result.errors.push(
+            'uv not found on PATH. reflect-kb requires uv. Install with: ' +
+            'curl -LsSf https://astral.sh/uv/install.sh | sh'
+        );
+        return result;
+    }
+
+    // 2. Resolve source (env override or cached git clone).
+    let sourceInfo;
+    try {
+        sourceInfo = resolveReflectKbSource();
+    } catch (err) {
+        result.errors.push(`failed to resolve reflect-kb source: ${err.message}`);
+        return result;
+    }
+    const sourceVersion = readPyprojectVersion(sourceInfo.dir);
+
+    // 3. Idempotency: if reflect is already on PATH and reports a version,
+    // skip the install unless --force is set. We deliberately don't compare
+    // to sourceVersion strictly because the CLI's version_option is hardcoded
+    // separately from pyproject (a known reflect-kb quirk); presence is enough.
+    const installedVersion = getReflectInstalledVersion();
+    if (installedVersion && !force) {
+        result.skippedReason = `reflect ${installedVersion} already installed`;
+        result.version = installedVersion;
+    } else {
+        // 4. Install the package. The [graph] extra pulls heavy ML deps and is
+        // mandatory — the recall/search workflow needs it.
+        const installSpec = `${sourceInfo.source}[graph]`;
+        try {
+            execSync(`uv tool install --force ${JSON.stringify(installSpec)}`, {
+                stdio: 'pipe',
+            });
+            result.installed = true;
+        } catch (err) {
+            const stderr = err.stderr ? err.stderr.toString() : err.message;
+            result.errors.push(`uv tool install failed: ${stderr.split('\n').slice(-5).join(' | ')}`);
+            return result;
+        }
+
+        // 5. Smoke test — fail loudly if the CLI didn't land on PATH.
+        const postInstallVersion = getReflectInstalledVersion();
+        if (!postInstallVersion) {
+            result.errors.push(
+                'reflect --version did not run after install. Ensure ~/.local/bin is on PATH ' +
+                '(uv tool install puts shims there by default).'
+            );
+            return result;
+        }
+        result.version = postInstallVersion;
+    }
+
+    // 6. Run the per-harness adapter for this tool. Adapter failures are
+    // warnings, not errors — the package install above is the load-bearing
+    // piece, and the adapter can be re-run by hand.
+    const adapterSlug = REFLECT_ADAPTER_BY_TOOL[tool];
+    if (!adapterSlug) {
+        result.warnings.push(`no reflect adapter for tool '${tool}'; skipping adapter step`);
+        return result;
+    }
+    const adapterScript = path.join(
+        __dirname,
+        'packages', 'plugins', 'reflect', 'adapters', adapterSlug, `${adapterSlug}_adapter.py`
+    );
+    if (!fs.existsSync(adapterScript)) {
+        result.warnings.push(`adapter script missing: ${adapterScript}`);
+        return result;
+    }
+    result.adapter = adapterSlug;
+
+    try {
+        execSync(`python3 ${JSON.stringify(adapterScript)} install`, { stdio: 'pipe' });
+    } catch (err) {
+        const stderr = err.stderr ? err.stderr.toString() : err.message;
+        result.warnings.push(
+            `adapter '${adapterSlug}' install failed: ${stderr.split('\n').slice(-5).join(' | ')}. ` +
+            `Re-run manually: python3 ${adapterScript} install`
+        );
+    }
+
+    return result;
+}
+
 async function handleSharedContentCopy(tool, config, targetFolder) {
     if (!targetFolder) {
         const answers = await inquirer.prompt([
@@ -1510,22 +1725,32 @@ async function handlePackagesStructureCopy(tool, config, overrideHomeDir = null,
         completeProgress(`Generated setup-external.sh (${config._externalDepsCount} external deps)`);
     }
 
-    // Deploy the learnings CLI so ai-coder-rules is the single source of
-    // truth for the tool, even though the KB content lives in a separate
-    // repo (learnings-kb). Runs on every tool install; cheap and idempotent.
+    // Deploy the reflect-kb package + per-harness adapter so ai-coder-rules
+    // wires the canonical retrieval/learning CLI into the user's harness home
+    // dir. Runs on every home-scoped tool install; idempotent (skips reinstall
+    // if `reflect --version` already responds, and the adapter has its own
+    // managed_by sentinel that refuses to clobber hand-edited files).
     if (shouldUseHome) {
-        showProgress('Installing learnings CLI to ~/.learnings/cli/');
-        const { copied, pruned, prunedNames, errors } = installLearningsCli();
-        if (copied > 0) {
-            const prunedMsg = pruned > 0 ? `, pruned ${pruned} stale (${prunedNames.join(', ')})` : '';
-            completeProgress(`Installed learnings CLI (${copied} files${prunedMsg}) to ~/.learnings/cli/`);
+        showProgress('Installing reflect-kb (universal retrieval CLI)');
+        const reflectResult = await installReflectKb(tool);
+        if (reflectResult.errors.length > 0) {
+            // Hard errors (uv missing, install/smoke-test failure) — surface
+            // and continue rather than abort the whole bootstrap; the rest of
+            // the install is independent.
+            completeProgress('reflect-kb install failed — see warnings below');
+            for (const msg of reflectResult.errors) {
+                console.log(`  ⚠ reflect-kb: ${msg}`);
+            }
         } else {
-            completeProgress('learnings CLI template not found — skipped');
+            const versionStr = reflectResult.version ? ` v${reflectResult.version}` : '';
+            const adapterStr = reflectResult.adapter ? `, adapter: ${reflectResult.adapter}` : '';
+            const action = reflectResult.skippedReason
+                ? `skipped (${reflectResult.skippedReason})`
+                : `installed${versionStr}`;
+            completeProgress(`reflect-kb ${action}${adapterStr}`);
         }
-        // Warn-continue: don't abort the whole install on a single copy/prune
-        // failure, but surface it so the user knows something is off.
-        for (const msg of errors) {
-            console.log(`  ⚠ learnings CLI: ${msg}`);
+        for (const msg of reflectResult.warnings) {
+            console.log(`  ⚠ reflect-kb: ${msg}`);
         }
     }
 
