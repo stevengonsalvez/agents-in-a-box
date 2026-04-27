@@ -316,21 +316,20 @@ jobs:
           path: artifacts
 
       - name: Update Formula
-        working-directory: ${{ env.WORKING_DIR }}
         run: |
           VERSION="${{ needs.prepare.outputs.version }}"
 
           # Debug: show artifacts structure
           echo "Artifacts structure:"
-          ls -la ../artifacts/ || true
-          ls -la ../artifacts/*/ || true
+          ls -la artifacts/ || true
+          ls -la artifacts/*/ || true
 
-          # Calculate SHA256 for macOS ARM binary (artifacts are in parent directory)
-          MAC_SHA=$(cat ../artifacts/aarch64-apple-darwin/*.sha256 | awk '{print $1}')
+          # Calculate SHA256 for macOS ARM binary
+          MAC_SHA=$(cat artifacts/aarch64-apple-darwin/*.sha256 | awk '{print $1}')
           echo "MAC_SHA: $MAC_SHA"
 
           # Calculate SHA256 for Linux binary
-          LINUX_SHA=$(cat ../artifacts/x86_64-unknown-linux-gnu/*.sha256 | awk '{print $1}')
+          LINUX_SHA=$(cat artifacts/x86_64-unknown-linux-gnu/*.sha256 | awk '{print $1}')
           echo "LINUX_SHA: $LINUX_SHA"
 
           # Validate SHA values are not empty
@@ -381,7 +380,6 @@ jobs:
           cat Formula/ainb.rb
 
       - name: Commit and push Formula update
-        working-directory: ${{ env.WORKING_DIR }}
         run: |
           VERSION="${{ needs.prepare.outputs.version }}"
           git add Formula/ainb.rb
