@@ -387,3 +387,85 @@ jobs:
           git add Formula/ainb.rb
           git commit -m "chore(homebrew): update formula to v${VERSION}" || echo "No changes to commit"
           git push origin main
+
+  scoop:
+    name: Update Scoop Manifest
+    needs: [prepare, build, release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Update bucket/ainb.json
+        run: |
+          VERSION="${{ needs.prepare.outputs.version }}"
+
+          WIN_SHA=$(cat artifacts/x86_64-pc-windows-msvc/*.sha256 | awk '{print $1}')
+          if [ -z "$WIN_SHA" ]; then
+            echo "Error: Failed to extract Windows SHA256"
+            exit 1
+          fi
+          echo "WIN_SHA: $WIN_SHA"
+
+          cat > bucket/ainb.json << 'MANIFEST'
+          {
+              "version": "VERSION_PLACEHOLDER",
+              "description": "Terminal-based development environment manager for Claude Code agents",
+              "homepage": "https://github.com/stevengonsalvez/agents-in-a-box",
+              "license": "MIT",
+              "architecture": {
+                  "64bit": {
+                      "url": "https://github.com/stevengonsalvez/agents-in-a-box/releases/download/vVERSION_PLACEHOLDER/agents-box-VERSION_PLACEHOLDER-x86_64-pc-windows-msvc.zip",
+                      "hash": "WIN_SHA_PLACEHOLDER"
+                  }
+              },
+              "bin": [
+                  "agents-box.exe",
+                  [
+                      "agents-box.exe",
+                      "ainb"
+                  ]
+              ],
+              "checkver": {
+                  "github": "https://github.com/stevengonsalvez/agents-in-a-box"
+              },
+              "autoupdate": {
+                  "architecture": {
+                      "64bit": {
+                          "url": "https://github.com/stevengonsalvez/agents-in-a-box/releases/download/v$version/agents-box-$version-x86_64-pc-windows-msvc.zip",
+                          "hash": {
+                              "url": "$url.sha256"
+                          }
+                      }
+                  }
+              }
+          }
+          MANIFEST
+
+          sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" bucket/ainb.json
+          sed -i "s/WIN_SHA_PLACEHOLDER/${WIN_SHA}/g" bucket/ainb.json
+
+          echo "Updated bucket/ainb.json to version ${VERSION}"
+          cat bucket/ainb.json
+
+      - name: Commit and push manifest update
+        run: |
+          VERSION="${{ needs.prepare.outputs.version }}"
+          git add bucket/ainb.json
+          git commit -m "chore(scoop): update manifest to v${VERSION}" || echo "No changes to commit"
+          git push origin main
