@@ -59,9 +59,13 @@ packages/
 ├── plugins/
 │   └── reflect/         Learning-capture plugin (reflect:capture, reflect:ingest)
 └── knowledge/
-    ├── docs-solutions-template/
-    └── global-learnings-template/
+    └── docs-solutions-template/
 ```
+
+The reflect/recall knowledge base CLI now lives in a separate repo
+([reflect-kb](https://github.com/stevengonsalvez/reflect-kb)) and is
+installed via `uv tool install` by `bootstrap.js`. See the bootstrap's
+`installReflectKb()` function for details.
 
 ### Skills at a glance (86 total, grouped by purpose)
 
