@@ -13,7 +13,7 @@
 # =============================================================================
 
 version: "1.0.0"
-updated: "2026-03-07"
+updated: "2026-04-27"
 
 # =============================================================================
 # EXTERNAL PACKAGES (Python/Node packages installed globally per machine)
@@ -462,16 +462,21 @@ npx-skills:
 
   - name: caveman
     repo: JuliusBrussee/caveman
-    install: "npx skills add JuliusBrussee/caveman --yes"
-    purpose: "Token-efficient caveman-speak response mode (~75% token reduction)"
+    install: "npx skills add JuliusBrussee/caveman -g -a claude-code --skill '*' --yes --copy"
+    purpose: "Token-efficient caveman-speak response and review/commit/compression skill family"
     multi-skill: true
+    installed-to: ~/.claude/skills
     skills:
       - caveman: "Ultra-compressed communication dropping articles, filler, pleasantries"
+      - caveman-compress: "Caveman-flavored compression workflow for reducing context/token footprint"
+      - caveman-commit: "Generate terse but complete caveman-style commit summaries when requested"
+      - caveman-help: "Help/usage guide for the caveman skill family"
+      - caveman-review: "Review outputs in caveman-compressed style while preserving technical accuracy"
       - compress: "Compress memory/CLAUDE.md files into caveman format to save input tokens"
     features:
       - Drops articles, filler words, hedging while preserving technical accuracy
-      - Code blocks, git commits, and PR descriptions remain unchanged
-      - Companion compress tool for memory file token optimization
+      - Code blocks, git commits, and PR descriptions remain unchanged unless a caveman-specific skill is explicitly requested
+      - Companion compression tools for memory/context token optimization
       - Backup original files as FILE.original.md before compression
 
   - name: impeccable
