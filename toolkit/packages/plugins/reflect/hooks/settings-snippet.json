@@ -33,7 +33,7 @@
         "matcher": "",
         "hooks": [
           {
-            "_comment": "Option 2: auto-reflect if /reflect on has been invoked",
+            "_comment": "Option 2: Auto-reflect — queues the transcript so the *next* SessionStart agent runs /reflect on it. Requires the SessionStart drain hook below.",
             "type": "command",
             "command": "uv run {{HOME_TOOL_DIR}}/skills/reflect/hooks/precompact_reflect.py --auto --verbose"
           }
@@ -43,12 +43,29 @@
 
     "_PreCompact_full": [
       {
+        "_comment": "Option 3: Handover + backup + auto-reflect. CRITICAL: each command MUST be a separate hooks-array entry, NOT chained with &&. Hook stdin is consumed by the first reader, so chained commands silently lose the JSON event payload (only the last command sees stdin in a shell pipeline).",
         "matcher": "",
         "hooks": [
           {
-            "_comment": "Option 3: handover + backup + reflect",
             "type": "command",
-            "command": "claude handover && uv run {{HOME_TOOL_DIR}}/hooks/pre_compact.py --backup && uv run {{HOME_TOOL_DIR}}/skills/reflect/hooks/precompact_reflect.py --auto"
+            "command": "uv run {{HOME_TOOL_DIR}}/hooks/pre_compact.py --handover --backup --verbose"
+          },
+          {
+            "type": "command",
+            "command": "uv run {{HOME_TOOL_DIR}}/skills/reflect/hooks/precompact_reflect.py --auto --verbose"
+          }
+        ]
+      }
+    ],
+
+    "SessionStart": [
+      {
+        "_comment": "Drain hook for Option 2/3 above: surfaces queued auto-reflections to the new agent via additionalContext, so the agent (which IS an LLM) can run /reflect on each transcript. Exits silently when the queue is empty.",
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run {{HOME_TOOL_DIR}}/skills/reflect/hooks/sessionstart_drain_reflections.py"
           }
         ]
       }

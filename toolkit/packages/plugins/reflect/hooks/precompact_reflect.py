@@ -120,51 +120,51 @@ def generate_reminder_context(trigger: str) -> dict:
 
 def run_reflection_analysis(input_data: dict) -> dict:
     """
-    Run reflection analysis on the session transcript.
+    Queue the current session's transcript for reflection on the *next* session start.
 
-    This reads the transcript and generates a reflection output file.
+    Hook scripts can't run an LLM, so they can't do real signal detection. Instead we
+    append the transcript path + metadata to a JSONL queue. A SessionStart drain hook
+    surfaces queued entries to the next agent via additionalContext, and that agent
+    (which IS an LLM) runs the actual /reflect analysis on each transcript.
     """
     transcript_path = input_data.get('transcript_path', '')
 
-    if not transcript_path or not Path(transcript_path).exists():
+    if not transcript_path:
         return {
             "hookSpecificOutput": {
                 "hookEventName": "PreCompact",
-                "additionalContext": "Could not access transcript for reflection analysis."
+                "additionalContext": "Auto-reflect: no transcript_path in event, skipping queue."
             }
         }
 
-    # Import the output generator
-    scripts_dir = Path(__file__).parent.parent / 'scripts'
-    sys.path.insert(0, str(scripts_dir))
+    queue_dir = get_state_dir()
+    queue_dir.mkdir(parents=True, exist_ok=True)
+    queue_file = queue_dir / 'pending_reflections.jsonl'
 
-    try:
-        from output_generator import create_episode_note
+    entry = {
+        "ts": datetime.now().isoformat(),
+        "session_id": input_data.get('session_id', 'unknown'),
+        "transcript_path": transcript_path,
+        "trigger": input_data.get('trigger', 'unknown'),
+        "cwd": input_data.get('cwd', os.getcwd()),
+    }
 
-        # For auto-reflection, we create a minimal episode record
-        # The actual signal detection would be done by the LLM
-        episode_path = create_episode_note(
-            signals=[],
-            learnings=[],
-            session_narrative=f"Auto-reflection triggered by PreCompact ({input_data.get('trigger', 'auto')})",
-        )
+    with open(queue_file, 'a') as f:
+        f.write(json.dumps(entry) + '\n')
 
-        return {
-            "hookSpecificOutput": {
-                "hookEventName": "PreCompact",
-                "additionalContext": (
-                    f"Episode placeholder created at: {episode_path}\n"
-                    "Run `/reflect` to perform full analysis and populate with learnings."
-                )
-            }
+    # Count pending entries (cheap: re-open file)
+    with open(queue_file) as f:
+        pending_count = sum(1 for line in f if line.strip())
+
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreCompact",
+            "additionalContext": (
+                f"Auto-reflect: transcript queued for analysis at next session start "
+                f"({pending_count} pending). Real signal detection runs in the next agent."
+            )
         }
-    except ImportError:
-        return {
-            "hookSpecificOutput": {
-                "hookEventName": "PreCompact",
-                "additionalContext": "Reflection analysis not available. Run `/reflect` manually."
-            }
-        }
+    }
 
 
 def main():

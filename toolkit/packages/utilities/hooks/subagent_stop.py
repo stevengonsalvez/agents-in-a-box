@@ -72,6 +72,9 @@ def build_subagent_completion_message(input_data):
 
 def announce_subagent_completion(completion_message):
     """Announce subagent completion using the best available TTS service."""
+    # TTS opt-in: stay silent unless ~/.claude/.tts-on exists.
+    if not (Path.home() / ".claude" / ".tts-on").exists():
+        return
     try:
         tts_script = get_tts_script_path()
         if not tts_script:
