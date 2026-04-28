@@ -101,10 +101,15 @@ jobs:
           # Minimum file count check
           [ "$FILE_COUNT" -lt 100 ] && echo "ERROR: Too few files installed" && exit 1
 
-          # Check for required components. Commands have been consolidated
-          # into skills, so we no longer require a separate commands/ tree.
-          [ ! -d "$TARGET_DIR/agents" ] && echo "ERROR: agents/ missing" && exit 1
+          # skills/ is required for every supported tool. Commands have
+          # been consolidated into skills, so no separate commands/ check.
           [ ! -d "$TARGET_DIR/skills" ] && echo "ERROR: skills/ missing" && exit 1
+
+          # agents/ is only required by claude-code-4.5. Codex, Gemini, and
+          # Copilot represent agents via a top-level AGENTS.md instead.
+          if [ "${{ matrix.tool }}" = "claude-code-4.5" ]; then
+            [ ! -d "$TARGET_DIR/agents" ] && echo "ERROR: agents/ missing" && exit 1
+          fi
 
           echo "✓ ${{ matrix.tool }} installation validated"
 
