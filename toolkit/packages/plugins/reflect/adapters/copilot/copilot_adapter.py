@@ -20,6 +20,13 @@ against hand-written sibling files.
 Mirrors the Codex adapter; only the harness directory and copy differ.
 Both delegate the install/uninstall mechanics to
 :class:`AdapterBase`.
+
+TODO(closed-loop): also wire ``~/.claude/scripts/reflect-drain-bg.sh``
+into a Copilot session-init hook once Copilot grows hook parity. The
+drain script is harness-agnostic — it reads the shared
+``~/.reflect/pending_reflections.jsonl`` queue and shells out to
+``claude -p /reflect <transcript>`` to capture learnings. Until then,
+Copilot sessions rely on Claude Code session-starts to drain the queue.
 """
 
 from __future__ import annotations
