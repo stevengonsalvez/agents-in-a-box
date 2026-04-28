@@ -162,16 +162,18 @@ Add simple built-in pricing lookup for known Claude and GPT model names. Return 
 ### Success Criteria
 
 #### Automated Verification
-- [ ] Unit tests parse small Claude fixture and preserve daily/project totals.
-- [ ] Unit tests parse small Codex fixture and normalize cached input tokens.
-- [ ] Unit tests validate date filtering uses assistant-call timestamp.
-- [ ] Unit tests validate custom from/to ranges are inclusive and reject inverted ranges.
-- [ ] Unit tests validate include and exclude filters apply after provider parsing and before aggregation.
-- [ ] `cargo test usage --all-targets` passes from `ainb-tui`.
+- [x] Unit tests parse small Claude fixture and preserve daily/project totals.
+- [x] Unit tests parse small Codex fixture and normalize cached input tokens.
+- [x] Unit tests validate date filtering uses assistant-call timestamp.
+- [x] Unit tests validate custom from/to ranges are inclusive and reject inverted ranges.
+- [x] Unit tests validate include and exclude filters apply after provider parsing and before aggregation.
+- [x] `cargo test usage --all-targets` passes from `ainb-tui`.
 
 #### Manual Verification
 - [ ] Opening Stats still shows existing Daily/Weekly/Projects data.
 - [ ] Codex provider no longer shows "not yet available" when local Codex sessions exist.
+
+Phase 1 implementation note: Codex parsing exists behind `parse_usage_for`, but TUI provider wiring is intentionally deferred to Phase 3/4 because Phase 1 only owns `ainb-tui/src/models/usage.rs` and `ainb-tui/src/models/mod.rs`.
 
 ## Phase 2: Activity Classifier And Burndown Aggregation
 <!-- wave: 2 | depends_on: [Phase 1] | files: [ainb-tui/src/models/usage.rs] -->
@@ -209,9 +211,9 @@ Aggregate:
 ### Success Criteria
 
 #### Automated Verification
-- [ ] Classifier tests cover coding, debugging, feature, refactoring, testing, exploration, planning, delegation, git, build/deploy, brainstorming, conversation, general.
-- [ ] Retry tests cover edit-only one-shot and edit -> bash -> edit retry.
-- [ ] Aggregation tests verify project/model/activity/tool totals from mixed Claude/Codex fixture calls.
+- [x] Classifier tests cover coding, debugging, feature, refactoring, testing, exploration, planning, delegation, git, build/deploy, brainstorming, conversation, general.
+- [x] Retry tests cover edit-only one-shot and edit -> bash -> edit retry.
+- [x] Aggregation tests verify project/model/activity/tool totals from mixed Claude/Codex fixture calls.
 
 #### Manual Verification
 - [ ] Generated summary values are plausible compared with a known small fixture.
