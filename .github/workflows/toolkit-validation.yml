@@ -43,18 +43,17 @@ jobs:
 
           # Count files
           AGENT_COUNT=$(find packages/agents -name "*.md" | wc -l)
-          SKILL_COUNT=$(find packages/skills -type f | wc -l)
-          CMD_COUNT=$(find packages -path "*/commands/*.md" | wc -l)
+          SKILL_COUNT=$(find packages/skills -mindepth 2 -name "SKILL.md" | wc -l)
 
           echo ""
           echo "File counts:"
-          echo "  Agents: $AGENT_COUNT"
-          echo "  Skills: $SKILL_COUNT"
-          echo "  Commands: $CMD_COUNT"
+          echo "  Agents:    $AGENT_COUNT"
+          echo "  Skills:    $SKILL_COUNT"
 
-          # Minimum thresholds
+          # Minimum thresholds. Commands have been consolidated into skills,
+          # so we no longer count a separate commands/ tree.
           [ "$AGENT_COUNT" -lt 30 ] && echo "WARNING: Agent count seems low" && exit 1
-          [ "$CMD_COUNT" -lt 35 ] && echo "WARNING: Command count seems low" && exit 1
+          [ "$SKILL_COUNT" -lt 60 ] && echo "WARNING: Skill count seems low" && exit 1
 
           echo "✓ Package structure validated"
 
@@ -81,16 +80,17 @@ jobs:
       - name: Test ${{ matrix.tool }} installation
         run: |
           cd toolkit
-          mkdir -p /tmp/test-${{ matrix.tool }}
+          FAKE_HOME="/tmp/test-${{ matrix.tool }}"
+          mkdir -p "$FAKE_HOME"
 
           echo "Installing ${{ matrix.tool }}..."
-          node create-rule.js --tool=${{ matrix.tool }} --targetFolder=/tmp/test-${{ matrix.tool }} --yes
+          node bootstrap.js --tool=${{ matrix.tool }} --homeDir="$FAKE_HOME"
 
           # Verify installation
-          TARGET_DIR="/tmp/test-${{ matrix.tool }}/.${{ matrix.tool == 'claude-code-4.5' && 'claude' || matrix.tool }}"
+          TARGET_DIR="$FAKE_HOME/.${{ matrix.tool == 'claude-code-4.5' && 'claude' || matrix.tool }}"
 
           if [ ! -d "$TARGET_DIR" ]; then
-            echo "ERROR: Installation directory not created"
+            echo "ERROR: Installation directory not created at $TARGET_DIR"
             exit 1
           fi
 
@@ -101,9 +101,10 @@ jobs:
           # Minimum file count check
           [ "$FILE_COUNT" -lt 100 ] && echo "ERROR: Too few files installed" && exit 1
 
-          # Check for required components
+          # Check for required components. Commands have been consolidated
+          # into skills, so we no longer require a separate commands/ tree.
           [ ! -d "$TARGET_DIR/agents" ] && echo "ERROR: agents/ missing" && exit 1
-          [ ! -d "$TARGET_DIR/commands" ] && echo "ERROR: commands/ missing" && exit 1
+          [ ! -d "$TARGET_DIR/skills" ] && echo "ERROR: skills/ missing" && exit 1
 
           echo "✓ ${{ matrix.tool }} installation validated"
 
@@ -127,17 +128,18 @@ jobs:
       - name: Test template substitution
         run: |
           cd toolkit
-          mkdir -p /tmp/test-templates
+          FAKE_HOME="/tmp/test-templates"
+          mkdir -p "$FAKE_HOME"
 
-          # Install claude-code-4.5
-          node create-rule.js --tool=claude-code-4.5 --targetFolder=/tmp/test-templates --yes
+          # Install claude-code-4.5 into a fake $HOME so we can grep the result.
+          node bootstrap.js --tool=claude-code-4.5 --homeDir="$FAKE_HOME"
 
           # Check that {{TOOL_DIR}} and {{HOME_TOOL_DIR}} are replaced
-          UNSUBSTITUTED=$(grep -r "{{TOOL_DIR}}\|{{HOME_TOOL_DIR}}" /tmp/test-templates/.claude/ 2>/dev/null | wc -l)
+          UNSUBSTITUTED=$(grep -r "{{TOOL_DIR}}\|{{HOME_TOOL_DIR}}" "$FAKE_HOME/.claude/" 2>/dev/null | wc -l)
 
           if [ "$UNSUBSTITUTED" -gt 0 ]; then
             echo "ERROR: Found $UNSUBSTITUTED unsubstituted template variables"
-            grep -r "{{TOOL_DIR}}\|{{HOME_TOOL_DIR}}" /tmp/test-templates/.claude/ | head -10
+            grep -r "{{TOOL_DIR}}\|{{HOME_TOOL_DIR}}" "$FAKE_HOME/.claude/" | head -10
             exit 1
           fi
 
