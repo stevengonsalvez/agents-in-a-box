@@ -1,8 +1,8 @@
-# CodeBurn-Style Burndown Implementation Plan
+# CodeBurn-Style Usage Analytics Implementation Plan
 
 ## Overview
 
-Add a CodeBurn-inspired `Burndown` sub-tab to AINB's existing `Usage Analytics` screen, plus report/export CLI support for the same data. The first release should show local AI coding usage by period, provider, project, model, activity, tool, shell command, and MCP server while keeping parsing read-only and off the UI thread.
+Add a CodeBurn-inspired usage analytics subsystem to AINB in Rust. This now covers the comprehensive CodeBurn CLI feature set except macOS menubar install/app support: reports, status, export, optimize findings, plan/budget tracking, currency, model aliases, model comparison, yield analysis, and a native TUI Burndown/analytics view.
 
 ## Current State Analysis
 
@@ -15,11 +15,11 @@ Current usage support is narrow:
 - `UsageProvider` lists Claude, Codex, Gemini, and Copilot, but `has_data()` only enables Claude in `ainb-tui/src/components/usage.rs:59`.
 - `parse_usage()` reads `~/.claude/projects/**/*.jsonl` and produces token totals only in `ainb-tui/src/models/usage.rs:85`.
 
-CodeBurn shows a richer usage dashboard: period tabs, provider switching, cost/calls/sessions/cache-hit overview, daily/project/model/activity/tool/shell/MCP panels, deterministic activity classification, and one-shot edit-cycle rates.
+CodeBurn shows a richer usage dashboard and CLI: period tabs, provider switching, cost/calls/sessions/cache-hit overview, daily/project/model/activity/tool/shell/MCP panels, deterministic activity classification, one-shot edit-cycle rates, export/report/status commands, subscription plan tracking, setup optimization findings, model comparison, and git-correlated yield analysis.
 
 ## Desired End State
 
-AINB's Stats screen includes a `Burndown` tab that looks and behaves like a native AINB Ratatui screen while borrowing CodeBurn's information architecture:
+AINB gets a new `ainb usage ...` CLI namespace and an expanded Stats screen that looks and behaves like native AINB while borrowing CodeBurn's information architecture:
 
 - Period selector: Today, 7 Days, 30 Days, Month, All.
 - Custom date range support: inclusive `from` / `to` dates in `YYYY-MM-DD` format.
@@ -27,7 +27,12 @@ AINB's Stats screen includes a `Burndown` tab that looks and behaves like a nati
 - Include/exclude project filters by case-insensitive substring.
 - Overview metrics: estimated cost, calls, sessions, cache hit, input/output/cache tokens.
 - Panels: Daily Activity, By Project, Top Sessions, By Activity, By Model, Core Tools, Shell Commands, MCP Servers.
-- CLI report/export commands for text, JSON, and CSV output using the same summary model as the TUI.
+- CLI report/status/today/month/export commands for text, JSON, and CSV output using the same summary model as the TUI.
+- Read-only optimize findings equivalent to CodeBurn's waste analyzer.
+- Plan/budget settings with presets, custom monthly USD, provider scope, reset day, and projection.
+- Currency and model-alias settings used by cost display and pricing lookup.
+- Model comparison metrics by cost, one-shot rate, retry rate, self-correction rate, cache hit, and working style.
+- Yield analysis that correlates usage spend with git commits and categorizes productive, reverted, and abandoned spend.
 - Existing Daily/Weekly/Projects tabs keep working.
 - Parsing remains local, read-only, asynchronous, and safe for large history folders.
 
@@ -36,19 +41,23 @@ AINB's Stats screen includes a `Burndown` tab that looks and behaves like a nati
 - `start_background_usage_load()` already keeps expensive JSONL parsing off the event thread in `ainb-tui/src/app/state.rs:3245`.
 - Usage keyboard handling already supports tab switching, provider switching, scroll, and refresh in `ainb-tui/src/app/events.rs:1540`.
 - CodeBurn's normalized model and deterministic classifier are portable: `/tmp/codeburn-research/src/parser.ts:359` and `/tmp/codeburn-research/src/classifier.ts:56`.
+- CodeBurn's `optimize` command is read-only: it scans Claude sessions/config, ranks findings, and prints copy-paste fixes without applying changes.
+- CodeBurn does not appear to call `claude -p /usage`; it stores plan settings and compares local API-equivalent spend against budget.
+- Existing top-level `ainb status` is session status, so CodeBurn-style status should live at `ainb usage status`.
 
 ## What We're NOT Doing
 
 - Not vendoring CodeBurn's TypeScript implementation into AINB.
-- Not adding a new top-level `Burndown` screen for MVP.
+- Not adding a new top-level `Burndown` screen for the first TUI integration; use existing Stats/Usage surface.
 - Not writing to Claude, Codex, Cursor, Copilot, or other agent session files.
-- Not implementing Cursor/OpenCode/Gemini/Copilot parsing in the first pass unless the provider abstraction makes it trivial later.
-- Not implementing CodeBurn optimize findings, subscription plan tracking, model comparison, model aliases, currency conversion, menubar, or yield analysis in MVP.
-- Not adding API calls to price usage. MVP can use built-in/fallback pricing and show token-only values when price is unknown.
+- Not implementing macOS menubar install/app behavior.
+- Not executing optimize fixes. Findings produce text/actions only.
+- Not depending on `claude -p /usage` for correct plan data. Manual plan config is required; optional detect/import can be added only if Claude CLI output is stable and parseable.
+- Not promising exact costs for unknown models. Unknown pricing must be visible.
 
 ## Implementation Approach
 
-Build the data model first, then render it inside the existing Usage screen. Keep the current `UsageData` fields or equivalent adapters so existing Daily/Weekly/Projects tables do not regress. Add richer summaries behind the same background load path and only then add the `Burndown` tab UI.
+Build the shared usage domain first, then layer CLI commands and TUI views over the same summaries. Keep the current `UsageData` fields or equivalent adapters so existing Daily/Weekly/Projects tables do not regress. Add richer summaries behind the same background load path, then add CLI parity, then add optimize/plan/compare/yield.
 
 ## Phase 1: Domain Model And Provider Adapters
 <!-- wave: 1 | depends_on: [] | files: [ainb-tui/src/models/usage.rs, ainb-tui/src/models/mod.rs] -->
@@ -122,7 +131,7 @@ pub struct UsageQuery {
 }
 ```
 
-Add dashboard summary structs for daily, project, session, model, activity, tool, shell, and MCP panels. Keep or derive current `daily`, `weekly`, `projects`, and `grand_total` so old tabs remain backed by the new summary.
+Add dashboard summary structs for overview, daily, project, session, model, activity, tool, shell, MCP, plan, optimize, compare, and yield. Keep or derive current `daily`, `weekly`, `projects`, and `grand_total` so old tabs remain backed by the new summary.
 
 #### 2. Provider Parsing
 **File**: `ainb-tui/src/models/usage.rs`
@@ -335,7 +344,7 @@ Update background usage loading to pass selected period, custom range, provider 
 
 ### Overview
 
-Add non-interactive usage report/export commands powered by the same parser and summary types as the TUI.
+Add non-interactive usage report/status/today/month/export commands powered by the same parser and summary types as the TUI.
 
 ### Changes Required
 
@@ -343,11 +352,13 @@ Add non-interactive usage report/export commands powered by the same parser and 
 **File**: `ainb-tui/src/cli/mod.rs`
 **Changes**:
 
-Add usage commands:
+Add one namespaced command:
 
 ```rust
-Usage(UsageArgs),
-Export(ExportArgs),
+Usage {
+    #[command(subcommand)]
+    command: usage::UsageCommands,
+}
 ```
 
 Recommended CLI:
@@ -357,11 +368,14 @@ ainb usage report --period week
 ainb usage report --from 2026-04-01 --to 2026-04-10
 ainb usage report --provider codex --include agents-in-a-box
 ainb usage report --exclude scratch --format json
-ainb usage export --period 30days --format csv --output usage.csv
+ainb usage status --format json
+ainb usage today --format json
+ainb usage month --format json
+ainb usage export --format csv --output ./usage-export
 ainb usage export --from 2026-04-01 --to 2026-04-10 --format json
 ```
 
-Support repeatable `--include` and `--exclude` flags. `--from` and `--to` must accept `YYYY-MM-DD`; either flag alone is valid, with missing bound defaulting to earliest data or today.
+Support repeatable `--include`/`--project` and `--exclude` flags. `--from` and `--to` must accept `YYYY-MM-DD`; either flag alone is valid, with missing bound defaulting to earliest data or today.
 
 #### 2. CLI Implementation
 **File**: `ainb-tui/src/cli/usage.rs`
@@ -370,15 +384,18 @@ Support repeatable `--include` and `--exclude` flags. `--from` and `--to` must a
 Implement:
 
 - Text report: same high-level sections as Burndown, compact for terminal output.
+- Status report: today/month cost and calls, with optional plan.
 - JSON report: complete structured summary for automation.
-- CSV export: stable rows for daily, project, model, activity, tool, shell, and MCP sections.
+- CSV export: CodeBurn-style folder export with README, summary, daily, activity, models, projects, sessions, tools, and shell command CSVs.
+- JSON export: schema, generated timestamp, currency, summary, periods, projects, sessions, tools, and shell commands.
 - `--output` support. Without `--output`, write to stdout.
+- CSV formula-injection protection for cells starting with tab, carriage return, `=`, `+`, `-`, or `@`.
 
 #### 3. Main Routing
 **File**: `ainb-tui/src/main.rs`
 **Changes**:
 
-Route `Commands::Usage` and `Commands::Export` to the new implementation without entering TUI mode.
+Route `Commands::Usage` to the new implementation without entering TUI mode.
 
 ### Success Criteria
 
@@ -386,6 +403,8 @@ Route `Commands::Usage` and `Commands::Export` to the new implementation without
 - [ ] CLI argument tests cover period, custom dates, provider, include/exclude, format, and output path.
 - [ ] JSON output test validates stable keys for overview, daily, projects, models, activities, tools, shell commands, and MCP servers.
 - [ ] CSV output test validates headers and row sections.
+- [ ] CSV output test validates formula-injection escaping.
+- [ ] JSON export test validates schema and core keys.
 - [ ] Invalid date format and inverted range return clear errors.
 
 #### Manual Verification
@@ -393,8 +412,229 @@ Route `Commands::Usage` and `Commands::Export` to the new implementation without
 - [ ] `ainb usage report --from 2026-04-01 --to 2026-04-10 --format json | jq '.overview'` works.
 - [ ] `ainb usage export --format csv --output /tmp/ainb-usage.csv` creates a usable CSV.
 
-## Phase 6: Quality Gates And Documentation
-<!-- wave: 6 | depends_on: [Phase 4, Phase 5] | files: [ainb-tui/tests/test_ui_display.rs, ainb-tui/tests/test_events.rs, ainb-tui/tests/test_app_state.rs, ainb-tui/docs/CLI.md, ainb-tui/README.md] -->
+## Phase 6: Plan, Currency, And Model Alias CLI
+<!-- wave: 6 | depends_on: [Phase 1, Phase 5] | files: [ainb-tui/src/config/mod.rs, ainb-tui/src/cli/usage.rs, ainb-tui/src/models/usage.rs] -->
+
+### Overview
+
+Port CodeBurn's persisted settings for budget, currency display, and model aliasing into AINB config.
+
+### Changes Required
+
+#### 1. Config
+**File**: `ainb-tui/src/config/mod.rs`
+**Changes**:
+
+Add `UsageConfig` under `AppConfig`:
+
+```rust
+pub struct UsageConfig {
+    pub plan: Option<UsagePlan>,
+    pub currency: CurrencyConfig,
+    pub model_aliases: HashMap<String, String>,
+}
+```
+
+Plan fields:
+
+- `id`: `claude-pro`, `claude-max`, `claude-max-5x`, `cursor-pro`, `custom`, `none`.
+- `monthly_usd`
+- `provider`: `all`, `claude`, `codex`, `cursor`
+- `reset_day`: 1-28
+- `set_at`
+
+#### 2. CLI
+**File**: `ainb-tui/src/cli/usage.rs`
+**Changes**:
+
+Implement:
+
+```bash
+ainb usage plan show --format text|json
+ainb usage plan set claude-pro --provider claude --reset-day 12
+ainb usage plan set custom --monthly-usd 75 --provider all
+ainb usage plan reset
+ainb usage plan detect
+ainb usage currency GBP
+ainb usage currency --reset
+ainb usage currency EUR --symbol EUR
+ainb usage model-alias --list
+ainb usage model-alias cursor-auto claude-sonnet-4-5
+ainb usage model-alias --remove cursor-auto
+```
+
+`plan detect` may attempt `claude -p /usage` only if available and parseable. Failure must be non-fatal and instruct manual `plan set`.
+
+#### 3. Projection
+**File**: `ainb-tui/src/models/usage.rs`
+**Changes**:
+
+Implement CodeBurn plan math:
+
+- Current billing period from reset day.
+- Spend is parsed API-equivalent cost in the plan period.
+- Percent = spend / monthly budget.
+- Status: `under`, `near` at >=80%, `over` at >100%.
+- Projection = spent + trailing 7-day median daily spend * remaining days.
+
+### Success Criteria
+
+#### Automated Verification
+- [ ] Config serialization/deserialization preserves plan, currency, and aliases.
+- [ ] Plan reset-day tests cover beginning, middle, and end of month.
+- [ ] Plan projection tests cover under, near, and over status.
+- [ ] CLI tests cover plan show/set/reset/custom/detect failure path.
+- [ ] Currency validation rejects invalid codes and caches/falls back safely.
+- [ ] Alias tests verify user aliases override built-ins.
+
+#### Manual Verification
+- [ ] `ainb usage plan set claude-pro --reset-day 12` persists.
+- [ ] `ainb usage plan show --format json` includes usage and projection.
+- [ ] `ainb usage currency GBP` changes displayed report costs.
+
+## Phase 7: Optimize Findings CLI And TUI Panel
+<!-- wave: 7 | depends_on: [Phase 1, Phase 2, Phase 5] | files: [ainb-tui/src/models/usage.rs, ainb-tui/src/cli/usage.rs, ainb-tui/src/components/usage.rs] -->
+
+### Overview
+
+Port CodeBurn's read-only waste analyzer into Rust.
+
+### Changes Required
+
+#### 1. Findings Model
+**File**: `ainb-tui/src/models/usage.rs`
+**Changes**:
+
+Add:
+
+- `WasteFinding`
+- `WasteAction`
+- `Impact`
+- `HealthGrade`
+- `OptimizeResult`
+
+#### 2. Detectors
+**File**: `ainb-tui/src/models/usage.rs`
+**Changes**:
+
+Implement detectors:
+
+- Junk reads.
+- Duplicate reads.
+- Unused MCP servers.
+- Bloated `CLAUDE.md` with `@` import expansion.
+- Low read/edit ratio.
+- Cache bloat.
+- Ghost agents.
+- Ghost skills.
+- Ghost commands.
+- Bash output bloat.
+
+Port scoring:
+
+- Health score starts at 100.
+- Penalties: high 15, medium 7, low 3.
+- Minimum score 20.
+- Grades: A >=90, B >=75, C >=55, D >=30, F below 30.
+- Urgency sort weights impact and token savings.
+- Recent 48h trend can mark findings improving or suppress resolved issues.
+
+#### 3. CLI / TUI
+**Files**: `ainb-tui/src/cli/usage.rs`, `ainb-tui/src/components/usage.rs`
+**Changes**:
+
+Add:
+
+```bash
+ainb usage optimize --period 30days --provider claude
+ainb usage optimize --period 30days --format json
+```
+
+TUI can render an Optimize tab/panel with health, total potential savings, and top findings. Actions must be text only.
+
+### Success Criteria
+
+#### Automated Verification
+- [ ] Detector fixture tests cover each finding type.
+- [ ] Health scoring and urgency sort match CodeBurn behavior.
+- [ ] Trend tests cover improving and resolved suppression.
+- [ ] CLI JSON output includes health, findings, token savings, and actions.
+
+#### Manual Verification
+- [ ] `ainb usage optimize --period 30days` prints actionable findings without modifying files.
+- [ ] Suggested commands are clearly labeled as suggestions.
+
+## Phase 8: Compare And Yield
+<!-- wave: 8 | depends_on: [Phase 1, Phase 2, Phase 5] | files: [ainb-tui/src/models/usage.rs, ainb-tui/src/cli/usage.rs, ainb-tui/src/components/usage.rs] -->
+
+### Overview
+
+Port CodeBurn's model comparison and git yield logic.
+
+### Changes Required
+
+#### 1. Compare
+**File**: `ainb-tui/src/models/usage.rs`
+**Changes**:
+
+Aggregate by primary model per turn:
+
+- Calls, cost, token totals.
+- Edit turns, one-shot turns, retries.
+- Self-correction count from assistant text.
+- Cost/call, cost/edit, output tokens/call, cache hit.
+- Category head-to-head.
+- Working style: delegation rate, planning rate, average tools/turn, fast-mode usage.
+
+**File**: `ainb-tui/src/cli/usage.rs`
+**Changes**:
+
+Add:
+
+```bash
+ainb usage compare --period all
+ainb usage compare --period all --provider claude --format json
+```
+
+For TTY, show interactive selector if practical; for non-TTY, JSON/text summary is more useful than CodeBurn's interactive-only guard.
+
+#### 2. Yield
+**File**: `ainb-tui/src/models/usage.rs`
+**Changes**:
+
+Implement git correlation:
+
+- Detect repo from cwd/project path.
+- Resolve main branch from `origin/HEAD`, `main`, then `master`.
+- Read commits from all branches in selected period.
+- Mark revert commits.
+- Match session window from first timestamp to last timestamp + 1 hour.
+- Categorize spend as productive, reverted, abandoned.
+
+**File**: `ainb-tui/src/cli/usage.rs`
+**Changes**:
+
+Add:
+
+```bash
+ainb usage yield --period week
+ainb usage yield --period week --format json
+```
+
+### Success Criteria
+
+#### Automated Verification
+- [ ] Compare aggregation tests cover winner logic and low-data handling.
+- [ ] Self-correction regex tests cover correction/apology phrases.
+- [ ] Yield tests use temporary git repo fixtures for productive, reverted, abandoned sessions.
+- [ ] CLI output tests cover text and JSON.
+
+#### Manual Verification
+- [ ] `ainb usage compare --period all` gives model-level tradeoffs.
+- [ ] `ainb usage yield --period week` categorizes spend in a real repo.
+
+## Phase 9: Quality Gates And Documentation
+<!-- wave: 9 | depends_on: [Phase 4, Phase 5, Phase 6, Phase 7, Phase 8] | files: [ainb-tui/tests/test_ui_display.rs, ainb-tui/tests/test_events.rs, ainb-tui/tests/test_app_state.rs, ainb-tui/docs/CLI.md, ainb-tui/README.md] -->
 
 ### Overview
 
@@ -412,7 +652,7 @@ Add tests for:
 - Usage tab/state navigation.
 - Analytics event routing.
 - Parser fixture behavior.
-- CLI report/export behavior.
+- CLI report/status/export/plan/optimize/compare/yield behavior.
 
 #### 2. Docs
 **Files**: `ainb-tui/docs/CLI.md`, `ainb-tui/README.md`
@@ -426,6 +666,9 @@ Document:
 - Periods and custom `--from` / `--to` ranges.
 - Include/exclude project filters.
 - Text, JSON, and CSV export.
+- Plan, currency, and model alias settings.
+- Optimize findings.
+- Model comparison and yield analysis.
 - Read-only local parsing.
 - Cost estimate caveat.
 
@@ -468,6 +711,10 @@ Document:
 9. Press `r` and confirm reload notification/loading state.
 10. Run `ainb usage report --from 2026-04-01 --to 2026-04-10 --format json`.
 11. Run `ainb usage export --format csv --output /tmp/ainb-usage.csv`.
+12. Run `ainb usage plan set claude-pro --reset-day 12`.
+13. Run `ainb usage optimize --period 30days`.
+14. Run `ainb usage compare --period all --format json`.
+15. Run `ainb usage yield --period week`.
 
 ## Performance Considerations
 
@@ -483,9 +730,15 @@ No data migration. The feature is read-only and derives summaries from local ses
 ## References
 
 - Research: `research/2026-04-28_22-39-40_codeburn-burndown-ainb-tui.md`
+- Comprehensive CLI parity research: `research/2026-04-28_23-31-36_codeburn-cli-parity.md`
 - CodeBurn dashboard composition: `/tmp/codeburn-research/src/dashboard.tsx:602`
 - CodeBurn parser aggregation: `/tmp/codeburn-research/src/parser.ts:167`
 - CodeBurn classifier: `/tmp/codeburn-research/src/classifier.ts:56`
+- CodeBurn optimize: `/tmp/codeburn-research/src/optimize.ts:373`
+- CodeBurn plan usage: `/tmp/codeburn-research/src/plan-usage.ts:107`
+- CodeBurn export: `/tmp/codeburn-research/src/export.ts:280`
+- CodeBurn compare: `/tmp/codeburn-research/src/compare-stats.ts:26`
+- CodeBurn yield: `/tmp/codeburn-research/src/yield.ts:116`
 - AINB Analytics view: `ainb-tui/src/app/state.rs:397`
 - AINB Usage UI state: `ainb-tui/src/components/usage.rs:121`
 - AINB usage parser: `ainb-tui/src/models/usage.rs:85`
