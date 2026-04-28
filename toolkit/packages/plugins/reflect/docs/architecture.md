@@ -387,65 +387,121 @@ sequenceDiagram
     Note over IDE: injected into session context before user's first message
 ```
 
-### 5.4 PreCompact Reflection Flow
+### 5.4 PreCompact Capture (queue, don't process)
 
 ```mermaid
 sequenceDiagram
     participant CC as Claude Code (compaction trigger)
     participant PC as precompact_reflect.py
-    participant ST as ~/.reflect/reflect-state.yaml
-    participant OG as output_generator.py
+    participant Q as ~/.reflect/pending_reflections.jsonl
     participant LOG as ~/.claude/logs/reflect_precompact.log
 
     CC->>PC: PreCompact hook fires (stdin: {trigger, session_id, transcript_path})
-    PC->>LOG: log_precompact_event(mode="remind"|"auto")
-    PC->>ST: load_state() → auto_reflect: true/false
-    alt --remind mode (default)
-        PC-->>CC: { additionalContext: "Consider running /reflect..." }
-    else --auto mode AND auto_reflect=true
-        PC->>OG: create_episode_note(signals=[], learnings=[])
-        OG-->>PC: episode_path
-        PC-->>CC: { additionalContext: "Episode placeholder created at <path>..." }
-    else --auto mode AND auto_reflect=false
-        PC-->>CC: reminder only (same as --remind)
-    end
+    PC->>LOG: log event (mode, session_id, ts)
+    PC->>Q: append-only enqueue {ts, session_id, trigger, cwd, transcript}
+    PC-->>CC: { additionalContext: reminder } (does not block compaction)
 ```
 
-### 5.5 Dashboard Sync Flow
+**Why a queue, not synchronous reflection?** Hooks are shell commands —
+they cannot invoke an LLM. The agent that captured the conversation is
+already exiting (its context is being compacted away). The only honest
+move is to **queue and hand off** to a future agent that *does* have an
+LLM. That handoff is the auto-drain (5.5).
+
+### 5.5 Closed-Loop Auto-Drain (SessionStart → background `claude -p`)
+
+The drain is what actually closes the capture loop. It fires whenever
+**any** new Claude Code session starts on the host, runs in the
+background (detached, non-blocking), and walks the queue with headless
+`claude -p`. Same script is wired into the Codex and Copilot adapters
+once they grow session-init hook parity (see `TODO(closed-loop)` in
+`adapters/{codex,copilot}/{tool}_adapter.py`).
 
 ```mermaid
 sequenceDiagram
-    participant CLI as reflect metrics dashboard sync
-    participant AGG as metrics_stats.aggregate()
-    participant JSONL as ~/.learnings/metrics.jsonl
-    participant CFG as ~/.learnings/config.toml
-    participant DB as dashboard.py
-    participant EP as <endpoint>/v1/ingest
+    participant CC as New Claude session
+    participant H as SessionStart hook (detached)
+    participant DRN as reflect-drain-bg.sh
+    participant LCK as ~/.reflect/drain.lock
+    participant Q as ~/.reflect/pending_reflections.jsonl
+    participant CP as claude -p "/reflect $T" --max-turns 25
+    participant DOC as ~/.learnings/documents/<slug>.md
+    participant SC as <slug>.entities.yaml
+    participant IDX as reflect reindex --incremental
+    participant GR as nano_graphrag_cache + qmd
 
-    CLI->>JSONL: read all records (linear scan)
-    JSONL-->>AGG: records[]
-    AGG->>AGG: bucket all-time + last-7d windows
-    AGG-->>CLI: StatsReport {all_time, last_7d}
-    CLI->>CFG: load [dashboard] section
-    alt not configured
-        CFG-->>CLI: None → exit 0, "dashboard not configured"
-    else configured (endpoint + token present)
-        CLI->>DB: sync(report.to_dict())
-        DB->>DB: build_payload(stats, client_id=hostname)
-        loop up to 2 attempts
-            DB->>EP: POST /v1/ingest (Bearer token, JSON payload)
-            alt 2xx
-                EP-->>DB: 200 OK
-                DB-->>CLI: exit 0, "dashboard sync ok"
-            else 5xx or transport error
-                Note over DB: retry once; re-raise on second failure
-            else 4xx
-                EP-->>DB: 4xx (config bug, no retry)
-                DB-->>CLI: exit 1, "dashboard POST returned HTTP <N>"
+    CC->>H: SessionStart fires
+    H->>DRN: ( nohup ./drain.sh & ) — detach, return in <100ms
+    DRN->>LCK: PID-based lock (skip if held; reclaim if stale)
+    DRN->>Q: read up to REFLECT_DRAIN_MAX entries (default 3)
+    loop per entry (cap REFLECT_DRAIN_DAILY_MAX/day, default 20)
+        alt transcript missing on disk
+            DRN-->>Q: archive as "stale", drop from queue
+        else transcript present
+            DRN->>CP: subscription auth, --permission-mode bypassPermissions
+            alt exit 0 (success)
+                CP->>DOC: write learning markdown
+                CP->>SC: write entity sidecar YAML
+                CP-->>DRN: result envelope (cost, turns)
+                DRN->>Q: archive entry to .processed-YYYYMMDD
+            else exit non-zero AND envelope says "max_turns"
+                Note over DRN: partial work; retry++; poison after 3
+                DRN-->>Q: keep entry, increment retry-count.jsonl
+            else hard error
+                DRN-->>Q: log + leave in queue
             end
         end
     end
+    DRN->>IDX: reflect reindex --incremental
+    IDX->>GR: update graphml + vdb_entities + kv_store_full_docs
+    DRN-->>LCK: release on EXIT/INT/TERM trap
 ```
+
+**Properties**:
+
+- **Non-blocking**: hook returns in milliseconds; drain runs detached
+  (`(nohup ... &) >/dev/null 2>&1`).
+- **Idempotent**: PID-based lock with stale-lock reclaim — concurrent
+  sessions don't multi-drain.
+- **Cost-capped**: per-run cap (`REFLECT_DRAIN_MAX`, default 3) and
+  per-day cap (`REFLECT_DRAIN_DAILY_MAX`, default 20). At ~$0.20–0.75
+  per `/reflect` call (Opus 4.7 + cached system prompt), worst case
+  ≈ $15/day.
+- **Poison-resistant**: each transcript tracked in
+  `~/.reflect/retry-count.jsonl`; entries with `retry > 3` get archived
+  with a marker so they don't infinite-loop.
+- **Stale-transcript safe**: if the transcript JSONL no longer exists on
+  disk (old worktrees, deleted files), drop it cleanly instead of
+  failing.
+- **Auto-reindex**: after the drain processes its batch, runs
+  `reflect reindex --incremental` so new docs land in
+  GraphRAG (`graphml` + `vdb_entities`) **and** QMD without manual
+  intervention. Recall in the *next* session sees the freshly-captured
+  learnings.
+- **Cross-tool universal**: the drain script reads the shared
+  `~/.reflect/pending_reflections.jsonl`. Any tool's session-init hook
+  can fire it. Today only the Claude adapter wires it; Codex and Copilot
+  adapters carry `TODO(closed-loop)` markers for parity.
+
+**Configuration surface**:
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `REFLECT_DRAIN_MAX` | `3` | Max transcripts processed per session-start fire |
+| `REFLECT_DRAIN_DAILY_MAX` | `20` | Hard daily cost cap (~$15/day at default rate) |
+| `REFLECT_DRAIN_MAX_TURNS` | `25` | Per-`/reflect` LLM turn limit |
+| `REFLECT_DRAIN_DRY_RUN` | unset | Set `1` to log intent without spending |
+
+**Files**:
+
+| Path | Purpose |
+|---|---|
+| `~/.claude/scripts/reflect-drain-bg.sh` | The drain script |
+| `~/.reflect/drain.lock` | PID lock (single drain at a time) |
+| `~/.reflect/drain.log` | Run log, rotates at 10 MB |
+| `~/.reflect/drain-cost.jsonl` | Daily-cap accounting |
+| `~/.reflect/retry-count.jsonl` | Per-transcript retry counters |
+| `~/.reflect/pending_reflections.jsonl.processed-YYYYMMDD` | Archive of successful drains |
 
 ---
 
