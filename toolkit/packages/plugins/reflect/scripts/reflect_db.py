@@ -10,6 +10,21 @@ Provides a single-file database (~/.reflect/reflect.db by default) that
 replaces the previous YAML-based state, metrics, and learnings files.
 
 All public write functions use ``with conn:`` for transactional safety.
+
+Threading contract
+------------------
+This module caches one ``sqlite3.Connection`` per resolved DB path in
+``_CONN_CACHE`` (process-global). ``sqlite3`` connections default to
+``check_same_thread=True``, which means: the *first* thread that calls
+``init_db`` for a given path owns that connection forever. Other threads
+hitting the cached connection raise ``ProgrammingError``.
+
+The reflect callers today are single-threaded (CLI invocations, hooks
+shelling out, headless ``claude -p`` drains). If a future caller needs
+multi-threaded access, either pass an explicit ``conn=`` argument and
+manage lifecycle locally, or switch the cache to ``threading.local``.
+
+Tests reset cached connections via the public ``close_all()`` helper.
 """
 
 from __future__ import annotations
@@ -37,6 +52,13 @@ from reflect_config import get_config, resolve_path
 
 
 def _quoted_csv(values: tuple[str, ...]) -> str:
+    """Concatenate *values* into a single-quoted CSV string for inline DDL.
+
+    WARNING: callers are responsible for ensuring *values* contains only
+    trusted constants (enum members defined in this codebase). Output is
+    interpolated directly into ``CREATE TABLE`` statements and does NOT
+    escape embedded quotes — never feed it user-controlled strings.
+    """
     return ", ".join(f"'{value}'" for value in values)
 
 
@@ -573,6 +595,21 @@ def get_conn(path: Optional[Path] = None) -> sqlite3.Connection:
     return init_db(path)
 
 
+def close_all() -> None:
+    """Close every cached connection and clear the cache.
+
+    Primarily for tests that need to swap DB files between cases. In
+    production code there's no need to call this — connection lifetime
+    matches process lifetime by design.
+    """
+    for conn in _CONN_CACHE.values():
+        try:
+            conn.close()
+        except Exception:
+            pass
+    _CONN_CACHE.clear()
+
+
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
@@ -632,7 +669,14 @@ def add_learning(
     superseded_by_learning_id: Optional[str] = None,
     conn: Optional[sqlite3.Connection] = None,
 ) -> str:
-    """Insert a new learning row. Returns the generated id."""
+    """Insert a new learning row. Returns the generated id.
+
+    ``source_quote`` is captured raw regardless of ``privacy_level`` —
+    redaction is applied at read-time by callers that surface the quote
+    to the user (see ``RESTRICTED`` / ``SECRET_REDACTED`` in
+    ``PrivacyLevel``). Storing raw lets future queries re-evaluate the
+    redaction policy without losing the original evidence.
+    """
     conn = conn or get_conn()
     lid = _new_id()
     provider = source_provider or source_tool
@@ -874,14 +918,42 @@ def increment_metric(
     *,
     conn: Optional[sqlite3.Connection] = None,
 ) -> int:
-    """Atomically increment an integer metric. Returns new value."""
+    """Atomically increment an integer metric. Returns new value.
+
+    Resolved in a single SQL upsert so concurrent writers on the same
+    connection cannot lose increments. Non-integer existing values
+    coerce to 0 before the addition (matches the prior behaviour of the
+    Python read-modify-write path).
+    """
     conn = conn or get_conn()
-    current = get_metric(key, 0, conn=conn)
-    if not isinstance(current, (int, float)):
-        current = 0
-    new_val = int(current) + delta
-    set_metric(key, new_val, conn=conn)
-    return new_val
+    now = _now_iso()
+    # The CASE picks an integer-coercible representation of the existing value:
+    # numeric typeof passes through, text that round-trips cleanly through
+    # CAST→printf is an integer-shaped string (e.g. '5', '-3'), and anything
+    # else (timestamps like '2026-04-28T...', JSON blobs) falls back to 0 to
+    # match the legacy Python read-modify-write semantics.
+    sql = """
+        INSERT INTO metrics (key, value, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET
+            value = CAST(
+                CAST(
+                    CASE
+                        WHEN typeof(value) IN ('integer', 'real') THEN value
+                        WHEN CAST(value AS TEXT) =
+                             printf('%d', CAST(value AS INTEGER)) THEN value
+                        ELSE '0'
+                    END AS INTEGER
+                ) + excluded.value AS TEXT
+            ),
+            updated_at = excluded.updated_at
+    """
+    with conn:
+        row = conn.execute(
+            sql + " RETURNING value",
+            (key, str(delta), now),
+        ).fetchone()
+    return int(row["value"])
 
 
 # ---------------------------------------------------------------------------

@@ -128,14 +128,9 @@ class ReflectSystemTest(unittest.TestCase):
 
     def setUp(self) -> None:
         # Each test gets a fresh DB to avoid cross-test pollution.
-        # reflect_db caches connections per-path at module level, so clear it
-        # before deleting the file otherwise stale handles see old rows.
-        for conn in reflect_db._CONN_CACHE.values():
-            try:
-                conn.close()
-            except Exception:
-                pass
-        reflect_db._CONN_CACHE.clear()
+        # reflect_db caches connections per-path at module level, so close
+        # them before deleting the file otherwise stale handles see old rows.
+        reflect_db.close_all()
         if self.db_path.exists():
             self.db_path.unlink()
         reflect_db.init_db(self.db_path)

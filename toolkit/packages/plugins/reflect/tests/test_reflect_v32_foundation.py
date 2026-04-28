@@ -46,12 +46,7 @@ class ReflectV32FoundationTest(unittest.TestCase):
         shutil.rmtree(cls.sandbox, ignore_errors=True)
 
     def setUp(self) -> None:
-        for conn in reflect_db._CONN_CACHE.values():
-            try:
-                conn.close()
-            except Exception:
-                pass
-        reflect_db._CONN_CACHE.clear()
+        reflect_db.close_all()
         if self.db_path.exists():
             self.db_path.unlink()
         reflect_db.init_db(self.db_path)
@@ -112,12 +107,9 @@ class ReflectV32FoundationTest(unittest.TestCase):
             self.assertIn(column, learning_columns)
 
     def test_03_legacy_schema_migrates_forward(self) -> None:
-        for conn in reflect_db._CONN_CACHE.values():
-            try:
-                conn.close()
-            except Exception:
-                pass
-        reflect_db._CONN_CACHE.clear()
+        # Drop the v3.2 DB this test class created so we can seed a v3.1 DB
+        # in its place and prove the migration path.
+        reflect_db.close_all()
         if self.db_path.exists():
             self.db_path.unlink()
 
@@ -350,6 +342,72 @@ class ReflectV32FoundationTest(unittest.TestCase):
         self.assertEqual(job["status"], "pending")
         self.assertEqual(artifact["artifact_type"], "entity_sidecar")
         self.assertEqual(artifact["status"], "created")
+
+    def test_09_init_db_is_idempotent_on_v32_db(self) -> None:
+        """Re-running init_db on an already-migrated v3.2 DB must be a no-op.
+
+        Regression test against migration loops that re-add columns or rebuild
+        tables when called twice in the same process.
+        """
+        conn = reflect_db.get_conn(self.db_path)
+        lid = reflect_db.add_learning(
+            title="Idempotent init",
+            confidence="HIGH",
+            conn=conn,
+        )
+        before_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(learnings)")
+        }
+        before_indexes = {
+            row["name"]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            )
+        }
+
+        # Drop the cached connection without deleting the DB file, then re-init.
+        reflect_db.close_all()
+        conn2 = reflect_db.init_db(self.db_path)
+
+        after_columns = {
+            row["name"] for row in conn2.execute("PRAGMA table_info(learnings)")
+        }
+        after_indexes = {
+            row["name"]
+            for row in conn2.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            )
+        }
+        self.assertEqual(before_columns, after_columns)
+        self.assertEqual(before_indexes, after_indexes)
+
+        # Row written before the second init_db is still there.
+        row = reflect_db.get_learning(lid, conn=conn2)
+        self.assertIsNotNone(row)
+        self.assertEqual(row["title"], "Idempotent init")
+
+    def test_10_increment_metric_is_atomic_and_handles_non_numeric(self) -> None:
+        """Single-SQL upsert: no read-modify-write race, non-numeric coerces to 0."""
+        conn = reflect_db.get_conn(self.db_path)
+
+        # Fresh key — first increment seeds value to delta.
+        result = reflect_db.increment_metric("recall_hits", 1, conn=conn)
+        self.assertEqual(result, 1)
+        self.assertEqual(reflect_db.get_metric("recall_hits", conn=conn), 1)
+
+        # Multiple increments accumulate without losing updates.
+        for _ in range(5):
+            reflect_db.increment_metric("recall_hits", 1, conn=conn)
+        self.assertEqual(reflect_db.get_metric("recall_hits", conn=conn), 6)
+
+        # Negative delta works.
+        reflect_db.increment_metric("recall_hits", -2, conn=conn)
+        self.assertEqual(reflect_db.get_metric("recall_hits", conn=conn), 4)
+
+        # Non-numeric existing value coerces to 0 before the addition.
+        reflect_db.set_metric("last_reflection", "2026-04-28T12:00:00Z", conn=conn)
+        result = reflect_db.increment_metric("last_reflection", 7, conn=conn)
+        self.assertEqual(result, 7)
 
 
 if __name__ == "__main__":
