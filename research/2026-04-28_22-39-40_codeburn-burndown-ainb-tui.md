@@ -12,12 +12,13 @@ Investigate `https://github.com/getagentseal/codeburn` and plan how to bake the 
 
 ## Executive Summary
 
-AINB already has a full-screen `Usage Analytics` view, so the lowest-risk path is to extend that screen with a new `Burndown` sub-tab rather than add a separate top-level view. CodeBurn's highest-value ideas are a provider-normalized usage model, deterministic activity classification, period/provider switching, and compact Ratatui panels for daily, project, model, activity, tool, shell, and MCP breakdowns.
+AINB already has a full-screen `Usage Analytics` view, so the lowest-risk path is to extend that screen with a new `Burndown` sub-tab rather than add a separate top-level view. CodeBurn's highest-value ideas are a provider-normalized usage model, deterministic activity classification, period/provider switching, custom date ranges, project include/exclude filters, export/report output, and compact Ratatui panels for daily, project, model, activity, tool, shell, and MCP breakdowns.
 
 ## Key Findings
 
 - CodeBurn is a local-session reader, not a wrapper or proxy. Its README says it reads data from disk and uses LiteLLM pricing, with no API keys or proxy flow required.
 - CodeBurn's dashboard is a multi-panel terminal dashboard: overview, daily activity, project, top sessions, activity, model, core tools, shell commands, and MCP servers.
+- CodeBurn also provides custom `--from` / `--to` ranges, project include/exclude filters, JSON report output, and CSV/JSON exports; these should be required scope, not follow-up.
 - AINB has `View::Analytics`, a `Stats` sidebar entry, `UsageViewState`, async usage parsing, and existing usage keyboard handling.
 - AINB's current usage parser only supports Claude Code token totals from `~/.claude/projects/**/*.jsonl`; Codex/Gemini/Copilot providers are listed in UI but have no data implementation.
 - Implementation should start by reshaping `UsageData` into a richer normalized summary while preserving the current daily/weekly/project table behavior.
@@ -45,6 +46,8 @@ Important README details:
 - Dashboard navigation uses arrows for periods, `1`-`5` for direct periods, `p` for provider, `o` for optimize, and `c` for model comparison.
 - JSON output includes overview, daily breakdown, project summaries, model counts, activities with one-shot rates, core tools, MCP servers, and shell commands.
 - Provider paths include `~/.claude/projects/` and `~/.codex/sessions/`.
+- Custom `--from` and `--to` dates use `YYYY-MM-DD`, local-time inclusive windows.
+- Project filters use repeatable include and exclude flags by case-insensitive substring.
 
 ### CodeBurn UI Layout
 
@@ -137,10 +140,11 @@ UI rendering tests already use `ratatui::backend::TestBackend` and buffer assert
 2. Introduce richer usage-domain types before UI work: normalized provider calls, classified turns, session summaries, project summaries, daily summaries, and dashboard totals.
 3. Keep provider adapters isolated. Start with Claude and Codex because AINB already exposes those providers in the UI and both have disk-backed session logs.
 4. Preserve the current async parse pathway and add lightweight cache/incremental scan later if parsing grows expensive.
-5. Implement the Burndown view as a compact CodeBurn-style panel dashboard first, then add optimize/plan/model-compare as later tabs or overlays.
-6. Add behavioral tests at model, state, event, and Ratatui render layers.
+5. Treat custom date ranges, include/exclude filters, JSON reports, and CSV/JSON export as required scope for first delivery.
+6. Implement the Burndown view as a compact CodeBurn-style panel dashboard first, then add optimize/plan/model-compare as later tabs or overlays.
+7. Add behavioral tests at model, CLI, state, event, and Ratatui render layers.
 
 ## Open Questions
 
 - No blocking questions. Assumption: `Burndown` should live inside existing `Usage Analytics` as a sub-tab and reuse shortcut `i`, with `Tab` cycling through Daily, Weekly, Projects, and Burndown.
-- Later product decision: whether to copy CodeBurn's subscription plan tracking and optimize findings into the first release or defer them after basic burndown parity.
+- Later product decision: whether to copy CodeBurn's subscription plan tracking, optimize findings, model comparison, currency conversion, model aliases, menubar, and yield analysis after first delivery.

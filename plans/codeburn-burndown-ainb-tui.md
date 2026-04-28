@@ -2,7 +2,7 @@
 
 ## Overview
 
-Add a CodeBurn-inspired `Burndown` sub-tab to AINB's existing `Usage Analytics` screen. The first release should show local AI coding usage by period, provider, project, model, activity, tool, shell command, and MCP server while keeping parsing read-only and off the UI thread.
+Add a CodeBurn-inspired `Burndown` sub-tab to AINB's existing `Usage Analytics` screen, plus report/export CLI support for the same data. The first release should show local AI coding usage by period, provider, project, model, activity, tool, shell command, and MCP server while keeping parsing read-only and off the UI thread.
 
 ## Current State Analysis
 
@@ -22,9 +22,12 @@ CodeBurn shows a richer usage dashboard: period tabs, provider switching, cost/c
 AINB's Stats screen includes a `Burndown` tab that looks and behaves like a native AINB Ratatui screen while borrowing CodeBurn's information architecture:
 
 - Period selector: Today, 7 Days, 30 Days, Month, All.
+- Custom date range support: inclusive `from` / `to` dates in `YYYY-MM-DD` format.
 - Provider selector: All, Claude, Codex for MVP; existing unsupported providers remain visibly unavailable.
+- Include/exclude project filters by case-insensitive substring.
 - Overview metrics: estimated cost, calls, sessions, cache hit, input/output/cache tokens.
 - Panels: Daily Activity, By Project, Top Sessions, By Activity, By Model, Core Tools, Shell Commands, MCP Servers.
+- CLI report/export commands for text, JSON, and CSV output using the same summary model as the TUI.
 - Existing Daily/Weekly/Projects tabs keep working.
 - Parsing remains local, read-only, asynchronous, and safe for large history folders.
 
@@ -40,7 +43,7 @@ AINB's Stats screen includes a `Burndown` tab that looks and behaves like a nati
 - Not adding a new top-level `Burndown` screen for MVP.
 - Not writing to Claude, Codex, Cursor, Copilot, or other agent session files.
 - Not implementing Cursor/OpenCode/Gemini/Copilot parsing in the first pass unless the provider abstraction makes it trivial later.
-- Not implementing CodeBurn optimize findings, subscription plan tracking, CSV/JSON export, or model comparison in MVP.
+- Not implementing CodeBurn optimize findings, subscription plan tracking, model comparison, model aliases, currency conversion, menubar, or yield analysis in MVP.
 - Not adding API calls to price usage. MVP can use built-in/fallback pricing and show token-only values when price is unknown.
 
 ## Implementation Approach
@@ -69,6 +72,7 @@ pub enum UsagePeriod {
     ThirtyDays,
     Month,
     All,
+    Custom { from: chrono::NaiveDate, to: chrono::NaiveDate },
 }
 
 pub enum UsageProviderFilter {
@@ -109,6 +113,13 @@ pub struct ProviderCall {
     pub bash_commands: Vec<String>,
     pub user_message: String,
 }
+
+pub struct UsageQuery {
+    pub period: UsagePeriod,
+    pub provider_filter: UsageProviderFilter,
+    pub include_projects: Vec<String>,
+    pub exclude_projects: Vec<String>,
+}
 ```
 
 Add dashboard summary structs for daily, project, session, model, activity, tool, shell, and MCP panels. Keep or derive current `daily`, `weekly`, `projects`, and `grand_total` so old tabs remain backed by the new summary.
@@ -123,7 +134,7 @@ Split the current Claude parser into:
 - `parse_claude_source()`
 - `discover_codex_sources()`
 - `parse_codex_source()`
-- `parse_usage_for(period, provider_filter)`
+- `parse_usage_for(query: UsageQuery)`
 
 For Codex, read `CODEX_HOME` or `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`, validate `session_meta`, extract token count events, normalize cached tokens, and map tools:
 
@@ -145,6 +156,8 @@ Add simple built-in pricing lookup for known Claude and GPT model names. Return 
 - [ ] Unit tests parse small Claude fixture and preserve daily/project totals.
 - [ ] Unit tests parse small Codex fixture and normalize cached input tokens.
 - [ ] Unit tests validate date filtering uses assistant-call timestamp.
+- [ ] Unit tests validate custom from/to ranges are inclusive and reject inverted ranges.
+- [ ] Unit tests validate include and exclude filters apply after provider parsing and before aggregation.
 - [ ] `cargo test usage --all-targets` passes from `ainb-tui`.
 
 #### Manual Verification
@@ -257,12 +270,12 @@ Render clear empty states for:
 - [ ] Text fits at 80x24 and 120x40.
 - [ ] Tab cycling reaches Burndown and returns to Daily.
 
-## Phase 4: Period And Provider Controls
+## Phase 4: Period, Range, Provider, And Filter Controls
 <!-- wave: 4 | depends_on: [Phase 3] | files: [ainb-tui/src/components/usage.rs, ainb-tui/src/app/events.rs, ainb-tui/src/app/state.rs] -->
 
 ### Overview
 
-Add CodeBurn-like period and provider interaction without disrupting existing Usage keys.
+Add CodeBurn-like period, custom range, provider, and project filter interaction without disrupting existing Usage keys.
 
 ### Changes Required
 
@@ -275,6 +288,8 @@ Add period and provider filter state:
 ```rust
 pub period: UsagePeriod,
 pub provider_filter: UsageProviderFilter,
+pub include_projects: Vec<String>,
+pub exclude_projects: Vec<String>,
 ```
 
 Keep existing `provider` behavior if needed for compatibility, or replace it with the richer filter if all call sites can move cleanly.
@@ -288,6 +303,10 @@ Add or reuse events for:
 - Left/right: period switch while Burndown is active.
 - `p`: provider filter cycle while Burndown is active.
 - `1`-`5`: direct period shortcuts.
+- `/`: open project include filter input.
+- `x`: open project exclude filter input.
+- `c`: clear include/exclude filters.
+- `d`: open custom date range input.
 - `r`: reload current period/provider.
 
 Preserve current left/right provider switching on Daily/Weekly/Projects if changing it would be too disruptive; otherwise make provider cycling consistently use `p`.
@@ -296,20 +315,86 @@ Preserve current left/right provider switching on Daily/Weekly/Projects if chang
 **File**: `ainb-tui/src/app/state.rs`
 **Changes**:
 
-Update background usage loading to pass selected period/provider filter into the parser. Cache results by `(period, provider_filter)` for the current process.
+Update background usage loading to pass selected period, custom range, provider filter, and project filters into the parser. Cache raw parsed provider calls by provider/range where possible, then apply include/exclude filters cheaply in memory.
 
 ### Success Criteria
 
 #### Automated Verification
-- [ ] Event tests cover `1`-`5`, `p`, tab cycling, and refresh in Analytics.
-- [ ] State tests verify reloads use selected period/provider and do not spawn duplicate loads.
+- [ ] Event tests cover `1`-`5`, custom range entry, `p`, include filter, exclude filter, tab cycling, filter clearing, and refresh in Analytics.
+- [ ] State tests verify reloads use selected period/provider/filter query and do not spawn duplicate loads.
+- [ ] Filter tests verify include/exclude can be combined and exclusion wins when both match.
 
 #### Manual Verification
 - [ ] Period changes update data and loading state visibly.
+- [ ] Custom from/to dates update the dashboard and reject invalid or inverted dates.
 - [ ] Provider cycling works for All, Claude, and Codex.
+- [ ] Include/exclude project filters visibly change project, daily, and overview totals.
 
-## Phase 5: Quality Gates And Documentation
-<!-- wave: 5 | depends_on: [Phase 4] | files: [ainb-tui/tests/test_ui_display.rs, ainb-tui/tests/test_events.rs, ainb-tui/tests/test_app_state.rs, ainb-tui/docs/CLI.md, ainb-tui/README.md] -->
+## Phase 5: Report And Export CLI
+<!-- wave: 5 | depends_on: [Phase 2] | files: [ainb-tui/src/cli/mod.rs, ainb-tui/src/cli/usage.rs, ainb-tui/src/main.rs, ainb-tui/src/models/usage.rs] -->
+
+### Overview
+
+Add non-interactive usage report/export commands powered by the same parser and summary types as the TUI.
+
+### Changes Required
+
+#### 1. CLI Command Shape
+**File**: `ainb-tui/src/cli/mod.rs`
+**Changes**:
+
+Add usage commands:
+
+```rust
+Usage(UsageArgs),
+Export(ExportArgs),
+```
+
+Recommended CLI:
+
+```bash
+ainb usage report --period week
+ainb usage report --from 2026-04-01 --to 2026-04-10
+ainb usage report --provider codex --include agents-in-a-box
+ainb usage report --exclude scratch --format json
+ainb usage export --period 30days --format csv --output usage.csv
+ainb usage export --from 2026-04-01 --to 2026-04-10 --format json
+```
+
+Support repeatable `--include` and `--exclude` flags. `--from` and `--to` must accept `YYYY-MM-DD`; either flag alone is valid, with missing bound defaulting to earliest data or today.
+
+#### 2. CLI Implementation
+**File**: `ainb-tui/src/cli/usage.rs`
+**Changes**:
+
+Implement:
+
+- Text report: same high-level sections as Burndown, compact for terminal output.
+- JSON report: complete structured summary for automation.
+- CSV export: stable rows for daily, project, model, activity, tool, shell, and MCP sections.
+- `--output` support. Without `--output`, write to stdout.
+
+#### 3. Main Routing
+**File**: `ainb-tui/src/main.rs`
+**Changes**:
+
+Route `Commands::Usage` and `Commands::Export` to the new implementation without entering TUI mode.
+
+### Success Criteria
+
+#### Automated Verification
+- [ ] CLI argument tests cover period, custom dates, provider, include/exclude, format, and output path.
+- [ ] JSON output test validates stable keys for overview, daily, projects, models, activities, tools, shell commands, and MCP servers.
+- [ ] CSV output test validates headers and row sections.
+- [ ] Invalid date format and inverted range return clear errors.
+
+#### Manual Verification
+- [ ] `ainb usage report --period week` prints useful text.
+- [ ] `ainb usage report --from 2026-04-01 --to 2026-04-10 --format json | jq '.overview'` works.
+- [ ] `ainb usage export --format csv --output /tmp/ainb-usage.csv` creates a usable CSV.
+
+## Phase 6: Quality Gates And Documentation
+<!-- wave: 6 | depends_on: [Phase 4, Phase 5] | files: [ainb-tui/tests/test_ui_display.rs, ainb-tui/tests/test_events.rs, ainb-tui/tests/test_app_state.rs, ainb-tui/docs/CLI.md, ainb-tui/README.md] -->
 
 ### Overview
 
@@ -327,6 +412,7 @@ Add tests for:
 - Usage tab/state navigation.
 - Analytics event routing.
 - Parser fixture behavior.
+- CLI report/export behavior.
 
 #### 2. Docs
 **Files**: `ainb-tui/docs/CLI.md`, `ainb-tui/README.md`
@@ -337,6 +423,9 @@ Document:
 - Stats screen shortcut.
 - Burndown tab.
 - Supported providers and session locations.
+- Periods and custom `--from` / `--to` ranges.
+- Include/exclude project filters.
+- Text, JSON, and CSV export.
 - Read-only local parsing.
 - Cost estimate caveat.
 
@@ -374,13 +463,17 @@ Document:
 4. Press `Tab` until Burndown is active.
 5. Press `1`, `2`, `3`, `4`, `5` and confirm period labels/data update.
 6. Press `p` and confirm provider filter cycles.
-7. Press `r` and confirm reload notification/loading state.
+7. Enter custom date range and confirm dashboard updates.
+8. Add include/exclude project filters and confirm totals change.
+9. Press `r` and confirm reload notification/loading state.
+10. Run `ainb usage report --from 2026-04-01 --to 2026-04-10 --format json`.
+11. Run `ainb usage export --format csv --output /tmp/ainb-usage.csv`.
 
 ## Performance Considerations
 
 - Keep all filesystem scans in `spawn_blocking`, matching existing usage load behavior.
 - Use file mtime to skip files older than selected date range where safe.
-- Cache parsed summaries by period/provider for the process lifetime.
+- Cache parsed raw calls by date range/provider where possible; apply include/exclude filters without reparsing.
 - Consider a daily cache only after MVP if local histories are too large.
 
 ## Migration Notes
