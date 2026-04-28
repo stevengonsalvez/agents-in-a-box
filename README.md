@@ -85,8 +85,11 @@ Most AI coding setups are a loose collection of dotfiles. This project treats th
 ## Quick Start
 
 ```bash
-# Install the TUI
-brew tap stevengonsalvez/ainb && brew install ainb
+# Install the TUI (macOS / Linux)
+brew tap stevengonsalvez/agents-in-a-box && brew install ainb
+
+# Or on Windows (Scoop)
+scoop bucket add ainb https://github.com/stevengonsalvez/agents-in-a-box && scoop install ainb
 
 # Install the toolkit for your AI tool
 cd toolkit && npm install && node create-rule.js --tool=claude-code-4.5
@@ -176,9 +179,20 @@ ainb completion zsh > ~/.zsh/completions/_ainb
 <summary><b>Homebrew (macOS / Linux)</b></summary>
 
 ```bash
-brew tap stevengonsalvez/ainb
+brew tap stevengonsalvez/agents-in-a-box
 brew install ainb
 ```
+</details>
+
+<details>
+<summary><b>Scoop (Windows native)</b></summary>
+
+```powershell
+scoop bucket add ainb https://github.com/stevengonsalvez/agents-in-a-box
+scoop install ainb
+```
+
+> WinGet support is planned — see [#46](https://github.com/stevengonsalvez/agents-in-a-box/issues/46).
 </details>
 
 <details>
@@ -211,7 +225,7 @@ sudo apt update && sudo apt install -y tmux
 ainb
 ```
 
-> ainb requires tmux for persistent sessions, which is Unix-only. WSL provides the best Windows experience.
+> Native Windows works via Scoop above. WSL is recommended if you want full tmux-backed session persistence (the native build skips tmux).
 </details>
 
 ### Keyboard Shortcuts
@@ -235,7 +249,7 @@ ainb
 | Linux x86_64 | ✅ | Pre-built binary |
 | Linux ARM64 | ✅ | Build from source |
 | Windows (WSL2) | ✅ | Install script |
-| Windows (Native) | ❌ | Use WSL |
+| Windows (Native) | ✅ | Scoop bucket (WinGet planned — [#46](https://github.com/stevengonsalvez/agents-in-a-box/issues/46)) |
 
 ### Requirements
 
