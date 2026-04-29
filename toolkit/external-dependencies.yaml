@@ -109,13 +109,15 @@ bundled-skills:
       - Works with Claude Code and Codex
 
   - name: reflect
-    path: packages/skills/reflect
-    purpose: "Self-improvement through conversation analysis"
+    path: packages/plugins/reflect/skills/reflect
+    purpose: "Self-improvement through conversation analysis (v3 plugin, colon-namespaced sub-skills)"
     features:
-      - Extract learnings from corrections
-      - Detect success patterns
-      - Propose agent file updates
-      - Create new skills from learnings
+      - Extract learnings from corrections (reflect)
+      - Consolidate worktree memories (reflect:consolidate)
+      - Ingest into GraphRAG/QMD index (reflect:ingest)
+      - Recall prior learnings at session start (recall)
+      - Deployment via claude_adapter.py (pointer install + SessionStart hook)
+    note: "Installed by toolkit/packages/plugins/reflect/adapters/claude/claude_adapter.py install --force"
 
   - name: remotion-best-practices
     path: packages/skills/remotion-best-practices
