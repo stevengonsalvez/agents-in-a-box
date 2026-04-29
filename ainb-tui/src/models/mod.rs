@@ -7,7 +7,15 @@ pub mod usage;
 pub mod workspace;
 
 pub use other_tmux::OtherTmuxSession;
-pub use session::{ClaudeModel, GitChanges, Session, SessionAgentType, SessionMode, SessionStatus, ShellSession, ShellSessionStatus, SshTarget};
+pub use session::{
+    ClaudeModel, GitChanges, Session, SessionAgentType, SessionMode, SessionStatus, ShellSession,
+    ShellSessionStatus, SshTarget,
+};
 pub use skills::{AgentDef, Skill, SkillsData};
-pub use usage::{UsageData, format_tokens_short};
+pub use usage::{
+    ActivityCategory, ActivityUsage, CompareResult, HealthGrade, ModelComparison, ModelUsage,
+    NamedUsage, OptimizeResult, PlanProjection, PlanStatus, ProjectUsage, ProviderCall,
+    SessionUsage, TokenBucket, UsageData, UsagePeriod, UsageProviderFilter, UsageQuery,
+    WasteFinding, YieldResult, format_tokens_short, optimize_usage,
+};
 pub use workspace::Workspace;

@@ -182,9 +182,7 @@ where
         ),
     ];
 
-    let all_required_present = checks
-        .iter()
-        .all(|c| !c.required || c.status == PrereqStatus::Ok);
+    let all_required_present = checks.iter().all(|c| !c.required || c.status == PrereqStatus::Ok);
 
     PrereqReport {
         checks,
@@ -230,7 +228,7 @@ fn cmd_check(format: OutputFormat) -> Result<()> {
                 .context("Failed to serialize prerequisite report")?;
             println!("{json}");
         }
-        OutputFormat::Text => print_report_text(&report),
+        OutputFormat::Text | OutputFormat::Csv => print_report_text(&report),
     }
 
     if !report.all_required_present {
@@ -281,9 +279,7 @@ fn cmd_setup(format: OutputFormat) -> Result<()> {
     // Mark onboarding as complete and persist
     let mut onboarding = OnboardingConfig::load().context("Failed to load onboarding config")?;
     onboarding.mark_completed();
-    onboarding
-        .save()
-        .context("Failed to save onboarding config")?;
+    onboarding.save().context("Failed to save onboarding config")?;
 
     match format {
         OutputFormat::Json => {
@@ -299,7 +295,7 @@ fn cmd_setup(format: OutputFormat) -> Result<()> {
                 serde_json::to_string_pretty(&output).context("Failed to serialize output")?
             );
         }
-        OutputFormat::Text => {
+        OutputFormat::Text | OutputFormat::Csv => {
             println!("Setup complete.");
             println!("  Base dir:    {}", base_dir.display());
             println!("  Config file: {}", config_path.display());
@@ -339,7 +335,7 @@ fn cmd_status(format: OutputFormat) -> Result<()> {
                 .context("Failed to serialize status report")?;
             println!("{json}");
         }
-        OutputFormat::Text => {
+        OutputFormat::Text | OutputFormat::Csv => {
             println!("Onboarding status:");
             println!("{}", "\u{2501}".repeat(60));
             let marker = if report.completed {
@@ -390,7 +386,7 @@ fn cmd_reset(force: bool, format: OutputFormat) -> Result<()> {
                 });
                 println!("{}", serde_json::to_string_pretty(&out)?);
             }
-            OutputFormat::Text => {
+            OutputFormat::Text | OutputFormat::Csv => {
                 println!("Nothing to reset: {} does not exist", base_dir.display());
             }
         }
@@ -423,7 +419,7 @@ fn cmd_reset(force: bool, format: OutputFormat) -> Result<()> {
             });
             println!("{}", serde_json::to_string_pretty(&out)?);
         }
-        OutputFormat::Text => {
+        OutputFormat::Text | OutputFormat::Csv => {
             println!("Factory reset complete.");
             println!("  Removed: {}", base_dir.display());
         }

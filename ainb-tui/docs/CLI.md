@@ -32,6 +32,7 @@ Run `ainb` with no arguments to launch the TUI, or use any subcommand below for 
   - [`init`](#ainb-init) — first-time setup & factory reset
   - [`presets`](#ainb-presets) — session presets
   - [`completion`](#ainb-completion) — shell completions
+  - [`usage`](#ainb-usage) — local usage analytics and export
 - [Scripting recipes](#scripting-recipes)
 
 ---
@@ -42,7 +43,7 @@ Every command accepts:
 
 | Flag | Values | Default | Purpose |
 |------|--------|---------|---------|
-| `--format` | `text`, `json` | `text` | Switch any command's output to machine-readable JSON. Pair with `jq` for scripting. |
+| `--format` | `text`, `json`, `csv` | `text` | Switch output format. `csv` is mainly for `ainb usage export`. |
 | `-h`, `--help` | — | — | Print help for the command or subcommand. |
 | `-V`, `--version` | — | — | Print `ainb` version (top level only). |
 
@@ -187,6 +188,51 @@ ainb list [OPTIONS]
 ```bash
 ainb list --format json | jq '.[] | {name: .workspace_name, tool: .agent_type, branch}'
 ```
+
+### `ainb usage`
+
+Read-only local usage analytics for Claude Code and Codex session histories. AINB reads `~/.claude/projects/**/*.jsonl` plus `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` or `$CODEX_HOME/sessions/...`. It does not modify session files. Cost values are estimates from built-in model pricing; unknown models still report tokens and calls.
+
+```bash
+ainb usage report --period week
+ainb usage report --from 2026-04-01 --to 2026-04-10 --format json
+ainb usage report --provider codex --include agents-in-a-box
+ainb usage report --exclude scratch --format json
+ainb usage status --format json
+ainb usage today --format json
+ainb usage month --format json
+ainb usage export --format csv --output /tmp/ainb-usage.csv
+ainb usage export --format csv --output /tmp/ainb-usage-export
+ainb usage optimize --period 30days
+ainb usage compare --period all --format json
+ainb usage yield --period week
+```
+
+Usage filters:
+
+| Flag | Values | Purpose |
+|------|--------|---------|
+| `--period` | `today`, `week`, `30days`, `month`, `all` | Select time window. |
+| `--from`, `--to` | `YYYY-MM-DD` | Custom inclusive range. One bound may be omitted. |
+| `--provider` | `all`, `claude`, `codex` | Provider filter. |
+| `--include`, `--project` | repeatable text | Include projects whose name/path contains text. |
+| `--exclude` | repeatable text | Exclude projects whose name/path contains text. Exclusion wins. |
+
+Usage settings:
+
+```bash
+ainb usage plan show --format json
+ainb usage plan set claude-pro --provider claude --reset-day 12
+ainb usage plan set custom --monthly-usd 75 --provider all
+ainb usage plan reset
+ainb usage currency GBP --symbol GBP
+ainb usage currency --reset
+ainb usage model-alias --list
+ainb usage model-alias cursor-auto claude-sonnet-4-5
+ainb usage model-alias --remove cursor-auto
+```
+
+TUI: press `i` to open Stats, `Tab` to reach `Burndown` and `Optimize`, `1`-`5` for periods, `p` for All/Claude/Codex, `/` include filter, `x` exclude filter, `d` custom range, `c` clear filters, and `r` reload.
 
 ---
 

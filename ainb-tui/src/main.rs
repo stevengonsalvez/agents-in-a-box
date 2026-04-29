@@ -37,8 +37,8 @@ mod cli;
 mod components;
 mod config;
 mod credentials;
-mod editors;
 mod docker;
+mod editors;
 mod git;
 mod interactive;
 mod models;
@@ -93,15 +93,26 @@ async fn main() -> Result<()> {
         Some(cli::Commands::List(list_args)) => cli::list::execute(list_args, args.format).await,
         Some(cli::Commands::Logs(logs_args)) => cli::logs::execute(logs_args).await,
         Some(cli::Commands::Attach(attach_args)) => cli::attach::execute(attach_args).await,
-        Some(cli::Commands::Status(status_args)) => cli::status::execute(status_args, args.format).await,
+        Some(cli::Commands::Status(status_args)) => {
+            cli::status::execute(status_args, args.format).await
+        }
         Some(cli::Commands::Kill(kill_args)) => cli::status::kill(kill_args).await,
         Some(cli::Commands::Auth) => run_auth_setup().await,
-        Some(cli::Commands::Recover { command }) => cli::recover::execute(command, args.format).await,
-        Some(cli::Commands::Config { command }) => cli::config_cmd::execute(command, args.format).await,
+        Some(cli::Commands::Recover { command }) => {
+            cli::recover::execute(command, args.format).await
+        }
+        Some(cli::Commands::Config { command }) => {
+            cli::config_cmd::execute(command, args.format).await
+        }
         Some(cli::Commands::Git { command }) => cli::git_cmd::execute(command, args.format).await,
-        Some(cli::Commands::Favorites { command }) => cli::favorites::execute(command, args.format).await,
+        Some(cli::Commands::Favorites { command }) => {
+            cli::favorites::execute(command, args.format).await
+        }
         Some(cli::Commands::Init(init_args)) => cli::init::execute(init_args, args.format).await,
-        Some(cli::Commands::Presets { command }) => cli::presets::execute(command, args.format).await,
+        Some(cli::Commands::Presets { command }) => {
+            cli::presets::execute(command, args.format).await
+        }
+        Some(cli::Commands::Usage { command }) => cli::usage::execute(command, args.format).await,
         Some(cli::Commands::Completion { shell }) => {
             use clap::CommandFactory;
             let mut cmd = cli::Cli::command();
@@ -409,13 +420,16 @@ async fn run_tui_loop(
                             AppEvent::ExitScrollMode => {
                                 layout.tmux_preview_mut().exit_scroll_mode();
                             }
-                            AppEvent::NewSession | AppEvent::SearchWorkspace | AppEvent::NewSessionCreate | AppEvent::ConfirmationConfirm => {
+                            AppEvent::NewSession
+                            | AppEvent::SearchWorkspace
+                            | AppEvent::NewSessionCreate
+                            | AppEvent::ConfirmationConfirm => {
                                 // Process the event to queue the async action
                                 EventHandler::process_event(app_event, &mut app.state);
 
                                 // IMMEDIATELY process the async action for responsive UI
                                 // This ensures dialogs appear without delay and session creation/deletion starts immediately
-                                use tracing::{info, error};
+                                use tracing::{error, info};
                                 info!(">>> Immediately processing async action for responsive UI");
                                 match app.tick().await {
                                     Ok(()) => {
@@ -439,8 +453,8 @@ async fn run_tui_loop(
                     }
                 }
                 Event::Mouse(mouse_event) => {
-                    use crossterm::event::{MouseEventKind, MouseButton};
                     use crate::app::events::AppEvent;
+                    use crossterm::event::{MouseButton, MouseEventKind};
 
                     match mouse_event.kind {
                         MouseEventKind::Down(MouseButton::Left) => {
@@ -453,7 +467,7 @@ async fn run_tui_loop(
                                 app.state.log_history_state.handle_click(col, row, 0, 0);
                             } else if let Some(app_event) = EventHandler::handle_mouse_event(
                                 AppEvent::MouseClick { x: col, y: row },
-                                &mut app.state
+                                &mut app.state,
                             ) {
                                 EventHandler::process_event(app_event, &mut app.state);
                             }
@@ -501,7 +515,10 @@ async fn run_tui_loop(
                             } else if app.state.current_view == View::LogHistory {
                                 // Scroll log history viewer
                                 // Shift+Scroll = horizontal, normal scroll = vertical
-                                if mouse_event.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
+                                if mouse_event
+                                    .modifiers
+                                    .contains(crossterm::event::KeyModifiers::SHIFT)
+                                {
                                     // Horizontal scroll
                                     if is_down {
                                         app.state.log_history_state.scroll_right(SCROLL_LINES * 4);
@@ -519,8 +536,12 @@ async fn run_tui_loop(
                             } else {
                                 // Default: scroll live logs
                                 if is_down {
-                                    let total_logs =
-                                        app.state.live_logs.values().map(|v| v.len()).sum::<usize>();
+                                    let total_logs = app
+                                        .state
+                                        .live_logs
+                                        .values()
+                                        .map(|v| v.len())
+                                        .sum::<usize>();
                                     layout.live_logs_mut().scroll_down(total_logs);
                                 } else {
                                     layout.live_logs_mut().scroll_up();
@@ -535,7 +556,7 @@ async fn run_tui_loop(
                                 app.state.log_history_state.update_selection(col, row);
                             } else if let Some(app_event) = EventHandler::handle_mouse_event(
                                 AppEvent::MouseDragging { x: col, y: row },
-                                &mut app.state
+                                &mut app.state,
                             ) {
                                 EventHandler::process_event(app_event, &mut app.state);
                             }
@@ -548,7 +569,7 @@ async fn run_tui_loop(
                                 app.state.log_history_state.end_selection();
                             } else if let Some(app_event) = EventHandler::handle_mouse_event(
                                 AppEvent::MouseDragEnd { x: col, y: row },
-                                &mut app.state
+                                &mut app.state,
                             ) {
                                 EventHandler::process_event(app_event, &mut app.state);
                             }
@@ -585,25 +606,38 @@ async fn run_tui_loop(
             // IMPORTANT: Use match instead of multiple if-let with .take() to avoid dropping unmatched actions
             if let Some(action) = app.state.pending_async_action.take() {
                 use crate::app::state::AsyncAction;
-                use tracing::{info, error, warn, debug};
+                use tracing::{debug, error, info, warn};
 
                 match action {
                     AsyncAction::AttachToOtherTmux(session_name) => {
                         use crate::app::AttachHandler;
 
-                        info!("[ACTION] Handling AttachToOtherTmux for session '{}'", session_name);
+                        info!(
+                            "[ACTION] Handling AttachToOtherTmux for session '{}'",
+                            session_name
+                        );
 
                         // Create attach handler and attach directly using the session name
-                        info!("[ACTION] Creating attach handler for other tmux session '{}'", session_name);
+                        info!(
+                            "[ACTION] Creating attach handler for other tmux session '{}'",
+                            session_name
+                        );
                         let mut attach_handler = AttachHandler::new_from_terminal(terminal)?;
                         info!("[ACTION] Attach handler created, calling attach_to_session...");
                         match attach_handler.attach_to_session(&session_name).await {
                             Ok(()) => {
-                                info!("[ACTION] Successfully attached and detached from other tmux session '{}'", session_name);
+                                info!(
+                                    "[ACTION] Successfully attached and detached from other tmux session '{}'",
+                                    session_name
+                                );
                             }
                             Err(e) => {
-                                error!("[ACTION] Failed to attach to other tmux session '{}': {}", session_name, e);
-                                app.state.add_error_notification(format!("Failed to attach: {}", e));
+                                error!(
+                                    "[ACTION] Failed to attach to other tmux session '{}': {}",
+                                    session_name, e
+                                );
+                                app.state
+                                    .add_error_notification(format!("Failed to attach: {}", e));
                             }
                         }
 
@@ -625,20 +659,31 @@ async fn run_tui_loop(
                         match output {
                             Ok(o) if o.status.success() => {
                                 info!("Successfully killed tmux session '{}'", session_name);
-                                app.state.add_success_notification(format!("Killed tmux session '{}'", session_name));
+                                app.state.add_success_notification(format!(
+                                    "Killed tmux session '{}'",
+                                    session_name
+                                ));
                                 // Clear selection if we just killed the selected session
-                                if app.state.selected_other_tmux_session().map(|s| s.name.as_str()) == Some(&session_name) {
+                                if app.state.selected_other_tmux_session().map(|s| s.name.as_str())
+                                    == Some(&session_name)
+                                {
                                     app.state.selected_other_tmux_index = None;
                                 }
                             }
                             Ok(o) => {
                                 let stderr = String::from_utf8_lossy(&o.stderr);
                                 warn!("Failed to kill tmux session '{}': {}", session_name, stderr);
-                                app.state.add_error_notification(format!("Failed to kill session: {}", stderr));
+                                app.state.add_error_notification(format!(
+                                    "Failed to kill session: {}",
+                                    stderr
+                                ));
                             }
                             Err(e) => {
                                 warn!("Failed to kill tmux session '{}': {}", session_name, e);
-                                app.state.add_error_notification(format!("Failed to kill session: {}", e));
+                                app.state.add_error_notification(format!(
+                                    "Failed to kill session: {}",
+                                    e
+                                ));
                             }
                         }
 
@@ -657,21 +702,22 @@ async fn run_tui_loop(
                             Some(cmd) => {
                                 info!("Opening {} in {}", workspace_path.display(), cmd);
 
-                                let result = std::process::Command::new(&cmd)
-                                    .arg(&workspace_path)
-                                    .spawn();
+                                let result =
+                                    std::process::Command::new(&cmd).arg(&workspace_path).spawn();
 
                                 match result {
                                     Ok(_) => {
-                                        app.state.add_success_notification(
-                                            format!("📝 Opened in {}", cmd)
-                                        );
+                                        app.state.add_success_notification(format!(
+                                            "📝 Opened in {}",
+                                            cmd
+                                        ));
                                     }
                                     Err(e) => {
                                         error!("Failed to open editor: {}", e);
-                                        app.state.add_error_notification(
-                                            format!("❌ Failed to open editor: {}", e)
-                                        );
+                                        app.state.add_error_notification(format!(
+                                            "❌ Failed to open editor: {}",
+                                            e
+                                        ));
                                     }
                                 }
                             }
@@ -685,14 +731,20 @@ async fn run_tui_loop(
                     }
 
                     // Workspace shell handling (one shell per workspace, cd to switch directories)
-                    AsyncAction::OpenWorkspaceShell { workspace_index, target_dir } => {
+                    AsyncAction::OpenWorkspaceShell {
+                        workspace_index,
+                        target_dir,
+                    } => {
                         use crate::app::AttachHandler;
                         use crate::models::ShellSession;
                         use shell_escape::escape;
                         use std::borrow::Cow;
                         use tokio::process::Command;
 
-                        info!("[ACTION] Opening workspace shell, index: {}, target_dir: {:?}", workspace_index, target_dir);
+                        info!(
+                            "[ACTION] Opening workspace shell, index: {}, target_dir: {:?}",
+                            workspace_index, target_dir
+                        );
 
                         // Get workspace info
                         let (workspace_path, workspace_name, existing_shell) = {
@@ -700,7 +752,10 @@ async fn run_tui_loop(
                                 (
                                     workspace.path.clone(),
                                     workspace.name.clone(),
-                                    workspace.shell_session.as_ref().map(|s| s.tmux_session_name.clone()),
+                                    workspace
+                                        .shell_session
+                                        .as_ref()
+                                        .map(|s| s.tmux_session_name.clone()),
                                 )
                             } else {
                                 app.state.add_error_notification("Workspace not found".to_string());
@@ -713,7 +768,10 @@ async fn run_tui_loop(
                         let (tmux_name, is_new_shell) = if let Some(existing) = existing_shell {
                             (existing, false)
                         } else {
-                            let shell = ShellSession::new_workspace_shell(workspace_path.clone(), &workspace_name);
+                            let shell = ShellSession::new_workspace_shell(
+                                workspace_path.clone(),
+                                &workspace_name,
+                            );
                             let name = shell.tmux_session_name.clone();
                             // Store the new shell in workspace
                             if let Some(workspace) = app.state.workspaces.get_mut(workspace_index) {
@@ -727,8 +785,8 @@ async fn run_tui_loop(
                         let workspace_path_str = workspace_path.to_str().unwrap_or(".");
                         let create_result = Command::new("tmux")
                             .arg("new-session")
-                            .arg("-A")  // Atomic: attach if exists, create if not
-                            .arg("-d")  // Detached (we'll attach separately for TUI handling)
+                            .arg("-A") // Atomic: attach if exists, create if not
+                            .arg("-d") // Detached (we'll attach separately for TUI handling)
                             .arg("-s")
                             .arg(&tmux_name)
                             .arg("-c")
@@ -745,9 +803,10 @@ async fn run_tui_loop(
 
                                 if is_new_shell {
                                     info!("[ACTION] Created new workspace shell: {}", tmux_name);
-                                    app.state.add_success_notification(
-                                        format!("$ Created workspace shell: {}", workspace_name)
-                                    );
+                                    app.state.add_success_notification(format!(
+                                        "$ Created workspace shell: {}",
+                                        workspace_name
+                                    ));
                                 } else {
                                     info!("[ACTION] Reusing workspace shell: {}", tmux_name);
                                 }
@@ -755,13 +814,19 @@ async fn run_tui_loop(
                             Ok(output) => {
                                 let stderr = String::from_utf8_lossy(&output.stderr);
                                 error!("[ACTION] Failed to create/attach tmux session: {}", stderr);
-                                app.state.add_error_notification(format!("Failed to create shell: {}", stderr));
+                                app.state.add_error_notification(format!(
+                                    "Failed to create shell: {}",
+                                    stderr
+                                ));
                                 app.state.ui_needs_refresh = true;
                                 continue;
                             }
                             Err(e) => {
                                 error!("[ACTION] Failed to create tmux session: {}", e);
-                                app.state.add_error_notification(format!("Failed to create shell: {}", e));
+                                app.state.add_error_notification(format!(
+                                    "Failed to create shell: {}",
+                                    e
+                                ));
                                 app.state.ui_needs_refresh = true;
                                 continue;
                             }
@@ -785,7 +850,9 @@ async fn run_tui_loop(
                             match cd_result {
                                 Ok(output) if output.status.success() => {
                                     // Update stored working_dir for state consistency
-                                    if let Some(workspace) = app.state.workspaces.get_mut(workspace_index) {
+                                    if let Some(workspace) =
+                                        app.state.workspaces.get_mut(workspace_index)
+                                    {
                                         if let Some(shell) = workspace.get_shell_session_mut() {
                                             shell.set_working_dir(dir.clone());
                                         }
@@ -794,15 +861,17 @@ async fn run_tui_loop(
                                 Ok(output) => {
                                     let stderr = String::from_utf8_lossy(&output.stderr);
                                     warn!("[ACTION] tmux send-keys may have failed: {}", stderr);
-                                    app.state.add_warning_notification(
-                                        format!("May have failed to cd to: {}", dir_str)
-                                    );
+                                    app.state.add_warning_notification(format!(
+                                        "May have failed to cd to: {}",
+                                        dir_str
+                                    ));
                                 }
                                 Err(e) => {
                                     error!("[ACTION] tmux send-keys error: {}", e);
-                                    app.state.add_error_notification(
-                                        format!("Shell command error: {}", e)
-                                    );
+                                    app.state.add_error_notification(format!(
+                                        "Shell command error: {}",
+                                        e
+                                    ));
                                 }
                             }
                         }
@@ -822,7 +891,8 @@ async fn run_tui_loop(
                             }
                             Err(e) => {
                                 error!("[ACTION] Failed to attach to shell: {}", e);
-                                app.state.add_error_notification(format!("Failed to attach: {}", e));
+                                app.state
+                                    .add_error_notification(format!("Failed to attach: {}", e));
                             }
                         }
 
@@ -837,12 +907,13 @@ async fn run_tui_loop(
 
                         // Generate a simple tmux session name based on repo directory
                         // Sanitize repo name: periods are tmux session.window delimiters
-                        let repo_name = repo_path.file_name()
+                        let repo_name = repo_path
+                            .file_name()
                             .and_then(|n| n.to_str())
                             .unwrap_or("shell")
-                            .replace('.', "-")    // Periods break tmux (session.window delimiter)
-                            .replace(':', "-")    // Colons are special in tmux
-                            .replace('/', "-");   // Slashes for safety
+                            .replace('.', "-") // Periods break tmux (session.window delimiter)
+                            .replace(':', "-") // Colons are special in tmux
+                            .replace('/', "-"); // Slashes for safety
                         let timestamp = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .map(|d| d.as_secs())
@@ -864,9 +935,11 @@ async fn run_tui_loop(
                             let create_result = Command::new("tmux")
                                 .args([
                                     "new-session",
-                                    "-d",           // Start detached
-                                    "-s", &tmux_name,
-                                    "-c", repo_path_str,  // Set working directory
+                                    "-d", // Start detached
+                                    "-s",
+                                    &tmux_name,
+                                    "-c",
+                                    repo_path_str, // Set working directory
                                 ])
                                 .output()
                                 .await;
@@ -874,7 +947,9 @@ async fn run_tui_loop(
                             match create_result {
                                 Ok(output) if output.status.success() => {
                                     // Configure clipboard for the tmux session
-                                    if let Err(e) = crate::tmux::configure_clipboard(&tmux_name).await {
+                                    if let Err(e) =
+                                        crate::tmux::configure_clipboard(&tmux_name).await
+                                    {
                                         warn!("[ACTION] Failed to configure clipboard: {}", e);
                                     }
                                     info!("[ACTION] Created tmux session: {}", tmux_name);
@@ -882,7 +957,10 @@ async fn run_tui_loop(
                                 Ok(output) => {
                                     let stderr = String::from_utf8_lossy(&output.stderr);
                                     error!("[ACTION] tmux session creation failed: {}", stderr);
-                                    app.state.add_error_notification(format!("Shell creation failed: {}", stderr));
+                                    app.state.add_error_notification(format!(
+                                        "Shell creation failed: {}",
+                                        stderr
+                                    ));
                                     app.state.ui_needs_refresh = true;
                                     continue;
                                 }
@@ -906,11 +984,15 @@ async fn run_tui_loop(
                         match attach_handler.attach_to_session(&tmux_name).await {
                             Ok(()) => {
                                 info!("[ACTION] Successfully attached to shell at {:?}", repo_path);
-                                app.state.add_success_notification(format!("Shell opened at: {}", repo_name));
+                                app.state.add_success_notification(format!(
+                                    "Shell opened at: {}",
+                                    repo_name
+                                ));
                             }
                             Err(e) => {
                                 error!("[ACTION] Failed to attach to shell: {}", e);
-                                app.state.add_error_notification(format!("Failed to attach: {}", e));
+                                app.state
+                                    .add_error_notification(format!("Failed to attach: {}", e));
                             }
                         }
 
@@ -925,7 +1007,10 @@ async fn run_tui_loop(
 
                         // Get SSH target from state
                         let ssh_target = app.state.build_ssh_target();
-                        let repo_path = app.state.new_session_state.as_ref()
+                        let repo_path = app
+                            .state
+                            .new_session_state
+                            .as_ref()
                             .and_then(|s| s.get_selected_repo_path());
 
                         // Clear new session state
@@ -941,25 +1026,16 @@ async fn run_tui_loop(
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .map(|d| d.as_secs())
                                 .unwrap_or(0);
-                            let sanitized_host = target.host
-                                .replace('.', "-")
-                                .replace(':', "-");
+                            let sanitized_host = target.host.replace('.', "-").replace(':', "-");
                             let tmux_name = format!("ssh-{}-{}", sanitized_host, timestamp % 10000);
 
                             // Determine working directory (use repo path if available, else home)
-                            let work_dir = repo_path
-                                .as_ref()
-                                .and_then(|p| p.to_str())
-                                .unwrap_or("~");
+                            let work_dir =
+                                repo_path.as_ref().and_then(|p| p.to_str()).unwrap_or("~");
 
                             // Create tmux session first (detached)
                             let create_result = Command::new("tmux")
-                                .args([
-                                    "new-session",
-                                    "-d",
-                                    "-s", &tmux_name,
-                                    "-c", work_dir,
-                                ])
+                                .args(["new-session", "-d", "-s", &tmux_name, "-c", work_dir])
                                 .output()
                                 .await;
 
@@ -968,18 +1044,15 @@ async fn run_tui_loop(
                                     info!("[ACTION] Created tmux session for SSH: {}", tmux_name);
 
                                     // Configure clipboard
-                                    if let Err(e) = crate::tmux::configure_clipboard(&tmux_name).await {
+                                    if let Err(e) =
+                                        crate::tmux::configure_clipboard(&tmux_name).await
+                                    {
                                         warn!("[ACTION] Failed to configure clipboard: {}", e);
                                     }
 
                                     // Send SSH command to the tmux session
                                     let send_result = Command::new("tmux")
-                                        .args([
-                                            "send-keys",
-                                            "-t", &tmux_name,
-                                            &ssh_cmd,
-                                            "Enter",
-                                        ])
+                                        .args(["send-keys", "-t", &tmux_name, &ssh_cmd, "Enter"])
                                         .output()
                                         .await;
 
@@ -988,22 +1061,38 @@ async fn run_tui_loop(
                                     }
 
                                     // Attach to the SSH session
-                                    let mut attach_handler = AttachHandler::new_from_terminal(terminal)?;
+                                    let mut attach_handler =
+                                        AttachHandler::new_from_terminal(terminal)?;
                                     match attach_handler.attach_to_session(&tmux_name).await {
                                         Ok(()) => {
-                                            info!("[ACTION] Successfully attached to SSH session: {}", display_name);
-                                            app.state.add_success_notification(format!("SSH: {}", display_name));
+                                            info!(
+                                                "[ACTION] Successfully attached to SSH session: {}",
+                                                display_name
+                                            );
+                                            app.state.add_success_notification(format!(
+                                                "SSH: {}",
+                                                display_name
+                                            ));
                                         }
                                         Err(e) => {
-                                            error!("[ACTION] Failed to attach to SSH session: {}", e);
-                                            app.state.add_error_notification(format!("SSH attach failed: {}", e));
+                                            error!(
+                                                "[ACTION] Failed to attach to SSH session: {}",
+                                                e
+                                            );
+                                            app.state.add_error_notification(format!(
+                                                "SSH attach failed: {}",
+                                                e
+                                            ));
                                         }
                                     }
                                 }
                                 Ok(output) => {
                                     let stderr = String::from_utf8_lossy(&output.stderr);
                                     error!("[ACTION] SSH tmux session creation failed: {}", stderr);
-                                    app.state.add_error_notification(format!("SSH session failed: {}", stderr));
+                                    app.state.add_error_notification(format!(
+                                        "SSH session failed: {}",
+                                        stderr
+                                    ));
                                 }
                                 Err(e) => {
                                     error!("[ACTION] tmux command error for SSH: {}", e);
@@ -1011,7 +1100,8 @@ async fn run_tui_loop(
                                 }
                             }
                         } else {
-                            app.state.add_error_notification("SSH target not configured".to_string());
+                            app.state
+                                .add_error_notification("SSH target not configured".to_string());
                         }
 
                         app.state.ui_needs_refresh = true;
@@ -1020,10 +1110,15 @@ async fn run_tui_loop(
                     AsyncAction::KillWorkspaceShell(workspace_index) => {
                         use tokio::process::Command;
 
-                        info!("[ACTION] Killing workspace shell, index: {}", workspace_index);
+                        info!(
+                            "[ACTION] Killing workspace shell, index: {}",
+                            workspace_index
+                        );
 
                         // Extract info first to avoid borrow issues
-                        let shell_info = if let Some(workspace) = app.state.workspaces.get_mut(workspace_index) {
+                        let shell_info = if let Some(workspace) =
+                            app.state.workspaces.get_mut(workspace_index)
+                        {
                             if let Some(shell) = workspace.shell_session.take() {
                                 Some((shell.tmux_session_name.clone(), workspace.name.clone()))
                             } else {
@@ -1040,9 +1135,10 @@ async fn run_tui_loop(
                                 .output()
                                 .await;
 
-                            app.state.add_success_notification(
-                                format!("Killed workspace shell: {}", workspace_name)
-                            );
+                            app.state.add_success_notification(format!(
+                                "Killed workspace shell: {}",
+                                workspace_name
+                            ));
                         }
 
                         // Refresh workspace list to ensure UI reflects the actual state
@@ -1053,23 +1149,39 @@ async fn run_tui_loop(
                     AsyncAction::AttachToTmuxSession(session_id) => {
                         use crate::app::AttachHandler;
 
-                        info!("[ACTION] Handling AttachToTmuxSession for session {}", session_id);
-                        debug!("[ACTION] Looking for session in {} workspaces", app.state.workspaces.len());
+                        info!(
+                            "[ACTION] Handling AttachToTmuxSession for session {}",
+                            session_id
+                        );
+                        debug!(
+                            "[ACTION] Looking for session in {} workspaces",
+                            app.state.workspaces.len()
+                        );
 
                         // Get session to find tmux session name
-                        let tmux_session_name = if let Some(session) = app.state.workspaces
+                        let tmux_session_name = if let Some(session) = app
+                            .state
+                            .workspaces
                             .iter()
                             .flat_map(|w| &w.sessions)
                             .find(|s| s.id == session_id)
                         {
-                            debug!("[ACTION] Found session: name='{}', status={:?}, tmux_name={:?}",
-                                session.name, session.status, session.tmux_session_name);
+                            debug!(
+                                "[ACTION] Found session: name='{}', status={:?}, tmux_name={:?}",
+                                session.name, session.status, session.tmux_session_name
+                            );
                             if let Some(ref name) = session.tmux_session_name {
                                 info!("[ACTION] Using tmux session name: {}", name);
                                 Some(name.clone())
                             } else {
-                                error!("[ACTION] No tmux session name found for session {} (name={})", session_id, session.name);
-                                app.state.add_error_notification(format!("Session '{}' has no tmux session", session.name));
+                                error!(
+                                    "[ACTION] No tmux session name found for session {} (name={})",
+                                    session_id, session.name
+                                );
+                                app.state.add_error_notification(format!(
+                                    "Session '{}' has no tmux session",
+                                    session.name
+                                ));
                                 app.state.ui_needs_refresh = true;
                                 None
                             }
@@ -1092,16 +1204,26 @@ async fn run_tui_loop(
                             }
 
                             // Create attach handler and attach directly
-                            info!("[ACTION] Creating attach handler for tmux session '{}'", tmux_session_name);
+                            info!(
+                                "[ACTION] Creating attach handler for tmux session '{}'",
+                                tmux_session_name
+                            );
                             let mut attach_handler = AttachHandler::new_from_terminal(terminal)?;
                             info!("[ACTION] Attach handler created, calling attach_to_session...");
                             match attach_handler.attach_to_session(&tmux_session_name).await {
                                 Ok(()) => {
-                                    info!("[ACTION] Successfully attached and detached from tmux session '{}'", tmux_session_name);
+                                    info!(
+                                        "[ACTION] Successfully attached and detached from tmux session '{}'",
+                                        tmux_session_name
+                                    );
                                 }
                                 Err(e) => {
-                                    error!("[ACTION] Failed to attach to tmux session '{}': {}", tmux_session_name, e);
-                                    app.state.add_error_notification(format!("Failed to attach: {}", e));
+                                    error!(
+                                        "[ACTION] Failed to attach to tmux session '{}': {}",
+                                        tmux_session_name, e
+                                    );
+                                    app.state
+                                        .add_error_notification(format!("Failed to attach: {}", e));
                                 }
                             }
 
@@ -1121,7 +1243,10 @@ async fn run_tui_loop(
 
                     // Put back any other actions we don't handle here
                     other => {
-                        debug!("[ACTION] Passing through unhandled action in main loop: {:?}", std::any::type_name_of_val(&other));
+                        debug!(
+                            "[ACTION] Passing through unhandled action in main loop: {:?}",
+                            std::any::type_name_of_val(&other)
+                        );
                         app.state.pending_async_action = Some(other);
                     }
                 }
@@ -1184,8 +1309,8 @@ fn setup_logging() {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::fmt::layer()
-                .json()             // Output in JSON Lines format
-                .with_target(true)  // Include target module in JSON
+                .json() // Output in JSON Lines format
+                .with_target(true) // Include target module in JSON
                 .with_writer(file)
                 .with_ansi(false),
         )

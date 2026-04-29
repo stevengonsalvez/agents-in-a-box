@@ -2,7 +2,91 @@
 
 use ainb::app::{App, state::View};
 use ainb::components::LayoutComponent;
+use ainb::components::usage::UsageTab;
+use ainb::models::{
+    ActivityCategory, ActivityUsage, ModelUsage, NamedUsage, ProjectUsage, ProviderCall,
+    TokenBucket, UsageData,
+};
+use chrono::{Local, TimeZone};
 use ratatui::{Terminal, backend::TestBackend};
+
+fn sample_usage_data() -> UsageData {
+    let bucket = TokenBucket {
+        input_tokens: 100,
+        output_tokens: 50,
+        call_count: 2,
+        session_count: 1,
+        project_count: 1,
+        cost_usd: Some(0.42),
+        ..TokenBucket::default()
+    };
+    UsageData {
+        calls: vec![ProviderCall {
+            provider: "claude".to_string(),
+            model: "claude-sonnet-4-5".to_string(),
+            session_id: "s1".to_string(),
+            project: "agents-in-a-box".to_string(),
+            project_path: "/tmp/agents-in-a-box".to_string(),
+            timestamp: Local.with_ymd_and_hms(2026, 4, 29, 10, 0, 0).unwrap(),
+            input_tokens: 100,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            output_tokens: 50,
+            reasoning_tokens: 0,
+            cost_usd: Some(0.42),
+            tools: vec!["Edit".to_string()],
+            bash_commands: vec!["cargo test".to_string()],
+            user_message: "implement burndown".to_string(),
+        }],
+        daily: vec![(
+            chrono::NaiveDate::from_ymd_opt(2026, 4, 29).unwrap(),
+            bucket.clone(),
+        )],
+        weekly: vec![(
+            chrono::NaiveDate::from_ymd_opt(2026, 4, 27).unwrap(),
+            bucket.clone(),
+        )],
+        projects: vec![ProjectUsage {
+            name: "agents-in-a-box".to_string(),
+            path: "/tmp/agents-in-a-box".to_string(),
+            bucket: bucket.clone(),
+        }],
+        grand_total: bucket.clone(),
+        sessions: vec![ainb::models::SessionUsage {
+            provider: "claude".to_string(),
+            project: "agents-in-a-box".to_string(),
+            session_id: "s1".to_string(),
+            first_timestamp: Local.with_ymd_and_hms(2026, 4, 29, 10, 0, 0).unwrap(),
+            last_timestamp: Local.with_ymd_and_hms(2026, 4, 29, 10, 10, 0).unwrap(),
+            bucket: bucket.clone(),
+        }],
+        models: vec![ModelUsage {
+            model: "claude-sonnet-4-5".to_string(),
+            bucket: bucket.clone(),
+        }],
+        activities: vec![ActivityUsage {
+            category: ActivityCategory::Feature,
+            bucket: bucket.clone(),
+            turns: 2,
+            retries: 0,
+            edit_turns: 1,
+            one_shot_turns: 1,
+        }],
+        tools: vec![NamedUsage {
+            name: "Edit".to_string(),
+            calls: 1,
+        }],
+        shell_commands: vec![NamedUsage {
+            name: "cargo test".to_string(),
+            calls: 1,
+        }],
+        mcp_servers: vec![NamedUsage {
+            name: "github".to_string(),
+            calls: 1,
+        }],
+        ..UsageData::default()
+    }
+}
 
 #[tokio::test]
 async fn test_bottom_menu_bar_shows_refresh_key() {
@@ -57,6 +141,67 @@ async fn test_bottom_menu_bar_shows_refresh_key() {
         "Should contain '[q]uit' but content was: {}",
         printable_content
     );
+}
+
+#[tokio::test]
+async fn test_usage_burndown_render_contains_core_panels() {
+    let mut app = App::new();
+    app.state.current_view = View::Analytics;
+    app.state.usage_state.active_tab = UsageTab::Burndown;
+    app.state.usage_state.data = Some(sample_usage_data());
+
+    let backend = TestBackend::new(120, 40);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut layout = LayoutComponent::new();
+
+    terminal
+        .draw(|frame| {
+            layout.render(frame, &mut app.state);
+        })
+        .unwrap();
+
+    let content: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(ratatui::buffer::Cell::symbol)
+        .collect();
+
+    assert!(content.contains("Burndown"));
+    assert!(content.contains("Daily Activity"));
+    assert!(content.contains("By Project"));
+    assert!(content.contains("By Activity"));
+    assert!(content.contains("By Model"));
+}
+
+#[tokio::test]
+async fn test_usage_burndown_narrow_render_does_not_panic() {
+    let mut app = App::new();
+    app.state.current_view = View::Analytics;
+    app.state.usage_state.active_tab = UsageTab::Burndown;
+    app.state.usage_state.data = Some(sample_usage_data());
+
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut layout = LayoutComponent::new();
+
+    terminal
+        .draw(|frame| {
+            layout.render(frame, &mut app.state);
+        })
+        .unwrap();
+
+    let content: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(ratatui::buffer::Cell::symbol)
+        .collect();
+
+    assert!(content.contains("Burndown"));
+    assert!(content.contains("Daily Activity"));
 }
 
 #[tokio::test]

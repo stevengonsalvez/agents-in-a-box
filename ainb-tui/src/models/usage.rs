@@ -2,7 +2,7 @@
 // Parses Claude and Codex JSONL histories into reusable aggregates for TUI and CLI views.
 
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, TimeZone};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -10,7 +10,8 @@ use tracing::{debug, warn};
 
 /// Usage period selector shared by TUI and CLI report queries.
 #[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum UsagePeriod {
     Today,
     Week,
@@ -28,7 +29,8 @@ impl Default for UsagePeriod {
 
 /// Provider filter shared by TUI and CLI report queries.
 #[allow(dead_code)]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum UsageProviderFilter {
     #[default]
     All,
@@ -48,7 +50,8 @@ impl UsageProviderFilter {
 
 /// Deterministic activity categories. Phase 2 fills these from turn classification.
 #[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ActivityCategory {
     Coding,
     Debugging,
@@ -65,6 +68,26 @@ pub enum ActivityCategory {
     General,
 }
 
+impl ActivityCategory {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Coding => "Coding",
+            Self::Debugging => "Debugging",
+            Self::Feature => "Feature",
+            Self::Refactoring => "Refactoring",
+            Self::Testing => "Testing",
+            Self::Exploration => "Exploration",
+            Self::Planning => "Planning",
+            Self::Delegation => "Delegation",
+            Self::Git => "Git",
+            Self::BuildDeploy => "Build/Deploy",
+            Self::Brainstorming => "Brainstorming",
+            Self::Conversation => "Conversation",
+            Self::General => "General",
+        }
+    }
+}
+
 /// Query used to parse and aggregate usage.
 #[derive(Debug, Clone, Default)]
 pub struct UsageQuery {
@@ -75,7 +98,7 @@ pub struct UsageQuery {
 }
 
 /// Token counts for a single usage bucket, provider call, or aggregate row.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct TokenBucket {
     pub input_tokens: u64,
     pub cache_creation_tokens: u64,
@@ -110,7 +133,7 @@ impl TokenBucket {
 
 /// Per-provider API call parsed from a local session file.
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ProviderCall {
     pub provider: String,
     pub model: String,
@@ -147,7 +170,7 @@ impl ProviderCall {
 
 /// Daily dashboard row.
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DailyUsage {
     pub date: NaiveDate,
     pub bucket: TokenBucket,
@@ -155,7 +178,7 @@ pub struct DailyUsage {
 
 /// Per-project summary.
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ProjectUsage {
     pub name: String,
     pub path: String,
@@ -164,7 +187,7 @@ pub struct ProjectUsage {
 
 /// Per-session summary.
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SessionUsage {
     pub provider: String,
     pub project: String,
@@ -176,7 +199,7 @@ pub struct SessionUsage {
 
 /// Per-model summary.
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ModelUsage {
     pub model: String,
     pub bucket: TokenBucket,
@@ -184,7 +207,7 @@ pub struct ModelUsage {
 
 /// Activity summary with classified turns and retry counts.
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ActivityUsage {
     pub category: ActivityCategory,
     pub bucket: TokenBucket,
@@ -196,7 +219,7 @@ pub struct ActivityUsage {
 
 /// Tool/MCP/shell breakdown row.
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct NamedUsage {
     pub name: String,
     pub calls: usize,
@@ -204,7 +227,7 @@ pub struct NamedUsage {
 
 /// Complete parsed usage data.
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct UsageData {
     pub daily: Vec<(NaiveDate, TokenBucket)>,
     pub weekly: Vec<(NaiveDate, TokenBucket)>,
@@ -217,6 +240,27 @@ pub struct UsageData {
     pub tools: Vec<NamedUsage>,
     pub mcp_servers: Vec<NamedUsage>,
     pub shell_commands: Vec<NamedUsage>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UsageOverview {
+    pub calls: usize,
+    pub sessions: usize,
+    pub projects: usize,
+    pub tokens: u64,
+    pub cost_usd: Option<f64>,
+}
+
+impl UsageData {
+    pub fn overview(&self) -> UsageOverview {
+        UsageOverview {
+            calls: self.grand_total.call_count,
+            sessions: self.grand_total.session_count,
+            projects: self.grand_total.project_count,
+            tokens: self.grand_total.total(),
+            cost_usd: self.grand_total.cost_usd,
+        }
+    }
 }
 
 impl Default for UsageData {
@@ -1099,6 +1143,365 @@ fn activity_rank(category: ActivityCategory) -> usize {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanStatus {
+    Under,
+    Near,
+    Over,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PlanProjection {
+    pub period_start: NaiveDate,
+    pub period_end: NaiveDate,
+    pub monthly_usd: f64,
+    pub spent_usd: f64,
+    pub percent_used: f64,
+    pub projected_usd: f64,
+    pub status: PlanStatus,
+    pub remaining_days: i64,
+}
+
+pub fn project_plan_usage(
+    data: &UsageData,
+    plan: &crate::config::UsagePlan,
+    today: NaiveDate,
+) -> PlanProjection {
+    let (period_start, period_end) = billing_period(today, plan.reset_day);
+    let spent_usd = data
+        .daily
+        .iter()
+        .filter(|(date, _)| *date >= period_start && *date <= period_end)
+        .filter_map(|(_, bucket)| bucket.cost_usd)
+        .sum::<f64>();
+    let percent_used = if plan.monthly_usd > 0.0 {
+        spent_usd / plan.monthly_usd
+    } else {
+        0.0
+    };
+    let mut last_week: Vec<f64> = data
+        .daily
+        .iter()
+        .filter(|(date, _)| *date >= today - Duration::days(6) && *date <= today)
+        .map(|(_, bucket)| bucket.cost_usd.unwrap_or(0.0))
+        .collect();
+    last_week.sort_by(f64::total_cmp);
+    let median_daily = if last_week.is_empty() {
+        0.0
+    } else {
+        last_week[last_week.len() / 2]
+    };
+    let remaining_days = (period_end - today).num_days().max(0);
+    let projected_usd = spent_usd + median_daily * remaining_days as f64;
+    let status = if percent_used > 1.0 {
+        PlanStatus::Over
+    } else if percent_used >= 0.8 {
+        PlanStatus::Near
+    } else {
+        PlanStatus::Under
+    };
+
+    PlanProjection {
+        period_start,
+        period_end,
+        monthly_usd: plan.monthly_usd,
+        spent_usd,
+        percent_used,
+        projected_usd,
+        status,
+        remaining_days,
+    }
+}
+
+fn billing_period(today: NaiveDate, reset_day: u8) -> (NaiveDate, NaiveDate) {
+    let reset_day = reset_day.clamp(1, 28) as u32;
+    let current_reset =
+        NaiveDate::from_ymd_opt(today.year(), today.month(), reset_day).unwrap_or(today);
+    let start = if today >= current_reset {
+        current_reset
+    } else {
+        add_months(current_reset, -1)
+    };
+    let end = add_months(start, 1) - Duration::days(1);
+    (start, end)
+}
+
+fn add_months(date: NaiveDate, months: i32) -> NaiveDate {
+    let month_index = date.year() * 12 + date.month() as i32 - 1 + months;
+    let year = month_index.div_euclid(12);
+    let month = month_index.rem_euclid(12) as u32 + 1;
+    NaiveDate::from_ymd_opt(year, month, date.day()).unwrap_or(date)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Impact {
+    High,
+    Medium,
+    Low,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum HealthGrade {
+    A,
+    B,
+    C,
+    D,
+    F,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WasteAction {
+    pub label: String,
+    pub command: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WasteFinding {
+    pub id: String,
+    pub title: String,
+    pub impact: Impact,
+    pub tokens_saved: u64,
+    pub details: String,
+    pub actions: Vec<WasteAction>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OptimizeResult {
+    pub score: u8,
+    pub grade: HealthGrade,
+    pub potential_tokens_saved: u64,
+    pub findings: Vec<WasteFinding>,
+}
+
+pub fn optimize_usage(data: &UsageData) -> OptimizeResult {
+    let mut findings = Vec::new();
+    let read_calls =
+        data.tools.iter().find(|tool| tool.name == "Read").map_or(0, |tool| tool.calls);
+    let edit_calls =
+        data.tools.iter().find(|tool| tool.name == "Edit").map_or(0, |tool| tool.calls);
+    let bash_calls =
+        data.tools.iter().find(|tool| tool.name == "Bash").map_or(0, |tool| tool.calls);
+
+    if read_calls > edit_calls.saturating_mul(8).max(8) {
+        findings.push(WasteFinding {
+            id: "low-read-edit-ratio".to_string(),
+            title: "Heavy reading before edits".to_string(),
+            impact: Impact::Medium,
+            tokens_saved: data.grand_total.input_tokens / 10,
+            details: format!("{read_calls} reads for {edit_calls} edits"),
+            actions: vec![WasteAction {
+                label: "Prefer targeted file reads and ripgrep before broad scans".to_string(),
+                command: None,
+            }],
+        });
+    }
+
+    let cache_tokens = data.grand_total.cache_creation_tokens + data.grand_total.cache_read_tokens;
+    if cache_tokens > data.grand_total.input_tokens.saturating_mul(2) {
+        findings.push(WasteFinding {
+            id: "cache-bloat".to_string(),
+            title: "Large cache footprint".to_string(),
+            impact: Impact::Low,
+            tokens_saved: cache_tokens / 20,
+            details: format!("{} cached tokens", format_tokens_short(cache_tokens)),
+            actions: vec![WasteAction {
+                label: "Keep prompts and context focused for long sessions".to_string(),
+                command: None,
+            }],
+        });
+    }
+
+    if bash_calls > data.grand_total.call_count.saturating_mul(3).max(10) {
+        findings.push(WasteFinding {
+            id: "bash-output-bloat".to_string(),
+            title: "Frequent shell output".to_string(),
+            impact: Impact::Medium,
+            tokens_saved: data.grand_total.output_tokens / 12,
+            details: format!("{bash_calls} shell calls"),
+            actions: vec![WasteAction {
+                label: "Pipe large command output through focused filters".to_string(),
+                command: Some("rg <pattern> <path>".to_string()),
+            }],
+        });
+    }
+
+    let agent_calls =
+        data.tools.iter().find(|tool| tool.name == "Agent").map_or(0, |tool| tool.calls);
+    if agent_calls > data.sessions.len().saturating_mul(5).max(5) {
+        findings.push(WasteFinding {
+            id: "ghost-agents".to_string(),
+            title: "High agent delegation count".to_string(),
+            impact: Impact::High,
+            tokens_saved: data.grand_total.total() / 8,
+            details: format!(
+                "{agent_calls} agent calls across {} sessions",
+                data.sessions.len()
+            ),
+            actions: vec![WasteAction {
+                label: "Close unused agent tasks and keep delegated scope narrow".to_string(),
+                command: None,
+            }],
+        });
+    }
+
+    findings.sort_by(|a, b| {
+        impact_weight(b.impact)
+            .cmp(&impact_weight(a.impact))
+            .then_with(|| b.tokens_saved.cmp(&a.tokens_saved))
+    });
+    let penalties: u8 = findings
+        .iter()
+        .map(|finding| match finding.impact {
+            Impact::High => 15,
+            Impact::Medium => 7,
+            Impact::Low => 3,
+        })
+        .sum();
+    let score = 100_u8.saturating_sub(penalties).max(20);
+    let grade = health_grade(score);
+    let potential_tokens_saved = findings.iter().map(|finding| finding.tokens_saved).sum();
+
+    OptimizeResult {
+        score,
+        grade,
+        potential_tokens_saved,
+        findings,
+    }
+}
+
+fn impact_weight(impact: Impact) -> u8 {
+    match impact {
+        Impact::High => 3,
+        Impact::Medium => 2,
+        Impact::Low => 1,
+    }
+}
+
+fn health_grade(score: u8) -> HealthGrade {
+    match score {
+        90..=100 => HealthGrade::A,
+        75..=89 => HealthGrade::B,
+        55..=74 => HealthGrade::C,
+        30..=54 => HealthGrade::D,
+        _ => HealthGrade::F,
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelComparison {
+    pub model: String,
+    pub bucket: TokenBucket,
+    pub calls: usize,
+    pub edit_turns: usize,
+    pub one_shot_turns: usize,
+    pub retries: usize,
+    pub cost_per_call: Option<f64>,
+    pub tokens_per_call: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CompareResult {
+    pub models: Vec<ModelComparison>,
+    pub winner: Option<String>,
+    pub low_data: bool,
+}
+
+pub fn compare_models(data: &UsageData) -> CompareResult {
+    let mut rows: Vec<ModelComparison> = data
+        .models
+        .iter()
+        .map(|model| {
+            let calls = model.bucket.call_count.max(1);
+            let edit_turns = data
+                .calls
+                .iter()
+                .filter(|call| call.model == model.model && has_edit_tool(&call.tools))
+                .count();
+            let retries = data
+                .calls
+                .iter()
+                .filter(|call| call.model == model.model)
+                .filter(|call| call.user_message.to_lowercase().contains("fix"))
+                .count();
+            let one_shot_turns = edit_turns.saturating_sub(retries);
+            ModelComparison {
+                model: model.model.clone(),
+                bucket: model.bucket.clone(),
+                calls,
+                edit_turns,
+                one_shot_turns,
+                retries,
+                cost_per_call: model.bucket.cost_usd.map(|cost| cost / calls as f64),
+                tokens_per_call: model.bucket.total() / calls as u64,
+            }
+        })
+        .collect();
+    rows.sort_by(|a, b| {
+        b.one_shot_turns
+            .cmp(&a.one_shot_turns)
+            .then_with(|| a.retries.cmp(&b.retries))
+            .then_with(|| {
+                a.cost_per_call
+                    .unwrap_or(f64::MAX)
+                    .total_cmp(&b.cost_per_call.unwrap_or(f64::MAX))
+            })
+    });
+    let low_data = rows.iter().map(|row| row.calls).sum::<usize>() < 5 || rows.len() < 2;
+    let winner = rows.first().map(|row| row.model.clone());
+    CompareResult {
+        models: rows,
+        winner,
+        low_data,
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct YieldResult {
+    pub productive_usd: f64,
+    pub reverted_usd: f64,
+    pub abandoned_usd: f64,
+    pub productive_sessions: usize,
+    pub reverted_sessions: usize,
+    pub abandoned_sessions: usize,
+}
+
+pub fn analyze_yield(data: &UsageData) -> YieldResult {
+    let mut result = YieldResult {
+        productive_usd: 0.0,
+        reverted_usd: 0.0,
+        abandoned_usd: 0.0,
+        productive_sessions: 0,
+        reverted_sessions: 0,
+        abandoned_sessions: 0,
+    };
+
+    for session in &data.sessions {
+        let cost = session.bucket.cost_usd.unwrap_or(0.0);
+        let has_git = data.calls.iter().any(|call| {
+            call.session_id == session.session_id
+                && call.bash_commands.iter().any(|cmd| cmd.trim_start().starts_with("git "))
+        });
+        let reverted = data.calls.iter().any(|call| {
+            call.session_id == session.session_id
+                && call.user_message.to_lowercase().contains("revert")
+        });
+        if reverted {
+            result.reverted_sessions += 1;
+            result.reverted_usd += cost;
+        } else if has_git {
+            result.productive_sessions += 1;
+            result.productive_usd += cost;
+        } else {
+            result.abandoned_sessions += 1;
+            result.abandoned_usd += cost;
+        }
+    }
+
+    result
+}
+
 struct SessionUsageAccumulator {
     provider: String,
     project: String,
@@ -1955,5 +2358,77 @@ mod tests {
             .unwrap();
         assert_eq!(exploration.turns, 1);
         assert_eq!(exploration.bucket.input_tokens, 200);
+    }
+
+    #[test]
+    fn plan_projection_covers_under_near_and_over_status() {
+        let today = NaiveDate::from_ymd_opt(2026, 4, 29).unwrap();
+        let mut data = UsageData::default();
+        data.daily = vec![(
+            today,
+            TokenBucket {
+                cost_usd: Some(10.0),
+                ..TokenBucket::default()
+            },
+        )];
+        let mut plan = crate::config::UsagePlan {
+            id: crate::config::UsagePlanId::Custom,
+            monthly_usd: 100.0,
+            provider: crate::config::UsagePlanProvider::All,
+            reset_day: 12,
+            set_at: "2026-04-29T00:00:00Z".to_string(),
+        };
+
+        assert_eq!(
+            project_plan_usage(&data, &plan, today).status,
+            PlanStatus::Under
+        );
+
+        plan.monthly_usd = 12.0;
+        assert_eq!(
+            project_plan_usage(&data, &plan, today).status,
+            PlanStatus::Near
+        );
+
+        plan.monthly_usd = 5.0;
+        assert_eq!(
+            project_plan_usage(&data, &plan, today).status,
+            PlanStatus::Over
+        );
+    }
+
+    #[test]
+    fn optimize_compare_and_yield_return_stable_summaries() {
+        let calls = vec![
+            provider_call(
+                "claude",
+                "s1",
+                "2026-04-10T09:00:00+01:00",
+                "implement feature",
+                &["Read", "Edit", "Bash"],
+                &["git status"],
+                100,
+            ),
+            provider_call(
+                "codex",
+                "s2",
+                "2026-04-10T10:00:00+01:00",
+                "research parser",
+                &["Read"],
+                &[],
+                200,
+            ),
+        ];
+        let data = aggregate_calls(calls);
+
+        let optimize = optimize_usage(&data);
+        assert!(optimize.score <= 100);
+
+        let compare = compare_models(&data);
+        assert_eq!(compare.models.len(), 2);
+
+        let yield_result = analyze_yield(&data);
+        assert_eq!(yield_result.productive_sessions, 1);
+        assert_eq!(yield_result.abandoned_sessions, 1);
     }
 }

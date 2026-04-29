@@ -118,7 +118,7 @@ fn cmd_worktrees(format: OutputFormat) -> Result<()> {
                 .context("Failed to serialize worktree entries")?;
             println!("{json}");
         }
-        OutputFormat::Text => {
+        OutputFormat::Text | OutputFormat::Csv => {
             if entries.is_empty() {
                 println!("No managed worktrees found.");
                 return Ok(());
@@ -178,7 +178,9 @@ fn cmd_cleanup(force: bool, dry_run: bool, format: OutputFormat) -> Result<()> {
     if orphans.is_empty() {
         match format {
             OutputFormat::Json => println!("[]"),
-            OutputFormat::Text => println!("No orphaned worktrees to clean up."),
+            OutputFormat::Text | OutputFormat::Csv => {
+                println!("No orphaned worktrees to clean up.")
+            }
         }
         return Ok(());
     }
@@ -190,7 +192,7 @@ fn cmd_cleanup(force: bool, dry_run: bool, format: OutputFormat) -> Result<()> {
                     .context("Failed to serialize orphan entries")?;
                 println!("{json}");
             }
-            OutputFormat::Text => {
+            OutputFormat::Text | OutputFormat::Csv => {
                 println!(
                     "Dry run - {} orphaned worktree(s) would be removed:",
                     orphans.len()
@@ -258,7 +260,7 @@ fn cmd_status(session: &str, format: OutputFormat) -> Result<()> {
                 .context("Failed to serialize git status report")?;
             println!("{json}");
         }
-        OutputFormat::Text => {
+        OutputFormat::Text | OutputFormat::Csv => {
             let short_id = short_session_id(&report.session_id);
             println!("Session: {} ({})", report.workspace_name, short_id);
             println!("Branch:  {}", report.branch);
@@ -371,7 +373,10 @@ fn build_status_report(
             unstaged += 1;
         }
 
-        files.push(FileStatus { path, status: status_str });
+        files.push(FileStatus {
+            path,
+            status: status_str,
+        });
     }
 
     Ok(GitStatusReport {
@@ -471,7 +476,10 @@ mod tests {
     fn make_worktree_info(id: Uuid, branch: &str) -> WorktreeInfo {
         WorktreeInfo {
             id,
-            path: PathBuf::from(format!("/tmp/worktrees/by-name/repo--{branch}--{}", &id.to_string()[..8])),
+            path: PathBuf::from(format!(
+                "/tmp/worktrees/by-name/repo--{branch}--{}",
+                &id.to_string()[..8]
+            )),
             session_path: PathBuf::from(format!("/tmp/worktrees/by-session/{id}")),
             branch_name: branch.to_string(),
             source_repository: PathBuf::from("/tmp/source-repo"),
@@ -578,8 +586,14 @@ mod tests {
         let json = serde_json::to_value(&entry).unwrap();
         assert!(json["session_id"].is_string());
         assert!(json["path"].is_string());
-        assert_eq!(json["branch"], serde_json::Value::String("main".to_string()));
-        assert_eq!(json["status"], serde_json::Value::String("orphaned".to_string()));
+        assert_eq!(
+            json["branch"],
+            serde_json::Value::String("main".to_string())
+        );
+        assert_eq!(
+            json["status"],
+            serde_json::Value::String("orphaned".to_string())
+        );
         assert!(json["commit"].is_string());
     }
 
@@ -668,23 +682,38 @@ mod tests {
             unstaged: 1,
             untracked: 0,
             files: vec![
-                FileStatus { path: "a.rs".to_string(), status: "M".to_string() },
-                FileStatus { path: "b.rs".to_string(), status: "m".to_string() },
+                FileStatus {
+                    path: "a.rs".to_string(),
+                    status: "M".to_string(),
+                },
+                FileStatus {
+                    path: "b.rs".to_string(),
+                    status: "m".to_string(),
+                },
             ],
         };
 
         let json = serde_json::to_value(&report).unwrap();
         assert_eq!(json["files_changed"], serde_json::json!(2));
         assert_eq!(json["staged"], serde_json::json!(1));
-        assert_eq!(json["branch"], serde_json::Value::String("main".to_string()));
+        assert_eq!(
+            json["branch"],
+            serde_json::Value::String("main".to_string())
+        );
         assert_eq!(json["files"].as_array().unwrap().len(), 2);
     }
 
     #[test]
     fn test_file_status_serialize() {
-        let fs = FileStatus { path: "src/main.rs".to_string(), status: "M".to_string() };
+        let fs = FileStatus {
+            path: "src/main.rs".to_string(),
+            status: "M".to_string(),
+        };
         let json = serde_json::to_value(&fs).unwrap();
-        assert_eq!(json["path"], serde_json::Value::String("src/main.rs".to_string()));
+        assert_eq!(
+            json["path"],
+            serde_json::Value::String("src/main.rs".to_string())
+        );
         assert_eq!(json["status"], serde_json::Value::String("M".to_string()));
     }
 

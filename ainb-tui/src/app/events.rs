@@ -16,7 +16,7 @@ const SESSIONS_PANE_WIDTH_PERCENTAGE: f32 = 0.4;
 #[derive(Debug, Clone)]
 pub enum AppEvent {
     Quit,
-    GoToHomeScreen,  // Return to home screen from any view
+    GoToHomeScreen, // Return to home screen from any view
     NextSession,
     PreviousSession,
     NextWorkspace,
@@ -60,33 +60,33 @@ pub enum AppEvent {
     NewSessionInputChar(char),
     NewSessionInputPasteText(String),
     NewSessionBackspace,
-    NewSessionBackspaceWord,  // Delete word backward (Shift+Backspace)
+    NewSessionBackspaceWord, // Delete word backward (Shift+Backspace)
     // Source selection events (Local, Remote, SSH, Favorites)
-    SourceSelectionToggle,        // Toggle forward: Local → Remote → SSH → Favorites → Local
+    SourceSelectionToggle, // Toggle forward: Local → Remote → SSH → Favorites → Local
     SourceSelectionToggleReverse, // Toggle backward: Local → Favorites → SSH → Remote → Local
-    SourceSelectionConfirm,       // Proceed with selected source
-    SourceQuickSelectLocal,       // Quick select Local and proceed
-    SourceQuickSelectRemote,      // Quick select Remote and proceed
-    SourceQuickSelectSsh,         // Quick select SSH and proceed
-    SourceQuickSelectFavorites,   // Quick select Favorites and proceed
+    SourceSelectionConfirm, // Proceed with selected source
+    SourceQuickSelectLocal, // Quick select Local and proceed
+    SourceQuickSelectRemote, // Quick select Remote and proceed
+    SourceQuickSelectSsh,  // Quick select SSH and proceed
+    SourceQuickSelectFavorites, // Quick select Favorites and proceed
     // Favorites picker events (SelectFavorite step)
-    FavoriteSelectNext,           // Navigate to next favorite
-    FavoriteSelectPrev,           // Navigate to previous favorite
-    FavoriteSelectConfirm,        // Confirm selection
-    FavoriteGoBack,               // Go back to source selection
-    FavoriteDelete,               // Delete selected favorite
+    FavoriteSelectNext,    // Navigate to next favorite
+    FavoriteSelectPrev,    // Navigate to previous favorite
+    FavoriteSelectConfirm, // Confirm selection
+    FavoriteGoBack,        // Go back to source selection
+    FavoriteDelete,        // Delete selected favorite
     // Repo input events (URL or path)
     RepoInputChar(char),
     RepoInputBackspace,
     RepoInputBackspaceWord,
     RepoInputPasteText(String),
     RepoInputSubmit,
-    RepoInputFavoriteNext,     // Navigate to next favorite in inline list
-    RepoInputFavoritePrev,     // Navigate to previous favorite in inline list
-    RepoInputSelectFavorite,   // Use selected favorite
-    RepoInputToggleFavorite,   // Star/unstar current input as favorite
+    RepoInputFavoriteNext,   // Navigate to next favorite in inline list
+    RepoInputFavoritePrev,   // Navigate to previous favorite in inline list
+    RepoInputSelectFavorite, // Use selected favorite
+    RepoInputToggleFavorite, // Star/unstar current input as favorite
     // Local repo selection events
-    LocalRepoToggleFavorite,   // Star/unstar currently selected local repo
+    LocalRepoToggleFavorite, // Star/unstar currently selected local repo
     // Branch selection events
     BranchSelectNext,
     BranchSelectPrev,
@@ -121,21 +121,21 @@ pub enum AppEvent {
     NewSessionAgentNext,
     NewSessionAgentPrev,
     NewSessionAgentSelect,
-    NewSessionOpenShell,  // Open shell directly when Shell agent is selected
+    NewSessionOpenShell, // Open shell directly when Shell agent is selected
     // SSH configuration events (new session flow - for SSH agent)
-    NewSessionSshNextField,      // Tab to next SSH input field
-    NewSessionSshPrevField,      // Shift+Tab to previous SSH input field
-    NewSessionSshInputChar(char), // Character input for SSH fields
+    NewSessionSshNextField,         // Tab to next SSH input field
+    NewSessionSshPrevField,         // Shift+Tab to previous SSH input field
+    NewSessionSshInputChar(char),   // Character input for SSH fields
     NewSessionSshPasteText(String), // Paste text into focused SSH field
-    NewSessionSshBackspace,       // Backspace in SSH fields
-    NewSessionSshConfirm,         // Confirm SSH configuration
-    NewSessionSshGoBack,          // Go back to agent selection
+    NewSessionSshBackspace,         // Backspace in SSH fields
+    NewSessionSshConfirm,           // Confirm SSH configuration
+    NewSessionSshGoBack,            // Go back to agent selection
     // Model selection events (new session flow - for Claude agent)
     NewSessionModelNext,
     NewSessionModelPrev,
     NewSessionToggleAgentModelFocus, // Tab to switch between agent and model panels
     // Notification events
-    ShowNotification(String),  // Display a notification message to the user
+    ShowNotification(String), // Display a notification message to the user
     // File finder events for @ symbol trigger
     FileFinderNavigateUp,
     FileFinderNavigateDown,
@@ -159,18 +159,18 @@ pub enum AppEvent {
     AuthSetupRefresh,         // Manual refresh to check auth completion
     AuthSetupShowCommand,     // Show manual CLI command
     // Git view events
-    ShowGitView,       // Show git view for selected session
-    GitViewSwitchTab,  // Switch between Files and Diff tabs
-    GitViewNextFile,   // Navigate to next file
-    GitViewPrevFile,   // Navigate to previous file
-    GitViewScrollUp,   // Scroll diff up
-    GitViewScrollDown, // Scroll diff down
-    GitViewNextCommit, // Navigate to next commit in commits tab
-    GitViewPrevCommit, // Navigate to previous commit in commits tab
+    ShowGitView,           // Show git view for selected session
+    GitViewSwitchTab,      // Switch between Files and Diff tabs
+    GitViewNextFile,       // Navigate to next file
+    GitViewPrevFile,       // Navigate to previous file
+    GitViewScrollUp,       // Scroll diff up
+    GitViewScrollDown,     // Scroll diff down
+    GitViewNextCommit,     // Navigate to next commit in commits tab
+    GitViewPrevCommit,     // Navigate to previous commit in commits tab
     GitViewShowCommitDiff, // Show diff for selected commit (Enter on Commits tab)
-    GitViewCommitPush, // Commit and push changes
-    GitViewBack,       // Return to session list
-    GitCommitAndPush,  // Direct commit and push from main view (p key)
+    GitViewCommitPush,     // Commit and push changes
+    GitViewBack,           // Return to session list
+    GitCommitAndPush,      // Direct commit and push from main view (p key)
     // Quick commit dialog events (for home screen [p] key)
     QuickCommitStart,           // Start quick commit dialog
     QuickCommitInputChar(char), // Character input for quick commit
@@ -189,189 +189,199 @@ pub enum AppEvent {
     GitViewCommitConfirm,         // Confirm and execute commit (Enter)
     GitCommitSuccess(String),     // Commit was successful with message
     // File tree navigation events
-    GitViewToggleFolder,          // Toggle folder expand/collapse
-    GitViewExpandAll,             // Expand all folders
-    GitViewCollapseAll,           // Collapse all folders
+    GitViewToggleFolder, // Toggle folder expand/collapse
+    GitViewExpandAll,    // Expand all folders
+    GitViewCollapseAll,  // Collapse all folders
     // Tmux integration events
-    AttachTmuxSession,            // Attach to tmux session
-    DetachTmuxSession,            // Detach from tmux session
-    EnterScrollMode,              // Enter scroll mode in tmux preview
-    ExitScrollMode,               // Exit scroll mode in tmux preview
-    ScrollPreviewUp,              // Scroll tmux preview up
-    ScrollPreviewDown,            // Scroll tmux preview down
-    ToggleExpandAll,              // Toggle expand/collapse all workspaces
+    AttachTmuxSession, // Attach to tmux session
+    DetachTmuxSession, // Detach from tmux session
+    EnterScrollMode,   // Enter scroll mode in tmux preview
+    ExitScrollMode,    // Exit scroll mode in tmux preview
+    ScrollPreviewUp,   // Scroll tmux preview up
+    ScrollPreviewDown, // Scroll tmux preview down
+    ToggleExpandAll,   // Toggle expand/collapse all workspaces
     // Other tmux rename events
-    OtherTmuxStartRename,         // Start rename mode for selected "Other tmux" session
-    OtherTmuxRenameChar(char),    // Character input for rename
-    OtherTmuxRenameBackspace,     // Backspace in rename
-    OtherTmuxConfirmRename,       // Confirm rename (Enter)
-    OtherTmuxCancelRename,        // Cancel rename (Escape)
+    OtherTmuxStartRename, // Start rename mode for selected "Other tmux" session
+    OtherTmuxRenameChar(char), // Character input for rename
+    OtherTmuxRenameBackspace, // Backspace in rename
+    OtherTmuxConfirmRename, // Confirm rename (Enter)
+    OtherTmuxCancelRename, // Cancel rename (Escape)
     // SSH session rename events
-    SshSessionStartRename,        // Start rename mode for selected SSH session
-    SshSessionRenameChar(char),   // Character input for SSH rename
-    SshSessionRenameBackspace,    // Backspace in SSH rename
-    SshSessionConfirmRename,      // Confirm SSH rename (Enter)
-    SshSessionCancelRename,       // Cancel SSH rename (Escape)
+    SshSessionStartRename,      // Start rename mode for selected SSH session
+    SshSessionRenameChar(char), // Character input for SSH rename
+    SshSessionRenameBackspace,  // Backspace in SSH rename
+    SshSessionConfirmRename,    // Confirm SSH rename (Enter)
+    SshSessionCancelRename,     // Cancel SSH rename (Escape)
     // AINB 2.0: Home screen events
-    HomeScreenSelectTile,        // Select current tile (Enter)
-    HomeScreenNavigateUp,        // Navigate up in tile grid
-    HomeScreenNavigateDown,      // Navigate down in tile grid
-    HomeScreenNavigateLeft,      // Navigate left in tile grid
-    HomeScreenNavigateRight,     // Navigate right in tile grid
+    HomeScreenSelectTile,    // Select current tile (Enter)
+    HomeScreenNavigateUp,    // Navigate up in tile grid
+    HomeScreenNavigateDown,  // Navigate down in tile grid
+    HomeScreenNavigateLeft,  // Navigate left in tile grid
+    HomeScreenNavigateRight, // Navigate right in tile grid
     // AINB 2.0: Home screen V2 events (sidebar navigation)
-    HomeScreenSidebarUp,         // Navigate up in sidebar
-    HomeScreenSidebarDown,       // Navigate down in sidebar
-    HomeScreenSidebarSelect,     // Select current sidebar item (Enter)
-    HomeScreenToggleFocus,       // Toggle focus between sidebar and content panel (Tab)
-    StarSelectedWorkspace,        // Star/unstar the currently selected workspace
+    HomeScreenSidebarUp,     // Navigate up in sidebar
+    HomeScreenSidebarDown,   // Navigate down in sidebar
+    HomeScreenSidebarSelect, // Select current sidebar item (Enter)
+    HomeScreenToggleFocus,   // Toggle focus between sidebar and content panel (Tab)
+    StarSelectedWorkspace,   // Star/unstar the currently selected workspace
     // AINB 2.0: Home screen V2 welcome panel events
-    WelcomePanelScrollUp,        // Scroll welcome panel up
-    WelcomePanelScrollDown,      // Scroll welcome panel down
-    WelcomePanelPageUp,          // Page up in welcome panel
-    WelcomePanelPageDown,        // Page down in welcome panel
-    WelcomePanelCopyContent,     // Copy welcome panel content to clipboard (y)
-    GoToAgentSelection,          // Navigate to agent selection view
-    GoToCatalog,                 // Navigate to catalog view (coming soon)
-    GoToConfig,                  // Navigate to config view
-    GoToSessionList,             // Navigate to session list view
-    GoToStats,                   // Navigate to stats view
-    GoToSkills,                  // Navigate to skills view
-    GoToRecovery,                // Navigate to session recovery view
+    WelcomePanelScrollUp,    // Scroll welcome panel up
+    WelcomePanelScrollDown,  // Scroll welcome panel down
+    WelcomePanelPageUp,      // Page up in welcome panel
+    WelcomePanelPageDown,    // Page down in welcome panel
+    WelcomePanelCopyContent, // Copy welcome panel content to clipboard (y)
+    GoToAgentSelection,      // Navigate to agent selection view
+    GoToCatalog,             // Navigate to catalog view (coming soon)
+    GoToConfig,              // Navigate to config view
+    GoToSessionList,         // Navigate to session list view
+    GoToStats,               // Navigate to stats view
+    GoToSkills,              // Navigate to skills view
+    GoToRecovery,            // Navigate to session recovery view
     // AINB 2.0: Agent selection events
-    AgentSelectionBack,          // Return to home screen (Esc)
-    AgentSelectionNextProvider,  // Navigate to next provider
-    AgentSelectionPrevProvider,  // Navigate to previous provider
-    AgentSelectionNextModel,     // Navigate to next model
-    AgentSelectionPrevModel,     // Navigate to previous model
-    AgentSelectionToggleExpand,  // Toggle provider expand
-    AgentSelectionSelect,        // Select current agent (Enter)
+    AgentSelectionBack,         // Return to home screen (Esc)
+    AgentSelectionNextProvider, // Navigate to next provider
+    AgentSelectionPrevProvider, // Navigate to previous provider
+    AgentSelectionNextModel,    // Navigate to next model
+    AgentSelectionPrevModel,    // Navigate to previous model
+    AgentSelectionToggleExpand, // Toggle provider expand
+    AgentSelectionSelect,       // Select current agent (Enter)
     // AINB 2.0: Config screen events
-    ConfigBack,                  // Return to home screen (Esc)
-    ConfigNextCategory,          // Navigate to next category
-    ConfigPrevCategory,          // Navigate to previous category
-    ConfigNextSetting,           // Navigate to next setting
-    ConfigPrevSetting,           // Navigate to previous setting
-    ConfigSwitchPane,            // Toggle focus between category and settings pane (Tab)
-    ConfigNavigateUp,            // Navigate up within current focused pane
-    ConfigNavigateDown,          // Navigate down within current focused pane
-    ConfigFocusCategories,       // Switch focus to categories pane (Left)
-    ConfigFocusSettings,         // Switch focus to settings pane (Right)
-    ConfigEditSetting,           // Start editing current setting (Enter)
-    ConfigSaveEdit,              // Save current edit (Enter while editing)
-    ConfigCancelEdit,            // Cancel current edit (Esc while editing)
-    ConfigEditChar(char),        // Input character while editing
-    ConfigEditBackspace,         // Backspace while editing
-    ConfigSaveAll,               // Save all settings (S)
+    ConfigBack,            // Return to home screen (Esc)
+    ConfigNextCategory,    // Navigate to next category
+    ConfigPrevCategory,    // Navigate to previous category
+    ConfigNextSetting,     // Navigate to next setting
+    ConfigPrevSetting,     // Navigate to previous setting
+    ConfigSwitchPane,      // Toggle focus between category and settings pane (Tab)
+    ConfigNavigateUp,      // Navigate up within current focused pane
+    ConfigNavigateDown,    // Navigate down within current focused pane
+    ConfigFocusCategories, // Switch focus to categories pane (Left)
+    ConfigFocusSettings,   // Switch focus to settings pane (Right)
+    ConfigEditSetting,     // Start editing current setting (Enter)
+    ConfigSaveEdit,        // Save current edit (Enter while editing)
+    ConfigCancelEdit,      // Cancel current edit (Esc while editing)
+    ConfigEditChar(char),  // Input character while editing
+    ConfigEditBackspace,   // Backspace while editing
+    ConfigSaveAll,         // Save all settings (S)
     // API Key configuration
-    ConfigApiKeyStart,           // Start API key input mode (when on API Key Status)
-    ConfigApiKeySave,            // Save the entered API key to keychain
-    ConfigApiKeyDelete,          // Delete stored API key
+    ConfigApiKeyStart,  // Start API key input mode (when on API Key Status)
+    ConfigApiKeySave,   // Save the entered API key to keychain
+    ConfigApiKeyDelete, // Delete stored API key
     // Auth provider popup
-    AuthProviderPopupOpen,       // Open the auth provider popup
-    AuthProviderPopupClose,      // Close the popup (Esc)
-    AuthProviderPopupNext,       // Navigate to next provider
-    AuthProviderPopupPrev,       // Navigate to previous provider
-    AuthProviderPopupSelect,     // Select current provider (Enter)
+    AuthProviderPopupOpen,            // Open the auth provider popup
+    AuthProviderPopupClose,           // Close the popup (Esc)
+    AuthProviderPopupNext,            // Navigate to next provider
+    AuthProviderPopupPrev,            // Navigate to previous provider
+    AuthProviderPopupSelect,          // Select current provider (Enter)
     AuthProviderPopupInputChar(char), // Input character for API key
-    AuthProviderPopupBackspace,  // Backspace in API key input
-    AuthProviderPopupDeleteKey,  // Delete stored API key (D)
+    AuthProviderPopupBackspace,       // Backspace in API key input
+    AuthProviderPopupDeleteKey,       // Delete stored API key (D)
     // Config popup events (for choice/text input popups)
-    ConfigPopupNavigateUp,       // Navigate up in choice list
-    ConfigPopupNavigateDown,     // Navigate down in choice list
-    ConfigPopupConfirm,          // Confirm selection/save text (Enter)
-    ConfigPopupCancel,           // Cancel popup (Esc)
-    ConfigPopupInputChar(char),  // Input character in text/number input
-    ConfigPopupBackspace,        // Backspace in text/number input
+    ConfigPopupNavigateUp,      // Navigate up in choice list
+    ConfigPopupNavigateDown,    // Navigate down in choice list
+    ConfigPopupConfirm,         // Confirm selection/save text (Enter)
+    ConfigPopupCancel,          // Cancel popup (Esc)
+    ConfigPopupInputChar(char), // Input character in text/number input
+    ConfigPopupBackspace,       // Backspace in text/number input
     // Log history viewer events
-    LogHistoryBack,              // Return to home screen (Esc)
-    LogHistoryNextSession,       // Navigate to next session
-    LogHistoryPrevSession,       // Navigate to previous session
-    LogHistorySelectSession,     // Select/load session logs (Enter)
-    LogHistoryToggleFocus,       // Toggle focus between sessions and logs (Tab)
-    LogHistoryScrollUp,          // Scroll log entries up
-    LogHistoryScrollDown,        // Scroll log entries down
-    LogHistoryPageUp,            // Page up in log entries
-    LogHistoryPageDown,          // Page down in log entries
-    LogHistoryCycleFilter,       // Cycle through filter levels (f)
-    LogHistoryRefresh,           // Refresh session list (r)
-    LogHistoryCopySelection,     // Copy selected text to clipboard (y or Ctrl+c)
-    LogHistoryScrollLeft,        // Scroll log content left (←)
-    LogHistoryScrollRight,       // Scroll log content right (→)
-    LogHistoryScrollHome,        // Reset horizontal scroll to start (Home)
-    LogHistoryCleanup,           // Delete all log files (C)
+    LogHistoryBack,          // Return to home screen (Esc)
+    LogHistoryNextSession,   // Navigate to next session
+    LogHistoryPrevSession,   // Navigate to previous session
+    LogHistorySelectSession, // Select/load session logs (Enter)
+    LogHistoryToggleFocus,   // Toggle focus between sessions and logs (Tab)
+    LogHistoryScrollUp,      // Scroll log entries up
+    LogHistoryScrollDown,    // Scroll log entries down
+    LogHistoryPageUp,        // Page up in log entries
+    LogHistoryPageDown,      // Page down in log entries
+    LogHistoryCycleFilter,   // Cycle through filter levels (f)
+    LogHistoryRefresh,       // Refresh session list (r)
+    LogHistoryCopySelection, // Copy selected text to clipboard (y or Ctrl+c)
+    LogHistoryScrollLeft,    // Scroll log content left (←)
+    LogHistoryScrollRight,   // Scroll log content right (→)
+    LogHistoryScrollHome,    // Reset horizontal scroll to start (Home)
+    LogHistoryCleanup,       // Delete all log files (C)
     // Onboarding wizard events
-    OnboardingNext,              // Go to next step (Enter/Right Arrow)
-    OnboardingBack,              // Go to previous step (Backspace/Left Arrow)
-    OnboardingCancel,            // Cancel onboarding (Esc)
-    OnboardingInputChar(char),   // Input character for git directories
-    OnboardingBackspace,         // Backspace in git directories input
-    OnboardingDelete,            // Delete character in input
-    OnboardingCursorLeft,        // Move cursor left in input
-    OnboardingCursorRight,       // Move cursor right in input
-    OnboardingCursorHome,        // Move cursor to start of input
-    OnboardingCursorEnd,         // Move cursor to end of input
-    OnboardingCheckDeps,         // Run dependency check
-    OnboardingSkipAuth,          // Skip authentication step
-    OnboardingEditorUp,          // Move editor selection up
-    OnboardingEditorDown,        // Move editor selection down
-    OnboardingFinish,            // Complete onboarding
-    OnboardingInstallConfig,     // Install recommended config (I key)
+    OnboardingNext,            // Go to next step (Enter/Right Arrow)
+    OnboardingBack,            // Go to previous step (Backspace/Left Arrow)
+    OnboardingCancel,          // Cancel onboarding (Esc)
+    OnboardingInputChar(char), // Input character for git directories
+    OnboardingBackspace,       // Backspace in git directories input
+    OnboardingDelete,          // Delete character in input
+    OnboardingCursorLeft,      // Move cursor left in input
+    OnboardingCursorRight,     // Move cursor right in input
+    OnboardingCursorHome,      // Move cursor to start of input
+    OnboardingCursorEnd,       // Move cursor to end of input
+    OnboardingCheckDeps,       // Run dependency check
+    OnboardingSkipAuth,        // Skip authentication step
+    OnboardingEditorUp,        // Move editor selection up
+    OnboardingEditorDown,      // Move editor selection down
+    OnboardingFinish,          // Complete onboarding
+    OnboardingInstallConfig,   // Install recommended config (I key)
     // Setup menu events
-    SetupMenuBack,               // Return to home screen (Esc)
-    SetupMenuSelect,             // Select menu item (Enter)
-    SetupMenuUp,                 // Navigate up
-    SetupMenuDown,               // Navigate down
-    StartOnboarding,             // Start onboarding wizard (from setup menu)
-    FactoryReset,                // Factory reset AINB
+    SetupMenuBack,   // Return to home screen (Esc)
+    SetupMenuSelect, // Select menu item (Enter)
+    SetupMenuUp,     // Navigate up
+    SetupMenuDown,   // Navigate down
+    StartOnboarding, // Start onboarding wizard (from setup menu)
+    FactoryReset,    // Factory reset AINB
     // Changelog viewer events
-    ShowChangelog,               // Navigate to changelog view (v key)
-    ChangelogBack,               // Return to home screen (Esc)
-    ChangelogScrollUp,           // Scroll up one line
-    ChangelogScrollDown,         // Scroll down one line
-    ChangelogPageUp,             // Page up
-    ChangelogPageDown,           // Page down
-    ChangelogToTop,              // Jump to top (g)
-    ChangelogToBottom,           // Jump to bottom (G)
+    ShowChangelog,       // Navigate to changelog view (v key)
+    ChangelogBack,       // Return to home screen (Esc)
+    ChangelogScrollUp,   // Scroll up one line
+    ChangelogScrollDown, // Scroll down one line
+    ChangelogPageUp,     // Page up
+    ChangelogPageDown,   // Page down
+    ChangelogToTop,      // Jump to top (g)
+    ChangelogToBottom,   // Jump to bottom (G)
     // Usage analytics events
-    UsageBack,                   // Return to home screen (Esc)
-    UsageNextProvider,           // Next provider (Right arrow)
-    UsagePrevProvider,           // Previous provider (Left arrow)
-    UsageNextTab,                // Next sub-tab (Tab)
-    UsagePrevTab,                // Previous sub-tab (Shift+Tab)
-    UsageScrollUp,               // Scroll up (k)
-    UsageScrollDown,             // Scroll down (j)
-    UsagePageUp,                 // Page up
-    UsagePageDown,               // Page down
-    UsageToTop,                  // Jump to top (g)
-    UsageToBottom,               // Jump to bottom (G)
-    UsageRefresh,                // Reload data (r)
+    UsageBack,                // Return to home screen (Esc)
+    UsageNextProvider,        // Next provider (Right arrow)
+    UsagePrevProvider,        // Previous provider (Left arrow)
+    UsageNextTab,             // Next sub-tab (Tab)
+    UsagePrevTab,             // Previous sub-tab (Shift+Tab)
+    UsageScrollUp,            // Scroll up (k)
+    UsageScrollDown,          // Scroll down (j)
+    UsagePageUp,              // Page up
+    UsagePageDown,            // Page down
+    UsageToTop,               // Jump to top (g)
+    UsageToBottom,            // Jump to bottom (G)
+    UsageRefresh,             // Reload data (r)
+    UsageCycleProviderFilter, // Cycle All/Claude/Codex (p)
+    UsageSetPeriod(u8),       // Period shortcut 1-5
+    UsageStartIncludeFilter,  // Start include project input (/)
+    UsageStartExcludeFilter,  // Start exclude project input (x)
+    UsageStartDateRange,      // Start date range input (d)
+    UsageClearFilters,        // Clear include/exclude filters (c)
+    UsageInputChar(char),     // Input for usage filter/range
+    UsageInputBackspace,      // Backspace in usage input
+    UsageInputSubmit,         // Submit usage input
+    UsageInputCancel,         // Cancel usage input
     // Skills browser events
-    SkillsBack,                  // Return to home screen (Esc)
-    SkillsNextProvider,          // Next provider (Right arrow)
-    SkillsPrevProvider,          // Previous provider (Left arrow)
-    SkillsNextTab,               // Next sub-tab (Tab)
-    SkillsPrevTab,               // Previous sub-tab (Shift+Tab)
-    SkillsScrollUp,              // Move selection up (k/Up)
-    SkillsScrollDown,            // Move selection down (j/Down)
-    SkillsPageUp,                // Page up
-    SkillsPageDown,              // Page down
-    SkillsToTop,                 // Jump to top (g)
-    SkillsToBottom,              // Jump to bottom (G)
-    SkillsRefresh,               // Reload data (r)
-    SkillsSearchStart,           // Enter search mode (/)
-    SkillsSearchChar(char),      // Append char to search query
-    SkillsSearchBackspace,       // Remove last char from search query
-    SkillsSearchClose,           // Exit search mode (Esc)
+    SkillsBack,             // Return to home screen (Esc)
+    SkillsNextProvider,     // Next provider (Right arrow)
+    SkillsPrevProvider,     // Previous provider (Left arrow)
+    SkillsNextTab,          // Next sub-tab (Tab)
+    SkillsPrevTab,          // Previous sub-tab (Shift+Tab)
+    SkillsScrollUp,         // Move selection up (k/Up)
+    SkillsScrollDown,       // Move selection down (j/Down)
+    SkillsPageUp,           // Page up
+    SkillsPageDown,         // Page down
+    SkillsToTop,            // Jump to top (g)
+    SkillsToBottom,         // Jump to bottom (G)
+    SkillsRefresh,          // Reload data (r)
+    SkillsSearchStart,      // Enter search mode (/)
+    SkillsSearchChar(char), // Append char to search query
+    SkillsSearchBackspace,  // Remove last char from search query
+    SkillsSearchClose,      // Exit search mode (Esc)
     // Session recovery events
-    SessionRecoveryBack,         // Return to home screen (Esc)
-    SessionRecoveryNext,         // Navigate to next session (Down/j)
-    SessionRecoveryPrev,         // Navigate to previous session (Up/k)
-    SessionRecoveryResume,       // Resume selected session (r)
-    SessionRecoveryArchive,      // Archive/delete selected item (d)
-    SessionRecoveryRefresh,      // Refresh session list (R)
-    SessionRecoveryToggleView,   // Toggle view mode: Sessions/Worktrees/All (Tab)
-    SessionRecoveryRecoverAll,   // Recover all orphaned worktrees (Shift+A)
-    SessionRecoveryToggleSelect, // Toggle multi-select on current item (Space)
+    SessionRecoveryBack,           // Return to home screen (Esc)
+    SessionRecoveryNext,           // Navigate to next session (Down/j)
+    SessionRecoveryPrev,           // Navigate to previous session (Up/k)
+    SessionRecoveryResume,         // Resume selected session (r)
+    SessionRecoveryArchive,        // Archive/delete selected item (d)
+    SessionRecoveryRefresh,        // Refresh session list (R)
+    SessionRecoveryToggleView,     // Toggle view mode: Sessions/Worktrees/All (Tab)
+    SessionRecoveryRecoverAll,     // Recover all orphaned worktrees (Shift+A)
+    SessionRecoveryToggleSelect,   // Toggle multi-select on current item (Space)
     SessionRecoveryDeleteSelected, // Delete all multi-selected items (Shift+D)
     ToggleSelectSession,           // Toggle multi-select on current session (Space)
     DeleteSelectedSessions,        // Bulk delete all multi-selected sessions (Shift+D)
@@ -659,7 +669,9 @@ impl EventHandler {
                 if state.selected_workspace_index.is_some() {
                     Some(AppEvent::StarSelectedWorkspace)
                 } else {
-                    Some(AppEvent::ShowNotification("Select a workspace first to star it".to_string()))
+                    Some(AppEvent::ShowNotification(
+                        "Select a workspace first to star it".to_string(),
+                    ))
                 }
             }
             KeyCode::Char('a') => {
@@ -674,7 +686,9 @@ impl EventHandler {
                 } else if state.is_other_tmux_selected() {
                     Some(AppEvent::OtherTmuxStartRename)
                 } else {
-                    Some(AppEvent::ShowNotification("F2 rename only works on SSH and 'Other tmux' sessions".to_string()))
+                    Some(AppEvent::ShowNotification(
+                        "F2 rename only works on SSH and 'Other tmux' sessions".to_string(),
+                    ))
                 }
             }
             KeyCode::Char('e') => Some(AppEvent::RestartSession),
@@ -791,9 +805,7 @@ impl EventHandler {
                         KeyCode::Esc => Some(AppEvent::NewSessionCancel),
                         KeyCode::Enter => Some(AppEvent::SourceSelectionConfirm),
                         // Down/j cycles forward: Local → Remote → SSH → Favorites → Local
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            Some(AppEvent::SourceSelectionToggle)
-                        }
+                        KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::SourceSelectionToggle),
                         // Up/k cycles backward: Local → Favorites → SSH → Remote → Local
                         KeyCode::Up | KeyCode::Char('k') => {
                             Some(AppEvent::SourceSelectionToggleReverse)
@@ -833,7 +845,9 @@ impl EventHandler {
                         KeyCode::Esc => Some(AppEvent::NewSessionCancel),
                         KeyCode::Enter => {
                             // If a favorite is selected, use it; otherwise submit input
-                            if state.new_session_state.as_ref()
+                            if state
+                                .new_session_state
+                                .as_ref()
                                 .map(|s| s.selected_favorite_index.is_some())
                                 .unwrap_or(false)
                             {
@@ -844,22 +858,20 @@ impl EventHandler {
                         }
                         KeyCode::Down => Some(AppEvent::RepoInputFavoriteNext),
                         KeyCode::Up => Some(AppEvent::RepoInputFavoritePrev),
-                        KeyCode::Char('s') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                        KeyCode::Char('s')
+                            if key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
                             Some(AppEvent::RepoInputToggleFavorite)
                         }
-                        KeyCode::Char('v') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
-                            Self::get_clipboard_text()
-                                .ok()
-                                .map(AppEvent::RepoInputPasteText)
+                        KeyCode::Char('v')
+                            if key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            Self::get_clipboard_text().ok().map(AppEvent::RepoInputPasteText)
                         }
                         KeyCode::Insert if key_event.modifiers.contains(KeyModifiers::SHIFT) => {
-                            Self::get_clipboard_text()
-                                .ok()
-                                .map(AppEvent::RepoInputPasteText)
+                            Self::get_clipboard_text().ok().map(AppEvent::RepoInputPasteText)
                         }
-                        KeyCode::Backspace
-                            if key_event.modifiers.contains(KeyModifiers::SHIFT) =>
-                        {
+                        KeyCode::Backspace if key_event.modifiers.contains(KeyModifiers::SHIFT) => {
                             Some(AppEvent::RepoInputBackspaceWord)
                         }
                         KeyCode::Backspace => Some(AppEvent::RepoInputBackspace),
@@ -874,18 +886,16 @@ impl EventHandler {
                         _ => None,
                     }
                 }
-                NewSessionStep::SelectBranch => {
-                    match key_event.code {
-                        KeyCode::Esc => Some(AppEvent::BranchSelectBack),
-                        KeyCode::Enter => Some(AppEvent::BranchSelectConfirm),
-                        KeyCode::Down => Some(AppEvent::BranchSelectNext),
-                        KeyCode::Up => Some(AppEvent::BranchSelectPrev),
-                        KeyCode::Tab => Some(AppEvent::BranchToggleCheckoutMode),
-                        KeyCode::Backspace => Some(AppEvent::BranchFilterBackspace),
-                        KeyCode::Char(c) => Some(AppEvent::BranchFilterInput(c)),
-                        _ => None,
-                    }
-                }
+                NewSessionStep::SelectBranch => match key_event.code {
+                    KeyCode::Esc => Some(AppEvent::BranchSelectBack),
+                    KeyCode::Enter => Some(AppEvent::BranchSelectConfirm),
+                    KeyCode::Down => Some(AppEvent::BranchSelectNext),
+                    KeyCode::Up => Some(AppEvent::BranchSelectPrev),
+                    KeyCode::Tab => Some(AppEvent::BranchToggleCheckoutMode),
+                    KeyCode::Backspace => Some(AppEvent::BranchFilterBackspace),
+                    KeyCode::Char(c) => Some(AppEvent::BranchFilterInput(c)),
+                    _ => None,
+                },
                 NewSessionStep::SelectRepo => {
                     match key_event.code {
                         KeyCode::Esc => Some(AppEvent::NewSessionCancel),
@@ -893,9 +903,7 @@ impl EventHandler {
                         KeyCode::Up => Some(AppEvent::NewSessionPrevRepo),
                         KeyCode::Enter => Some(AppEvent::NewSessionConfirmRepo),
                         // 's' key to star/unstar selected repo
-                        KeyCode::Char('s') => {
-                            Some(AppEvent::LocalRepoToggleFavorite)
-                        }
+                        KeyCode::Char('s') => Some(AppEvent::LocalRepoToggleFavorite),
                         // '$' key to open shell directly at repo (no branch/worktree prompt)
                         KeyCode::Char('$') => Some(AppEvent::NewSessionOpenShell),
                         _ => None,
@@ -911,39 +919,37 @@ impl EventHandler {
                         KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::NewSessionAgentNext),
                         KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::NewSessionAgentPrev),
                         // Model navigation (horizontal) - only when Claude is selected
-                        KeyCode::Right | KeyCode::Char('l') if show_model => Some(AppEvent::NewSessionModelNext),
-                        KeyCode::Left | KeyCode::Char('h') if show_model => Some(AppEvent::NewSessionModelPrev),
+                        KeyCode::Right | KeyCode::Char('l') if show_model => {
+                            Some(AppEvent::NewSessionModelNext)
+                        }
+                        KeyCode::Left | KeyCode::Char('h') if show_model => {
+                            Some(AppEvent::NewSessionModelPrev)
+                        }
                         KeyCode::Enter => Some(AppEvent::NewSessionAgentSelect),
                         _ => None,
                     }
                 }
-                NewSessionStep::ConfigureSsh => {
-                    match key_event.code {
-                        KeyCode::Esc => Some(AppEvent::NewSessionSshGoBack),
-                        KeyCode::Tab => {
-                            if key_event.modifiers.contains(KeyModifiers::SHIFT) {
-                                Some(AppEvent::NewSessionSshPrevField)
-                            } else {
-                                Some(AppEvent::NewSessionSshNextField)
-                            }
+                NewSessionStep::ConfigureSsh => match key_event.code {
+                    KeyCode::Esc => Some(AppEvent::NewSessionSshGoBack),
+                    KeyCode::Tab => {
+                        if key_event.modifiers.contains(KeyModifiers::SHIFT) {
+                            Some(AppEvent::NewSessionSshPrevField)
+                        } else {
+                            Some(AppEvent::NewSessionSshNextField)
                         }
-                        KeyCode::BackTab => Some(AppEvent::NewSessionSshPrevField),
-                        KeyCode::Enter => Some(AppEvent::NewSessionSshConfirm),
-                        KeyCode::Char('v') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
-                            Self::get_clipboard_text()
-                                .ok()
-                                .map(AppEvent::NewSessionSshPasteText)
-                        }
-                        KeyCode::Insert if key_event.modifiers.contains(KeyModifiers::SHIFT) => {
-                            Self::get_clipboard_text()
-                                .ok()
-                                .map(AppEvent::NewSessionSshPasteText)
-                        }
-                        KeyCode::Backspace => Some(AppEvent::NewSessionSshBackspace),
-                        KeyCode::Char(ch) => Some(AppEvent::NewSessionSshInputChar(ch)),
-                        _ => None,
                     }
-                }
+                    KeyCode::BackTab => Some(AppEvent::NewSessionSshPrevField),
+                    KeyCode::Enter => Some(AppEvent::NewSessionSshConfirm),
+                    KeyCode::Char('v') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                        Self::get_clipboard_text().ok().map(AppEvent::NewSessionSshPasteText)
+                    }
+                    KeyCode::Insert if key_event.modifiers.contains(KeyModifiers::SHIFT) => {
+                        Self::get_clipboard_text().ok().map(AppEvent::NewSessionSshPasteText)
+                    }
+                    KeyCode::Backspace => Some(AppEvent::NewSessionSshBackspace),
+                    KeyCode::Char(ch) => Some(AppEvent::NewSessionSshInputChar(ch)),
+                    _ => None,
+                },
                 NewSessionStep::InputBranch => {
                     // Check if model selection is available (Claude selected)
                     let show_model = session_state.should_show_model_selection();
@@ -958,7 +964,9 @@ impl EventHandler {
                             // Check if selected agent is available
                             if !agent_available {
                                 // Agent not available yet (Coming Soon)
-                                Some(AppEvent::ShowNotification("This agent is coming soon!".to_string()))
+                                Some(AppEvent::ShowNotification(
+                                    "This agent is coming soon!".to_string(),
+                                ))
                             } else if selected_agent == crate::models::SessionAgentType::Shell {
                                 // Shell selected - open shell directly
                                 Some(AppEvent::NewSessionOpenShell)
@@ -981,19 +989,15 @@ impl EventHandler {
                         // Left/Right for model selection (only when Claude is selected)
                         KeyCode::Left if show_model => Some(AppEvent::NewSessionModelPrev),
                         KeyCode::Right if show_model => Some(AppEvent::NewSessionModelNext),
-                        KeyCode::Char('v') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
-                            Self::get_clipboard_text()
-                                .ok()
-                                .map(AppEvent::NewSessionInputPasteText)
+                        KeyCode::Char('v')
+                            if key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            Self::get_clipboard_text().ok().map(AppEvent::NewSessionInputPasteText)
                         }
                         KeyCode::Insert if key_event.modifiers.contains(KeyModifiers::SHIFT) => {
-                            Self::get_clipboard_text()
-                                .ok()
-                                .map(AppEvent::NewSessionInputPasteText)
+                            Self::get_clipboard_text().ok().map(AppEvent::NewSessionInputPasteText)
                         }
-                        KeyCode::Backspace
-                            if key_event.modifiers.contains(KeyModifiers::SHIFT) =>
-                        {
+                        KeyCode::Backspace if key_event.modifiers.contains(KeyModifiers::SHIFT) => {
                             Some(AppEvent::NewSessionBackspaceWord)
                         }
                         KeyCode::Backspace => Some(AppEvent::NewSessionBackspace),
@@ -1347,43 +1351,39 @@ impl EventHandler {
                             Some(AppEvent::OnboardingBack)
                         }
                         KeyCode::Char('r') => Some(AppEvent::OnboardingCheckDeps), // Re-check
-                        KeyCode::Char('i') | KeyCode::Char('I') => Some(AppEvent::OnboardingInstallConfig), // Install config
+                        KeyCode::Char('i') | KeyCode::Char('I') => {
+                            Some(AppEvent::OnboardingInstallConfig)
+                        } // Install config
                         _ => None,
                     }
                 }
-                OnboardingStep::Authentication => {
-                    match key_event.code {
-                        KeyCode::Enter => Some(AppEvent::OnboardingNext),
-                        KeyCode::Esc => Some(AppEvent::OnboardingCancel),
-                        KeyCode::Left | KeyCode::Backspace | KeyCode::Up => {
-                            Some(AppEvent::OnboardingBack)
-                        }
-                        KeyCode::Char('s') | KeyCode::Char('S') => Some(AppEvent::OnboardingSkipAuth),
-                        _ => None,
+                OnboardingStep::Authentication => match key_event.code {
+                    KeyCode::Enter => Some(AppEvent::OnboardingNext),
+                    KeyCode::Esc => Some(AppEvent::OnboardingCancel),
+                    KeyCode::Left | KeyCode::Backspace | KeyCode::Up => {
+                        Some(AppEvent::OnboardingBack)
                     }
-                }
-                OnboardingStep::EditorSelection => {
-                    match key_event.code {
-                        KeyCode::Enter => Some(AppEvent::OnboardingNext),
-                        KeyCode::Esc => Some(AppEvent::OnboardingCancel),
-                        KeyCode::Left | KeyCode::Backspace => Some(AppEvent::OnboardingBack),
-                        KeyCode::Up => Some(AppEvent::OnboardingEditorUp),
-                        KeyCode::Down => Some(AppEvent::OnboardingEditorDown),
-                        KeyCode::Char('k') => Some(AppEvent::OnboardingEditorUp),
-                        KeyCode::Char('j') => Some(AppEvent::OnboardingEditorDown),
-                        _ => None,
+                    KeyCode::Char('s') | KeyCode::Char('S') => Some(AppEvent::OnboardingSkipAuth),
+                    _ => None,
+                },
+                OnboardingStep::EditorSelection => match key_event.code {
+                    KeyCode::Enter => Some(AppEvent::OnboardingNext),
+                    KeyCode::Esc => Some(AppEvent::OnboardingCancel),
+                    KeyCode::Left | KeyCode::Backspace => Some(AppEvent::OnboardingBack),
+                    KeyCode::Up => Some(AppEvent::OnboardingEditorUp),
+                    KeyCode::Down => Some(AppEvent::OnboardingEditorDown),
+                    KeyCode::Char('k') => Some(AppEvent::OnboardingEditorUp),
+                    KeyCode::Char('j') => Some(AppEvent::OnboardingEditorDown),
+                    _ => None,
+                },
+                OnboardingStep::Summary => match key_event.code {
+                    KeyCode::Enter => Some(AppEvent::OnboardingFinish),
+                    KeyCode::Esc => Some(AppEvent::OnboardingCancel),
+                    KeyCode::Left | KeyCode::Backspace | KeyCode::Up => {
+                        Some(AppEvent::OnboardingBack)
                     }
-                }
-                OnboardingStep::Summary => {
-                    match key_event.code {
-                        KeyCode::Enter => Some(AppEvent::OnboardingFinish),
-                        KeyCode::Esc => Some(AppEvent::OnboardingCancel),
-                        KeyCode::Left | KeyCode::Backspace | KeyCode::Up => {
-                            Some(AppEvent::OnboardingBack)
-                        }
-                        _ => None,
-                    }
-                }
+                    _ => None,
+                },
                 _ => {
                     // Welcome and other steps - basic navigation
                     match key_event.code {
@@ -1406,10 +1406,10 @@ impl EventHandler {
         if state.setup_menu_state.showing_confirmation {
             match key_event.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                    Some(AppEvent::SetupMenuSelect)  // Confirm
+                    Some(AppEvent::SetupMenuSelect) // Confirm
                 }
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                    Some(AppEvent::SetupMenuBack)  // Cancel
+                    Some(AppEvent::SetupMenuBack) // Cancel
                 }
                 _ => None,
             }
@@ -1553,7 +1553,9 @@ impl EventHandler {
             KeyCode::Char('f') => return Some(AppEvent::LogHistoryCycleFilter),
             KeyCode::Char('r') => return Some(AppEvent::LogHistoryRefresh),
             KeyCode::Char('y') => return Some(AppEvent::LogHistoryCopySelection),
-            KeyCode::Char('c') if key_event.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+            KeyCode::Char('c')
+                if key_event.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
+            {
                 return Some(AppEvent::LogHistoryCopySelection);
             }
             KeyCode::Char('c') | KeyCode::Char('C') => return Some(AppEvent::LogHistoryCleanup),
@@ -1564,31 +1566,37 @@ impl EventHandler {
 
         // Focus-specific navigation
         match state.log_history_state.focus {
-            LogViewerFocus::SessionList => {
-                match key_event.code {
-                    KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::LogHistoryPrevSession),
-                    KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::LogHistoryNextSession),
-                    KeyCode::Enter => Some(AppEvent::LogHistorySelectSession),
-                    _ => None,
-                }
-            }
-            LogViewerFocus::LogEntries => {
-                match key_event.code {
-                    KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::LogHistoryScrollUp),
-                    KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::LogHistoryScrollDown),
-                    KeyCode::PageUp => Some(AppEvent::LogHistoryPageUp),
-                    KeyCode::PageDown => Some(AppEvent::LogHistoryPageDown),
-                    KeyCode::Left | KeyCode::Char('h') => Some(AppEvent::LogHistoryScrollLeft),
-                    KeyCode::Right | KeyCode::Char('l') => Some(AppEvent::LogHistoryScrollRight),
-                    _ => None,
-                }
-            }
+            LogViewerFocus::SessionList => match key_event.code {
+                KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::LogHistoryPrevSession),
+                KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::LogHistoryNextSession),
+                KeyCode::Enter => Some(AppEvent::LogHistorySelectSession),
+                _ => None,
+            },
+            LogViewerFocus::LogEntries => match key_event.code {
+                KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::LogHistoryScrollUp),
+                KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::LogHistoryScrollDown),
+                KeyCode::PageUp => Some(AppEvent::LogHistoryPageUp),
+                KeyCode::PageDown => Some(AppEvent::LogHistoryPageDown),
+                KeyCode::Left | KeyCode::Char('h') => Some(AppEvent::LogHistoryScrollLeft),
+                KeyCode::Right | KeyCode::Char('l') => Some(AppEvent::LogHistoryScrollRight),
+                _ => None,
+            },
         }
     }
 
     // Usage analytics key handling
-    fn handle_usage_keys(key_event: KeyEvent, _state: &AppState) -> Option<AppEvent> {
+    fn handle_usage_keys(key_event: KeyEvent, state: &AppState) -> Option<AppEvent> {
         tracing::debug!("Usage key handler: {:?}", key_event.code);
+
+        if state.usage_state.input_mode.is_some() {
+            return match key_event.code {
+                KeyCode::Esc => Some(AppEvent::UsageInputCancel),
+                KeyCode::Enter => Some(AppEvent::UsageInputSubmit),
+                KeyCode::Backspace => Some(AppEvent::UsageInputBackspace),
+                KeyCode::Char(ch) => Some(AppEvent::UsageInputChar(ch)),
+                _ => None,
+            };
+        }
 
         match key_event.code {
             KeyCode::Esc => Some(AppEvent::UsageBack),
@@ -1603,6 +1611,16 @@ impl EventHandler {
             KeyCode::Char('g') => Some(AppEvent::UsageToTop),
             KeyCode::Char('G') => Some(AppEvent::UsageToBottom),
             KeyCode::Char('r') => Some(AppEvent::UsageRefresh),
+            KeyCode::Char('p') => Some(AppEvent::UsageCycleProviderFilter),
+            KeyCode::Char('1') => Some(AppEvent::UsageSetPeriod(1)),
+            KeyCode::Char('2') => Some(AppEvent::UsageSetPeriod(2)),
+            KeyCode::Char('3') => Some(AppEvent::UsageSetPeriod(3)),
+            KeyCode::Char('4') => Some(AppEvent::UsageSetPeriod(4)),
+            KeyCode::Char('5') => Some(AppEvent::UsageSetPeriod(5)),
+            KeyCode::Char('/') => Some(AppEvent::UsageStartIncludeFilter),
+            KeyCode::Char('x') => Some(AppEvent::UsageStartExcludeFilter),
+            KeyCode::Char('d') => Some(AppEvent::UsageStartDateRange),
+            KeyCode::Char('c') => Some(AppEvent::UsageClearFilters),
             _ => None,
         }
     }
@@ -1712,24 +1730,20 @@ impl EventHandler {
         // Focus-specific navigation
         let focus = &state.home_screen_v2_state.focus;
         let event = match focus {
-            HomeScreenFocus::Sidebar => {
-                match key_event.code {
-                    KeyCode::Up => Some(AppEvent::HomeScreenSidebarUp),
-                    KeyCode::Down => Some(AppEvent::HomeScreenSidebarDown),
-                    KeyCode::Enter => Some(AppEvent::HomeScreenSidebarSelect),
-                    _ => None,
-                }
-            }
-            HomeScreenFocus::ContentPanel => {
-                match key_event.code {
-                    KeyCode::Up => Some(AppEvent::WelcomePanelScrollUp),
-                    KeyCode::Down => Some(AppEvent::WelcomePanelScrollDown),
-                    KeyCode::PageUp => Some(AppEvent::WelcomePanelPageUp),
-                    KeyCode::PageDown => Some(AppEvent::WelcomePanelPageDown),
-                    KeyCode::Char('y') => Some(AppEvent::WelcomePanelCopyContent),
-                    _ => None,
-                }
-            }
+            HomeScreenFocus::Sidebar => match key_event.code {
+                KeyCode::Up => Some(AppEvent::HomeScreenSidebarUp),
+                KeyCode::Down => Some(AppEvent::HomeScreenSidebarDown),
+                KeyCode::Enter => Some(AppEvent::HomeScreenSidebarSelect),
+                _ => None,
+            },
+            HomeScreenFocus::ContentPanel => match key_event.code {
+                KeyCode::Up => Some(AppEvent::WelcomePanelScrollUp),
+                KeyCode::Down => Some(AppEvent::WelcomePanelScrollDown),
+                KeyCode::PageUp => Some(AppEvent::WelcomePanelPageUp),
+                KeyCode::PageDown => Some(AppEvent::WelcomePanelPageDown),
+                KeyCode::Char('y') => Some(AppEvent::WelcomePanelCopyContent),
+                _ => None,
+            },
         };
 
         tracing::debug!("HomeScreen V2 key handler returning: {:?}", event);
@@ -1797,8 +1811,8 @@ impl EventHandler {
             }
         } else {
             // Navigation mode - check if we're on auth settings
-            let is_auth_category = config_state.selected_category == 0;  // Authentication category
-            let on_claude_auth = is_auth_category && config_state.selected_setting == 0;  // Claude Authentication
+            let is_auth_category = config_state.selected_category == 0; // Authentication category
+            let on_claude_auth = is_auth_category && config_state.selected_setting == 0; // Claude Authentication
 
             match key_event.code {
                 KeyCode::Esc => Some(AppEvent::ConfigBack),
@@ -1907,10 +1921,22 @@ impl EventHandler {
                 // Mark for async processing to reload workspace data
                 state.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
             }
-            AppEvent::NextSession => { state.next_session(); state.last_preview_update = None; },
-            AppEvent::PreviousSession => { state.previous_session(); state.last_preview_update = None; },
-            AppEvent::NextWorkspace => { state.next_workspace(); state.last_preview_update = None; },
-            AppEvent::PreviousWorkspace => { state.previous_workspace(); state.last_preview_update = None; },
+            AppEvent::NextSession => {
+                state.next_session();
+                state.last_preview_update = None;
+            }
+            AppEvent::PreviousSession => {
+                state.previous_session();
+                state.last_preview_update = None;
+            }
+            AppEvent::NextWorkspace => {
+                state.next_workspace();
+                state.last_preview_update = None;
+            }
+            AppEvent::PreviousWorkspace => {
+                state.previous_workspace();
+                state.last_preview_update = None;
+            }
             AppEvent::GoToTop => {
                 if state.selected_workspace_index.is_some() {
                     state.selected_session_index = Some(0);
@@ -2117,16 +2143,15 @@ impl EventHandler {
                             tracing::info!("Opening shell in workspace: {:?}", repo_path);
 
                             // Find the workspace index for this repo
-                            let workspace_idx = state.workspaces.iter()
-                                .position(|w| w.path == repo_path);
+                            let workspace_idx =
+                                state.workspaces.iter().position(|w| w.path == repo_path);
 
                             if let Some(idx) = workspace_idx {
-                                state.pending_async_action = Some(
-                                    AsyncAction::OpenWorkspaceShell {
+                                state.pending_async_action =
+                                    Some(AsyncAction::OpenWorkspaceShell {
                                         workspace_index: idx,
                                         target_dir: None, // Open in workspace root
-                                    }
-                                );
+                                    });
                             } else {
                                 state.add_warning_notification("Workspace not found".to_string());
                             }
@@ -2237,10 +2262,13 @@ impl EventHandler {
                         if let Some(tmux_name) = &ssh_session.tmux_session_name {
                             let session_name = tmux_name.clone();
                             tracing::info!("[ACTION] Attaching to SSH session: {}", session_name);
-                            state.pending_async_action = Some(AsyncAction::AttachToOtherTmux(session_name));
+                            state.pending_async_action =
+                                Some(AsyncAction::AttachToOtherTmux(session_name));
                         } else {
                             tracing::warn!("[ACTION] SSH session has no tmux session name");
-                            state.add_error_notification("SSH session has no tmux session".to_string());
+                            state.add_error_notification(
+                                "SSH session has no tmux session".to_string(),
+                            );
                         }
                     } else {
                         tracing::warn!("[ACTION] SSH session selected but no session found");
@@ -2249,8 +2277,12 @@ impl EventHandler {
                 } else if state.is_other_tmux_selected() {
                     if let Some(other_session) = state.selected_other_tmux_session() {
                         let session_name = other_session.name.clone();
-                        tracing::info!("[ACTION] Attaching to other tmux session: {}", session_name);
-                        state.pending_async_action = Some(AsyncAction::AttachToOtherTmux(session_name));
+                        tracing::info!(
+                            "[ACTION] Attaching to other tmux session: {}",
+                            session_name
+                        );
+                        state.pending_async_action =
+                            Some(AsyncAction::AttachToOtherTmux(session_name));
                     } else {
                         tracing::warn!("[ACTION] Other tmux selected but no session found");
                     }
@@ -2260,10 +2292,16 @@ impl EventHandler {
                         if let Some(workspace) = state.workspaces.get(workspace_idx) {
                             if let Some(shell) = &workspace.shell_session {
                                 let session_name = shell.tmux_session_name.clone();
-                                tracing::info!("[ACTION] Attaching to workspace shell: {}", session_name);
-                                state.pending_async_action = Some(AsyncAction::AttachToOtherTmux(session_name));
+                                tracing::info!(
+                                    "[ACTION] Attaching to workspace shell: {}",
+                                    session_name
+                                );
+                                state.pending_async_action =
+                                    Some(AsyncAction::AttachToOtherTmux(session_name));
                             } else {
-                                tracing::warn!("[ACTION] Shell selected but no shell session found in workspace");
+                                tracing::warn!(
+                                    "[ACTION] Shell selected but no shell session found in workspace"
+                                );
                                 state.add_error_notification("No shell session found".to_string());
                             }
                         }
@@ -2281,8 +2319,11 @@ impl EventHandler {
                     }
                     state.pending_async_action = Some(AsyncAction::AttachToTmuxSession(session_id));
                 } else {
-                    tracing::warn!("[ACTION] AttachTmuxSession: No session selected (workspace_idx={:?}, session_idx={:?})",
-                        state.selected_workspace_index, state.selected_session_index);
+                    tracing::warn!(
+                        "[ACTION] AttachTmuxSession: No session selected (workspace_idx={:?}, session_idx={:?})",
+                        state.selected_workspace_index,
+                        state.selected_session_index
+                    );
                     state.add_error_notification("No session selected to attach".to_string());
                 }
             }
@@ -2347,27 +2388,46 @@ impl EventHandler {
                     if let Some(ssh_session) = state.selected_ssh_session() {
                         // SSH sessions are tmux sessions - use the tmux session name for kill
                         if let Some(tmux_name) = ssh_session.tmux_session_name.clone() {
-                            tracing::info!("[ACTION] Showing kill confirmation for SSH session: {}", tmux_name);
+                            tracing::info!(
+                                "[ACTION] Showing kill confirmation for SSH session: {}",
+                                tmux_name
+                            );
                             state.show_kill_ssh_session_confirmation(tmux_name);
                         } else {
                             tracing::warn!("[ACTION] SSH session has no tmux_session_name");
-                            state.add_warning_notification("Cannot delete SSH session: no tmux session name".to_string());
+                            state.add_warning_notification(
+                                "Cannot delete SSH session: no tmux session name".to_string(),
+                            );
                         }
                     } else {
-                        tracing::warn!("[ACTION] SSH session selected but no session found at index {:?}", state.selected_ssh_session_index);
+                        tracing::warn!(
+                            "[ACTION] SSH session selected but no session found at index {:?}",
+                            state.selected_ssh_session_index
+                        );
                     }
                 // Check if we're in the "Other tmux" section
                 } else if state.is_other_tmux_selected() {
                     if let Some(other_session) = state.selected_other_tmux_session() {
-                        tracing::info!("[ACTION] Showing kill confirmation for other tmux session: {}", other_session.name);
+                        tracing::info!(
+                            "[ACTION] Showing kill confirmation for other tmux session: {}",
+                            other_session.name
+                        );
                         state.show_kill_other_tmux_confirmation(other_session.name.clone());
                     } else {
-                        tracing::warn!("[ACTION] Other tmux selected but no session found at index {:?}", state.selected_other_tmux_index);
+                        tracing::warn!(
+                            "[ACTION] Other tmux selected but no session found at index {:?}",
+                            state.selected_other_tmux_index
+                        );
                     }
                 } else if state.shell_selected {
                     // Shell session selected - show kill shell confirmation
                     if let Some(workspace_idx) = state.selected_workspace_index {
-                        if state.workspaces.get(workspace_idx).and_then(|w| w.shell_session.as_ref()).is_some() {
+                        if state
+                            .workspaces
+                            .get(workspace_idx)
+                            .and_then(|w| w.shell_session.as_ref())
+                            .is_some()
+                        {
                             state.show_kill_shell_confirmation(workspace_idx);
                         }
                     }
@@ -2389,16 +2449,24 @@ impl EventHandler {
                 state.toggle_select_session();
                 let count = state.selected_sessions.len();
                 if count > 0 {
-                    state.add_success_notification(format!("{} session(s) selected — Shift+D to delete", count));
+                    state.add_success_notification(format!(
+                        "{} session(s) selected — Shift+D to delete",
+                        count
+                    ));
                 }
             }
             AppEvent::DeleteSelectedSessions => {
                 let count = state.selected_sessions.len();
                 if count == 0 {
-                    state.add_warning_notification("No sessions selected. Use Space to select sessions first.".to_string());
+                    state.add_warning_notification(
+                        "No sessions selected. Use Space to select sessions first.".to_string(),
+                    );
                 } else {
                     let ids: Vec<uuid::Uuid> = state.selected_sessions.iter().copied().collect();
-                    state.add_success_notification(format!("Deleting {} selected session(s)...", count));
+                    state.add_success_notification(format!(
+                        "Deleting {} selected session(s)...",
+                        count
+                    ));
                     state.pending_async_action = Some(AsyncAction::BulkDeleteSessions(ids));
                     state.selected_sessions.clear();
                 }
@@ -2679,7 +2747,9 @@ impl EventHandler {
                 if let Some(ref mut git_state) = state.git_view_state {
                     match git_state.active_tab {
                         crate::components::git_view::GitTab::Diff => git_state.scroll_diff_up(),
-                        crate::components::git_view::GitTab::Markdown => git_state.scroll_markdown_up(),
+                        crate::components::git_view::GitTab::Markdown => {
+                            git_state.scroll_markdown_up()
+                        }
                         _ => {}
                     }
                 }
@@ -2688,7 +2758,9 @@ impl EventHandler {
                 if let Some(ref mut git_state) = state.git_view_state {
                     match git_state.active_tab {
                         crate::components::git_view::GitTab::Diff => git_state.scroll_diff_down(),
-                        crate::components::git_view::GitTab::Markdown => git_state.scroll_markdown_down(),
+                        crate::components::git_view::GitTab::Markdown => {
+                            git_state.scroll_markdown_down()
+                        }
                         _ => {}
                     }
                 }
@@ -2713,7 +2785,10 @@ impl EventHandler {
                     if let Some(commit) = git_state.commits.get(git_state.selected_commit_index) {
                         let commit_hash = commit.hash_short.clone();
                         // Load the commit diff
-                        match crate::git::operations::get_commit_diff(&git_state.worktree_path, &commit_hash) {
+                        match crate::git::operations::get_commit_diff(
+                            &git_state.worktree_path,
+                            &commit_hash,
+                        ) {
                             Ok(diff_lines) => {
                                 git_state.diff_content = diff_lines;
                                 git_state.diff_scroll_offset = 0;
@@ -2722,7 +2797,10 @@ impl EventHandler {
                             }
                             Err(e) => {
                                 tracing::error!("Failed to get commit diff: {}", e);
-                                state.add_error_notification(format!("Failed to load commit diff: {}", e));
+                                state.add_error_notification(format!(
+                                    "Failed to load commit diff: {}",
+                                    e
+                                ));
                             }
                         }
                     }
@@ -2748,7 +2826,8 @@ impl EventHandler {
             }
             AppEvent::GitViewBack => {
                 // Return to the previous view (where user was before opening Git view)
-                state.current_view = state.previous_view.take().unwrap_or(crate::app::state::View::SessionList);
+                state.current_view =
+                    state.previous_view.take().unwrap_or(crate::app::state::View::SessionList);
                 state.git_view_state = None;
             }
             // Commit message input events
@@ -2958,54 +3037,46 @@ impl EventHandler {
 
                         // Try to get the remote URL from the git repository
                         // This allows favoriting the REMOTE repo, not just the local path
-                        let (source, source_type, display_source) =
-                            if let Ok(git_repo) = crate::git::RepositoryManager::open(&workspace.path) {
-                                if let Ok(Some(remote_url)) = git_repo.get_remote_url() {
-                                    // Parse the remote URL to get owner/repo
-                                    if let Ok(repo_source) =
-                                        crate::git::RepoSource::from_input(&remote_url)
-                                    {
-                                        if let Ok(parsed) = repo_source.parse_components() {
-                                            // Use GitHub shorthand if it's a GitHub repo
-                                            if parsed.host == "github.com" {
-                                                let shorthand =
-                                                    format!("{}/{}", parsed.owner, parsed.repo_name);
-                                                (
-                                                    shorthand.clone(),
-                                                    crate::config::FavoriteSourceType::GithubShorthand,
-                                                    shorthand,
-                                                )
-                                            } else {
-                                                // For other hosts, use the full URL
-                                                let source_type = if remote_url.starts_with("git@") {
-                                                    crate::config::FavoriteSourceType::SshUrl
-                                                } else {
-                                                    crate::config::FavoriteSourceType::HttpsUrl
-                                                };
-                                                let display =
-                                                    format!("{}/{}", parsed.owner, parsed.repo_name);
-                                                (remote_url, source_type, display)
-                                            }
+                        let (source, source_type, display_source) = if let Ok(git_repo) =
+                            crate::git::RepositoryManager::open(&workspace.path)
+                        {
+                            if let Ok(Some(remote_url)) = git_repo.get_remote_url() {
+                                // Parse the remote URL to get owner/repo
+                                if let Ok(repo_source) =
+                                    crate::git::RepoSource::from_input(&remote_url)
+                                {
+                                    if let Ok(parsed) = repo_source.parse_components() {
+                                        // Use GitHub shorthand if it's a GitHub repo
+                                        if parsed.host == "github.com" {
+                                            let shorthand =
+                                                format!("{}/{}", parsed.owner, parsed.repo_name);
+                                            (
+                                                shorthand.clone(),
+                                                crate::config::FavoriteSourceType::GithubShorthand,
+                                                shorthand,
+                                            )
                                         } else {
-                                            // Couldn't parse, use raw URL
+                                            // For other hosts, use the full URL
                                             let source_type = if remote_url.starts_with("git@") {
                                                 crate::config::FavoriteSourceType::SshUrl
                                             } else {
                                                 crate::config::FavoriteSourceType::HttpsUrl
                                             };
-                                            (remote_url.clone(), source_type, remote_url)
+                                            let display =
+                                                format!("{}/{}", parsed.owner, parsed.repo_name);
+                                            (remote_url, source_type, display)
                                         }
                                     } else {
-                                        // Fallback to local path
-                                        let path_str = workspace.path.display().to_string();
-                                        (
-                                            path_str.clone(),
-                                            crate::config::FavoriteSourceType::LocalPath,
-                                            path_str,
-                                        )
+                                        // Couldn't parse, use raw URL
+                                        let source_type = if remote_url.starts_with("git@") {
+                                            crate::config::FavoriteSourceType::SshUrl
+                                        } else {
+                                            crate::config::FavoriteSourceType::HttpsUrl
+                                        };
+                                        (remote_url.clone(), source_type, remote_url)
                                     }
                                 } else {
-                                    // No remote, use local path
+                                    // Fallback to local path
                                     let path_str = workspace.path.display().to_string();
                                     (
                                         path_str.clone(),
@@ -3014,14 +3085,23 @@ impl EventHandler {
                                     )
                                 }
                             } else {
-                                // Not a git repo, use local path
+                                // No remote, use local path
                                 let path_str = workspace.path.display().to_string();
                                 (
                                     path_str.clone(),
                                     crate::config::FavoriteSourceType::LocalPath,
                                     path_str,
                                 )
-                            };
+                            }
+                        } else {
+                            // Not a git repo, use local path
+                            let path_str = workspace.path.display().to_string();
+                            (
+                                path_str.clone(),
+                                crate::config::FavoriteSourceType::LocalPath,
+                                path_str,
+                            )
+                        };
 
                         // Toggle: remove if exists, add if not
                         // Check both source and local path for existing favorites
@@ -3168,8 +3248,16 @@ impl EventHandler {
                     // Store selected agent and proceed to session creation
                     state.add_success_notification(format!(
                         "Selected: {} - {}",
-                        state.agent_selection_state.current_provider().map(|p| p.name.as_str()).unwrap_or("Unknown"),
-                        state.agent_selection_state.current_model().map(|m| m.name.as_str()).unwrap_or("Unknown")
+                        state
+                            .agent_selection_state
+                            .current_provider()
+                            .map(|p| p.name.as_str())
+                            .unwrap_or("Unknown"),
+                        state
+                            .agent_selection_state
+                            .current_model()
+                            .map(|m| m.name.as_str())
+                            .unwrap_or("Unknown")
                     ));
                     // Go to session list or new session
                     state.current_view = View::SessionList;
@@ -3193,15 +3281,17 @@ impl EventHandler {
             AppEvent::ConfigPrevCategory => {
                 let num_categories = state.config_screen_state.categories.len();
                 if num_categories > 0 {
-                    state.config_screen_state.selected_category =
-                        state.config_screen_state.selected_category
-                            .checked_sub(1)
-                            .unwrap_or(num_categories - 1);
+                    state.config_screen_state.selected_category = state
+                        .config_screen_state
+                        .selected_category
+                        .checked_sub(1)
+                        .unwrap_or(num_categories - 1);
                     state.config_screen_state.selected_setting = 0;
                 }
             }
             AppEvent::ConfigNextSetting => {
-                let current_category = &state.config_screen_state.categories[state.config_screen_state.selected_category];
+                let current_category = &state.config_screen_state.categories
+                    [state.config_screen_state.selected_category];
                 if let Some(settings) = state.config_screen_state.settings.get(current_category) {
                     if !settings.is_empty() {
                         state.config_screen_state.selected_setting =
@@ -3210,23 +3300,29 @@ impl EventHandler {
                 }
             }
             AppEvent::ConfigPrevSetting => {
-                let current_category = &state.config_screen_state.categories[state.config_screen_state.selected_category];
+                let current_category = &state.config_screen_state.categories
+                    [state.config_screen_state.selected_category];
                 if let Some(settings) = state.config_screen_state.settings.get(current_category) {
                     if !settings.is_empty() {
-                        state.config_screen_state.selected_setting =
-                            state.config_screen_state.selected_setting
-                                .checked_sub(1)
-                                .unwrap_or(settings.len() - 1);
+                        state.config_screen_state.selected_setting = state
+                            .config_screen_state
+                            .selected_setting
+                            .checked_sub(1)
+                            .unwrap_or(settings.len() - 1);
                     }
                 }
             }
             AppEvent::ConfigSwitchPane => {
                 // Toggle focus between categories and settings panes
-                state.config_screen_state.focused_pane = match state.config_screen_state.focused_pane {
-                    ConfigPane::Categories => ConfigPane::Settings,
-                    ConfigPane::Settings => ConfigPane::Categories,
-                };
-                tracing::debug!("Config switch pane - focus is now on {:?}", state.config_screen_state.focused_pane);
+                state.config_screen_state.focused_pane =
+                    match state.config_screen_state.focused_pane {
+                        ConfigPane::Categories => ConfigPane::Settings,
+                        ConfigPane::Settings => ConfigPane::Categories,
+                    };
+                tracing::debug!(
+                    "Config switch pane - focus is now on {:?}",
+                    state.config_screen_state.focused_pane
+                );
             }
             AppEvent::ConfigNavigateUp => {
                 // Navigate up within the currently focused pane
@@ -3235,22 +3331,27 @@ impl EventHandler {
                         // Navigate to previous category
                         let num_categories = state.config_screen_state.categories.len();
                         if num_categories > 0 {
-                            state.config_screen_state.selected_category =
-                                state.config_screen_state.selected_category
-                                    .checked_sub(1)
-                                    .unwrap_or(num_categories - 1);
+                            state.config_screen_state.selected_category = state
+                                .config_screen_state
+                                .selected_category
+                                .checked_sub(1)
+                                .unwrap_or(num_categories - 1);
                             state.config_screen_state.selected_setting = 0;
                         }
                     }
                     ConfigPane::Settings => {
                         // Navigate to previous setting
-                        let current_category = &state.config_screen_state.categories[state.config_screen_state.selected_category];
-                        if let Some(settings) = state.config_screen_state.settings.get(current_category) {
+                        let current_category = &state.config_screen_state.categories
+                            [state.config_screen_state.selected_category];
+                        if let Some(settings) =
+                            state.config_screen_state.settings.get(current_category)
+                        {
                             if !settings.is_empty() {
-                                state.config_screen_state.selected_setting =
-                                    state.config_screen_state.selected_setting
-                                        .checked_sub(1)
-                                        .unwrap_or(settings.len() - 1);
+                                state.config_screen_state.selected_setting = state
+                                    .config_screen_state
+                                    .selected_setting
+                                    .checked_sub(1)
+                                    .unwrap_or(settings.len() - 1);
                             }
                         }
                     }
@@ -3270,11 +3371,15 @@ impl EventHandler {
                     }
                     ConfigPane::Settings => {
                         // Navigate to next setting
-                        let current_category = &state.config_screen_state.categories[state.config_screen_state.selected_category];
-                        if let Some(settings) = state.config_screen_state.settings.get(current_category) {
+                        let current_category = &state.config_screen_state.categories
+                            [state.config_screen_state.selected_category];
+                        if let Some(settings) =
+                            state.config_screen_state.settings.get(current_category)
+                        {
                             if !settings.is_empty() {
                                 state.config_screen_state.selected_setting =
-                                    (state.config_screen_state.selected_setting + 1) % settings.len();
+                                    (state.config_screen_state.selected_setting + 1)
+                                        % settings.len();
                             }
                         }
                     }
@@ -3289,9 +3394,11 @@ impl EventHandler {
                 tracing::debug!("Config focus switched to Settings pane");
             }
             AppEvent::ConfigEditSetting => {
-                let current_category = state.config_screen_state.categories[state.config_screen_state.selected_category];
+                let current_category = state.config_screen_state.categories
+                    [state.config_screen_state.selected_category];
                 if let Some(settings) = state.config_screen_state.settings.get(&current_category) {
-                    if let Some(setting) = settings.get(state.config_screen_state.selected_setting) {
+                    if let Some(setting) = settings.get(state.config_screen_state.selected_setting)
+                    {
                         // Open popup based on setting type
                         let title = setting.label.clone();
                         let description = setting.description.clone();
@@ -3317,12 +3424,7 @@ impl EventHandler {
                             }
                             crate::app::state::ConfigValue::Secret(_) => {
                                 // For secrets, show empty input (don't reveal existing value)
-                                state.config_popup_state.open_text(
-                                    &title,
-                                    &description,
-                                    &key,
-                                    "",
-                                );
+                                state.config_popup_state.open_text(&title, &description, &key, "");
                             }
                             crate::app::state::ConfigValue::Bool(value) => {
                                 state.config_popup_state.open_boolean(
@@ -3346,23 +3448,44 @@ impl EventHandler {
                 }
             }
             AppEvent::ConfigSaveEdit => {
-                let current_category = state.config_screen_state.categories[state.config_screen_state.selected_category];
-                if let Some(settings) = state.config_screen_state.settings.get_mut(&current_category) {
-                    if let Some(setting) = settings.get_mut(state.config_screen_state.selected_setting) {
+                let current_category = state.config_screen_state.categories
+                    [state.config_screen_state.selected_category];
+                if let Some(settings) =
+                    state.config_screen_state.settings.get_mut(&current_category)
+                {
+                    if let Some(setting) =
+                        settings.get_mut(state.config_screen_state.selected_setting)
+                    {
                         let new_value = state.config_screen_state.edit_buffer.clone();
                         // Update the value based on the type
                         setting.value = match &setting.value {
-                            crate::app::state::ConfigValue::Text(_) => crate::app::state::ConfigValue::Text(new_value),
-                            crate::app::state::ConfigValue::Secret(_) => crate::app::state::ConfigValue::Secret(new_value),
-                            crate::app::state::ConfigValue::Bool(_) => crate::app::state::ConfigValue::Bool(new_value.to_lowercase() == "true"),
-                            crate::app::state::ConfigValue::Number(_) => crate::app::state::ConfigValue::Number(new_value.parse().unwrap_or(0)),
+                            crate::app::state::ConfigValue::Text(_) => {
+                                crate::app::state::ConfigValue::Text(new_value)
+                            }
+                            crate::app::state::ConfigValue::Secret(_) => {
+                                crate::app::state::ConfigValue::Secret(new_value)
+                            }
+                            crate::app::state::ConfigValue::Bool(_) => {
+                                crate::app::state::ConfigValue::Bool(
+                                    new_value.to_lowercase() == "true",
+                                )
+                            }
+                            crate::app::state::ConfigValue::Number(_) => {
+                                crate::app::state::ConfigValue::Number(
+                                    new_value.parse().unwrap_or(0),
+                                )
+                            }
                             crate::app::state::ConfigValue::Choice(options, _) => {
                                 // Try to find the index of the entered value
                                 let idx = options.iter().position(|o| o == &new_value).unwrap_or(0);
                                 crate::app::state::ConfigValue::Choice(options.clone(), idx)
                             }
                         };
-                        tracing::info!("Saved setting: {} = {}", setting.label, setting.value.display());
+                        tracing::info!(
+                            "Saved setting: {} = {}",
+                            setting.label,
+                            setting.value.display()
+                        );
                     }
                 }
                 state.config_screen_state.editing = false;
@@ -3402,7 +3525,9 @@ impl EventHandler {
                 tracing::info!("Starting API key input mode");
                 state.config_screen_state.api_key_input_mode = true;
                 state.config_screen_state.edit_buffer.clear();
-                state.add_info_notification("Enter your Anthropic API key (starts with sk-ant-)".to_string());
+                state.add_info_notification(
+                    "Enter your Anthropic API key (starts with sk-ant-)".to_string(),
+                );
             }
             AppEvent::ConfigApiKeySave => {
                 let api_key = state.config_screen_state.edit_buffer.clone();
@@ -3410,15 +3535,21 @@ impl EventHandler {
 
                 match credentials::store_anthropic_api_key(&api_key) {
                     Ok(()) => {
-                        state.add_success_notification("API key saved to system keychain".to_string());
+                        state.add_success_notification(
+                            "API key saved to system keychain".to_string(),
+                        );
                         tracing::info!("API key successfully stored in keychain");
 
                         // Update auth status to show API key configured
                         let masked = credentials::get_anthropic_api_key_masked();
                         let status = format!("API Key ({})", masked);
                         let auth_category = crate::app::state::ConfigCategory::Authentication;
-                        if let Some(settings) = state.config_screen_state.settings.get_mut(&auth_category) {
-                            if let Some(status_setting) = settings.iter_mut().find(|s| s.key == "claude_auth") {
+                        if let Some(settings) =
+                            state.config_screen_state.settings.get_mut(&auth_category)
+                        {
+                            if let Some(status_setting) =
+                                settings.iter_mut().find(|s| s.key == "claude_auth")
+                            {
                                 status_setting.value = crate::app::state::ConfigValue::Text(status);
                             }
                         }
@@ -3437,15 +3568,21 @@ impl EventHandler {
 
                 match credentials::delete_anthropic_api_key() {
                     Ok(()) => {
-                        state.add_success_notification("API key removed from system keychain".to_string());
+                        state.add_success_notification(
+                            "API key removed from system keychain".to_string(),
+                        );
                         tracing::info!("API key successfully deleted from keychain");
 
                         // Update auth status to show system auth
                         let auth_category = crate::app::state::ConfigCategory::Authentication;
-                        if let Some(settings) = state.config_screen_state.settings.get_mut(&auth_category) {
-                            if let Some(status_setting) = settings.iter_mut().find(|s| s.key == "claude_auth") {
+                        if let Some(settings) =
+                            state.config_screen_state.settings.get_mut(&auth_category)
+                        {
+                            if let Some(status_setting) =
+                                settings.iter_mut().find(|s| s.key == "claude_auth")
+                            {
                                 status_setting.value = crate::app::state::ConfigValue::Text(
-                                    "System Auth (Pro/Max Plan)".to_string()
+                                    "System Auth (Pro/Max Plan)".to_string(),
                                 );
                             }
                         }
@@ -3484,20 +3621,28 @@ impl EventHandler {
 
                     match credentials::store_anthropic_api_key(&api_key) {
                         Ok(()) => {
-                            state.add_success_notification("API key saved to system keychain".to_string());
+                            state.add_success_notification(
+                                "API key saved to system keychain".to_string(),
+                            );
 
                             // Update config screen status
                             let masked = credentials::get_anthropic_api_key_masked();
                             let status = format!("API Key ({})", masked);
                             let auth_category = crate::app::state::ConfigCategory::Authentication;
-                            if let Some(settings) = state.config_screen_state.settings.get_mut(&auth_category) {
-                                if let Some(status_setting) = settings.iter_mut().find(|s| s.key == "claude_auth") {
-                                    status_setting.value = crate::app::state::ConfigValue::Text(status);
+                            if let Some(settings) =
+                                state.config_screen_state.settings.get_mut(&auth_category)
+                            {
+                                if let Some(status_setting) =
+                                    settings.iter_mut().find(|s| s.key == "claude_auth")
+                                {
+                                    status_setting.value =
+                                        crate::app::state::ConfigValue::Text(status);
                                 }
                             }
 
                             // Persist auth provider to config.toml
-                            state.app_config.authentication.claude_provider = crate::config::ClaudeAuthProvider::ApiKey;
+                            state.app_config.authentication.claude_provider =
+                                crate::config::ClaudeAuthProvider::ApiKey;
                             if let Err(e) = state.app_config.save() {
                                 tracing::warn!("Failed to save config: {}", e);
                             }
@@ -3516,29 +3661,37 @@ impl EventHandler {
                     // Check what's selected
                     if let Some(provider) = popup_state.current_provider() {
                         if !provider.available {
-                            state.add_info_notification(format!("{} - Coming Soon!", provider.name));
+                            state
+                                .add_info_notification(format!("{} - Coming Soon!", provider.name));
                         } else if provider.id == "api_key" {
                             // Start API key input mode
                             state.auth_provider_popup_state.start_key_input();
                         } else if provider.id == "system" {
                             // System auth - just close and confirm
-                            state.add_success_notification("Using system authentication (Pro/Max plan)".to_string());
+                            state.add_success_notification(
+                                "Using system authentication (Pro/Max plan)".to_string(),
+                            );
 
                             // Delete any stored API key to switch to system auth
                             let _ = credentials::delete_anthropic_api_key();
 
                             // Update config screen status
                             let auth_category = crate::app::state::ConfigCategory::Authentication;
-                            if let Some(settings) = state.config_screen_state.settings.get_mut(&auth_category) {
-                                if let Some(status_setting) = settings.iter_mut().find(|s| s.key == "claude_auth") {
+                            if let Some(settings) =
+                                state.config_screen_state.settings.get_mut(&auth_category)
+                            {
+                                if let Some(status_setting) =
+                                    settings.iter_mut().find(|s| s.key == "claude_auth")
+                                {
                                     status_setting.value = crate::app::state::ConfigValue::Text(
-                                        "System Auth (Pro/Max Plan)".to_string()
+                                        "System Auth (Pro/Max Plan)".to_string(),
                                     );
                                 }
                             }
 
                             // Persist auth provider to config.toml
-                            state.app_config.authentication.claude_provider = crate::config::ClaudeAuthProvider::SystemAuth;
+                            state.app_config.authentication.claude_provider =
+                                crate::config::ClaudeAuthProvider::SystemAuth;
                             if let Err(e) = state.app_config.save() {
                                 tracing::warn!("Failed to save config: {}", e);
                             }
@@ -3569,16 +3722,21 @@ impl EventHandler {
 
                         // Update config screen
                         let auth_category = crate::app::state::ConfigCategory::Authentication;
-                        if let Some(settings) = state.config_screen_state.settings.get_mut(&auth_category) {
-                            if let Some(status_setting) = settings.iter_mut().find(|s| s.key == "claude_auth") {
+                        if let Some(settings) =
+                            state.config_screen_state.settings.get_mut(&auth_category)
+                        {
+                            if let Some(status_setting) =
+                                settings.iter_mut().find(|s| s.key == "claude_auth")
+                            {
                                 status_setting.value = crate::app::state::ConfigValue::Text(
-                                    "System Auth (Pro/Max Plan)".to_string()
+                                    "System Auth (Pro/Max Plan)".to_string(),
                                 );
                             }
                         }
 
                         // Persist switch to system auth in config.toml
-                        state.app_config.authentication.claude_provider = crate::config::ClaudeAuthProvider::SystemAuth;
+                        state.app_config.authentication.claude_provider =
+                            crate::config::ClaudeAuthProvider::SystemAuth;
                         if let Err(e) = state.app_config.save() {
                             tracing::warn!("Failed to save config: {}", e);
                         }
@@ -3600,29 +3758,54 @@ impl EventHandler {
 
                 if let Some(value) = state.config_popup_state.get_value() {
                     let setting_key = state.config_popup_state.setting_key.clone();
-                    let current_category = state.config_screen_state.categories[state.config_screen_state.selected_category];
+                    let current_category = state.config_screen_state.categories
+                        [state.config_screen_state.selected_category];
 
                     // Update the setting value
-                    if let Some(settings) = state.config_screen_state.settings.get_mut(&current_category) {
+                    if let Some(settings) =
+                        state.config_screen_state.settings.get_mut(&current_category)
+                    {
                         if let Some(setting) = settings.iter_mut().find(|s| s.key == setting_key) {
                             match value {
                                 ConfigPopupValue::Choice(text, idx) => {
-                                    if let crate::app::state::ConfigValue::Choice(opts, _) = &setting.value {
-                                        setting.value = crate::app::state::ConfigValue::Choice(opts.clone(), idx);
+                                    if let crate::app::state::ConfigValue::Choice(opts, _) =
+                                        &setting.value
+                                    {
+                                        setting.value = crate::app::state::ConfigValue::Choice(
+                                            opts.clone(),
+                                            idx,
+                                        );
                                     }
-                                    tracing::info!("Config setting {} changed to: {}", setting_key, text);
+                                    tracing::info!(
+                                        "Config setting {} changed to: {}",
+                                        setting_key,
+                                        text
+                                    );
                                 }
                                 ConfigPopupValue::Text(text) => {
-                                    setting.value = crate::app::state::ConfigValue::Text(text.clone());
-                                    tracing::info!("Config setting {} changed to: {}", setting_key, text);
+                                    setting.value =
+                                        crate::app::state::ConfigValue::Text(text.clone());
+                                    tracing::info!(
+                                        "Config setting {} changed to: {}",
+                                        setting_key,
+                                        text
+                                    );
                                 }
                                 ConfigPopupValue::Boolean(b) => {
                                     setting.value = crate::app::state::ConfigValue::Bool(b);
-                                    tracing::info!("Config setting {} changed to: {}", setting_key, b);
+                                    tracing::info!(
+                                        "Config setting {} changed to: {}",
+                                        setting_key,
+                                        b
+                                    );
                                 }
                                 ConfigPopupValue::Number(n) => {
                                     setting.value = crate::app::state::ConfigValue::Number(n);
-                                    tracing::info!("Config setting {} changed to: {}", setting_key, n);
+                                    tracing::info!(
+                                        "Config setting {} changed to: {}",
+                                        setting_key,
+                                        n
+                                    );
                                 }
                             }
                         }
@@ -3807,6 +3990,53 @@ impl EventHandler {
                 };
                 state.add_success_notification(msg.to_string());
             }
+            AppEvent::UsageCycleProviderFilter => {
+                state.usage_state.cycle_provider_filter();
+                state.start_background_usage_load(true);
+            }
+            AppEvent::UsageSetPeriod(period) => {
+                use crate::models::usage::UsagePeriod;
+                let selected = match period {
+                    1 => UsagePeriod::Today,
+                    2 => UsagePeriod::Week,
+                    3 => UsagePeriod::ThirtyDays,
+                    4 => UsagePeriod::Month,
+                    5 => UsagePeriod::All,
+                    _ => state.usage_state.period.clone(),
+                };
+                state.usage_state.set_period(selected);
+                state.start_background_usage_load(true);
+            }
+            AppEvent::UsageStartIncludeFilter => {
+                state.usage_state.begin_input(crate::components::usage::UsageInputMode::Include);
+            }
+            AppEvent::UsageStartExcludeFilter => {
+                state.usage_state.begin_input(crate::components::usage::UsageInputMode::Exclude);
+            }
+            AppEvent::UsageStartDateRange => {
+                state
+                    .usage_state
+                    .begin_input(crate::components::usage::UsageInputMode::DateRange);
+            }
+            AppEvent::UsageClearFilters => {
+                state.usage_state.clear_filters();
+                state.start_background_usage_load(true);
+            }
+            AppEvent::UsageInputChar(ch) => {
+                state.usage_state.input_char(ch);
+            }
+            AppEvent::UsageInputBackspace => {
+                state.usage_state.input_backspace();
+            }
+            AppEvent::UsageInputCancel => {
+                state.usage_state.cancel_input();
+            }
+            AppEvent::UsageInputSubmit => match state.usage_state.submit_input() {
+                Ok(()) => {
+                    state.start_background_usage_load(true);
+                }
+                Err(e) => state.add_error_notification(e),
+            },
             // Skills browser events
             AppEvent::SkillsBack => {
                 tracing::debug!("Skills back");
@@ -3907,28 +4137,39 @@ impl EventHandler {
                         state.add_success_notification(format!("Resumed {} sessions", resumed));
                     } else {
                         state.add_info_notification(format!(
-                            "Resumed {}, failed {}", resumed, failed
+                            "Resumed {}, failed {}",
+                            resumed, failed
                         ));
                     }
                 } else {
                     // Single item resume (worktree or session)
                     let (name, result) = if state.session_recovery_state.is_worktree_selected() {
-                        let name = state.session_recovery_state.selected_worktree()
-                            .map(|w| w.name.clone()).unwrap_or_default();
+                        let name = state
+                            .session_recovery_state
+                            .selected_worktree()
+                            .map(|w| w.name.clone())
+                            .unwrap_or_default();
                         (name, state.session_recovery_state.resume_worktree())
                     } else {
-                        let name = state.session_recovery_state.selected()
-                            .map(|s| s.session.clone()).unwrap_or_default();
+                        let name = state
+                            .session_recovery_state
+                            .selected()
+                            .map(|s| s.session.clone())
+                            .unwrap_or_default();
                         (name, state.session_recovery_state.resume_selected())
                     };
 
                     let overlay_result = match result {
-                        Ok(ref tmux_name) => crate::components::session_recovery::RecoveryResultLine {
-                            name: name.clone(), success: true,
-                            detail: format!("→ {}", tmux_name),
-                        },
+                        Ok(ref tmux_name) => {
+                            crate::components::session_recovery::RecoveryResultLine {
+                                name: name.clone(),
+                                success: true,
+                                detail: format!("→ {}", tmux_name),
+                            }
+                        }
                         Err(ref e) => crate::components::session_recovery::RecoveryResultLine {
-                            name: name.clone(), success: false,
+                            name: name.clone(),
+                            success: false,
                             detail: e.clone(),
                         },
                     };
@@ -3938,13 +4179,12 @@ impl EventHandler {
                         Err(e) => (format!("Failed: {}", e), false),
                     };
 
-                    state.session_recovery_state.recovery_overlay = Some(
-                        crate::components::session_recovery::RecoveryOverlay {
+                    state.session_recovery_state.recovery_overlay =
+                        Some(crate::components::session_recovery::RecoveryOverlay {
                             title,
                             results: vec![overlay_result],
                             scroll_offset: 0,
-                        }
-                    );
+                        });
 
                     if succeeded {
                         state.add_success_notification("Session resumed".to_string());
@@ -3992,7 +4232,9 @@ impl EventHandler {
                 } else {
                     state.add_info_notification(format!(
                         "Recovered {}/{} sessions ({} failed)",
-                        result.succeeded.len(), total, result.failed.len()
+                        result.succeeded.len(),
+                        total,
+                        result.failed.len()
                     ));
                 }
             }
@@ -4006,7 +4248,9 @@ impl EventHandler {
             AppEvent::SessionRecoveryDeleteSelected => {
                 let count = state.session_recovery_state.selected_items.len();
                 if count == 0 {
-                    state.add_info_notification("No items selected. Use Space to select items first.".to_string());
+                    state.add_info_notification(
+                        "No items selected. Use Space to select items first.".to_string(),
+                    );
                 } else {
                     tracing::info!("Session recovery: deleting {} selected items", count);
                     let (deleted, failed) = state.session_recovery_state.delete_multi_selected();
@@ -4015,7 +4259,9 @@ impl EventHandler {
                     } else {
                         state.add_info_notification(format!(
                             "Deleted {}/{} items ({} failed)",
-                            deleted, deleted + failed, failed
+                            deleted,
+                            deleted + failed,
+                            failed
                         ));
                     }
                 }
@@ -4238,10 +4484,10 @@ impl EventHandler {
                 }
             }
             // Mouse events are handled directly in the main event loop
-            AppEvent::MouseClick { .. } |
-            AppEvent::MouseDragStart { .. } |
-            AppEvent::MouseDragEnd { .. } |
-            AppEvent::MouseDragging { .. } => {
+            AppEvent::MouseClick { .. }
+            | AppEvent::MouseDragStart { .. }
+            | AppEvent::MouseDragEnd { .. }
+            | AppEvent::MouseDragging { .. } => {
                 // These are processed by handle_mouse_event
             }
         }

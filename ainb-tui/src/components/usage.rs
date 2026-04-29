@@ -2,14 +2,17 @@
 // Accessible via 'i' key from home screen or Stats sidebar item.
 
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph, Row, Table, Tabs},
-    Frame,
 };
 
-use crate::models::{UsageData, format_tokens_short};
+use crate::models::{
+    ActivityUsage, ModelUsage, NamedUsage, ProjectUsage, SessionUsage, UsageData, UsagePeriod,
+    UsageProviderFilter, UsageQuery, format_tokens_short, optimize_usage,
+};
 
 // Color palette from TUI style guide
 const CORNFLOWER_BLUE: Color = Color::Rgb(100, 149, 237);
@@ -35,7 +38,12 @@ pub enum UsageProvider {
 
 impl UsageProvider {
     fn all() -> &'static [UsageProvider] {
-        &[UsageProvider::Claude, UsageProvider::Codex, UsageProvider::Gemini, UsageProvider::Copilot]
+        &[
+            UsageProvider::Claude,
+            UsageProvider::Codex,
+            UsageProvider::Gemini,
+            UsageProvider::Copilot,
+        ]
     }
 
     fn label(&self) -> &'static str {
@@ -57,7 +65,7 @@ impl UsageProvider {
     }
 
     pub fn has_data(&self) -> bool {
-        matches!(self, UsageProvider::Claude)
+        matches!(self, UsageProvider::Claude | UsageProvider::Codex)
     }
 
     fn next(&self) -> Self {
@@ -86,11 +94,19 @@ pub enum UsageTab {
     Daily,
     Weekly,
     Projects,
+    Burndown,
+    Optimize,
 }
 
 impl UsageTab {
     fn all() -> &'static [UsageTab] {
-        &[UsageTab::Daily, UsageTab::Weekly, UsageTab::Projects]
+        &[
+            UsageTab::Daily,
+            UsageTab::Weekly,
+            UsageTab::Projects,
+            UsageTab::Burndown,
+            UsageTab::Optimize,
+        ]
     }
 
     fn title(&self) -> &'static str {
@@ -98,6 +114,8 @@ impl UsageTab {
             UsageTab::Daily => "Daily",
             UsageTab::Weekly => "Weekly",
             UsageTab::Projects => "By Project",
+            UsageTab::Burndown => "Burndown",
+            UsageTab::Optimize => "Optimize",
         }
     }
 
@@ -105,17 +123,28 @@ impl UsageTab {
         match self {
             UsageTab::Daily => UsageTab::Weekly,
             UsageTab::Weekly => UsageTab::Projects,
-            UsageTab::Projects => UsageTab::Daily,
+            UsageTab::Projects => UsageTab::Burndown,
+            UsageTab::Burndown => UsageTab::Optimize,
+            UsageTab::Optimize => UsageTab::Daily,
         }
     }
 
     fn prev(&self) -> Self {
         match self {
-            UsageTab::Daily => UsageTab::Projects,
+            UsageTab::Daily => UsageTab::Optimize,
             UsageTab::Weekly => UsageTab::Daily,
             UsageTab::Projects => UsageTab::Weekly,
+            UsageTab::Burndown => UsageTab::Projects,
+            UsageTab::Optimize => UsageTab::Burndown,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageInputMode {
+    Include,
+    Exclude,
+    DateRange,
 }
 
 /// View state for the usage analytics screen
@@ -126,6 +155,12 @@ pub struct UsageViewState {
     pub data: Option<UsageData>,
     pub loading: bool,
     pub scroll_offset: usize,
+    pub period: UsagePeriod,
+    pub provider_filter: UsageProviderFilter,
+    pub include_projects: Vec<String>,
+    pub exclude_projects: Vec<String>,
+    pub input_mode: Option<UsageInputMode>,
+    pub input_buffer: String,
 }
 
 impl Default for UsageViewState {
@@ -136,6 +171,12 @@ impl Default for UsageViewState {
             data: None,
             loading: false,
             scroll_offset: 0,
+            period: UsagePeriod::Week,
+            provider_filter: UsageProviderFilter::All,
+            include_projects: Vec::new(),
+            exclude_projects: Vec::new(),
+            input_mode: None,
+            input_buffer: String::new(),
         }
     }
 }
@@ -143,11 +184,35 @@ impl Default for UsageViewState {
 impl UsageViewState {
     pub fn next_provider(&mut self) {
         self.provider = self.provider.next();
+        self.provider_filter = match self.provider {
+            UsageProvider::Claude => UsageProviderFilter::Claude,
+            UsageProvider::Codex => UsageProviderFilter::Codex,
+            UsageProvider::Gemini | UsageProvider::Copilot => UsageProviderFilter::All,
+        };
         self.scroll_offset = 0;
     }
 
     pub fn prev_provider(&mut self) {
         self.provider = self.provider.prev();
+        self.provider_filter = match self.provider {
+            UsageProvider::Claude => UsageProviderFilter::Claude,
+            UsageProvider::Codex => UsageProviderFilter::Codex,
+            UsageProvider::Gemini | UsageProvider::Copilot => UsageProviderFilter::All,
+        };
+        self.scroll_offset = 0;
+    }
+
+    pub fn cycle_provider_filter(&mut self) {
+        self.provider_filter = match self.provider_filter {
+            UsageProviderFilter::All => UsageProviderFilter::Claude,
+            UsageProviderFilter::Claude => UsageProviderFilter::Codex,
+            UsageProviderFilter::Codex => UsageProviderFilter::All,
+        };
+        self.scroll_offset = 0;
+    }
+
+    pub fn set_period(&mut self, period: UsagePeriod) {
+        self.period = period;
         self.scroll_offset = 0;
     }
 
@@ -194,8 +259,84 @@ impl UsageViewState {
                 UsageTab::Daily => data.daily.len(),
                 UsageTab::Weekly => data.weekly.len(),
                 UsageTab::Projects => data.projects.len(),
+                UsageTab::Burndown => {
+                    data.daily.len()
+                        + data.projects.len()
+                        + data.sessions.len()
+                        + data.activities.len()
+                        + data.models.len()
+                }
+                UsageTab::Optimize => optimize_usage(data).findings.len(),
             },
         }
+    }
+
+    pub fn query(&self) -> UsageQuery {
+        UsageQuery {
+            period: self.period.clone(),
+            provider_filter: self.provider_filter,
+            include_projects: self.include_projects.clone(),
+            exclude_projects: self.exclude_projects.clone(),
+        }
+    }
+
+    pub fn begin_input(&mut self, mode: UsageInputMode) {
+        self.input_mode = Some(mode);
+        self.input_buffer.clear();
+    }
+
+    pub fn input_char(&mut self, ch: char) {
+        self.input_buffer.push(ch);
+    }
+
+    pub fn input_backspace(&mut self) {
+        self.input_buffer.pop();
+    }
+
+    pub fn cancel_input(&mut self) {
+        self.input_mode = None;
+        self.input_buffer.clear();
+    }
+
+    pub fn submit_input(&mut self) -> Result<(), String> {
+        let value = self.input_buffer.trim().to_string();
+        match self.input_mode {
+            Some(UsageInputMode::Include) => {
+                if !value.is_empty() {
+                    self.include_projects.push(value);
+                }
+            }
+            Some(UsageInputMode::Exclude) => {
+                if !value.is_empty() {
+                    self.exclude_projects.push(value);
+                }
+            }
+            Some(UsageInputMode::DateRange) => {
+                let parts: Vec<_> = value
+                    .split(|ch| ch == '.' || ch == ',' || ch == ' ')
+                    .filter(|part| !part.is_empty())
+                    .collect();
+                if parts.len() != 2 {
+                    return Err("Use YYYY-MM-DD YYYY-MM-DD".to_string());
+                }
+                let from = chrono::NaiveDate::parse_from_str(parts[0], "%Y-%m-%d")
+                    .map_err(|_| "Invalid from date".to_string())?;
+                let to = chrono::NaiveDate::parse_from_str(parts[1], "%Y-%m-%d")
+                    .map_err(|_| "Invalid to date".to_string())?;
+                if from > to {
+                    return Err("From date must be before to date".to_string());
+                }
+                self.period = UsagePeriod::Custom { from, to };
+            }
+            None => {}
+        }
+        self.cancel_input();
+        Ok(())
+    }
+
+    pub fn clear_filters(&mut self) {
+        self.include_projects.clear();
+        self.exclude_projects.clear();
     }
 }
 
@@ -208,7 +349,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &UsageViewState) {
             Constraint::Length(3), // Summary bar
             Constraint::Length(3), // Provider selector
             Constraint::Length(3), // Tab bar
-            Constraint::Min(0),   // Table content
+            Constraint::Min(0),    // Table content
             Constraint::Length(2), // Help bar
         ])
         .split(area);
@@ -227,6 +368,8 @@ pub fn render(frame: &mut Frame, area: Rect, state: &UsageViewState) {
             UsageTab::Daily => render_daily(frame, layout[3], data, state.scroll_offset),
             UsageTab::Weekly => render_weekly(frame, layout[3], data, state.scroll_offset),
             UsageTab::Projects => render_projects(frame, layout[3], data, state.scroll_offset),
+            UsageTab::Burndown => render_burndown(frame, layout[3], data, state),
+            UsageTab::Optimize => render_optimize(frame, layout[3], data),
         }
     }
 
@@ -236,7 +379,10 @@ pub fn render(frame: &mut Frame, area: Rect, state: &UsageViewState) {
 fn render_summary_bar(frame: &mut Frame, area: Rect, state: &UsageViewState) {
     let mut spans = vec![
         Span::styled("📊 ", Style::default().fg(GOLD)),
-        Span::styled("Usage Analytics", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "Usage Analytics",
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ),
     ];
 
     if let Some(data) = &state.data {
@@ -244,18 +390,33 @@ fn render_summary_bar(frame: &mut Frame, area: Rect, state: &UsageViewState) {
         spans.extend_from_slice(&[
             Span::styled("  │  ", Style::default().fg(MUTED_GRAY)),
             Span::styled("Total: ", Style::default().fg(MUTED_GRAY)),
-            Span::styled(format_tokens_short(gt.total()), Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format_tokens_short(gt.total()),
+                Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" tokens", Style::default().fg(MUTED_GRAY)),
             Span::styled("  │  ", Style::default().fg(MUTED_GRAY)),
-            Span::styled(format!("{}", data.daily.len()), Style::default().fg(SOFT_WHITE)),
+            Span::styled(
+                format!("{}", data.daily.len()),
+                Style::default().fg(SOFT_WHITE),
+            ),
             Span::styled(" days  ", Style::default().fg(MUTED_GRAY)),
-            Span::styled(format!("{}", data.projects.len()), Style::default().fg(SOFT_WHITE)),
+            Span::styled(
+                format!("{}", data.projects.len()),
+                Style::default().fg(SOFT_WHITE),
+            ),
             Span::styled(" projects  ", Style::default().fg(MUTED_GRAY)),
-            Span::styled(format!("{}", gt.session_count), Style::default().fg(SOFT_WHITE)),
+            Span::styled(
+                format!("{}", gt.session_count),
+                Style::default().fg(SOFT_WHITE),
+            ),
             Span::styled(" sessions", Style::default().fg(MUTED_GRAY)),
         ]);
     } else if state.provider.has_data() {
-        spans.push(Span::styled("  │  Loading...", Style::default().fg(MUTED_GRAY)));
+        spans.push(Span::styled(
+            "  │  Loading...",
+            Style::default().fg(MUTED_GRAY),
+        ));
     }
 
     let block = Block::default()
@@ -269,7 +430,10 @@ fn render_summary_bar(frame: &mut Frame, area: Rect, state: &UsageViewState) {
 }
 
 fn render_provider_bar(frame: &mut Frame, area: Rect, state: &UsageViewState) {
-    let mut spans: Vec<Span> = vec![Span::styled("  Provider: ", Style::default().fg(MUTED_GRAY))];
+    let mut spans: Vec<Span> = vec![Span::styled(
+        "  Provider: ",
+        Style::default().fg(MUTED_GRAY),
+    )];
 
     for (i, provider) in UsageProvider::all().iter().enumerate() {
         if i > 0 {
@@ -289,8 +453,34 @@ fn render_provider_bar(frame: &mut Frame, area: Rect, state: &UsageViewState) {
     }
 
     spans.push(Span::styled("    ", Style::default()));
-    spans.push(Span::styled("◀/▶", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)));
+    spans.push(Span::styled(
+        "◀/▶",
+        Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+    ));
     spans.push(Span::styled(" switch", Style::default().fg(MUTED_GRAY)));
+    spans.push(Span::styled("  │  p ", Style::default().fg(GOLD)));
+    spans.push(Span::styled(
+        format!("filter: {}", provider_filter_label(state.provider_filter)),
+        Style::default().fg(MUTED_GRAY),
+    ));
+    spans.push(Span::styled("  │  ", Style::default().fg(MUTED_GRAY)));
+    spans.push(Span::styled(
+        period_label(&state.period),
+        Style::default().fg(SOFT_WHITE),
+    ));
+    if !state.include_projects.is_empty() || !state.exclude_projects.is_empty() {
+        spans.push(Span::styled(
+            "  │  filters active",
+            Style::default().fg(GOLD),
+        ));
+    }
+    if let Some(mode) = state.input_mode {
+        spans.push(Span::styled("  │  ", Style::default().fg(MUTED_GRAY)));
+        spans.push(Span::styled(
+            format!("{}: {}", input_label(mode), state.input_buffer),
+            Style::default().fg(GOLD),
+        ));
+    }
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -317,12 +507,18 @@ fn render_no_data(frame: &mut Frame, area: Rect, state: &UsageViewState) {
         Line::from(""),
         Line::from(vec![
             Span::styled("  ", Style::default()),
-            Span::styled(state.provider.label(), Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD)),
-            Span::styled(" usage tracking is not yet available.", Style::default().fg(MUTED_GRAY)),
+            Span::styled(
+                state.provider.label(),
+                Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " usage tracking is not yet available.",
+                Style::default().fg(MUTED_GRAY),
+            ),
         ]),
         Line::from(""),
         Line::from(Span::styled(
-            "  Usage data parsing is currently supported for Claude Code only.",
+            "  Usage data parsing is currently supported for Claude Code and Codex.",
             Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
         )),
         Line::from(Span::styled(
@@ -371,9 +567,10 @@ fn render_loading(frame: &mut Frame, area: Rect) {
         .border_style(Style::default().fg(CORNFLOWER_BLUE))
         .style(Style::default().bg(DARK_BG));
 
-    let paragraph = Paragraph::new(Line::from(vec![
-        Span::styled("  ⏳ Scanning session files...", Style::default().fg(MUTED_GRAY)),
-    ]))
+    let paragraph = Paragraph::new(Line::from(vec![Span::styled(
+        "  ⏳ Scanning session files...",
+        Style::default().fg(MUTED_GRAY),
+    )]))
     .block(block);
     frame.render_widget(paragraph, area);
 }
@@ -401,9 +598,11 @@ fn render_daily(frame: &mut Frame, area: Rect, data: &UsageData, scroll_offset: 
         .split(inner);
 
     // Table
-    let header = Row::new(vec!["Date", "Total", "Input", "Cache", "Output", "Sessions"])
-        .style(Style::default().fg(GOLD).add_modifier(Modifier::BOLD))
-        .bottom_margin(1);
+    let header = Row::new(vec![
+        "Date", "Total", "Input", "Cache", "Output", "Sessions",
+    ])
+    .style(Style::default().fg(GOLD).add_modifier(Modifier::BOLD))
+    .bottom_margin(1);
 
     let visible_rows = chunks[0].height.saturating_sub(2) as usize;
     let total_rows = data.daily.len();
@@ -414,7 +613,9 @@ fn render_daily(frame: &mut Frame, area: Rect, data: &UsageData, scroll_offset: 
         scroll_offset
     };
 
-    let rows: Vec<Row> = data.daily.iter()
+    let rows: Vec<Row> = data
+        .daily
+        .iter()
         .skip(effective_offset)
         .take(visible_rows)
         .map(|(date, bucket)| {
@@ -439,9 +640,7 @@ fn render_daily(frame: &mut Frame, area: Rect, data: &UsageData, scroll_offset: 
         Constraint::Length(8),
     ];
 
-    let table = Table::new(rows, widths)
-        .header(header)
-        .column_spacing(1);
+    let table = Table::new(rows, widths).header(header).column_spacing(1);
 
     frame.render_widget(table, chunks[0]);
 
@@ -465,9 +664,17 @@ fn render_weekly(frame: &mut Frame, area: Rect, data: &UsageData, scroll_offset:
         return;
     }
 
-    let header = Row::new(vec!["Week Start", "Total", "Input", "Cache", "Output", "Sessions", "Projects"])
-        .style(Style::default().fg(GOLD).add_modifier(Modifier::BOLD))
-        .bottom_margin(1);
+    let header = Row::new(vec![
+        "Week Start",
+        "Total",
+        "Input",
+        "Cache",
+        "Output",
+        "Sessions",
+        "Projects",
+    ])
+    .style(Style::default().fg(GOLD).add_modifier(Modifier::BOLD))
+    .bottom_margin(1);
 
     let visible_rows = inner.height.saturating_sub(2) as usize;
     let total_rows = data.weekly.len();
@@ -477,7 +684,9 @@ fn render_weekly(frame: &mut Frame, area: Rect, data: &UsageData, scroll_offset:
         scroll_offset
     };
 
-    let rows: Vec<Row> = data.weekly.iter()
+    let rows: Vec<Row> = data
+        .weekly
+        .iter()
         .skip(effective_offset)
         .take(visible_rows)
         .map(|(date, bucket)| {
@@ -504,9 +713,7 @@ fn render_weekly(frame: &mut Frame, area: Rect, data: &UsageData, scroll_offset:
         Constraint::Length(8),
     ];
 
-    let table = Table::new(rows, widths)
-        .header(header)
-        .column_spacing(1);
+    let table = Table::new(rows, widths).header(header).column_spacing(1);
 
     frame.render_widget(table, inner);
 }
@@ -527,13 +734,17 @@ fn render_projects(frame: &mut Frame, area: Rect, data: &UsageData, scroll_offse
         return;
     }
 
-    let header = Row::new(vec!["#", "Project", "Total", "Input", "Cache", "Output", "Sessions"])
-        .style(Style::default().fg(GOLD).add_modifier(Modifier::BOLD))
-        .bottom_margin(1);
+    let header = Row::new(vec![
+        "#", "Project", "Total", "Input", "Cache", "Output", "Sessions",
+    ])
+    .style(Style::default().fg(GOLD).add_modifier(Modifier::BOLD))
+    .bottom_margin(1);
 
     let visible_rows = inner.height.saturating_sub(2) as usize;
 
-    let rows: Vec<Row> = data.projects.iter()
+    let rows: Vec<Row> = data
+        .projects
+        .iter()
         .enumerate()
         .skip(scroll_offset)
         .take(visible_rows)
@@ -562,11 +773,308 @@ fn render_projects(frame: &mut Frame, area: Rect, data: &UsageData, scroll_offse
         Constraint::Length(8),
     ];
 
-    let table = Table::new(rows, widths)
-        .header(header)
-        .column_spacing(1);
+    let table = Table::new(rows, widths).header(header).column_spacing(1);
 
     frame.render_widget(table, inner);
+}
+
+fn render_burndown(frame: &mut Frame, area: Rect, data: &UsageData, state: &UsageViewState) {
+    let block = Block::default()
+        .title(" Burndown ")
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(CORNFLOWER_BLUE))
+        .style(Style::default().bg(DARK_BG));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if data.calls.is_empty() {
+        let p = Paragraph::new("  No usage data found for selected period/provider/filter.")
+            .style(Style::default().fg(MUTED_GRAY));
+        frame.render_widget(p, inner);
+        return;
+    }
+
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(4),
+            Constraint::Length(3),
+            Constraint::Min(0),
+        ])
+        .split(inner);
+
+    render_burndown_header(frame, vertical[0], data);
+    render_period_row(frame, vertical[1], state);
+
+    let body = if vertical[2].width >= 110 {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(vertical[2])
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(vertical[2])
+    };
+
+    let left = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(34),
+            Constraint::Percentage(33),
+            Constraint::Percentage(33),
+        ])
+        .split(body[0]);
+    let right = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(34),
+            Constraint::Percentage(33),
+            Constraint::Percentage(33),
+        ])
+        .split(body[1]);
+
+    render_daily_activity_panel(frame, left[0], data);
+    render_project_panel(frame, left[1], &data.projects);
+    render_session_panel(frame, left[2], &data.sessions);
+    render_activity_panel(frame, right[0], &data.activities);
+    render_model_panel(frame, right[1], &data.models);
+
+    let tool_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(34),
+            Constraint::Percentage(33),
+            Constraint::Percentage(33),
+        ])
+        .split(right[2]);
+    render_named_panel(frame, tool_chunks[0], "Core Tools", &data.tools);
+    render_named_panel(
+        frame,
+        tool_chunks[1],
+        "Shell Commands",
+        &data.shell_commands,
+    );
+    render_named_panel(frame, tool_chunks[2], "MCP Servers", &data.mcp_servers);
+}
+
+fn render_burndown_header(frame: &mut Frame, area: Rect, data: &UsageData) {
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("Calls ", Style::default().fg(MUTED_GRAY)),
+            Span::styled(
+                data.grand_total.call_count.to_string(),
+                Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  Sessions ", Style::default().fg(MUTED_GRAY)),
+            Span::styled(
+                data.grand_total.session_count.to_string(),
+                Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  Projects ", Style::default().fg(MUTED_GRAY)),
+            Span::styled(
+                data.grand_total.project_count.to_string(),
+                Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  Cost ", Style::default().fg(MUTED_GRAY)),
+            Span::styled(
+                format_cost(data.grand_total.cost_usd),
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Tokens ", Style::default().fg(MUTED_GRAY)),
+            Span::styled(
+                format_tokens_short(data.grand_total.total()),
+                Style::default().fg(SOFT_WHITE),
+            ),
+            Span::styled("  Cache ", Style::default().fg(MUTED_GRAY)),
+            Span::styled(
+                format_tokens_short(
+                    data.grand_total.cache_creation_tokens + data.grand_total.cache_read_tokens,
+                ),
+                Style::default().fg(SOFT_WHITE),
+            ),
+        ]),
+    ];
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn render_period_row(frame: &mut Frame, area: Rect, state: &UsageViewState) {
+    let text = Line::from(vec![
+        Span::styled(
+            "1 Today  2 Week  3 30d  4 Month  5 All  d Custom  / Include  x Exclude  c Clear  r Reload",
+            Style::default().fg(MUTED_GRAY),
+        ),
+        Span::styled("   Active: ", Style::default().fg(MUTED_GRAY)),
+        Span::styled(period_label(&state.period), Style::default().fg(GOLD)),
+    ]);
+    frame.render_widget(Paragraph::new(text), area);
+}
+
+fn render_daily_activity_panel(frame: &mut Frame, area: Rect, data: &UsageData) {
+    let max = data.daily.iter().map(|(_, bucket)| bucket.total()).max().unwrap_or(1);
+    let rows: Vec<_> = data
+        .daily
+        .iter()
+        .rev()
+        .take(area.height.saturating_sub(2) as usize)
+        .map(|(date, bucket)| {
+            format!(
+                "{} {} {}",
+                date.format("%m-%d"),
+                bar(bucket.total(), max, 18),
+                format_tokens_short(bucket.total())
+            )
+        })
+        .collect();
+    render_panel(frame, area, "Daily Activity", rows);
+}
+
+fn render_project_panel(frame: &mut Frame, area: Rect, rows: &[ProjectUsage]) {
+    let max = rows.iter().map(|row| row.bucket.total()).max().unwrap_or(1);
+    let lines = rows
+        .iter()
+        .take(area.height.saturating_sub(2) as usize)
+        .map(|row| {
+            format!(
+                "{} {} {}",
+                truncate_string(&row.name, 22),
+                bar(row.bucket.total(), max, 12),
+                format_cost(row.bucket.cost_usd)
+            )
+        })
+        .collect();
+    render_panel(frame, area, "By Project", lines);
+}
+
+fn render_session_panel(frame: &mut Frame, area: Rect, rows: &[SessionUsage]) {
+    let max = rows.iter().map(|row| row.bucket.total()).max().unwrap_or(1);
+    let lines = rows
+        .iter()
+        .take(area.height.saturating_sub(2) as usize)
+        .map(|row| {
+            format!(
+                "{} {} {}",
+                truncate_string(&row.project, 18),
+                bar(row.bucket.total(), max, 12),
+                format_tokens_short(row.bucket.total())
+            )
+        })
+        .collect();
+    render_panel(frame, area, "Top Sessions", lines);
+}
+
+fn render_activity_panel(frame: &mut Frame, area: Rect, rows: &[ActivityUsage]) {
+    let max = rows.iter().map(|row| row.bucket.total()).max().unwrap_or(1);
+    let lines = rows
+        .iter()
+        .take(area.height.saturating_sub(2) as usize)
+        .map(|row| {
+            format!(
+                "{} {} {}t {}r",
+                row.category.label(),
+                bar(row.bucket.total(), max, 10),
+                row.turns,
+                row.retries
+            )
+        })
+        .collect();
+    render_panel(frame, area, "By Activity", lines);
+}
+
+fn render_model_panel(frame: &mut Frame, area: Rect, rows: &[ModelUsage]) {
+    let max = rows.iter().map(|row| row.bucket.total()).max().unwrap_or(1);
+    let lines = rows
+        .iter()
+        .take(area.height.saturating_sub(2) as usize)
+        .map(|row| {
+            format!(
+                "{} {} {}",
+                truncate_string(&row.model, 18),
+                bar(row.bucket.total(), max, 10),
+                format_tokens_short(row.bucket.total())
+            )
+        })
+        .collect();
+    render_panel(frame, area, "By Model", lines);
+}
+
+fn render_named_panel(frame: &mut Frame, area: Rect, title: &str, rows: &[NamedUsage]) {
+    let max = rows.iter().map(|row| row.calls as u64).max().unwrap_or(1);
+    let lines = rows
+        .iter()
+        .take(area.height.saturating_sub(2) as usize)
+        .map(|row| {
+            format!(
+                "{} {} {}",
+                truncate_string(&row.name, 14),
+                bar(row.calls as u64, max, 8),
+                row.calls
+            )
+        })
+        .collect();
+    render_panel(frame, area, title, lines);
+}
+
+fn render_optimize(frame: &mut Frame, area: Rect, data: &UsageData) {
+    let result = optimize_usage(data);
+    let mut lines = vec![
+        format!("Health {:?} ({}/100)", result.grade, result.score),
+        format!(
+            "Potential savings {} tokens",
+            format_tokens_short(result.potential_tokens_saved)
+        ),
+        String::new(),
+    ];
+    for finding in result.findings.iter().take(area.height.saturating_sub(5) as usize) {
+        lines.push(format!("{:?}: {}", finding.impact, finding.title));
+        lines.push(format!("  {}", truncate_string(&finding.details, 80)));
+        if let Some(action) = finding.actions.first() {
+            lines.push(format!(
+                "  Suggestion: {}",
+                truncate_string(&action.label, 80)
+            ));
+        }
+    }
+    render_panel(frame, area, "Optimize Findings", lines);
+}
+
+fn render_panel(frame: &mut Frame, area: Rect, title: &str, rows: Vec<String>) {
+    let block = Block::default()
+        .title(format!(" {title} "))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(CORNFLOWER_BLUE))
+        .style(Style::default().bg(DARK_BG));
+    let lines = if rows.is_empty() {
+        vec![Line::from(Span::styled(
+            "No data",
+            Style::default().fg(MUTED_GRAY),
+        ))]
+    } else {
+        rows.into_iter()
+            .map(|row| Line::from(Span::styled(row, Style::default().fg(SOFT_WHITE))))
+            .collect()
+    };
+    frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+fn bar(value: u64, max: u64, width: usize) -> String {
+    let filled = if max == 0 {
+        0
+    } else {
+        ((value as f64 / max as f64) * width as f64).round() as usize
+    }
+    .min(width);
+    format!(
+        "{}{}",
+        "█".repeat(filled),
+        "░".repeat(width.saturating_sub(filled))
+    )
 }
 
 fn render_bar_chart(frame: &mut Frame, area: Rect, data: &UsageData) {
@@ -637,6 +1145,12 @@ fn render_help_bar(frame: &mut Frame, area: Rect) {
     let spans = vec![
         Span::styled(" ◀/▶", Style::default().fg(GOLD)),
         Span::styled(" provider  ", Style::default().fg(MUTED_GRAY)),
+        Span::styled("p", Style::default().fg(GOLD)),
+        Span::styled(" filter  ", Style::default().fg(MUTED_GRAY)),
+        Span::styled("1-5", Style::default().fg(GOLD)),
+        Span::styled(" period  ", Style::default().fg(MUTED_GRAY)),
+        Span::styled("/ x d c", Style::default().fg(GOLD)),
+        Span::styled(" filters  ", Style::default().fg(MUTED_GRAY)),
         Span::styled("Tab", Style::default().fg(GOLD)),
         Span::styled(" view  ", Style::default().fg(MUTED_GRAY)),
         Span::styled("j/k", Style::default().fg(GOLD)),
@@ -648,8 +1162,7 @@ fn render_help_bar(frame: &mut Frame, area: Rect) {
         Span::styled("Esc", Style::default().fg(GOLD)),
         Span::styled(" back", Style::default().fg(MUTED_GRAY)),
     ];
-    let paragraph = Paragraph::new(Line::from(spans))
-        .style(Style::default().bg(DARK_BG));
+    let paragraph = Paragraph::new(Line::from(spans)).style(Style::default().bg(DARK_BG));
     frame.render_widget(paragraph, area);
 }
 
@@ -659,4 +1172,36 @@ fn truncate_string(s: &str, max_len: usize) -> String {
     } else {
         format!("{}…", &s[..max_len - 1])
     }
+}
+
+fn provider_filter_label(filter: UsageProviderFilter) -> &'static str {
+    match filter {
+        UsageProviderFilter::All => "All",
+        UsageProviderFilter::Claude => "Claude",
+        UsageProviderFilter::Codex => "Codex",
+    }
+}
+
+fn period_label(period: &UsagePeriod) -> String {
+    match period {
+        UsagePeriod::Today => "Today".to_string(),
+        UsagePeriod::Week => "Week".to_string(),
+        UsagePeriod::ThirtyDays => "30 days".to_string(),
+        UsagePeriod::Month => "Month".to_string(),
+        UsagePeriod::All => "All".to_string(),
+        UsagePeriod::Custom { from, to } => format!("{from} to {to}"),
+    }
+}
+
+fn input_label(mode: UsageInputMode) -> &'static str {
+    match mode {
+        UsageInputMode::Include => "include",
+        UsageInputMode::Exclude => "exclude",
+        UsageInputMode::DateRange => "date range",
+    }
+}
+
+fn format_cost(cost: Option<f64>) -> String {
+    cost.map(|value| format!("${value:.2}"))
+        .unwrap_or_else(|| "cost n/a".to_string())
 }
