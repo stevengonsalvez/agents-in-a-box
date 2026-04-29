@@ -10,7 +10,24 @@ Provides a single-file database (~/.reflect/reflect.db by default) that
 replaces the previous YAML-based state, metrics, and learnings files.
 
 All public write functions use ``with conn:`` for transactional safety.
+
+Threading contract
+------------------
+This module caches one ``sqlite3.Connection`` per resolved DB path in
+``_CONN_CACHE`` (process-global). ``sqlite3`` connections default to
+``check_same_thread=True``, which means: the *first* thread that calls
+``init_db`` for a given path owns that connection forever. Other threads
+hitting the cached connection raise ``ProgrammingError``.
+
+The reflect callers today are single-threaded (CLI invocations, hooks
+shelling out, headless ``claude -p`` drains). If a future caller needs
+multi-threaded access, either pass an explicit ``conn=`` argument and
+manage lifecycle locally, or switch the cache to ``threading.local``.
+
+Tests reset cached connections via the public ``close_all()`` helper.
 """
+
+from __future__ import annotations
 
 import hashlib
 import json
@@ -20,82 +37,272 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from domain.enums import (
+    ArtifactStatus,
+    ArtifactType,
+    IndexBackend,
+    IndexJobStatus,
+    LearningStatus,
+    PrivacyLevel,
+    ProposalStatus,
+    ProposalType,
+    SourceStatus,
+)
 from reflect_config import get_config, resolve_path
+
+
+def _quoted_csv(values: tuple[str, ...]) -> str:
+    """Concatenate *values* into a single-quoted CSV string for inline DDL.
+
+    WARNING: callers are responsible for ensuring *values* contains only
+    trusted constants (enum members defined in this codebase). Output is
+    interpolated directly into ``CREATE TABLE`` statements and does NOT
+    escape embedded quotes — never feed it user-controlled strings.
+    """
+    return ", ".join(f"'{value}'" for value in values)
+
+
+LEARNING_STATUS_VALUES = tuple(status.value for status in LearningStatus)
+PROPOSAL_STATUS_VALUES = tuple(status.value for status in ProposalStatus)
+SOURCE_STATUS_VALUES = tuple(status.value for status in SourceStatus)
+PRIVACY_LEVEL_VALUES = tuple(level.value for level in PrivacyLevel)
+INDEX_JOB_STATUS_VALUES = tuple(status.value for status in IndexJobStatus)
+INDEX_BACKEND_VALUES = tuple(backend.value for backend in IndexBackend)
+ARTIFACT_TYPE_VALUES = tuple(artifact_type.value for artifact_type in ArtifactType)
+ARTIFACT_STATUS_VALUES = tuple(status.value for status in ArtifactStatus)
+
+_LEARNING_COLUMNS = (
+    "id",
+    "title",
+    "category",
+    "confidence",
+    "status",
+    "scope",
+    "source_tool",
+    "source_provider",
+    "source_kind",
+    "source_path",
+    "source_quote",
+    "source_quote_hash",
+    "content_hash",
+    "session_id",
+    "thread_id",
+    "privacy_level",
+    "artifact_path",
+    "sidecar_path",
+    "commit_hash",
+    "supersedes_learning_id",
+    "superseded_by_learning_id",
+    "created_at",
+    "approved_at",
+    "indexed_at",
+    "reverted_at",
+    "revert_reason",
+    "last_recalled_at",
+    "recall_count",
+    "helpful_count",
+    "ignored_count",
+    "stale_count",
+)
+
+_PROPOSAL_COLUMNS = (
+    "id",
+    "learning_id",
+    "proposal_type",
+    "target_kind",
+    "target_path",
+    "agent_file",
+    "diff",
+    "status",
+    "decision_actor",
+    "rationale_json",
+    "created_at",
+    "decided_at",
+    "materialized_at",
+    "materialization_error",
+)
 
 # ---------------------------------------------------------------------------
 # Schema
 # ---------------------------------------------------------------------------
 
-# DDL for the learnings table kept as a constant so the CHECK-constraint
-# rebuild migration can recreate it identically without duplicating the SQL.
-_LEARNINGS_DDL = """
+_LEARNINGS_DDL = f"""
 CREATE TABLE IF NOT EXISTS learnings (
-    id              TEXT PRIMARY KEY,
-    title           TEXT NOT NULL,
-    category        TEXT NOT NULL DEFAULT 'Unknown',
-    confidence      TEXT NOT NULL DEFAULT 'LOW',
-    status          TEXT NOT NULL DEFAULT 'pending'
-                    CHECK (status IN ('pending', 'approved', 'rejected', 'indexed', 'reverted')),
-    source_tool     TEXT NOT NULL DEFAULT '',
-    source_path     TEXT NOT NULL DEFAULT '',
-    content_hash    TEXT NOT NULL DEFAULT '',
-    commit_hash     TEXT,
-    created_at      TEXT NOT NULL,
-    approved_at     TEXT,
-    indexed_at      TEXT,
-    reverted_at     TEXT,
-    revert_reason   TEXT
+    id                      TEXT PRIMARY KEY,
+    title                   TEXT NOT NULL,
+    category                TEXT NOT NULL DEFAULT 'Unknown',
+    confidence              TEXT NOT NULL DEFAULT 'LOW',
+    status                  TEXT NOT NULL DEFAULT '{LearningStatus.PENDING.value}'
+                            CHECK (status IN ({_quoted_csv(LEARNING_STATUS_VALUES)})),
+    scope                   TEXT NOT NULL DEFAULT 'project',
+    source_tool             TEXT NOT NULL DEFAULT '',
+    source_provider         TEXT NOT NULL DEFAULT '',
+    source_kind             TEXT NOT NULL DEFAULT '',
+    source_path             TEXT NOT NULL DEFAULT '',
+    source_quote            TEXT NOT NULL DEFAULT '',
+    source_quote_hash       TEXT NOT NULL DEFAULT '',
+    content_hash            TEXT NOT NULL DEFAULT '',
+    session_id              TEXT NOT NULL DEFAULT '',
+    thread_id               TEXT NOT NULL DEFAULT '',
+    privacy_level           TEXT NOT NULL DEFAULT '{PrivacyLevel.INTERNAL.value}'
+                            CHECK (privacy_level IN ({_quoted_csv(PRIVACY_LEVEL_VALUES)})),
+    artifact_path           TEXT NOT NULL DEFAULT '',
+    sidecar_path            TEXT NOT NULL DEFAULT '',
+    commit_hash             TEXT,
+    supersedes_learning_id  TEXT,
+    superseded_by_learning_id TEXT,
+    created_at              TEXT NOT NULL,
+    approved_at             TEXT,
+    indexed_at              TEXT,
+    reverted_at             TEXT,
+    revert_reason           TEXT,
+    last_recalled_at        TEXT,
+    recall_count            INTEGER NOT NULL DEFAULT 0,
+    helpful_count           INTEGER NOT NULL DEFAULT 0,
+    ignored_count           INTEGER NOT NULL DEFAULT 0,
+    stale_count             INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (supersedes_learning_id) REFERENCES learnings(id),
+    FOREIGN KEY (superseded_by_learning_id) REFERENCES learnings(id)
 );
 """
 
-_SCHEMA_SQL = _LEARNINGS_DDL + """
+_PROPOSALS_DDL = f"""
 CREATE TABLE IF NOT EXISTS proposals (
-    id              TEXT PRIMARY KEY,
-    learning_id     TEXT NOT NULL REFERENCES learnings(id),
-    agent_file      TEXT NOT NULL DEFAULT '',
-    diff            TEXT NOT NULL DEFAULT '',
-    status          TEXT NOT NULL DEFAULT 'pending'
-                    CHECK (status IN ('pending', 'accepted', 'rejected')),
-    created_at      TEXT NOT NULL
+    id                      TEXT PRIMARY KEY,
+    learning_id             TEXT NOT NULL REFERENCES learnings(id),
+    proposal_type           TEXT NOT NULL DEFAULT '{ProposalType.LEARNING.value}',
+    target_kind             TEXT NOT NULL DEFAULT '',
+    target_path             TEXT NOT NULL DEFAULT '',
+    agent_file              TEXT NOT NULL DEFAULT '',
+    diff                    TEXT NOT NULL DEFAULT '',
+    status                  TEXT NOT NULL DEFAULT '{ProposalStatus.PENDING.value}'
+                            CHECK (status IN ({_quoted_csv(PROPOSAL_STATUS_VALUES)})),
+    decision_actor          TEXT NOT NULL DEFAULT '',
+    rationale_json          TEXT NOT NULL DEFAULT '{{}}',
+    created_at              TEXT NOT NULL,
+    decided_at              TEXT,
+    materialized_at         TEXT,
+    materialization_error   TEXT
 );
+"""
 
+_METRICS_DDL = """
 CREATE TABLE IF NOT EXISTS metrics (
     key             TEXT PRIMARY KEY,
     value           TEXT NOT NULL,
     updated_at      TEXT NOT NULL
 );
+"""
 
+_EVENTS_DDL = """
 CREATE TABLE IF NOT EXISTS events (
     id              TEXT PRIMARY KEY,
     type            TEXT NOT NULL,
     learning_id     TEXT,
+    actor           TEXT NOT NULL DEFAULT '',
+    parent_event_id TEXT,
+    idempotency_key TEXT NOT NULL DEFAULT '',
     details_json    TEXT NOT NULL DEFAULT '{}',
     created_at      TEXT NOT NULL
 );
+"""
 
+_SOURCES_DDL = f"""
 CREATE TABLE IF NOT EXISTS sources (
-    id              TEXT PRIMARY KEY,
-    provider        TEXT NOT NULL,
-    path            TEXT NOT NULL,
-    project_name    TEXT NOT NULL DEFAULT '',
-    content_hash    TEXT NOT NULL DEFAULT '',
-    last_seen       TEXT NOT NULL,
-    status          TEXT NOT NULL DEFAULT 'active'
-                    CHECK (status IN ('active', 'stale', 'archived'))
+    id                      TEXT PRIMARY KEY,
+    provider                TEXT NOT NULL,
+    path                    TEXT NOT NULL,
+    project_name            TEXT NOT NULL DEFAULT '',
+    source_kind             TEXT NOT NULL DEFAULT '',
+    provider_id             TEXT NOT NULL DEFAULT '',
+    canonical_project_id    TEXT NOT NULL DEFAULT '',
+    content_hash            TEXT NOT NULL DEFAULT '',
+    first_seen              TEXT NOT NULL DEFAULT '',
+    last_seen               TEXT NOT NULL,
+    archived_at             TEXT,
+    ingest_state            TEXT NOT NULL DEFAULT 'discovered',
+    status                  TEXT NOT NULL DEFAULT '{SourceStatus.ACTIVE.value}'
+                            CHECK (status IN ({_quoted_csv(SOURCE_STATUS_VALUES)}))
 );
+"""
 
+_INDEX_JOBS_DDL = f"""
+CREATE TABLE IF NOT EXISTS index_jobs (
+    id              TEXT PRIMARY KEY,
+    learning_id     TEXT NOT NULL REFERENCES learnings(id),
+    backend         TEXT NOT NULL
+                    CHECK (backend IN ({_quoted_csv(INDEX_BACKEND_VALUES)})),
+    status          TEXT NOT NULL DEFAULT '{IndexJobStatus.PENDING.value}'
+                    CHECK (status IN ({_quoted_csv(INDEX_JOB_STATUS_VALUES)})),
+    idempotency_key TEXT NOT NULL DEFAULT '',
+    attempt_count   INTEGER NOT NULL DEFAULT 0,
+    last_error      TEXT NOT NULL DEFAULT '',
+    created_at      TEXT NOT NULL,
+    started_at      TEXT,
+    finished_at     TEXT
+);
+"""
+
+_RECALL_EVENTS_DDL = """
+CREATE TABLE IF NOT EXISTS recall_events (
+    id              TEXT PRIMARY KEY,
+    learning_id     TEXT NOT NULL REFERENCES learnings(id),
+    query           TEXT NOT NULL,
+    query_hash      TEXT NOT NULL DEFAULT '',
+    source_context  TEXT NOT NULL DEFAULT '',
+    rank            INTEGER,
+    feedback        TEXT NOT NULL DEFAULT '',
+    created_at      TEXT NOT NULL
+);
+"""
+
+_ARTIFACTS_DDL = f"""
+CREATE TABLE IF NOT EXISTS artifacts (
+    id              TEXT PRIMARY KEY,
+    learning_id     TEXT NOT NULL REFERENCES learnings(id),
+    artifact_type   TEXT NOT NULL
+                    CHECK (artifact_type IN ({_quoted_csv(ARTIFACT_TYPE_VALUES)})),
+    path            TEXT NOT NULL,
+    content_hash    TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT '{ArtifactStatus.CREATED.value}'
+                    CHECK (status IN ({_quoted_csv(ARTIFACT_STATUS_VALUES)})),
+    metadata_json   TEXT NOT NULL DEFAULT '{{}}',
+    created_at      TEXT NOT NULL
+);
+"""
+
+_INDEXES_SQL = """
 CREATE INDEX IF NOT EXISTS idx_learnings_status ON learnings(status);
 CREATE INDEX IF NOT EXISTS idx_learnings_source_tool ON learnings(source_tool);
+CREATE INDEX IF NOT EXISTS idx_learnings_source_provider ON learnings(source_provider);
 CREATE INDEX IF NOT EXISTS idx_events_type ON events(type);
+CREATE INDEX IF NOT EXISTS idx_events_learning_id ON events(learning_id);
 CREATE INDEX IF NOT EXISTS idx_sources_provider ON sources(provider);
 CREATE INDEX IF NOT EXISTS idx_sources_status ON sources(status);
+CREATE INDEX IF NOT EXISTS idx_index_jobs_learning_id ON index_jobs(learning_id);
+CREATE INDEX IF NOT EXISTS idx_index_jobs_status ON index_jobs(status);
+CREATE INDEX IF NOT EXISTS idx_recall_events_learning_id ON recall_events(learning_id);
+CREATE INDEX IF NOT EXISTS idx_artifacts_learning_id ON artifacts(learning_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_events_idempotency_key
+    ON events(idempotency_key)
+    WHERE idempotency_key != '';
 """
+
+_SCHEMA_DDL = (
+    _LEARNINGS_DDL
+    + _PROPOSALS_DDL
+    + _METRICS_DDL
+    + _EVENTS_DDL
+    + _SOURCES_DDL
+    + _INDEX_JOBS_DDL
+    + _RECALL_EVENTS_DDL
+    + _ARTIFACTS_DDL
+)
 
 # ---------------------------------------------------------------------------
 # Legacy v2 state paths (relative to Path.home())
 # ---------------------------------------------------------------------------
 
-# Exposed so migrate_v2 and the doctor CLI agree on the canonical list.
 LEGACY_V2_PATHS: tuple[Path, ...] = (
     Path(".claude") / "session" / "reflect-state.yaml",
     Path(".claude") / "session" / "reflect-metrics.yaml",
@@ -108,12 +315,7 @@ LEGACY_V2_PATHS: tuple[Path, ...] = (
 
 
 def has_legacy_state() -> bool:
-    """Return True if any legacy v2 YAML state or a non-empty reflections dir exists.
-
-    Shallow-only: we don't rglob the reflections directory because a legacy
-    tree with thousands of nested files would make this O(files) on every
-    call; a top-level iterdir is enough to answer "is there anything here".
-    """
+    """Return True if any legacy v2 YAML state or a non-empty reflections dir exists."""
     home = Path.home()
     for rel in LEGACY_V2_PATHS:
         p = home / rel
@@ -170,6 +372,10 @@ def _new_id() -> str:
     return uuid.uuid4().hex[:16]
 
 
+def _stable_text_hash(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+
+
 def _db_path() -> Path:
     cfg = get_config()
     raw = cfg.get("storage", {}).get("db_path", "~/.reflect/reflect.db")
@@ -182,13 +388,7 @@ def db_path() -> Path:
 
 
 def init_db(path: Optional[Path] = None) -> sqlite3.Connection:
-    """Create tables if they don't exist and return a connection.
-
-    The connection is cached per path so callers can call ``init_db()``
-    repeatedly without opening duplicate handles. Legacy-state warning
-    logic lives in the CLI doctor command; keeping init_db free of IO
-    beyond the DB itself avoids per-call home-dir scans.
-    """
+    """Create tables if they don't exist and return a connection."""
     if path is None:
         path = _db_path()
 
@@ -201,84 +401,193 @@ def init_db(path: Optional[Path] = None) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
-    conn.executescript(_SCHEMA_SQL)
+    conn.executescript(_SCHEMA_DDL)
     _migrate_schema(conn)
+    _ensure_indexes(conn)
 
     _CONN_CACHE[key] = conn
     return conn
 
 
 def _warn_if_legacy_state_exists() -> None:
-    """Print the legacy-state reminder to stderr, if any is found.
-
-    Callable only from the CLI doctor command; no longer invoked from
-    init_db. Any IO error is swallowed because warning logic must never
-    escalate into a user-facing failure.
-    """
+    """Print the legacy-state reminder to stderr, if any is found."""
     try:
         msg = get_legacy_state_summary()
         if msg is None:
             return
         import sys as _sys
+
         print(msg, file=_sys.stderr)
-    except Exception:  # noqa: BLE001 - warnings must never raise
+    except Exception:
         return
 
 
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _table_sql(conn: sqlite3.Connection, table: str) -> str:
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+        (table,),
+    ).fetchone()
+    return row[0] if row and row[0] else ""
+
+
+def _ensure_indexes(conn: sqlite3.Connection) -> None:
+    with conn:
+        conn.executescript(_INDEXES_SQL)
+
+
+def _rebuild_table(
+    conn: sqlite3.Connection,
+    table: str,
+    create_sql: str,
+    columns: tuple[str, ...],
+) -> None:
+    temp_table = f"{table}_old"
+    column_list = ", ".join(columns)
+    with conn:
+        conn.execute(f"ALTER TABLE {table} RENAME TO {temp_table}")
+        conn.execute(create_sql)
+        conn.execute(
+            f"INSERT INTO {table} ({column_list}) "
+            f"SELECT {column_list} FROM {temp_table}"
+        )
+        conn.execute(f"DROP TABLE {temp_table}")
+
+
 def _migrate_schema(conn: sqlite3.Connection) -> None:
-    """Idempotent migrations for existing DBs.
-
-    Two phases:
-
-    1. Additive ALTERs for columns added after v3.0: ``commit_hash``,
-       ``reverted_at``, ``revert_reason``.
-    2. CHECK-constraint rebuild when the existing ``learnings`` table was
-       created before ``'reverted'`` was added to the status CHECK. SQLite's
-       ``CREATE TABLE IF NOT EXISTS`` is a no-op for existing tables, so
-       without this rebuild an old DB will reject UPDATE status='reverted'.
-    """
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(learnings)").fetchall()}
-    alters = []
-    if "commit_hash" not in cols:
-        alters.append("ALTER TABLE learnings ADD COLUMN commit_hash TEXT")
-    if "reverted_at" not in cols:
-        alters.append("ALTER TABLE learnings ADD COLUMN reverted_at TEXT")
-    if "revert_reason" not in cols:
-        alters.append("ALTER TABLE learnings ADD COLUMN revert_reason TEXT")
-    if alters:
-        with conn:
-            for sql in alters:
+    """Idempotent migrations for existing DBs."""
+    learning_columns = _table_columns(conn, "learnings")
+    learning_alters = [
+        ("scope", "ALTER TABLE learnings ADD COLUMN scope TEXT NOT NULL DEFAULT 'project'"),
+        (
+            "source_provider",
+            "ALTER TABLE learnings ADD COLUMN source_provider TEXT NOT NULL DEFAULT ''",
+        ),
+        ("source_kind", "ALTER TABLE learnings ADD COLUMN source_kind TEXT NOT NULL DEFAULT ''"),
+        ("source_quote", "ALTER TABLE learnings ADD COLUMN source_quote TEXT NOT NULL DEFAULT ''"),
+        (
+            "source_quote_hash",
+            "ALTER TABLE learnings ADD COLUMN source_quote_hash TEXT NOT NULL DEFAULT ''",
+        ),
+        ("session_id", "ALTER TABLE learnings ADD COLUMN session_id TEXT NOT NULL DEFAULT ''"),
+        ("thread_id", "ALTER TABLE learnings ADD COLUMN thread_id TEXT NOT NULL DEFAULT ''"),
+        (
+            "privacy_level",
+            "ALTER TABLE learnings ADD COLUMN privacy_level TEXT NOT NULL DEFAULT 'internal'",
+        ),
+        ("artifact_path", "ALTER TABLE learnings ADD COLUMN artifact_path TEXT NOT NULL DEFAULT ''"),
+        ("sidecar_path", "ALTER TABLE learnings ADD COLUMN sidecar_path TEXT NOT NULL DEFAULT ''"),
+        ("commit_hash", "ALTER TABLE learnings ADD COLUMN commit_hash TEXT"),
+        (
+            "supersedes_learning_id",
+            "ALTER TABLE learnings ADD COLUMN supersedes_learning_id TEXT",
+        ),
+        (
+            "superseded_by_learning_id",
+            "ALTER TABLE learnings ADD COLUMN superseded_by_learning_id TEXT",
+        ),
+        ("reverted_at", "ALTER TABLE learnings ADD COLUMN reverted_at TEXT"),
+        ("revert_reason", "ALTER TABLE learnings ADD COLUMN revert_reason TEXT"),
+        ("last_recalled_at", "ALTER TABLE learnings ADD COLUMN last_recalled_at TEXT"),
+        (
+            "recall_count",
+            "ALTER TABLE learnings ADD COLUMN recall_count INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "helpful_count",
+            "ALTER TABLE learnings ADD COLUMN helpful_count INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "ignored_count",
+            "ALTER TABLE learnings ADD COLUMN ignored_count INTEGER NOT NULL DEFAULT 0",
+        ),
+        ("stale_count", "ALTER TABLE learnings ADD COLUMN stale_count INTEGER NOT NULL DEFAULT 0"),
+    ]
+    with conn:
+        for column, sql in learning_alters:
+            if column not in learning_columns:
                 conn.execute(sql)
 
-    # CHECK-constraint rebuild: detect a stale CHECK that predates 'reverted'.
-    row = conn.execute(
-        "SELECT sql FROM sqlite_master WHERE type='table' AND name='learnings'"
-    ).fetchone()
-    table_sql = row[0] if row else ""
-    if table_sql and "'reverted'" not in table_sql:
-        # Indexes reference the table name, so SQLite drops them automatically
-        # on rename. We re-create them via _SCHEMA_SQL after the rebuild.
-        with conn:
-            conn.execute("DROP INDEX IF EXISTS idx_learnings_status")
-            conn.execute("DROP INDEX IF EXISTS idx_learnings_source_tool")
-            conn.execute("ALTER TABLE learnings RENAME TO learnings_old")
-            conn.executescript(_LEARNINGS_DDL)
-            # Column set is stable between old and new — additive ALTERs above
-            # already brought pre-rebuild DBs up to the current column set.
-            conn.execute(
-                "INSERT INTO learnings SELECT "
-                "id, title, category, confidence, status, source_tool, "
-                "source_path, content_hash, commit_hash, created_at, "
-                "approved_at, indexed_at, reverted_at, revert_reason "
-                "FROM learnings_old"
-            )
-            conn.execute("DROP TABLE learnings_old")
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_learnings_status ON learnings(status)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_learnings_source_tool ON learnings(source_tool)"
-            )
+    learning_sql = _table_sql(conn, "learnings")
+    if learning_sql and not all(f"'{status}'" in learning_sql for status in LEARNING_STATUS_VALUES):
+        _rebuild_table(conn, "learnings", _LEARNINGS_DDL, _LEARNING_COLUMNS)
+
+    proposal_columns = _table_columns(conn, "proposals")
+    proposal_alters = [
+        (
+            "proposal_type",
+            "ALTER TABLE proposals ADD COLUMN proposal_type TEXT NOT NULL DEFAULT 'learning'",
+        ),
+        ("target_kind", "ALTER TABLE proposals ADD COLUMN target_kind TEXT NOT NULL DEFAULT ''"),
+        ("target_path", "ALTER TABLE proposals ADD COLUMN target_path TEXT NOT NULL DEFAULT ''"),
+        (
+            "decision_actor",
+            "ALTER TABLE proposals ADD COLUMN decision_actor TEXT NOT NULL DEFAULT ''",
+        ),
+        (
+            "rationale_json",
+            "ALTER TABLE proposals ADD COLUMN rationale_json TEXT NOT NULL DEFAULT '{}'",
+        ),
+        ("decided_at", "ALTER TABLE proposals ADD COLUMN decided_at TEXT"),
+        ("materialized_at", "ALTER TABLE proposals ADD COLUMN materialized_at TEXT"),
+        (
+            "materialization_error",
+            "ALTER TABLE proposals ADD COLUMN materialization_error TEXT",
+        ),
+    ]
+    with conn:
+        for column, sql in proposal_alters:
+            if column not in proposal_columns:
+                conn.execute(sql)
+
+    proposal_sql = _table_sql(conn, "proposals")
+    if proposal_sql and not all(f"'{status}'" in proposal_sql for status in PROPOSAL_STATUS_VALUES):
+        _rebuild_table(conn, "proposals", _PROPOSALS_DDL, _PROPOSAL_COLUMNS)
+
+    event_columns = _table_columns(conn, "events")
+    event_alters = [
+        ("actor", "ALTER TABLE events ADD COLUMN actor TEXT NOT NULL DEFAULT ''"),
+        ("parent_event_id", "ALTER TABLE events ADD COLUMN parent_event_id TEXT"),
+        (
+            "idempotency_key",
+            "ALTER TABLE events ADD COLUMN idempotency_key TEXT NOT NULL DEFAULT ''",
+        ),
+    ]
+    with conn:
+        for column, sql in event_alters:
+            if column not in event_columns:
+                conn.execute(sql)
+
+    source_columns = _table_columns(conn, "sources")
+    source_alters = [
+        ("source_kind", "ALTER TABLE sources ADD COLUMN source_kind TEXT NOT NULL DEFAULT ''"),
+        ("provider_id", "ALTER TABLE sources ADD COLUMN provider_id TEXT NOT NULL DEFAULT ''"),
+        (
+            "canonical_project_id",
+            "ALTER TABLE sources ADD COLUMN canonical_project_id TEXT NOT NULL DEFAULT ''",
+        ),
+        ("first_seen", "ALTER TABLE sources ADD COLUMN first_seen TEXT NOT NULL DEFAULT ''"),
+        ("archived_at", "ALTER TABLE sources ADD COLUMN archived_at TEXT"),
+        (
+            "ingest_state",
+            "ALTER TABLE sources ADD COLUMN ingest_state TEXT NOT NULL DEFAULT 'discovered'",
+        ),
+    ]
+    with conn:
+        for column, sql in source_alters:
+            if column not in source_columns:
+                conn.execute(sql)
+        conn.execute(
+            "UPDATE sources SET first_seen = last_seen WHERE first_seen = '' OR first_seen IS NULL"
+        )
+
+    with conn:
+        conn.execute(_INDEX_JOBS_DDL)
+        conn.execute(_RECALL_EVENTS_DDL)
+        conn.execute(_ARTIFACTS_DDL)
 
 
 def get_conn(path: Optional[Path] = None) -> sqlite3.Connection:
@@ -286,24 +595,33 @@ def get_conn(path: Optional[Path] = None) -> sqlite3.Connection:
     return init_db(path)
 
 
+def close_all() -> None:
+    """Close every cached connection and clear the cache.
+
+    Primarily for tests that need to swap DB files between cases. In
+    production code there's no need to call this — connection lifetime
+    matches process lifetime by design.
+    """
+    for conn in _CONN_CACHE.values():
+        try:
+            conn.close()
+        except Exception:
+            pass
+    _CONN_CACHE.clear()
+
+
 # ---------------------------------------------------------------------------
-# Shared helpers (used by reflect_db and migrate_v2)
+# Shared helpers
 # ---------------------------------------------------------------------------
 
 
 def compute_content_hash(payload: dict[str, Any]) -> str:
-    """Stable 16-hex-char SHA-256 prefix over canonical JSON of *payload*.
-
-    Pure: performs no DB access. The 16-char prefix matches the width used
-    by other ids in this module and keeps content_hash small in the row.
-    """
+    """Stable 16-hex-char SHA-256 prefix over canonical JSON of *payload*."""
     blob = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()[:16]
 
 
-def get_known_content_hashes(
-    *, conn: Optional[sqlite3.Connection] = None,
-) -> set[str]:
+def get_known_content_hashes(*, conn: Optional[sqlite3.Connection] = None) -> set[str]:
     """Return the set of distinct non-empty content_hash values in learnings."""
     conn = conn or get_conn()
     rows = conn.execute(
@@ -335,28 +653,75 @@ def add_learning(
     source_path: str = "",
     content_hash: str = "",
     *,
+    status: str = LearningStatus.PENDING.value,
+    scope: str = "project",
+    source_provider: str = "",
+    source_kind: str = "",
+    source_quote: str = "",
+    source_quote_hash: str = "",
+    session_id: str = "",
+    thread_id: str = "",
+    privacy_level: str = PrivacyLevel.INTERNAL.value,
+    artifact_path: str = "",
+    sidecar_path: str = "",
+    commit_hash: Optional[str] = None,
+    supersedes_learning_id: Optional[str] = None,
+    superseded_by_learning_id: Optional[str] = None,
     conn: Optional[sqlite3.Connection] = None,
 ) -> str:
     """Insert a new learning row. Returns the generated id.
 
-    The insert and the accompanying ``learning_added`` audit event are
-    written in a single transaction so a crash between them cannot leave
-    an un-audited row.
+    ``source_quote`` is captured raw regardless of ``privacy_level`` —
+    redaction is applied at read-time by callers that surface the quote
+    to the user (see ``RESTRICTED`` / ``SECRET_REDACTED`` in
+    ``PrivacyLevel``). Storing raw lets future queries re-evaluate the
+    redaction policy without losing the original evidence.
     """
     conn = conn or get_conn()
     lid = _new_id()
+    provider = source_provider or source_tool
+    quote_hash = source_quote_hash or (_stable_text_hash(source_quote) if source_quote else "")
+    now = _now_iso()
     with conn:
         conn.execute(
             """INSERT INTO learnings
-               (id, title, category, confidence, status, source_tool,
-                source_path, content_hash, created_at)
-               VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)""",
-            (lid, title, category, confidence, source_tool,
-             source_path, content_hash, _now_iso()),
+               (id, title, category, confidence, status, scope, source_tool,
+                source_provider, source_kind, source_path, source_quote,
+                source_quote_hash, content_hash, session_id, thread_id,
+                privacy_level, artifact_path, sidecar_path, commit_hash,
+                supersedes_learning_id, superseded_by_learning_id, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                lid,
+                title,
+                category,
+                confidence,
+                status,
+                scope,
+                source_tool,
+                provider,
+                source_kind,
+                source_path,
+                source_quote,
+                quote_hash,
+                content_hash,
+                session_id,
+                thread_id,
+                privacy_level,
+                artifact_path,
+                sidecar_path,
+                commit_hash,
+                supersedes_learning_id,
+                superseded_by_learning_id,
+                now,
+            ),
         )
         add_event(
-            "learning_added", lid, {"title": title},
-            conn=conn, autocommit=False,
+            "learning_added",
+            lid,
+            {"title": title, "status": status, "scope": scope},
+            conn=conn,
+            autocommit=False,
         )
     return lid
 
@@ -369,26 +734,20 @@ def update_learning_status(
     commit_hash: Optional[str] = None,
     conn: Optional[sqlite3.Connection] = None,
 ) -> None:
-    """Transition a learning to *status*.
-
-    Valid statuses: pending, approved, rejected, indexed, reverted.
-
-    For status='reverted', pass *revert_reason* (short explanation) and
-    optionally *commit_hash* (the commit where the learning was backed out).
-
-    The UPDATE and the ``status_change`` audit event commit atomically.
-    """
+    """Transition a learning to *status* and write a matching audit event."""
     conn = conn or get_conn()
     now = _now_iso()
     extras: dict[str, Any] = {}
-    if status == "approved":
+    if status == LearningStatus.APPROVED.value:
         extras["approved_at"] = now
-    elif status == "indexed":
+    elif status == LearningStatus.INDEXED.value:
         extras["indexed_at"] = now
-    elif status == "reverted":
+    elif status == LearningStatus.REVERTED.value:
         extras["reverted_at"] = now
         if revert_reason is not None:
             extras["revert_reason"] = revert_reason
+    elif status == LearningStatus.RECALLED.value:
+        extras["last_recalled_at"] = now
     if commit_hash is not None:
         extras["commit_hash"] = commit_hash
 
@@ -411,8 +770,11 @@ def update_learning_status(
             params,
         )
         add_event(
-            "status_change", learning_id, details,
-            conn=conn, autocommit=False,
+            "status_change",
+            learning_id,
+            details,
+            conn=conn,
+            autocommit=False,
         )
 
 
@@ -422,18 +784,22 @@ def get_pending_learnings(
     """Return all learnings with status='pending'."""
     conn = conn or get_conn()
     rows = conn.execute(
-        "SELECT * FROM learnings WHERE status = 'pending' ORDER BY created_at"
+        "SELECT * FROM learnings WHERE status = ? ORDER BY created_at",
+        (LearningStatus.PENDING.value,),
     ).fetchall()
     return [dict(r) for r in rows]
 
 
 def get_learning(
-    learning_id: str, *, conn: Optional[sqlite3.Connection] = None,
+    learning_id: str,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
 ) -> Optional[dict[str, Any]]:
     """Fetch a single learning by id."""
     conn = conn or get_conn()
     row = conn.execute(
-        "SELECT * FROM learnings WHERE id = ?", (learning_id,)
+        "SELECT * FROM learnings WHERE id = ?",
+        (learning_id,),
     ).fetchone()
     return dict(row) if row else None
 
@@ -448,23 +814,48 @@ def add_proposal(
     agent_file: str = "",
     diff: str = "",
     *,
+    proposal_type: str = ProposalType.LEARNING.value,
+    target_kind: str = "",
+    target_path: str = "",
+    status: str = ProposalStatus.PENDING.value,
+    decision_actor: str = "",
+    rationale_json: Optional[dict[str, Any] | str] = None,
     conn: Optional[sqlite3.Connection] = None,
 ) -> str:
     """Insert a new proposal. Returns the generated id."""
     conn = conn or get_conn()
     pid = _new_id()
+    serialized_rationale = (
+        rationale_json
+        if isinstance(rationale_json, str)
+        else json.dumps(rationale_json or {})
+    )
     with conn:
         conn.execute(
             """INSERT INTO proposals
-               (id, learning_id, agent_file, diff, status, created_at)
-               VALUES (?, ?, ?, ?, 'pending', ?)""",
-            (pid, learning_id, agent_file, diff, _now_iso()),
+               (id, learning_id, proposal_type, target_kind, target_path,
+                agent_file, diff, status, decision_actor, rationale_json,
+                created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                pid,
+                learning_id,
+                proposal_type,
+                target_kind,
+                target_path,
+                agent_file,
+                diff,
+                status,
+                decision_actor,
+                serialized_rationale,
+                _now_iso(),
+            ),
         )
     return pid
 
 
 # ---------------------------------------------------------------------------
-# Metrics (key-value store)
+# Metrics
 # ---------------------------------------------------------------------------
 
 
@@ -496,7 +887,8 @@ def get_metric(
     """Read a single metric value. Returns *default* if not found."""
     conn = conn or get_conn()
     row = conn.execute(
-        "SELECT value FROM metrics WHERE key = ?", (key,)
+        "SELECT value FROM metrics WHERE key = ?",
+        (key,),
     ).fetchone()
     if row is None:
         return default
@@ -507,9 +899,7 @@ def get_metric(
         return raw
 
 
-def get_metrics(
-    *, conn: Optional[sqlite3.Connection] = None,
-) -> dict[str, Any]:
+def get_metrics(*, conn: Optional[sqlite3.Connection] = None) -> dict[str, Any]:
     """Return all metrics as a flat dict."""
     conn = conn or get_conn()
     rows = conn.execute("SELECT key, value FROM metrics").fetchall()
@@ -528,18 +918,46 @@ def increment_metric(
     *,
     conn: Optional[sqlite3.Connection] = None,
 ) -> int:
-    """Atomically increment an integer metric. Returns new value."""
+    """Atomically increment an integer metric. Returns new value.
+
+    Resolved in a single SQL upsert so concurrent writers on the same
+    connection cannot lose increments. Non-integer existing values
+    coerce to 0 before the addition (matches the prior behaviour of the
+    Python read-modify-write path).
+    """
     conn = conn or get_conn()
-    current = get_metric(key, 0, conn=conn)
-    if not isinstance(current, (int, float)):
-        current = 0
-    new_val = int(current) + delta
-    set_metric(key, new_val, conn=conn)
-    return new_val
+    now = _now_iso()
+    # The CASE picks an integer-coercible representation of the existing value:
+    # numeric typeof passes through, text that round-trips cleanly through
+    # CAST→printf is an integer-shaped string (e.g. '5', '-3'), and anything
+    # else (timestamps like '2026-04-28T...', JSON blobs) falls back to 0 to
+    # match the legacy Python read-modify-write semantics.
+    sql = """
+        INSERT INTO metrics (key, value, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET
+            value = CAST(
+                CAST(
+                    CASE
+                        WHEN typeof(value) IN ('integer', 'real') THEN value
+                        WHEN CAST(value AS TEXT) =
+                             printf('%d', CAST(value AS INTEGER)) THEN value
+                        ELSE '0'
+                    END AS INTEGER
+                ) + excluded.value AS TEXT
+            ),
+            updated_at = excluded.updated_at
+    """
+    with conn:
+        row = conn.execute(
+            sql + " RETURNING value",
+            (key, str(delta), now),
+        ).fetchone()
+    return int(row["value"])
 
 
 # ---------------------------------------------------------------------------
-# Events (audit trail)
+# Events
 # ---------------------------------------------------------------------------
 
 
@@ -548,28 +966,54 @@ def add_event(
     learning_id: Optional[str] = None,
     details: Optional[dict[str, Any]] = None,
     *,
+    actor: str = "",
+    parent_event_id: Optional[str] = None,
+    idempotency_key: str = "",
     conn: Optional[sqlite3.Connection] = None,
     autocommit: bool = True,
 ) -> str:
-    """Insert an audit event. Returns the event id.
-
-    ``autocommit=False`` lets callers nest the insert inside an outer
-    ``with conn:`` so the event commits atomically with the row that
-    produced it. Default behaviour is unchanged for external callers.
-    """
+    """Insert an audit event. Returns the event id."""
     conn = conn or get_conn()
+    if idempotency_key:
+        existing = conn.execute(
+            "SELECT id FROM events WHERE idempotency_key = ?",
+            (idempotency_key,),
+        ).fetchone()
+        if existing:
+            return existing["id"]
+
     eid = _new_id()
-    sql = """INSERT INTO events (id, type, learning_id, details_json, created_at)
-             VALUES (?, ?, ?, ?, ?)"""
+    sql = """
+        INSERT INTO events
+            (id, type, learning_id, actor, parent_event_id, idempotency_key,
+             details_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """
     params = (
-        eid, event_type, learning_id,
-        json.dumps(details or {}), _now_iso(),
+        eid,
+        event_type,
+        learning_id,
+        actor,
+        parent_event_id,
+        idempotency_key,
+        json.dumps(details or {}),
+        _now_iso(),
     )
-    if autocommit:
-        with conn:
+    try:
+        if autocommit:
+            with conn:
+                conn.execute(sql, params)
+        else:
             conn.execute(sql, params)
-    else:
-        conn.execute(sql, params)
+    except sqlite3.IntegrityError:
+        if idempotency_key:
+            existing = conn.execute(
+                "SELECT id FROM events WHERE idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+            if existing:
+                return existing["id"]
+        raise
     return eid
 
 
@@ -605,6 +1049,10 @@ def upsert_source(
     project_name: str = "",
     content_hash: str = "",
     *,
+    source_kind: str = "",
+    provider_id: str = "",
+    canonical_project_id: str = "",
+    ingest_state: str = "discovered",
     conn: Optional[sqlite3.Connection] = None,
 ) -> str:
     """Insert or update a discovered source. Returns the source id."""
@@ -612,7 +1060,7 @@ def upsert_source(
     now = _now_iso()
 
     existing = conn.execute(
-        "SELECT id FROM sources WHERE provider = ? AND path = ?",
+        "SELECT id, first_seen FROM sources WHERE provider = ? AND path = ?",
         (provider, path),
     ).fetchone()
 
@@ -621,10 +1069,21 @@ def upsert_source(
         with conn:
             conn.execute(
                 """UPDATE sources
-                   SET content_hash = ?, last_seen = ?, status = 'active',
-                       project_name = ?
+                   SET content_hash = ?, last_seen = ?, status = ?, project_name = ?,
+                       source_kind = ?, provider_id = ?, canonical_project_id = ?,
+                       ingest_state = ?, archived_at = NULL
                    WHERE id = ?""",
-                (content_hash, now, project_name, sid),
+                (
+                    content_hash,
+                    now,
+                    SourceStatus.ACTIVE.value,
+                    project_name,
+                    source_kind,
+                    provider_id,
+                    canonical_project_id,
+                    ingest_state,
+                    sid,
+                ),
             )
         return sid
 
@@ -632,9 +1091,24 @@ def upsert_source(
     with conn:
         conn.execute(
             """INSERT INTO sources
-               (id, provider, path, project_name, content_hash, last_seen, status)
-               VALUES (?, ?, ?, ?, ?, ?, 'active')""",
-            (sid, provider, path, project_name, content_hash, now),
+               (id, provider, path, project_name, source_kind, provider_id,
+                canonical_project_id, content_hash, first_seen, last_seen,
+                ingest_state, status)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                sid,
+                provider,
+                path,
+                project_name,
+                source_kind,
+                provider_id,
+                canonical_project_id,
+                content_hash,
+                now,
+                now,
+                ingest_state,
+                SourceStatus.ACTIVE.value,
+            ),
         )
     return sid
 
@@ -664,16 +1138,160 @@ def mark_sources_stale(
     conn = conn or get_conn()
     with conn:
         cur = conn.execute(
-            """UPDATE sources SET status = 'stale'
-               WHERE status = 'active'
+            """UPDATE sources SET status = ?
+               WHERE status = ?
                  AND julianday('now') - julianday(last_seen) > ?""",
-            (days,),
+            (SourceStatus.STALE.value, SourceStatus.ACTIVE.value, days),
         )
     return cur.rowcount
 
 
 # ---------------------------------------------------------------------------
-# CLI — quick diagnostics
+# Index jobs, recall, and artifacts
+# ---------------------------------------------------------------------------
+
+
+def add_index_job(
+    learning_id: str,
+    backend: str,
+    *,
+    status: str = IndexJobStatus.PENDING.value,
+    idempotency_key: str = "",
+    attempt_count: int = 0,
+    last_error: str = "",
+    conn: Optional[sqlite3.Connection] = None,
+) -> str:
+    """Insert an index job or return the existing row for an idempotency key."""
+    conn = conn or get_conn()
+    if idempotency_key:
+        existing = conn.execute(
+            "SELECT id FROM index_jobs WHERE idempotency_key = ?",
+            (idempotency_key,),
+        ).fetchone()
+        if existing:
+            return existing["id"]
+
+    jid = _new_id()
+    with conn:
+        conn.execute(
+            """INSERT INTO index_jobs
+               (id, learning_id, backend, status, idempotency_key, attempt_count,
+                last_error, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                jid,
+                learning_id,
+                backend,
+                status,
+                idempotency_key,
+                attempt_count,
+                last_error,
+                _now_iso(),
+            ),
+        )
+    return jid
+
+
+def add_recall_event(
+    learning_id: str,
+    query: str,
+    *,
+    source_context: str = "",
+    rank: Optional[int] = None,
+    feedback: str = "",
+    query_hash: str = "",
+    conn: Optional[sqlite3.Connection] = None,
+) -> str:
+    """Record a recall hit and update recall telemetry on the learning row."""
+    conn = conn or get_conn()
+    rid = _new_id()
+    now = _now_iso()
+    effective_query_hash = query_hash or _stable_text_hash(query)
+    feedback = feedback.strip().lower()
+
+    update_parts = [
+        "last_recalled_at = ?",
+        "recall_count = recall_count + 1",
+    ]
+    params: list[Any] = [now]
+    if feedback == "helpful":
+        update_parts.append("helpful_count = helpful_count + 1")
+    elif feedback == "ignored":
+        update_parts.append("ignored_count = ignored_count + 1")
+    elif feedback == "stale":
+        update_parts.append("stale_count = stale_count + 1")
+    params.append(learning_id)
+
+    with conn:
+        conn.execute(
+            """INSERT INTO recall_events
+               (id, learning_id, query, query_hash, source_context, rank, feedback, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                rid,
+                learning_id,
+                query,
+                effective_query_hash,
+                source_context,
+                rank,
+                feedback,
+                now,
+            ),
+        )
+        conn.execute(
+            f"UPDATE learnings SET {', '.join(update_parts)} WHERE id = ?",
+            params,
+        )
+        add_event(
+            "learning_recalled",
+            learning_id,
+            {
+                "query_hash": effective_query_hash,
+                "rank": rank,
+                "feedback": feedback,
+            },
+            conn=conn,
+            autocommit=False,
+        )
+    return rid
+
+
+def add_artifact(
+    learning_id: str,
+    artifact_type: str,
+    path: str,
+    *,
+    content_hash: str = "",
+    status: str = ArtifactStatus.CREATED.value,
+    metadata: Optional[dict[str, Any] | str] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> str:
+    """Record a generated artifact for a learning."""
+    conn = conn or get_conn()
+    aid = _new_id()
+    metadata_json = metadata if isinstance(metadata, str) else json.dumps(metadata or {})
+    with conn:
+        conn.execute(
+            """INSERT INTO artifacts
+               (id, learning_id, artifact_type, path, content_hash, status,
+                metadata_json, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                aid,
+                learning_id,
+                artifact_type,
+                path,
+                content_hash,
+                status,
+                metadata_json,
+                _now_iso(),
+            ),
+        )
+    return aid
+
+
+# ---------------------------------------------------------------------------
+# CLI
 # ---------------------------------------------------------------------------
 
 
@@ -695,15 +1313,26 @@ def main() -> None:
         print(f"Database initialized at {_db_path()}")
 
     elif args.command == "stats":
-        for table in ("learnings", "proposals", "metrics", "events", "sources"):
+        for table in (
+            "learnings",
+            "proposals",
+            "metrics",
+            "events",
+            "sources",
+            "index_jobs",
+            "recall_events",
+            "artifacts",
+        ):
             count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             print(f"  {table}: {count} rows")
 
     elif args.command == "events":
         for ev in get_events(limit=args.limit, conn=conn):
-            print(f"  [{ev['created_at']}] {ev['type']}  "
-                  f"learning={ev['learning_id'] or '-'}  "
-                  f"{ev['details_json']}")
+            print(
+                f"  [{ev['created_at']}] {ev['type']}  "
+                f"learning={ev['learning_id'] or '-'}  "
+                f"{ev['details_json']}"
+            )
 
     elif args.command == "doctor":
         msg = get_legacy_state_summary()

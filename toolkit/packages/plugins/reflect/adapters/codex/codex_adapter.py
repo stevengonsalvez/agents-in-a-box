@@ -22,6 +22,15 @@ Most of the install/uninstall mechanics live on :class:`AdapterBase` —
 this module just supplies the harness-specific constants and pointer
 body. Compare with ``claude_adapter.py`` which adds a SessionStart hook
 merge step on top of the same base.
+
+TODO(closed-loop): also wire ``~/.claude/scripts/reflect-drain-bg.sh``
+into a Codex session-init hook once Codex grows hook parity. The drain
+script is harness-agnostic — it reads the shared
+``~/.reflect/pending_reflections.jsonl`` queue and shells out to
+``claude -p /reflect <transcript>`` to capture learnings. Until Codex
+gets a session-start hook (or we add a wrapper that runs the drain on
+``codex`` invocation), Codex sessions piggy-back on Claude Code sessions
+opening to drain the queue.
 """
 
 from __future__ import annotations
