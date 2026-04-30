@@ -388,7 +388,9 @@ jobs:
 
   scoop:
     name: Update Scoop Manifest
-    needs: [prepare, build, release]
+    # Chained after `homebrew` (not just release) so the two jobs don't race on
+    # `git push origin main` — they touch different files but the same branch.
+    needs: [prepare, build, release, homebrew]
     runs-on: ubuntu-latest
     permissions:
       contents: write
