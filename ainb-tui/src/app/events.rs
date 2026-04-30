@@ -58,6 +58,7 @@ pub enum AppEvent {
     NewSessionPrevRepo,
     NewSessionConfirmRepo,
     NewSessionInputChar(char),
+    NewSessionInputPasteText(String),
     NewSessionBackspace,
     NewSessionBackspaceWord,  // Delete word backward (Shift+Backspace)
     // Source selection events (Local, Remote, SSH, Favorites)
@@ -78,6 +79,7 @@ pub enum AppEvent {
     RepoInputChar(char),
     RepoInputBackspace,
     RepoInputBackspaceWord,
+    RepoInputPasteText(String),
     RepoInputSubmit,
     RepoInputFavoriteNext,     // Navigate to next favorite in inline list
     RepoInputFavoritePrev,     // Navigate to previous favorite in inline list
@@ -124,6 +126,7 @@ pub enum AppEvent {
     NewSessionSshNextField,      // Tab to next SSH input field
     NewSessionSshPrevField,      // Shift+Tab to previous SSH input field
     NewSessionSshInputChar(char), // Character input for SSH fields
+    NewSessionSshPasteText(String), // Paste text into focused SSH field
     NewSessionSshBackspace,       // Backspace in SSH fields
     NewSessionSshConfirm,         // Confirm SSH configuration
     NewSessionSshGoBack,          // Go back to agent selection
@@ -443,6 +446,22 @@ impl EventHandler {
         let mut clipboard = Clipboard::new()?;
         let text = clipboard.get_text()?;
         Ok(text)
+    }
+
+    /// Dispatch a bracketed-paste event to the right New Session text-entry step.
+    /// Returns `None` when the user isn't currently in a text-entry step that
+    /// accepts paste, so the text is dropped silently rather than typed literally.
+    pub fn handle_paste_event(text: String, state: &AppState) -> Option<AppEvent> {
+        use crate::app::state::NewSessionStep;
+
+        let session_state = state.new_session_state.as_ref()?;
+        match session_state.step {
+            NewSessionStep::InputRepoSource => Some(AppEvent::RepoInputPasteText(text)),
+            NewSessionStep::ConfigureSsh => Some(AppEvent::NewSessionSshPasteText(text)),
+            NewSessionStep::InputBranch => Some(AppEvent::NewSessionInputPasteText(text)),
+            NewSessionStep::InputPrompt => Some(AppEvent::NewSessionPasteText(text)),
+            _ => None,
+        }
     }
 
     pub fn handle_key_event(key_event: KeyEvent, state: &mut AppState) -> Option<AppEvent> {
@@ -828,6 +847,16 @@ impl EventHandler {
                         KeyCode::Char('s') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
                             Some(AppEvent::RepoInputToggleFavorite)
                         }
+                        KeyCode::Char('v') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                            Self::get_clipboard_text()
+                                .ok()
+                                .map(AppEvent::RepoInputPasteText)
+                        }
+                        KeyCode::Insert if key_event.modifiers.contains(KeyModifiers::SHIFT) => {
+                            Self::get_clipboard_text()
+                                .ok()
+                                .map(AppEvent::RepoInputPasteText)
+                        }
                         KeyCode::Backspace
                             if key_event.modifiers.contains(KeyModifiers::SHIFT) =>
                         {
@@ -900,6 +929,16 @@ impl EventHandler {
                         }
                         KeyCode::BackTab => Some(AppEvent::NewSessionSshPrevField),
                         KeyCode::Enter => Some(AppEvent::NewSessionSshConfirm),
+                        KeyCode::Char('v') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                            Self::get_clipboard_text()
+                                .ok()
+                                .map(AppEvent::NewSessionSshPasteText)
+                        }
+                        KeyCode::Insert if key_event.modifiers.contains(KeyModifiers::SHIFT) => {
+                            Self::get_clipboard_text()
+                                .ok()
+                                .map(AppEvent::NewSessionSshPasteText)
+                        }
                         KeyCode::Backspace => Some(AppEvent::NewSessionSshBackspace),
                         KeyCode::Char(ch) => Some(AppEvent::NewSessionSshInputChar(ch)),
                         _ => None,
@@ -942,6 +981,16 @@ impl EventHandler {
                         // Left/Right for model selection (only when Claude is selected)
                         KeyCode::Left if show_model => Some(AppEvent::NewSessionModelPrev),
                         KeyCode::Right if show_model => Some(AppEvent::NewSessionModelNext),
+                        KeyCode::Char('v') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                            Self::get_clipboard_text()
+                                .ok()
+                                .map(AppEvent::NewSessionInputPasteText)
+                        }
+                        KeyCode::Insert if key_event.modifiers.contains(KeyModifiers::SHIFT) => {
+                            Self::get_clipboard_text()
+                                .ok()
+                                .map(AppEvent::NewSessionInputPasteText)
+                        }
                         KeyCode::Backspace
                             if key_event.modifiers.contains(KeyModifiers::SHIFT) =>
                         {
@@ -1958,6 +2007,9 @@ impl EventHandler {
             AppEvent::RepoInputBackspaceWord => {
                 state.repo_input_backspace_word();
             }
+            AppEvent::RepoInputPasteText(text) => {
+                state.repo_input_paste_text(&text);
+            }
             AppEvent::RepoInputSubmit => {
                 tracing::info!("Event: RepoInputSubmit - validating repo source");
                 state.pending_async_action = Some(AsyncAction::ValidateRepoSource);
@@ -1996,6 +2048,10 @@ impl EventHandler {
             AppEvent::NewSessionInputChar(ch) => {
                 tracing::debug!("Event: NewSessionInputChar({})", ch);
                 state.new_session_update_branch(ch);
+            }
+            AppEvent::NewSessionInputPasteText(text) => {
+                tracing::debug!("Event: NewSessionInputPasteText({} chars)", text.len());
+                state.new_session_input_paste_text(&text);
             }
             AppEvent::NewSessionBackspace => {
                 tracing::debug!("Event: NewSessionBackspace");
@@ -2106,6 +2162,10 @@ impl EventHandler {
             AppEvent::NewSessionSshInputChar(ch) => {
                 tracing::debug!("Event: NewSessionSshInputChar({})", ch);
                 state.new_session_ssh_input_char(ch);
+            }
+            AppEvent::NewSessionSshPasteText(text) => {
+                tracing::debug!("Event: NewSessionSshPasteText({} chars)", text.len());
+                state.new_session_ssh_paste_text(&text);
             }
             AppEvent::NewSessionSshBackspace => {
                 tracing::debug!("Event: NewSessionSshBackspace");
