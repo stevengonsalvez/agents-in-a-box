@@ -5,7 +5,7 @@ use crate::cli::OutputFormat;
 use crate::config::{AppConfig, CurrencyConfig, UsagePlan, UsagePlanId, UsagePlanProvider};
 use crate::models::usage::{
     ActivityUsage, NamedUsage, ProjectUsage, SessionUsage, UsageData, UsagePeriod,
-    UsageProviderFilter, UsageQuery, analyze_yield, compare_models, optimize_usage,
+    UsageProviderFilter, UsageQuery, analyze_yield, billing_period, compare_models, optimize_usage,
     parse_usage_for,
 };
 use anyhow::{Result, anyhow, bail};
@@ -357,10 +357,17 @@ fn plan_command(command: UsagePlanCommands, format: OutputFormat) -> Result<()> 
     let mut config = AppConfig::load().unwrap_or_default();
     match command {
         UsagePlanCommands::Show(args) => {
-            let data = load_usage(&args)?;
-            let projection = config.usage.plan.as_ref().map(|plan| {
-                crate::models::usage::project_plan_usage(&data, plan, Local::now().date_naive())
-            });
+            let today = Local::now().date_naive();
+            let data = if let Some(plan) = config.usage.plan.as_ref() {
+                load_usage(&plan_show_args_for_plan(&args, plan, today))?
+            } else {
+                load_usage(&args)?
+            };
+            let projection = config
+                .usage
+                .plan
+                .as_ref()
+                .map(|plan| crate::models::usage::project_plan_usage(&data, plan, today));
             if matches!(format, OutputFormat::Json) {
                 println!(
                     "{}",
@@ -742,6 +749,28 @@ fn plan_provider(provider: PlanProviderArg) -> UsagePlanProvider {
     }
 }
 
+fn provider_arg_for_plan(provider: UsagePlanProvider) -> ProviderArg {
+    match provider {
+        UsagePlanProvider::All | UsagePlanProvider::Cursor => ProviderArg::All,
+        UsagePlanProvider::Claude => ProviderArg::Claude,
+        UsagePlanProvider::Codex => ProviderArg::Codex,
+    }
+}
+
+fn plan_show_args_for_plan(
+    args: &UsageReportArgs,
+    plan: &UsagePlan,
+    today: NaiveDate,
+) -> UsageReportArgs {
+    let (from, to) = billing_period(today, plan.reset_day);
+    let mut scoped_args = args.clone();
+    scoped_args.period = PeriodArg::All;
+    scoped_args.from = Some(from.to_string());
+    scoped_args.to = Some(to.to_string());
+    scoped_args.provider = provider_arg_for_plan(plan.provider);
+    scoped_args
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -811,5 +840,23 @@ mod tests {
         };
         let err = query_from_args(&args).unwrap_err().to_string();
         assert!(err.contains("from date"));
+    }
+
+    #[test]
+    fn plan_show_uses_billing_window_and_plan_provider() {
+        let today = NaiveDate::from_ymd_opt(2026, 4, 29).unwrap();
+        let plan = UsagePlan {
+            id: UsagePlanId::ClaudePro,
+            monthly_usd: 20.0,
+            provider: UsagePlanProvider::Claude,
+            reset_day: 12,
+            set_at: "2026-04-29T00:00:00Z".to_string(),
+        };
+
+        let scoped = plan_show_args_for_plan(&UsageReportArgs::default(), &plan, today);
+
+        assert_eq!(scoped.from.as_deref(), Some("2026-04-12"));
+        assert_eq!(scoped.to.as_deref(), Some("2026-05-11"));
+        assert!(matches!(scoped.provider, ProviderArg::Claude));
     }
 }

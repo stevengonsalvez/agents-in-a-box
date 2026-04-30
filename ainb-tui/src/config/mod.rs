@@ -268,8 +268,8 @@ impl UsagePlanId {
     pub fn monthly_usd(self) -> Option<f64> {
         match self {
             Self::ClaudePro => Some(20.0),
-            Self::ClaudeMax => Some(100.0),
-            Self::ClaudeMax5x => Some(200.0),
+            Self::ClaudeMax => Some(200.0),
+            Self::ClaudeMax5x => Some(100.0),
             Self::CursorPro => Some(20.0),
             Self::Custom | Self::None => None,
         }
@@ -468,10 +468,16 @@ impl AppConfig {
                 let content = fs::read_to_string(&path)
                     .with_context(|| format!("Failed to read config from {}", path.display()))?;
 
+                let usage_present = content
+                    .parse::<toml::Value>()
+                    .ok()
+                    .and_then(|value| value.as_table().cloned())
+                    .is_some_and(|table| table.contains_key("usage"));
+
                 let file_config: AppConfig = toml::from_str(&content)
                     .with_context(|| format!("Failed to parse config from {}", path.display()))?;
 
-                config.merge(file_config);
+                config.merge_loaded(file_config, usage_present);
             }
         }
 
@@ -544,6 +550,11 @@ impl AppConfig {
 
     /// Merge another config into this one
     fn merge(&mut self, other: AppConfig) {
+        self.merge_loaded(other, true);
+    }
+
+    /// Merge another config into this one, preserving defaulted tables omitted from config files.
+    fn merge_loaded(&mut self, other: AppConfig, usage_present: bool) {
         // Don't override version
 
         // Merge authentication config
@@ -612,7 +623,9 @@ impl AppConfig {
             self.docker.timeout = other.docker.timeout;
         }
 
-        self.usage = other.usage;
+        if usage_present {
+            self.usage = other.usage;
+        }
     }
 
     /// Load built-in container templates
@@ -905,6 +918,45 @@ mod tests {
             Some("unix:///custom/docker.sock".to_string())
         );
         assert_eq!(base.docker.timeout, 90);
+    }
+
+    #[test]
+    fn usage_built_in_plan_budgets_match_spec() {
+        assert_eq!(UsagePlanId::ClaudeMax.monthly_usd(), Some(200.0));
+        assert_eq!(UsagePlanId::ClaudeMax5x.monthly_usd(), Some(100.0));
+    }
+
+    #[test]
+    fn layered_merge_preserves_usage_when_higher_layer_omits_usage() {
+        let mut base = AppConfig::default();
+        base.usage.plan = Some(UsagePlan {
+            id: UsagePlanId::ClaudePro,
+            monthly_usd: 20.0,
+            provider: UsagePlanProvider::Claude,
+            reset_day: 12,
+            set_at: "2026-04-29T00:00:00Z".to_string(),
+        });
+        base.usage.currency = CurrencyConfig {
+            code: "GBP".to_string(),
+            symbol: "GBP".to_string(),
+            usd_rate: 1.0,
+        };
+        base.usage
+            .model_aliases
+            .insert("cursor-auto".to_string(), "claude-sonnet-4-5".to_string());
+
+        let mut higher = AppConfig::default();
+        higher.ui_preferences.theme = "light".to_string();
+
+        base.merge_loaded(higher, false);
+
+        assert_eq!(base.ui_preferences.theme, "light");
+        assert_eq!(base.usage.plan.as_ref().unwrap().reset_day, 12);
+        assert_eq!(base.usage.currency.code, "GBP");
+        assert_eq!(
+            base.usage.model_aliases.get("cursor-auto"),
+            Some(&"claude-sonnet-4-5".to_string())
+        );
     }
 }
 

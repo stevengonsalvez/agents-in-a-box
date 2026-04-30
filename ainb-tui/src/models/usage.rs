@@ -731,12 +731,25 @@ fn parse_codex_source(path: &Path) -> Vec<ProviderCall> {
 
         let (input_tokens, cached_tokens, output_tokens, reasoning_tokens) =
             if let Some(last) = info.last_token_usage {
-                (
-                    last.input_tokens.unwrap_or(0),
-                    last.cached_input_tokens.unwrap_or(0),
-                    last.output_tokens.unwrap_or(0),
-                    last.reasoning_output_tokens.unwrap_or(0),
-                )
+                let input = last.input_tokens.unwrap_or(0);
+                let cached = last.cached_input_tokens.unwrap_or(0);
+                let output = last.output_tokens.unwrap_or(0);
+                let reasoning = last.reasoning_output_tokens.unwrap_or(0);
+
+                if let Some(total) = info.total_token_usage {
+                    previous_input = total.input_tokens.unwrap_or(previous_input + input);
+                    previous_cached = total.cached_input_tokens.unwrap_or(previous_cached + cached);
+                    previous_output = total.output_tokens.unwrap_or(previous_output + output);
+                    previous_reasoning =
+                        total.reasoning_output_tokens.unwrap_or(previous_reasoning + reasoning);
+                } else {
+                    previous_input += input;
+                    previous_cached += cached;
+                    previous_output += output;
+                    previous_reasoning += reasoning;
+                }
+
+                (input, cached, output, reasoning)
             } else if let Some(total) = info.total_token_usage {
                 let input = total.input_tokens.unwrap_or(0).saturating_sub(previous_input);
                 let cached = total.cached_input_tokens.unwrap_or(0).saturating_sub(previous_cached);
@@ -1169,29 +1182,20 @@ pub fn project_plan_usage(
     today: NaiveDate,
 ) -> PlanProjection {
     let (period_start, period_end) = billing_period(today, plan.reset_day);
-    let spent_usd = data
-        .daily
-        .iter()
-        .filter(|(date, _)| *date >= period_start && *date <= period_end)
-        .filter_map(|(_, bucket)| bucket.cost_usd)
-        .sum::<f64>();
+    let spent_usd = plan_cost_for_range(data, plan.provider, period_start, period_end);
     let percent_used = if plan.monthly_usd > 0.0 {
         spent_usd / plan.monthly_usd
     } else {
         0.0
     };
-    let mut last_week: Vec<f64> = data
-        .daily
-        .iter()
-        .filter(|(date, _)| *date >= today - Duration::days(6) && *date <= today)
-        .map(|(_, bucket)| bucket.cost_usd.unwrap_or(0.0))
+    let mut last_week: Vec<f64> = (0..7)
+        .map(|offset| {
+            let date = today - Duration::days(offset);
+            plan_cost_for_range(data, plan.provider, date, date)
+        })
         .collect();
     last_week.sort_by(f64::total_cmp);
-    let median_daily = if last_week.is_empty() {
-        0.0
-    } else {
-        last_week[last_week.len() / 2]
-    };
+    let median_daily = last_week[last_week.len() / 2];
     let remaining_days = (period_end - today).num_days().max(0);
     let projected_usd = spent_usd + median_daily * remaining_days as f64;
     let status = if percent_used > 1.0 {
@@ -1214,7 +1218,43 @@ pub fn project_plan_usage(
     }
 }
 
-fn billing_period(today: NaiveDate, reset_day: u8) -> (NaiveDate, NaiveDate) {
+fn plan_cost_for_range(
+    data: &UsageData,
+    provider: crate::config::UsagePlanProvider,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> f64 {
+    let call_cost = data
+        .calls
+        .iter()
+        .filter(|call| {
+            let date = call.timestamp.date_naive();
+            date >= start && date <= end && plan_provider_includes(provider, &call.provider)
+        })
+        .filter_map(|call| call.cost_usd)
+        .sum::<f64>();
+
+    if call_cost > 0.0 || provider != crate::config::UsagePlanProvider::All {
+        return call_cost;
+    }
+
+    data.daily
+        .iter()
+        .filter(|(date, _)| *date >= start && *date <= end)
+        .filter_map(|(_, bucket)| bucket.cost_usd)
+        .sum::<f64>()
+}
+
+fn plan_provider_includes(provider: crate::config::UsagePlanProvider, call_provider: &str) -> bool {
+    match provider {
+        crate::config::UsagePlanProvider::All => true,
+        crate::config::UsagePlanProvider::Claude => call_provider == "claude",
+        crate::config::UsagePlanProvider::Codex => call_provider == "codex",
+        crate::config::UsagePlanProvider::Cursor => call_provider == "cursor",
+    }
+}
+
+pub fn billing_period(today: NaiveDate, reset_day: u8) -> (NaiveDate, NaiveDate) {
     let reset_day = reset_day.clamp(1, 28) as u32;
     let current_reset =
         NaiveDate::from_ymd_opt(today.year(), today.month(), reset_day).unwrap_or(today);
@@ -1577,9 +1617,9 @@ fn date_range_for_period(period: &UsagePeriod) -> Option<(DateTime<Local>, DateT
     match period {
         UsagePeriod::All => None,
         UsagePeriod::Today => Some(day_bounds(today)),
-        UsagePeriod::Week => Some((start_of_day(today - Duration::days(7)), end_of_day(today))),
+        UsagePeriod::Week => Some((start_of_day(today - Duration::days(6)), end_of_day(today))),
         UsagePeriod::ThirtyDays => {
-            Some((start_of_day(today - Duration::days(30)), end_of_day(today)))
+            Some((start_of_day(today - Duration::days(29)), end_of_day(today)))
         }
         UsagePeriod::Month => {
             let first = NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap_or(today);
@@ -1992,6 +2032,38 @@ mod tests {
     }
 
     #[test]
+    fn codex_last_usage_advances_total_delta_baseline() {
+        let temp = tempdir().unwrap();
+        let codex_dir = temp.path().join(".codex");
+        let rollout = codex_dir.join("sessions/2026/04/10/rollout-1.jsonl");
+        write_file(
+            &rollout,
+            r#"{"type":"session_meta","payload":{"originator":"codex_cli","session_id":"codex-1","cwd":"/Users/stevie/work/project","model":"gpt-5"}}
+{"type":"response_item","timestamp":"2026-04-10T10:00:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"first"}]}}
+{"type":"event_msg","timestamp":"2026-04-10T10:00:01Z","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1000,"cached_input_tokens":400,"output_tokens":200,"reasoning_output_tokens":50},"total_token_usage":{"input_tokens":1000,"cached_input_tokens":400,"output_tokens":200,"reasoning_output_tokens":50,"total_tokens":1650}}}}
+{"type":"response_item","timestamp":"2026-04-10T10:00:02Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"second"}]}}
+{"type":"event_msg","timestamp":"2026-04-10T10:00:03Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1300,"cached_input_tokens":450,"output_tokens":260,"reasoning_output_tokens":70,"total_tokens":2080}}}}
+"#,
+        );
+
+        let data = parse_usage_for_with_roots(
+            UsageQuery {
+                provider_filter: UsageProviderFilter::Codex,
+                period: UsagePeriod::All,
+                include_projects: Vec::new(),
+                exclude_projects: Vec::new(),
+            },
+            &roots(None, Some(codex_dir)),
+        );
+
+        assert_eq!(data.calls.len(), 2);
+        assert_eq!(data.grand_total.input_tokens, 850);
+        assert_eq!(data.grand_total.cache_read_tokens, 450);
+        assert_eq!(data.grand_total.output_tokens, 260);
+        assert_eq!(data.grand_total.reasoning_tokens, 70);
+    }
+
+    #[test]
     fn date_filter_uses_assistant_call_timestamp() {
         let temp = tempdir().unwrap();
         let claude_projects = temp.path().join(".claude/projects");
@@ -2394,6 +2466,77 @@ mod tests {
         assert_eq!(
             project_plan_usage(&data, &plan, today).status,
             PlanStatus::Over
+        );
+    }
+
+    #[test]
+    fn plan_projection_scopes_provider_and_counts_missing_days_as_zero() {
+        let today = NaiveDate::from_ymd_opt(2026, 4, 29).unwrap();
+        let mut data = UsageData::default();
+        data.calls = vec![
+            ProviderCall {
+                provider: "claude".to_string(),
+                model: "claude-sonnet-4-5".to_string(),
+                session_id: "s1".to_string(),
+                project: "alpha".to_string(),
+                project_path: "/work/alpha".to_string(),
+                timestamp: Local.with_ymd_and_hms(2026, 4, 29, 10, 0, 0).unwrap(),
+                cost_usd: Some(70.0),
+                ..provider_call(
+                    "claude",
+                    "s1",
+                    "2026-04-29T10:00:00+01:00",
+                    "build",
+                    &[],
+                    &[],
+                    1,
+                )
+            },
+            ProviderCall {
+                provider: "codex".to_string(),
+                model: "gpt-5".to_string(),
+                session_id: "s2".to_string(),
+                project: "alpha".to_string(),
+                project_path: "/work/alpha".to_string(),
+                timestamp: Local.with_ymd_and_hms(2026, 4, 29, 11, 0, 0).unwrap(),
+                cost_usd: Some(30.0),
+                ..provider_call(
+                    "codex",
+                    "s2",
+                    "2026-04-29T11:00:00+01:00",
+                    "build",
+                    &[],
+                    &[],
+                    1,
+                )
+            },
+        ];
+        let plan = crate::config::UsagePlan {
+            id: crate::config::UsagePlanId::Custom,
+            monthly_usd: 100.0,
+            provider: crate::config::UsagePlanProvider::Claude,
+            reset_day: 1,
+            set_at: "2026-04-29T00:00:00Z".to_string(),
+        };
+
+        let projection = project_plan_usage(&data, &plan, today);
+
+        assert_eq!(projection.spent_usd, 70.0);
+        assert_eq!(projection.projected_usd, 70.0);
+    }
+
+    #[test]
+    fn fixed_periods_cover_labeled_calendar_days() {
+        let week = date_range_for_period(&UsagePeriod::Week).unwrap();
+        let thirty = date_range_for_period(&UsagePeriod::ThirtyDays).unwrap();
+
+        assert_eq!(
+            (week.1.date_naive() - week.0.date_naive()).num_days() + 1,
+            7
+        );
+        assert_eq!(
+            (thirty.1.date_naive() - thirty.0.date_naive()).num_days() + 1,
+            30
         );
     }
 

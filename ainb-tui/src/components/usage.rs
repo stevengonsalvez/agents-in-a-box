@@ -358,18 +358,20 @@ pub fn render(frame: &mut Frame, area: Rect, state: &UsageViewState) {
     render_provider_bar(frame, layout[1], state);
     render_tab_bar(frame, layout[2], state);
 
-    if !state.provider.has_data() {
-        render_no_data(frame, layout[3], state);
-    } else if state.loading || state.data.is_none() {
+    if state.loading || state.data.is_none() {
         render_loading(frame, layout[3]);
     } else {
         let data = state.data.as_ref().unwrap();
-        match state.active_tab {
-            UsageTab::Daily => render_daily(frame, layout[3], data, state.scroll_offset),
-            UsageTab::Weekly => render_weekly(frame, layout[3], data, state.scroll_offset),
-            UsageTab::Projects => render_projects(frame, layout[3], data, state.scroll_offset),
-            UsageTab::Burndown => render_burndown(frame, layout[3], data, state),
-            UsageTab::Optimize => render_optimize(frame, layout[3], data),
+        if data.calls.is_empty() && !state.provider.has_data() {
+            render_no_data(frame, layout[3], state);
+        } else {
+            match state.active_tab {
+                UsageTab::Daily => render_daily(frame, layout[3], data, state.scroll_offset),
+                UsageTab::Weekly => render_weekly(frame, layout[3], data, state.scroll_offset),
+                UsageTab::Projects => render_projects(frame, layout[3], data, state.scroll_offset),
+                UsageTab::Burndown => render_burndown(frame, layout[3], data, state),
+                UsageTab::Optimize => render_optimize(frame, layout[3], data),
+            }
         }
     }
 

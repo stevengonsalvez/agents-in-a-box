@@ -2,7 +2,7 @@
 
 use ainb::app::{App, state::View};
 use ainb::components::LayoutComponent;
-use ainb::components::usage::UsageTab;
+use ainb::components::usage::{UsageProvider, UsageTab};
 use ainb::models::{
     ActivityCategory, ActivityUsage, ModelUsage, NamedUsage, ProjectUsage, ProviderCall,
     TokenBucket, UsageData,
@@ -202,6 +202,37 @@ async fn test_usage_burndown_narrow_render_does_not_panic() {
 
     assert!(content.contains("Burndown"));
     assert!(content.contains("Daily Activity"));
+}
+
+#[tokio::test]
+async fn test_usage_render_uses_loaded_data_before_legacy_provider_gate() {
+    let mut app = App::new();
+    app.state.current_view = View::Analytics;
+    app.state.usage_state.active_tab = UsageTab::Burndown;
+    app.state.usage_state.provider = UsageProvider::Gemini;
+    app.state.usage_state.data = Some(sample_usage_data());
+
+    let backend = TestBackend::new(120, 40);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut layout = LayoutComponent::new();
+
+    terminal
+        .draw(|frame| {
+            layout.render(frame, &mut app.state);
+        })
+        .unwrap();
+
+    let content: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(ratatui::buffer::Cell::symbol)
+        .collect();
+
+    assert!(content.contains("Burndown"));
+    assert!(content.contains("Daily Activity"));
+    assert!(!content.contains("No Data"));
 }
 
 #[tokio::test]
