@@ -3683,10 +3683,18 @@ impl AppState {
                     workspace.sessions.push(stopped);
                 }
             } else {
-                let mut workspace = crate::models::Workspace::new(
-                    metadata.workspace_name.clone(),
-                    workspace_path,
-                );
+                let source_repo =
+                    crate::interactive::InteractiveSessionManager::get_source_repository(
+                        &metadata.worktree_path,
+                    )
+                    .unwrap_or_else(|| metadata.worktree_path.clone());
+                let workspace_name =
+                    crate::interactive::InteractiveSessionManager::derive_workspace_name(
+                        &metadata.worktree_path,
+                        &source_repo,
+                    );
+                let mut workspace =
+                    crate::models::Workspace::new(workspace_name, workspace_path);
                 workspace.sessions.push(stopped);
                 self.workspaces.push(workspace);
             }

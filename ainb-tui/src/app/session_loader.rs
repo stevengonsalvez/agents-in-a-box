@@ -79,26 +79,11 @@ impl SessionLoader {
                             }
                         });
 
-                        // Get workspace name from worktree path
-                        // Worktree naming: <repo-name>--<branch-hash>--<session-id>
-                        // Extract the repo name from the worktree directory name
-                        let workspace_name = worktree_info
-                            .path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .and_then(|name| {
-                                // Split by "--" and take the first part (repo name)
-                                name.split("--").next()
-                            })
-                            .unwrap_or_else(|| {
-                                // Fallback to source repository name
-                                worktree_info
-                                    .source_repository
-                                    .file_name()
-                                    .and_then(|n| n.to_str())
-                                    .unwrap_or("unknown")
-                            })
-                            .to_string();
+                        let workspace_name =
+                            crate::interactive::InteractiveSessionManager::derive_workspace_name(
+                                &worktree_info.path,
+                                &worktree_info.source_repository,
+                            );
 
                         // Add session to appropriate workspace
                         let workspace = workspace_map

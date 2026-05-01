@@ -480,7 +480,7 @@ impl InteractiveSessionManager {
                     .unwrap_or_else(|| "unknown".to_string());
 
                 // Try to get source repository from worktree
-                let source_repository = self.get_source_repository(&metadata.worktree_path)
+                let source_repository = Self::get_source_repository(&metadata.worktree_path)
                     .unwrap_or_else(|| metadata.worktree_path.clone());
 
                 // Use persisted agent_type, fall back to tmux process detection
@@ -491,13 +491,21 @@ impl InteractiveSessionManager {
                     metadata.agent_type
                 };
 
+                // Re-derive workspace_name from current paths rather than trusting
+                // the persisted value — older sessions.json entries may carry the
+                // full sanitized worktree dir name as workspace_name.
+                let workspace_name = Self::derive_workspace_name(
+                    &metadata.worktree_path,
+                    &source_repository,
+                );
+
                 return Ok(InteractiveSession {
                     session_id: metadata.session_id,
                     worktree_path: metadata.worktree_path.clone(),
                     source_repository,
                     tmux_session_name: tmux_name.to_string(),
                     branch_name,
-                    workspace_name: metadata.workspace_name.clone(),
+                    workspace_name,
                     created_at: metadata.created_at,
                     agent_type,
                     model: None,
@@ -527,24 +535,10 @@ impl InteractiveSessionManager {
 
             if matches_new_format || matches_legacy_format || matches_branch_guess {
 
-                // Extract workspace name from worktree directory name
-                // Worktree naming: <repo-name>--<branch-hash>--<session-id>
-                // Split by "--" and take the first part (repo name)
-                let workspace_name = worktree.path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .and_then(|name| {
-                        // Split by "--" and take the first part (repo name)
-                        name.split("--").next()
-                    })
-                    .unwrap_or_else(|| {
-                        // Fallback to source repository name
-                        worktree.source_repository
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("unknown")
-                    })
-                    .to_string();
+                let workspace_name = Self::derive_workspace_name(
+                    &worktree.path,
+                    &worktree.source_repository,
+                );
 
                 // Try to detect agent from tmux process, default to Claude
                 let agent_type = Self::detect_agent_from_tmux(tmux_name).await
@@ -616,8 +610,31 @@ impl InteractiveSessionManager {
         }
     }
 
+    /// Derive a workspace display name from a worktree path.
+    ///
+    /// Why: only the legacy `<repo>--<hash>--<session>` worktree layout encodes
+    /// the repo in the directory name. Newer flat-format paths (no `--`) made
+    /// `path.split("--").next()` return the entire directory, producing bogus
+    /// workspace groups like `shotclubhouse_shotclubhouse_temp_debug`.
+    pub fn derive_workspace_name(worktree_path: &Path, source_repository: &Path) -> String {
+        let from_dir = worktree_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .filter(|name| name.contains("--"))
+            .and_then(|name| name.split("--").next());
+
+        from_dir
+            .or_else(|| {
+                source_repository
+                    .file_name()
+                    .and_then(|n| n.to_str())
+            })
+            .unwrap_or("unknown")
+            .to_string()
+    }
+
     /// Get the source repository path from a worktree
-    fn get_source_repository(&self, worktree_path: &Path) -> Option<PathBuf> {
+    pub fn get_source_repository(worktree_path: &Path) -> Option<PathBuf> {
         // Read the .git file in the worktree to find the main repo
         let git_file = worktree_path.join(".git");
         if !git_file.exists() || !git_file.is_file() {
@@ -1094,6 +1111,34 @@ impl InteractiveSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_derive_workspace_name() {
+        // Legacy worktree layout: <repo>--<hash>--<session-id>
+        assert_eq!(
+            InteractiveSessionManager::derive_workspace_name(
+                Path::new("/wt/by-name/nanoclaw--ops-main--5950b4bd"),
+                Path::new("/repos/nanoclaw"),
+            ),
+            "nanoclaw"
+        );
+
+        // Flat layout (no `--`): must fall back to source_repository basename,
+        // not return the full directory name.
+        assert_eq!(
+            InteractiveSessionManager::derive_workspace_name(
+                Path::new("/wt/shotclubhouse_shotclubhouse_temp_debug"),
+                Path::new("/repos/shotclubhouse"),
+            ),
+            "shotclubhouse"
+        );
+
+        // Both unusable → "unknown"
+        assert_eq!(
+            InteractiveSessionManager::derive_workspace_name(Path::new("/"), Path::new("/")),
+            "unknown"
+        );
+    }
 
     #[test]
     fn test_generate_tmux_name() {
