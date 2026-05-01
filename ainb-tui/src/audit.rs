@@ -14,6 +14,8 @@ use uuid::Uuid;
 pub enum AuditAction {
     SessionCreated,
     SessionDeleted,
+    SessionStopped,
+    SessionResumed,
     ConfigSaved,
     OrphanedContainersCleanup,
     GitWorktreePrune,
@@ -24,6 +26,8 @@ impl std::fmt::Display for AuditAction {
         match self {
             AuditAction::SessionCreated => write!(f, "SESSION_CREATED"),
             AuditAction::SessionDeleted => write!(f, "SESSION_DELETED"),
+            AuditAction::SessionStopped => write!(f, "SESSION_STOPPED"),
+            AuditAction::SessionResumed => write!(f, "SESSION_RESUMED"),
             AuditAction::ConfigSaved => write!(f, "CONFIG_SAVED"),
             AuditAction::OrphanedContainersCleanup => write!(f, "ORPHANED_CLEANUP"),
             AuditAction::GitWorktreePrune => write!(f, "GIT_WORKTREE_PRUNE"),
@@ -84,6 +88,48 @@ pub fn audit_session_deleted(
         trigger = %trigger,
         result = %result,
         "Session deleted"
+    );
+}
+
+/// Log a soft-stop (tmux killed; worktree, sessions.json, symlink preserved)
+pub fn audit_session_stopped(
+    session_id: Uuid,
+    tmux_session: Option<String>,
+    worktree_path: Option<String>,
+    trigger: AuditTrigger,
+    result: AuditResult,
+) {
+    info!(
+        target: "audit",
+        action = %AuditAction::SessionStopped,
+        session_id = %session_id,
+        tmux_session = ?tmux_session,
+        path = ?worktree_path,
+        trigger = %trigger,
+        result = %result,
+        "Session stopped"
+    );
+}
+
+/// Log a resume (tmux re-created from preserved sessions.json metadata)
+pub fn audit_session_resumed(
+    session_id: Uuid,
+    tmux_session: Option<String>,
+    worktree_path: Option<String>,
+    transcript_path: Option<String>,
+    trigger: AuditTrigger,
+    result: AuditResult,
+) {
+    info!(
+        target: "audit",
+        action = %AuditAction::SessionResumed,
+        session_id = %session_id,
+        tmux_session = ?tmux_session,
+        path = ?worktree_path,
+        transcript = ?transcript_path,
+        trigger = %trigger,
+        result = %result,
+        "Session resumed"
     );
 }
 
@@ -166,6 +212,8 @@ mod tests {
     #[test]
     fn test_action_display() {
         assert_eq!(format!("{}", AuditAction::SessionDeleted), "SESSION_DELETED");
+        assert_eq!(format!("{}", AuditAction::SessionStopped), "SESSION_STOPPED");
+        assert_eq!(format!("{}", AuditAction::SessionResumed), "SESSION_RESUMED");
         assert_eq!(format!("{}", AuditAction::ConfigSaved), "CONFIG_SAVED");
     }
 

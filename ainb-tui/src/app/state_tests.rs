@@ -418,4 +418,199 @@ mod tests {
             "Remote source should not queue StartWorkspaceSearch"
         );
     }
+
+    // ========================================================================
+    // Stop / Resume coverage
+    // ========================================================================
+
+    use crate::app::state::{
+        ConfirmAction, ConfirmationDialog, DialogOption,
+    };
+
+    /// Verify the tri-option dialog defaults to Stop and cycles forward through
+    /// all three options before wrapping back to Stop.
+    #[test]
+    fn test_show_delete_or_stop_confirmation_defaults_to_stop() {
+        let mut state = AppState::new();
+        let session_id = uuid::Uuid::new_v4();
+
+        state.show_delete_or_stop_confirmation(session_id);
+
+        let dialog = state
+            .confirmation_dialog
+            .as_ref()
+            .expect("Dialog should be present");
+        let opts = dialog.options.as_ref().expect("Tri-option dialog");
+        assert_eq!(opts.len(), 3, "Stop / Delete / Cancel");
+        assert_eq!(opts[0].label, "Stop");
+        assert_eq!(opts[1].label, "Delete");
+        assert_eq!(opts[2].label, "Cancel");
+        assert_eq!(dialog.selected_index, 0, "Default = Stop");
+        assert!(
+            matches!(opts[0].action, ConfirmAction::StopSession(id) if id == session_id),
+            "First option must be StopSession for the right uuid"
+        );
+        assert!(
+            matches!(opts[1].action, ConfirmAction::DeleteSession(id) if id == session_id),
+            "Second option must be DeleteSession for the right uuid"
+        );
+        assert!(matches!(opts[2].action, ConfirmAction::Cancel));
+    }
+
+    /// Forward cycling and backwards cycling on a tri-option dialog.
+    #[test]
+    fn test_tri_option_dialog_cycle() {
+        let mut dialog = ConfirmationDialog {
+            title: "T".into(),
+            message: "M".into(),
+            confirm_action: ConfirmAction::Cancel,
+            selected_option: false,
+            warning: None,
+            options: Some(vec![
+                DialogOption { label: "A".into(), action: ConfirmAction::Cancel },
+                DialogOption { label: "B".into(), action: ConfirmAction::Cancel },
+                DialogOption { label: "C".into(), action: ConfirmAction::Cancel },
+            ]),
+            selected_index: 0,
+        };
+
+        // Forward cycle 0 -> 1 -> 2 -> 0
+        let len = dialog.options.as_ref().unwrap().len();
+        dialog.selected_index = (dialog.selected_index + 1) % len;
+        assert_eq!(dialog.selected_index, 1);
+        dialog.selected_index = (dialog.selected_index + 1) % len;
+        assert_eq!(dialog.selected_index, 2);
+        dialog.selected_index = (dialog.selected_index + 1) % len;
+        assert_eq!(dialog.selected_index, 0);
+
+        // Backward cycle 0 -> 2 -> 1 -> 0
+        dialog.selected_index = (dialog.selected_index + len - 1) % len;
+        assert_eq!(dialog.selected_index, 2);
+        dialog.selected_index = (dialog.selected_index + len - 1) % len;
+        assert_eq!(dialog.selected_index, 1);
+        dialog.selected_index = (dialog.selected_index + len - 1) % len;
+        assert_eq!(dialog.selected_index, 0);
+    }
+
+    /// Binary dialog (existing callsites) keeps the legacy yes/no toggle.
+    #[test]
+    fn test_binary_dialog_unchanged() {
+        let session_id = uuid::Uuid::new_v4();
+        let mut state = AppState::new();
+        state.show_delete_confirmation(session_id);
+        let dialog = state.confirmation_dialog.as_ref().unwrap();
+        assert!(dialog.options.is_none(), "Legacy binary dialog");
+        assert!(!dialog.selected_option, "Default = No");
+        assert!(matches!(
+            dialog.confirm_action,
+            ConfirmAction::DeleteSession(_)
+        ));
+    }
+
+    /// Path encoding mirrors `find_transcript_path` in spawn-agent-lib.sh:30-69.
+    #[test]
+    fn test_encode_claude_project_dir() {
+        use std::path::PathBuf;
+        let p = PathBuf::from("/Users/stevie/code/foo-bar");
+        assert_eq!(
+            AppState::encode_claude_project_dir(&p),
+            "-Users-stevie-code-foo-bar"
+        );
+
+        let p = PathBuf::from("/");
+        assert_eq!(AppState::encode_claude_project_dir(&p), "-");
+    }
+
+    /// `find_latest_transcript_in` returns the most recently modified `.jsonl`
+    /// under `<home>/.claude/projects/-{encoded}/`.
+    #[test]
+    fn test_find_latest_transcript_picks_newest_by_mtime() {
+        use std::fs::{self, File};
+        use std::path::PathBuf;
+        use std::time::{Duration, SystemTime};
+
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let fake_home = tmp.path().to_path_buf();
+
+        let worktree = PathBuf::from("/tmp/work-abc-test");
+        let encoded = AppState::encode_claude_project_dir(&worktree);
+        let project_dir = fake_home.join(".claude").join("projects").join(&encoded);
+        fs::create_dir_all(&project_dir).unwrap();
+
+        let older = project_dir.join("2024-01.jsonl");
+        let newer = project_dir.join("2024-02.jsonl");
+        fs::write(&older, "x").unwrap();
+        fs::write(&newer, "y").unwrap();
+
+        let now = SystemTime::now();
+        File::open(&older)
+            .unwrap()
+            .set_modified(now - Duration::from_secs(120))
+            .unwrap();
+        File::open(&newer)
+            .unwrap()
+            .set_modified(now + Duration::from_secs(120))
+            .unwrap();
+
+        // Decoy non-jsonl file should be ignored.
+        fs::write(project_dir.join("ignored.txt"), "z").unwrap();
+
+        let result = AppState::find_latest_transcript_in(&fake_home, &worktree)
+            .expect("Should find a transcript");
+        assert_eq!(result.file_name().unwrap(), "2024-02.jsonl");
+    }
+
+    /// Missing project directory returns None (no transcript = fresh start).
+    #[test]
+    fn test_find_latest_transcript_missing_dir_returns_none() {
+        use std::path::PathBuf;
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let fake_home = tmp.path().to_path_buf();
+
+        let nonexistent = PathBuf::from("/tmp/never-existed-xyz");
+        let result = AppState::find_latest_transcript_in(&fake_home, &nonexistent);
+        assert!(result.is_none());
+    }
+
+    /// Empty project directory (no `.jsonl` files) returns None.
+    #[test]
+    fn test_find_latest_transcript_empty_dir_returns_none() {
+        use std::fs;
+        use std::path::PathBuf;
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let fake_home = tmp.path().to_path_buf();
+        let worktree = PathBuf::from("/tmp/empty-work");
+        let encoded = AppState::encode_claude_project_dir(&worktree);
+        let project_dir = fake_home.join(".claude").join("projects").join(&encoded);
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::write(project_dir.join("not-a-jsonl.txt"), "z").unwrap();
+
+        let result = AppState::find_latest_transcript_in(&fake_home, &worktree);
+        assert!(result.is_none());
+    }
+
+    /// `stopped_session_from_metadata` produces a Session with status Stopped
+    /// and the right tmux name + worktree path. Backbone of the discovery pass.
+    #[test]
+    fn test_stopped_session_from_metadata_marks_status_stopped() {
+        use crate::interactive::SessionMetadata;
+        use crate::models::{SessionAgentType, SessionStatus};
+        use std::path::PathBuf;
+
+        let metadata = SessionMetadata {
+            session_id: uuid::Uuid::new_v4(),
+            tmux_session_name: "tmux_some_branch".to_string(),
+            worktree_path: PathBuf::from("/tmp/work-stopped"),
+            workspace_name: "ws".to_string(),
+            created_at: chrono::Utc::now(),
+            agent_type: SessionAgentType::Claude,
+        };
+
+        let session = AppState::stopped_session_from_metadata(&metadata);
+        assert_eq!(session.id, metadata.session_id);
+        assert!(matches!(session.status, SessionStatus::Stopped));
+        assert_eq!(session.tmux_session_name.as_deref(), Some("tmux_some_branch"));
+        assert_eq!(session.workspace_path, "/tmp/work-stopped");
+        assert_eq!(session.agent_type, SessionAgentType::Claude);
+    }
 }

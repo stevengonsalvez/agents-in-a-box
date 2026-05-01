@@ -92,33 +92,59 @@ impl ConfirmationDialogComponent {
 
             frame.render_widget(message, chunks[message_chunk]);
 
-            // Render buttons
-            let button_chunks = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(chunks[button_chunk]);
+            // Render buttons. Tri-option mode (e.g. Stop / Delete / Cancel) takes
+            // precedence; binary mode is used by all legacy callsites.
+            if let Some(options) = dialog.options.as_ref() {
+                let n = options.len().max(1);
+                let pct = (100u16 / n as u16).max(1);
+                let constraints: Vec<Constraint> = (0..n).map(|_| Constraint::Percentage(pct)).collect();
+                let button_chunks = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints(constraints)
+                    .split(chunks[button_chunk]);
 
-            // Yes button
-            let yes_style = if dialog.selected_option {
-                Style::default().fg(Color::Black).bg(Color::White)
+                for (i, opt) in options.iter().enumerate() {
+                    let style = if i == dialog.selected_index {
+                        Style::default().fg(Color::Black).bg(Color::White)
+                    } else {
+                        Style::default().fg(Color::White)
+                    };
+                    let label = format!("[ {} ]", opt.label);
+                    let button = Paragraph::new(label)
+                        .style(style)
+                        .alignment(Alignment::Center);
+                    if let Some(area) = button_chunks.get(i) {
+                        frame.render_widget(button, *area);
+                    }
+                }
             } else {
-                Style::default().fg(Color::White)
-            };
+                let button_chunks = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .split(chunks[button_chunk]);
 
-            let yes_button = Paragraph::new("Yes").style(yes_style).alignment(Alignment::Center);
+                // Yes button
+                let yes_style = if dialog.selected_option {
+                    Style::default().fg(Color::Black).bg(Color::White)
+                } else {
+                    Style::default().fg(Color::White)
+                };
 
-            frame.render_widget(yes_button, button_chunks[0]);
+                let yes_button = Paragraph::new("Yes").style(yes_style).alignment(Alignment::Center);
 
-            // No button
-            let no_style = if !dialog.selected_option {
-                Style::default().fg(Color::Black).bg(Color::White)
-            } else {
-                Style::default().fg(Color::White)
-            };
+                frame.render_widget(yes_button, button_chunks[0]);
 
-            let no_button = Paragraph::new("No").style(no_style).alignment(Alignment::Center);
+                // No button
+                let no_style = if !dialog.selected_option {
+                    Style::default().fg(Color::Black).bg(Color::White)
+                } else {
+                    Style::default().fg(Color::White)
+                };
 
-            frame.render_widget(no_button, button_chunks[1]);
+                let no_button = Paragraph::new("No").style(no_style).alignment(Alignment::Center);
+
+                frame.render_widget(no_button, button_chunks[1]);
+            }
         }
     }
 }
