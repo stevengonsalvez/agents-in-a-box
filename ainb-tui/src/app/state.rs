@@ -424,15 +424,29 @@ pub struct ConfirmationDialog {
     pub title: String,
     pub message: String,
     pub confirm_action: ConfirmAction,
-    pub selected_option: bool,   // true = Yes, false = No
+    pub selected_option: bool, // true = Yes, false = No (binary mode)
     pub warning: Option<String>, // Optional warning (e.g., uncommitted files in worktree)
+    // Tri-option mode: when `options` is `Some`, the dialog renders one button per
+    // entry and Left/Right cycles `selected_index`. The final-option index is
+    // treated as Cancel by the confirm handler.
+    pub options: Option<Vec<DialogOption>>,
+    pub selected_index: usize,
+}
+
+/// One choice in a tri-option (or n-option) confirmation dialog.
+#[derive(Debug, Clone)]
+pub struct DialogOption {
+    pub label: String,
+    pub action: ConfirmAction,
 }
 
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
     DeleteSession(Uuid),
-    KillOtherTmux(String), // Kill a non-agents-in-a-box tmux session by name
+    StopSession(Uuid),         // Soft-stop interactive session (tmux only; preserves worktree)
+    KillOtherTmux(String),     // Kill a non-agents-in-a-box tmux session by name
     KillWorkspaceShell(usize), // Kill workspace shell by workspace index
+    Cancel,                    // No-op terminator for tri-option dialogs
 }
 
 // ============================================================================
@@ -2509,7 +2523,9 @@ pub enum AsyncAction {
     CloneRemoteRepo,         // NEW: Clone remote repo to cache
     FetchRemoteBranches,     // NEW: Get branch list from remote
     CreateNewSession,
-    DeleteSession(Uuid),           // New - delete session with container cleanup
+    DeleteSession(Uuid),         // New - delete session with container cleanup
+    StopSession(Uuid),           // Soft-stop interactive session (kill tmux only)
+    ResumeSession(Uuid, String), // Recreate tmux for a Stopped interactive session; String is the trigger key for audit
     BulkDeleteSessions(Vec<Uuid>), // Bulk delete multiple sessions
     RefreshWorkspaces,             // Manual refresh of workspace data
     FetchContainerLogs(Uuid),      // Fetch container logs for a session
@@ -3574,7 +3590,7 @@ impl AppState {
 
     /// Load Interactive mode sessions from tmux
     async fn load_interactive_mode_sessions(&mut self) {
-        use crate::interactive::InteractiveSessionManager;
+        use crate::interactive::{InteractiveSessionManager, SessionStore};
 
         // Create Interactive session manager (no Docker needed)
         let mut manager = match InteractiveSessionManager::new() {
@@ -3584,6 +3600,11 @@ impl AppState {
                 return;
             }
         };
+
+        // Track tmux names of live sessions so the stopped-detection pass below
+        // does not double-add anything that was already discovered.
+        let mut live_tmux_names: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
 
         // Discover Interactive sessions from tmux
         match manager.list_sessions().await {
@@ -3595,6 +3616,7 @@ impl AppState {
 
                 // Convert to Session models and add to workspaces
                 for interactive_session in sessions {
+                    live_tmux_names.insert(interactive_session.tmux_session_name.clone());
                     let session = interactive_session.to_session_model();
 
                     // Find or create workspace for this session
@@ -3636,6 +3658,60 @@ impl AppState {
                 warn!("Failed to discover Interactive sessions: {}", e);
             }
         }
+
+        // Second pass: discover Stopped sessions. These are entries persisted in
+        // sessions.json whose tmux session is no longer alive but whose worktree
+        // still exists on disk. Worktree-missing entries fall through to the
+        // existing recovery flow.
+        let store = SessionStore::load();
+        for metadata in store.sessions().values() {
+            if live_tmux_names.contains(&metadata.tmux_session_name) {
+                continue;
+            }
+            if !metadata.worktree_path.exists() {
+                continue;
+            }
+
+            let stopped = Self::stopped_session_from_metadata(metadata);
+            let workspace_path = metadata.worktree_path.parent().unwrap_or(&metadata.worktree_path).to_path_buf();
+
+            if let Some(workspace) = self.workspaces.iter_mut().find(|w| {
+                std::path::Path::new(&w.path).canonicalize().ok()
+                    == workspace_path.canonicalize().ok()
+            }) {
+                if !workspace.sessions.iter().any(|s| s.id == metadata.session_id) {
+                    workspace.sessions.push(stopped);
+                }
+            } else {
+                let mut workspace = crate::models::Workspace::new(
+                    metadata.workspace_name.clone(),
+                    workspace_path,
+                );
+                workspace.sessions.push(stopped);
+                self.workspaces.push(workspace);
+            }
+        }
+    }
+
+    /// Build a `Session` model in `Stopped` state from persisted metadata.
+    /// Used to render sessions whose tmux is dead but whose worktree is alive.
+    pub(crate) fn stopped_session_from_metadata(metadata: &crate::interactive::SessionMetadata) -> crate::models::Session {
+        use crate::models::{Session, SessionMode, SessionStatus};
+
+        let mut session = Session::new_with_options(
+            metadata.workspace_name.clone(),
+            metadata.worktree_path.to_string_lossy().to_string(),
+            false, // skip_permissions — unknown when offline; safe default
+            SessionMode::Interactive,
+            None,
+            metadata.agent_type,
+            None,
+        );
+        session.id = metadata.session_id;
+        session.tmux_session_name = Some(metadata.tmux_session_name.clone());
+        session.status = SessionStatus::Stopped;
+        session.created_at = metadata.created_at;
+        session
     }
 
     /// Discover tmux sessions that are NOT managed by agents-in-a-box
@@ -4505,6 +4581,46 @@ impl AppState {
             confirm_action: ConfirmAction::DeleteSession(session_id),
             selected_option: false, // Default to "No"
             warning,
+            options: None,
+            selected_index: 0,
+        });
+    }
+
+    /// Show a tri-option Stop / Delete / Cancel dialog for an interactive session.
+    ///
+    /// Stop is the default (selected) action: it kills only tmux and keeps the
+    /// worktree, sessions.json entry, and `by-session/<uuid>` symlink intact.
+    /// Delete maps to the existing destructive flow.
+    pub fn show_delete_or_stop_confirmation(&mut self, session_id: Uuid) {
+        info!("Showing Stop/Delete/Cancel dialog for session: {}", session_id);
+
+        let warning = self.check_session_uncommitted_warning(session_id);
+
+        let options = vec![
+            DialogOption {
+                label: "Stop".to_string(),
+                action: ConfirmAction::StopSession(session_id),
+            },
+            DialogOption {
+                label: "Delete".to_string(),
+                action: ConfirmAction::DeleteSession(session_id),
+            },
+            DialogOption {
+                label: "Cancel".to_string(),
+                action: ConfirmAction::Cancel,
+            },
+        ];
+
+        self.confirmation_dialog = Some(ConfirmationDialog {
+            title: "Stop or Delete Session".to_string(),
+            message: "Stop keeps the worktree and resumes later. Delete removes the worktree.".to_string(),
+            // confirm_action mirrors the default (Stop) so the legacy ConfirmationConfirm
+            // handler still has something sensible if it ever runs without options.
+            confirm_action: ConfirmAction::StopSession(session_id),
+            selected_option: true,
+            warning,
+            options: Some(options),
+            selected_index: 0, // Default = Stop (safe option)
         });
     }
 
@@ -4548,6 +4664,8 @@ impl AppState {
             confirm_action: ConfirmAction::KillOtherTmux(session_name),
             selected_option: false, // Default to "No"
             warning: None,
+            options: None,
+            selected_index: 0,
         });
     }
 
@@ -4572,6 +4690,8 @@ impl AppState {
             confirm_action: ConfirmAction::KillOtherTmux(session_name), // Reuse KillOtherTmux since SSH sessions are tmux sessions
             selected_option: false,                                     // Default to "No"
             warning: None,
+            options: None,
+            selected_index: 0,
         });
     }
 
@@ -4603,6 +4723,8 @@ impl AppState {
             confirm_action: ConfirmAction::KillWorkspaceShell(workspace_index),
             selected_option: false, // Default to "No"
             warning: None,
+            options: None,
+            selected_index: 0,
         });
     }
 
@@ -7875,6 +7997,305 @@ impl AppState {
         Ok(())
     }
 
+    /// Soft-stop an interactive session by killing only its tmux session.
+    ///
+    /// Unlike `delete_interactive_session`, this preserves:
+    ///   - the worktree on disk
+    ///   - the `~/.agents-in-a-box/sessions.json` entry
+    ///   - the `by-session/<uuid>` symlink
+    ///
+    /// The session is rediscovered as `Stopped` on the next workspace reload (and
+    /// across TUI restarts) and can be resumed via `resume_interactive_session`.
+    async fn stop_interactive_session(&mut self, session_id: Uuid) -> anyhow::Result<()> {
+        use crate::interactive::SessionStore;
+        use crate::models::SessionStatus;
+
+        info!("Soft-stopping interactive session: {}", session_id);
+
+        // Resolve tmux session name preferring the in-memory map, falling back to
+        // sessions.json (handles edge case where the live map is out of sync).
+        let tmux_name = self
+            .tmux_sessions
+            .get(&session_id)
+            .map(|t| t.name().to_string())
+            .or_else(|| {
+                self.find_session(session_id)
+                    .and_then(|s| s.tmux_session_name.clone())
+            })
+            .or_else(|| {
+                let store = SessionStore::load();
+                store
+                    .sessions()
+                    .values()
+                    .find(|m| m.session_id == session_id)
+                    .map(|m| m.tmux_session_name.clone())
+            });
+
+        let worktree_path = self
+            .find_session(session_id)
+            .map(|s| s.workspace_path.clone());
+
+        let result: anyhow::Result<()> = if let Some(ref name) = tmux_name {
+            // Hard constraint: kill only the exact named session. NEVER kill-server.
+            let output = tokio::process::Command::new("tmux")
+                .args(["kill-session", "-t", name])
+                .output()
+                .await?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                // tmux returns non-zero when the session is already gone — treat as success
+                // since the post-condition (no tmux session) is what we care about.
+                if stderr.contains("can't find session") || stderr.contains("no server running") {
+                    info!("tmux session '{}' already gone — proceeding", name);
+                } else {
+                    return Err(anyhow::anyhow!(
+                        "Failed to kill tmux session '{}': {}",
+                        name,
+                        stderr
+                    ));
+                }
+            } else {
+                info!("Killed tmux session: {}", name);
+            }
+            Ok(())
+        } else {
+            warn!(
+                "No tmux_session_name for {} — nothing to kill, just marking Stopped",
+                session_id
+            );
+            Ok(())
+        };
+
+        // Drop the live tmux handle but DO NOT touch SessionStore or worktree.
+        self.tmux_sessions.remove(&session_id);
+
+        if let Some(session) = self.find_session_mut(session_id) {
+            session.set_status(SessionStatus::Stopped);
+            session.is_attached = false;
+        }
+
+        let audit_result = match &result {
+            Ok(()) => AuditResult::Success,
+            Err(e) => AuditResult::Failed(e.to_string()),
+        };
+        audit::audit_session_stopped(
+            session_id,
+            tmux_name,
+            worktree_path,
+            AuditTrigger::UserKeypress("D→Stop".to_string()),
+            audit_result,
+        );
+
+        // Mirror delete_session: refresh workspace view so the Stopped indicator is rendered.
+        self.load_real_workspaces().await;
+        self.ui_needs_refresh = true;
+
+        result
+    }
+
+    /// Resume a previously-stopped interactive session.
+    ///
+    /// Recreates the tmux session at the original worktree and re-launches the
+    /// agent CLI. For Claude, attempts to discover the latest transcript and
+    /// pass `--resume <path>` to continue the conversation. Other agents start
+    /// fresh because their CLIs do not support transcript-based resume.
+    async fn resume_interactive_session(
+        &mut self,
+        session_id: Uuid,
+        trigger_key: String,
+    ) -> anyhow::Result<()> {
+        use crate::interactive::{InteractiveSessionManager, SessionStore};
+        use crate::models::SessionStatus;
+
+        info!("Resuming interactive session: {} (trigger={})", session_id, trigger_key);
+
+        // Resolve metadata up-front so we can audit even if subsequent steps fail.
+        let store = SessionStore::load();
+        let metadata = store
+            .sessions()
+            .values()
+            .find(|m| m.session_id == session_id)
+            .cloned();
+
+        // Pull skip_permissions and model from the in-memory Session if available.
+        let (skip_permissions, model) = self
+            .find_session(session_id)
+            .map(|s| (s.skip_permissions, s.model))
+            .unwrap_or((false, None));
+
+        // Capture audit context before any fallible step so we can record both
+        // success and failure with the same fields.
+        let tmux_name_for_audit = metadata.as_ref().map(|m| m.tmux_session_name.clone());
+        let worktree_for_audit = metadata
+            .as_ref()
+            .map(|m| m.worktree_path.display().to_string());
+
+        let mut transcript: Option<PathBuf> = None;
+        let result: anyhow::Result<()> = async {
+            let metadata = metadata.ok_or_else(|| {
+                anyhow::anyhow!("Session {} not found in sessions.json", session_id)
+            })?;
+
+            // Recreate the tmux session at the worktree. If something is already
+            // listening on this name (shouldn't be, since we set Stopped), kill it
+            // first so we get a clean shell — narrow target, never wildcard.
+            let _ = tokio::process::Command::new("tmux")
+                .args(["kill-session", "-t", &metadata.tmux_session_name])
+                .output()
+                .await;
+
+            let new_output = tokio::process::Command::new("tmux")
+                .args([
+                    "new-session",
+                    "-d",
+                    "-s",
+                    &metadata.tmux_session_name,
+                    "-c",
+                    metadata
+                        .worktree_path
+                        .to_str()
+                        .ok_or_else(|| anyhow::anyhow!("Worktree path is not valid UTF-8"))?,
+                    "-x",
+                    "120",
+                    "-y",
+                    "40",
+                ])
+                .output()
+                .await?;
+
+            if !new_output.status.success() {
+                let stderr = String::from_utf8_lossy(&new_output.stderr);
+                return Err(anyhow::anyhow!(
+                    "Failed to create tmux session '{}': {}",
+                    metadata.tmux_session_name,
+                    stderr
+                ));
+            }
+
+            transcript = if metadata.agent_type == SessionAgentType::Claude {
+                Self::find_latest_transcript(&metadata.worktree_path)
+            } else {
+                None
+            };
+
+            let manager = InteractiveSessionManager::new()?;
+            manager
+                .start_cli_in_tmux(
+                    &metadata.tmux_session_name,
+                    skip_permissions,
+                    model,
+                    metadata.agent_type,
+                    transcript.clone(),
+                )
+                .await?;
+
+            // Re-register live tmux handle and flip status to Running.
+            let tmux_session = crate::tmux::TmuxSession::new(
+                metadata.tmux_session_name.clone(),
+                metadata.agent_type.name().to_string(),
+            );
+            self.tmux_sessions.insert(session_id, tmux_session);
+
+            if let Some(session) = self.find_session_mut(session_id) {
+                session.set_status(SessionStatus::Running);
+                session.tmux_session_name = Some(metadata.tmux_session_name.clone());
+            }
+
+            // Inline status banner. Encoded path is shown only on the no-transcript
+            // path so the user can locate (or rule out) Claude's project directory.
+            let banner: String = match (metadata.agent_type, transcript.as_ref()) {
+                (SessionAgentType::Claude, Some(_)) => "Resumed".to_string(),
+                (SessionAgentType::Claude, None) => {
+                    let encoded = Self::encode_claude_project_dir(&metadata.worktree_path);
+                    format!(
+                        "No transcript found at ~/.claude/projects/{} - starting fresh",
+                        encoded
+                    )
+                }
+                (other, _) => format!(
+                    "Resumed (fresh session - {} doesn't support --resume)",
+                    other.name()
+                ),
+            };
+            self.add_info_notification(banner);
+
+            Ok(())
+        }
+        .await;
+
+        let audit_result = match &result {
+            Ok(()) => AuditResult::Success,
+            Err(e) => AuditResult::Failed(e.to_string()),
+        };
+        audit::audit_session_resumed(
+            session_id,
+            tmux_name_for_audit,
+            worktree_for_audit,
+            transcript.as_ref().map(|p| p.display().to_string()),
+            AuditTrigger::UserKeypress(trigger_key),
+            audit_result,
+        );
+
+        if result.is_ok() {
+            self.load_real_workspaces().await;
+            self.ui_needs_refresh = true;
+        }
+
+        result
+    }
+
+    /// Encode an absolute worktree path the same way Claude Code does for its
+    /// `~/.claude/projects/-{encoded}/` transcript directory:
+    ///   - replace `/` with `-`
+    ///   - strip leading slash
+    /// Then prefix with `-` (callers do this).
+    ///
+    /// Mirror of `find_transcript_path()` in
+    /// `toolkit/packages/utilities/utils/spawn-agent-lib.sh:30-69`.
+    pub(crate) fn encode_claude_project_dir(worktree_path: &std::path::Path) -> String {
+        let s = worktree_path.to_string_lossy();
+        let stripped = s.strip_prefix('/').unwrap_or(&s);
+        format!("-{}", stripped.replace('/', "-"))
+    }
+
+    /// Find the most recently modified Claude transcript (`*.jsonl`) for the
+    /// given worktree under `~/.claude/projects/-{encoded}/`.
+    ///
+    /// Returns `None` when the project directory is missing or contains no
+    /// transcripts.
+    pub fn find_latest_transcript(worktree_path: &std::path::Path) -> Option<std::path::PathBuf> {
+        let home = dirs::home_dir()?;
+        Self::find_latest_transcript_in(&home, worktree_path)
+    }
+
+    /// Test-friendly variant: caller supplies the home directory so unit tests
+    /// don't have to mutate process-wide environment.
+    pub(crate) fn find_latest_transcript_in(
+        home: &std::path::Path,
+        worktree_path: &std::path::Path,
+    ) -> Option<std::path::PathBuf> {
+        let project_dir = home
+            .join(".claude")
+            .join("projects")
+            .join(Self::encode_claude_project_dir(worktree_path));
+
+        let read = std::fs::read_dir(&project_dir).ok()?;
+        let mut candidates: Vec<(std::path::PathBuf, std::time::SystemTime)> = Vec::new();
+        for entry in read.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                continue;
+            }
+            if let Ok(meta) = entry.metadata() {
+                if let Ok(mtime) = meta.modified() {
+                    candidates.push((path, mtime));
+                }
+            }
+        }
+        candidates.into_iter().max_by_key(|(_, t)| *t).map(|(p, _)| p)
+    }
+
     /// Delete a Boss mode session
     async fn delete_boss_session(&mut self, session_id: Uuid) -> anyhow::Result<()> {
         use crate::docker::{ContainerManager, SessionLifecycleManager};
@@ -7988,6 +8409,18 @@ impl AppState {
                 AsyncAction::DeleteSession(session_id) => {
                     if let Err(e) = self.delete_session(session_id).await {
                         error!("Failed to delete session {}: {}", session_id, e);
+                    }
+                }
+                AsyncAction::StopSession(session_id) => {
+                    if let Err(e) = self.stop_interactive_session(session_id).await {
+                        error!("Failed to stop session {}: {}", session_id, e);
+                        self.add_error_notification(format!("Stop failed: {}", e));
+                    }
+                }
+                AsyncAction::ResumeSession(session_id, trigger) => {
+                    if let Err(e) = self.resume_interactive_session(session_id, trigger).await {
+                        error!("Failed to resume session {}: {}", session_id, e);
+                        self.add_error_notification(format!("Resume failed: {}", e));
                     }
                 }
                 AsyncAction::BulkDeleteSessions(session_ids) => {
