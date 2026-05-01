@@ -25,6 +25,12 @@ const MUTED_GRAY: Color = Color::Rgb(120, 120, 140);
 const BAR_COLOR: Color = Color::Rgb(80, 160, 230);
 const BAR_HIGH: Color = Color::Rgb(230, 120, 80);
 const BAR_MED: Color = Color::Rgb(200, 180, 80);
+const TERMINAL_BG: Color = Color::Rgb(13, 14, 18);
+const TERMINAL_PANEL: Color = Color::Rgb(17, 19, 26);
+const TERMINAL_BORDER: Color = Color::Rgb(130, 90, 70);
+const TERMINAL_ACCENT: Color = Color::Rgb(255, 184, 108);
+const TERMINAL_GOOD: Color = Color::Rgb(155, 216, 106);
+const TERMINAL_CYAN: Color = Color::Rgb(125, 211, 200);
 
 /// Which agent provider's usage to show
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -782,11 +788,11 @@ fn render_projects(frame: &mut Frame, area: Rect, data: &UsageData, scroll_offse
 
 fn render_burndown(frame: &mut Frame, area: Rect, data: &UsageData, state: &UsageViewState) {
     let block = Block::default()
-        .title(" Burndown ")
+        .title(" [ Burndown ] ")
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(CORNFLOWER_BLUE))
-        .style(Style::default().bg(DARK_BG));
+        .border_type(BorderType::Plain)
+        .border_style(Style::default().fg(TERMINAL_BORDER))
+        .style(Style::default().bg(TERMINAL_BG));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -801,7 +807,7 @@ fn render_burndown(frame: &mut Frame, area: Rect, data: &UsageData, state: &Usag
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4),
+            Constraint::Length(5),
             Constraint::Length(3),
             Constraint::Min(0),
         ])
@@ -810,63 +816,136 @@ fn render_burndown(frame: &mut Frame, area: Rect, data: &UsageData, state: &Usag
     render_burndown_header(frame, vertical[0], data);
     render_period_row(frame, vertical[1], state);
 
-    let body = if vertical[2].width >= 110 {
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(vertical[2])
+    if vertical[2].width >= 120 && vertical[2].height >= 24 {
+        render_dashboard_grid(frame, vertical[2], data);
+    } else if vertical[2].width >= 96 {
+        render_dashboard_compact(frame, vertical[2], data);
     } else {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(vertical[2])
-    };
+        render_dashboard_stack(frame, vertical[2], data);
+    }
+}
 
+fn render_dashboard_grid(frame: &mut Frame, area: Rect, data: &UsageData) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
+        ])
+        .split(area);
+
+    let top = three_columns(rows[0]);
+    render_daily_activity_panel(frame, top[0], data);
+    render_project_panel(frame, top[1], &data.projects);
+    render_live_panel(frame, top[2], &data.sessions);
+
+    let middle = three_columns(rows[1]);
+    render_session_panel(frame, middle[0], &data.sessions);
+    render_activity_panel(frame, middle[1], &data.activities);
+    render_model_panel(frame, middle[2], &data.models);
+
+    let lower = three_columns(rows[2]);
+    render_named_panel(frame, lower[0], "Core Tools", &data.tools);
+    render_named_panel(frame, lower[1], "Shell Commands", &data.shell_commands);
+    render_named_panel(frame, lower[2], "MCP Servers", &data.mcp_servers);
+
+    let bottom = three_columns(rows[3]);
+    render_optimize_compact_panel(frame, bottom[0], data);
+    render_leaderboard_panel(frame, bottom[1], data);
+    render_budget_panel(frame, bottom[2], data);
+}
+
+fn render_dashboard_compact(frame: &mut Frame, area: Rect, data: &UsageData) {
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
     let left = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage(34),
-            Constraint::Percentage(33),
-            Constraint::Percentage(33),
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
         ])
-        .split(body[0]);
+        .split(columns[0]);
     let right = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage(34),
-            Constraint::Percentage(33),
-            Constraint::Percentage(33),
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
         ])
-        .split(body[1]);
+        .split(columns[1]);
 
     render_daily_activity_panel(frame, left[0], data);
     render_project_panel(frame, left[1], &data.projects);
     render_session_panel(frame, left[2], &data.sessions);
+    render_live_panel(frame, left[3], &data.sessions);
+
     render_activity_panel(frame, right[0], &data.activities);
     render_model_panel(frame, right[1], &data.models);
+    render_optimize_compact_panel(frame, right[2], data);
+    let tools = three_columns(right[3]);
+    render_named_panel(frame, tools[0], "Core Tools", &data.tools);
+    render_named_panel(frame, tools[1], "Shell Commands", &data.shell_commands);
+    render_named_panel(frame, tools[2], "MCP Servers", &data.mcp_servers);
+}
 
-    let tool_chunks = Layout::default()
+fn render_dashboard_stack(frame: &mut Frame, area: Rect, data: &UsageData) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(20),
+            Constraint::Percentage(20),
+            Constraint::Percentage(20),
+            Constraint::Percentage(20),
+            Constraint::Percentage(20),
+        ])
+        .split(area);
+
+    render_daily_activity_panel(frame, chunks[0], data);
+    render_project_panel(frame, chunks[1], &data.projects);
+    render_session_panel(frame, chunks[2], &data.sessions);
+    render_activity_panel(frame, chunks[3], &data.activities);
+    render_model_panel(frame, chunks[4], &data.models);
+}
+
+fn three_columns(area: Rect) -> std::rc::Rc<[Rect]> {
+    Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Percentage(34),
             Constraint::Percentage(33),
             Constraint::Percentage(33),
         ])
-        .split(right[2]);
-    render_named_panel(frame, tool_chunks[0], "Core Tools", &data.tools);
-    render_named_panel(
-        frame,
-        tool_chunks[1],
-        "Shell Commands",
-        &data.shell_commands,
-    );
-    render_named_panel(frame, tool_chunks[2], "MCP Servers", &data.mcp_servers);
+        .split(area)
 }
 
 fn render_burndown_header(frame: &mut Frame, area: Rect, data: &UsageData) {
+    let cost = format_cost(data.grand_total.cost_usd);
+    let cache_hit = cache_hit_percent(data);
+    let projected = projected_month_cost(data);
     let lines = vec![
         Line::from(vec![
-            Span::styled("Calls ", Style::default().fg(MUTED_GRAY)),
+            Span::styled(
+                "◆ agents-in-a-box",
+                Style::default().fg(TERMINAL_ACCENT).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" · usage command center", Style::default().fg(MUTED_GRAY)),
+            Span::styled("    ", Style::default()),
+            Span::styled("● live", Style::default().fg(TERMINAL_GOOD)),
+        ]),
+        Line::from(vec![
+            Span::styled("Cost ", Style::default().fg(MUTED_GRAY)),
+            Span::styled(
+                cost,
+                Style::default().fg(TERMINAL_ACCENT).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  Calls ", Style::default().fg(MUTED_GRAY)),
             Span::styled(
                 data.grand_total.call_count.to_string(),
                 Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
@@ -881,10 +960,10 @@ fn render_burndown_header(frame: &mut Frame, area: Rect, data: &UsageData) {
                 data.grand_total.project_count.to_string(),
                 Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  Cost ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("  Cache hit ", Style::default().fg(MUTED_GRAY)),
             Span::styled(
-                format_cost(data.grand_total.cost_usd),
-                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                format!("{cache_hit:.1}%"),
+                Style::default().fg(TERMINAL_GOOD).add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::from(vec![
@@ -900,6 +979,18 @@ fn render_burndown_header(frame: &mut Frame, area: Rect, data: &UsageData) {
                 ),
                 Style::default().fg(SOFT_WHITE),
             ),
+            Span::styled("  In ", Style::default().fg(MUTED_GRAY)),
+            Span::styled(
+                format_tokens_short(data.grand_total.input_tokens),
+                Style::default().fg(TERMINAL_CYAN),
+            ),
+            Span::styled("  Out ", Style::default().fg(MUTED_GRAY)),
+            Span::styled(
+                format_tokens_short(data.grand_total.output_tokens),
+                Style::default().fg(TERMINAL_CYAN),
+            ),
+            Span::styled("  Projected month ", Style::default().fg(MUTED_GRAY)),
+            Span::styled(format_cost(projected), Style::default().fg(TERMINAL_ACCENT)),
         ]),
     ];
     frame.render_widget(Paragraph::new(lines), area);
@@ -908,28 +999,38 @@ fn render_burndown_header(frame: &mut Frame, area: Rect, data: &UsageData) {
 fn render_period_row(frame: &mut Frame, area: Rect, state: &UsageViewState) {
     let text = Line::from(vec![
         Span::styled(
-            "1 Today  2 Week  3 30d  4 Month  5 All  d Custom  / Include  x Exclude  c Clear  r Reload",
+            "[1 Today]  [2 7d]  [3 30d]  [4 Month]  [5 All]  [d Custom]  [/] filter  [x] exclude  [r] reload",
             Style::default().fg(MUTED_GRAY),
         ),
         Span::styled("   Active: ", Style::default().fg(MUTED_GRAY)),
-        Span::styled(period_label(&state.period), Style::default().fg(GOLD)),
+        Span::styled(
+            period_label(&state.period),
+            Style::default().fg(TERMINAL_ACCENT).add_modifier(Modifier::BOLD),
+        ),
     ]);
     frame.render_widget(Paragraph::new(text), area);
 }
 
 fn render_daily_activity_panel(frame: &mut Frame, area: Rect, data: &UsageData) {
-    let max = data.daily.iter().map(|(_, bucket)| bucket.total()).max().unwrap_or(1);
+    let max = data
+        .daily
+        .iter()
+        .filter_map(|(_, bucket)| bucket.cost_usd)
+        .fold(0.0_f64, f64::max)
+        .max(1.0);
     let rows: Vec<_> = data
         .daily
         .iter()
         .rev()
         .take(area.height.saturating_sub(2) as usize)
         .map(|(date, bucket)| {
+            let cost = bucket.cost_usd.unwrap_or(0.0);
             format!(
-                "{} {} {}",
+                "{} {} {:>7} {} calls",
                 date.format("%m-%d"),
-                bar(bucket.total(), max, 18),
-                format_tokens_short(bucket.total())
+                ratio_bar(cost, max, 18),
+                format_cost(bucket.cost_usd),
+                bucket.call_count
             )
         })
         .collect();
@@ -968,6 +1069,22 @@ fn render_session_panel(frame: &mut Frame, area: Rect, rows: &[SessionUsage]) {
         })
         .collect();
     render_panel(frame, area, "Top Sessions", lines);
+}
+
+fn render_live_panel(frame: &mut Frame, area: Rect, rows: &[SessionUsage]) {
+    let lines = rows
+        .iter()
+        .take(area.height.saturating_sub(2) as usize)
+        .map(|row| {
+            format!(
+                "● {} · {} · {}",
+                truncate_string(&row.project, 18),
+                truncate_string(&row.provider, 6),
+                format_cost(row.bucket.cost_usd)
+            )
+        })
+        .collect();
+    render_panel(frame, area, "Live Session Ticker", lines);
 }
 
 fn render_activity_panel(frame: &mut Frame, area: Rect, rows: &[ActivityUsage]) {
@@ -1022,6 +1139,69 @@ fn render_named_panel(frame: &mut Frame, area: Rect, title: &str, rows: &[NamedU
     render_panel(frame, area, title, lines);
 }
 
+fn render_optimize_compact_panel(frame: &mut Frame, area: Rect, data: &UsageData) {
+    let result = optimize_usage(data);
+    let mut lines = vec![format!(
+        "Health {:?} · score {} · save {} tokens",
+        result.grade,
+        result.score,
+        format_tokens_short(result.potential_tokens_saved)
+    )];
+    for finding in result.findings.iter().take(area.height.saturating_sub(3) as usize) {
+        lines.push(format!(
+            "{:?} {}",
+            finding.impact,
+            truncate_string(&finding.title, area.width.saturating_sub(14) as usize)
+        ));
+    }
+    render_panel(frame, area, "Optimization Recommendations", lines);
+}
+
+fn render_leaderboard_panel(frame: &mut Frame, area: Rect, data: &UsageData) {
+    let max = data.projects.iter().map(|row| row.bucket.total()).max().unwrap_or(1);
+    let lines = data
+        .projects
+        .iter()
+        .enumerate()
+        .take(area.height.saturating_sub(2) as usize)
+        .map(|(idx, project)| {
+            format!(
+                "{} {} {} {}",
+                idx + 1,
+                truncate_string(&project.name, 16),
+                bar(project.bucket.total(), max, 8),
+                format_cost(project.bucket.cost_usd)
+            )
+        })
+        .collect();
+    render_panel(frame, area, "Agent Leaderboard", lines);
+}
+
+fn render_budget_panel(frame: &mut Frame, area: Rect, data: &UsageData) {
+    let spent = data.grand_total.cost_usd.unwrap_or(0.0);
+    let projected = projected_month_cost(data).unwrap_or(spent);
+    let cap = projected.max(spent).max(1.0) * 1.25;
+    let usage = ((projected / cap) * 100.0).min(100.0);
+    let lines = vec![
+        format!(
+            "Monthly cap {} / {}",
+            format_cost(Some(projected)),
+            format_cost(Some(cap))
+        ),
+        format!("{} {:>4.1}% projected", ratio_bar(usage, 100.0, 24), usage),
+        format!(
+            "Plan utilization {}",
+            format_cost(data.grand_total.cost_usd)
+        ),
+        format!(
+            "{} cache hit · {} days sampled",
+            format!("{:.1}%", cache_hit_percent(data)),
+            data.daily.len()
+        ),
+    ];
+    render_panel(frame, area, "Budget · Alerts", lines);
+}
+
 fn render_optimize(frame: &mut Frame, area: Rect, data: &UsageData) {
     let result = optimize_usage(data);
     let mut lines = vec![
@@ -1047,11 +1227,11 @@ fn render_optimize(frame: &mut Frame, area: Rect, data: &UsageData) {
 
 fn render_panel(frame: &mut Frame, area: Rect, title: &str, rows: Vec<String>) {
     let block = Block::default()
-        .title(format!(" {title} "))
+        .title(format!(" [ {title} ] "))
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(CORNFLOWER_BLUE))
-        .style(Style::default().bg(DARK_BG));
+        .border_type(BorderType::Plain)
+        .border_style(Style::default().fg(TERMINAL_BORDER))
+        .style(Style::default().bg(TERMINAL_PANEL));
     let lines = if rows.is_empty() {
         vec![Line::from(Span::styled(
             "No data",
@@ -1077,6 +1257,38 @@ fn bar(value: u64, max: u64, width: usize) -> String {
         "█".repeat(filled),
         "░".repeat(width.saturating_sub(filled))
     )
+}
+
+fn ratio_bar(value: f64, max: f64, width: usize) -> String {
+    let filled = if max <= 0.0 {
+        0
+    } else {
+        ((value / max) * width as f64).round() as usize
+    }
+    .min(width);
+    format!(
+        "{}{}",
+        "▓".repeat(filled),
+        "░".repeat(width.saturating_sub(filled))
+    )
+}
+
+fn cache_hit_percent(data: &UsageData) -> f64 {
+    let cached = data.grand_total.cache_creation_tokens + data.grand_total.cache_read_tokens;
+    let denominator = data.grand_total.input_tokens + cached;
+    if denominator == 0 {
+        0.0
+    } else {
+        cached as f64 * 100.0 / denominator as f64
+    }
+}
+
+fn projected_month_cost(data: &UsageData) -> Option<f64> {
+    let spent = data.grand_total.cost_usd?;
+    if data.daily.is_empty() {
+        return Some(spent);
+    }
+    Some(spent / data.daily.len() as f64 * 30.0)
 }
 
 fn render_bar_chart(frame: &mut Frame, area: Rect, data: &UsageData) {

@@ -150,7 +150,7 @@ async fn test_usage_burndown_render_contains_core_panels() {
     app.state.usage_state.active_tab = UsageTab::Burndown;
     app.state.usage_state.data = Some(sample_usage_data());
 
-    let backend = TestBackend::new(120, 40);
+    let backend = TestBackend::new(180, 52);
     let mut terminal = Terminal::new(backend).unwrap();
     let mut layout = LayoutComponent::new();
 
@@ -173,6 +173,10 @@ async fn test_usage_burndown_render_contains_core_panels() {
     assert!(content.contains("By Project"));
     assert!(content.contains("By Activity"));
     assert!(content.contains("By Model"));
+    assert!(content.contains("Live Session Ticker"));
+    assert!(content.contains("Optimization Recommendations"));
+    assert!(content.contains("Budget"));
+    assert!(content.contains("Agent Leaderboard"));
 }
 
 #[tokio::test]
