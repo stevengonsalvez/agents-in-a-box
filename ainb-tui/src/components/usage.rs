@@ -33,6 +33,10 @@ const TERMINAL_ACCENT: Color = Color::Rgb(255, 184, 108);
 const TERMINAL_GOOD: Color = Color::Rgb(155, 216, 106);
 const TERMINAL_CYAN: Color = Color::Rgb(125, 211, 200);
 
+// Bar gradient thresholds: ratio of value/max above which a row is colored.
+const BAR_THRESHOLD_HIGH: f64 = 0.66;
+const BAR_THRESHOLD_MED: f64 = 0.33;
+
 /// Which agent provider's usage to show
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UsageProvider {
@@ -817,7 +821,7 @@ fn render_burndown(frame: &mut Frame, area: Rect, data: &UsageData, state: &Usag
     render_burndown_header(frame, vertical[0], data, &state.period);
     render_period_row(frame, vertical[1], state);
 
-    if vertical[2].width >= 120 && vertical[2].height >= 20 {
+    if vertical[2].width >= 120 && vertical[2].height >= 22 {
         render_dashboard_grid(frame, vertical[2], data, &state.period);
     } else if vertical[2].width >= 96 {
         render_dashboard_compact(frame, vertical[2], data);
@@ -1564,9 +1568,9 @@ fn render_panel_lines(frame: &mut Frame, area: Rect, title: &str, lines: Vec<Lin
 }
 
 fn pick_bar_color(ratio: f64) -> Color {
-    if ratio >= 0.66 {
+    if ratio >= BAR_THRESHOLD_HIGH {
         BAR_HIGH
-    } else if ratio >= 0.33 {
+    } else if ratio >= BAR_THRESHOLD_MED {
         BAR_MED
     } else {
         BAR_COLOR
@@ -1658,8 +1662,10 @@ fn shorten_project_name(name: &str, max_w: usize) -> String {
         }
         // Keep tail of last segment.
         let tail_w = max_w.saturating_sub(2); // "…/"
-        if tail_w > 0 && last.chars().count() > tail_w {
-            let suffix: String = last.chars().rev().take(tail_w).collect::<String>().chars().rev().collect();
+        let last_count = last.chars().count();
+        if tail_w > 0 && last_count > tail_w {
+            let skip = last_count - tail_w;
+            let suffix: String = last.chars().skip(skip).collect();
             return format!("…/{suffix}");
         }
         if combined.chars().count() <= max_w + 4 {
