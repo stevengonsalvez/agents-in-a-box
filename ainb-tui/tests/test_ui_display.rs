@@ -5,7 +5,7 @@ use ainb::components::LayoutComponent;
 use ainb::components::usage::{UsageProvider, UsageTab};
 use ainb::models::{
     ActivityCategory, ActivityUsage, ModelUsage, NamedUsage, ProjectUsage, ProviderCall,
-    TokenBucket, UsageData,
+    TokenBucket, UsageData, UsagePeriod,
 };
 use chrono::{Local, TimeZone};
 use ratatui::{Terminal, backend::TestBackend};
@@ -177,6 +177,81 @@ async fn test_usage_burndown_render_contains_core_panels() {
     assert!(content.contains("Optimization Recommendations"));
     assert!(content.contains("Budget"));
     assert!(content.contains("Agent Leaderboard"));
+}
+
+#[tokio::test]
+async fn test_usage_burndown_cache_hit_uses_cache_reads_only() {
+    let mut data = sample_usage_data();
+    data.grand_total.input_tokens = 100;
+    data.grand_total.cache_creation_tokens = 900;
+    data.grand_total.cache_read_tokens = 0;
+    data.daily[0].1.input_tokens = 100;
+    data.daily[0].1.cache_creation_tokens = 900;
+    data.daily[0].1.cache_read_tokens = 0;
+
+    let mut app = App::new();
+    app.state.current_view = View::Analytics;
+    app.state.usage_state.active_tab = UsageTab::Burndown;
+    app.state.usage_state.data = Some(data);
+
+    let backend = TestBackend::new(180, 52);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut layout = LayoutComponent::new();
+
+    terminal
+        .draw(|frame| {
+            layout.render(frame, &mut app.state);
+        })
+        .unwrap();
+
+    let content: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(ratatui::buffer::Cell::symbol)
+        .collect();
+
+    assert!(content.contains("Cache hit"));
+    assert!(content.contains("0.0%"));
+}
+
+#[tokio::test]
+async fn test_usage_burndown_projection_uses_elapsed_custom_range_days() {
+    let mut data = sample_usage_data();
+    data.grand_total.cost_usd = Some(10.0);
+    data.daily[0].1.cost_usd = Some(10.0);
+
+    let mut app = App::new();
+    app.state.current_view = View::Analytics;
+    app.state.usage_state.active_tab = UsageTab::Burndown;
+    app.state.usage_state.period = UsagePeriod::Custom {
+        from: chrono::NaiveDate::from_ymd_opt(2026, 4, 23).unwrap(),
+        to: chrono::NaiveDate::from_ymd_opt(2026, 4, 29).unwrap(),
+    };
+    app.state.usage_state.data = Some(data);
+
+    let backend = TestBackend::new(180, 52);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut layout = LayoutComponent::new();
+
+    terminal
+        .draw(|frame| {
+            layout.render(frame, &mut app.state);
+        })
+        .unwrap();
+
+    let content: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(ratatui::buffer::Cell::symbol)
+        .collect();
+
+    assert!(content.contains("Projected month"));
+    assert!(content.contains("$42.86"));
+    assert!(!content.contains("$300.00"));
 }
 
 #[tokio::test]

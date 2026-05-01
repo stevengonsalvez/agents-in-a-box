@@ -1,6 +1,7 @@
 // ABOUTME: Usage analytics screen showing token consumption by day, week, and project.
 // Accessible via 'i' key from home screen or Stats sidebar item.
 
+use chrono::{Datelike, Local, NaiveDate};
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
@@ -813,11 +814,11 @@ fn render_burndown(frame: &mut Frame, area: Rect, data: &UsageData, state: &Usag
         ])
         .split(inner);
 
-    render_burndown_header(frame, vertical[0], data);
+    render_burndown_header(frame, vertical[0], data, &state.period);
     render_period_row(frame, vertical[1], state);
 
     if vertical[2].width >= 120 && vertical[2].height >= 24 {
-        render_dashboard_grid(frame, vertical[2], data);
+        render_dashboard_grid(frame, vertical[2], data, &state.period);
     } else if vertical[2].width >= 96 {
         render_dashboard_compact(frame, vertical[2], data);
     } else {
@@ -825,7 +826,7 @@ fn render_burndown(frame: &mut Frame, area: Rect, data: &UsageData, state: &Usag
     }
 }
 
-fn render_dashboard_grid(frame: &mut Frame, area: Rect, data: &UsageData) {
+fn render_dashboard_grid(frame: &mut Frame, area: Rect, data: &UsageData, period: &UsagePeriod) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -854,7 +855,7 @@ fn render_dashboard_grid(frame: &mut Frame, area: Rect, data: &UsageData) {
     let bottom = three_columns(rows[3]);
     render_optimize_compact_panel(frame, bottom[0], data);
     render_leaderboard_panel(frame, bottom[1], data);
-    render_budget_panel(frame, bottom[2], data);
+    render_budget_panel(frame, bottom[2], data, period);
 }
 
 fn render_dashboard_compact(frame: &mut Frame, area: Rect, data: &UsageData) {
@@ -925,10 +926,10 @@ fn three_columns(area: Rect) -> std::rc::Rc<[Rect]> {
         .split(area)
 }
 
-fn render_burndown_header(frame: &mut Frame, area: Rect, data: &UsageData) {
+fn render_burndown_header(frame: &mut Frame, area: Rect, data: &UsageData, period: &UsagePeriod) {
     let cost = format_cost(data.grand_total.cost_usd);
     let cache_hit = cache_hit_percent(data);
-    let projected = projected_month_cost(data);
+    let projected = projected_month_cost(data, period);
     let lines = vec![
         Line::from(vec![
             Span::styled(
@@ -1177,9 +1178,9 @@ fn render_leaderboard_panel(frame: &mut Frame, area: Rect, data: &UsageData) {
     render_panel(frame, area, "Agent Leaderboard", lines);
 }
 
-fn render_budget_panel(frame: &mut Frame, area: Rect, data: &UsageData) {
+fn render_budget_panel(frame: &mut Frame, area: Rect, data: &UsageData, period: &UsagePeriod) {
     let spent = data.grand_total.cost_usd.unwrap_or(0.0);
-    let projected = projected_month_cost(data).unwrap_or(spent);
+    let projected = projected_month_cost(data, period).unwrap_or(spent);
     let cap = projected.max(spent).max(1.0) * 1.25;
     let usage = ((projected / cap) * 100.0).min(100.0);
     let lines = vec![
@@ -1274,21 +1275,49 @@ fn ratio_bar(value: f64, max: f64, width: usize) -> String {
 }
 
 fn cache_hit_percent(data: &UsageData) -> f64 {
-    let cached = data.grand_total.cache_creation_tokens + data.grand_total.cache_read_tokens;
-    let denominator = data.grand_total.input_tokens + cached;
+    let cache_reads = data.grand_total.cache_read_tokens;
+    let denominator = data.grand_total.input_tokens
+        + data.grand_total.cache_creation_tokens
+        + data.grand_total.cache_read_tokens;
     if denominator == 0 {
         0.0
     } else {
-        cached as f64 * 100.0 / denominator as f64
+        cache_reads as f64 * 100.0 / denominator as f64
     }
 }
 
-fn projected_month_cost(data: &UsageData) -> Option<f64> {
+fn projected_month_cost(data: &UsageData, period: &UsagePeriod) -> Option<f64> {
     let spent = data.grand_total.cost_usd?;
-    if data.daily.is_empty() {
+    let elapsed_days = elapsed_days_for_period(period, data)?;
+    if elapsed_days == 0 {
         return Some(spent);
     }
-    Some(spent / data.daily.len() as f64 * 30.0)
+    Some(spent / elapsed_days as f64 * 30.0)
+}
+
+fn elapsed_days_for_period(period: &UsagePeriod, data: &UsageData) -> Option<u64> {
+    match period {
+        UsagePeriod::Today => Some(1),
+        UsagePeriod::Week => Some(7),
+        UsagePeriod::ThirtyDays => Some(30),
+        UsagePeriod::Month => {
+            let today = Local::now().date_naive();
+            let first = NaiveDate::from_ymd_opt(today.year(), today.month(), 1)?;
+            Some((today - first).num_days().max(0) as u64 + 1)
+        }
+        UsagePeriod::Custom { from, to } => {
+            if to < from {
+                Some(0)
+            } else {
+                Some((*to - *from).num_days() as u64 + 1)
+            }
+        }
+        UsagePeriod::All => {
+            let first = data.daily.first().map(|(date, _)| *date)?;
+            let last = data.daily.last().map(|(date, _)| *date).unwrap_or(first);
+            Some((last - first).num_days().max(0) as u64 + 1)
+        }
+    }
 }
 
 fn render_bar_chart(frame: &mut Frame, area: Rect, data: &UsageData) {
