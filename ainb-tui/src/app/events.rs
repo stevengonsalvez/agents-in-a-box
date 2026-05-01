@@ -32,6 +32,7 @@ pub enum AppEvent {
     ReauthenticateCredentials,
     RestartSession,
     DeleteSession,
+    ResumeSession(String), // Resume a Stopped interactive session (carries trigger key: "Enter" or "r")
     OpenInEditor,    // Open selected session's workspace in preferred editor
     OpenQuickShell,  // Open shell in selected workspace/session directory
     CleanupOrphaned, // Clean up orphaned containers
@@ -145,7 +146,8 @@ pub enum AppEvent {
     SearchWorkspaceInputChar(char),
     SearchWorkspaceBackspace,
     // Confirmation dialog events
-    ConfirmationToggle,  // Switch between Yes/No
+    ConfirmationToggle,  // Switch between Yes/No (binary) or cycle forward (tri-option)
+    ConfirmationPrev,    // Cycle backwards through tri-option dialog
     ConfirmationConfirm, // Confirm action
     ConfirmationCancel,  // Cancel dialog
     // Auth setup events
@@ -478,9 +480,16 @@ impl EventHandler {
         use crate::app::state::View;
 
         // Handle confirmation dialog first (highest priority)
-        if state.confirmation_dialog.is_some() {
+        if let Some(ref dialog) = state.confirmation_dialog {
+            // Tri-option dialogs cycle backwards on Left so users can navigate
+            // both directions; binary dialogs keep the simple Toggle behaviour.
+            let is_tri = dialog.options.is_some();
             match key_event.code {
-                KeyCode::Left | KeyCode::Right | KeyCode::Tab => {
+                KeyCode::Left if is_tri => return Some(AppEvent::ConfirmationPrev),
+                KeyCode::Right | KeyCode::Tab => {
+                    return Some(AppEvent::ConfirmationToggle);
+                }
+                KeyCode::Left => {
                     return Some(AppEvent::ConfirmationToggle);
                 }
                 KeyCode::Enter => {
@@ -678,7 +687,51 @@ impl EventHandler {
                 tracing::info!("[ACTION] 'a' key pressed - AttachTmuxSession requested");
                 Some(AppEvent::AttachTmuxSession)
             }
-            KeyCode::Char('r') => Some(AppEvent::ReauthenticateCredentials),
+            KeyCode::Enter => {
+                // Enter on a Stopped interactive session = resume it.
+                // Enter on a Running session = attach (mirrors 'a').
+                // Other selection types fall through to None to preserve prior behaviour.
+                use crate::models::{SessionAgentType, SessionMode, SessionStatus};
+                if let Some(session) = state.selected_session() {
+                    let is_interactive = matches!(session.mode, SessionMode::Interactive)
+                        && matches!(
+                            session.agent_type,
+                            SessionAgentType::Claude
+                                | SessionAgentType::Codex
+                                | SessionAgentType::Gemini
+                                | SessionAgentType::Copilot
+                        );
+                    if is_interactive && matches!(session.status, SessionStatus::Stopped) {
+                        Some(AppEvent::ResumeSession("Enter".to_string()))
+                    } else {
+                        Some(AppEvent::AttachTmuxSession)
+                    }
+                } else {
+                    None
+                }
+            }
+            KeyCode::Char('r') => {
+                // 'r' resumes a Stopped interactive session; otherwise it falls
+                // back to the existing reauthenticate-credentials shortcut.
+                use crate::models::{SessionAgentType, SessionMode, SessionStatus};
+                if let Some(session) = state.selected_session() {
+                    let is_interactive = matches!(session.mode, SessionMode::Interactive)
+                        && matches!(
+                            session.agent_type,
+                            SessionAgentType::Claude
+                                | SessionAgentType::Codex
+                                | SessionAgentType::Gemini
+                                | SessionAgentType::Copilot
+                        );
+                    if is_interactive && matches!(session.status, SessionStatus::Stopped) {
+                        Some(AppEvent::ResumeSession("r".to_string()))
+                    } else {
+                        Some(AppEvent::ReauthenticateCredentials)
+                    }
+                } else {
+                    Some(AppEvent::ReauthenticateCredentials)
+                }
+            }
             KeyCode::F(2) => {
                 // F2 for rename - works in "SSH Sessions" and "Other tmux" sections
                 if state.is_ssh_session_selected() {
@@ -2432,8 +2485,27 @@ impl EventHandler {
                         }
                     }
                 } else if let Some(session) = state.selected_session() {
-                    // Show confirmation dialog for regular session
-                    state.show_delete_confirmation(session.id);
+                    // Interactive sessions (Claude/Codex/Gemini/Copilot) get the
+                    // tri-option Stop / Delete / Cancel dialog so the user can
+                    // soft-stop without losing the worktree. Boss/Docker, SSH,
+                    // and Shell sessions stick with the binary delete flow.
+                    use crate::models::{SessionAgentType, SessionMode};
+                    let is_interactive_agent = matches!(
+                        session.mode,
+                        SessionMode::Interactive
+                    ) && matches!(
+                        session.agent_type,
+                        SessionAgentType::Claude
+                            | SessionAgentType::Codex
+                            | SessionAgentType::Gemini
+                            | SessionAgentType::Copilot
+                    );
+                    let session_id = session.id;
+                    if is_interactive_agent {
+                        state.show_delete_or_stop_confirmation(session_id);
+                    } else {
+                        state.show_delete_confirmation(session_id);
+                    }
                 } else {
                     tracing::warn!(
                         "[ACTION] DeleteSession: No item to delete (workspace_idx={:?}, session_idx={:?}, shell={}, other_tmux_idx={:?})",
@@ -2469,6 +2541,14 @@ impl EventHandler {
                     ));
                     state.pending_async_action = Some(AsyncAction::BulkDeleteSessions(ids));
                     state.selected_sessions.clear();
+                }
+            }
+            AppEvent::ResumeSession(trigger) => {
+                if let Some(session_id) = state.get_selected_session_id() {
+                    tracing::info!("[ACTION] Resuming stopped session: {} (trigger={})", session_id, trigger);
+                    state.pending_async_action = Some(AsyncAction::ResumeSession(session_id, trigger));
+                } else {
+                    state.add_warning_notification("No session selected to resume".to_string());
                 }
             }
             AppEvent::OpenInEditor => {
@@ -2541,17 +2621,46 @@ impl EventHandler {
             }
             AppEvent::ConfirmationToggle => {
                 if let Some(ref mut dialog) = state.confirmation_dialog {
-                    dialog.selected_option = !dialog.selected_option;
+                    if let Some(ref options) = dialog.options {
+                        let len = options.len().max(1);
+                        dialog.selected_index = (dialog.selected_index + 1) % len;
+                    } else {
+                        dialog.selected_option = !dialog.selected_option;
+                    }
+                }
+            }
+            AppEvent::ConfirmationPrev => {
+                if let Some(ref mut dialog) = state.confirmation_dialog {
+                    if let Some(ref options) = dialog.options {
+                        let len = options.len().max(1);
+                        dialog.selected_index = (dialog.selected_index + len - 1) % len;
+                    } else {
+                        dialog.selected_option = !dialog.selected_option;
+                    }
                 }
             }
             AppEvent::ConfirmationConfirm => {
                 if let Some(dialog) = state.confirmation_dialog.take() {
-                    if dialog.selected_option {
-                        // User confirmed, execute the action
-                        match dialog.confirm_action {
+                    let action = if let Some(options) = dialog.options.as_ref() {
+                        // Tri-option mode: pick the highlighted option's action.
+                        options
+                            .get(dialog.selected_index)
+                            .map(|o| o.action.clone())
+                    } else if dialog.selected_option {
+                        Some(dialog.confirm_action.clone())
+                    } else {
+                        None
+                    };
+
+                    if let Some(action) = action {
+                        match action {
                             crate::app::state::ConfirmAction::DeleteSession(session_id) => {
                                 state.pending_async_action =
                                     Some(AsyncAction::DeleteSession(session_id));
+                            }
+                            crate::app::state::ConfirmAction::StopSession(session_id) => {
+                                state.pending_async_action =
+                                    Some(AsyncAction::StopSession(session_id));
                             }
                             crate::app::state::ConfirmAction::KillOtherTmux(session_name) => {
                                 state.pending_async_action =
@@ -2561,9 +2670,11 @@ impl EventHandler {
                                 state.pending_async_action =
                                     Some(AsyncAction::KillWorkspaceShell(workspace_idx));
                             }
+                            crate::app::state::ConfirmAction::Cancel => {
+                                // Explicit Cancel: dialog already taken; nothing to do.
+                            }
                         }
                     }
-                    // If not confirmed, just close the dialog
                 }
             }
             AppEvent::ConfirmationCancel => {
