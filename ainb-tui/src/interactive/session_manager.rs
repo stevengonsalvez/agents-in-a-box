@@ -241,7 +241,7 @@ impl InteractiveSessionManager {
         match agent_type {
             SessionAgentType::Claude | SessionAgentType::Codex | SessionAgentType::Gemini | SessionAgentType::Copilot => {
                 info!("Starting {:?} CLI in tmux session (model={:?}, skip_permissions={})", agent_type, model, skip_permissions);
-                self.start_cli_in_tmux(&tmux_session_name, skip_permissions, model, agent_type).await?;
+                self.start_cli_in_tmux(&tmux_session_name, skip_permissions, model, agent_type, None).await?;
             }
             _ => {
                 info!("Skipping CLI for agent type: {:?}", agent_type);
@@ -364,7 +364,7 @@ impl InteractiveSessionManager {
         match agent_type {
             SessionAgentType::Claude | SessionAgentType::Codex | SessionAgentType::Gemini | SessionAgentType::Copilot => {
                 info!("Starting {:?} CLI in tmux session (model={:?}, skip_permissions={})", agent_type, model, skip_permissions);
-                self.start_cli_in_tmux(&tmux_session_name, skip_permissions, model, agent_type).await?;
+                self.start_cli_in_tmux(&tmux_session_name, skip_permissions, model, agent_type, None).await?;
             }
             _ => {
                 info!("Skipping CLI for agent type: {:?}", agent_type);
@@ -916,12 +916,17 @@ impl InteractiveSessionManager {
     }
 
     /// Start AI CLI in the tmux session (Claude, Codex, or Gemini)
-    async fn start_cli_in_tmux(
+    ///
+    /// `resume_transcript`, when supplied for `agent_type == Claude`, appends
+    /// `--resume <path>` to the CLI invocation. Mirrors `spawn-agent-lib.sh:508`.
+    /// Ignored for other agent types since they have no equivalent flag yet.
+    pub async fn start_cli_in_tmux(
         &self,
         session_name: &str,
         skip_permissions: bool,
         model: Option<ClaudeModel>,
         agent_type: SessionAgentType,
+        resume_transcript: Option<PathBuf>,
     ) -> Result<(), InteractiveSessionError> {
         use crate::config::CliProvider;
 
@@ -956,6 +961,23 @@ impl InteractiveSessionManager {
         // Add skip permissions flag if specified (provider-specific)
         if skip_permissions {
             cmd_parts.push(provider.skip_permissions_flag().to_string());
+        }
+
+        // Resume only supported by Claude today; other CLIs simply start fresh.
+        if agent_type == SessionAgentType::Claude {
+            if let Some(path) = resume_transcript.as_ref() {
+                cmd_parts.push("--resume".to_string());
+                cmd_parts.push(
+                    path.to_str()
+                        .ok_or_else(|| {
+                            InteractiveSessionError::Tmux(format!(
+                                "Resume transcript path is not valid UTF-8: {:?}",
+                                path
+                            ))
+                        })?
+                        .to_string(),
+                );
+            }
         }
 
         let cli_cmd = cmd_parts.join(" ");
