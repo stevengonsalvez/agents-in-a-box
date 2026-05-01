@@ -808,8 +808,8 @@ fn render_burndown(frame: &mut Frame, area: Rect, data: &UsageData, state: &Usag
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(5),
             Constraint::Length(3),
+            Constraint::Length(1),
             Constraint::Min(0),
         ])
         .split(inner);
@@ -817,7 +817,7 @@ fn render_burndown(frame: &mut Frame, area: Rect, data: &UsageData, state: &Usag
     render_burndown_header(frame, vertical[0], data, &state.period);
     render_period_row(frame, vertical[1], state);
 
-    if vertical[2].width >= 120 && vertical[2].height >= 24 {
+    if vertical[2].width >= 120 && vertical[2].height >= 20 {
         render_dashboard_grid(frame, vertical[2], data, &state.period);
     } else if vertical[2].width >= 96 {
         render_dashboard_compact(frame, vertical[2], data);
@@ -1013,194 +1013,497 @@ fn render_period_row(frame: &mut Frame, area: Rect, state: &UsageViewState) {
 }
 
 fn render_daily_activity_panel(frame: &mut Frame, area: Rect, data: &UsageData) {
+    let cap = area.height.saturating_sub(2) as usize;
+    let inner_w = area.width.saturating_sub(2) as usize;
+    if cap == 0 || inner_w < 16 {
+        render_panel_lines(frame, area, "Daily Activity", vec![]);
+        return;
+    }
     let max = data
         .daily
         .iter()
         .filter_map(|(_, bucket)| bucket.cost_usd)
         .fold(0.0_f64, f64::max)
         .max(1.0);
-    let rows: Vec<_> = data
-        .daily
+    let rows_data: Vec<_> = data.daily.iter().rev().take(cap).collect();
+    let cost_w = rows_data
         .iter()
-        .rev()
-        .take(area.height.saturating_sub(2) as usize)
+        .map(|(_, b)| format_cost(b.cost_usd).chars().count())
+        .max()
+        .unwrap_or(7)
+        .max(7);
+    let calls_w = rows_data
+        .iter()
+        .map(|(_, b)| format!("{}c", b.call_count).chars().count())
+        .max()
+        .unwrap_or(4)
+        .max(4);
+    let date_w = 5; // MM-DD
+    let bar_w = inner_w
+        .saturating_sub(1 + date_w + 1 + cost_w + 1 + calls_w + 1)
+        .max(4);
+    let lines: Vec<Line> = rows_data
+        .into_iter()
         .map(|(date, bucket)| {
             let cost = bucket.cost_usd.unwrap_or(0.0);
-            format!(
-                "{} {} {:>7} {} calls",
-                date.format("%m-%d"),
-                ratio_bar(cost, max, 18),
-                format_cost(bucket.cost_usd),
-                bucket.call_count
-            )
+            let mut spans = vec![
+                Span::raw(" "),
+                Span::styled(date.format("%m-%d").to_string(), Style::default().fg(MUTED_GRAY)),
+                Span::raw(" "),
+            ];
+            spans.extend(ratio_gradient_spans(cost, max, bar_w));
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                format!("{:>w$}", format_cost(bucket.cost_usd), w = cost_w),
+                Style::default().fg(TERMINAL_ACCENT),
+            ));
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                format!("{:>w$}", format!("{}c", bucket.call_count), w = calls_w),
+                Style::default().fg(MUTED_GRAY),
+            ));
+            Line::from(spans)
         })
         .collect();
-    render_panel(frame, area, "Daily Activity", rows);
+    render_panel_lines(frame, area, "Daily Activity", lines);
 }
 
 fn render_project_panel(frame: &mut Frame, area: Rect, rows: &[ProjectUsage]) {
-    let max = rows.iter().map(|row| row.bucket.total()).max().unwrap_or(1);
-    let lines = rows
+    let cap = area.height.saturating_sub(2) as usize;
+    let inner_w = area.width.saturating_sub(2) as usize;
+    if cap == 0 || inner_w < 16 {
+        render_panel_lines(frame, area, "By Project", vec![]);
+        return;
+    }
+    let max = rows
         .iter()
-        .take(area.height.saturating_sub(2) as usize)
+        .map(|row| row.bucket.cost_usd.unwrap_or(0.0))
+        .fold(0.0_f64, f64::max)
+        .max(1.0);
+    let value_w = rows
+        .iter()
+        .take(cap)
+        .map(|r| format_cost(r.bucket.cost_usd).chars().count())
+        .max()
+        .unwrap_or(7)
+        .max(7);
+    let label_w = ((inner_w as i32 - value_w as i32 - 4) / 2)
+        .clamp(10, 24) as usize;
+    let bar_w = inner_w
+        .saturating_sub(1 + label_w + 1 + value_w + 1)
+        .max(4);
+    let lines: Vec<Line> = rows
+        .iter()
+        .take(cap)
         .map(|row| {
-            format!(
-                "{} {} {}",
-                truncate_string(&row.name, 22),
-                bar(row.bucket.total(), max, 12),
-                format_cost(row.bucket.cost_usd)
-            )
+            let cost = row.bucket.cost_usd.unwrap_or(0.0);
+            let label = shorten_project_name(&row.name, label_w);
+            let mut spans = vec![
+                Span::raw(" "),
+                Span::styled(
+                    pad_label(&label, label_w),
+                    Style::default().fg(SOFT_WHITE),
+                ),
+                Span::raw(" "),
+            ];
+            spans.extend(ratio_gradient_spans(cost, max, bar_w));
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                format!("{:>w$}", format_cost(row.bucket.cost_usd), w = value_w),
+                Style::default().fg(TERMINAL_ACCENT),
+            ));
+            Line::from(spans)
         })
         .collect();
-    render_panel(frame, area, "By Project", lines);
+    render_panel_lines(frame, area, "By Project", lines);
 }
 
 fn render_session_panel(frame: &mut Frame, area: Rect, rows: &[SessionUsage]) {
+    let cap = area.height.saturating_sub(2) as usize;
+    let inner_w = area.width.saturating_sub(2) as usize;
+    if cap == 0 || inner_w < 16 {
+        render_panel_lines(frame, area, "Top Sessions", vec![]);
+        return;
+    }
     let max = rows.iter().map(|row| row.bucket.total()).max().unwrap_or(1);
-    let lines = rows
+    let value_w = rows
         .iter()
-        .take(area.height.saturating_sub(2) as usize)
+        .take(cap)
+        .map(|r| format_tokens_short(r.bucket.total()).chars().count())
+        .max()
+        .unwrap_or(6)
+        .max(6);
+    let label_w = ((inner_w as i32 - value_w as i32 - 4) / 2)
+        .clamp(10, 22) as usize;
+    let bar_w = inner_w
+        .saturating_sub(1 + label_w + 1 + value_w + 1)
+        .max(4);
+    let lines: Vec<Line> = rows
+        .iter()
+        .take(cap)
         .map(|row| {
-            format!(
-                "{} {} {}",
-                truncate_string(&row.project, 18),
-                bar(row.bucket.total(), max, 12),
-                format_tokens_short(row.bucket.total())
-            )
+            let label = shorten_project_name(&row.project, label_w);
+            let mut spans = vec![
+                Span::raw(" "),
+                Span::styled(pad_label(&label, label_w), Style::default().fg(SOFT_WHITE)),
+                Span::raw(" "),
+            ];
+            spans.extend(gradient_spans(row.bucket.total(), max, bar_w));
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                format!("{:>w$}", format_tokens_short(row.bucket.total()), w = value_w),
+                Style::default().fg(TERMINAL_CYAN),
+            ));
+            Line::from(spans)
         })
         .collect();
-    render_panel(frame, area, "Top Sessions", lines);
+    render_panel_lines(frame, area, "Top Sessions", lines);
 }
 
 fn render_live_panel(frame: &mut Frame, area: Rect, rows: &[SessionUsage]) {
-    let lines = rows
+    let cap = area.height.saturating_sub(2) as usize;
+    let inner_w = area.width.saturating_sub(2) as usize;
+    if cap == 0 || inner_w < 16 {
+        render_panel_lines(frame, area, "Live Session Ticker", vec![]);
+        return;
+    }
+    let value_w = rows
         .iter()
-        .take(area.height.saturating_sub(2) as usize)
+        .take(cap)
+        .map(|r| format_cost(r.bucket.cost_usd).chars().count())
+        .max()
+        .unwrap_or(7)
+        .max(7);
+    let provider_w = 6;
+    // " ● " + label + " · " + provider + " · " + value
+    let prefix = 3 + 3 + provider_w + 3;
+    let label_w = inner_w
+        .saturating_sub(prefix + value_w)
+        .max(8);
+    let lines: Vec<Line> = rows
+        .iter()
+        .take(cap)
         .map(|row| {
-            format!(
-                "● {} · {} · {}",
-                truncate_string(&row.project, 18),
-                truncate_string(&row.provider, 6),
-                format_cost(row.bucket.cost_usd)
-            )
+            let label = shorten_project_name(&row.project, label_w);
+            let provider = truncate_string(&row.provider, provider_w);
+            Line::from(vec![
+                Span::raw(" "),
+                Span::styled("●", Style::default().fg(TERMINAL_GOOD)),
+                Span::raw(" "),
+                Span::styled(pad_label(&label, label_w), Style::default().fg(SOFT_WHITE)),
+                Span::styled(" · ", Style::default().fg(MUTED_GRAY)),
+                Span::styled(
+                    format!("{:<w$}", provider, w = provider_w),
+                    Style::default().fg(TERMINAL_CYAN),
+                ),
+                Span::styled(" · ", Style::default().fg(MUTED_GRAY)),
+                Span::styled(
+                    format!("{:>w$}", format_cost(row.bucket.cost_usd), w = value_w),
+                    Style::default().fg(TERMINAL_ACCENT),
+                ),
+            ])
         })
         .collect();
-    render_panel(frame, area, "Live Session Ticker", lines);
+    render_panel_lines(frame, area, "Live Session Ticker", lines);
 }
 
 fn render_activity_panel(frame: &mut Frame, area: Rect, rows: &[ActivityUsage]) {
+    let cap = area.height.saturating_sub(2) as usize;
+    let inner_w = area.width.saturating_sub(2) as usize;
+    if cap == 0 || inner_w < 16 {
+        render_panel_lines(frame, area, "By Activity", vec![]);
+        return;
+    }
     let max = rows.iter().map(|row| row.bucket.total()).max().unwrap_or(1);
-    let lines = rows
+    let label_w = rows
         .iter()
-        .take(area.height.saturating_sub(2) as usize)
+        .take(cap)
+        .map(|r| r.category.label().chars().count())
+        .max()
+        .unwrap_or(8)
+        .clamp(8, 14);
+    let suffix_w = rows
+        .iter()
+        .take(cap)
+        .map(|r| format!("{}t {}r", r.turns, r.retries).chars().count())
+        .max()
+        .unwrap_or(8)
+        .max(8);
+    let bar_w = inner_w
+        .saturating_sub(1 + label_w + 1 + suffix_w + 1)
+        .max(4);
+    let lines: Vec<Line> = rows
+        .iter()
+        .take(cap)
         .map(|row| {
-            format!(
-                "{} {} {}t {}r",
-                row.category.label(),
-                bar(row.bucket.total(), max, 10),
-                row.turns,
-                row.retries
-            )
+            let mut spans = vec![
+                Span::raw(" "),
+                Span::styled(
+                    pad_label(row.category.label(), label_w),
+                    Style::default().fg(SOFT_WHITE),
+                ),
+                Span::raw(" "),
+            ];
+            spans.extend(gradient_spans(row.bucket.total(), max, bar_w));
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                format!("{:>w$}", format!("{}t {}r", row.turns, row.retries), w = suffix_w),
+                Style::default().fg(MUTED_GRAY),
+            ));
+            Line::from(spans)
         })
         .collect();
-    render_panel(frame, area, "By Activity", lines);
+    render_panel_lines(frame, area, "By Activity", lines);
 }
 
 fn render_model_panel(frame: &mut Frame, area: Rect, rows: &[ModelUsage]) {
+    let cap = area.height.saturating_sub(2) as usize;
+    let inner_w = area.width.saturating_sub(2) as usize;
+    if cap == 0 || inner_w < 16 {
+        render_panel_lines(frame, area, "By Model", vec![]);
+        return;
+    }
     let max = rows.iter().map(|row| row.bucket.total()).max().unwrap_or(1);
-    let lines = rows
+    let value_w = rows
         .iter()
-        .take(area.height.saturating_sub(2) as usize)
+        .take(cap)
+        .map(|r| format_tokens_short(r.bucket.total()).chars().count())
+        .max()
+        .unwrap_or(6)
+        .max(6);
+    let label_w = ((inner_w as i32 - value_w as i32 - 4) / 2)
+        .clamp(10, 22) as usize;
+    let bar_w = inner_w
+        .saturating_sub(1 + label_w + 1 + value_w + 1)
+        .max(4);
+    let lines: Vec<Line> = rows
+        .iter()
+        .take(cap)
         .map(|row| {
-            format!(
-                "{} {} {}",
-                truncate_string(&row.model, 18),
-                bar(row.bucket.total(), max, 10),
-                format_tokens_short(row.bucket.total())
-            )
+            let label = truncate_string(&row.model, label_w);
+            let mut spans = vec![
+                Span::raw(" "),
+                Span::styled(pad_label(&label, label_w), Style::default().fg(SOFT_WHITE)),
+                Span::raw(" "),
+            ];
+            spans.extend(gradient_spans(row.bucket.total(), max, bar_w));
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                format!("{:>w$}", format_tokens_short(row.bucket.total()), w = value_w),
+                Style::default().fg(TERMINAL_CYAN),
+            ));
+            Line::from(spans)
         })
         .collect();
-    render_panel(frame, area, "By Model", lines);
+    render_panel_lines(frame, area, "By Model", lines);
 }
 
 fn render_named_panel(frame: &mut Frame, area: Rect, title: &str, rows: &[NamedUsage]) {
+    let cap = area.height.saturating_sub(2) as usize;
+    let inner_w = area.width.saturating_sub(2) as usize;
+    if cap == 0 || inner_w < 14 {
+        render_panel_lines(frame, area, title, vec![]);
+        return;
+    }
     let max = rows.iter().map(|row| row.calls as u64).max().unwrap_or(1);
-    let lines = rows
+    let value_w = rows
         .iter()
-        .take(area.height.saturating_sub(2) as usize)
+        .take(cap)
+        .map(|r| r.calls.to_string().chars().count())
+        .max()
+        .unwrap_or(4)
+        .max(4);
+    let label_w = ((inner_w as i32 - value_w as i32 - 4) / 2)
+        .clamp(8, 22) as usize;
+    let bar_w = inner_w
+        .saturating_sub(1 + label_w + 1 + value_w + 1)
+        .max(3);
+    let lines: Vec<Line> = rows
+        .iter()
+        .take(cap)
         .map(|row| {
-            format!(
-                "{} {} {}",
-                truncate_string(&row.name, 14),
-                bar(row.calls as u64, max, 8),
-                row.calls
-            )
+            let label = truncate_string(&row.name, label_w);
+            let mut spans = vec![
+                Span::raw(" "),
+                Span::styled(pad_label(&label, label_w), Style::default().fg(SOFT_WHITE)),
+                Span::raw(" "),
+            ];
+            spans.extend(gradient_spans(row.calls as u64, max, bar_w));
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                format!("{:>w$}", row.calls, w = value_w),
+                Style::default().fg(MUTED_GRAY),
+            ));
+            Line::from(spans)
         })
         .collect();
-    render_panel(frame, area, title, lines);
+    render_panel_lines(frame, area, title, lines);
 }
 
 fn render_optimize_compact_panel(frame: &mut Frame, area: Rect, data: &UsageData) {
-    let result = optimize_usage(data);
-    let mut lines = vec![format!(
-        "Health {:?} · score {} · save {} tokens",
-        result.grade,
-        result.score,
-        format_tokens_short(result.potential_tokens_saved)
-    )];
-    for finding in result.findings.iter().take(area.height.saturating_sub(3) as usize) {
-        lines.push(format!(
-            "{:?} {}",
-            finding.impact,
-            truncate_string(&finding.title, area.width.saturating_sub(14) as usize)
-        ));
+    let cap = area.height.saturating_sub(2) as usize;
+    let inner_w = area.width.saturating_sub(2) as usize;
+    if cap == 0 {
+        render_panel_lines(frame, area, "Optimization Recommendations", vec![]);
+        return;
     }
-    render_panel(frame, area, "Optimization Recommendations", lines);
+    let result = optimize_usage(data);
+    let mut lines: Vec<Line> = Vec::new();
+    let grade_color = match format!("{:?}", result.grade).as_str() {
+        "A" | "B" => TERMINAL_GOOD,
+        "C" => TERMINAL_ACCENT,
+        _ => BAR_HIGH,
+    };
+    lines.push(Line::from(vec![
+        Span::styled(" Health ", Style::default().fg(MUTED_GRAY)),
+        Span::styled(
+            format!("{:?}", result.grade),
+            Style::default().fg(grade_color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" · score ", Style::default().fg(MUTED_GRAY)),
+        Span::styled(
+            result.score.to_string(),
+            Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" · save ", Style::default().fg(MUTED_GRAY)),
+        Span::styled(
+            format_tokens_short(result.potential_tokens_saved),
+            Style::default().fg(TERMINAL_GOOD).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" tokens", Style::default().fg(MUTED_GRAY)),
+    ]));
+    let title_budget = inner_w.saturating_sub(8); // leading symbol + space + tag area
+    for finding in result.findings.iter().take(cap.saturating_sub(1)) {
+        let (sym, sym_color) = impact_marker(format!("{:?}", finding.impact).as_str());
+        let title = truncate_string(&finding.title, title_budget);
+        lines.push(Line::from(vec![
+            Span::raw(" "),
+            Span::styled(sym, Style::default().fg(sym_color).add_modifier(Modifier::BOLD)),
+            Span::raw(" "),
+            Span::styled(title, Style::default().fg(SOFT_WHITE)),
+        ]));
+    }
+    render_panel_lines(frame, area, "Optimization Recommendations", lines);
 }
 
 fn render_leaderboard_panel(frame: &mut Frame, area: Rect, data: &UsageData) {
-    let max = data.projects.iter().map(|row| row.bucket.total()).max().unwrap_or(1);
-    let lines = data
+    let cap = area.height.saturating_sub(2) as usize;
+    let inner_w = area.width.saturating_sub(2) as usize;
+    if cap == 0 || inner_w < 16 {
+        render_panel_lines(frame, area, "Agent Leaderboard", vec![]);
+        return;
+    }
+    let max = data
+        .projects
+        .iter()
+        .map(|row| row.bucket.cost_usd.unwrap_or(0.0))
+        .fold(0.0_f64, f64::max)
+        .max(1.0);
+    let value_w = data
+        .projects
+        .iter()
+        .take(cap)
+        .map(|r| format_cost(r.bucket.cost_usd).chars().count())
+        .max()
+        .unwrap_or(7)
+        .max(7);
+    // " 1 " (3) + label + " " + bar + " " + value
+    let rank_w = 2;
+    let label_w = ((inner_w as i32 - value_w as i32 - rank_w as i32 - 5) / 2)
+        .clamp(10, 24) as usize;
+    let bar_w = inner_w
+        .saturating_sub(1 + rank_w + 1 + label_w + 1 + value_w + 1)
+        .max(4);
+    let lines: Vec<Line> = data
         .projects
         .iter()
         .enumerate()
-        .take(area.height.saturating_sub(2) as usize)
+        .take(cap)
         .map(|(idx, project)| {
-            format!(
-                "{} {} {} {}",
-                idx + 1,
-                truncate_string(&project.name, 16),
-                bar(project.bucket.total(), max, 8),
-                format_cost(project.bucket.cost_usd)
-            )
+            let cost = project.bucket.cost_usd.unwrap_or(0.0);
+            let rank_color = match idx {
+                0 => GOLD,
+                1 => SOFT_WHITE,
+                2 => TERMINAL_ACCENT,
+                _ => MUTED_GRAY,
+            };
+            let label = shorten_project_name(&project.name, label_w);
+            let mut spans = vec![
+                Span::raw(" "),
+                Span::styled(
+                    format!("{:>w$}", idx + 1, w = rank_w),
+                    Style::default().fg(rank_color).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+                Span::styled(pad_label(&label, label_w), Style::default().fg(SOFT_WHITE)),
+                Span::raw(" "),
+            ];
+            spans.extend(ratio_gradient_spans(cost, max, bar_w));
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                format!("{:>w$}", format_cost(project.bucket.cost_usd), w = value_w),
+                Style::default().fg(TERMINAL_ACCENT),
+            ));
+            Line::from(spans)
         })
         .collect();
-    render_panel(frame, area, "Agent Leaderboard", lines);
+    render_panel_lines(frame, area, "Agent Leaderboard", lines);
 }
 
 fn render_budget_panel(frame: &mut Frame, area: Rect, data: &UsageData, period: &UsagePeriod) {
+    let inner_w = area.width.saturating_sub(2) as usize;
     let spent = data.grand_total.cost_usd.unwrap_or(0.0);
     let projected = projected_month_cost(data, period).unwrap_or(spent);
-    let cap = projected.max(spent).max(1.0) * 1.25;
-    let usage = ((projected / cap) * 100.0).min(100.0);
-    let lines = vec![
-        format!(
-            "Monthly cap {} / {}",
-            format_cost(Some(projected)),
-            format_cost(Some(cap))
-        ),
-        format!("{} {:>4.1}% projected", ratio_bar(usage, 100.0, 24), usage),
-        format!(
-            "Plan utilization {}",
-            format_cost(data.grand_total.cost_usd)
-        ),
-        format!(
-            "{} cache hit · {} days sampled",
-            format!("{:.1}%", cache_hit_percent(data)),
-            data.daily.len()
-        ),
+    let cap_value = projected.max(spent).max(1.0) * 1.25;
+    let usage = ((projected / cap_value) * 100.0).min(100.0);
+
+    let bar_w = inner_w.saturating_sub(10).max(8); // " " + bar + " 80.0%"
+    let mut bar_spans = vec![Span::raw(" ")];
+    bar_spans.extend(ratio_gradient_spans(usage, 100.0, bar_w));
+    bar_spans.push(Span::raw(" "));
+    bar_spans.push(Span::styled(
+        format!("{usage:>4.1}%"),
+        Style::default()
+            .fg(if usage >= 85.0 { BAR_HIGH } else if usage >= 60.0 { TERMINAL_ACCENT } else { TERMINAL_GOOD })
+            .add_modifier(Modifier::BOLD),
+    ));
+
+    let lines: Vec<Line> = vec![
+        Line::from(vec![
+            Span::styled(" Monthly cap ", Style::default().fg(MUTED_GRAY)),
+            Span::styled(
+                format_cost(Some(projected)),
+                Style::default().fg(TERMINAL_ACCENT).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" / ", Style::default().fg(MUTED_GRAY)),
+            Span::styled(
+                format_cost(Some(cap_value)),
+                Style::default().fg(SOFT_WHITE),
+            ),
+        ]),
+        Line::from(bar_spans),
+        Line::from(vec![
+            Span::styled(" Plan utilization ", Style::default().fg(MUTED_GRAY)),
+            Span::styled(
+                format_cost(data.grand_total.cost_usd),
+                Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(" ", Style::default()),
+            Span::styled(
+                format!("{:.1}%", cache_hit_percent(data)),
+                Style::default().fg(TERMINAL_GOOD).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" cache hit · ", Style::default().fg(MUTED_GRAY)),
+            Span::styled(
+                data.daily.len().to_string(),
+                Style::default().fg(SOFT_WHITE),
+            ),
+            Span::styled(" days sampled", Style::default().fg(MUTED_GRAY)),
+        ]),
     ];
-    render_panel(frame, area, "Budget · Alerts", lines);
+    render_panel_lines(frame, area, "Budget · Alerts", lines);
 }
 
 fn render_optimize(frame: &mut Frame, area: Rect, data: &UsageData) {
@@ -1227,51 +1530,151 @@ fn render_optimize(frame: &mut Frame, area: Rect, data: &UsageData) {
 }
 
 fn render_panel(frame: &mut Frame, area: Rect, title: &str, rows: Vec<String>) {
+    let lines: Vec<Line> = if rows.is_empty() {
+        Vec::new()
+    } else {
+        rows.into_iter()
+            .map(|row| {
+                Line::from(Span::styled(
+                    format!(" {row}"),
+                    Style::default().fg(SOFT_WHITE),
+                ))
+            })
+            .collect()
+    };
+    render_panel_lines(frame, area, title, lines);
+}
+
+fn render_panel_lines(frame: &mut Frame, area: Rect, title: &str, lines: Vec<Line<'_>>) {
     let block = Block::default()
         .title(format!(" [ {title} ] "))
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
         .border_style(Style::default().fg(TERMINAL_BORDER))
         .style(Style::default().bg(TERMINAL_PANEL));
-    let lines = if rows.is_empty() {
+    let final_lines = if lines.is_empty() {
         vec![Line::from(Span::styled(
-            "No data",
+            "  No data",
             Style::default().fg(MUTED_GRAY),
         ))]
     } else {
-        rows.into_iter()
-            .map(|row| Line::from(Span::styled(row, Style::default().fg(SOFT_WHITE))))
-            .collect()
+        lines
     };
-    frame.render_widget(Paragraph::new(lines).block(block), area);
+    frame.render_widget(Paragraph::new(final_lines).block(block), area);
 }
 
-fn bar(value: u64, max: u64, width: usize) -> String {
-    let filled = if max == 0 {
-        0
+fn pick_bar_color(ratio: f64) -> Color {
+    if ratio >= 0.66 {
+        BAR_HIGH
+    } else if ratio >= 0.33 {
+        BAR_MED
     } else {
-        ((value as f64 / max as f64) * width as f64).round() as usize
+        BAR_COLOR
     }
-    .min(width);
-    format!(
-        "{}{}",
-        "█".repeat(filled),
-        "░".repeat(width.saturating_sub(filled))
-    )
 }
 
-fn ratio_bar(value: f64, max: f64, width: usize) -> String {
-    let filled = if max <= 0.0 {
-        0
-    } else {
-        ((value / max) * width as f64).round() as usize
+fn gradient_spans(value: u64, max: u64, width: usize) -> Vec<Span<'static>> {
+    let max = max.max(1);
+    let ratio = (value as f64) / (max as f64);
+    let filled = ((ratio.clamp(0.0, 1.0) * width as f64).round() as usize).min(width);
+    let color = pick_bar_color(ratio.clamp(0.0, 1.0));
+    let mut out = Vec::with_capacity(2);
+    if filled > 0 {
+        out.push(Span::styled(
+            "█".repeat(filled),
+            Style::default().fg(color),
+        ));
     }
-    .min(width);
-    format!(
-        "{}{}",
-        "▓".repeat(filled),
-        "░".repeat(width.saturating_sub(filled))
-    )
+    let empty = width.saturating_sub(filled);
+    if empty > 0 {
+        out.push(Span::styled(
+            "░".repeat(empty),
+            Style::default().fg(MUTED_GRAY),
+        ));
+    }
+    out
+}
+
+fn ratio_gradient_spans(value: f64, max: f64, width: usize) -> Vec<Span<'static>> {
+    let max = max.max(1e-9);
+    let ratio = (value / max).clamp(0.0, 1.0);
+    let filled = ((ratio * width as f64).round() as usize).min(width);
+    let color = pick_bar_color(ratio);
+    let mut out = Vec::with_capacity(2);
+    if filled > 0 {
+        out.push(Span::styled(
+            "▓".repeat(filled),
+            Style::default().fg(color),
+        ));
+    }
+    let empty = width.saturating_sub(filled);
+    if empty > 0 {
+        out.push(Span::styled(
+            "░".repeat(empty),
+            Style::default().fg(MUTED_GRAY),
+        ));
+    }
+    out
+}
+
+fn pad_label(label: &str, width: usize) -> String {
+    let len = label.chars().count();
+    if len >= width {
+        label.to_string()
+    } else {
+        let pad = width - len;
+        let mut out = String::with_capacity(label.len() + pad);
+        out.push_str(label);
+        for _ in 0..pad {
+            out.push(' ');
+        }
+        out
+    }
+}
+
+fn shorten_project_name(name: &str, max_w: usize) -> String {
+    if name.chars().count() <= max_w {
+        return name.to_string();
+    }
+    // Strip well-known prefixes that add no value.
+    let stripped = name
+        .strip_prefix("worktrees/")
+        .or_else(|| name.strip_prefix("worktree/"))
+        .unwrap_or(name);
+    if stripped.chars().count() <= max_w {
+        return stripped.to_string();
+    }
+    // Keep the last 2 path segments, ellipse the front.
+    let segs: Vec<&str> = stripped.split('/').collect();
+    if segs.len() >= 2 {
+        let last = segs.last().copied().unwrap_or("");
+        let combined = if segs.len() >= 3 {
+            format!("…/{}/{}", segs[segs.len() - 2], last)
+        } else {
+            format!("…/{}", last)
+        };
+        if combined.chars().count() <= max_w {
+            return combined;
+        }
+        // Keep tail of last segment.
+        let tail_w = max_w.saturating_sub(2); // "…/"
+        if tail_w > 0 && last.chars().count() > tail_w {
+            let suffix: String = last.chars().rev().take(tail_w).collect::<String>().chars().rev().collect();
+            return format!("…/{suffix}");
+        }
+        if combined.chars().count() <= max_w + 4 {
+            return truncate_string(&combined, max_w);
+        }
+    }
+    truncate_string(stripped, max_w)
+}
+
+fn impact_marker(impact: &str) -> (&'static str, Color) {
+    match impact {
+        "High" => ("!!", BAR_HIGH),
+        "Medium" => ("!", TERMINAL_ACCENT),
+        _ => ("·", MUTED_GRAY),
+    }
 }
 
 fn cache_hit_percent(data: &UsageData) -> f64 {
