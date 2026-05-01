@@ -12,8 +12,8 @@ use crate::components::home_screen_v2::HomeScreenV2State;
 use crate::components::live_logs_stream::LogEntry;
 use crate::config::{AppConfig, SshDisplayNameStore, WorktreeCollisionBehavior};
 use crate::credentials;
-use crate::editors;
 use crate::docker::LogStreamingCoordinator;
+use crate::editors;
 use crate::git::{ParsedRepo, RemoteBranch, RepoSource};
 use crate::models::{ClaudeModel, Session, SessionAgentType, Workspace};
 use std::collections::{HashMap, HashSet};
@@ -395,28 +395,28 @@ pub enum FocusedPane {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum View {
-    HomeScreen,       // Default landing page with tile navigation
-    AgentSelection,   // Choose agent provider and model
-    Config,           // Settings and configuration
-    Catalog,          // Browse marketplace/catalog
-    Analytics,        // Usage statistics and cost tracking
+    HomeScreen,     // Default landing page with tile navigation
+    AgentSelection, // Choose agent provider and model
+    Config,         // Settings and configuration
+    Catalog,        // Browse marketplace/catalog
+    Analytics,      // Usage statistics and cost tracking
     SessionList,
     Logs,
-    LogHistory,       // Historical JSONL log viewer
+    LogHistory, // Historical JSONL log viewer
     Terminal,
     Help,
     NewSession,
     SearchWorkspace,
     NonGitNotification,
     AttachedTerminal,
-    AuthSetup,        // New view for authentication setup
-    ClaudeChat,       // Claude chat popup overlay
-    GitView,          // Git status and diff view
-    Onboarding,       // First-time setup wizard
-    SetupMenu,        // Setup menu with factory reset option
-    Changelog,        // Version history viewer
-    SessionRecovery,  // Recover orphaned agent sessions after crash/shutdown
-    Skills,           // Per-agent skills + agents browser
+    AuthSetup,       // New view for authentication setup
+    ClaudeChat,      // Claude chat popup overlay
+    GitView,         // Git status and diff view
+    Onboarding,      // First-time setup wizard
+    SetupMenu,       // Setup menu with factory reset option
+    Changelog,       // Version history viewer
+    SessionRecovery, // Recover orphaned agent sessions after crash/shutdown
+    Skills,          // Per-agent skills + agents browser
 }
 
 #[derive(Debug, Clone)]
@@ -424,15 +424,15 @@ pub struct ConfirmationDialog {
     pub title: String,
     pub message: String,
     pub confirm_action: ConfirmAction,
-    pub selected_option: bool, // true = Yes, false = No
+    pub selected_option: bool,   // true = Yes, false = No
     pub warning: Option<String>, // Optional warning (e.g., uncommitted files in worktree)
 }
 
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
     DeleteSession(Uuid),
-    KillOtherTmux(String),        // Kill a non-agents-in-a-box tmux session by name
-    KillWorkspaceShell(usize),    // Kill workspace shell by workspace index
+    KillOtherTmux(String), // Kill a non-agents-in-a-box tmux session by name
+    KillWorkspaceShell(usize), // Kill workspace shell by workspace index
 }
 
 // ============================================================================
@@ -441,13 +441,13 @@ pub enum ConfirmAction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HomeTile {
-    Agents,    // Agent selection
-    Catalog,   // Browse catalog/marketplace
-    Config,    // Settings & presets
-    Sessions,  // Session manager
-    Recovery,  // Recover orphaned sessions
-    Stats,     // Analytics & usage
-    Help,      // Docs & guides
+    Agents,   // Agent selection
+    Catalog,  // Browse catalog/marketplace
+    Config,   // Settings & presets
+    Sessions, // Session manager
+    Recovery, // Recover orphaned sessions
+    Stats,    // Analytics & usage
+    Help,     // Docs & guides
 }
 
 impl HomeTile {
@@ -602,19 +602,40 @@ pub enum CostTier {
 #[derive(Debug, Clone)]
 pub struct SessionAgentOption {
     pub agent_type: SessionAgentType,
-    pub is_current: bool,  // Is this the currently selected agent for the app?
+    pub is_current: bool, // Is this the currently selected agent for the app?
 }
 
 impl SessionAgentOption {
     pub fn all() -> Vec<Self> {
         vec![
-            Self { agent_type: SessionAgentType::Claude, is_current: true },  // Claude is default
-            Self { agent_type: SessionAgentType::Shell, is_current: false },
-            Self { agent_type: SessionAgentType::Ssh, is_current: false },    // SSH sessions
-            Self { agent_type: SessionAgentType::Codex, is_current: false },
-            Self { agent_type: SessionAgentType::Gemini, is_current: false },
-            Self { agent_type: SessionAgentType::Copilot, is_current: false },
-            Self { agent_type: SessionAgentType::Kiro, is_current: false },
+            Self {
+                agent_type: SessionAgentType::Claude,
+                is_current: true,
+            }, // Claude is default
+            Self {
+                agent_type: SessionAgentType::Shell,
+                is_current: false,
+            },
+            Self {
+                agent_type: SessionAgentType::Ssh,
+                is_current: false,
+            }, // SSH sessions
+            Self {
+                agent_type: SessionAgentType::Codex,
+                is_current: false,
+            },
+            Self {
+                agent_type: SessionAgentType::Gemini,
+                is_current: false,
+            },
+            Self {
+                agent_type: SessionAgentType::Copilot,
+                is_current: false,
+            },
+            Self {
+                agent_type: SessionAgentType::Kiro,
+                is_current: false,
+            },
         ]
     }
 }
@@ -652,7 +673,12 @@ impl AgentProvider {
             name: "Claude Code".to_string(),
             vendor: "Anthropic".to_string(),
             models: vec![
-                AgentModel::new("Opus 4.5", "Best reasoning, complex tasks", CostTier::Premium, false),
+                AgentModel::new(
+                    "Opus 4.5",
+                    "Best reasoning, complex tasks",
+                    CostTier::Premium,
+                    false,
+                ),
                 AgentModel::new("Sonnet 4.5", "Balanced (Recommended)", CostTier::High, true),
                 AgentModel::new("Haiku 4.5", "Fast, lightweight", CostTier::Medium, false),
             ],
@@ -665,10 +691,30 @@ impl AgentProvider {
             name: "Codex CLI".to_string(),
             vendor: "OpenAI".to_string(),
             models: vec![
-                AgentModel::new("gpt-5.2-codex", "Latest frontier agentic coding model", CostTier::Premium, true),
-                AgentModel::new("gpt-5.1-codex-max", "Deep and fast reasoning flagship", CostTier::High, false),
-                AgentModel::new("gpt-5.1-codex-mini", "Cheaper, faster, less capable", CostTier::Medium, false),
-                AgentModel::new("gpt-5.2", "Frontier model, reasoning & coding", CostTier::Premium, false),
+                AgentModel::new(
+                    "gpt-5.2-codex",
+                    "Latest frontier agentic coding model",
+                    CostTier::Premium,
+                    true,
+                ),
+                AgentModel::new(
+                    "gpt-5.1-codex-max",
+                    "Deep and fast reasoning flagship",
+                    CostTier::High,
+                    false,
+                ),
+                AgentModel::new(
+                    "gpt-5.1-codex-mini",
+                    "Cheaper, faster, less capable",
+                    CostTier::Medium,
+                    false,
+                ),
+                AgentModel::new(
+                    "gpt-5.2",
+                    "Frontier model, reasoning & coding",
+                    CostTier::Premium,
+                    false,
+                ),
             ],
             status: ProviderStatus::Available,
         }
@@ -679,11 +725,36 @@ impl AgentProvider {
             name: "Gemini CLI".to_string(),
             vendor: "Google".to_string(),
             models: vec![
-                AgentModel::new("gemini-3-pro", "Latest reasoning model (preview)", CostTier::Premium, false),
-                AgentModel::new("gemini-3-flash", "Fast agentic model (preview)", CostTier::High, false),
-                AgentModel::new("gemini-2.5-pro", "1M context, adaptive thinking", CostTier::High, true),
-                AgentModel::new("gemini-2.5-flash", "Fast multimodal model", CostTier::Medium, false),
-                AgentModel::new("gemini-2.5-flash-lite", "Ultra-efficient, low cost", CostTier::Low, false),
+                AgentModel::new(
+                    "gemini-3-pro",
+                    "Latest reasoning model (preview)",
+                    CostTier::Premium,
+                    false,
+                ),
+                AgentModel::new(
+                    "gemini-3-flash",
+                    "Fast agentic model (preview)",
+                    CostTier::High,
+                    false,
+                ),
+                AgentModel::new(
+                    "gemini-2.5-pro",
+                    "1M context, adaptive thinking",
+                    CostTier::High,
+                    true,
+                ),
+                AgentModel::new(
+                    "gemini-2.5-flash",
+                    "Fast multimodal model",
+                    CostTier::Medium,
+                    false,
+                ),
+                AgentModel::new(
+                    "gemini-2.5-flash-lite",
+                    "Ultra-efficient, low cost",
+                    CostTier::Low,
+                    false,
+                ),
             ],
             status: ProviderStatus::Available,
         }
@@ -694,13 +765,38 @@ impl AgentProvider {
             name: "GitHub Copilot".to_string(),
             vendor: "GitHub".to_string(),
             models: vec![
-                AgentModel::new("claude-sonnet-4.6", "Claude Sonnet 4.6 (default)", CostTier::High, true),
-                AgentModel::new("claude-opus-4.6", "Claude Opus 4.6 (premium)", CostTier::Premium, false),
-                AgentModel::new("claude-haiku-4.5", "Claude Haiku 4.5 (fast)", CostTier::Low, false),
+                AgentModel::new(
+                    "claude-sonnet-4.6",
+                    "Claude Sonnet 4.6 (default)",
+                    CostTier::High,
+                    true,
+                ),
+                AgentModel::new(
+                    "claude-opus-4.6",
+                    "Claude Opus 4.6 (premium)",
+                    CostTier::Premium,
+                    false,
+                ),
+                AgentModel::new(
+                    "claude-haiku-4.5",
+                    "Claude Haiku 4.5 (fast)",
+                    CostTier::Low,
+                    false,
+                ),
                 AgentModel::new("gpt-5.2", "GPT-5.2", CostTier::High, false),
-                AgentModel::new("gpt-5.1-codex", "GPT-5.1 Codex (coding)", CostTier::High, false),
+                AgentModel::new(
+                    "gpt-5.1-codex",
+                    "GPT-5.1 Codex (coding)",
+                    CostTier::High,
+                    false,
+                ),
                 AgentModel::new("gpt-4.1", "GPT-4.1 (stable)", CostTier::Medium, false),
-                AgentModel::new("gemini-3-pro-preview", "Gemini 3 Pro (preview)", CostTier::High, false),
+                AgentModel::new(
+                    "gemini-3-pro-preview",
+                    "Gemini 3 Pro (preview)",
+                    CostTier::High,
+                    false,
+                ),
             ],
             status: ProviderStatus::Available,
         }
@@ -710,9 +806,12 @@ impl AgentProvider {
         Self {
             name: "Local Models".to_string(),
             vendor: "Ollama".to_string(),
-            models: vec![
-                AgentModel::new("Configurable", "Self-hosted models", CostTier::Low, true),
-            ],
+            models: vec![AgentModel::new(
+                "Configurable",
+                "Self-hosted models",
+                CostTier::Low,
+                true,
+            )],
             status: ProviderStatus::ComingSoon,
         }
     }
@@ -757,8 +856,7 @@ impl AgentSelectionState {
     }
 
     pub fn current_model(&self) -> Option<&AgentModel> {
-        self.current_provider()
-            .and_then(|p| p.models.get(self.selected_model))
+        self.current_provider().and_then(|p| p.models.get(self.selected_model))
     }
 
     pub fn select_next_provider(&mut self) {
@@ -902,7 +1000,7 @@ pub struct ConfigSetting {
 #[derive(Debug, Clone)]
 pub enum ConfigValue {
     Text(String),
-    Secret(String),      // Masked display
+    Secret(String), // Masked display
     Bool(bool),
     Choice(Vec<String>, usize), // Options and selected index
     Number(i64),
@@ -968,171 +1066,206 @@ impl Default for ConfigScreenState {
             _ => "System Auth (Pro/Max Plan)".to_string(),
         };
 
-        settings.insert(ConfigCategory::Authentication, vec![
-            ConfigSetting {
-                key: "claude_auth".to_string(),
-                label: "Claude Authentication".to_string(),
-                value: ConfigValue::Text(auth_status),
-                description: "Press Enter to configure authentication provider".to_string(),
-            },
-            ConfigSetting {
-                key: "github_auth".to_string(),
-                label: "GitHub Credentials".to_string(),
-                value: ConfigValue::Text("System Default".to_string()),
-                description: "Uses git credential helper. PAT support coming soon.".to_string(),
-            },
-        ]);
+        settings.insert(
+            ConfigCategory::Authentication,
+            vec![
+                ConfigSetting {
+                    key: "claude_auth".to_string(),
+                    label: "Claude Authentication".to_string(),
+                    value: ConfigValue::Text(auth_status),
+                    description: "Press Enter to configure authentication provider".to_string(),
+                },
+                ConfigSetting {
+                    key: "github_auth".to_string(),
+                    label: "GitHub Credentials".to_string(),
+                    value: ConfigValue::Text("System Default".to_string()),
+                    description: "Uses git credential helper. PAT support coming soon.".to_string(),
+                },
+            ],
+        );
 
         // Workspace settings
-        settings.insert(ConfigCategory::Workspace, vec![
-            ConfigSetting {
-                key: "default_workspace".to_string(),
-                label: "Default Workspace".to_string(),
-                value: ConfigValue::Text("~/projects".to_string()),
-                description: "Default directory for new sessions".to_string(),
-            },
-            ConfigSetting {
-                key: "branch_prefix".to_string(),
-                label: "Branch Prefix".to_string(),
-                value: ConfigValue::Text("agents/".to_string()),
-                description: "Prefix for auto-created branch names".to_string(),
-            },
-            ConfigSetting {
-                key: "exclude_paths".to_string(),
-                label: "Exclude Paths".to_string(),
-                value: ConfigValue::Text("node_modules, .git, target".to_string()),
-                description: "Patterns to exclude from repo scanning (comma-separated)".to_string(),
-            },
-            ConfigSetting {
-                key: "max_repositories".to_string(),
-                label: "Max Repositories".to_string(),
-                value: ConfigValue::Number(500),
-                description: "Maximum repositories to show in search results".to_string(),
-            },
-        ]);
+        settings.insert(
+            ConfigCategory::Workspace,
+            vec![
+                ConfigSetting {
+                    key: "default_workspace".to_string(),
+                    label: "Default Workspace".to_string(),
+                    value: ConfigValue::Text("~/projects".to_string()),
+                    description: "Default directory for new sessions".to_string(),
+                },
+                ConfigSetting {
+                    key: "branch_prefix".to_string(),
+                    label: "Branch Prefix".to_string(),
+                    value: ConfigValue::Text("agents/".to_string()),
+                    description: "Prefix for auto-created branch names".to_string(),
+                },
+                ConfigSetting {
+                    key: "exclude_paths".to_string(),
+                    label: "Exclude Paths".to_string(),
+                    value: ConfigValue::Text("node_modules, .git, target".to_string()),
+                    description: "Patterns to exclude from repo scanning (comma-separated)"
+                        .to_string(),
+                },
+                ConfigSetting {
+                    key: "max_repositories".to_string(),
+                    label: "Max Repositories".to_string(),
+                    value: ConfigValue::Number(500),
+                    description: "Maximum repositories to show in search results".to_string(),
+                },
+            ],
+        );
 
         // Docker settings
-        settings.insert(ConfigCategory::Docker, vec![
-            ConfigSetting {
-                key: "docker_host".to_string(),
-                label: "Docker Host".to_string(),
-                value: ConfigValue::Text("Auto-detect".to_string()),
-                description: "Docker daemon connection (auto-detect, unix socket, or TCP)".to_string(),
-            },
-            ConfigSetting {
-                key: "docker_timeout".to_string(),
-                label: "Connection Timeout".to_string(),
-                value: ConfigValue::Number(60),
-                description: "Docker connection timeout in seconds".to_string(),
-            },
-        ]);
+        settings.insert(
+            ConfigCategory::Docker,
+            vec![
+                ConfigSetting {
+                    key: "docker_host".to_string(),
+                    label: "Docker Host".to_string(),
+                    value: ConfigValue::Text("Auto-detect".to_string()),
+                    description: "Docker daemon connection (auto-detect, unix socket, or TCP)"
+                        .to_string(),
+                },
+                ConfigSetting {
+                    key: "docker_timeout".to_string(),
+                    label: "Connection Timeout".to_string(),
+                    value: ConfigValue::Number(60),
+                    description: "Docker connection timeout in seconds".to_string(),
+                },
+            ],
+        );
 
         // Agent defaults
-        settings.insert(ConfigCategory::AgentDefaults, vec![
-            ConfigSetting {
-                key: "default_model".to_string(),
-                label: "Default Model".to_string(),
-                value: ConfigValue::Choice(
-                    vec!["Opus 4.5".to_string(), "Sonnet 4.5".to_string(), "Haiku 4.5".to_string()],
-                    1, // Sonnet default
-                ),
-                description: "Default Claude model for new sessions".to_string(),
-            },
-            ConfigSetting {
-                key: "auto_approve".to_string(),
-                label: "Auto-Approve Actions".to_string(),
-                value: ConfigValue::Bool(false),
-                description: "Automatically approve file writes and commands".to_string(),
-            },
-        ]);
+        settings.insert(
+            ConfigCategory::AgentDefaults,
+            vec![
+                ConfigSetting {
+                    key: "default_model".to_string(),
+                    label: "Default Model".to_string(),
+                    value: ConfigValue::Choice(
+                        vec![
+                            "Opus 4.5".to_string(),
+                            "Sonnet 4.5".to_string(),
+                            "Haiku 4.5".to_string(),
+                        ],
+                        1, // Sonnet default
+                    ),
+                    description: "Default Claude model for new sessions".to_string(),
+                },
+                ConfigSetting {
+                    key: "auto_approve".to_string(),
+                    label: "Auto-Approve Actions".to_string(),
+                    value: ConfigValue::Bool(false),
+                    description: "Automatically approve file writes and commands".to_string(),
+                },
+            ],
+        );
 
         // Permissions
-        settings.insert(ConfigCategory::Permissions, vec![
-            ConfigSetting {
-                key: "allow_file_write".to_string(),
-                label: "Allow File Write".to_string(),
-                value: ConfigValue::Bool(true),
-                description: "Allow agents to write files".to_string(),
-            },
-            ConfigSetting {
-                key: "allow_shell".to_string(),
-                label: "Allow Shell Commands".to_string(),
-                value: ConfigValue::Bool(true),
-                description: "Allow agents to run shell commands".to_string(),
-            },
-            ConfigSetting {
-                key: "allow_git".to_string(),
-                label: "Allow Git Operations".to_string(),
-                value: ConfigValue::Bool(true),
-                description: "Allow agents to perform git operations".to_string(),
-            },
-        ]);
+        settings.insert(
+            ConfigCategory::Permissions,
+            vec![
+                ConfigSetting {
+                    key: "allow_file_write".to_string(),
+                    label: "Allow File Write".to_string(),
+                    value: ConfigValue::Bool(true),
+                    description: "Allow agents to write files".to_string(),
+                },
+                ConfigSetting {
+                    key: "allow_shell".to_string(),
+                    label: "Allow Shell Commands".to_string(),
+                    value: ConfigValue::Bool(true),
+                    description: "Allow agents to run shell commands".to_string(),
+                },
+                ConfigSetting {
+                    key: "allow_git".to_string(),
+                    label: "Allow Git Operations".to_string(),
+                    value: ConfigValue::Bool(true),
+                    description: "Allow agents to perform git operations".to_string(),
+                },
+            ],
+        );
 
         // Editor
         // Detect available editors for the editor preference setting
         let available_editors = editors::get_editor_options();
-        let editor_names: Vec<String> = available_editors.iter().map(|(name, _)| name.clone()).collect();
-        let default_editor_index = available_editors.iter().position(|(_, avail)| *avail).unwrap_or(0);
+        let editor_names: Vec<String> =
+            available_editors.iter().map(|(name, _)| name.clone()).collect();
+        let default_editor_index =
+            available_editors.iter().position(|(_, avail)| *avail).unwrap_or(0);
 
-        settings.insert(ConfigCategory::Editor, vec![
-            ConfigSetting {
+        settings.insert(
+            ConfigCategory::Editor,
+            vec![ConfigSetting {
                 key: "preferred_editor".to_string(),
                 label: "Preferred Editor".to_string(),
                 value: ConfigValue::Choice(editor_names, default_editor_index),
                 description: "Editor for opening sessions (o key)".to_string(),
-            },
-        ]);
+            }],
+        );
 
         // Appearance
-        settings.insert(ConfigCategory::Appearance, vec![
-            ConfigSetting {
-                key: "theme".to_string(),
-                label: "Theme".to_string(),
-                value: ConfigValue::Choice(
-                    vec!["Dark".to_string(), "Light".to_string(), "System".to_string()],
-                    0,
-                ),
-                description: "Color theme for the TUI".to_string(),
-            },
-            ConfigSetting {
-                key: "show_container_status".to_string(),
-                label: "Show Container Status".to_string(),
-                value: ConfigValue::Bool(true),
-                description: "Show container mode icons in session list".to_string(),
-            },
-            ConfigSetting {
-                key: "show_git_status".to_string(),
-                label: "Show Git Status".to_string(),
-                value: ConfigValue::Bool(true),
-                description: "Show git changes in session list".to_string(),
-            },
-        ]);
+        settings.insert(
+            ConfigCategory::Appearance,
+            vec![
+                ConfigSetting {
+                    key: "theme".to_string(),
+                    label: "Theme".to_string(),
+                    value: ConfigValue::Choice(
+                        vec![
+                            "Dark".to_string(),
+                            "Light".to_string(),
+                            "System".to_string(),
+                        ],
+                        0,
+                    ),
+                    description: "Color theme for the TUI".to_string(),
+                },
+                ConfigSetting {
+                    key: "show_container_status".to_string(),
+                    label: "Show Container Status".to_string(),
+                    value: ConfigValue::Bool(true),
+                    description: "Show container mode icons in session list".to_string(),
+                },
+                ConfigSetting {
+                    key: "show_git_status".to_string(),
+                    label: "Show Git Status".to_string(),
+                    value: ConfigValue::Bool(true),
+                    description: "Show git changes in session list".to_string(),
+                },
+            ],
+        );
 
         // Plugins (empty for now)
-        settings.insert(ConfigCategory::Plugins, vec![
-            ConfigSetting {
+        settings.insert(
+            ConfigCategory::Plugins,
+            vec![ConfigSetting {
                 key: "installed_plugins".to_string(),
                 label: "Installed Plugins".to_string(),
                 value: ConfigValue::Text("None installed".to_string()),
                 description: "Manage installed plugins from the Catalog".to_string(),
-            },
-        ]);
+            }],
+        );
 
         // Analytics
-        settings.insert(ConfigCategory::Analytics, vec![
-            ConfigSetting {
-                key: "track_usage".to_string(),
-                label: "Track Usage".to_string(),
-                value: ConfigValue::Bool(true),
-                description: "Track session duration and token usage".to_string(),
-            },
-            ConfigSetting {
-                key: "cost_alerts".to_string(),
-                label: "Cost Alerts".to_string(),
-                value: ConfigValue::Bool(false),
-                description: "Alert when spending exceeds threshold".to_string(),
-            },
-        ]);
+        settings.insert(
+            ConfigCategory::Analytics,
+            vec![
+                ConfigSetting {
+                    key: "track_usage".to_string(),
+                    label: "Track Usage".to_string(),
+                    value: ConfigValue::Bool(true),
+                    description: "Track session duration and token usage".to_string(),
+                },
+                ConfigSetting {
+                    key: "cost_alerts".to_string(),
+                    label: "Cost Alerts".to_string(),
+                    value: ConfigValue::Bool(false),
+                    description: "Alert when spending exceeds threshold".to_string(),
+                },
+            ],
+        );
 
         Self {
             selected_category: 0,
@@ -1239,9 +1372,15 @@ impl ConfigScreenState {
                             }
                         }
                         ClaudeAuthProvider::SystemAuth => "System Auth (Pro/Max Plan)".to_string(),
-                        ClaudeAuthProvider::AmazonBedrock => "Amazon Bedrock [Coming Soon]".to_string(),
-                        ClaudeAuthProvider::GoogleVertex => "Google Vertex [Coming Soon]".to_string(),
-                        ClaudeAuthProvider::AzureFoundry => "Azure Foundry [Coming Soon]".to_string(),
+                        ClaudeAuthProvider::AmazonBedrock => {
+                            "Amazon Bedrock [Coming Soon]".to_string()
+                        }
+                        ClaudeAuthProvider::GoogleVertex => {
+                            "Google Vertex [Coming Soon]".to_string()
+                        }
+                        ClaudeAuthProvider::AzureFoundry => {
+                            "Azure Foundry [Coming Soon]".to_string()
+                        }
                         ClaudeAuthProvider::GlmZai => "GLM on ZAI [Coming Soon]".to_string(),
                         ClaudeAuthProvider::LlmGateway => "LLM Gateway [Coming Soon]".to_string(),
                     };
@@ -1256,14 +1395,17 @@ impl ConfigScreenState {
                 match setting.key.as_str() {
                     "default_workspace" => {
                         // Use first scan path or default
-                        let path = config.workspace_defaults.workspace_scan_paths
+                        let path = config
+                            .workspace_defaults
+                            .workspace_scan_paths
                             .first()
                             .map(|p| p.display().to_string())
                             .unwrap_or_else(|| "~/projects".to_string());
                         setting.value = ConfigValue::Text(path);
                     }
                     "branch_prefix" => {
-                        setting.value = ConfigValue::Text(config.workspace_defaults.branch_prefix.clone());
+                        setting.value =
+                            ConfigValue::Text(config.workspace_defaults.branch_prefix.clone());
                     }
                     "exclude_paths" => {
                         let paths = config.workspace_defaults.exclude_paths.join(", ");
@@ -1274,7 +1416,8 @@ impl ConfigScreenState {
                         });
                     }
                     "max_repositories" => {
-                        setting.value = ConfigValue::Number(config.workspace_defaults.max_repositories as i64);
+                        setting.value =
+                            ConfigValue::Number(config.workspace_defaults.max_repositories as i64);
                     }
                     _ => {}
                 }
@@ -1286,8 +1429,8 @@ impl ConfigScreenState {
             for setting in settings.iter_mut() {
                 match setting.key.as_str() {
                     "docker_host" => {
-                        let host_display = config.docker.host.clone()
-                            .unwrap_or_else(|| "Auto-detect".to_string());
+                        let host_display =
+                            config.docker.host.clone().unwrap_or_else(|| "Auto-detect".to_string());
                         setting.value = ConfigValue::Text(host_display);
                     }
                     "docker_timeout" => {
@@ -1351,12 +1494,17 @@ impl ConfigScreenState {
                             _ => 0,
                         };
                         setting.value = ConfigValue::Choice(
-                            vec!["Dark".to_string(), "Light".to_string(), "System".to_string()],
+                            vec![
+                                "Dark".to_string(),
+                                "Light".to_string(),
+                                "System".to_string(),
+                            ],
                             theme_idx,
                         );
                     }
                     "show_container_status" => {
-                        setting.value = ConfigValue::Bool(config.ui_preferences.show_container_status);
+                        setting.value =
+                            ConfigValue::Bool(config.ui_preferences.show_container_status);
                     }
                     "show_git_status" => {
                         setting.value = ConfigValue::Bool(config.ui_preferences.show_git_status);
@@ -1544,9 +1692,8 @@ pub struct AuthProviderPopupState {
 impl Default for AuthProviderPopupState {
     fn default() -> Self {
         // Check current API key status to mark current provider
-        let has_api_key = credentials::get_anthropic_api_key()
-            .map(|opt| opt.is_some())
-            .unwrap_or(false);
+        let has_api_key =
+            credentials::get_anthropic_api_key().map(|opt| opt.is_some()).unwrap_or(false);
 
         let mut providers = vec![
             AuthProviderOption::new(
@@ -1691,15 +1838,12 @@ impl AuthProviderPopupState {
 
     /// Get the current provider ID (the one marked as is_current)
     pub fn get_current_provider_id(&self) -> Option<&str> {
-        self.providers.iter()
-            .find(|p| p.is_current)
-            .map(|p| p.id.as_str())
+        self.providers.iter().find(|p| p.is_current).map(|p| p.id.as_str())
     }
 
     pub fn refresh_providers(&mut self) {
-        let has_api_key = credentials::get_anthropic_api_key()
-            .map(|opt| opt.is_some())
-            .unwrap_or(false);
+        let has_api_key =
+            credentials::get_anthropic_api_key().map(|opt| opt.is_some()).unwrap_or(false);
 
         for p in &mut self.providers {
             p.is_current = false;
@@ -1969,19 +2113,26 @@ async fn load_workspaces_async() -> anyhow::Result<Vec<Workspace>> {
     if AppState::is_docker_available_sync() {
         info!("load_workspaces_async: Docker available, loading Boss mode sessions");
         match SessionLoader::new().await {
-            Ok(loader) => {
-                match loader.load_active_sessions().await {
-                    Ok(mut docker_workspaces) => {
-                        info!("load_workspaces_async: Loaded {} Boss mode workspaces", docker_workspaces.len());
-                        workspaces.append(&mut docker_workspaces);
-                    }
-                    Err(e) => {
-                        warn!("load_workspaces_async: Failed to load Boss mode sessions: {}", e);
-                    }
+            Ok(loader) => match loader.load_active_sessions().await {
+                Ok(mut docker_workspaces) => {
+                    info!(
+                        "load_workspaces_async: Loaded {} Boss mode workspaces",
+                        docker_workspaces.len()
+                    );
+                    workspaces.append(&mut docker_workspaces);
                 }
-            }
+                Err(e) => {
+                    warn!(
+                        "load_workspaces_async: Failed to load Boss mode sessions: {}",
+                        e
+                    );
+                }
+            },
             Err(e) => {
-                warn!("load_workspaces_async: Failed to create session loader: {}", e);
+                warn!(
+                    "load_workspaces_async: Failed to create session loader: {}",
+                    e
+                );
             }
         }
     } else {
@@ -1994,7 +2145,10 @@ async fn load_workspaces_async() -> anyhow::Result<Vec<Workspace>> {
         Ok(mut manager) => {
             match manager.list_sessions().await {
                 Ok(interactive_sessions) => {
-                    info!("load_workspaces_async: Found {} Interactive sessions", interactive_sessions.len());
+                    info!(
+                        "load_workspaces_async: Found {} Interactive sessions",
+                        interactive_sessions.len()
+                    );
                     // Group sessions by workspace
                     for interactive_session in interactive_sessions {
                         let session = interactive_session.to_session_model();
@@ -2005,9 +2159,10 @@ async fn load_workspaces_async() -> anyhow::Result<Vec<Workspace>> {
                         // This prevents duplicates when paths differ only by normalization
                         // (e.g., symlinks, ".." components, trailing slashes)
                         let canonical_workspace_path = workspace_path.canonicalize().ok();
-                        if let Some(workspace) = workspaces.iter_mut().find(|w| {
-                            w.path.canonicalize().ok() == canonical_workspace_path
-                        }) {
+                        if let Some(workspace) = workspaces
+                            .iter_mut()
+                            .find(|w| w.path.canonicalize().ok() == canonical_workspace_path)
+                        {
                             workspace.add_session(session);
                         } else {
                             let mut workspace = Workspace::new(workspace_name, workspace_path);
@@ -2017,18 +2172,27 @@ async fn load_workspaces_async() -> anyhow::Result<Vec<Workspace>> {
                     }
                 }
                 Err(e) => {
-                    warn!("load_workspaces_async: Failed to list Interactive sessions: {}", e);
+                    warn!(
+                        "load_workspaces_async: Failed to list Interactive sessions: {}",
+                        e
+                    );
                 }
             }
         }
         Err(e) => {
-            warn!("load_workspaces_async: Failed to create Interactive session manager: {}", e);
+            warn!(
+                "load_workspaces_async: Failed to create Interactive session manager: {}",
+                e
+            );
         }
     }
 
     // Load other tmux sessions (not managed by agents-in-a-box)
     // This is quick and doesn't involve Docker, so we include it
-    info!("load_workspaces_async: Complete with {} workspaces", workspaces.len());
+    info!(
+        "load_workspaces_async: Complete with {} workspaces",
+        workspaces.len()
+    );
     Ok(workspaces)
 }
 
@@ -2044,7 +2208,7 @@ pub enum AgentModelFocus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BranchCheckoutMode {
     #[default]
-    CreateNew,        // Create ainb/{uuid} branch from selected (default)
+    CreateNew, // Create ainb/{uuid} branch from selected (default)
     CheckoutExisting, // Use the remote branch directly
 }
 
@@ -2065,35 +2229,35 @@ pub struct NewSessionState {
     pub file_finder: FuzzyFileFinderState, // Fuzzy file finder for @ symbol
     pub restart_session_id: Option<Uuid>, // If set, this is a restart operation
     // Agent selection
-    pub selected_agent: SessionAgentType,       // The selected agent for this session
+    pub selected_agent: SessionAgentType, // The selected agent for this session
     pub agent_options: Vec<SessionAgentOption>, // List of available agents
-    pub selected_agent_index: usize,            // Index in agent_options list
+    pub selected_agent_index: usize,      // Index in agent_options list
     // Model selection (for Claude agent)
-    pub selected_model: ClaudeModel,     // The selected model for this session
+    pub selected_model: ClaudeModel, // The selected model for this session
     pub model_options: Vec<ClaudeModel>, // List of available models
-    pub selected_model_index: usize,     // Index in model_options list
+    pub selected_model_index: usize, // Index in model_options list
     pub agent_model_focus: AgentModelFocus, // Which panel has focus (Agent or Model)
 
     // Remote repository support
-    pub repo_input: String,                    // URL or path input from user
-    pub repo_source: Option<RepoSource>,       // Parsed repo source
-    pub remote_branches: Vec<RemoteBranch>,    // Available branches from remote
+    pub repo_input: String,                 // URL or path input from user
+    pub repo_source: Option<RepoSource>,    // Parsed repo source
+    pub remote_branches: Vec<RemoteBranch>, // Available branches from remote
     pub filtered_branches: Vec<(usize, RemoteBranch)>, // (original_index, branch) after filter
-    pub branch_filter_text: String,            // Filter text for fuzzy branch search
-    pub selected_branch_index: usize,          // Selected index in filtered branch list
-    pub selected_base_branch: Option<String>,  // The base branch to create worktree from
-    pub cached_repo_path: Option<PathBuf>,     // Path to cached bare clone
+    pub branch_filter_text: String,         // Filter text for fuzzy branch search
+    pub selected_branch_index: usize,       // Selected index in filtered branch list
+    pub selected_base_branch: Option<String>, // The base branch to create worktree from
+    pub cached_repo_path: Option<PathBuf>,  // Path to cached bare clone
     pub repo_validation_error: Option<String>, // Error message for UI display
-    pub is_validating: bool,                   // Show loading indicator
-    pub recent_repos: Vec<ParsedRepo>,         // Recently used repos for suggestions
+    pub is_validating: bool,                // Show loading indicator
+    pub recent_repos: Vec<ParsedRepo>,      // Recently used repos for suggestions
     pub branch_checkout_mode: BranchCheckoutMode, // Toggle: create new vs checkout existing
 
     // SSH configuration (only used when agent_type == Ssh)
-    pub ssh_host: String,                      // SSH host (e.g., "server.example.com")
-    pub ssh_port: String,                      // SSH port (string for input, parsed to u16)
-    pub ssh_user: String,                      // SSH username (optional)
-    pub ssh_identity_file: String,             // Path to SSH identity file (optional)
-    pub ssh_input_focus: SshInputFocus,        // Which SSH field has focus
+    pub ssh_host: String,               // SSH host (e.g., "server.example.com")
+    pub ssh_port: String,               // SSH port (string for input, parsed to u16)
+    pub ssh_user: String,               // SSH username (optional)
+    pub ssh_identity_file: String,      // Path to SSH identity file (optional)
+    pub ssh_input_focus: SshInputFocus, // Which SSH field has focus
 
     // Favorites (shown inline in InputRepoSource for quick selection)
     pub favorites_store: crate::config::FavoritesStore, // Cached favorites
@@ -2209,9 +2373,7 @@ impl NewSessionState {
     }
 
     pub fn current_agent_type(&self) -> SessionAgentType {
-        self.current_agent_option()
-            .map(|o| o.agent_type)
-            .unwrap_or_default()
+        self.current_agent_option().map(|o| o.agent_type).unwrap_or_default()
     }
 
     pub fn is_current_agent_available(&self) -> bool {
@@ -2265,10 +2427,7 @@ impl NewSessionState {
 
     /// Get the currently selected model
     pub fn current_model(&self) -> ClaudeModel {
-        self.model_options
-            .get(self.selected_model_index)
-            .copied()
-            .unwrap_or_default()
+        self.model_options.get(self.selected_model_index).copied().unwrap_or_default()
     }
 
     /// Toggle focus between Agent and Model panels
@@ -2333,7 +2492,7 @@ pub enum SshInputFocus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RepoSourceChoice {
     #[default]
-    Local,     // Browse local repos
+    Local, // Browse local repos
     Remote,    // Clone from URL
     Ssh,       // SSH connection to remote server
     Favorites, // Quick access to saved favorites
@@ -2341,37 +2500,37 @@ pub enum RepoSourceChoice {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AsyncAction {
-    StartNewSession,        // Old - will be removed
-    StartWorkspaceSearch,   // New - search all workspaces
-    NewSessionInCurrentDir, // New - create session in current directory
-    NewSessionNormal,       // New - create normal new session with mode selection
+    StartNewSession,         // Old - will be removed
+    StartWorkspaceSearch,    // New - search all workspaces
+    NewSessionInCurrentDir,  // New - create session in current directory
+    NewSessionNormal,        // New - create normal new session with mode selection
     NewSessionWithRepoInput, // NEW: Start with URL/path input
     ValidateRepoSource,      // NEW: Parse and validate repo input
     CloneRemoteRepo,         // NEW: Clone remote repo to cache
     FetchRemoteBranches,     // NEW: Get branch list from remote
     CreateNewSession,
-    DeleteSession(Uuid),       // New - delete session with container cleanup
+    DeleteSession(Uuid),           // New - delete session with container cleanup
     BulkDeleteSessions(Vec<Uuid>), // Bulk delete multiple sessions
-    RefreshWorkspaces,         // Manual refresh of workspace data
-    FetchContainerLogs(Uuid),  // Fetch container logs for a session
-    AttachToContainer(Uuid),   // Attach to a container session
-    AttachToTmuxSession(Uuid), // Attach to a tmux session
-    KillContainer(Uuid),       // Kill container for a session
-    AuthSetupOAuth,            // Run OAuth authentication setup
-    AuthSetupApiKey,           // Save API key authentication
-    ReauthenticateCredentials, // Re-authenticate Claude credentials
-    RestartSession(Uuid),      // Restart a stopped session with new container
-    CleanupOrphaned,           // Clean up orphaned containers without worktrees
-    AttachToOtherTmux(String), // Attach to a non-agents-in-a-box tmux session by name
-    KillOtherTmux(String),     // Kill a non-agents-in-a-box tmux session by name
-    ConfirmOtherTmuxRename,    // Confirm and execute rename for "Other tmux" session
+    RefreshWorkspaces,             // Manual refresh of workspace data
+    FetchContainerLogs(Uuid),      // Fetch container logs for a session
+    AttachToContainer(Uuid),       // Attach to a container session
+    AttachToTmuxSession(Uuid),     // Attach to a tmux session
+    KillContainer(Uuid),           // Kill container for a session
+    AuthSetupOAuth,                // Run OAuth authentication setup
+    AuthSetupApiKey,               // Save API key authentication
+    ReauthenticateCredentials,     // Re-authenticate Claude credentials
+    RestartSession(Uuid),          // Restart a stopped session with new container
+    CleanupOrphaned,               // Clean up orphaned containers without worktrees
+    AttachToOtherTmux(String),     // Attach to a non-agents-in-a-box tmux session by name
+    KillOtherTmux(String),         // Kill a non-agents-in-a-box tmux session by name
+    ConfirmOtherTmuxRename,        // Confirm and execute rename for "Other tmux" session
     // Shell session actions (one shell per workspace)
     OpenWorkspaceShell {
-        workspace_index: usize,                      // Index of workspace to open shell for
-        target_dir: Option<std::path::PathBuf>,      // Optional: cd to this directory (worktree)
+        workspace_index: usize,                 // Index of workspace to open shell for
+        target_dir: Option<std::path::PathBuf>, // Optional: cd to this directory (worktree)
     },
     OpenShellAtPath(std::path::PathBuf), // Open shell directly at a path (no workspace required)
-    KillWorkspaceShell(usize), // Kill workspace shell by workspace index
+    KillWorkspaceShell(usize),           // Kill workspace shell by workspace index
     // SSH session actions
     CreateSshSession, // Create a new SSH session with configured target
     // Editor action
@@ -2862,7 +3021,10 @@ impl AppState {
             }
 
             if let Err(e) = self.app_config.save() {
-                warn!("Failed to save app config during onboarding completion: {}", e);
+                warn!(
+                    "Failed to save app config during onboarding completion: {}",
+                    e
+                );
             }
         }
 
@@ -3002,7 +3164,10 @@ impl AppState {
 
         // Preserve shell_sessions before clearing workspaces
         // Map workspace path -> shell_session for restoration after reload
-        let preserved_shells: std::collections::HashMap<std::path::PathBuf, crate::models::ShellSession> = self
+        let preserved_shells: std::collections::HashMap<
+            std::path::PathBuf,
+            crate::models::ShellSession,
+        > = self
             .workspaces
             .iter()
             .filter_map(|w| w.shell_session.clone().map(|s| (w.path.clone(), s)))
@@ -3049,7 +3214,10 @@ impl AppState {
 
         // Restore preserved shell_sessions to matching workspaces
         if !preserved_shells.is_empty() {
-            info!("Restoring {} preserved shell sessions", preserved_shells.len());
+            info!(
+                "Restoring {} preserved shell sessions",
+                preserved_shells.len()
+            );
             for workspace in &mut self.workspaces {
                 if let Some(shell) = preserved_shells.get(&workspace.path) {
                     // Only restore if the tmux session still exists
@@ -3059,12 +3227,16 @@ impl AppState {
                         .await;
 
                     if check.map(|o| o.status.success()).unwrap_or(false) {
-                        info!("Restored shell session '{}' for workspace '{}'",
-                              shell.tmux_session_name, workspace.name);
+                        info!(
+                            "Restored shell session '{}' for workspace '{}'",
+                            shell.tmux_session_name, workspace.name
+                        );
                         workspace.set_shell_session(shell.clone());
                     } else {
-                        info!("Shell session '{}' no longer exists, not restoring",
-                              shell.tmux_session_name);
+                        info!(
+                            "Shell session '{}' no longer exists, not restoring",
+                            shell.tmux_session_name
+                        );
                     }
                 }
             }
@@ -3112,7 +3284,9 @@ impl AppState {
 
     /// Start loading workspaces in the background (non-blocking)
     /// Returns a channel receiver that will receive the result
-    pub fn start_background_workspace_loading(&mut self) -> mpsc::UnboundedSender<WorkspaceLoadResult> {
+    pub fn start_background_workspace_loading(
+        &mut self,
+    ) -> mpsc::UnboundedSender<WorkspaceLoadResult> {
         let (tx, rx) = mpsc::unbounded_channel();
         self.workspace_load_receiver = Some(rx);
         self.is_loading_workspaces = true;
@@ -3132,21 +3306,25 @@ impl AppState {
 
                     match result {
                         WorkspaceLoadResult::Success(mut workspaces) => {
-                            info!("Background workspace loading completed: {} workspaces", workspaces.len());
+                            info!(
+                                "Background workspace loading completed: {} workspaces",
+                                workspaces.len()
+                            );
 
                             // Extract SSH sessions from workspaces into their own section
                             let mut ssh_sessions = Vec::new();
                             for workspace in &mut workspaces {
-                                let (ssh, non_ssh): (Vec<_>, Vec<_>) = workspace
-                                    .sessions
-                                    .drain(..)
-                                    .partition(|s| s.agent_type == crate::models::SessionAgentType::Ssh);
+                                let (ssh, non_ssh): (Vec<_>, Vec<_>) =
+                                    workspace.sessions.drain(..).partition(|s| {
+                                        s.agent_type == crate::models::SessionAgentType::Ssh
+                                    });
                                 workspace.sessions = non_ssh;
                                 ssh_sessions.extend(ssh);
                             }
 
                             // Remove empty workspaces (those that only had SSH sessions)
-                            workspaces.retain(|w| !w.sessions.is_empty() || w.shell_session.is_some());
+                            workspaces
+                                .retain(|w| !w.sessions.is_empty() || w.shell_session.is_some());
 
                             info!(
                                 "Separated {} SSH sessions from {} workspaces",
@@ -3164,18 +3342,26 @@ impl AppState {
                                 for session in &workspace.sessions {
                                     if session.mode == crate::models::SessionMode::Interactive {
                                         // Use tmux_session_name if available, otherwise generate from session name
-                                        let tmux_name = session.tmux_session_name.clone()
+                                        let tmux_name = session
+                                            .tmux_session_name
+                                            .clone()
                                             .unwrap_or_else(|| session.get_tmux_name());
                                         let tmux_session = crate::tmux::TmuxSession::new(
                                             tmux_name,
                                             "claude".to_string(),
                                         );
                                         self.tmux_sessions.insert(session.id, tmux_session);
-                                        debug!("Populated tmux_sessions for session {}: {}", session.id, session.name);
+                                        debug!(
+                                            "Populated tmux_sessions for session {}: {}",
+                                            session.id, session.name
+                                        );
                                     }
                                 }
                             }
-                            info!("Populated tmux_sessions with {} entries", self.tmux_sessions.len());
+                            info!(
+                                "Populated tmux_sessions with {} entries",
+                                self.tmux_sessions.len()
+                            );
 
                             // Set initial selection
                             self.selected_workspace_index = None;
@@ -3205,13 +3391,19 @@ impl AppState {
                         WorkspaceLoadResult::Error(err) => {
                             warn!("Background workspace loading failed: {}", err);
                             self.workspace_load_error = Some(err.clone());
-                            self.add_warning_notification(format!("Failed to load sessions: {}", err));
+                            self.add_warning_notification(format!(
+                                "Failed to load sessions: {}",
+                                err
+                            ));
                             return true;
                         }
                         WorkspaceLoadResult::Timeout => {
                             warn!("Background workspace loading timed out");
-                            self.workspace_load_error = Some("Docker operation timed out".to_string());
-                            self.add_warning_notification("Docker is slow - sessions may be incomplete".to_string());
+                            self.workspace_load_error =
+                                Some("Docker operation timed out".to_string());
+                            self.add_warning_notification(
+                                "Docker is slow - sessions may be incomplete".to_string(),
+                            );
                             return true;
                         }
                     }
@@ -3225,7 +3417,9 @@ impl AppState {
                             self.is_loading_workspaces = false;
                             self.workspace_load_receiver = None;
                             self.workspace_load_error = Some("Loading timed out".to_string());
-                            self.add_warning_notification("Session loading timed out - using cached data".to_string());
+                            self.add_warning_notification(
+                                "Session loading timed out - using cached data".to_string(),
+                            );
                             return true;
                         }
                     }
@@ -3257,8 +3451,11 @@ impl AppState {
         let (tx, rx) = mpsc::unbounded_channel();
         self.usage_load_receiver = Some(rx);
         self.usage_state.loading = true;
+        let query = self.usage_state.query();
         tokio::spawn(async move {
-            match tokio::task::spawn_blocking(crate::models::usage::parse_usage).await {
+            match tokio::task::spawn_blocking(move || crate::models::usage::parse_usage_for(query))
+                .await
+            {
                 Ok(data) => {
                     let _ = tx.send(data);
                 }
@@ -3337,9 +3534,7 @@ impl AppState {
                 Err(mpsc::error::TryRecvError::Disconnected) => {
                     self.skills_state.loading = false;
                     self.skills_load_receiver = None;
-                    warn!(
-                        "Skills parse task dropped its sender without delivering data"
-                    );
+                    warn!("Skills parse task dropped its sender without delivering data");
                     self.add_warning_notification(
                         "Failed to parse skills; keeping cached data".to_string(),
                     );
@@ -3393,7 +3588,10 @@ impl AppState {
         // Discover Interactive sessions from tmux
         match manager.list_sessions().await {
             Ok(sessions) => {
-                info!("Discovered {} Interactive sessions from tmux", sessions.len());
+                info!(
+                    "Discovered {} Interactive sessions from tmux",
+                    sessions.len()
+                );
 
                 // Convert to Session models and add to workspaces
                 for interactive_session in sessions {
@@ -3443,21 +3641,28 @@ impl AppState {
     /// Discover tmux sessions that are NOT managed by agents-in-a-box
     /// Also includes orphaned `tmux_` sessions whose worktrees no longer exist
     pub async fn load_other_tmux_sessions(&mut self) {
-        use tokio::process::Command;
-        use crate::models::OtherTmuxSession;
         use crate::interactive::SessionStore;
+        use crate::models::OtherTmuxSession;
+        use tokio::process::Command;
 
         info!("Discovering other tmux sessions");
 
         // Get all tmux sessions with format: name:attached:windows
         let output = match Command::new("tmux")
-            .args(["list-sessions", "-F", "#{session_name}:#{session_attached}:#{session_windows}"])
+            .args([
+                "list-sessions",
+                "-F",
+                "#{session_name}:#{session_attached}:#{session_windows}",
+            ])
             .output()
             .await
         {
             Ok(o) => o,
             Err(e) => {
-                debug!("Failed to list tmux sessions: {} (tmux might not be running)", e);
+                debug!(
+                    "Failed to list tmux sessions: {} (tmux might not be running)",
+                    e
+                );
                 self.other_tmux_sessions.clear();
                 return;
             }
@@ -3473,7 +3678,8 @@ impl AppState {
         let session_store = SessionStore::load();
 
         // Collect tmux names that appear in loaded workspaces (successfully matched)
-        let matched_tmux_names: std::collections::HashSet<&str> = self.workspaces
+        let matched_tmux_names: std::collections::HashSet<&str> = self
+            .workspaces
             .iter()
             .flat_map(|ws| ws.sessions.iter())
             .filter_map(|s| s.tmux_session_name.as_deref())
@@ -3492,13 +3698,17 @@ impl AppState {
                 // Skip shell sessions (ainb-ws-*, ainb-sh-*, ainb-shell-*)
                 if name.starts_with("ainb-ws-")
                     || name.starts_with("ainb-sh-")
-                    || name.starts_with("ainb-shell-") {
+                    || name.starts_with("ainb-shell-")
+                {
                     continue;
                 }
 
                 let attached = parts[parts.len() - 2] == "1";
                 let windows = parts[parts.len() - 1].parse().unwrap_or_else(|e| {
-                    warn!("Failed to parse window count for tmux session '{}': {}. Defaulting to 1.", name, e);
+                    warn!(
+                        "Failed to parse window count for tmux session '{}': {}. Defaulting to 1.",
+                        name, e
+                    );
                     1
                 });
 
@@ -3520,12 +3730,14 @@ impl AppState {
 
                     // Try to parse host info from session name
                     // Expected format: ssh-{host}-{port} or ssh-{host}-{user}-{port}
-                    let parts: Vec<&str> = name.strip_prefix("ssh-").unwrap_or(&name).split('-').collect();
+                    let parts: Vec<&str> =
+                        name.strip_prefix("ssh-").unwrap_or(&name).split('-').collect();
                     if parts.len() >= 2 {
                         // Last part should be port or timestamp
                         if let Ok(port) = parts[parts.len() - 1].parse::<u16>() {
                             let host = parts[..parts.len() - 1].join("-");
-                            ssh_session.ssh_target = Some(crate::models::SshTarget::new(host).with_port(port));
+                            ssh_session.ssh_target =
+                                Some(crate::models::SshTarget::new(host).with_port(port));
                         } else {
                             // Couldn't parse port, use name as-is
                             let host = parts.join("-");
@@ -3554,12 +3766,21 @@ impl AppState {
                         // If worktree exists, session should have been discovered by normal flow
                         // If we're here, something went wrong - show as orphaned
                         if metadata.worktree_path.exists() {
-                            debug!("tmux_ session {} has valid worktree but wasn't matched - adding to Other", name);
+                            debug!(
+                                "tmux_ session {} has valid worktree but wasn't matched - adding to Other",
+                                name
+                            );
                         } else {
-                            debug!("tmux_ session {} is orphaned (worktree deleted) - adding to Other", name);
+                            debug!(
+                                "tmux_ session {} is orphaned (worktree deleted) - adding to Other",
+                                name
+                            );
                         }
                     } else {
-                        debug!("tmux_ session {} not in sessions.json - adding to Other", name);
+                        debug!(
+                            "tmux_ session {} not in sessions.json - adding to Other",
+                            name
+                        );
                     }
                     // Fall through to add as "other" session
                 }
@@ -3568,7 +3789,11 @@ impl AppState {
             }
         }
 
-        info!("Discovered {} other tmux sessions and {} SSH sessions", other_sessions.len(), ssh_sessions.len());
+        info!(
+            "Discovered {} other tmux sessions and {} SSH sessions",
+            other_sessions.len(),
+            ssh_sessions.len()
+        );
         self.other_tmux_sessions = other_sessions;
         self.ssh_sessions = ssh_sessions;
     }
@@ -3576,8 +3801,8 @@ impl AppState {
     /// Auto-detect workspace shell sessions from tmux
     /// Finds ainb-ws-* sessions and matches them to workspaces
     pub async fn auto_detect_workspace_shells(&mut self) {
-        use tokio::process::Command;
         use crate::models::{ShellSession, ShellSessionStatus};
+        use tokio::process::Command;
 
         info!("Auto-detecting workspace shell sessions from tmux");
 
@@ -3586,17 +3811,14 @@ impl AppState {
         // Note: #{...} is tmux format syntax, not Rust format
         #[allow(clippy::literal_string_with_formatting_args)]
         let tmux_format = "#{session_name}:#{pane_current_path}";
-        let output = match Command::new("tmux")
-            .args(["list-sessions", "-F", tmux_format])
-            .output()
-            .await
-        {
-            Ok(o) => o,
-            Err(e) => {
-                debug!("Failed to list tmux sessions for shell detection: {}", e);
-                return;
-            }
-        };
+        let output =
+            match Command::new("tmux").args(["list-sessions", "-F", tmux_format]).output().await {
+                Ok(o) => o,
+                Err(e) => {
+                    debug!("Failed to list tmux sessions for shell detection: {}", e);
+                    return;
+                }
+            };
 
         if !output.status.success() {
             debug!("No tmux sessions found for shell detection");
@@ -4084,8 +4306,7 @@ impl AppState {
 
     /// Get the currently selected other tmux session, if any
     pub fn selected_other_tmux_session(&self) -> Option<&crate::models::OtherTmuxSession> {
-        self.selected_other_tmux_index
-            .and_then(|idx| self.other_tmux_sessions.get(idx))
+        self.selected_other_tmux_index.and_then(|idx| self.other_tmux_sessions.get(idx))
     }
 
     /// Check if the selection is in the "Other tmux" section
@@ -4137,10 +4358,7 @@ impl AppState {
                 let old_name = session.name.clone();
 
                 // Sanitize new name (tmux compatible)
-                let sanitized_name = new_name
-                    .replace(' ', "_")
-                    .replace('.', "_")
-                    .replace(':', "_");
+                let sanitized_name = new_name.replace(' ', "_").replace('.', "_").replace(':', "_");
 
                 // Execute tmux rename-session
                 let output = tokio::process::Command::new("tmux")
@@ -4178,8 +4396,7 @@ impl AppState {
 
     /// Get the currently selected SSH session, if any
     pub fn selected_ssh_session(&self) -> Option<&crate::models::Session> {
-        self.selected_ssh_session_index
-            .and_then(|idx| self.ssh_sessions.get(idx))
+        self.selected_ssh_session_index.and_then(|idx| self.ssh_sessions.get(idx))
     }
 
     /// Check if the selection is in the "SSH Sessions" section
@@ -4193,12 +4410,13 @@ impl AppState {
     pub fn start_ssh_session_rename(&mut self) {
         if let Some(session) = self.selected_ssh_session() {
             // Start with existing display_name or ssh_target display
-            self.ssh_session_rename_buffer = session.display_name.clone()
-                .unwrap_or_else(|| {
-                    session.ssh_target.as_ref()
-                        .map(|t| t.display_name())
-                        .unwrap_or_else(|| session.name.clone())
-                });
+            self.ssh_session_rename_buffer = session.display_name.clone().unwrap_or_else(|| {
+                session
+                    .ssh_target
+                    .as_ref()
+                    .map(|t| t.display_name())
+                    .unwrap_or_else(|| session.name.clone())
+            });
             self.ssh_session_rename_mode = true;
         }
     }
@@ -4273,7 +4491,10 @@ impl AppState {
     }
 
     pub fn show_delete_confirmation(&mut self, session_id: Uuid) {
-        info!("!!! SHOWING DELETE CONFIRMATION DIALOG for session: {}", session_id);
+        info!(
+            "!!! SHOWING DELETE CONFIRMATION DIALOG for session: {}",
+            session_id
+        );
 
         // Check for uncommitted changes in worktree (only for non-Shell sessions)
         let warning = self.check_session_uncommitted_warning(session_id);
@@ -4314,10 +4535,16 @@ impl AppState {
 
     /// Show confirmation dialog for killing an "other" tmux session
     pub fn show_kill_other_tmux_confirmation(&mut self, session_name: String) {
-        info!("Showing kill confirmation for other tmux session: {}", session_name);
+        info!(
+            "Showing kill confirmation for other tmux session: {}",
+            session_name
+        );
         self.confirmation_dialog = Some(ConfirmationDialog {
             title: "Kill tmux Session".to_string(),
-            message: format!("Are you sure you want to kill tmux session '{}'?", session_name),
+            message: format!(
+                "Are you sure you want to kill tmux session '{}'?",
+                session_name
+            ),
             confirm_action: ConfirmAction::KillOtherTmux(session_name),
             selected_option: false, // Default to "No"
             warning: None,
@@ -4327,37 +4554,52 @@ impl AppState {
     /// Show confirmation dialog for killing an SSH session (which is a tmux session)
     pub fn show_kill_ssh_session_confirmation(&mut self, session_name: String) {
         // Get the display name if available for a friendlier message
-        let display_text = self.selected_ssh_session()
+        let display_text = self
+            .selected_ssh_session()
             .and_then(|s| s.display_name.clone())
             .unwrap_or_else(|| session_name.clone());
 
-        info!("Showing kill confirmation for SSH session: {} (display: {})", session_name, display_text);
+        info!(
+            "Showing kill confirmation for SSH session: {} (display: {})",
+            session_name, display_text
+        );
         self.confirmation_dialog = Some(ConfirmationDialog {
             title: "Kill SSH Session".to_string(),
-            message: format!("Are you sure you want to kill SSH session '{}'?", display_text),
+            message: format!(
+                "Are you sure you want to kill SSH session '{}'?",
+                display_text
+            ),
             confirm_action: ConfirmAction::KillOtherTmux(session_name), // Reuse KillOtherTmux since SSH sessions are tmux sessions
-            selected_option: false, // Default to "No"
+            selected_option: false,                                     // Default to "No"
             warning: None,
         });
     }
 
     /// Show confirmation dialog for killing a workspace shell session
     pub fn show_kill_shell_confirmation(&mut self, workspace_index: usize) {
-        let shell_name = self.workspaces
+        let shell_name = self
+            .workspaces
             .get(workspace_index)
             .and_then(|w| w.shell_session.as_ref())
             .map(|s| s.name.clone())
             .unwrap_or_else(|| "shell".to_string());
 
-        let workspace_name = self.workspaces
+        let workspace_name = self
+            .workspaces
             .get(workspace_index)
             .map(|w| w.name.clone())
             .unwrap_or_else(|| "workspace".to_string());
 
-        info!("Showing kill confirmation for workspace shell: {} in {}", shell_name, workspace_name);
+        info!(
+            "Showing kill confirmation for workspace shell: {} in {}",
+            shell_name, workspace_name
+        );
         self.confirmation_dialog = Some(ConfirmationDialog {
             title: "Kill Shell Session".to_string(),
-            message: format!("Are you sure you want to kill shell '{}' in workspace '{}'?", shell_name, workspace_name),
+            message: format!(
+                "Are you sure you want to kill shell '{}' in workspace '{}'?",
+                shell_name, workspace_name
+            ),
             confirm_action: ConfirmAction::KillWorkspaceShell(workspace_index),
             selected_option: false, // Default to "No"
             warning: None,
@@ -4725,7 +4967,11 @@ impl AppState {
             }
         };
 
-        info!("Parsed repo source: {:?}, is_remote: {}", source, source.is_remote());
+        info!(
+            "Parsed repo source: {:?}, is_remote: {}",
+            source,
+            source.is_remote()
+        );
 
         if source.is_remote() {
             // Remote URL - try to fetch branches
@@ -4745,7 +4991,8 @@ impl AppState {
             Err(e) => {
                 if let Some(ref mut state) = self.new_session_state {
                     state.is_validating = false;
-                    state.repo_validation_error = Some(format!("Failed to init repo manager: {}", e));
+                    state.repo_validation_error =
+                        Some(format!("Failed to init repo manager: {}", e));
                 }
                 return;
             }
@@ -4806,7 +5053,8 @@ impl AppState {
             if !path.exists() {
                 if let Some(ref mut state) = self.new_session_state {
                     state.is_validating = false;
-                    state.repo_validation_error = Some(format!("Path not found: {}", path.display()));
+                    state.repo_validation_error =
+                        Some(format!("Path not found: {}", path.display()));
                 }
                 return;
             }
@@ -4815,7 +5063,8 @@ impl AppState {
             if !WorkspaceScanner::validate_workspace(path).unwrap_or(false) {
                 if let Some(ref mut state) = self.new_session_state {
                     state.is_validating = false;
-                    state.repo_validation_error = Some(format!("Not a git repository: {}", path.display()));
+                    state.repo_validation_error =
+                        Some(format!("Not a git repository: {}", path.display()));
                 }
                 return;
             }
@@ -4845,12 +5094,17 @@ impl AppState {
 
         let (source, base_branch, checkout_mode) = if let Some(ref state) = self.new_session_state {
             // Get branch from filtered list (which stores (original_idx, branch) tuples)
-            let branch = state.filtered_branches
+            let branch = state
+                .filtered_branches
                 .get(state.selected_branch_index)
                 .map(|(_, b)| b.name.clone())
                 .or_else(|| state.selected_base_branch.clone())
                 .unwrap_or_else(|| "main".to_string());
-            (state.repo_source.clone(), branch, state.branch_checkout_mode)
+            (
+                state.repo_source.clone(),
+                branch,
+                state.branch_checkout_mode,
+            )
         } else {
             error!("clone_remote_repo called but no state");
             return;
@@ -4872,7 +5126,8 @@ impl AppState {
             Err(e) => {
                 if let Some(ref mut state) = self.new_session_state {
                     state.is_validating = false;
-                    state.repo_validation_error = Some(format!("Failed to init repo manager: {}", e));
+                    state.repo_validation_error =
+                        Some(format!("Failed to init repo manager: {}", e));
                     state.step = NewSessionStep::SelectBranch;
                 }
                 return;
@@ -4999,7 +5254,8 @@ impl AppState {
             state.filtered_branches = state.remote_branches.iter().cloned().enumerate().collect();
         } else {
             // Fuzzy filter - match if filter chars appear in order
-            state.filtered_branches = state.remote_branches
+            state.filtered_branches = state
+                .remote_branches
                 .iter()
                 .enumerate()
                 .filter(|(_, branch)| {
@@ -5212,11 +5468,8 @@ impl AppState {
         );
 
         // Initialize filtered repos with all repos (even if empty)
-        let filtered_repos: Vec<(usize, std::path::PathBuf)> = repos
-            .iter()
-            .enumerate()
-            .map(|(idx, path)| (idx, path.clone()))
-            .collect();
+        let filtered_repos: Vec<(usize, std::path::PathBuf)> =
+            repos.iter().enumerate().map(|(idx, path)| (idx, path.clone())).collect();
 
         // Check if user has already cancelled (e.g., pressed escape while loading)
         if self.async_operation_cancelled {
@@ -5255,12 +5508,7 @@ impl AppState {
                 match scanner.scan() {
                     Ok(scan_result) => {
                         let max_repos = config.workspace_defaults.max_repositories;
-                        scan_result
-                            .workspaces
-                            .into_iter()
-                            .map(|w| w.path)
-                            .take(max_repos)
-                            .collect()
+                        scan_result.workspaces.into_iter().map(|w| w.path).take(max_repos).collect()
                     }
                     Err(e) => {
                         warn!("Failed to scan for repositories: {}", e);
@@ -5392,7 +5640,9 @@ impl AppState {
     pub fn new_session_next_agent(&mut self) {
         if let Some(ref mut state) = self.new_session_state {
             // Allow agent selection on both SelectAgent and InputBranch steps
-            if state.step == NewSessionStep::SelectAgent || state.step == NewSessionStep::InputBranch {
+            if state.step == NewSessionStep::SelectAgent
+                || state.step == NewSessionStep::InputBranch
+            {
                 state.next_agent();
             }
         }
@@ -5402,7 +5652,9 @@ impl AppState {
     pub fn new_session_prev_agent(&mut self) {
         if let Some(ref mut state) = self.new_session_state {
             // Allow agent selection on both SelectAgent and InputBranch steps
-            if state.step == NewSessionStep::SelectAgent || state.step == NewSessionStep::InputBranch {
+            if state.step == NewSessionStep::SelectAgent
+                || state.step == NewSessionStep::InputBranch
+            {
                 state.prev_agent();
             }
         }
@@ -5412,7 +5664,9 @@ impl AppState {
     pub fn new_session_next_model(&mut self) {
         if let Some(ref mut state) = self.new_session_state {
             // Allow model selection on both SelectAgent and InputBranch steps
-            if state.step == NewSessionStep::SelectAgent || state.step == NewSessionStep::InputBranch {
+            if state.step == NewSessionStep::SelectAgent
+                || state.step == NewSessionStep::InputBranch
+            {
                 state.next_model();
             }
         }
@@ -5422,7 +5676,9 @@ impl AppState {
     pub fn new_session_prev_model(&mut self) {
         if let Some(ref mut state) = self.new_session_state {
             // Allow model selection on both SelectAgent and InputBranch steps
-            if state.step == NewSessionStep::SelectAgent || state.step == NewSessionStep::InputBranch {
+            if state.step == NewSessionStep::SelectAgent
+                || state.step == NewSessionStep::InputBranch
+            {
                 state.prev_model();
             }
         }
@@ -5431,7 +5687,9 @@ impl AppState {
     /// Toggle focus between agent and model panels
     pub fn new_session_toggle_agent_model_focus(&mut self) {
         if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::SelectAgent || state.step == NewSessionStep::InputBranch {
+            if state.step == NewSessionStep::SelectAgent
+                || state.step == NewSessionStep::InputBranch
+            {
                 state.toggle_agent_model_focus();
             }
         }
@@ -5482,7 +5740,8 @@ impl AppState {
 
             // For AI agents, check if we should skip branch input
             // In CheckoutExisting mode for remote repos, the branch name is already set
-            let skip_branch_input = state.branch_checkout_mode == BranchCheckoutMode::CheckoutExisting
+            let skip_branch_input = state.branch_checkout_mode
+                == BranchCheckoutMode::CheckoutExisting
                 && state.cached_repo_path.is_some()
                 && !state.branch_name.is_empty();
 
@@ -5535,13 +5794,15 @@ impl AppState {
                 // Find the last word boundary (space, slash, dash, underscore)
                 let s = &state.branch_name;
                 // First, skip any trailing delimiters
-                let trimmed_end = s.trim_end_matches(|c: char| c == ' ' || c == '/' || c == '-' || c == '_');
+                let trimmed_end =
+                    s.trim_end_matches(|c: char| c == ' ' || c == '/' || c == '-' || c == '_');
                 if trimmed_end.is_empty() {
                     state.branch_name.clear();
                     return;
                 }
                 // Find the last word boundary
-                let last_boundary = trimmed_end.rfind(|c: char| c == ' ' || c == '/' || c == '-' || c == '_');
+                let last_boundary =
+                    trimmed_end.rfind(|c: char| c == ' ' || c == '/' || c == '-' || c == '_');
                 match last_boundary {
                     Some(idx) => {
                         // Keep up to and including the delimiter
@@ -5624,10 +5885,18 @@ impl AppState {
         if let Some(ref mut state) = self.new_session_state {
             if state.step == NewSessionStep::ConfigureSsh {
                 match state.ssh_input_focus {
-                    SshInputFocus::Host => { state.ssh_host.pop(); }
-                    SshInputFocus::Port => { state.ssh_port.pop(); }
-                    SshInputFocus::User => { state.ssh_user.pop(); }
-                    SshInputFocus::IdentityFile => { state.ssh_identity_file.pop(); }
+                    SshInputFocus::Host => {
+                        state.ssh_host.pop();
+                    }
+                    SshInputFocus::Port => {
+                        state.ssh_port.pop();
+                    }
+                    SshInputFocus::User => {
+                        state.ssh_user.pop();
+                    }
+                    SshInputFocus::IdentityFile => {
+                        state.ssh_identity_file.pop();
+                    }
                 }
             }
         }
@@ -5655,7 +5924,11 @@ impl AppState {
 
             tracing::info!(
                 "SSH configuration confirmed: {}@{}:{}",
-                if state.ssh_user.is_empty() { "(no user)" } else { &state.ssh_user },
+                if state.ssh_user.is_empty() {
+                    "(no user)"
+                } else {
+                    &state.ssh_user
+                },
                 state.ssh_host,
                 port
             );
@@ -5802,7 +6075,10 @@ impl AppState {
                     RepoSourceChoice::Ssh => RepoSourceChoice::Remote,
                     RepoSourceChoice::Favorites => RepoSourceChoice::Ssh,
                 };
-                tracing::info!("Source choice toggled (reverse) to: {:?}", state.source_choice);
+                tracing::info!(
+                    "Source choice toggled (reverse) to: {:?}",
+                    state.source_choice
+                );
             }
         }
     }
@@ -5821,7 +6097,9 @@ impl AppState {
                         self.pending_async_action = Some(AsyncAction::StartWorkspaceSearch);
                     }
                     RepoSourceChoice::Remote => {
-                        tracing::info!("Proceeding with Remote source - showing URL input with favorites");
+                        tracing::info!(
+                            "Proceeding with Remote source - showing URL input with favorites"
+                        );
                         // Load favorites for quick selection in InputRepoSource
                         state.favorites_store = crate::config::FavoritesStore::load();
                         state.selected_favorite_index = None; // Start with URL input focused
@@ -5840,7 +6118,9 @@ impl AppState {
                         state.ssh_input_focus = SshInputFocus::Host;
                     }
                     RepoSourceChoice::Favorites => {
-                        tracing::info!("Proceeding with Favorites source - showing favorites picker");
+                        tracing::info!(
+                            "Proceeding with Favorites source - showing favorites picker"
+                        );
                         // Load favorites and go to favorites picker
                         state.favorites_store = crate::config::FavoritesStore::load();
                         state.selected_favorite_index = if state.favorites_store.is_empty() {
@@ -6049,7 +6329,9 @@ impl AppState {
             if !state.repo_input.is_empty() {
                 let source = state.repo_input.clone();
                 // Check if already a favorite
-                if let Some(existing) = state.favorites_store.favorites.iter().find(|f| f.source == source) {
+                if let Some(existing) =
+                    state.favorites_store.favorites.iter().find(|f| f.source == source)
+                {
                     let alias = existing.alias.clone();
                     state.favorites_store.remove(&alias);
                     tracing::info!("Removed from favorites: {}", source);
@@ -6057,7 +6339,8 @@ impl AppState {
                     // Add as new favorite with auto-generated alias
                     let alias = Self::generate_favorite_alias(&source);
                     let source_type = Self::detect_source_type(&source);
-                    let favorite = crate::config::Favorite::new(alias.clone(), source.clone(), source_type);
+                    let favorite =
+                        crate::config::Favorite::new(alias.clone(), source.clone(), source_type);
                     let _ = state.favorites_store.add(favorite);
                     tracing::info!("Added to favorites: {} as {}", source, alias);
                 }
@@ -6098,7 +6381,11 @@ impl AppState {
     pub fn is_repo_input_favorite(&self) -> bool {
         if let Some(ref state) = self.new_session_state {
             if !state.repo_input.is_empty() {
-                return state.favorites_store.favorites.iter().any(|f| f.source == state.repo_input);
+                return state
+                    .favorites_store
+                    .favorites
+                    .iter()
+                    .any(|f| f.source == state.repo_input);
             }
         }
         false
@@ -6113,7 +6400,9 @@ impl AppState {
                     let source = repo_path.display().to_string();
 
                     // Check if already a favorite
-                    if let Some(existing) = state.favorites_store.favorites.iter().find(|f| f.source == source) {
+                    if let Some(existing) =
+                        state.favorites_store.favorites.iter().find(|f| f.source == source)
+                    {
                         let alias = existing.alias.clone();
                         state.favorites_store.remove(&alias);
                         tracing::info!("Removed local repo from favorites: {}", source);
@@ -6121,7 +6410,11 @@ impl AppState {
                         // Add as new favorite with auto-generated alias
                         let alias = Self::generate_favorite_alias(&source);
                         let source_type = crate::config::FavoriteSourceType::LocalPath;
-                        let favorite = crate::config::Favorite::new(alias.clone(), source.clone(), source_type);
+                        let favorite = crate::config::Favorite::new(
+                            alias.clone(),
+                            source.clone(),
+                            source_type,
+                        );
                         let _ = state.favorites_store.add(favorite);
                         tracing::info!("Added local repo to favorites: {} as {}", source, alias);
                     }
@@ -6399,7 +6692,9 @@ impl AppState {
 
             // Then check if authentication is set up
             if Self::is_first_time_setup() {
-                info!("Boss mode selected but authentication not set up, switching to auth setup view");
+                info!(
+                    "Boss mode selected but authentication not set up, switching to auth setup view"
+                );
                 self.current_view = View::AuthSetup;
                 self.auth_setup_state = Some(AuthSetupState {
                     selected_method: AuthMethod::OAuth,
@@ -6413,7 +6708,9 @@ impl AppState {
                 return;
             }
         } else {
-            info!("Interactive mode selected - skipping Docker auth check (will use host ~/.claude)");
+            info!(
+                "Interactive mode selected - skipping Docker auth check (will use host ~/.claude)"
+            );
         }
 
         let (
@@ -6449,8 +6746,11 @@ impl AppState {
                     // Check if this is a remote repo flow (cached_repo_path is set)
                     // For remote repos, we create worktree here and pass it to session creation
                     // For local repos, session creation will create the worktree
-                    let (repo_path, existing_worktree, worktree_notice) =
-                        if let Some(ref cached_path) = state.cached_repo_path {
+                    let (repo_path, existing_worktree, worktree_notice) = if let Some(
+                        ref cached_path,
+                    ) =
+                        state.cached_repo_path
+                    {
                         // Remote repo flow - create worktree from bare cache
                         use crate::git::RemoteRepoManager;
 
@@ -6462,14 +6762,16 @@ impl AppState {
                             Some(dir) => dir.join(".agents-in-a-box").join("worktrees"),
                             None => {
                                 tracing::error!("Home directory not found, cannot create worktree");
-                                state.repo_validation_error = Some("Home directory not found".to_string());
+                                state.repo_validation_error =
+                                    Some("Home directory not found".to_string());
                                 state.step = NewSessionStep::InputRepoSource;
                                 return;
                             }
                         };
 
                         // Create unique worktree path using repo name and branch
-                        let repo_name = state.repo_source
+                        let repo_name = state
+                            .repo_source
                             .as_ref()
                             .map(|s| s.display_name().replace('/', "_"))
                             .unwrap_or_else(|| "unknown".to_string());
@@ -6483,8 +6785,8 @@ impl AppState {
                                 WorktreeCollisionBehavior::AutoRename => {
                                     let mut suffix = Uuid::new_v4().to_string();
                                     suffix.truncate(8);
-                                    let mut candidate =
-                                        worktree_base.join(format!("{}-{}", base_worktree_name, suffix));
+                                    let mut candidate = worktree_base
+                                        .join(format!("{}-{}", base_worktree_name, suffix));
                                     while candidate.exists() {
                                         let mut next_suffix = Uuid::new_v4().to_string();
                                         next_suffix.truncate(8);
@@ -6548,7 +6850,8 @@ impl AppState {
                                     Ok(()) => worktree_path.clone(),
                                     Err(e) => {
                                         tracing::error!("Failed to create worktree: {}", e);
-                                        state.repo_validation_error = Some(format!("Failed to create worktree: {}", e));
+                                        state.repo_validation_error =
+                                            Some(format!("Failed to create worktree: {}", e));
                                         state.step = NewSessionStep::InputRepoSource;
                                         return;
                                     }
@@ -6577,7 +6880,8 @@ impl AppState {
                                     }
                                     Err(e) => {
                                         tracing::error!("Failed to create worktree: {}", e);
-                                        state.repo_validation_error = Some(format!("Failed to create worktree: {}", e));
+                                        state.repo_validation_error =
+                                            Some(format!("Failed to create worktree: {}", e));
                                         state.step = NewSessionStep::InputRepoSource;
                                         return;
                                     }
@@ -6631,10 +6935,10 @@ impl AppState {
                         } else {
                             None
                         },
-                        state.restart_session_id, // Pass restart session ID
-                        state.selected_agent,     // Agent type for session
+                        state.restart_session_id,  // Pass restart session ID
+                        state.selected_agent,      // Agent type for session
                         state.get_session_model(), // Model (only for Claude agent)
-                        existing_worktree,        // Existing worktree for remote repos
+                        existing_worktree,         // Existing worktree for remote repos
                         worktree_notice,
                     )
                 } else {
@@ -6869,18 +7173,21 @@ impl AppState {
         if let Ok(ref session_state) = result {
             if mode_clone == crate::models::SessionMode::Interactive {
                 if let Some(ref worktree_info) = session_state.worktree_info {
-                    info!("Creating tmux session for restarted Interactive mode session {}", session_id);
+                    info!(
+                        "Creating tmux session for restarted Interactive mode session {}",
+                        session_id
+                    );
 
                     // Send log message about tmux session creation
-                    let _ = log_sender.send("Creating tmux session for interactive mode...".to_string());
+                    let _ = log_sender
+                        .send("Creating tmux session for interactive mode...".to_string());
 
                     // Create tmux session name from session info
-                    let tmux_name = format!("tmux_{}", branch_name.replace('/', "_").replace(' ', "_"));
+                    let tmux_name =
+                        format!("tmux_{}", branch_name.replace('/', "_").replace(' ', "_"));
 
-                    let mut tmux_session = crate::tmux::TmuxSession::new(
-                        tmux_name.clone(),
-                        "claude".to_string()
-                    );
+                    let mut tmux_session =
+                        crate::tmux::TmuxSession::new(tmux_name.clone(), "claude".to_string());
                     let tmux_session_name = tmux_session.name().to_string();
 
                     // Start tmux session in the worktree directory
@@ -6896,11 +7203,13 @@ impl AppState {
                             // Store tmux session in our map
                             self.tmux_sessions.insert(session_id, tmux_session);
 
-                            let _ = log_sender.send("Tmux session created successfully!".to_string());
+                            let _ =
+                                log_sender.send("Tmux session created successfully!".to_string());
                         }
                         Err(e) => {
                             warn!("Failed to start tmux session: {}", e);
-                            let _ = log_sender.send(format!("Warning: Failed to create tmux session: {}", e));
+                            let _ = log_sender
+                                .send(format!("Warning: Failed to create tmux session: {}", e));
                             // Don't fail the whole session creation if tmux fails
                         }
                     }
@@ -6908,7 +7217,10 @@ impl AppState {
                     warn!("Session state has no worktree info, skipping tmux creation");
                 }
             } else {
-                info!("Skipping tmux creation for Boss mode session {}", session_id);
+                info!(
+                    "Skipping tmux creation for Boss mode session {}",
+                    session_id
+                );
             }
         }
 
@@ -6979,14 +7291,20 @@ impl AppState {
 
         info!(
             "Creating Interactive mode session {} for branch '{}' (skip_permissions={}, existing_worktree={})",
-            session_id, branch_name, skip_permissions, existing_worktree.is_some()
+            session_id,
+            branch_name,
+            skip_permissions,
+            existing_worktree.is_some()
         );
 
         // Create a channel for logs
         let (log_sender, mut log_receiver) = mpsc::unbounded_channel::<String>();
 
         // Initialize logs for this session
-        self.logs.insert(session_id, vec!["Starting Interactive session creation...".to_string()]);
+        self.logs.insert(
+            session_id,
+            vec!["Starting Interactive session creation...".to_string()],
+        );
 
         // Create a shared vector for logs
         let session_logs = Arc::new(Mutex::new(Vec::new()));
@@ -6999,15 +7317,15 @@ impl AppState {
                 if let Ok(mut logs) = logs_clone.lock() {
                     logs.push(log_message.clone());
                 }
-                info!("Interactive session log for {}: {}", session_id_clone, log_message);
+                info!(
+                    "Interactive session log for {}: {}",
+                    session_id_clone, log_message
+                );
             }
         });
 
-        let workspace_name = repo_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown")
-            .to_string();
+        let workspace_name =
+            repo_path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown").to_string();
 
         // Create Interactive session manager (NO Docker dependency)
         let mut manager = InteractiveSessionManager::new()?;
@@ -7066,20 +7384,20 @@ impl AppState {
                 let session = interactive_session.to_session_model();
 
                 // Find or create workspace for this repo
-                if let Some((ws_idx, workspace)) = self.workspaces.iter_mut().enumerate().find(|(_, w)| {
-                    std::path::Path::new(&w.path).canonicalize().ok()
-                        == repo_path.canonicalize().ok()
-                }) {
+                if let Some((ws_idx, workspace)) =
+                    self.workspaces.iter_mut().enumerate().find(|(_, w)| {
+                        std::path::Path::new(&w.path).canonicalize().ok()
+                            == repo_path.canonicalize().ok()
+                    })
+                {
                     workspace.sessions.push(session);
                     // Auto-select the new session so the list scrolls to show it
                     self.selected_workspace_index = Some(ws_idx);
                     self.selected_session_index = Some(workspace.sessions.len() - 1);
                 } else {
                     // Create new workspace
-                    let mut workspace = crate::models::Workspace::new(
-                        workspace_name,
-                        repo_path.to_path_buf(),
-                    );
+                    let mut workspace =
+                        crate::models::Workspace::new(workspace_name, repo_path.to_path_buf());
                     workspace.sessions.push(session);
                     self.workspaces.push(workspace);
                     // Auto-select the new workspace and session
@@ -7129,7 +7447,10 @@ impl AppState {
         let (log_sender, mut log_receiver) = mpsc::unbounded_channel::<String>();
 
         // Initialize logs for this session
-        self.logs.insert(session_id, vec!["Starting Boss session creation...".to_string()]);
+        self.logs.insert(
+            session_id,
+            vec!["Starting Boss session creation...".to_string()],
+        );
 
         // Create a shared vector for logs
         let session_logs = Arc::new(Mutex::new(Vec::new()));
@@ -7236,10 +7557,7 @@ impl AppState {
                                 );
                             } else {
                                 cleaned_up += 1;
-                                info!(
-                                    "Successfully removed orphaned container {}",
-                                    container_id
-                                );
+                                info!("Successfully removed orphaned container {}", container_id);
                             }
                         }
                     }
@@ -7260,7 +7578,10 @@ impl AppState {
                 } else {
                     // Also check if the worktree actually exists
                     if let Err(_) = worktree_manager.get_worktree_info(session.id) {
-                        info!("Found session without worktree: {} ({})", session.name, session.id);
+                        info!(
+                            "Found session without worktree: {} ({})",
+                            session.name, session.id
+                        );
                         orphaned_sessions.push(session.id);
                     }
                 }
@@ -7285,20 +7606,15 @@ impl AppState {
         // Step 3: Prune git worktrees (removes stale git references for deleted worktrees)
         info!("Pruning git worktrees to remove stale references");
         use tokio::process::Command;
-        match Command::new("git")
-            .arg("worktree")
-            .arg("prune")
-            .arg("-v")
-            .output()
-            .await
-        {
+        match Command::new("git").arg("worktree").arg("prune").arg("-v").output().await {
             Ok(output) => {
                 if output.status.success() {
                     let stdout = String::from_utf8_lossy(&output.stdout);
                     if !stdout.trim().is_empty() {
                         info!("Git worktree prune output: {}", stdout.trim());
                         // Count lines that start with "Removing" to track pruned worktrees
-                        let pruned_count = stdout.lines().filter(|line| line.contains("Removing")).count();
+                        let pruned_count =
+                            stdout.lines().filter(|line| line.contains("Removing")).count();
                         if pruned_count > 0 {
                             info!("Pruned {} stale git worktree references", pruned_count);
                             cleaned_up += pruned_count;
@@ -7343,11 +7659,11 @@ impl AppState {
         cleaned_up += shells_cleaned;
 
         if cleaned_up > 0 {
-            info!("Cleaned up {} orphaned items (containers + state + git refs + tmux shells)", cleaned_up);
-            self.add_success_notification(format!(
-                "🧹 Cleaned up {} orphaned items",
+            info!(
+                "Cleaned up {} orphaned items (containers + state + git refs + tmux shells)",
                 cleaned_up
-            ));
+            );
+            self.add_success_notification(format!("🧹 Cleaned up {} orphaned items", cleaned_up));
 
             // Reload workspaces to reflect changes
             self.load_real_workspaces().await;
@@ -7357,7 +7673,10 @@ impl AppState {
             audit::audit_orphaned_cleanup(
                 AuditTrigger::UserKeypress("Ctrl+X".to_string()),
                 AuditResult::Success,
-                format!("Cleaned up {} orphaned items (containers + state + git refs + tmux shells)", cleaned_up),
+                format!(
+                    "Cleaned up {} orphaned items (containers + state + git refs + tmux shells)",
+                    cleaned_up
+                ),
             );
         } else {
             info!("No orphaned containers or sessions found");
@@ -7405,16 +7724,15 @@ impl AppState {
             return 0;
         }
 
-        info!("Found {} orphaned tmux shell sessions to clean up", orphaned_shells.len());
+        info!(
+            "Found {} orphaned tmux shell sessions to clean up",
+            orphaned_shells.len()
+        );
         let mut killed_count = 0;
 
         for session_name in &orphaned_shells {
             info!("Killing orphaned tmux shell session: {}", session_name);
-            match Command::new("tmux")
-                .args(["kill-session", "-t", session_name])
-                .output()
-                .await
-            {
+            match Command::new("tmux").args(["kill-session", "-t", session_name]).output().await {
                 Ok(output) if output.status.success() => {
                     killed_count += 1;
                     info!("Successfully killed tmux session: {}", session_name);
@@ -7424,7 +7742,10 @@ impl AppState {
                     warn!("Failed to kill tmux session {}: {}", session_name, stderr);
                 }
                 Err(e) => {
-                    warn!("Failed to run tmux kill-session for {}: {}", session_name, e);
+                    warn!(
+                        "Failed to run tmux kill-session for {}: {}",
+                        session_name, e
+                    );
                 }
             }
         }
@@ -7459,13 +7780,14 @@ impl AppState {
                 crate::models::SessionMode::Interactive => {
                     self.delete_interactive_session(session_id).await
                 }
-                crate::models::SessionMode::Boss => {
-                    self.delete_boss_session(session_id).await
-                }
+                crate::models::SessionMode::Boss => self.delete_boss_session(session_id).await,
             }
         } else {
             // Session not found in UI, try both cleanup methods
-            warn!("Session {} not found in UI, attempting cleanup anyway", session_id);
+            warn!(
+                "Session {} not found in UI, attempting cleanup anyway",
+                session_id
+            );
 
             // Try Interactive cleanup first (no Docker needed)
             if let Err(e) = self.delete_interactive_session(session_id).await {
@@ -7532,7 +7854,10 @@ impl AppState {
         }
 
         // Use Interactive session manager to remove session
-        info!("Creating InteractiveSessionManager for session: {}", session_id);
+        info!(
+            "Creating InteractiveSessionManager for session: {}",
+            session_id
+        );
         let mut manager = InteractiveSessionManager::new()?;
         info!("Calling manager.remove_session() for: {}", session_id);
         match manager.remove_session(session_id).await {
@@ -7543,7 +7868,10 @@ impl AppState {
             }
         }
 
-        info!("=== DELETE INTERACTIVE SESSION COMPLETE: {} ===", session_id);
+        info!(
+            "=== DELETE INTERACTIVE SESSION COMPLETE: {} ===",
+            session_id
+        );
         Ok(())
     }
 
@@ -7614,7 +7942,10 @@ impl AppState {
 
     pub async fn process_async_action(&mut self) -> anyhow::Result<()> {
         if let Some(action) = self.pending_async_action.take() {
-            info!(">>> process_async_action() called with action: {:?}", action);
+            info!(
+                ">>> process_async_action() called with action: {:?}",
+                action
+            );
             match action {
                 AsyncAction::StartNewSession => {
                     self.start_new_session().await;
@@ -7674,7 +8005,10 @@ impl AppState {
                     // Refresh once after all deletions
                     self.load_real_workspaces().await;
                     if failed > 0 {
-                        self.add_warning_notification(format!("Deleted {}/{} sessions ({} failed)", deleted, total, failed));
+                        self.add_warning_notification(format!(
+                            "Deleted {}/{} sessions ({} failed)",
+                            deleted, total, failed
+                        ));
                     } else {
                         self.add_success_notification(format!("Deleted {} session(s)", deleted));
                     }
@@ -7776,7 +8110,9 @@ impl AppState {
                     info!("Executing Other tmux rename");
                     match self.confirm_other_tmux_rename().await {
                         Ok(()) => {
-                            self.add_success_notification("Session renamed successfully".to_string());
+                            self.add_success_notification(
+                                "Session renamed successfully".to_string(),
+                            );
                             self.ui_needs_refresh = true;
                         }
                         Err(e) => {
@@ -8019,8 +8355,10 @@ impl AppState {
                 // Wrap in tokio timeout
                 match tokio::time::timeout(
                     std::time::Duration::from_secs(3),
-                    tokio::task::spawn_blocking(move || child.wait_with_output())
-                ).await {
+                    tokio::task::spawn_blocking(move || child.wait_with_output()),
+                )
+                .await
+                {
                     Ok(Ok(Ok(output))) => {
                         if output.status.success() {
                             let version = String::from_utf8_lossy(&output.stdout);
@@ -8245,11 +8583,11 @@ impl AppState {
 
                     // For Idle sessions, we restart Claude within the existing tmux session
                     if let Err(e) = self.restart_claude_in_tmux(session_id).await {
-                        error!("Failed to restart Claude in tmux for session {}: {}", session_id, e);
-                        self.add_error_notification(format!(
-                            "❌ Failed to restart Claude: {}",
-                            e
-                        ));
+                        error!(
+                            "Failed to restart Claude in tmux for session {}: {}",
+                            session_id, e
+                        );
+                        self.add_error_notification(format!("❌ Failed to restart Claude: {}", e));
                     } else {
                         self.add_success_notification(
                             "✓ Claude restarted successfully".to_string(),
@@ -8490,7 +8828,7 @@ impl AppState {
     /// Update preview content for all tmux sessions (called from main update loop)
     pub async fn update_tmux_previews(&mut self) -> anyhow::Result<()> {
         use crate::tmux::ClaudeProcessDetector;
-        use crate::tmux::capture::{capture_pane, CaptureOptions};
+        use crate::tmux::capture::{CaptureOptions, capture_pane};
 
         // THROTTLE: Only update previews every 5 seconds (not every 250ms tick)
         // This prevents spawning N tmux capture-pane subprocesses per tick
@@ -8600,7 +8938,9 @@ impl AppState {
         // Update shell session preview (only the selected workspace's shell)
         let selected_workspace_idx = self.selected_workspace_index;
         if let Some(ws_idx) = selected_workspace_idx {
-            if let Some(tmux_name) = self.workspaces.get(ws_idx)
+            if let Some(tmux_name) = self
+                .workspaces
+                .get(ws_idx)
                 .and_then(|w| w.shell_session.as_ref())
                 .map(|s| s.tmux_session_name.clone())
             {
@@ -8620,7 +8960,10 @@ impl AppState {
                         }
                     }
                     Err(e) => {
-                        debug!("Failed to capture shell session content for {}: {}", tmux_name, e);
+                        debug!(
+                            "Failed to capture shell session content for {}: {}",
+                            tmux_name, e
+                        );
                     }
                 }
             }
@@ -8683,7 +9026,10 @@ impl AppState {
             session.set_status(crate::models::SessionStatus::Running);
         }
 
-        info!("Successfully sent Claude restart command to tmux session '{}'", tmux_session_name);
+        info!(
+            "Successfully sent Claude restart command to tmux session '{}'",
+            tmux_session_name
+        );
         Ok(())
     }
 
@@ -8700,7 +9046,10 @@ impl AppState {
     }
 
     /// Helper to find a mutable session by ID across all workspaces
-    fn find_session_mut(&mut self, session_id: uuid::Uuid) -> Option<&mut crate::models::session::Session> {
+    fn find_session_mut(
+        &mut self,
+        session_id: uuid::Uuid,
+    ) -> Option<&mut crate::models::session::Session> {
         for workspace in &mut self.workspaces {
             for session in &mut workspace.sessions {
                 if session.id == session_id {
@@ -8760,7 +9109,9 @@ impl App {
                         Err(e) => warn!("Failed to refresh OAuth tokens: {}", e),
                     }
                 } else {
-                    info!("Docker not available - skipping OAuth token refresh (Boss mode will require Docker)");
+                    info!(
+                        "Docker not available - skipping OAuth token refresh (Boss mode will require Docker)"
+                    );
                     // Don't show error - user might only use Interactive mode which doesn't need Docker
                 }
             }
@@ -8790,14 +9141,14 @@ impl App {
             let timeout_duration = Duration::from_secs(AppState::DOCKER_TIMEOUT_SECS);
 
             // Load workspaces with timeout
-            let load_result = tokio::time::timeout(
-                timeout_duration,
-                load_workspaces_async()
-            ).await;
+            let load_result = tokio::time::timeout(timeout_duration, load_workspaces_async()).await;
 
             let result = match load_result {
                 Ok(Ok(workspaces)) => {
-                    info!("Background workspace loading succeeded: {} workspaces", workspaces.len());
+                    info!(
+                        "Background workspace loading succeeded: {} workspaces",
+                        workspaces.len()
+                    );
                     WorkspaceLoadResult::Success(workspaces)
                 }
                 Ok(Err(e)) => {
@@ -8805,7 +9156,10 @@ impl App {
                     WorkspaceLoadResult::Error(e.to_string())
                 }
                 Err(_) => {
-                    warn!("Background workspace loading timed out after {}s", AppState::DOCKER_TIMEOUT_SECS);
+                    warn!(
+                        "Background workspace loading timed out after {}s",
+                        AppState::DOCKER_TIMEOUT_SECS
+                    );
                     WorkspaceLoadResult::Timeout
                 }
             };
@@ -8958,9 +9312,13 @@ impl App {
             tokio::spawn(async {
                 match crate::app::snapshot::SnapshotManager::take_snapshot().await {
                     Ok(snapshot) => {
-                        if let Err(e) = crate::app::snapshot::SnapshotManager::save_snapshot(&snapshot).await {
+                        if let Err(e) =
+                            crate::app::snapshot::SnapshotManager::save_snapshot(&snapshot).await
+                        {
                             tracing::warn!("Failed to save session snapshot: {}", e);
-                        } else if let Err(e) = crate::app::snapshot::SnapshotManager::prune_snapshots(48).await {
+                        } else if let Err(e) =
+                            crate::app::snapshot::SnapshotManager::prune_snapshots(48).await
+                        {
                             tracing::warn!("Failed to prune old snapshots: {}", e);
                         }
                     }
@@ -8993,12 +9351,18 @@ impl App {
 
         // Process any pending async actions
         if self.state.pending_async_action.is_some() {
-            info!(">>> tick() detected pending_async_action: {:?}", self.state.pending_async_action);
+            info!(
+                ">>> tick() detected pending_async_action: {:?}",
+                self.state.pending_async_action
+            );
         }
         match self.state.process_async_action().await {
             Ok(()) => {
                 if self.state.pending_async_action.is_some() {
-                    info!(">>> After process_async_action, still pending: {:?}", self.state.pending_async_action);
+                    info!(
+                        ">>> After process_async_action, still pending: {:?}",
+                        self.state.pending_async_action
+                    );
                 }
             }
             Err(e) => {

@@ -1,6 +1,11 @@
 // ABOUTME: Unit tests for event handling to ensure keyboard inputs map to correct app actions
 
+use ainb::app::events::AppEvent;
+use ainb::app::state::View;
 use ainb::app::{AppState, EventHandler};
+use ainb::components::usage::UsageInputMode;
+use ainb::models::{UsagePeriod, UsageProviderFilter};
+use chrono::NaiveDate;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 const fn create_key_event(code: KeyCode) -> KeyEvent {
@@ -219,4 +224,77 @@ fn test_process_help_toggle_event() {
     }
 
     assert!(state.help_visible);
+}
+
+#[tokio::test]
+async fn test_usage_period_provider_and_filters_events() {
+    let mut state = AppState::default();
+    state.current_view = View::Analytics;
+
+    let event = EventHandler::handle_key_event(create_key_event(KeyCode::Char('p')), &mut state);
+    assert!(matches!(event, Some(AppEvent::UsageCycleProviderFilter)));
+    EventHandler::process_event(event.unwrap(), &mut state);
+    assert_eq!(
+        state.usage_state.provider_filter,
+        UsageProviderFilter::Claude
+    );
+
+    let event = EventHandler::handle_key_event(create_key_event(KeyCode::Char('3')), &mut state);
+    assert!(matches!(event, Some(AppEvent::UsageSetPeriod(3))));
+    EventHandler::process_event(event.unwrap(), &mut state);
+    assert!(matches!(state.usage_state.period, UsagePeriod::ThirtyDays));
+
+    let event = EventHandler::handle_key_event(create_key_event(KeyCode::Char('/')), &mut state);
+    assert!(matches!(event, Some(AppEvent::UsageStartIncludeFilter)));
+    EventHandler::process_event(event.unwrap(), &mut state);
+    for ch in "agents".chars() {
+        let event = EventHandler::handle_key_event(create_key_event(KeyCode::Char(ch)), &mut state);
+        EventHandler::process_event(event.unwrap(), &mut state);
+    }
+    let event = EventHandler::handle_key_event(create_key_event(KeyCode::Enter), &mut state);
+    assert!(matches!(event, Some(AppEvent::UsageInputSubmit)));
+    EventHandler::process_event(event.unwrap(), &mut state);
+    assert_eq!(state.usage_state.include_projects, vec!["agents"]);
+
+    let event = EventHandler::handle_key_event(create_key_event(KeyCode::Char('x')), &mut state);
+    assert!(matches!(event, Some(AppEvent::UsageStartExcludeFilter)));
+    EventHandler::process_event(event.unwrap(), &mut state);
+    assert!(matches!(
+        state.usage_state.input_mode,
+        Some(UsageInputMode::Exclude)
+    ));
+    for ch in "scratch".chars() {
+        let event = EventHandler::handle_key_event(create_key_event(KeyCode::Char(ch)), &mut state);
+        EventHandler::process_event(event.unwrap(), &mut state);
+    }
+    let event = EventHandler::handle_key_event(create_key_event(KeyCode::Backspace), &mut state);
+    assert!(matches!(event, Some(AppEvent::UsageInputBackspace)));
+    EventHandler::process_event(event.unwrap(), &mut state);
+    let event = EventHandler::handle_key_event(create_key_event(KeyCode::Char('h')), &mut state);
+    EventHandler::process_event(event.unwrap(), &mut state);
+    let event = EventHandler::handle_key_event(create_key_event(KeyCode::Enter), &mut state);
+    EventHandler::process_event(event.unwrap(), &mut state);
+    assert_eq!(state.usage_state.exclude_projects, vec!["scratch"]);
+
+    let event = EventHandler::handle_key_event(create_key_event(KeyCode::Char('d')), &mut state);
+    assert!(matches!(event, Some(AppEvent::UsageStartDateRange)));
+    EventHandler::process_event(event.unwrap(), &mut state);
+    for ch in "2026-04-01..2026-04-10".chars() {
+        let event = EventHandler::handle_key_event(create_key_event(KeyCode::Char(ch)), &mut state);
+        EventHandler::process_event(event.unwrap(), &mut state);
+    }
+    let event = EventHandler::handle_key_event(create_key_event(KeyCode::Enter), &mut state);
+    EventHandler::process_event(event.unwrap(), &mut state);
+    assert!(matches!(
+        state.usage_state.period,
+        UsagePeriod::Custom { from, to }
+            if from == NaiveDate::from_ymd_opt(2026, 4, 1).unwrap()
+                && to == NaiveDate::from_ymd_opt(2026, 4, 10).unwrap()
+    ));
+
+    let event = EventHandler::handle_key_event(create_key_event(KeyCode::Char('c')), &mut state);
+    assert!(matches!(event, Some(AppEvent::UsageClearFilters)));
+    EventHandler::process_event(event.unwrap(), &mut state);
+    assert!(state.usage_state.include_projects.is_empty());
+    assert!(state.usage_state.exclude_projects.is_empty());
 }

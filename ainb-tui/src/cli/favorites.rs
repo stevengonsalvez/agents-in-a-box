@@ -95,14 +95,17 @@ fn cmd_list(format: OutputFormat) -> Result<()> {
 
     match format {
         OutputFormat::Json => {
-            let entries: Vec<FavoriteJson<'_>> = sorted.iter().map(|f| FavoriteJson::from(*f)).collect();
-            let json =
-                serde_json::to_string_pretty(&entries).context("Failed to serialize favorites as JSON")?;
+            let entries: Vec<FavoriteJson<'_>> =
+                sorted.iter().map(|f| FavoriteJson::from(*f)).collect();
+            let json = serde_json::to_string_pretty(&entries)
+                .context("Failed to serialize favorites as JSON")?;
             println!("{json}");
         }
-        OutputFormat::Text => {
+        OutputFormat::Text | OutputFormat::Csv => {
             if sorted.is_empty() {
-                println!("No favorites yet. Add one with 'ainb favorites add <source> --alias <name>'.");
+                println!(
+                    "No favorites yet. Add one with 'ainb favorites add <source> --alias <name>'."
+                );
                 return Ok(());
             }
 
@@ -116,11 +119,8 @@ fn cmd_list(format: OutputFormat) -> Result<()> {
                     format!(" [{}]", fav.tags.join(", "))
                 };
 
-                let desc = fav
-                    .description
-                    .as_deref()
-                    .map(|d| format!(" — {d}"))
-                    .unwrap_or_default();
+                let desc =
+                    fav.description.as_deref().map(|d| format!(" — {d}")).unwrap_or_default();
 
                 println!(
                     "  {alias} ({kind})  uses={count}{tags}",
@@ -157,9 +157,7 @@ fn cmd_add(source: &str, alias: &str, description: Option<&str>, tags: Option<&s
     fav.description = description.map(str::to_string);
     fav.tags = parse_tags(tags);
 
-    store
-        .add(fav)
-        .map_err(|e| anyhow!("Failed to add favorite '{alias}': {e}"))?;
+    store.add(fav).map_err(|e| anyhow!("Failed to add favorite '{alias}': {e}"))?;
 
     store.save().context("Failed to save favorites store")?;
 
@@ -242,7 +240,11 @@ fn is_github_shorthand(input: &str) -> bool {
     if input.contains(char::is_whitespace) {
         return false;
     }
-    if input.contains("://") || input.starts_with('/') || input.starts_with('.') || input.starts_with('~') {
+    if input.contains("://")
+        || input.starts_with('/')
+        || input.starts_with('.')
+        || input.starts_with('~')
+    {
         return false;
     }
 
@@ -306,7 +308,10 @@ mod tests {
             detect_source_type("anthropics/claude-code"),
             SourceType::GithubShorthand
         );
-        assert_eq!(detect_source_type("rust-lang/rust"), SourceType::GithubShorthand);
+        assert_eq!(
+            detect_source_type("rust-lang/rust"),
+            SourceType::GithubShorthand
+        );
     }
 
     #[test]
@@ -328,10 +333,7 @@ mod tests {
     #[test]
     fn test_detect_three_segments_not_shorthand() {
         // Three slashes is not GitHub shorthand. Falls through to local path.
-        assert_eq!(
-            detect_source_type("a/b/c"),
-            SourceType::LocalPath
-        );
+        assert_eq!(detect_source_type("a/b/c"), SourceType::LocalPath);
     }
 
     #[test]
@@ -374,7 +376,11 @@ mod tests {
     fn test_parse_tags_multiple_with_whitespace() {
         assert_eq!(
             parse_tags(Some("frontend, react ,  ui")),
-            vec!["frontend".to_string(), "react".to_string(), "ui".to_string()]
+            vec![
+                "frontend".to_string(),
+                "react".to_string(),
+                "ui".to_string()
+            ]
         );
     }
 

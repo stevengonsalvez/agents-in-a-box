@@ -1,7 +1,7 @@
 // ABOUTME: Unit tests for AppState to ensure navigation and state management work correctly
 
 use ainb::app::AppState;
-use ainb::models::{Session, SessionStatus, Workspace};
+use ainb::models::{Session, SessionStatus, UsagePeriod, UsageProviderFilter, Workspace};
 use std::path::PathBuf;
 
 fn create_test_state() -> AppState {
@@ -157,4 +157,26 @@ fn test_navigation_with_empty_workspace() {
 
     state.previous_session();
     assert_eq!(state.selected_session_index, None);
+}
+
+#[test]
+fn test_usage_query_reflects_selected_controls() {
+    let mut state = AppState::default();
+    state.usage_state.period = UsagePeriod::Month;
+    state.usage_state.provider_filter = UsageProviderFilter::Codex;
+    state.usage_state.include_projects = vec!["agents".to_string()];
+    state.usage_state.exclude_projects = vec!["scratch".to_string()];
+
+    let query = state.usage_state.query();
+    assert!(matches!(query.period, UsagePeriod::Month));
+    assert_eq!(query.provider_filter, UsageProviderFilter::Codex);
+    assert_eq!(query.include_projects, vec!["agents"]);
+    assert_eq!(query.exclude_projects, vec!["scratch"]);
+}
+
+#[tokio::test]
+async fn test_usage_duplicate_loads_are_coalesced() {
+    let mut state = AppState::default();
+    assert!(state.start_background_usage_load(true));
+    assert!(!state.start_background_usage_load(true));
 }

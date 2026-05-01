@@ -6,18 +6,19 @@
 // - Viewing session output (logs)
 // - Launching TUI (tui, default)
 
-pub mod run;
+pub mod attach;
+pub mod config_cmd;
+pub mod favorites;
+pub mod git_cmd;
+pub mod init;
 pub mod list;
 pub mod logs;
-pub mod attach;
-pub mod status;
-pub mod util;
-pub mod recover;
-pub mod config_cmd;
-pub mod git_cmd;
-pub mod favorites;
-pub mod init;
 pub mod presets;
+pub mod recover;
+pub mod run;
+pub mod status;
+pub mod usage;
+pub mod util;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
@@ -77,6 +78,7 @@ pub enum OutputFormat {
     #[default]
     Text,
     Json,
+    Csv,
 }
 
 /// Available CLI commands
@@ -137,6 +139,12 @@ pub enum Commands {
     Presets {
         #[command(subcommand)]
         command: presets::PresetsCommands,
+    },
+
+    /// Usage analytics, reports, export, and optimization
+    Usage {
+        #[command(subcommand)]
+        command: usage::UsageCommands,
     },
 
     /// Generate shell completions (bash, zsh, fish, powershell, elvish)

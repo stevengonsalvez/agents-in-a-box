@@ -52,9 +52,7 @@ pub async fn execute(args: StatusArgs, format: OutputFormat) -> Result<()> {
     // Check if Claude is active in the session
     let claude_active = if is_running {
         let detector = ClaudeProcessDetector::new();
-        detector
-            .is_claude_running(&session.tmux_session_name)
-            .unwrap_or(false)
+        detector.is_claude_running(&session.tmux_session_name).unwrap_or(false)
     } else {
         false
     };
@@ -75,7 +73,7 @@ pub async fn execute(args: StatusArgs, format: OutputFormat) -> Result<()> {
                 serde_json::to_string_pretty(&output).context("Failed to serialize status")?
             );
         }
-        OutputFormat::Text => {
+        OutputFormat::Text | OutputFormat::Csv => {
             let status_text = if is_running {
                 if claude_active {
                     "\x1b[32m●\x1b[0m Running (Claude active)"
@@ -94,7 +92,10 @@ pub async fn execute(args: StatusArgs, format: OutputFormat) -> Result<()> {
             println!("Status:       {status_text}");
             println!("Tmux:         {}", session.tmux_session_name);
             println!("Worktree:     {}", session.worktree_path.display());
-            println!("Created:      {}", session.created_at.format("%Y-%m-%d %H:%M:%S UTC"));
+            println!(
+                "Created:      {}",
+                session.created_at.format("%Y-%m-%d %H:%M:%S UTC")
+            );
             println!();
             println!("Commands:");
             println!("  Attach:     ainb attach {short_id}");
@@ -160,10 +161,7 @@ pub async fn kill(args: KillArgs) -> Result<()> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        eprintln!(
-            "Warning: tmux kill-session failed: {}",
-            stderr.trim()
-        );
+        eprintln!("Warning: tmux kill-session failed: {}", stderr.trim());
         // Continue anyway - might already be dead
     } else {
         println!("Tmux session killed.");
@@ -182,7 +180,10 @@ pub async fn kill(args: KillArgs) -> Result<()> {
         "\nNote: Worktree at '{}' was not removed.",
         session.worktree_path.display()
     );
-    println!("To clean up, run: rm -rf {}", session.worktree_path.display());
+    println!(
+        "To clean up, run: rm -rf {}",
+        session.worktree_path.display()
+    );
 
     Ok(())
 }
@@ -190,9 +191,9 @@ pub async fn kill(args: KillArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
     use crate::interactive::session_manager::SessionMetadata;
     use crate::models::session::SessionAgentType;
+    use chrono::Utc;
     use std::path::PathBuf;
     use uuid::Uuid;
 

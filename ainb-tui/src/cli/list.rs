@@ -48,7 +48,11 @@ pub struct SessionInfo {
 impl SessionInfo {
     /// Create `SessionInfo` from metadata and status
     #[must_use]
-    pub fn from_metadata(metadata: &SessionMetadata, is_running: bool, claude_active: bool) -> Self {
+    pub fn from_metadata(
+        metadata: &SessionMetadata,
+        is_running: bool,
+        claude_active: bool,
+    ) -> Self {
         Self {
             session_id: metadata.session_id.to_string(),
             tmux_session_name: metadata.tmux_session_name.clone(),
@@ -79,7 +83,7 @@ pub async fn execute(args: ListArgs, format: OutputFormat) -> Result<()> {
 
     match format {
         OutputFormat::Json => output_json(&sessions)?,
-        OutputFormat::Text => output_text(&sessions),
+        OutputFormat::Text | OutputFormat::Csv => output_text(&sessions),
     }
 
     Ok(())
@@ -136,7 +140,10 @@ fn output_text(sessions: &[SessionInfo]) {
     }
 
     // Print header
-    println!("{:<36} {:<25} {:<10} TMUX SESSION", "ID", "WORKSPACE", "STATUS");
+    println!(
+        "{:<36} {:<25} {:<10} TMUX SESSION",
+        "ID", "WORKSPACE", "STATUS"
+    );
     let separator = "-".repeat(100);
     println!("{separator}");
 
@@ -146,7 +153,10 @@ fn output_text(sessions: &[SessionInfo]) {
         let workspace = truncate(&session.workspace_name, 25);
         println!(
             "{:<36} {:<25} {:<10} {}",
-            session.session_id, workspace, status.icon(), session.tmux_session_name
+            session.session_id,
+            workspace,
+            status.icon(),
+            session.tmux_session_name
         );
     }
 }

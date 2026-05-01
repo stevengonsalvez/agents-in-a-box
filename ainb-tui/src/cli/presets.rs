@@ -98,11 +98,15 @@ fn cmd_list(format: OutputFormat) -> Result<()> {
                 .context("Failed to serialize presets as JSON")?;
             println!("{json}");
         }
-        OutputFormat::Text => {
+        OutputFormat::Text | OutputFormat::Csv => {
             println!("Available presets:");
             println!("{}", "\u{2501}".repeat(60));
             for entry in &entries {
-                let marker = if entry.builtin { "[built-in]" } else { "[custom]  " };
+                let marker = if entry.builtin {
+                    "[built-in]"
+                } else {
+                    "[custom]  "
+                };
                 println!(
                     "  {marker} {}  ({}/{})",
                     entry.name, entry.provider, entry.model
@@ -131,11 +135,8 @@ fn build_list_entries(manager: &PresetManager) -> Vec<PresetListEntry> {
         entries.push(to_list_entry(&preset, true));
     }
 
-    let mut customs: Vec<&RepositoryPreset> = manager
-        .all()
-        .into_iter()
-        .filter(|p| !seen.contains(&p.name))
-        .collect();
+    let mut customs: Vec<&RepositoryPreset> =
+        manager.all().into_iter().filter(|p| !seen.contains(&p.name)).collect();
     customs.sort_by(|a, b| a.name.cmp(&b.name));
     for preset in customs {
         entries.push(to_list_entry(preset, false));
@@ -170,7 +171,7 @@ fn cmd_show(name: &str, format: OutputFormat) -> Result<()> {
             });
             println!("{}", serde_json::to_string_pretty(&wrapper)?);
         }
-        OutputFormat::Text => {
+        OutputFormat::Text | OutputFormat::Csv => {
             println!("{}", format_preset_text(&preset, builtin));
         }
     }
@@ -260,9 +261,7 @@ fn cmd_create(
     }
 
     let preset = build_new_preset(name, provider, model, description);
-    manager
-        .save_preset(&preset)
-        .context("Failed to save new preset")?;
+    manager.save_preset(&preset).context("Failed to save new preset")?;
 
     println!("Created preset '{name}'");
     println!("  Provider: {}", preset.agent_provider);
@@ -365,10 +364,7 @@ mod tests {
 
     #[test]
     fn test_default_presets_contain_expected_names() {
-        let names: Vec<String> = create_default_presets()
-            .into_iter()
-            .map(|p| p.name)
-            .collect();
+        let names: Vec<String> = create_default_presets().into_iter().map(|p| p.name).collect();
         assert!(names.contains(&"rust-backend".to_string()));
         assert!(names.contains(&"typescript-frontend".to_string()));
         assert!(names.contains(&"fast-iteration".to_string()));
@@ -419,10 +415,8 @@ mod tests {
     #[test]
     fn test_apply_preset_round_trip_via_load_repo_preset() {
         let dir = tempdir().unwrap();
-        let original = create_default_presets()
-            .into_iter()
-            .find(|p| p.name == "rust-backend")
-            .unwrap();
+        let original =
+            create_default_presets().into_iter().find(|p| p.name == "rust-backend").unwrap();
 
         apply_preset_to_dir(&original, dir.path()).unwrap();
 
@@ -433,7 +427,10 @@ mod tests {
         assert_eq!(loaded.agent_provider, original.agent_provider);
         assert_eq!(loaded.agent_model, original.agent_model);
         assert_eq!(loaded.skills, original.skills);
-        assert_eq!(loaded.permissions.file_write, original.permissions.file_write);
+        assert_eq!(
+            loaded.permissions.file_write,
+            original.permissions.file_write
+        );
     }
 
     #[test]
@@ -467,10 +464,8 @@ mod tests {
 
     #[test]
     fn test_format_preset_text_mentions_builtin_tag() {
-        let preset = create_default_presets()
-            .into_iter()
-            .find(|p| p.name == "rust-backend")
-            .unwrap();
+        let preset =
+            create_default_presets().into_iter().find(|p| p.name == "rust-backend").unwrap();
         let text = format_preset_text(&preset, true);
         assert!(text.contains("rust-backend"));
         assert!(text.contains("built-in"));
