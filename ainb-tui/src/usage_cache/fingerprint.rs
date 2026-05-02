@@ -85,6 +85,8 @@ pub enum FingerprintAction {
 /// * Same `size_bytes` and same suffix hash → `Unchanged`. mtime is
 ///   ignored to tolerate sync tools that bump mtime without altering bytes,
 ///   and clock skew that makes mtime appear to regress.
+/// * Same `size_bytes` but different suffix → `FullReparse`. The trailing
+///   bytes were rewritten in place; we can't trust any prior offset.
 /// * Size shrank → `FullReparse`. JSONL is append-only; truncation means
 ///   the file was rewritten and prior offsets are meaningless.
 /// * Size grew → tentative `Append`. The byte-equality verification of the
@@ -94,8 +96,11 @@ pub fn classify(
     current: &FileFingerprint,
     prior_offset: u64,
 ) -> FingerprintAction {
-    if prior.size_bytes == current.size_bytes && prior.suffix_blake3 == current.suffix_blake3 {
-        return FingerprintAction::Unchanged;
+    if prior.size_bytes == current.size_bytes {
+        if prior.suffix_blake3 == current.suffix_blake3 {
+            return FingerprintAction::Unchanged;
+        }
+        return FingerprintAction::FullReparse;
     }
 
     if current.size_bytes < prior.size_bytes {
@@ -108,22 +113,24 @@ pub fn classify(
 }
 
 /// Verify that, given a candidate `Append` action, the bytes that *were*
-/// present at `prior_size_bytes - SUFFIX_HASH_BYTES .. prior_size_bytes` in
-/// the prior parse still hash to `prior_suffix_blake3` in the current file.
+/// present at `prior_offset_bytes - SUFFIX_HASH_BYTES .. prior_offset_bytes`
+/// in the prior parse still hash to `prior_suffix_blake3` in the current
+/// file. `prior_offset_bytes` is the byte position where the previous parse
+/// stopped — equal to the file size at that time (JSONL is append-only).
 ///
 /// Returns `true` if append is safe; `false` means the prior tail was
 /// rewritten and the caller must downgrade to `FullReparse`.
 pub fn verify_append_safe(
     file: &mut File,
-    prior_size_bytes: u64,
+    prior_offset_bytes: u64,
     prior_suffix_blake3: &[u8; 32],
 ) -> Result<bool, CacheError> {
-    if prior_size_bytes == 0 {
+    if prior_offset_bytes == 0 {
         return Ok(true);
     }
 
-    let window = SUFFIX_HASH_BYTES.min(prior_size_bytes);
-    let start = prior_size_bytes - window;
+    let window = SUFFIX_HASH_BYTES.min(prior_offset_bytes);
+    let start = prior_offset_bytes - window;
     file.seek(SeekFrom::Start(start)).map_err(CacheError::Io)?;
     let mut buf = vec![0u8; window as usize];
     file.read_exact(&mut buf).map_err(CacheError::Io)?;
