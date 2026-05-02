@@ -1004,7 +1004,7 @@ fn render_burndown_header(frame: &mut Frame, area: Rect, data: &UsageData, perio
 fn render_period_row(frame: &mut Frame, area: Rect, state: &UsageViewState) {
     let text = Line::from(vec![
         Span::styled(
-            "[1 Today]  [2 7d]  [3 30d]  [4 Month]  [5 All]  [d Custom]  [/] filter  [x] exclude  [r] reload",
+            "[1 Today]  [2 7d]  [3 30d]  [4 Month]  [5 All]  [d Custom]  [/] filter  [x] exclude  [r] reload  [R] force refresh",
             Style::default().fg(MUTED_GRAY),
         ),
         Span::styled("   Active: ", Style::default().fg(MUTED_GRAY)),

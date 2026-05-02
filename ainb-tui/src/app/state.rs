@@ -3458,6 +3458,17 @@ impl AppState {
     /// The parse walks ~1GB of jsonl files; keeping it off the event thread
     /// is what prevents the Stats/Usage screen from hanging on provider switch.
     pub fn start_background_usage_load(&mut self, force: bool) -> bool {
+        self.start_background_usage_load_with_options(force, false)
+    }
+
+    /// Variant with explicit cache control. `bypass_cache = true` clears the
+    /// persistent usage cache before parsing — used by `Shift+R` (force
+    /// refresh) and the CLI `--no-cache` flag.
+    pub fn start_background_usage_load_with_options(
+        &mut self,
+        force: bool,
+        bypass_cache: bool,
+    ) -> bool {
         if self.usage_load_receiver.is_some() {
             return false;
         }
@@ -3469,8 +3480,15 @@ impl AppState {
         self.usage_state.loading = true;
         let query = self.usage_state.query();
         tokio::spawn(async move {
-            match tokio::task::spawn_blocking(move || crate::models::usage::parse_usage_for(query))
-                .await
+            match tokio::task::spawn_blocking(move || {
+                if bypass_cache {
+                    if let Err(err) = crate::models::usage::shared_cache().clear() {
+                        warn!("Usage cache clear failed during force-refresh: {err}");
+                    }
+                }
+                crate::models::usage::parse_usage_for(query)
+            })
+            .await
             {
                 Ok(data) => {
                     let _ = tx.send(data);
