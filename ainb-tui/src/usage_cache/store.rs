@@ -105,6 +105,7 @@ impl Cache {
     }
 
     /// On-disk path of the cache DB.
+    #[allow(dead_code)]
     pub fn db_path(&self) -> &Path {
         &self.db_path
     }

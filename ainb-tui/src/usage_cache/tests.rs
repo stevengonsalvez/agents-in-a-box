@@ -1,8 +1,288 @@
 // ABOUTME: Unit tests for the usage_cache module — fingerprinting, schema
-// migration, and the store get_or_parse contract. Integration tests that
-// exercise the parser callbacks end-to-end live in
-// tests/usage_cache_integration.rs.
+// migration, and basic store get_or_parse semantics. End-to-end parser
+// integration lives in tests/usage_cache_integration.rs.
 
 #![cfg(test)]
 
-// (Tests added in the dedicated test commit.)
+use std::fs;
+use std::io::Write;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use tempfile::TempDir;
+
+use rusqlite::Connection;
+
+use crate::models::usage::ProviderCall;
+use crate::usage_cache::db::SCHEMA_VERSION;
+use crate::usage_cache::fingerprint::{
+    classify, verify_append_safe, FileFingerprint, FingerprintAction, SUFFIX_HASH_BYTES,
+};
+use crate::usage_cache::store::{Cache, ParseHint, ParseResult};
+
+fn write_file(dir: &TempDir, name: &str, contents: &[u8]) -> PathBuf {
+    let path = dir.path().join(name);
+    let mut f = fs::File::create(&path).unwrap();
+    f.write_all(contents).unwrap();
+    path
+}
+
+fn synth_call(seed: &str) -> ProviderCall {
+    use chrono::TimeZone;
+    ProviderCall {
+        provider: "claude".into(),
+        model: "test-model".into(),
+        session_id: format!("session-{seed}"),
+        project: "p".into(),
+        project_path: "/tmp/p".into(),
+        timestamp: chrono::Local.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap(),
+        input_tokens: 1,
+        cache_creation_tokens: 0,
+        cache_read_tokens: 0,
+        output_tokens: 1,
+        reasoning_tokens: 0,
+        cost_usd: None,
+        tools: Vec::new(),
+        bash_commands: Vec::new(),
+        user_message: String::new(),
+    }
+}
+
+#[test]
+fn schema_open_creates_files_table_and_records_version() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("usage.db");
+    let cache = Cache::open(db.clone()).unwrap();
+    drop(cache);
+
+    let conn = Connection::open(&db).unwrap();
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
+    let v: i64 = conn
+        .query_row("SELECT version FROM schema_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(v, SCHEMA_VERSION);
+}
+
+#[test]
+fn schema_bump_drops_and_rebuilds() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("usage.db");
+
+    // Hand-craft an "old" DB at version 0 with an unrelated table to prove
+    // the rebuild wipes things.
+    {
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+             INSERT INTO schema_version VALUES (0);
+             CREATE TABLE files (path TEXT PRIMARY KEY, junk TEXT);
+             INSERT INTO files VALUES ('legacy', 'should be wiped');",
+        )
+        .unwrap();
+    }
+
+    let _cache = Cache::open(db.clone()).unwrap();
+    let conn = Connection::open(&db).unwrap();
+    let v: i64 = conn
+        .query_row("SELECT version FROM schema_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(v, SCHEMA_VERSION);
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 0, "legacy row must not survive a schema bump");
+}
+
+#[test]
+fn fingerprint_unchanged_when_size_and_suffix_match() {
+    let prior = FileFingerprint {
+        size_bytes: 100,
+        mtime_nanos: 1_000,
+        suffix_blake3: [0xAB; 32],
+    };
+    let current = FileFingerprint {
+        size_bytes: 100,
+        mtime_nanos: 2_000, // mtime changed but size + suffix identical
+        suffix_blake3: [0xAB; 32],
+    };
+    assert_eq!(classify(&prior, &current, 100), FingerprintAction::Unchanged);
+}
+
+#[test]
+fn fingerprint_truncate_forces_full_reparse() {
+    let prior = FileFingerprint {
+        size_bytes: 100,
+        mtime_nanos: 1_000,
+        suffix_blake3: [0xAB; 32],
+    };
+    let current = FileFingerprint {
+        size_bytes: 50,
+        mtime_nanos: 2_000,
+        suffix_blake3: [0xCD; 32],
+    };
+    assert_eq!(classify(&prior, &current, 100), FingerprintAction::FullReparse);
+}
+
+#[test]
+fn fingerprint_growth_signals_append() {
+    let prior = FileFingerprint {
+        size_bytes: 100,
+        mtime_nanos: 1_000,
+        suffix_blake3: [0xAB; 32],
+    };
+    let current = FileFingerprint {
+        size_bytes: 200,
+        mtime_nanos: 2_000,
+        suffix_blake3: [0xEF; 32],
+    };
+    assert_eq!(
+        classify(&prior, &current, 100),
+        FingerprintAction::Append { from_offset: 100 }
+    );
+}
+
+#[test]
+fn verify_append_safe_detects_in_place_rewrite() {
+    let dir = TempDir::new().unwrap();
+    // Original tail bytes:
+    let original = b"hello-world".repeat(10); // ~110 bytes
+    let path = write_file(&dir, "f.jsonl", &original);
+    let prior_size = original.len() as u64;
+    let prior_window = SUFFIX_HASH_BYTES.min(prior_size) as usize;
+    let prior_suffix = blake3::hash(&original[(original.len() - prior_window)..]);
+
+    // Rewrite the file in-place with different content same length, then
+    // append more bytes.
+    let mut rewritten = b"GOODBYE-WORLD".repeat(10);
+    rewritten.truncate(original.len());
+    rewritten.extend_from_slice(b"new-tail-bytes");
+    fs::write(&path, &rewritten).unwrap();
+
+    let mut handle = fs::File::open(&path).unwrap();
+    let safe = verify_append_safe(&mut handle, prior_size, prior_suffix.as_bytes()).unwrap();
+    assert!(!safe, "in-place rewrite must be detected");
+}
+
+#[test]
+fn cache_disabled_skips_all_writes() {
+    let dir = TempDir::new().unwrap();
+    let path = write_file(&dir, "f.jsonl", b"line\n");
+    let cache = Cache::disabled();
+
+    let calls_emitted = Arc::new(AtomicUsize::new(0));
+    let counter = calls_emitted.clone();
+    let result = cache.get_or_parse(&path, |_p, hint| {
+        counter.fetch_add(1, Ordering::SeqCst);
+        assert!(matches!(hint, ParseHint::Full));
+        ParseResult {
+            calls: vec![synth_call("a")],
+            end_offset: 5,
+        }
+    });
+    assert_eq!(result.len(), 1);
+    assert_eq!(calls_emitted.load(Ordering::SeqCst), 1);
+
+    // Run again — disabled cache means we still fall through to parse.
+    let _ = cache.get_or_parse(&path, |_p, _hint| ParseResult {
+        calls: vec![synth_call("b")],
+        end_offset: 5,
+    });
+    assert!(!cache.is_enabled());
+}
+
+#[test]
+fn cache_first_scan_then_unchanged_serves_from_cache() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("usage.db");
+    let path = write_file(&dir, "f.jsonl", b"line1\nline2\n");
+    let cache = Cache::open(db).unwrap();
+
+    let parses = Arc::new(AtomicUsize::new(0));
+
+    // First scan → parse called.
+    let counter = parses.clone();
+    let r1 = cache.get_or_parse(&path, |_p, hint| {
+        assert!(matches!(hint, ParseHint::Full));
+        counter.fetch_add(1, Ordering::SeqCst);
+        ParseResult {
+            calls: vec![synth_call("first")],
+            end_offset: 12,
+        }
+    });
+    assert_eq!(r1.len(), 1);
+    assert_eq!(parses.load(Ordering::SeqCst), 1);
+
+    // Second scan → cache hit; closure must not run.
+    let counter = parses.clone();
+    let r2 = cache.get_or_parse(&path, |_p, _hint| {
+        counter.fetch_add(1, Ordering::SeqCst);
+        ParseResult {
+            calls: Vec::new(),
+            end_offset: 0,
+        }
+    });
+    assert_eq!(r2.len(), 1);
+    assert_eq!(
+        parses.load(Ordering::SeqCst),
+        1,
+        "unchanged file must not re-invoke parser"
+    );
+}
+
+#[test]
+fn concurrent_get_or_parse_does_not_deadlock() {
+    use std::thread;
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("usage.db");
+    let path = write_file(&dir, "f.jsonl", b"line1\nline2\n");
+    let cache = Arc::new(Cache::open(db).unwrap());
+
+    let handles: Vec<_> = (0..4)
+        .map(|i| {
+            let cache = cache.clone();
+            let path = path.clone();
+            thread::spawn(move || {
+                let r = cache.get_or_parse(&path, |_p, _h| ParseResult {
+                    calls: vec![synth_call(&format!("t{i}"))],
+                    end_offset: 12,
+                });
+                assert_eq!(r.len(), 1);
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
+    let info = cache.info().unwrap();
+    assert_eq!(info.file_count, 1, "single PK row regardless of contention");
+}
+
+#[test]
+fn cache_clear_drops_rows_but_preserves_schema() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("usage.db");
+    let path = write_file(&dir, "f.jsonl", b"line\n");
+    let cache = Cache::open(db.clone()).unwrap();
+
+    cache.get_or_parse(&path, |_p, _h| ParseResult {
+        calls: vec![synth_call("x")],
+        end_offset: 5,
+    });
+
+    let before = cache.info().unwrap();
+    assert_eq!(before.file_count, 1);
+
+    cache.clear().unwrap();
+    let after = cache.info().unwrap();
+    assert_eq!(after.file_count, 0);
+
+    // Schema row still present.
+    let conn = Connection::open(&db).unwrap();
+    let v: i64 = conn
+        .query_row("SELECT version FROM schema_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(v, SCHEMA_VERSION);
+}

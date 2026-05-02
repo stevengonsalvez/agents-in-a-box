@@ -28,6 +28,7 @@ pub struct FileFingerprint {
 
 impl FileFingerprint {
     /// Compute a fresh fingerprint for `path`.
+    #[allow(dead_code)]
     pub fn from_path(path: &Path) -> Result<Self, CacheError> {
         let mut file = File::open(path).map_err(CacheError::Io)?;
         let meta = file.metadata().map_err(CacheError::Io)?;
