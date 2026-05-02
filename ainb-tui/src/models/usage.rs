@@ -139,6 +139,21 @@ impl TokenBucket {
 ///
 /// `Deserialize` is required for bincode round-trip in the persistent
 /// usage cache (`usage_cache::store`).
+///
+/// **WARNING — bincode layout stability.** Bincode v1 with default options
+/// encodes positionally with no field tags. Any change to the field set or
+/// order of this struct (or any nested type it owns) silently invalidates
+/// every cached blob written under the current `BLOB_FORMAT_BINCODE_V1`.
+/// Wrong-shape decodes can either panic (caught — falls through to a full
+/// re-parse) or, much worse, succeed with mis-aligned bytes and return
+/// wrong analytics from the cache.
+///
+/// **If you change this struct or any nested type, you MUST:**
+/// 1. Bump `usage_cache::db::BLOB_FORMAT_BINCODE_V1` to a new value, and
+/// 2. Update the layout-stability tripwire test in `usage_cache::tests`.
+///
+/// The tripwire test asserts a fixed serialized byte length for a known
+/// fixture and will fail CI if the layout drifts without an explicit bump.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderCall {
