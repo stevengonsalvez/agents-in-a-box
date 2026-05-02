@@ -3482,11 +3482,25 @@ impl AppState {
         tokio::spawn(async move {
             match tokio::task::spawn_blocking(move || {
                 if bypass_cache {
-                    if let Err(err) = crate::models::usage::shared_cache().clear() {
-                        warn!("Usage cache clear failed during force-refresh: {err}");
+                    // Wipe persisted rows so future runs start fresh, but
+                    // also bypass the singleton for THIS parse — clear()
+                    // failure (locked DB, IO error) must not silently
+                    // degrade force-refresh into a regular cached refresh.
+                    let clear_failed = crate::models::usage::shared_cache().clear().is_err();
+                    if clear_failed {
+                        warn!(
+                            "Usage cache clear failed during force-refresh; \
+                             parsing with disabled cache to honour bypass"
+                        );
                     }
+                    crate::models::usage::parse_usage_for_with_roots_and_cache(
+                        query,
+                        &crate::models::usage::UsageSourceRoots::default(),
+                        crate::models::usage::disabled_cache(),
+                    )
+                } else {
+                    crate::models::usage::parse_usage_for(query)
                 }
-                crate::models::usage::parse_usage_for(query)
             })
             .await
             {
