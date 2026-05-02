@@ -1811,6 +1811,8 @@ fn render_help_bar(frame: &mut Frame, area: Rect) {
         Span::styled(" top/bottom  ", Style::default().fg(MUTED_GRAY)),
         Span::styled("r", Style::default().fg(GOLD)),
         Span::styled(" refresh  ", Style::default().fg(MUTED_GRAY)),
+        Span::styled("R", Style::default().fg(GOLD)),
+        Span::styled(" force refresh  ", Style::default().fg(MUTED_GRAY)),
         Span::styled("Esc", Style::default().fg(GOLD)),
         Span::styled(" back", Style::default().fg(MUTED_GRAY)),
     ];
