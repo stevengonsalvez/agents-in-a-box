@@ -237,6 +237,7 @@ impl Cache {
     }
 
     /// Drop a single cache row by path.
+    #[allow(dead_code)]
     pub fn clear_path(&self, path: &Path) -> Result<(), CacheError> {
         let CacheInner::Open(conn) = &self.inner else {
             return Ok(());
