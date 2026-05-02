@@ -13,9 +13,11 @@
 //! * [`store::default_db_path`] — resolve the standard cache location.
 
 pub mod db;
+pub mod fingerprint;
 pub mod store;
 
 #[cfg(test)]
 mod tests;
 
-pub use store::{BlobFormat, Cache, CacheError, CacheInfo};
+pub use fingerprint::{FileFingerprint, FingerprintAction, SUFFIX_HASH_BYTES};
+pub use store::{BlobFormat, Cache, CacheError, CacheInfo, ParseHint, ParseResult};

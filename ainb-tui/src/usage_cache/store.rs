@@ -8,6 +8,8 @@
 //! `get_or_parse` is added in the next commit together with
 //! [`super::fingerprint`].
 
+use std::fs::File;
+use std::io::Seek;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
@@ -15,7 +17,10 @@ use std::time::SystemTime;
 use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 
+use crate::models::usage::ProviderCall;
+
 use super::db;
+use super::fingerprint::{FileFingerprint, FingerprintAction, classify, verify_append_safe};
 
 /// Versioned blob encoding for `files.calls_blob`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +109,123 @@ impl Cache {
         &self.db_path
     }
 
+    /// Get cached calls for `path` if the file is unchanged; otherwise call
+    /// `parse` with the appropriate [`ParseHint`] and persist the result.
+    ///
+    /// On any cache error we fall back to a full parse with `ParseHint::Full`
+    /// — the cache is never allowed to break analytics.
+    pub fn get_or_parse<F>(&self, path: &Path, mut parse: F) -> Vec<ProviderCall>
+    where
+        F: FnMut(&Path, ParseHint<'_>) -> ParseResult,
+    {
+        match self.try_get_or_parse(path, &mut parse) {
+            Ok(calls) => calls,
+            Err(err) => {
+                tracing::warn!(
+                    "usage_cache fallback to full re-parse for {:?}: {err}",
+                    path
+                );
+                parse(path, ParseHint::Full).calls
+            }
+        }
+    }
+
+    fn try_get_or_parse<F>(
+        &self,
+        path: &Path,
+        parse: &mut F,
+    ) -> Result<Vec<ProviderCall>, CacheError>
+    where
+        F: FnMut(&Path, ParseHint<'_>) -> ParseResult,
+    {
+        let CacheInner::Open(conn) = &self.inner else {
+            return Ok(parse(path, ParseHint::Full).calls);
+        };
+
+        let prior = {
+            let lock = conn.lock().expect("usage_cache mutex poisoned");
+            load_row(&lock, path)?
+        };
+
+        let mut file = match File::open(path) {
+            Ok(f) => f,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                if prior.is_some() {
+                    let lock = conn.lock().expect("usage_cache mutex poisoned");
+                    let _ = lock
+                        .execute("DELETE FROM files WHERE path = ?1", params![path.to_string_lossy().into_owned()]);
+                }
+                return Ok(Vec::new());
+            }
+            Err(err) => return Err(CacheError::Io(err)),
+        };
+        let meta = file.metadata().map_err(CacheError::Io)?;
+        let current = FileFingerprint::from_open_file(&mut file, &meta)?;
+
+        let (action, prior_calls, prior_suffix, _prior_offset) = match prior {
+            Some(row) => {
+                let action = classify(&row.fingerprint, &current, row.last_offset);
+                (
+                    action,
+                    Some(row.calls),
+                    Some(row.fingerprint.suffix_blake3),
+                    row.last_offset,
+                )
+            }
+            None => (FingerprintAction::FullReparse, None, None, 0),
+        };
+
+        let result = match action {
+            FingerprintAction::Unchanged => {
+                return Ok(prior_calls.unwrap_or_default());
+            }
+            FingerprintAction::Append { from_offset } => {
+                let safe = match prior_suffix {
+                    Some(suffix) => verify_append_safe(&mut file, from_offset, &suffix)?,
+                    None => false,
+                };
+                file.rewind().map_err(CacheError::Io)?;
+                drop(file);
+                if !safe {
+                    parse(path, ParseHint::Full)
+                } else {
+                    let existing = prior_calls.as_deref().unwrap_or(&[]);
+                    parse(
+                        path,
+                        ParseHint::Append {
+                            from_offset,
+                            existing,
+                        },
+                    )
+                }
+            }
+            FingerprintAction::FullReparse => {
+                drop(file);
+                parse(path, ParseHint::Full)
+            }
+        };
+
+        let row = StoredRow {
+            fingerprint: current,
+            last_offset: result.end_offset,
+            calls: result.calls,
+        };
+        if let Err(err) = self.write_row(path, &row) {
+            tracing::warn!("usage_cache row write failed for {:?}: {err}", path);
+        }
+        Ok(row.calls)
+    }
+
+    fn write_row(&self, path: &Path, row: &StoredRow) -> Result<(), CacheError> {
+        let CacheInner::Open(conn) = &self.inner else {
+            return Ok(());
+        };
+        let blob = bincode::serialize(&row.calls)?;
+        let lock = conn.lock().expect("usage_cache mutex poisoned");
+        upsert_row(&lock, path, row, &blob)?;
+        Ok(())
+    }
+
     /// Drop all cached rows. Schema row is preserved.
     pub fn clear(&self) -> Result<(), CacheError> {
         let CacheInner::Open(conn) = &self.inner else {
@@ -159,6 +281,127 @@ pub fn default_db_path() -> Option<PathBuf> {
         return Some(PathBuf::from(p));
     }
     dirs::home_dir().map(|h| h.join(".agents-in-a-box").join("cache").join("usage.db"))
+}
+
+/// Hint passed to user parsers. The parser gets to decide what to do — the
+/// cache merely tells it what's safe.
+#[derive(Debug, Clone)]
+pub enum ParseHint<'a> {
+    /// No cache row, or fingerprint forced a full re-parse.
+    Full,
+    /// Append-only parse: skip the first `from_offset` bytes; existing calls
+    /// from the prior run are in `existing` (parser must extend, not
+    /// replace).
+    Append {
+        from_offset: u64,
+        existing: &'a [crate::models::usage::ProviderCall],
+    },
+}
+
+/// Result the caller's parser must produce: the complete `Vec<ProviderCall>`
+/// for the file plus the offset at which it stopped reading.
+pub struct ParseResult {
+    pub calls: Vec<crate::models::usage::ProviderCall>,
+    /// Byte offset in the file where parsing stopped. Almost always
+    /// `metadata().len()`; used to drive the next append-only parse.
+    pub end_offset: u64,
+}
+
+#[derive(Debug)]
+struct StoredRow {
+    fingerprint: FileFingerprint,
+    last_offset: u64,
+    calls: Vec<crate::models::usage::ProviderCall>,
+}
+
+#[derive(Debug)]
+struct LoadedRow {
+    fingerprint: FileFingerprint,
+    last_offset: u64,
+    calls: Vec<crate::models::usage::ProviderCall>,
+}
+
+fn load_row(conn: &Connection, path: &Path) -> Result<Option<LoadedRow>, CacheError> {
+    let path_str = path.to_string_lossy().into_owned();
+    let row = conn
+        .query_row(
+            "SELECT size_bytes, mtime_nanos, last_offset, suffix_blake3, calls_blob, blob_format
+             FROM files WHERE path = ?1",
+            params![path_str],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            },
+        )
+        .optional()?;
+
+    let Some((size_i, mtime, offset, suffix, blob, fmt)) = row else {
+        return Ok(None);
+    };
+
+    let Some(format) = BlobFormat::from_i64(fmt) else {
+        return Ok(None);
+    };
+    let calls: Vec<crate::models::usage::ProviderCall> = match format {
+        BlobFormat::Bincode => bincode::deserialize(&blob)?,
+    };
+    let fingerprint = FileFingerprint::from_columns(
+        u64::try_from(size_i).unwrap_or(0),
+        mtime,
+        &suffix,
+    )?;
+
+    Ok(Some(LoadedRow {
+        fingerprint,
+        last_offset: u64::try_from(offset).unwrap_or(0),
+        calls,
+    }))
+}
+
+fn upsert_row(
+    conn: &Connection,
+    path: &Path,
+    row: &StoredRow,
+    blob: &[u8],
+) -> Result<(), CacheError> {
+    let path_str = path.to_string_lossy().into_owned();
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    conn.execute(
+        "INSERT INTO files
+            (path, size_bytes, mtime_nanos, last_offset, suffix_blake3,
+             row_count, calls_blob, blob_format, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         ON CONFLICT(path) DO UPDATE SET
+            size_bytes    = excluded.size_bytes,
+            mtime_nanos   = excluded.mtime_nanos,
+            last_offset   = excluded.last_offset,
+            suffix_blake3 = excluded.suffix_blake3,
+            row_count     = excluded.row_count,
+            calls_blob    = excluded.calls_blob,
+            blob_format   = excluded.blob_format,
+            updated_at    = excluded.updated_at",
+        params![
+            path_str,
+            i64::try_from(row.fingerprint.size_bytes).unwrap_or(i64::MAX),
+            row.fingerprint.mtime_nanos,
+            i64::try_from(row.last_offset).unwrap_or(i64::MAX),
+            row.fingerprint.suffix_blake3.to_vec(),
+            i64::try_from(row.calls.len()).unwrap_or(i64::MAX),
+            blob,
+            db::BLOB_FORMAT_BINCODE_V1,
+            now,
+        ],
+    )?;
+    Ok(())
 }
 
 /// Internal helper for tests / diagnostics: stamp `updated_at` into a row
