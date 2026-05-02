@@ -132,8 +132,11 @@ impl TokenBucket {
 }
 
 /// Per-provider API call parsed from a local session file.
+///
+/// `Deserialize` is required for bincode round-trip in the persistent
+/// usage cache (`usage_cache::store`).
 #[allow(dead_code)]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderCall {
     pub provider: String,
     pub model: String,
