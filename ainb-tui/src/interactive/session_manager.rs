@@ -610,12 +610,23 @@ impl InteractiveSessionManager {
         }
     }
 
+    /// Sentinel workspace name for sessions whose worktree is on disk but
+    /// has no `.git` file (e.g. emptied except for a leftover cache like
+    /// `.vite/`). Callers also use this as the workspace bucket key so
+    /// every broken session collapses into one row instead of fanning out.
+    pub const BROKEN_WORKSPACE_NAME: &'static str = "(broken)";
+
     /// Derive a workspace display name from a worktree path.
     ///
     /// Why: only the legacy `<repo>--<hash>--<session>` worktree layout encodes
     /// the repo in the directory name. Newer flat-format paths (no `--`) made
     /// `path.split("--").next()` return the entire directory, producing bogus
     /// workspace groups like `shotclubhouse_shotclubhouse_temp_debug`.
+    ///
+    /// When the worktree is broken (no `.git` file), callers fall back to
+    /// passing `worktree_path` itself as `source_repository`. Detect that
+    /// collapse and surface `(broken)` instead of the sanitized doubled-prefix
+    /// dir name — otherwise a dead worktree dir appears as a real workspace.
     pub fn derive_workspace_name(worktree_path: &Path, source_repository: &Path) -> String {
         let from_dir = worktree_path
             .file_name()
@@ -623,12 +634,21 @@ impl InteractiveSessionManager {
             .filter(|name| name.contains("--"))
             .and_then(|name| name.split("--").next());
 
-        from_dir
-            .or_else(|| {
-                source_repository
-                    .file_name()
-                    .and_then(|n| n.to_str())
-            })
+        if let Some(name) = from_dir {
+            return name.to_string();
+        }
+
+        // Broken-worktree sentinel: the loaders fall back to
+        // `source_repository = worktree_path` whenever `get_source_repository`
+        // returns None. We only treat that collapse as "broken" when both
+        // paths actually have a basename (so `/` + `/` still yields "unknown").
+        if source_repository == worktree_path && worktree_path.file_name().is_some() {
+            return Self::BROKEN_WORKSPACE_NAME.to_string();
+        }
+
+        source_repository
+            .file_name()
+            .and_then(|n| n.to_str())
             .unwrap_or("unknown")
             .to_string()
     }
@@ -1133,10 +1153,21 @@ mod tests {
             "shotclubhouse"
         );
 
-        // Both unusable → "unknown"
+        // Both unusable → "unknown" (root paths have no `file_name`,
+        // so the broken-sentinel branch is skipped).
         assert_eq!(
             InteractiveSessionManager::derive_workspace_name(Path::new("/"), Path::new("/")),
             "unknown"
+        );
+
+        // Broken worktree: source_repository collapsed onto worktree_path
+        // (caller's get_source_repository() returned None and used the
+        // worktree_path as fallback). Must surface "(broken)" rather than
+        // the doubled-prefix dir name.
+        let dead = Path::new("/wt/shotclubhouse_shotclubhouse_fix_all-bugs");
+        assert_eq!(
+            InteractiveSessionManager::derive_workspace_name(dead, dead),
+            InteractiveSessionManager::BROKEN_WORKSPACE_NAME
         );
     }
 
