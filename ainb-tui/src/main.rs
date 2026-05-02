@@ -43,6 +43,7 @@ mod git;
 mod interactive;
 mod models;
 mod tmux;
+mod usage_cache;
 mod widgets;
 
 use app::{App, EventHandler};

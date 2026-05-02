@@ -5,8 +5,12 @@ use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, TimeZone};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tracing::{debug, warn};
+
+use crate::usage_cache::{Cache, ParseHint, ParseResult};
 
 /// Usage period selector shared by TUI and CLI report queries.
 #[allow(dead_code)]
@@ -397,16 +401,67 @@ pub fn parse_usage_for(query: UsageQuery) -> UsageData {
     parse_usage_for_with_roots(query, &UsageSourceRoots::default())
 }
 
+/// Process-wide singleton cache handle. Constructed lazily; on open
+/// failure (eg. read-only home dir) we fall back to a disabled cache so
+/// analytics remain functional.
+fn default_cache() -> Arc<Cache> {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<Arc<Cache>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            let path = match crate::usage_cache::store::default_db_path() {
+                Some(p) => p,
+                None => {
+                    debug!("usage_cache: no home dir; running with cache disabled");
+                    return Arc::new(Cache::disabled());
+                }
+            };
+            match Cache::open(path.clone()) {
+                Ok(c) => Arc::new(c),
+                Err(err) => {
+                    warn!("usage_cache: failed to open {:?} ({err}); cache disabled", path);
+                    Arc::new(Cache::disabled())
+                }
+            }
+        })
+        .clone()
+}
+
+/// Public helper for callers (CLI `--no-cache`, tests) to get a fresh
+/// disabled cache without going through the singleton.
+pub fn disabled_cache() -> Arc<Cache> {
+    Arc::new(Cache::disabled())
+}
+
+/// Public helper for callers that want the process-wide cache (eg. CLI
+/// `cache info` / `cache clear`).
+pub fn shared_cache() -> Arc<Cache> {
+    default_cache()
+}
+
 /// Parse local session files for a query using explicit roots.
 pub fn parse_usage_for_with_roots(query: UsageQuery, roots: &UsageSourceRoots) -> UsageData {
+    parse_usage_for_with_roots_and_cache(query, roots, default_cache())
+}
+
+/// Parse local session files for a query, using an explicit cache. Pass
+/// `Cache::disabled()` to bypass the cache entirely.
+pub fn parse_usage_for_with_roots_and_cache(
+    query: UsageQuery,
+    roots: &UsageSourceRoots,
+    cache: Arc<Cache>,
+) -> UsageData {
     let range = date_range_for_period(&query.period);
     let mut calls = Vec::new();
 
     if query.provider_filter.includes("claude") {
-        calls.extend(parse_claude_sources(roots.claude_projects_dir.as_deref()));
+        calls.extend(parse_claude_sources(
+            roots.claude_projects_dir.as_deref(),
+            cache.as_ref(),
+        ));
     }
     if query.provider_filter.includes("codex") {
-        calls.extend(parse_codex_sources(roots.codex_dir.as_deref()));
+        calls.extend(parse_codex_sources(roots.codex_dir.as_deref(), cache.as_ref()));
     }
 
     let filtered = calls
@@ -422,7 +477,7 @@ pub fn parse_usage_for_with_roots(query: UsageQuery, roots: &UsageSourceRoots) -
     aggregate_calls(filtered)
 }
 
-fn parse_claude_sources(projects_dir: Option<&Path>) -> Vec<ProviderCall> {
+fn parse_claude_sources(projects_dir: Option<&Path>, cache: &Cache) -> Vec<ProviderCall> {
     let Some(projects_dir) = projects_dir else {
         return Vec::new();
     };
@@ -448,7 +503,19 @@ fn parse_claude_sources(projects_dir: Option<&Path>) -> Vec<ProviderCall> {
         let project_path = unsanitize_project_path(raw_name);
 
         for jsonl_path in collect_claude_jsonl_files(&path) {
-            calls.extend(parse_claude_source(&jsonl_path, &project, &project_path));
+            let project = project.clone();
+            let project_path = project_path.clone();
+            let parsed = cache.get_or_parse(&jsonl_path, |path, hint| match hint {
+                ParseHint::Full => parse_claude_source_full(path, &project, &project_path),
+                ParseHint::Append { from_offset, existing } => parse_claude_source_append(
+                    path,
+                    &project,
+                    &project_path,
+                    from_offset,
+                    existing,
+                ),
+            });
+            calls.extend(parsed);
         }
     }
 
@@ -483,86 +550,164 @@ fn collect_claude_jsonl_files(project_dir: &Path) -> Vec<PathBuf> {
     files
 }
 
-fn parse_claude_source(path: &Path, project: &str, project_path: &str) -> Vec<ProviderCall> {
-    let content = match std::fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(_) => return Vec::new(),
+/// Full parse of a Claude JSONL session file. Returns the complete
+/// `Vec<ProviderCall>` and the byte offset where parsing stopped (typically
+/// the file size at open time — note this is best-effort: if the file is
+/// being appended to concurrently we may stop short, which the cache will
+/// recover from on the next call via append-only).
+fn parse_claude_source_full(
+    path: &Path,
+    project: &str,
+    project_path: &str,
+) -> ParseResult {
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => {
+            return ParseResult {
+                calls: Vec::new(),
+                end_offset: 0,
+            };
+        }
     };
+    let mut content = String::new();
+    if file.read_to_string(&mut content).is_err() {
+        return ParseResult {
+            calls: Vec::new(),
+            end_offset: 0,
+        };
+    }
+    let end_offset = content.len() as u64;
 
     let mut calls = Vec::new();
     let mut current_user_message = String::new();
-
     for line in content.lines() {
-        let parsed: ClaudeLine = match serde_json::from_str(line) {
-            Ok(parsed) => parsed,
-            Err(_) => continue,
-        };
-
-        match parsed.msg_type.as_deref() {
-            Some("user") => {
-                if let Some(message) = parsed.message {
-                    current_user_message = extract_claude_user_text(message.content.as_ref());
-                }
-            }
-            Some("assistant") => {
-                let Some(message) = parsed.message else {
-                    continue;
-                };
-                let Some(usage) = message.usage else {
-                    continue;
-                };
-                let Some(timestamp) = parsed.timestamp.as_deref().and_then(parse_timestamp) else {
-                    continue;
-                };
-
-                let model = message.model.unwrap_or_else(|| "claude-unknown".to_string());
-                let tools = extract_claude_tools(message.content.as_ref());
-                let bash_commands =
-                    extract_bash_commands_from_claude_content(message.content.as_ref());
-                let input_tokens = usage.input_tokens.unwrap_or(0);
-                let output_tokens = usage.output_tokens.unwrap_or(0);
-                let cache_creation_tokens = usage.cache_creation_input_tokens.unwrap_or(0);
-                let cache_read_tokens = usage.cache_read_input_tokens.unwrap_or(0);
-                let cost_usd = estimate_cost_usd(
-                    &model,
-                    input_tokens,
-                    output_tokens,
-                    cache_creation_tokens,
-                    cache_read_tokens,
-                    0,
-                );
-
-                calls.push(ProviderCall {
-                    provider: "claude".to_string(),
-                    model,
-                    session_id: parsed.session_id.unwrap_or_else(|| {
-                        path.file_stem()
-                            .and_then(|stem| stem.to_str())
-                            .unwrap_or("unknown")
-                            .to_string()
-                    }),
-                    project: project.to_string(),
-                    project_path: parsed.cwd.unwrap_or_else(|| project_path.to_string()),
-                    timestamp,
-                    input_tokens,
-                    cache_creation_tokens,
-                    cache_read_tokens,
-                    output_tokens,
-                    reasoning_tokens: 0,
-                    cost_usd,
-                    tools,
-                    bash_commands,
-                    user_message: current_user_message.clone(),
-                });
-            }
-            _ => {}
+        if let Some(call) =
+            parse_claude_line(line, path, project, project_path, &mut current_user_message)
+        {
+            calls.push(call);
         }
     }
-
-    calls
+    ParseResult { calls, end_offset }
 }
 
-fn parse_codex_sources(codex_dir: Option<&Path>) -> Vec<ProviderCall> {
+/// Append-only parse: re-open the file, seek to `from_offset`, and parse
+/// only the new bytes. The returned `Vec<ProviderCall>` is `existing`
+/// concatenated with the new calls, so the cache can persist a complete
+/// blob for the file.
+///
+/// Trade-off: `current_user_message` state from before `from_offset` is
+/// not restored. New assistant rows that appear *before* the next user
+/// line in the appended tail will get an empty `user_message`. This is
+/// rare in practice and cheap to fix in a follow-up by persisting parser
+/// state alongside the row.
+fn parse_claude_source_append(
+    path: &Path,
+    project: &str,
+    project_path: &str,
+    from_offset: u64,
+    existing: &[ProviderCall],
+) -> ParseResult {
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => {
+            return ParseResult {
+                calls: existing.to_vec(),
+                end_offset: from_offset,
+            };
+        }
+    };
+    let total_len = file.metadata().map(|m| m.len()).unwrap_or(from_offset);
+    if file.seek(SeekFrom::Start(from_offset)).is_err() {
+        return ParseResult {
+            calls: existing.to_vec(),
+            end_offset: from_offset,
+        };
+    }
+    let reader = BufReader::new(file);
+    let mut calls = existing.to_vec();
+    let mut current_user_message = String::new();
+    for line in reader.lines() {
+        let Ok(line) = line else { break };
+        if let Some(call) =
+            parse_claude_line(&line, path, project, project_path, &mut current_user_message)
+        {
+            calls.push(call);
+        }
+    }
+    ParseResult {
+        calls,
+        end_offset: total_len,
+    }
+}
+
+/// Parse a single Claude JSONL line. Returns `Some(call)` for assistant
+/// lines that carry usage data; mutates `current_user_message` when a
+/// user line is encountered. None for unrecognized / unparseable lines.
+fn parse_claude_line(
+    line: &str,
+    path: &Path,
+    project: &str,
+    project_path: &str,
+    current_user_message: &mut String,
+) -> Option<ProviderCall> {
+    let parsed: ClaudeLine = serde_json::from_str(line).ok()?;
+    match parsed.msg_type.as_deref() {
+        Some("user") => {
+            if let Some(message) = parsed.message {
+                *current_user_message = extract_claude_user_text(message.content.as_ref());
+            }
+            None
+        }
+        Some("assistant") => {
+            let message = parsed.message?;
+            let usage = message.usage?;
+            let timestamp = parsed.timestamp.as_deref().and_then(parse_timestamp)?;
+
+            let model = message.model.unwrap_or_else(|| "claude-unknown".to_string());
+            let tools = extract_claude_tools(message.content.as_ref());
+            let bash_commands =
+                extract_bash_commands_from_claude_content(message.content.as_ref());
+            let input_tokens = usage.input_tokens.unwrap_or(0);
+            let output_tokens = usage.output_tokens.unwrap_or(0);
+            let cache_creation_tokens = usage.cache_creation_input_tokens.unwrap_or(0);
+            let cache_read_tokens = usage.cache_read_input_tokens.unwrap_or(0);
+            let cost_usd = estimate_cost_usd(
+                &model,
+                input_tokens,
+                output_tokens,
+                cache_creation_tokens,
+                cache_read_tokens,
+                0,
+            );
+
+            Some(ProviderCall {
+                provider: "claude".to_string(),
+                model,
+                session_id: parsed.session_id.unwrap_or_else(|| {
+                    path.file_stem()
+                        .and_then(|stem| stem.to_str())
+                        .unwrap_or("unknown")
+                        .to_string()
+                }),
+                project: project.to_string(),
+                project_path: parsed.cwd.unwrap_or_else(|| project_path.to_string()),
+                timestamp,
+                input_tokens,
+                cache_creation_tokens,
+                cache_read_tokens,
+                output_tokens,
+                reasoning_tokens: 0,
+                cost_usd,
+                tools,
+                bash_commands,
+                user_message: current_user_message.clone(),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn parse_codex_sources(codex_dir: Option<&Path>, cache: &Cache) -> Vec<ProviderCall> {
     let Some(codex_dir) = codex_dir else {
         return Vec::new();
     };
@@ -573,7 +718,16 @@ fn parse_codex_sources(codex_dir: Option<&Path>) -> Vec<ProviderCall> {
 
     let mut calls = Vec::new();
     for file in discover_codex_sources(&sessions_dir) {
-        calls.extend(parse_codex_source(&file));
+        // Codex sessions accumulate cumulative token totals across the file,
+        // so an append-only parse would need replayed state. For PR-A we
+        // ignore the append hint and always full-parse on change. The cache
+        // still serves the unchanged-fingerprint path.
+        let parsed = cache.get_or_parse(&file, |path, _hint| {
+            let calls = parse_codex_source(path);
+            let end_offset = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+            ParseResult { calls, end_offset }
+        });
+        calls.extend(parsed);
     }
     calls
 }
