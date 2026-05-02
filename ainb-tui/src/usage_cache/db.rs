@@ -47,12 +47,12 @@ pub fn open(path: &Path) -> Result<Connection, CacheError> {
 
 /// Ensure the cache DB matches `SCHEMA_VERSION`. Drops & recreates on mismatch.
 fn ensure_schema(conn: &Connection) -> Result<(), CacheError> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)",
-    )?;
+    conn.execute_batch("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)")?;
 
     let current: Option<i64> = conn
-        .query_row("SELECT version FROM schema_version LIMIT 1", [], |row| row.get(0))
+        .query_row("SELECT version FROM schema_version LIMIT 1", [], |row| {
+            row.get(0)
+        })
         .ok();
 
     if current == Some(SCHEMA_VERSION) {

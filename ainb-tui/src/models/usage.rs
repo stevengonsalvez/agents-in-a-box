@@ -409,12 +409,9 @@ fn default_cache() -> Arc<Cache> {
     static CACHE: OnceLock<Arc<Cache>> = OnceLock::new();
     CACHE
         .get_or_init(|| {
-            let path = match crate::usage_cache::store::default_db_path() {
-                Some(p) => p,
-                None => {
-                    debug!("usage_cache: no home dir; running with cache disabled");
-                    return Arc::new(Cache::disabled());
-                }
+            let Some(path) = crate::usage_cache::store::default_db_path() else {
+                debug!("usage_cache: no home dir; running with cache disabled");
+                return Arc::new(Cache::disabled());
             };
             match Cache::open(path.clone()) {
                 Ok(c) => Arc::new(c),

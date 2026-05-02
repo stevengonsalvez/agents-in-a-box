@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use ainb::models::usage::{
-    parse_usage_for_with_roots_and_cache, UsageProviderFilter, UsageQuery, UsageSourceRoots,
+    UsageProviderFilter, UsageQuery, UsageSourceRoots, parse_usage_for_with_roots_and_cache,
 };
 use ainb::usage_cache::Cache;
 use tempfile::TempDir;
@@ -52,11 +52,7 @@ fn append_assistant_turn(
             }
         }
     });
-    let mut f = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .unwrap();
+    let mut f = fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
     writeln!(f, "{user}").unwrap();
     writeln!(f, "{assistant}").unwrap();
 }
@@ -124,14 +120,15 @@ fn append_only_adds_new_rows_and_matches_full_reparse() {
     append_assistant_turn(&session, "sess-2", "2026-05-01T12:30:00Z", 200, 75);
 
     let after_append = parse_usage_for_with_roots_and_cache(query_all(), &roots, cache.clone());
-    assert_eq!(after_append.calls.len(), 2, "appended turn should be visible");
+    assert_eq!(
+        after_append.calls.len(),
+        2,
+        "appended turn should be visible"
+    );
 
     // Compare with a fresh disabled-cache full re-parse.
-    let fresh = parse_usage_for_with_roots_and_cache(
-        query_all(),
-        &roots,
-        Arc::new(Cache::disabled()),
-    );
+    let fresh =
+        parse_usage_for_with_roots_and_cache(query_all(), &roots, Arc::new(Cache::disabled()));
     assert_eq!(after_append.calls.len(), fresh.calls.len());
     assert_eq!(
         after_append.grand_total.total(),

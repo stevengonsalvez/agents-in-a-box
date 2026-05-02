@@ -3,10 +3,9 @@
 
 //! High-level cache API surface.
 //!
-//! This commit lands the lifecycle primitives: open/disabled, clear,
-//! clear_path, info, default_db_path. The fingerprint-aware
-//! `get_or_parse` is added in the next commit together with
-//! [`super::fingerprint`].
+//! Lifecycle primitives: open / disabled / clear / `clear_path` / info /
+//! `default_db_path`, plus the fingerprint-aware `get_or_parse` hot path
+//! that drives the analytics scan.
 
 use std::fs::File;
 use std::io::Seek;
@@ -31,7 +30,7 @@ pub enum BlobFormat {
 }
 
 impl BlobFormat {
-    pub(crate) fn from_i64(v: i64) -> Option<Self> {
+    pub(crate) const fn from_i64(v: i64) -> Option<Self> {
         match v {
             1 => Some(Self::Bincode),
             _ => None,
@@ -100,7 +99,7 @@ impl Cache {
     }
 
     /// Whether cache writes are enabled.
-    pub fn is_enabled(&self) -> bool {
+    pub const fn is_enabled(&self) -> bool {
         matches!(self.inner, CacheInner::Open(_))
     }
 
@@ -187,9 +186,7 @@ impl Cache {
                 };
                 file.rewind().map_err(CacheError::Io)?;
                 drop(file);
-                if !safe {
-                    parse(path, ParseHint::Full)
-                } else {
+                if safe {
                     let existing = prior_calls.as_deref().unwrap_or(&[]);
                     parse(
                         path,
@@ -198,6 +195,8 @@ impl Cache {
                             existing,
                         },
                     )
+                } else {
+                    parse(path, ParseHint::Full)
                 }
             }
             FingerprintAction::FullReparse => {
