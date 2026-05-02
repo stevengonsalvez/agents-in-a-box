@@ -3619,9 +3619,20 @@ impl AppState {
                     live_tmux_names.insert(interactive_session.tmux_session_name.clone());
                     let session = interactive_session.to_session_model();
 
-                    // Find or create workspace for this session
-                    // Use source_repository (the original git repo) not worktree_path parent
-                    let workspace_path = &interactive_session.source_repository;
+                    // Find or create workspace for this session.
+                    // Use source_repository (the original git repo) not worktree_path parent.
+                    // When the worktree is broken (no `.git`), source_repository was
+                    // collapsed onto worktree_path by the discovery fallback — bucket
+                    // every such session under a single sentinel path so they all
+                    // collapse into one "(broken)" workspace row instead of fanning out.
+                    let broken_bucket = std::path::PathBuf::from("__broken_worktrees__");
+                    let is_broken = interactive_session.workspace_name
+                        == crate::interactive::InteractiveSessionManager::BROKEN_WORKSPACE_NAME;
+                    let workspace_path: &std::path::Path = if is_broken {
+                        broken_bucket.as_path()
+                    } else {
+                        interactive_session.source_repository.as_path()
+                    };
 
                     // Remove any stale entries for this session (e.g., added by Boss-mode loader)
                     for workspace in &mut self.workspaces {
@@ -3663,6 +3674,15 @@ impl AppState {
         // sessions.json whose tmux session is no longer alive but whose worktree
         // still exists on disk. Worktree-missing entries fall through to the
         // existing recovery flow.
+        //
+        // Skip "dead-but-not-deleted" worktrees (dir exists but `.git` file is
+        // gone — usually a leftover cache like `.vite/` keeping the dir alive).
+        // Without this guard the loader fabricates a phantom workspace named
+        // after the sanitized worktree-dir basename and bunches every such
+        // session into it, because the previous grouping key was
+        // `worktree_path.parent()` (a single shared dir for every flat
+        // worktree). These entries should be surfaced via /recover-sessions
+        // instead.
         let store = SessionStore::load();
         for metadata in store.sessions().values() {
             if live_tmux_names.contains(&metadata.tmux_session_name) {
@@ -3672,8 +3692,24 @@ impl AppState {
                 continue;
             }
 
+            let Some(source_repo) =
+                crate::interactive::InteractiveSessionManager::get_source_repository(
+                    &metadata.worktree_path,
+                )
+            else {
+                debug!(
+                    "Skipping stopped session {} — worktree {:?} has no `.git` file (broken). Use /recover-sessions to clean up.",
+                    metadata.session_id, metadata.worktree_path
+                );
+                continue;
+            };
+
             let stopped = Self::stopped_session_from_metadata(metadata);
-            let workspace_path = metadata.worktree_path.parent().unwrap_or(&metadata.worktree_path).to_path_buf();
+            // Group by the actual source repository (matches Phase 1's
+            // grouping above). The previous `worktree_path.parent()` key was
+            // always the shared `~/.agents-in-a-box/worktrees/` dir, which
+            // collapsed every stopped session into one bucket.
+            let workspace_path = source_repo.clone();
 
             if let Some(workspace) = self.workspaces.iter_mut().find(|w| {
                 std::path::Path::new(&w.path).canonicalize().ok()
@@ -3683,11 +3719,6 @@ impl AppState {
                     workspace.sessions.push(stopped);
                 }
             } else {
-                let source_repo =
-                    crate::interactive::InteractiveSessionManager::get_source_repository(
-                        &metadata.worktree_path,
-                    )
-                    .unwrap_or_else(|| metadata.worktree_path.clone());
                 let workspace_name =
                     crate::interactive::InteractiveSessionManager::derive_workspace_name(
                         &metadata.worktree_path,
