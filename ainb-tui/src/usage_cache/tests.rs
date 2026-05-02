@@ -286,3 +286,68 @@ fn cache_clear_drops_rows_but_preserves_schema() {
         .unwrap();
     assert_eq!(v, SCHEMA_VERSION);
 }
+
+#[test]
+fn fingerprint_full_reparse_when_size_equal_but_suffix_differs() {
+    // Same size + different suffix means the trailing bytes were rewritten
+    // in place; classify must NOT return Append (and rely on
+    // verify_append_safe to clean up). It must return FullReparse directly.
+    let prior = FileFingerprint {
+        size_bytes: 100,
+        mtime_nanos: 1_000,
+        suffix_blake3: [0xAA; 32],
+    };
+    let current = FileFingerprint {
+        size_bytes: 100,
+        mtime_nanos: 2_000,
+        suffix_blake3: [0xBB; 32],
+    };
+    assert_eq!(classify(&prior, &current, 100), FingerprintAction::FullReparse);
+}
+
+/// Layout-stability tripwire for the bincode-encoded `Vec<ProviderCall>`
+/// blob. If any field is added, removed, or reordered in `ProviderCall`
+/// (or any nested type), the encoded length will change and this test will
+/// fail. When it does, you MUST bump
+/// `usage_cache::db::BLOB_FORMAT_BINCODE_V1` AND update the expected length
+/// here — that's the protocol that prevents silent cache corruption from
+/// mis-decoding old blobs into a new struct shape.
+#[test]
+fn provider_call_bincode_layout_is_stable() {
+    let fixture = synth_call("layout-tripwire");
+    let encoded = bincode::serialize(&fixture).unwrap();
+
+    // Round-trip first as the meaningful behavioural check.
+    let decoded: ProviderCall = bincode::deserialize(&encoded).unwrap();
+    assert_eq!(decoded.session_id, fixture.session_id);
+    assert_eq!(decoded.input_tokens, fixture.input_tokens);
+    assert_eq!(decoded.output_tokens, fixture.output_tokens);
+
+    // Tripwire: if the byte length drifts, the struct layout changed.
+    // See the doc comment on `ProviderCall` in `models/usage.rs`.
+    const EXPECTED_LEN: usize = const_expected_len();
+    assert_eq!(
+        encoded.len(),
+        EXPECTED_LEN,
+        "ProviderCall bincode layout changed — bump BLOB_FORMAT_BINCODE_V1 \
+         and update EXPECTED_LEN. See ProviderCall doc comment."
+    );
+}
+
+/// Compute the expected serialized length once. Bincode uses a varint-free
+/// fixed encoding by default, so for a fixture with deterministic fields
+/// the size is deterministic. Computed at compile time conceptually, but
+/// inlined here so a layout drift surfaces as an `assert_eq!` mismatch.
+const fn const_expected_len() -> usize {
+    // String layout (bincode default options): u64 len + bytes.
+    // Vec<T>:                                  u64 len + items.
+    // Option<T> (None):                        1 byte tag.
+    // Option<T> (Some):                        1 byte tag + payload.
+    // chrono::DateTime<Local> serializes as a tagged enum + i64 secs +
+    // u32 nanos pair (via serde impl in chrono); seed value covers it.
+    //
+    // Rather than re-deriving the formula on every change, we hard-code
+    // the value observed for `synth_call("layout-tripwire")`. If chrono
+    // or bincode bump their encoding, update this constant intentionally.
+    184
+}
