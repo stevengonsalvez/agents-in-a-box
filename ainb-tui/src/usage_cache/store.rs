@@ -21,18 +21,25 @@ use crate::models::usage::ProviderCall;
 use super::db;
 use super::fingerprint::{FileFingerprint, FingerprintAction, classify, verify_append_safe};
 
-/// Versioned blob encoding for `files.calls_blob`.
+/// Versioned blob encoding for `files.calls_blob`. Discriminant must match
+/// `db::BLOB_FORMAT_BINCODE_V1` — bump both together when `ProviderCall`
+/// layout changes, and update the deserializer match below.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i64)]
 pub enum BlobFormat {
-    /// `bincode::serialize` of `Vec<ProviderCall>` with default options.
-    Bincode = 1,
+    /// Current `bincode::serialize` of `Vec<ProviderCall>` with default
+    /// options. Version 2 replaced version 1 when `ProviderCall.branch`
+    /// (Option<String>) was added in PR-D.
+    Bincode = 2,
 }
 
 impl BlobFormat {
     pub(crate) const fn from_i64(v: i64) -> Option<Self> {
         match v {
-            1 => Some(Self::Bincode),
+            // 1 was the pre-branch layout. Rows tagged 1 are stale on
+            // upgrade and intentionally skipped — the next scan re-parses
+            // and rewrites them at version 2.
+            2 => Some(Self::Bincode),
             _ => None,
         }
     }
