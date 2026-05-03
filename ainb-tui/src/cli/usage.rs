@@ -128,6 +128,11 @@ pub struct UsageReportArgs {
     /// Drill into a single session id. Repeatable.
     #[arg(long)]
     pub session: Vec<String>,
+    /// Drill into a single git branch (exact match against `gitBranch` on
+    /// Claude turns). Repeatable. Codex turns have no recorded branch and
+    /// are excluded by any non-empty `--branch` filter.
+    #[arg(long)]
+    pub branch: Vec<String>,
 }
 
 #[derive(Args, Clone, Default)]
@@ -661,6 +666,7 @@ fn query_from_args(args: &UsageReportArgs) -> Result<UsageQuery> {
             model: args.model.clone(),
             activity: args.activity.clone(),
             session: args.session.clone(),
+            branch: args.branch.clone(),
         },
     })
 }

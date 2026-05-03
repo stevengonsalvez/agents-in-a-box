@@ -4153,6 +4153,32 @@ mod cli_parity_tests {
     }
 
     #[test]
+    fn branch_filter_keeps_only_matching_branch_and_drops_branchless_calls() {
+        let mut on_main = call("alpha", "opus", "s1");
+        on_main.branch = Some("main".into());
+        let mut on_feat = call("alpha", "opus", "s2");
+        on_feat.branch = Some("feat/x".into());
+        let no_branch = call("alpha", "opus", "s3"); // branch: None
+
+        let data = data_with_calls(vec![on_main, on_feat, no_branch]);
+
+        let mut filters = UsageFilters::default();
+        filters.branch.push("feat/x".into());
+        let filtered = filter_usage_data(&data, &filters);
+        assert_eq!(filtered.calls.len(), 1, "only feat/x survives");
+        assert_eq!(filtered.calls[0].session_id, "s2");
+
+        // Branchless calls must NOT match a non-empty branch filter — even
+        // a generic "main" filter excludes calls that have no recorded
+        // branch (codex turns, Claude turns outside a git repo).
+        let mut main_only = UsageFilters::default();
+        main_only.branch.push("main".into());
+        let only_main = filter_usage_data(&data, &main_only);
+        assert_eq!(only_main.calls.len(), 1);
+        assert!(only_main.calls.iter().all(|c| c.branch.as_deref() == Some("main")));
+    }
+
+    #[test]
     fn session_filter_keeps_only_matching_session_id() {
         let data = data_with_calls(vec![
             call("alpha", "opus", "s1"),

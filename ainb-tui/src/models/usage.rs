@@ -131,18 +131,24 @@ pub struct UsageQuery {
 
 /// Exact-match drill-down filters set by the dashboard cross-filter
 /// (Grafana-style click-to-pivot) and the `--project / --model /
-/// --activity / --session` CLI flags.
+/// --activity / --session / --branch` CLI flags.
 ///
 /// All filter sets are AND-combined with each other and with the existing
 /// `include_projects` / `exclude_projects` globs. Each filter list is
 /// internally OR-combined: `--project a --project b` matches calls in
 /// either project.
+///
+/// Branch filtering matches `call.branch` exactly. Calls with no recorded
+/// branch (`branch == None`, eg. codex turns or Claude turns made outside a
+/// git repo) are excluded by any non-empty branch filter — there's no way
+/// to ask for "untracked branch" via this struct on purpose.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UsageFilters {
     pub project: Vec<String>,
     pub model: Vec<String>,
     pub activity: Vec<String>,
     pub session: Vec<String>,
+    pub branch: Vec<String>,
 }
 
 impl UsageFilters {
@@ -151,6 +157,7 @@ impl UsageFilters {
             && self.model.is_empty()
             && self.activity.is_empty()
             && self.session.is_empty()
+            && self.branch.is_empty()
     }
 
     /// True if any cross-filter is set. Mirror of `!is_empty()` for sites
@@ -159,10 +166,13 @@ impl UsageFilters {
         !self.is_empty()
     }
 
-    /// Pop the most-recently-added filter chip. Removal order: session →
-    /// activity → model → project (matches the chip-strip render order so
-    /// `Esc` removes the visually rightmost chip first).
+    /// Pop the most-recently-added filter chip. Removal order: branch →
+    /// session → activity → model → project (matches the chip-strip render
+    /// order so `Esc` removes the visually rightmost chip first).
     pub fn pop_last(&mut self) -> Option<UsageFilterChip> {
+        if let Some(value) = self.branch.pop() {
+            return Some(UsageFilterChip::Branch(value));
+        }
         if let Some(value) = self.session.pop() {
             return Some(UsageFilterChip::Session(value));
         }
@@ -183,6 +193,7 @@ impl UsageFilters {
         self.model.clear();
         self.activity.clear();
         self.session.clear();
+        self.branch.clear();
     }
 
     fn matches(&self, call: &ProviderCall, category: ActivityCategory) -> bool {
@@ -201,6 +212,14 @@ impl UsageFilters {
                 return false;
             }
         }
+        if !self.branch.is_empty() {
+            let Some(branch) = call.branch.as_deref() else {
+                return false;
+            };
+            if !self.branch.iter().any(|b| b == branch) {
+                return false;
+            }
+        }
         true
     }
 }
@@ -212,6 +231,7 @@ pub enum UsageFilterChip {
     Model(String),
     Activity(String),
     Session(String),
+    Branch(String),
 }
 
 impl UsageFilterChip {
@@ -221,12 +241,17 @@ impl UsageFilterChip {
             Self::Model(_) => "model",
             Self::Activity(_) => "activity",
             Self::Session(_) => "session",
+            Self::Branch(_) => "branch",
         }
     }
 
     pub fn value(&self) -> &str {
         match self {
-            Self::Project(v) | Self::Model(v) | Self::Activity(v) | Self::Session(v) => v,
+            Self::Project(v)
+            | Self::Model(v)
+            | Self::Activity(v)
+            | Self::Session(v)
+            | Self::Branch(v) => v,
         }
     }
 }
