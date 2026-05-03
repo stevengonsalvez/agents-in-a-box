@@ -818,9 +818,9 @@ fn render_burndown(frame: &mut Frame, area: Rect, data: &UsageData, state: &Usag
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
-            Constraint::Length(1),
-            Constraint::Min(0),
+            Constraint::Length(3), // header
+            Constraint::Length(2), // period+provider strip (2 rows)
+            Constraint::Min(0),    // dashboard
         ])
         .split(inner);
 
@@ -1007,19 +1007,83 @@ fn render_burndown_header(frame: &mut Frame, area: Rect, data: &UsageData, perio
     frame.render_widget(Paragraph::new(lines), area);
 }
 
+/// Build the "Period: …  Provider: …" labelled strip that replaces the
+/// old cryptic single-line period selector. Renders period chips with
+/// key-hints (1-5, d) and provider-filter chips (P toggles). The
+/// active option in each row is bold + GOLD background.
+///
+/// Returned as a `Vec<Line>` so tests can assert chip ordering and
+/// active-marker placement without hitting the Frame.
+fn build_period_provider_strip(state: &UsageViewState) -> Vec<Line<'static>> {
+    let mut period_spans: Vec<Span<'static>> =
+        vec![Span::styled("Period: ", Style::default().fg(MUTED_GRAY))];
+    let periods: [(&str, char, fn(&UsagePeriod) -> bool); 6] = [
+        ("Today", '1', |p| matches!(p, UsagePeriod::Today)),
+        ("Week", '2', |p| matches!(p, UsagePeriod::Week)),
+        ("30d", '3', |p| matches!(p, UsagePeriod::ThirtyDays)),
+        ("Month", '4', |p| matches!(p, UsagePeriod::Month)),
+        ("All", '5', |p| matches!(p, UsagePeriod::All)),
+        ("Custom", 'd', |p| matches!(p, UsagePeriod::Custom { .. })),
+    ];
+    for (i, (label, key, is_active)) in periods.iter().enumerate() {
+        if i > 0 {
+            period_spans.push(Span::styled("  ", Style::default()));
+        }
+        period_spans.push(period_chip_span(label, *key, is_active(&state.period)));
+    }
+
+    let mut provider_spans: Vec<Span<'static>> =
+        vec![Span::styled("Provider: ", Style::default().fg(MUTED_GRAY))];
+    let providers: [(&str, UsageProviderFilter); 3] = [
+        ("All", UsageProviderFilter::All),
+        ("Claude", UsageProviderFilter::Claude),
+        ("Codex", UsageProviderFilter::Codex),
+    ];
+    for (i, (label, value)) in providers.iter().enumerate() {
+        if i > 0 {
+            provider_spans.push(Span::styled("  ", Style::default()));
+        }
+        provider_spans.push(provider_chip_span(label, *value == state.provider_filter));
+    }
+    provider_spans.push(Span::styled("  (P)", Style::default().fg(MUTED_GRAY)));
+
+    // Two label rows so narrow terminals can wrap cleanly.
+    vec![Line::from(period_spans), Line::from(provider_spans)]
+}
+
+fn period_chip_span(label: &str, key: char, active: bool) -> Span<'static> {
+    let text = format!(" {key} {label} ");
+    if active {
+        Span::styled(
+            text,
+            Style::default()
+                .fg(DARK_BG)
+                .bg(GOLD)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled(text, Style::default().fg(SOFT_WHITE))
+    }
+}
+
+fn provider_chip_span(label: &str, active: bool) -> Span<'static> {
+    let text = format!(" {label} ");
+    if active {
+        Span::styled(
+            text,
+            Style::default()
+                .fg(DARK_BG)
+                .bg(GOLD)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled(text, Style::default().fg(MUTED_GRAY))
+    }
+}
+
 fn render_period_row(frame: &mut Frame, area: Rect, state: &UsageViewState) {
-    let text = Line::from(vec![
-        Span::styled(
-            "[1 Today]  [2 7d]  [3 30d]  [4 Month]  [5 All]  [d Custom]  [/] filter  [x] exclude  [r] reload  [R] force refresh",
-            Style::default().fg(MUTED_GRAY),
-        ),
-        Span::styled("   Active: ", Style::default().fg(MUTED_GRAY)),
-        Span::styled(
-            period_label(&state.period),
-            Style::default().fg(TERMINAL_ACCENT).add_modifier(Modifier::BOLD),
-        ),
-    ]);
-    frame.render_widget(Paragraph::new(text), area);
+    let lines = build_period_provider_strip(state);
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn render_daily_activity_panel(frame: &mut Frame, area: Rect, data: &UsageData) {
@@ -1952,6 +2016,53 @@ fn input_label(mode: UsageInputMode) -> &'static str {
 fn format_cost(cost: Option<f64>) -> String {
     cost.map(|value| format!("${value:.2}"))
         .unwrap_or_else(|| "cost n/a".to_string())
+}
+
+#[cfg(test)]
+mod period_provider_strip_tests {
+    use super::*;
+
+    fn flatten(line: &Line<'_>) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect::<String>()
+    }
+
+    fn highlighted_chip(line: &Line<'_>) -> Option<String> {
+        line.spans
+            .iter()
+            .find(|s| s.style.bg == Some(GOLD))
+            .map(|s| s.content.trim().to_string())
+    }
+
+    #[test]
+    fn period_row_lists_all_six_options_with_key_hints() {
+        let mut state = UsageViewState::default();
+        state.period = UsagePeriod::Week;
+        let lines = build_period_provider_strip(&state);
+        assert_eq!(lines.len(), 2);
+        let row = flatten(&lines[0]);
+        for needle in ["Period:", "1 Today", "2 Week", "3 30d", "4 Month", "5 All", "d Custom"] {
+            assert!(row.contains(needle), "missing `{needle}` in {row}");
+        }
+    }
+
+    #[test]
+    fn period_row_highlights_active_period() {
+        let mut state = UsageViewState::default();
+        state.period = UsagePeriod::Month;
+        let lines = build_period_provider_strip(&state);
+        let active = highlighted_chip(&lines[0]).expect("a period chip should be highlighted");
+        assert!(active.contains("Month"), "got {active}");
+    }
+
+    #[test]
+    fn provider_row_highlights_active_provider_filter() {
+        let mut state = UsageViewState::default();
+        state.provider_filter = UsageProviderFilter::Codex;
+        let lines = build_period_provider_strip(&state);
+        let active =
+            highlighted_chip(&lines[1]).expect("a provider chip should be highlighted");
+        assert_eq!(active, "Codex");
+    }
 }
 
 #[cfg(test)]
