@@ -33,9 +33,9 @@ pub enum AppEvent {
     RestartSession,
     DeleteSession,
     ResumeSession(String), // Resume a Stopped interactive session (carries trigger key: "Enter" or "r")
-    OpenInEditor,    // Open selected session's workspace in preferred editor
-    OpenQuickShell,  // Open shell in selected workspace/session directory
-    CleanupOrphaned, // Clean up orphaned containers
+    OpenInEditor,          // Open selected session's workspace in preferred editor
+    OpenQuickShell,        // Open shell in selected workspace/session directory
+    CleanupOrphaned,       // Clean up orphaned containers
     SwitchToLogs,
     SwitchToTerminal,
     GoToTop,
@@ -146,10 +146,10 @@ pub enum AppEvent {
     SearchWorkspaceInputChar(char),
     SearchWorkspaceBackspace,
     // Confirmation dialog events
-    ConfirmationToggle,  // Switch between Yes/No (binary) or cycle forward (tri-option)
-    ConfirmationPrev,    // Cycle backwards through tri-option dialog
+    ConfirmationToggle, // Switch between Yes/No (binary) or cycle forward (tri-option)
+    ConfirmationPrev,   // Cycle backwards through tri-option dialog
     ConfirmationConfirm, // Confirm action
-    ConfirmationCancel,  // Cancel dialog
+    ConfirmationCancel, // Cancel dialog
     // Auth setup events
     AuthSetupNext,            // Next auth method
     AuthSetupPrevious,        // Previous auth method
@@ -358,6 +358,14 @@ pub enum AppEvent {
     UsageInputBackspace,      // Backspace in usage input
     UsageInputSubmit,         // Submit usage input
     UsageInputCancel,         // Cancel usage input
+    // Cross-filter (Grafana-style dashboard pivot) on Burndown view
+    UsageFocusNextPanel, // Tab while on Burndown
+    UsageFocusPrevPanel, // Shift+Tab while on Burndown
+    UsageFocusRowUp,     // Up/k while a panel is focused
+    UsageFocusRowDown,   // Down/j while a panel is focused
+    UsageCommitFilter,   // Enter on focused row -> add chip
+    UsagePopFilterChip,  // Esc when chips exist
+    UsageClearAllChips,  // C — drop every chip in one shot
     // Skills browser events
     SkillsBack,             // Return to home screen (Esc)
     SkillsNextProvider,     // Next provider (Right arrow)
@@ -1652,6 +1660,39 @@ impl EventHandler {
             };
         }
 
+        // Burndown-only cross-filter shortcuts. Tab cycles panel focus
+        // here instead of advancing the outer tab bar so the user can
+        // pivot without losing the dashboard layout. Esc backs out of
+        // the most recent chip when chips exist; otherwise it falls
+        // through to the standard "back to home" handler below.
+        let on_burndown = matches!(
+            state.usage_state.active_tab,
+            crate::components::usage::UsageTab::Burndown
+        );
+        if on_burndown {
+            match key_event.code {
+                KeyCode::Tab => return Some(AppEvent::UsageFocusNextPanel),
+                KeyCode::BackTab => return Some(AppEvent::UsageFocusPrevPanel),
+                KeyCode::Enter => return Some(AppEvent::UsageCommitFilter),
+                KeyCode::Char('C') => return Some(AppEvent::UsageClearAllChips),
+                KeyCode::Esc if state.usage_state.filters.any() => {
+                    return Some(AppEvent::UsagePopFilterChip);
+                }
+                _ => {}
+            }
+            if state.usage_state.focused_panel.is_some() {
+                match key_event.code {
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        return Some(AppEvent::UsageFocusRowUp);
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        return Some(AppEvent::UsageFocusRowDown);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         match key_event.code {
             KeyCode::Esc => Some(AppEvent::UsageBack),
             KeyCode::Right | KeyCode::Char('l') => Some(AppEvent::UsageNextProvider),
@@ -2492,16 +2533,14 @@ impl EventHandler {
                     // soft-stop without losing the worktree. Boss/Docker, SSH,
                     // and Shell sessions stick with the binary delete flow.
                     use crate::models::{SessionAgentType, SessionMode};
-                    let is_interactive_agent = matches!(
-                        session.mode,
-                        SessionMode::Interactive
-                    ) && matches!(
-                        session.agent_type,
-                        SessionAgentType::Claude
-                            | SessionAgentType::Codex
-                            | SessionAgentType::Gemini
-                            | SessionAgentType::Copilot
-                    );
+                    let is_interactive_agent = matches!(session.mode, SessionMode::Interactive)
+                        && matches!(
+                            session.agent_type,
+                            SessionAgentType::Claude
+                                | SessionAgentType::Codex
+                                | SessionAgentType::Gemini
+                                | SessionAgentType::Copilot
+                        );
                     let session_id = session.id;
                     if is_interactive_agent {
                         state.show_delete_or_stop_confirmation(session_id);
@@ -2547,8 +2586,13 @@ impl EventHandler {
             }
             AppEvent::ResumeSession(trigger) => {
                 if let Some(session_id) = state.get_selected_session_id() {
-                    tracing::info!("[ACTION] Resuming stopped session: {} (trigger={})", session_id, trigger);
-                    state.pending_async_action = Some(AsyncAction::ResumeSession(session_id, trigger));
+                    tracing::info!(
+                        "[ACTION] Resuming stopped session: {} (trigger={})",
+                        session_id,
+                        trigger
+                    );
+                    state.pending_async_action =
+                        Some(AsyncAction::ResumeSession(session_id, trigger));
                 } else {
                     state.add_warning_notification("No session selected to resume".to_string());
                 }
@@ -2645,9 +2689,7 @@ impl EventHandler {
                 if let Some(dialog) = state.confirmation_dialog.take() {
                     let action = if let Some(options) = dialog.options.as_ref() {
                         // Tri-option mode: pick the highlighted option's action.
-                        options
-                            .get(dialog.selected_index)
-                            .map(|o| o.action.clone())
+                        options.get(dialog.selected_index).map(|o| o.action.clone())
                     } else if dialog.selected_option {
                         Some(dialog.confirm_action.clone())
                     } else {
@@ -4159,6 +4201,42 @@ impl EventHandler {
                 }
                 Err(e) => state.add_error_notification(e),
             },
+            AppEvent::UsageFocusNextPanel => {
+                state.usage_state.focus_next_panel();
+            }
+            AppEvent::UsageFocusPrevPanel => {
+                state.usage_state.focus_prev_panel();
+            }
+            AppEvent::UsageFocusRowUp => {
+                state.usage_state.focus_row_up();
+            }
+            AppEvent::UsageFocusRowDown => {
+                state.usage_state.focus_row_down();
+            }
+            AppEvent::UsageCommitFilter => {
+                if state.usage_state.commit_focused_row() {
+                    // Cross-filter is client-side: no re-parse needed.
+                    // The next render will run filter_usage_data over
+                    // the already-parsed call set.
+                    state.add_success_notification("Filter added".to_string());
+                }
+            }
+            AppEvent::UsagePopFilterChip => {
+                if let Some(chip) = state.usage_state.pop_filter_chip() {
+                    state.add_success_notification(format!(
+                        "Removed filter {}={}",
+                        chip.label(),
+                        chip.value()
+                    ));
+                }
+            }
+            AppEvent::UsageClearAllChips => {
+                let had_any = state.usage_state.filters.any();
+                state.usage_state.clear_all_filter_chips();
+                if had_any {
+                    state.add_success_notification("Cleared all chips".to_string());
+                }
+            }
             // Skills browser events
             AppEvent::SkillsBack => {
                 tracing::debug!("Skills back");

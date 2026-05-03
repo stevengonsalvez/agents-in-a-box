@@ -4,7 +4,7 @@
 use crate::cli::OutputFormat;
 use crate::config::{AppConfig, CurrencyConfig, UsagePlan, UsagePlanId, UsagePlanProvider};
 use crate::models::usage::{
-    ActivityUsage, NamedUsage, ProjectUsage, SessionUsage, UsageData, UsagePeriod,
+    ActivityUsage, NamedUsage, ProjectUsage, SessionUsage, UsageData, UsageFilters, UsagePeriod,
     UsageProviderFilter, UsageQuery, UsageSourceRoots, analyze_yield, billing_period,
     compare_models, disabled_cache, optimize_usage, parse_usage_for,
     parse_usage_for_with_roots_and_cache, shared_cache,
@@ -72,15 +72,37 @@ pub struct UsageReportArgs {
     /// Provider: all, claude, codex
     #[arg(long, value_enum, default_value_t = ProviderArg::All)]
     pub provider: ProviderArg,
-    /// Include projects matching substring
-    #[arg(long, alias = "project")]
+    /// Include projects matching substring (repeatable; OR-combined).
+    /// Note: previously aliased as `--project`; the alias has been
+    /// removed because `--project` is now a distinct exact-match
+    /// cross-filter flag (see below). Use `--include <substring>` for
+    /// the substring/glob behaviour.
+    #[arg(long)]
     pub include: Vec<String>,
-    /// Exclude projects matching substring
+    /// Exclude projects matching substring (repeatable; OR-combined).
     #[arg(long)]
     pub exclude: Vec<String>,
     /// Bypass the persistent usage cache and force a full re-parse.
     #[arg(long)]
     pub no_cache: bool,
+    // ---- Cross-filter knobs (mirrors of the TUI dashboard pivot) ----
+    // All four are repeatable; multiple values for the same filter
+    // are OR-combined, and different filters AND together. They layer
+    // on top of `--include` / `--exclude` and run through the same
+    // `filter_usage_data` helper as the TUI.
+    /// Drill into a single project (exact match). Repeatable.
+    #[arg(long)]
+    pub project: Vec<String>,
+    /// Drill into a single model (exact match). Repeatable.
+    #[arg(long)]
+    pub model: Vec<String>,
+    /// Drill into one activity category (Coding, Conversation, Git,
+    /// etc. — see ActivityCategory::label). Repeatable.
+    #[arg(long)]
+    pub activity: Vec<String>,
+    /// Drill into a single session id. Repeatable.
+    #[arg(long)]
+    pub session: Vec<String>,
 }
 
 #[derive(Args, Clone, Default)]
@@ -203,9 +225,7 @@ fn cache_command(command: UsageCacheCommands, format: OutputFormat) -> Result<()
     match command {
         UsageCacheCommands::Info => {
             let cache = shared_cache();
-            let info = cache
-                .info()
-                .map_err(|e| anyhow!("usage cache info failed: {e}"))?;
+            let info = cache.info().map_err(|e| anyhow!("usage cache info failed: {e}"))?;
             match format {
                 OutputFormat::Json => {
                     println!(
@@ -240,12 +260,13 @@ fn cache_command(command: UsageCacheCommands, format: OutputFormat) -> Result<()
         }
         UsageCacheCommands::Clear => {
             let cache = shared_cache();
-            cache
-                .clear()
-                .map_err(|e| anyhow!("usage cache clear failed: {e}"))?;
+            cache.clear().map_err(|e| anyhow!("usage cache clear failed: {e}"))?;
             match format {
                 OutputFormat::Json => {
-                    println!("{}", serde_json::to_string_pretty(&json!({"cleared": true}))?);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&json!({"cleared": true}))?
+                    );
                 }
                 _ => println!("Usage cache cleared."),
             }
@@ -591,6 +612,12 @@ fn query_from_args(args: &UsageReportArgs) -> Result<UsageQuery> {
         },
         include_projects: args.include.clone(),
         exclude_projects: args.exclude.clone(),
+        filters: UsageFilters {
+            project: args.project.clone(),
+            model: args.model.clone(),
+            activity: args.activity.clone(),
+            session: args.session.clone(),
+        },
     })
 }
 
