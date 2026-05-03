@@ -1682,7 +1682,10 @@ impl EventHandler {
         // standard zoom handler below.
         if state.usage_state.zoom_search_active {
             return match key_event.code {
-                KeyCode::Esc => Some(AppEvent::UsageZoomCancelSearch),
+                // Route Esc through the state machine so the documented
+                // detail > search > exit precedence is enforced when both
+                // overlays are open. zoom_handle_esc owns the order.
+                KeyCode::Esc => Some(AppEvent::UsageZoomEsc),
                 KeyCode::Enter => Some(AppEvent::UsageZoomCommitSearch),
                 KeyCode::Backspace => Some(AppEvent::UsageZoomSearchBackspace),
                 KeyCode::Char(ch) => Some(AppEvent::UsageZoomSearchChar(ch)),
