@@ -63,12 +63,37 @@ pub struct UsageReportArgs {
     /// Period: today, week, 30days, month, all
     #[arg(long, value_enum, default_value_t = PeriodArg::Week)]
     pub period: PeriodArg,
-    /// Start date YYYY-MM-DD
-    #[arg(long)]
+    /// Start date YYYY-MM-DD (mutually exclusive with --month, --quarter,
+    /// --last-n-days, --ytd; pairs with --to for an explicit range).
+    #[arg(long, conflicts_with_all = ["month", "quarter", "last_n_days", "ytd"])]
     pub from: Option<String>,
-    /// End date YYYY-MM-DD
-    #[arg(long)]
+    /// End date YYYY-MM-DD (mutually exclusive with --month, --quarter,
+    /// --last-n-days, --ytd; pairs with --from for an explicit range).
+    #[arg(long, conflicts_with_all = ["month", "quarter", "last_n_days", "ytd"])]
     pub to: Option<String>,
+    /// Pin to a specific calendar month, e.g. `2026-04`. Mutually
+    /// exclusive with --quarter, --last-n-days, --ytd, --from, --to.
+    #[arg(long, conflicts_with_all = ["quarter", "last_n_days", "ytd", "from", "to"])]
+    pub month: Option<String>,
+    /// Pin to a specific calendar quarter, e.g. `2026-Q2`. Mutually
+    /// exclusive with --month, --last-n-days, --ytd, --from, --to.
+    #[arg(long, conflicts_with_all = ["month", "last_n_days", "ytd", "from", "to"])]
+    pub quarter: Option<String>,
+    /// Last N days (rolling window ending today). Mutually exclusive
+    /// with --month, --quarter, --ytd, --from, --to.
+    #[arg(
+        long = "last-n-days",
+        value_name = "N",
+        conflicts_with_all = ["month", "quarter", "ytd", "from", "to"]
+    )]
+    pub last_n_days: Option<u32>,
+    /// Jan 1 of the current year through today. Mutually exclusive
+    /// with --month, --quarter, --last-n-days, --from, --to.
+    #[arg(
+        long,
+        conflicts_with_all = ["month", "quarter", "last_n_days", "from", "to"]
+    )]
+    pub ytd: bool,
     /// Provider: all, claude, codex
     #[arg(long, value_enum, default_value_t = ProviderArg::All)]
     pub provider: ProviderArg,
@@ -580,7 +605,26 @@ fn load_usage(args: &UsageReportArgs) -> Result<UsageData> {
 }
 
 fn query_from_args(args: &UsageReportArgs) -> Result<UsageQuery> {
-    let period = if args.from.is_some() || args.to.is_some() {
+    // Period precedence (top wins; clap rejects combinations via the
+    // conflicts_with_all groups on UsageReportArgs):
+    //   --month YYYY-MM            -> SpecificMonth
+    //   --quarter YYYY-Qn          -> SpecificQuarter
+    //   --last-n-days N            -> LastNDays(N)
+    //   --ytd                      -> YearToDate
+    //   --from / --to              -> Custom (existing free-text behaviour)
+    //   --period {today|week|30days|month|all}  (default)
+    let period = if let Some(month_str) = &args.month {
+        parse_month_arg(month_str)?
+    } else if let Some(quarter_str) = &args.quarter {
+        parse_quarter_arg(quarter_str)?
+    } else if let Some(n) = args.last_n_days {
+        if n == 0 {
+            bail!("--last-n-days must be >= 1");
+        }
+        UsagePeriod::LastNDays(n)
+    } else if args.ytd {
+        UsagePeriod::YearToDate
+    } else if args.from.is_some() || args.to.is_some() {
         let from = match &args.from {
             Some(value) => parse_date(value)?,
             None => NaiveDate::from_ymd_opt(1970, 1, 1).expect("valid date"),
@@ -624,6 +668,29 @@ fn query_from_args(args: &UsageReportArgs) -> Result<UsageQuery> {
 fn parse_date(value: &str) -> Result<NaiveDate> {
     NaiveDate::parse_from_str(value, "%Y-%m-%d")
         .map_err(|_| anyhow!("invalid date `{value}`, expected YYYY-MM-DD"))
+}
+
+/// Parse `--month YYYY-MM` into `UsagePeriod::SpecificMonth(first-of-month)`.
+fn parse_month_arg(value: &str) -> Result<UsagePeriod> {
+    // chrono's NaiveDate parser wants a day; pin to `-01`.
+    let with_day = format!("{value}-01");
+    let date = NaiveDate::parse_from_str(&with_day, "%Y-%m-%d")
+        .map_err(|_| anyhow!("invalid --month `{value}`, expected YYYY-MM"))?;
+    Ok(UsagePeriod::SpecificMonth(date))
+}
+
+/// Parse `--quarter YYYY-Qn` into `UsagePeriod::SpecificQuarter(year, q)`.
+fn parse_quarter_arg(value: &str) -> Result<UsagePeriod> {
+    let err = || anyhow!("invalid --quarter `{value}`, expected YYYY-Qn (n=1..=4)");
+    // Accept either case for the Q.
+    let normalised = value.to_ascii_uppercase();
+    let (year_part, q_part) = normalised.split_once("-Q").ok_or_else(err)?;
+    let year: i32 = year_part.parse().map_err(|_| err())?;
+    let q: u8 = q_part.parse().map_err(|_| err())?;
+    if !(1..=4).contains(&q) {
+        return Err(err());
+    }
+    Ok(UsagePeriod::SpecificQuarter(year, q))
 }
 
 fn print_text_report(title: &str, data: &UsageData) {
@@ -928,6 +995,137 @@ mod tests {
         ] {
             assert!(csv.contains(header), "missing {header}");
         }
+    }
+
+    #[test]
+    fn month_flag_yields_specific_month_period() {
+        let args = UsageReportArgs {
+            month: Some("2026-04".into()),
+            ..UsageReportArgs::default()
+        };
+        let q = query_from_args(&args).unwrap();
+        match q.period {
+            UsagePeriod::SpecificMonth(d) => {
+                assert_eq!(d, NaiveDate::from_ymd_opt(2026, 4, 1).unwrap())
+            }
+            other => panic!("expected SpecificMonth, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quarter_flag_yields_specific_quarter_period() {
+        let args = UsageReportArgs {
+            quarter: Some("2026-Q2".into()),
+            ..UsageReportArgs::default()
+        };
+        let q = query_from_args(&args).unwrap();
+        assert!(matches!(q.period, UsagePeriod::SpecificQuarter(2026, 2)));
+    }
+
+    #[test]
+    fn quarter_flag_lowercase_q_is_accepted() {
+        let args = UsageReportArgs {
+            quarter: Some("2026-q3".into()),
+            ..UsageReportArgs::default()
+        };
+        let q = query_from_args(&args).unwrap();
+        assert!(matches!(q.period, UsagePeriod::SpecificQuarter(2026, 3)));
+    }
+
+    #[test]
+    fn quarter_flag_rejects_q5() {
+        let args = UsageReportArgs {
+            quarter: Some("2026-Q5".into()),
+            ..UsageReportArgs::default()
+        };
+        let err = query_from_args(&args).unwrap_err().to_string();
+        assert!(err.contains("YYYY-Qn"));
+    }
+
+    #[test]
+    fn last_n_days_flag_yields_last_n_days_period() {
+        let args = UsageReportArgs {
+            last_n_days: Some(14),
+            ..UsageReportArgs::default()
+        };
+        let q = query_from_args(&args).unwrap();
+        assert!(matches!(q.period, UsagePeriod::LastNDays(14)));
+    }
+
+    #[test]
+    fn last_n_days_zero_is_rejected() {
+        let args = UsageReportArgs {
+            last_n_days: Some(0),
+            ..UsageReportArgs::default()
+        };
+        assert!(query_from_args(&args).is_err());
+    }
+
+    #[test]
+    fn month_and_quarter_are_mutually_exclusive_at_clap_parse_time() {
+        use clap::CommandFactory;
+        // We exercise the conflicts_with_all groups by parsing a synthetic
+        // argv. Reach for the cli::Cli struct so the full subcommand
+        // routing is exercised — this gives us the realistic error path
+        // a user would hit.
+        let result = crate::cli::Cli::command().try_get_matches_from([
+            "ainb",
+            "usage",
+            "report",
+            "--month",
+            "2026-04",
+            "--quarter",
+            "2026-Q2",
+        ]);
+        assert!(
+            result.is_err(),
+            "clap should reject --month and --quarter together"
+        );
+    }
+
+    #[test]
+    fn last_n_days_conflicts_with_ytd_at_clap_parse_time() {
+        use clap::CommandFactory;
+        let result = crate::cli::Cli::command().try_get_matches_from([
+            "ainb",
+            "usage",
+            "report",
+            "--last-n-days",
+            "14",
+            "--ytd",
+        ]);
+        assert!(
+            result.is_err(),
+            "clap should reject --last-n-days and --ytd together"
+        );
+    }
+
+    #[test]
+    fn from_to_conflicts_with_month_at_clap_parse_time() {
+        use clap::CommandFactory;
+        let result = crate::cli::Cli::command().try_get_matches_from([
+            "ainb",
+            "usage",
+            "report",
+            "--from",
+            "2026-04-01",
+            "--month",
+            "2026-04",
+        ]);
+        assert!(
+            result.is_err(),
+            "clap should reject --from with --month"
+        );
+    }
+
+    #[test]
+    fn ytd_flag_yields_year_to_date_period() {
+        let args = UsageReportArgs {
+            ytd: true,
+            ..UsageReportArgs::default()
+        };
+        let q = query_from_args(&args).unwrap();
+        assert!(matches!(q.period, UsagePeriod::YearToDate));
     }
 
     #[test]
