@@ -602,7 +602,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &UsageViewState) {
         }
     }
 
-    render_help_bar(frame, layout[4]);
+    render_help_bar(frame, layout[4], state);
 }
 
 fn render_summary_bar(frame: &mut Frame, area: Rect, state: &UsageViewState) {
@@ -2517,29 +2517,44 @@ fn render_bar_chart(frame: &mut Frame, area: Rect, data: &UsageData) {
     frame.render_widget(paragraph, area);
 }
 
-fn render_help_bar(frame: &mut Frame, area: Rect) {
-    let spans = vec![
+fn render_help_bar(frame: &mut Frame, area: Rect, state: &UsageViewState) {
+    let on_burndown = matches!(state.active_tab, UsageTab::Burndown);
+    let mut spans = vec![
         Span::styled(" ◀/▶", Style::default().fg(GOLD)),
         Span::styled(" provider  ", Style::default().fg(MUTED_GRAY)),
         Span::styled("p", Style::default().fg(GOLD)),
         Span::styled(" filter  ", Style::default().fg(MUTED_GRAY)),
         Span::styled("1-5", Style::default().fg(GOLD)),
         Span::styled(" period  ", Style::default().fg(MUTED_GRAY)),
+    ];
+    if on_burndown {
+        // Burndown view: Tab pivots panels; Enter commits chip; C clears.
+        spans.extend_from_slice(&[
+            Span::styled("Tab", Style::default().fg(GOLD)),
+            Span::styled(" focus panel  ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("Enter", Style::default().fg(GOLD)),
+            Span::styled(" pin filter  ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("Esc", Style::default().fg(GOLD)),
+            Span::styled(" pop chip  ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("C", Style::default().fg(GOLD)),
+            Span::styled(" clear all  ", Style::default().fg(MUTED_GRAY)),
+        ]);
+    } else {
+        spans.extend_from_slice(&[
+            Span::styled("Tab", Style::default().fg(GOLD)),
+            Span::styled(" view  ", Style::default().fg(MUTED_GRAY)),
+        ]);
+    }
+    spans.extend_from_slice(&[
         Span::styled("/ x d c", Style::default().fg(GOLD)),
         Span::styled(" filters  ", Style::default().fg(MUTED_GRAY)),
-        Span::styled("Tab", Style::default().fg(GOLD)),
-        Span::styled(" view  ", Style::default().fg(MUTED_GRAY)),
         Span::styled("j/k", Style::default().fg(GOLD)),
         Span::styled(" scroll  ", Style::default().fg(MUTED_GRAY)),
-        Span::styled("g/G", Style::default().fg(GOLD)),
-        Span::styled(" top/bottom  ", Style::default().fg(MUTED_GRAY)),
-        Span::styled("r", Style::default().fg(GOLD)),
+        Span::styled("r/R", Style::default().fg(GOLD)),
         Span::styled(" refresh  ", Style::default().fg(MUTED_GRAY)),
-        Span::styled("R", Style::default().fg(GOLD)),
-        Span::styled(" force refresh  ", Style::default().fg(MUTED_GRAY)),
         Span::styled("Esc", Style::default().fg(GOLD)),
         Span::styled(" back", Style::default().fg(MUTED_GRAY)),
-    ];
+    ]);
     let paragraph = Paragraph::new(Line::from(spans)).style(Style::default().bg(DARK_BG));
     frame.render_widget(paragraph, area);
 }

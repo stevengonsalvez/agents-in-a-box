@@ -358,6 +358,14 @@ pub enum AppEvent {
     UsageInputBackspace,      // Backspace in usage input
     UsageInputSubmit,         // Submit usage input
     UsageInputCancel,         // Cancel usage input
+    // Cross-filter (Grafana-style dashboard pivot) on Burndown view
+    UsageFocusNextPanel,      // Tab while on Burndown
+    UsageFocusPrevPanel,      // Shift+Tab while on Burndown
+    UsageFocusRowUp,          // Up/k while a panel is focused
+    UsageFocusRowDown,        // Down/j while a panel is focused
+    UsageCommitFilter,        // Enter on focused row -> add chip
+    UsagePopFilterChip,       // Esc when chips exist
+    UsageClearAllChips,       // C — drop every chip in one shot
     // Skills browser events
     SkillsBack,             // Return to home screen (Esc)
     SkillsNextProvider,     // Next provider (Right arrow)
@@ -1650,6 +1658,39 @@ impl EventHandler {
                 KeyCode::Char(ch) => Some(AppEvent::UsageInputChar(ch)),
                 _ => None,
             };
+        }
+
+        // Burndown-only cross-filter shortcuts. Tab cycles panel focus
+        // here instead of advancing the outer tab bar so the user can
+        // pivot without losing the dashboard layout. Esc backs out of
+        // the most recent chip when chips exist; otherwise it falls
+        // through to the standard "back to home" handler below.
+        let on_burndown = matches!(
+            state.usage_state.active_tab,
+            crate::components::usage::UsageTab::Burndown
+        );
+        if on_burndown {
+            match key_event.code {
+                KeyCode::Tab => return Some(AppEvent::UsageFocusNextPanel),
+                KeyCode::BackTab => return Some(AppEvent::UsageFocusPrevPanel),
+                KeyCode::Enter => return Some(AppEvent::UsageCommitFilter),
+                KeyCode::Char('C') => return Some(AppEvent::UsageClearAllChips),
+                KeyCode::Esc if state.usage_state.filters.any() => {
+                    return Some(AppEvent::UsagePopFilterChip);
+                }
+                _ => {}
+            }
+            if state.usage_state.focused_panel.is_some() {
+                match key_event.code {
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        return Some(AppEvent::UsageFocusRowUp);
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        return Some(AppEvent::UsageFocusRowDown);
+                    }
+                    _ => {}
+                }
+            }
         }
 
         match key_event.code {
@@ -4159,6 +4200,42 @@ impl EventHandler {
                 }
                 Err(e) => state.add_error_notification(e),
             },
+            AppEvent::UsageFocusNextPanel => {
+                state.usage_state.focus_next_panel();
+            }
+            AppEvent::UsageFocusPrevPanel => {
+                state.usage_state.focus_prev_panel();
+            }
+            AppEvent::UsageFocusRowUp => {
+                state.usage_state.focus_row_up();
+            }
+            AppEvent::UsageFocusRowDown => {
+                state.usage_state.focus_row_down();
+            }
+            AppEvent::UsageCommitFilter => {
+                if state.usage_state.commit_focused_row() {
+                    // Cross-filter is client-side: no re-parse needed.
+                    // The next render will run filter_usage_data over
+                    // the already-parsed call set.
+                    state.add_success_notification("Filter added".to_string());
+                }
+            }
+            AppEvent::UsagePopFilterChip => {
+                if let Some(chip) = state.usage_state.pop_filter_chip() {
+                    state.add_success_notification(format!(
+                        "Removed filter {}={}",
+                        chip.label(),
+                        chip.value()
+                    ));
+                }
+            }
+            AppEvent::UsageClearAllChips => {
+                let had_any = state.usage_state.filters.any();
+                state.usage_state.clear_all_filter_chips();
+                if had_any {
+                    state.add_success_notification("Cleared all chips".to_string());
+                }
+            }
             // Skills browser events
             AppEvent::SkillsBack => {
                 tracing::debug!("Skills back");
