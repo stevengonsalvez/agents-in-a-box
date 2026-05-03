@@ -37,6 +37,7 @@ fn sample_usage_data() -> UsageData {
             tools: vec!["Edit".to_string()],
             bash_commands: vec!["cargo test".to_string()],
             user_message: "implement burndown".to_string(),
+            branch: None,
         }],
         daily: vec![(
             chrono::NaiveDate::from_ymd_opt(2026, 4, 29).unwrap(),
