@@ -1107,7 +1107,7 @@ fn render_project_panel(frame: &mut Frame, area: Rect, rows: &[ProjectUsage]) {
         .take(cap)
         .map(|row| {
             let cost = row.bucket.cost_usd.unwrap_or(0.0);
-            let label = shorten_project_name(&row.name, label_w);
+            let label = pretty_project_name(&row.name, label_w);
             let mut spans = vec![
                 Span::raw(" "),
                 Span::styled(
@@ -1152,7 +1152,7 @@ fn render_session_panel(frame: &mut Frame, area: Rect, rows: &[SessionUsage]) {
         .iter()
         .take(cap)
         .map(|row| {
-            let label = shorten_project_name(&row.project, label_w);
+            let label = pretty_project_name(&row.project, label_w);
             let mut spans = vec![
                 Span::raw(" "),
                 Span::styled(pad_label(&label, label_w), Style::default().fg(SOFT_WHITE)),
@@ -1194,7 +1194,7 @@ fn render_live_panel(frame: &mut Frame, area: Rect, rows: &[SessionUsage]) {
         .iter()
         .take(cap)
         .map(|row| {
-            let label = shorten_project_name(&row.project, label_w);
+            let label = pretty_project_name(&row.project, label_w);
             let provider = truncate_string(&row.provider, provider_w);
             Line::from(vec![
                 Span::raw(" "),
@@ -1437,7 +1437,7 @@ fn render_leaderboard_panel(frame: &mut Frame, area: Rect, data: &UsageData) {
                 2 => TERMINAL_ACCENT,
                 _ => MUTED_GRAY,
             };
-            let label = shorten_project_name(&project.name, label_w);
+            let label = pretty_project_name(&project.name, label_w);
             let mut spans = vec![
                 Span::raw(" "),
                 Span::styled(
@@ -1640,6 +1640,94 @@ fn pad_label(label: &str, width: usize) -> String {
         }
         out
     }
+}
+
+/// Render a project label that's friendly for Stevie's worktree
+/// layout. Recognises the `worktrees/<repo>_<branch>` and
+/// `user-repo-branch` patterns and renders them as `repo:branch`.
+/// Falls back to `shorten_project_name` for anything else.
+///
+/// Returns a string of at most `max_w` displayed characters.
+fn pretty_project_name(name: &str, max_w: usize) -> String {
+    if max_w == 0 {
+        return String::new();
+    }
+    if let Some(pretty) = try_pretty_repo_branch(name) {
+        if pretty.chars().count() <= max_w {
+            return pretty;
+        }
+        // Pretty form is still too long — apply tail-truncation on the
+        // branch portion, keeping the `repo:` prefix intact when we can.
+        if let Some((repo, branch)) = pretty.split_once(':') {
+            let repo_w = repo.chars().count();
+            // Need room for repo + ':' + at least 1 branch char.
+            if repo_w + 2 <= max_w {
+                let branch_w = max_w - repo_w - 1;
+                let truncated_branch = truncate_string(branch, branch_w);
+                let combined = format!("{repo}:{truncated_branch}");
+                if combined.chars().count() <= max_w {
+                    return combined;
+                }
+            }
+        }
+        // Else fall through to the generic shortener on the pretty form.
+        return shorten_project_name(&pretty, max_w);
+    }
+    shorten_project_name(name, max_w)
+}
+
+/// Detect `<root>/worktrees/<repo>_<branch>` (sanitised, segment-style)
+/// or `user-repo-branch...` (dash-style) and emit `<repo>:<branch>`.
+/// Returns `None` if the input doesn't look like one of those patterns,
+/// so callers can fall back to a generic shortener.
+fn try_pretty_repo_branch(name: &str) -> Option<String> {
+    // Pattern A: worktree path. `clean_project_name` rewrites these to
+    // `worktree/<user>_<repo>_<branch>` for Claude sources, and the
+    // raw `worktrees/<...>` form may also reach us via project_path.
+    let after_worktree = name
+        .rsplit_once("worktree/")
+        .map(|(_, tail)| tail)
+        .or_else(|| name.rsplit_once("worktrees/").map(|(_, tail)| tail));
+    if let Some(tail) = after_worktree {
+        let stem = tail.split('/').next().unwrap_or(tail);
+        // Worktree convention is underscore-separated user/repo/branch
+        // (the repo and branch may legitimately contain dashes).
+        if let Some(pretty) = repo_branch_from_token(stem, '_') {
+            return Some(pretty);
+        }
+    }
+
+    // Pattern B: a single token with `user-repo-branch...` shape.
+    // Only opt in when there are at least 3 dash-separated parts AND
+    // no slashes/underscores — otherwise we'd misformat ordinary
+    // `org/repo` names or interfere with the worktree path above.
+    if !name.contains('/')
+        && !name.contains('_')
+        && name.matches('-').count() >= 2
+    {
+        if let Some(pretty) = repo_branch_from_token(name, '-') {
+            return Some(pretty);
+        }
+    }
+
+    None
+}
+
+/// Decompose `user{sep}repo{sep}branch...` into `repo:branch` using the
+/// caller-chosen `sep`. Returns `None` for tokens with fewer than three
+/// parts. The branch portion is rejoined with `-` for readability so
+/// `feat_codeburn` and `feat-codeburn` both render the same.
+fn repo_branch_from_token(token: &str, sep: char) -> Option<String> {
+    let parts: Vec<&str> = token.split(sep).collect();
+    if parts.len() < 3 {
+        return None;
+    }
+    let repo = parts[1];
+    let branch = parts[2..].join("-");
+    if repo.is_empty() || branch.is_empty() {
+        return None;
+    }
+    Some(format!("{repo}:{branch}"))
 }
 
 fn shorten_project_name(name: &str, max_w: usize) -> String {
@@ -1864,4 +1952,54 @@ fn input_label(mode: UsageInputMode) -> &'static str {
 fn format_cost(cost: Option<f64>) -> String {
     cost.map(|value| format!("${value:.2}"))
         .unwrap_or_else(|| "cost n/a".to_string())
+}
+
+#[cfg(test)]
+mod pretty_project_tests {
+    use super::*;
+
+    #[test]
+    fn worktree_path_renders_repo_colon_branch() {
+        let name = "worktree/stevengonsalvez_agents-in-a-box_feat_codeburn";
+        assert_eq!(
+            pretty_project_name(name, 40),
+            "agents-in-a-box:feat-codeburn"
+        );
+    }
+
+    #[test]
+    fn dashed_session_token_renders_repo_colon_branch() {
+        let name = "stevengonsalvez-biolift-feat-all";
+        assert_eq!(pretty_project_name(name, 40), "biolift:feat-all");
+    }
+
+    #[test]
+    fn ordinary_path_falls_back_to_shorten() {
+        let name = "/Users/stevie/work/project";
+        // Falls back: name has slashes, shouldn't trip the dash heuristic.
+        // Just assert we did not produce a "repo:branch" colon form.
+        let out = pretty_project_name(name, 40);
+        assert!(!out.contains(':') || out.contains("/"));
+    }
+
+    #[test]
+    fn truncates_branch_when_pretty_form_overflows() {
+        let name = "worktree/u_repository_very-long-feature-branch-name";
+        let out = pretty_project_name(name, 16);
+        // "repository:" is 11 chars, leaves 5 for branch (with truncate ellipsis).
+        assert!(out.starts_with("repository:"), "got {out}");
+        assert!(out.chars().count() <= 16, "got {out}");
+    }
+
+    #[test]
+    fn empty_max_w_returns_empty() {
+        assert_eq!(pretty_project_name("worktree/a_b_c", 0), "");
+    }
+
+    #[test]
+    fn two_dash_segments_do_not_misclassify() {
+        // "org-repo" — only 1 dash, must NOT match user-repo-branch shape.
+        let name = "org-repo";
+        assert_eq!(pretty_project_name(name, 40), "org-repo");
+    }
 }
