@@ -2499,10 +2499,17 @@ fn render_help_bar(frame: &mut Frame, area: Rect, state: &UsageViewState) {
 }
 
 fn truncate_string(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
+    // max_len is char count, not bytes. The previous `s.len()` gate let
+    // multi-byte strings reach a byte-slice (`&s[..max_len-1]`) that
+    // could fall inside a codepoint and panic. Since pretty_project_name
+    // now feeds branch names into here, that path is reachable on any
+    // non-ASCII branch name. Switch to char-count + chars().take().
+    if s.chars().count() <= max_len {
         s.to_string()
     } else {
-        format!("{}…", &s[..max_len - 1])
+        let take = max_len.saturating_sub(1);
+        let truncated: String = s.chars().take(take).collect();
+        format!("{truncated}…")
     }
 }
 
