@@ -2933,6 +2933,55 @@ mod tests {
     }
 
     #[test]
+    fn last_n_days_period_covers_n_calendar_days() {
+        for n in [1u32, 7, 14, 90] {
+            let (start, end) =
+                date_range_for_period(&UsagePeriod::LastNDays(n)).unwrap();
+            assert_eq!(
+                (end.date_naive() - start.date_naive()).num_days() + 1,
+                i64::from(n),
+                "n={n}"
+            );
+        }
+    }
+
+    #[test]
+    fn specific_month_period_starts_on_day_one_and_ends_on_last_day() {
+        let anchor = NaiveDate::from_ymd_opt(2026, 4, 17).unwrap();
+        let (start, end) =
+            date_range_for_period(&UsagePeriod::SpecificMonth(anchor)).unwrap();
+        assert_eq!(start.date_naive(), NaiveDate::from_ymd_opt(2026, 4, 1).unwrap());
+        assert_eq!(end.date_naive(), NaiveDate::from_ymd_opt(2026, 4, 30).unwrap());
+    }
+
+    #[test]
+    fn specific_quarter_q1_to_q4_cover_three_months_each() {
+        for q in 1u8..=4 {
+            let (start, end) =
+                date_range_for_period(&UsagePeriod::SpecificQuarter(2026, q)).unwrap();
+            // Q1 = 90 days (Jan 31 + Feb 28 + Mar 31), Q2 = 91, Q3 = 92, Q4 = 92.
+            let days = (end.date_naive() - start.date_naive()).num_days() + 1;
+            assert!((90..=92).contains(&days), "q={q} got {days} days");
+        }
+    }
+
+    #[test]
+    fn ytd_period_starts_on_jan_1() {
+        let (start, _) = date_range_for_period(&UsagePeriod::YearToDate).unwrap();
+        assert_eq!(start.date_naive().month(), 1);
+        assert_eq!(start.date_naive().day(), 1);
+    }
+
+    #[test]
+    fn quarter_of_dispatches_jan_to_dec_correctly() {
+        assert_eq!(quarter_of(NaiveDate::from_ymd_opt(2026, 1, 5).unwrap()), 1);
+        assert_eq!(quarter_of(NaiveDate::from_ymd_opt(2026, 3, 31).unwrap()), 1);
+        assert_eq!(quarter_of(NaiveDate::from_ymd_opt(2026, 4, 1).unwrap()), 2);
+        assert_eq!(quarter_of(NaiveDate::from_ymd_opt(2026, 7, 1).unwrap()), 3);
+        assert_eq!(quarter_of(NaiveDate::from_ymd_opt(2026, 12, 31).unwrap()), 4);
+    }
+
+    #[test]
     fn optimize_compare_and_yield_return_stable_summaries() {
         let calls = vec![
             provider_call(
