@@ -302,6 +302,10 @@ pub struct ProviderCall {
     pub tools: Vec<String>,
     pub bash_commands: Vec<String>,
     pub user_message: String,
+    /// Git branch the turn was made from, parsed from `gitBranch` on
+    /// Claude assistant turns. Codex transcripts don't carry branch state,
+    /// so codex calls always have `None` here.
+    pub branch: Option<String>,
 }
 
 impl ProviderCall {
@@ -466,6 +470,8 @@ struct ClaudeLine {
     #[serde(rename = "sessionId")]
     session_id: Option<String>,
     cwd: Option<String>,
+    #[serde(rename = "gitBranch")]
+    git_branch: Option<String>,
     message: Option<ClaudeMessage>,
 }
 
@@ -850,6 +856,7 @@ fn parse_claude_line(
                 tools,
                 bash_commands,
                 user_message: current_user_message.clone(),
+                branch: parsed.git_branch.filter(|b| !b.is_empty()),
             })
         }
         _ => None,
@@ -1108,6 +1115,7 @@ fn parse_codex_source(path: &Path) -> Vec<ProviderCall> {
             tools: std::mem::take(&mut pending_tools),
             bash_commands: Vec::new(),
             user_message: std::mem::take(&mut pending_user_message),
+            branch: None,
         });
     }
 
@@ -2345,6 +2353,7 @@ mod tests {
             tools: tools.iter().map(|tool| tool.to_string()).collect(),
             bash_commands: bash_commands.iter().map(|command| command.to_string()).collect(),
             user_message: message.to_string(),
+            branch: None,
         }
     }
 
@@ -2381,6 +2390,40 @@ mod tests {
         assert_eq!(data.grand_total.session_count, 1);
         assert!(data.tools.iter().any(|tool| tool.name == "Read" && tool.calls == 1));
         assert!(data.shell_commands.iter().any(|cmd| cmd.name == "cargo test" && cmd.calls == 1));
+    }
+
+    #[test]
+    fn claude_assistant_turn_carries_git_branch_through_parser() {
+        let temp = tempdir().unwrap();
+        let claude_projects = temp.path().join(".claude/projects");
+        let project_dir = claude_projects.join("-Users-stevie-myrepo");
+        write_file(
+            &project_dir.join("session.jsonl"),
+            r#"{"type":"user","timestamp":"2026-04-10T09:00:00Z","sessionId":"s1","gitBranch":"feat/x","message":{"role":"user","content":"go"}}
+{"type":"assistant","timestamp":"2026-04-10T09:00:05Z","sessionId":"s1","gitBranch":"feat/x","message":{"role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":10,"output_tokens":5}}}
+{"type":"assistant","timestamp":"2026-04-10T09:01:00Z","sessionId":"s1","gitBranch":"","message":{"role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"again"}],"usage":{"input_tokens":1,"output_tokens":1}}}
+{"type":"assistant","timestamp":"2026-04-10T09:02:00Z","sessionId":"s1","message":{"role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"none"}],"usage":{"input_tokens":1,"output_tokens":1}}}
+"#,
+        );
+
+        let data = parse_usage_for_with_roots(
+            UsageQuery {
+                provider_filter: UsageProviderFilter::Claude,
+                period: UsagePeriod::All,
+                include_projects: Vec::new(),
+                exclude_projects: Vec::new(),
+                filters: UsageFilters::default(),
+            },
+            &roots(Some(claude_projects), None),
+        );
+
+        assert_eq!(data.calls.len(), 3);
+        assert_eq!(data.calls[0].branch.as_deref(), Some("feat/x"));
+        assert_eq!(
+            data.calls[1].branch, None,
+            "empty gitBranch should normalize to None so empty doesn't leak as a real branch label",
+        );
+        assert_eq!(data.calls[2].branch, None, "missing gitBranch becomes None");
     }
 
     #[test]

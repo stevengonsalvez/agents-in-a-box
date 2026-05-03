@@ -4065,6 +4065,7 @@ mod cli_parity_tests {
             tools: vec!["Edit".into()],
             bash_commands: vec![],
             user_message: "tidy".into(),
+            branch: None,
         }
     }
 

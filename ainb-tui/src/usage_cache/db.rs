@@ -13,9 +13,13 @@ use super::store::CacheError;
 /// Bumping this drops & rebuilds the DB on next open.
 pub const SCHEMA_VERSION: i64 = 1;
 
-/// `files.blob_format` value for bincode v1 (`bincode::serialize` of
-/// `Vec<ProviderCall>` with default options).
-pub const BLOB_FORMAT_BINCODE_V1: i64 = 1;
+/// `files.blob_format` value for the current bincode-encoded
+/// `Vec<ProviderCall>` blob shape (default options).
+///
+/// History:
+///   1 — original 14-field `ProviderCall`.
+///   2 — added `branch: Option<String>` (PR-D, branch attribution).
+pub const BLOB_FORMAT_BINCODE_V1: i64 = 2;
 
 /// Open (or create) the usage-cache sqlite DB at `path`, applying schema and
 /// performance pragmas. Caller owns the resulting connection — wrap in a

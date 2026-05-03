@@ -45,6 +45,7 @@ fn synth_call(seed: &str) -> ProviderCall {
         tools: Vec::new(),
         bash_commands: Vec::new(),
         user_message: String::new(),
+        branch: None,
     }
 }
 
@@ -349,5 +350,7 @@ const fn const_expected_len() -> usize {
     // Rather than re-deriving the formula on every change, we hard-code
     // the value observed for `synth_call("layout-tripwire")`. If chrono
     // or bincode bump their encoding, update this constant intentionally.
-    184
+    //
+    // History: 184 (V1) -> 185 (V2: +Option<String> branch field, None tag).
+    185
 }
