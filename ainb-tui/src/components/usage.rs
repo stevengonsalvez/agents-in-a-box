@@ -159,6 +159,84 @@ pub enum UsageInputMode {
     DateRange,
 }
 
+/// Focusable panels on the Burndown dashboard for cross-filter pivot.
+///
+/// Order matters: it defines the Tab/BackTab traversal sequence. The
+/// brief specifies Daily Activity → By Project → Top Sessions → Live →
+/// By Activity → By Model → Named → Optimize → Leaderboard → Budget.
+/// We expand "Named" into the three concrete panels so every visible
+/// table is keyboard-reachable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsagePanel {
+    DailyActivity,
+    ByProject,
+    TopSessions,
+    Live,
+    ByActivity,
+    ByModel,
+    CoreTools,
+    ShellCommands,
+    McpServers,
+    Optimize,
+    Leaderboard,
+    Budget,
+}
+
+impl UsagePanel {
+    pub const ALL: [UsagePanel; 12] = [
+        UsagePanel::DailyActivity,
+        UsagePanel::ByProject,
+        UsagePanel::TopSessions,
+        UsagePanel::Live,
+        UsagePanel::ByActivity,
+        UsagePanel::ByModel,
+        UsagePanel::CoreTools,
+        UsagePanel::ShellCommands,
+        UsagePanel::McpServers,
+        UsagePanel::Optimize,
+        UsagePanel::Leaderboard,
+        UsagePanel::Budget,
+    ];
+
+    pub fn next(self) -> Self {
+        let idx = Self::ALL.iter().position(|p| *p == self).unwrap_or(0);
+        Self::ALL[(idx + 1) % Self::ALL.len()]
+    }
+
+    pub fn prev(self) -> Self {
+        let idx = Self::ALL.iter().position(|p| *p == self).unwrap_or(0);
+        let last = Self::ALL.len() - 1;
+        Self::ALL[if idx == 0 { last } else { idx - 1 }]
+    }
+
+    /// Whether `Enter` on this panel maps a row onto a cross-filter.
+    /// Daily Activity, Optimize, and Budget are read-only — Enter is a
+    /// no-op there. Leaderboard maps the focused row onto the Project
+    /// filter (rows are projects).
+    pub fn enter_target(self) -> Option<UsageFilterTarget> {
+        match self {
+            UsagePanel::ByProject | UsagePanel::Leaderboard => {
+                Some(UsageFilterTarget::Project)
+            }
+            UsagePanel::ByActivity => Some(UsageFilterTarget::Activity),
+            UsagePanel::ByModel => Some(UsageFilterTarget::Model),
+            UsagePanel::TopSessions | UsagePanel::Live => {
+                Some(UsageFilterTarget::Session)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Which slot on `UsageFilters` a panel-row commits into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageFilterTarget {
+    Project,
+    Model,
+    Activity,
+    Session,
+}
+
 /// View state for the usage analytics screen
 #[derive(Debug, Clone)]
 pub struct UsageViewState {
@@ -173,6 +251,16 @@ pub struct UsageViewState {
     pub exclude_projects: Vec<String>,
     pub input_mode: Option<UsageInputMode>,
     pub input_buffer: String,
+    /// Cross-filter chips set by the Burndown panel pivot or CLI flags.
+    /// These layer on top of include/exclude project globs (see
+    /// `models::usage::UsageFilters` for matching semantics).
+    pub filters: UsageFilters,
+    /// Currently-focused dashboard panel (Burndown only). `None` means
+    /// no focus — Tab moves between outer tabs as before.
+    pub focused_panel: Option<UsagePanel>,
+    /// Row indicator inside the focused panel. Clamped to the row count
+    /// of the focused panel's underlying collection at render time.
+    pub focus_row: usize,
 }
 
 impl Default for UsageViewState {
@@ -189,6 +277,9 @@ impl Default for UsageViewState {
             exclude_projects: Vec::new(),
             input_mode: None,
             input_buffer: String::new(),
+            filters: UsageFilters::default(),
+            focused_panel: None,
+            focus_row: 0,
         }
     }
 }
@@ -354,6 +445,125 @@ impl UsageViewState {
     pub fn clear_filters(&mut self) {
         self.include_projects.clear();
         self.exclude_projects.clear();
+    }
+
+    /// Cycle the focus pointer to the next panel. If unfocused, focus
+    /// the first panel. Resets `focus_row` to 0.
+    pub fn focus_next_panel(&mut self) {
+        self.focused_panel = Some(match self.focused_panel {
+            Some(panel) => panel.next(),
+            None => UsagePanel::ALL[0],
+        });
+        self.focus_row = 0;
+    }
+
+    /// Cycle focus backward.
+    pub fn focus_prev_panel(&mut self) {
+        self.focused_panel = Some(match self.focused_panel {
+            Some(panel) => panel.prev(),
+            None => UsagePanel::ALL[UsagePanel::ALL.len() - 1],
+        });
+        self.focus_row = 0;
+    }
+
+    /// Drop focus entirely (no panel highlighted).
+    pub fn clear_focus(&mut self) {
+        self.focused_panel = None;
+        self.focus_row = 0;
+    }
+
+    /// Move the row indicator inside the focused panel. No-op when
+    /// nothing is focused. Clamping happens at render time once we know
+    /// the row count of the underlying collection.
+    pub fn focus_row_up(&mut self) {
+        self.focus_row = self.focus_row.saturating_sub(1);
+    }
+
+    pub fn focus_row_down(&mut self) {
+        // Saturate at usize::MAX is safe — render-side clamps to actual
+        // rows and the user sees no further movement.
+        self.focus_row = self.focus_row.saturating_add(1);
+    }
+
+    /// Filtered view of the parsed data, applying the active cross
+    /// filter chips. Cheap when no filters are set (clones the source).
+    pub fn filtered_data(&self) -> Option<UsageData> {
+        self.data
+            .as_ref()
+            .map(|data| filter_usage_data(data, &self.filters))
+    }
+
+    /// Append the focused row of the focused panel as a chip. Returns
+    /// `true` if a chip was added (so callers can show feedback).
+    /// Requires `data` to be loaded; uses the unfiltered `data` to
+    /// resolve the row by index because that's what the user is
+    /// looking at when focus is active (we render from filtered_data
+    /// at draw time, which is the same source).
+    pub fn commit_focused_row(&mut self) -> bool {
+        let Some(panel) = self.focused_panel else {
+            return false;
+        };
+        let Some(target) = panel.enter_target() else {
+            return false;
+        };
+        let Some(filtered) = self.filtered_data() else {
+            return false;
+        };
+        let row_idx = self.focus_row;
+        let value = match (target, panel) {
+            (UsageFilterTarget::Project, UsagePanel::Leaderboard | UsagePanel::ByProject) => {
+                filtered.projects.get(row_idx).map(|p| p.name.clone())
+            }
+            (UsageFilterTarget::Activity, _) => filtered
+                .activities
+                .get(row_idx)
+                .map(|a| a.category.label().to_string()),
+            (UsageFilterTarget::Model, _) => {
+                filtered.models.get(row_idx).map(|m| m.model.clone())
+            }
+            (UsageFilterTarget::Session, _) => filtered
+                .sessions
+                .get(row_idx)
+                .map(|s| s.session_id.clone()),
+            _ => None,
+        };
+        let Some(value) = value else {
+            return false;
+        };
+        match target {
+            UsageFilterTarget::Project => {
+                if !self.filters.project.contains(&value) {
+                    self.filters.project.push(value);
+                }
+            }
+            UsageFilterTarget::Model => {
+                if !self.filters.model.contains(&value) {
+                    self.filters.model.push(value);
+                }
+            }
+            UsageFilterTarget::Activity => {
+                if !self.filters.activity.contains(&value) {
+                    self.filters.activity.push(value);
+                }
+            }
+            UsageFilterTarget::Session => {
+                if !self.filters.session.contains(&value) {
+                    self.filters.session.push(value);
+                }
+            }
+        }
+        true
+    }
+
+    /// Pop the most recently added cross-filter chip. Returns the
+    /// removed chip so the caller can echo it in the notification.
+    pub fn pop_filter_chip(&mut self) -> Option<UsageFilterChip> {
+        self.filters.pop_last()
+    }
+
+    /// Drop every cross-filter chip. Leaves include/exclude untouched.
+    pub fn clear_all_filter_chips(&mut self) {
+        self.filters.clear();
     }
 }
 
@@ -815,28 +1025,73 @@ fn render_burndown(frame: &mut Frame, area: Rect, data: &UsageData, state: &Usag
         return;
     }
 
+    // Apply cross-filter chips client-side. With no chips this is a
+    // cheap clone; with chips it re-aggregates from the in-memory call
+    // set so every panel and the header reflect the active pivot.
+    let filtered = filter_usage_data(data, &state.filters);
+    let view_data: &UsageData = if state.filters.any() { &filtered } else { data };
+
+    // Filter chip strip occupies one row when chips are active OR when
+    // a panel is focused (we want the affordance hint visible). When
+    // both are absent we still show the hint at low contrast so users
+    // discover the pivot.
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // header
-            Constraint::Length(2), // period+provider strip (2 rows)
+            Constraint::Length(2), // period+provider strip
+            Constraint::Length(1), // chip strip / hint
             Constraint::Min(0),    // dashboard
         ])
         .split(inner);
 
-    render_burndown_header(frame, vertical[0], data, &state.period);
+    render_burndown_header(frame, vertical[0], view_data, &state.period);
     render_period_row(frame, vertical[1], state);
+    render_filter_chip_strip(frame, vertical[2], state);
 
-    if vertical[2].width >= 120 && vertical[2].height >= 22 {
-        render_dashboard_grid(frame, vertical[2], data, &state.period);
-    } else if vertical[2].width >= 96 {
-        render_dashboard_compact(frame, vertical[2], data);
+    if vertical[3].width >= 120 && vertical[3].height >= 22 {
+        render_dashboard_grid(frame, vertical[3], view_data, &state.period, state);
+    } else if vertical[3].width >= 96 {
+        render_dashboard_compact(frame, vertical[3], view_data, state);
     } else {
-        render_dashboard_stack(frame, vertical[2], data);
+        render_dashboard_stack(frame, vertical[3], view_data, state);
     }
 }
 
-fn render_dashboard_grid(frame: &mut Frame, area: Rect, data: &UsageData, period: &UsagePeriod) {
+/// `FocusCtx` packages the focus arguments threaded into every panel
+/// renderer. `Some(row_idx)` means the panel is focused and should
+/// render the highlighted row indicator at that index; `None` means
+/// "render normally".
+#[derive(Debug, Clone, Copy)]
+struct FocusCtx {
+    focused_row: Option<usize>,
+}
+
+impl FocusCtx {
+    fn for_panel(state: &UsageViewState, panel: UsagePanel) -> Self {
+        if state.focused_panel == Some(panel) {
+            Self {
+                focused_row: Some(state.focus_row),
+            }
+        } else {
+            Self { focused_row: None }
+        }
+    }
+    fn unfocused() -> Self {
+        Self { focused_row: None }
+    }
+    fn is_focused(self) -> bool {
+        self.focused_row.is_some()
+    }
+}
+
+fn render_dashboard_grid(
+    frame: &mut Frame,
+    area: Rect,
+    data: &UsageData,
+    period: &UsagePeriod,
+    state: &UsageViewState,
+) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -848,27 +1103,96 @@ fn render_dashboard_grid(frame: &mut Frame, area: Rect, data: &UsageData, period
         .split(area);
 
     let top = three_columns(rows[0]);
-    render_daily_activity_panel(frame, top[0], data);
-    render_project_panel(frame, top[1], &data.projects);
-    render_live_panel(frame, top[2], &data.sessions);
+    render_daily_activity_panel(
+        frame,
+        top[0],
+        data,
+        FocusCtx::for_panel(state, UsagePanel::DailyActivity),
+    );
+    render_project_panel(
+        frame,
+        top[1],
+        &data.projects,
+        FocusCtx::for_panel(state, UsagePanel::ByProject),
+    );
+    render_live_panel(
+        frame,
+        top[2],
+        &data.sessions,
+        FocusCtx::for_panel(state, UsagePanel::Live),
+    );
 
     let middle = three_columns(rows[1]);
-    render_session_panel(frame, middle[0], &data.sessions);
-    render_activity_panel(frame, middle[1], &data.activities);
-    render_model_panel(frame, middle[2], &data.models);
+    render_session_panel(
+        frame,
+        middle[0],
+        &data.sessions,
+        FocusCtx::for_panel(state, UsagePanel::TopSessions),
+    );
+    render_activity_panel(
+        frame,
+        middle[1],
+        &data.activities,
+        FocusCtx::for_panel(state, UsagePanel::ByActivity),
+    );
+    render_model_panel(
+        frame,
+        middle[2],
+        &data.models,
+        FocusCtx::for_panel(state, UsagePanel::ByModel),
+    );
 
     let lower = three_columns(rows[2]);
-    render_named_panel(frame, lower[0], "Core Tools", &data.tools);
-    render_named_panel(frame, lower[1], "Shell Commands", &data.shell_commands);
-    render_named_panel(frame, lower[2], "MCP Servers", &data.mcp_servers);
+    render_named_panel(
+        frame,
+        lower[0],
+        "Core Tools",
+        &data.tools,
+        FocusCtx::for_panel(state, UsagePanel::CoreTools),
+    );
+    render_named_panel(
+        frame,
+        lower[1],
+        "Shell Commands",
+        &data.shell_commands,
+        FocusCtx::for_panel(state, UsagePanel::ShellCommands),
+    );
+    render_named_panel(
+        frame,
+        lower[2],
+        "MCP Servers",
+        &data.mcp_servers,
+        FocusCtx::for_panel(state, UsagePanel::McpServers),
+    );
 
     let bottom = three_columns(rows[3]);
-    render_optimize_compact_panel(frame, bottom[0], data);
-    render_leaderboard_panel(frame, bottom[1], data);
-    render_budget_panel(frame, bottom[2], data, period);
+    render_optimize_compact_panel(
+        frame,
+        bottom[0],
+        data,
+        FocusCtx::for_panel(state, UsagePanel::Optimize),
+    );
+    render_leaderboard_panel(
+        frame,
+        bottom[1],
+        data,
+        FocusCtx::for_panel(state, UsagePanel::Leaderboard),
+    );
+    render_budget_panel(
+        frame,
+        bottom[2],
+        data,
+        period,
+        FocusCtx::for_panel(state, UsagePanel::Budget),
+    );
 }
 
-fn render_dashboard_compact(frame: &mut Frame, area: Rect, data: &UsageData) {
+fn render_dashboard_compact(
+    frame: &mut Frame,
+    area: Rect,
+    data: &UsageData,
+    state: &UsageViewState,
+) {
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
@@ -892,21 +1216,79 @@ fn render_dashboard_compact(frame: &mut Frame, area: Rect, data: &UsageData) {
         ])
         .split(columns[1]);
 
-    render_daily_activity_panel(frame, left[0], data);
-    render_project_panel(frame, left[1], &data.projects);
-    render_session_panel(frame, left[2], &data.sessions);
-    render_live_panel(frame, left[3], &data.sessions);
+    render_daily_activity_panel(
+        frame,
+        left[0],
+        data,
+        FocusCtx::for_panel(state, UsagePanel::DailyActivity),
+    );
+    render_project_panel(
+        frame,
+        left[1],
+        &data.projects,
+        FocusCtx::for_panel(state, UsagePanel::ByProject),
+    );
+    render_session_panel(
+        frame,
+        left[2],
+        &data.sessions,
+        FocusCtx::for_panel(state, UsagePanel::TopSessions),
+    );
+    render_live_panel(
+        frame,
+        left[3],
+        &data.sessions,
+        FocusCtx::for_panel(state, UsagePanel::Live),
+    );
 
-    render_activity_panel(frame, right[0], &data.activities);
-    render_model_panel(frame, right[1], &data.models);
-    render_optimize_compact_panel(frame, right[2], data);
+    render_activity_panel(
+        frame,
+        right[0],
+        &data.activities,
+        FocusCtx::for_panel(state, UsagePanel::ByActivity),
+    );
+    render_model_panel(
+        frame,
+        right[1],
+        &data.models,
+        FocusCtx::for_panel(state, UsagePanel::ByModel),
+    );
+    render_optimize_compact_panel(
+        frame,
+        right[2],
+        data,
+        FocusCtx::for_panel(state, UsagePanel::Optimize),
+    );
     let tools = three_columns(right[3]);
-    render_named_panel(frame, tools[0], "Core Tools", &data.tools);
-    render_named_panel(frame, tools[1], "Shell Commands", &data.shell_commands);
-    render_named_panel(frame, tools[2], "MCP Servers", &data.mcp_servers);
+    render_named_panel(
+        frame,
+        tools[0],
+        "Core Tools",
+        &data.tools,
+        FocusCtx::for_panel(state, UsagePanel::CoreTools),
+    );
+    render_named_panel(
+        frame,
+        tools[1],
+        "Shell Commands",
+        &data.shell_commands,
+        FocusCtx::for_panel(state, UsagePanel::ShellCommands),
+    );
+    render_named_panel(
+        frame,
+        tools[2],
+        "MCP Servers",
+        &data.mcp_servers,
+        FocusCtx::for_panel(state, UsagePanel::McpServers),
+    );
 }
 
-fn render_dashboard_stack(frame: &mut Frame, area: Rect, data: &UsageData) {
+fn render_dashboard_stack(
+    frame: &mut Frame,
+    area: Rect,
+    data: &UsageData,
+    state: &UsageViewState,
+) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -918,11 +1300,36 @@ fn render_dashboard_stack(frame: &mut Frame, area: Rect, data: &UsageData) {
         ])
         .split(area);
 
-    render_daily_activity_panel(frame, chunks[0], data);
-    render_project_panel(frame, chunks[1], &data.projects);
-    render_session_panel(frame, chunks[2], &data.sessions);
-    render_activity_panel(frame, chunks[3], &data.activities);
-    render_model_panel(frame, chunks[4], &data.models);
+    render_daily_activity_panel(
+        frame,
+        chunks[0],
+        data,
+        FocusCtx::for_panel(state, UsagePanel::DailyActivity),
+    );
+    render_project_panel(
+        frame,
+        chunks[1],
+        &data.projects,
+        FocusCtx::for_panel(state, UsagePanel::ByProject),
+    );
+    render_session_panel(
+        frame,
+        chunks[2],
+        &data.sessions,
+        FocusCtx::for_panel(state, UsagePanel::TopSessions),
+    );
+    render_activity_panel(
+        frame,
+        chunks[3],
+        &data.activities,
+        FocusCtx::for_panel(state, UsagePanel::ByActivity),
+    );
+    render_model_panel(
+        frame,
+        chunks[4],
+        &data.models,
+        FocusCtx::for_panel(state, UsagePanel::ByModel),
+    );
 }
 
 fn three_columns(area: Rect) -> std::rc::Rc<[Rect]> {
@@ -1086,11 +1493,64 @@ fn render_period_row(frame: &mut Frame, area: Rect, state: &UsageViewState) {
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-fn render_daily_activity_panel(frame: &mut Frame, area: Rect, data: &UsageData) {
+/// Build the chip strip line shown directly under the period+provider
+/// strip. Active chips render as `[label=value]` in GOLD; with no
+/// chips, an instruction hint is shown so users discover the pivot.
+pub fn build_filter_chip_line(state: &UsageViewState) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> =
+        vec![Span::styled("Filters: ", Style::default().fg(MUTED_GRAY))];
+    if !state.filters.any() {
+        spans.push(Span::styled(
+            "(none) — Tab focus a panel, ↑↓ pick a row, Enter to add",
+            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+        ));
+        return Line::from(spans);
+    }
+    push_chip_group(&mut spans, "project", &state.filters.project);
+    push_chip_group(&mut spans, "model", &state.filters.model);
+    push_chip_group(&mut spans, "activity", &state.filters.activity);
+    push_chip_group(&mut spans, "session", &state.filters.session);
+    spans.push(Span::styled("  ·  ", Style::default().fg(MUTED_GRAY)));
+    spans.push(Span::styled(
+        "Esc",
+        Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+    ));
+    spans.push(Span::styled(
+        " clear last  ",
+        Style::default().fg(MUTED_GRAY),
+    ));
+    spans.push(Span::styled(
+        "C",
+        Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+    ));
+    spans.push(Span::styled(" clear all", Style::default().fg(MUTED_GRAY)));
+    Line::from(spans)
+}
+
+fn push_chip_group(spans: &mut Vec<Span<'static>>, label: &str, values: &[String]) {
+    for value in values {
+        let chip_text = format!(" {label}={value} ");
+        spans.push(Span::styled(
+            chip_text,
+            Style::default()
+                .fg(DARK_BG)
+                .bg(GOLD)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::raw(" "));
+    }
+}
+
+fn render_filter_chip_strip(frame: &mut Frame, area: Rect, state: &UsageViewState) {
+    let line = build_filter_chip_line(state);
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+fn render_daily_activity_panel(frame: &mut Frame, area: Rect, data: &UsageData, focus: FocusCtx) {
     let cap = area.height.saturating_sub(2) as usize;
     let inner_w = area.width.saturating_sub(2) as usize;
     if cap == 0 || inner_w < 16 {
-        render_panel_lines(frame, area, "Daily Activity", vec![]);
+        render_panel_lines_with_focus(frame, area, "Daily Activity", vec![], focus);
         return;
     }
     let max = data
@@ -1139,14 +1599,19 @@ fn render_daily_activity_panel(frame: &mut Frame, area: Rect, data: &UsageData) 
             Line::from(spans)
         })
         .collect();
-    render_panel_lines(frame, area, "Daily Activity", lines);
+    render_panel_lines_with_focus(frame, area, "Daily Activity", lines, focus);
 }
 
-fn render_project_panel(frame: &mut Frame, area: Rect, rows: &[ProjectUsage]) {
+fn render_project_panel(
+    frame: &mut Frame,
+    area: Rect,
+    rows: &[ProjectUsage],
+    focus: FocusCtx,
+) {
     let cap = area.height.saturating_sub(2) as usize;
     let inner_w = area.width.saturating_sub(2) as usize;
     if cap == 0 || inner_w < 16 {
-        render_panel_lines(frame, area, "By Project", vec![]);
+        render_panel_lines_with_focus(frame, area, "By Project", vec![], focus);
         return;
     }
     let max = rows
@@ -1189,14 +1654,19 @@ fn render_project_panel(frame: &mut Frame, area: Rect, rows: &[ProjectUsage]) {
             Line::from(spans)
         })
         .collect();
-    render_panel_lines(frame, area, "By Project", lines);
+    render_panel_lines_with_focus(frame, area, "By Project", lines, focus);
 }
 
-fn render_session_panel(frame: &mut Frame, area: Rect, rows: &[SessionUsage]) {
+fn render_session_panel(
+    frame: &mut Frame,
+    area: Rect,
+    rows: &[SessionUsage],
+    focus: FocusCtx,
+) {
     let cap = area.height.saturating_sub(2) as usize;
     let inner_w = area.width.saturating_sub(2) as usize;
     if cap == 0 || inner_w < 16 {
-        render_panel_lines(frame, area, "Top Sessions", vec![]);
+        render_panel_lines_with_focus(frame, area, "Top Sessions", vec![], focus);
         return;
     }
     let max = rows.iter().map(|row| row.bucket.total()).max().unwrap_or(1);
@@ -1231,14 +1701,19 @@ fn render_session_panel(frame: &mut Frame, area: Rect, rows: &[SessionUsage]) {
             Line::from(spans)
         })
         .collect();
-    render_panel_lines(frame, area, "Top Sessions", lines);
+    render_panel_lines_with_focus(frame, area, "Top Sessions", lines, focus);
 }
 
-fn render_live_panel(frame: &mut Frame, area: Rect, rows: &[SessionUsage]) {
+fn render_live_panel(
+    frame: &mut Frame,
+    area: Rect,
+    rows: &[SessionUsage],
+    focus: FocusCtx,
+) {
     let cap = area.height.saturating_sub(2) as usize;
     let inner_w = area.width.saturating_sub(2) as usize;
     if cap == 0 || inner_w < 16 {
-        render_panel_lines(frame, area, "Live Session Ticker", vec![]);
+        render_panel_lines_with_focus(frame, area, "Live Session Ticker", vec![], focus);
         return;
     }
     let value_w = rows
@@ -1278,14 +1753,19 @@ fn render_live_panel(frame: &mut Frame, area: Rect, rows: &[SessionUsage]) {
             ])
         })
         .collect();
-    render_panel_lines(frame, area, "Live Session Ticker", lines);
+    render_panel_lines_with_focus(frame, area, "Live Session Ticker", lines, focus);
 }
 
-fn render_activity_panel(frame: &mut Frame, area: Rect, rows: &[ActivityUsage]) {
+fn render_activity_panel(
+    frame: &mut Frame,
+    area: Rect,
+    rows: &[ActivityUsage],
+    focus: FocusCtx,
+) {
     let cap = area.height.saturating_sub(2) as usize;
     let inner_w = area.width.saturating_sub(2) as usize;
     if cap == 0 || inner_w < 16 {
-        render_panel_lines(frame, area, "By Activity", vec![]);
+        render_panel_lines_with_focus(frame, area, "By Activity", vec![], focus);
         return;
     }
     let max = rows.iter().map(|row| row.bucket.total()).max().unwrap_or(1);
@@ -1327,14 +1807,19 @@ fn render_activity_panel(frame: &mut Frame, area: Rect, rows: &[ActivityUsage]) 
             Line::from(spans)
         })
         .collect();
-    render_panel_lines(frame, area, "By Activity", lines);
+    render_panel_lines_with_focus(frame, area, "By Activity", lines, focus);
 }
 
-fn render_model_panel(frame: &mut Frame, area: Rect, rows: &[ModelUsage]) {
+fn render_model_panel(
+    frame: &mut Frame,
+    area: Rect,
+    rows: &[ModelUsage],
+    focus: FocusCtx,
+) {
     let cap = area.height.saturating_sub(2) as usize;
     let inner_w = area.width.saturating_sub(2) as usize;
     if cap == 0 || inner_w < 16 {
-        render_panel_lines(frame, area, "By Model", vec![]);
+        render_panel_lines_with_focus(frame, area, "By Model", vec![], focus);
         return;
     }
     let max = rows.iter().map(|row| row.bucket.total()).max().unwrap_or(1);
@@ -1369,14 +1854,20 @@ fn render_model_panel(frame: &mut Frame, area: Rect, rows: &[ModelUsage]) {
             Line::from(spans)
         })
         .collect();
-    render_panel_lines(frame, area, "By Model", lines);
+    render_panel_lines_with_focus(frame, area, "By Model", lines, focus);
 }
 
-fn render_named_panel(frame: &mut Frame, area: Rect, title: &str, rows: &[NamedUsage]) {
+fn render_named_panel(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    rows: &[NamedUsage],
+    focus: FocusCtx,
+) {
     let cap = area.height.saturating_sub(2) as usize;
     let inner_w = area.width.saturating_sub(2) as usize;
     if cap == 0 || inner_w < 14 {
-        render_panel_lines(frame, area, title, vec![]);
+        render_panel_lines_with_focus(frame, area, title, vec![], focus);
         return;
     }
     let max = rows.iter().map(|row| row.calls as u64).max().unwrap_or(1);
@@ -1411,14 +1902,25 @@ fn render_named_panel(frame: &mut Frame, area: Rect, title: &str, rows: &[NamedU
             Line::from(spans)
         })
         .collect();
-    render_panel_lines(frame, area, title, lines);
+    render_panel_lines_with_focus(frame, area, title, lines, focus);
 }
 
-fn render_optimize_compact_panel(frame: &mut Frame, area: Rect, data: &UsageData) {
+fn render_optimize_compact_panel(
+    frame: &mut Frame,
+    area: Rect,
+    data: &UsageData,
+    focus: FocusCtx,
+) {
     let cap = area.height.saturating_sub(2) as usize;
     let inner_w = area.width.saturating_sub(2) as usize;
     if cap == 0 {
-        render_panel_lines(frame, area, "Optimization Recommendations", vec![]);
+        render_panel_lines_with_focus(
+            frame,
+            area,
+            "Optimization Recommendations",
+            vec![],
+            focus,
+        );
         return;
     }
     let result = optimize_usage(data);
@@ -1457,14 +1959,19 @@ fn render_optimize_compact_panel(frame: &mut Frame, area: Rect, data: &UsageData
             Span::styled(title, Style::default().fg(SOFT_WHITE)),
         ]));
     }
-    render_panel_lines(frame, area, "Optimization Recommendations", lines);
+    render_panel_lines_with_focus(frame, area, "Optimization Recommendations", lines, focus);
 }
 
-fn render_leaderboard_panel(frame: &mut Frame, area: Rect, data: &UsageData) {
+fn render_leaderboard_panel(
+    frame: &mut Frame,
+    area: Rect,
+    data: &UsageData,
+    focus: FocusCtx,
+) {
     let cap = area.height.saturating_sub(2) as usize;
     let inner_w = area.width.saturating_sub(2) as usize;
     if cap == 0 || inner_w < 16 {
-        render_panel_lines(frame, area, "Agent Leaderboard", vec![]);
+        render_panel_lines_with_focus(frame, area, "Agent Leaderboard", vec![], focus);
         return;
     }
     let max = data
@@ -1521,10 +2028,16 @@ fn render_leaderboard_panel(frame: &mut Frame, area: Rect, data: &UsageData) {
             Line::from(spans)
         })
         .collect();
-    render_panel_lines(frame, area, "Agent Leaderboard", lines);
+    render_panel_lines_with_focus(frame, area, "Agent Leaderboard", lines, focus);
 }
 
-fn render_budget_panel(frame: &mut Frame, area: Rect, data: &UsageData, period: &UsagePeriod) {
+fn render_budget_panel(
+    frame: &mut Frame,
+    area: Rect,
+    data: &UsageData,
+    period: &UsagePeriod,
+    focus: FocusCtx,
+) {
     let inner_w = area.width.saturating_sub(2) as usize;
     let spent = data.grand_total.cost_usd.unwrap_or(0.0);
     let projected = projected_month_cost(data, period).unwrap_or(spent);
@@ -1577,7 +2090,7 @@ fn render_budget_panel(frame: &mut Frame, area: Rect, data: &UsageData, period: 
             Span::styled(" days sampled", Style::default().fg(MUTED_GRAY)),
         ]),
     ];
-    render_panel_lines(frame, area, "Budget · Alerts", lines);
+    render_panel_lines_with_focus(frame, area, "Budget · Alerts", lines, focus);
 }
 
 fn render_optimize(frame: &mut Frame, area: Rect, data: &UsageData) {
@@ -1620,11 +2133,44 @@ fn render_panel(frame: &mut Frame, area: Rect, title: &str, rows: Vec<String>) {
 }
 
 fn render_panel_lines(frame: &mut Frame, area: Rect, title: &str, lines: Vec<Line<'_>>) {
+    render_panel_lines_with_focus(frame, area, title, lines, FocusCtx::unfocused());
+}
+
+/// Render variant that knows about focus: highlights the border in
+/// `BAR_HIGH` and replaces the leading-space cell on the focused row
+/// with a `▶` indicator. Row clamping is done here too — the state
+/// only knows about logical row index, not how many rows the panel is
+/// currently displaying.
+fn render_panel_lines_with_focus(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    mut lines: Vec<Line<'_>>,
+    focus: FocusCtx,
+) {
+    let border_color = if focus.is_focused() {
+        BAR_HIGH
+    } else {
+        TERMINAL_BORDER
+    };
+    let mut title_style = Style::default();
+    if focus.is_focused() {
+        title_style = title_style.fg(GOLD).add_modifier(Modifier::BOLD);
+    }
+
+    if let Some(row_idx) = focus.focused_row {
+        if !lines.is_empty() {
+            let clamped = row_idx.min(lines.len() - 1);
+            apply_row_indicator(&mut lines[clamped]);
+        }
+    }
+
+    let title_span = Span::styled(format!(" [ {title} ] "), title_style);
     let block = Block::default()
-        .title(format!(" [ {title} ] "))
+        .title(Line::from(title_span))
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
-        .border_style(Style::default().fg(TERMINAL_BORDER))
+        .border_style(Style::default().fg(border_color))
         .style(Style::default().bg(TERMINAL_PANEL));
     let final_lines = if lines.is_empty() {
         vec![Line::from(Span::styled(
@@ -1635,6 +2181,26 @@ fn render_panel_lines(frame: &mut Frame, area: Rect, title: &str, lines: Vec<Lin
         lines
     };
     frame.render_widget(Paragraph::new(final_lines).block(block), area);
+}
+
+/// Replace the very first character of the line (which renderers
+/// reserve as a single-space gutter) with the `▶` glyph. Idempotent:
+/// if the line is empty we just append the indicator.
+fn apply_row_indicator(line: &mut Line<'_>) {
+    let style = Style::default()
+        .fg(SELECTION_GREEN)
+        .add_modifier(Modifier::BOLD);
+    if line.spans.is_empty() {
+        line.spans.push(Span::styled("▶", style));
+        return;
+    }
+    // The first span is conventionally `Span::raw(" ")`. Replace it.
+    let first = line.spans.first().expect("checked non-empty");
+    if first.content.as_ref() == " " {
+        line.spans[0] = Span::styled("▶", style);
+    } else {
+        line.spans.insert(0, Span::styled("▶", style));
+    }
 }
 
 fn pick_bar_color(ratio: f64) -> Color {
