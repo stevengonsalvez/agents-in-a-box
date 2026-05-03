@@ -2308,10 +2308,14 @@ fn build_period_provider_strip(state: &UsageViewState) -> Vec<Line<'static>> {
         vec![Span::styled("Period: ", Style::default().fg(MUTED_GRAY))];
 
     // Simple key-prefixed chips: 1 Today, 2 7d, 3 30d, 4 90d, 5 YTD.
+    // Each chip lights up for both the legacy variant (set by the TUI
+    // shortcut) and the equivalent LastNDays(N) variant (set by the
+    // CLI --last-n-days flag), so the active state is consistent
+    // regardless of which entry point selected the period.
     let simple: [(&str, char, fn(&UsagePeriod) -> bool); 5] = [
         ("Today", '1', |p| matches!(p, UsagePeriod::Today)),
-        ("7d", '2', |p| matches!(p, UsagePeriod::Week)),
-        ("30d", '3', |p| matches!(p, UsagePeriod::ThirtyDays)),
+        ("7d", '2', |p| matches!(p, UsagePeriod::Week | UsagePeriod::LastNDays(7))),
+        ("30d", '3', |p| matches!(p, UsagePeriod::ThirtyDays | UsagePeriod::LastNDays(30))),
         ("90d", '4', |p| matches!(p, UsagePeriod::LastNDays(90))),
         ("YTD", '5', |p| matches!(p, UsagePeriod::YearToDate)),
     ];
