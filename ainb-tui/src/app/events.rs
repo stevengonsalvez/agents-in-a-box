@@ -350,10 +350,15 @@ pub enum AppEvent {
     UsageRefresh,             // Reload data (r) — cache-respecting
     UsageForceRefresh,        // Force-refresh bypassing the persistent cache (Shift+R)
     UsageCycleProviderFilter, // Cycle All/Claude/Codex (p)
-    UsageSetPeriod(u8),       // Period shortcut 1-5
+    UsageSetPeriod(u8),       // Period shortcut 1=Today/2=7d/3=30d/4=90d/5=YTD
+    UsageSetPeriodMonth,      // m — switch to SpecificMonth(today's month)
+    UsageSetPeriodQuarter,    // q — switch to SpecificQuarter(today)
+    UsageSetPeriodAll,        // a — switch to All
+    UsagePeriodStepBack,      // ◀ — step Month/Quarter back
+    UsagePeriodStepForward,   // ▶ — step Month/Quarter forward
     UsageStartIncludeFilter,  // Start include project input (/)
     UsageStartExcludeFilter,  // Start exclude project input (x)
-    UsageStartDateRange,      // Start date range input (d)
+    UsageStartDateRange,      // Start date range input (capital D)
     UsageClearFilters,        // Clear include/exclude filters (c)
     UsageInputChar(char),     // Input for usage filter/range
     UsageInputBackspace,      // Backspace in usage input
@@ -1695,6 +1700,22 @@ impl EventHandler {
             }
         }
 
+        // Step Month/Quarter via ◀/▶ when one of those pickers is the
+        // active period. Must run before the generic Left/Right
+        // handler below, otherwise ◀/▶ would walk the provider tab.
+        let stepable = matches!(
+            state.usage_state.period,
+            crate::models::usage::UsagePeriod::SpecificMonth(_)
+                | crate::models::usage::UsagePeriod::SpecificQuarter(..)
+        );
+        if stepable {
+            match key_event.code {
+                KeyCode::Left => return Some(AppEvent::UsagePeriodStepBack),
+                KeyCode::Right => return Some(AppEvent::UsagePeriodStepForward),
+                _ => {}
+            }
+        }
+
         match key_event.code {
             KeyCode::Esc => Some(AppEvent::UsageBack),
             KeyCode::Right | KeyCode::Char('l') => Some(AppEvent::UsageNextProvider),
@@ -1710,14 +1731,22 @@ impl EventHandler {
             KeyCode::Char('r') => Some(AppEvent::UsageRefresh),
             KeyCode::Char('R') => Some(AppEvent::UsageForceRefresh),
             KeyCode::Char('p') => Some(AppEvent::UsageCycleProviderFilter),
+            // PR-C period strip mappings:
+            //   1 Today  2 7d  3 30d  4 90d  5 YTD
+            //   m Month (steppable)  q Quarter (steppable)
+            //   a All  D advanced (free-text custom range)
+            //   ◀/▶ step Month or Quarter when one is active (handled above)
             KeyCode::Char('1') => Some(AppEvent::UsageSetPeriod(1)),
             KeyCode::Char('2') => Some(AppEvent::UsageSetPeriod(2)),
             KeyCode::Char('3') => Some(AppEvent::UsageSetPeriod(3)),
             KeyCode::Char('4') => Some(AppEvent::UsageSetPeriod(4)),
             KeyCode::Char('5') => Some(AppEvent::UsageSetPeriod(5)),
+            KeyCode::Char('m') => Some(AppEvent::UsageSetPeriodMonth),
+            KeyCode::Char('q') => Some(AppEvent::UsageSetPeriodQuarter),
+            KeyCode::Char('a') => Some(AppEvent::UsageSetPeriodAll),
+            KeyCode::Char('D') => Some(AppEvent::UsageStartDateRange),
             KeyCode::Char('/') => Some(AppEvent::UsageStartIncludeFilter),
             KeyCode::Char('x') => Some(AppEvent::UsageStartExcludeFilter),
-            KeyCode::Char('d') => Some(AppEvent::UsageStartDateRange),
             KeyCode::Char('c') => Some(AppEvent::UsageClearFilters),
             _ => None,
         }
@@ -4176,12 +4205,56 @@ impl EventHandler {
                     1 => UsagePeriod::Today,
                     2 => UsagePeriod::Week,
                     3 => UsagePeriod::ThirtyDays,
-                    4 => UsagePeriod::Month,
-                    5 => UsagePeriod::All,
+                    4 => UsagePeriod::LastNDays(90),
+                    5 => UsagePeriod::YearToDate,
                     _ => state.usage_state.period.clone(),
                 };
                 state.usage_state.set_period(selected);
                 state.start_background_usage_load(true);
+            }
+            AppEvent::UsageSetPeriodMonth => {
+                use crate::models::usage::UsagePeriod;
+                use chrono::Datelike;
+                // If already on a SpecificMonth keep its anchor; otherwise
+                // default to the current calendar month (day=1).
+                let anchor = match state.usage_state.period {
+                    UsagePeriod::SpecificMonth(d) => d,
+                    _ => {
+                        let today = chrono::Local::now().date_naive();
+                        chrono::NaiveDate::from_ymd_opt(today.year(), today.month(), 1)
+                            .unwrap_or(today)
+                    }
+                };
+                state.usage_state.set_period(UsagePeriod::SpecificMonth(anchor));
+                state.start_background_usage_load(true);
+            }
+            AppEvent::UsageSetPeriodQuarter => {
+                use crate::models::usage::{UsagePeriod, quarter_of};
+                use chrono::Datelike;
+                let (year, q) = match state.usage_state.period {
+                    UsagePeriod::SpecificQuarter(y, q) => (y, q),
+                    _ => {
+                        let today = chrono::Local::now().date_naive();
+                        (today.year(), quarter_of(today))
+                    }
+                };
+                state.usage_state.set_period(UsagePeriod::SpecificQuarter(year, q));
+                state.start_background_usage_load(true);
+            }
+            AppEvent::UsageSetPeriodAll => {
+                use crate::models::usage::UsagePeriod;
+                state.usage_state.set_period(UsagePeriod::All);
+                state.start_background_usage_load(true);
+            }
+            AppEvent::UsagePeriodStepBack => {
+                if state.usage_state.step_period_back() {
+                    state.start_background_usage_load(true);
+                }
+            }
+            AppEvent::UsagePeriodStepForward => {
+                if state.usage_state.step_period_forward() {
+                    state.start_background_usage_load(true);
+                }
             }
             AppEvent::UsageStartIncludeFilter => {
                 state.usage_state.begin_input(crate::components::usage::UsageInputMode::Include);

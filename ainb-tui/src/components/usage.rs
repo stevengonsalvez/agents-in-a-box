@@ -315,6 +315,73 @@ impl UsageViewState {
         self.scroll_offset = 0;
     }
 
+    /// Step the active Month or Quarter picker one unit back. Clamps
+    /// at the oldest day in `data.daily` (so we never step into a
+    /// region known to have no usage rows). Returns `true` when the
+    /// period actually changed.
+    ///
+    /// No-op when the active period is not a Month/Quarter picker.
+    pub fn step_period_back(&mut self) -> bool {
+        let oldest = self
+            .data
+            .as_ref()
+            .and_then(|d| d.daily.first().map(|(date, _)| *date));
+        match self.period.clone() {
+            UsagePeriod::SpecificMonth(anchor) => {
+                let new_anchor = previous_month_first(anchor);
+                if let Some(oldest_first) = oldest.map(first_of_month) {
+                    if new_anchor < oldest_first {
+                        return false;
+                    }
+                }
+                self.period = UsagePeriod::SpecificMonth(new_anchor);
+                self.scroll_offset = 0;
+                true
+            }
+            UsagePeriod::SpecificQuarter(year, q) => {
+                let (new_year, new_q) = previous_quarter(year, q);
+                if let Some(oldest_date) = oldest {
+                    let (qy, qq) = current_quarter(oldest_date);
+                    if (new_year, new_q) < (qy, qq) {
+                        return false;
+                    }
+                }
+                self.period = UsagePeriod::SpecificQuarter(new_year, new_q);
+                self.scroll_offset = 0;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Step forward one unit. Clamps at the current real-world month
+    /// or quarter — never lets the user pick a future window.
+    pub fn step_period_forward(&mut self) -> bool {
+        let today = Local::now().date_naive();
+        match self.period.clone() {
+            UsagePeriod::SpecificMonth(anchor) => {
+                let new_anchor = next_month_first(anchor);
+                if new_anchor > first_of_month(today) {
+                    return false;
+                }
+                self.period = UsagePeriod::SpecificMonth(new_anchor);
+                self.scroll_offset = 0;
+                true
+            }
+            UsagePeriod::SpecificQuarter(year, q) => {
+                let (new_year, new_q) = next_quarter(year, q);
+                let (cy, cq) = current_quarter(today);
+                if (new_year, new_q) > (cy, cq) {
+                    return false;
+                }
+                self.period = UsagePeriod::SpecificQuarter(new_year, new_q);
+                self.scroll_offset = 0;
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub fn next_tab(&mut self) {
         self.active_tab = self.active_tab.next();
         self.scroll_offset = 0;
@@ -1413,30 +1480,68 @@ fn render_burndown_header(frame: &mut Frame, area: Rect, data: &UsageData, perio
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-/// Build the "Period: …  Provider: …" labelled strip that replaces the
-/// old cryptic single-line period selector. Renders period chips with
-/// key-hints (1-5, d) and provider-filter chips (P toggles). The
-/// active option in each row is bold + GOLD background.
+/// Build the "Period: …  Provider: …" labelled strip.
+///
+/// Period strip layout:
+/// ```text
+/// Period: 1 Today  2 7d  3 30d  4 90d  5 YTD  [◀ Apr 2026 ▶ m Month]  [◀ Q2 2026 ▶ q Quarter]  a All  D advanced
+/// ```
+/// Active chip: bold + GOLD background. The Month/Quarter blocks render
+/// inline pickers when their variant is active — clicking ◀/▶ steps the
+/// underlying month or quarter back/forward.
 ///
 /// Returned as a `Vec<Line>` so tests can assert chip ordering and
 /// active-marker placement without hitting the Frame.
 fn build_period_provider_strip(state: &UsageViewState) -> Vec<Line<'static>> {
     let mut period_spans: Vec<Span<'static>> =
         vec![Span::styled("Period: ", Style::default().fg(MUTED_GRAY))];
-    let periods: [(&str, char, fn(&UsagePeriod) -> bool); 6] = [
+
+    // Simple key-prefixed chips: 1 Today, 2 7d, 3 30d, 4 90d, 5 YTD.
+    let simple: [(&str, char, fn(&UsagePeriod) -> bool); 5] = [
         ("Today", '1', |p| matches!(p, UsagePeriod::Today)),
-        ("Week", '2', |p| matches!(p, UsagePeriod::Week)),
+        ("7d", '2', |p| matches!(p, UsagePeriod::Week)),
         ("30d", '3', |p| matches!(p, UsagePeriod::ThirtyDays)),
-        ("Month", '4', |p| matches!(p, UsagePeriod::Month)),
-        ("All", '5', |p| matches!(p, UsagePeriod::All)),
-        ("Custom", 'd', |p| matches!(p, UsagePeriod::Custom { .. })),
+        ("90d", '4', |p| matches!(p, UsagePeriod::LastNDays(90))),
+        ("YTD", '5', |p| matches!(p, UsagePeriod::YearToDate)),
     ];
-    for (i, (label, key, is_active)) in periods.iter().enumerate() {
+    for (i, (label, key, is_active)) in simple.iter().enumerate() {
         if i > 0 {
             period_spans.push(Span::styled("  ", Style::default()));
         }
         period_spans.push(period_chip_span(label, *key, is_active(&state.period)));
     }
+
+    // Stepable Month picker.
+    period_spans.push(Span::styled("  ", Style::default()));
+    period_spans.extend(build_step_picker_spans(
+        'm',
+        "Month",
+        &month_picker_label(&state.period),
+        matches!(state.period, UsagePeriod::SpecificMonth(_)),
+    ));
+
+    // Stepable Quarter picker.
+    period_spans.push(Span::styled("  ", Style::default()));
+    period_spans.extend(build_step_picker_spans(
+        'q',
+        "Quarter",
+        &quarter_picker_label(&state.period),
+        matches!(state.period, UsagePeriod::SpecificQuarter(..)),
+    ));
+
+    // Trailing All + advanced custom.
+    period_spans.push(Span::styled("  ", Style::default()));
+    period_spans.push(period_chip_span(
+        "All",
+        'a',
+        matches!(state.period, UsagePeriod::All),
+    ));
+    period_spans.push(Span::styled("  ", Style::default()));
+    period_spans.push(period_chip_span(
+        "advanced",
+        'D',
+        matches!(state.period, UsagePeriod::Custom { .. }),
+    ));
 
     let mut provider_spans: Vec<Span<'static>> =
         vec![Span::styled("Provider: ", Style::default().fg(MUTED_GRAY))];
@@ -1455,6 +1560,59 @@ fn build_period_provider_strip(state: &UsageViewState) -> Vec<Line<'static>> {
 
     // Two label rows so narrow terminals can wrap cleanly.
     vec![Line::from(period_spans), Line::from(provider_spans)]
+}
+
+/// Render `[◀ <label> ▶ <key> <name>]` for the inline Month/Quarter
+/// pickers. Active variant gets the GOLD chip background; inactive
+/// renders as soft white text with hint key prefix.
+fn build_step_picker_spans(
+    key: char,
+    name: &str,
+    label: &str,
+    active: bool,
+) -> Vec<Span<'static>> {
+    let style = if active {
+        Style::default().fg(DARK_BG).bg(GOLD).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(SOFT_WHITE)
+    };
+    let arrow_style = if active {
+        Style::default().fg(DARK_BG).bg(GOLD).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(MUTED_GRAY)
+    };
+    vec![
+        Span::styled("[", arrow_style),
+        Span::styled("◀ ", arrow_style),
+        Span::styled(label.to_string(), style),
+        Span::styled(" ▶", arrow_style),
+        Span::styled(format!(" {key} {name}"), style),
+        Span::styled("]", arrow_style),
+    ]
+}
+
+/// Label rendered inside the Month picker chip. When the active period
+/// is SpecificMonth we render its anchor; otherwise we render today's
+/// month so the user sees a sensible default before pressing `m`.
+fn month_picker_label(period: &UsagePeriod) -> String {
+    let anchor = match period {
+        UsagePeriod::SpecificMonth(d) => *d,
+        _ => Local::now().date_naive(),
+    };
+    anchor.format("%b %Y").to_string()
+}
+
+/// Label rendered inside the Quarter picker chip. Same fallback rule
+/// as `month_picker_label`.
+fn quarter_picker_label(period: &UsagePeriod) -> String {
+    let (year, q) = match period {
+        UsagePeriod::SpecificQuarter(y, q) => (*y, *q),
+        _ => {
+            let today = Local::now().date_naive();
+            (today.year(), crate::models::usage::quarter_of(today))
+        }
+    };
+    format!("Q{q} {year}")
 }
 
 fn period_chip_span(label: &str, key: char, active: bool) -> Span<'static> {
@@ -2536,6 +2694,48 @@ fn provider_filter_label(filter: UsageProviderFilter) -> &'static str {
     }
 }
 
+/// First day of the calendar month containing `date`.
+fn first_of_month(date: NaiveDate) -> NaiveDate {
+    NaiveDate::from_ymd_opt(date.year(), date.month(), 1).unwrap_or(date)
+}
+
+/// First day of the previous calendar month.
+fn previous_month_first(anchor: NaiveDate) -> NaiveDate {
+    let (y, m) = if anchor.month() == 1 {
+        (anchor.year() - 1, 12)
+    } else {
+        (anchor.year(), anchor.month() - 1)
+    };
+    NaiveDate::from_ymd_opt(y, m, 1).unwrap_or(anchor)
+}
+
+/// First day of the next calendar month.
+fn next_month_first(anchor: NaiveDate) -> NaiveDate {
+    let (y, m) = if anchor.month() == 12 {
+        (anchor.year() + 1, 1)
+    } else {
+        (anchor.year(), anchor.month() + 1)
+    };
+    NaiveDate::from_ymd_opt(y, m, 1).unwrap_or(anchor)
+}
+
+/// `(year, quarter)` of the previous quarter, wrapping into the prior
+/// year at Q1.
+fn previous_quarter(year: i32, q: u8) -> (i32, u8) {
+    if q <= 1 { (year - 1, 4) } else { (year, q - 1) }
+}
+
+/// `(year, quarter)` of the next quarter, wrapping into the next year
+/// at Q4.
+fn next_quarter(year: i32, q: u8) -> (i32, u8) {
+    if q >= 4 { (year + 1, 1) } else { (year, q + 1) }
+}
+
+/// `(year, quarter)` containing `date`.
+fn current_quarter(date: NaiveDate) -> (i32, u8) {
+    (date.year(), crate::models::usage::quarter_of(date))
+}
+
 fn period_label(period: &UsagePeriod) -> String {
     match period {
         UsagePeriod::Today => "Today".to_string(),
@@ -2580,14 +2780,23 @@ mod period_provider_strip_tests {
     }
 
     #[test]
-    fn period_row_lists_all_six_options_with_key_hints() {
+    fn period_row_lists_all_options_with_key_hints() {
         let mut state = UsageViewState::default();
         state.period = UsagePeriod::Week;
         let lines = build_period_provider_strip(&state);
         assert_eq!(lines.len(), 2);
         let row = flatten(&lines[0]);
         for needle in [
-            "Period:", "1 Today", "2 Week", "3 30d", "4 Month", "5 All", "d Custom",
+            "Period:",
+            "1 Today",
+            "2 7d",
+            "3 30d",
+            "4 90d",
+            "5 YTD",
+            "m Month",
+            "q Quarter",
+            "a All",
+            "D advanced",
         ] {
             assert!(row.contains(needle), "missing `{needle}` in {row}");
         }
@@ -2596,10 +2805,19 @@ mod period_provider_strip_tests {
     #[test]
     fn period_row_highlights_active_period() {
         let mut state = UsageViewState::default();
-        state.period = UsagePeriod::Month;
+        state.period = UsagePeriod::Today;
         let lines = build_period_provider_strip(&state);
         let active = highlighted_chip(&lines[0]).expect("a period chip should be highlighted");
-        assert!(active.contains("Month"), "got {active}");
+        assert!(active.contains("Today"), "got {active}");
+    }
+
+    #[test]
+    fn period_row_highlights_90d_chip_when_last_n_days_90() {
+        let mut state = UsageViewState::default();
+        state.period = UsagePeriod::LastNDays(90);
+        let lines = build_period_provider_strip(&state);
+        let active = highlighted_chip(&lines[0]).expect("90d should be highlighted");
+        assert!(active.contains("90d"), "got {active}");
     }
 
     #[test]
