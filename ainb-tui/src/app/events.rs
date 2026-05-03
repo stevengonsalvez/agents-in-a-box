@@ -372,6 +372,15 @@ pub enum AppEvent {
     UsageCommitFilter,   // Enter on focused row -> add chip
     UsagePopFilterChip,  // Esc when chips exist
     UsageClearAllChips,  // C — drop every chip in one shot
+    // Zoom mode (PR-C)
+    UsageToggleZoom,         // z — toggle fullscreen panel zoom on Burndown
+    UsageZoomStartSearch,    // / inside zoom — begin fuzzy search
+    UsageZoomCommitSearch,   // Enter inside zoom search
+    UsageZoomCancelSearch,   // Esc inside zoom search
+    UsageZoomSearchChar(char),  // typed char in zoom search input
+    UsageZoomSearchBackspace,   // Backspace in zoom search input
+    UsageZoomToggleDetail,   // d inside zoom — toggle detail drawer
+    UsageZoomEsc,            // Esc inside zoom — detail-close > zoom-exit
     // Skills browser events
     SkillsBack,             // Return to home screen (Esc)
     SkillsNextProvider,     // Next provider (Right arrow)
@@ -1667,6 +1676,20 @@ impl EventHandler {
             };
         }
 
+        // Zoom-search input mode eats most keys: typing builds the query,
+        // Enter commits, Esc cancels, Backspace edits. Other navigation
+        // keys (Up/Down/Esc-when-no-search etc.) are deferred to the
+        // standard zoom handler below.
+        if state.usage_state.zoom_search_active {
+            return match key_event.code {
+                KeyCode::Esc => Some(AppEvent::UsageZoomCancelSearch),
+                KeyCode::Enter => Some(AppEvent::UsageZoomCommitSearch),
+                KeyCode::Backspace => Some(AppEvent::UsageZoomSearchBackspace),
+                KeyCode::Char(ch) => Some(AppEvent::UsageZoomSearchChar(ch)),
+                _ => None,
+            };
+        }
+
         // Burndown-only cross-filter shortcuts. Tab cycles panel focus
         // here instead of advancing the outer tab bar so the user can
         // pivot without losing the dashboard layout. Esc backs out of
@@ -1677,7 +1700,27 @@ impl EventHandler {
             crate::components::usage::UsageTab::Burndown
         );
         if on_burndown {
+            // Zoom-mode keys take priority over the dashboard cross-filter
+            // shortcuts so `/`, `d`, `Esc` behave as documented in zoom.
+            if state.usage_state.is_zoomed() {
+                match key_event.code {
+                    KeyCode::Char('z') => return Some(AppEvent::UsageToggleZoom),
+                    KeyCode::Esc => return Some(AppEvent::UsageZoomEsc),
+                    KeyCode::Char('/') => return Some(AppEvent::UsageZoomStartSearch),
+                    KeyCode::Char('d') => return Some(AppEvent::UsageZoomToggleDetail),
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        return Some(AppEvent::UsageFocusRowUp);
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        return Some(AppEvent::UsageFocusRowDown);
+                    }
+                    _ => return None,
+                }
+            }
+
+            // Outside zoom: existing burndown shortcuts.
             match key_event.code {
+                KeyCode::Char('z') => return Some(AppEvent::UsageToggleZoom),
                 KeyCode::Tab => return Some(AppEvent::UsageFocusNextPanel),
                 KeyCode::BackTab => return Some(AppEvent::UsageFocusPrevPanel),
                 KeyCode::Enter => return Some(AppEvent::UsageCommitFilter),
@@ -4321,6 +4364,31 @@ impl EventHandler {
                 if had_any {
                     state.add_success_notification("Cleared all chips".to_string());
                 }
+            }
+            // PR-C zoom mode events
+            AppEvent::UsageToggleZoom => {
+                state.usage_state.toggle_zoom();
+            }
+            AppEvent::UsageZoomEsc => {
+                state.usage_state.zoom_handle_esc();
+            }
+            AppEvent::UsageZoomStartSearch => {
+                state.usage_state.zoom_begin_search();
+            }
+            AppEvent::UsageZoomCommitSearch => {
+                state.usage_state.zoom_commit_search();
+            }
+            AppEvent::UsageZoomCancelSearch => {
+                state.usage_state.zoom_cancel_search();
+            }
+            AppEvent::UsageZoomSearchChar(ch) => {
+                state.usage_state.zoom_search_char(ch);
+            }
+            AppEvent::UsageZoomSearchBackspace => {
+                state.usage_state.zoom_search_backspace();
+            }
+            AppEvent::UsageZoomToggleDetail => {
+                state.usage_state.toggle_zoom_detail();
             }
             // Skills browser events
             AppEvent::SkillsBack => {

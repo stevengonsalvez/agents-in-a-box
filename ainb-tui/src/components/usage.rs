@@ -209,6 +209,24 @@ impl UsagePanel {
         Self::ALL[if idx == 0 { last } else { idx - 1 }]
     }
 
+    /// Human-readable panel name used in the zoom breadcrumb.
+    pub fn title(self) -> &'static str {
+        match self {
+            UsagePanel::DailyActivity => "Daily Activity",
+            UsagePanel::ByProject => "By Project",
+            UsagePanel::TopSessions => "Top Sessions",
+            UsagePanel::Live => "Live Session Ticker",
+            UsagePanel::ByActivity => "By Activity",
+            UsagePanel::ByModel => "By Model",
+            UsagePanel::CoreTools => "Core Tools",
+            UsagePanel::ShellCommands => "Shell Commands",
+            UsagePanel::McpServers => "MCP Servers",
+            UsagePanel::Optimize => "Optimization Recommendations",
+            UsagePanel::Leaderboard => "Agent Leaderboard",
+            UsagePanel::Budget => "Budget · Alerts",
+        }
+    }
+
     /// Whether `Enter` on this panel maps a row onto a cross-filter.
     /// Daily Activity, Optimize, and Budget are read-only — Enter is a
     /// no-op there. Leaderboard maps the focused row onto the Project
@@ -257,6 +275,20 @@ pub struct UsageViewState {
     /// Row indicator inside the focused panel. Clamped to the row count
     /// of the focused panel's underlying collection at render time.
     pub focus_row: usize,
+    /// When `Some`, the burndown view is rendered as a single full-area
+    /// zoomed panel for the given panel kind. Driven by the `z`
+    /// keybinding on Burndown; only meaningful when on Burndown.
+    pub zoom: Option<UsagePanel>,
+    /// True when the zoom view's `/` fuzzy-search overlay is active.
+    /// Resets on zoom exit (we deliberately do *not* persist a search
+    /// across zoom cycles — the brief is "search clears on zoom exit").
+    pub zoom_search_active: bool,
+    /// Live query buffer for the zoom-mode fuzzy search.
+    pub zoom_search_query: String,
+    /// True when the zoom view's `d` detail drawer is open. The drawer
+    /// occupies the bottom 40% of the zoom area and shows the full
+    /// row record for the focused row.
+    pub zoom_detail_open: bool,
 }
 
 impl Default for UsageViewState {
@@ -276,6 +308,10 @@ impl Default for UsageViewState {
             filters: UsageFilters::default(),
             focused_panel: None,
             focus_row: 0,
+            zoom: None,
+            zoom_search_active: false,
+            zoom_search_query: String::new(),
+            zoom_detail_open: false,
         }
     }
 }
@@ -322,10 +358,7 @@ impl UsageViewState {
     ///
     /// No-op when the active period is not a Month/Quarter picker.
     pub fn step_period_back(&mut self) -> bool {
-        let oldest = self
-            .data
-            .as_ref()
-            .and_then(|d| d.daily.first().map(|(date, _)| *date));
+        let oldest = self.data.as_ref().and_then(|d| d.daily.first().map(|(date, _)| *date));
         match self.period.clone() {
             UsagePeriod::SpecificMonth(anchor) => {
                 let new_anchor = previous_month_first(anchor);
@@ -580,10 +613,9 @@ impl UsageViewState {
             (UsageFilterTarget::Project, UsagePanel::Leaderboard | UsagePanel::ByProject) => {
                 filtered.projects.get(row_idx).map(|p| (p.name.clone(), None))
             }
-            (UsageFilterTarget::Activity, _) => filtered
-                .activities
-                .get(row_idx)
-                .map(|a| (a.category.label().to_string(), None)),
+            (UsageFilterTarget::Activity, _) => {
+                filtered.activities.get(row_idx).map(|a| (a.category.label().to_string(), None))
+            }
             (UsageFilterTarget::Model, _) => {
                 filtered.models.get(row_idx).map(|m| (m.model.clone(), None))
             }
@@ -635,6 +667,102 @@ impl UsageViewState {
     /// Drop every cross-filter chip. Leaves include/exclude untouched.
     pub fn clear_all_filter_chips(&mut self) {
         self.filters.clear();
+    }
+
+    /// True when the burndown view is currently zoomed.
+    pub fn is_zoomed(&self) -> bool {
+        self.zoom.is_some()
+    }
+
+    /// Toggle full-screen zoom for the currently-focused panel. If no
+    /// panel is focused (Tab not pressed yet), the first focusable
+    /// dashboard panel is used so `z` works as a discoverable
+    /// "open up bigger" shortcut.
+    pub fn toggle_zoom(&mut self) {
+        if self.zoom.is_some() {
+            self.exit_zoom();
+        } else {
+            let target = self.focused_panel.unwrap_or(UsagePanel::ALL[0]);
+            self.zoom = Some(target);
+            self.focused_panel = Some(target);
+            self.focus_row = 0;
+            self.zoom_search_active = false;
+            self.zoom_search_query.clear();
+            self.zoom_detail_open = false;
+        }
+    }
+
+    /// Exit zoom mode and clear all zoom-scoped UI state (search query,
+    /// detail drawer). Does NOT clear filter chips.
+    pub fn exit_zoom(&mut self) {
+        self.zoom = None;
+        self.zoom_search_active = false;
+        self.zoom_search_query.clear();
+        self.zoom_detail_open = false;
+    }
+
+    /// Begin fuzzy-search input inside the zoomed panel.
+    pub fn zoom_begin_search(&mut self) {
+        if self.zoom.is_some() {
+            self.zoom_search_active = true;
+            self.zoom_search_query.clear();
+        }
+    }
+
+    /// Cancel the active search and drop the partial query.
+    pub fn zoom_cancel_search(&mut self) {
+        self.zoom_search_active = false;
+        self.zoom_search_query.clear();
+    }
+
+    /// Commit the typed search query. Same effect as cancel for the
+    /// renderer (we filter by `zoom_search_query`); we just exit input
+    /// mode so further keys flow back to navigation.
+    pub fn zoom_commit_search(&mut self) {
+        self.zoom_search_active = false;
+    }
+
+    pub fn zoom_search_char(&mut self, ch: char) {
+        if self.zoom_search_active {
+            self.zoom_search_query.push(ch);
+        }
+    }
+
+    pub fn zoom_search_backspace(&mut self) {
+        if self.zoom_search_active {
+            self.zoom_search_query.pop();
+        }
+    }
+
+    /// Toggle the detail drawer in zoom mode. No-op when not zoomed.
+    pub fn toggle_zoom_detail(&mut self) {
+        if self.zoom.is_some() {
+            self.zoom_detail_open = !self.zoom_detail_open;
+        }
+    }
+
+    /// Esc precedence in the zoom view (highest first):
+    /// 1. close detail drawer
+    /// 2. cancel active search
+    /// 3. exit zoom
+    /// 4. pop a chip (caller falls through here when nothing else
+    ///    handled it — this method only consumes the first three).
+    ///
+    /// Returns `true` when Esc was consumed.
+    pub fn zoom_handle_esc(&mut self) -> bool {
+        if !self.is_zoomed() {
+            return false;
+        }
+        if self.zoom_detail_open {
+            self.zoom_detail_open = false;
+            return true;
+        }
+        if self.zoom_search_active {
+            self.zoom_cancel_search();
+            return true;
+        }
+        self.exit_zoom();
+        true
     }
 }
 
@@ -1102,6 +1230,13 @@ fn render_burndown(frame: &mut Frame, area: Rect, data: &UsageData, state: &Usag
     let filtered = filter_usage_data(data, &state.filters);
     let view_data: &UsageData = if state.filters.any() { &filtered } else { data };
 
+    // Zoom takes the full inner area minus a small breadcrumb and an
+    // optional search box. Skip the dashboard grid entirely.
+    if let Some(panel) = state.zoom {
+        render_burndown_zoomed(frame, inner, view_data, state, panel);
+        return;
+    }
+
     // Filter chip strip occupies one row when chips are active OR when
     // a panel is focused (we want the affordance hint visible). When
     // both are absent we still show the hint at low contrast so users
@@ -1126,6 +1261,682 @@ fn render_burndown(frame: &mut Frame, area: Rect, data: &UsageData, state: &Usag
         render_dashboard_compact(frame, vertical[3], view_data, state);
     } else {
         render_dashboard_stack(frame, vertical[3], view_data, state);
+    }
+}
+
+/// Full-screen zoom for a single dashboard panel. The layout is:
+///
+/// ```text
+/// [ Zoomed: <panel name> ]   ◀ Esc back ▶
+/// / search query                              <- only when search active
+/// ┌───────────── panel body (all rows + extra cols) ─────────────┐
+/// │                                                              │
+/// └──────────────────────────────────────────────────────────────┘
+/// ┌──── Detail drawer ─────────── 40% bottom split, when open ──┐
+/// │                                                              │
+/// └──────────────────────────────────────────────────────────────┘
+/// ```
+fn render_burndown_zoomed(
+    frame: &mut Frame,
+    area: Rect,
+    data: &UsageData,
+    state: &UsageViewState,
+    panel: UsagePanel,
+) {
+    let search_h: u16 = if state.zoom_search_active || !state.zoom_search_query.is_empty() {
+        1
+    } else {
+        0
+    };
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // breadcrumb
+            Constraint::Length(search_h),
+            Constraint::Min(0), // body (and optional detail split)
+        ])
+        .split(area);
+
+    render_zoom_breadcrumb(frame, vertical[0], panel);
+    if search_h > 0 {
+        render_zoom_search_bar(frame, vertical[1], state);
+    }
+
+    // Optional 60/40 vertical split when the detail drawer is open.
+    let body_area = vertical[2];
+    let (panel_area, detail_area) = if state.zoom_detail_open {
+        let split = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+            .split(body_area);
+        (split[0], Some(split[1]))
+    } else {
+        (body_area, None)
+    };
+
+    render_zoom_panel_body(frame, panel_area, data, state, panel);
+
+    if let Some(detail) = detail_area {
+        render_zoom_detail_drawer(frame, detail, data, state, panel);
+    }
+}
+
+fn render_zoom_breadcrumb(frame: &mut Frame, area: Rect, panel: UsagePanel) {
+    let line = Line::from(vec![
+        Span::styled(
+            format!(" [ Zoomed: {} ] ", panel.title()),
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("   ", Style::default()),
+        Span::styled("◀ Esc back ▶", Style::default().fg(MUTED_GRAY)),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+/// Score `haystack` against `query` with nucleo-matcher; `None` means
+/// no match. An empty query matches everything (returns `Some(0)`).
+fn fuzzy_score(matcher: &mut nucleo_matcher::Matcher, query: &str, haystack: &str) -> Option<u32> {
+    if query.is_empty() {
+        return Some(0);
+    }
+    let needle = nucleo_matcher::pattern::Pattern::parse(
+        query,
+        nucleo_matcher::pattern::CaseMatching::Smart,
+        nucleo_matcher::pattern::Normalization::Smart,
+    );
+    needle.score(
+        nucleo_matcher::Utf32Str::Ascii(haystack.as_bytes()),
+        matcher,
+    )
+}
+
+/// Filter `rows` by a fuzzy-search query, preserving original order.
+/// Empty query returns all rows. The `label` closure projects each row
+/// to its primary search string (project name, session id, etc.).
+fn apply_zoom_filter<'a, T, F>(rows: &'a [T], query: &str, label: F) -> Vec<&'a T>
+where
+    F: Fn(&T) -> String,
+{
+    if query.is_empty() {
+        return rows.iter().collect();
+    }
+    let mut matcher = nucleo_matcher::Matcher::new(nucleo_matcher::Config::DEFAULT);
+    rows.iter()
+        .filter_map(|row| {
+            let label = label(row);
+            // nucleo expects ASCII-friendly bytes; fall back to a
+            // case-insensitive substring check when the label has
+            // non-ASCII chars (rare, but project paths can include
+            // unicode dashes etc.).
+            if !label.is_ascii() {
+                if label.to_lowercase().contains(query.to_lowercase().as_str()) {
+                    return Some(row);
+                }
+                return None;
+            }
+            fuzzy_score(&mut matcher, query, &label).map(|_| row)
+        })
+        .collect()
+}
+
+fn render_zoom_search_bar(frame: &mut Frame, area: Rect, state: &UsageViewState) {
+    let cursor = if state.zoom_search_active { "_" } else { "" };
+    let line = Line::from(vec![
+        Span::styled(
+            " / ",
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            state.zoom_search_query.clone(),
+            Style::default().fg(SOFT_WHITE),
+        ),
+        Span::styled(cursor, Style::default().fg(GOLD)),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+/// Render the body of a zoomed panel — all rows visible, primary
+/// columns plus extras specific to the panel. Each row is filtered by
+/// `state.zoom_search_query` (fuzzy match on the row's primary label).
+///
+/// Per the brief, the headline panels (By Project, Top Sessions, By
+/// Model, By Activity, Daily Activity) get extra columns; everything
+/// else just renders the full untruncated row list inside the same
+/// focus-aware frame used by the dashboard renderers.
+#[allow(clippy::too_many_lines)]
+fn render_zoom_panel_body(
+    frame: &mut Frame,
+    area: Rect,
+    data: &UsageData,
+    state: &UsageViewState,
+    panel: UsagePanel,
+) {
+    let q = state.zoom_search_query.as_str();
+    match panel {
+        UsagePanel::ByProject => render_zoom_by_project(frame, area, data, state, q),
+        UsagePanel::TopSessions => render_zoom_top_sessions(frame, area, data, state, q),
+        UsagePanel::Live => render_zoom_top_sessions(frame, area, data, state, q),
+        UsagePanel::ByModel => render_zoom_by_model(frame, area, data, state, q),
+        UsagePanel::ByActivity => render_zoom_by_activity(frame, area, data, state, q),
+        UsagePanel::DailyActivity => render_zoom_daily_activity(frame, area, data, state, q),
+        UsagePanel::Leaderboard => render_zoom_by_project(frame, area, data, state, q),
+        UsagePanel::CoreTools => {
+            render_zoom_named(frame, area, "Core Tools", &data.tools, state, q)
+        }
+        UsagePanel::ShellCommands => render_zoom_named(
+            frame,
+            area,
+            "Shell Commands",
+            &data.shell_commands,
+            state,
+            q,
+        ),
+        UsagePanel::McpServers => {
+            render_zoom_named(frame, area, "MCP Servers", &data.mcp_servers, state, q)
+        }
+        UsagePanel::Optimize | UsagePanel::Budget => {
+            // These panels are summary cards rather than row lists. We
+            // reuse the standard renderers in a fullscreen frame.
+            let focus = FocusCtx::for_panel(state, panel);
+            if matches!(panel, UsagePanel::Optimize) {
+                render_optimize_compact_panel(frame, area, data, focus);
+            } else {
+                render_budget_panel(frame, area, data, &state.period, focus);
+            }
+        }
+    }
+}
+
+fn render_zoom_by_project(
+    frame: &mut Frame,
+    area: Rect,
+    data: &UsageData,
+    _state: &UsageViewState,
+    query: &str,
+) {
+    let rows = apply_zoom_filter(&data.projects, query, |p| p.name.clone());
+    let header = Row::new(vec![
+        "#",
+        "Project",
+        "Cost",
+        "Tokens",
+        "Calls",
+        "Sessions",
+        "First seen",
+        "Last seen",
+    ])
+    .style(Style::default().fg(GOLD).add_modifier(Modifier::BOLD))
+    .bottom_margin(1);
+
+    let visible_rows = area.height.saturating_sub(2) as usize;
+    let table_rows: Vec<Row> = rows
+        .iter()
+        .enumerate()
+        .take(visible_rows)
+        .map(|(idx, project)| {
+            let b = &project.bucket;
+            let (first, last) = project_seen_window(data, &project.name);
+            Row::new(vec![
+                format!("{}", idx + 1),
+                project.path.clone(),
+                format_cost(b.cost_usd),
+                format_tokens_short(b.total()),
+                b.call_count.to_string(),
+                b.session_count.to_string(),
+                first,
+                last,
+            ])
+            .style(Style::default().fg(SOFT_WHITE))
+        })
+        .collect();
+
+    let widths = [
+        Constraint::Length(4),
+        Constraint::Min(20),
+        Constraint::Length(10),
+        Constraint::Length(10),
+        Constraint::Length(8),
+        Constraint::Length(8),
+        Constraint::Length(11),
+        Constraint::Length(11),
+    ];
+    let table = Table::new(table_rows, widths).header(header).column_spacing(1);
+    frame.render_widget(table, area);
+}
+
+fn render_zoom_top_sessions(
+    frame: &mut Frame,
+    area: Rect,
+    data: &UsageData,
+    _state: &UsageViewState,
+    query: &str,
+) {
+    let rows = apply_zoom_filter(&data.sessions, query, |s| {
+        format!("{} {}", s.project, s.session_id)
+    });
+    let header = Row::new(vec![
+        "Provider",
+        "Project",
+        "Session",
+        "Cost",
+        "Tokens",
+        "Calls",
+        "Duration",
+        "Last seen",
+    ])
+    .style(Style::default().fg(GOLD).add_modifier(Modifier::BOLD))
+    .bottom_margin(1);
+
+    let visible_rows = area.height.saturating_sub(2) as usize;
+    let table_rows: Vec<Row> = rows
+        .iter()
+        .take(visible_rows)
+        .map(|sess| {
+            let b = &sess.bucket;
+            let dur = (sess.last_timestamp - sess.first_timestamp).num_minutes().max(0);
+            let dur_str = format_duration_min(dur as u64);
+            Row::new(vec![
+                sess.provider.clone(),
+                truncate_string(&sess.project, 24),
+                truncate_string(&sess.session_id, 18),
+                format_cost(b.cost_usd),
+                format_tokens_short(b.total()),
+                b.call_count.to_string(),
+                dur_str,
+                sess.last_timestamp.format("%Y-%m-%d").to_string(),
+            ])
+            .style(Style::default().fg(SOFT_WHITE))
+        })
+        .collect();
+    let widths = [
+        Constraint::Length(8),
+        Constraint::Length(24),
+        Constraint::Length(18),
+        Constraint::Length(10),
+        Constraint::Length(10),
+        Constraint::Length(8),
+        Constraint::Length(10),
+        Constraint::Length(11),
+    ];
+    let table = Table::new(table_rows, widths).header(header).column_spacing(1);
+    frame.render_widget(table, area);
+}
+
+fn render_zoom_by_model(
+    frame: &mut Frame,
+    area: Rect,
+    data: &UsageData,
+    _state: &UsageViewState,
+    query: &str,
+) {
+    let rows = apply_zoom_filter(&data.models, query, |m| m.model.clone());
+    let header = Row::new(vec![
+        "Model",
+        "Calls",
+        "Tokens",
+        "Cost",
+        "Cost/call",
+        "Top projects",
+    ])
+    .style(Style::default().fg(GOLD).add_modifier(Modifier::BOLD))
+    .bottom_margin(1);
+    let visible_rows = area.height.saturating_sub(2) as usize;
+    let table_rows: Vec<Row> = rows
+        .iter()
+        .take(visible_rows)
+        .map(|m| {
+            let b = &m.bucket;
+            let cost_per_call = b
+                .cost_usd
+                .map(|c| {
+                    if b.call_count == 0 {
+                        0.0
+                    } else {
+                        c / (b.call_count as f64)
+                    }
+                })
+                .map(|c| format!("${c:.4}"))
+                .unwrap_or_else(|| "—".to_string());
+            let top_projects = top_projects_for_model(data, &m.model, 3);
+            Row::new(vec![
+                m.model.clone(),
+                b.call_count.to_string(),
+                format_tokens_short(b.total()),
+                format_cost(b.cost_usd),
+                cost_per_call,
+                top_projects,
+            ])
+            .style(Style::default().fg(SOFT_WHITE))
+        })
+        .collect();
+    let widths = [
+        Constraint::Min(20),
+        Constraint::Length(8),
+        Constraint::Length(10),
+        Constraint::Length(10),
+        Constraint::Length(11),
+        Constraint::Min(20),
+    ];
+    let table = Table::new(table_rows, widths).header(header).column_spacing(1);
+    frame.render_widget(table, area);
+}
+
+fn render_zoom_by_activity(
+    frame: &mut Frame,
+    area: Rect,
+    data: &UsageData,
+    _state: &UsageViewState,
+    query: &str,
+) {
+    let rows = apply_zoom_filter(&data.activities, query, |a| a.category.label().to_string());
+    let header = Row::new(vec![
+        "Activity", "Turns", "Edit", "1-shot", "Retries", "Tokens", "Cost",
+    ])
+    .style(Style::default().fg(GOLD).add_modifier(Modifier::BOLD))
+    .bottom_margin(1);
+    let visible_rows = area.height.saturating_sub(2) as usize;
+    let table_rows: Vec<Row> = rows
+        .iter()
+        .take(visible_rows)
+        .map(|a| {
+            let b = &a.bucket;
+            Row::new(vec![
+                a.category.label().to_string(),
+                a.turns.to_string(),
+                a.edit_turns.to_string(),
+                a.one_shot_turns.to_string(),
+                a.retries.to_string(),
+                format_tokens_short(b.total()),
+                format_cost(b.cost_usd),
+            ])
+            .style(Style::default().fg(SOFT_WHITE))
+        })
+        .collect();
+    let widths = [
+        Constraint::Length(14),
+        Constraint::Length(7),
+        Constraint::Length(7),
+        Constraint::Length(7),
+        Constraint::Length(8),
+        Constraint::Length(10),
+        Constraint::Length(10),
+    ];
+    let table = Table::new(table_rows, widths).header(header).column_spacing(1);
+    frame.render_widget(table, area);
+}
+
+fn render_zoom_daily_activity(
+    frame: &mut Frame,
+    area: Rect,
+    data: &UsageData,
+    _state: &UsageViewState,
+    query: &str,
+) {
+    // Daily rows are (date, bucket) tuples — search over the date string.
+    let rows: Vec<&(NaiveDate, crate::models::usage::TokenBucket)> = if query.is_empty() {
+        data.daily.iter().collect()
+    } else {
+        data.daily
+            .iter()
+            .filter(|(date, _)| date.format("%Y-%m-%d").to_string().contains(query))
+            .collect()
+    };
+    let header = Row::new(vec![
+        "Date", "Calls", "Sessions", "Projects", "Tokens", "Cost",
+    ])
+    .style(Style::default().fg(GOLD).add_modifier(Modifier::BOLD))
+    .bottom_margin(1);
+    let visible_rows = area.height.saturating_sub(2) as usize;
+    let table_rows: Vec<Row> = rows
+        .iter()
+        .rev()
+        .take(visible_rows)
+        .map(|(date, b)| {
+            Row::new(vec![
+                date.format("%Y-%m-%d").to_string(),
+                b.call_count.to_string(),
+                b.session_count.to_string(),
+                b.project_count.to_string(),
+                format_tokens_short(b.total()),
+                format_cost(b.cost_usd),
+            ])
+            .style(Style::default().fg(SOFT_WHITE))
+        })
+        .collect();
+    let widths = [
+        Constraint::Length(11),
+        Constraint::Length(8),
+        Constraint::Length(9),
+        Constraint::Length(9),
+        Constraint::Length(10),
+        Constraint::Length(10),
+    ];
+    let table = Table::new(table_rows, widths).header(header).column_spacing(1);
+    frame.render_widget(table, area);
+}
+
+fn render_zoom_named(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    rows: &[NamedUsage],
+    _state: &UsageViewState,
+    query: &str,
+) {
+    let filtered = apply_zoom_filter(rows, query, |n| n.name.clone());
+    let header = Row::new(vec![title, "Calls"])
+        .style(Style::default().fg(GOLD).add_modifier(Modifier::BOLD))
+        .bottom_margin(1);
+    let visible_rows = area.height.saturating_sub(2) as usize;
+    let table_rows: Vec<Row> = filtered
+        .iter()
+        .take(visible_rows)
+        .map(|row| {
+            Row::new(vec![row.name.clone(), row.calls.to_string()])
+                .style(Style::default().fg(SOFT_WHITE))
+        })
+        .collect();
+    let widths = [Constraint::Min(20), Constraint::Length(10)];
+    let table = Table::new(table_rows, widths).header(header).column_spacing(1);
+    frame.render_widget(table, area);
+}
+
+/// Render the detail drawer for the currently-selected row in the
+/// zoomed panel. Static info card; no extra fetching for PR-C.
+fn render_zoom_detail_drawer(
+    frame: &mut Frame,
+    area: Rect,
+    data: &UsageData,
+    state: &UsageViewState,
+    panel: UsagePanel,
+) {
+    let block = Block::default()
+        .title(" [ Detail ] ")
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(Style::default().fg(GOLD))
+        .style(Style::default().bg(TERMINAL_PANEL));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let lines = build_detail_lines(data, state, panel);
+    let paragraph = Paragraph::new(lines).style(Style::default().fg(SOFT_WHITE));
+    frame.render_widget(paragraph, inner);
+}
+
+fn build_detail_lines(
+    data: &UsageData,
+    state: &UsageViewState,
+    panel: UsagePanel,
+) -> Vec<Line<'static>> {
+    let row = state.focus_row;
+    let mut lines = Vec::new();
+    let kv = |k: &str, v: String| -> Line<'static> {
+        Line::from(vec![
+            Span::styled(format!(" {k:<14}"), Style::default().fg(MUTED_GRAY)),
+            Span::styled(
+                v,
+                Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
+            ),
+        ])
+    };
+    match panel {
+        UsagePanel::ByProject | UsagePanel::Leaderboard => {
+            if let Some(p) = data.projects.get(row) {
+                lines.push(kv("Project", p.name.clone()));
+                lines.push(kv("Path", p.path.clone()));
+                lines.push(kv("Cost", format_cost(p.bucket.cost_usd)));
+                lines.push(kv("Tokens", format_tokens_short(p.bucket.total())));
+                lines.push(kv("Calls", p.bucket.call_count.to_string()));
+                lines.push(kv("Sessions", p.bucket.session_count.to_string()));
+            }
+        }
+        UsagePanel::TopSessions | UsagePanel::Live => {
+            if let Some(s) = data.sessions.get(row) {
+                lines.push(kv("Session", s.session_id.clone()));
+                lines.push(kv("Project", s.project.clone()));
+                lines.push(kv("Provider", s.provider.clone()));
+                lines.push(kv(
+                    "First seen",
+                    s.first_timestamp.format("%Y-%m-%d %H:%M").to_string(),
+                ));
+                lines.push(kv(
+                    "Last seen",
+                    s.last_timestamp.format("%Y-%m-%d %H:%M").to_string(),
+                ));
+                lines.push(kv("Cost", format_cost(s.bucket.cost_usd)));
+                lines.push(kv("Tokens", format_tokens_short(s.bucket.total())));
+                lines.push(kv("Calls", s.bucket.call_count.to_string()));
+            }
+        }
+        UsagePanel::ByModel => {
+            if let Some(m) = data.models.get(row) {
+                lines.push(kv("Model", m.model.clone()));
+                lines.push(kv("Cost", format_cost(m.bucket.cost_usd)));
+                lines.push(kv("Tokens", format_tokens_short(m.bucket.total())));
+                lines.push(kv("Calls", m.bucket.call_count.to_string()));
+                lines.push(kv(
+                    "Top projects",
+                    top_projects_for_model(data, &m.model, 3),
+                ));
+            }
+        }
+        UsagePanel::ByActivity => {
+            if let Some(a) = data.activities.get(row) {
+                lines.push(kv("Activity", a.category.label().to_string()));
+                lines.push(kv("Turns", a.turns.to_string()));
+                lines.push(kv("Edit turns", a.edit_turns.to_string()));
+                lines.push(kv("1-shot turns", a.one_shot_turns.to_string()));
+                lines.push(kv("Retries", a.retries.to_string()));
+                lines.push(kv("Tokens", format_tokens_short(a.bucket.total())));
+                lines.push(kv("Cost", format_cost(a.bucket.cost_usd)));
+            }
+        }
+        UsagePanel::DailyActivity => {
+            if let Some((date, b)) = data.daily.iter().rev().nth(row) {
+                lines.push(kv("Date", date.format("%Y-%m-%d").to_string()));
+                lines.push(kv("Calls", b.call_count.to_string()));
+                lines.push(kv("Sessions", b.session_count.to_string()));
+                lines.push(kv("Projects", b.project_count.to_string()));
+                lines.push(kv("Tokens", format_tokens_short(b.total())));
+                lines.push(kv("Cost", format_cost(b.cost_usd)));
+            }
+        }
+        UsagePanel::CoreTools => detail_named(&mut lines, &data.tools, row, "Tool", &kv),
+        UsagePanel::ShellCommands => {
+            detail_named(&mut lines, &data.shell_commands, row, "Command", &kv)
+        }
+        UsagePanel::McpServers => {
+            detail_named(&mut lines, &data.mcp_servers, row, "MCP server", &kv)
+        }
+        UsagePanel::Optimize | UsagePanel::Budget => {
+            lines.push(Line::from(Span::styled(
+                "  No detail card for summary panels.",
+                Style::default().fg(MUTED_GRAY),
+            )));
+        }
+    }
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  No row selected.",
+            Style::default().fg(MUTED_GRAY),
+        )));
+    }
+    lines
+}
+
+fn detail_named<F>(
+    lines: &mut Vec<Line<'static>>,
+    rows: &[NamedUsage],
+    idx: usize,
+    name_label: &str,
+    kv: &F,
+) where
+    F: Fn(&str, String) -> Line<'static>,
+{
+    if let Some(row) = rows.get(idx) {
+        lines.push(kv(name_label, row.name.clone()));
+        lines.push(kv("Calls", row.calls.to_string()));
+    }
+}
+
+/// First-seen / last-seen ISO dates for a project, derived from the
+/// session timeline. Empty strings when the project has no sessions.
+fn project_seen_window(data: &UsageData, project_name: &str) -> (String, String) {
+    let mut iter = data.sessions.iter().filter(|s| s.project == project_name);
+    let Some(first) = iter.next() else {
+        return (String::new(), String::new());
+    };
+    let mut min_ts = first.first_timestamp;
+    let mut max_ts = first.last_timestamp;
+    for s in iter {
+        if s.first_timestamp < min_ts {
+            min_ts = s.first_timestamp;
+        }
+        if s.last_timestamp > max_ts {
+            max_ts = s.last_timestamp;
+        }
+    }
+    (
+        min_ts.format("%Y-%m-%d").to_string(),
+        max_ts.format("%Y-%m-%d").to_string(),
+    )
+}
+
+/// Top `n` projects by call count for `model_name`, joined with "·".
+/// Returns "—" when the model has no calls in `data.calls`.
+fn top_projects_for_model(data: &UsageData, model_name: &str, n: usize) -> String {
+    use std::collections::HashMap;
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for call in &data.calls {
+        if call.model == model_name {
+            *counts.entry(call.project.as_str()).or_insert(0) += 1;
+        }
+    }
+    if counts.is_empty() {
+        return "—".to_string();
+    }
+    let mut sorted: Vec<_> = counts.into_iter().collect();
+    sorted.sort_by(|a, b| b.1.cmp(&a.1));
+    sorted
+        .into_iter()
+        .take(n)
+        .map(|(p, _)| p.to_string())
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// Render `min_total` as `1h 04m` / `42m` / `<1m`.
+fn format_duration_min(min_total: u64) -> String {
+    if min_total == 0 {
+        return "<1m".to_string();
+    }
+    let h = min_total / 60;
+    let m = min_total % 60;
+    if h > 0 {
+        format!("{h}h {m:02}m")
+    } else {
+        format!("{m}m")
     }
 }
 
@@ -1565,12 +2376,7 @@ fn build_period_provider_strip(state: &UsageViewState) -> Vec<Line<'static>> {
 /// Render `[◀ <label> ▶ <key> <name>]` for the inline Month/Quarter
 /// pickers. Active variant gets the GOLD chip background; inactive
 /// renders as soft white text with hint key prefix.
-fn build_step_picker_spans(
-    key: char,
-    name: &str,
-    label: &str,
-    active: bool,
-) -> Vec<Span<'static>> {
+fn build_step_picker_spans(key: char, name: &str, label: &str, active: bool) -> Vec<Span<'static>> {
     let style = if active {
         Style::default().fg(DARK_BG).bg(GOLD).add_modifier(Modifier::BOLD)
     } else {
@@ -2630,18 +3436,40 @@ fn render_bar_chart(frame: &mut Frame, area: Rect, data: &UsageData) {
 }
 
 fn render_help_bar(frame: &mut Frame, area: Rect, state: &UsageViewState) {
+    // When zoomed, swap to a focused help string so the user has the
+    // zoom-only affordances visible.
+    if state.is_zoomed() {
+        let spans = vec![
+            Span::styled(" /", Style::default().fg(GOLD)),
+            Span::styled(" search  ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("d", Style::default().fg(GOLD)),
+            Span::styled(" detail  ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("z/Esc", Style::default().fg(GOLD)),
+            Span::styled(" back  ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("j/k", Style::default().fg(GOLD)),
+            Span::styled(" row  ", Style::default().fg(MUTED_GRAY)),
+        ];
+        let paragraph = Paragraph::new(Line::from(spans)).style(Style::default().bg(DARK_BG));
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
     let on_burndown = matches!(state.active_tab, UsageTab::Burndown);
     let mut spans = vec![
         Span::styled(" ◀/▶", Style::default().fg(GOLD)),
         Span::styled(" provider  ", Style::default().fg(MUTED_GRAY)),
         Span::styled("p", Style::default().fg(GOLD)),
         Span::styled(" filter  ", Style::default().fg(MUTED_GRAY)),
-        Span::styled("1-5", Style::default().fg(GOLD)),
-        Span::styled(" period  ", Style::default().fg(MUTED_GRAY)),
+        Span::styled(
+            "1 Today  2 7d  3 30d  4 90d  5 YTD  m Month  q Quarter  a All  D advanced  ",
+            Style::default().fg(MUTED_GRAY),
+        ),
     ];
     if on_burndown {
-        // Burndown view: Tab pivots panels; Enter commits chip; C clears.
+        // Burndown view: z zoom; Tab pivots panels; Enter commits chip; C clears.
         spans.extend_from_slice(&[
+            Span::styled("z", Style::default().fg(GOLD)),
+            Span::styled(" zoom  ", Style::default().fg(MUTED_GRAY)),
             Span::styled("Tab", Style::default().fg(GOLD)),
             Span::styled(" focus panel  ", Style::default().fg(MUTED_GRAY)),
             Span::styled("Enter", Style::default().fg(GOLD)),
@@ -2658,7 +3486,7 @@ fn render_help_bar(frame: &mut Frame, area: Rect, state: &UsageViewState) {
         ]);
     }
     spans.extend_from_slice(&[
-        Span::styled("/ x d c", Style::default().fg(GOLD)),
+        Span::styled("/ x c", Style::default().fg(GOLD)),
         Span::styled(" filters  ", Style::default().fg(MUTED_GRAY)),
         Span::styled("j/k", Style::default().fg(GOLD)),
         Span::styled(" scroll  ", Style::default().fg(MUTED_GRAY)),
@@ -3097,6 +3925,97 @@ mod cross_filter_tests {
         state.filters.session.push("sess-1".into());
         state.clear_all_filter_chips();
         assert!(state.filters.is_empty());
+    }
+
+    #[test]
+    fn z_toggles_zoom_state_and_records_focused_panel() {
+        let mut state = UsageViewState::default();
+        state.focused_panel = Some(UsagePanel::ByProject);
+        state.toggle_zoom();
+        assert_eq!(state.zoom, Some(UsagePanel::ByProject));
+        assert!(state.is_zoomed());
+        state.toggle_zoom();
+        assert!(state.zoom.is_none());
+        assert!(!state.is_zoomed());
+    }
+
+    #[test]
+    fn z_without_focus_picks_first_panel() {
+        let mut state = UsageViewState::default();
+        assert!(state.focused_panel.is_none());
+        state.toggle_zoom();
+        assert_eq!(state.zoom, Some(UsagePanel::ALL[0]));
+        assert_eq!(state.focused_panel, Some(UsagePanel::ALL[0]));
+    }
+
+    #[test]
+    fn slash_enters_search_mode_and_typing_appends() {
+        let mut state = UsageViewState::default();
+        state.toggle_zoom();
+        state.zoom_begin_search();
+        assert!(state.zoom_search_active);
+        state.zoom_search_char('a');
+        state.zoom_search_char('l');
+        state.zoom_search_char('p');
+        assert_eq!(state.zoom_search_query, "alp");
+        state.zoom_commit_search();
+        assert!(!state.zoom_search_active);
+        assert_eq!(state.zoom_search_query, "alp");
+    }
+
+    #[test]
+    fn esc_priority_is_detail_then_search_then_zoom_exit() {
+        let mut state = UsageViewState::default();
+        state.toggle_zoom();
+        state.zoom_detail_open = true;
+        state.zoom_search_active = true;
+        state.zoom_search_query.push('x');
+
+        // 1st Esc -> close detail.
+        assert!(state.zoom_handle_esc());
+        assert!(!state.zoom_detail_open);
+        assert!(state.zoom_search_active, "search still active");
+
+        // 2nd Esc -> cancel search.
+        assert!(state.zoom_handle_esc());
+        assert!(!state.zoom_search_active);
+        assert!(state.zoom_search_query.is_empty());
+
+        // 3rd Esc -> exit zoom.
+        assert!(state.zoom_handle_esc());
+        assert!(!state.is_zoomed());
+
+        // 4th Esc -> not consumed; caller falls through to chip pop.
+        assert!(!state.zoom_handle_esc());
+    }
+
+    #[test]
+    fn d_toggles_detail_drawer_when_zoomed() {
+        let mut state = UsageViewState::default();
+        state.toggle_zoom();
+        assert!(!state.zoom_detail_open);
+        state.toggle_zoom_detail();
+        assert!(state.zoom_detail_open);
+        state.toggle_zoom_detail();
+        assert!(!state.zoom_detail_open);
+    }
+
+    #[test]
+    fn fuzzy_filter_matches_substring_when_query_present() {
+        let projects = vec![
+            "alpha".to_string(),
+            "beta".to_string(),
+            "alphabet".to_string(),
+        ];
+        let out = apply_zoom_filter(&projects, "alp", |s| s.clone());
+        assert_eq!(out.len(), 2, "alpha + alphabet should both match");
+    }
+
+    #[test]
+    fn fuzzy_filter_empty_query_returns_all() {
+        let projects = vec!["alpha".to_string(), "beta".to_string()];
+        let out = apply_zoom_filter(&projects, "", |s| s.clone());
+        assert_eq!(out.len(), 2);
     }
 
     #[test]

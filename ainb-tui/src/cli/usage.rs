@@ -1112,10 +1112,7 @@ mod tests {
             "--month",
             "2026-04",
         ]);
-        assert!(
-            result.is_err(),
-            "clap should reject --from with --month"
-        );
+        assert!(result.is_err(), "clap should reject --from with --month");
     }
 
     #[test]
