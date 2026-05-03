@@ -504,20 +504,29 @@ impl UsageViewState {
             return false;
         };
         let row_idx = self.focus_row;
-        let value = match (target, panel) {
+        // For Session rows we also need the owning project so we can
+        // auto-attach a project chip — session ids can collide across
+        // projects/providers because the aggregator key is
+        // `provider:project:session_id` but `filters.session` only holds
+        // the bare id. Other targets pass None as the second element.
+        let value: Option<(String, Option<String>)> = match (target, panel) {
             (UsageFilterTarget::Project, UsagePanel::Leaderboard | UsagePanel::ByProject) => {
-                filtered.projects.get(row_idx).map(|p| p.name.clone())
+                filtered.projects.get(row_idx).map(|p| (p.name.clone(), None))
             }
-            (UsageFilterTarget::Activity, _) => {
-                filtered.activities.get(row_idx).map(|a| a.category.label().to_string())
+            (UsageFilterTarget::Activity, _) => filtered
+                .activities
+                .get(row_idx)
+                .map(|a| (a.category.label().to_string(), None)),
+            (UsageFilterTarget::Model, _) => {
+                filtered.models.get(row_idx).map(|m| (m.model.clone(), None))
             }
-            (UsageFilterTarget::Model, _) => filtered.models.get(row_idx).map(|m| m.model.clone()),
-            (UsageFilterTarget::Session, _) => {
-                filtered.sessions.get(row_idx).map(|s| s.session_id.clone())
-            }
+            (UsageFilterTarget::Session, _) => filtered
+                .sessions
+                .get(row_idx)
+                .map(|s| (s.session_id.clone(), Some(s.project.clone()))),
             _ => None,
         };
-        let Some(value) = value else {
+        let Some((value, owner_project)) = value else {
             return false;
         };
         match target {
@@ -539,6 +548,11 @@ impl UsageViewState {
             UsageFilterTarget::Session => {
                 if !self.filters.session.contains(&value) {
                     self.filters.session.push(value);
+                }
+                if let Some(p) = owner_project {
+                    if !self.filters.project.contains(&p) {
+                        self.filters.project.push(p);
+                    }
                 }
             }
         }
