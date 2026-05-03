@@ -13,6 +13,20 @@ use tracing::{debug, warn};
 use crate::usage_cache::{Cache, ParseHint, ParseResult};
 
 /// Usage period selector shared by TUI and CLI report queries.
+///
+/// Variants beyond the original `Today/Week/ThirtyDays/Month/All/Custom`
+/// set are introduced for the date-picker UX:
+/// - `LastNDays(n)` — generic "last n days" used for 90d (and exposed
+///   over the CLI as `--last-n-days N`).
+/// - `SpecificMonth(date)` — calendar month containing `date` (day is
+///   ignored; canonicalised to day=1 by callers).
+/// - `SpecificQuarter(year, q)` — calendar quarter `q` of `year`,
+///   `q ∈ 1..=4`.
+/// - `YearToDate` — Jan 1 of the current local year through today.
+///
+/// `Week` and `ThirtyDays` are retained (rather than collapsing into
+/// `LastNDays`) to keep the existing CLI `PeriodArg` enum, JSON
+/// serialisation, and downstream tests stable.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -20,6 +34,17 @@ pub enum UsagePeriod {
     Today,
     Week,
     ThirtyDays,
+    /// Generic "last N days" — used for 90d and the `--last-n-days N`
+    /// CLI flag. `n=0` is treated as 1 day (today only) by
+    /// `date_range_for_period` to avoid empty ranges.
+    LastNDays(u32),
+    /// Calendar month of the given date. Callers should canonicalise
+    /// the day to 1 — the renderer pretty-prints as "Apr 2026".
+    SpecificMonth(NaiveDate),
+    /// Calendar quarter `q ∈ 1..=4` of `year`. Renders as "Q2 2026".
+    SpecificQuarter(i32, u8),
+    /// Jan 1 of the current local year through today.
+    YearToDate,
     Month,
     All,
     Custom { from: NaiveDate, to: NaiveDate },
@@ -1930,12 +1955,63 @@ fn date_range_for_period(period: &UsagePeriod) -> Option<(DateTime<Local>, DateT
         UsagePeriod::ThirtyDays => {
             Some((start_of_day(today - Duration::days(29)), end_of_day(today)))
         }
+        UsagePeriod::LastNDays(n) => {
+            let n = (*n).max(1);
+            Some((
+                start_of_day(today - Duration::days(i64::from(n - 1))),
+                end_of_day(today),
+            ))
+        }
         UsagePeriod::Month => {
             let first = NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap_or(today);
             Some((start_of_day(first), end_of_day(today)))
         }
+        UsagePeriod::SpecificMonth(anchor) => {
+            let first =
+                NaiveDate::from_ymd_opt(anchor.year(), anchor.month(), 1).unwrap_or(*anchor);
+            let last = last_day_of_month(anchor.year(), anchor.month());
+            Some((start_of_day(first), end_of_day(last)))
+        }
+        UsagePeriod::SpecificQuarter(year, q) => {
+            let (first, last) = quarter_bounds(*year, *q);
+            Some((start_of_day(first), end_of_day(last)))
+        }
+        UsagePeriod::YearToDate => {
+            let first = NaiveDate::from_ymd_opt(today.year(), 1, 1).unwrap_or(today);
+            Some((start_of_day(first), end_of_day(today)))
+        }
         UsagePeriod::Custom { from, to } => Some((start_of_day(*from), end_of_day(*to))),
     }
+}
+
+/// Last calendar day of a `(year, month)`. Falls back to day 28 only
+/// for genuinely impossible chrono inputs (year out of range).
+pub fn last_day_of_month(year: i32, month: u32) -> NaiveDate {
+    let (next_year, next_month) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    let next_first = NaiveDate::from_ymd_opt(next_year, next_month, 1)
+        .unwrap_or_else(|| NaiveDate::from_ymd_opt(year, month, 28).expect("valid 28th"));
+    next_first - Duration::days(1)
+}
+
+/// First and last calendar days of `quarter` (1..=4) within `year`.
+/// Out-of-range quarters are clamped to Q1.
+pub fn quarter_bounds(year: i32, quarter: u8) -> (NaiveDate, NaiveDate) {
+    let q = quarter.clamp(1, 4);
+    let start_month = (u32::from(q) - 1) * 3 + 1;
+    let end_month = start_month + 2;
+    let first = NaiveDate::from_ymd_opt(year, start_month, 1)
+        .unwrap_or_else(|| NaiveDate::from_ymd_opt(year, 1, 1).expect("valid Jan 1"));
+    let last = last_day_of_month(year, end_month);
+    (first, last)
+}
+
+/// Quarter (1..=4) containing `date`.
+pub fn quarter_of(date: NaiveDate) -> u8 {
+    ((date.month0() / 3) + 1) as u8
 }
 
 fn day_bounds(date: NaiveDate) -> (DateTime<Local>, DateTime<Local>) {
@@ -2854,6 +2930,55 @@ mod tests {
             (thirty.1.date_naive() - thirty.0.date_naive()).num_days() + 1,
             30
         );
+    }
+
+    #[test]
+    fn last_n_days_period_covers_n_calendar_days() {
+        for n in [1u32, 7, 14, 90] {
+            let (start, end) =
+                date_range_for_period(&UsagePeriod::LastNDays(n)).unwrap();
+            assert_eq!(
+                (end.date_naive() - start.date_naive()).num_days() + 1,
+                i64::from(n),
+                "n={n}"
+            );
+        }
+    }
+
+    #[test]
+    fn specific_month_period_starts_on_day_one_and_ends_on_last_day() {
+        let anchor = NaiveDate::from_ymd_opt(2026, 4, 17).unwrap();
+        let (start, end) =
+            date_range_for_period(&UsagePeriod::SpecificMonth(anchor)).unwrap();
+        assert_eq!(start.date_naive(), NaiveDate::from_ymd_opt(2026, 4, 1).unwrap());
+        assert_eq!(end.date_naive(), NaiveDate::from_ymd_opt(2026, 4, 30).unwrap());
+    }
+
+    #[test]
+    fn specific_quarter_q1_to_q4_cover_three_months_each() {
+        for q in 1u8..=4 {
+            let (start, end) =
+                date_range_for_period(&UsagePeriod::SpecificQuarter(2026, q)).unwrap();
+            // Q1 = 90 days (Jan 31 + Feb 28 + Mar 31), Q2 = 91, Q3 = 92, Q4 = 92.
+            let days = (end.date_naive() - start.date_naive()).num_days() + 1;
+            assert!((90..=92).contains(&days), "q={q} got {days} days");
+        }
+    }
+
+    #[test]
+    fn ytd_period_starts_on_jan_1() {
+        let (start, _) = date_range_for_period(&UsagePeriod::YearToDate).unwrap();
+        assert_eq!(start.date_naive().month(), 1);
+        assert_eq!(start.date_naive().day(), 1);
+    }
+
+    #[test]
+    fn quarter_of_dispatches_jan_to_dec_correctly() {
+        assert_eq!(quarter_of(NaiveDate::from_ymd_opt(2026, 1, 5).unwrap()), 1);
+        assert_eq!(quarter_of(NaiveDate::from_ymd_opt(2026, 3, 31).unwrap()), 1);
+        assert_eq!(quarter_of(NaiveDate::from_ymd_opt(2026, 4, 1).unwrap()), 2);
+        assert_eq!(quarter_of(NaiveDate::from_ymd_opt(2026, 7, 1).unwrap()), 3);
+        assert_eq!(quarter_of(NaiveDate::from_ymd_opt(2026, 12, 31).unwrap()), 4);
     }
 
     #[test]

@@ -350,10 +350,15 @@ pub enum AppEvent {
     UsageRefresh,             // Reload data (r) — cache-respecting
     UsageForceRefresh,        // Force-refresh bypassing the persistent cache (Shift+R)
     UsageCycleProviderFilter, // Cycle All/Claude/Codex (p)
-    UsageSetPeriod(u8),       // Period shortcut 1-5
+    UsageSetPeriod(u8),       // Period shortcut 1=Today/2=7d/3=30d/4=90d/5=YTD
+    UsageSetPeriodMonth,      // m — switch to SpecificMonth(today's month)
+    UsageSetPeriodQuarter,    // q — switch to SpecificQuarter(today)
+    UsageSetPeriodAll,        // a — switch to All
+    UsagePeriodStepBack,      // ◀ — step Month/Quarter back
+    UsagePeriodStepForward,   // ▶ — step Month/Quarter forward
     UsageStartIncludeFilter,  // Start include project input (/)
     UsageStartExcludeFilter,  // Start exclude project input (x)
-    UsageStartDateRange,      // Start date range input (d)
+    UsageStartDateRange,      // Start date range input (capital D)
     UsageClearFilters,        // Clear include/exclude filters (c)
     UsageInputChar(char),     // Input for usage filter/range
     UsageInputBackspace,      // Backspace in usage input
@@ -367,6 +372,15 @@ pub enum AppEvent {
     UsageCommitFilter,   // Enter on focused row -> add chip
     UsagePopFilterChip,  // Esc when chips exist
     UsageClearAllChips,  // C — drop every chip in one shot
+    // Zoom mode (PR-C)
+    UsageToggleZoom,         // z — toggle fullscreen panel zoom on Burndown
+    UsageZoomStartSearch,    // / inside zoom — begin fuzzy search
+    UsageZoomCommitSearch,   // Enter inside zoom search
+    UsageZoomCancelSearch,   // Esc inside zoom search
+    UsageZoomSearchChar(char),  // typed char in zoom search input
+    UsageZoomSearchBackspace,   // Backspace in zoom search input
+    UsageZoomToggleDetail,   // d inside zoom — toggle detail drawer
+    UsageZoomEsc,            // Esc inside zoom — detail-close > zoom-exit
     // Skills browser events
     SkillsBack,             // Return to home screen (Esc)
     SkillsNextProvider,     // Next provider (Right arrow)
@@ -1662,6 +1676,23 @@ impl EventHandler {
             };
         }
 
+        // Zoom-search input mode eats most keys: typing builds the query,
+        // Enter commits, Esc cancels, Backspace edits. Other navigation
+        // keys (Up/Down/Esc-when-no-search etc.) are deferred to the
+        // standard zoom handler below.
+        if state.usage_state.zoom_search_active {
+            return match key_event.code {
+                // Route Esc through the state machine so the documented
+                // detail > search > exit precedence is enforced when both
+                // overlays are open. zoom_handle_esc owns the order.
+                KeyCode::Esc => Some(AppEvent::UsageZoomEsc),
+                KeyCode::Enter => Some(AppEvent::UsageZoomCommitSearch),
+                KeyCode::Backspace => Some(AppEvent::UsageZoomSearchBackspace),
+                KeyCode::Char(ch) => Some(AppEvent::UsageZoomSearchChar(ch)),
+                _ => None,
+            };
+        }
+
         // Burndown-only cross-filter shortcuts. Tab cycles panel focus
         // here instead of advancing the outer tab bar so the user can
         // pivot without losing the dashboard layout. Esc backs out of
@@ -1672,7 +1703,27 @@ impl EventHandler {
             crate::components::usage::UsageTab::Burndown
         );
         if on_burndown {
+            // Zoom-mode keys take priority over the dashboard cross-filter
+            // shortcuts so `/`, `d`, `Esc` behave as documented in zoom.
+            if state.usage_state.is_zoomed() {
+                match key_event.code {
+                    KeyCode::Char('z') => return Some(AppEvent::UsageToggleZoom),
+                    KeyCode::Esc => return Some(AppEvent::UsageZoomEsc),
+                    KeyCode::Char('/') => return Some(AppEvent::UsageZoomStartSearch),
+                    KeyCode::Char('d') => return Some(AppEvent::UsageZoomToggleDetail),
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        return Some(AppEvent::UsageFocusRowUp);
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        return Some(AppEvent::UsageFocusRowDown);
+                    }
+                    _ => return None,
+                }
+            }
+
+            // Outside zoom: existing burndown shortcuts.
             match key_event.code {
+                KeyCode::Char('z') => return Some(AppEvent::UsageToggleZoom),
                 KeyCode::Tab => return Some(AppEvent::UsageFocusNextPanel),
                 KeyCode::BackTab => return Some(AppEvent::UsageFocusPrevPanel),
                 KeyCode::Enter => return Some(AppEvent::UsageCommitFilter),
@@ -1695,6 +1746,22 @@ impl EventHandler {
             }
         }
 
+        // Step Month/Quarter via ◀/▶ when one of those pickers is the
+        // active period. Must run before the generic Left/Right
+        // handler below, otherwise ◀/▶ would walk the provider tab.
+        let stepable = matches!(
+            state.usage_state.period,
+            crate::models::usage::UsagePeriod::SpecificMonth(_)
+                | crate::models::usage::UsagePeriod::SpecificQuarter(..)
+        );
+        if stepable {
+            match key_event.code {
+                KeyCode::Left => return Some(AppEvent::UsagePeriodStepBack),
+                KeyCode::Right => return Some(AppEvent::UsagePeriodStepForward),
+                _ => {}
+            }
+        }
+
         match key_event.code {
             KeyCode::Esc => Some(AppEvent::UsageBack),
             KeyCode::Right | KeyCode::Char('l') => Some(AppEvent::UsageNextProvider),
@@ -1710,14 +1777,22 @@ impl EventHandler {
             KeyCode::Char('r') => Some(AppEvent::UsageRefresh),
             KeyCode::Char('R') => Some(AppEvent::UsageForceRefresh),
             KeyCode::Char('p') => Some(AppEvent::UsageCycleProviderFilter),
+            // PR-C period strip mappings:
+            //   1 Today  2 7d  3 30d  4 90d  5 YTD
+            //   m Month (steppable)  q Quarter (steppable)
+            //   a All  D advanced (free-text custom range)
+            //   ◀/▶ step Month or Quarter when one is active (handled above)
             KeyCode::Char('1') => Some(AppEvent::UsageSetPeriod(1)),
             KeyCode::Char('2') => Some(AppEvent::UsageSetPeriod(2)),
             KeyCode::Char('3') => Some(AppEvent::UsageSetPeriod(3)),
             KeyCode::Char('4') => Some(AppEvent::UsageSetPeriod(4)),
             KeyCode::Char('5') => Some(AppEvent::UsageSetPeriod(5)),
+            KeyCode::Char('m') => Some(AppEvent::UsageSetPeriodMonth),
+            KeyCode::Char('q') => Some(AppEvent::UsageSetPeriodQuarter),
+            KeyCode::Char('a') => Some(AppEvent::UsageSetPeriodAll),
+            KeyCode::Char('D') => Some(AppEvent::UsageStartDateRange),
             KeyCode::Char('/') => Some(AppEvent::UsageStartIncludeFilter),
             KeyCode::Char('x') => Some(AppEvent::UsageStartExcludeFilter),
-            KeyCode::Char('d') => Some(AppEvent::UsageStartDateRange),
             KeyCode::Char('c') => Some(AppEvent::UsageClearFilters),
             _ => None,
         }
@@ -4176,12 +4251,56 @@ impl EventHandler {
                     1 => UsagePeriod::Today,
                     2 => UsagePeriod::Week,
                     3 => UsagePeriod::ThirtyDays,
-                    4 => UsagePeriod::Month,
-                    5 => UsagePeriod::All,
+                    4 => UsagePeriod::LastNDays(90),
+                    5 => UsagePeriod::YearToDate,
                     _ => state.usage_state.period.clone(),
                 };
                 state.usage_state.set_period(selected);
                 state.start_background_usage_load(true);
+            }
+            AppEvent::UsageSetPeriodMonth => {
+                use crate::models::usage::UsagePeriod;
+                use chrono::Datelike;
+                // If already on a SpecificMonth keep its anchor; otherwise
+                // default to the current calendar month (day=1).
+                let anchor = match state.usage_state.period {
+                    UsagePeriod::SpecificMonth(d) => d,
+                    _ => {
+                        let today = chrono::Local::now().date_naive();
+                        chrono::NaiveDate::from_ymd_opt(today.year(), today.month(), 1)
+                            .unwrap_or(today)
+                    }
+                };
+                state.usage_state.set_period(UsagePeriod::SpecificMonth(anchor));
+                state.start_background_usage_load(true);
+            }
+            AppEvent::UsageSetPeriodQuarter => {
+                use crate::models::usage::{UsagePeriod, quarter_of};
+                use chrono::Datelike;
+                let (year, q) = match state.usage_state.period {
+                    UsagePeriod::SpecificQuarter(y, q) => (y, q),
+                    _ => {
+                        let today = chrono::Local::now().date_naive();
+                        (today.year(), quarter_of(today))
+                    }
+                };
+                state.usage_state.set_period(UsagePeriod::SpecificQuarter(year, q));
+                state.start_background_usage_load(true);
+            }
+            AppEvent::UsageSetPeriodAll => {
+                use crate::models::usage::UsagePeriod;
+                state.usage_state.set_period(UsagePeriod::All);
+                state.start_background_usage_load(true);
+            }
+            AppEvent::UsagePeriodStepBack => {
+                if state.usage_state.step_period_back() {
+                    state.start_background_usage_load(true);
+                }
+            }
+            AppEvent::UsagePeriodStepForward => {
+                if state.usage_state.step_period_forward() {
+                    state.start_background_usage_load(true);
+                }
             }
             AppEvent::UsageStartIncludeFilter => {
                 state.usage_state.begin_input(crate::components::usage::UsageInputMode::Include);
@@ -4248,6 +4367,31 @@ impl EventHandler {
                 if had_any {
                     state.add_success_notification("Cleared all chips".to_string());
                 }
+            }
+            // PR-C zoom mode events
+            AppEvent::UsageToggleZoom => {
+                state.usage_state.toggle_zoom();
+            }
+            AppEvent::UsageZoomEsc => {
+                state.usage_state.zoom_handle_esc();
+            }
+            AppEvent::UsageZoomStartSearch => {
+                state.usage_state.zoom_begin_search();
+            }
+            AppEvent::UsageZoomCommitSearch => {
+                state.usage_state.zoom_commit_search();
+            }
+            AppEvent::UsageZoomCancelSearch => {
+                state.usage_state.zoom_cancel_search();
+            }
+            AppEvent::UsageZoomSearchChar(ch) => {
+                state.usage_state.zoom_search_char(ch);
+            }
+            AppEvent::UsageZoomSearchBackspace => {
+                state.usage_state.zoom_search_backspace();
+            }
+            AppEvent::UsageZoomToggleDetail => {
+                state.usage_state.toggle_zoom_detail();
             }
             // Skills browser events
             AppEvent::SkillsBack => {

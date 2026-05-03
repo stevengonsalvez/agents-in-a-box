@@ -76,6 +76,9 @@ rusqlite = { version = "0.31", features = ["bundled", "blob"] }
 blake3 = "1"
 bincode = "1.3"
 
+# Fuzzy search for the burndown zoom panels
+nucleo-matcher = "0.3"
+
 [features]
 default = []
 visual-debug = []  # Enable live terminal during tests
