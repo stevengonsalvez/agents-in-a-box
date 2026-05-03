@@ -2372,9 +2372,24 @@ fn elapsed_days_for_period(period: &UsagePeriod, data: &UsageData) -> Option<u64
         UsagePeriod::Today => Some(1),
         UsagePeriod::Week => Some(7),
         UsagePeriod::ThirtyDays => Some(30),
+        UsagePeriod::LastNDays(n) => Some(u64::from((*n).max(1))),
         UsagePeriod::Month => {
             let today = Local::now().date_naive();
             let first = NaiveDate::from_ymd_opt(today.year(), today.month(), 1)?;
+            Some((today - first).num_days().max(0) as u64 + 1)
+        }
+        UsagePeriod::SpecificMonth(anchor) => {
+            let first = NaiveDate::from_ymd_opt(anchor.year(), anchor.month(), 1)?;
+            let last = crate::models::usage::last_day_of_month(anchor.year(), anchor.month());
+            Some((last - first).num_days().max(0) as u64 + 1)
+        }
+        UsagePeriod::SpecificQuarter(year, q) => {
+            let (first, last) = crate::models::usage::quarter_bounds(*year, *q);
+            Some((last - first).num_days().max(0) as u64 + 1)
+        }
+        UsagePeriod::YearToDate => {
+            let today = Local::now().date_naive();
+            let first = NaiveDate::from_ymd_opt(today.year(), 1, 1)?;
             Some((today - first).num_days().max(0) as u64 + 1)
         }
         UsagePeriod::Custom { from, to } => {
@@ -2524,9 +2539,13 @@ fn provider_filter_label(filter: UsageProviderFilter) -> &'static str {
 fn period_label(period: &UsagePeriod) -> String {
     match period {
         UsagePeriod::Today => "Today".to_string(),
-        UsagePeriod::Week => "Week".to_string(),
-        UsagePeriod::ThirtyDays => "30 days".to_string(),
+        UsagePeriod::Week => "7d".to_string(),
+        UsagePeriod::ThirtyDays => "30d".to_string(),
+        UsagePeriod::LastNDays(n) => format!("{n}d"),
         UsagePeriod::Month => "Month".to_string(),
+        UsagePeriod::SpecificMonth(anchor) => anchor.format("%b %Y").to_string(),
+        UsagePeriod::SpecificQuarter(year, q) => format!("Q{q} {year}"),
+        UsagePeriod::YearToDate => "YTD".to_string(),
         UsagePeriod::All => "All".to_string(),
         UsagePeriod::Custom { from, to } => format!("{from} to {to}"),
     }
