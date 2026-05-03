@@ -358,14 +358,20 @@ impl UsageViewState {
     ///
     /// No-op when the active period is not a Month/Quarter picker.
     pub fn step_period_back(&mut self) -> bool {
-        let oldest = self.data.as_ref().and_then(|d| d.daily.first().map(|(date, _)| *date));
+        // Refuse to step until data has loaded — without an `oldest`
+        // anchor we'd let the user wander arbitrarily far backwards,
+        // and the resulting picker state would silently fall outside
+        // the data range once the load completes.
+        let Some(oldest) =
+            self.data.as_ref().and_then(|d| d.daily.first().map(|(date, _)| *date))
+        else {
+            return false;
+        };
         match self.period.clone() {
             UsagePeriod::SpecificMonth(anchor) => {
                 let new_anchor = previous_month_first(anchor);
-                if let Some(oldest_first) = oldest.map(first_of_month) {
-                    if new_anchor < oldest_first {
-                        return false;
-                    }
+                if new_anchor < first_of_month(oldest) {
+                    return false;
                 }
                 self.period = UsagePeriod::SpecificMonth(new_anchor);
                 self.scroll_offset = 0;
@@ -373,11 +379,9 @@ impl UsageViewState {
             }
             UsagePeriod::SpecificQuarter(year, q) => {
                 let (new_year, new_q) = previous_quarter(year, q);
-                if let Some(oldest_date) = oldest {
-                    let (qy, qq) = current_quarter(oldest_date);
-                    if (new_year, new_q) < (qy, qq) {
-                        return false;
-                    }
+                let (qy, qq) = current_quarter(oldest);
+                if (new_year, new_q) < (qy, qq) {
+                    return false;
                 }
                 self.period = UsagePeriod::SpecificQuarter(new_year, new_q);
                 self.scroll_offset = 0;
