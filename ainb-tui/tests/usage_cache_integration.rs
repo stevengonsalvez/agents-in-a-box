@@ -67,6 +67,7 @@ fn query_all() -> UsageQuery {
         provider_filter: UsageProviderFilter::Claude,
         include_projects: Vec::new(),
         exclude_projects: Vec::new(),
+        filters: ainb::models::usage::UsageFilters::default(),
     }
 }
 
