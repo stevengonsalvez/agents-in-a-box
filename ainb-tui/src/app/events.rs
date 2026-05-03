@@ -23,6 +23,7 @@ pub enum AppEvent {
     PreviousWorkspace,
     ToggleHelp,
     RefreshWorkspaces, // Manual refresh of workspace data
+    CycleSessionFilter, // Cycle Interactive session filter (Shift+F): All → ActiveOnly → StoppedOnly
     ToggleClaudeChat,  // Toggle Claude chat visibility
     NewSession,        // Create session in current directory
     SearchWorkspace,   // Search all workspaces
@@ -681,6 +682,7 @@ impl EventHandler {
             }
             KeyCode::Char('c') => Some(AppEvent::ToggleClaudeChat),
             KeyCode::Char('f') => Some(AppEvent::RefreshWorkspaces), // Manual refresh
+            KeyCode::Char('F') => Some(AppEvent::CycleSessionFilter), // Cycle session filter (active/stopped/all)
             KeyCode::Char('n') => Some(AppEvent::NewSession),
             KeyCode::Char('s') => {
                 // Star/unstar the selected workspace (only if a workspace is selected)
@@ -2016,6 +2018,16 @@ impl EventHandler {
             AppEvent::RefreshWorkspaces => {
                 // Mark for async processing to reload workspace data
                 state.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
+            }
+            AppEvent::CycleSessionFilter => {
+                state.cycle_session_filter();
+                let label = match state.session_filter {
+                    crate::app::state::SessionFilter::All => "all sessions",
+                    crate::app::state::SessionFilter::ActiveOnly => "active only",
+                    crate::app::state::SessionFilter::StoppedOnly => "stopped only",
+                };
+                state.add_success_notification(format!("Filter: {}", label));
+                state.ui_needs_refresh = true;
             }
             AppEvent::NextSession => {
                 state.next_session();

@@ -1959,6 +1959,41 @@ impl ClaudeChatState {
     }
 }
 
+/// View filter for the session tree, cycled by `Shift+F` on the sessions screen.
+///
+/// Phase 2 of `load_interactive_mode_sessions` started surfacing Stopped sessions
+/// (tmux-dead but worktree-alive) alongside Running ones. With many worktrees
+/// the tree gets crowded; this filter lets the user hide stopped rows or focus
+/// on stopped-only without losing access. In-memory only (resets each launch).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SessionFilter {
+    #[default]
+    All,
+    ActiveOnly,
+    StoppedOnly,
+}
+
+impl SessionFilter {
+    /// Cycle order: All → ActiveOnly → StoppedOnly → All.
+    pub fn next(self) -> Self {
+        match self {
+            Self::All => Self::ActiveOnly,
+            Self::ActiveOnly => Self::StoppedOnly,
+            Self::StoppedOnly => Self::All,
+        }
+    }
+
+    /// Short label rendered in the workspace panel title (`[active]` etc.).
+    /// Returns None for `All` so the default view stays unmarked.
+    pub fn title_label(self) -> Option<&'static str> {
+        match self {
+            Self::All => None,
+            Self::ActiveOnly => Some("active"),
+            Self::StoppedOnly => Some("stopped"),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct AppState {
     pub workspaces: Vec<Workspace>,
@@ -1967,6 +2002,7 @@ pub struct AppState {
     pub shell_selected: bool, // Whether the workspace shell is currently selected
     pub selected_sessions: HashSet<Uuid>, // Multi-selected session IDs for bulk operations
     pub expand_all_workspaces: bool, // When true, show all sessions across all workspaces
+    pub session_filter: SessionFilter, // View filter for Interactive sessions (Shift+F to cycle)
     pub current_view: View,
     pub should_quit: bool,
     pub logs: HashMap<Uuid, Vec<String>>,
@@ -2570,6 +2606,7 @@ impl Default for AppState {
             shell_selected: false,
             selected_sessions: HashSet::new(),
             expand_all_workspaces: true, // Default to expanded view
+            session_filter: SessionFilter::All,
             current_view: View::HomeScreen,
             should_quit: false,
             logs: HashMap::new(),
@@ -4220,27 +4257,37 @@ impl AppState {
                     return;
                 }
 
-                // Currently in regular sessions
+                // Currently in regular sessions. Find the next *visible*
+                // session (skipping any that the active filter hides) so j/k
+                // doesn't land on a row that isn't rendered.
                 if let Some(session_idx) = self.selected_session_index {
-                    if session_idx + 1 < workspace.sessions.len() {
-                        // Move to next session in this workspace
-                        self.selected_session_index = Some(session_idx + 1);
+                    let next_visible = workspace
+                        .sessions
+                        .iter()
+                        .enumerate()
+                        .skip(session_idx + 1)
+                        .find(|(_, s)| self.session_passes_filter(s))
+                        .map(|(i, _)| i);
+                    if let Some(next_idx) = next_visible {
+                        self.selected_session_index = Some(next_idx);
                         self.queue_logs_fetch();
                     } else if workspace.shell_session.is_some() {
-                        // At last regular session - move to shell session
                         self.selected_session_index = None;
                         self.shell_selected = true;
                     } else {
-                        // At last session, no shell - try next workspace
                         self.move_to_next_workspace_first_item(workspace_idx);
                     }
-                } else if !workspace.sessions.is_empty() {
-                    // No session selected, select first
-                    self.selected_session_index = Some(0);
-                    self.queue_logs_fetch();
-                } else if workspace.shell_session.is_some() {
-                    // No regular sessions, go to shell session
-                    self.shell_selected = true;
+                } else {
+                    let first_visible = workspace
+                        .sessions
+                        .iter()
+                        .position(|s| self.session_passes_filter(s));
+                    if let Some(first_idx) = first_visible {
+                        self.selected_session_index = Some(first_idx);
+                        self.queue_logs_fetch();
+                    } else if workspace.shell_session.is_some() {
+                        self.shell_selected = true;
+                    }
                 }
             }
         }
@@ -4371,10 +4418,20 @@ impl AppState {
                     return;
                 }
 
-                // Currently in regular sessions
+                // Currently in regular sessions. Find the previous *visible*
+                // session under the active filter so k doesn't land on a
+                // hidden row.
                 if let Some(session_idx) = self.selected_session_index {
-                    if session_idx > 0 {
-                        self.selected_session_index = Some(session_idx - 1);
+                    let prev_visible = workspace
+                        .sessions
+                        .iter()
+                        .enumerate()
+                        .take(session_idx)
+                        .rev()
+                        .find(|(_, s)| self.session_passes_filter(s))
+                        .map(|(i, _)| i);
+                    if let Some(prev_idx) = prev_visible {
+                        self.selected_session_index = Some(prev_idx);
                         self.queue_logs_fetch();
                     } else {
                         // At first session - try to move to previous workspace's last item
@@ -4444,6 +4501,50 @@ impl AppState {
 
     pub fn toggle_expand_all_workspaces(&mut self) {
         self.expand_all_workspaces = !self.expand_all_workspaces;
+    }
+
+    /// Cycle the session-status filter (Shift+F): All → ActiveOnly → StoppedOnly → All.
+    /// Resets the session selection so it doesn't point to a now-hidden row.
+    pub fn cycle_session_filter(&mut self) {
+        self.session_filter = self.session_filter.next();
+        // Selection indices are positional over the *displayed* list. Resetting
+        // to the first session of the first workspace is simplest and matches
+        // what `load_real_workspaces` already does after a refresh.
+        self.selected_session_index = None;
+        self.shell_selected = false;
+        if let Some(idx) = self.selected_workspace_index {
+            // Clamp workspace index too, in case the active workspace gets
+            // hidden (no sessions match the filter and no shell).
+            if self.workspaces.get(idx).map(|w| {
+                w.sessions.iter().any(|s| self.session_passes_filter(s))
+                    || w.shell_session.is_some()
+            }) != Some(true) {
+                let new_idx = self.workspaces.iter().position(|w| {
+                    w.sessions.iter().any(|s| self.session_passes_filter(s))
+                        || w.shell_session.is_some()
+                });
+                self.selected_workspace_index = new_idx;
+            }
+        }
+        self.last_preview_update = None;
+    }
+
+    /// Predicate used by both rendering and counts so the displayed list and
+    /// the workspace-header `(N)` count never drift apart.
+    ///
+    /// The filter only applies to Interactive sessions (the ones for which
+    /// Stopped is meaningful). Boss-mode sessions and other variants pass
+    /// through regardless.
+    pub fn session_passes_filter(&self, session: &crate::models::Session) -> bool {
+        use crate::models::{SessionMode, SessionStatus};
+        if !matches!(session.mode, SessionMode::Interactive) {
+            return true;
+        }
+        match self.session_filter {
+            SessionFilter::All => true,
+            SessionFilter::ActiveOnly => !matches!(session.status, SessionStatus::Stopped),
+            SessionFilter::StoppedOnly => matches!(session.status, SessionStatus::Stopped),
+        }
     }
 
     /// Toggle the expand/collapse state of the "Other tmux" section
