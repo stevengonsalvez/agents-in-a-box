@@ -3809,6 +3809,7 @@ mod cross_filter_tests {
             tools: vec![],
             mcp_servers: vec![],
             shell_commands: vec![],
+            branches: vec![],
         }
     }
 

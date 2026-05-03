@@ -386,6 +386,16 @@ pub struct ModelUsage {
     pub bucket: TokenBucket,
 }
 
+/// Per-branch summary. Built only from calls whose `branch` is `Some`;
+/// branchless calls (codex, non-git Claude turns) are dropped from this
+/// view so the panel never grows a misleading "(no branch)" bucket.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize)]
+pub struct BranchUsage {
+    pub branch: String,
+    pub bucket: TokenBucket,
+}
+
 /// Activity summary with classified turns and retry counts.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize)]
@@ -421,6 +431,9 @@ pub struct UsageData {
     pub tools: Vec<NamedUsage>,
     pub mcp_servers: Vec<NamedUsage>,
     pub shell_commands: Vec<NamedUsage>,
+    /// Branch attribution rows, sorted by largest bucket. Only Claude
+    /// assistant turns with a non-empty `gitBranch` populate this.
+    pub branches: Vec<BranchUsage>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -458,6 +471,7 @@ impl Default for UsageData {
             tools: Vec::new(),
             mcp_servers: Vec::new(),
             shell_commands: Vec::new(),
+            branches: Vec::new(),
         }
     }
 }
@@ -1160,6 +1174,7 @@ fn aggregate_calls(mut calls: Vec<ProviderCall>) -> UsageData {
     let mut project_map: HashMap<String, (String, HashSet<String>, TokenBucket)> = HashMap::new();
     let mut session_map: HashMap<String, SessionUsageAccumulator> = HashMap::new();
     let mut model_map: HashMap<String, TokenBucket> = HashMap::new();
+    let mut branch_map: HashMap<String, TokenBucket> = HashMap::new();
     let mut activity_map: HashMap<ActivityCategory, ActivityAccumulator> = HashMap::new();
     let mut tool_map: HashMap<String, usize> = HashMap::new();
     let mut mcp_map: HashMap<String, usize> = HashMap::new();
@@ -1203,6 +1218,10 @@ fn aggregate_calls(mut calls: Vec<ProviderCall>) -> UsageData {
         session.bucket.merge(&bucket);
 
         model_map.entry(call.model.clone()).or_default().merge(&bucket);
+
+        if let Some(branch) = call.branch.as_deref().filter(|b| !b.is_empty()) {
+            branch_map.entry(branch.to_string()).or_default().merge(&bucket);
+        }
 
         let analysis = turn_analysis.get(&idx).copied().unwrap_or_else(|| TurnAnalysis {
             category: classify_activity(call),
@@ -1265,6 +1284,12 @@ fn aggregate_calls(mut calls: Vec<ProviderCall>) -> UsageData {
         .collect();
     models.sort_by(|a, b| bucket_sort_value(&b.bucket).total_cmp(&bucket_sort_value(&a.bucket)));
 
+    let mut branches: Vec<_> = branch_map
+        .into_iter()
+        .map(|(branch, bucket)| BranchUsage { branch, bucket })
+        .collect();
+    branches.sort_by(|a, b| bucket_sort_value(&b.bucket).total_cmp(&bucket_sort_value(&a.bucket)));
+
     let tools = sorted_named_usage(tool_map);
     let mcp_servers = sorted_named_usage(mcp_map);
     let shell_commands = sorted_named_usage(shell_map);
@@ -1301,6 +1326,7 @@ fn aggregate_calls(mut calls: Vec<ProviderCall>) -> UsageData {
         tools,
         mcp_servers,
         shell_commands,
+        branches,
     }
 }
 
@@ -2415,6 +2441,46 @@ mod tests {
         assert_eq!(data.grand_total.session_count, 1);
         assert!(data.tools.iter().any(|tool| tool.name == "Read" && tool.calls == 1));
         assert!(data.shell_commands.iter().any(|cmd| cmd.name == "cargo test" && cmd.calls == 1));
+    }
+
+    #[test]
+    fn branches_aggregate_only_from_calls_with_recorded_branch() {
+        let temp = tempdir().unwrap();
+        let claude_projects = temp.path().join(".claude/projects");
+        let project_dir = claude_projects.join("-Users-stevie-myrepo");
+        write_file(
+            &project_dir.join("session.jsonl"),
+            r#"{"type":"assistant","timestamp":"2026-04-10T09:00:00Z","sessionId":"s1","gitBranch":"main","message":{"role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"a"}],"usage":{"input_tokens":100,"output_tokens":10}}}
+{"type":"assistant","timestamp":"2026-04-10T09:00:01Z","sessionId":"s1","gitBranch":"main","message":{"role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"b"}],"usage":{"input_tokens":50,"output_tokens":5}}}
+{"type":"assistant","timestamp":"2026-04-10T09:00:02Z","sessionId":"s1","gitBranch":"feat/x","message":{"role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"c"}],"usage":{"input_tokens":1000,"output_tokens":50}}}
+{"type":"assistant","timestamp":"2026-04-10T09:00:03Z","sessionId":"s1","message":{"role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"d"}],"usage":{"input_tokens":99999,"output_tokens":99999}}}
+"#,
+        );
+
+        let data = parse_usage_for_with_roots(
+            UsageQuery {
+                provider_filter: UsageProviderFilter::Claude,
+                period: UsagePeriod::All,
+                include_projects: Vec::new(),
+                exclude_projects: Vec::new(),
+                filters: UsageFilters::default(),
+            },
+            &roots(Some(claude_projects), None),
+        );
+
+        // 4 turns parsed but only 3 have a recorded branch — the 4th is
+        // missing gitBranch and must be excluded from `branches`. Note its
+        // huge token count: if we accidentally bucketed branchless calls
+        // under "(none)" it would dominate the sort and the assertion
+        // below would fail noisily.
+        assert_eq!(data.calls.len(), 4);
+        assert_eq!(data.branches.len(), 2, "only main and feat/x are recorded");
+
+        // Sorted largest first by total bucket value.
+        assert_eq!(data.branches[0].branch, "feat/x");
+        assert_eq!(data.branches[0].bucket.input_tokens, 1000);
+        assert_eq!(data.branches[1].branch, "main");
+        assert_eq!(data.branches[1].bucket.input_tokens, 150);
     }
 
     #[test]
