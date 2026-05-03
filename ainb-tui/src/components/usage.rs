@@ -11,8 +11,9 @@ use ratatui::{
 };
 
 use crate::models::{
-    ActivityUsage, ModelUsage, NamedUsage, ProjectUsage, SessionUsage, UsageData, UsagePeriod,
-    UsageProviderFilter, UsageQuery, format_tokens_short, optimize_usage,
+    ActivityUsage, ModelUsage, NamedUsage, ProjectUsage, SessionUsage, UsageData, UsageFilterChip,
+    UsageFilters, UsagePeriod, UsageProviderFilter, UsageQuery, filter_usage_data,
+    format_tokens_short, optimize_usage,
 };
 
 // Color palette from TUI style guide
@@ -288,6 +289,11 @@ impl UsageViewState {
             provider_filter: self.provider_filter,
             include_projects: self.include_projects.clone(),
             exclude_projects: self.exclude_projects.clone(),
+            // Cross-filters apply client-side via `filter_usage_data` after
+            // the (cached) parse, so we deliberately do NOT plumb them
+            // into the parse query — that would invalidate the cache key
+            // every time the user pivoted.
+            filters: UsageFilters::default(),
         }
     }
 

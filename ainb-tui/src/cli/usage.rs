@@ -591,6 +591,7 @@ fn query_from_args(args: &UsageReportArgs) -> Result<UsageQuery> {
         },
         include_projects: args.include.clone(),
         exclude_projects: args.exclude.clone(),
+        filters: Default::default(),
     })
 }
 

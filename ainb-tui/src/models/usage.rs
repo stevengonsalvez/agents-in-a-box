@@ -99,6 +99,113 @@ pub struct UsageQuery {
     pub provider_filter: UsageProviderFilter,
     pub include_projects: Vec<String>,
     pub exclude_projects: Vec<String>,
+    /// Cross-filters (exact-match drill-downs) layered on top of the
+    /// substring `include_projects` / `exclude_projects` globs.
+    pub filters: UsageFilters,
+}
+
+/// Exact-match drill-down filters set by the dashboard cross-filter
+/// (Grafana-style click-to-pivot) and the `--project / --model /
+/// --activity / --session` CLI flags.
+///
+/// All filter sets are AND-combined with each other and with the existing
+/// `include_projects` / `exclude_projects` globs. Each filter list is
+/// internally OR-combined: `--project a --project b` matches calls in
+/// either project.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UsageFilters {
+    pub project: Vec<String>,
+    pub model: Vec<String>,
+    pub activity: Vec<String>,
+    pub session: Vec<String>,
+}
+
+impl UsageFilters {
+    pub fn is_empty(&self) -> bool {
+        self.project.is_empty()
+            && self.model.is_empty()
+            && self.activity.is_empty()
+            && self.session.is_empty()
+    }
+
+    /// True if any cross-filter is set. Mirror of `!is_empty()` for sites
+    /// where the positive form reads better.
+    pub fn any(&self) -> bool {
+        !self.is_empty()
+    }
+
+    /// Pop the most-recently-added filter chip. Removal order: session →
+    /// activity → model → project (matches the chip-strip render order so
+    /// `Esc` removes the visually rightmost chip first).
+    pub fn pop_last(&mut self) -> Option<UsageFilterChip> {
+        if let Some(value) = self.session.pop() {
+            return Some(UsageFilterChip::Session(value));
+        }
+        if let Some(value) = self.activity.pop() {
+            return Some(UsageFilterChip::Activity(value));
+        }
+        if let Some(value) = self.model.pop() {
+            return Some(UsageFilterChip::Model(value));
+        }
+        if let Some(value) = self.project.pop() {
+            return Some(UsageFilterChip::Project(value));
+        }
+        None
+    }
+
+    pub fn clear(&mut self) {
+        self.project.clear();
+        self.model.clear();
+        self.activity.clear();
+        self.session.clear();
+    }
+
+    fn matches(&self, call: &ProviderCall, category: ActivityCategory) -> bool {
+        if !self.project.is_empty() && !self.project.iter().any(|p| p == &call.project) {
+            return false;
+        }
+        if !self.model.is_empty() && !self.model.iter().any(|m| m == &call.model) {
+            return false;
+        }
+        if !self.session.is_empty()
+            && !self.session.iter().any(|s| s == &call.session_id)
+        {
+            return false;
+        }
+        if !self.activity.is_empty() {
+            let label = category.label();
+            if !self.activity.iter().any(|a| a == label) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// One filter chip — used by the chip-strip widget and `pop_last`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UsageFilterChip {
+    Project(String),
+    Model(String),
+    Activity(String),
+    Session(String),
+}
+
+impl UsageFilterChip {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Project(_) => "project",
+            Self::Model(_) => "model",
+            Self::Activity(_) => "activity",
+            Self::Session(_) => "session",
+        }
+    }
+
+    pub fn value(&self) -> &str {
+        match self {
+            Self::Project(v) | Self::Model(v) | Self::Activity(v) | Self::Session(v) => v,
+        }
+    }
 }
 
 /// Token counts for a single usage bucket, provider call, or aggregate row.
@@ -408,6 +515,7 @@ pub fn parse_usage() -> UsageData {
         period: UsagePeriod::All,
         include_projects: Vec::new(),
         exclude_projects: Vec::new(),
+        filters: UsageFilters::default(),
     })
 }
 
@@ -476,7 +584,7 @@ pub fn parse_usage_for_with_roots_and_cache(
         calls.extend(parse_codex_sources(roots.codex_dir.as_deref(), cache.as_ref()));
     }
 
-    let filtered = calls
+    let filtered: Vec<ProviderCall> = calls
         .into_iter()
         .filter(|call| {
             range.as_ref().map_or(true, |(start, end)| {
@@ -486,7 +594,12 @@ pub fn parse_usage_for_with_roots_and_cache(
         .filter(|call| project_matches(call, &query.include_projects, &query.exclude_projects))
         .collect();
 
-    aggregate_calls(filtered)
+    let aggregated = aggregate_calls(filtered);
+    if query.filters.is_empty() {
+        aggregated
+    } else {
+        filter_usage_data(&aggregated, &query.filters)
+    }
 }
 
 fn parse_claude_sources(projects_dir: Option<&Path>, cache: &Cache) -> Vec<ProviderCall> {
@@ -1132,6 +1245,34 @@ fn aggregate_calls(mut calls: Vec<ProviderCall>) -> UsageData {
         mcp_servers,
         shell_commands,
     }
+}
+
+/// Filter an already-parsed `UsageData` by exact-match cross-filters.
+///
+/// Returns a new `UsageData` with `calls`, `daily`, `weekly`, `projects`,
+/// `sessions`, `models`, `activities`, `tools`, `mcp_servers`,
+/// `shell_commands`, and `grand_total` re-aggregated from the filtered
+/// call set. If no filters are active the original data is returned
+/// unchanged via clone.
+///
+/// This is the in-memory pivot used by:
+/// - the TUI cross-filter (Grafana-style click-to-pivot on rows), and
+/// - the CLI `--project / --model / --activity / --session` flags after
+///   the period+provider+include/exclude pre-pass.
+///
+/// The activity filter compares against the per-call classified category
+/// label (see `ActivityCategory::label()`), case-sensitive.
+pub fn filter_usage_data(data: &UsageData, filters: &UsageFilters) -> UsageData {
+    if filters.is_empty() {
+        return data.clone();
+    }
+    let filtered_calls: Vec<ProviderCall> = data
+        .calls
+        .iter()
+        .filter(|call| filters.matches(call, classify_activity(call)))
+        .cloned()
+        .collect();
+    aggregate_calls(filtered_calls)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2150,6 +2291,7 @@ mod tests {
                 period: UsagePeriod::All,
                 include_projects: Vec::new(),
                 exclude_projects: Vec::new(),
+                filters: UsageFilters::default(),
             },
             &roots(Some(claude_projects), None),
         );
@@ -2186,6 +2328,7 @@ mod tests {
                 period: UsagePeriod::All,
                 include_projects: Vec::new(),
                 exclude_projects: Vec::new(),
+                filters: UsageFilters::default(),
             },
             &roots(None, Some(codex_dir)),
         );
@@ -2221,6 +2364,7 @@ mod tests {
                 period: UsagePeriod::All,
                 include_projects: Vec::new(),
                 exclude_projects: Vec::new(),
+                filters: UsageFilters::default(),
             },
             &roots(None, Some(codex_dir)),
         );
@@ -2251,6 +2395,7 @@ mod tests {
                 period: UsagePeriod::Custom { from: day, to: day },
                 include_projects: Vec::new(),
                 exclude_projects: Vec::new(),
+                filters: UsageFilters::default(),
             },
             &roots(Some(claude_projects), None),
         );
@@ -2278,6 +2423,7 @@ mod tests {
                 period: UsagePeriod::Custom { from: day, to: day },
                 include_projects: Vec::new(),
                 exclude_projects: Vec::new(),
+                filters: UsageFilters::default(),
             },
             &roots(Some(claude_projects), None),
         );
@@ -2305,6 +2451,7 @@ mod tests {
                 period: UsagePeriod::Custom { from, to },
                 include_projects: Vec::new(),
                 exclude_projects: Vec::new(),
+                filters: UsageFilters::default(),
             },
             &roots(Some(claude_projects), None),
         );
@@ -2339,6 +2486,7 @@ mod tests {
                 period: UsagePeriod::All,
                 include_projects: vec!["alpha".to_string()],
                 exclude_projects: vec!["scratch".to_string()],
+                filters: UsageFilters::default(),
             },
             &roots(Some(claude_projects), None),
         );
