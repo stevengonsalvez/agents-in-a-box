@@ -167,9 +167,7 @@ impl UsageFilters {
         if !self.model.is_empty() && !self.model.iter().any(|m| m == &call.model) {
             return false;
         }
-        if !self.session.is_empty()
-            && !self.session.iter().any(|s| s == &call.session_id)
-        {
+        if !self.session.is_empty() && !self.session.iter().any(|s| s == &call.session_id) {
             return false;
         }
         if !self.activity.is_empty() {
@@ -539,7 +537,10 @@ fn default_cache() -> Arc<Cache> {
             match Cache::open(path.clone()) {
                 Ok(c) => Arc::new(c),
                 Err(err) => {
-                    warn!("usage_cache: failed to open {:?} ({err}); cache disabled", path);
+                    warn!(
+                        "usage_cache: failed to open {:?} ({err}); cache disabled",
+                        path
+                    );
                     Arc::new(Cache::disabled())
                 }
             }
@@ -581,7 +582,10 @@ pub fn parse_usage_for_with_roots_and_cache(
         ));
     }
     if query.provider_filter.includes("codex") {
-        calls.extend(parse_codex_sources(roots.codex_dir.as_deref(), cache.as_ref()));
+        calls.extend(parse_codex_sources(
+            roots.codex_dir.as_deref(),
+            cache.as_ref(),
+        ));
     }
 
     let filtered: Vec<ProviderCall> = calls
@@ -632,13 +636,12 @@ fn parse_claude_sources(projects_dir: Option<&Path>, cache: &Cache) -> Vec<Provi
             let project_path = project_path.clone();
             let parsed = cache.get_or_parse(&jsonl_path, |path, hint| match hint {
                 ParseHint::Full => parse_claude_source_full(path, &project, &project_path),
-                ParseHint::Append { from_offset, existing } => parse_claude_source_append(
-                    path,
-                    &project,
-                    &project_path,
+                ParseHint::Append {
                     from_offset,
                     existing,
-                ),
+                } => {
+                    parse_claude_source_append(path, &project, &project_path, from_offset, existing)
+                }
             });
             calls.extend(parsed);
         }
@@ -680,11 +683,7 @@ fn collect_claude_jsonl_files(project_dir: &Path) -> Vec<PathBuf> {
 /// the file size at open time — note this is best-effort: if the file is
 /// being appended to concurrently we may stop short, which the cache will
 /// recover from on the next call via append-only).
-fn parse_claude_source_full(
-    path: &Path,
-    project: &str,
-    project_path: &str,
-) -> ParseResult {
+fn parse_claude_source_full(path: &Path, project: &str, project_path: &str) -> ParseResult {
     let mut file = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(_) => {
@@ -753,9 +752,13 @@ fn parse_claude_source_append(
     let mut current_user_message = String::new();
     for line in reader.lines() {
         let Ok(line) = line else { break };
-        if let Some(call) =
-            parse_claude_line(&line, path, project, project_path, &mut current_user_message)
-        {
+        if let Some(call) = parse_claude_line(
+            &line,
+            path,
+            project,
+            project_path,
+            &mut current_user_message,
+        ) {
             calls.push(call);
         }
     }
@@ -790,8 +793,7 @@ fn parse_claude_line(
 
             let model = message.model.unwrap_or_else(|| "claude-unknown".to_string());
             let tools = extract_claude_tools(message.content.as_ref());
-            let bash_commands =
-                extract_bash_commands_from_claude_content(message.content.as_ref());
+            let bash_commands = extract_bash_commands_from_claude_content(message.content.as_ref());
             let input_tokens = usage.input_tokens.unwrap_or(0);
             let output_tokens = usage.output_tokens.unwrap_or(0);
             let cache_creation_tokens = usage.cache_creation_input_tokens.unwrap_or(0);
@@ -809,10 +811,7 @@ fn parse_claude_line(
                 provider: "claude".to_string(),
                 model,
                 session_id: parsed.session_id.unwrap_or_else(|| {
-                    path.file_stem()
-                        .and_then(|stem| stem.to_str())
-                        .unwrap_or("unknown")
-                        .to_string()
+                    path.file_stem().and_then(|stem| stem.to_str()).unwrap_or("unknown").to_string()
                 }),
                 project: project.to_string(),
                 project_path: parsed.cwd.unwrap_or_else(|| project_path.to_string()),

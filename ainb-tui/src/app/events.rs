@@ -33,9 +33,9 @@ pub enum AppEvent {
     RestartSession,
     DeleteSession,
     ResumeSession(String), // Resume a Stopped interactive session (carries trigger key: "Enter" or "r")
-    OpenInEditor,    // Open selected session's workspace in preferred editor
-    OpenQuickShell,  // Open shell in selected workspace/session directory
-    CleanupOrphaned, // Clean up orphaned containers
+    OpenInEditor,          // Open selected session's workspace in preferred editor
+    OpenQuickShell,        // Open shell in selected workspace/session directory
+    CleanupOrphaned,       // Clean up orphaned containers
     SwitchToLogs,
     SwitchToTerminal,
     GoToTop,
@@ -146,10 +146,10 @@ pub enum AppEvent {
     SearchWorkspaceInputChar(char),
     SearchWorkspaceBackspace,
     // Confirmation dialog events
-    ConfirmationToggle,  // Switch between Yes/No (binary) or cycle forward (tri-option)
-    ConfirmationPrev,    // Cycle backwards through tri-option dialog
+    ConfirmationToggle, // Switch between Yes/No (binary) or cycle forward (tri-option)
+    ConfirmationPrev,   // Cycle backwards through tri-option dialog
     ConfirmationConfirm, // Confirm action
-    ConfirmationCancel,  // Cancel dialog
+    ConfirmationCancel, // Cancel dialog
     // Auth setup events
     AuthSetupNext,            // Next auth method
     AuthSetupPrevious,        // Previous auth method
@@ -359,13 +359,13 @@ pub enum AppEvent {
     UsageInputSubmit,         // Submit usage input
     UsageInputCancel,         // Cancel usage input
     // Cross-filter (Grafana-style dashboard pivot) on Burndown view
-    UsageFocusNextPanel,      // Tab while on Burndown
-    UsageFocusPrevPanel,      // Shift+Tab while on Burndown
-    UsageFocusRowUp,          // Up/k while a panel is focused
-    UsageFocusRowDown,        // Down/j while a panel is focused
-    UsageCommitFilter,        // Enter on focused row -> add chip
-    UsagePopFilterChip,       // Esc when chips exist
-    UsageClearAllChips,       // C — drop every chip in one shot
+    UsageFocusNextPanel, // Tab while on Burndown
+    UsageFocusPrevPanel, // Shift+Tab while on Burndown
+    UsageFocusRowUp,     // Up/k while a panel is focused
+    UsageFocusRowDown,   // Down/j while a panel is focused
+    UsageCommitFilter,   // Enter on focused row -> add chip
+    UsagePopFilterChip,  // Esc when chips exist
+    UsageClearAllChips,  // C — drop every chip in one shot
     // Skills browser events
     SkillsBack,             // Return to home screen (Esc)
     SkillsNextProvider,     // Next provider (Right arrow)
@@ -2533,16 +2533,14 @@ impl EventHandler {
                     // soft-stop without losing the worktree. Boss/Docker, SSH,
                     // and Shell sessions stick with the binary delete flow.
                     use crate::models::{SessionAgentType, SessionMode};
-                    let is_interactive_agent = matches!(
-                        session.mode,
-                        SessionMode::Interactive
-                    ) && matches!(
-                        session.agent_type,
-                        SessionAgentType::Claude
-                            | SessionAgentType::Codex
-                            | SessionAgentType::Gemini
-                            | SessionAgentType::Copilot
-                    );
+                    let is_interactive_agent = matches!(session.mode, SessionMode::Interactive)
+                        && matches!(
+                            session.agent_type,
+                            SessionAgentType::Claude
+                                | SessionAgentType::Codex
+                                | SessionAgentType::Gemini
+                                | SessionAgentType::Copilot
+                        );
                     let session_id = session.id;
                     if is_interactive_agent {
                         state.show_delete_or_stop_confirmation(session_id);
@@ -2588,8 +2586,13 @@ impl EventHandler {
             }
             AppEvent::ResumeSession(trigger) => {
                 if let Some(session_id) = state.get_selected_session_id() {
-                    tracing::info!("[ACTION] Resuming stopped session: {} (trigger={})", session_id, trigger);
-                    state.pending_async_action = Some(AsyncAction::ResumeSession(session_id, trigger));
+                    tracing::info!(
+                        "[ACTION] Resuming stopped session: {} (trigger={})",
+                        session_id,
+                        trigger
+                    );
+                    state.pending_async_action =
+                        Some(AsyncAction::ResumeSession(session_id, trigger));
                 } else {
                     state.add_warning_notification("No session selected to resume".to_string());
                 }
@@ -2686,9 +2689,7 @@ impl EventHandler {
                 if let Some(dialog) = state.confirmation_dialog.take() {
                     let action = if let Some(options) = dialog.options.as_ref() {
                         // Tri-option mode: pick the highlighted option's action.
-                        options
-                            .get(dialog.selected_index)
-                            .map(|o| o.action.clone())
+                        options.get(dialog.selected_index).map(|o| o.action.clone())
                     } else if dialog.selected_option {
                         Some(dialog.confirm_action.clone())
                     } else {

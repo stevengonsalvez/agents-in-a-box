@@ -225,9 +225,7 @@ fn cache_command(command: UsageCacheCommands, format: OutputFormat) -> Result<()
     match command {
         UsageCacheCommands::Info => {
             let cache = shared_cache();
-            let info = cache
-                .info()
-                .map_err(|e| anyhow!("usage cache info failed: {e}"))?;
+            let info = cache.info().map_err(|e| anyhow!("usage cache info failed: {e}"))?;
             match format {
                 OutputFormat::Json => {
                     println!(
@@ -262,12 +260,13 @@ fn cache_command(command: UsageCacheCommands, format: OutputFormat) -> Result<()
         }
         UsageCacheCommands::Clear => {
             let cache = shared_cache();
-            cache
-                .clear()
-                .map_err(|e| anyhow!("usage cache clear failed: {e}"))?;
+            cache.clear().map_err(|e| anyhow!("usage cache clear failed: {e}"))?;
             match format {
                 OutputFormat::Json => {
-                    println!("{}", serde_json::to_string_pretty(&json!({"cleared": true}))?);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&json!({"cleared": true}))?
+                    );
                 }
                 _ => println!("Usage cache cleared."),
             }
