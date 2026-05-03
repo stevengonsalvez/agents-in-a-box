@@ -53,7 +53,33 @@ impl SessionListComponent {
             FocusedPane::LiveLogs => (SUBDUED_BORDER, false),
         };
 
-        let workspace_count = state.workspaces.len();
+        // Visible workspace count reflects the filter — workspaces that lose
+        // all their sessions to the filter (and have no shell) are dropped
+        // from the rendered list, so the header should match.
+        let workspace_count = state
+            .workspaces
+            .iter()
+            .filter(|w| {
+                w.sessions.iter().any(|s| state.session_passes_filter(s))
+                    || w.shell_session.is_some()
+            })
+            .count();
+
+        let mut title_spans = vec![
+            Span::styled(" 📁 ", Style::default().fg(GOLD)),
+            Span::styled("Workspaces ", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("({})", workspace_count),
+                Style::default().fg(if is_focused { CORNFLOWER_BLUE } else { MUTED_GRAY }).add_modifier(Modifier::BOLD)
+            ),
+        ];
+        if let Some(label) = state.session_filter.title_label() {
+            title_spans.push(Span::raw(" "));
+            title_spans.push(Span::styled(
+                format!("[{}]", label),
+                Style::default().fg(GOLD),
+            ));
+        }
 
         let list = List::new(items)
             .block(
@@ -62,14 +88,7 @@ impl SessionListComponent {
                     .border_type(BorderType::Rounded)
                     .border_style(Style::default().fg(border_color))
                     .style(Style::default().bg(DARK_BG))
-                    .title(Line::from(vec![
-                        Span::styled(" 📁 ", Style::default().fg(GOLD)),
-                        Span::styled("Workspaces ", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
-                        Span::styled(
-                            format!("({})", workspace_count),
-                            Style::default().fg(if is_focused { CORNFLOWER_BLUE } else { MUTED_GRAY }).add_modifier(Modifier::BOLD)
-                        ),
-                    ]))
+                    .title(Line::from(title_spans))
                     .title_bottom(if state.ssh_session_rename_mode || state.other_tmux_rename_mode {
                         // Rename mode help (SSH or Other tmux)
                         Line::from(vec![
@@ -111,6 +130,9 @@ impl SessionListComponent {
                             Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
                             Span::styled(" D", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
                             Span::styled(" del marked ", Style::default().fg(MUTED_GRAY)),
+                            Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
+                            Span::styled(" F", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                            Span::styled(" filter ", Style::default().fg(MUTED_GRAY)),
                         ])
                     }),
             )
@@ -128,9 +150,23 @@ impl SessionListComponent {
 
         for (workspace_idx, workspace) in state.workspaces.iter().enumerate() {
             let is_selected_workspace = state.selected_workspace_index == Some(workspace_idx);
-            let session_count = workspace.sessions.len();
+            // Apply the session filter (Shift+F cycles): only count sessions
+            // that pass the predicate so the workspace `(N)` matches what the
+            // user actually sees rendered below.
+            let session_count = workspace
+                .sessions
+                .iter()
+                .filter(|s| state.session_passes_filter(s))
+                .count();
             let has_shell = workspace.shell_session.is_some();
             let total_count = session_count + if has_shell { 1 } else { 0 };
+
+            // Hide workspaces that have no visible content under the active
+            // filter (no matching sessions and no shell). Skip the entire
+            // entry — including its header row — so the tree stays compact.
+            if total_count == 0 {
+                continue;
+            }
 
             // Determine expand state: expanded if selected OR if expand_all is true
             let is_expanded = is_selected_workspace || state.expand_all_workspaces;
@@ -207,10 +243,19 @@ impl SessionListComponent {
 
             // Show sessions if workspace is expanded
             if is_expanded {
-                let session_len = workspace.sessions.len();
-                for (session_idx, session) in workspace.sessions.iter().enumerate() {
+                // Apply the session filter; preserve original indices so the
+                // selection match (`selected_session_index`) keeps pointing
+                // at the correct entry in `workspace.sessions`.
+                let visible: Vec<(usize, &crate::models::Session)> = workspace
+                    .sessions
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, s)| state.session_passes_filter(s))
+                    .collect();
+                let visible_len = visible.len();
+                for (visible_pos, &(session_idx, session)) in visible.iter().enumerate() {
                     let is_selected_session = is_selected_workspace && state.selected_session_index == Some(session_idx);
-                    let is_last_session = session_idx == session_len - 1;
+                    let is_last_session = visible_pos == visible_len - 1;
 
                     // Tree line characters with subdued color
                     let tree_prefix = if is_last_session { "└─" } else { "├─" };

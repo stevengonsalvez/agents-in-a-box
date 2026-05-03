@@ -613,4 +613,108 @@ mod tests {
         assert_eq!(session.workspace_path, "/tmp/work-stopped");
         assert_eq!(session.agent_type, SessionAgentType::Claude);
     }
+
+    // -- SessionFilter tests ------------------------------------------------
+
+    use crate::app::state::SessionFilter;
+    use crate::models::{Session, SessionStatus as Status};
+
+    fn make_filter_session(mode: SessionMode, status: Status) -> Session {
+        let mut s = Session::new("test".to_string(), "/tmp/x".to_string());
+        s.mode = mode;
+        s.status = status;
+        s
+    }
+
+    #[test]
+    fn test_session_filter_cycle_order() {
+        assert_eq!(SessionFilter::All.next(), SessionFilter::ActiveOnly);
+        assert_eq!(SessionFilter::ActiveOnly.next(), SessionFilter::StoppedOnly);
+        assert_eq!(SessionFilter::StoppedOnly.next(), SessionFilter::All);
+    }
+
+    #[test]
+    fn test_session_filter_default_is_all() {
+        assert_eq!(SessionFilter::default(), SessionFilter::All);
+    }
+
+    #[test]
+    fn test_session_filter_title_label() {
+        assert_eq!(SessionFilter::All.title_label(), None);
+        assert_eq!(SessionFilter::ActiveOnly.title_label(), Some("active"));
+        assert_eq!(SessionFilter::StoppedOnly.title_label(), Some("stopped"));
+    }
+
+    #[test]
+    fn test_session_passes_filter_all_lets_everything_through() {
+        let mut state = AppState::new();
+        state.session_filter = SessionFilter::All;
+        for mode in [SessionMode::Interactive, SessionMode::Boss] {
+            for status in [Status::Running, Status::Stopped, Status::Idle] {
+                assert!(
+                    state.session_passes_filter(&make_filter_session(
+                        mode.clone(),
+                        status.clone()
+                    )),
+                    "All should pass mode={:?} status={:?}",
+                    mode,
+                    status
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_session_passes_filter_active_only_hides_stopped_interactive() {
+        let mut state = AppState::new();
+        state.session_filter = SessionFilter::ActiveOnly;
+
+        // Interactive Stopped → hidden
+        assert!(!state.session_passes_filter(&make_filter_session(
+            SessionMode::Interactive,
+            Status::Stopped
+        )));
+        // Interactive Running → shown
+        assert!(state.session_passes_filter(&make_filter_session(
+            SessionMode::Interactive,
+            Status::Running
+        )));
+        // Boss-mode Stopped → still passes (filter only touches Interactive)
+        assert!(state.session_passes_filter(&make_filter_session(
+            SessionMode::Boss,
+            Status::Stopped
+        )));
+    }
+
+    #[test]
+    fn test_session_passes_filter_stopped_only() {
+        let mut state = AppState::new();
+        state.session_filter = SessionFilter::StoppedOnly;
+
+        assert!(state.session_passes_filter(&make_filter_session(
+            SessionMode::Interactive,
+            Status::Stopped
+        )));
+        assert!(!state.session_passes_filter(&make_filter_session(
+            SessionMode::Interactive,
+            Status::Running
+        )));
+        // Boss-mode is exempt — always passes regardless of filter mode.
+        assert!(state.session_passes_filter(&make_filter_session(
+            SessionMode::Boss,
+            Status::Running
+        )));
+    }
+
+    #[test]
+    fn test_cycle_session_filter_advances_state() {
+        let mut state = AppState::new();
+        assert_eq!(state.session_filter, SessionFilter::All);
+        state.cycle_session_filter();
+        assert_eq!(state.session_filter, SessionFilter::ActiveOnly);
+        state.cycle_session_filter();
+        assert_eq!(state.session_filter, SessionFilter::StoppedOnly);
+        state.cycle_session_filter();
+        assert_eq!(state.session_filter, SessionFilter::All);
+    }
 }
