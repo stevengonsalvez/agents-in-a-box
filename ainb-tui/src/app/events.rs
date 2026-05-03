@@ -346,7 +346,8 @@ pub enum AppEvent {
     UsagePageDown,            // Page down
     UsageToTop,               // Jump to top (g)
     UsageToBottom,            // Jump to bottom (G)
-    UsageRefresh,             // Reload data (r)
+    UsageRefresh,             // Reload data (r) — cache-respecting
+    UsageForceRefresh,        // Force-refresh bypassing the persistent cache (Shift+R)
     UsageCycleProviderFilter, // Cycle All/Claude/Codex (p)
     UsageSetPeriod(u8),       // Period shortcut 1-5
     UsageStartIncludeFilter,  // Start include project input (/)
@@ -1664,6 +1665,7 @@ impl EventHandler {
             KeyCode::Char('g') => Some(AppEvent::UsageToTop),
             KeyCode::Char('G') => Some(AppEvent::UsageToBottom),
             KeyCode::Char('r') => Some(AppEvent::UsageRefresh),
+            KeyCode::Char('R') => Some(AppEvent::UsageForceRefresh),
             KeyCode::Char('p') => Some(AppEvent::UsageCycleProviderFilter),
             KeyCode::Char('1') => Some(AppEvent::UsageSetPeriod(1)),
             KeyCode::Char('2') => Some(AppEvent::UsageSetPeriod(2)),
@@ -4096,6 +4098,15 @@ impl EventHandler {
                 tracing::info!("Refreshing usage data");
                 let msg = if state.start_background_usage_load(true) {
                     "Refreshing usage data…"
+                } else {
+                    "Refresh already in progress"
+                };
+                state.add_success_notification(msg.to_string());
+            }
+            AppEvent::UsageForceRefresh => {
+                tracing::info!("Force-refreshing usage data (bypass cache)");
+                let msg = if state.start_background_usage_load_with_options(true, true) {
+                    "Force-refreshing usage data (cache cleared)…"
                 } else {
                     "Refresh already in progress"
                 };

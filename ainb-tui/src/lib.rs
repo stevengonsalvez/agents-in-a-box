@@ -16,4 +16,5 @@ pub mod git;
 pub mod interactive;
 pub mod models;
 pub mod tmux;
+pub mod usage_cache;
 pub mod widgets;

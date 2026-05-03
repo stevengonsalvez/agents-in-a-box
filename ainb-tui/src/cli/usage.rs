@@ -5,8 +5,9 @@ use crate::cli::OutputFormat;
 use crate::config::{AppConfig, CurrencyConfig, UsagePlan, UsagePlanId, UsagePlanProvider};
 use crate::models::usage::{
     ActivityUsage, NamedUsage, ProjectUsage, SessionUsage, UsageData, UsagePeriod,
-    UsageProviderFilter, UsageQuery, analyze_yield, billing_period, compare_models, optimize_usage,
-    parse_usage_for,
+    UsageProviderFilter, UsageQuery, UsageSourceRoots, analyze_yield, billing_period,
+    compare_models, disabled_cache, optimize_usage, parse_usage_for,
+    parse_usage_for_with_roots_and_cache, shared_cache,
 };
 use anyhow::{Result, anyhow, bail};
 use chrono::{Local, NaiveDate};
@@ -42,6 +43,19 @@ pub enum UsageCommands {
     Compare(UsageReportArgs),
     /// Estimate usage yield from session signals
     Yield(UsageReportArgs),
+    /// Inspect or wipe the persistent usage cache
+    Cache {
+        #[command(subcommand)]
+        command: UsageCacheCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum UsageCacheCommands {
+    /// Show cache DB path, on-disk size, file count, oldest entry timestamp
+    Info,
+    /// Drop all cached file rows (schema_version row preserved)
+    Clear,
 }
 
 #[derive(Args, Clone, Default)]
@@ -64,6 +78,9 @@ pub struct UsageReportArgs {
     /// Exclude projects matching substring
     #[arg(long)]
     pub exclude: Vec<String>,
+    /// Bypass the persistent usage cache and force a full re-parse.
+    #[arg(long)]
+    pub no_cache: bool,
 }
 
 #[derive(Args, Clone, Default)]
@@ -178,6 +195,62 @@ pub async fn execute(command: UsageCommands, format: OutputFormat) -> Result<()>
         UsageCommands::Optimize(args) => print_optimize(&args, format),
         UsageCommands::Compare(args) => print_compare(&args, format),
         UsageCommands::Yield(args) => print_yield(&args, format),
+        UsageCommands::Cache { command } => cache_command(command, format),
+    }
+}
+
+fn cache_command(command: UsageCacheCommands, format: OutputFormat) -> Result<()> {
+    match command {
+        UsageCacheCommands::Info => {
+            let cache = shared_cache();
+            let info = cache
+                .info()
+                .map_err(|e| anyhow!("usage cache info failed: {e}"))?;
+            match format {
+                OutputFormat::Json => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&json!({
+                            "db_path": info.db_path,
+                            "size_bytes": info.size_bytes,
+                            "file_count": info.file_count,
+                            "oldest_updated_at": info.oldest_updated_at,
+                            "enabled": cache.is_enabled(),
+                        }))?
+                    );
+                }
+                _ => {
+                    println!("Usage cache");
+                    println!("  Path:           {}", info.db_path.display());
+                    println!("  Size on disk:   {} bytes", info.size_bytes);
+                    println!("  File count:     {}", info.file_count);
+                    println!(
+                        "  Oldest entry:   {}",
+                        info.oldest_updated_at
+                            .map(|t| t.to_string())
+                            .unwrap_or_else(|| "—".to_string())
+                    );
+                    println!(
+                        "  Enabled:        {}",
+                        if cache.is_enabled() { "yes" } else { "no" }
+                    );
+                }
+            }
+            Ok(())
+        }
+        UsageCacheCommands::Clear => {
+            let cache = shared_cache();
+            cache
+                .clear()
+                .map_err(|e| anyhow!("usage cache clear failed: {e}"))?;
+            match format {
+                OutputFormat::Json => {
+                    println!("{}", serde_json::to_string_pretty(&json!({"cleared": true}))?);
+                }
+                _ => println!("Usage cache cleared."),
+            }
+            Ok(())
+        }
     }
 }
 
@@ -473,7 +546,16 @@ fn model_alias_command(args: UsageModelAliasArgs) -> Result<()> {
 }
 
 fn load_usage(args: &UsageReportArgs) -> Result<UsageData> {
-    Ok(parse_usage_for(query_from_args(args)?))
+    let query = query_from_args(args)?;
+    if args.no_cache {
+        Ok(parse_usage_for_with_roots_and_cache(
+            query,
+            &UsageSourceRoots::default(),
+            disabled_cache(),
+        ))
+    } else {
+        Ok(parse_usage_for(query))
+    }
 }
 
 fn query_from_args(args: &UsageReportArgs) -> Result<UsageQuery> {

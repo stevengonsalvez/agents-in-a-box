@@ -71,6 +71,11 @@ pulldown-cmark = "0.9"  # Markdown parsing
 syntect = "5.0"  # Syntax highlighting for code blocks
 ansi-to-tui = "4"
 
+# Persistent usage analytics cache
+rusqlite = { version = "0.31", features = ["bundled", "blob"] }
+blake3 = "1"
+bincode = "1.3"
+
 [features]
 default = []
 visual-debug = []  # Enable live terminal during tests
