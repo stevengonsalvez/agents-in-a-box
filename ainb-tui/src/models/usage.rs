@@ -2028,7 +2028,7 @@ fn date_range_for_period(period: &UsagePeriod) -> Option<(DateTime<Local>, DateT
         UsagePeriod::SpecificMonth(anchor) => {
             let first =
                 NaiveDate::from_ymd_opt(anchor.year(), anchor.month(), 1).unwrap_or(*anchor);
-            let last = last_day_of_month(anchor.year(), anchor.month());
+            let last = last_day_of_month(anchor.year(), anchor.month()).unwrap_or(*anchor);
             Some((start_of_day(first), end_of_day(last)))
         }
         UsagePeriod::SpecificQuarter(year, q) => {
@@ -2043,17 +2043,25 @@ fn date_range_for_period(period: &UsagePeriod) -> Option<(DateTime<Local>, DateT
     }
 }
 
-/// Last calendar day of a `(year, month)`. Falls back to day 28 only
-/// for genuinely impossible chrono inputs (year out of range).
-pub fn last_day_of_month(year: i32, month: u32) -> NaiveDate {
+/// Last calendar day of a `(year, month)`. Returns `None` if the inputs
+/// are out of chrono's representable range (year < -262_144 or > 262_143,
+/// month not in 1..=12). Previously this silently returned the 28th,
+/// which produced wrong-on-purpose results for callers that didn't
+/// notice — `Option` makes the failure explicit.
+pub fn last_day_of_month(year: i32, month: u32) -> Option<NaiveDate> {
+    // Reject obviously-invalid months up front so month=0 doesn't silently
+    // roll into the previous December (which the next-month-minus-one
+    // trick below would otherwise compute).
+    if !(1..=12).contains(&month) {
+        return None;
+    }
     let (next_year, next_month) = if month == 12 {
         (year + 1, 1)
     } else {
         (year, month + 1)
     };
-    let next_first = NaiveDate::from_ymd_opt(next_year, next_month, 1)
-        .unwrap_or_else(|| NaiveDate::from_ymd_opt(year, month, 28).expect("valid 28th"));
-    next_first - Duration::days(1)
+    let next_first = NaiveDate::from_ymd_opt(next_year, next_month, 1)?;
+    Some(next_first - Duration::days(1))
 }
 
 /// First and last calendar days of `quarter` (1..=4) within `year`.
@@ -2064,7 +2072,10 @@ pub fn quarter_bounds(year: i32, quarter: u8) -> (NaiveDate, NaiveDate) {
     let end_month = start_month + 2;
     let first = NaiveDate::from_ymd_opt(year, start_month, 1)
         .unwrap_or_else(|| NaiveDate::from_ymd_opt(year, 1, 1).expect("valid Jan 1"));
-    let last = last_day_of_month(year, end_month);
+    // Quarter end-month is always 3, 6, 9, or 12 — last_day_of_month can
+    // only fail for an out-of-range `year`. In that case fall back to
+    // `first` so the bounds collapse to a single day rather than panic.
+    let last = last_day_of_month(year, end_month).unwrap_or(first);
     (first, last)
 }
 
@@ -2360,6 +2371,43 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+
+    #[test]
+    fn last_day_of_month_handles_leap_years() {
+        // Leap year: Feb has 29 days.
+        assert_eq!(
+            last_day_of_month(2024, 2),
+            Some(NaiveDate::from_ymd_opt(2024, 2, 29).unwrap())
+        );
+        // Non-leap year: Feb has 28 days.
+        assert_eq!(
+            last_day_of_month(2023, 2),
+            Some(NaiveDate::from_ymd_opt(2023, 2, 28).unwrap())
+        );
+        // Century non-leap (divisible by 100 but not 400).
+        assert_eq!(
+            last_day_of_month(1900, 2),
+            Some(NaiveDate::from_ymd_opt(1900, 2, 28).unwrap())
+        );
+        // Quad-century leap (divisible by 400).
+        assert_eq!(
+            last_day_of_month(2000, 2),
+            Some(NaiveDate::from_ymd_opt(2000, 2, 29).unwrap())
+        );
+        // 31-day month.
+        assert_eq!(
+            last_day_of_month(2024, 1),
+            Some(NaiveDate::from_ymd_opt(2024, 1, 31).unwrap())
+        );
+        // December rollover into next year.
+        assert_eq!(
+            last_day_of_month(2024, 12),
+            Some(NaiveDate::from_ymd_opt(2024, 12, 31).unwrap())
+        );
+        // Out-of-range month returns None instead of silently wrong data.
+        assert_eq!(last_day_of_month(2024, 13), None);
+        assert_eq!(last_day_of_month(2024, 0), None);
+    }
 
     fn write_file(path: &Path, content: &str) {
         if let Some(parent) = path.parent() {

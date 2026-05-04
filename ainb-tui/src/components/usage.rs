@@ -3353,7 +3353,7 @@ fn elapsed_days_for_period(period: &UsagePeriod, data: &UsageData) -> Option<u64
         }
         UsagePeriod::SpecificMonth(anchor) => {
             let first = NaiveDate::from_ymd_opt(anchor.year(), anchor.month(), 1)?;
-            let last = crate::models::usage::last_day_of_month(anchor.year(), anchor.month());
+            let last = crate::models::usage::last_day_of_month(anchor.year(), anchor.month())?;
             Some((last - first).num_days().max(0) as u64 + 1)
         }
         UsagePeriod::SpecificQuarter(year, q) => {
