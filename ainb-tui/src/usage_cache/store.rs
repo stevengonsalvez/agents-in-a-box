@@ -252,7 +252,7 @@ impl Cache {
             }
         };
 
-        let row = StoredRow {
+        let row = CacheRow {
             fingerprint: current,
             last_offset: result.end_offset,
             calls: result.calls,
@@ -263,7 +263,7 @@ impl Cache {
         Ok(row.calls)
     }
 
-    fn write_row(&self, path: &Path, row: &StoredRow) -> Result<(), CacheError> {
+    fn write_row(&self, path: &Path, row: &CacheRow) -> Result<(), CacheError> {
         let CacheInner::Open(conn) = &self.inner else {
             return Ok(());
         };
@@ -355,21 +355,17 @@ pub struct ParseResult {
     pub end_offset: u64,
 }
 
+/// One row of the `files` table, deserialized. Used both for inserts
+/// (write_row) and lookups (load_row) — the schema is symmetric so a
+/// single struct serves both directions.
 #[derive(Debug)]
-struct StoredRow {
+struct CacheRow {
     fingerprint: FileFingerprint,
     last_offset: u64,
     calls: Vec<crate::models::usage::ProviderCall>,
 }
 
-#[derive(Debug)]
-struct LoadedRow {
-    fingerprint: FileFingerprint,
-    last_offset: u64,
-    calls: Vec<crate::models::usage::ProviderCall>,
-}
-
-fn load_row(conn: &Connection, path: &Path) -> Result<Option<LoadedRow>, CacheError> {
+fn load_row(conn: &Connection, path: &Path) -> Result<Option<CacheRow>, CacheError> {
     let path_str = path.to_string_lossy().into_owned();
     let row = conn
         .query_row(
@@ -411,7 +407,7 @@ fn load_row(conn: &Connection, path: &Path) -> Result<Option<LoadedRow>, CacheEr
         &suffix,
     )?;
 
-    Ok(Some(LoadedRow {
+    Ok(Some(CacheRow {
         fingerprint,
         last_offset: u64::try_from(offset).unwrap_or(0),
         calls,
@@ -421,7 +417,7 @@ fn load_row(conn: &Connection, path: &Path) -> Result<Option<LoadedRow>, CacheEr
 fn upsert_row(
     conn: &Connection,
     path: &Path,
-    row: &StoredRow,
+    row: &CacheRow,
     blob: &[u8],
 ) -> Result<(), CacheError> {
     let path_str = path.to_string_lossy().into_owned();
