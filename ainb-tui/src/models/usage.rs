@@ -326,6 +326,14 @@ pub struct ProviderCall {
     pub session_id: String,
     pub project: String,
     pub project_path: String,
+    // TODO(refactor): migrate this to DateTime<Utc>. The Local variant
+    // bakes a timezone offset into the cached blob, so a user moving
+    // across timezones (or DST transition) sees inconsistent
+    // serialised representations between cache hit and full reparse.
+    // Migration bumps BLOB_FORMAT_BINCODE_CURRENT to 3 and forces
+    // every constructor + render site to convert at the boundary.
+    // Deferred — V2 was bumped to 2 recently for branch attribution
+    // and another bump is best paired with the analyze_turns id work.
     pub timestamp: DateTime<Local>,
     pub input_tokens: u64,
     pub cache_creation_tokens: u64,
@@ -696,6 +704,13 @@ pub fn parse_usage_for_with_roots_and_cache(
     aggregate_calls(filtered)
 }
 
+// TODO(perf): parallelise per-file cache.get_or_parse with rayon
+// (par_iter() over collect_claude_jsonl_files results). SQLite writes
+// still serialise on the connection mutex but JSONL parsing +
+// fingerprinting can run concurrent. Cache itself is already
+// Send+Sync via Mutex<Connection>. Deferred — adding rayon as a
+// dependency is the largest unrelated lift in this batch and is
+// best landed in its own change with benchmarks attached.
 fn parse_claude_sources(projects_dir: Option<&Path>, cache: &Cache) -> Vec<ProviderCall> {
     let Some(projects_dir) = projects_dir else {
         return Vec::new();
