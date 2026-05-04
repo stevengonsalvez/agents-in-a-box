@@ -9,7 +9,17 @@
 //! are available to in-tree unit tests automatically and to integration
 //! tests in `tests/` via `--features test-support`.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use chrono::{DateTime, TimeZone, Utc};
+
+/// Monotonic id source for `ProviderCallBuilder::new()`'s default. Starts at
+/// 1 so `0` stays available for explicit "unset" semantics elsewhere. Each
+/// fresh builder gets a unique id, so multi-call test fixtures don't
+/// silently collide on `analyze_turns`'s id-keyed map (which would mask
+/// retry/has_edits assertions). Tests that need a deterministic id still
+/// override via `with_id`.
+static BUILDER_DEFAULT_ID: AtomicU64 = AtomicU64::new(1);
 
 use crate::models::{
     ActivityCategory, ActivityUsage, ModelUsage, NamedUsage, ProjectUsage, ProviderCall,
@@ -33,10 +43,11 @@ impl ProviderCallBuilder {
     pub fn new() -> Self {
         Self {
             call: ProviderCall {
-                // Deterministic placeholder id for fixtures. Tests that
-                // exercise the analyze_turns precompute (which keys on
-                // id) override via `with_id` to differentiate calls.
-                id: 0,
+                // Unique-per-builder id from a process-wide counter so
+                // multi-call fixtures don't collide on analyze_turns'
+                // id-keyed map. Tests that need a stable id override via
+                // `with_id`.
+                id: BUILDER_DEFAULT_ID.fetch_add(1, Ordering::Relaxed),
                 provider: "claude".to_string(),
                 model: "claude-sonnet-4-5".to_string(),
                 session_id: "s1".to_string(),
