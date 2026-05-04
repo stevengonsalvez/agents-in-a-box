@@ -235,6 +235,15 @@ pub enum UsageFilterChip {
 }
 
 impl UsageFilterChip {
+    /// Stable string key for this chip, used by the chip-strip widget,
+    /// CLI flag mapping, and filter telemetry. The match below is the
+    /// single source of truth — keep it in sync with new variants.
+    //
+    // NOTE: an earlier cleanup considered switching to strum_macros'
+    // AsRefStr. Skipped: adding the strum crate purely for five mappings
+    // costs more than the match itself, and a const-slice indexed by
+    // discriminant order is harder to read than the match and not type-
+    // checked when a variant is added. The match is already canonical.
     pub fn label(&self) -> &'static str {
         match self {
             Self::Project(_) => "project",
