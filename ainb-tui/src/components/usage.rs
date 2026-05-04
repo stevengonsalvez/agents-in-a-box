@@ -1594,7 +1594,10 @@ fn render_zoom_top_sessions(
                 format_tokens_short(b.total()),
                 b.call_count.to_string(),
                 dur_str,
-                sess.last_timestamp.format("%Y-%m-%d").to_string(),
+                sess.last_timestamp
+                    .with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d")
+                    .to_string(),
             ])
             .style(Style::default().fg(SOFT_WHITE))
         })
@@ -1849,11 +1852,17 @@ fn build_detail_lines(
                 lines.push(kv("Provider", s.provider.clone()));
                 lines.push(kv(
                     "First seen",
-                    s.first_timestamp.format("%Y-%m-%d %H:%M").to_string(),
+                    s.first_timestamp
+                        .with_timezone(&chrono::Local)
+                        .format("%Y-%m-%d %H:%M")
+                        .to_string(),
                 ));
                 lines.push(kv(
                     "Last seen",
-                    s.last_timestamp.format("%Y-%m-%d %H:%M").to_string(),
+                    s.last_timestamp
+                        .with_timezone(&chrono::Local)
+                        .format("%Y-%m-%d %H:%M")
+                        .to_string(),
                 ));
                 lines.push(kv("Cost", format_cost(s.bucket.cost_usd)));
                 lines.push(kv("Tokens", format_tokens_short(s.bucket.total())));
@@ -1949,8 +1958,8 @@ fn project_seen_window(data: &UsageData, project_name: &str) -> (String, String)
         }
     }
     (
-        min_ts.format("%Y-%m-%d").to_string(),
-        max_ts.format("%Y-%m-%d").to_string(),
+        min_ts.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string(),
+        max_ts.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string(),
     )
 }
 
