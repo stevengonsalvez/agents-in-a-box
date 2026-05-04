@@ -1228,10 +1228,10 @@ fn aggregate_calls(mut calls: Vec<ProviderCall>) -> UsageData {
         }
         session.bucket.merge(&bucket);
 
-        model_map.entry(call.model.clone()).or_default().merge(&bucket);
+        add_bucket(&mut model_map, call.model.clone(), &bucket);
 
         if let Some(branch) = call.recorded_branch() {
-            branch_map.entry(branch.to_string()).or_default().merge(&bucket);
+            add_bucket(&mut branch_map, branch.to_string(), &bucket);
         }
 
         let analysis = turn_analysis.get(&idx).copied().unwrap_or_else(|| TurnAnalysis {
@@ -1254,13 +1254,13 @@ fn aggregate_calls(mut calls: Vec<ProviderCall>) -> UsageData {
             if let Some(server) =
                 tool.strip_prefix("mcp__").and_then(|rest| rest.split("__").next())
             {
-                *mcp_map.entry(server.to_string()).or_default() += 1;
+                bump(&mut mcp_map, server.to_string());
             } else {
-                *tool_map.entry(tool.clone()).or_default() += 1;
+                bump(&mut tool_map, tool.clone());
             }
         }
         for command in &call.bash_commands {
-            *shell_map.entry(command.clone()).or_default() += 1;
+            bump(&mut shell_map, command.clone());
         }
     }
 
@@ -2334,6 +2334,26 @@ where
     rows.sort_by(|a, b| {
         bucket_sort_value(key(b)).total_cmp(&bucket_sort_value(key(a)))
     });
+}
+
+/// Merge `bucket` into the entry at `key` in a `String -> TokenBucket`
+/// map, defaulting to an empty bucket when the key is absent. Centralises
+/// the model_map / branch_map merge pattern used inside `aggregate_calls`.
+fn add_bucket<K>(map: &mut HashMap<K, TokenBucket>, key: K, bucket: &TokenBucket)
+where
+    K: std::hash::Hash + Eq,
+{
+    map.entry(key).or_default().merge(bucket);
+}
+
+/// Increment the count at `key` in a `String -> usize` map, defaulting to
+/// zero when the key is absent. Centralises the tool/mcp/shell counter
+/// pattern used inside `aggregate_calls`.
+fn bump<K>(map: &mut HashMap<K, usize>, key: K)
+where
+    K: std::hash::Hash + Eq,
+{
+    *map.entry(key).or_default() += 1;
 }
 
 fn estimate_cost_usd(
