@@ -415,9 +415,20 @@ fn load_row(conn: &Connection, path: &Path) -> Result<Option<CacheRow>, CacheErr
     let format = match BlobFormat::lookup(fmt) {
         BlobFormatLookup::Current(fmt) => fmt,
         // Stale = recognised prior format (PR-D bumped 1->2). Unknown =
-        // never written by us. Both skip+reparse; callers may log if they
-        // want to distinguish (currently neither path emits telemetry).
-        BlobFormatLookup::Stale(_) | BlobFormatLookup::Unknown(_) => {
+        // never written by us. Both skip+reparse; the debug log lets us
+        // tell the two apart when diagnosing unexpected reparses.
+        BlobFormatLookup::Stale(v) => {
+            tracing::debug!(
+                "usage_cache stale blob_format={v} for {:?}; reparsing",
+                path
+            );
+            return Ok(None);
+        }
+        BlobFormatLookup::Unknown(v) => {
+            tracing::debug!(
+                "usage_cache unknown blob_format={v} for {:?}; reparsing",
+                path
+            );
             return Ok(None);
         }
     };
