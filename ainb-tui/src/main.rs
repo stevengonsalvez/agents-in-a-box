@@ -46,6 +46,9 @@ mod tmux;
 mod usage_cache;
 mod widgets;
 
+#[cfg(any(test, feature = "test-support"))]
+mod test_support;
+
 use app::{App, EventHandler};
 use components::LayoutComponent;
 
