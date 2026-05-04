@@ -6,6 +6,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Changed
+- **BREAKING (ainb-tui CLI)**: `--include` no longer treats `--project` as
+  an alias. Users must migrate `--project foo` filters that relied on
+  substring matching to `--include foo` (substring match) or keep
+  `--project foo` for exact-match. The split makes intent explicit:
+  `--include` is the substring-match flag, `--project` is the exact
+  cross-filter chip equivalent of clicking a project in the burndown.
+
+### Added
+- **ainb-tui**: branch attribution panel data — `BranchUsage` rows on
+  `UsageData` aggregate per-`gitBranch` token totals (rendering wired
+  in a follow-on; data is already available via the cache).
+- **ainb-tui**: `recover_user_message_before` recovers `user_message`
+  attribution on cache-hit append paths so cached and full-reparse
+  rows agree turn-for-turn.
+- **ainb-tui**: `model_project_counts` precomputed index on `UsageData`
+  removes the O(N·M) per-render scan for "top projects per model".
+
+### Fixed
+- **ainb-tui**: cache `clear` now `VACUUM`s so the on-disk db shrinks.
+- **ainb-tui**: cache write rejects non-UTF8 paths instead of silent
+  lossy collisions.
+- **ainb-tui**: append parser rolls back `end_offset` on I/O errors,
+  preventing silent data loss on the next scan.
+- **ainb-tui**: fuzzy-search routes non-ASCII queries through
+  `Utf32String` so unicode queries match unicode haystacks.
+- **ainb-tui**: `last_day_of_month` returns `Option` for invalid input
+  instead of silently producing the 28th.
+- **ainb-tui**: session-duration column distinguishes `0m` from `<1m`.
 
 ## [0.5.5-beta1] - 2026-04-14
 ### Added
