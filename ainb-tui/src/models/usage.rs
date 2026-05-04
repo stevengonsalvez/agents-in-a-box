@@ -831,6 +831,12 @@ fn parse_claude_source_append(
         }
     };
     let total_len = file.metadata().map(|m| m.len()).unwrap_or(from_offset);
+    // Recover the user message that was last in scope at `from_offset`
+    // by reading the prefix [0, from_offset) and walking it for "type":
+    // "user" lines. Without this, every appended assistant turn would
+    // carry an empty user_message and lose attribution. Bounded by
+    // from_offset; only paid on cache-hit append paths.
+    let current_user_message = recover_user_message_before(&mut file, from_offset);
     if file.seek(SeekFrom::Start(from_offset)).is_err() {
         return ParseResult {
             calls: existing.to_vec(),
@@ -839,7 +845,7 @@ fn parse_claude_source_append(
     }
     let reader = BufReader::new(file);
     let mut calls = existing.to_vec();
-    let mut current_user_message = String::new();
+    let mut current_user_message = current_user_message;
     for line in reader.lines() {
         // On any I/O or UTF-8 error from BufReader::lines we cannot
         // safely advance the cached end_offset — the next run would
@@ -866,6 +872,47 @@ fn parse_claude_source_append(
         calls,
         end_offset: total_len,
     }
+}
+
+/// Walk the prefix `[0, from_offset)` of `file` looking for the last
+/// `"type":"user"` line, returning its extracted message text. Used by
+/// the append parser so user_message attribution survives a cache hit
+/// (the user line that primed the message is in the prefix; without
+/// recovery, every appended assistant turn ends up with an empty
+/// `user_message`).
+///
+/// Errors are absorbed — if the prefix is unreadable we return an empty
+/// string and the next assistant turn's `user_message` is empty (same
+/// fallback as before this fix). Leaves the file cursor at an
+/// undefined offset; the caller must re-seek to `from_offset`.
+fn recover_user_message_before(
+    file: &mut std::fs::File,
+    from_offset: u64,
+) -> String {
+    if from_offset == 0 {
+        return String::new();
+    }
+    if file.seek(SeekFrom::Start(0)).is_err() {
+        return String::new();
+    }
+    let limited = (file as &mut std::fs::File).take(from_offset);
+    let reader = BufReader::new(limited);
+    let mut last = String::new();
+    for line in reader.lines() {
+        let Ok(line) = line else {
+            // Partial scan still useful — keep whatever we'd
+            // discovered up to the error.
+            break;
+        };
+        if let Ok(parsed) = serde_json::from_str::<ClaudeLine>(&line) {
+            if parsed.msg_type.as_deref() == Some("user") {
+                if let Some(message) = parsed.message {
+                    last = extract_claude_user_text(message.content.as_ref());
+                }
+            }
+        }
+    }
+    last
 }
 
 /// Parse a single Claude JSONL line. Returns `Some(call)` for assistant

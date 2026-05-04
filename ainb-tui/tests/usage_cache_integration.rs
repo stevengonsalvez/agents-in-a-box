@@ -167,6 +167,75 @@ fn truncate_triggers_full_reparse() {
     );
 }
 
+/// Append a user line + assistant turn with a chosen `user_text`. Used
+/// to assert user_message attribution survives an append-from-cache path.
+fn append_pair_with_user(
+    path: &Path,
+    session_id: &str,
+    timestamp: &str,
+    user_text: &str,
+) {
+    let user = serde_json::json!({
+        "type": "user",
+        "sessionId": session_id,
+        "timestamp": timestamp,
+        "message": { "content": user_text }
+    });
+    let assistant = serde_json::json!({
+        "type": "assistant",
+        "sessionId": session_id,
+        "timestamp": timestamp,
+        "cwd": "/Users/test/myrepo",
+        "message": {
+            "model": "claude-sonnet-4-5",
+            "content": [{"type": "text", "text": "ok"}],
+            "usage": { "input_tokens": 1, "output_tokens": 1 }
+        }
+    });
+    let mut f = fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
+    writeln!(f, "{user}").unwrap();
+    writeln!(f, "{assistant}").unwrap();
+}
+
+#[test]
+fn append_path_recovers_user_message_from_prefix() {
+    let work = TempDir::new().unwrap();
+    let projects = build_claude_root(work.path());
+    let session = projects.join("-Users-test-myrepo").join("sess-um.jsonl");
+    append_pair_with_user(&session, "sess-um", "2026-05-01T12:00:00Z", "first turn");
+
+    let roots = UsageSourceRoots {
+        claude_projects_dir: Some(projects.clone()),
+        codex_dir: None,
+    };
+    let cache_dir = TempDir::new().unwrap();
+    let cache = cache_at(cache_dir.path());
+
+    let _ = parse_usage_for_with_roots_and_cache(query_all(), &roots, cache.clone());
+
+    // Append a second user+assistant pair. The second assistant turn
+    // sees the second user line in its own append window so its
+    // user_message should be "second turn". The first user line is
+    // *before* from_offset; recovery makes sure that turn (already
+    // cached) keeps its original user_message.
+    append_pair_with_user(&session, "sess-um", "2026-05-01T12:30:00Z", "second turn");
+
+    let cached =
+        parse_usage_for_with_roots_and_cache(query_all(), &roots, cache.clone());
+    let fresh =
+        parse_usage_for_with_roots_and_cache(query_all(), &roots, Arc::new(Cache::disabled()));
+
+    assert_eq!(cached.calls.len(), 2);
+    assert_eq!(fresh.calls.len(), 2);
+    // Per-row user_message must agree between cached-append and full
+    // reparse — that's the contract the recovery path restores.
+    let cached_msgs: Vec<&str> =
+        cached.calls.iter().map(|c| c.user_message.as_str()).collect();
+    let fresh_msgs: Vec<&str> =
+        fresh.calls.iter().map(|c| c.user_message.as_str()).collect();
+    assert_eq!(cached_msgs, fresh_msgs);
+}
+
 #[test]
 fn no_cache_path_writes_no_rows() {
     let work = TempDir::new().unwrap();
