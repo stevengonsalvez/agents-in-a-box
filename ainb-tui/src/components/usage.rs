@@ -557,7 +557,6 @@ impl UsageViewState {
         self.focus_row = 0;
     }
 
-    /// Cycle focus backward.
     pub fn focus_prev_panel(&mut self) {
         self.focused_panel = Some(match self.focused_panel {
             Some(panel) => panel.prev(),
@@ -740,7 +739,6 @@ impl UsageViewState {
         }
     }
 
-    /// Toggle the detail drawer in zoom mode. No-op when not zoomed.
     pub fn toggle_zoom_detail(&mut self) {
         if self.zoom.is_some() {
             self.zoom_detail_open = !self.zoom_detail_open;

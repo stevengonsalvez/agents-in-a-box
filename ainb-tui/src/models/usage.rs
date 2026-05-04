@@ -389,6 +389,8 @@ pub struct ModelUsage {
 /// Per-branch summary. Built only from calls whose `branch` is `Some`;
 /// branchless calls (codex, non-git Claude turns) are dropped from this
 /// view so the panel never grows a misleading "(no branch)" bucket.
+// TODO(PR-E): wire BranchUsage into render_branch_panel — currently
+// aggregated but not rendered (see UsageData.branches).
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize)]
 pub struct BranchUsage {
