@@ -395,8 +395,8 @@ pub struct SessionUsage {
     pub provider: String,
     pub project: String,
     pub session_id: String,
-    pub first_timestamp: DateTime<Local>,
-    pub last_timestamp: DateTime<Local>,
+    pub first_timestamp: DateTime<Utc>,
+    pub last_timestamp: DateTime<Utc>,
     pub bucket: TokenBucket,
 }
 
@@ -1306,22 +1306,19 @@ fn aggregate_calls(mut calls: Vec<ProviderCall>) -> UsageData {
         project.1.insert(session_key.clone());
         project.2.merge(&bucket);
 
-        // SessionUsageAccumulator still carries DateTime<Local> until
-        // the SessionUsage migration commit; convert at insertion.
-        let call_ts_local = call.timestamp.with_timezone(&Local);
         let session = session_map.entry(session_key).or_insert_with(|| SessionUsageAccumulator {
             provider: call.provider.clone(),
             project: call.project.clone(),
             session_id: call.session_id.clone(),
-            first_timestamp: call_ts_local,
-            last_timestamp: call_ts_local,
+            first_timestamp: call.timestamp,
+            last_timestamp: call.timestamp,
             bucket: TokenBucket::default(),
         });
-        if call_ts_local < session.first_timestamp {
-            session.first_timestamp = call_ts_local;
+        if call.timestamp < session.first_timestamp {
+            session.first_timestamp = call.timestamp;
         }
-        if call_ts_local > session.last_timestamp {
-            session.last_timestamp = call_ts_local;
+        if call.timestamp > session.last_timestamp {
+            session.last_timestamp = call.timestamp;
         }
         session.bucket.merge(&bucket);
 
@@ -2082,8 +2079,8 @@ struct SessionUsageAccumulator {
     provider: String,
     project: String,
     session_id: String,
-    first_timestamp: DateTime<Local>,
-    last_timestamp: DateTime<Local>,
+    first_timestamp: DateTime<Utc>,
+    last_timestamp: DateTime<Utc>,
     bucket: TokenBucket,
 }
 

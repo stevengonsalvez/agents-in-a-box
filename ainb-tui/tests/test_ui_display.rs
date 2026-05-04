@@ -28,7 +28,7 @@ fn sample_usage_data() -> UsageData {
         ActivityCategory, ActivityUsage, ModelUsage, ProjectUsage, ProviderCall, SessionUsage,
         TokenBucket,
     };
-    use chrono::{Local, TimeZone, Utc};
+    use chrono::{TimeZone, Utc};
     let bucket = TokenBucket {
         input_tokens: 100,
         output_tokens: 50,
@@ -75,8 +75,8 @@ fn sample_usage_data() -> UsageData {
             provider: "claude".to_string(),
             project: "agents-in-a-box".to_string(),
             session_id: "s1".to_string(),
-            first_timestamp: Local.with_ymd_and_hms(2026, 4, 29, 10, 0, 0).unwrap(),
-            last_timestamp: Local.with_ymd_and_hms(2026, 4, 29, 10, 10, 0).unwrap(),
+            first_timestamp: Utc.with_ymd_and_hms(2026, 4, 29, 10, 0, 0).unwrap(),
+            last_timestamp: Utc.with_ymd_and_hms(2026, 4, 29, 10, 10, 0).unwrap(),
             bucket: bucket.clone(),
         }],
         models: vec![ModelUsage {

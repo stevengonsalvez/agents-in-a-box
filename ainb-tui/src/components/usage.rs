@@ -3726,7 +3726,7 @@ mod cross_filter_tests {
     use crate::models::usage::{
         ActivityCategory, ActivityUsage, ModelUsage, ProjectUsage, SessionUsage, TokenBucket,
     };
-    use chrono::Local;
+    use chrono::Utc;
 
     fn bucket(call_count: usize) -> TokenBucket {
         TokenBucket {
@@ -3746,7 +3746,7 @@ mod cross_filter_tests {
     /// activities and two sessions — enough surface for the
     /// commit_focused_row dispatch table.
     fn fixture() -> UsageData {
-        let now = Local::now();
+        let now = Utc::now();
         UsageData {
             daily: vec![],
             weekly: vec![],
@@ -3868,7 +3868,7 @@ mod cross_filter_tests {
         // session row's project on commit_focused_row. The first
         // commit must attach the alpha project chip; a subsequent
         // pop+commit on a beta-owned row must attach beta.
-        let now = Local::now();
+        let now = Utc::now();
         let session_alpha = SessionUsage {
             provider: "claude".into(),
             project: "alpha".into(),

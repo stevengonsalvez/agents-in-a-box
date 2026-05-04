@@ -9,7 +9,7 @@
 //! are available to in-tree unit tests automatically and to integration
 //! tests in `tests/` via `--features test-support`.
 
-use chrono::{DateTime, Local, TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 
 use crate::models::{
     ActivityCategory, ActivityUsage, ModelUsage, NamedUsage, ProjectUsage, ProviderCall,
@@ -150,10 +150,6 @@ pub fn sample_usage_data() -> UsageData {
         ..TokenBucket::default()
     };
     let now = default_timestamp();
-    // SessionUsage carries DateTime<Local> until the SessionUsage Utc
-    // migration commit; bridge here so the fixture compiles in the
-    // intermediate state.
-    let now_local = now.with_timezone(&Local);
     UsageData {
         calls: vec![
             ProviderCallBuilder::new()
@@ -185,8 +181,8 @@ pub fn sample_usage_data() -> UsageData {
             provider: "claude".to_string(),
             project: "agents-in-a-box".to_string(),
             session_id: "s1".to_string(),
-            first_timestamp: now_local,
-            last_timestamp: now_local,
+            first_timestamp: now,
+            last_timestamp: now,
             bucket: bucket.clone(),
         }],
         models: vec![ModelUsage {
