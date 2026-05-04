@@ -4,7 +4,7 @@ description: |
   Full conversation scan for self-improvement. Detects behavioral corrections and
   knowledge signals, classifies them, proposes agent updates and knowledge notes
   with entity sidecars for GraphRAG indexing. Correct once, never again.
-version: "3.0.0"
+version: "3.1.0"
 user-invocable: true
 triggers:
   - reflect
@@ -95,20 +95,72 @@ See `references/signal_patterns.md` for full detection rules.
 If a signal has clear behavioral implications, you MUST propose an edit to an
 existing agent target — do not skip straight to knowledge-note output.
 
-**Behavioral signals** map to agent files:
+**Behavioral signals** map to agent files OR existing skills (preferred when domain matches):
 
 | Category | Target Files |
 |----------|--------------|
+| **Existing skill match** | **`.claude/skills/<name>/skill.md` or `~/.claude/skills/<name>/SKILL.md` (EDIT in-place — see Step 2.5)** |
 | Code Style | `code-reviewer`, `backend-developer`, `frontend-developer` |
 | Architecture | `solution-architect`, `api-architect`, `architecture-reviewer` |
 | Process | Agent config file (`CLAUDE.md`), orchestrator agents |
 | Domain | Domain-specific agents, agent config file |
 | Tools | Agent config file, relevant specialists |
 | Security | `security-agent`, `code-reviewer` |
-| New Skill | Create new skill file |
+| New Skill | Create new skill file (only when no existing skill matches and quality gates pass — see Step 3) |
 
 See `references/agent_mappings.md` for detailed mapping rules.
 See `references/classification_rules.md` for behavioral vs knowledge routing.
+
+### Step 2.5: Match Against Existing Skills (BEFORE falling through to memory)
+
+**Why this step exists**: Operational gotchas (e.g. "publish AD_ID declaration must
+be Yes when Firebase is a dep") frequently belong in an existing skill (`publish`,
+`shot-testing`, `stripe-webhook-debug`) rather than `.agents/MEMORY.md`. Without
+this step, signals default to memory files and skills go stale.
+
+**Build skill index** (cached for 24h, refreshed on `/reflect-status`):
+
+```bash
+# Walk skill directories and extract searchable metadata
+for skill_md in ~/.claude/skills/*/SKILL.md ~/.claude/skills/*/skill.md \
+                .claude/skills/*/skill.md .claude/skills/*/SKILL.md; do
+  [ -f "$skill_md" ] || continue
+  # Extract: name (from frontmatter or dirname), description (frontmatter),
+  # triggers (frontmatter.triggers), first H1 heading, first paragraph of body
+done
+```
+
+Output one record per skill:
+```yaml
+name: publish
+path: .claude/skills/publish/skill.md
+keywords:
+  - publish, testflight, play store, ios, android
+  - app store connect, fastlane, xcode, capacitor
+  - cap sync, version bump, ad_id, manifest
+description: "Publish SHOT mobile apps to TestFlight and Play Store..."
+```
+
+**Score signals against each skill**:
+
+For each detected signal, compute keyword overlap with each skill's keyword set
+(token Jaccard or embedding cosine if QMD available).
+
+**Routing decision**:
+
+| Match score | Action |
+|-------------|--------|
+| **≥ 0.6** (strong overlap) | **Propose EDIT to that skill** (additive section). Do NOT route to agent or memory file. |
+| 0.4–0.6 (candidate) | Present skill edit AND agent edit as alternatives — let user pick. |
+| < 0.4 (no match) | Fall through to existing routing (agent file → memory file). |
+
+**Important reuse rule**: A short bullet rule (≤3 lines) STILL routes to a matching
+skill. The "≥10 min debugging / Problem-Solution writeup" criterion in Step 3
+applies only to NEW skill *creation*, not to edits of existing skills. Skills
+naturally accumulate operational bullets in their gotchas / known issues sections.
+
+**What this prevents**: 5 publish-domain learnings landing in `.agents/MEMORY.md`
+when `.claude/skills/publish/skill.md` is the natural canonical home for them.
 
 **Knowledge signals** become learning notes:
 
@@ -135,11 +187,13 @@ See `references/classification_rules.md` for behavioral vs knowledge routing.
 - `references/schema.yaml` -- JSON-schema describing valid knowledge notes
 - `assets/learning_template.md` -- canonical template for new learnings
 
-### Step 3: Check for Skill-Worthy Signals
+### Step 3: Check for NEW Skill Creation
 
-Some learnings should become new skills rather than agent updates or notes.
+This step decides whether to **CREATE a brand-new skill**. Note: edits to existing
+skills are handled in Step 2.5 above; this step only fires when no existing skill
+matched and the signal is substantial enough to warrant a new top-level skill.
 
-**Skill-Worthy Criteria:**
+**Skill-Worthy Criteria (for NEW skill creation):**
 - Non-obvious debugging (>10 min investigation)
 - Misleading error (root cause different from message)
 - Workaround discovered through experimentation
@@ -166,14 +220,17 @@ Anti-Pattern/Context sections).
 The output must include:
 
 1. **Signals table** -- all detected signals with confidence and category
-2. **Proposed agent updates** -- diffs for each behavioral change
-3. **Proposed knowledge notes** -- for each knowledge signal, show:
+2. **Proposed skill edits** (NEW in v3.1) -- when Step 2.5 found a matching skill
+   (score ≥ 0.6), show the additive section diff for that skill file
+3. **Proposed agent updates** -- diffs for each behavioral change that fell
+   through to agents
+4. **Proposed knowledge notes** -- for each knowledge signal, show:
    - YAML frontmatter preview
    - Entity sidecar preview (entities + relationships)
    - Target path: `docs/solutions/{category}/{filename}.md`
-4. **Proposed new skills** -- with quality gate checklist
-5. **Conflict check** -- warn if new rules contradict existing
-6. **Review prompt** -- allow selective approval
+5. **Proposed new skills** -- with quality gate checklist
+6. **Conflict check** -- warn if new rules contradict existing
+7. **Review prompt** -- allow selective approval
 
 ### Step 5: MANDATORY Entity Sidecar Generation
 
@@ -252,13 +309,15 @@ relationships:
 1. Present each change individually
 2. Allow editing before applying
 
-**On selective (e.g., `1,3` or `k1,k2` or `s1`):**
+**On selective (e.g., `1,3` or `k1,k2` or `s1` or `e1,e2`):**
 1. Apply only specified changes
 2. `1,3` = agent changes 1 and 3
 3. `k1,k2` = knowledge notes 1 and 2
-4. `s1` = skill 1
-5. `all-knowledge` = all knowledge notes, skip others
-6. `all-skills` = all skills, skip agent updates
+4. `s1` = skill 1 (new skill creation)
+5. `e1,e2` = existing skill edits 1 and 2 (Step 2.5 matches)
+6. `all-knowledge` = all knowledge notes, skip others
+7. `all-skills` = all new skill creations, skip agent updates
+8. `all-skill-edits` = all existing skill edits, skip new skill creations
 
 ### Step 7: Episode Note (Auto)
 
@@ -395,6 +454,43 @@ relationships:
 1. Agent update proposal (behavioral) for `frontend-developer.md`
 2. Knowledge note + entity sidecar (knowledge) for `docs/solutions/build-errors/`
 3. Episode note linking both learnings
+
+### Example 4: Existing Skill Match (NEW in v3.1)
+
+**Context**: While shipping a Play Store release, user discovered that
+"Advertising ID" declaration must be set to "Yes + Analytics" when Firebase
+is a dep, and that `npx cap sync` updates `build.gradle` versionCode (which
+must be committed alongside `npm version` bumps).
+
+**Step 2.5 skill index** finds:
+```yaml
+name: publish
+path: .claude/skills/publish/skill.md
+keywords: [publish, play store, testflight, cap sync, version bump,
+           ad_id, manifest, fastlane, app store, capacitor]
+```
+
+**Score**: signal keywords {ad_id, declaration, cap sync, versionCode, capacitor}
+overlap heavily with the `publish` skill keyword set → **score 0.78** ≥ 0.6.
+
+**Proposed skill edit** (NOT a memory file edit, NOT a new skill):
+
+```diff
+# .claude/skills/publish/skill.md
+## Android Build Gotchas
++ * `npx cap sync` updates `android/app/build.gradle` versionCode/versionName.
++   Commit alongside `npm version` bumps — otherwise build.gradle drifts.
++ * Capacitor plugin install ≠ registration: cap sync writes 3 files
++   (capacitor.build.gradle, settings.gradle, plugins.json) — all required.
+
+## Play Store Submission Quirks
++ * Advertising ID declaration MUST be "Yes + Analytics use case" when
++   Firebase Analytics / RevenueCat / Crashlytics are deps. Mismatch →
++   upload rejected.
+```
+
+This routing prevents 5 publish-domain learnings from accumulating in
+`.agents/MEMORY.md` when the canonical skill home already exists.
 
 ## Troubleshooting
 
