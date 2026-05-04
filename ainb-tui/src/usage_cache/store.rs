@@ -28,10 +28,13 @@ use super::fingerprint::{FileFingerprint, FingerprintAction, classify, verify_ap
 #[repr(i64)]
 pub enum BlobFormat {
     /// `bincode::serialize` of `Vec<ProviderCall>` with default options at
-    /// the V2 layout: V2 added `ProviderCall.branch: Option<String>` (PR-D).
-    /// V1 was the pre-branch layout — rows tagged 1 are stale on upgrade
-    /// and intentionally skipped (re-parsed on next scan).
-    BincodeV2 = 2,
+    /// the V3 layout: V3 migrated `ProviderCall.timestamp` from
+    /// `DateTime<Local>` to `DateTime<Utc>` and added a stable
+    /// `id: u64` field (hash of `path:offset`).
+    /// V1 (pre-branch) and V2 (`branch: Option<String>` at Local
+    /// timestamp) are stale on upgrade and intentionally skipped
+    /// (re-parsed on next scan).
+    BincodeV3 = 3,
 }
 
 /// Result of decoding a `files.blob_format` column. Behaviour for `Stale`
@@ -55,10 +58,12 @@ impl BlobFormat {
     /// distinction is useful for diagnostics.
     pub(crate) const fn lookup(v: i64) -> BlobFormatLookup {
         match v {
-            2 => BlobFormatLookup::Current(Self::BincodeV2),
-            // 1 was the pre-branch layout (PR-D bumped to 2). Recognised
-            // but intentionally not deserialized — fields don't align.
-            1 => BlobFormatLookup::Stale(v),
+            3 => BlobFormatLookup::Current(Self::BincodeV3),
+            // 1 was the pre-branch layout (PR-D bumped to 2). 2 was the
+            // Local-timestamp layout (PR-F bumped to 3). Both are
+            // recognised but intentionally not deserialized — fields
+            // don't align with the current struct shape.
+            1 | 2 => BlobFormatLookup::Stale(v),
             _ => BlobFormatLookup::Unknown(v),
         }
     }
@@ -414,9 +419,10 @@ fn load_row(conn: &Connection, path: &Path) -> Result<Option<CacheRow>, CacheErr
 
     let format = match BlobFormat::lookup(fmt) {
         BlobFormatLookup::Current(fmt) => fmt,
-        // Stale = recognised prior format (PR-D bumped 1->2). Unknown =
-        // never written by us. Both skip+reparse; the debug log lets us
-        // tell the two apart when diagnosing unexpected reparses.
+        // Stale = recognised prior format (PR-D bumped 1->2; PR-F bumped
+        // 2->3). Unknown = never written by us. Both skip+reparse; the
+        // debug log lets us tell the two apart when diagnosing
+        // unexpected reparses.
         BlobFormatLookup::Stale(v) => {
             tracing::debug!(
                 "usage_cache stale blob_format={v} for {:?}; reparsing",
@@ -433,7 +439,7 @@ fn load_row(conn: &Connection, path: &Path) -> Result<Option<CacheRow>, CacheErr
         }
     };
     let calls: Vec<crate::models::usage::ProviderCall> = match format {
-        BlobFormat::BincodeV2 => bincode::deserialize(&blob)?,
+        BlobFormat::BincodeV3 => bincode::deserialize(&blob)?,
     };
     let fingerprint = FileFingerprint::from_columns(
         u64::try_from(size_i).unwrap_or(0),

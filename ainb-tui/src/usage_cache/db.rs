@@ -24,7 +24,11 @@ pub const SCHEMA_VERSION: i64 = 1;
 /// History:
 ///   1 — original 14-field `ProviderCall`.
 ///   2 — added `branch: Option<String>` (PR-D, branch attribution).
-pub const BLOB_FORMAT_BINCODE_CURRENT: i64 = 2;
+///   3 — `timestamp` migrated from `DateTime<Local>` to `DateTime<Utc>` so
+///       caches survive timezone moves / DST transitions, and a stable
+///       `id: u64` field added (hash of `path:offset`) so `analyze_turns`
+///       results can be precomputed once on the unfiltered call set.
+pub const BLOB_FORMAT_BINCODE_CURRENT: i64 = 3;
 
 /// Open (or create) the usage-cache sqlite DB at `path`, applying schema and
 /// performance pragmas. Caller owns the resulting connection — wrap in a
