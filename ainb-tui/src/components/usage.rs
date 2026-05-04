@@ -705,11 +705,13 @@ impl UsageViewState {
         self.zoom_detail_open = false;
     }
 
-    /// Begin fuzzy-search input inside the zoomed panel.
+    /// Begin fuzzy-search input inside the zoomed panel. Preserves the
+    /// prior typed query so re-pressing `/` resumes editing where the
+    /// last search left off (vim / fzf convention). Esc (`zoom_cancel_search`)
+    /// is the path that drops the query entirely.
     pub fn zoom_begin_search(&mut self) {
         if self.zoom.is_some() {
             self.zoom_search_active = true;
-            self.zoom_search_query.clear();
         }
     }
 
