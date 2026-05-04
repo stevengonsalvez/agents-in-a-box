@@ -1318,13 +1318,41 @@ fn parse_codex_source(path: &Path) -> Vec<ProviderCall> {
 // Deferred — the largest single change in this cleanup pass and best
 // landed alongside the analyze_turns precompute (whose stable-id
 // requirement triggers a coordinated bincode bump). See PR-E thread.
-fn aggregate_calls(mut calls: Vec<ProviderCall>) -> UsageData {
+fn aggregate_calls(calls: Vec<ProviderCall>) -> UsageData {
+    aggregate_calls_with_analysis(calls, None)
+}
+
+/// Variant of `aggregate_calls` that accepts an optional precomputed
+/// `analyze_turns` result keyed by `ProviderCall.id`. When `Some`, the
+/// per-call analysis is looked up by id rather than re-walking the
+/// session timeline — this is what `filter_usage_data` uses so chip
+/// pivots don't pay a fresh O(N) timeline scan on each re-aggregate.
+///
+/// When the precompute is missing or doesn't contain an id (test
+/// fixtures default id to 0), the function falls back to computing
+/// `analyze_turns` over `calls` exactly as the unparameterised path.
+fn aggregate_calls_with_analysis(
+    mut calls: Vec<ProviderCall>,
+    precomputed_analysis: Option<&HashMap<u64, TurnAnalysis>>,
+) -> UsageData {
     if calls.is_empty() {
         return UsageData::default();
     }
 
     calls.sort_by_key(|call| call.timestamp);
-    let turn_analysis = analyze_turns(&calls);
+    // Local fallback only if the caller didn't precompute. Using the
+    // precomputed map preserves correctness across filtering: a call's
+    // retry count is measured against its *own* session's timeline in
+    // the unfiltered set, not against whatever subset survived the
+    // filter.
+    let local_analysis: HashMap<u64, TurnAnalysis>;
+    let turn_analysis: &HashMap<u64, TurnAnalysis> = match precomputed_analysis {
+        Some(m) => m,
+        None => {
+            local_analysis = analyze_turns(&calls);
+            &local_analysis
+        }
+    };
 
     let mut daily_map: HashMap<NaiveDate, (HashSet<String>, HashSet<String>, TokenBucket)> =
         HashMap::new();
@@ -1337,7 +1365,7 @@ fn aggregate_calls(mut calls: Vec<ProviderCall>) -> UsageData {
     let mut mcp_map: HashMap<String, usize> = HashMap::new();
     let mut shell_map: HashMap<String, usize> = HashMap::new();
 
-    for (idx, call) in calls.iter().enumerate() {
+    for call in &calls {
         let bucket = call.bucket();
         // Daily bucketing is a user-facing calendar concept: render and
         // the period bounds both treat "a day" as a local-tz day, so the
@@ -1384,7 +1412,7 @@ fn aggregate_calls(mut calls: Vec<ProviderCall>) -> UsageData {
             add_bucket(&mut branch_map, branch.to_string(), &bucket);
         }
 
-        let analysis = turn_analysis.get(&idx).copied().unwrap_or_else(|| TurnAnalysis {
+        let analysis = turn_analysis.get(&call.id).copied().unwrap_or_else(|| TurnAnalysis {
             category: classify_activity(call),
             retries: 0,
             has_edits: has_edit_tool(&call.tools),
@@ -1537,13 +1565,20 @@ pub fn filter_usage_data(data: &UsageData, filters: &UsageFilters) -> UsageData 
     if filters.is_empty() {
         return data.clone();
     }
+    // Precompute analyze_turns once on the *unfiltered* call set so
+    // each call's retry/has_edits classification reflects its actual
+    // session timeline, not the post-filter subset (a retry that
+    // happened before a filtered-out edit still counts). The
+    // aggregate path looks up by ProviderCall.id, which is stable
+    // across the filter-and-sort pipeline.
+    let turn_analysis = analyze_turns(&data.calls);
     let filtered_calls: Vec<ProviderCall> = data
         .calls
         .iter()
         .filter(|call| filters.matches(call, classify_activity(call)))
         .cloned()
         .collect();
-    aggregate_calls(filtered_calls)
+    aggregate_calls_with_analysis(filtered_calls, Some(&turn_analysis))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1562,13 +1597,18 @@ struct ActivityAccumulator {
     one_shot_turns: usize,
 }
 
-// TODO(perf): precompute analyze_turns once on the unfiltered call set
-// and thread it into aggregate_calls so filter_usage_data chip pivots
-// don't re-run the per-session timeline walk. Requires a stable
-// per-call key; ProviderCall has no id field today and adding one bumps
-// the bincode blob format. Deferred — the win is bounded by session
-// length and the TUI hot path is sub-frame already.
-fn analyze_turns(calls: &[ProviderCall]) -> HashMap<usize, TurnAnalysis> {
+/// Walk the per-session timeline and produce a per-call
+/// `TurnAnalysis` keyed by `ProviderCall.id`. Idempotent on the same
+/// inputs — produced once on the unfiltered call set in
+/// `filter_usage_data` and reused across chip-pivot re-aggregates so
+/// each chip switch costs an O(1) lookup per call instead of an O(N)
+/// timeline rewalk over the filtered subset.
+///
+/// Keying on `id` (rather than the previous positional `idx`) means the
+/// map survives sorting and filtering: the precompute can be done on
+/// the unfiltered set and consumed by `aggregate_calls_with_analysis`
+/// after `filter_usage_data` has dropped non-matching calls.
+fn analyze_turns(calls: &[ProviderCall]) -> HashMap<u64, TurnAnalysis> {
     let mut sessions: HashMap<String, Vec<usize>> = HashMap::new();
     for (idx, call) in calls.iter().enumerate() {
         let key = format!("{}:{}:{}", call.provider, call.project, call.session_id);
@@ -1596,7 +1636,7 @@ fn analyze_turns(calls: &[ProviderCall]) -> HashMap<usize, TurnAnalysis> {
             }
 
             analysis.insert(
-                idx,
+                call.id,
                 TurnAnalysis {
                     category: classify_activity(call),
                     retries,
@@ -2726,10 +2766,22 @@ mod tests {
         }
     }
 
+    /// Per-test-process counter for ProviderCall.id. Tests that key
+    /// off id (analyze_turns, the precompute lookup) need each call to
+    /// have a distinct id; using an atomic counter keeps the helper
+    /// stateless from the caller's perspective.
+    static TEST_CALL_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+    fn next_test_call_id() -> u64 {
+        TEST_CALL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Test-only convenience that wraps the shared `ProviderCallBuilder`
     /// with the parameter shape this module's parser tests expect.
     /// Picks gpt-5 for codex and claude-sonnet-4-5 otherwise; sets
     /// output_tokens to a fixed 10 (the tests rely on that constant).
+    /// Each call gets a fresh `id` from `next_test_call_id` so
+    /// analyze_turns can key the result map without collisions.
     fn provider_call(
         provider: &str,
         session_id: &str,
@@ -2741,6 +2793,7 @@ mod tests {
     ) -> ProviderCall {
         let model = if provider == "codex" { "gpt-5" } else { "claude-sonnet-4-5" };
         crate::test_support::ProviderCallBuilder::new()
+            .with_id(next_test_call_id())
             .with_provider(provider)
             .with_model(model)
             .with_session(session_id)
@@ -3241,9 +3294,12 @@ mod tests {
         ];
 
         let analysis = analyze_turns(&calls);
-        assert_eq!(analysis.get(&0).unwrap().retries, 0);
-        assert!(analysis.get(&0).unwrap().has_edits);
-        assert_eq!(analysis.get(&2).unwrap().retries, 1);
+        // Lookups now key on ProviderCall.id (was positional idx); the
+        // helper assigns a fresh id per call from an atomic counter so
+        // we read the actual id off each call rather than guessing.
+        assert_eq!(analysis.get(&calls[0].id).unwrap().retries, 0);
+        assert!(analysis.get(&calls[0].id).unwrap().has_edits);
+        assert_eq!(analysis.get(&calls[2].id).unwrap().retries, 1);
 
         let data = aggregate_calls(calls);
         let edit_turns: usize = data.activities.iter().map(|activity| activity.edit_turns).sum();
