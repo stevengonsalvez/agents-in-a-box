@@ -348,6 +348,7 @@ const fn expected_layout_len() -> usize {
     // History:
     //   184 (V1) — original 14-field layout with Local timestamp.
     //   185 (V2) — +Option<String> branch field (None tag).
-    //   180 (V3) — timestamp Utc instead of Local (-5 bytes).
-    180
+    //   180     — timestamp Utc instead of Local (-5 bytes).
+    //   188 (V3) — +id: u64 from (path, offset) (+8 bytes).
+    188
 }
