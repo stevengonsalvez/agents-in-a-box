@@ -321,6 +321,20 @@ impl TokenBucket {
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderCall {
+    /// Stable per-call identifier: `blake3(format!("{path}:{offset}"))`
+    /// truncated to a `u64` (first 8 little-endian bytes of the digest).
+    /// `path` is the source JSONL file, `offset` is the byte position of
+    /// the assistant line that produced this call. The combination is
+    /// unique per call across a parse run and stable across cache hits
+    /// (the parser feeds the same `(path, offset)` tuple every time the
+    /// same line is rewalked), which makes `analyze_turns` results safe
+    /// to memoise on the unfiltered call set and look up by id during
+    /// chip-pivot re-aggregation in `filter_usage_data`.
+    ///
+    /// `blake3` is reused here rather than introducing a new hashing
+    /// dependency just for an id; the cryptographic strength is overkill
+    /// but the API is already in scope (see `usage_cache::fingerprint`).
+    pub id: u64,
     pub provider: String,
     pub model: String,
     pub session_id: String,
@@ -808,10 +822,23 @@ fn parse_claude_source_full(path: &Path, project: &str, project_path: &str) -> P
 
     let mut calls = Vec::new();
     let mut current_user_message = String::new();
-    for line in content.lines() {
-        if let Some(call) =
-            parse_claude_line(line, path, project, project_path, &mut current_user_message)
-        {
+    // Walk lines manually rather than using `content.lines()` so each
+    // call carries the byte offset of its source line in the file, which
+    // feeds the stable `ProviderCall.id`. `split_inclusive` keeps the
+    // newline byte counted in the offset advance.
+    let mut offset: u64 = 0;
+    for chunk in content.split_inclusive('\n') {
+        let line_offset = offset;
+        offset += chunk.len() as u64;
+        let line = chunk.strip_suffix('\n').unwrap_or(chunk);
+        if let Some(call) = parse_claude_line(
+            line,
+            path,
+            project,
+            project_path,
+            &mut current_user_message,
+            line_offset,
+        ) {
             calls.push(call);
         }
     }
@@ -857,27 +884,44 @@ fn parse_claude_source_append(
             end_offset: from_offset,
         };
     }
-    let reader = BufReader::new(file);
+    let mut reader = BufReader::new(file);
     let mut calls = existing.to_vec();
     let mut current_user_message = current_user_message;
-    for line in reader.lines() {
-        // On any I/O or UTF-8 error from BufReader::lines we cannot
-        // safely advance the cached end_offset — the next run would
-        // skip past the unread tail and silently lose data. Roll the
-        // cursor back to from_offset so the next scan retries the
-        // append. Mirror the Full path's all-or-nothing semantics.
-        let Ok(line) = line else {
-            return ParseResult {
-                calls: existing.to_vec(),
-                end_offset: from_offset,
-            };
+    // Track the running byte offset so each call's stable id matches
+    // the full-parse path. `read_line` advances exactly the bytes it
+    // consumed (including the trailing newline), so `running_offset`
+    // is the offset of the *next* line at any iteration tip — the
+    // current line's offset is captured before the read.
+    let mut running_offset = from_offset;
+    let mut buf = String::new();
+    loop {
+        buf.clear();
+        let line_offset = running_offset;
+        let read = match reader.read_line(&mut buf) {
+            Ok(0) => break, // EOF
+            Ok(n) => n,
+            Err(_) => {
+                // On any I/O or UTF-8 error we cannot safely advance
+                // the cached end_offset — the next run would skip past
+                // the unread tail and silently lose data. Roll the
+                // cursor back to from_offset so the next scan retries
+                // the append. Mirror the Full path's all-or-nothing
+                // semantics.
+                return ParseResult {
+                    calls: existing.to_vec(),
+                    end_offset: from_offset,
+                };
+            }
         };
+        running_offset += read as u64;
+        let line = buf.strip_suffix('\n').unwrap_or(&buf);
         if let Some(call) = parse_claude_line(
-            &line,
+            line,
             path,
             project,
             project_path,
             &mut current_user_message,
+            line_offset,
         ) {
             calls.push(call);
         }
@@ -932,12 +976,17 @@ fn recover_user_message_before(
 /// Parse a single Claude JSONL line. Returns `Some(call)` for assistant
 /// lines that carry usage data; mutates `current_user_message` when a
 /// user line is encountered. None for unrecognized / unparseable lines.
+///
+/// `line_offset` is the byte position of `line` in `path` and feeds the
+/// stable `ProviderCall.id` derivation. The full and append parsers
+/// track the running offset and pass it in.
 fn parse_claude_line(
     line: &str,
     path: &Path,
     project: &str,
     project_path: &str,
     current_user_message: &mut String,
+    line_offset: u64,
 ) -> Option<ProviderCall> {
     let parsed: ClaudeLine = serde_json::from_str(line).ok()?;
     match parsed.msg_type.as_deref() {
@@ -969,6 +1018,7 @@ fn parse_claude_line(
             );
 
             Some(ProviderCall {
+                id: provider_call_id(path, line_offset),
                 provider: "claude".to_string(),
                 model,
                 session_id: parsed.session_id.unwrap_or_else(|| {
@@ -1087,7 +1137,14 @@ fn parse_codex_source(path: &Path) -> Vec<ProviderCall> {
     let mut pending_tools: Vec<String> = Vec::new();
     let mut pending_user_message = String::new();
 
-    for line in content.lines() {
+    // Mirror the Claude parser's offset-tracking so each codex call
+    // carries a stable `(path, offset)` id. `split_inclusive` ensures
+    // the trailing newline is counted in the per-line advance.
+    let mut offset: u64 = 0;
+    for chunk in content.split_inclusive('\n') {
+        let line_offset = offset;
+        offset += chunk.len() as u64;
+        let line = chunk.strip_suffix('\n').unwrap_or(chunk);
         let entry: CodexEntry = match serde_json::from_str(line) {
             Ok(entry) => entry,
             Err(_) => continue,
@@ -1230,6 +1287,7 @@ fn parse_codex_source(path: &Path) -> Vec<ProviderCall> {
         );
 
         calls.push(ProviderCall {
+            id: provider_call_id(path, line_offset),
             provider: "codex".to_string(),
             model,
             session_id: session_id.clone(),
@@ -2309,6 +2367,18 @@ fn end_of_day(date: NaiveDate) -> DateTime<Utc> {
 
 fn parse_timestamp(timestamp: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(timestamp).map(|dt| dt.with_timezone(&Utc)).ok()
+}
+
+/// Compute the stable per-call id from `(path, offset)`. See the
+/// doc-comment on `ProviderCall.id` for the rationale (reusing blake3 to
+/// avoid pulling in a separate hashing crate).
+fn provider_call_id(path: &Path, offset: u64) -> u64 {
+    let key = format!("{}:{}", path.to_string_lossy(), offset);
+    let digest = blake3::hash(key.as_bytes());
+    let bytes = digest.as_bytes();
+    u64::from_le_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ])
 }
 
 fn extract_claude_user_text(content: Option<&Value>) -> String {

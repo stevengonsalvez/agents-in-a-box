@@ -33,6 +33,10 @@ impl ProviderCallBuilder {
     pub fn new() -> Self {
         Self {
             call: ProviderCall {
+                // Deterministic placeholder id for fixtures. Tests that
+                // exercise the analyze_turns precompute (which keys on
+                // id) override via `with_id` to differentiate calls.
+                id: 0,
                 provider: "claude".to_string(),
                 model: "claude-sonnet-4-5".to_string(),
                 session_id: "s1".to_string(),
@@ -53,6 +57,10 @@ impl ProviderCallBuilder {
         }
     }
 
+    pub fn with_id(mut self, v: u64) -> Self {
+        self.call.id = v;
+        self
+    }
     pub fn with_provider(mut self, v: impl Into<String>) -> Self {
         self.call.provider = v.into();
         self

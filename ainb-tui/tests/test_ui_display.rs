@@ -40,6 +40,7 @@ fn sample_usage_data() -> UsageData {
     };
     UsageData {
         calls: vec![ProviderCall {
+            id: 0,
             provider: "claude".to_string(),
             model: "claude-sonnet-4-5".to_string(),
             session_id: "s1".to_string(),
