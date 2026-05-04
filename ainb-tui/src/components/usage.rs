@@ -320,6 +320,14 @@ impl Default for UsageViewState {
     }
 }
 
+/// Direction parameter for `step_period`. Internal — wrappers
+/// `step_period_back` / `step_period_forward` are the public API.
+#[derive(Debug, Clone, Copy)]
+enum StepDirection {
+    Back,
+    Forward,
+}
+
 impl UsageViewState {
     pub fn next_provider(&mut self) {
         self.provider = self.provider.next();
@@ -371,38 +379,32 @@ impl UsageViewState {
         else {
             return false;
         };
-        match self.period.clone() {
-            UsagePeriod::SpecificMonth(anchor) => {
-                let new_anchor = previous_month_first(anchor);
-                if new_anchor < first_of_month(oldest) {
-                    return false;
-                }
-                self.period = UsagePeriod::SpecificMonth(new_anchor);
-                self.scroll_offset = 0;
-                true
-            }
-            UsagePeriod::SpecificQuarter(year, q) => {
-                let (new_year, new_q) = previous_quarter(year, q);
-                let (qy, qq) = current_quarter(oldest);
-                if (new_year, new_q) < (qy, qq) {
-                    return false;
-                }
-                self.period = UsagePeriod::SpecificQuarter(new_year, new_q);
-                self.scroll_offset = 0;
-                true
-            }
-            _ => false,
-        }
+        self.step_period(StepDirection::Back, oldest)
     }
 
     /// Step forward one unit. Clamps at the current real-world month
     /// or quarter — never lets the user pick a future window.
     pub fn step_period_forward(&mut self) -> bool {
         let today = Local::now().date_naive();
+        self.step_period(StepDirection::Forward, today)
+    }
+
+    /// Shared body for back/forward stepping. `clamp_anchor` is the
+    /// extreme of the allowed range — the oldest data day for `Back`,
+    /// today for `Forward`.
+    fn step_period(&mut self, direction: StepDirection, clamp_anchor: NaiveDate) -> bool {
         match self.period.clone() {
             UsagePeriod::SpecificMonth(anchor) => {
-                let new_anchor = next_month_first(anchor);
-                if new_anchor > first_of_month(today) {
+                let new_anchor = match direction {
+                    StepDirection::Back => previous_month_first(anchor),
+                    StepDirection::Forward => next_month_first(anchor),
+                };
+                let clamp = first_of_month(clamp_anchor);
+                let out_of_range = match direction {
+                    StepDirection::Back => new_anchor < clamp,
+                    StepDirection::Forward => new_anchor > clamp,
+                };
+                if out_of_range {
                     return false;
                 }
                 self.period = UsagePeriod::SpecificMonth(new_anchor);
@@ -410,9 +412,16 @@ impl UsageViewState {
                 true
             }
             UsagePeriod::SpecificQuarter(year, q) => {
-                let (new_year, new_q) = next_quarter(year, q);
-                let (cy, cq) = current_quarter(today);
-                if (new_year, new_q) > (cy, cq) {
+                let (new_year, new_q) = match direction {
+                    StepDirection::Back => previous_quarter(year, q),
+                    StepDirection::Forward => next_quarter(year, q),
+                };
+                let (cy, cq) = current_quarter(clamp_anchor);
+                let out_of_range = match direction {
+                    StepDirection::Back => (new_year, new_q) < (cy, cq),
+                    StepDirection::Forward => (new_year, new_q) > (cy, cq),
+                };
+                if out_of_range {
                     return false;
                 }
                 self.period = UsagePeriod::SpecificQuarter(new_year, new_q);
