@@ -16,10 +16,15 @@ pub const SCHEMA_VERSION: i64 = 1;
 /// `files.blob_format` value for the current bincode-encoded
 /// `Vec<ProviderCall>` blob shape (default options).
 ///
+/// Renamed from `BLOB_FORMAT_BINCODE_V1` because the discriminant value drifts
+/// (currently 2, was 1) every time `ProviderCall` layout changes. The constant
+/// names the *current* on-disk format, not a fixed schema generation — the
+/// numeric value is the version, the constant name is its role.
+///
 /// History:
 ///   1 — original 14-field `ProviderCall`.
 ///   2 — added `branch: Option<String>` (PR-D, branch attribution).
-pub const BLOB_FORMAT_BINCODE_V1: i64 = 2;
+pub const BLOB_FORMAT_BINCODE_CURRENT: i64 = 2;
 
 /// Open (or create) the usage-cache sqlite DB at `path`, applying schema and
 /// performance pragmas. Caller owns the resulting connection — wrap in a

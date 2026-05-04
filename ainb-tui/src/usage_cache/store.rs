@@ -22,7 +22,7 @@ use super::db;
 use super::fingerprint::{FileFingerprint, FingerprintAction, classify, verify_append_safe};
 
 /// Versioned blob encoding for `files.calls_blob`. Discriminant must match
-/// `db::BLOB_FORMAT_BINCODE_V1` — bump both together when `ProviderCall`
+/// `db::BLOB_FORMAT_BINCODE_CURRENT` — bump both together when `ProviderCall`
 /// layout changes, and update the deserializer match below.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i64)]
@@ -423,7 +423,7 @@ fn upsert_row(
             row.fingerprint.suffix_blake3.to_vec(),
             i64::try_from(row.calls.len()).unwrap_or(i64::MAX),
             blob,
-            db::BLOB_FORMAT_BINCODE_V1,
+            db::BLOB_FORMAT_BINCODE_CURRENT,
             now,
         ],
     )?;

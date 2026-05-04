@@ -310,7 +310,7 @@ fn fingerprint_full_reparse_when_size_equal_but_suffix_differs() {
 /// blob. If any field is added, removed, or reordered in `ProviderCall`
 /// (or any nested type), the encoded length will change and this test will
 /// fail. When it does, you MUST bump
-/// `usage_cache::db::BLOB_FORMAT_BINCODE_V1` AND update the expected length
+/// `usage_cache::db::BLOB_FORMAT_BINCODE_CURRENT` AND update the expected length
 /// here — that's the protocol that prevents silent cache corruption from
 /// mis-decoding old blobs into a new struct shape.
 #[test]
@@ -330,7 +330,7 @@ fn provider_call_bincode_layout_is_stable() {
     assert_eq!(
         encoded.len(),
         EXPECTED_LEN,
-        "ProviderCall bincode layout changed — bump BLOB_FORMAT_BINCODE_V1 \
+        "ProviderCall bincode layout changed — bump BLOB_FORMAT_BINCODE_CURRENT \
          and update EXPECTED_LEN. See ProviderCall doc comment."
     );
 }
