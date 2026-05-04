@@ -112,6 +112,18 @@ pub(crate) enum CacheInner {
     Disabled,
 }
 
+/// Acquire the connection mutex, recovering from poisoning by reusing the
+/// inner guard. The cache is a derived store and individual writes are
+/// independent, so a poisoned mutex from one panicked write is safe to
+/// continue using — the worst case is the corrupt row is overwritten on
+/// the next scan. Centralised so we log the recovery once and consistently.
+fn lock_conn(conn: &Mutex<Connection>) -> std::sync::MutexGuard<'_, Connection> {
+    conn.lock().unwrap_or_else(|e| {
+        tracing::warn!("usage_cache mutex poisoned; recovering");
+        e.into_inner()
+    })
+}
+
 impl Cache {
     /// Open (or create) the cache DB at `db_path`. Returns an error on schema
     /// or I/O failure — callers in the parse path should log and fall back to
@@ -178,10 +190,7 @@ impl Cache {
         };
 
         let prior = {
-            let lock = conn.lock().unwrap_or_else(|e| {
-            tracing::warn!("usage_cache mutex poisoned; recovering");
-            e.into_inner()
-        });
+            let lock = lock_conn(conn);
             load_row(&lock, path)?
         };
 
@@ -189,10 +198,7 @@ impl Cache {
             Ok(f) => f,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 if prior.is_some() {
-                    let lock = conn.lock().unwrap_or_else(|e| {
-            tracing::warn!("usage_cache mutex poisoned; recovering");
-            e.into_inner()
-        });
+                    let lock = lock_conn(conn);
                     let _ = lock
                         .execute("DELETE FROM files WHERE path = ?1", params![path.to_string_lossy().into_owned()]);
                 }
@@ -262,10 +268,7 @@ impl Cache {
             return Ok(());
         };
         let blob = bincode::serialize(&row.calls)?;
-        let lock = conn.lock().unwrap_or_else(|e| {
-            tracing::warn!("usage_cache mutex poisoned; recovering");
-            e.into_inner()
-        });
+        let lock = lock_conn(conn);
         upsert_row(&lock, path, row, &blob)?;
         Ok(())
     }
@@ -275,10 +278,7 @@ impl Cache {
         let CacheInner::Open(conn) = &self.inner else {
             return Ok(());
         };
-        let lock = conn.lock().unwrap_or_else(|e| {
-            tracing::warn!("usage_cache mutex poisoned; recovering");
-            e.into_inner()
-        });
+        let lock = lock_conn(conn);
         lock.execute("DELETE FROM files", [])?;
         Ok(())
     }
@@ -289,10 +289,7 @@ impl Cache {
         let CacheInner::Open(conn) = &self.inner else {
             return Ok(());
         };
-        let lock = conn.lock().unwrap_or_else(|e| {
-            tracing::warn!("usage_cache mutex poisoned; recovering");
-            e.into_inner()
-        });
+        let lock = lock_conn(conn);
         let path_str = path.to_string_lossy().into_owned();
         lock.execute("DELETE FROM files WHERE path = ?1", params![path_str])?;
         Ok(())
@@ -308,10 +305,7 @@ impl Cache {
                 oldest_updated_at: None,
             });
         };
-        let lock = conn.lock().unwrap_or_else(|e| {
-            tracing::warn!("usage_cache mutex poisoned; recovering");
-            e.into_inner()
-        });
+        let lock = lock_conn(conn);
         let file_count: i64 =
             lock.query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))?;
         let oldest_updated_at: Option<i64> = lock
