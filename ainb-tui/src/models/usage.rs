@@ -1328,9 +1328,11 @@ fn aggregate_calls(calls: Vec<ProviderCall>) -> UsageData {
 /// session timeline — this is what `filter_usage_data` uses so chip
 /// pivots don't pay a fresh O(N) timeline scan on each re-aggregate.
 ///
-/// When the precompute is missing or doesn't contain an id (test
-/// fixtures default id to 0), the function falls back to computing
-/// `analyze_turns` over `calls` exactly as the unparameterised path.
+/// Fallback semantics: only `None` triggers a local `analyze_turns`
+/// recompute. `Some(map)` is trusted as authoritative — calls whose id
+/// is missing from the map silently get a default `TurnAnalysis` (zero
+/// retries, zero edits). Callers passing `Some` must ensure every
+/// `call.id` in the unfiltered superset appears in the precompute.
 fn aggregate_calls_with_analysis(
     mut calls: Vec<ProviderCall>,
     precomputed_analysis: Option<&HashMap<u64, TurnAnalysis>>,
