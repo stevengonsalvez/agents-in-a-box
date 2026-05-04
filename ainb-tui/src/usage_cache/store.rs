@@ -124,6 +124,17 @@ fn lock_conn(conn: &Mutex<Connection>) -> std::sync::MutexGuard<'_, Connection> 
     })
 }
 
+/// Convert `path` to a UTF-8 string for use as the cache primary key.
+/// Returns `CacheError::Schema` for non-UTF8 paths instead of using
+/// `to_string_lossy`, because lossy conversion can collide two distinct
+/// paths into one cache key (different `?` byte sequences both render
+/// as `?` in the lossy string).
+fn path_key(path: &Path) -> Result<String, CacheError> {
+    path.to_str().map(str::to_string).ok_or_else(|| {
+        CacheError::Schema(format!("non-UTF8 path: {path:?}"))
+    })
+}
+
 impl Cache {
     /// Open (or create) the cache DB at `db_path`. Returns an error on schema
     /// or I/O failure — callers in the parse path should log and fall back to
@@ -432,7 +443,7 @@ fn upsert_row(
     row: &CacheRow,
     blob: &[u8],
 ) -> Result<(), CacheError> {
-    let path_str = path.to_string_lossy().into_owned();
+    let path_str = path_key(path)?;
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
