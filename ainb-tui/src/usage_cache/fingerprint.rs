@@ -10,9 +10,13 @@ use std::path::Path;
 
 use super::store::CacheError;
 
-/// How many trailing bytes feed into the suffix hash. 4 KiB is enough to
-/// catch nearly all in-place rewrites without paying for a full re-hash.
-pub const SUFFIX_HASH_BYTES: u64 = 4096;
+/// How many trailing bytes feed into the suffix hash. 64 KiB chosen
+/// over 4 KiB because Claude assistant-line bodies routinely exceed
+/// 4 KiB (long tool results, large diffs); an in-place tail edit could
+/// leave the last 4 KiB byte-identical and the cache would serve a
+/// stale entry. blake3 runs at ~1 GB/s on modern hardware so the
+/// extra 60 KiB is sub-millisecond per file.
+pub const SUFFIX_HASH_BYTES: u64 = 65_536;
 
 /// Per-file change-detection record stored in the cache.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -54,6 +54,30 @@ pub use tool_result_store::ToolResultStore;
 pub use unified_message::{UnifiedMessage, MessageType, ContentBlock};
 pub use reminder_filter::ReminderFilter;
 
+/// Truncate a string to at most `max_chars` displayed characters,
+/// appending the ellipsis glyph `…` when truncation occurs. Returns
+/// the input borrowed when no truncation is needed.
+///
+/// Char-safe: counts and slices on Unicode scalars, so multi-byte
+/// strings (branch names, project paths) cannot land mid-codepoint.
+/// `max_chars == 0` returns an empty string. `max_chars == 1` returns
+/// just `…`.
+///
+/// Use this in place of the per-file `truncate_string` / `truncate`
+/// copies that previously lived in components/cli modules.
+pub fn truncate_with_ellipsis(s: &str, max_chars: usize) -> std::borrow::Cow<'_, str> {
+    if max_chars == 0 {
+        return std::borrow::Cow::Borrowed("");
+    }
+    if s.chars().count() <= max_chars {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let take = max_chars.saturating_sub(1);
+    let mut out: String = s.chars().take(take).collect();
+    out.push('…');
+    std::borrow::Cow::Owned(out)
+}
+
 /// Output from widget rendering
 #[derive(Debug, Clone)]
 pub enum WidgetOutput {

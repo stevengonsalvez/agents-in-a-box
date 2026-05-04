@@ -28,25 +28,14 @@ fn write_file(dir: &TempDir, name: &str, contents: &[u8]) -> PathBuf {
 }
 
 fn synth_call(seed: &str) -> ProviderCall {
-    use chrono::TimeZone;
-    ProviderCall {
-        provider: "claude".into(),
-        model: "test-model".into(),
-        session_id: format!("session-{seed}"),
-        project: "p".into(),
-        project_path: "/tmp/p".into(),
-        timestamp: chrono::Local.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap(),
-        input_tokens: 1,
-        cache_creation_tokens: 0,
-        cache_read_tokens: 0,
-        output_tokens: 1,
-        reasoning_tokens: 0,
-        cost_usd: None,
-        tools: Vec::new(),
-        bash_commands: Vec::new(),
-        user_message: String::new(),
-        branch: None,
-    }
+    crate::test_support::ProviderCallBuilder::new()
+        .with_model("test-model")
+        .with_session(format!("session-{seed}"))
+        .with_project("p")
+        .with_project_path("/tmp/p")
+        .with_input_tokens(1)
+        .with_output_tokens(1)
+        .build()
 }
 
 #[test]
@@ -310,7 +299,7 @@ fn fingerprint_full_reparse_when_size_equal_but_suffix_differs() {
 /// blob. If any field is added, removed, or reordered in `ProviderCall`
 /// (or any nested type), the encoded length will change and this test will
 /// fail. When it does, you MUST bump
-/// `usage_cache::db::BLOB_FORMAT_BINCODE_V1` AND update the expected length
+/// `usage_cache::db::BLOB_FORMAT_BINCODE_CURRENT` AND update the expected length
 /// here — that's the protocol that prevents silent cache corruption from
 /// mis-decoding old blobs into a new struct shape.
 #[test]
@@ -326,11 +315,11 @@ fn provider_call_bincode_layout_is_stable() {
 
     // Tripwire: if the byte length drifts, the struct layout changed.
     // See the doc comment on `ProviderCall` in `models/usage.rs`.
-    const EXPECTED_LEN: usize = const_expected_len();
+    const EXPECTED_LEN: usize = expected_layout_len();
     assert_eq!(
         encoded.len(),
         EXPECTED_LEN,
-        "ProviderCall bincode layout changed — bump BLOB_FORMAT_BINCODE_V1 \
+        "ProviderCall bincode layout changed — bump BLOB_FORMAT_BINCODE_CURRENT \
          and update EXPECTED_LEN. See ProviderCall doc comment."
     );
 }
@@ -339,7 +328,7 @@ fn provider_call_bincode_layout_is_stable() {
 /// fixed encoding by default, so for a fixture with deterministic fields
 /// the size is deterministic. Computed at compile time conceptually, but
 /// inlined here so a layout drift surfaces as an `assert_eq!` mismatch.
-const fn const_expected_len() -> usize {
+const fn expected_layout_len() -> usize {
     // String layout (bincode default options): u64 len + bytes.
     // Vec<T>:                                  u64 len + items.
     // Option<T> (None):                        1 byte tag.

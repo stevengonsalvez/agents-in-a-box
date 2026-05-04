@@ -161,18 +161,10 @@ fn output_text(sessions: &[SessionInfo]) {
     }
 }
 
-/// Truncate a string to fit in the given width (character-aware for UTF-8)
+/// Truncate a string to fit in the given width. Delegates to the canonical
+/// `truncate_with_ellipsis` (uses `…`, single Unicode char).
 fn truncate(s: &str, max_len: usize) -> String {
-    if max_len <= 3 {
-        return ".".repeat(max_len);
-    }
-    let char_count = s.chars().count();
-    if char_count <= max_len {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max_len.saturating_sub(3)).collect();
-        format!("{truncated}...")
-    }
+    crate::widgets::truncate_with_ellipsis(s, max_len).into_owned()
 }
 
 #[cfg(test)]
@@ -241,7 +233,7 @@ mod tests {
 
     #[test]
     fn test_truncate_long_string() {
-        assert_eq!(truncate("hello world", 8), "hello...");
+        assert_eq!(truncate("hello world", 8), "hello w…");
     }
 
     #[test]

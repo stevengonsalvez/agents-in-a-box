@@ -22,25 +22,53 @@ use super::db;
 use super::fingerprint::{FileFingerprint, FingerprintAction, classify, verify_append_safe};
 
 /// Versioned blob encoding for `files.calls_blob`. Discriminant must match
-/// `db::BLOB_FORMAT_BINCODE_V1` — bump both together when `ProviderCall`
+/// `db::BLOB_FORMAT_BINCODE_CURRENT` — bump both together when `ProviderCall`
 /// layout changes, and update the deserializer match below.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i64)]
 pub enum BlobFormat {
-    /// Current `bincode::serialize` of `Vec<ProviderCall>` with default
-    /// options. Version 2 replaced version 1 when `ProviderCall.branch`
-    /// (Option<String>) was added in PR-D.
-    Bincode = 2,
+    /// `bincode::serialize` of `Vec<ProviderCall>` with default options at
+    /// the V2 layout: V2 added `ProviderCall.branch: Option<String>` (PR-D).
+    /// V1 was the pre-branch layout — rows tagged 1 are stale on upgrade
+    /// and intentionally skipped (re-parsed on next scan).
+    BincodeV2 = 2,
+}
+
+/// Result of decoding a `files.blob_format` column. Behaviour for `Stale`
+/// and `Unknown` is identical (skip the row, re-parse), but the variants
+/// stay distinct so callers can emit different telemetry: stale rows are
+/// expected after a schema bump, unknown rows indicate corruption or a
+/// downgrade.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BlobFormatLookup {
+    /// Row matches the current on-disk format; safe to deserialize.
+    Current(BlobFormat),
+    /// Row is a recognised prior format; skip and re-parse.
+    Stale(i64),
+    /// Row carries a value we've never written; skip and re-parse.
+    Unknown(i64),
 }
 
 impl BlobFormat {
-    pub(crate) const fn from_i64(v: i64) -> Option<Self> {
+    /// Classify a `files.blob_format` value. Distinguishes "old known
+    /// format" from "never seen" — both result in skip+reparse but the
+    /// distinction is useful for diagnostics.
+    pub(crate) const fn lookup(v: i64) -> BlobFormatLookup {
         match v {
-            // 1 was the pre-branch layout. Rows tagged 1 are stale on
-            // upgrade and intentionally skipped — the next scan re-parses
-            // and rewrites them at version 2.
-            2 => Some(Self::Bincode),
-            _ => None,
+            2 => BlobFormatLookup::Current(Self::BincodeV2),
+            // 1 was the pre-branch layout (PR-D bumped to 2). Recognised
+            // but intentionally not deserialized — fields don't align.
+            1 => BlobFormatLookup::Stale(v),
+            _ => BlobFormatLookup::Unknown(v),
+        }
+    }
+
+    /// Convenience: returns `Some(Current)` only, matching the prior
+    /// `from_i64` shape for callers that don't care about the distinction.
+    pub(crate) const fn from_i64(v: i64) -> Option<Self> {
+        match Self::lookup(v) {
+            BlobFormatLookup::Current(fmt) => Some(fmt),
+            BlobFormatLookup::Stale(_) | BlobFormatLookup::Unknown(_) => None,
         }
     }
 }
@@ -82,6 +110,29 @@ pub(crate) enum CacheInner {
     /// Cache disabled — every `get_or_parse` performs a full parse and the
     /// result is *not* persisted. Used by `--no-cache` on the CLI.
     Disabled,
+}
+
+/// Acquire the connection mutex, recovering from poisoning by reusing the
+/// inner guard. The cache is a derived store and individual writes are
+/// independent, so a poisoned mutex from one panicked write is safe to
+/// continue using — the worst case is the corrupt row is overwritten on
+/// the next scan. Centralised so we log the recovery once and consistently.
+fn lock_conn(conn: &Mutex<Connection>) -> std::sync::MutexGuard<'_, Connection> {
+    conn.lock().unwrap_or_else(|e| {
+        tracing::warn!("usage_cache mutex poisoned; recovering");
+        e.into_inner()
+    })
+}
+
+/// Convert `path` to a UTF-8 string for use as the cache primary key.
+/// Returns `CacheError::Schema` for non-UTF8 paths instead of using
+/// `to_string_lossy`, because lossy conversion can collide two distinct
+/// paths into one cache key (different `?` byte sequences both render
+/// as `?` in the lossy string).
+fn path_key(path: &Path) -> Result<String, CacheError> {
+    path.to_str().map(str::to_string).ok_or_else(|| {
+        CacheError::Schema(format!("non-UTF8 path: {path:?}"))
+    })
 }
 
 impl Cache {
@@ -150,10 +201,7 @@ impl Cache {
         };
 
         let prior = {
-            let lock = conn.lock().unwrap_or_else(|e| {
-            tracing::warn!("usage_cache mutex poisoned; recovering");
-            e.into_inner()
-        });
+            let lock = lock_conn(conn);
             load_row(&lock, path)?
         };
 
@@ -161,10 +209,7 @@ impl Cache {
             Ok(f) => f,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 if prior.is_some() {
-                    let lock = conn.lock().unwrap_or_else(|e| {
-            tracing::warn!("usage_cache mutex poisoned; recovering");
-            e.into_inner()
-        });
+                    let lock = lock_conn(conn);
                     let _ = lock
                         .execute("DELETE FROM files WHERE path = ?1", params![path.to_string_lossy().into_owned()]);
                 }
@@ -218,7 +263,7 @@ impl Cache {
             }
         };
 
-        let row = StoredRow {
+        let row = CacheRow {
             fingerprint: current,
             last_offset: result.end_offset,
             calls: result.calls,
@@ -229,29 +274,35 @@ impl Cache {
         Ok(row.calls)
     }
 
-    fn write_row(&self, path: &Path, row: &StoredRow) -> Result<(), CacheError> {
+    fn write_row(&self, path: &Path, row: &CacheRow) -> Result<(), CacheError> {
         let CacheInner::Open(conn) = &self.inner else {
             return Ok(());
         };
         let blob = bincode::serialize(&row.calls)?;
-        let lock = conn.lock().unwrap_or_else(|e| {
-            tracing::warn!("usage_cache mutex poisoned; recovering");
-            e.into_inner()
-        });
+        let lock = lock_conn(conn);
         upsert_row(&lock, path, row, &blob)?;
         Ok(())
     }
 
     /// Drop all cached rows. Schema row is preserved.
+    ///
+    /// Runs `VACUUM` after the bulk delete so freed pages are returned
+    /// to the filesystem. SQLite's freelist would otherwise keep the
+    /// db at its high-water mark, defeating the user's expectation that
+    /// `cache clear` reclaims disk.
     pub fn clear(&self) -> Result<(), CacheError> {
         let CacheInner::Open(conn) = &self.inner else {
             return Ok(());
         };
-        let lock = conn.lock().unwrap_or_else(|e| {
-            tracing::warn!("usage_cache mutex poisoned; recovering");
-            e.into_inner()
-        });
+        let lock = lock_conn(conn);
         lock.execute("DELETE FROM files", [])?;
+        // VACUUM cannot run inside an explicit transaction, but rusqlite
+        // doesn't auto-wrap a single execute() so this is fine. Failure
+        // is non-fatal — clearing the rows already gave the user the
+        // semantic they asked for; a stale freelist is a tidiness issue.
+        if let Err(err) = lock.execute("VACUUM", []) {
+            tracing::warn!("usage_cache VACUUM after clear failed: {err}");
+        }
         Ok(())
     }
 
@@ -261,10 +312,7 @@ impl Cache {
         let CacheInner::Open(conn) = &self.inner else {
             return Ok(());
         };
-        let lock = conn.lock().unwrap_or_else(|e| {
-            tracing::warn!("usage_cache mutex poisoned; recovering");
-            e.into_inner()
-        });
+        let lock = lock_conn(conn);
         let path_str = path.to_string_lossy().into_owned();
         lock.execute("DELETE FROM files WHERE path = ?1", params![path_str])?;
         Ok(())
@@ -280,10 +328,7 @@ impl Cache {
                 oldest_updated_at: None,
             });
         };
-        let lock = conn.lock().unwrap_or_else(|e| {
-            tracing::warn!("usage_cache mutex poisoned; recovering");
-            e.into_inner()
-        });
+        let lock = lock_conn(conn);
         let file_count: i64 =
             lock.query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))?;
         let oldest_updated_at: Option<i64> = lock
@@ -333,21 +378,17 @@ pub struct ParseResult {
     pub end_offset: u64,
 }
 
+/// One row of the `files` table, deserialized. Used both for inserts
+/// (write_row) and lookups (load_row) — the schema is symmetric so a
+/// single struct serves both directions.
 #[derive(Debug)]
-struct StoredRow {
+struct CacheRow {
     fingerprint: FileFingerprint,
     last_offset: u64,
     calls: Vec<crate::models::usage::ProviderCall>,
 }
 
-#[derive(Debug)]
-struct LoadedRow {
-    fingerprint: FileFingerprint,
-    last_offset: u64,
-    calls: Vec<crate::models::usage::ProviderCall>,
-}
-
-fn load_row(conn: &Connection, path: &Path) -> Result<Option<LoadedRow>, CacheError> {
+fn load_row(conn: &Connection, path: &Path) -> Result<Option<CacheRow>, CacheError> {
     let path_str = path.to_string_lossy().into_owned();
     let row = conn
         .query_row(
@@ -371,11 +412,28 @@ fn load_row(conn: &Connection, path: &Path) -> Result<Option<LoadedRow>, CacheEr
         return Ok(None);
     };
 
-    let Some(format) = BlobFormat::from_i64(fmt) else {
-        return Ok(None);
+    let format = match BlobFormat::lookup(fmt) {
+        BlobFormatLookup::Current(fmt) => fmt,
+        // Stale = recognised prior format (PR-D bumped 1->2). Unknown =
+        // never written by us. Both skip+reparse; the debug log lets us
+        // tell the two apart when diagnosing unexpected reparses.
+        BlobFormatLookup::Stale(v) => {
+            tracing::debug!(
+                "usage_cache stale blob_format={v} for {:?}; reparsing",
+                path
+            );
+            return Ok(None);
+        }
+        BlobFormatLookup::Unknown(v) => {
+            tracing::debug!(
+                "usage_cache unknown blob_format={v} for {:?}; reparsing",
+                path
+            );
+            return Ok(None);
+        }
     };
     let calls: Vec<crate::models::usage::ProviderCall> = match format {
-        BlobFormat::Bincode => bincode::deserialize(&blob)?,
+        BlobFormat::BincodeV2 => bincode::deserialize(&blob)?,
     };
     let fingerprint = FileFingerprint::from_columns(
         u64::try_from(size_i).unwrap_or(0),
@@ -383,7 +441,7 @@ fn load_row(conn: &Connection, path: &Path) -> Result<Option<LoadedRow>, CacheEr
         &suffix,
     )?;
 
-    Ok(Some(LoadedRow {
+    Ok(Some(CacheRow {
         fingerprint,
         last_offset: u64::try_from(offset).unwrap_or(0),
         calls,
@@ -393,10 +451,10 @@ fn load_row(conn: &Connection, path: &Path) -> Result<Option<LoadedRow>, CacheEr
 fn upsert_row(
     conn: &Connection,
     path: &Path,
-    row: &StoredRow,
+    row: &CacheRow,
     blob: &[u8],
 ) -> Result<(), CacheError> {
-    let path_str = path.to_string_lossy().into_owned();
+    let path_str = path_key(path)?;
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -423,7 +481,7 @@ fn upsert_row(
             row.fingerprint.suffix_blake3.to_vec(),
             i64::try_from(row.calls.len()).unwrap_or(i64::MAX),
             blob,
-            db::BLOB_FORMAT_BINCODE_V1,
+            db::BLOB_FORMAT_BINCODE_CURRENT,
             now,
         ],
     )?;

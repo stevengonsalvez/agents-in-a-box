@@ -971,16 +971,7 @@ fn one_line(s: &str) -> String {
 }
 
 fn truncate_string(s: &str, max_len: usize) -> String {
-    if max_len == 0 {
-        return String::new();
-    }
-    if s.chars().count() <= max_len {
-        s.to_string()
-    } else {
-        let mut out: String = s.chars().take(max_len.saturating_sub(1)).collect();
-        out.push('…');
-        out
-    }
+    crate::widgets::truncate_with_ellipsis(s, max_len).into_owned()
 }
 
 fn display_path(p: &str) -> String {

@@ -440,18 +440,10 @@ fn short_session_id(id: &str) -> String {
     id.chars().take(8).collect()
 }
 
-/// Truncate a string with an ellipsis for fixed-width table columns
+/// Truncate a string for fixed-width table columns. Delegates to the
+/// canonical `truncate_with_ellipsis` (uses `…`, single Unicode char).
 fn truncate(s: &str, max_len: usize) -> String {
-    if max_len <= 3 {
-        return ".".repeat(max_len);
-    }
-    let char_count = s.chars().count();
-    if char_count <= max_len {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max_len.saturating_sub(3)).collect();
-        format!("{truncated}...")
-    }
+    crate::widgets::truncate_with_ellipsis(s, max_len).into_owned()
 }
 
 #[cfg(test)]
@@ -606,7 +598,7 @@ mod tests {
 
     #[test]
     fn test_truncate_long() {
-        assert_eq!(truncate("hello world foo", 10), "hello w...");
+        assert_eq!(truncate("hello world foo", 10), "hello wor…");
     }
 
     #[test]
@@ -616,7 +608,9 @@ mod tests {
 
     #[test]
     fn test_truncate_tiny_max_len() {
-        assert_eq!(truncate("hello", 2), "..");
+        // Canonical truncate_with_ellipsis returns N-1 chars + `…` for any
+        // truncation, so max_len=2 yields one source char plus the ellipsis.
+        assert_eq!(truncate("hello", 2), "h…");
     }
 
     // --- short_session_id ---

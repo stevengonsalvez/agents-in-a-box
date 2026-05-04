@@ -15,6 +15,10 @@ use crate::models::{
     UsageFilters, UsagePeriod, UsageProviderFilter, UsageQuery, filter_usage_data,
     format_tokens_short, optimize_usage,
 };
+use crate::models::usage::{
+    current_quarter, first_of_month, next_month_first, next_quarter, previous_month_first,
+    previous_quarter,
+};
 
 // Color palette from TUI style guide
 const CORNFLOWER_BLUE: Color = Color::Rgb(100, 149, 237);
@@ -251,7 +255,16 @@ pub enum UsageFilterTarget {
     Session,
 }
 
-/// View state for the usage analytics screen
+/// View state for the usage analytics screen.
+///
+// TODO(refactor): collapse the 4 zoom-related fields (zoom,
+// zoom_search_active, zoom_search_query, zoom_detail_open) into a
+// single `Option<ZoomState>` so the "in zoom" invariant lives in the
+// type system. Currently every zoom-related callsite has to remember
+// to check `self.zoom.is_some()` and the search/detail flags carry
+// stale values from prior zoom sessions. Deferred — touches every
+// zoom-related event handler and renderer; safer to land alongside
+// snapshot tests for the zoom view.
 #[derive(Debug, Clone)]
 pub struct UsageViewState {
     pub provider: UsageProvider,
@@ -316,6 +329,14 @@ impl Default for UsageViewState {
     }
 }
 
+/// Direction parameter for `step_period`. Internal — wrappers
+/// `step_period_back` / `step_period_forward` are the public API.
+#[derive(Debug, Clone, Copy)]
+enum StepDirection {
+    Back,
+    Forward,
+}
+
 impl UsageViewState {
     pub fn next_provider(&mut self) {
         self.provider = self.provider.next();
@@ -367,38 +388,32 @@ impl UsageViewState {
         else {
             return false;
         };
-        match self.period.clone() {
-            UsagePeriod::SpecificMonth(anchor) => {
-                let new_anchor = previous_month_first(anchor);
-                if new_anchor < first_of_month(oldest) {
-                    return false;
-                }
-                self.period = UsagePeriod::SpecificMonth(new_anchor);
-                self.scroll_offset = 0;
-                true
-            }
-            UsagePeriod::SpecificQuarter(year, q) => {
-                let (new_year, new_q) = previous_quarter(year, q);
-                let (qy, qq) = current_quarter(oldest);
-                if (new_year, new_q) < (qy, qq) {
-                    return false;
-                }
-                self.period = UsagePeriod::SpecificQuarter(new_year, new_q);
-                self.scroll_offset = 0;
-                true
-            }
-            _ => false,
-        }
+        self.step_period(StepDirection::Back, oldest)
     }
 
     /// Step forward one unit. Clamps at the current real-world month
     /// or quarter — never lets the user pick a future window.
     pub fn step_period_forward(&mut self) -> bool {
         let today = Local::now().date_naive();
+        self.step_period(StepDirection::Forward, today)
+    }
+
+    /// Shared body for back/forward stepping. `clamp_anchor` is the
+    /// extreme of the allowed range — the oldest data day for `Back`,
+    /// today for `Forward`.
+    fn step_period(&mut self, direction: StepDirection, clamp_anchor: NaiveDate) -> bool {
         match self.period.clone() {
             UsagePeriod::SpecificMonth(anchor) => {
-                let new_anchor = next_month_first(anchor);
-                if new_anchor > first_of_month(today) {
+                let new_anchor = match direction {
+                    StepDirection::Back => previous_month_first(anchor),
+                    StepDirection::Forward => next_month_first(anchor),
+                };
+                let clamp = first_of_month(clamp_anchor);
+                let out_of_range = match direction {
+                    StepDirection::Back => new_anchor < clamp,
+                    StepDirection::Forward => new_anchor > clamp,
+                };
+                if out_of_range {
                     return false;
                 }
                 self.period = UsagePeriod::SpecificMonth(new_anchor);
@@ -406,9 +421,16 @@ impl UsageViewState {
                 true
             }
             UsagePeriod::SpecificQuarter(year, q) => {
-                let (new_year, new_q) = next_quarter(year, q);
-                let (cy, cq) = current_quarter(today);
-                if (new_year, new_q) > (cy, cq) {
+                let (new_year, new_q) = match direction {
+                    StepDirection::Back => previous_quarter(year, q),
+                    StepDirection::Forward => next_quarter(year, q),
+                };
+                let (cy, cq) = current_quarter(clamp_anchor);
+                let out_of_range = match direction {
+                    StepDirection::Back => (new_year, new_q) < (cy, cq),
+                    StepDirection::Forward => (new_year, new_q) > (cy, cq),
+                };
+                if out_of_range {
                     return false;
                 }
                 self.period = UsagePeriod::SpecificQuarter(new_year, new_q);
@@ -557,7 +579,6 @@ impl UsageViewState {
         self.focus_row = 0;
     }
 
-    /// Cycle focus backward.
     pub fn focus_prev_panel(&mut self) {
         self.focused_panel = Some(match self.focused_panel {
             Some(panel) => panel.prev(),
@@ -705,11 +726,13 @@ impl UsageViewState {
         self.zoom_detail_open = false;
     }
 
-    /// Begin fuzzy-search input inside the zoomed panel.
+    /// Begin fuzzy-search input inside the zoomed panel. Preserves the
+    /// prior typed query so re-pressing `/` resumes editing where the
+    /// last search left off (vim / fzf convention). Esc (`zoom_cancel_search`)
+    /// is the path that drops the query entirely.
     pub fn zoom_begin_search(&mut self) {
         if self.zoom.is_some() {
             self.zoom_search_active = true;
-            self.zoom_search_query.clear();
         }
     }
 
@@ -738,7 +761,6 @@ impl UsageViewState {
         }
     }
 
-    /// Toggle the detail drawer in zoom mode. No-op when not zoomed.
     pub fn toggle_zoom_detail(&mut self) {
         if self.zoom.is_some() {
             self.zoom_detail_open = !self.zoom_detail_open;
@@ -1339,6 +1361,11 @@ fn render_zoom_breadcrumb(frame: &mut Frame, area: Rect, panel: UsagePanel) {
 
 /// Score `haystack` against `query` with nucleo-matcher; `None` means
 /// no match. An empty query matches everything (returns `Some(0)`).
+///
+/// When either side carries non-ASCII codepoints we route through
+/// `Utf32String` so multibyte chars match natively. The previous code
+/// fed `Utf32Str::Ascii(haystack.as_bytes())` even when the query had
+/// non-ASCII content, which silently lost matches.
 fn fuzzy_score(matcher: &mut nucleo_matcher::Matcher, query: &str, haystack: &str) -> Option<u32> {
     if query.is_empty() {
         return Some(0);
@@ -1348,15 +1375,24 @@ fn fuzzy_score(matcher: &mut nucleo_matcher::Matcher, query: &str, haystack: &st
         nucleo_matcher::pattern::CaseMatching::Smart,
         nucleo_matcher::pattern::Normalization::Smart,
     );
-    needle.score(
-        nucleo_matcher::Utf32Str::Ascii(haystack.as_bytes()),
-        matcher,
-    )
+    if query.is_ascii() && haystack.is_ascii() {
+        needle.score(
+            nucleo_matcher::Utf32Str::Ascii(haystack.as_bytes()),
+            matcher,
+        )
+    } else {
+        let utf32 = nucleo_matcher::Utf32String::from(haystack);
+        needle.score(utf32.slice(..), matcher)
+    }
 }
 
 /// Filter `rows` by a fuzzy-search query, preserving original order.
 /// Empty query returns all rows. The `label` closure projects each row
 /// to its primary search string (project name, session id, etc.).
+///
+/// Pattern parsing happens once before the filter loop (was per-call
+/// inside the filter via fuzzy_score). Worth doing because zoom-mode
+/// re-renders typing-rate (~10/s) over potentially 1k+ row sets.
 fn apply_zoom_filter<'a, T, F>(rows: &'a [T], query: &str, label: F) -> Vec<&'a T>
 where
     F: Fn(&T) -> String,
@@ -1364,21 +1400,26 @@ where
     if query.is_empty() {
         return rows.iter().collect();
     }
+    let needle = nucleo_matcher::pattern::Pattern::parse(
+        query,
+        nucleo_matcher::pattern::CaseMatching::Smart,
+        nucleo_matcher::pattern::Normalization::Smart,
+    );
+    let query_ascii = query.is_ascii();
     let mut matcher = nucleo_matcher::Matcher::new(nucleo_matcher::Config::DEFAULT);
     rows.iter()
         .filter_map(|row| {
             let label = label(row);
-            // nucleo expects ASCII-friendly bytes; fall back to a
-            // case-insensitive substring check when the label has
-            // non-ASCII chars (rare, but project paths can include
-            // unicode dashes etc.).
-            if !label.is_ascii() {
-                if label.to_lowercase().contains(query.to_lowercase().as_str()) {
-                    return Some(row);
-                }
-                return None;
-            }
-            fuzzy_score(&mut matcher, query, &label).map(|_| row)
+            let score = if query_ascii && label.is_ascii() {
+                needle.score(
+                    nucleo_matcher::Utf32Str::Ascii(label.as_bytes()),
+                    &mut matcher,
+                )
+            } else {
+                let utf32 = nucleo_matcher::Utf32String::from(label.as_str());
+                needle.score(utf32.slice(..), &mut matcher)
+            };
+            score.map(|_| row)
         })
         .collect()
 }
@@ -1451,6 +1492,12 @@ fn render_zoom_panel_body(
     }
 }
 
+// TODO(refactor): the 5 render_zoom_* fns below all build a header,
+// truncate to area.height-2 visible rows, build per-row cells, and
+// hand a Table back to the frame. Extract a `render_zoom_table` helper
+// taking `ZoomTableSpec { headers, widths, rows }` once snapshot tests
+// exist to assert visual identity — without them a refactor risks
+// silent column-spacing/header-style drift.
 fn render_zoom_by_project(
     frame: &mut Frame,
     area: Rect,
@@ -1537,7 +1584,7 @@ fn render_zoom_top_sessions(
         .take(visible_rows)
         .map(|sess| {
             let b = &sess.bucket;
-            let dur = (sess.last_timestamp - sess.first_timestamp).num_minutes().max(0);
+            let dur = (sess.last_timestamp - sess.first_timestamp).num_seconds().max(0);
             let dur_str = format_duration_min(dur as u64);
             Row::new(vec![
                 sess.provider.clone(),
@@ -1909,29 +1956,35 @@ fn project_seen_window(data: &UsageData, project_name: &str) -> (String, String)
 
 /// Top `n` projects by call count for `model_name`, joined with "·".
 /// Returns "—" when the model has no calls in `data.calls`.
+///
+/// Reads from the precomputed `data.model_project_counts` index built
+/// during `aggregate_calls`. Render path is O(n) (constant) instead of
+/// O(N) over `data.calls` per call.
 fn top_projects_for_model(data: &UsageData, model_name: &str, n: usize) -> String {
-    use std::collections::HashMap;
-    let mut counts: HashMap<&str, usize> = HashMap::new();
-    for call in &data.calls {
-        if call.model == model_name {
-            *counts.entry(call.project.as_str()).or_insert(0) += 1;
-        }
-    }
-    if counts.is_empty() {
+    let Some(rows) = data.model_project_counts.get(model_name) else {
+        return "—".to_string();
+    };
+    if rows.is_empty() {
         return "—".to_string();
     }
-    let mut sorted: Vec<_> = counts.into_iter().collect();
-    sorted.sort_by(|a, b| b.1.cmp(&a.1));
-    sorted
-        .into_iter()
+    rows.iter()
         .take(n)
-        .map(|(p, _)| p.to_string())
+        .map(|(p, _)| p.clone())
         .collect::<Vec<_>>()
         .join(" · ")
 }
 
-/// Render `min_total` as `1h 04m` / `42m` / `<1m`.
-fn format_duration_min(min_total: u64) -> String {
+/// Render a duration (in seconds) as `1h 04m` / `42m` / `<1m` / `0m`.
+///
+/// Distinguishes a true zero duration (`first == last` timestamp, e.g. a
+/// session with one logged turn) from a positive sub-minute duration
+/// (rounded down to 0 minutes). Both used to render as `<1m`, which
+/// hid the zero case.
+fn format_duration_min(secs_total: u64) -> String {
+    if secs_total == 0 {
+        return "0m".to_string();
+    }
+    let min_total = secs_total / 60;
     if min_total == 0 {
         return "<1m".to_string();
     }
@@ -2475,6 +2528,7 @@ pub fn build_filter_chip_line(state: &UsageViewState) -> Line<'static> {
     push_chip_group(&mut spans, "model", &state.filters.model);
     push_chip_group(&mut spans, "activity", &state.filters.activity);
     push_chip_group(&mut spans, "session", &state.filters.session);
+    push_chip_group(&mut spans, "branch", &state.filters.branch);
     spans.push(Span::styled("  ·  ", Style::default().fg(MUTED_GRAY)));
     spans.push(Span::styled(
         "Esc",
@@ -3204,8 +3258,11 @@ fn pretty_project_name(name: &str, max_w: usize) -> String {
         // branch portion, keeping the `repo:` prefix intact when we can.
         if let Some((repo, branch)) = pretty.split_once(':') {
             let repo_w = repo.chars().count();
-            // Need room for repo + ':' + at least 1 branch char.
-            if repo_w + 2 <= max_w {
+            // Need room for repo + ':' + at least 2 branch chars. With
+            // branch_w == 1 truncate_string returns just `…`, producing
+            // `repo:…` which conveys nothing — fall through to the
+            // generic shortener instead so we keep the repo name whole.
+            if repo_w + 3 <= max_w {
                 let branch_w = max_w - repo_w - 1;
                 let truncated_branch = truncate_string(branch, branch_w);
                 let combined = format!("{repo}:{truncated_branch}");
@@ -3352,7 +3409,7 @@ fn elapsed_days_for_period(period: &UsagePeriod, data: &UsageData) -> Option<u64
         }
         UsagePeriod::SpecificMonth(anchor) => {
             let first = NaiveDate::from_ymd_opt(anchor.year(), anchor.month(), 1)?;
-            let last = crate::models::usage::last_day_of_month(anchor.year(), anchor.month());
+            let last = crate::models::usage::last_day_of_month(anchor.year(), anchor.month())?;
             Some((last - first).num_days().max(0) as u64 + 1)
         }
         UsagePeriod::SpecificQuarter(year, q) => {
@@ -3508,18 +3565,7 @@ fn render_help_bar(frame: &mut Frame, area: Rect, state: &UsageViewState) {
 }
 
 fn truncate_string(s: &str, max_len: usize) -> String {
-    // max_len is char count, not bytes. The previous `s.len()` gate let
-    // multi-byte strings reach a byte-slice (`&s[..max_len-1]`) that
-    // could fall inside a codepoint and panic. Since pretty_project_name
-    // now feeds branch names into here, that path is reachable on any
-    // non-ASCII branch name. Switch to char-count + chars().take().
-    if s.chars().count() <= max_len {
-        s.to_string()
-    } else {
-        let take = max_len.saturating_sub(1);
-        let truncated: String = s.chars().take(take).collect();
-        format!("{truncated}…")
-    }
+    crate::widgets::truncate_with_ellipsis(s, max_len).into_owned()
 }
 
 fn provider_filter_label(filter: UsageProviderFilter) -> &'static str {
@@ -3528,48 +3574,6 @@ fn provider_filter_label(filter: UsageProviderFilter) -> &'static str {
         UsageProviderFilter::Claude => "Claude",
         UsageProviderFilter::Codex => "Codex",
     }
-}
-
-/// First day of the calendar month containing `date`.
-fn first_of_month(date: NaiveDate) -> NaiveDate {
-    NaiveDate::from_ymd_opt(date.year(), date.month(), 1).unwrap_or(date)
-}
-
-/// First day of the previous calendar month.
-fn previous_month_first(anchor: NaiveDate) -> NaiveDate {
-    let (y, m) = if anchor.month() == 1 {
-        (anchor.year() - 1, 12)
-    } else {
-        (anchor.year(), anchor.month() - 1)
-    };
-    NaiveDate::from_ymd_opt(y, m, 1).unwrap_or(anchor)
-}
-
-/// First day of the next calendar month.
-fn next_month_first(anchor: NaiveDate) -> NaiveDate {
-    let (y, m) = if anchor.month() == 12 {
-        (anchor.year() + 1, 1)
-    } else {
-        (anchor.year(), anchor.month() + 1)
-    };
-    NaiveDate::from_ymd_opt(y, m, 1).unwrap_or(anchor)
-}
-
-/// `(year, quarter)` of the previous quarter, wrapping into the prior
-/// year at Q1.
-fn previous_quarter(year: i32, q: u8) -> (i32, u8) {
-    if q <= 1 { (year - 1, 4) } else { (year, q - 1) }
-}
-
-/// `(year, quarter)` of the next quarter, wrapping into the next year
-/// at Q4.
-fn next_quarter(year: i32, q: u8) -> (i32, u8) {
-    if q >= 4 { (year + 1, 1) } else { (year, q + 1) }
-}
-
-/// `(year, quarter)` containing `date`.
-fn current_quarter(date: NaiveDate) -> (i32, u8) {
-    (date.year(), crate::models::usage::quarter_of(date))
 }
 
 fn period_label(period: &UsagePeriod) -> String {
@@ -3810,6 +3814,7 @@ mod cross_filter_tests {
             mcp_servers: vec![],
             shell_commands: vec![],
             branches: vec![],
+            model_project_counts: std::collections::HashMap::new(),
         }
     }
 
@@ -3854,6 +3859,49 @@ mod cross_filter_tests {
         state.focus_row = 0;
         assert!(state.commit_focused_row());
         assert_eq!(state.filters.session, vec!["sess-A".to_string()]);
+    }
+
+    #[test]
+    fn cross_project_session_id_collision_attaches_owning_project_chip() {
+        // Two sessions with the same id "s1" but different owning
+        // projects — exactly the case that prompted carrying the
+        // session row's project on commit_focused_row. The first
+        // commit must attach the alpha project chip; a subsequent
+        // pop+commit on a beta-owned row must attach beta.
+        let now = Local::now();
+        let session_alpha = SessionUsage {
+            provider: "claude".into(),
+            project: "alpha".into(),
+            session_id: "s1".into(),
+            first_timestamp: now,
+            last_timestamp: now,
+            bucket: bucket(3),
+        };
+        let session_beta = SessionUsage {
+            provider: "claude".into(),
+            project: "beta".into(),
+            session_id: "s1".into(),
+            first_timestamp: now,
+            last_timestamp: now,
+            bucket: bucket(2),
+        };
+        let mut data = fixture();
+        data.sessions = vec![session_alpha, session_beta];
+
+        let mut state = UsageViewState::default();
+        state.data = Some(data);
+        state.focused_panel = Some(UsagePanel::TopSessions);
+        state.focus_row = 0;
+        assert!(state.commit_focused_row());
+        assert_eq!(state.filters.session, vec!["s1".to_string()]);
+        assert_eq!(state.filters.project, vec!["alpha".to_string()]);
+
+        // Pop both chips and target the beta row.
+        state.filters.clear();
+        state.focus_row = 1;
+        assert!(state.commit_focused_row());
+        assert_eq!(state.filters.session, vec!["s1".to_string()]);
+        assert_eq!(state.filters.project, vec!["beta".to_string()]);
     }
 
     #[test]
@@ -3902,27 +3950,59 @@ mod cross_filter_tests {
         let mut state = UsageViewState::default();
         state.filters.project.push("alpha".into());
         state.filters.model.push("opus".into());
+        state.filters.branch.push("main".into());
 
-        // First pop -> model (the chip-strip pop order: session →
-        // activity → model → project).
+        // First pop -> branch (rightmost in the strip; pop order is
+        // branch → session → activity → model → project).
+        let removed = state.pop_filter_chip();
+        assert!(matches!(removed, Some(UsageFilterChip::Branch(v)) if v == "main"));
+        assert!(state.filters.branch.is_empty());
+
+        // The chip strip must show every surviving chip — including the
+        // branch chip while it was set. Render symmetry: the chip the
+        // user sees rightmost is the one Esc removes next.
+        let line = build_filter_chip_line(&state);
+        let flat: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(flat.contains("project=alpha"), "got {flat}");
+        assert!(flat.contains("model=opus"), "got {flat}");
+        assert!(!flat.contains("branch="), "branch chip lingered: {flat}");
+
+        // Second pop -> model.
         let removed = state.pop_filter_chip();
         assert!(matches!(removed, Some(UsageFilterChip::Model(v)) if v == "opus"));
-        assert!(state.filters.model.is_empty());
-        assert_eq!(state.filters.project, vec!["alpha".to_string()]);
-
-        // Chip strip should still show the remaining chip + Esc/C hint.
         let line = build_filter_chip_line(&state);
         let flat: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(flat.contains("project=alpha"), "got {flat}");
         assert!(flat.contains("Esc") && flat.contains("C"), "got {flat}");
 
-        // Second pop -> project. With no chips left we fall back to
+        // Third pop -> project. With no chips left we fall back to
         // the discoverability hint.
         assert!(state.pop_filter_chip().is_some());
         assert!(state.filters.is_empty());
         let line = build_filter_chip_line(&state);
         let flat: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(flat.contains("(none)"), "got {flat}");
+    }
+
+    /// Tripwire: every `UsageFilterChip` variant must render in
+    /// `build_filter_chip_line`. If a new variant is added without a
+    /// `push_chip_group` call this test fails — the PR-D regression where
+    /// `branch` chips set via `--branch` were invisible but still consumed
+    /// `Esc` is exactly what this guards against.
+    #[test]
+    fn every_filter_chip_variant_renders_in_strip() {
+        let mut state = UsageViewState::default();
+        state.filters.project.push("p".into());
+        state.filters.model.push("m".into());
+        state.filters.activity.push("Coding".into());
+        state.filters.session.push("s".into());
+        state.filters.branch.push("b".into());
+
+        let line = build_filter_chip_line(&state);
+        let flat: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        for needle in ["project=p", "model=m", "activity=Coding", "session=s", "branch=b"] {
+            assert!(flat.contains(needle), "chip strip missing {needle}: {flat}");
+        }
     }
 
     #[test]
@@ -4050,24 +4130,18 @@ mod cli_parity_tests {
     use chrono::Local;
 
     fn call(project: &str, model: &str, session: &str) -> ProviderCall {
-        ProviderCall {
-            provider: "claude".into(),
-            model: model.into(),
-            session_id: session.into(),
-            project: project.into(),
-            project_path: format!("/work/{project}"),
-            timestamp: Local::now(),
-            input_tokens: 100,
-            cache_creation_tokens: 0,
-            cache_read_tokens: 0,
-            output_tokens: 50,
-            reasoning_tokens: 0,
-            cost_usd: Some(1.0),
-            tools: vec!["Edit".into()],
-            bash_commands: vec![],
-            user_message: "tidy".into(),
-            branch: None,
-        }
+        crate::test_support::ProviderCallBuilder::new()
+            .with_model(model)
+            .with_session(session)
+            .with_project(project)
+            .with_project_path(format!("/work/{project}"))
+            .with_timestamp(Local::now())
+            .with_input_tokens(100)
+            .with_output_tokens(50)
+            .with_cost(1.0)
+            .with_tools(&["Edit"])
+            .with_user_message("tidy")
+            .build()
     }
 
     fn data_with_calls(calls: Vec<ProviderCall>) -> UsageData {

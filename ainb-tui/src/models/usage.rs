@@ -196,7 +196,7 @@ impl UsageFilters {
         self.branch.clear();
     }
 
-    fn matches(&self, call: &ProviderCall, category: ActivityCategory) -> bool {
+    pub(crate) fn matches(&self, call: &ProviderCall, category: ActivityCategory) -> bool {
         if !self.project.is_empty() && !self.project.iter().any(|p| p == &call.project) {
             return false;
         }
@@ -213,7 +213,7 @@ impl UsageFilters {
             }
         }
         if !self.branch.is_empty() {
-            let Some(branch) = call.branch.as_deref() else {
+            let Some(branch) = call.recorded_branch() else {
                 return false;
             };
             if !self.branch.iter().any(|b| b == branch) {
@@ -235,6 +235,15 @@ pub enum UsageFilterChip {
 }
 
 impl UsageFilterChip {
+    /// Stable string key for this chip, used by the chip-strip widget,
+    /// CLI flag mapping, and filter telemetry. The match below is the
+    /// single source of truth — keep it in sync with new variants.
+    //
+    // NOTE: an earlier cleanup considered switching to strum_macros'
+    // AsRefStr. Skipped: adding the strum crate purely for five mappings
+    // costs more than the match itself, and a const-slice indexed by
+    // discriminant order is harder to read than the match and not type-
+    // checked when a variant is added. The match is already canonical.
     pub fn label(&self) -> &'static str {
         match self {
             Self::Project(_) => "project",
@@ -298,13 +307,13 @@ impl TokenBucket {
 /// **WARNING — bincode layout stability.** Bincode v1 with default options
 /// encodes positionally with no field tags. Any change to the field set or
 /// order of this struct (or any nested type it owns) silently invalidates
-/// every cached blob written under the current `BLOB_FORMAT_BINCODE_V1`.
+/// every cached blob written under the current `BLOB_FORMAT_BINCODE_CURRENT`.
 /// Wrong-shape decodes can either panic (caught — falls through to a full
 /// re-parse) or, much worse, succeed with mis-aligned bytes and return
 /// wrong analytics from the cache.
 ///
 /// **If you change this struct or any nested type, you MUST:**
-/// 1. Bump `usage_cache::db::BLOB_FORMAT_BINCODE_V1` to a new value, and
+/// 1. Bump `usage_cache::db::BLOB_FORMAT_BINCODE_CURRENT` to a new value, and
 /// 2. Update the layout-stability tripwire test in `usage_cache::tests`.
 ///
 /// The tripwire test asserts a fixed serialized byte length for a known
@@ -317,6 +326,14 @@ pub struct ProviderCall {
     pub session_id: String,
     pub project: String,
     pub project_path: String,
+    // TODO(refactor): migrate this to DateTime<Utc>. The Local variant
+    // bakes a timezone offset into the cached blob, so a user moving
+    // across timezones (or DST transition) sees inconsistent
+    // serialised representations between cache hit and full reparse.
+    // Migration bumps BLOB_FORMAT_BINCODE_CURRENT to 3 and forces
+    // every constructor + render site to convert at the boundary.
+    // Deferred — V2 was bumped to 2 recently for branch attribution
+    // and another bump is best paired with the analyze_turns id work.
     pub timestamp: DateTime<Local>,
     pub input_tokens: u64,
     pub cache_creation_tokens: u64,
@@ -346,6 +363,15 @@ impl ProviderCall {
             call_count: 1,
             cost_usd: self.cost_usd,
         }
+    }
+
+    /// Branch attribution that's safe to display: returns the recorded
+    /// branch only when it's `Some(non-empty)`. Empty strings creep in
+    /// from downstream branch detection that returns `""` for a non-git
+    /// project; the canonical accessor stops them from being aggregated
+    /// as a real branch named "" anywhere in the pipeline.
+    pub fn recorded_branch(&self) -> Option<&str> {
+        self.branch.as_deref().filter(|b| !b.is_empty())
     }
 }
 
@@ -389,6 +415,8 @@ pub struct ModelUsage {
 /// Per-branch summary. Built only from calls whose `branch` is `Some`;
 /// branchless calls (codex, non-git Claude turns) are dropped from this
 /// view so the panel never grows a misleading "(no branch)" bucket.
+// TODO(PR-E): wire BranchUsage into render_branch_panel — currently
+// aggregated but not rendered (see UsageData.branches).
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize)]
 pub struct BranchUsage {
@@ -434,6 +462,12 @@ pub struct UsageData {
     /// Branch attribution rows, sorted by largest bucket. Only Claude
     /// assistant turns with a non-empty `gitBranch` populate this.
     pub branches: Vec<BranchUsage>,
+    /// Precomputed `model -> [(project, call_count), ...]` sorted by
+    /// count descending. Built once during `aggregate_calls` so the
+    /// render path's "top N projects for model X" lookup is O(1) plus
+    /// the constant-N truncation, instead of a full O(N·M) scan of
+    /// `data.calls` per render frame.
+    pub model_project_counts: HashMap<String, Vec<(String, usize)>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -472,6 +506,7 @@ impl Default for UsageData {
             mcp_servers: Vec::new(),
             shell_commands: Vec::new(),
             branches: Vec::new(),
+            model_project_counts: HashMap::new(),
         }
     }
 }
@@ -575,18 +610,6 @@ struct CodexTokenUsage {
     total_tokens: Option<u64>,
 }
 
-/// Parse all known local session files using the legacy Claude-only query.
-/// This is designed to run in a background thread.
-pub fn parse_usage() -> UsageData {
-    parse_usage_for(UsageQuery {
-        provider_filter: UsageProviderFilter::Claude,
-        period: UsagePeriod::All,
-        include_projects: Vec::new(),
-        exclude_projects: Vec::new(),
-        filters: UsageFilters::default(),
-    })
-}
-
 /// Parse local session files for a query using default user data roots.
 pub fn parse_usage_for(query: UsageQuery) -> UsageData {
     parse_usage_for_with_roots(query, &UsageSourceRoots::default())
@@ -658,6 +681,7 @@ pub fn parse_usage_for_with_roots_and_cache(
         ));
     }
 
+    let filters_active = !query.filters.is_empty();
     let filtered: Vec<ProviderCall> = calls
         .into_iter()
         .filter(|call| {
@@ -666,16 +690,27 @@ pub fn parse_usage_for_with_roots_and_cache(
             })
         })
         .filter(|call| project_matches(call, &query.include_projects, &query.exclude_projects))
+        // Apply cross-filter chips up-front when present. Saves a full
+        // aggregate+re-aggregate round trip on the CLI path: previously
+        // we built the full UsageData and then filter_usage_data
+        // re-aggregated the filtered subset. The TUI hot path keeps
+        // calling filter_usage_data over cached UsageData and is
+        // unaffected.
+        .filter(|call| {
+            !filters_active || query.filters.matches(call, classify_activity(call))
+        })
         .collect();
 
-    let aggregated = aggregate_calls(filtered);
-    if query.filters.is_empty() {
-        aggregated
-    } else {
-        filter_usage_data(&aggregated, &query.filters)
-    }
+    aggregate_calls(filtered)
 }
 
+// TODO(perf): parallelise per-file cache.get_or_parse with rayon
+// (par_iter() over collect_claude_jsonl_files results). SQLite writes
+// still serialise on the connection mutex but JSONL parsing +
+// fingerprinting can run concurrent. Cache itself is already
+// Send+Sync via Mutex<Connection>. Deferred — adding rayon as a
+// dependency is the largest unrelated lift in this batch and is
+// best landed in its own change with benchmarks attached.
 fn parse_claude_sources(projects_dir: Option<&Path>, cache: &Cache) -> Vec<ProviderCall> {
     let Some(projects_dir) = projects_dir else {
         return Vec::new();
@@ -789,11 +824,11 @@ fn parse_claude_source_full(path: &Path, project: &str, project_path: &str) -> P
 /// concatenated with the new calls, so the cache can persist a complete
 /// blob for the file.
 ///
-/// Trade-off: `current_user_message` state from before `from_offset` is
-/// not restored. New assistant rows that appear *before* the next user
-/// line in the appended tail will get an empty `user_message`. This is
-/// rare in practice and cheap to fix in a follow-up by persisting parser
-/// state alongside the row.
+/// `current_user_message` state from before `from_offset` is restored
+/// by `recover_user_message_before`, which walks the prefix
+/// `[0, from_offset)` for the last `"type":"user"` line. Without that,
+/// every appended assistant turn would lose user_message attribution
+/// across cache hits.
 fn parse_claude_source_append(
     path: &Path,
     project: &str,
@@ -811,6 +846,12 @@ fn parse_claude_source_append(
         }
     };
     let total_len = file.metadata().map(|m| m.len()).unwrap_or(from_offset);
+    // Recover the user message that was last in scope at `from_offset`
+    // by reading the prefix [0, from_offset) and walking it for "type":
+    // "user" lines. Without this, every appended assistant turn would
+    // carry an empty user_message and lose attribution. Bounded by
+    // from_offset; only paid on cache-hit append paths.
+    let current_user_message = recover_user_message_before(&mut file, from_offset);
     if file.seek(SeekFrom::Start(from_offset)).is_err() {
         return ParseResult {
             calls: existing.to_vec(),
@@ -819,9 +860,19 @@ fn parse_claude_source_append(
     }
     let reader = BufReader::new(file);
     let mut calls = existing.to_vec();
-    let mut current_user_message = String::new();
+    let mut current_user_message = current_user_message;
     for line in reader.lines() {
-        let Ok(line) = line else { break };
+        // On any I/O or UTF-8 error from BufReader::lines we cannot
+        // safely advance the cached end_offset — the next run would
+        // skip past the unread tail and silently lose data. Roll the
+        // cursor back to from_offset so the next scan retries the
+        // append. Mirror the Full path's all-or-nothing semantics.
+        let Ok(line) = line else {
+            return ParseResult {
+                calls: existing.to_vec(),
+                end_offset: from_offset,
+            };
+        };
         if let Some(call) = parse_claude_line(
             &line,
             path,
@@ -836,6 +887,47 @@ fn parse_claude_source_append(
         calls,
         end_offset: total_len,
     }
+}
+
+/// Walk the prefix `[0, from_offset)` of `file` looking for the last
+/// `"type":"user"` line, returning its extracted message text. Used by
+/// the append parser so user_message attribution survives a cache hit
+/// (the user line that primed the message is in the prefix; without
+/// recovery, every appended assistant turn ends up with an empty
+/// `user_message`).
+///
+/// Errors are absorbed — if the prefix is unreadable we return an empty
+/// string and the next assistant turn's `user_message` is empty (same
+/// fallback as before this fix). Leaves the file cursor at an
+/// undefined offset; the caller must re-seek to `from_offset`.
+fn recover_user_message_before(
+    file: &mut std::fs::File,
+    from_offset: u64,
+) -> String {
+    if from_offset == 0 {
+        return String::new();
+    }
+    if file.seek(SeekFrom::Start(0)).is_err() {
+        return String::new();
+    }
+    let limited = file.by_ref().take(from_offset);
+    let reader = BufReader::new(limited);
+    let mut last = String::new();
+    for line in reader.lines() {
+        let Ok(line) = line else {
+            // Partial scan still useful — keep whatever we'd
+            // discovered up to the error.
+            break;
+        };
+        if let Ok(parsed) = serde_json::from_str::<ClaudeLine>(&line) {
+            if parsed.msg_type.as_deref() == Some("user") {
+                if let Some(message) = parsed.message {
+                    last = extract_claude_user_text(message.content.as_ref());
+                }
+            }
+        }
+    }
+    last
 }
 
 /// Parse a single Claude JSONL line. Returns `Some(call)` for assistant
@@ -1161,6 +1253,14 @@ fn parse_codex_source(path: &Path) -> Vec<ProviderCall> {
     calls
 }
 
+// TODO(refactor): the function below ingests `calls` into ten parallel
+// accumulators (daily, weekly, projects, sessions, models, branches,
+// activities, tools, mcp, shell). Extract a per-dimension Accumulator
+// trait so each one is unit-testable in isolation; orchestrator
+// becomes `for call in calls { for acc in &mut accumulators { acc.ingest(call) } }`.
+// Deferred — the largest single change in this cleanup pass and best
+// landed alongside the analyze_turns precompute (whose stable-id
+// requirement triggers a coordinated bincode bump). See PR-E thread.
 fn aggregate_calls(mut calls: Vec<ProviderCall>) -> UsageData {
     if calls.is_empty() {
         return UsageData::default();
@@ -1217,10 +1317,10 @@ fn aggregate_calls(mut calls: Vec<ProviderCall>) -> UsageData {
         }
         session.bucket.merge(&bucket);
 
-        model_map.entry(call.model.clone()).or_default().merge(&bucket);
+        add_bucket(&mut model_map, call.model.clone(), &bucket);
 
-        if let Some(branch) = call.branch.as_deref().filter(|b| !b.is_empty()) {
-            branch_map.entry(branch.to_string()).or_default().merge(&bucket);
+        if let Some(branch) = call.recorded_branch() {
+            add_bucket(&mut branch_map, branch.to_string(), &bucket);
         }
 
         let analysis = turn_analysis.get(&idx).copied().unwrap_or_else(|| TurnAnalysis {
@@ -1243,13 +1343,13 @@ fn aggregate_calls(mut calls: Vec<ProviderCall>) -> UsageData {
             if let Some(server) =
                 tool.strip_prefix("mcp__").and_then(|rest| rest.split("__").next())
             {
-                *mcp_map.entry(server.to_string()).or_default() += 1;
+                bump(&mut mcp_map, server.to_string());
             } else {
-                *tool_map.entry(tool.clone()).or_default() += 1;
+                bump(&mut tool_map, tool.clone());
             }
         }
         for command in &call.bash_commands {
-            *shell_map.entry(command.clone()).or_default() += 1;
+            bump(&mut shell_map, command.clone());
         }
     }
 
@@ -1272,23 +1372,23 @@ fn aggregate_calls(mut calls: Vec<ProviderCall>) -> UsageData {
             ProjectUsage { name, path, bucket }
         })
         .collect();
-    projects.sort_by(|a, b| bucket_sort_value(&b.bucket).total_cmp(&bucket_sort_value(&a.bucket)));
+    sort_by_bucket_desc(&mut projects, |p| &p.bucket);
 
     let mut sessions: Vec<_> =
         session_map.into_values().map(SessionUsageAccumulator::into_usage).collect();
-    sessions.sort_by(|a, b| bucket_sort_value(&b.bucket).total_cmp(&bucket_sort_value(&a.bucket)));
+    sort_by_bucket_desc(&mut sessions, |s| &s.bucket);
 
     let mut models: Vec<_> = model_map
         .into_iter()
         .map(|(model, bucket)| ModelUsage { model, bucket })
         .collect();
-    models.sort_by(|a, b| bucket_sort_value(&b.bucket).total_cmp(&bucket_sort_value(&a.bucket)));
+    sort_by_bucket_desc(&mut models, |m| &m.bucket);
 
     let mut branches: Vec<_> = branch_map
         .into_iter()
         .map(|(branch, bucket)| BranchUsage { branch, bucket })
         .collect();
-    branches.sort_by(|a, b| bucket_sort_value(&b.bucket).total_cmp(&bucket_sort_value(&a.bucket)));
+    sort_by_bucket_desc(&mut branches, |b| &b.bucket);
 
     let tools = sorted_named_usage(tool_map);
     let mcp_servers = sorted_named_usage(mcp_map);
@@ -1311,6 +1411,8 @@ fn aggregate_calls(mut calls: Vec<ProviderCall>) -> UsageData {
         grand_total.total()
     );
 
+    let model_project_counts = build_model_project_counts(&calls);
+
     UsageData {
         daily,
         weekly: {
@@ -1327,7 +1429,32 @@ fn aggregate_calls(mut calls: Vec<ProviderCall>) -> UsageData {
         mcp_servers,
         shell_commands,
         branches,
+        model_project_counts,
     }
+}
+
+/// Build the `model -> [(project, count), ...]` index used by the
+/// burndown render path's "top N projects for model X" lookup. Sorted
+/// desc by count so the render call is `take(n)` with no extra work.
+fn build_model_project_counts(
+    calls: &[ProviderCall],
+) -> HashMap<String, Vec<(String, usize)>> {
+    let mut by_model: HashMap<String, HashMap<String, usize>> = HashMap::new();
+    for call in calls {
+        *by_model
+            .entry(call.model.clone())
+            .or_default()
+            .entry(call.project.clone())
+            .or_insert(0) += 1;
+    }
+    by_model
+        .into_iter()
+        .map(|(model, projs)| {
+            let mut v: Vec<(String, usize)> = projs.into_iter().collect();
+            v.sort_by(|a, b| b.1.cmp(&a.1));
+            (model, v)
+        })
+        .collect()
 }
 
 /// Filter an already-parsed `UsageData` by exact-match cross-filters.
@@ -1374,6 +1501,12 @@ struct ActivityAccumulator {
     one_shot_turns: usize,
 }
 
+// TODO(perf): precompute analyze_turns once on the unfiltered call set
+// and thread it into aggregate_calls so filter_usage_data chip pivots
+// don't re-run the per-session timeline walk. Requires a stable
+// per-call key; ProviderCall has no id field today and adding one bumps
+// the bincode blob format. Deferred — the win is bounded by session
+// length and the TUI hot path is sub-frame already.
 fn analyze_turns(calls: &[ProviderCall]) -> HashMap<usize, TurnAnalysis> {
     let mut sessions: HashMap<String, Vec<usize>> = HashMap::new();
     for (idx, call) in calls.iter().enumerate() {
@@ -2028,7 +2161,7 @@ fn date_range_for_period(period: &UsagePeriod) -> Option<(DateTime<Local>, DateT
         UsagePeriod::SpecificMonth(anchor) => {
             let first =
                 NaiveDate::from_ymd_opt(anchor.year(), anchor.month(), 1).unwrap_or(*anchor);
-            let last = last_day_of_month(anchor.year(), anchor.month());
+            let last = last_day_of_month(anchor.year(), anchor.month()).unwrap_or(*anchor);
             Some((start_of_day(first), end_of_day(last)))
         }
         UsagePeriod::SpecificQuarter(year, q) => {
@@ -2043,34 +2176,90 @@ fn date_range_for_period(period: &UsagePeriod) -> Option<(DateTime<Local>, DateT
     }
 }
 
-/// Last calendar day of a `(year, month)`. Falls back to day 28 only
-/// for genuinely impossible chrono inputs (year out of range).
-pub fn last_day_of_month(year: i32, month: u32) -> NaiveDate {
+/// Last calendar day of a `(year, month)`. Returns `None` if the inputs
+/// are out of chrono's representable range (year < -262_144 or > 262_143,
+/// month not in 1..=12). Previously this silently returned the 28th,
+/// which produced wrong-on-purpose results for callers that didn't
+/// notice — `Option` makes the failure explicit.
+pub fn last_day_of_month(year: i32, month: u32) -> Option<NaiveDate> {
+    // Reject obviously-invalid months up front so month=0 doesn't silently
+    // roll into the previous December (which the next-month-minus-one
+    // trick below would otherwise compute).
+    if !(1..=12).contains(&month) {
+        return None;
+    }
     let (next_year, next_month) = if month == 12 {
         (year + 1, 1)
     } else {
         (year, month + 1)
     };
-    let next_first = NaiveDate::from_ymd_opt(next_year, next_month, 1)
-        .unwrap_or_else(|| NaiveDate::from_ymd_opt(year, month, 28).expect("valid 28th"));
-    next_first - Duration::days(1)
+    let next_first = NaiveDate::from_ymd_opt(next_year, next_month, 1)?;
+    Some(next_first - Duration::days(1))
 }
 
 /// First and last calendar days of `quarter` (1..=4) within `year`.
-/// Out-of-range quarters are clamped to Q1.
+/// Out-of-range quarters are clamped to the nearest valid quarter
+/// (`quarter < 1 -> Q1`, `quarter > 4 -> Q4`) via `clamp(1, 4)`.
 pub fn quarter_bounds(year: i32, quarter: u8) -> (NaiveDate, NaiveDate) {
     let q = quarter.clamp(1, 4);
     let start_month = (u32::from(q) - 1) * 3 + 1;
     let end_month = start_month + 2;
     let first = NaiveDate::from_ymd_opt(year, start_month, 1)
         .unwrap_or_else(|| NaiveDate::from_ymd_opt(year, 1, 1).expect("valid Jan 1"));
-    let last = last_day_of_month(year, end_month);
+    // Quarter end-month is always 3, 6, 9, or 12 — last_day_of_month can
+    // only fail for an out-of-range `year`. In that case fall back to
+    // `first` so the bounds collapse to a single day rather than panic.
+    let last = last_day_of_month(year, end_month).unwrap_or(first);
     (first, last)
 }
 
 /// Quarter (1..=4) containing `date`.
 pub fn quarter_of(date: NaiveDate) -> u8 {
     ((date.month0() / 3) + 1) as u8
+}
+
+/// First day of the calendar month containing `date`. Falls back to
+/// `date` itself if chrono rejects the (year, month, 1) tuple, which is
+/// only possible at the extreme edges of the representable range.
+pub fn first_of_month(date: NaiveDate) -> NaiveDate {
+    NaiveDate::from_ymd_opt(date.year(), date.month(), 1).unwrap_or(date)
+}
+
+/// First day of the previous calendar month, wrapping the year at Jan.
+pub fn previous_month_first(anchor: NaiveDate) -> NaiveDate {
+    let (y, m) = if anchor.month() == 1 {
+        (anchor.year() - 1, 12)
+    } else {
+        (anchor.year(), anchor.month() - 1)
+    };
+    NaiveDate::from_ymd_opt(y, m, 1).unwrap_or(anchor)
+}
+
+/// First day of the next calendar month, wrapping the year at Dec.
+pub fn next_month_first(anchor: NaiveDate) -> NaiveDate {
+    let (y, m) = if anchor.month() == 12 {
+        (anchor.year() + 1, 1)
+    } else {
+        (anchor.year(), anchor.month() + 1)
+    };
+    NaiveDate::from_ymd_opt(y, m, 1).unwrap_or(anchor)
+}
+
+/// `(year, quarter)` of the previous quarter, wrapping into the prior
+/// year at Q1.
+pub fn previous_quarter(year: i32, q: u8) -> (i32, u8) {
+    if q <= 1 { (year - 1, 4) } else { (year, q - 1) }
+}
+
+/// `(year, quarter)` of the next quarter, wrapping into the next year
+/// at Q4.
+pub fn next_quarter(year: i32, q: u8) -> (i32, u8) {
+    if q >= 4 { (year + 1, 1) } else { (year, q + 1) }
+}
+
+/// `(year, quarter)` containing `date`.
+pub fn current_quarter(date: NaiveDate) -> (i32, u8) {
+    (date.year(), quarter_of(date))
 }
 
 fn day_bounds(date: NaiveDate) -> (DateTime<Local>, DateTime<Local>) {
@@ -2255,6 +2444,40 @@ fn bucket_sort_value(bucket: &TokenBucket) -> f64 {
     bucket.cost_usd.unwrap_or(bucket.total() as f64)
 }
 
+/// Sort `rows` in-place by bucket weight (descending), where each row's
+/// bucket is extracted via `key`. Centralises the cost-then-tokens
+/// ranking used across every usage panel (projects, sessions, models,
+/// branches, ...). The closure return type is `&TokenBucket` so callers
+/// can point at a field without cloning.
+fn sort_by_bucket_desc<T, F>(rows: &mut Vec<T>, key: F)
+where
+    F: Fn(&T) -> &TokenBucket,
+{
+    rows.sort_by(|a, b| {
+        bucket_sort_value(key(b)).total_cmp(&bucket_sort_value(key(a)))
+    });
+}
+
+/// Merge `bucket` into the entry at `key` in a `String -> TokenBucket`
+/// map, defaulting to an empty bucket when the key is absent. Centralises
+/// the model_map / branch_map merge pattern used inside `aggregate_calls`.
+fn add_bucket<K>(map: &mut HashMap<K, TokenBucket>, key: K, bucket: &TokenBucket)
+where
+    K: std::hash::Hash + Eq,
+{
+    map.entry(key).or_default().merge(bucket);
+}
+
+/// Increment the count at `key` in a `String -> usize` map, defaulting to
+/// zero when the key is absent. Centralises the tool/mcp/shell counter
+/// pattern used inside `aggregate_calls`.
+fn bump<K>(map: &mut HashMap<K, usize>, key: K)
+where
+    K: std::hash::Hash + Eq,
+{
+    *map.entry(key).or_default() += 1;
+}
+
 fn estimate_cost_usd(
     model: &str,
     input_tokens: u64,
@@ -2361,6 +2584,43 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
+    #[test]
+    fn last_day_of_month_handles_leap_years() {
+        // Leap year: Feb has 29 days.
+        assert_eq!(
+            last_day_of_month(2024, 2),
+            Some(NaiveDate::from_ymd_opt(2024, 2, 29).unwrap())
+        );
+        // Non-leap year: Feb has 28 days.
+        assert_eq!(
+            last_day_of_month(2023, 2),
+            Some(NaiveDate::from_ymd_opt(2023, 2, 28).unwrap())
+        );
+        // Century non-leap (divisible by 100 but not 400).
+        assert_eq!(
+            last_day_of_month(1900, 2),
+            Some(NaiveDate::from_ymd_opt(1900, 2, 28).unwrap())
+        );
+        // Quad-century leap (divisible by 400).
+        assert_eq!(
+            last_day_of_month(2000, 2),
+            Some(NaiveDate::from_ymd_opt(2000, 2, 29).unwrap())
+        );
+        // 31-day month.
+        assert_eq!(
+            last_day_of_month(2024, 1),
+            Some(NaiveDate::from_ymd_opt(2024, 1, 31).unwrap())
+        );
+        // December rollover into next year.
+        assert_eq!(
+            last_day_of_month(2024, 12),
+            Some(NaiveDate::from_ymd_opt(2024, 12, 31).unwrap())
+        );
+        // Out-of-range month returns None instead of silently wrong data.
+        assert_eq!(last_day_of_month(2024, 13), None);
+        assert_eq!(last_day_of_month(2024, 0), None);
+    }
+
     fn write_file(path: &Path, content: &str) {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).unwrap();
@@ -2375,6 +2635,10 @@ mod tests {
         }
     }
 
+    /// Test-only convenience that wraps the shared `ProviderCallBuilder`
+    /// with the parameter shape this module's parser tests expect.
+    /// Picks gpt-5 for codex and claude-sonnet-4-5 otherwise; sets
+    /// output_tokens to a fixed 10 (the tests rely on that constant).
     fn provider_call(
         provider: &str,
         session_id: &str,
@@ -2384,28 +2648,18 @@ mod tests {
         bash_commands: &[&str],
         input_tokens: u64,
     ) -> ProviderCall {
-        ProviderCall {
-            provider: provider.to_string(),
-            model: if provider == "codex" {
-                "gpt-5".to_string()
-            } else {
-                "claude-sonnet-4-5".to_string()
-            },
-            session_id: session_id.to_string(),
-            project: "alpha".to_string(),
-            project_path: "/work/alpha".to_string(),
-            timestamp: parse_timestamp(timestamp).unwrap(),
-            input_tokens,
-            cache_creation_tokens: 0,
-            cache_read_tokens: 0,
-            output_tokens: 10,
-            reasoning_tokens: 0,
-            cost_usd: None,
-            tools: tools.iter().map(|tool| tool.to_string()).collect(),
-            bash_commands: bash_commands.iter().map(|command| command.to_string()).collect(),
-            user_message: message.to_string(),
-            branch: None,
-        }
+        let model = if provider == "codex" { "gpt-5" } else { "claude-sonnet-4-5" };
+        crate::test_support::ProviderCallBuilder::new()
+            .with_provider(provider)
+            .with_model(model)
+            .with_session(session_id)
+            .with_timestamp(parse_timestamp(timestamp).unwrap())
+            .with_input_tokens(input_tokens)
+            .with_output_tokens(10)
+            .with_tools(tools)
+            .with_bash(bash_commands)
+            .with_user_message(message)
+            .build()
     }
 
     #[test]

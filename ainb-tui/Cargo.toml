@@ -83,6 +83,10 @@ nucleo-matcher = "0.3"
 default = []
 visual-debug = []  # Enable live terminal during tests
 vt100-tests = []   # Enable vt100 screen verification
+# Exposes shared test fixtures (test_support module) so integration
+# tests in tests/ can use them. Always enabled under #[cfg(test)] for
+# unit tests; integration tests must opt in via this feature.
+test-support = []
 
 [dev-dependencies]
 mockall = "0.12"
