@@ -2522,6 +2522,10 @@ mod tests {
         }
     }
 
+    /// Test-only convenience that wraps the shared `ProviderCallBuilder`
+    /// with the parameter shape this module's parser tests expect.
+    /// Picks gpt-5 for codex and claude-sonnet-4-5 otherwise; sets
+    /// output_tokens to a fixed 10 (the tests rely on that constant).
     fn provider_call(
         provider: &str,
         session_id: &str,
@@ -2531,28 +2535,18 @@ mod tests {
         bash_commands: &[&str],
         input_tokens: u64,
     ) -> ProviderCall {
-        ProviderCall {
-            provider: provider.to_string(),
-            model: if provider == "codex" {
-                "gpt-5".to_string()
-            } else {
-                "claude-sonnet-4-5".to_string()
-            },
-            session_id: session_id.to_string(),
-            project: "alpha".to_string(),
-            project_path: "/work/alpha".to_string(),
-            timestamp: parse_timestamp(timestamp).unwrap(),
-            input_tokens,
-            cache_creation_tokens: 0,
-            cache_read_tokens: 0,
-            output_tokens: 10,
-            reasoning_tokens: 0,
-            cost_usd: None,
-            tools: tools.iter().map(|tool| tool.to_string()).collect(),
-            bash_commands: bash_commands.iter().map(|command| command.to_string()).collect(),
-            user_message: message.to_string(),
-            branch: None,
-        }
+        let model = if provider == "codex" { "gpt-5" } else { "claude-sonnet-4-5" };
+        crate::test_support::ProviderCallBuilder::new()
+            .with_provider(provider)
+            .with_model(model)
+            .with_session(session_id)
+            .with_timestamp(parse_timestamp(timestamp).unwrap())
+            .with_input_tokens(input_tokens)
+            .with_output_tokens(10)
+            .with_tools(tools)
+            .with_bash(bash_commands)
+            .with_user_message(message)
+            .build()
     }
 
     #[test]

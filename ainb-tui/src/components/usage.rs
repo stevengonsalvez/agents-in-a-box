@@ -4055,24 +4055,18 @@ mod cli_parity_tests {
     use chrono::Local;
 
     fn call(project: &str, model: &str, session: &str) -> ProviderCall {
-        ProviderCall {
-            provider: "claude".into(),
-            model: model.into(),
-            session_id: session.into(),
-            project: project.into(),
-            project_path: format!("/work/{project}"),
-            timestamp: Local::now(),
-            input_tokens: 100,
-            cache_creation_tokens: 0,
-            cache_read_tokens: 0,
-            output_tokens: 50,
-            reasoning_tokens: 0,
-            cost_usd: Some(1.0),
-            tools: vec!["Edit".into()],
-            bash_commands: vec![],
-            user_message: "tidy".into(),
-            branch: None,
-        }
+        crate::test_support::ProviderCallBuilder::new()
+            .with_model(model)
+            .with_session(session)
+            .with_project(project)
+            .with_project_path(format!("/work/{project}"))
+            .with_timestamp(Local::now())
+            .with_input_tokens(100)
+            .with_output_tokens(50)
+            .with_cost(1.0)
+            .with_tools(&["Edit"])
+            .with_user_message("tidy")
+            .build()
     }
 
     fn data_with_calls(calls: Vec<ProviderCall>) -> UsageData {

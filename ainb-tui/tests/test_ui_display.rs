@@ -3,14 +3,32 @@
 use ainb::app::{App, state::View};
 use ainb::components::LayoutComponent;
 use ainb::components::usage::{UsageProvider, UsageTab};
-use ainb::models::{
-    ActivityCategory, ActivityUsage, ModelUsage, NamedUsage, ProjectUsage, ProviderCall,
-    TokenBucket, UsageData, UsagePeriod,
-};
-use chrono::{Local, TimeZone};
+use ainb::models::{NamedUsage, UsageData, UsagePeriod};
 use ratatui::{Terminal, backend::TestBackend};
 
+#[cfg(feature = "test-support")]
 fn sample_usage_data() -> UsageData {
+    // Augment the shared fixture with the mcp_servers entry this test
+    // file's UI assertions look for. The shared fixture stays minimal so
+    // unit tests don't depend on mcp surface.
+    let mut data = ainb::test_support::sample_usage_data();
+    data.mcp_servers = vec![NamedUsage {
+        name: "github".to_string(),
+        calls: 1,
+    }];
+    data
+}
+
+// Fallback for cargo test invocations without --features test-support.
+// Mirrors the prior inline fixture exactly so existing test runs are
+// unaffected when the feature is off.
+#[cfg(not(feature = "test-support"))]
+fn sample_usage_data() -> UsageData {
+    use ainb::models::{
+        ActivityCategory, ActivityUsage, ModelUsage, ProjectUsage, ProviderCall, SessionUsage,
+        TokenBucket,
+    };
+    use chrono::{Local, TimeZone};
     let bucket = TokenBucket {
         input_tokens: 100,
         output_tokens: 50,
@@ -53,7 +71,7 @@ fn sample_usage_data() -> UsageData {
             bucket: bucket.clone(),
         }],
         grand_total: bucket.clone(),
-        sessions: vec![ainb::models::SessionUsage {
+        sessions: vec![SessionUsage {
             provider: "claude".to_string(),
             project: "agents-in-a-box".to_string(),
             session_id: "s1".to_string(),

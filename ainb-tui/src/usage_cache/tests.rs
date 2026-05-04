@@ -28,25 +28,14 @@ fn write_file(dir: &TempDir, name: &str, contents: &[u8]) -> PathBuf {
 }
 
 fn synth_call(seed: &str) -> ProviderCall {
-    use chrono::TimeZone;
-    ProviderCall {
-        provider: "claude".into(),
-        model: "test-model".into(),
-        session_id: format!("session-{seed}"),
-        project: "p".into(),
-        project_path: "/tmp/p".into(),
-        timestamp: chrono::Local.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap(),
-        input_tokens: 1,
-        cache_creation_tokens: 0,
-        cache_read_tokens: 0,
-        output_tokens: 1,
-        reasoning_tokens: 0,
-        cost_usd: None,
-        tools: Vec::new(),
-        bash_commands: Vec::new(),
-        user_message: String::new(),
-        branch: None,
-    }
+    crate::test_support::ProviderCallBuilder::new()
+        .with_model("test-model")
+        .with_session(format!("session-{seed}"))
+        .with_project("p")
+        .with_project_path("/tmp/p")
+        .with_input_tokens(1)
+        .with_output_tokens(1)
+        .build()
 }
 
 #[test]
