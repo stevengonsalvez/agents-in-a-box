@@ -1483,6 +1483,12 @@ fn render_zoom_panel_body(
     }
 }
 
+// TODO(refactor): the 5 render_zoom_* fns below all build a header,
+// truncate to area.height-2 visible rows, build per-row cells, and
+// hand a Table back to the frame. Extract a `render_zoom_table` helper
+// taking `ZoomTableSpec { headers, widths, rows }` once snapshot tests
+// exist to assert visual identity — without them a refactor risks
+// silent column-spacing/header-style drift.
 fn render_zoom_by_project(
     frame: &mut Frame,
     area: Rect,
