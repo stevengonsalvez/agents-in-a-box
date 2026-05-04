@@ -843,8 +843,12 @@ fn sessions_csv(sessions: &[SessionUsage]) -> String {
             csv_cell(&session.provider),
             csv_cell(&session.project),
             csv_cell(&session.session_id),
-            session.first_timestamp.to_rfc3339(),
-            session.last_timestamp.to_rfc3339(),
+            // Emit RFC3339 in the user's local offset. The instant is
+            // the same as the Utc-stored value; rendering with the
+            // local offset matches what the TUI shows so a CSV row
+            // round-trips visibly to the user's clock.
+            session.first_timestamp.with_timezone(&chrono::Local).to_rfc3339(),
+            session.last_timestamp.with_timezone(&chrono::Local).to_rfc3339(),
             session.bucket.call_count,
             session.bucket.total(),
             session.bucket.cost_usd.unwrap_or(0.0)

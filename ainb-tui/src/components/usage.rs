@@ -1594,7 +1594,10 @@ fn render_zoom_top_sessions(
                 format_tokens_short(b.total()),
                 b.call_count.to_string(),
                 dur_str,
-                sess.last_timestamp.format("%Y-%m-%d").to_string(),
+                sess.last_timestamp
+                    .with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d")
+                    .to_string(),
             ])
             .style(Style::default().fg(SOFT_WHITE))
         })
@@ -1849,11 +1852,17 @@ fn build_detail_lines(
                 lines.push(kv("Provider", s.provider.clone()));
                 lines.push(kv(
                     "First seen",
-                    s.first_timestamp.format("%Y-%m-%d %H:%M").to_string(),
+                    s.first_timestamp
+                        .with_timezone(&chrono::Local)
+                        .format("%Y-%m-%d %H:%M")
+                        .to_string(),
                 ));
                 lines.push(kv(
                     "Last seen",
-                    s.last_timestamp.format("%Y-%m-%d %H:%M").to_string(),
+                    s.last_timestamp
+                        .with_timezone(&chrono::Local)
+                        .format("%Y-%m-%d %H:%M")
+                        .to_string(),
                 ));
                 lines.push(kv("Cost", format_cost(s.bucket.cost_usd)));
                 lines.push(kv("Tokens", format_tokens_short(s.bucket.total())));
@@ -1949,8 +1958,8 @@ fn project_seen_window(data: &UsageData, project_name: &str) -> (String, String)
         }
     }
     (
-        min_ts.format("%Y-%m-%d").to_string(),
-        max_ts.format("%Y-%m-%d").to_string(),
+        min_ts.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string(),
+        max_ts.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string(),
     )
 }
 
@@ -3726,7 +3735,7 @@ mod cross_filter_tests {
     use crate::models::usage::{
         ActivityCategory, ActivityUsage, ModelUsage, ProjectUsage, SessionUsage, TokenBucket,
     };
-    use chrono::Local;
+    use chrono::Utc;
 
     fn bucket(call_count: usize) -> TokenBucket {
         TokenBucket {
@@ -3746,7 +3755,7 @@ mod cross_filter_tests {
     /// activities and two sessions — enough surface for the
     /// commit_focused_row dispatch table.
     fn fixture() -> UsageData {
-        let now = Local::now();
+        let now = Utc::now();
         UsageData {
             daily: vec![],
             weekly: vec![],
@@ -3868,7 +3877,7 @@ mod cross_filter_tests {
         // session row's project on commit_focused_row. The first
         // commit must attach the alpha project chip; a subsequent
         // pop+commit on a beta-owned row must attach beta.
-        let now = Local::now();
+        let now = Utc::now();
         let session_alpha = SessionUsage {
             provider: "claude".into(),
             project: "alpha".into(),
@@ -4127,7 +4136,7 @@ mod cli_parity_tests {
         ActivityCategory, ActivityUsage, ModelUsage, ProjectUsage, ProviderCall, SessionUsage,
         TokenBucket, UsageData, UsageFilters, filter_usage_data,
     };
-    use chrono::Local;
+    use chrono::Utc;
 
     fn call(project: &str, model: &str, session: &str) -> ProviderCall {
         crate::test_support::ProviderCallBuilder::new()
@@ -4135,7 +4144,7 @@ mod cli_parity_tests {
             .with_session(session)
             .with_project(project)
             .with_project_path(format!("/work/{project}"))
-            .with_timestamp(Local::now())
+            .with_timestamp(Utc::now())
             .with_input_tokens(100)
             .with_output_tokens(50)
             .with_cost(1.0)

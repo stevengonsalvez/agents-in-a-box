@@ -333,13 +333,22 @@ const fn expected_layout_len() -> usize {
     // Vec<T>:                                  u64 len + items.
     // Option<T> (None):                        1 byte tag.
     // Option<T> (Some):                        1 byte tag + payload.
-    // chrono::DateTime<Local> serializes as a tagged enum + i64 secs +
-    // u32 nanos pair (via serde impl in chrono); seed value covers it.
+    // chrono::DateTime<Utc> serializes as i64 secs + u32 nanos pair
+    // (via serde impl in chrono); seed value covers it. Local previously
+    // serialized as a tagged enum (+5 bytes for the offset variant tag
+    // and payload) — the V3 migration to Utc shaved those bytes off.
     //
     // Rather than re-deriving the formula on every change, we hard-code
-    // the value observed for `synth_call("layout-tripwire")`. If chrono
-    // or bincode bump their encoding, update this constant intentionally.
+    // the value observed for `synth_call("layout-tripwire")` (verified
+    // by running with the old constant once and reading the actual size
+    // from the failure message — see feedback_dont_guess_test_constants).
+    // If chrono or bincode bump their encoding, update this constant
+    // intentionally.
     //
-    // History: 184 (V1) -> 185 (V2: +Option<String> branch field, None tag).
-    185
+    // History:
+    //   184 (V1) — original 14-field layout with Local timestamp.
+    //   185 (V2) — +Option<String> branch field (None tag).
+    //   180     — timestamp Utc instead of Local (-5 bytes).
+    //   188 (V3) — +id: u64 from (path, offset) (+8 bytes).
+    188
 }

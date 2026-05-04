@@ -1,7 +1,7 @@
 // ABOUTME: Token usage data model and local session parsers for usage analytics.
 // Parses Claude and Codex JSONL histories into reusable aggregates for TUI and CLI views.
 
-use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, TimeZone};
+use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -321,20 +321,30 @@ impl TokenBucket {
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderCall {
+    /// Stable per-call identifier: `blake3(format!("{path}:{offset}"))`
+    /// truncated to a `u64` (first 8 little-endian bytes of the digest).
+    /// `path` is the source JSONL file, `offset` is the byte position of
+    /// the assistant line that produced this call. The combination is
+    /// unique per call across a parse run and stable across cache hits
+    /// (the parser feeds the same `(path, offset)` tuple every time the
+    /// same line is rewalked), which makes `analyze_turns` results safe
+    /// to memoise on the unfiltered call set and look up by id during
+    /// chip-pivot re-aggregation in `filter_usage_data`.
+    ///
+    /// `blake3` is reused here rather than introducing a new hashing
+    /// dependency just for an id; the cryptographic strength is overkill
+    /// but the API is already in scope (see `usage_cache::fingerprint`).
+    pub id: u64,
     pub provider: String,
     pub model: String,
     pub session_id: String,
     pub project: String,
     pub project_path: String,
-    // TODO(refactor): migrate this to DateTime<Utc>. The Local variant
-    // bakes a timezone offset into the cached blob, so a user moving
-    // across timezones (or DST transition) sees inconsistent
-    // serialised representations between cache hit and full reparse.
-    // Migration bumps BLOB_FORMAT_BINCODE_CURRENT to 3 and forces
-    // every constructor + render site to convert at the boundary.
-    // Deferred — V2 was bumped to 2 recently for branch attribution
-    // and another bump is best paired with the analyze_turns id work.
-    pub timestamp: DateTime<Local>,
+    /// Stored in UTC so cached blobs are timezone-independent. Render
+    /// sites convert to local at the display boundary via
+    /// `.with_timezone(&Local)` (see `components/usage.rs`,
+    /// `cli/usage.rs`).
+    pub timestamp: DateTime<Utc>,
     pub input_tokens: u64,
     pub cache_creation_tokens: u64,
     pub cache_read_tokens: u64,
@@ -399,8 +409,8 @@ pub struct SessionUsage {
     pub provider: String,
     pub project: String,
     pub session_id: String,
-    pub first_timestamp: DateTime<Local>,
-    pub last_timestamp: DateTime<Local>,
+    pub first_timestamp: DateTime<Utc>,
+    pub last_timestamp: DateTime<Utc>,
     pub bucket: TokenBucket,
 }
 
@@ -686,6 +696,9 @@ pub fn parse_usage_for_with_roots_and_cache(
         .into_iter()
         .filter(|call| {
             range.as_ref().map_or(true, |(start, end)| {
+                // Period bounds and call timestamps both live in Utc
+                // (period bounds are anchored at local-midnight and
+                // converted via `start_of_day` / `end_of_day`).
                 call.timestamp >= *start && call.timestamp <= *end
             })
         })
@@ -809,10 +822,23 @@ fn parse_claude_source_full(path: &Path, project: &str, project_path: &str) -> P
 
     let mut calls = Vec::new();
     let mut current_user_message = String::new();
-    for line in content.lines() {
-        if let Some(call) =
-            parse_claude_line(line, path, project, project_path, &mut current_user_message)
-        {
+    // Walk lines manually rather than using `content.lines()` so each
+    // call carries the byte offset of its source line in the file, which
+    // feeds the stable `ProviderCall.id`. `split_inclusive` keeps the
+    // newline byte counted in the offset advance.
+    let mut offset: u64 = 0;
+    for chunk in content.split_inclusive('\n') {
+        let line_offset = offset;
+        offset += chunk.len() as u64;
+        let line = chunk.strip_suffix('\n').unwrap_or(chunk);
+        if let Some(call) = parse_claude_line(
+            line,
+            path,
+            project,
+            project_path,
+            &mut current_user_message,
+            line_offset,
+        ) {
             calls.push(call);
         }
     }
@@ -858,27 +884,44 @@ fn parse_claude_source_append(
             end_offset: from_offset,
         };
     }
-    let reader = BufReader::new(file);
+    let mut reader = BufReader::new(file);
     let mut calls = existing.to_vec();
     let mut current_user_message = current_user_message;
-    for line in reader.lines() {
-        // On any I/O or UTF-8 error from BufReader::lines we cannot
-        // safely advance the cached end_offset — the next run would
-        // skip past the unread tail and silently lose data. Roll the
-        // cursor back to from_offset so the next scan retries the
-        // append. Mirror the Full path's all-or-nothing semantics.
-        let Ok(line) = line else {
-            return ParseResult {
-                calls: existing.to_vec(),
-                end_offset: from_offset,
-            };
+    // Track the running byte offset so each call's stable id matches
+    // the full-parse path. `read_line` advances exactly the bytes it
+    // consumed (including the trailing newline), so `running_offset`
+    // is the offset of the *next* line at any iteration tip — the
+    // current line's offset is captured before the read.
+    let mut running_offset = from_offset;
+    let mut buf = String::new();
+    loop {
+        buf.clear();
+        let line_offset = running_offset;
+        let read = match reader.read_line(&mut buf) {
+            Ok(0) => break, // EOF
+            Ok(n) => n,
+            Err(_) => {
+                // On any I/O or UTF-8 error we cannot safely advance
+                // the cached end_offset — the next run would skip past
+                // the unread tail and silently lose data. Roll the
+                // cursor back to from_offset so the next scan retries
+                // the append. Mirror the Full path's all-or-nothing
+                // semantics.
+                return ParseResult {
+                    calls: existing.to_vec(),
+                    end_offset: from_offset,
+                };
+            }
         };
+        running_offset += read as u64;
+        let line = buf.strip_suffix('\n').unwrap_or(&buf);
         if let Some(call) = parse_claude_line(
-            &line,
+            line,
             path,
             project,
             project_path,
             &mut current_user_message,
+            line_offset,
         ) {
             calls.push(call);
         }
@@ -933,12 +976,17 @@ fn recover_user_message_before(
 /// Parse a single Claude JSONL line. Returns `Some(call)` for assistant
 /// lines that carry usage data; mutates `current_user_message` when a
 /// user line is encountered. None for unrecognized / unparseable lines.
+///
+/// `line_offset` is the byte position of `line` in `path` and feeds the
+/// stable `ProviderCall.id` derivation. The full and append parsers
+/// track the running offset and pass it in.
 fn parse_claude_line(
     line: &str,
     path: &Path,
     project: &str,
     project_path: &str,
     current_user_message: &mut String,
+    line_offset: u64,
 ) -> Option<ProviderCall> {
     let parsed: ClaudeLine = serde_json::from_str(line).ok()?;
     match parsed.msg_type.as_deref() {
@@ -970,6 +1018,7 @@ fn parse_claude_line(
             );
 
             Some(ProviderCall {
+                id: provider_call_id(path, line_offset),
                 provider: "claude".to_string(),
                 model,
                 session_id: parsed.session_id.unwrap_or_else(|| {
@@ -1088,7 +1137,14 @@ fn parse_codex_source(path: &Path) -> Vec<ProviderCall> {
     let mut pending_tools: Vec<String> = Vec::new();
     let mut pending_user_message = String::new();
 
-    for line in content.lines() {
+    // Mirror the Claude parser's offset-tracking so each codex call
+    // carries a stable `(path, offset)` id. `split_inclusive` ensures
+    // the trailing newline is counted in the per-line advance.
+    let mut offset: u64 = 0;
+    for chunk in content.split_inclusive('\n') {
+        let line_offset = offset;
+        offset += chunk.len() as u64;
+        let line = chunk.strip_suffix('\n').unwrap_or(chunk);
         let entry: CodexEntry = match serde_json::from_str(line) {
             Ok(entry) => entry,
             Err(_) => continue,
@@ -1231,6 +1287,7 @@ fn parse_codex_source(path: &Path) -> Vec<ProviderCall> {
         );
 
         calls.push(ProviderCall {
+            id: provider_call_id(path, line_offset),
             provider: "codex".to_string(),
             model,
             session_id: session_id.clone(),
@@ -1258,16 +1315,46 @@ fn parse_codex_source(path: &Path) -> Vec<ProviderCall> {
 // activities, tools, mcp, shell). Extract a per-dimension Accumulator
 // trait so each one is unit-testable in isolation; orchestrator
 // becomes `for call in calls { for acc in &mut accumulators { acc.ingest(call) } }`.
-// Deferred — the largest single change in this cleanup pass and best
-// landed alongside the analyze_turns precompute (whose stable-id
-// requirement triggers a coordinated bincode bump). See PR-E thread.
-fn aggregate_calls(mut calls: Vec<ProviderCall>) -> UsageData {
+// Deferred — large refactor with no functional delta. The
+// analyze_turns precompute that previously gated this work has landed,
+// so a future pass is unblocked.
+fn aggregate_calls(calls: Vec<ProviderCall>) -> UsageData {
+    aggregate_calls_with_analysis(calls, None)
+}
+
+/// Variant of `aggregate_calls` that accepts an optional precomputed
+/// `analyze_turns` result keyed by `ProviderCall.id`. When `Some`, the
+/// per-call analysis is looked up by id rather than re-walking the
+/// session timeline — this is what `filter_usage_data` uses so chip
+/// pivots don't pay a fresh O(N) timeline scan on each re-aggregate.
+///
+/// Fallback semantics: only `None` triggers a local `analyze_turns`
+/// recompute. `Some(map)` is trusted as authoritative — calls whose id
+/// is missing from the map silently get a default `TurnAnalysis` (zero
+/// retries, zero edits). Callers passing `Some` must ensure every
+/// `call.id` in the unfiltered superset appears in the precompute.
+fn aggregate_calls_with_analysis(
+    mut calls: Vec<ProviderCall>,
+    precomputed_analysis: Option<&HashMap<u64, TurnAnalysis>>,
+) -> UsageData {
     if calls.is_empty() {
         return UsageData::default();
     }
 
     calls.sort_by_key(|call| call.timestamp);
-    let turn_analysis = analyze_turns(&calls);
+    // Local fallback only if the caller didn't precompute. Using the
+    // precomputed map preserves correctness across filtering: a call's
+    // retry count is measured against its *own* session's timeline in
+    // the unfiltered set, not against whatever subset survived the
+    // filter.
+    let local_analysis: HashMap<u64, TurnAnalysis>;
+    let turn_analysis: &HashMap<u64, TurnAnalysis> = match precomputed_analysis {
+        Some(m) => m,
+        None => {
+            local_analysis = analyze_turns(&calls);
+            &local_analysis
+        }
+    };
 
     let mut daily_map: HashMap<NaiveDate, (HashSet<String>, HashSet<String>, TokenBucket)> =
         HashMap::new();
@@ -1280,9 +1367,13 @@ fn aggregate_calls(mut calls: Vec<ProviderCall>) -> UsageData {
     let mut mcp_map: HashMap<String, usize> = HashMap::new();
     let mut shell_map: HashMap<String, usize> = HashMap::new();
 
-    for (idx, call) in calls.iter().enumerate() {
+    for call in &calls {
         let bucket = call.bucket();
-        let day = call.timestamp.date_naive();
+        // Daily bucketing is a user-facing calendar concept: render and
+        // the period bounds both treat "a day" as a local-tz day, so the
+        // grouping key has to be local. The cached call timestamp is
+        // Utc — convert at the boundary.
+        let day = call.timestamp.with_timezone(&Local).date_naive();
         let session_key = format!("{}:{}:{}", call.provider, call.project, call.session_id);
 
         let daily = daily_map.entry(day).or_default();
@@ -1323,7 +1414,7 @@ fn aggregate_calls(mut calls: Vec<ProviderCall>) -> UsageData {
             add_bucket(&mut branch_map, branch.to_string(), &bucket);
         }
 
-        let analysis = turn_analysis.get(&idx).copied().unwrap_or_else(|| TurnAnalysis {
+        let analysis = turn_analysis.get(&call.id).copied().unwrap_or_else(|| TurnAnalysis {
             category: classify_activity(call),
             retries: 0,
             has_edits: has_edit_tool(&call.tools),
@@ -1476,13 +1567,20 @@ pub fn filter_usage_data(data: &UsageData, filters: &UsageFilters) -> UsageData 
     if filters.is_empty() {
         return data.clone();
     }
+    // Precompute analyze_turns once on the *unfiltered* call set so
+    // each call's retry/has_edits classification reflects its actual
+    // session timeline, not the post-filter subset (a retry that
+    // happened before a filtered-out edit still counts). The
+    // aggregate path looks up by ProviderCall.id, which is stable
+    // across the filter-and-sort pipeline.
+    let turn_analysis = analyze_turns(&data.calls);
     let filtered_calls: Vec<ProviderCall> = data
         .calls
         .iter()
         .filter(|call| filters.matches(call, classify_activity(call)))
         .cloned()
         .collect();
-    aggregate_calls(filtered_calls)
+    aggregate_calls_with_analysis(filtered_calls, Some(&turn_analysis))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1501,13 +1599,18 @@ struct ActivityAccumulator {
     one_shot_turns: usize,
 }
 
-// TODO(perf): precompute analyze_turns once on the unfiltered call set
-// and thread it into aggregate_calls so filter_usage_data chip pivots
-// don't re-run the per-session timeline walk. Requires a stable
-// per-call key; ProviderCall has no id field today and adding one bumps
-// the bincode blob format. Deferred — the win is bounded by session
-// length and the TUI hot path is sub-frame already.
-fn analyze_turns(calls: &[ProviderCall]) -> HashMap<usize, TurnAnalysis> {
+/// Walk the per-session timeline and produce a per-call
+/// `TurnAnalysis` keyed by `ProviderCall.id`. Idempotent on the same
+/// inputs — produced once on the unfiltered call set in
+/// `filter_usage_data` and reused across chip-pivot re-aggregates so
+/// each chip switch costs an O(1) lookup per call instead of an O(N)
+/// timeline rewalk over the filtered subset.
+///
+/// Keying on `id` (rather than the previous positional `idx`) means the
+/// map survives sorting and filtering: the precompute can be done on
+/// the unfiltered set and consumed by `aggregate_calls_with_analysis`
+/// after `filter_usage_data` has dropped non-matching calls.
+fn analyze_turns(calls: &[ProviderCall]) -> HashMap<u64, TurnAnalysis> {
     let mut sessions: HashMap<String, Vec<usize>> = HashMap::new();
     for (idx, call) in calls.iter().enumerate() {
         let key = format!("{}:{}:{}", call.provider, call.project, call.session_id);
@@ -1535,7 +1638,7 @@ fn analyze_turns(calls: &[ProviderCall]) -> HashMap<usize, TurnAnalysis> {
             }
 
             analysis.insert(
-                idx,
+                call.id,
                 TurnAnalysis {
                     category: classify_activity(call),
                     retries,
@@ -1754,7 +1857,9 @@ fn plan_cost_for_range(
         .calls
         .iter()
         .filter(|call| {
-            let date = call.timestamp.date_naive();
+            // start/end are NaiveDate in the user's local calendar;
+            // bucket the Utc timestamp into the same calendar.
+            let date = call.timestamp.with_timezone(&Local).date_naive();
             date >= start && date <= end && plan_provider_includes(provider, &call.provider)
         })
         .filter_map(|call| call.cost_usd)
@@ -2072,8 +2177,8 @@ struct SessionUsageAccumulator {
     provider: String,
     project: String,
     session_id: String,
-    first_timestamp: DateTime<Local>,
-    last_timestamp: DateTime<Local>,
+    first_timestamp: DateTime<Utc>,
+    last_timestamp: DateTime<Utc>,
     bucket: TokenBucket,
 }
 
@@ -2136,7 +2241,14 @@ fn project_matches(call: &ProviderCall, include: &[String], exclude: &[String]) 
     true
 }
 
-fn date_range_for_period(period: &UsagePeriod) -> Option<(DateTime<Local>, DateTime<Local>)> {
+/// Returns the inclusive `(start, end)` instants for `period`, expressed
+/// in UTC for direct comparison against `ProviderCall.timestamp`.
+///
+/// The "day" anchor is the user's local calendar day (so "today" still
+/// means the user's wall-clock today across DST and timezone moves) —
+/// `start_of_day` / `end_of_day` build a local-midnight / local-23:59
+/// datetime first, then convert to UTC for the comparison surface.
+fn date_range_for_period(period: &UsagePeriod) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
     let now = Local::now();
     let today = now.date_naive();
 
@@ -2262,20 +2374,28 @@ pub fn current_quarter(date: NaiveDate) -> (i32, u8) {
     (date.year(), quarter_of(date))
 }
 
-fn day_bounds(date: NaiveDate) -> (DateTime<Local>, DateTime<Local>) {
+fn day_bounds(date: NaiveDate) -> (DateTime<Utc>, DateTime<Utc>) {
     (start_of_day(date), end_of_day(date))
 }
 
-fn start_of_day(date: NaiveDate) -> DateTime<Local> {
+/// Local-midnight on `date`, converted to UTC. The local interpretation
+/// is intentional: `date` originates from the user's calendar (`today`
+/// in the period helpers), so the bound has to anchor at local midnight
+/// to match how the user experiences "the day". Conversion to UTC
+/// happens last so the bound is directly comparable to the
+/// Utc-stored `ProviderCall.timestamp`.
+fn start_of_day(date: NaiveDate) -> DateTime<Utc> {
     Local
         .from_local_datetime(&date.and_hms_opt(0, 0, 0).expect("valid start of day"))
         .single()
         .unwrap_or_else(|| {
             Local.from_utc_datetime(&date.and_hms_opt(0, 0, 0).expect("valid start of day"))
         })
+        .with_timezone(&Utc)
 }
 
-fn end_of_day(date: NaiveDate) -> DateTime<Local> {
+/// Local-23:59:59.999 on `date`, converted to UTC. See `start_of_day`.
+fn end_of_day(date: NaiveDate) -> DateTime<Utc> {
     Local
         .from_local_datetime(&date.and_hms_milli_opt(23, 59, 59, 999).expect("valid end of day"))
         .single()
@@ -2284,10 +2404,23 @@ fn end_of_day(date: NaiveDate) -> DateTime<Local> {
                 &date.and_hms_milli_opt(23, 59, 59, 999).expect("valid end of day"),
             )
         })
+        .with_timezone(&Utc)
 }
 
-fn parse_timestamp(timestamp: &str) -> Option<DateTime<Local>> {
-    DateTime::parse_from_rfc3339(timestamp).map(|dt| dt.with_timezone(&Local)).ok()
+fn parse_timestamp(timestamp: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(timestamp).map(|dt| dt.with_timezone(&Utc)).ok()
+}
+
+/// Compute the stable per-call id from `(path, offset)`. See the
+/// doc-comment on `ProviderCall.id` for the rationale (reusing blake3 to
+/// avoid pulling in a separate hashing crate).
+fn provider_call_id(path: &Path, offset: u64) -> u64 {
+    let key = format!("{}:{}", path.to_string_lossy(), offset);
+    let digest = blake3::hash(key.as_bytes());
+    let bytes = digest.as_bytes();
+    u64::from_le_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ])
 }
 
 fn extract_claude_user_text(content: Option<&Value>) -> String {
@@ -2635,10 +2768,22 @@ mod tests {
         }
     }
 
+    /// Per-test-process counter for ProviderCall.id. Tests that key
+    /// off id (analyze_turns, the precompute lookup) need each call to
+    /// have a distinct id; using an atomic counter keeps the helper
+    /// stateless from the caller's perspective.
+    static TEST_CALL_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+    fn next_test_call_id() -> u64 {
+        TEST_CALL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Test-only convenience that wraps the shared `ProviderCallBuilder`
     /// with the parameter shape this module's parser tests expect.
     /// Picks gpt-5 for codex and claude-sonnet-4-5 otherwise; sets
     /// output_tokens to a fixed 10 (the tests rely on that constant).
+    /// Each call gets a fresh `id` from `next_test_call_id` so
+    /// analyze_turns can key the result map without collisions.
     fn provider_call(
         provider: &str,
         session_id: &str,
@@ -2650,6 +2795,7 @@ mod tests {
     ) -> ProviderCall {
         let model = if provider == "codex" { "gpt-5" } else { "claude-sonnet-4-5" };
         crate::test_support::ProviderCallBuilder::new()
+            .with_id(next_test_call_id())
             .with_provider(provider)
             .with_model(model)
             .with_session(session_id)
@@ -3150,9 +3296,12 @@ mod tests {
         ];
 
         let analysis = analyze_turns(&calls);
-        assert_eq!(analysis.get(&0).unwrap().retries, 0);
-        assert!(analysis.get(&0).unwrap().has_edits);
-        assert_eq!(analysis.get(&2).unwrap().retries, 1);
+        // Lookups now key on ProviderCall.id (was positional idx); the
+        // helper assigns a fresh id per call from an atomic counter so
+        // we read the actual id off each call rather than guessing.
+        assert_eq!(analysis.get(&calls[0].id).unwrap().retries, 0);
+        assert!(analysis.get(&calls[0].id).unwrap().has_edits);
+        assert_eq!(analysis.get(&calls[2].id).unwrap().retries, 1);
 
         let data = aggregate_calls(calls);
         let edit_turns: usize = data.activities.iter().map(|activity| activity.edit_turns).sum();
@@ -3260,7 +3409,7 @@ mod tests {
                 session_id: "s1".to_string(),
                 project: "alpha".to_string(),
                 project_path: "/work/alpha".to_string(),
-                timestamp: Local.with_ymd_and_hms(2026, 4, 29, 10, 0, 0).unwrap(),
+                timestamp: Utc.with_ymd_and_hms(2026, 4, 29, 10, 0, 0).unwrap(),
                 cost_usd: Some(70.0),
                 ..provider_call(
                     "claude",
@@ -3278,7 +3427,7 @@ mod tests {
                 session_id: "s2".to_string(),
                 project: "alpha".to_string(),
                 project_path: "/work/alpha".to_string(),
-                timestamp: Local.with_ymd_and_hms(2026, 4, 29, 11, 0, 0).unwrap(),
+                timestamp: Utc.with_ymd_and_hms(2026, 4, 29, 11, 0, 0).unwrap(),
                 cost_usd: Some(30.0),
                 ..provider_call(
                     "codex",
@@ -3310,14 +3459,16 @@ mod tests {
         let week = date_range_for_period(&UsagePeriod::Week).unwrap();
         let thirty = date_range_for_period(&UsagePeriod::ThirtyDays).unwrap();
 
-        assert_eq!(
-            (week.1.date_naive() - week.0.date_naive()).num_days() + 1,
-            7
-        );
-        assert_eq!(
-            (thirty.1.date_naive() - thirty.0.date_naive()).num_days() + 1,
-            30
-        );
+        // Bounds are Utc-stored but anchored at the user's local
+        // midnight; convert back to Local before reading the calendar
+        // day so the assertion is independent of the host offset.
+        let week_start = week.0.with_timezone(&Local).date_naive();
+        let week_end = week.1.with_timezone(&Local).date_naive();
+        let thirty_start = thirty.0.with_timezone(&Local).date_naive();
+        let thirty_end = thirty.1.with_timezone(&Local).date_naive();
+
+        assert_eq!((week_end - week_start).num_days() + 1, 7);
+        assert_eq!((thirty_end - thirty_start).num_days() + 1, 30);
     }
 
     #[test]
@@ -3325,8 +3476,10 @@ mod tests {
         for n in [1u32, 7, 14, 90] {
             let (start, end) =
                 date_range_for_period(&UsagePeriod::LastNDays(n)).unwrap();
+            let start_d = start.with_timezone(&Local).date_naive();
+            let end_d = end.with_timezone(&Local).date_naive();
             assert_eq!(
-                (end.date_naive() - start.date_naive()).num_days() + 1,
+                (end_d - start_d).num_days() + 1,
                 i64::from(n),
                 "n={n}"
             );
@@ -3338,8 +3491,14 @@ mod tests {
         let anchor = NaiveDate::from_ymd_opt(2026, 4, 17).unwrap();
         let (start, end) =
             date_range_for_period(&UsagePeriod::SpecificMonth(anchor)).unwrap();
-        assert_eq!(start.date_naive(), NaiveDate::from_ymd_opt(2026, 4, 1).unwrap());
-        assert_eq!(end.date_naive(), NaiveDate::from_ymd_opt(2026, 4, 30).unwrap());
+        assert_eq!(
+            start.with_timezone(&Local).date_naive(),
+            NaiveDate::from_ymd_opt(2026, 4, 1).unwrap()
+        );
+        assert_eq!(
+            end.with_timezone(&Local).date_naive(),
+            NaiveDate::from_ymd_opt(2026, 4, 30).unwrap()
+        );
     }
 
     #[test]
@@ -3347,8 +3506,10 @@ mod tests {
         for q in 1u8..=4 {
             let (start, end) =
                 date_range_for_period(&UsagePeriod::SpecificQuarter(2026, q)).unwrap();
+            let start_d = start.with_timezone(&Local).date_naive();
+            let end_d = end.with_timezone(&Local).date_naive();
             // Q1 = 90 days (Jan 31 + Feb 28 + Mar 31), Q2 = 91, Q3 = 92, Q4 = 92.
-            let days = (end.date_naive() - start.date_naive()).num_days() + 1;
+            let days = (end_d - start_d).num_days() + 1;
             assert!((90..=92).contains(&days), "q={q} got {days} days");
         }
     }
@@ -3356,8 +3517,9 @@ mod tests {
     #[test]
     fn ytd_period_starts_on_jan_1() {
         let (start, _) = date_range_for_period(&UsagePeriod::YearToDate).unwrap();
-        assert_eq!(start.date_naive().month(), 1);
-        assert_eq!(start.date_naive().day(), 1);
+        let start_d = start.with_timezone(&Local).date_naive();
+        assert_eq!(start_d.month(), 1);
+        assert_eq!(start_d.day(), 1);
     }
 
     #[test]
