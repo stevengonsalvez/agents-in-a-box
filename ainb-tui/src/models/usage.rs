@@ -824,11 +824,11 @@ fn parse_claude_source_full(path: &Path, project: &str, project_path: &str) -> P
 /// concatenated with the new calls, so the cache can persist a complete
 /// blob for the file.
 ///
-/// Trade-off: `current_user_message` state from before `from_offset` is
-/// not restored. New assistant rows that appear *before* the next user
-/// line in the appended tail will get an empty `user_message`. This is
-/// rare in practice and cheap to fix in a follow-up by persisting parser
-/// state alongside the row.
+/// `current_user_message` state from before `from_offset` is restored
+/// by `recover_user_message_before`, which walks the prefix
+/// `[0, from_offset)` for the last `"type":"user"` line. Without that,
+/// every appended assistant turn would lose user_message attribution
+/// across cache hits.
 fn parse_claude_source_append(
     path: &Path,
     project: &str,
