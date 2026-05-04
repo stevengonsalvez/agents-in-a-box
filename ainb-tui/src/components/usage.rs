@@ -3216,8 +3216,11 @@ fn pretty_project_name(name: &str, max_w: usize) -> String {
         // branch portion, keeping the `repo:` prefix intact when we can.
         if let Some((repo, branch)) = pretty.split_once(':') {
             let repo_w = repo.chars().count();
-            // Need room for repo + ':' + at least 1 branch char.
-            if repo_w + 2 <= max_w {
+            // Need room for repo + ':' + at least 2 branch chars. With
+            // branch_w == 1 truncate_string returns just `…`, producing
+            // `repo:…` which conveys nothing — fall through to the
+            // generic shortener instead so we keep the repo name whole.
+            if repo_w + 3 <= max_w {
                 let branch_w = max_w - repo_w - 1;
                 let truncated_branch = truncate_string(branch, branch_w);
                 let combined = format!("{repo}:{truncated_branch}");
