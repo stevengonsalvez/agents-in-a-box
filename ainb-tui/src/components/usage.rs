@@ -1352,6 +1352,11 @@ fn render_zoom_breadcrumb(frame: &mut Frame, area: Rect, panel: UsagePanel) {
 
 /// Score `haystack` against `query` with nucleo-matcher; `None` means
 /// no match. An empty query matches everything (returns `Some(0)`).
+///
+/// When either side carries non-ASCII codepoints we route through
+/// `Utf32String` so multibyte chars match natively. The previous code
+/// fed `Utf32Str::Ascii(haystack.as_bytes())` even when the query had
+/// non-ASCII content, which silently lost matches.
 fn fuzzy_score(matcher: &mut nucleo_matcher::Matcher, query: &str, haystack: &str) -> Option<u32> {
     if query.is_empty() {
         return Some(0);
@@ -1361,10 +1366,15 @@ fn fuzzy_score(matcher: &mut nucleo_matcher::Matcher, query: &str, haystack: &st
         nucleo_matcher::pattern::CaseMatching::Smart,
         nucleo_matcher::pattern::Normalization::Smart,
     );
-    needle.score(
-        nucleo_matcher::Utf32Str::Ascii(haystack.as_bytes()),
-        matcher,
-    )
+    if query.is_ascii() && haystack.is_ascii() {
+        needle.score(
+            nucleo_matcher::Utf32Str::Ascii(haystack.as_bytes()),
+            matcher,
+        )
+    } else {
+        let utf32 = nucleo_matcher::Utf32String::from(haystack);
+        needle.score(utf32.slice(..), matcher)
+    }
 }
 
 /// Filter `rows` by a fuzzy-search query, preserving original order.
@@ -1381,16 +1391,8 @@ where
     rows.iter()
         .filter_map(|row| {
             let label = label(row);
-            // nucleo expects ASCII-friendly bytes; fall back to a
-            // case-insensitive substring check when the label has
-            // non-ASCII chars (rare, but project paths can include
-            // unicode dashes etc.).
-            if !label.is_ascii() {
-                if label.to_lowercase().contains(query.to_lowercase().as_str()) {
-                    return Some(row);
-                }
-                return None;
-            }
+            // fuzzy_score routes non-ASCII through Utf32String, so we
+            // no longer need a substring fallback for unicode labels.
             fuzzy_score(&mut matcher, query, &label).map(|_| row)
         })
         .collect()
