@@ -682,12 +682,10 @@ pub fn parse_usage_for_with_roots_and_cache(
         .into_iter()
         .filter(|call| {
             range.as_ref().map_or(true, |(start, end)| {
-                // Period bounds are still DateTime<Local>; bridge by
-                // converting the Utc-stored call timestamp at the
-                // comparison. Subsequent commit will flip period
-                // bounds to Utc and remove this conversion.
-                let local = call.timestamp.with_timezone(&Local);
-                local >= *start && local <= *end
+                // Period bounds and call timestamps both live in Utc
+                // (period bounds are anchored at local-midnight and
+                // converted via `start_of_day` / `end_of_day`).
+                call.timestamp >= *start && call.timestamp <= *end
             })
         })
         .filter(|call| project_matches(call, &query.include_projects, &query.exclude_projects))
@@ -2143,7 +2141,14 @@ fn project_matches(call: &ProviderCall, include: &[String], exclude: &[String]) 
     true
 }
 
-fn date_range_for_period(period: &UsagePeriod) -> Option<(DateTime<Local>, DateTime<Local>)> {
+/// Returns the inclusive `(start, end)` instants for `period`, expressed
+/// in UTC for direct comparison against `ProviderCall.timestamp`.
+///
+/// The "day" anchor is the user's local calendar day (so "today" still
+/// means the user's wall-clock today across DST and timezone moves) —
+/// `start_of_day` / `end_of_day` build a local-midnight / local-23:59
+/// datetime first, then convert to UTC for the comparison surface.
+fn date_range_for_period(period: &UsagePeriod) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
     let now = Local::now();
     let today = now.date_naive();
 
@@ -2269,20 +2274,28 @@ pub fn current_quarter(date: NaiveDate) -> (i32, u8) {
     (date.year(), quarter_of(date))
 }
 
-fn day_bounds(date: NaiveDate) -> (DateTime<Local>, DateTime<Local>) {
+fn day_bounds(date: NaiveDate) -> (DateTime<Utc>, DateTime<Utc>) {
     (start_of_day(date), end_of_day(date))
 }
 
-fn start_of_day(date: NaiveDate) -> DateTime<Local> {
+/// Local-midnight on `date`, converted to UTC. The local interpretation
+/// is intentional: `date` originates from the user's calendar (`today`
+/// in the period helpers), so the bound has to anchor at local midnight
+/// to match how the user experiences "the day". Conversion to UTC
+/// happens last so the bound is directly comparable to the
+/// Utc-stored `ProviderCall.timestamp`.
+fn start_of_day(date: NaiveDate) -> DateTime<Utc> {
     Local
         .from_local_datetime(&date.and_hms_opt(0, 0, 0).expect("valid start of day"))
         .single()
         .unwrap_or_else(|| {
             Local.from_utc_datetime(&date.and_hms_opt(0, 0, 0).expect("valid start of day"))
         })
+        .with_timezone(&Utc)
 }
 
-fn end_of_day(date: NaiveDate) -> DateTime<Local> {
+/// Local-23:59:59.999 on `date`, converted to UTC. See `start_of_day`.
+fn end_of_day(date: NaiveDate) -> DateTime<Utc> {
     Local
         .from_local_datetime(&date.and_hms_milli_opt(23, 59, 59, 999).expect("valid end of day"))
         .single()
@@ -2291,6 +2304,7 @@ fn end_of_day(date: NaiveDate) -> DateTime<Local> {
                 &date.and_hms_milli_opt(23, 59, 59, 999).expect("valid end of day"),
             )
         })
+        .with_timezone(&Utc)
 }
 
 fn parse_timestamp(timestamp: &str) -> Option<DateTime<Utc>> {
@@ -3317,14 +3331,16 @@ mod tests {
         let week = date_range_for_period(&UsagePeriod::Week).unwrap();
         let thirty = date_range_for_period(&UsagePeriod::ThirtyDays).unwrap();
 
-        assert_eq!(
-            (week.1.date_naive() - week.0.date_naive()).num_days() + 1,
-            7
-        );
-        assert_eq!(
-            (thirty.1.date_naive() - thirty.0.date_naive()).num_days() + 1,
-            30
-        );
+        // Bounds are Utc-stored but anchored at the user's local
+        // midnight; convert back to Local before reading the calendar
+        // day so the assertion is independent of the host offset.
+        let week_start = week.0.with_timezone(&Local).date_naive();
+        let week_end = week.1.with_timezone(&Local).date_naive();
+        let thirty_start = thirty.0.with_timezone(&Local).date_naive();
+        let thirty_end = thirty.1.with_timezone(&Local).date_naive();
+
+        assert_eq!((week_end - week_start).num_days() + 1, 7);
+        assert_eq!((thirty_end - thirty_start).num_days() + 1, 30);
     }
 
     #[test]
@@ -3332,8 +3348,10 @@ mod tests {
         for n in [1u32, 7, 14, 90] {
             let (start, end) =
                 date_range_for_period(&UsagePeriod::LastNDays(n)).unwrap();
+            let start_d = start.with_timezone(&Local).date_naive();
+            let end_d = end.with_timezone(&Local).date_naive();
             assert_eq!(
-                (end.date_naive() - start.date_naive()).num_days() + 1,
+                (end_d - start_d).num_days() + 1,
                 i64::from(n),
                 "n={n}"
             );
@@ -3345,8 +3363,14 @@ mod tests {
         let anchor = NaiveDate::from_ymd_opt(2026, 4, 17).unwrap();
         let (start, end) =
             date_range_for_period(&UsagePeriod::SpecificMonth(anchor)).unwrap();
-        assert_eq!(start.date_naive(), NaiveDate::from_ymd_opt(2026, 4, 1).unwrap());
-        assert_eq!(end.date_naive(), NaiveDate::from_ymd_opt(2026, 4, 30).unwrap());
+        assert_eq!(
+            start.with_timezone(&Local).date_naive(),
+            NaiveDate::from_ymd_opt(2026, 4, 1).unwrap()
+        );
+        assert_eq!(
+            end.with_timezone(&Local).date_naive(),
+            NaiveDate::from_ymd_opt(2026, 4, 30).unwrap()
+        );
     }
 
     #[test]
@@ -3354,8 +3378,10 @@ mod tests {
         for q in 1u8..=4 {
             let (start, end) =
                 date_range_for_period(&UsagePeriod::SpecificQuarter(2026, q)).unwrap();
+            let start_d = start.with_timezone(&Local).date_naive();
+            let end_d = end.with_timezone(&Local).date_naive();
             // Q1 = 90 days (Jan 31 + Feb 28 + Mar 31), Q2 = 91, Q3 = 92, Q4 = 92.
-            let days = (end.date_naive() - start.date_naive()).num_days() + 1;
+            let days = (end_d - start_d).num_days() + 1;
             assert!((90..=92).contains(&days), "q={q} got {days} days");
         }
     }
@@ -3363,8 +3389,9 @@ mod tests {
     #[test]
     fn ytd_period_starts_on_jan_1() {
         let (start, _) = date_range_for_period(&UsagePeriod::YearToDate).unwrap();
-        assert_eq!(start.date_naive().month(), 1);
-        assert_eq!(start.date_naive().day(), 1);
+        let start_d = start.with_timezone(&Local).date_naive();
+        assert_eq!(start_d.month(), 1);
+        assert_eq!(start_d.day(), 1);
     }
 
     #[test]
