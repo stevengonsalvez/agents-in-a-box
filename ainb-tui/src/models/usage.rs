@@ -213,7 +213,7 @@ impl UsageFilters {
             }
         }
         if !self.branch.is_empty() {
-            let Some(branch) = call.branch.as_deref() else {
+            let Some(branch) = call.recorded_branch() else {
                 return false;
             };
             if !self.branch.iter().any(|b| b == branch) {
@@ -346,6 +346,15 @@ impl ProviderCall {
             call_count: 1,
             cost_usd: self.cost_usd,
         }
+    }
+
+    /// Branch attribution that's safe to display: returns the recorded
+    /// branch only when it's `Some(non-empty)`. Empty strings creep in
+    /// from downstream branch detection that returns `""` for a non-git
+    /// project; the canonical accessor stops them from being aggregated
+    /// as a real branch named "" anywhere in the pipeline.
+    pub fn recorded_branch(&self) -> Option<&str> {
+        self.branch.as_deref().filter(|b| !b.is_empty())
     }
 }
 
@@ -1221,7 +1230,7 @@ fn aggregate_calls(mut calls: Vec<ProviderCall>) -> UsageData {
 
         model_map.entry(call.model.clone()).or_default().merge(&bucket);
 
-        if let Some(branch) = call.branch.as_deref().filter(|b| !b.is_empty()) {
+        if let Some(branch) = call.recorded_branch() {
             branch_map.entry(branch.to_string()).or_default().merge(&bucket);
         }
 
