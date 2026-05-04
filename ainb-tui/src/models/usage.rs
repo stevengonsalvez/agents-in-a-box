@@ -1274,23 +1274,23 @@ fn aggregate_calls(mut calls: Vec<ProviderCall>) -> UsageData {
             ProjectUsage { name, path, bucket }
         })
         .collect();
-    projects.sort_by(|a, b| bucket_sort_value(&b.bucket).total_cmp(&bucket_sort_value(&a.bucket)));
+    sort_by_bucket_desc(&mut projects, |p| &p.bucket);
 
     let mut sessions: Vec<_> =
         session_map.into_values().map(SessionUsageAccumulator::into_usage).collect();
-    sessions.sort_by(|a, b| bucket_sort_value(&b.bucket).total_cmp(&bucket_sort_value(&a.bucket)));
+    sort_by_bucket_desc(&mut sessions, |s| &s.bucket);
 
     let mut models: Vec<_> = model_map
         .into_iter()
         .map(|(model, bucket)| ModelUsage { model, bucket })
         .collect();
-    models.sort_by(|a, b| bucket_sort_value(&b.bucket).total_cmp(&bucket_sort_value(&a.bucket)));
+    sort_by_bucket_desc(&mut models, |m| &m.bucket);
 
     let mut branches: Vec<_> = branch_map
         .into_iter()
         .map(|(branch, bucket)| BranchUsage { branch, bucket })
         .collect();
-    branches.sort_by(|a, b| bucket_sort_value(&b.bucket).total_cmp(&bucket_sort_value(&a.bucket)));
+    sort_by_bucket_desc(&mut branches, |b| &b.bucket);
 
     let tools = sorted_named_usage(tool_map);
     let mcp_servers = sorted_named_usage(mcp_map);
@@ -2267,6 +2267,20 @@ fn merge_cost(left: Option<f64>, right: Option<f64>) -> Option<f64> {
 
 fn bucket_sort_value(bucket: &TokenBucket) -> f64 {
     bucket.cost_usd.unwrap_or(bucket.total() as f64)
+}
+
+/// Sort `rows` in-place by bucket weight (descending), where each row's
+/// bucket is extracted via `key`. Centralises the cost-then-tokens
+/// ranking used across every usage panel (projects, sessions, models,
+/// branches, ...). The closure return type is `&TokenBucket` so callers
+/// can point at a field without cloning.
+fn sort_by_bucket_desc<T, F>(rows: &mut Vec<T>, key: F)
+where
+    F: Fn(&T) -> &TokenBucket,
+{
+    rows.sort_by(|a, b| {
+        bucket_sort_value(key(b)).total_cmp(&bucket_sort_value(key(a)))
+    });
 }
 
 fn estimate_cost_usd(
