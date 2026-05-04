@@ -1315,9 +1315,9 @@ fn parse_codex_source(path: &Path) -> Vec<ProviderCall> {
 // activities, tools, mcp, shell). Extract a per-dimension Accumulator
 // trait so each one is unit-testable in isolation; orchestrator
 // becomes `for call in calls { for acc in &mut accumulators { acc.ingest(call) } }`.
-// Deferred — the largest single change in this cleanup pass and best
-// landed alongside the analyze_turns precompute (whose stable-id
-// requirement triggers a coordinated bincode bump). See PR-E thread.
+// Deferred — large refactor with no functional delta. The
+// analyze_turns precompute that previously gated this work has landed,
+// so a future pass is unblocked.
 fn aggregate_calls(calls: Vec<ProviderCall>) -> UsageData {
     aggregate_calls_with_analysis(calls, None)
 }
