@@ -1935,16 +1935,9 @@ impl GitViewComponent {
     }
 }
 
-/// Truncate a string to a maximum length, adding "..." if truncated
-/// Uses char-based counting to safely handle UTF-8 multi-byte characters
+/// Truncate a string to at most `max_len` displayed chars. Delegates to
+/// the canonical `truncate_with_ellipsis` (uses `…`, single Unicode char).
+/// Renamed-on-merge from a per-file copy that used `...` (3 ASCII chars).
 fn truncate_string(s: &str, max_len: usize) -> String {
-    if s.chars().count() <= max_len {
-        s.to_string()
-    } else if max_len <= 3 {
-        "...".to_string()
-    } else {
-        let mut truncated: String = s.chars().take(max_len - 3).collect();
-        truncated.push_str("...");
-        truncated
-    }
+    crate::widgets::truncate_with_ellipsis(s, max_len).into_owned()
 }

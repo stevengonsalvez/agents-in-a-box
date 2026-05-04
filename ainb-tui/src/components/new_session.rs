@@ -3100,14 +3100,8 @@ impl Default for NewSessionComponent {
     }
 }
 
-/// Truncate a string to max_len characters, adding "..." if truncated
+/// Truncate a string to at most `max_len` displayed chars. Delegates to
+/// the canonical `truncate_with_ellipsis` (uses `…`).
 fn truncate_string(s: &str, max_len: usize) -> String {
-    if s.chars().count() <= max_len {
-        s.to_string()
-    } else if max_len <= 3 {
-        "...".to_string()
-    } else {
-        let truncated: String = s.chars().take(max_len - 3).collect();
-        format!("{truncated}...")
-    }
+    crate::widgets::truncate_with_ellipsis(s, max_len).into_owned()
 }

@@ -3521,18 +3521,7 @@ fn render_help_bar(frame: &mut Frame, area: Rect, state: &UsageViewState) {
 }
 
 fn truncate_string(s: &str, max_len: usize) -> String {
-    // max_len is char count, not bytes. The previous `s.len()` gate let
-    // multi-byte strings reach a byte-slice (`&s[..max_len-1]`) that
-    // could fall inside a codepoint and panic. Since pretty_project_name
-    // now feeds branch names into here, that path is reachable on any
-    // non-ASCII branch name. Switch to char-count + chars().take().
-    if s.chars().count() <= max_len {
-        s.to_string()
-    } else {
-        let take = max_len.saturating_sub(1);
-        let truncated: String = s.chars().take(take).collect();
-        format!("{truncated}…")
-    }
+    crate::widgets::truncate_with_ellipsis(s, max_len).into_owned()
 }
 
 fn provider_filter_label(filter: UsageProviderFilter) -> &'static str {
