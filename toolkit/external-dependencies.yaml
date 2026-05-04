@@ -388,6 +388,30 @@ claude-plugins:
       - Result handling and presentation patterns
     docs: "https://github.com/openai/codex-plugin-cc"
 
+  - name: caveman
+    marketplace: JuliusBrussee/caveman
+    marketplace_id: caveman
+    install: |
+      claude plugin marketplace add JuliusBrussee/caveman
+      claude plugin install caveman@caveman
+    purpose: "Token-efficient caveman-speak response and review/commit/compression skill family"
+    has_skills: true
+    multi-skill: true
+    installed-to: ~/.claude/skills
+    skills:
+      - caveman: "Ultra-compressed communication dropping articles, filler, pleasantries"
+      - caveman-compress: "Caveman-flavored compression workflow for reducing context/token footprint"
+      - caveman-commit: "Generate terse but complete caveman-style commit summaries when requested"
+      - caveman-help: "Help/usage guide for the caveman skill family"
+      - caveman-review: "Review outputs in caveman-compressed style while preserving technical accuracy"
+      - compress: "Compress memory/CLAUDE.md files into caveman format to save input tokens"
+    features:
+      - Drops articles, filler words, hedging while preserving technical accuracy
+      - Code blocks, git commits, and PR descriptions remain unchanged unless a caveman-specific skill is explicitly requested
+      - Companion compression tools for memory/context token optimization
+      - Backup original files as FILE.original.md before compression
+    docs: "https://github.com/JuliusBrussee/caveman"
+
 # =============================================================================
 # NPX SKILLS (agent skills from npm/GitHub)
 # =============================================================================
@@ -461,25 +485,6 @@ npx-skills:
   - name: find-skills
     source: "npx add-skill"
     purpose: "Discover and install agent skills from registries"
-
-  - name: caveman
-    repo: JuliusBrussee/caveman
-    install: "npx skills add JuliusBrussee/caveman -g -a claude-code --skill '*' --yes --copy"
-    purpose: "Token-efficient caveman-speak response and review/commit/compression skill family"
-    multi-skill: true
-    installed-to: ~/.claude/skills
-    skills:
-      - caveman: "Ultra-compressed communication dropping articles, filler, pleasantries"
-      - caveman-compress: "Caveman-flavored compression workflow for reducing context/token footprint"
-      - caveman-commit: "Generate terse but complete caveman-style commit summaries when requested"
-      - caveman-help: "Help/usage guide for the caveman skill family"
-      - caveman-review: "Review outputs in caveman-compressed style while preserving technical accuracy"
-      - compress: "Compress memory/CLAUDE.md files into caveman format to save input tokens"
-    features:
-      - Drops articles, filler words, hedging while preserving technical accuracy
-      - Code blocks, git commits, and PR descriptions remain unchanged unless a caveman-specific skill is explicitly requested
-      - Companion compression tools for memory/context token optimization
-      - Backup original files as FILE.original.md before compression
 
   - name: impeccable
     repo: pbakaus/impeccable
