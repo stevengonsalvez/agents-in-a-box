@@ -236,6 +236,67 @@ fn append_path_recovers_user_message_from_prefix() {
     assert_eq!(cached_msgs, fresh_msgs);
 }
 
+/// Append a single assistant turn with NO preceding user line. Used to
+/// exercise the prefix-only branch of `recover_user_message_before` —
+/// the new turn's `user_message` can only come from the prefix walk.
+fn append_assistant_only(path: &Path, session_id: &str, timestamp: &str) {
+    let assistant = serde_json::json!({
+        "type": "assistant",
+        "sessionId": session_id,
+        "timestamp": timestamp,
+        "cwd": "/Users/test/myrepo",
+        "message": {
+            "model": "claude-sonnet-4-5",
+            "content": [{"type": "text", "text": "ok"}],
+            "usage": { "input_tokens": 1, "output_tokens": 1 }
+        }
+    });
+    let mut f = fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
+    writeln!(f, "{assistant}").unwrap();
+}
+
+#[test]
+fn append_only_assistant_recovers_user_message_from_prefix_walk() {
+    // The append window contains *only* an assistant turn — no fresh
+    // user line. The only way the new row can carry "first turn" as its
+    // user_message is via the prefix walk in `recover_user_message_before`.
+    let work = TempDir::new().unwrap();
+    let projects = build_claude_root(work.path());
+    let session = projects.join("-Users-test-myrepo").join("sess-um-prefix.jsonl");
+    append_pair_with_user(&session, "sess-um-prefix", "2026-05-01T12:00:00Z", "first turn");
+
+    let roots = UsageSourceRoots {
+        claude_projects_dir: Some(projects.clone()),
+        codex_dir: None,
+    };
+    let cache_dir = TempDir::new().unwrap();
+    let cache = cache_at(cache_dir.path());
+
+    let _ = parse_usage_for_with_roots_and_cache(query_all(), &roots, cache.clone());
+
+    // Append assistant-only — no preceding user line in the window.
+    append_assistant_only(&session, "sess-um-prefix", "2026-05-01T12:30:00Z");
+
+    let cached =
+        parse_usage_for_with_roots_and_cache(query_all(), &roots, cache.clone());
+    let fresh =
+        parse_usage_for_with_roots_and_cache(query_all(), &roots, Arc::new(Cache::disabled()));
+
+    assert_eq!(cached.calls.len(), 2);
+    assert_eq!(fresh.calls.len(), 2);
+
+    let cached_msgs: Vec<&str> =
+        cached.calls.iter().map(|c| c.user_message.as_str()).collect();
+    let fresh_msgs: Vec<&str> =
+        fresh.calls.iter().map(|c| c.user_message.as_str()).collect();
+    // Both rows must carry "first turn" — the second from prefix recovery.
+    assert_eq!(cached_msgs, fresh_msgs);
+    assert_eq!(
+        cached_msgs[1], "first turn",
+        "appended assistant turn must inherit user_message from prefix walk"
+    );
+}
+
 #[test]
 fn no_cache_path_writes_no_rows() {
     let work = TempDir::new().unwrap();
