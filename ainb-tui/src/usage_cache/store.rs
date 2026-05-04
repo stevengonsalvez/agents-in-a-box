@@ -274,12 +274,24 @@ impl Cache {
     }
 
     /// Drop all cached rows. Schema row is preserved.
+    ///
+    /// Runs `VACUUM` after the bulk delete so freed pages are returned
+    /// to the filesystem. SQLite's freelist would otherwise keep the
+    /// db at its high-water mark, defeating the user's expectation that
+    /// `cache clear` reclaims disk.
     pub fn clear(&self) -> Result<(), CacheError> {
         let CacheInner::Open(conn) = &self.inner else {
             return Ok(());
         };
         let lock = lock_conn(conn);
         lock.execute("DELETE FROM files", [])?;
+        // VACUUM cannot run inside an explicit transaction, but rusqlite
+        // doesn't auto-wrap a single execute() so this is fine. Failure
+        // is non-fatal — clearing the rows already gave the user the
+        // semantic they asked for; a stale freelist is a tidiness issue.
+        if let Err(err) = lock.execute("VACUUM", []) {
+            tracing::warn!("usage_cache VACUUM after clear failed: {err}");
+        }
         Ok(())
     }
 
