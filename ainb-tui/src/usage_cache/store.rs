@@ -27,10 +27,11 @@ use super::fingerprint::{FileFingerprint, FingerprintAction, classify, verify_ap
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i64)]
 pub enum BlobFormat {
-    /// Current `bincode::serialize` of `Vec<ProviderCall>` with default
-    /// options. Version 2 replaced version 1 when `ProviderCall.branch`
-    /// (Option<String>) was added in PR-D.
-    Bincode = 2,
+    /// `bincode::serialize` of `Vec<ProviderCall>` with default options at
+    /// the V2 layout: V2 added `ProviderCall.branch: Option<String>` (PR-D).
+    /// V1 was the pre-branch layout — rows tagged 1 are stale on upgrade
+    /// and intentionally skipped (re-parsed on next scan).
+    BincodeV2 = 2,
 }
 
 impl BlobFormat {
@@ -39,7 +40,7 @@ impl BlobFormat {
             // 1 was the pre-branch layout. Rows tagged 1 are stale on
             // upgrade and intentionally skipped — the next scan re-parses
             // and rewrites them at version 2.
-            2 => Some(Self::Bincode),
+            2 => Some(Self::BincodeV2),
             _ => None,
         }
     }
@@ -375,7 +376,7 @@ fn load_row(conn: &Connection, path: &Path) -> Result<Option<LoadedRow>, CacheEr
         return Ok(None);
     };
     let calls: Vec<crate::models::usage::ProviderCall> = match format {
-        BlobFormat::Bincode => bincode::deserialize(&blob)?,
+        BlobFormat::BincodeV2 => bincode::deserialize(&blob)?,
     };
     let fingerprint = FileFingerprint::from_columns(
         u64::try_from(size_i).unwrap_or(0),
