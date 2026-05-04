@@ -1,7 +1,7 @@
 // ABOUTME: Token usage data model and local session parsers for usage analytics.
 // Parses Claude and Codex JSONL histories into reusable aggregates for TUI and CLI views.
 
-use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, TimeZone};
+use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -326,15 +326,11 @@ pub struct ProviderCall {
     pub session_id: String,
     pub project: String,
     pub project_path: String,
-    // TODO(refactor): migrate this to DateTime<Utc>. The Local variant
-    // bakes a timezone offset into the cached blob, so a user moving
-    // across timezones (or DST transition) sees inconsistent
-    // serialised representations between cache hit and full reparse.
-    // Migration bumps BLOB_FORMAT_BINCODE_CURRENT to 3 and forces
-    // every constructor + render site to convert at the boundary.
-    // Deferred — V2 was bumped to 2 recently for branch attribution
-    // and another bump is best paired with the analyze_turns id work.
-    pub timestamp: DateTime<Local>,
+    /// Stored in UTC so cached blobs are timezone-independent. Render
+    /// sites convert to local at the display boundary via
+    /// `.with_timezone(&Local)` (see `components/usage.rs`,
+    /// `cli/usage.rs`).
+    pub timestamp: DateTime<Utc>,
     pub input_tokens: u64,
     pub cache_creation_tokens: u64,
     pub cache_read_tokens: u64,
@@ -686,7 +682,12 @@ pub fn parse_usage_for_with_roots_and_cache(
         .into_iter()
         .filter(|call| {
             range.as_ref().map_or(true, |(start, end)| {
-                call.timestamp >= *start && call.timestamp <= *end
+                // Period bounds are still DateTime<Local>; bridge by
+                // converting the Utc-stored call timestamp at the
+                // comparison. Subsequent commit will flip period
+                // bounds to Utc and remove this conversion.
+                let local = call.timestamp.with_timezone(&Local);
+                local >= *start && local <= *end
             })
         })
         .filter(|call| project_matches(call, &query.include_projects, &query.exclude_projects))
@@ -1282,7 +1283,11 @@ fn aggregate_calls(mut calls: Vec<ProviderCall>) -> UsageData {
 
     for (idx, call) in calls.iter().enumerate() {
         let bucket = call.bucket();
-        let day = call.timestamp.date_naive();
+        // Daily bucketing is a user-facing calendar concept: render and
+        // the period bounds both treat "a day" as a local-tz day, so the
+        // grouping key has to be local. The cached call timestamp is
+        // Utc — convert at the boundary.
+        let day = call.timestamp.with_timezone(&Local).date_naive();
         let session_key = format!("{}:{}:{}", call.provider, call.project, call.session_id);
 
         let daily = daily_map.entry(day).or_default();
@@ -1301,19 +1306,22 @@ fn aggregate_calls(mut calls: Vec<ProviderCall>) -> UsageData {
         project.1.insert(session_key.clone());
         project.2.merge(&bucket);
 
+        // SessionUsageAccumulator still carries DateTime<Local> until
+        // the SessionUsage migration commit; convert at insertion.
+        let call_ts_local = call.timestamp.with_timezone(&Local);
         let session = session_map.entry(session_key).or_insert_with(|| SessionUsageAccumulator {
             provider: call.provider.clone(),
             project: call.project.clone(),
             session_id: call.session_id.clone(),
-            first_timestamp: call.timestamp,
-            last_timestamp: call.timestamp,
+            first_timestamp: call_ts_local,
+            last_timestamp: call_ts_local,
             bucket: TokenBucket::default(),
         });
-        if call.timestamp < session.first_timestamp {
-            session.first_timestamp = call.timestamp;
+        if call_ts_local < session.first_timestamp {
+            session.first_timestamp = call_ts_local;
         }
-        if call.timestamp > session.last_timestamp {
-            session.last_timestamp = call.timestamp;
+        if call_ts_local > session.last_timestamp {
+            session.last_timestamp = call_ts_local;
         }
         session.bucket.merge(&bucket);
 
@@ -1754,7 +1762,9 @@ fn plan_cost_for_range(
         .calls
         .iter()
         .filter(|call| {
-            let date = call.timestamp.date_naive();
+            // start/end are NaiveDate in the user's local calendar;
+            // bucket the Utc timestamp into the same calendar.
+            let date = call.timestamp.with_timezone(&Local).date_naive();
             date >= start && date <= end && plan_provider_includes(provider, &call.provider)
         })
         .filter_map(|call| call.cost_usd)
@@ -2286,8 +2296,8 @@ fn end_of_day(date: NaiveDate) -> DateTime<Local> {
         })
 }
 
-fn parse_timestamp(timestamp: &str) -> Option<DateTime<Local>> {
-    DateTime::parse_from_rfc3339(timestamp).map(|dt| dt.with_timezone(&Local)).ok()
+fn parse_timestamp(timestamp: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(timestamp).map(|dt| dt.with_timezone(&Utc)).ok()
 }
 
 fn extract_claude_user_text(content: Option<&Value>) -> String {
@@ -3260,7 +3270,7 @@ mod tests {
                 session_id: "s1".to_string(),
                 project: "alpha".to_string(),
                 project_path: "/work/alpha".to_string(),
-                timestamp: Local.with_ymd_and_hms(2026, 4, 29, 10, 0, 0).unwrap(),
+                timestamp: Utc.with_ymd_and_hms(2026, 4, 29, 10, 0, 0).unwrap(),
                 cost_usd: Some(70.0),
                 ..provider_call(
                     "claude",
@@ -3278,7 +3288,7 @@ mod tests {
                 session_id: "s2".to_string(),
                 project: "alpha".to_string(),
                 project_path: "/work/alpha".to_string(),
-                timestamp: Local.with_ymd_and_hms(2026, 4, 29, 11, 0, 0).unwrap(),
+                timestamp: Utc.with_ymd_and_hms(2026, 4, 29, 11, 0, 0).unwrap(),
                 cost_usd: Some(30.0),
                 ..provider_call(
                     "codex",

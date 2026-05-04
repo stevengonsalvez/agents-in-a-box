@@ -9,7 +9,7 @@
 //! are available to in-tree unit tests automatically and to integration
 //! tests in `tests/` via `--features test-support`.
 
-use chrono::{DateTime, Local, TimeZone};
+use chrono::{DateTime, Local, TimeZone, Utc};
 
 use crate::models::{
     ActivityCategory, ActivityUsage, ModelUsage, NamedUsage, ProjectUsage, ProviderCall,
@@ -73,7 +73,7 @@ impl ProviderCallBuilder {
         self.call.project_path = v.into();
         self
     }
-    pub fn with_timestamp(mut self, v: DateTime<Local>) -> Self {
+    pub fn with_timestamp(mut self, v: DateTime<Utc>) -> Self {
         self.call.timestamp = v;
         self
     }
@@ -124,13 +124,13 @@ pub fn provider_call_default() -> ProviderCall {
 }
 
 /// Deterministic default timestamp shared across fixtures. Pinning this
-/// to a specific value (rather than `Local::now()`) keeps tests
-/// reproducible.
-fn default_timestamp() -> DateTime<Local> {
-    Local
-        .with_ymd_and_hms(2026, 4, 29, 10, 0, 0)
+/// to a specific value (rather than `Utc::now()`) keeps tests
+/// reproducible. Stored Utc to match `ProviderCall.timestamp`; render
+/// sites convert to local at the boundary.
+fn default_timestamp() -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 4, 29, 10, 0, 0)
         .single()
-        .unwrap_or_else(Local::now)
+        .unwrap_or_else(Utc::now)
 }
 
 /// Build a small `UsageData` fixture covering one project, one model,
@@ -150,6 +150,10 @@ pub fn sample_usage_data() -> UsageData {
         ..TokenBucket::default()
     };
     let now = default_timestamp();
+    // SessionUsage carries DateTime<Local> until the SessionUsage Utc
+    // migration commit; bridge here so the fixture compiles in the
+    // intermediate state.
+    let now_local = now.with_timezone(&Local);
     UsageData {
         calls: vec![
             ProviderCallBuilder::new()
@@ -181,8 +185,8 @@ pub fn sample_usage_data() -> UsageData {
             provider: "claude".to_string(),
             project: "agents-in-a-box".to_string(),
             session_id: "s1".to_string(),
-            first_timestamp: now,
-            last_timestamp: now,
+            first_timestamp: now_local,
+            last_timestamp: now_local,
             bucket: bucket.clone(),
         }],
         models: vec![ModelUsage {

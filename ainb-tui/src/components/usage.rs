@@ -4127,7 +4127,7 @@ mod cli_parity_tests {
         ActivityCategory, ActivityUsage, ModelUsage, ProjectUsage, ProviderCall, SessionUsage,
         TokenBucket, UsageData, UsageFilters, filter_usage_data,
     };
-    use chrono::Local;
+    use chrono::Utc;
 
     fn call(project: &str, model: &str, session: &str) -> ProviderCall {
         crate::test_support::ProviderCallBuilder::new()
@@ -4135,7 +4135,7 @@ mod cli_parity_tests {
             .with_session(session)
             .with_project(project)
             .with_project_path(format!("/work/{project}"))
-            .with_timestamp(Local::now())
+            .with_timestamp(Utc::now())
             .with_input_tokens(100)
             .with_output_tokens(50)
             .with_cost(1.0)
