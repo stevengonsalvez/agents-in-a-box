@@ -841,7 +841,17 @@ fn parse_claude_source_append(
     let mut calls = existing.to_vec();
     let mut current_user_message = String::new();
     for line in reader.lines() {
-        let Ok(line) = line else { break };
+        // On any I/O or UTF-8 error from BufReader::lines we cannot
+        // safely advance the cached end_offset — the next run would
+        // skip past the unread tail and silently lose data. Roll the
+        // cursor back to from_offset so the next scan retries the
+        // append. Mirror the Full path's all-or-nothing semantics.
+        let Ok(line) = line else {
+            return ParseResult {
+                calls: existing.to_vec(),
+                end_offset: from_offset,
+            };
+        };
         if let Some(call) = parse_claude_line(
             &line,
             path,
