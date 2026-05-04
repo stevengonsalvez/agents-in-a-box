@@ -1490,6 +1490,12 @@ struct ActivityAccumulator {
     one_shot_turns: usize,
 }
 
+// TODO(perf): precompute analyze_turns once on the unfiltered call set
+// and thread it into aggregate_calls so filter_usage_data chip pivots
+// don't re-run the per-session timeline walk. Requires a stable
+// per-call key; ProviderCall has no id field today and adding one bumps
+// the bincode blob format. Deferred — the win is bounded by session
+// length and the TUI hot path is sub-frame already.
 fn analyze_turns(calls: &[ProviderCall]) -> HashMap<usize, TurnAnalysis> {
     let mut sessions: HashMap<String, Vec<usize>> = HashMap::new();
     for (idx, call) in calls.iter().enumerate() {
