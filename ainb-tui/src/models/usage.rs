@@ -2065,7 +2065,8 @@ pub fn last_day_of_month(year: i32, month: u32) -> Option<NaiveDate> {
 }
 
 /// First and last calendar days of `quarter` (1..=4) within `year`.
-/// Out-of-range quarters are clamped to Q1.
+/// Out-of-range quarters are clamped to the nearest valid quarter
+/// (`quarter < 1 -> Q1`, `quarter > 4 -> Q4`) via `clamp(1, 4)`.
 pub fn quarter_bounds(year: i32, quarter: u8) -> (NaiveDate, NaiveDate) {
     let q = quarter.clamp(1, 4);
     let start_month = (u32::from(q) - 1) * 3 + 1;
