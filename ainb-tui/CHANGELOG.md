@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Changed
+- **BREAKING (ainb-tui usage cache)**: bumped the cache blob format to
+  V3 (`BLOB_FORMAT_BINCODE_CURRENT = 3`). Caches built under V1
+  (pre-branch) or V2 (Local-timestamp) are recognised as stale and
+  skipped on first run after upgrade — the affected files are
+  re-parsed from the underlying JSONL transparently. No user action
+  required, but the first analytics scan after the bump will be
+  slower than usual while the cache rebuilds. The bump folds two
+  layout changes:
+  - `ProviderCall.timestamp` migrated from `DateTime<Local>` to
+    `DateTime<Utc>` so cached blobs are timezone-independent
+    (cache vs full-reparse no longer drifts after a timezone move
+    or DST transition). Display is still local — render sites
+    convert via `.with_timezone(&Local)` at the boundary.
+  - `ProviderCall.id: u64` added (stable hash of `path:offset`) so
+    `analyze_turns` results can be precomputed once on the
+    unfiltered call set; chip-pivot re-aggregates in
+    `filter_usage_data` now skip the per-session timeline rewalk.
 - **BREAKING (ainb-tui CLI)**: `--include` no longer treats `--project` as
   an alias. Users must migrate `--project foo` filters that relied on
   substring matching to `--include foo` (substring match) or keep
