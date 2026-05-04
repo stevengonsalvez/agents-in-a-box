@@ -111,11 +111,10 @@ impl SessionListComponent {
                             Span::styled(" rename ", Style::default().fg(MUTED_GRAY)),
                         ])
                     } else {
-                        // Default help
+                        // Default help — `j/k` nav segment dropped: arrow keys
+                        // also navigate, and the panel was overflowing once
+                        // `F filter` was added.
                         Line::from(vec![
-                            Span::styled(" j/k", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
-                            Span::styled(" nav ", Style::default().fg(MUTED_GRAY)),
-                            Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
                             Span::styled(" Enter", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
                             Span::styled(" select ", Style::default().fg(MUTED_GRAY)),
                             Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
