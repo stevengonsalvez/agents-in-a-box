@@ -15,6 +15,10 @@ use crate::models::{
     UsageFilters, UsagePeriod, UsageProviderFilter, UsageQuery, filter_usage_data,
     format_tokens_short, optimize_usage,
 };
+use crate::models::usage::{
+    current_quarter, first_of_month, next_month_first, next_quarter, previous_month_first,
+    previous_quarter,
+};
 
 // Color palette from TUI style guide
 const CORNFLOWER_BLUE: Color = Color::Rgb(100, 149, 237);
@@ -3530,48 +3534,6 @@ fn provider_filter_label(filter: UsageProviderFilter) -> &'static str {
         UsageProviderFilter::Claude => "Claude",
         UsageProviderFilter::Codex => "Codex",
     }
-}
-
-/// First day of the calendar month containing `date`.
-fn first_of_month(date: NaiveDate) -> NaiveDate {
-    NaiveDate::from_ymd_opt(date.year(), date.month(), 1).unwrap_or(date)
-}
-
-/// First day of the previous calendar month.
-fn previous_month_first(anchor: NaiveDate) -> NaiveDate {
-    let (y, m) = if anchor.month() == 1 {
-        (anchor.year() - 1, 12)
-    } else {
-        (anchor.year(), anchor.month() - 1)
-    };
-    NaiveDate::from_ymd_opt(y, m, 1).unwrap_or(anchor)
-}
-
-/// First day of the next calendar month.
-fn next_month_first(anchor: NaiveDate) -> NaiveDate {
-    let (y, m) = if anchor.month() == 12 {
-        (anchor.year() + 1, 1)
-    } else {
-        (anchor.year(), anchor.month() + 1)
-    };
-    NaiveDate::from_ymd_opt(y, m, 1).unwrap_or(anchor)
-}
-
-/// `(year, quarter)` of the previous quarter, wrapping into the prior
-/// year at Q1.
-fn previous_quarter(year: i32, q: u8) -> (i32, u8) {
-    if q <= 1 { (year - 1, 4) } else { (year, q - 1) }
-}
-
-/// `(year, quarter)` of the next quarter, wrapping into the next year
-/// at Q4.
-fn next_quarter(year: i32, q: u8) -> (i32, u8) {
-    if q >= 4 { (year + 1, 1) } else { (year, q + 1) }
-}
-
-/// `(year, quarter)` containing `date`.
-fn current_quarter(date: NaiveDate) -> (i32, u8) {
-    (date.year(), crate::models::usage::quarter_of(date))
 }
 
 fn period_label(period: &UsagePeriod) -> String {

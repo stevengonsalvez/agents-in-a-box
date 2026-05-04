@@ -2096,6 +2096,50 @@ pub fn quarter_of(date: NaiveDate) -> u8 {
     ((date.month0() / 3) + 1) as u8
 }
 
+/// First day of the calendar month containing `date`. Falls back to
+/// `date` itself if chrono rejects the (year, month, 1) tuple, which is
+/// only possible at the extreme edges of the representable range.
+pub fn first_of_month(date: NaiveDate) -> NaiveDate {
+    NaiveDate::from_ymd_opt(date.year(), date.month(), 1).unwrap_or(date)
+}
+
+/// First day of the previous calendar month, wrapping the year at Jan.
+pub fn previous_month_first(anchor: NaiveDate) -> NaiveDate {
+    let (y, m) = if anchor.month() == 1 {
+        (anchor.year() - 1, 12)
+    } else {
+        (anchor.year(), anchor.month() - 1)
+    };
+    NaiveDate::from_ymd_opt(y, m, 1).unwrap_or(anchor)
+}
+
+/// First day of the next calendar month, wrapping the year at Dec.
+pub fn next_month_first(anchor: NaiveDate) -> NaiveDate {
+    let (y, m) = if anchor.month() == 12 {
+        (anchor.year() + 1, 1)
+    } else {
+        (anchor.year(), anchor.month() + 1)
+    };
+    NaiveDate::from_ymd_opt(y, m, 1).unwrap_or(anchor)
+}
+
+/// `(year, quarter)` of the previous quarter, wrapping into the prior
+/// year at Q1.
+pub fn previous_quarter(year: i32, q: u8) -> (i32, u8) {
+    if q <= 1 { (year - 1, 4) } else { (year, q - 1) }
+}
+
+/// `(year, quarter)` of the next quarter, wrapping into the next year
+/// at Q4.
+pub fn next_quarter(year: i32, q: u8) -> (i32, u8) {
+    if q >= 4 { (year + 1, 1) } else { (year, q + 1) }
+}
+
+/// `(year, quarter)` containing `date`.
+pub fn current_quarter(date: NaiveDate) -> (i32, u8) {
+    (date.year(), quarter_of(date))
+}
+
 fn day_bounds(date: NaiveDate) -> (DateTime<Local>, DateTime<Local>) {
     (start_of_day(date), end_of_day(date))
 }
