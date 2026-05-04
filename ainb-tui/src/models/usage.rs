@@ -602,18 +602,6 @@ struct CodexTokenUsage {
     total_tokens: Option<u64>,
 }
 
-/// Parse all known local session files using the legacy Claude-only query.
-/// This is designed to run in a background thread.
-pub fn parse_usage() -> UsageData {
-    parse_usage_for(UsageQuery {
-        provider_filter: UsageProviderFilter::Claude,
-        period: UsagePeriod::All,
-        include_projects: Vec::new(),
-        exclude_projects: Vec::new(),
-        filters: UsageFilters::default(),
-    })
-}
-
 /// Parse local session files for a query using default user data roots.
 pub fn parse_usage_for(query: UsageQuery) -> UsageData {
     parse_usage_for_with_roots(query, &UsageSourceRoots::default())
