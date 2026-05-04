@@ -196,7 +196,7 @@ impl UsageFilters {
         self.branch.clear();
     }
 
-    fn matches(&self, call: &ProviderCall, category: ActivityCategory) -> bool {
+    pub(crate) fn matches(&self, call: &ProviderCall, category: ActivityCategory) -> bool {
         if !self.project.is_empty() && !self.project.iter().any(|p| p == &call.project) {
             return false;
         }
@@ -678,6 +678,7 @@ pub fn parse_usage_for_with_roots_and_cache(
         ));
     }
 
+    let filters_active = !query.filters.is_empty();
     let filtered: Vec<ProviderCall> = calls
         .into_iter()
         .filter(|call| {
@@ -686,14 +687,18 @@ pub fn parse_usage_for_with_roots_and_cache(
             })
         })
         .filter(|call| project_matches(call, &query.include_projects, &query.exclude_projects))
+        // Apply cross-filter chips up-front when present. Saves a full
+        // aggregate+re-aggregate round trip on the CLI path: previously
+        // we built the full UsageData and then filter_usage_data
+        // re-aggregated the filtered subset. The TUI hot path keeps
+        // calling filter_usage_data over cached UsageData and is
+        // unaffected.
+        .filter(|call| {
+            !filters_active || query.filters.matches(call, classify_activity(call))
+        })
         .collect();
 
-    let aggregated = aggregate_calls(filtered);
-    if query.filters.is_empty() {
-        aggregated
-    } else {
-        filter_usage_data(&aggregated, &query.filters)
-    }
+    aggregate_calls(filtered)
 }
 
 fn parse_claude_sources(projects_dir: Option<&Path>, cache: &Cache) -> Vec<ProviderCall> {
