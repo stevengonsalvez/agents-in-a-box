@@ -2475,6 +2475,7 @@ pub fn build_filter_chip_line(state: &UsageViewState) -> Line<'static> {
     push_chip_group(&mut spans, "model", &state.filters.model);
     push_chip_group(&mut spans, "activity", &state.filters.activity);
     push_chip_group(&mut spans, "session", &state.filters.session);
+    push_chip_group(&mut spans, "branch", &state.filters.branch);
     spans.push(Span::styled("  ·  ", Style::default().fg(MUTED_GRAY)));
     spans.push(Span::styled(
         "Esc",
@@ -3902,27 +3903,59 @@ mod cross_filter_tests {
         let mut state = UsageViewState::default();
         state.filters.project.push("alpha".into());
         state.filters.model.push("opus".into());
+        state.filters.branch.push("main".into());
 
-        // First pop -> model (the chip-strip pop order: session →
-        // activity → model → project).
+        // First pop -> branch (rightmost in the strip; pop order is
+        // branch → session → activity → model → project).
+        let removed = state.pop_filter_chip();
+        assert!(matches!(removed, Some(UsageFilterChip::Branch(v)) if v == "main"));
+        assert!(state.filters.branch.is_empty());
+
+        // The chip strip must show every surviving chip — including the
+        // branch chip while it was set. Render symmetry: the chip the
+        // user sees rightmost is the one Esc removes next.
+        let line = build_filter_chip_line(&state);
+        let flat: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(flat.contains("project=alpha"), "got {flat}");
+        assert!(flat.contains("model=opus"), "got {flat}");
+        assert!(!flat.contains("branch="), "branch chip lingered: {flat}");
+
+        // Second pop -> model.
         let removed = state.pop_filter_chip();
         assert!(matches!(removed, Some(UsageFilterChip::Model(v)) if v == "opus"));
-        assert!(state.filters.model.is_empty());
-        assert_eq!(state.filters.project, vec!["alpha".to_string()]);
-
-        // Chip strip should still show the remaining chip + Esc/C hint.
         let line = build_filter_chip_line(&state);
         let flat: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(flat.contains("project=alpha"), "got {flat}");
         assert!(flat.contains("Esc") && flat.contains("C"), "got {flat}");
 
-        // Second pop -> project. With no chips left we fall back to
+        // Third pop -> project. With no chips left we fall back to
         // the discoverability hint.
         assert!(state.pop_filter_chip().is_some());
         assert!(state.filters.is_empty());
         let line = build_filter_chip_line(&state);
         let flat: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(flat.contains("(none)"), "got {flat}");
+    }
+
+    /// Tripwire: every `UsageFilterChip` variant must render in
+    /// `build_filter_chip_line`. If a new variant is added without a
+    /// `push_chip_group` call this test fails — the PR-D regression where
+    /// `branch` chips set via `--branch` were invisible but still consumed
+    /// `Esc` is exactly what this guards against.
+    #[test]
+    fn every_filter_chip_variant_renders_in_strip() {
+        let mut state = UsageViewState::default();
+        state.filters.project.push("p".into());
+        state.filters.model.push("m".into());
+        state.filters.activity.push("Coding".into());
+        state.filters.session.push("s".into());
+        state.filters.branch.push("b".into());
+
+        let line = build_filter_chip_line(&state);
+        let flat: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        for needle in ["project=p", "model=m", "activity=Coding", "session=s", "branch=b"] {
+            assert!(flat.contains(needle), "chip strip missing {needle}: {flat}");
+        }
     }
 
     #[test]
