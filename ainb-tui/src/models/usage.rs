@@ -454,6 +454,12 @@ pub struct UsageData {
     /// Branch attribution rows, sorted by largest bucket. Only Claude
     /// assistant turns with a non-empty `gitBranch` populate this.
     pub branches: Vec<BranchUsage>,
+    /// Precomputed `model -> [(project, call_count), ...]` sorted by
+    /// count descending. Built once during `aggregate_calls` so the
+    /// render path's "top N projects for model X" lookup is O(1) plus
+    /// the constant-N truncation, instead of a full O(N·M) scan of
+    /// `data.calls` per render frame.
+    pub model_project_counts: HashMap<String, Vec<(String, usize)>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -492,6 +498,7 @@ impl Default for UsageData {
             mcp_servers: Vec::new(),
             shell_commands: Vec::new(),
             branches: Vec::new(),
+            model_project_counts: HashMap::new(),
         }
     }
 }
@@ -1393,6 +1400,8 @@ fn aggregate_calls(mut calls: Vec<ProviderCall>) -> UsageData {
         grand_total.total()
     );
 
+    let model_project_counts = build_model_project_counts(&calls);
+
     UsageData {
         daily,
         weekly: {
@@ -1409,7 +1418,32 @@ fn aggregate_calls(mut calls: Vec<ProviderCall>) -> UsageData {
         mcp_servers,
         shell_commands,
         branches,
+        model_project_counts,
     }
+}
+
+/// Build the `model -> [(project, count), ...]` index used by the
+/// burndown render path's "top N projects for model X" lookup. Sorted
+/// desc by count so the render call is `take(n)` with no extra work.
+fn build_model_project_counts(
+    calls: &[ProviderCall],
+) -> HashMap<String, Vec<(String, usize)>> {
+    let mut by_model: HashMap<String, HashMap<String, usize>> = HashMap::new();
+    for call in calls {
+        *by_model
+            .entry(call.model.clone())
+            .or_default()
+            .entry(call.project.clone())
+            .or_insert(0) += 1;
+    }
+    by_model
+        .into_iter()
+        .map(|(model, projs)| {
+            let mut v: Vec<(String, usize)> = projs.into_iter().collect();
+            v.sort_by(|a, b| b.1.cmp(&a.1));
+            (model, v)
+        })
+        .collect()
 }
 
 /// Filter an already-parsed `UsageData` by exact-match cross-filters.

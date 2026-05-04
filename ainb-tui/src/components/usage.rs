@@ -1924,23 +1924,20 @@ fn project_seen_window(data: &UsageData, project_name: &str) -> (String, String)
 
 /// Top `n` projects by call count for `model_name`, joined with "·".
 /// Returns "—" when the model has no calls in `data.calls`.
+///
+/// Reads from the precomputed `data.model_project_counts` index built
+/// during `aggregate_calls`. Render path is O(n) (constant) instead of
+/// O(N) over `data.calls` per call.
 fn top_projects_for_model(data: &UsageData, model_name: &str, n: usize) -> String {
-    use std::collections::HashMap;
-    let mut counts: HashMap<&str, usize> = HashMap::new();
-    for call in &data.calls {
-        if call.model == model_name {
-            *counts.entry(call.project.as_str()).or_insert(0) += 1;
-        }
-    }
-    if counts.is_empty() {
+    let Some(rows) = data.model_project_counts.get(model_name) else {
+        return "—".to_string();
+    };
+    if rows.is_empty() {
         return "—".to_string();
     }
-    let mut sorted: Vec<_> = counts.into_iter().collect();
-    sorted.sort_by(|a, b| b.1.cmp(&a.1));
-    sorted
-        .into_iter()
+    rows.iter()
         .take(n)
-        .map(|(p, _)| p.to_string())
+        .map(|(p, _)| p.clone())
         .collect::<Vec<_>>()
         .join(" · ")
 }
@@ -3785,6 +3782,7 @@ mod cross_filter_tests {
             mcp_servers: vec![],
             shell_commands: vec![],
             branches: vec![],
+            model_project_counts: std::collections::HashMap::new(),
         }
     }
 
