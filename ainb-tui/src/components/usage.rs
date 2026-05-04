@@ -1380,6 +1380,10 @@ fn fuzzy_score(matcher: &mut nucleo_matcher::Matcher, query: &str, haystack: &st
 /// Filter `rows` by a fuzzy-search query, preserving original order.
 /// Empty query returns all rows. The `label` closure projects each row
 /// to its primary search string (project name, session id, etc.).
+///
+/// Pattern parsing happens once before the filter loop (was per-call
+/// inside the filter via fuzzy_score). Worth doing because zoom-mode
+/// re-renders typing-rate (~10/s) over potentially 1k+ row sets.
 fn apply_zoom_filter<'a, T, F>(rows: &'a [T], query: &str, label: F) -> Vec<&'a T>
 where
     F: Fn(&T) -> String,
@@ -1387,13 +1391,26 @@ where
     if query.is_empty() {
         return rows.iter().collect();
     }
+    let needle = nucleo_matcher::pattern::Pattern::parse(
+        query,
+        nucleo_matcher::pattern::CaseMatching::Smart,
+        nucleo_matcher::pattern::Normalization::Smart,
+    );
+    let query_ascii = query.is_ascii();
     let mut matcher = nucleo_matcher::Matcher::new(nucleo_matcher::Config::DEFAULT);
     rows.iter()
         .filter_map(|row| {
             let label = label(row);
-            // fuzzy_score routes non-ASCII through Utf32String, so we
-            // no longer need a substring fallback for unicode labels.
-            fuzzy_score(&mut matcher, query, &label).map(|_| row)
+            let score = if query_ascii && label.is_ascii() {
+                needle.score(
+                    nucleo_matcher::Utf32Str::Ascii(label.as_bytes()),
+                    &mut matcher,
+                )
+            } else {
+                let utf32 = nucleo_matcher::Utf32String::from(label.as_str());
+                needle.score(utf32.slice(..), &mut matcher)
+            };
+            score.map(|_| row)
         })
         .collect()
 }
