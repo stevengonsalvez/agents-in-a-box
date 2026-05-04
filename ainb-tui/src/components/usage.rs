@@ -3862,6 +3862,49 @@ mod cross_filter_tests {
     }
 
     #[test]
+    fn cross_project_session_id_collision_attaches_owning_project_chip() {
+        // Two sessions with the same id "s1" but different owning
+        // projects — exactly the case that prompted carrying the
+        // session row's project on commit_focused_row. The first
+        // commit must attach the alpha project chip; a subsequent
+        // pop+commit on a beta-owned row must attach beta.
+        let now = Local::now();
+        let session_alpha = SessionUsage {
+            provider: "claude".into(),
+            project: "alpha".into(),
+            session_id: "s1".into(),
+            first_timestamp: now,
+            last_timestamp: now,
+            bucket: bucket(3),
+        };
+        let session_beta = SessionUsage {
+            provider: "claude".into(),
+            project: "beta".into(),
+            session_id: "s1".into(),
+            first_timestamp: now,
+            last_timestamp: now,
+            bucket: bucket(2),
+        };
+        let mut data = fixture();
+        data.sessions = vec![session_alpha, session_beta];
+
+        let mut state = UsageViewState::default();
+        state.data = Some(data);
+        state.focused_panel = Some(UsagePanel::TopSessions);
+        state.focus_row = 0;
+        assert!(state.commit_focused_row());
+        assert_eq!(state.filters.session, vec!["s1".to_string()]);
+        assert_eq!(state.filters.project, vec!["alpha".to_string()]);
+
+        // Pop both chips and target the beta row.
+        state.filters.clear();
+        state.focus_row = 1;
+        assert!(state.commit_focused_row());
+        assert_eq!(state.filters.session, vec!["s1".to_string()]);
+        assert_eq!(state.filters.project, vec!["beta".to_string()]);
+    }
+
+    #[test]
     fn enter_on_by_model_row_sets_model_filter() {
         let mut state = UsageViewState::default();
         state.data = Some(fixture());
