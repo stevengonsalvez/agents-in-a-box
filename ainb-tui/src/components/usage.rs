@@ -1537,7 +1537,7 @@ fn render_zoom_top_sessions(
         .take(visible_rows)
         .map(|sess| {
             let b = &sess.bucket;
-            let dur = (sess.last_timestamp - sess.first_timestamp).num_minutes().max(0);
+            let dur = (sess.last_timestamp - sess.first_timestamp).num_seconds().max(0);
             let dur_str = format_duration_min(dur as u64);
             Row::new(vec![
                 sess.provider.clone(),
@@ -1930,8 +1930,17 @@ fn top_projects_for_model(data: &UsageData, model_name: &str, n: usize) -> Strin
         .join(" · ")
 }
 
-/// Render `min_total` as `1h 04m` / `42m` / `<1m`.
-fn format_duration_min(min_total: u64) -> String {
+/// Render a duration (in seconds) as `1h 04m` / `42m` / `<1m` / `0m`.
+///
+/// Distinguishes a true zero duration (`first == last` timestamp, e.g. a
+/// session with one logged turn) from a positive sub-minute duration
+/// (rounded down to 0 minutes). Both used to render as `<1m`, which
+/// hid the zero case.
+fn format_duration_min(secs_total: u64) -> String {
+    if secs_total == 0 {
+        return "0m".to_string();
+    }
+    let min_total = secs_total / 60;
     if min_total == 0 {
         return "<1m".to_string();
     }
