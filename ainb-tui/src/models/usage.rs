@@ -1238,6 +1238,14 @@ fn parse_codex_source(path: &Path) -> Vec<ProviderCall> {
     calls
 }
 
+// TODO(refactor): the function below ingests `calls` into ten parallel
+// accumulators (daily, weekly, projects, sessions, models, branches,
+// activities, tools, mcp, shell). Extract a per-dimension Accumulator
+// trait so each one is unit-testable in isolation; orchestrator
+// becomes `for call in calls { for acc in &mut accumulators { acc.ingest(call) } }`.
+// Deferred — the largest single change in this cleanup pass and best
+// landed alongside the analyze_turns precompute (whose stable-id
+// requirement triggers a coordinated bincode bump). See PR-E thread.
 fn aggregate_calls(mut calls: Vec<ProviderCall>) -> UsageData {
     if calls.is_empty() {
         return UsageData::default();

@@ -255,7 +255,16 @@ pub enum UsageFilterTarget {
     Session,
 }
 
-/// View state for the usage analytics screen
+/// View state for the usage analytics screen.
+///
+// TODO(refactor): collapse the 4 zoom-related fields (zoom,
+// zoom_search_active, zoom_search_query, zoom_detail_open) into a
+// single `Option<ZoomState>` so the "in zoom" invariant lives in the
+// type system. Currently every zoom-related callsite has to remember
+// to check `self.zoom.is_some()` and the search/detail flags carry
+// stale values from prior zoom sessions. Deferred — touches every
+// zoom-related event handler and renderer; safer to land alongside
+// snapshot tests for the zoom view.
 #[derive(Debug, Clone)]
 pub struct UsageViewState {
     pub provider: UsageProvider,
