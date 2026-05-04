@@ -34,14 +34,41 @@ pub enum BlobFormat {
     BincodeV2 = 2,
 }
 
+/// Result of decoding a `files.blob_format` column. Behaviour for `Stale`
+/// and `Unknown` is identical (skip the row, re-parse), but the variants
+/// stay distinct so callers can emit different telemetry: stale rows are
+/// expected after a schema bump, unknown rows indicate corruption or a
+/// downgrade.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BlobFormatLookup {
+    /// Row matches the current on-disk format; safe to deserialize.
+    Current(BlobFormat),
+    /// Row is a recognised prior format; skip and re-parse.
+    Stale(i64),
+    /// Row carries a value we've never written; skip and re-parse.
+    Unknown(i64),
+}
+
 impl BlobFormat {
-    pub(crate) const fn from_i64(v: i64) -> Option<Self> {
+    /// Classify a `files.blob_format` value. Distinguishes "old known
+    /// format" from "never seen" — both result in skip+reparse but the
+    /// distinction is useful for diagnostics.
+    pub(crate) const fn lookup(v: i64) -> BlobFormatLookup {
         match v {
-            // 1 was the pre-branch layout. Rows tagged 1 are stale on
-            // upgrade and intentionally skipped — the next scan re-parses
-            // and rewrites them at version 2.
-            2 => Some(Self::BincodeV2),
-            _ => None,
+            2 => BlobFormatLookup::Current(Self::BincodeV2),
+            // 1 was the pre-branch layout (PR-D bumped to 2). Recognised
+            // but intentionally not deserialized — fields don't align.
+            1 => BlobFormatLookup::Stale(v),
+            _ => BlobFormatLookup::Unknown(v),
+        }
+    }
+
+    /// Convenience: returns `Some(Current)` only, matching the prior
+    /// `from_i64` shape for callers that don't care about the distinction.
+    pub(crate) const fn from_i64(v: i64) -> Option<Self> {
+        match Self::lookup(v) {
+            BlobFormatLookup::Current(fmt) => Some(fmt),
+            BlobFormatLookup::Stale(_) | BlobFormatLookup::Unknown(_) => None,
         }
     }
 }
@@ -372,8 +399,14 @@ fn load_row(conn: &Connection, path: &Path) -> Result<Option<LoadedRow>, CacheEr
         return Ok(None);
     };
 
-    let Some(format) = BlobFormat::from_i64(fmt) else {
-        return Ok(None);
+    let format = match BlobFormat::lookup(fmt) {
+        BlobFormatLookup::Current(fmt) => fmt,
+        // Stale = recognised prior format (PR-D bumped 1->2). Unknown =
+        // never written by us. Both skip+reparse; callers may log if they
+        // want to distinguish (currently neither path emits telemetry).
+        BlobFormatLookup::Stale(_) | BlobFormatLookup::Unknown(_) => {
+            return Ok(None);
+        }
     };
     let calls: Vec<crate::models::usage::ProviderCall> = match format {
         BlobFormat::BincodeV2 => bincode::deserialize(&blob)?,
