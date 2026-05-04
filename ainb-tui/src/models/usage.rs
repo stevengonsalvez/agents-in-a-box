@@ -910,7 +910,7 @@ fn recover_user_message_before(
     if file.seek(SeekFrom::Start(0)).is_err() {
         return String::new();
     }
-    let limited = (file as &mut std::fs::File).take(from_offset);
+    let limited = file.by_ref().take(from_offset);
     let reader = BufReader::new(limited);
     let mut last = String::new();
     for line in reader.lines() {
