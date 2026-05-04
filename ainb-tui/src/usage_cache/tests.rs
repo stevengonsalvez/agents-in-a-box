@@ -326,7 +326,7 @@ fn provider_call_bincode_layout_is_stable() {
 
     // Tripwire: if the byte length drifts, the struct layout changed.
     // See the doc comment on `ProviderCall` in `models/usage.rs`.
-    const EXPECTED_LEN: usize = const_expected_len();
+    const EXPECTED_LEN: usize = expected_layout_len();
     assert_eq!(
         encoded.len(),
         EXPECTED_LEN,
@@ -339,7 +339,7 @@ fn provider_call_bincode_layout_is_stable() {
 /// fixed encoding by default, so for a fixture with deterministic fields
 /// the size is deterministic. Computed at compile time conceptually, but
 /// inlined here so a layout drift surfaces as an `assert_eq!` mismatch.
-const fn const_expected_len() -> usize {
+const fn expected_layout_len() -> usize {
     // String layout (bincode default options): u64 len + bytes.
     // Vec<T>:                                  u64 len + items.
     // Option<T> (None):                        1 byte tag.
