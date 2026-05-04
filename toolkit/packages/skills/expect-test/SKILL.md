@@ -73,22 +73,87 @@ expect-cli -m "sign in as coach, navigate to perform, check events show only fut
 
 ## Running in tmux (for agents)
 
-**Always run in tmux** — expect-cli has an interactive TUI that blocks the terminal.
+**Always run in tmux** — expect-cli `tui` has an interactive TUI that blocks the terminal.
+
+### CLI syntax changed — use the `tui` subcommand
+
+Recent expect-cli versions (≥0.1.2) moved the test runner under the `tui` subcommand.
+`expect-cli -m "..."` without `tui` will print `error: unknown option '-m'`.
 
 ```bash
-SESSION="expect-$(date +%s)"
-tmux new-session -d -s "$SESSION"
+# ✅ CORRECT — tui subcommand
+expect-cli tui -m "short description" --browser-mode headed -y
 
-# Run with -y to skip interactive review
-tmux send-keys -t "$SESSION" "expect-cli -m 'test description here' --headed -y --verbose 2>&1 | tee expect-results.log" C-m
-
-# Monitor progress
-sleep 30
-tmux capture-pane -t "$SESSION" -p | tail -20
-
-# Check results
-cat expect-results.log | grep -E "✔|✘|PASS|FAIL"
+# ❌ WRONG on v0.1.2+
+expect-cli -m "short description" --headed -y
 ```
+
+### TUI is deprecated — prefer the MCP server going forward
+
+On first run, expect-cli prints a banner:
+> ⚠ The TUI is deprecated. Use /expect from your coding agent instead. Run `npx expect-cli@latest init` to set up.
+
+For new projects, install the MCP server (`expect-cli init`) so Claude Code can call
+the atomic tools (`expect open`, `expect screenshot`, `expect network_requests`, etc.)
+directly. The `tui` command still works but will be removed in a future release.
+
+### Safe pattern for long missions (the ONLY way that's robust)
+
+Put the mission in a file via heredoc. Inline `-m "..."` strings with apostrophes,
+embedded double-quotes, or newlines break the shell chain: `tmux send-keys` →
+`bash -c` → expect-cli argv parser. Symptom: `error: too many arguments for 'tui'. Expected 0 arguments but got 4`.
+
+```bash
+STAMP=$(date +%s)
+SESSION="expect-${STAMP}"
+LOG="/tmp/expect-${STAMP}.log"
+MISSION_FILE="/tmp/mission-${STAMP}.txt"
+URL="http://localhost:5173"   # or a deployed preview
+
+# 1) Write the mission to a file — heredoc preserves apostrophes/quotes/newlines.
+cat > "$MISSION_FILE" <<'EOF'
+Navigate to the page. Wait for network idle.
+Verify the SHOTs tab is selected and 5+ article cards are visible.
+Apostrophes ("don't"), quotes, and newlines all survive when the mission is a file.
+EOF
+
+# 2) Launch tmux + expect-cli tui — reference the file with $(cat …), NOT inline.
+tmux new-session -d -s "$SESSION" \
+  "EXPECT_REPLAY_OUTPUT_PATH=/tmp/expect-replays \
+   expect-cli tui -u '$URL' -m \"\$(cat $MISSION_FILE)\" --browser-mode headed -y --verbose \
+   2>&1 | tee $LOG"
+
+# 3) First-run prompt: expect-cli asks "Install the expect skill for your coding agents? (Y/n)".
+#    The `-y` flag does NOT cover this prompt. Decline it:
+sleep 5
+tmux send-keys -t "$SESSION" "n" Enter
+
+# 4) Monitor. DO NOT attach — it blocks the agent.
+tmux capture-pane -t "$SESSION" -p | tail -30
+```
+
+### Why the naive inline approach fails
+
+```bash
+# ❌ BROKEN — the double-quote nesting inside bash -c collapses
+tmux send-keys -t "$S" "bash -c 'expect-cli tui -m \"$LONG_MISSION\" ...'"
+# With apostrophes and newlines in $LONG_MISSION, bash sees 4+ positional args.
+```
+
+### Quick-check pattern (no AI, just raw browser)
+
+For smoke checks where you don't need the AI agent:
+
+```bash
+expect-cli open "$URL" --headed --wait-until networkidle
+expect-cli screenshot             # saves to /tmp/expect-artifacts/
+expect-cli console_logs
+expect-cli network_requests --url supabase
+expect-cli close
+```
+
+These atomic commands don't need tmux (they return immediately), don't require a mission
+string, and don't block on the install prompt.
 
 ## CLI Reference
 
@@ -164,7 +229,7 @@ cp /tmp/expect-replays/${SESSION_ID}.ndjson.js /tmp/replay/
 cp /tmp/expect-replays/${SESSION_ID}.ndjson /tmp/replay/
 
 # Publish (3 files: HTML shell + ndjson.js recording + ndjson raw data)
-$HOME/{{TOOL_DIR}}/skills/here-now/scripts/publish.sh /tmp/replay/ --client claude
+/.claude/skills/here-now/scripts/publish.sh /tmp/replay/ --client claude
 
 # The replay URL is: https://{slug}.here.now/{SESSION_ID}.html
 # Post to PR comment with the direct link
@@ -265,7 +330,7 @@ ffmpeg -i "$WEBM" -ss 60 -frames:v 1 /tmp/screenshots/step2.png -y 2>/dev/null
 SESSION_ID=$(ls -t /tmp/expect-replays/*.html | head -1 | xargs basename .html)
 mkdir -p /tmp/replay
 cp /tmp/expect-replays/${SESSION_ID}.{html,ndjson.js,ndjson} /tmp/replay/
-$HOME/{{TOOL_DIR}}/skills/here-now/scripts/publish.sh /tmp/replay/ --client claude
+/.claude/skills/here-now/scripts/publish.sh /tmp/replay/ --client claude
 # Post the replay URL to PR
 
 # 5b. Upload static screenshots (FALLBACK if replay not suitable)

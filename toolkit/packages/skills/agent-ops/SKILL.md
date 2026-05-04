@@ -28,7 +28,7 @@ Set maximum spend per session or per agent:
 
 ```bash
 # Check current session cost
-METRICS_FILE="$HOME/{{TOOL_DIR}}/metrics/costs.jsonl"
+METRICS_FILE="/.claude/metrics/costs.jsonl"
 if [[ -f "$METRICS_FILE" ]]; then
     SESSION_ID="${CLAUDE_SESSION_ID:-default}"
     TOTAL=$(grep "$SESSION_ID" "$METRICS_FILE" | \
@@ -159,7 +159,7 @@ echo ""
 
 # Cost metrics
 echo "## Cost Metrics (last 24h)"
-METRICS="$HOME/{{TOOL_DIR}}/metrics/costs.jsonl"
+METRICS="/.claude/metrics/costs.jsonl"
 if [[ -f "$METRICS" ]]; then
     CUTOFF=$(date -u -v-24H +%Y-%m-%dT%H:%M:%S 2>/dev/null || date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%S)
     python3 -c "
@@ -184,8 +184,8 @@ echo ""
 
 # Disk usage
 echo "## Knowledge Base Size"
-du -sh "$HOME/{{TOOL_DIR}}/global-learnings/" 2>/dev/null || echo "  No knowledge base"
-du -sh "$HOME/{{TOOL_DIR}}/metrics/" 2>/dev/null || echo "  No metrics"
+du -sh "/.claude/global-learnings/" 2>/dev/null || echo "  No knowledge base"
+du -sh "/.claude/metrics/" 2>/dev/null || echo "  No metrics"
 ```
 
 ## Runbook: Common Agent Incidents
@@ -197,7 +197,7 @@ du -sh "$HOME/{{TOOL_DIR}}/metrics/" 2>/dev/null || echo "  No metrics"
 4. Restart with more specific instructions
 
 ### Cost Spike
-1. Check `{{HOME_TOOL_DIR}}/metrics/costs.jsonl` for recent sessions
+1. Check `~/.claude/metrics/costs.jsonl` for recent sessions
 2. Identify high-cost session IDs
 3. Set cost cap: `export AGENT_COST_CAP=2.00`
 4. Consider using haiku for sub-tasks: model parameter in Agent tool
@@ -209,7 +209,7 @@ du -sh "$HOME/{{TOOL_DIR}}/metrics/" 2>/dev/null || echo "  No metrics"
 4. Consider /reflect to capture the correction
 
 ### Swarm Coordination Failure
-1. Check team config: `cat {{HOME_TOOL_DIR}}/teams/*/config.json`
+1. Check team config: `cat ~/.claude/teams/*/config.json`
 2. Verify task list: use TaskList tool
 3. Check for blocked tasks with unresolved dependencies
 4. Send broadcast to all agents if needed

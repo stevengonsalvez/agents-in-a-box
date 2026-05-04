@@ -93,8 +93,8 @@ get_dev_metadata() {
 get_agent_metadata() {
     local SESSION_NAME=$1
     # Runtime-aware metadata path — TOOLKIT_HOME is set by bootstrap's agent-env.sh
-    # Falls back to $HOME/{{TOOL_DIR}} for backward compatibility
-    local TOOLKIT_HOME="${TOOLKIT_HOME:-$HOME/{{TOOL_DIR}}}"
+    # Falls back to /.claude for backward compatibility
+    local TOOLKIT_HOME="${TOOLKIT_HOME:-/.claude}"
     local METADATA_FILE="$TOOLKIT_HOME/agents/${SESSION_NAME}.json"
 
     if [ -f "$METADATA_FILE" ]; then

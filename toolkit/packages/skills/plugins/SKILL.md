@@ -32,7 +32,7 @@ a closed-loop system: skills enter from any tool, get canonicalized, and deploy 
     manual copy              manual copy             manual copy
          │                       │                       │
          ▼                       ▼                       ▼
-    {{HOME_TOOL_DIR}}/skills/       ~/.codex/skills/       ~/.copilot/skills/
+    ~/.claude/skills/       ~/.codex/skills/       ~/.copilot/skills/
          │                       │                       │
          └───────────┬───────────┘───────────────────────┘
                      │
@@ -56,7 +56,7 @@ a closed-loop system: skills enter from any tool, get canonicalized, and deploy 
                      │
           ┌──────────┼──────────┐
           ▼          ▼          ▼
-     {{HOME_TOOL_DIR}}/  ~/.codex/  ~/.copilot/
+     ~/.claude/  ~/.codex/  ~/.copilot/
       skills/     skills/     skills/     ◄── ALL tools get ALL skills
           │          │          │
           ▼          ▼          ▼
@@ -103,8 +103,8 @@ When adding a new skill, determine its type:
 
 | Source | Location | Format |
 |--------|----------|--------|
-| Claude Plugins | `{{HOME_TOOL_DIR}}/plugins/installed_plugins.json` | JSON |
-| Marketplaces | `{{HOME_TOOL_DIR}}/plugins/known_marketplaces.json` | JSON |
+| Claude Plugins | `~/.claude/plugins/installed_plugins.json` | JSON |
+| Marketplaces | `~/.claude/plugins/known_marketplaces.json` | JSON |
 | Bundled Skills | `packages/skills/*/SKILL.md` | Markdown |
 | Unified Manifest | `toolkit/external-dependencies.yaml` | YAML |
 
@@ -151,11 +151,11 @@ None installed
 ```bash
 # Read Claude plugins
 jq -r '.plugins | to_entries[] | "\(.key): \(.value[0].version)"' \
-  $HOME/{{TOOL_DIR}}/plugins/installed_plugins.json
+  /.claude/plugins/installed_plugins.json
 
 # Read marketplaces
 jq -r 'to_entries[] | "\(.key): \(.value.source.repo)"' \
-  $HOME/{{TOOL_DIR}}/plugins/known_marketplaces.json
+  /.claude/plugins/known_marketplaces.json
 
 # Read bundled skills
 for skill in packages/skills/*/SKILL.md; do
@@ -171,7 +171,7 @@ Add a new skill to the toolkit ecosystem. Handles all three skill types.
 
 ```
 /plugins add <name>                     # interactive — detects source
-/plugins add <name> --from {{HOME_TOOL_DIR}}/skills/<name>   # from installed skill
+/plugins add <name> --from ~/.claude/skills/<name>   # from installed skill
 /plugins add <name> --from https://github.com/org/repo  # from git repo
 ```
 
@@ -188,7 +188,7 @@ Source provided?
   ├─ Git URL ──► Agent-skill
   │
   └─ No source ──► Scan all tool skill dirs for <name>:
-       {{HOME_TOOL_DIR}}/skills/<name>/
+       ~/.claude/skills/<name>/
        ~/.codex/skills/<name>/
        ~/.copilot/skills/<name>/
        If found: use that path and re-enter detection
@@ -246,9 +246,9 @@ Run `/plugins status` to verify.
 ### Examples
 
 ```bash
-# Skill discovered in $HOME/{{TOOL_DIR}}/skills/ during /plugins list drift check
+# Skill discovered in /.claude/skills/ during /plugins list drift check
 /plugins add remotion-best-practices
-# → Detects in $HOME/{{TOOL_DIR}}/skills/, no .git → copies to packages/skills/ as bundled
+# → Detects in /.claude/skills/, no .git → copies to packages/skills/ as bundled
 
 # Skill from a public git repo
 /plugins add ui-ux-pro-max --from https://github.com/nextlevelbuilder/ui-ux-pro-max-skill
@@ -266,8 +266,8 @@ Update `toolkit/external-dependencies.yaml` from current installed state.
 ### Workflow
 
 1. **Read Current State**
-   - Parse `{{HOME_TOOL_DIR}}/plugins/installed_plugins.json`
-   - Parse `{{HOME_TOOL_DIR}}/plugins/known_marketplaces.json`
+   - Parse `~/.claude/plugins/installed_plugins.json`
+   - Parse `~/.claude/plugins/known_marketplaces.json`
    - Scan `packages/skills/*/SKILL.md`
 
 2. **Compare with Manifest**
@@ -302,8 +302,8 @@ Update `toolkit/external-dependencies.yaml` from current installed state.
 # Sync Claude plugins to manifest
 
 MANIFEST="toolkit/external-dependencies.yaml"
-PLUGINS_JSON="$HOME/{{TOOL_DIR}}/plugins/installed_plugins.json"
-MARKETPLACES_JSON="$HOME/{{TOOL_DIR}}/plugins/known_marketplaces.json"
+PLUGINS_JSON="/.claude/plugins/installed_plugins.json"
+MARKETPLACES_JSON="/.claude/plugins/known_marketplaces.json"
 
 # Extract plugin data
 jq -r '.plugins | to_entries[] | {
@@ -398,7 +398,7 @@ All extensions are in sync.
 yq '.claude-plugins[] | "\(.name)=\(.version)"' toolkit/external-dependencies.yaml > /tmp/manifest_versions
 
 jq -r '.plugins | to_entries[] | "\(.key | split("@")[0])=\(.value[0].version)"' \
-  $HOME/{{TOOL_DIR}}/plugins/installed_plugins.json > /tmp/installed_versions
+  /.claude/plugins/installed_plugins.json > /tmp/installed_versions
 
 diff /tmp/manifest_versions /tmp/installed_versions
 ```
@@ -421,8 +421,8 @@ If plugin changes detected:
 | File | Purpose |
 |------|---------|
 | `toolkit/external-dependencies.yaml` | Unified manifest (versioned) |
-| `{{HOME_TOOL_DIR}}/plugins/installed_plugins.json` | Claude's plugin state |
-| `{{HOME_TOOL_DIR}}/plugins/known_marketplaces.json` | Registered marketplaces |
+| `~/.claude/plugins/installed_plugins.json` | Claude's plugin state |
+| `~/.claude/plugins/known_marketplaces.json` | Registered marketplaces |
 | `packages/skills/*/SKILL.md` | Bundled skill definitions |
 
 ## Best Practices

@@ -280,8 +280,8 @@ exit 0
 ## Notes
 
 - Orphaned sessions are detected by checking if tmux session exists for each metadata file
-- Resume requires a valid transcript file (stored by Claude at `{{HOME_TOOL_DIR}}/projects/`)
-- Archiving moves metadata to `{{HOME_TOOL_DIR}}/agents/archived/` - worktrees are NOT auto-removed
+- Resume requires a valid transcript file (stored by Claude at `~/.claude/projects/`)
+- Archiving moves metadata to `~/.claude/agents/archived/` - worktrees are NOT auto-removed
 - Use `/cleanup-agent-worktree` or manual git commands to remove worktrees after archiving
 
 ## Recovery Workflow

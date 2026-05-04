@@ -43,9 +43,9 @@ export LEARNINGS_HOME="$HOME/.learnings"
 
 ## Setup
 
-### 1. Migration (from {{HOME_TOOL_DIR}}/global-learnings/)
+### 1. Migration (from ~/.claude/global-learnings/)
 
-If you have an existing installation at `{{HOME_TOOL_DIR}}/global-learnings/`, run the migration script:
+If you have an existing installation at `~/.claude/global-learnings/`, run the migration script:
 
 ```bash
 # From the toolkit source
@@ -55,7 +55,7 @@ If you have an existing installation at `{{HOME_TOOL_DIR}}/global-learnings/`, r
 This script:
 - Creates `~/.learnings/` directory structure
 - Migrates existing documents to `documents/learnings/`
-- Creates a backward-compat symlink (`{{HOME_TOOL_DIR}}/global-learnings -> ~/.learnings`)
+- Creates a backward-compat symlink (`~/.claude/global-learnings -> ~/.learnings`)
 - Copies CLI scripts to `~/.learnings/cli/`
 - Adds `LEARNINGS_HOME` export to your shell profile
 - Initializes a git repository

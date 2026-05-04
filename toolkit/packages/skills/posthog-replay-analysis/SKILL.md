@@ -26,22 +26,30 @@ PostHog session replays are **not video files** — they are [rrweb](https://www
 
 ## Prerequisites
 
+You need three things from the target project:
+
+| What | Where to find it |
+|---|---|
+| PostHog personal API key | PostHog UI → Settings → Personal API keys. **Must** have `session_recording:read` scope. Also frequently stored in repo `.env*` files under `POSTHOG_PERSONAL_API_KEY` or similar — check there first. |
+| Project ID (numeric) | PostHog UI → Settings → Project ID. NOT the project name. |
+| Region host | `https://eu.posthog.com` or `https://us.posthog.com` — check the URL when you're logged into the PostHog UI. |
+
 ```bash
-# PostHog personal API key (read access to project)
-#   Look in .env* files for POSTHOG_PERSONAL_API_KEY
-# Project ID (numeric) and region host
-#   EU: https://eu.posthog.com    US: https://us.posthog.com
 pip install --quiet matplotlib   # only if you want the chart at the end
 ```
 
-Export for convenience:
+If the project has a config skill (e.g. `shot-debug-auth`, `incident-investigate`, or similar), check it first — common IDs and token paths may already be documented there.
+
+Export for convenience (substitute your own values):
 
 ```bash
-export PH_HOST="https://eu.posthog.com"
-export PH_PROJECT_ID="85669"
-export PH_TOKEN="phx_…"
-export PH_RECORDING_ID="019d9f5c-e4c3-7bd0-8567-e981cf070f80"
+export PH_HOST="https://eu.posthog.com"          # or us.posthog.com
+export PH_PROJECT_ID="<your-project-id>"          # numeric
+export PH_TOKEN="phx_…"                            # personal API key
+export PH_RECORDING_ID="<recording-uuid>"          # from a replay URL
 ```
+
+The recording ID is the last path segment in a PostHog replay URL: `…/project/{id}/replay/{recording-id}`.
 
 ## Step 1 — Confirm the Recording Exists
 
@@ -212,6 +220,6 @@ For a complete write-up, attach:
 
 ## Related
 
-- **`media-processing`** — how to turn chart/screenshot PNGs into mp4 slideshows and side-by-side composites for sharing in PRs or incident reports
-- **`sentry-query`** — pair with Sentry to correlate replay timeline against JS stacktraces; PostHog typically strips PII while Sentry has user IDs
-- **`shot-debug-auth`** — uses the same rrweb decode for auth-flow forensics
+- **`media-processing`** — turn chart/screenshot PNGs into mp4 slideshows and side-by-side composites for sharing in PRs or incident reports
+- **`sentry-query`** *(if available)* — pair with Sentry to correlate replay timeline against JS stacktraces; PostHog typically strips PII while Sentry has user IDs
+- **Project-level auth/debug skills** *(if available)* — e.g. a project may ship its own `<project>-debug-auth` or `incident-investigate` skill that wraps this one with known project IDs, env paths, and distinct_id → user lookups. Prefer those when investigating incidents in that project.

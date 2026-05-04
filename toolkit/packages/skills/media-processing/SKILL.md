@@ -203,6 +203,40 @@ ffmpeg -i input.mp4 -vf "fps=15,scale=640:-1:flags=lanczos,split[s0][s1];[s0]pal
 magick input.jpg -gaussian-blur 0x8 output.jpg
 ```
 
+### Incident Evidence Composite
+
+Side-by-side composite with a title bar — useful for pasting into PRs or incident
+reports when you have a screenshot plus a chart/second screenshot to compare.
+
+```bash
+# Resize both panels to matching height, append horizontally, add title strip
+magick screenshot.png  -resize 'x800' -background '#111' -gravity center -extent '450x800' panel_a.png
+magick chart.png       -resize 'x800' -background '#fff' -gravity center -extent '1450x800' panel_b.png
+magick panel_a.png panel_b.png +append \
+  -background '#111' -splice 0x40 \
+  -gravity north -pointsize 22 -fill white \
+  -annotate +0+8 'Incident · URL · device · timestamp' \
+  composite.png
+```
+
+### Slideshow MP4 from PNG Glob
+
+Turn a directory of PNGs into a short mp4 (great for evidence clips when you don't
+have a real video source — e.g. rrweb/session-replay data).
+
+```bash
+# 2 seconds per frame, H.264-compatible output
+ffmpeg -y -loglevel error \
+  -framerate 1/2 -pattern_type glob -i 'frames/*.png' \
+  -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p,fps=30" \
+  -c:v libx264 -preset veryfast -crf 22 slideshow.mp4
+```
+
+**Non-obvious bits:**
+- `scale=trunc(iw/2)*2:trunc(ih/2)*2` — H.264 requires **even dimensions**; skip this and the encoder fails silently on odd-width PNGs.
+- `format=yuv420p` — without it, players like QuickTime refuse to open.
+- `fps=30` keeps the output cadence smooth even when the input is 1/2 fps.
+
 ## Advanced Techniques
 
 ### Multi-Pass Video Encoding
@@ -349,6 +383,17 @@ sudo nano /etc/ImageMagick-7/policy.xml
 ffmpeg -threads 4 input.mp4 output.mp4
 magick -limit memory 2GB -limit map 4GB input.jpg output.jpg
 ```
+
+## Related Skills
+
+- **PostHog / rrweb session replays** — if the "video" source is actually a
+  PostHog session recording (or any rrweb event stream), don't reach for ffmpeg
+  first. rrweb replays are event logs, not pixel streams; `rrvideo` npm packages
+  are broken (`@rrweb/rrvideo` is 404, unscoped `rrvideo@0.2.1` silently
+  produces nothing). See the `posthog-replay-analysis` skill for the decode
+  recipe — you can extract network timelines, DOM snapshots, and console logs
+  directly from the rrweb events, then render them into a chart + mp4 slideshow
+  using the patterns above (*Incident Evidence Composite* and *Slideshow MP4*).
 
 ## Resources
 

@@ -16,7 +16,7 @@ Analyze Claude Code token consumption across all sessions.
 Run the script and display the FULL output as-is:
 
 ```bash
-python3 {{HOME_TOOL_DIR}}/skills/token-usage/scripts/token_usage.py --format markdown [ARGS]
+python3 ~/.claude/skills/token-usage/scripts/token_usage.py --format markdown [ARGS]
 ```
 
 Pass through any user-provided arguments (--days, --since, --project, --top-sessions).
@@ -25,22 +25,22 @@ Pass through any user-provided arguments (--days, --since, --project, --top-sess
 
 ```bash
 # All time usage
-python3 {{HOME_TOOL_DIR}}/skills/token-usage/scripts/token_usage.py --format markdown
+python3 ~/.claude/skills/token-usage/scripts/token_usage.py --format markdown
 
 # Last 7 days
-python3 {{HOME_TOOL_DIR}}/skills/token-usage/scripts/token_usage.py --days 7 --format markdown
+python3 ~/.claude/skills/token-usage/scripts/token_usage.py --days 7 --format markdown
 
 # Since a specific date
-python3 {{HOME_TOOL_DIR}}/skills/token-usage/scripts/token_usage.py --since 2026-04-01 --format markdown
+python3 ~/.claude/skills/token-usage/scripts/token_usage.py --since 2026-04-01 --format markdown
 
 # Filter to a specific project
-python3 {{HOME_TOOL_DIR}}/skills/token-usage/scripts/token_usage.py --project shotclubhouse --format markdown
+python3 ~/.claude/skills/token-usage/scripts/token_usage.py --project shotclubhouse --format markdown
 
 # Top 20 costliest sessions
-python3 {{HOME_TOOL_DIR}}/skills/token-usage/scripts/token_usage.py --days 30 --top-sessions 20 --format markdown
+python3 ~/.claude/skills/token-usage/scripts/token_usage.py --days 30 --top-sessions 20 --format markdown
 
 # JSON output (for piping to jq)
-python3 {{HOME_TOOL_DIR}}/skills/token-usage/scripts/token_usage.py --format json | jq '.grand_total'
+python3 ~/.claude/skills/token-usage/scripts/token_usage.py --format json | jq '.grand_total'
 ```
 
 ## Display Instructions
