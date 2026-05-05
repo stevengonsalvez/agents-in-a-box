@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## [1.0.0] - 2026-05-05
+### Fixed
+- Merge pull request #73 from stevengonsalvez/chore/drop-windows-release
+- **release**: drop native Windows + Scoop from publishing pipeline
+
+### Documentation
+- **readme**: remove Scoop install path; mark native Windows unsupported
+
+
+## [1.0.0] - 2026-05-05
 ### Added
 - Merge pull request #52 from stevengonsalvez/feat/codeburn
 - Merge pull request #53 from stevengonsalvez/fix/tmux-hang
