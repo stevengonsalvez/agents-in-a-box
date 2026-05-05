@@ -4237,6 +4237,12 @@ impl EventHandler {
             }
             AppEvent::UsageForceRefresh => {
                 tracing::info!("Force-refreshing usage data (bypass cache)");
+                // Force-refresh re-reads JSONL from disk; the data extent
+                // could legitimately have shrunk (files deleted, cache
+                // cleared on rotated logs). Reset oldest_call_day so the
+                // monotonic-min on reload picks up the true new extent
+                // rather than a stale earlier value.
+                state.usage_state.oldest_call_day = None;
                 let msg = if state.start_background_usage_load_with_options(true, true) {
                     "Force-refreshing usage data (cache cleared)…"
                 } else {
