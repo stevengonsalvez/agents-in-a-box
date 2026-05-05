@@ -28,7 +28,7 @@ Set maximum spend per session or per agent:
 
 ```bash
 # Check current session cost
-METRICS_FILE="/.claude/metrics/costs.jsonl"
+METRICS_FILE="$HOME/{{TOOL_DIR}}/metrics/costs.jsonl"
 if [[ -f "$METRICS_FILE" ]]; then
     SESSION_ID="${CLAUDE_SESSION_ID:-default}"
     TOTAL=$(grep "$SESSION_ID" "$METRICS_FILE" | \
@@ -159,7 +159,7 @@ echo ""
 
 # Cost metrics
 echo "## Cost Metrics (last 24h)"
-METRICS="/.claude/metrics/costs.jsonl"
+METRICS="$HOME/{{TOOL_DIR}}/metrics/costs.jsonl"
 if [[ -f "$METRICS" ]]; then
     CUTOFF=$(date -u -v-24H +%Y-%m-%dT%H:%M:%S 2>/dev/null || date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%S)
     python3 -c "
@@ -185,7 +185,7 @@ echo ""
 # Disk usage
 echo "## Knowledge Base Size"
 du -sh "/.claude/global-learnings/" 2>/dev/null || echo "  No knowledge base"
-du -sh "/.claude/metrics/" 2>/dev/null || echo "  No metrics"
+du -sh "$HOME/{{TOOL_DIR}}/metrics/" 2>/dev/null || echo "  No metrics"
 ```
 
 ## Runbook: Common Agent Incidents

@@ -48,7 +48,7 @@
 
 1. **Load Session State**
    ```
-   Check .claude/session/current-session.yaml
+   Check {{TOOL_DIR}}/session/current-session.yaml
    ```
 
 2. **Verify Git Branch**

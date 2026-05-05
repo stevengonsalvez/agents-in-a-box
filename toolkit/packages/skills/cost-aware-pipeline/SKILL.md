@@ -186,7 +186,7 @@ export AGENT_COST_CAP_WARN=0.80
 
 ```bash
 # View today's costs
-grep "$(date +%Y-%m-%d)" /.claude/metrics/costs.jsonl | \
+grep "$(date +%Y-%m-%d)" "$HOME/{{TOOL_DIR}}/metrics/costs.jsonl" | \
   python3 -c "import sys,json; rows=[json.loads(l) for l in sys.stdin]; \
   print(f'Sessions: {len(set(r[\"session_id\"] for r in rows))}'); \
   print(f'Total: \${sum(r[\"estimated_cost_usd\"] for r in rows):.4f}')"
