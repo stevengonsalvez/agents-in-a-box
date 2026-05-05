@@ -1,6 +1,6 @@
 #!/bin/bash
-# Install script for agents-box
-# Usage: curl -fsSL https://raw.githubusercontent.com/stevengonsalvez/agents-in-a-box/v2/ainb-tui/install.sh | bash
+# Install script for ainb
+# Usage: curl -fsSL https://raw.githubusercontent.com/stevengonsalvez/agents-in-a-box/main/ainb-tui/install.sh | bash
 #
 # Options:
 #   INSTALL_DIR=/custom/path  - Custom install directory (default: /usr/local/bin or ~/.local/bin)
@@ -9,7 +9,7 @@
 set -e
 
 REPO="stevengonsalvez/agents-in-a-box"
-BINARY_NAME="agents-box"
+BINARY_NAME="ainb"
 GITHUB_API="https://api.github.com/repos/${REPO}/releases"
 GITHUB_RELEASES="https://github.com/${REPO}/releases/download"
 
@@ -104,8 +104,8 @@ verify_checksum() {
 main() {
     echo ""
     echo -e "${GREEN}╔═══════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}║       agents-box Installer                ║${NC}"
-    echo -e "${GREEN}║  Terminal UI for Claude Code Sessions    ║${NC}"
+    echo -e "${GREEN}║             ainb Installer                ║${NC}"
+    echo -e "${GREEN}║   Terminal UI for Claude Code Sessions    ║${NC}"
     echo -e "${GREEN}╚═══════════════════════════════════════════╝${NC}"
     echo ""
 
@@ -128,7 +128,7 @@ main() {
             warn "Intel Mac binaries are not pre-built."
             warn "Please install via cargo:"
             echo ""
-            echo "  cargo install --git https://github.com/${REPO} --branch v2 agents-box"
+            echo "  cargo install --git https://github.com/${REPO} --branch main ainb"
             echo ""
             exit 0
             ;;
@@ -138,7 +138,7 @@ main() {
             warn "ARM64 Linux binaries are not pre-built."
             warn "Please install via cargo:"
             echo ""
-            echo "  cargo install --git https://github.com/${REPO} --branch v2 agents-box"
+            echo "  cargo install --git https://github.com/${REPO} --branch main ainb"
             echo ""
             exit 0
             ;;

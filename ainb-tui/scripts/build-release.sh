@@ -4,11 +4,11 @@
 set -e
 
 VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
-BINARY_NAME="agents-box"
+BINARY_NAME="ainb"
 TARGET_DIR="target/release"
 DIST_DIR="dist"
 
-echo "🔨 Building agents-box v${VERSION}..."
+echo "🔨 Building ainb v${VERSION}..."
 
 # Build release binary
 cargo build --release
