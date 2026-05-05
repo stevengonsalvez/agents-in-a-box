@@ -302,6 +302,16 @@ pub struct UsageViewState {
     /// occupies the bottom 40% of the zoom area and shows the full
     /// row record for the focused row.
     pub zoom_detail_open: bool,
+    /// Absolute oldest call day observed across the unfiltered call
+    /// set, monotonically narrowing across loads. Used to clamp
+    /// `step_period_back` independent of the currently-active period
+    /// (which restricts `data.daily` to the visible window and would
+    /// otherwise prevent stepping into earlier months/quarters).
+    ///
+    /// Updated on every load via `min(existing, new_min_from_data_calls)`
+    /// so a narrow period (eg. `SpecificMonth(May)`) cannot raise the
+    /// anchor above an earlier value seen during a wider load.
+    pub oldest_call_day: Option<NaiveDate>,
 }
 
 impl Default for UsageViewState {
@@ -325,6 +335,7 @@ impl Default for UsageViewState {
             zoom_search_active: false,
             zoom_search_query: String::new(),
             zoom_detail_open: false,
+            oldest_call_day: None,
         }
     }
 }
@@ -373,19 +384,17 @@ impl UsageViewState {
     }
 
     /// Step the active Month or Quarter picker one unit back. Clamps
-    /// at the oldest day in `data.daily` (so we never step into a
-    /// region known to have no usage rows). Returns `true` when the
-    /// period actually changed.
+    /// at `oldest_call_day` — the absolute oldest day observed across
+    /// the unfiltered call set — so the user can step from a narrow
+    /// period (eg. `SpecificMonth(May)`) into an earlier month, even
+    /// though `data.daily` only holds the May rows in that state.
+    /// Returns `true` when the period actually changed.
     ///
-    /// No-op when the active period is not a Month/Quarter picker.
+    /// No-op when the active period is not a Month/Quarter picker, or
+    /// when no data has been loaded yet (no oldest anchor to clamp
+    /// against — would let the user wander arbitrarily far back).
     pub fn step_period_back(&mut self) -> bool {
-        // Refuse to step until data has loaded — without an `oldest`
-        // anchor we'd let the user wander arbitrarily far backwards,
-        // and the resulting picker state would silently fall outside
-        // the data range once the load completes.
-        let Some(oldest) =
-            self.data.as_ref().and_then(|d| d.daily.first().map(|(date, _)| *date))
-        else {
+        let Some(oldest) = self.oldest_call_day else {
             return false;
         };
         self.step_period(StepDirection::Back, oldest)
@@ -4012,6 +4021,54 @@ mod cross_filter_tests {
         for needle in ["project=p", "model=m", "activity=Coding", "session=s", "branch=b"] {
             assert!(flat.contains(needle), "chip strip missing {needle}: {flat}");
         }
+    }
+
+    #[test]
+    fn step_period_back_uses_oldest_call_day_not_data_daily() {
+        // The picker must clamp at the absolute oldest call day (which
+        // tracks the unfiltered call set across loads), not at
+        // `data.daily.first()` — when the active period is
+        // `SpecificMonth(May)`, `data.daily` only has May rows so the
+        // old clamp-at-data path would refuse to step into April even
+        // though April is in range.
+        use crate::models::usage::UsagePeriod;
+        let mut state = UsageViewState::default();
+        state.oldest_call_day = NaiveDate::from_ymd_opt(2026, 4, 1);
+        state.period = UsagePeriod::SpecificMonth(NaiveDate::from_ymd_opt(2026, 5, 1).unwrap());
+
+        assert!(state.step_period_back(), "April is in range; back must succeed");
+        assert_eq!(
+            state.period,
+            UsagePeriod::SpecificMonth(NaiveDate::from_ymd_opt(2026, 4, 1).unwrap()),
+        );
+    }
+
+    #[test]
+    fn step_period_back_clamps_when_oldest_is_inside_target_month() {
+        // April 1 < May 15, so stepping back from May lands on April 1,
+        // which is BEFORE the oldest known day — must refuse the step.
+        use crate::models::usage::UsagePeriod;
+        let mut state = UsageViewState::default();
+        state.oldest_call_day = NaiveDate::from_ymd_opt(2026, 5, 15);
+        state.period = UsagePeriod::SpecificMonth(NaiveDate::from_ymd_opt(2026, 5, 1).unwrap());
+
+        assert!(!state.step_period_back(), "April predates oldest May 15; back must fail");
+        assert_eq!(
+            state.period,
+            UsagePeriod::SpecificMonth(NaiveDate::from_ymd_opt(2026, 5, 1).unwrap()),
+        );
+    }
+
+    #[test]
+    fn step_period_back_returns_false_when_no_data_loaded() {
+        // Without an oldest anchor the user could wander arbitrarily
+        // far back; refuse to step until at least one load has populated
+        // `oldest_call_day`.
+        use crate::models::usage::UsagePeriod;
+        let mut state = UsageViewState::default();
+        state.oldest_call_day = None;
+        state.period = UsagePeriod::SpecificMonth(NaiveDate::from_ymd_opt(2026, 5, 1).unwrap());
+        assert!(!state.step_period_back());
     }
 
     #[test]

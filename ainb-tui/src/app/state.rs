@@ -3560,6 +3560,24 @@ impl AppState {
         if let Some(ref mut receiver) = self.usage_load_receiver {
             match receiver.try_recv() {
                 Ok(data) => {
+                    // Refresh `oldest_call_day` monotonically (only ever
+                    // narrows downward). The call set delivered here is
+                    // already period-filtered, so a narrow period would
+                    // raise the local minimum above an earlier value
+                    // seen on a wider load — we want the absolute oldest
+                    // observed across the session, so we take the min.
+                    use chrono::Local;
+                    let new_oldest = data
+                        .calls
+                        .iter()
+                        .map(|c| c.timestamp.with_timezone(&Local).date_naive())
+                        .min();
+                    self.usage_state.oldest_call_day =
+                        match (self.usage_state.oldest_call_day, new_oldest) {
+                            (Some(a), Some(b)) => Some(a.min(b)),
+                            (Some(a), None) => Some(a),
+                            (None, b) => b,
+                        };
                     self.usage_state.data = Some(data);
                     self.usage_state.loading = false;
                     self.usage_load_receiver = None;
