@@ -4358,8 +4358,9 @@ impl EventHandler {
             }
             AppEvent::UsagePopFilterChip => {
                 if let Some(chip) = state.usage_state.pop_filter_chip() {
+                    let kind = if chip.is_exclude() { "exclude" } else { "include" };
                     state.add_success_notification(format!(
-                        "Removed filter {}={}",
+                        "Removed {kind} {}={}",
                         chip.label(),
                         chip.value()
                     ));
