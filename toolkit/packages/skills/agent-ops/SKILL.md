@@ -197,7 +197,7 @@ du -sh "/.claude/metrics/" 2>/dev/null || echo "  No metrics"
 4. Restart with more specific instructions
 
 ### Cost Spike
-1. Check `~/.claude/metrics/costs.jsonl` for recent sessions
+1. Check `{{HOME_TOOL_DIR}}/metrics/costs.jsonl` for recent sessions
 2. Identify high-cost session IDs
 3. Set cost cap: `export AGENT_COST_CAP=2.00`
 4. Consider using haiku for sub-tasks: model parameter in Agent tool
@@ -209,7 +209,7 @@ du -sh "/.claude/metrics/" 2>/dev/null || echo "  No metrics"
 4. Consider /reflect to capture the correction
 
 ### Swarm Coordination Failure
-1. Check team config: `cat ~/.claude/teams/*/config.json`
+1. Check team config: `cat {{HOME_TOOL_DIR}}/teams/*/config.json`
 2. Verify task list: use TaskList tool
 3. Check for blocked tasks with unresolved dependencies
 4. Send broadcast to all agents if needed

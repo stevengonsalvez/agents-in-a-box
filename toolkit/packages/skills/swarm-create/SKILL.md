@@ -79,7 +79,7 @@ When you receive this command:
 
 5. **Initialize Team Directory**
    ```bash
-   source ~/.claude/utils/swarm-lib.sh
+   source {{HOME_TOOL_DIR}}/utils/swarm-lib.sh
 
    # Create team with isolation mode
    TEAM_ID=$(swarm_create_team "$EPIC_ID" "$AGENT_COUNT" "$ISOLATION_MODE")
@@ -136,13 +136,13 @@ DRY RUN: Would create swarm from epic: bd-epic-123
 Isolation Mode: worktree
 
 Would create:
-  - Team directory: ~/.claude/swarm/swarm-XXXXXXXXXX/
-  - Team file: ~/.claude/swarm/swarm-XXXXXXXXXX/team.json
+  - Team directory: {{HOME_TOOL_DIR}}/swarm/swarm-XXXXXXXXXX/
+  - Team file: {{HOME_TOOL_DIR}}/swarm/swarm-XXXXXXXXXX/team.json
   - Inbox files:
     - inbox/leader.jsonl
     - inbox/agent-1.jsonl
     - inbox/agent-2.jsonl
-  - Shared directory: ~/.claude/swarm/swarm-XXXXXXXXXX/shared/
+  - Shared directory: {{HOME_TOOL_DIR}}/swarm/swarm-XXXXXXXXXX/shared/
   - Worktrees (if worktree mode):
     - worktrees/agent-1/ (branch: swarm-XXXXXXXXXX-agent-1)
     - worktrees/agent-2/ (branch: swarm-XXXXXXXXXX-agent-2)
@@ -183,7 +183,7 @@ When using worktree isolation, after the swarm completes:
 /swarm-shutdown $TEAM_ID
 
 # 2. Merge all agent branches back to main
-bash ~/.claude/utils/swarm-lib.sh merge-worktrees $TEAM_ID
+bash {{HOME_TOOL_DIR}}/utils/swarm-lib.sh merge-worktrees $TEAM_ID
 
 # 3. Review the merged changes
 git log --oneline -10
@@ -219,7 +219,7 @@ The swarm integrates with Beads task tracking:
 
 ### Shared Mode
 ```
-~/.claude/swarm/{team-id}/
+{{HOME_TOOL_DIR}}/swarm/{team-id}/
 +-- team.json           # Team metadata (isolation_mode: "shared")
 +-- inbox/
 |   +-- leader.jsonl    # Leader's message inbox
@@ -231,7 +231,7 @@ The swarm integrates with Beads task tracking:
 
 ### Worktree Mode
 ```
-~/.claude/swarm/{team-id}/
+{{HOME_TOOL_DIR}}/swarm/{team-id}/
 +-- team.json           # Team metadata (isolation_mode: "worktree")
 +-- inbox/
 |   +-- leader.jsonl

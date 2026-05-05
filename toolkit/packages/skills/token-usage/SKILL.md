@@ -1,6 +1,6 @@
 ---
 name: token-usage
-description: 'Show Claude Code token usage across sessions — daily, weekly, per-project, and per-session breakdowns. Parses ~/.claude/projects/**/*.jsonl for consumption data. Use when the user asks about token usage, costs, how many tokens were used, session statistics, or wants a usage report.'
+description: 'Show Claude Code token usage across sessions — daily, weekly, per-project, and per-session breakdowns. Parses {{HOME_TOOL_DIR}}/projects/**/*.jsonl for consumption data. Use when the user asks about token usage, costs, how many tokens were used, session statistics, or wants a usage report.'
 user-invocable: true
 argument-hint: "[--days N] [--since YYYY-MM-DD] [--project NAME]"
 ---
@@ -16,7 +16,7 @@ Analyze Claude Code token consumption across all sessions.
 Run the script and display the FULL output as-is:
 
 ```bash
-python3 ~/.claude/skills/token-usage/scripts/token_usage.py --format markdown [ARGS]
+python3 {{HOME_TOOL_DIR}}/skills/token-usage/scripts/token_usage.py --format markdown [ARGS]
 ```
 
 Pass through any user-provided arguments (--days, --since, --project, --top-sessions).
@@ -25,22 +25,22 @@ Pass through any user-provided arguments (--days, --since, --project, --top-sess
 
 ```bash
 # All time usage
-python3 ~/.claude/skills/token-usage/scripts/token_usage.py --format markdown
+python3 {{HOME_TOOL_DIR}}/skills/token-usage/scripts/token_usage.py --format markdown
 
 # Last 7 days
-python3 ~/.claude/skills/token-usage/scripts/token_usage.py --days 7 --format markdown
+python3 {{HOME_TOOL_DIR}}/skills/token-usage/scripts/token_usage.py --days 7 --format markdown
 
 # Since a specific date
-python3 ~/.claude/skills/token-usage/scripts/token_usage.py --since 2026-04-01 --format markdown
+python3 {{HOME_TOOL_DIR}}/skills/token-usage/scripts/token_usage.py --since 2026-04-01 --format markdown
 
 # Filter to a specific project
-python3 ~/.claude/skills/token-usage/scripts/token_usage.py --project shotclubhouse --format markdown
+python3 {{HOME_TOOL_DIR}}/skills/token-usage/scripts/token_usage.py --project shotclubhouse --format markdown
 
 # Top 20 costliest sessions
-python3 ~/.claude/skills/token-usage/scripts/token_usage.py --days 30 --top-sessions 20 --format markdown
+python3 {{HOME_TOOL_DIR}}/skills/token-usage/scripts/token_usage.py --days 30 --top-sessions 20 --format markdown
 
 # JSON output (for piping to jq)
-python3 ~/.claude/skills/token-usage/scripts/token_usage.py --format json | jq '.grand_total'
+python3 {{HOME_TOOL_DIR}}/skills/token-usage/scripts/token_usage.py --format json | jq '.grand_total'
 ```
 
 ## Display Instructions
@@ -60,11 +60,11 @@ After running the script:
 | `--project NAME` | Filter to project (substring match) | All projects |
 | `--top-sessions N` | Number of top sessions to show | 10 |
 | `--format text\|markdown\|json` | Output format | text |
-| `--projects-dir PATH` | Override projects directory | `~/.claude/projects` |
+| `--projects-dir PATH` | Override projects directory | `{{HOME_TOOL_DIR}}/projects` |
 
 ## Data Source
 
-Parses `~/.claude/projects/**/*.jsonl` — Claude Code's session transcript files. Each `assistant` message contains a `usage` block with `input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`, and `output_tokens`.
+Parses `{{HOME_TOOL_DIR}}/projects/**/*.jsonl` — Claude Code's session transcript files. Each `assistant` message contains a `usage` block with `input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`, and `output_tokens`.
 
 ## Integration with ainb-tui
 

@@ -70,7 +70,7 @@ When you receive `/swarm-inbox` (no send args):
 
 2. **Read Messages**
    ```bash
-   source ~/.claude/utils/swarm-lib.sh
+   source {{HOME_TOOL_DIR}}/utils/swarm-lib.sh
 
    MESSAGES=$(swarm_read_inbox "$TEAM_ID" "$AGENT_NAME" --last 20)
 
@@ -193,6 +193,6 @@ done
 
 | File | Description |
 |------|-------------|
-| `~/.claude/swarm/{team-id}/inbox/leader.jsonl` | Leader's inbox |
-| `~/.claude/swarm/{team-id}/inbox/agent-1.jsonl` | Agent 1's inbox |
-| `~/.claude/swarm/{team-id}/inbox/agent-N.jsonl` | Agent N's inbox |
+| `{{HOME_TOOL_DIR}}/swarm/{team-id}/inbox/leader.jsonl` | Leader's inbox |
+| `{{HOME_TOOL_DIR}}/swarm/{team-id}/inbox/agent-1.jsonl` | Agent 1's inbox |
+| `{{HOME_TOOL_DIR}}/swarm/{team-id}/inbox/agent-N.jsonl` | Agent N's inbox |

@@ -338,10 +338,10 @@ tmux send-keys -t "$SESSION" C-m
 - Agent runs in tmux session named `agent-{timestamp}`
 - Use `tmux attach -t agent-{timestamp}` to monitor
 - Use `tmux send-keys` to send additional prompts
-- Metadata saved to `~/.claude/agents/agent-{timestamp}.json`
+- Metadata saved to `{{HOME_TOOL_DIR}}/agents/agent-{timestamp}.json`
 - **Session Recovery**: If tmux dies (crash/shutdown), use `/recover-sessions` to resume
 - Transcript path tracked for `--resume` capability
-- Session events logged to `~/.claude/agents/registry.jsonl`
+- Session events logged to `{{HOME_TOOL_DIR}}/agents/registry.jsonl`
 - Robust readiness detection with 30s timeout
 - Multi-line input handled correctly via line-by-line sending
 - Verification that task was received and processing started

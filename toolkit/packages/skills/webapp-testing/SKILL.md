@@ -15,7 +15,7 @@ To test local web applications, write native Python Playwright scripts.
 
 ## Browser Tools (Direct Chrome DevTools Control)
 
-The `~/.claude/skills/webapp-testing/bin/browser-tools` utility provides lightweight, context-rot-proof browser automation using the Chrome DevTools Protocol directly (no MCP overhead).
+The `{{HOME_TOOL_DIR}}/skills/webapp-testing/bin/browser-tools` utility provides lightweight, context-rot-proof browser automation using the Chrome DevTools Protocol directly (no MCP overhead).
 
 **Available Commands**:
 

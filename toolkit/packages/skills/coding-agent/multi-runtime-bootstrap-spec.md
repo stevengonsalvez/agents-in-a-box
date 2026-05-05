@@ -6,30 +6,30 @@
 
 ## Executive Summary
 
-Extend `toolkit/bootstrap.js` to deploy toolkit skills to hermes-agent and nanoclaw runtimes, in addition to the existing claude-code-4.5, codex, copilot, gemini, etc. Fix hardcoded `~/.claude/` references in existing skills so they work across runtimes. Establish a `TOOLKIT_RUNTIME` env var convention for scripts that need runtime detection.
+Extend `toolkit/bootstrap.js` to deploy toolkit skills to hermes-agent and nanoclaw runtimes, in addition to the existing claude-code-4.5, codex, copilot, gemini, etc. Fix hardcoded `{{HOME_TOOL_DIR}}/` references in existing skills so they work across runtimes. Establish a `TOOLKIT_RUNTIME` env var convention for scripts that need runtime detection.
 
 ## Objectives
 
 ### Primary Goals
 - Add `hermes-agent` as a bootstrap target (writes skills-only to `~/.hermes/skills/`)
-- Add `nanoclaw` as a bootstrap target (alias/shared with claude-code-4.5, writes to `~/.claude/`)
-- Audit and fix hardcoded `~/.claude/` paths in skills (use `~/.claude` substitution)
+- Add `nanoclaw` as a bootstrap target (alias/shared with claude-code-4.5, writes to `{{HOME_TOOL_DIR}}/`)
+- Audit and fix hardcoded `{{HOME_TOOL_DIR}}/` paths in skills (use `{{HOME_TOOL_DIR}}` substitution)
 - Introduce `TOOLKIT_RUNTIME` env var so scripts can detect which runtime they are running under
 - Defer OpenClaw support until later (explicit user decision)
 
 ### Success Metrics
 - `node bootstrap.js --tool=hermes-agent` deploys all toolkit skills to `~/.hermes/skills/`
-- `node bootstrap.js --tool=nanoclaw` writes to `~/.claude/` (same target as claude-code-4.5)
-- Zero skills contain hardcoded `~/.claude/` literal references after audit (exception: claude-code-4.5 template substitutions, which resolve to `.claude`)
+- `node bootstrap.js --tool=nanoclaw` writes to `{{HOME_TOOL_DIR}}/` (same target as claude-code-4.5)
+- Zero skills contain hardcoded `{{HOME_TOOL_DIR}}/` literal references after audit (exception: claude-code-4.5 template substitutions, which resolve to `.claude`)
 - All existing runtimes (claude-code-4.5, codex, copilot, gemini) still work unchanged
 
 ## Scope
 
 ### In Scope
 - New `hermes-agent` entry in `TOOL_CONFIG` with skills-only mapping
-- New `nanoclaw` entry in `TOOL_CONFIG` (shares `~/.claude/` with claude-code-4.5)
-- Audit of `toolkit/packages/skills/**` for hardcoded `~/.claude/` paths
-- Replace hardcoded paths with `~/.claude` template placeholders
+- New `nanoclaw` entry in `TOOL_CONFIG` (shares `{{HOME_TOOL_DIR}}/` with claude-code-4.5)
+- Audit of `toolkit/packages/skills/**` for hardcoded `{{HOME_TOOL_DIR}}/` paths
+- Replace hardcoded paths with `{{HOME_TOOL_DIR}}` template placeholders
 - Add `TOOLKIT_RUNTIME` env var export in bootstrap (written to a wrapper script or activated in shell profile hint)
 - Update `webapp-testing/SKILL.md` (20+ hardcoded refs) and `tmux-monitor/scripts/monitor.sh` (line 95)
 - Documentation updates: add a portability section to any skill that still needs runtime-specific behavior
@@ -98,8 +98,8 @@ Extend `toolkit/bootstrap.js` to deploy toolkit skills to hermes-agent and nanoc
         'utilities/reflections': 'reflections'
     },
     templateSubstitutions: {
-        '**/*.md':   { 'TOOL_DIR': '.claude', 'HOME_TOOL_DIR': '~/.claude', 'TOOLKIT_RUNTIME': 'nanoclaw' },
-        '**/*.sh':   { 'TOOL_DIR': '.claude', 'HOME_TOOL_DIR': '~/.claude', 'TOOLKIT_RUNTIME': 'nanoclaw' },
+        '**/*.md':   { 'TOOL_DIR': '.claude', 'HOME_TOOL_DIR': '{{HOME_TOOL_DIR}}', 'TOOLKIT_RUNTIME': 'nanoclaw' },
+        '**/*.sh':   { 'TOOL_DIR': '.claude', 'HOME_TOOL_DIR': '{{HOME_TOOL_DIR}}', 'TOOLKIT_RUNTIME': 'nanoclaw' },
         // ... same file types as above
     }
 }
@@ -142,10 +142,10 @@ esac
 
 | File | Issue | Fix |
 |------|-------|-----|
-| `skills/webapp-testing/SKILL.md` | 20+ refs to `~/.claude/skills/webapp-testing/bin/browser-tools` | Replace with `~/.claude/skills/webapp-testing/bin/browser-tools` |
+| `skills/webapp-testing/SKILL.md` | 20+ refs to `{{HOME_TOOL_DIR}}/skills/webapp-testing/bin/browser-tools` | Replace with `{{HOME_TOOL_DIR}}/skills/webapp-testing/bin/browser-tools` |
 | `skills/tmux-monitor/scripts/monitor.sh` L95 | `/.claude/agents/${SESSION_NAME}.json` | Replace with `${TOOLKIT_HOME:-/.claude}/agents/${SESSION_NAME}.json` |
-| `skills/reflect/SKILL.md` | References `~/.claude/session/` as fallback | Use `~/.claude/session/` |
-| Other `.sh`, `.py`, `.md` in `skills/` | Any `~/.claude/` literal not under template substitution | Replace with `~/.claude` |
+| `skills/reflect/SKILL.md` | References `{{HOME_TOOL_DIR}}/session/` as fallback | Use `{{HOME_TOOL_DIR}}/session/` |
+| Other `.sh`, `.py`, `.md` in `skills/` | Any `{{HOME_TOOL_DIR}}/` literal not under template substitution | Replace with `{{HOME_TOOL_DIR}}` |
 
 **Grep strategy:**
 
@@ -174,7 +174,7 @@ grep -rn '~/\.claude\|$HOME/\.claude\|/Users/[^/]*/\.claude' \
 
 2. **First-time nanoclaw bootstrap**
    - User: `node bootstrap.js --tool=nanoclaw`
-   - Skill: copies to `~/.claude/` (same as claude-code-4.5)
+   - Skill: copies to `{{HOME_TOOL_DIR}}/` (same as claude-code-4.5)
    - If claude-code-4.5 already installed, files are overwritten cleanly
 
 3. **Multi-runtime user**
@@ -186,16 +186,16 @@ grep -rn '~/\.claude\|$HOME/\.claude\|/Users/[^/]*/\.claude' \
 
 | Scenario | Expected Behavior |
 |----------|-------------------|
-| User runs `--tool=nanoclaw` after `--tool=claude-code-4.5` | Files overwritten in `~/.claude/`. No error. |
+| User runs `--tool=nanoclaw` after `--tool=claude-code-4.5` | Files overwritten in `{{HOME_TOOL_DIR}}/`. No error. |
 | Hermes `~/.hermes/` doesn't exist | Bootstrap creates it (via `mkdirSync({recursive: true})`) |
-| Skill has a hardcoded `~/.claude/` that wasn't caught in audit | Leaks into hermes install as a literal path. Runtime detection won't save it. Must be caught in review. |
+| Skill has a hardcoded `{{HOME_TOOL_DIR}}/` that wasn't caught in audit | Leaks into hermes install as a literal path. Runtime detection won't save it. Must be caught in review. |
 | User has both `TOOLKIT_RUNTIME=hermes-agent` and is running claude | Scripts will misroute. Document that env var should only be set per-terminal session. |
 
 ## Constraints & Dependencies
 
 ### Technical Constraints
 - No breaking changes to existing tool configs (claude-code-4.5, codex, copilot, gemini, etc.)
-- Must preserve backward compatibility — existing `~/.claude/` installs should continue working
+- Must preserve backward compatibility — existing `{{HOME_TOOL_DIR}}/` installs should continue working
 - No new npm dependencies in bootstrap.js
 - Template substitution must handle ALL file types that skills ship (`.md`, `.sh`, `.py`, `.js`, `.ts`, `.yaml`, `.yml`, `.toml`, `.json`)
 
@@ -211,8 +211,8 @@ grep -rn '~/\.claude\|$HOME/\.claude\|/Users/[^/]*/\.claude' \
 
 | Risk | Impact | Likelihood | Mitigation |
 |------|--------|------------|------------|
-| Audit misses a hardcoded `~/.claude/` path | Skills break silently on hermes | Medium | Grep strategy above + test install + file-by-file review |
-| `TOOLKIT_RUNTIME` env var not set when skill runs | Skills fall back to `~/.claude/` default | Low | Default fallback is safe; document the env var in skill docs |
+| Audit misses a hardcoded `{{HOME_TOOL_DIR}}/` path | Skills break silently on hermes | Medium | Grep strategy above + test install + file-by-file review |
+| `TOOLKIT_RUNTIME` env var not set when skill runs | Skills fall back to `{{HOME_TOOL_DIR}}/` default | Low | Default fallback is safe; document the env var in skill docs |
 | nanoclaw shared target causes conflict with claude-code-4.5 | Last-install wins; files overwritten | Low | User intentional (per interview decision); add warning in docs |
 | Hermes-agent skill format incompatible | Skills don't load in hermes | Low | Research confirmed hermes uses same YAML frontmatter as Claude Code; agentskills.io standard |
 | Bootstrap error in one tool breaks all | Existing users can't install updates | Medium | Each tool config is independent; test each new tool in isolation before merging |
@@ -221,9 +221,9 @@ grep -rn '~/\.claude\|$HOME/\.claude\|/Users/[^/]*/\.claude' \
 
 ### Key Trade-offs
 
-**Decision 1: nanoclaw shares `~/.claude/` with claude-code-4.5**
+**Decision 1: nanoclaw shares `{{HOME_TOOL_DIR}}/` with claude-code-4.5**
 - Alternatives: separate `~/.nanoclaw/`; skip nanoclaw entirely
-- Rationale: Nanoclaw IS a claude-code fork that reads from `~/.claude/`. Shared target avoids duplication. Nanoclaw's native-runner already auto-syncs its container skills to `~/.claude/skills/`, so toolkit bootstrap is additive.
+- Rationale: Nanoclaw IS a claude-code fork that reads from `{{HOME_TOOL_DIR}}/`. Shared target avoids duplication. Nanoclaw's native-runner already auto-syncs its container skills to `{{HOME_TOOL_DIR}}/skills/`, so toolkit bootstrap is additive.
 
 **Decision 2: Hermes-agent gets skills-only (no agents/hooks/utils/etc.)**
 - Alternatives: same full set as claude-code-4.5; skills+hooks+utils
@@ -255,8 +255,8 @@ grep -rn '~/\.claude\|$HOME/\.claude\|/Users/[^/]*/\.claude' \
 ### Priority Order
 
 1. **Add `TOOLKIT_RUNTIME` to existing template substitutions** for all tools (single source of truth)
-2. **Grep audit** — find all hardcoded `~/.claude/` references in `toolkit/packages/skills/`
-3. **Fix webapp-testing** — replace `~/.claude/` with `~/.claude` in SKILL.md
+2. **Grep audit** — find all hardcoded `{{HOME_TOOL_DIR}}/` references in `toolkit/packages/skills/`
+3. **Fix webapp-testing** — replace `{{HOME_TOOL_DIR}}/` with `{{HOME_TOOL_DIR}}` in SKILL.md
 4. **Fix tmux-monitor** — replace with `${TOOLKIT_HOME:-/.claude}` in monitor.sh
 5. **Fix reflect and any others** found in audit
 6. **Add `hermes-agent` to TOOL_CONFIG**

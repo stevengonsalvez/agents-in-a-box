@@ -32,7 +32,7 @@ a closed-loop system: skills enter from any tool, get canonicalized, and deploy 
     manual copy              manual copy             manual copy
          │                       │                       │
          ▼                       ▼                       ▼
-    ~/.claude/skills/       ~/.codex/skills/       ~/.copilot/skills/
+    {{HOME_TOOL_DIR}}/skills/       ~/.codex/skills/       ~/.copilot/skills/
          │                       │                       │
          └───────────┬───────────┘───────────────────────┘
                      │
@@ -56,7 +56,7 @@ a closed-loop system: skills enter from any tool, get canonicalized, and deploy 
                      │
           ┌──────────┼──────────┐
           ▼          ▼          ▼
-     ~/.claude/  ~/.codex/  ~/.copilot/
+     {{HOME_TOOL_DIR}}/  ~/.codex/  ~/.copilot/
       skills/     skills/     skills/     ◄── ALL tools get ALL skills
           │          │          │
           ▼          ▼          ▼
@@ -103,8 +103,8 @@ When adding a new skill, determine its type:
 
 | Source | Location | Format |
 |--------|----------|--------|
-| Claude Plugins | `~/.claude/plugins/installed_plugins.json` | JSON |
-| Marketplaces | `~/.claude/plugins/known_marketplaces.json` | JSON |
+| Claude Plugins | `{{HOME_TOOL_DIR}}/plugins/installed_plugins.json` | JSON |
+| Marketplaces | `{{HOME_TOOL_DIR}}/plugins/known_marketplaces.json` | JSON |
 | Bundled Skills | `packages/skills/*/SKILL.md` | Markdown |
 | Unified Manifest | `toolkit/external-dependencies.yaml` | YAML |
 
@@ -171,7 +171,7 @@ Add a new skill to the toolkit ecosystem. Handles all three skill types.
 
 ```
 /plugins add <name>                     # interactive — detects source
-/plugins add <name> --from ~/.claude/skills/<name>   # from installed skill
+/plugins add <name> --from {{HOME_TOOL_DIR}}/skills/<name>   # from installed skill
 /plugins add <name> --from https://github.com/org/repo  # from git repo
 ```
 
@@ -188,7 +188,7 @@ Source provided?
   ├─ Git URL ──► Agent-skill
   │
   └─ No source ──► Scan all tool skill dirs for <name>:
-       ~/.claude/skills/<name>/
+       {{HOME_TOOL_DIR}}/skills/<name>/
        ~/.codex/skills/<name>/
        ~/.copilot/skills/<name>/
        If found: use that path and re-enter detection
@@ -266,8 +266,8 @@ Update `toolkit/external-dependencies.yaml` from current installed state.
 ### Workflow
 
 1. **Read Current State**
-   - Parse `~/.claude/plugins/installed_plugins.json`
-   - Parse `~/.claude/plugins/known_marketplaces.json`
+   - Parse `{{HOME_TOOL_DIR}}/plugins/installed_plugins.json`
+   - Parse `{{HOME_TOOL_DIR}}/plugins/known_marketplaces.json`
    - Scan `packages/skills/*/SKILL.md`
 
 2. **Compare with Manifest**
@@ -421,8 +421,8 @@ If plugin changes detected:
 | File | Purpose |
 |------|---------|
 | `toolkit/external-dependencies.yaml` | Unified manifest (versioned) |
-| `~/.claude/plugins/installed_plugins.json` | Claude's plugin state |
-| `~/.claude/plugins/known_marketplaces.json` | Registered marketplaces |
+| `{{HOME_TOOL_DIR}}/plugins/installed_plugins.json` | Claude's plugin state |
+| `{{HOME_TOOL_DIR}}/plugins/known_marketplaces.json` | Registered marketplaces |
 | `packages/skills/*/SKILL.md` | Bundled skill definitions |
 
 ## Best Practices
