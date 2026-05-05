@@ -268,7 +268,18 @@ async fn test_usage_period_and_provider_events() {
     // view — the picker (Enter / Shift+X / Shift+C) replaces them.
     let event = EventHandler::handle_key_event(create_key_event(KeyCode::Char('/')), &mut state);
     assert!(event.is_none(), "/ must not bind to any usage event");
-    // `c` and `x` collide with other key handlers in non-burndown
-    // contexts; the important assertion is that they no longer produce
-    // the removed UsageStartExcludeFilter / UsageClearFilters events.
+    // `c` and `x` may resolve to other unrelated events outside the
+    // burndown filter path. The chip-strip lives on capitals (X / C).
+    // Lowercase must NOT trigger the picker — that asymmetry is the
+    // contract a regression would break.
+    let event = EventHandler::handle_key_event(create_key_event(KeyCode::Char('x')), &mut state);
+    assert!(
+        !matches!(event, Some(AppEvent::UsageCommitExcludeFilter)),
+        "lowercase x must not commit an exclude chip (capital X owns that)"
+    );
+    let event = EventHandler::handle_key_event(create_key_event(KeyCode::Char('c')), &mut state);
+    assert!(
+        !matches!(event, Some(AppEvent::UsageClearAllChips)),
+        "lowercase c must not clear chips (capital C owns that)"
+    );
 }
