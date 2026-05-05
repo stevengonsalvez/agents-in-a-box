@@ -621,6 +621,38 @@ impl UsageViewState {
         self.data.as_ref().map(|data| filter_usage_data(data, &self.filters))
     }
 
+    /// Resolve the focused panel row to a `(target, value, owner_project)`
+    /// triple. Shared by include and exclude commit paths so both
+    /// dispatch tables stay in lock-step.
+    fn resolve_focused_row(&self) -> Option<(UsageFilterTarget, String, Option<String>)> {
+        let panel = self.focused_panel?;
+        let target = panel.enter_target()?;
+        let filtered = self.filtered_data()?;
+        let row_idx = self.focus_row;
+        // For Session rows we also need the owning project so we can
+        // auto-attach a project chip — session ids can collide across
+        // projects/providers because the aggregator key is
+        // `provider:project:session_id` but `filters.session` only holds
+        // the bare id. Other targets pass None as the second element.
+        match (target, panel) {
+            (UsageFilterTarget::Project, UsagePanel::Leaderboard | UsagePanel::ByProject) => {
+                filtered.projects.get(row_idx).map(|p| (target, p.name.clone(), None))
+            }
+            (UsageFilterTarget::Activity, _) => filtered
+                .activities
+                .get(row_idx)
+                .map(|a| (target, a.category.label().to_string(), None)),
+            (UsageFilterTarget::Model, _) => {
+                filtered.models.get(row_idx).map(|m| (target, m.model.clone(), None))
+            }
+            (UsageFilterTarget::Session, _) => filtered
+                .sessions
+                .get(row_idx)
+                .map(|s| (target, s.session_id.clone(), Some(s.project.clone()))),
+            _ => None,
+        }
+    }
+
     /// Append the focused row of the focused panel as a chip. Returns
     /// `true` if a chip was added (so callers can show feedback).
     /// Requires `data` to be loaded; uses the unfiltered `data` to
@@ -628,38 +660,7 @@ impl UsageViewState {
     /// looking at when focus is active (we render from filtered_data
     /// at draw time, which is the same source).
     pub fn commit_focused_row(&mut self) -> bool {
-        let Some(panel) = self.focused_panel else {
-            return false;
-        };
-        let Some(target) = panel.enter_target() else {
-            return false;
-        };
-        let Some(filtered) = self.filtered_data() else {
-            return false;
-        };
-        let row_idx = self.focus_row;
-        // For Session rows we also need the owning project so we can
-        // auto-attach a project chip — session ids can collide across
-        // projects/providers because the aggregator key is
-        // `provider:project:session_id` but `filters.session` only holds
-        // the bare id. Other targets pass None as the second element.
-        let value: Option<(String, Option<String>)> = match (target, panel) {
-            (UsageFilterTarget::Project, UsagePanel::Leaderboard | UsagePanel::ByProject) => {
-                filtered.projects.get(row_idx).map(|p| (p.name.clone(), None))
-            }
-            (UsageFilterTarget::Activity, _) => {
-                filtered.activities.get(row_idx).map(|a| (a.category.label().to_string(), None))
-            }
-            (UsageFilterTarget::Model, _) => {
-                filtered.models.get(row_idx).map(|m| (m.model.clone(), None))
-            }
-            (UsageFilterTarget::Session, _) => filtered
-                .sessions
-                .get(row_idx)
-                .map(|s| (s.session_id.clone(), Some(s.project.clone()))),
-            _ => None,
-        };
-        let Some((value, owner_project)) = value else {
+        let Some((target, value, owner_project)) = self.resolve_focused_row() else {
             return false;
         };
         match target {
@@ -686,6 +687,40 @@ impl UsageViewState {
                     if !self.filters.project.contains(&p) {
                         self.filters.project.push(p);
                     }
+                }
+            }
+        }
+        true
+    }
+
+    /// Append the focused row as an *exclude* chip. Mirror of
+    /// `commit_focused_row` that routes into the `exclude_*` filter
+    /// lists. Session rows do NOT auto-attach an owner-project exclude
+    /// — excluding the project because one of its sessions was excluded
+    /// would discard sibling sessions the user did not target.
+    pub fn commit_focused_row_exclude(&mut self) -> bool {
+        let Some((target, value, _owner_project)) = self.resolve_focused_row() else {
+            return false;
+        };
+        match target {
+            UsageFilterTarget::Project => {
+                if !self.filters.exclude_project.contains(&value) {
+                    self.filters.exclude_project.push(value);
+                }
+            }
+            UsageFilterTarget::Model => {
+                if !self.filters.exclude_model.contains(&value) {
+                    self.filters.exclude_model.push(value);
+                }
+            }
+            UsageFilterTarget::Activity => {
+                if !self.filters.exclude_activity.contains(&value) {
+                    self.filters.exclude_activity.push(value);
+                }
+            }
+            UsageFilterTarget::Session => {
+                if !self.filters.exclude_session.contains(&value) {
+                    self.filters.exclude_session.push(value);
                 }
             }
         }
@@ -2547,6 +2582,11 @@ pub fn build_filter_chip_line(state: &UsageViewState) -> Line<'static> {
     push_chip_group(&mut spans, "activity", &state.filters.activity);
     push_chip_group(&mut spans, "session", &state.filters.session);
     push_chip_group(&mut spans, "branch", &state.filters.branch);
+    push_exclude_chip_group(&mut spans, "project", &state.filters.exclude_project);
+    push_exclude_chip_group(&mut spans, "model", &state.filters.exclude_model);
+    push_exclude_chip_group(&mut spans, "activity", &state.filters.exclude_activity);
+    push_exclude_chip_group(&mut spans, "session", &state.filters.exclude_session);
+    push_exclude_chip_group(&mut spans, "branch", &state.filters.exclude_branch);
     spans.push(Span::styled("  ·  ", Style::default().fg(MUTED_GRAY)));
     spans.push(Span::styled(
         "Esc",
@@ -2570,6 +2610,20 @@ fn push_chip_group(spans: &mut Vec<Span<'static>>, label: &str, values: &[String
         spans.push(Span::styled(
             chip_text,
             Style::default().fg(DARK_BG).bg(GOLD).add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::raw(" "));
+    }
+}
+
+/// Exclude chips render with a leading `~` and a muted-orange fill so
+/// they are immediately distinguishable from include (gold) chips.
+/// They also pop first via Esc — see `UsageFilters::pop_last`.
+fn push_exclude_chip_group(spans: &mut Vec<Span<'static>>, label: &str, values: &[String]) {
+    for value in values {
+        let chip_text = format!(" ~{label}={value} ");
+        spans.push(Span::styled(
+            chip_text,
+            Style::default().fg(DARK_BG).bg(BAR_HIGH).add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::raw(" "));
     }
@@ -4019,6 +4073,48 @@ mod cross_filter_tests {
         for needle in ["project=p", "model=m", "activity=Coding", "session=s", "branch=b"] {
             assert!(flat.contains(needle), "chip strip missing {needle}: {flat}");
         }
+    }
+
+    #[test]
+    fn x_on_by_project_row_adds_exclude_chip_and_filter_drops_project() {
+        use crate::models::usage::{filter_usage_data, UsageData, UsageFilters};
+        use crate::test_support::ProviderCallBuilder;
+        use std::collections::HashMap;
+
+        let mut state = UsageViewState::default();
+        state.data = Some(fixture());
+        state.focused_panel = Some(UsagePanel::ByProject);
+        state.focus_row = 1; // beta
+        assert!(state.commit_focused_row_exclude());
+        assert_eq!(state.filters.exclude_project, vec!["beta".to_string()]);
+        assert!(state.filters.project.is_empty(), "include side must be untouched");
+
+        // End-to-end: filter_usage_data must drop calls matching the
+        // exclude project, leaving only the alpha call.
+        let calls = vec![
+            ProviderCallBuilder::new().with_project("alpha").build(),
+            ProviderCallBuilder::new().with_project("beta").build(),
+        ];
+        let data = UsageData {
+            daily: vec![],
+            weekly: vec![],
+            projects: vec![],
+            grand_total: TokenBucket::default(),
+            calls,
+            sessions: vec![],
+            models: vec![],
+            activities: vec![],
+            tools: vec![],
+            mcp_servers: vec![],
+            shell_commands: vec![],
+            branches: vec![],
+            model_project_counts: HashMap::new(),
+        };
+        let mut filters = UsageFilters::default();
+        filters.exclude_project.push("beta".into());
+        let filtered = filter_usage_data(&data, &filters);
+        assert_eq!(filtered.calls.len(), 1);
+        assert_eq!(filtered.calls[0].project, "alpha");
     }
 
     #[test]

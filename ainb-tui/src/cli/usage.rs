@@ -667,6 +667,9 @@ fn query_from_args(args: &UsageReportArgs) -> Result<UsageQuery> {
             activity: args.activity.clone(),
             session: args.session.clone(),
             branch: args.branch.clone(),
+            // No CLI surface for exclude filters yet — populated only
+            // via the TUI X-on-row picker.
+            ..UsageFilters::default()
         },
     })
 }

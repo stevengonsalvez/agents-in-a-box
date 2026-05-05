@@ -369,7 +369,8 @@ pub enum AppEvent {
     UsageFocusPrevPanel, // Shift+Tab while on Burndown
     UsageFocusRowUp,     // Up/k while a panel is focused
     UsageFocusRowDown,   // Down/j while a panel is focused
-    UsageCommitFilter,   // Enter on focused row -> add chip
+    UsageCommitFilter,   // Enter on focused row -> add include chip
+    UsageCommitExcludeFilter, // Shift+X on focused row -> add exclude chip
     UsagePopFilterChip,  // Esc when chips exist
     UsageClearAllChips,  // C — drop every chip in one shot
     // Zoom mode (PR-C)
@@ -1728,6 +1729,9 @@ impl EventHandler {
                 KeyCode::BackTab => return Some(AppEvent::UsageFocusPrevPanel),
                 KeyCode::Enter => return Some(AppEvent::UsageCommitFilter),
                 KeyCode::Char('C') => return Some(AppEvent::UsageClearAllChips),
+                // Capital X (Shift+x) only — lowercase x is reserved for
+                // future scope and must NOT trigger the exclude commit.
+                KeyCode::Char('X') => return Some(AppEvent::UsageCommitExcludeFilter),
                 KeyCode::Esc if state.usage_state.filters.any() => {
                     return Some(AppEvent::UsagePopFilterChip);
                 }
@@ -4350,6 +4354,11 @@ impl EventHandler {
                     // The next render will run filter_usage_data over
                     // the already-parsed call set.
                     state.add_success_notification("Filter added".to_string());
+                }
+            }
+            AppEvent::UsageCommitExcludeFilter => {
+                if state.usage_state.commit_focused_row_exclude() {
+                    state.add_success_notification("Exclude filter added".to_string());
                 }
             }
             AppEvent::UsagePopFilterChip => {
