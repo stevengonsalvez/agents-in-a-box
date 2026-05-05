@@ -6,18 +6,18 @@ user-invocable: true
 
 # Sync Learnings
 
-Bidirectional sync between `~/.claude/` (user-level) and toolkit `packages/` (canonical source).
+Bidirectional sync between `{{HOME_TOOL_DIR}}/` (user-level) and toolkit `packages/` (canonical source).
 
 ## Purpose
 
 When working on projects, learnings get captured in user-level agent files via `/reflect`. This command syncs improvements bidirectionally:
-- **TO_REPO**: New/updated files in ~/.claude -> packages/ (canonical)
-- **TO_HOME**: Newer files in packages/ -> ~/.claude
+- **TO_REPO**: New/updated files in {{HOME_TOOL_DIR}} -> packages/ (canonical)
+- **TO_HOME**: Newer files in packages/ -> {{HOME_TOOL_DIR}}
 
 ## Architecture
 
 ```
-~/.claude/  <--sync-->  packages/  --generates-->  claude-code-4.5/ (thin layer)
+{{HOME_TOOL_DIR}}/  <--sync-->  packages/  --generates-->  claude-code-4.5/ (thin layer)
                              |
                     create-rule.js installs
 ```
@@ -27,7 +27,7 @@ When working on projects, learnings get captured in user-level agent files via `
 ## Workflow
 
 1. **Assess**: Compare directories and categorize differences
-2. **Reverse Scan**: Enumerate all items in ~/.claude/ and flag orphans missing from packages/
+2. **Reverse Scan**: Enumerate all items in {{HOME_TOOL_DIR}}/ and flag orphans missing from packages/
 3. **Plugin Audit**: Cross-check installed plugins against external-dependencies.yaml manifest
 4. **Route**: Determine target package directory for each file
 5. **Plan**: Generate sync plan table with actions and rationale
@@ -40,13 +40,13 @@ When working on projects, learnings get captured in user-level agent files via `
 
 | Source (user-level) | Target (packages) |
 |---------------------|-------------------|
-| `~/.claude/agents/engineering/` | `packages/agents/engineering/` |
-| `~/.claude/agents/universal/` | `packages/agents/universal/` |
-| `~/.claude/agents/orchestrators/` | `packages/agents/orchestrators/` |
-| `~/.claude/agents/design/` | `packages/agents/design/` |
-| `~/.claude/agents/meta/` | `packages/agents/meta/` |
-| `~/.claude/agents/swarm/` | `packages/agents/swarm/` |
-| `~/.claude/agents/*.md` (root) | `packages/agents/` |
+| `{{HOME_TOOL_DIR}}/agents/engineering/` | `packages/agents/engineering/` |
+| `{{HOME_TOOL_DIR}}/agents/universal/` | `packages/agents/universal/` |
+| `{{HOME_TOOL_DIR}}/agents/orchestrators/` | `packages/agents/orchestrators/` |
+| `{{HOME_TOOL_DIR}}/agents/design/` | `packages/agents/design/` |
+| `{{HOME_TOOL_DIR}}/agents/meta/` | `packages/agents/meta/` |
+| `{{HOME_TOOL_DIR}}/agents/swarm/` | `packages/agents/swarm/` |
+| `{{HOME_TOOL_DIR}}/agents/*.md` (root) | `packages/agents/` |
 
 ### Commands (routed by type)
 
@@ -64,7 +64,7 @@ Commands are routed based on their purpose:
 
 | Source (user-level) | Target (packages) |
 |---------------------|-------------------|
-| `~/.claude/utils/` | `packages/utilities/utils/` |
+| `{{HOME_TOOL_DIR}}/utils/` | `packages/utilities/utils/` |
 
 ### Tool-Specific Config Files
 
@@ -72,23 +72,23 @@ These are NOT in `packages/` — they live in per-tool directories:
 
 | Source (user-level) | Target (toolkit source) |
 |---------------------|------------------------|
-| `~/.claude/CLAUDE.md` | `toolkit/claude-code-4.5/CLAUDE.md` |
-| `~/.claude/settings.json` | `toolkit/claude-code-4.5/settings.json` |
-| `~/.claude/statusline.sh` | `toolkit/claude-code-4.5/statusline.sh` (+x preserved) |
+| `{{HOME_TOOL_DIR}}/CLAUDE.md` | `toolkit/claude-code-4.5/CLAUDE.md` |
+| `{{HOME_TOOL_DIR}}/settings.json` | `toolkit/claude-code-4.5/settings.json` |
+| `{{HOME_TOOL_DIR}}/statusline.sh` | `toolkit/claude-code-4.5/statusline.sh` (+x preserved) |
 
 **CLAUDE.md sync requires reverse template interpolation** — when copying TO_REPO,
 replace interpolated paths back to template placeholders:
-- `~/.claude/` or `/.claude/` → `~/.claude/`
+- `{{HOME_TOOL_DIR}}/` or `/.claude/` → `{{HOME_TOOL_DIR}}/`
 - `.claude/` (in path context) → `.claude/`
 
 ### Other Files
 
 | Source (user-level) | Target (packages) |
 |---------------------|-------------------|
-| `~/.claude/skills/` | `packages/skills/` |
-| `~/.claude/templates/` | `packages/utilities/templates/` |
-| `~/.claude/hooks/` | `packages/utilities/hooks/` |
-| `~/.claude/output-styles/` | `packages/utilities/output-styles/` |
+| `{{HOME_TOOL_DIR}}/skills/` | `packages/skills/` |
+| `{{HOME_TOOL_DIR}}/templates/` | `packages/utilities/templates/` |
+| `{{HOME_TOOL_DIR}}/hooks/` | `packages/utilities/hooks/` |
+| `{{HOME_TOOL_DIR}}/output-styles/` | `packages/utilities/output-styles/` |
 
 ## Command Routing Logic
 
@@ -147,7 +147,7 @@ Content managed by external plugins (installed via `claude plugin install`):
 
 ## Reverse Scan Phase (Orphan Detection)
 
-CRITICAL: Before comparing files, enumerate ALL items in ~/.claude/ and check each one has a counterpart in packages/. This catches skills/agents that were created directly in ~/.claude/ but never added to the toolkit.
+CRITICAL: Before comparing files, enumerate ALL items in {{HOME_TOOL_DIR}}/ and check each one has a counterpart in packages/. This catches skills/agents that were created directly in {{HOME_TOOL_DIR}}/ but never added to the toolkit.
 
 ```bash
 # Reverse scan: find skills in /.claude with no packages/ counterpart
@@ -219,7 +219,7 @@ The audit report should include:
 | beads plugin | Installed v0.49.0, tracked in manifest | OK |
 | debug-bridge plugin | Installed v0.2.0, tracked in manifest | OK |
 | swarm-create skill | References `bd` CLI → beads tracked | OK |
-| mystery-skill | In ~/.claude only, not in packages | SYNC or EXCLUDE |
+| mystery-skill | In {{HOME_TOOL_DIR}} only, not in packages | SYNC or EXCLUDE |
 ```
 
 ## Assessment Phase
@@ -227,24 +227,24 @@ The audit report should include:
 Before syncing, generate an assessment table:
 
 ```markdown
-# Sync Assessment: ~/.claude <-> packages/
+# Sync Assessment: {{HOME_TOOL_DIR}} <-> packages/
 
 ## Summary
 
 | Action | Files | Reason |
 |--------|-------|--------|
 | **SYNC TO REPO** | N files | Useful generic additions |
-| **SYNC TO ~/.claude** | N files | Repo has newer versions |
-| **ORPHANS** | N items | In ~/.claude only, need classification |
+| **SYNC TO {{HOME_TOOL_DIR}}** | N files | Repo has newer versions |
+| **ORPHANS** | N items | In {{HOME_TOOL_DIR}} only, need classification |
 | **PLUGIN AUDIT** | N plugins | Cross-check with manifest |
 | **DON'T SYNC** | Multiple | Project-specific or session data |
 
 ---
 
-## ORPHANS (in ~/.claude only)
+## ORPHANS (in {{HOME_TOOL_DIR}} only)
 
 ### 1. `skills/mystery-skill/` (ORPHAN)
-- **Source**: ~/.claude/skills/mystery-skill/
+- **Source**: {{HOME_TOOL_DIR}}/skills/mystery-skill/
 - **Classification**: [SYNC TO REPO | EXTERNAL | PERSONAL | DEPRECATED]
 - **Action**: [Copy to packages/ | Verify in manifest | Add to exclusions | Remove]
 
@@ -267,7 +267,7 @@ Before syncing, generate an assessment table:
 
 ---
 
-## SYNC TO REPO (from ~/.claude)
+## SYNC TO REPO (from {{HOME_TOOL_DIR}})
 
 ### 1. `path/to/file.md` (NEW|UPDATED)
 - **Purpose**: [what this file does]
@@ -276,15 +276,15 @@ Before syncing, generate an assessment table:
 
 ---
 
-## SYNC TO ~/.claude (from packages/)
+## SYNC TO {{HOME_TOOL_DIR}} (from packages/)
 
 **⚠️ Always interpolate templates after copying** — see Template Interpolation section above.
 
 ### 1. `packages/path/to/file.md`
 - **Status**: Packages version is NEWER
 - **What's new**: [description of changes]
-- **Assessment**: Copy to ~/.claude
-- **Action**: Copy then interpolate `~/.claude` → `~/.claude/`
+- **Assessment**: Copy to {{HOME_TOOL_DIR}}
+- **Action**: Copy then interpolate `{{HOME_TOOL_DIR}}` → `{{HOME_TOOL_DIR}}/`
 
 ---
 
@@ -299,31 +299,59 @@ Before syncing, generate an assessment table:
 ### Reverse Template Interpolation (TO_REPO direction — CRITICAL)
 
 **When copying FROM user-level TO packages/toolkit, REVERSE the interpolation.**
-User-level files have resolved paths (`~/.claude/`, `/.claude/`, `.claude/`).
+User-level files have resolved paths (`{{HOME_TOOL_DIR}}/`, `/.claude/`, `.claude/`).
 These MUST be converted back to template placeholders before writing to the repo.
+
+> **CRITICAL**: The replacement side of every reverse-interpolation regex must
+> emit the literal placeholder text `{{HOME_TOOL_DIR}}` / `{{TOOL_DIR}}`. In this
+> SKILL.md source we write those placeholders ESCAPED (`\{\{HOME_TOOL_DIR\}\}`)
+> so that when the skill itself is deployed via the TO_HOME interpolation
+> below, the deploy-time perl substitution does NOT eat the example. After
+> deploy, users see `\{\{HOME_TOOL_DIR\}\}` — which is a valid perl replacement
+> producing literal `{{HOME_TOOL_DIR}}`. If you ever see `s|...|~/.claude|g`
+> in this section, the example has been corrupted by a buggy reverse-interp
+> pass — restore it from git history.
 
 ```bash
 # Reverse interpolation: user-level → packages/toolkit source
 # For .md files (documentation references use ~/ form):
-perl -pe 's|~/\.claude|~/.claude|g' ~/.claude/CLAUDE.md > toolkit/claude-code-4.5/CLAUDE.md
+perl -pe 's|~/\.claude|\{\{HOME_TOOL_DIR\}\}|g' \
+  "$HOME/.claude/CLAUDE.md" > toolkit/claude-code-4.5/CLAUDE.md
 
 # For .sh/.py files (bash code uses $HOME form):
-perl -pe 's|\$HOME/\.claude|\/.claude|g; s|~/\.claude|~/.claude|g' \
-  ~/.claude/skills/some-skill/scripts/script.sh > toolkit/packages/skills/some-skill/scripts/script.sh
+perl -pe 's|\$HOME/\.claude\b|\$HOME/\{\{TOOL_DIR\}\}|g; s|~/\.claude\b|\{\{HOME_TOOL_DIR\}\}|g' \
+  "$HOME/.claude/skills/some-skill/scripts/script.sh" \
+  > toolkit/packages/skills/some-skill/scripts/script.sh
 
 # For mixed files (both doc text AND bash code blocks — like CLAUDE.md):
-# Step 1: Replace /.claude → /.claude (bash-safe form)
-# Step 2: Replace ~/.claude → ~/.claude (doc-safe form)
-# Step 3: Replace quoted `.claude/` and "\.claude/" → .claude/ (backtick and double-quote contexts)
 # Order matters: $HOME first (most specific), then ~/, then bare .claude/
-perl -pe 's|\$HOME/\.claude|\/.claude|g; s|~/\.claude|~/.claude|g; s|`\.claude/|`.claude/|g; s|"\.claude/|".claude/|g' \
-  SOURCE > DEST
+perl -pe '
+  s|\$HOME/\.claude\b|\$HOME/\{\{TOOL_DIR\}\}|g;
+  s|~/\.claude\b|\{\{HOME_TOOL_DIR\}\}|g;
+  s|`\.claude/|`\{\{TOOL_DIR\}\}/|g;
+  s|"\.claude/|"\{\{TOOL_DIR\}\}/|g;
+' SOURCE > DEST
 ```
 
-**Always verify** after reverse interpolation:
+**Always verify** after reverse interpolation — these greps should return ZERO
+hits in the toolkit-side file (except inside intentional examples / quoted
+docs, which is why we use `\b` word-boundary in the regex above):
+
 ```bash
-# Should find ZERO literal .claude references (except in comments/descriptions):
-grep -n '~/\.claude\|\$HOME/\.claude' toolkit/claude-code-4.5/CLAUDE.md
+grep -nE '~/\.claude\b|\$HOME/\.claude\b' toolkit/claude-code-4.5/CLAUDE.md
+grep -nE '~/\.claude\b|\$HOME/\.claude\b' toolkit/packages/skills/<skill>/SKILL.md
+```
+
+**Bulk fixup** (when a sync regression slipped in and many files lost their
+placeholders — e.g. PR #70):
+
+```bash
+# Re-templatize a list of already-synced skill files.
+# In-place edit; review with `git diff` before committing.
+perl -i -pe '
+  s|\$HOME/\.claude\b|\$HOME/\{\{TOOL_DIR\}\}|g;
+  s|~/\.claude\b|\{\{HOME_TOOL_DIR\}\}|g;
+' toolkit/packages/skills/*/SKILL.md toolkit/packages/skills/*/scripts/*.sh
 ```
 
 **Do NOT reverse-interpolate**:
@@ -332,13 +360,13 @@ grep -n '~/\.claude\|\$HOME/\.claude' toolkit/claude-code-4.5/CLAUDE.md
 
 ### Template Interpolation (TO_HOME direction — CRITICAL)
 
-**Packages files use `~/.claude` as a cross-tool placeholder.** When syncing
-TO `~/.claude` (or any tool's home dir), these MUST be substituted before the file is
+**Packages files use `{{HOME_TOOL_DIR}}` as a cross-tool placeholder.** When syncing
+TO `{{HOME_TOOL_DIR}}` (or any tool's home dir), these MUST be substituted before the file is
 written — never leave them as literal strings.
 
 | Template | Claude Code | Codex | Copilot |
 |----------|-------------|-------|---------|
-| `~/.claude` | `~/.claude/` | `~/.codex/` | `~/.copilot/` |
+| `{{HOME_TOOL_DIR}}` | `{{HOME_TOOL_DIR}}/` | `~/.codex/` | `~/.copilot/` |
 | `.claude` | `.claude` | `.codex` | `.copilot` |
 
 Use `perl` for safe substitution (avoids shell expansion issues with `~`):
@@ -352,7 +380,7 @@ perl -pe 's/\{\{HOME_TOOL_DIR\}\}/\/Users\/stevengonsalvez\/.claude/g; s/\{\{TOO
   /tmp/SKILL.md > /.claude/path/to/SKILL.md
 ```
 
-**Always verify** after substitution — `grep -n "HOME_TOOL_DIR\|TOOL_DIR" ~/.claude/...` should return nothing.
+**Always verify** after substitution — `grep -n "HOME_TOOL_DIR\|TOOL_DIR" {{HOME_TOOL_DIR}}/...` should return nothing.
 
 ### Shell Alias Workaround
 
@@ -395,7 +423,7 @@ chore: sync learnings to packages
 ```bash
 # CLAUDE.md diff (tool-specific config file)
 # Normalize template vars before comparing to avoid false positives
-diff <(perl -pe 's|\{\{TOOL_DIR\}\}|.claude|g; s|\{\{HOME_TOOL_DIR\}\}|~/.claude|g' \
+diff <(perl -pe 's|\{\{TOOL_DIR\}\}|.claude|g; s|\{\{HOME_TOOL_DIR\}\}|{{HOME_TOOL_DIR}}|g' \
   toolkit/claude-code-4.5/CLAUDE.md) /.claude/CLAUDE.md
 
 # settings.json diff (Claude Code harness config)
@@ -453,21 +481,21 @@ grep -rl '\bbd\b' packages/skills/*/SKILL.md 2>/dev/null
 ```
 User: /sync-learnings
 
-Claude: # Sync Assessment: ~/.claude <-> packages/
+Claude: # Sync Assessment: {{HOME_TOOL_DIR}} <-> packages/
 
 ## Summary
 
 | Action | Files | Reason |
 |--------|-------|--------|
 | **SYNC TO REPO** | 3 files | Useful generic additions |
-| **SYNC TO ~/.claude** | 1 file | Packages has newer version |
+| **SYNC TO {{HOME_TOOL_DIR}}** | 1 file | Packages has newer version |
 | **ORPHANS** | 0 items | All skills/agents accounted for |
 | **PLUGIN AUDIT** | 6 plugins | All tracked in manifest |
 | **DON'T SYNC** | Multiple | Project-specific or session data |
 
 ## ORPHANS
 
-No orphaned skills or agents detected. All items in ~/.claude/ have
+No orphaned skills or agents detected. All items in {{HOME_TOOL_DIR}}/ have
 counterparts in packages/ or are tracked in external-dependencies.yaml.
 
 ## PLUGIN & EXTERNAL DEPENDENCY AUDIT
@@ -497,12 +525,12 @@ counterparts in packages/ or are tracked in external-dependencies.yaml.
 - **Target**: `packages/utilities/commands/` (routed)
 - **Assessment**: Generic utility
 
-## SYNC TO ~/.claude
+## SYNC TO {{HOME_TOOL_DIR}}
 
 ### 1. `packages/utilities/commands/sync-learnings.md`
 - **Status**: Packages version is NEWER
 - **What's new**: Added command routing logic
-- **Assessment**: Copy to ~/.claude
+- **Assessment**: Copy to {{HOME_TOOL_DIR}}
 
 Proceed with sync? [Y/n]
 
@@ -512,7 +540,7 @@ Claude: Executing sync...
 
 new-validator.md -> packages/agents/engineering/
 custom-workflow.md -> packages/utilities/commands/
-sync-learnings.md -> ~/.claude/commands/
+sync-learnings.md -> {{HOME_TOOL_DIR}}/commands/
 
 Committed: chore: sync learnings to packages
 ```
