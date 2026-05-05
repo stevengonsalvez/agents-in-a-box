@@ -172,54 +172,52 @@ ainb completion zsh > ~/.zsh/completions/_ainb
 
 ### Installation
 
-<details>
-<summary><b>Homebrew (macOS / Linux)</b></summary>
+**Recommended — Homebrew (macOS / Linux):**
 
 ```bash
 brew tap stevengonsalvez/agents-in-a-box
 brew install ainb
 ```
-</details>
+
+The tap lives at [`stevengonsalvez/homebrew-agents-in-a-box`](https://github.com/stevengonsalvez/homebrew-agents-in-a-box) and is auto-updated by the release workflow on every tagged release — `brew upgrade ainb` always pulls the latest.
 
 <details>
-<summary><b>One-liner install</b></summary>
+<summary><b>Other install methods</b></summary>
 
+**One-liner curl install** (any Unix):
 ```bash
 curl -fsSL https://raw.githubusercontent.com/stevengonsalvez/agents-in-a-box/main/ainb-tui/install.sh | bash
 ```
-</details>
 
-<details>
-<summary><b>Homebrew (macOS / Linux)</b></summary>
-
-```bash
-brew tap stevengonsalvez/agents-in-a-box
-brew install ainb
-```
-</details>
-
-<details>
-<summary><b>Cargo (any platform)</b></summary>
-
+**Cargo** (any platform with a Rust toolchain):
 ```bash
 cargo install --git https://github.com/stevengonsalvez/agents-in-a-box --branch main ainb
 ```
-</details>
 
-<details>
-<summary><b>Windows (WSL)</b></summary>
-
+**Windows via WSL2** — native Windows is not supported (`ainb` uses Unix-only APIs: PTY, POSIX file modes). Use WSL2:
 ```powershell
-# 1. Install WSL2
-wsl --install
-
-# 2. Inside Ubuntu/Debian
+wsl --install                                                                         # 1. Install WSL2
+# Inside Ubuntu/Debian:
 curl -fsSL https://raw.githubusercontent.com/stevengonsalvez/agents-in-a-box/main/ainb-tui/install.sh | bash
 sudo apt update && sudo apt install -y tmux
 ainb
 ```
+</details>
 
-> Native Windows is not supported — `ainb` uses Unix-only APIs (PTY, POSIX file modes). WSL2 + the Linux binary is the supported path.
+<details>
+<summary><b>Troubleshooting Homebrew</b></summary>
+
+**`Error: Your Command Line Tools are too outdated`** — this is a Homebrew check on the standalone `CommandLineTools` package, separate from a full Xcode install. If you have a recent Xcode but an old standalone CLT, brew picks the older one. Reinstall the CLT:
+```bash
+sudo rm -rf /Library/Developer/CommandLineTools
+sudo xcode-select --install
+```
+
+**`Formulae found in multiple taps`** — if you previously tapped a similarly-named bucket, untap it:
+```bash
+brew untap stevengonsalvez/ainb   # only if you tapped this earlier
+brew install stevengonsalvez/agents-in-a-box/ainb
+```
 </details>
 
 ### Keyboard Shortcuts
