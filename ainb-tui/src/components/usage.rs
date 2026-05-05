@@ -156,10 +156,14 @@ impl UsageTab {
     }
 }
 
+/// Live free-text input mode on the usage screen. Only `DateRange`
+/// remains — include/exclude project prompts were replaced by the
+/// picker-style chip strip (Enter / Shift+X) per the "no free text in
+/// TUI" principle. The variant is retained as a single-arm enum for
+/// forward compatibility (eg. CLI-driven advanced filters that may
+/// reintroduce a typed input later).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UsageInputMode {
-    Include,
-    Exclude,
     DateRange,
 }
 
@@ -302,6 +306,16 @@ pub struct UsageViewState {
     /// occupies the bottom 40% of the zoom area and shows the full
     /// row record for the focused row.
     pub zoom_detail_open: bool,
+    /// Absolute oldest call day observed across the unfiltered call
+    /// set, monotonically narrowing across loads. Used to clamp
+    /// `step_period_back` independent of the currently-active period
+    /// (which restricts `data.daily` to the visible window and would
+    /// otherwise prevent stepping into earlier months/quarters).
+    ///
+    /// Updated on every load via `min(existing, new_min_from_data_calls)`
+    /// so a narrow period (eg. `SpecificMonth(May)`) cannot raise the
+    /// anchor above an earlier value seen during a wider load.
+    pub oldest_call_day: Option<NaiveDate>,
 }
 
 impl Default for UsageViewState {
@@ -325,6 +339,7 @@ impl Default for UsageViewState {
             zoom_search_active: false,
             zoom_search_query: String::new(),
             zoom_detail_open: false,
+            oldest_call_day: None,
         }
     }
 }
@@ -373,19 +388,17 @@ impl UsageViewState {
     }
 
     /// Step the active Month or Quarter picker one unit back. Clamps
-    /// at the oldest day in `data.daily` (so we never step into a
-    /// region known to have no usage rows). Returns `true` when the
-    /// period actually changed.
+    /// at `oldest_call_day` — the absolute oldest day observed across
+    /// the unfiltered call set — so the user can step from a narrow
+    /// period (eg. `SpecificMonth(May)`) into an earlier month, even
+    /// though `data.daily` only holds the May rows in that state.
+    /// Returns `true` when the period actually changed.
     ///
-    /// No-op when the active period is not a Month/Quarter picker.
+    /// No-op when the active period is not a Month/Quarter picker, or
+    /// when no data has been loaded yet (no oldest anchor to clamp
+    /// against — would let the user wander arbitrarily far back).
     pub fn step_period_back(&mut self) -> bool {
-        // Refuse to step until data has loaded — without an `oldest`
-        // anchor we'd let the user wander arbitrarily far backwards,
-        // and the resulting picker state would silently fall outside
-        // the data range once the load completes.
-        let Some(oldest) =
-            self.data.as_ref().and_then(|d| d.daily.first().map(|(date, _)| *date))
-        else {
+        let Some(oldest) = self.oldest_call_day else {
             return false;
         };
         self.step_period(StepDirection::Back, oldest)
@@ -531,16 +544,6 @@ impl UsageViewState {
     pub fn submit_input(&mut self) -> Result<(), String> {
         let value = self.input_buffer.trim().to_string();
         match self.input_mode {
-            Some(UsageInputMode::Include) => {
-                if !value.is_empty() {
-                    self.include_projects.push(value);
-                }
-            }
-            Some(UsageInputMode::Exclude) => {
-                if !value.is_empty() {
-                    self.exclude_projects.push(value);
-                }
-            }
             Some(UsageInputMode::DateRange) => {
                 let parts: Vec<_> = value
                     .split(|ch| ch == '.' || ch == ',' || ch == ' ')
@@ -562,11 +565,6 @@ impl UsageViewState {
         }
         self.cancel_input();
         Ok(())
-    }
-
-    pub fn clear_filters(&mut self) {
-        self.include_projects.clear();
-        self.exclude_projects.clear();
     }
 
     /// Cycle the focus pointer to the next panel. If unfocused, focus
@@ -612,6 +610,38 @@ impl UsageViewState {
         self.data.as_ref().map(|data| filter_usage_data(data, &self.filters))
     }
 
+    /// Resolve the focused panel row to a `(target, value, owner_project)`
+    /// triple. Shared by include and exclude commit paths so both
+    /// dispatch tables stay in lock-step.
+    fn resolve_focused_row(&self) -> Option<(UsageFilterTarget, String, Option<String>)> {
+        let panel = self.focused_panel?;
+        let target = panel.enter_target()?;
+        let filtered = self.filtered_data()?;
+        let row_idx = self.focus_row;
+        // For Session rows we also need the owning project so we can
+        // auto-attach a project chip — session ids can collide across
+        // projects/providers because the aggregator key is
+        // `provider:project:session_id` but `filters.session` only holds
+        // the bare id. Other targets pass None as the second element.
+        match (target, panel) {
+            (UsageFilterTarget::Project, UsagePanel::Leaderboard | UsagePanel::ByProject) => {
+                filtered.projects.get(row_idx).map(|p| (target, p.name.clone(), None))
+            }
+            (UsageFilterTarget::Activity, _) => filtered
+                .activities
+                .get(row_idx)
+                .map(|a| (target, a.category.label().to_string(), None)),
+            (UsageFilterTarget::Model, _) => {
+                filtered.models.get(row_idx).map(|m| (target, m.model.clone(), None))
+            }
+            (UsageFilterTarget::Session, _) => filtered
+                .sessions
+                .get(row_idx)
+                .map(|s| (target, s.session_id.clone(), Some(s.project.clone()))),
+            _ => None,
+        }
+    }
+
     /// Append the focused row of the focused panel as a chip. Returns
     /// `true` if a chip was added (so callers can show feedback).
     /// Requires `data` to be loaded; uses the unfiltered `data` to
@@ -619,38 +649,7 @@ impl UsageViewState {
     /// looking at when focus is active (we render from filtered_data
     /// at draw time, which is the same source).
     pub fn commit_focused_row(&mut self) -> bool {
-        let Some(panel) = self.focused_panel else {
-            return false;
-        };
-        let Some(target) = panel.enter_target() else {
-            return false;
-        };
-        let Some(filtered) = self.filtered_data() else {
-            return false;
-        };
-        let row_idx = self.focus_row;
-        // For Session rows we also need the owning project so we can
-        // auto-attach a project chip — session ids can collide across
-        // projects/providers because the aggregator key is
-        // `provider:project:session_id` but `filters.session` only holds
-        // the bare id. Other targets pass None as the second element.
-        let value: Option<(String, Option<String>)> = match (target, panel) {
-            (UsageFilterTarget::Project, UsagePanel::Leaderboard | UsagePanel::ByProject) => {
-                filtered.projects.get(row_idx).map(|p| (p.name.clone(), None))
-            }
-            (UsageFilterTarget::Activity, _) => {
-                filtered.activities.get(row_idx).map(|a| (a.category.label().to_string(), None))
-            }
-            (UsageFilterTarget::Model, _) => {
-                filtered.models.get(row_idx).map(|m| (m.model.clone(), None))
-            }
-            (UsageFilterTarget::Session, _) => filtered
-                .sessions
-                .get(row_idx)
-                .map(|s| (s.session_id.clone(), Some(s.project.clone()))),
-            _ => None,
-        };
-        let Some((value, owner_project)) = value else {
+        let Some((target, value, owner_project)) = self.resolve_focused_row() else {
             return false;
         };
         match target {
@@ -677,6 +676,40 @@ impl UsageViewState {
                     if !self.filters.project.contains(&p) {
                         self.filters.project.push(p);
                     }
+                }
+            }
+        }
+        true
+    }
+
+    /// Append the focused row as an *exclude* chip. Mirror of
+    /// `commit_focused_row` that routes into the `exclude_*` filter
+    /// lists. Session rows do NOT auto-attach an owner-project exclude
+    /// — excluding the project because one of its sessions was excluded
+    /// would discard sibling sessions the user did not target.
+    pub fn commit_focused_row_exclude(&mut self) -> bool {
+        let Some((target, value, _owner_project)) = self.resolve_focused_row() else {
+            return false;
+        };
+        match target {
+            UsageFilterTarget::Project => {
+                if !self.filters.exclude_project.contains(&value) {
+                    self.filters.exclude_project.push(value);
+                }
+            }
+            UsageFilterTarget::Model => {
+                if !self.filters.exclude_model.contains(&value) {
+                    self.filters.exclude_model.push(value);
+                }
+            }
+            UsageFilterTarget::Activity => {
+                if !self.filters.exclude_activity.contains(&value) {
+                    self.filters.exclude_activity.push(value);
+                }
+            }
+            UsageFilterTarget::Session => {
+                if !self.filters.exclude_session.contains(&value) {
+                    self.filters.exclude_session.push(value);
                 }
             }
         }
@@ -2528,7 +2561,7 @@ pub fn build_filter_chip_line(state: &UsageViewState) -> Line<'static> {
         vec![Span::styled("Filters: ", Style::default().fg(MUTED_GRAY))];
     if !state.filters.any() {
         spans.push(Span::styled(
-            "(none) — Tab focus a panel, ↑↓ pick a row, Enter to add",
+            "(none)",
             Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
         ));
         return Line::from(spans);
@@ -2538,6 +2571,11 @@ pub fn build_filter_chip_line(state: &UsageViewState) -> Line<'static> {
     push_chip_group(&mut spans, "activity", &state.filters.activity);
     push_chip_group(&mut spans, "session", &state.filters.session);
     push_chip_group(&mut spans, "branch", &state.filters.branch);
+    push_exclude_chip_group(&mut spans, "project", &state.filters.exclude_project);
+    push_exclude_chip_group(&mut spans, "model", &state.filters.exclude_model);
+    push_exclude_chip_group(&mut spans, "activity", &state.filters.exclude_activity);
+    push_exclude_chip_group(&mut spans, "session", &state.filters.exclude_session);
+    push_exclude_chip_group(&mut spans, "branch", &state.filters.exclude_branch);
     spans.push(Span::styled("  ·  ", Style::default().fg(MUTED_GRAY)));
     spans.push(Span::styled(
         "Esc",
@@ -2561,6 +2599,20 @@ fn push_chip_group(spans: &mut Vec<Span<'static>>, label: &str, values: &[String
         spans.push(Span::styled(
             chip_text,
             Style::default().fg(DARK_BG).bg(GOLD).add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::raw(" "));
+    }
+}
+
+/// Exclude chips render with a leading `~` and a muted-orange fill so
+/// they are immediately distinguishable from include (gold) chips.
+/// They also pop first via Esc — see `UsageFilters::pop_last`.
+fn push_exclude_chip_group(spans: &mut Vec<Span<'static>>, label: &str, values: &[String]) {
+    for value in values {
+        let chip_text = format!(" ~{label}={value} ");
+        spans.push(Span::styled(
+            chip_text,
+            Style::default().fg(DARK_BG).bg(BAR_HIGH).add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::raw(" "));
     }
@@ -3530,28 +3582,28 @@ fn render_help_bar(frame: &mut Frame, area: Rect, state: &UsageViewState) {
 
     let on_burndown = matches!(state.active_tab, UsageTab::Burndown);
     let mut spans = vec![
-        Span::styled(" ◀/▶", Style::default().fg(GOLD)),
+        Span::styled(" ◀/▶ p", Style::default().fg(GOLD)),
         Span::styled(" provider  ", Style::default().fg(MUTED_GRAY)),
-        Span::styled("p", Style::default().fg(GOLD)),
-        Span::styled(" filter  ", Style::default().fg(MUTED_GRAY)),
         Span::styled(
             "1 Today  2 7d  3 30d  4 90d  5 YTD  m Month  q Quarter  a All  D advanced  ",
             Style::default().fg(MUTED_GRAY),
         ),
     ];
     if on_burndown {
-        // Burndown view: z zoom; Tab pivots panels; Enter commits chip; C clears.
+        // Burndown view: z zoom; Tab pivots panels; Enter/X commit chips; C clears.
         spans.extend_from_slice(&[
             Span::styled("z", Style::default().fg(GOLD)),
             Span::styled(" zoom  ", Style::default().fg(MUTED_GRAY)),
             Span::styled("Tab", Style::default().fg(GOLD)),
-            Span::styled(" focus panel  ", Style::default().fg(MUTED_GRAY)),
+            Span::styled(" focus  ", Style::default().fg(MUTED_GRAY)),
             Span::styled("Enter", Style::default().fg(GOLD)),
-            Span::styled(" pin filter  ", Style::default().fg(MUTED_GRAY)),
+            Span::styled(" add  ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("X", Style::default().fg(GOLD)),
+            Span::styled(" exclude  ", Style::default().fg(MUTED_GRAY)),
             Span::styled("Esc", Style::default().fg(GOLD)),
-            Span::styled(" pop chip  ", Style::default().fg(MUTED_GRAY)),
+            Span::styled(" pop  ", Style::default().fg(MUTED_GRAY)),
             Span::styled("C", Style::default().fg(GOLD)),
-            Span::styled(" clear all  ", Style::default().fg(MUTED_GRAY)),
+            Span::styled(" clear  ", Style::default().fg(MUTED_GRAY)),
         ]);
     } else {
         spans.extend_from_slice(&[
@@ -3560,8 +3612,6 @@ fn render_help_bar(frame: &mut Frame, area: Rect, state: &UsageViewState) {
         ]);
     }
     spans.extend_from_slice(&[
-        Span::styled("/ x c", Style::default().fg(GOLD)),
-        Span::styled(" filters  ", Style::default().fg(MUTED_GRAY)),
         Span::styled("j/k", Style::default().fg(GOLD)),
         Span::styled(" scroll  ", Style::default().fg(MUTED_GRAY)),
         Span::styled("r/R", Style::default().fg(GOLD)),
@@ -3602,8 +3652,6 @@ fn period_label(period: &UsagePeriod) -> String {
 
 fn input_label(mode: UsageInputMode) -> &'static str {
     match mode {
-        UsageInputMode::Include => "include",
-        UsageInputMode::Exclude => "exclude",
         UsageInputMode::DateRange => "date range",
     }
 }
@@ -4012,6 +4060,96 @@ mod cross_filter_tests {
         for needle in ["project=p", "model=m", "activity=Coding", "session=s", "branch=b"] {
             assert!(flat.contains(needle), "chip strip missing {needle}: {flat}");
         }
+    }
+
+    #[test]
+    fn x_on_by_project_row_adds_exclude_chip_and_filter_drops_project() {
+        use crate::models::usage::{filter_usage_data, UsageData, UsageFilters};
+        use crate::test_support::ProviderCallBuilder;
+        use std::collections::HashMap;
+
+        let mut state = UsageViewState::default();
+        state.data = Some(fixture());
+        state.focused_panel = Some(UsagePanel::ByProject);
+        state.focus_row = 1; // beta
+        assert!(state.commit_focused_row_exclude());
+        assert_eq!(state.filters.exclude_project, vec!["beta".to_string()]);
+        assert!(state.filters.project.is_empty(), "include side must be untouched");
+
+        // End-to-end: filter_usage_data must drop calls matching the
+        // exclude project, leaving only the alpha call.
+        let calls = vec![
+            ProviderCallBuilder::new().with_project("alpha").build(),
+            ProviderCallBuilder::new().with_project("beta").build(),
+        ];
+        let data = UsageData {
+            daily: vec![],
+            weekly: vec![],
+            projects: vec![],
+            grand_total: TokenBucket::default(),
+            calls,
+            sessions: vec![],
+            models: vec![],
+            activities: vec![],
+            tools: vec![],
+            mcp_servers: vec![],
+            shell_commands: vec![],
+            branches: vec![],
+            model_project_counts: HashMap::new(),
+        };
+        let mut filters = UsageFilters::default();
+        filters.exclude_project.push("beta".into());
+        let filtered = filter_usage_data(&data, &filters);
+        assert_eq!(filtered.calls.len(), 1);
+        assert_eq!(filtered.calls[0].project, "alpha");
+    }
+
+    #[test]
+    fn step_period_back_uses_oldest_call_day_not_data_daily() {
+        // The picker must clamp at the absolute oldest call day (which
+        // tracks the unfiltered call set across loads), not at
+        // `data.daily.first()` — when the active period is
+        // `SpecificMonth(May)`, `data.daily` only has May rows so the
+        // old clamp-at-data path would refuse to step into April even
+        // though April is in range.
+        use crate::models::usage::UsagePeriod;
+        let mut state = UsageViewState::default();
+        state.oldest_call_day = NaiveDate::from_ymd_opt(2026, 4, 1);
+        state.period = UsagePeriod::SpecificMonth(NaiveDate::from_ymd_opt(2026, 5, 1).unwrap());
+
+        assert!(state.step_period_back(), "April is in range; back must succeed");
+        assert_eq!(
+            state.period,
+            UsagePeriod::SpecificMonth(NaiveDate::from_ymd_opt(2026, 4, 1).unwrap()),
+        );
+    }
+
+    #[test]
+    fn step_period_back_clamps_when_oldest_is_inside_target_month() {
+        // April 1 < May 15, so stepping back from May lands on April 1,
+        // which is BEFORE the oldest known day — must refuse the step.
+        use crate::models::usage::UsagePeriod;
+        let mut state = UsageViewState::default();
+        state.oldest_call_day = NaiveDate::from_ymd_opt(2026, 5, 15);
+        state.period = UsagePeriod::SpecificMonth(NaiveDate::from_ymd_opt(2026, 5, 1).unwrap());
+
+        assert!(!state.step_period_back(), "April predates oldest May 15; back must fail");
+        assert_eq!(
+            state.period,
+            UsagePeriod::SpecificMonth(NaiveDate::from_ymd_opt(2026, 5, 1).unwrap()),
+        );
+    }
+
+    #[test]
+    fn step_period_back_returns_false_when_no_data_loaded() {
+        // Without an oldest anchor the user could wander arbitrarily
+        // far back; refuse to step until at least one load has populated
+        // `oldest_call_day`.
+        use crate::models::usage::UsagePeriod;
+        let mut state = UsageViewState::default();
+        state.oldest_call_day = None;
+        state.period = UsagePeriod::SpecificMonth(NaiveDate::from_ymd_opt(2026, 5, 1).unwrap());
+        assert!(!state.step_period_back());
     }
 
     #[test]

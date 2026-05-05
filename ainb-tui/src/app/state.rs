@@ -2707,6 +2707,23 @@ impl Default for AppState {
     }
 }
 
+/// Monotonic-min merge for `oldest_call_day`. Keeps the session-wide
+/// anchor honest across narrow→wide period switches: a wide load
+/// establishes the true extent and a subsequent narrow load only
+/// narrows the data view, never the anchor. `None` candidates leave
+/// the existing anchor untouched; `None` existing accepts whatever
+/// the candidate gives.
+fn merge_oldest_call_day(
+    existing: Option<chrono::NaiveDate>,
+    candidate: Option<chrono::NaiveDate>,
+) -> Option<chrono::NaiveDate> {
+    match (existing, candidate) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), None) => Some(a),
+        (None, b) => b,
+    }
+}
+
 impl AppState {
     pub fn new() -> Self {
         Self::default()
@@ -3560,6 +3577,20 @@ impl AppState {
         if let Some(ref mut receiver) = self.usage_load_receiver {
             match receiver.try_recv() {
                 Ok(data) => {
+                    // Refresh `oldest_call_day` monotonically (only ever
+                    // narrows downward). The call set delivered here is
+                    // already period-filtered, so a narrow period would
+                    // raise the local minimum above an earlier value
+                    // seen on a wider load — we want the absolute oldest
+                    // observed across the session, so we take the min.
+                    use chrono::Local;
+                    let new_oldest = data
+                        .calls
+                        .iter()
+                        .map(|c| c.timestamp.with_timezone(&Local).date_naive())
+                        .min();
+                    self.usage_state.oldest_call_day =
+                        merge_oldest_call_day(self.usage_state.oldest_call_day, new_oldest);
                     self.usage_state.data = Some(data);
                     self.usage_state.loading = false;
                     self.usage_load_receiver = None;

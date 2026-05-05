@@ -149,6 +149,14 @@ pub struct UsageFilters {
     pub activity: Vec<String>,
     pub session: Vec<String>,
     pub branch: Vec<String>,
+    /// Negative filters set via the X-on-row picker. A call is rejected
+    /// as soon as it matches any value in any of these lists. Mirrors
+    /// the include lists above so all five dimensions support exclude.
+    pub exclude_project: Vec<String>,
+    pub exclude_model: Vec<String>,
+    pub exclude_activity: Vec<String>,
+    pub exclude_session: Vec<String>,
+    pub exclude_branch: Vec<String>,
 }
 
 impl UsageFilters {
@@ -158,6 +166,11 @@ impl UsageFilters {
             && self.activity.is_empty()
             && self.session.is_empty()
             && self.branch.is_empty()
+            && self.exclude_project.is_empty()
+            && self.exclude_model.is_empty()
+            && self.exclude_activity.is_empty()
+            && self.exclude_session.is_empty()
+            && self.exclude_branch.is_empty()
     }
 
     /// True if any cross-filter is set. Mirror of `!is_empty()` for sites
@@ -166,10 +179,27 @@ impl UsageFilters {
         !self.is_empty()
     }
 
-    /// Pop the most-recently-added filter chip. Removal order: branch →
-    /// session → activity → model → project (matches the chip-strip render
-    /// order so `Esc` removes the visually rightmost chip first).
+    /// Pop the most-recently-added filter chip. Removal order matches
+    /// the chip-strip render order so `Esc` removes the visually
+    /// rightmost chip first: exclude chips are rendered after include
+    /// chips, so they pop first; within each group the order is
+    /// branch → session → activity → model → project.
     pub fn pop_last(&mut self) -> Option<UsageFilterChip> {
+        if let Some(value) = self.exclude_branch.pop() {
+            return Some(UsageFilterChip::ExcludeBranch(value));
+        }
+        if let Some(value) = self.exclude_session.pop() {
+            return Some(UsageFilterChip::ExcludeSession(value));
+        }
+        if let Some(value) = self.exclude_activity.pop() {
+            return Some(UsageFilterChip::ExcludeActivity(value));
+        }
+        if let Some(value) = self.exclude_model.pop() {
+            return Some(UsageFilterChip::ExcludeModel(value));
+        }
+        if let Some(value) = self.exclude_project.pop() {
+            return Some(UsageFilterChip::ExcludeProject(value));
+        }
         if let Some(value) = self.branch.pop() {
             return Some(UsageFilterChip::Branch(value));
         }
@@ -194,6 +224,11 @@ impl UsageFilters {
         self.activity.clear();
         self.session.clear();
         self.branch.clear();
+        self.exclude_project.clear();
+        self.exclude_model.clear();
+        self.exclude_activity.clear();
+        self.exclude_session.clear();
+        self.exclude_branch.clear();
     }
 
     pub(crate) fn matches(&self, call: &ProviderCall, category: ActivityCategory) -> bool {
@@ -220,6 +255,33 @@ impl UsageFilters {
                 return false;
             }
         }
+        // Exclude lists: a call is rejected if it matches any value.
+        // Branch exclusions only apply to calls with a recorded branch
+        // — calls without a branch are unaffected by branch excludes
+        // (mirror of the include-side semantics where `branch == None`
+        // means "no branch was recorded for this call").
+        if self.exclude_project.iter().any(|p| p == &call.project) {
+            return false;
+        }
+        if self.exclude_model.iter().any(|m| m == &call.model) {
+            return false;
+        }
+        if self.exclude_session.iter().any(|s| s == &call.session_id) {
+            return false;
+        }
+        if !self.exclude_activity.is_empty() {
+            let label = category.label();
+            if self.exclude_activity.iter().any(|a| a == label) {
+                return false;
+            }
+        }
+        if !self.exclude_branch.is_empty() {
+            if let Some(branch) = call.recorded_branch() {
+                if self.exclude_branch.iter().any(|b| b == branch) {
+                    return false;
+                }
+            }
+        }
         true
     }
 }
@@ -232,6 +294,15 @@ pub enum UsageFilterChip {
     Activity(String),
     Session(String),
     Branch(String),
+    /// Exclude variants set via the X-on-row picker. The chip strip
+    /// renders these with a leading `~` and `pop_last` returns them
+    /// before the include variants so Esc walks the visually
+    /// rightmost chip first.
+    ExcludeProject(String),
+    ExcludeModel(String),
+    ExcludeActivity(String),
+    ExcludeSession(String),
+    ExcludeBranch(String),
 }
 
 impl UsageFilterChip {
@@ -246,12 +317,26 @@ impl UsageFilterChip {
     // checked when a variant is added. The match is already canonical.
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Project(_) => "project",
-            Self::Model(_) => "model",
-            Self::Activity(_) => "activity",
-            Self::Session(_) => "session",
-            Self::Branch(_) => "branch",
+            Self::Project(_) | Self::ExcludeProject(_) => "project",
+            Self::Model(_) | Self::ExcludeModel(_) => "model",
+            Self::Activity(_) | Self::ExcludeActivity(_) => "activity",
+            Self::Session(_) | Self::ExcludeSession(_) => "session",
+            Self::Branch(_) | Self::ExcludeBranch(_) => "branch",
         }
+    }
+
+    /// True for negative (exclude) variants. Used by the chip strip to
+    /// render with a `~` prefix and by callers that want a single test
+    /// for "is this an exclusion".
+    pub fn is_exclude(&self) -> bool {
+        matches!(
+            self,
+            Self::ExcludeProject(_)
+                | Self::ExcludeModel(_)
+                | Self::ExcludeActivity(_)
+                | Self::ExcludeSession(_)
+                | Self::ExcludeBranch(_)
+        )
     }
 
     pub fn value(&self) -> &str {
@@ -260,7 +345,12 @@ impl UsageFilterChip {
             | Self::Model(v)
             | Self::Activity(v)
             | Self::Session(v)
-            | Self::Branch(v) => v,
+            | Self::Branch(v)
+            | Self::ExcludeProject(v)
+            | Self::ExcludeModel(v)
+            | Self::ExcludeActivity(v)
+            | Self::ExcludeSession(v)
+            | Self::ExcludeBranch(v) => v,
         }
     }
 }

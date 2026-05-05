@@ -356,11 +356,8 @@ pub enum AppEvent {
     UsageSetPeriodAll,        // a — switch to All
     UsagePeriodStepBack,      // ◀ — step Month/Quarter back
     UsagePeriodStepForward,   // ▶ — step Month/Quarter forward
-    UsageStartIncludeFilter,  // Start include project input (/)
-    UsageStartExcludeFilter,  // Start exclude project input (x)
     UsageStartDateRange,      // Start date range input (capital D)
-    UsageClearFilters,        // Clear include/exclude filters (c)
-    UsageInputChar(char),     // Input for usage filter/range
+    UsageInputChar(char),     // Input for usage date range
     UsageInputBackspace,      // Backspace in usage input
     UsageInputSubmit,         // Submit usage input
     UsageInputCancel,         // Cancel usage input
@@ -369,7 +366,8 @@ pub enum AppEvent {
     UsageFocusPrevPanel, // Shift+Tab while on Burndown
     UsageFocusRowUp,     // Up/k while a panel is focused
     UsageFocusRowDown,   // Down/j while a panel is focused
-    UsageCommitFilter,   // Enter on focused row -> add chip
+    UsageCommitFilter,   // Enter on focused row -> add include chip
+    UsageCommitExcludeFilter, // Shift+X on focused row -> add exclude chip
     UsagePopFilterChip,  // Esc when chips exist
     UsageClearAllChips,  // C — drop every chip in one shot
     // Zoom mode (PR-C)
@@ -1728,6 +1726,9 @@ impl EventHandler {
                 KeyCode::BackTab => return Some(AppEvent::UsageFocusPrevPanel),
                 KeyCode::Enter => return Some(AppEvent::UsageCommitFilter),
                 KeyCode::Char('C') => return Some(AppEvent::UsageClearAllChips),
+                // Capital X (Shift+x) only — lowercase x is reserved for
+                // future scope and must NOT trigger the exclude commit.
+                KeyCode::Char('X') => return Some(AppEvent::UsageCommitExcludeFilter),
                 KeyCode::Esc if state.usage_state.filters.any() => {
                     return Some(AppEvent::UsagePopFilterChip);
                 }
@@ -1791,9 +1792,11 @@ impl EventHandler {
             KeyCode::Char('q') => Some(AppEvent::UsageSetPeriodQuarter),
             KeyCode::Char('a') => Some(AppEvent::UsageSetPeriodAll),
             KeyCode::Char('D') => Some(AppEvent::UsageStartDateRange),
-            KeyCode::Char('/') => Some(AppEvent::UsageStartIncludeFilter),
-            KeyCode::Char('x') => Some(AppEvent::UsageStartExcludeFilter),
-            KeyCode::Char('c') => Some(AppEvent::UsageClearFilters),
+            // `/`, `x`, `c` are intentionally unmapped on the burndown
+            // view — include/exclude/clear are now picker-driven via
+            // the chip strip (Enter / Shift+X / Shift+C). Free-text
+            // prompts violated the project's "no free text in TUI"
+            // principle and were removed.
             _ => None,
         }
     }
@@ -4234,6 +4237,12 @@ impl EventHandler {
             }
             AppEvent::UsageForceRefresh => {
                 tracing::info!("Force-refreshing usage data (bypass cache)");
+                // Force-refresh re-reads JSONL from disk; the data extent
+                // could legitimately have shrunk (files deleted, cache
+                // cleared on rotated logs). Reset oldest_call_day so the
+                // monotonic-min on reload picks up the true new extent
+                // rather than a stale earlier value.
+                state.usage_state.oldest_call_day = None;
                 let msg = if state.start_background_usage_load_with_options(true, true) {
                     "Force-refreshing usage data (cache cleared)…"
                 } else {
@@ -4302,20 +4311,10 @@ impl EventHandler {
                     state.start_background_usage_load(true);
                 }
             }
-            AppEvent::UsageStartIncludeFilter => {
-                state.usage_state.begin_input(crate::components::usage::UsageInputMode::Include);
-            }
-            AppEvent::UsageStartExcludeFilter => {
-                state.usage_state.begin_input(crate::components::usage::UsageInputMode::Exclude);
-            }
             AppEvent::UsageStartDateRange => {
                 state
                     .usage_state
                     .begin_input(crate::components::usage::UsageInputMode::DateRange);
-            }
-            AppEvent::UsageClearFilters => {
-                state.usage_state.clear_filters();
-                state.start_background_usage_load(true);
             }
             AppEvent::UsageInputChar(ch) => {
                 state.usage_state.input_char(ch);
@@ -4352,10 +4351,16 @@ impl EventHandler {
                     state.add_success_notification("Filter added".to_string());
                 }
             }
+            AppEvent::UsageCommitExcludeFilter => {
+                if state.usage_state.commit_focused_row_exclude() {
+                    state.add_success_notification("Exclude filter added".to_string());
+                }
+            }
             AppEvent::UsagePopFilterChip => {
                 if let Some(chip) = state.usage_state.pop_filter_chip() {
+                    let kind = if chip.is_exclude() { "exclude" } else { "include" };
                     state.add_success_notification(format!(
-                        "Removed filter {}={}",
+                        "Removed {kind} {}={}",
                         chip.label(),
                         chip.value()
                     ));

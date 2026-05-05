@@ -3,7 +3,6 @@
 use ainb::app::events::AppEvent;
 use ainb::app::state::View;
 use ainb::app::{AppState, EventHandler};
-use ainb::components::usage::UsageInputMode;
 use ainb::models::{UsagePeriod, UsageProviderFilter};
 use chrono::NaiveDate;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -227,7 +226,10 @@ fn test_process_help_toggle_event() {
 }
 
 #[tokio::test]
-async fn test_usage_period_provider_and_filters_events() {
+async fn test_usage_period_and_provider_events() {
+    // Free-text include/exclude/clear prompts have been removed in
+    // favour of the picker-style chip strip; this test now exercises
+    // the period and provider key bindings only.
     let mut state = AppState::default();
     state.current_view = View::Analytics;
 
@@ -244,42 +246,12 @@ async fn test_usage_period_provider_and_filters_events() {
     EventHandler::process_event(event.unwrap(), &mut state);
     assert!(matches!(state.usage_state.period, UsagePeriod::ThirtyDays));
 
-    let event = EventHandler::handle_key_event(create_key_event(KeyCode::Char('/')), &mut state);
-    assert!(matches!(event, Some(AppEvent::UsageStartIncludeFilter)));
-    EventHandler::process_event(event.unwrap(), &mut state);
-    for ch in "agents".chars() {
-        let event = EventHandler::handle_key_event(create_key_event(KeyCode::Char(ch)), &mut state);
-        EventHandler::process_event(event.unwrap(), &mut state);
-    }
-    let event = EventHandler::handle_key_event(create_key_event(KeyCode::Enter), &mut state);
-    assert!(matches!(event, Some(AppEvent::UsageInputSubmit)));
-    EventHandler::process_event(event.unwrap(), &mut state);
-    assert_eq!(state.usage_state.include_projects, vec!["agents"]);
-
-    let event = EventHandler::handle_key_event(create_key_event(KeyCode::Char('x')), &mut state);
-    assert!(matches!(event, Some(AppEvent::UsageStartExcludeFilter)));
-    EventHandler::process_event(event.unwrap(), &mut state);
-    assert!(matches!(
-        state.usage_state.input_mode,
-        Some(UsageInputMode::Exclude)
-    ));
-    for ch in "scratch".chars() {
-        let event = EventHandler::handle_key_event(create_key_event(KeyCode::Char(ch)), &mut state);
-        EventHandler::process_event(event.unwrap(), &mut state);
-    }
-    let event = EventHandler::handle_key_event(create_key_event(KeyCode::Backspace), &mut state);
-    assert!(matches!(event, Some(AppEvent::UsageInputBackspace)));
-    EventHandler::process_event(event.unwrap(), &mut state);
-    let event = EventHandler::handle_key_event(create_key_event(KeyCode::Char('h')), &mut state);
-    EventHandler::process_event(event.unwrap(), &mut state);
-    let event = EventHandler::handle_key_event(create_key_event(KeyCode::Enter), &mut state);
-    EventHandler::process_event(event.unwrap(), &mut state);
-    assert_eq!(state.usage_state.exclude_projects, vec!["scratch"]);
-
-    let event = EventHandler::handle_key_event(create_key_event(KeyCode::Char('d')), &mut state);
+    // Capital D opens the date-range input (the only surviving free-text
+    // path on the usage screen).
+    let event = EventHandler::handle_key_event(create_key_event(KeyCode::Char('D')), &mut state);
     assert!(matches!(event, Some(AppEvent::UsageStartDateRange)));
     EventHandler::process_event(event.unwrap(), &mut state);
-    for ch in "2026-04-01..2026-04-10".chars() {
+    for ch in "2026-04-01 2026-04-10".chars() {
         let event = EventHandler::handle_key_event(create_key_event(KeyCode::Char(ch)), &mut state);
         EventHandler::process_event(event.unwrap(), &mut state);
     }
@@ -292,9 +264,22 @@ async fn test_usage_period_provider_and_filters_events() {
                 && to == NaiveDate::from_ymd_opt(2026, 4, 10).unwrap()
     ));
 
+    // Lowercase `/`, `x`, `c` are intentionally unbound on the burndown
+    // view — the picker (Enter / Shift+X / Shift+C) replaces them.
+    let event = EventHandler::handle_key_event(create_key_event(KeyCode::Char('/')), &mut state);
+    assert!(event.is_none(), "/ must not bind to any usage event");
+    // `c` and `x` may resolve to other unrelated events outside the
+    // burndown filter path. The chip-strip lives on capitals (X / C).
+    // Lowercase must NOT trigger the picker — that asymmetry is the
+    // contract a regression would break.
+    let event = EventHandler::handle_key_event(create_key_event(KeyCode::Char('x')), &mut state);
+    assert!(
+        !matches!(event, Some(AppEvent::UsageCommitExcludeFilter)),
+        "lowercase x must not commit an exclude chip (capital X owns that)"
+    );
     let event = EventHandler::handle_key_event(create_key_event(KeyCode::Char('c')), &mut state);
-    assert!(matches!(event, Some(AppEvent::UsageClearFilters)));
-    EventHandler::process_event(event.unwrap(), &mut state);
-    assert!(state.usage_state.include_projects.is_empty());
-    assert!(state.usage_state.exclude_projects.is_empty());
+    assert!(
+        !matches!(event, Some(AppEvent::UsageClearAllChips)),
+        "lowercase c must not clear chips (capital C owns that)"
+    );
 }
