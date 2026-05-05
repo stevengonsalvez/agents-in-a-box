@@ -3590,18 +3590,20 @@ fn render_help_bar(frame: &mut Frame, area: Rect, state: &UsageViewState) {
         ),
     ];
     if on_burndown {
-        // Burndown view: z zoom; Tab pivots panels; Enter commits chip; C clears.
+        // Burndown view: z zoom; Tab pivots panels; Enter/X commit chips; C clears.
         spans.extend_from_slice(&[
             Span::styled("z", Style::default().fg(GOLD)),
             Span::styled(" zoom  ", Style::default().fg(MUTED_GRAY)),
             Span::styled("Tab", Style::default().fg(GOLD)),
-            Span::styled(" focus panel  ", Style::default().fg(MUTED_GRAY)),
+            Span::styled(" focus  ", Style::default().fg(MUTED_GRAY)),
             Span::styled("Enter", Style::default().fg(GOLD)),
-            Span::styled(" pin filter  ", Style::default().fg(MUTED_GRAY)),
+            Span::styled(" add  ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("X", Style::default().fg(GOLD)),
+            Span::styled(" exclude  ", Style::default().fg(MUTED_GRAY)),
             Span::styled("Esc", Style::default().fg(GOLD)),
-            Span::styled(" pop chip  ", Style::default().fg(MUTED_GRAY)),
+            Span::styled(" pop  ", Style::default().fg(MUTED_GRAY)),
             Span::styled("C", Style::default().fg(GOLD)),
-            Span::styled(" clear all  ", Style::default().fg(MUTED_GRAY)),
+            Span::styled(" clear  ", Style::default().fg(MUTED_GRAY)),
         ]);
     } else {
         spans.extend_from_slice(&[
@@ -3610,8 +3612,6 @@ fn render_help_bar(frame: &mut Frame, area: Rect, state: &UsageViewState) {
         ]);
     }
     spans.extend_from_slice(&[
-        Span::styled("/ x c", Style::default().fg(GOLD)),
-        Span::styled(" filters  ", Style::default().fg(MUTED_GRAY)),
         Span::styled("j/k", Style::default().fg(GOLD)),
         Span::styled(" scroll  ", Style::default().fg(MUTED_GRAY)),
         Span::styled("r/R", Style::default().fg(GOLD)),
