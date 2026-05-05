@@ -2,23 +2,19 @@ class Ainb < Formula
   desc "Terminal-based development environment manager for Claude Code agents"
   homepage "https://github.com/stevengonsalvez/agents-in-a-box"
   license "MIT"
-  version "0.0.0"
-
-  # Real version, URLs, and SHA256 values are populated automatically by the
-  # release workflow on each tagged release. Until v1.0.0 ships this template
-  # is a placeholder so `brew tap` succeeds with a syntactically valid formula.
+  version "1.0.0"
 
   on_macos do
     if Hardware::CPU.arm?
-      url "https://github.com/stevengonsalvez/agents-in-a-box/releases/download/v0.0.0/ainb-0.0.0-aarch64-apple-darwin.tar.gz"
-      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+      url "https://github.com/stevengonsalvez/agents-in-a-box/releases/download/v1.0.0/ainb-1.0.0-aarch64-apple-darwin.tar.gz"
+      sha256 "f920c5bb0748cf4d71ee08f7828bc7ba039bcbde9a94d5f156d3f589617589a6"
     end
   end
 
   on_linux do
     if Hardware::CPU.intel?
-      url "https://github.com/stevengonsalvez/agents-in-a-box/releases/download/v0.0.0/ainb-0.0.0-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+      url "https://github.com/stevengonsalvez/agents-in-a-box/releases/download/v1.0.0/ainb-1.0.0-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "e41fc2aeadc7c72457422e2b2297b16c4873e81cf2487cbe8291957db48d0a7c"
     end
   end
 
