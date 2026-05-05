@@ -3539,10 +3539,8 @@ fn render_help_bar(frame: &mut Frame, area: Rect, state: &UsageViewState) {
 
     let on_burndown = matches!(state.active_tab, UsageTab::Burndown);
     let mut spans = vec![
-        Span::styled(" ◀/▶", Style::default().fg(GOLD)),
+        Span::styled(" ◀/▶ p", Style::default().fg(GOLD)),
         Span::styled(" provider  ", Style::default().fg(MUTED_GRAY)),
-        Span::styled("p", Style::default().fg(GOLD)),
-        Span::styled(" filter  ", Style::default().fg(MUTED_GRAY)),
         Span::styled(
             "1 Today  2 7d  3 30d  4 90d  5 YTD  m Month  q Quarter  a All  D advanced  ",
             Style::default().fg(MUTED_GRAY),
