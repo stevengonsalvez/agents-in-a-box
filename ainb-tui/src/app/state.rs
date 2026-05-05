@@ -2707,6 +2707,23 @@ impl Default for AppState {
     }
 }
 
+/// Monotonic-min merge for `oldest_call_day`. Keeps the session-wide
+/// anchor honest across narrow→wide period switches: a wide load
+/// establishes the true extent and a subsequent narrow load only
+/// narrows the data view, never the anchor. `None` candidates leave
+/// the existing anchor untouched; `None` existing accepts whatever
+/// the candidate gives.
+fn merge_oldest_call_day(
+    existing: Option<chrono::NaiveDate>,
+    candidate: Option<chrono::NaiveDate>,
+) -> Option<chrono::NaiveDate> {
+    match (existing, candidate) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), None) => Some(a),
+        (None, b) => b,
+    }
+}
+
 impl AppState {
     pub fn new() -> Self {
         Self::default()
@@ -3573,11 +3590,7 @@ impl AppState {
                         .map(|c| c.timestamp.with_timezone(&Local).date_naive())
                         .min();
                     self.usage_state.oldest_call_day =
-                        match (self.usage_state.oldest_call_day, new_oldest) {
-                            (Some(a), Some(b)) => Some(a.min(b)),
-                            (Some(a), None) => Some(a),
-                            (None, b) => b,
-                        };
+                        merge_oldest_call_day(self.usage_state.oldest_call_day, new_oldest);
                     self.usage_state.data = Some(data);
                     self.usage_state.loading = false;
                     self.usage_load_receiver = None;

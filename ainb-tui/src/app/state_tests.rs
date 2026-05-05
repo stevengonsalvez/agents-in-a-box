@@ -717,4 +717,37 @@ mod tests {
         state.cycle_session_filter();
         assert_eq!(state.session_filter, SessionFilter::All);
     }
+
+    #[test]
+    fn merge_oldest_call_day_keeps_earliest_across_loads() {
+        use chrono::NaiveDate;
+        let april = NaiveDate::from_ymd_opt(2026, 4, 1).unwrap();
+        let may = NaiveDate::from_ymd_opt(2026, 5, 1).unwrap();
+
+        // First load establishes the anchor.
+        assert_eq!(crate::app::state::merge_oldest_call_day(None, Some(april)), Some(april));
+
+        // Reproduces the reported defect: a wide load establishes April,
+        // a subsequent narrow (May-only) load must NOT raise the anchor.
+        assert_eq!(
+            crate::app::state::merge_oldest_call_day(Some(april), Some(may)),
+            Some(april),
+            "narrow load must not raise the anchor above its earlier extent"
+        );
+
+        // Order-independent: narrow first, then wide, narrows the anchor.
+        assert_eq!(
+            crate::app::state::merge_oldest_call_day(Some(may), Some(april)),
+            Some(april)
+        );
+
+        // Empty load (no calls in the period) leaves anchor untouched.
+        assert_eq!(
+            crate::app::state::merge_oldest_call_day(Some(april), None),
+            Some(april)
+        );
+
+        // Empty existing + empty candidate stays None.
+        assert_eq!(crate::app::state::merge_oldest_call_day(None, None), None);
+    }
 }
