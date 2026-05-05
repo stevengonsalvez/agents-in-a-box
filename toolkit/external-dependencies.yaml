@@ -261,6 +261,20 @@ agent-skills:
       - Remotion video walkthrough generation
       - shadcn/ui component discovery and customization
 
+  - name: mcporter
+    repo: https://github.com/openclaw/mcporter
+    homepage: "http://mcporter.dev"
+    install: "npm install -g mcporter@latest"
+    cli: mcporter
+    applies-to: [claude, codex, copilot]
+    purpose: "List, configure, auth, and call MCP servers/tools directly (HTTP or stdio) without registering them into Claude Code context. Includes ad-hoc servers, config edits, and CLI/type generation."
+    features:
+      - HTTP and stdio MCP server invocation
+      - Per-server config in ~/.mcporter/mcporter.json
+      - Auth flow management (one-shot login)
+      - CLI/type generation for ad-hoc tool wrappers
+    notes: "Used to keep occasional-use MCP tools (mobile, claude-peers) out of the Claude Code per-turn schema budget. See mcporter-servers section below for tracked entries. SKILL.md ships from the openclaw/mcporter repo (NOT from the stevengonsalvez/nanoclaw fork)."
+
   - name: graphify
     repo: https://github.com/safishamsi/graphify
     pypi: graphifyy
@@ -608,14 +622,6 @@ nanoclaw-skills:
       purpose: "Run long-running coding tasks in cloud environments (Claude Code or Codex), with session teleporting and automatic PR creation"
     - name: oracle
       purpose: "Best practices for the oracle CLI (prompt + file bundling, engines, sessions, attachments)"
-
-    # --- MCP / cross-tool runners ---
-    - name: mcporter
-      homepage: "http://mcporter.dev"
-      install: "npm install -g mcporter@latest"
-      cli: mcporter
-      purpose: "List, configure, auth, and call MCP servers/tools directly (HTTP or stdio) without registering them into Claude Code context. Includes ad-hoc servers, config edits, and CLI/type generation."
-      notes: "Used to keep occasional-use MCP tools (mobile, claude-peers) out of the Claude Code per-turn schema budget. See mcporter-servers section below for tracked entries."
 
     # --- Notes & productivity ---
     - name: apple-notes

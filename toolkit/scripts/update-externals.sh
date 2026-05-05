@@ -81,6 +81,7 @@ update_agent_skills() {
     ["ui-ux-pro-max"]="https://github.com/nextlevelbuilder/ui-ux-pro-max-skill"
     ["notebooklm"]="https://github.com/PleasePrompto/notebooklm-skill"
     ["fireworks-tech-graph"]="https://github.com/yizhiyanhua-ai/fireworks-tech-graph"
+    ["mcporter"]="https://github.com/openclaw/mcporter"
   )
   for name in "${!repos[@]}"; do
     local url="${repos[$name]}"
@@ -93,6 +94,9 @@ update_agent_skills() {
   done
   # scrapling-official has its own install path
   run "scrapling install --force"
+  # mcporter ships its SKILL.md via the openclaw/mcporter repo above; the
+  # underlying CLI is a separate npm package — bump it here too
+  run "npm install -g mcporter@latest"
 }
 
 # ----- nanoclaw-skills (fork pull, then run any agent in native mode) -----
@@ -105,8 +109,6 @@ update_nanoclaw() {
     run "git -C '$FORK' fetch origin && git -C '$FORK' pull --ff-only origin main"
   fi
   echo "  Note: skills auto-sync to ~/.claude/skills/ on next agent spawn (native-runner cpSync)"
-  # mcporter ships in nanoclaw skills but the underlying CLI is npm — pull latest CLI here too
-  run "npm install -g mcporter@latest"
 }
 
 # ----- reflect plugin (deploy from packaged plugin source) -----
