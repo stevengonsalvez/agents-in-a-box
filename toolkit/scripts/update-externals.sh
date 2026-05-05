@@ -105,22 +105,41 @@ update_nanoclaw() {
     run "git -C '$FORK' fetch origin && git -C '$FORK' pull --ff-only origin main"
   fi
   echo "  Note: skills auto-sync to ~/.claude/skills/ on next agent spawn (native-runner cpSync)"
+  # mcporter ships in nanoclaw skills but the underlying CLI is npm — pull latest CLI here too
+  run "npm install -g mcporter@latest"
+}
+
+# ----- reflect plugin (deploy from packaged plugin source) -----
+update_reflect() {
+  section "reflect plugin (claude_adapter install --force)"
+  local TOOLKIT_ROOT
+  TOOLKIT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  local ADAPTER="$TOOLKIT_ROOT/packages/plugins/reflect/adapters/claude/claude_adapter.py"
+  if [ ! -f "$ADAPTER" ]; then
+    echo "  (skip: $ADAPTER not found)"
+    return
+  fi
+  run "python3 '$ADAPTER' install --force"
+  echo "  Sub-skills deployed: reflect, reflect:consolidate, reflect:ingest, recall, reflect-status"
 }
 
 # ----- external-packages (uv tool) -----
 update_packages() {
   section "external-packages (uv tool)"
   run "uv tool install --force --upgrade 'git+https://github.com/stevengonsalvez/reflect-kb.git[graph]'"
+  # graphify (PyPI: graphifyy, double-y) — knowledge-graph builder used by /graphify skill
+  run "uv tool install --force --upgrade graphifyy"
 }
 
 case "$SCOPE" in
-  all)       update_npx; update_plugins; update_agent_skills; update_nanoclaw; update_packages ;;
+  all)       update_npx; update_plugins; update_agent_skills; update_nanoclaw; update_reflect; update_packages ;;
   npx)       update_npx ;;
   plugins)   update_plugins ;;
   agent)     update_agent_skills ;;
   nanoclaw)  update_nanoclaw ;;
+  reflect)   update_reflect ;;
   packages)  update_packages ;;
-  *)         echo "Usage: $0 [all|npx|plugins|agent|nanoclaw|packages] [--dry-run]"; exit 1 ;;
+  *)         echo "Usage: $0 [all|npx|plugins|agent|nanoclaw|reflect|packages] [--dry-run]"; exit 1 ;;
 esac
 
 section "Done"
