@@ -190,11 +190,6 @@ jobs:
             os: ubuntu-latest
             ext: ""
             archive: tar.gz
-          # Windows x64 (Scoop / WinGet / direct)
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            ext: .exe
-            archive: zip
 
     steps:
       - uses: actions/checkout@v4
@@ -218,14 +213,8 @@ jobs:
           mkdir -p dist
           cp target/${{ matrix.target }}/release/${BINARY_NAME}${{ matrix.ext }} dist/
           cd dist
-          if [ "${{ matrix.archive }}" = "zip" ]; then
-            # 7z is preinstalled on windows-latest; Scoop/WinGet expect .zip
-            7z a "${ARCHIVE}.zip" "${BINARY_NAME}${{ matrix.ext }}" > /dev/null
-            shasum -a 256 "${ARCHIVE}.zip" > "${ARCHIVE}.zip.sha256"
-          else
-            tar -czf "${ARCHIVE}.tar.gz" "${BINARY_NAME}${{ matrix.ext }}"
-            shasum -a 256 "${ARCHIVE}.tar.gz" > "${ARCHIVE}.tar.gz.sha256"
-          fi
+          tar -czf "${ARCHIVE}.tar.gz" "${BINARY_NAME}${{ matrix.ext }}"
+          shasum -a 256 "${ARCHIVE}.tar.gz" > "${ARCHIVE}.tar.gz.sha256"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -233,7 +222,6 @@ jobs:
           name: ${{ matrix.target }}
           path: |
             ${{ env.WORKING_DIR }}/dist/*.tar.gz
-            ${{ env.WORKING_DIR }}/dist/*.zip
             ${{ env.WORKING_DIR }}/dist/*.sha256
 
   release:
@@ -275,15 +263,9 @@ jobs:
             brew install ainb
             ```
 
-            ### Scoop (Windows)
-            ```powershell
-            scoop bucket add ainb https://github.com/stevengonsalvez/agents-in-a-box
-            scoop install ainb
-            ```
-
             ### Manual Install
             1. Download the appropriate archive for your platform from the assets below
-            2. Extract: `tar -xzf ainb-*.tar.gz` (or unzip `ainb-*.zip` on Windows)
+            2. Extract: `tar -xzf ainb-*.tar.gz`
             3. Move to PATH: `sudo mv ainb /usr/local/bin/`
 
             ### With Cargo (requires Rust)
@@ -294,7 +276,7 @@ jobs:
             ## Supported Platforms
             - macOS Apple Silicon (M1/M2/M3)
             - Linux x86_64
-            - Windows x86_64 (native + WSL)
+            - Windows: use WSL2 + the Linux binary (native Windows is not supported)
 
             *Intel Mac users: Use `cargo install` or run the Linux binary via Rosetta 2*
 
@@ -389,82 +371,4 @@ jobs:
           VERSION="${{ needs.prepare.outputs.version }}"
           git add Formula/ainb.rb
           git commit -m "chore(homebrew): update formula to v${VERSION}" || echo "No changes to commit"
-          git push origin main
-
-  scoop:
-    name: Update Scoop Manifest
-    # Chained after `homebrew` (not just release) so the two jobs don't race on
-    # `git push origin main` — they touch different files but the same branch.
-    needs: [prepare, build, release, homebrew]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: main
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Configure git
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Update bucket/ainb.json
-        run: |
-          VERSION="${{ needs.prepare.outputs.version }}"
-
-          WIN_SHA=$(cat artifacts/x86_64-pc-windows-msvc/*.sha256 | awk '{print $1}')
-          if [ -z "$WIN_SHA" ]; then
-            echo "Error: Failed to extract Windows SHA256"
-            exit 1
-          fi
-          echo "WIN_SHA: $WIN_SHA"
-
-          cat > bucket/ainb.json << 'MANIFEST'
-          {
-              "version": "VERSION_PLACEHOLDER",
-              "description": "Terminal-based development environment manager for Claude Code agents",
-              "homepage": "https://github.com/stevengonsalvez/agents-in-a-box",
-              "license": "MIT",
-              "architecture": {
-                  "64bit": {
-                      "url": "https://github.com/stevengonsalvez/agents-in-a-box/releases/download/vVERSION_PLACEHOLDER/ainb-VERSION_PLACEHOLDER-x86_64-pc-windows-msvc.zip",
-                      "hash": "WIN_SHA_PLACEHOLDER"
-                  }
-              },
-              "bin": "ainb.exe",
-              "checkver": {
-                  "github": "https://github.com/stevengonsalvez/agents-in-a-box"
-              },
-              "autoupdate": {
-                  "architecture": {
-                      "64bit": {
-                          "url": "https://github.com/stevengonsalvez/agents-in-a-box/releases/download/v$version/ainb-$version-x86_64-pc-windows-msvc.zip",
-                          "hash": {
-                              "url": "$url.sha256"
-                          }
-                      }
-                  }
-              }
-          }
-          MANIFEST
-
-          sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" bucket/ainb.json
-          sed -i "s/WIN_SHA_PLACEHOLDER/${WIN_SHA}/g" bucket/ainb.json
-
-          echo "Updated bucket/ainb.json to version ${VERSION}"
-          cat bucket/ainb.json
-
-      - name: Commit and push manifest update
-        run: |
-          VERSION="${{ needs.prepare.outputs.version }}"
-          git add bucket/ainb.json
-          git commit -m "chore(scoop): update manifest to v${VERSION}" || echo "No changes to commit"
           git push origin main
