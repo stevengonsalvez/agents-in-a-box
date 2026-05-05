@@ -9,24 +9,18 @@
     ],
     "architecture": {
         "64bit": {
-            "url": "https://github.com/stevengonsalvez/agents-in-a-box/releases/download/v0.0.0/agents-box-0.0.0-x86_64-pc-windows-msvc.zip",
+            "url": "https://github.com/stevengonsalvez/agents-in-a-box/releases/download/v0.0.0/ainb-0.0.0-x86_64-pc-windows-msvc.zip",
             "hash": "0000000000000000000000000000000000000000000000000000000000000000"
         }
     },
-    "bin": [
-        "agents-box.exe",
-        [
-            "agents-box.exe",
-            "ainb"
-        ]
-    ],
+    "bin": "ainb.exe",
     "checkver": {
         "github": "https://github.com/stevengonsalvez/agents-in-a-box"
     },
     "autoupdate": {
         "architecture": {
             "64bit": {
-                "url": "https://github.com/stevengonsalvez/agents-in-a-box/releases/download/v$version/agents-box-$version-x86_64-pc-windows-msvc.zip",
+                "url": "https://github.com/stevengonsalvez/agents-in-a-box/releases/download/v$version/ainb-$version-x86_64-pc-windows-msvc.zip",
                 "hash": {
                     "url": "$url.sha256"
                 }

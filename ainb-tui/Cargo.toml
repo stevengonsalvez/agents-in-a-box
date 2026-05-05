@@ -1,11 +1,11 @@
 [package]
 name = "ainb"
-version = "0.5.5-beta1"
+version = "1.0.0"
 edition = "2021"
 authors = ["Agents-in-a-Box Team"]
 description = "Terminal-based development environment manager for Claude Code containers"
 license = "MIT"
-repository = "https://github.com/your-org/agents-box"
+repository = "https://github.com/stevengonsalvez/agents-in-a-box"
 keywords = ["claude", "docker", "tui", "development", "containers"]
 categories = ["command-line-utilities", "development-tools"]
 

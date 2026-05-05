@@ -15,7 +15,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  BINARY_NAME: agents-box
+  BINARY_NAME: ainb
   WORKING_DIR: ainb-tui
 
 jobs:
@@ -269,20 +269,26 @@ jobs:
             curl -fsSL https://raw.githubusercontent.com/stevengonsalvez/agents-in-a-box/main/ainb-tui/install.sh | bash
             ```
 
-            ### Homebrew (macOS)
+            ### Homebrew (macOS / Linux)
             ```bash
             brew tap stevengonsalvez/agents-in-a-box
-            brew install agents-box
+            brew install ainb
+            ```
+
+            ### Scoop (Windows)
+            ```powershell
+            scoop bucket add ainb https://github.com/stevengonsalvez/agents-in-a-box
+            scoop install ainb
             ```
 
             ### Manual Install
             1. Download the appropriate archive for your platform from the assets below
-            2. Extract: `tar -xzf agents-box-*.tar.gz`
-            3. Move to PATH: `sudo mv agents-box /usr/local/bin/`
+            2. Extract: `tar -xzf ainb-*.tar.gz` (or unzip `ainb-*.zip` on Windows)
+            3. Move to PATH: `sudo mv ainb /usr/local/bin/`
 
             ### With Cargo (requires Rust)
             ```bash
-            cargo install --git https://github.com/stevengonsalvez/agents-in-a-box --branch main --root ~/.local agents-box
+            cargo install --git https://github.com/stevengonsalvez/agents-in-a-box --branch main --root ~/.local ainb
             ```
 
             ## Supported Platforms
@@ -348,25 +354,24 @@ jobs:
 
             on_macos do
               if Hardware::CPU.arm?
-                url "https://github.com/stevengonsalvez/agents-in-a-box/releases/download/vVERSION_PLACEHOLDER/agents-box-VERSION_PLACEHOLDER-aarch64-apple-darwin.tar.gz"
+                url "https://github.com/stevengonsalvez/agents-in-a-box/releases/download/vVERSION_PLACEHOLDER/ainb-VERSION_PLACEHOLDER-aarch64-apple-darwin.tar.gz"
                 sha256 "MAC_SHA_PLACEHOLDER"
               end
             end
 
             on_linux do
               if Hardware::CPU.intel?
-                url "https://github.com/stevengonsalvez/agents-in-a-box/releases/download/vVERSION_PLACEHOLDER/agents-box-VERSION_PLACEHOLDER-x86_64-unknown-linux-gnu.tar.gz"
+                url "https://github.com/stevengonsalvez/agents-in-a-box/releases/download/vVERSION_PLACEHOLDER/ainb-VERSION_PLACEHOLDER-x86_64-unknown-linux-gnu.tar.gz"
                 sha256 "LINUX_SHA_PLACEHOLDER"
               end
             end
 
             def install
-              bin.install "agents-box"
-              bin.install_symlink "agents-box" => "ainb"
+              bin.install "ainb"
             end
 
             test do
-              assert_match "agents-box", shell_output("#{bin}/agents-box --version")
+              assert_match "ainb", shell_output("#{bin}/ainb --version")
             end
           end
           FORMULA
@@ -430,24 +435,18 @@ jobs:
               "license": "MIT",
               "architecture": {
                   "64bit": {
-                      "url": "https://github.com/stevengonsalvez/agents-in-a-box/releases/download/vVERSION_PLACEHOLDER/agents-box-VERSION_PLACEHOLDER-x86_64-pc-windows-msvc.zip",
+                      "url": "https://github.com/stevengonsalvez/agents-in-a-box/releases/download/vVERSION_PLACEHOLDER/ainb-VERSION_PLACEHOLDER-x86_64-pc-windows-msvc.zip",
                       "hash": "WIN_SHA_PLACEHOLDER"
                   }
               },
-              "bin": [
-                  "agents-box.exe",
-                  [
-                      "agents-box.exe",
-                      "ainb"
-                  ]
-              ],
+              "bin": "ainb.exe",
               "checkver": {
                   "github": "https://github.com/stevengonsalvez/agents-in-a-box"
               },
               "autoupdate": {
                   "architecture": {
                       "64bit": {
-                          "url": "https://github.com/stevengonsalvez/agents-in-a-box/releases/download/v$version/agents-box-$version-x86_64-pc-windows-msvc.zip",
+                          "url": "https://github.com/stevengonsalvez/agents-in-a-box/releases/download/v$version/ainb-$version-x86_64-pc-windows-msvc.zip",
                           "hash": {
                               "url": "$url.sha256"
                           }

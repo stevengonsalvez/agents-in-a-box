@@ -199,7 +199,25 @@ scoop install ainb
 <summary><b>One-liner install</b></summary>
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/stevengonsalvez/agents-in-a-box/v2/ainb-tui/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/stevengonsalvez/agents-in-a-box/main/ainb-tui/install.sh | bash
+```
+</details>
+
+<details>
+<summary><b>Homebrew (macOS / Linux)</b></summary>
+
+```bash
+brew tap stevengonsalvez/agents-in-a-box
+brew install ainb
+```
+</details>
+
+<details>
+<summary><b>Scoop (Windows)</b></summary>
+
+```powershell
+scoop bucket add ainb https://github.com/stevengonsalvez/agents-in-a-box
+scoop install ainb
 ```
 </details>
 
@@ -207,8 +225,7 @@ curl -fsSL https://raw.githubusercontent.com/stevengonsalvez/agents-in-a-box/v2/
 <summary><b>Cargo (any platform)</b></summary>
 
 ```bash
-cargo install --git https://github.com/stevengonsalvez/agents-in-a-box --branch v2 agents-box
-# Optionally alias: alias ainb="agents-box"
+cargo install --git https://github.com/stevengonsalvez/agents-in-a-box --branch main ainb
 ```
 </details>
 
@@ -220,7 +237,7 @@ cargo install --git https://github.com/stevengonsalvez/agents-in-a-box --branch 
 wsl --install
 
 # 2. Inside Ubuntu/Debian
-curl -fsSL https://raw.githubusercontent.com/stevengonsalvez/agents-in-a-box/v2/ainb-tui/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/stevengonsalvez/agents-in-a-box/main/ainb-tui/install.sh | bash
 sudo apt update && sudo apt install -y tmux
 ainb
 ```
@@ -443,7 +460,7 @@ The Rust codebase enforces `unsafe_code = "forbid"` and runs clippy with `pedant
 ```bash
 cd ainb-tui
 cargo build --release
-./target/release/agents-box
+./target/release/ainb
 ```
 
 ### Running tests
