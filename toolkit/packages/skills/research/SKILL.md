@@ -70,54 +70,11 @@ Then wait for the user's research query.
 
 Create multiple Task agents to research different aspects concurrently. Think deeply about the query to determine which types of research are needed.
 
+> Step 0's recall preamble already covers prior learnings via `recall.py` — do not
+> duplicate that work in a sub-agent. Sub-agents below cover live codebase, docs,
+> web, and tests only.
+
 **Research Types to Consider:**
-
-**E. Learnings Research (ALWAYS do this FIRST):**
-
-Before diving into codebase research, check if we've solved similar problems before.
-Use CLI tools (no MCP required -- works with any AI coding agent).
-
-**Priority order (all via CLI):**
-
-```bash
-LEARNINGS_HOME="${LEARNINGS_HOME:-$HOME/.learnings}"
-
-# 1. QMD hybrid search (best quality - BM25 + vector + LLM reranking)
-qmd query --collection learnings --json "[query keywords]"
-
-# 2. GraphRAG entity traversal (finds related concepts via graph)
-"$LEARNINGS_HOME/cli/learnings" search "[query]" --mode local --format json
-
-# 3. Fallback text matching (grep-based, always available)
-bash "$(dirname "$0")/../scripts/search-learnings.sh" "[query keywords]"
-```
-
-**What to Search:**
-- Error messages (exact or partial)
-- Technology/framework names
-- Problem descriptions
-- Symptom keywords
-
-**What to Extract:**
-- `key_insight`: THE ONE THING that fixes the problem
-- `root_cause`: Understanding why it happened
-- `solution`: Steps to resolve
-- Related learnings for broader context
-
-**Critical Patterns:**
-Always check `docs/solutions/patterns/critical-patterns.md` for patterns that apply to the current task. These are "Required Reading" that prevent common mistakes.
-
-```
-Task: "Search past learnings for [topic]"
-- Run QMD query first for best hybrid search
-- Fall back to GraphRAG CLI for entity graph traversal
-- Fall back to search-learnings.sh for text matching
-- Return key_insight field prominently
-- Local results take priority over global
-- Check critical-patterns.md for applicable patterns
-```
-
----
 
 **A. Codebase Research (always do this):**
 ```
