@@ -156,10 +156,14 @@ impl UsageTab {
     }
 }
 
+/// Live free-text input mode on the usage screen. Only `DateRange`
+/// remains — include/exclude project prompts were replaced by the
+/// picker-style chip strip (Enter / Shift+X) per the "no free text in
+/// TUI" principle. The variant is retained as a single-arm enum for
+/// forward compatibility (eg. CLI-driven advanced filters that may
+/// reintroduce a typed input later).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UsageInputMode {
-    Include,
-    Exclude,
     DateRange,
 }
 
@@ -540,16 +544,6 @@ impl UsageViewState {
     pub fn submit_input(&mut self) -> Result<(), String> {
         let value = self.input_buffer.trim().to_string();
         match self.input_mode {
-            Some(UsageInputMode::Include) => {
-                if !value.is_empty() {
-                    self.include_projects.push(value);
-                }
-            }
-            Some(UsageInputMode::Exclude) => {
-                if !value.is_empty() {
-                    self.exclude_projects.push(value);
-                }
-            }
             Some(UsageInputMode::DateRange) => {
                 let parts: Vec<_> = value
                     .split(|ch| ch == '.' || ch == ',' || ch == ' ')
@@ -571,11 +565,6 @@ impl UsageViewState {
         }
         self.cancel_input();
         Ok(())
-    }
-
-    pub fn clear_filters(&mut self) {
-        self.include_projects.clear();
-        self.exclude_projects.clear();
     }
 
     /// Cycle the focus pointer to the next panel. If unfocused, focus
@@ -2572,7 +2561,7 @@ pub fn build_filter_chip_line(state: &UsageViewState) -> Line<'static> {
         vec![Span::styled("Filters: ", Style::default().fg(MUTED_GRAY))];
     if !state.filters.any() {
         spans.push(Span::styled(
-            "(none) — Tab focus a panel, ↑↓ pick a row, Enter to add",
+            "(none)",
             Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
         ));
         return Line::from(spans);
@@ -3663,8 +3652,6 @@ fn period_label(period: &UsagePeriod) -> String {
 
 fn input_label(mode: UsageInputMode) -> &'static str {
     match mode {
-        UsageInputMode::Include => "include",
-        UsageInputMode::Exclude => "exclude",
         UsageInputMode::DateRange => "date range",
     }
 }

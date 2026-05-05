@@ -356,11 +356,8 @@ pub enum AppEvent {
     UsageSetPeriodAll,        // a — switch to All
     UsagePeriodStepBack,      // ◀ — step Month/Quarter back
     UsagePeriodStepForward,   // ▶ — step Month/Quarter forward
-    UsageStartIncludeFilter,  // Start include project input (/)
-    UsageStartExcludeFilter,  // Start exclude project input (x)
     UsageStartDateRange,      // Start date range input (capital D)
-    UsageClearFilters,        // Clear include/exclude filters (c)
-    UsageInputChar(char),     // Input for usage filter/range
+    UsageInputChar(char),     // Input for usage date range
     UsageInputBackspace,      // Backspace in usage input
     UsageInputSubmit,         // Submit usage input
     UsageInputCancel,         // Cancel usage input
@@ -1795,9 +1792,11 @@ impl EventHandler {
             KeyCode::Char('q') => Some(AppEvent::UsageSetPeriodQuarter),
             KeyCode::Char('a') => Some(AppEvent::UsageSetPeriodAll),
             KeyCode::Char('D') => Some(AppEvent::UsageStartDateRange),
-            KeyCode::Char('/') => Some(AppEvent::UsageStartIncludeFilter),
-            KeyCode::Char('x') => Some(AppEvent::UsageStartExcludeFilter),
-            KeyCode::Char('c') => Some(AppEvent::UsageClearFilters),
+            // `/`, `x`, `c` are intentionally unmapped on the burndown
+            // view — include/exclude/clear are now picker-driven via
+            // the chip strip (Enter / Shift+X / Shift+C). Free-text
+            // prompts violated the project's "no free text in TUI"
+            // principle and were removed.
             _ => None,
         }
     }
@@ -4306,20 +4305,10 @@ impl EventHandler {
                     state.start_background_usage_load(true);
                 }
             }
-            AppEvent::UsageStartIncludeFilter => {
-                state.usage_state.begin_input(crate::components::usage::UsageInputMode::Include);
-            }
-            AppEvent::UsageStartExcludeFilter => {
-                state.usage_state.begin_input(crate::components::usage::UsageInputMode::Exclude);
-            }
             AppEvent::UsageStartDateRange => {
                 state
                     .usage_state
                     .begin_input(crate::components::usage::UsageInputMode::DateRange);
-            }
-            AppEvent::UsageClearFilters => {
-                state.usage_state.clear_filters();
-                state.start_background_usage_load(true);
             }
             AppEvent::UsageInputChar(ch) => {
                 state.usage_state.input_char(ch);
