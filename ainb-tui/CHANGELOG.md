@@ -6,6 +6,239 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [1.0.0] - 2026-05-05
+### Added
+- Merge pull request #52 from stevengonsalvez/feat/codeburn
+- Merge pull request #53 from stevengonsalvez/fix/tmux-hang
+- Merge pull request #59 from stevengonsalvez/feat/usage-sqlite-cache
+- Merge pull request #60 from stevengonsalvez/feat/session-status-filter
+- Merge pull request #61 from stevengonsalvez/feat/usage-filter-ux-crossfilter
+- Merge pull request #62 from stevengonsalvez/feat/usage-zoom-and-dates
+- Merge pull request #63 from stevengonsalvez/feat/usage-branch-attribution
+- Merge pull request #66 from stevengonsalvez/feat/reflect-existing-skill-routing
+- Merge pull request #69 from stevengonsalvez/feat/usage-utc-and-analyze-turns
+- **ainb-tui**: --month/--quarter/--last-n-days/--ytd CLI flags
+- **ainb-tui**: --project/--model/--activity/--session CLI flags
+- **ainb-tui**: UsagePeriod variants for 90d/YTD/Month/Quarter
+- **ainb-tui**: add Skills browser screen
+- **ainb-tui**: add UsageFilters struct + filter_usage_data helper
+- **ainb-tui**: add rusqlite + blake3 + bincode deps
+- **ainb-tui**: add session stop/resume audit hooks
+- **ainb-tui**: add stable ProviderCall.id from (path, offset)
+- **ainb-tui**: aggregate per-branch usage rows on UsageData
+- **ainb-tui**: ainb usage cache (clear|info) subcommand
+- **ainb-tui**: attach git branch to ProviderCall via Claude JSONL
+- **ainb-tui**: bind Tab/Enter/Esc/C to cross-filter pivot
+- **ainb-tui**: branch chip on UsageFilters + --branch CLI flag
+- **ainb-tui**: cache-bypass force-refresh via Shift+R and --no-cache
+- **ainb-tui**: commit focused row as exclude chip via X
+- **ainb-tui**: cross-filter dashboard pivot (focus, chips, filtered data)
+- **ainb-tui**: cycle filter to hide stopped sessions
+- **ainb-tui**: distinguish include vs exclude in pop-chip notification
+- **ainb-tui**: labelled period+provider strip in burndown header
+- **ainb-tui**: log stale/unknown blob_format on cache miss
+- **ainb-tui**: per-file fingerprint with blake3 suffix hash
+- **ainb-tui**: period strip swap d/Custom for m/q/4/5/a/D mappings
+- **ainb-tui**: pretty_project_name renders <repo>:<branch>
+- **ainb-tui**: scaffold usage_cache module with sqlite schema
+- **ainb-tui**: show [R] force refresh in usage help bar
+- **ainb-tui**: soft-stop and resume actions for stuck sessions
+- **ainb-tui**: support claude --resume in tmux launcher
+- **ainb-tui**: wire usage_cache into claude/codex parsers
+- **ainb-tui**: z toggles fullscreen panel zoom with all rows + extra cols
+- **ainb-tui/skills**: surface parse failures via notification
+- **bootstrap**: add --verify integrity check
+- **bootstrap**: add catalog-only flag to skip agent-skills install
+- **bootstrap**: add externalSkillsSubpath for per-tool external skill nesting
+- **bootstrap**: add multi-subpath install for bundled skill repos
+- **bootstrap**: install learnings CLI from ai-coder-rules
+- **bootstrap**: install reflect-kb + per-harness adapters
+- **bootstrap**: prune orphan files; document CLI/content split
+- **bootstrap**: ship statusline.sh as a claude-code-4.5 tool-specific file
+- **bootstrap**: support subpath for agent-skills with non-root SKILL.md
+- **cli**: full CLI feature parity with TUI (15 commands) (#32)
+- **deps**: add fireworks-tech-graph as primary technical diagram skill
+- **deps**: enable multi-subpath install for ui-ux-pro-max and stitch-skills
+- **deps**: extend ui-ux-pro-max and notebooklm to hermes-agent and nanoclaw
+- **hooks**: TTS opt-in gate via ~/.claude/.tts-on sentinel (#45)
+- **hooks**: add context-aware tts announcements
+- **reflect**: Claude Code adapter
+- **reflect**: Codex CLI adapter
+- **reflect**: GitHub Copilot adapter
+- **reflect**: add Copilot provider for cross-tool memory discovery
+- **reflect**: add migrate_v2.py for legacy v2 state import
+- **reflect**: add reflect:ingest sub-skill, separate from consolidate
+- **reflect**: enterprise rewrite with SQLite, TOML config, multi-tool providers
+- **reflect**: hybrid lex+vec retrieval — fuse qmd BM25 with graphrag
+- **reflect**: port learning_template.md asset with provenance fields
+- **reflect**: restore reverted lifecycle state in SQLite schema
+- **reflect**: route signals to existing skills before falling through to memory
+- **reflect**: v3.1.0 — add /reflect:recall + SessionStart auto-retrieval
+- **reflect**: v3.2 SQLite state manager foundation
+- **reflect**: wire recall preamble into tier-1+2 skills + sandbox tests
+- **release**: build Windows x64 target and emit .zip artifacts
+- **scoop**: add Scoop bucket manifest + auto-update job
+- **toolkit/skills**: add git-history-surgery skill
+- add CodeBurn usage parsing foundation
+- add Langfuse observability integration (default off)
+- add usage burndown analytics
+
+### Fixed
+- Merge pull request #51 from stevengonsalvez/fix/windows
+- Merge pull request #56 from stevengonsalvez/fix/dashboard-design
+- Merge pull request #57 from stevengonsalvez/fix/dashboard-polish
+- Merge pull request #58 from stevengonsalvez/fix/dead-worktree-bogus-workspace
+- Merge pull request #64 from stevengonsalvez/fix/help-bar-overflow
+- Merge pull request #71 from stevengonsalvez/fix/usage-tui-cleanups
+- **ainb-tui**: VACUUM after Cache::clear to reclaim disk space
+- **ainb-tui**: add filters field to integration test query
+- **ainb-tui**: align BlobFormat discriminant with bumped V1 constant
+- **ainb-tui**: broaden period chip activity to LastNDays(7|30)
+- **ainb-tui**: clamp step_period_back at unfiltered call-set extent
+- **ainb-tui**: classify same-size+different-suffix as FullReparse
+- **ainb-tui**: clear oldest_call_day on force-refresh
+- **ainb-tui**: derive workspace_name from source repo for flat worktrees
+- **ainb-tui**: distinguish 0m from <1m in session duration column
+- **ainb-tui**: drop crossterm Release key events on Windows
+- **ainb-tui**: drop j/k nav from sessions help bar
+- **ainb-tui**: expose test_support to bin compile under cfg(test)
+- **ainb-tui**: gate pretty_project_name branch width at >= 2 chars
+- **ainb-tui**: handle bracketed paste in new-session input fields
+- **ainb-tui**: honour force-refresh when cache clear fails
+- **ainb-tui**: make last_day_of_month return Option for invalid input
+- **ainb-tui**: move usage parsing off event thread
+- **ainb-tui**: polish burndown panel review findings
+- **ainb-tui**: preserve zoom search query when re-entering search mode
+- **ainb-tui**: qualify session filter with owning project chip
+- **ainb-tui**: recover from poisoned usage_cache mutex
+- **ainb-tui**: recover user_message attribution on append-from-cache path
+- **ainb-tui**: refuse step_period_back when usage data not yet loaded
+- **ainb-tui**: reject non-UTF8 paths at cache write time
+- **ainb-tui**: render branch chip in cross-filter strip
+- **ainb-tui**: roll back end_offset on append parse I/O error
+- **ainb-tui**: route non-ASCII queries through Utf32String in fuzzy_score
+- **ainb-tui**: route zoom Esc through state machine when search active
+- **ainb-tui**: stop dead worktrees fabricating phantom workspaces
+- **ainb-tui**: truncate_string char-boundary safe slicing
+- **ainb-tui**: truthful refresh notification + preserve cache on panic
+- **ainb-tui**: width-aware burndown panels with gradient bars
+- **ainb-tui/skills**: compute body offset safely on CRLF files
+- **ainb-tui/skills**: drop dead scroll_offset field
+- **ainb-tui/skills**: quote-aware tools parser
+- **ainb-tui/skills**: skip indented map/JSON blocks in frontmatter
+- **ainb-tui/skills**: treat hyphen as word boundary in association match
+- **bootstrap**: skip agent-skills without repo to prevent clone failures
+- **bootstrap**: skip catalog-only npx-skills, use non-interactive install
+- **deps**: modernize vercel-labs skill install commands to non-interactive
+- **external-deps**: update reflect entry to v3 plugin path
+- **homebrew**: move Formula to repo root for tap discovery
+- **learnings**: qmd update before qmd embed in add()
+- **reflect**: add sidecar validator + inline schema (closes #41)
+- **reflect**: address critical review findings
+- **reflect**: address review majors + minors
+- **reflect**: apply v3.2 review findings + extend tests
+- **reflect**: close 3 integrity gaps (LOW + MEDIUM)
+- **reflect**: close self-improvement loop — capture → index → recall
+- **reflect**: harden recall against parser and runtime edge cases
+- **reflect**: make auto-reflect actually capture transcripts via queue + drain
+- **reflect**: refuse to overwrite hand-written SKILL.md siblings
+- **reflect**: rename status sub-skill to avoid collision with generic /status
+- **reflect**: substitute HOME_TOOL_DIR placeholder at adapter install time
+- **reflect**: update marketplace.json to point to v3 plugin
+- **release**: chain scoop job after homebrew to avoid push race
+- **release**: standardize binary name on ainb across publishing pipeline
+- align usage dashboard design
+- correct usage analytics projections
+- correct usage dashboard projections
+
+### Documentation
+- Merge pull request #55 from stevengonsalvez/docs/git-surgery-squash-recipe
+- **ainb-tui**: CHANGELOG entries for the PR-E cleanup pass
+- **ainb-tui**: CHANGELOG entry for V3 cache blob format
+- **ainb-tui**: TODO for render_zoom_* table extraction
+- **ainb-tui**: TODO marker for analyze_turns precompute
+- **ainb-tui**: TODOs for DateTime<Utc> migration and rayon parallelism
+- **ainb-tui**: TODOs for UsageViewState zoom collapse and aggregate_calls accumulator extraction
+- **ainb-tui**: clarify aggregate_calls_with_analysis fallback semantics
+- **ainb-tui**: correct quarter_bounds clamp behaviour comment
+- **ainb-tui**: explain why UsageFilterChip::label stays a manual match
+- **ainb-tui**: refresh parse_claude_source_append doc-comment
+- **ainb-tui**: warn about bincode layout stability for ProviderCall
+- **assets**: add 7 TUI screenshots for README showcase
+- **cli**: add comprehensive CLI reference and link from README
+- **hooks**: add utilities/hooks README with TTS toggle, Langfuse, sync notes
+- **plans**: add CLI full-integration plan
+- **readme**: add dedicated CLI section with command overview
+- **readme**: add usage analytics hero below the dashboard
+- **readme**: document Scoop install + correct Homebrew tap
+- **readme**: expand feature highlights with multi-provider + analytics
+- **readme**: rename ainb section to "Terminal UI + CLI"
+- **readme**: replace broken demo.gif with live dashboard hero
+- **readme**: replace broken screenshot block with 6-panel showcase
+- **readme**: surface Homebrew + Scoop install paths
+- **reflect**: add handover + architecture diagram
+- **reflect**: document closed-loop auto-drain (replaces stale dashboard section)
+- **reflect**: document split PreCompact + SessionStart drain in snippet
+- **reflect**: full architecture reference with mermaid diagrams
+- **reflect**: note closed-loop drain TODO in codex/copilot adapters
+- **skill/git-history-surgery**: recipe for swapping squash-merge to merge commit
+- **sync-learnings**: add settings.json + statusline.sh drift checks
+- **toolkit**: sync CLAUDE.md commit hygiene rules from user-level
+- expand burndown reporting scope
+- expand codeburn cli parity scope
+- plan codeburn burndown usage tab
+- rewrite toolkit README and fix bootstrap script name
+
+### Other
+- Merge pull request #72 from stevengonsalvez/chore/release-v1
+- **ainb-tui**: bump usage cache blob format to V3
+- **ainb-tui**: bump version to 1.0.0 and fix repository URL
+- **ainb-tui**: refresh accumulator-trait TODO rationale
+- **ainb-tui/skills**: drop unused search state helpers
+- **bootstrap**: delete stale global-learnings-template
+- **ci**: remove stale duplicate ainb-tui workflow
+- **claude**: default bootstrap instructions to caveman (#48)
+- **deps**: list cocoon architecture-diagram as catalog-only alternative
+- **homebrew**: update formula to v0.5.5-beta1
+- **reflect**: archive v1 monolith to toolkit/archive/reflect-v1
+- **skills**: document caveman external dependency (#47)
+- add caveman default to agent instructions (#49)
+- clean generated planning artifacts
+- ignore beads runtime files
+- remove redundant hermes-agent installs, rely on external_dirs
+- sync mobile-e2e-mcp and posthog-replay-analysis skills
+- **ainb-tui**: apply cross-filter chips before aggregate on CLI path
+- **ainb-tui**: hoist Pattern::parse out of apply_zoom_filter inner loop
+- **ainb-tui**: precompute analyze_turns once on the unfiltered set
+- **ainb-tui**: precompute top_projects_for_model index in aggregate_calls
+- **ainb-tui**: widen SUFFIX_HASH_BYTES from 4 KiB to 64 KiB
+- **ainb-tui**: centralise truncate_with_ellipsis in widgets
+- **ainb-tui**: co-locate period helpers in models::usage
+- **ainb-tui**: collapse StoredRow and LoadedRow into CacheRow
+- **ainb-tui**: convert SessionUsage timestamps to DateTime<Utc>
+- **ainb-tui**: convert period date ranges to Utc internals
+- **ainb-tui**: drop dead parse_usage() shim
+- **ainb-tui**: drop free-text include/exclude/clear filter prompts
+- **ainb-tui**: drop two redundant doc comments and add BranchUsage TODO
+- **ainb-tui**: extract add_bucket / bump map micro-helpers
+- **ainb-tui**: extract lock_conn() helper for poisoned-mutex recovery
+- **ainb-tui**: extract merge_oldest_call_day helper with test
+- **ainb-tui**: extract sort_by_bucket_desc helper
+- **ainb-tui**: introduce ProviderCall::recorded_branch accessor
+- **ainb-tui**: rename BLOB_FORMAT_BINCODE_V1 to BLOB_FORMAT_BINCODE_CURRENT
+- **ainb-tui**: rename BlobFormat::Bincode variant to BincodeV2
+- **ainb-tui**: rename const_expected_len to expected_layout_len
+- **ainb-tui**: render usage timestamps in local time at the boundary
+- **ainb-tui**: split stale-vs-unknown blob format lookup
+- **ainb-tui**: store ProviderCall.timestamp as DateTime<Utc>
+- **ainb-tui**: unify step_period_back / forward into one helper
+- **ainb-tui**: use file.by_ref().take() in recover_user_message_before
+- **ainb-tui/sidebar**: derive layout constraints dynamically
+- **ainb-tui/skills**: pre-lowercase scanner data once
+- **reflect**: apply /simplify review fixes
+- **reflect**: extract AdapterBase to remove ~80% adapter duplication
+
 ### Changed
 - **BREAKING (ainb-tui usage cache)**: bumped the cache blob format to
   V3 (`BLOB_FORMAT_BINCODE_CURRENT = 3`). Caches built under V1
