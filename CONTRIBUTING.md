@@ -31,12 +31,9 @@ cd toolkit && npm install
 2. **Atomic commits** — one concern per commit, conventional-commit prefix (`feat:`, `fix:`, `chore:`, `refactor:`, `docs:`).
 3. **Don't bulk-commit** — if you've made multiple unrelated changes, split them with `git rebase -i` before pushing.
 4. **No AI/Claude attribution** in commit messages. Write them as a human author.
-5. **Test the bootstrap** before opening a PR:
-   ```bash
-   cd toolkit && npm test
-   ./test-bootstrap-parity.sh
-   ```
-6. **Open a PR** against `main`. CI runs template substitution checks, package validation, and tool-install tests for claude/codex/gemini.
+5. **CI** runs on every PR: template substitution checks, package validation, and tool-install tests for claude/codex/gemini. Wait for it to go green before requesting review.
+   - There's also a Jest suite under `toolkit/bootstrap.test.js` (`cd toolkit && npm test`). Some assertions are currently stale (drift between expected output paths and what `bootstrap.js` actually produces — tracked separately). Use it as a smoke check; don't treat red there as a hard blocker until the suite is fixed.
+6. **Open a PR** against `main`.
 7. **Merge with `--merge`** (not squash) so per-concern commit history is preserved.
 
 ## Adding a new skill
