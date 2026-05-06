@@ -56,18 +56,14 @@ toolkit/.claude/orchestration/checkpoints/*.json
 # Local infrastructure (not tracked)
 worktrees/
 
-# Beads local runtime/export state (tracked issue docs live in .beads/issues/)
-.beads/.local_version
-.beads/beads.db
-.beads/beads.db-shm
-.beads/beads.db-wal
-.beads/beads.left.jsonl
-.beads/beads.left.meta.json
-.beads/daemon.lock
-.beads/daemon.log
-.beads/daemon.pid
-.beads/issues.jsonl
-.beads/last-touched
+# Beads — entire dir is local-only project tracker state, never check in
+.beads/
+
+# Test caches
+.pytest_cache/
+
+# macOS junk
+**/.DS_Store
 
 # Future app ignores (when added)
 # claude-in-a-box/
