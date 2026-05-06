@@ -1,0 +1,34 @@
+{
+  "name": "agents-in-a-box",
+  "owner": {
+    "name": "stevengonsalvez",
+    "url": "https://github.com/stevengonsalvez"
+  },
+  "metadata": {
+    "description": "Marketplace for plugins shipped with the agents-in-a-box / ai-coder-rules toolkit. Plugins live under toolkit/packages/plugins/ and are installable via `claude plugin install <name>@agents-in-a-box`.",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "reflect",
+      "source": "./toolkit/packages/plugins/reflect",
+      "description": "Agent self-improvement + retrieval. Captures learnings via colon-namespaced sub-skills (reflect, reflect:consolidate, reflect:ingest, reflect:recall, reflect-status) and auto-injects relevant prior learnings at SessionStart via hook.",
+      "strict": false,
+      "keywords": [
+        "self-improvement",
+        "learnings",
+        "graphrag",
+        "memory",
+        "recall",
+        "retrieval"
+      ],
+      "skills": [
+        "./toolkit/packages/plugins/reflect/skills/reflect",
+        "./toolkit/packages/plugins/reflect/skills/recall",
+        "./toolkit/packages/plugins/reflect/skills/consolidate",
+        "./toolkit/packages/plugins/reflect/skills/ingest",
+        "./toolkit/packages/plugins/reflect/skills/reflect-status"
+      ]
+    }
+  ]
+}
