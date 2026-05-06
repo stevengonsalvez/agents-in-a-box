@@ -111,18 +111,18 @@ update_nanoclaw() {
   echo "  Note: skills auto-sync to ~/.claude/skills/ on next agent spawn (native-runner cpSync)"
 }
 
-# ----- reflect plugin (deploy from packaged plugin source) -----
+# ----- reflect plugin (Claude marketplace install) -----
+# This repo is itself a marketplace (.claude-plugin/marketplace.json at root)
+# that publishes reflect from toolkit/packages/plugins/reflect/. The marketplace
+# path is the canonical Claude-native install; the python adapter remains the
+# fallback for Codex/Copilot which lack plugin runtime parity.
 update_reflect() {
-  section "reflect plugin (claude_adapter install --force)"
-  local TOOLKIT_ROOT
-  TOOLKIT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-  local ADAPTER="$TOOLKIT_ROOT/packages/plugins/reflect/adapters/claude/claude_adapter.py"
-  if [ ! -f "$ADAPTER" ]; then
-    echo "  (skip: $ADAPTER not found)"
-    return
-  fi
-  run "python3 '$ADAPTER' install --force"
+  section "reflect plugin (claude plugin install via in-repo marketplace)"
+  run "claude plugin marketplace add stevengonsalvez/ai-coder-rules"
+  run "claude plugin install reflect@agents-in-a-box"
   echo "  Sub-skills deployed: reflect, reflect:consolidate, reflect:ingest, recall, reflect-status"
+  echo "  (Codex/Copilot still use the python adapter — see"
+  echo "   toolkit/packages/plugins/reflect/adapters/{codex,copilot}/)"
 }
 
 # ----- external-packages (uv tool) -----
