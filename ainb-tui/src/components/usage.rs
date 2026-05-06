@@ -107,51 +107,51 @@ impl UsageProvider {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UsageTab {
     #[default]
+    Burndown,
     Daily,
     Weekly,
     Projects,
-    Burndown,
     Optimize,
 }
 
 impl UsageTab {
     fn all() -> &'static [UsageTab] {
         &[
+            UsageTab::Burndown,
             UsageTab::Daily,
             UsageTab::Weekly,
             UsageTab::Projects,
-            UsageTab::Burndown,
             UsageTab::Optimize,
         ]
     }
 
     fn title(&self) -> &'static str {
         match self {
+            UsageTab::Burndown => "Burndown",
             UsageTab::Daily => "Daily",
             UsageTab::Weekly => "Weekly",
             UsageTab::Projects => "By Project",
-            UsageTab::Burndown => "Burndown",
             UsageTab::Optimize => "Optimize",
         }
     }
 
     fn next(&self) -> Self {
         match self {
+            UsageTab::Burndown => UsageTab::Daily,
             UsageTab::Daily => UsageTab::Weekly,
             UsageTab::Weekly => UsageTab::Projects,
-            UsageTab::Projects => UsageTab::Burndown,
-            UsageTab::Burndown => UsageTab::Optimize,
-            UsageTab::Optimize => UsageTab::Daily,
+            UsageTab::Projects => UsageTab::Optimize,
+            UsageTab::Optimize => UsageTab::Burndown,
         }
     }
 
     fn prev(&self) -> Self {
         match self {
-            UsageTab::Daily => UsageTab::Optimize,
+            UsageTab::Burndown => UsageTab::Optimize,
+            UsageTab::Daily => UsageTab::Burndown,
             UsageTab::Weekly => UsageTab::Daily,
             UsageTab::Projects => UsageTab::Weekly,
-            UsageTab::Burndown => UsageTab::Projects,
-            UsageTab::Optimize => UsageTab::Burndown,
+            UsageTab::Optimize => UsageTab::Projects,
         }
     }
 }
@@ -322,7 +322,7 @@ impl Default for UsageViewState {
     fn default() -> Self {
         Self {
             provider: UsageProvider::Claude,
-            active_tab: UsageTab::Daily,
+            active_tab: UsageTab::Burndown,
             data: None,
             loading: false,
             scroll_offset: 0,
