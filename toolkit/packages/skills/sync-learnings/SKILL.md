@@ -78,8 +78,8 @@ These are NOT in `packages/` — they live in per-tool directories:
 
 **CLAUDE.md sync requires reverse template interpolation** — when copying TO_REPO,
 replace interpolated paths back to template placeholders:
-- `~/.claude/` or `$HOME/.claude/` → `{{HOME_TOOL_DIR}}/`
-- `.claude/` (in path context) → `{{TOOL_DIR}}/`
+- `{{HOME_TOOL_DIR}}/` or `/.claude/` → `{{HOME_TOOL_DIR}}/`
+- `.claude/` (in path context) → `.claude/`
 
 ### Other Files
 
@@ -150,20 +150,20 @@ Content managed by external plugins (installed via `claude plugin install`):
 CRITICAL: Before comparing files, enumerate ALL items in {{HOME_TOOL_DIR}}/ and check each one has a counterpart in packages/. This catches skills/agents that were created directly in {{HOME_TOOL_DIR}}/ but never added to the toolkit.
 
 ```bash
-# Reverse scan: find skills in $HOME/{{TOOL_DIR}} with no packages/ counterpart
+# Reverse scan: find skills in /.claude with no packages/ counterpart
 echo "=== Orphan Detection: Skills ==="
-for skill_dir in $HOME/{{TOOL_DIR}}/skills/*/; do
+for skill_dir in /.claude/skills/*/; do
   skill_name=$(basename "$skill_dir")
   if [ ! -d "packages/skills/$skill_name" ]; then
-    echo "ORPHAN: skills/$skill_name (in $HOME/{{TOOL_DIR}} only, missing from packages/)"
+    echo "ORPHAN: skills/$skill_name (in /.claude only, missing from packages/)"
   fi
 done
 
 echo "=== Orphan Detection: Agents ==="
-for agent_file in $HOME/{{TOOL_DIR}}/agents/**/*.md; do
-  rel_path="${agent_file#$HOME/{{TOOL_DIR}}/}"
+for agent_file in /.claude/agents/**/*.md; do
+  rel_path="${agent_file#/.claude/}"
   if [ ! -f "packages/$rel_path" ]; then
-    echo "ORPHAN: $rel_path (in $HOME/{{TOOL_DIR}} only, missing from packages/)"
+    echo "ORPHAN: $rel_path (in /.claude only, missing from packages/)"
   fi
 done
 ```
@@ -183,7 +183,7 @@ MANIFEST="toolkit/external-dependencies.yaml"
 
 # 1. Check installed claude plugins vs manifest
 echo "=== Plugin Audit ==="
-for plugin_dir in $HOME/{{TOOL_DIR}}/plugins/cache/*/; do
+for plugin_dir in /.claude/plugins/cache/*/; do
   plugin_name=$(basename "$plugin_dir" | sed 's/-marketplace$//')
   if ! grep -q "name: $plugin_name" "$MANIFEST" 2>/dev/null; then
     echo "UNTRACKED PLUGIN: $plugin_name (installed but not in manifest)"
@@ -299,35 +299,63 @@ Before syncing, generate an assessment table:
 ### Reverse Template Interpolation (TO_REPO direction — CRITICAL)
 
 **When copying FROM user-level TO packages/toolkit, REVERSE the interpolation.**
-User-level files have resolved paths (`~/.claude/`, `$HOME/.claude/`, `.claude/`).
+User-level files have resolved paths (`{{HOME_TOOL_DIR}}/`, `/.claude/`, `.claude/`).
 These MUST be converted back to template placeholders before writing to the repo.
+
+> **CRITICAL**: The replacement side of every reverse-interpolation regex must
+> emit the literal placeholder text `{{HOME_TOOL_DIR}}` / `{{TOOL_DIR}}`. In this
+> SKILL.md source we write those placeholders ESCAPED (`\{\{HOME_TOOL_DIR\}\}`)
+> so that when the skill itself is deployed via the TO_HOME interpolation
+> below, the deploy-time perl substitution does NOT eat the example. After
+> deploy, users see `\{\{HOME_TOOL_DIR\}\}` — which is a valid perl replacement
+> producing literal `{{HOME_TOOL_DIR}}`. If you ever see `s|...|~/.claude|g`
+> in this section, the example has been corrupted by a buggy reverse-interp
+> pass — restore it from git history.
 
 ```bash
 # Reverse interpolation: user-level → packages/toolkit source
 # For .md files (documentation references use ~/ form):
-perl -pe 's|~/\.claude|{{HOME_TOOL_DIR}}|g' ~/.claude/CLAUDE.md > toolkit/claude-code-4.5/CLAUDE.md
+perl -pe 's|~/\.claude|\{\{HOME_TOOL_DIR\}\}|g' \
+  "$HOME/.claude/CLAUDE.md" > toolkit/claude-code-4.5/CLAUDE.md
 
 # For .sh/.py files (bash code uses $HOME form):
-perl -pe 's|\$HOME/\.claude|\$HOME/{{TOOL_DIR}}|g; s|~/\.claude|{{HOME_TOOL_DIR}}|g' \
-  ~/.claude/skills/some-skill/scripts/script.sh > toolkit/packages/skills/some-skill/scripts/script.sh
+perl -pe 's|\$HOME/\.claude\b|\$HOME/\{\{TOOL_DIR\}\}|g; s|~/\.claude\b|\{\{HOME_TOOL_DIR\}\}|g' \
+  "$HOME/.claude/skills/some-skill/scripts/script.sh" \
+  > toolkit/packages/skills/some-skill/scripts/script.sh
 
 # For mixed files (both doc text AND bash code blocks — like CLAUDE.md):
-# Step 1: Replace $HOME/.claude → $HOME/{{TOOL_DIR}} (bash-safe form)
-# Step 2: Replace ~/.claude → {{HOME_TOOL_DIR}} (doc-safe form)
-# Step 3: Replace quoted `.claude/` and "\.claude/" → {{TOOL_DIR}}/ (backtick and double-quote contexts)
 # Order matters: $HOME first (most specific), then ~/, then bare .claude/
-perl -pe 's|\$HOME/\.claude|\$HOME/{{TOOL_DIR}}|g; s|~/\.claude|{{HOME_TOOL_DIR}}|g; s|`\.claude/|`{{TOOL_DIR}}/|g; s|"\.claude/|"{{TOOL_DIR}}/|g' \
-  SOURCE > DEST
+perl -pe '
+  s|\$HOME/\.claude\b|\$HOME/\{\{TOOL_DIR\}\}|g;
+  s|~/\.claude\b|\{\{HOME_TOOL_DIR\}\}|g;
+  s|`\.claude/|`\{\{TOOL_DIR\}\}/|g;
+  s|"\.claude/|"\{\{TOOL_DIR\}\}/|g;
+' SOURCE > DEST
 ```
 
-**Always verify** after reverse interpolation:
+**Always verify** after reverse interpolation — these greps should return ZERO
+hits in the toolkit-side file (except inside intentional examples / quoted
+docs, which is why we use `\b` word-boundary in the regex above):
+
 ```bash
-# Should find ZERO literal .claude references (except in comments/descriptions):
-grep -n '~/\.claude\|\$HOME/\.claude' toolkit/claude-code-4.5/CLAUDE.md
+grep -nE '~/\.claude\b|\$HOME/\.claude\b' toolkit/claude-code-4.5/CLAUDE.md
+grep -nE '~/\.claude\b|\$HOME/\.claude\b' toolkit/packages/skills/<skill>/SKILL.md
+```
+
+**Bulk fixup** (when a sync regression slipped in and many files lost their
+placeholders — e.g. PR #70):
+
+```bash
+# Re-templatize a list of already-synced skill files.
+# In-place edit; review with `git diff` before committing.
+perl -i -pe '
+  s|\$HOME/\.claude\b|\$HOME/\{\{TOOL_DIR\}\}|g;
+  s|~/\.claude\b|\{\{HOME_TOOL_DIR\}\}|g;
+' toolkit/packages/skills/*/SKILL.md toolkit/packages/skills/*/scripts/*.sh
 ```
 
 **Do NOT reverse-interpolate**:
-- The string `.claude` when it's a directory name in a path context (e.g., `Check .claude/session/`) — this should become `{{TOOL_DIR}}/session/`
+- The string `.claude` when it's a directory name in a path context (e.g., `Check .claude/session/`) — this should become `.claude/session/`
 - But `.claude` as part of a domain name or unrelated word — leave alone
 
 ### Template Interpolation (TO_HOME direction — CRITICAL)
@@ -339,17 +367,17 @@ written — never leave them as literal strings.
 | Template | Claude Code | Codex | Copilot |
 |----------|-------------|-------|---------|
 | `{{HOME_TOOL_DIR}}` | `{{HOME_TOOL_DIR}}/` | `~/.codex/` | `~/.copilot/` |
-| `{{TOOL_DIR}}` | `.claude` | `.codex` | `.copilot` |
+| `.claude` | `.claude` | `.codex` | `.copilot` |
 
 Use `perl` for safe substitution (avoids shell expansion issues with `~`):
 
 ```bash
-# After copying FROM packages TO $HOME/{{TOOL_DIR}}, interpolate templates:
-perl -pi -e 's/\{\{HOME_TOOL_DIR\}\}/$ENV{HOME}\/.claude/g; s/\{\{TOOL_DIR\}\}/.claude/g' $HOME/{{TOOL_DIR}}/path/to/SKILL.md
+# After copying FROM packages TO /.claude, interpolate templates:
+perl -pi -e 's/\{\{HOME_TOOL_DIR\}\}/$ENV{HOME}\/.claude/g; s/\{\{TOOL_DIR\}\}/.claude/g' /.claude/path/to/SKILL.md
 
 # Or with explicit paths:
 perl -pe 's/\{\{HOME_TOOL_DIR\}\}/\/Users\/stevengonsalvez\/.claude/g; s/\{\{TOOL_DIR\}\}/.claude/g' \
-  /tmp/SKILL.md > $HOME/{{TOOL_DIR}}/path/to/SKILL.md
+  /tmp/SKILL.md > /.claude/path/to/SKILL.md
 ```
 
 **Always verify** after substitution — `grep -n "HOME_TOOL_DIR\|TOOL_DIR" {{HOME_TOOL_DIR}}/...` should return nothing.
@@ -367,18 +395,18 @@ Many shells alias `cp` to `cp -i`. Always use `\cp` to bypass:
 
 ```bash
 # Agent sync (direct)
-\cp $HOME/{{TOOL_DIR}}/agents/engineering/new-agent.md packages/agents/engineering/
+\cp /.claude/agents/engineering/new-agent.md packages/agents/engineering/
 
 # Command sync (routed)
-\cp $HOME/{{TOOL_DIR}}/commands/m-plan.md packages/workflows/multi-agent/commands/
-\cp $HOME/{{TOOL_DIR}}/commands/plan.md packages/workflows/single-agent/commands/
-\cp $HOME/{{TOOL_DIR}}/commands/session-info.md packages/utilities/commands/
+\cp /.claude/commands/m-plan.md packages/workflows/multi-agent/commands/
+\cp /.claude/commands/plan.md packages/workflows/single-agent/commands/
+\cp /.claude/commands/session-info.md packages/utilities/commands/
 
 # Skill sync
-\cp -R $HOME/{{TOOL_DIR}}/skills/new-skill/ packages/skills/
+\cp -R /.claude/skills/new-skill/ packages/skills/
 
 # Template sync
-\cp $HOME/{{TOOL_DIR}}/templates/new-template.md packages/utilities/templates/
+\cp /.claude/templates/new-template.md packages/utilities/templates/
 ```
 
 ### Commit Format
@@ -395,42 +423,42 @@ chore: sync learnings to packages
 ```bash
 # CLAUDE.md diff (tool-specific config file)
 # Normalize template vars before comparing to avoid false positives
-diff <(perl -pe 's|\{\{TOOL_DIR\}\}|.claude|g; s|\{\{HOME_TOOL_DIR\}\}|~/.claude|g' \
-  toolkit/claude-code-4.5/CLAUDE.md) $HOME/{{TOOL_DIR}}/CLAUDE.md
+diff <(perl -pe 's|\{\{TOOL_DIR\}\}|.claude|g; s|\{\{HOME_TOOL_DIR\}\}|{{HOME_TOOL_DIR}}|g' \
+  toolkit/claude-code-4.5/CLAUDE.md) /.claude/CLAUDE.md
 
 # settings.json diff (Claude Code harness config)
-# Fails if repo has drifted from $HOME/{{TOOL_DIR}} — sync TO_REPO if live has newer keys
-diff toolkit/claude-code-4.5/settings.json $HOME/{{TOOL_DIR}}/settings.json
+# Fails if repo has drifted from /.claude — sync TO_REPO if live has newer keys
+diff toolkit/claude-code-4.5/settings.json /.claude/settings.json
 
 # statusline.sh diff (rich statusline script shipped as tool-specific file)
-diff toolkit/claude-code-4.5/statusline.sh $HOME/{{TOOL_DIR}}/statusline.sh
+diff toolkit/claude-code-4.5/statusline.sh /.claude/statusline.sh
 
 # Find all differences (agents)
-diff -rq $HOME/{{TOOL_DIR}}/agents/ packages/agents/ 2>/dev/null
+diff -rq /.claude/agents/ packages/agents/ 2>/dev/null
 
 # Find all differences (commands - check all locations)
 for dir in packages/utilities/commands packages/workflows/*/commands; do
-  diff -rq $HOME/{{TOOL_DIR}}/commands/ "$dir" 2>/dev/null | head -5
+  diff -rq /.claude/commands/ "$dir" 2>/dev/null | head -5
 done
 
-# Find files only in $HOME/{{TOOL_DIR}} (candidates for TO_REPO)
-diff -rq $HOME/{{TOOL_DIR}}/agents/ packages/agents/ 2>/dev/null | grep "Only in /Users"
+# Find files only in /.claude (candidates for TO_REPO)
+diff -rq /.claude/agents/ packages/agents/ 2>/dev/null | grep "Only in /Users"
 
 # Show actual diff for a specific file
-diff $HOME/{{TOOL_DIR}}/agents/engineering/example.md packages/agents/engineering/example.md
+diff /.claude/agents/engineering/example.md packages/agents/engineering/example.md
 
-# REVERSE SCAN: Find orphaned skills (in $HOME/{{TOOL_DIR}} but not in packages)
+# REVERSE SCAN: Find orphaned skills (in /.claude but not in packages)
 comm -23 \
-  <(ls -1 $HOME/{{TOOL_DIR}}/skills/ 2>/dev/null | sort) \
+  <(ls -1 /.claude/skills/ 2>/dev/null | sort) \
   <(ls -1 packages/skills/ 2>/dev/null | sort)
 
 # REVERSE SCAN: Find orphaned agents
 comm -23 \
-  <(find $HOME/{{TOOL_DIR}}/agents/ -name '*.md' -exec basename {} \; 2>/dev/null | sort) \
+  <(find /.claude/agents/ -name '*.md' -exec basename {} \; 2>/dev/null | sort) \
   <(find packages/agents/ -name '*.md' -exec basename {} \; 2>/dev/null | sort)
 
 # PLUGIN AUDIT: List installed plugins not in manifest
-for d in $HOME/{{TOOL_DIR}}/plugins/cache/*/; do
+for d in /.claude/plugins/cache/*/; do
   name=$(basename "$d" | sed 's/-marketplace$//')
   grep -q "name: $name" toolkit/external-dependencies.yaml 2>/dev/null || echo "UNTRACKED: $name"
 done
@@ -523,7 +551,7 @@ Add to session start hook for automatic detection:
 
 ```bash
 # In hooks/session-start
-DIFF_COUNT=$(diff -rq $HOME/{{TOOL_DIR}}/agents/ packages/agents/ 2>/dev/null | grep "differ" | wc -l)
+DIFF_COUNT=$(diff -rq /.claude/agents/ packages/agents/ 2>/dev/null | grep "differ" | wc -l)
 if [ "$DIFF_COUNT" -gt 0 ]; then
   echo "  $DIFF_COUNT agent files differ from packages. Run /sync-learnings to sync."
 fi

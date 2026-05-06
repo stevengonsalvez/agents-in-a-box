@@ -29,7 +29,7 @@ When you receive this command:
 
 1. **Broadcast Shutdown Message**
    ```bash
-   source $HOME/{{TOOL_DIR}}/utils/swarm-lib.sh
+   source {{HOME_TOOL_DIR}}/utils/swarm-lib.sh
 
    echo "Initiating graceful shutdown of $TEAM_ID..."
 
@@ -49,7 +49,7 @@ When you receive this command:
 3. **Verify Agent Status**
    ```bash
    # Check if agents have acknowledged
-   TEAM_DIR="$HOME/{{TOOL_DIR}}/swarm/$TEAM_ID"
+   TEAM_DIR="{{HOME_TOOL_DIR}}/swarm/$TEAM_ID"
 
    for inbox in "$TEAM_DIR"/inbox/*.jsonl; do
      AGENT=$(basename "$inbox" .jsonl)
@@ -213,7 +213,7 @@ swarm-lib.sh archive swarm-1738585396
 ### Delete Team
 ```bash
 # Permanently remove team data
-rm -rf $HOME/{{TOOL_DIR}}/swarm/swarm-1738585396
+rm -rf {{HOME_TOOL_DIR}}/swarm/swarm-1738585396
 ```
 
 ### Restart Team

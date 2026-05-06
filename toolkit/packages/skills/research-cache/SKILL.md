@@ -216,7 +216,7 @@ bash toolkit/claude-code-4.5/utils/repo-analysis-cache.sh purge --force
 # Override cache directory
 export CLAUDE_RESEARCH_CACHE="/custom/cache/path"
 
-# Default: $HOME/{{TOOL_DIR}}/research-cache
+# Default: {{HOME_TOOL_DIR}}/research-cache
 ```
 
 ### Cache Settings
@@ -277,7 +277,7 @@ bash toolkit/claude-code-4.5/utils/repo-analysis-cache.sh purge --force
 **Fix**:
 ```bash
 # Manually remove corrupted entry
-rm -rf $HOME/{{TOOL_DIR}}/research-cache/<cache-key>
+rm -rf {{HOME_TOOL_DIR}}/research-cache/<cache-key>
 
 # Reinitialize cache
 bash toolkit/claude-code-4.5/utils/repo-analysis-cache.sh init
@@ -314,7 +314,7 @@ No manual intervention required for normal research workflows.
 
 ```bash
 # Get all valid cache keys
-for cache_dir in $HOME/{{TOOL_DIR}}/research-cache/*; do
+for cache_dir in {{HOME_TOOL_DIR}}/research-cache/*; do
     if [ -f "$cache_dir/metadata.json" ]; then
         CACHE_KEY=$(basename "$cache_dir")
         AGE=$(jq -r '.created_at' "$cache_dir/metadata.json")
@@ -337,10 +337,10 @@ grep "Total:" cache-stats.txt
 
 ```bash
 # Find all React-related analyses
-grep -r "React" $HOME/{{TOOL_DIR}}/research-cache/*/analysis.md
+grep -r "React" {{HOME_TOOL_DIR}}/research-cache/*/analysis.md
 
 # Find analyses newer than N days
-find $HOME/{{TOOL_DIR}}/research-cache -name "metadata.json" -mtime -7 -exec jq -r '.repo_url' {} \;
+find {{HOME_TOOL_DIR}}/research-cache -name "metadata.json" -mtime -7 -exec jq -r '.repo_url' {} \;
 ```
 
 ## See Also

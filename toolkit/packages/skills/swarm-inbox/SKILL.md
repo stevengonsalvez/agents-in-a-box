@@ -70,7 +70,7 @@ When you receive `/swarm-inbox` (no send args):
 
 2. **Read Messages**
    ```bash
-   source $HOME/{{TOOL_DIR}}/utils/swarm-lib.sh
+   source {{HOME_TOOL_DIR}}/utils/swarm-lib.sh
 
    MESSAGES=$(swarm_read_inbox "$TEAM_ID" "$AGENT_NAME" --last 20)
 

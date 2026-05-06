@@ -257,8 +257,8 @@ if [ -f "$SCRIPT_DIR/../utils/spawn-agent-lib.sh" ]; then
     (sleep 5 && update_agent_transcript "$SESSION" "$WORK_DIR" 2>/dev/null) &
 else
     # Fallback: save basic metadata if library not found
-    mkdir -p $HOME/{{TOOL_DIR}}/agents
-    cat > $HOME/{{TOOL_DIR}}/agents/${SESSION}.json <<EOF
+    mkdir -p /.claude/agents
+    cat > /.claude/agents/${SESSION}.json <<EOF
 {
   "session": "$SESSION",
   "task": "$TASK",

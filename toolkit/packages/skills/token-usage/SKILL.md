@@ -1,6 +1,6 @@
 ---
 name: token-usage
-description: 'Show Claude Code token usage across sessions — daily, weekly, per-project, and per-session breakdowns. Parses ~/.claude/projects/**/*.jsonl for consumption data. Use when the user asks about token usage, costs, how many tokens were used, session statistics, or wants a usage report.'
+description: 'Show Claude Code token usage across sessions — daily, weekly, per-project, and per-session breakdowns. Parses {{HOME_TOOL_DIR}}/projects/**/*.jsonl for consumption data. Use when the user asks about token usage, costs, how many tokens were used, session statistics, or wants a usage report.'
 user-invocable: true
 argument-hint: "[--days N] [--since YYYY-MM-DD] [--project NAME]"
 ---
@@ -60,11 +60,11 @@ After running the script:
 | `--project NAME` | Filter to project (substring match) | All projects |
 | `--top-sessions N` | Number of top sessions to show | 10 |
 | `--format text\|markdown\|json` | Output format | text |
-| `--projects-dir PATH` | Override projects directory | `~/.claude/projects` |
+| `--projects-dir PATH` | Override projects directory | `{{HOME_TOOL_DIR}}/projects` |
 
 ## Data Source
 
-Parses `~/.claude/projects/**/*.jsonl` — Claude Code's session transcript files. Each `assistant` message contains a `usage` block with `input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`, and `output_tokens`.
+Parses `{{HOME_TOOL_DIR}}/projects/**/*.jsonl` — Claude Code's session transcript files. Each `assistant` message contains a `usage` block with `input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`, and `output_tokens`.
 
 ## Integration with ainb-tui
 

@@ -151,11 +151,11 @@ None installed
 ```bash
 # Read Claude plugins
 jq -r '.plugins | to_entries[] | "\(.key): \(.value[0].version)"' \
-  $HOME/{{TOOL_DIR}}/plugins/installed_plugins.json
+  /.claude/plugins/installed_plugins.json
 
 # Read marketplaces
 jq -r 'to_entries[] | "\(.key): \(.value.source.repo)"' \
-  $HOME/{{TOOL_DIR}}/plugins/known_marketplaces.json
+  /.claude/plugins/known_marketplaces.json
 
 # Read bundled skills
 for skill in packages/skills/*/SKILL.md; do
@@ -246,9 +246,9 @@ Run `/plugins status` to verify.
 ### Examples
 
 ```bash
-# Skill discovered in $HOME/{{TOOL_DIR}}/skills/ during /plugins list drift check
+# Skill discovered in /.claude/skills/ during /plugins list drift check
 /plugins add remotion-best-practices
-# → Detects in $HOME/{{TOOL_DIR}}/skills/, no .git → copies to packages/skills/ as bundled
+# → Detects in /.claude/skills/, no .git → copies to packages/skills/ as bundled
 
 # Skill from a public git repo
 /plugins add ui-ux-pro-max --from https://github.com/nextlevelbuilder/ui-ux-pro-max-skill
@@ -302,8 +302,8 @@ Update `toolkit/external-dependencies.yaml` from current installed state.
 # Sync Claude plugins to manifest
 
 MANIFEST="toolkit/external-dependencies.yaml"
-PLUGINS_JSON="$HOME/{{TOOL_DIR}}/plugins/installed_plugins.json"
-MARKETPLACES_JSON="$HOME/{{TOOL_DIR}}/plugins/known_marketplaces.json"
+PLUGINS_JSON="/.claude/plugins/installed_plugins.json"
+MARKETPLACES_JSON="/.claude/plugins/known_marketplaces.json"
 
 # Extract plugin data
 jq -r '.plugins | to_entries[] | {
@@ -398,7 +398,7 @@ All extensions are in sync.
 yq '.claude-plugins[] | "\(.name)=\(.version)"' toolkit/external-dependencies.yaml > /tmp/manifest_versions
 
 jq -r '.plugins | to_entries[] | "\(.key | split("@")[0])=\(.value[0].version)"' \
-  $HOME/{{TOOL_DIR}}/plugins/installed_plugins.json > /tmp/installed_versions
+  /.claude/plugins/installed_plugins.json > /tmp/installed_versions
 
 diff /tmp/manifest_versions /tmp/installed_versions
 ```

@@ -111,12 +111,12 @@ fi
 
 **Agent Metadata** (`{{HOME_TOOL_DIR}}/agents/*.json`):
 ```bash
-if [ -f "$HOME/{{TOOL_DIR}}/agents/${SESSION}.json" ]; then
-    AGENT_TYPE=$(jq -r '.agent_type' "$HOME/{{TOOL_DIR}}/agents/${SESSION}.json")
-    TASK=$(jq -r '.task' "$HOME/{{TOOL_DIR}}/agents/${SESSION}.json")
-    STATUS=$(jq -r '.status' "$HOME/{{TOOL_DIR}}/agents/${SESSION}.json")
-    DIRECTORY=$(jq -r '.directory' "$HOME/{{TOOL_DIR}}/agents/${SESSION}.json")
-    CREATED=$(jq -r '.created' "$HOME/{{TOOL_DIR}}/agents/${SESSION}.json")
+if [ -f "/.claude/agents/${SESSION}.json" ]; then
+    AGENT_TYPE=$(jq -r '.agent_type' "/.claude/agents/${SESSION}.json")
+    TASK=$(jq -r '.task' "/.claude/agents/${SESSION}.json")
+    STATUS=$(jq -r '.status' "/.claude/agents/${SESSION}.json")
+    DIRECTORY=$(jq -r '.directory' "/.claude/agents/${SESSION}.json")
+    CREATED=$(jq -r '.created' "/.claude/agents/${SESSION}.json")
 fi
 ```
 

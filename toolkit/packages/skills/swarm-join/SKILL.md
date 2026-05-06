@@ -33,7 +33,7 @@ When you receive this command:
 
 2. **Validate Team Exists**
    ```bash
-   source $HOME/{{TOOL_DIR}}/utils/swarm-lib.sh
+   source {{HOME_TOOL_DIR}}/utils/swarm-lib.sh
 
    if ! swarm_get_team "$TEAM_ID" > /dev/null 2>&1; then
      echo "Error: Team $TEAM_ID not found"
@@ -85,7 +85,7 @@ When you receive this command:
    echo "Agent Name: $AGENT_NAME"
    echo "Session: $AGENT_SESSION"
    echo ""
-   echo "Your inbox: $HOME/{{TOOL_DIR}}/swarm/$TEAM_ID/inbox/$AGENT_NAME.jsonl"
+   echo "Your inbox: {{HOME_TOOL_DIR}}/swarm/$TEAM_ID/inbox/$AGENT_NAME.jsonl"
    echo ""
    echo "Commands:"
    echo "  Check inbox:    /swarm-inbox"
@@ -101,7 +101,7 @@ When you receive this command:
 /swarm-join swarm-1738585396 --as agent-3
 
 # List available teams first
-$HOME/{{TOOL_DIR}}/utils/swarm-lib.sh list-teams
+{{HOME_TOOL_DIR}}/utils/swarm-lib.sh list-teams
 ```
 
 ## Post-Join Behavior
@@ -119,7 +119,7 @@ As a team member, you must:
 1. **Monitor Your Inbox**
    ```bash
    # Your inbox location
-   $HOME/{{TOOL_DIR}}/swarm/{team-id}/inbox/{agent-name}.jsonl
+   {{HOME_TOOL_DIR}}/swarm/{team-id}/inbox/{agent-name}.jsonl
    ```
 
 2. **Execute Assigned Tasks**
