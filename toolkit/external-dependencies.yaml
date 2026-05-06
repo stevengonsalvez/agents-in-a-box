@@ -370,6 +370,26 @@ claude-plugins:
       - document-critique: "Document review (suggestions with approve/reject/comment workflow)"
     docs: "https://github.com/anthropics/claude-plugins-official/tree/main/plugins/playground"
 
+  - name: reflect
+    marketplace: stevengonsalvez/ai-coder-rules
+    marketplace_id: agents-in-a-box
+    version: "3.1.0"
+    install: |
+      claude plugin marketplace add stevengonsalvez/ai-coder-rules
+      claude plugin install reflect@agents-in-a-box
+    purpose: "Agent self-improvement + retrieval (GraphRAG-backed learnings KB)"
+    has_skills: true  # Plugin ships skills/ tree (reflect, recall, consolidate, ingest, reflect-status)
+    requires:
+      - "uv tool install --force --upgrade 'git+https://github.com/stevengonsalvez/reflect-kb.git[graph]' (see external-packages: reflect-kb — provides the `reflect` CLI the hooks shell out to)"
+    features:
+      - Captures behavioral corrections and success patterns into permanent agent updates
+      - SessionStart hook auto-injects relevant prior learnings into new sessions
+      - PreCompact hook queues a reflection on every conversation compaction
+      - Background drainer processes queued reflections without blocking the agent
+      - Sub-skills: reflect, reflect:consolidate, reflect:ingest, reflect:recall, reflect-status
+    in-repo-marketplace: ".claude-plugin/marketplace.json (lives at the root of stevengonsalvez/ai-coder-rules)"
+    plugin-source: "toolkit/packages/plugins/reflect/.claude-plugin/plugin.json"
+
   - name: dev-browser
     marketplace: sawyerhood/dev-browser
     marketplace_id: sawyerhood-dev-browser
