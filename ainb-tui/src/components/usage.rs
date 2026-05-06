@@ -3812,11 +3812,13 @@ mod cross_filter_tests {
                     name: "alpha".into(),
                     path: "/work/alpha".into(),
                     bucket: bucket(3),
+                    repo: None,
                 },
                 ProjectUsage {
                     name: "beta".into(),
                     path: "/work/beta".into(),
                     bucket: bucket(2),
+                    repo: None,
                 },
             ],
             grand_total: bucket(5),

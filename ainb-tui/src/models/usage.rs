@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, warn};
 
+use crate::models::repo_lookup;
 use crate::usage_cache::{Cache, ParseHint, ParseResult};
 
 /// Usage period selector shared by TUI and CLI report queries.
@@ -484,12 +485,27 @@ pub struct DailyUsage {
 }
 
 /// Per-project summary.
+///
+/// `name` is the display label and aggregation key. When the project's
+/// `cwd` belongs to a git repo with a resolvable `origin` remote,
+/// `name` is the upstream identifier (e.g. `"owner/repo"`) and `repo`
+/// holds the same value as an explicit "this came from a remote"
+/// marker. Otherwise `name` falls back to the local folder/sanitised
+/// project name and `repo` is `None`.
+///
+/// Two worktrees of the same upstream repo collapse into a single
+/// `ProjectUsage` row because they share the same `name`. Chip filters
+/// match on `name`, so the filter UI follows the same rule.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize)]
 pub struct ProjectUsage {
     pub name: String,
     pub path: String,
     pub bucket: TokenBucket,
+    /// `Some(owner/repo)` when the project's working directory was
+    /// successfully resolved to an upstream remote at aggregation
+    /// time. `None` for non-git paths or repos without an `origin`.
+    pub repo: Option<String>,
 }
 
 /// Per-session summary.
@@ -1448,7 +1464,19 @@ fn aggregate_calls_with_analysis(
 
     let mut daily_map: HashMap<NaiveDate, (HashSet<String>, HashSet<String>, TokenBucket)> =
         HashMap::new();
-    let mut project_map: HashMap<String, (String, HashSet<String>, TokenBucket)> = HashMap::new();
+    // Project aggregation key is the *display* name: the upstream repo
+    // id (e.g. "owner/repo") when resolvable, otherwise the local
+    // folder/sanitised project name. This is what collapses two
+    // worktrees of the same repo into one ProjectUsage row.
+    //
+    // Value tuple: (project_path, session_keys, bucket, repo_marker).
+    // `repo_marker` is `Some(owner/repo)` when the key came from the
+    // remote and `None` when it fell back to the folder name.
+    let mut project_map: HashMap<String, (String, HashSet<String>, TokenBucket, Option<String>)> =
+        HashMap::new();
+    // Per-cwd repo lookup cache: shared across the loop so each
+    // distinct working directory is parsed at most once.
+    let mut repo_cache: HashMap<String, Option<String>> = HashMap::new();
     let mut session_map: HashMap<String, SessionUsageAccumulator> = HashMap::new();
     let mut model_map: HashMap<String, TokenBucket> = HashMap::new();
     let mut branch_map: HashMap<String, TokenBucket> = HashMap::new();
@@ -1466,21 +1494,33 @@ fn aggregate_calls_with_analysis(
         let day = call.timestamp.with_timezone(&Local).date_naive();
         let session_key = format!("{}:{}:{}", call.provider, call.project, call.session_id);
 
+        // Resolve the call's working directory to an upstream repo id
+        // so worktrees collapse. Falls back to the folder/sanitised
+        // project name when the cwd isn't a git repo or has no origin.
+        let resolved_repo = repo_lookup::resolve_repo(&call.project_path, &mut repo_cache);
+        let project_key = resolved_repo.clone().unwrap_or_else(|| call.project.clone());
+
         let daily = daily_map.entry(day).or_default();
-        daily.0.insert(call.project.clone());
+        daily.0.insert(project_key.clone());
         daily.1.insert(session_key.clone());
         daily.2.merge(&bucket);
 
-        let project = project_map.entry(call.project.clone()).or_insert_with(|| {
+        let project = project_map.entry(project_key.clone()).or_insert_with(|| {
             (
                 call.project_path.clone(),
                 HashSet::new(),
                 TokenBucket::default(),
+                resolved_repo.clone(),
             )
         });
         project.0 = call.project_path.clone();
         project.1.insert(session_key.clone());
         project.2.merge(&bucket);
+        // Once a row is keyed by the upstream repo, keep it that way
+        // even if a later call from the same key fails resolution.
+        if project.3.is_none() && resolved_repo.is_some() {
+            project.3 = resolved_repo.clone();
+        }
 
         let session = session_map.entry(session_key).or_insert_with(|| SessionUsageAccumulator {
             provider: call.provider.clone(),
@@ -1548,9 +1588,14 @@ fn aggregate_calls_with_analysis(
 
     let mut projects: Vec<_> = project_map
         .into_iter()
-        .map(|(name, (path, sessions, mut bucket))| {
+        .map(|(name, (path, sessions, mut bucket, repo))| {
             bucket.session_count = sessions.len();
-            ProjectUsage { name, path, bucket }
+            ProjectUsage {
+                name,
+                path,
+                bucket,
+                repo,
+            }
         })
         .collect();
     sort_by_bucket_desc(&mut projects, |p| &p.bucket);
@@ -3654,5 +3699,87 @@ mod tests {
         let yield_result = analyze_yield(&data);
         assert_eq!(yield_result.productive_sessions, 1);
         assert_eq!(yield_result.abandoned_sessions, 1);
+    }
+
+    /// Two worktrees of the same upstream repo must collapse into a
+    /// single ProjectUsage row keyed by `owner/repo`. We materialise a
+    /// pair of throwaway repos on disk that share an `origin` so the
+    /// resolver attributes both worktrees to the same upstream id.
+    #[test]
+    fn aggregation_collapses_worktrees_with_shared_origin() {
+        let temp = tempdir().unwrap();
+        let wt_a = temp.path().join("wt-a");
+        let wt_b = temp.path().join("wt-b");
+
+        for wt in [&wt_a, &wt_b] {
+            let git_dir = wt.join(".git");
+            std::fs::create_dir_all(&git_dir).unwrap();
+            std::fs::write(
+                git_dir.join("config"),
+                "[remote \"origin\"]\n\turl = git@github.com:acme/widget.git\n",
+            )
+            .unwrap();
+        }
+
+        // Distinct sanitised project names — same upstream repo.
+        let mut call1 = provider_call(
+            "claude",
+            "s1",
+            "2026-04-10T09:00:00Z",
+            "edit",
+            &[],
+            &[],
+            100,
+        );
+        call1.project = "wt-a-folder".to_string();
+        call1.project_path = wt_a.to_string_lossy().into_owned();
+
+        let mut call2 = provider_call(
+            "claude",
+            "s2",
+            "2026-04-10T10:00:00Z",
+            "edit",
+            &[],
+            &[],
+            150,
+        );
+        call2.project = "wt-b-folder".to_string();
+        call2.project_path = wt_b.to_string_lossy().into_owned();
+
+        let data = aggregate_calls(vec![call1, call2]);
+        assert_eq!(data.projects.len(), 1, "worktrees should collapse");
+        let proj = &data.projects[0];
+        assert_eq!(proj.name, "acme/widget");
+        assert_eq!(proj.repo.as_deref(), Some("acme/widget"));
+        assert_eq!(proj.bucket.input_tokens, 250);
+    }
+
+    /// When a call's working directory has no resolvable upstream the
+    /// row falls back to the sanitised project name and `repo` stays
+    /// `None`.
+    #[test]
+    fn aggregation_falls_back_to_folder_when_no_origin() {
+        let temp = tempdir().unwrap();
+        let wt = temp.path().join("plain");
+        std::fs::create_dir_all(&wt).unwrap();
+        // No .git at all.
+
+        let mut call = provider_call(
+            "claude",
+            "s1",
+            "2026-04-10T09:00:00Z",
+            "edit",
+            &[],
+            &[],
+            100,
+        );
+        call.project = "plain-folder".to_string();
+        call.project_path = wt.to_string_lossy().into_owned();
+
+        let data = aggregate_calls(vec![call]);
+        assert_eq!(data.projects.len(), 1);
+        let proj = &data.projects[0];
+        assert_eq!(proj.name, "plain-folder");
+        assert!(proj.repo.is_none());
     }
 }

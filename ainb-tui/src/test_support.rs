@@ -194,6 +194,7 @@ pub fn sample_usage_data() -> UsageData {
             name: "agents-in-a-box".to_string(),
             path: "/tmp/agents-in-a-box".to_string(),
             bucket: bucket.clone(),
+            repo: None,
         }],
         grand_total: bucket.clone(),
         sessions: vec![SessionUsage {
