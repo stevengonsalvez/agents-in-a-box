@@ -1,5 +1,5 @@
 {
-  "_comment": "Reflect plugin hook snippets. Copy relevant sections into ~/.claude/settings.json hooks block.",
+  "_comment": "LEGACY/REFERENCE — as of plugin 3.2.0, `claude plugin install reflect@agents-in-a-box` auto-wires SessionStart (recall + reflect-drain-bg.sh) and PreCompact hooks via plugin.json. This snippet is retained for (a) Codex/Copilot adapter consumers that don't speak the Claude plugin runtime, and (b) showing alternative PreCompact variants (`_PreCompact_full`, `_PreCompact_auto`). Do NOT copy SessionStart blocks here into Claude Code settings.json — they are duplicates of the auto-wired hooks.",
 
   "hooks": {
     "SessionStart": [
