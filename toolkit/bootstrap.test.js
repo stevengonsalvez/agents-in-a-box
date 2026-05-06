@@ -106,7 +106,7 @@ describe('CLI Rule Copier', () => {
         const target = path.join(tempDir, 'sdd-project');
         fs.mkdirSync(target, { recursive: true });
 
-        execSync(`node create-rule.js --sdd --targetFolder=${target}`, { stdio: 'pipe', env: { ...process.env, SPEC_KIT_REPO: fakeRepo } });
+        execSync(`node bootstrap.js --sdd --targetFolder=${target}`, { stdio: 'pipe', env: { ...process.env, SPEC_KIT_REPO: fakeRepo } });
 
         // Commands copied
         expect(fs.existsSync(path.join(target, '.claude', 'commands', 'specify.md'))).toBe(true);
@@ -162,7 +162,7 @@ describe('CLI Rule Copier', () => {
         fs.mkdirSync(path.join(target, 'templates'), { recursive: true });
         fs.writeFileSync(path.join(target, 'templates', 'plan-template.md'), 'DIFFERENT');
 
-        execSync(`node create-rule.js --sdd --targetFolder=${target}`, { stdio: 'pipe', env: { ...process.env, SPEC_KIT_REPO: fakeRepo } });
+        execSync(`node bootstrap.js --sdd --targetFolder=${target}`, { stdio: 'pipe', env: { ...process.env, SPEC_KIT_REPO: fakeRepo } });
 
         expect(fs.existsSync(path.join(target, 'templates', 'plan-template.md.bak'))).toBe(true);
     });
@@ -210,7 +210,7 @@ printf '{"FEATURE_SPEC":"%s","IMPL_PLAN":"%s","SPECS_DIR":"%s","BRANCH":"%s"}\n'
         const target = path.join(tempDir, 'sdd-smoke');
         fs.mkdirSync(target, { recursive: true });
 
-        execSync(`node create-rule.js --sdd --targetFolder=${target}`, { stdio: 'pipe', env: { ...process.env, SPEC_KIT_REPO: fakeRepo } });
+        execSync(`node bootstrap.js --sdd --targetFolder=${target}`, { stdio: 'pipe', env: { ...process.env, SPEC_KIT_REPO: fakeRepo } });
 
         // Init git and create initial commit to satisfy HEAD-based scripts
         execSync('git init', { cwd: target, stdio: 'pipe' });
@@ -238,7 +238,7 @@ printf '{"FEATURE_SPEC":"%s","IMPL_PLAN":"%s","SPECS_DIR":"%s","BRANCH":"%s"}\n'
         const target = path.join(tempDir, tool);
         fs.mkdirSync(target, { recursive: true });
 
-        const command = `node create-rule.js --tool=${tool} --targetFolder=${target}`;
+        const command = `node bootstrap.js --tool=${tool} --targetFolder=${target}`;
         execSync(command, {
             stdio: 'pipe',
             env: { ...process.env },
@@ -257,7 +257,7 @@ printf '{"FEATURE_SPEC":"%s","IMPL_PLAN":"%s","SPECS_DIR":"%s","BRANCH":"%s"}\n'
         const target = path.join(tempDir, tool);
         fs.mkdirSync(target, { recursive: true });
 
-        const command = `node create-rule.js --tool=${tool} --targetFolder=${target}`;
+        const command = `node bootstrap.js --tool=${tool} --targetFolder=${target}`;
         execSync(command, {
             stdio: 'pipe',
             env: { ...process.env },
@@ -297,7 +297,7 @@ printf '{"FEATURE_SPEC":"%s","IMPL_PLAN":"%s","SPECS_DIR":"%s","BRANCH":"%s"}\n'
         const target = path.join(tempDir, tool);
         fs.mkdirSync(target, { recursive: true });
 
-        const command = `node create-rule.js --tool=${tool} --targetFolder=${target}`;
+        const command = `node bootstrap.js --tool=${tool} --targetFolder=${target}`;
         execSync(command, {
             stdio: 'pipe',
             env: { ...process.env },
@@ -353,7 +353,7 @@ printf '{"FEATURE_SPEC":"%s","IMPL_PLAN":"%s","SPECS_DIR":"%s","BRANCH":"%s"}\n'
         fs.mkdirSync(mockHomeDir, { recursive: true });
         const destDir = path.join(mockHomeDir, config.targetSubdir);
 
-        const command = `node create-rule.js --tool=${tool} --homeDir=${mockHomeDir}`;
+        const command = `node bootstrap.js --tool=${tool} --homeDir=${mockHomeDir}`;
         execSync(command, {
             stdio: 'pipe',
             env: { ...process.env },
@@ -392,7 +392,7 @@ printf '{"FEATURE_SPEC":"%s","IMPL_PLAN":"%s","SPECS_DIR":"%s","BRANCH":"%s"}\n'
         fs.mkdirSync(claudeCodeMockHomeDir, { recursive: true });
         const claudeCodeDestDir = path.join(claudeCodeMockHomeDir, claudeCodeConfig.targetSubdir);
 
-        const claudeCodeCommand = `node create-rule.js --tool=${claudeCodeTool} --homeDir=${claudeCodeMockHomeDir}`;
+        const claudeCodeCommand = `node bootstrap.js --tool=${claudeCodeTool} --homeDir=${claudeCodeMockHomeDir}`;
         execSync(claudeCodeCommand, {
             stdio: 'pipe',
             env: { ...process.env },
@@ -409,7 +409,7 @@ printf '{"FEATURE_SPEC":"%s","IMPL_PLAN":"%s","SPECS_DIR":"%s","BRANCH":"%s"}\n'
         const geminiTarget = path.join(tempDir, 'gemini-test');
         fs.mkdirSync(geminiTarget, { recursive: true });
 
-        const geminiCommand = `node create-rule.js --tool=${geminiTool} --targetFolder=${geminiTarget}`;
+        const geminiCommand = `node bootstrap.js --tool=${geminiTool} --targetFolder=${geminiTarget}`;
         execSync(geminiCommand, {
             stdio: 'pipe',
             env: { ...process.env },
@@ -425,7 +425,7 @@ printf '{"FEATURE_SPEC":"%s","IMPL_PLAN":"%s","SPECS_DIR":"%s","BRANCH":"%s"}\n'
         const amazonqTarget = path.join(tempDir, 'amazonq-test');
         fs.mkdirSync(amazonqTarget, { recursive: true });
 
-        const amazonqCommand = `node create-rule.js --tool=${amazonqTool} --targetFolder=${amazonqTarget}`;
+        const amazonqCommand = `node bootstrap.js --tool=${amazonqTool} --targetFolder=${amazonqTarget}`;
         execSync(amazonqCommand, {
             stdio: 'pipe',
             env: { ...process.env },
@@ -478,7 +478,7 @@ describe('Spec-Driven Development (SDD) Setup', () => {
         const target = path.join(tempDir, 'sdd-project');
         fs.mkdirSync(target, { recursive: true });
 
-        const cmd = `node create-rule.js --sdd --targetFolder=${target}`;
+        const cmd = `node bootstrap.js --sdd --targetFolder=${target}`;
         execSync(cmd, { cwd: path.join(__dirname), stdio: 'pipe', env: { ...process.env, SPEC_KIT_REPO: fakeRepo } });
 
         // Verify core folders

@@ -411,7 +411,7 @@ const TOOL_CONFIG = {
         }
     },
     clawdhub: {
-        ruleDir: 'clawdhub-skills',
+        ruleDir: 'clawdhub',
         targetSubdir: 'skills',
         useClawdhubStructure: true,
         excludeFiles: ['_meta.json'],  // Don't copy auto-generated ClawdHub metadata
@@ -1912,7 +1912,7 @@ async function handleClawdhubSkillsCopy(tool, config, targetFolder = null, isNon
     const availableSkills = discoverClawdhubSkills(clawdhubDir);
 
     if (availableSkills.length === 0) {
-        console.log('\\n⚠️  No ClawdHub skills found in clawdhub-skills/ directory.\\n');
+        console.log('\\n⚠️  No ClawdHub skills found in clawdhub/ directory.\\n');
         return;
     }
 
