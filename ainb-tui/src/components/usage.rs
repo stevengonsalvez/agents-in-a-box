@@ -10,14 +10,14 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Paragraph, Row, Table, Tabs},
 };
 
+use crate::models::usage::{
+    BranchUsage, current_quarter, first_of_month, next_month_first, next_quarter,
+    previous_month_first, previous_quarter,
+};
 use crate::models::{
     ActivityUsage, ModelUsage, NamedUsage, ProjectUsage, SessionUsage, UsageData, UsageFilterChip,
     UsageFilters, UsagePeriod, UsageProviderFilter, UsageQuery, filter_usage_data,
     format_tokens_short, optimize_usage,
-};
-use crate::models::usage::{
-    current_quarter, first_of_month, next_month_first, next_quarter, previous_month_first,
-    previous_quarter,
 };
 
 // Color palette from TUI style guide
@@ -178,6 +178,7 @@ pub enum UsageInputMode {
 pub enum UsagePanel {
     DailyActivity,
     ByProject,
+    ByBranch,
     TopSessions,
     Live,
     ByActivity,
@@ -191,9 +192,10 @@ pub enum UsagePanel {
 }
 
 impl UsagePanel {
-    pub const ALL: [UsagePanel; 12] = [
+    pub const ALL: [UsagePanel; 13] = [
         UsagePanel::DailyActivity,
         UsagePanel::ByProject,
+        UsagePanel::ByBranch,
         UsagePanel::TopSessions,
         UsagePanel::Live,
         UsagePanel::ByActivity,
@@ -222,6 +224,7 @@ impl UsagePanel {
         match self {
             UsagePanel::DailyActivity => "Daily Activity",
             UsagePanel::ByProject => "By Project",
+            UsagePanel::ByBranch => "By Branch",
             UsagePanel::TopSessions => "Top Sessions",
             UsagePanel::Live => "Live Session Ticker",
             UsagePanel::ByActivity => "By Activity",
@@ -1492,6 +1495,7 @@ fn render_zoom_panel_body(
     let q = state.zoom_search_query.as_str();
     match panel {
         UsagePanel::ByProject => render_zoom_by_project(frame, area, data, state, q),
+        UsagePanel::ByBranch => render_zoom_by_branch(frame, area, data, state, q),
         UsagePanel::TopSessions => render_zoom_top_sessions(frame, area, data, state, q),
         UsagePanel::Live => render_zoom_top_sessions(frame, area, data, state, q),
         UsagePanel::ByModel => render_zoom_by_model(frame, area, data, state, q),
@@ -1588,6 +1592,49 @@ fn render_zoom_by_project(
     frame.render_widget(table, area);
 }
 
+/// Zoom view for the By Branch panel. `BranchUsage` carries only the
+/// branch label and a `TokenBucket`, so the zoom table is intentionally
+/// narrow — `Branch | Tokens | Cost` is everything we have. Search
+/// matches on the branch name.
+fn render_zoom_by_branch(
+    frame: &mut Frame,
+    area: Rect,
+    data: &UsageData,
+    _state: &UsageViewState,
+    query: &str,
+) {
+    let rows = apply_zoom_filter(&data.branches, query, |b| b.branch.clone());
+    let header = Row::new(vec!["#", "Branch", "Tokens", "Cost"])
+        .style(Style::default().fg(GOLD).add_modifier(Modifier::BOLD))
+        .bottom_margin(1);
+
+    let visible_rows = area.height.saturating_sub(2) as usize;
+    let table_rows: Vec<Row> = rows
+        .iter()
+        .enumerate()
+        .take(visible_rows)
+        .map(|(idx, row)| {
+            let b = &row.bucket;
+            Row::new(vec![
+                format!("{}", idx + 1),
+                row.branch.clone(),
+                format_tokens_short(b.total()),
+                format_cost(b.cost_usd),
+            ])
+            .style(Style::default().fg(SOFT_WHITE))
+        })
+        .collect();
+
+    let widths = [
+        Constraint::Length(4),
+        Constraint::Min(20),
+        Constraint::Length(10),
+        Constraint::Length(10),
+    ];
+    let table = Table::new(table_rows, widths).header(header).column_spacing(1);
+    frame.render_widget(table, area);
+}
+
 fn render_zoom_top_sessions(
     frame: &mut Frame,
     area: Rect,
@@ -1627,10 +1674,7 @@ fn render_zoom_top_sessions(
                 format_tokens_short(b.total()),
                 b.call_count.to_string(),
                 dur_str,
-                sess.last_timestamp
-                    .with_timezone(&chrono::Local)
-                    .format("%Y-%m-%d")
-                    .to_string(),
+                sess.last_timestamp.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string(),
             ])
             .style(Style::default().fg(SOFT_WHITE))
         })
@@ -1878,6 +1922,14 @@ fn build_detail_lines(
                 lines.push(kv("Sessions", p.bucket.session_count.to_string()));
             }
         }
+        UsagePanel::ByBranch => {
+            if let Some(b) = data.branches.get(row) {
+                lines.push(kv("Branch", b.branch.clone()));
+                lines.push(kv("Cost", format_cost(b.bucket.cost_usd)));
+                lines.push(kv("Tokens", format_tokens_short(b.bucket.total())));
+                lines.push(kv("Calls", b.bucket.call_count.to_string()));
+            }
+        }
         UsagePanel::TopSessions | UsagePanel::Live => {
             if let Some(s) = data.sessions.get(row) {
                 lines.push(kv("Session", s.session_id.clone()));
@@ -2009,11 +2061,7 @@ fn top_projects_for_model(data: &UsageData, model_name: &str, n: usize) -> Strin
     if rows.is_empty() {
         return "—".to_string();
     }
-    rows.iter()
-        .take(n)
-        .map(|(p, _)| p.clone())
-        .collect::<Vec<_>>()
-        .join(" · ")
+    rows.iter().take(n).map(|(p, _)| p.clone()).collect::<Vec<_>>().join(" · ")
 }
 
 /// Render a duration (in seconds) as `1h 04m` / `42m` / `<1m` / `0m`.
@@ -2083,7 +2131,10 @@ fn render_dashboard_grid(
         ])
         .split(area);
 
-    let top = three_columns(rows[0]);
+    // Row 0 widens to four columns so the headline "where my tokens
+    // went" cluster (Daily Activity | By Project | By Branch | Live)
+    // reads left-to-right. Rows 1–3 stay 3-column.
+    let top = four_columns(rows[0]);
     render_daily_activity_panel(
         frame,
         top[0],
@@ -2096,9 +2147,15 @@ fn render_dashboard_grid(
         &data.projects,
         FocusCtx::for_panel(state, UsagePanel::ByProject),
     );
-    render_live_panel(
+    render_branch_panel(
         frame,
         top[2],
+        &data.branches,
+        FocusCtx::for_panel(state, UsagePanel::ByBranch),
+    );
+    render_live_panel(
+        frame,
+        top[3],
         &data.sessions,
         FocusCtx::for_panel(state, UsagePanel::Live),
     );
@@ -2228,11 +2285,25 @@ fn render_dashboard_compact(
         &data.activities,
         FocusCtx::for_panel(state, UsagePanel::ByActivity),
     );
+    // Compact grid (≥96w, <120w): split row 1 of the right column to
+    // host By Model and By Branch side-by-side. Branches typically have
+    // few rows so a half-width column reads fine without redistributing
+    // the existing four-row vertical budget.
+    let row1 = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(right[1]);
     render_model_panel(
         frame,
-        right[1],
+        row1[0],
         &data.models,
         FocusCtx::for_panel(state, UsagePanel::ByModel),
+    );
+    render_branch_panel(
+        frame,
+        row1[1],
+        &data.branches,
+        FocusCtx::for_panel(state, UsagePanel::ByBranch),
     );
     render_optimize_compact_panel(
         frame,
@@ -2265,14 +2336,19 @@ fn render_dashboard_compact(
 }
 
 fn render_dashboard_stack(frame: &mut Frame, area: Rect, data: &UsageData, state: &UsageViewState) {
+    // Narrow-width stack (<96w): six equal-ish rows. ByBranch sits at
+    // the bottom so the pre-existing top-of-stack reading order
+    // (activity → projects → sessions → activity → models) is
+    // preserved.
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage(20),
-            Constraint::Percentage(20),
-            Constraint::Percentage(20),
-            Constraint::Percentage(20),
-            Constraint::Percentage(20),
+            Constraint::Percentage(17),
+            Constraint::Percentage(17),
+            Constraint::Percentage(17),
+            Constraint::Percentage(17),
+            Constraint::Percentage(16),
+            Constraint::Percentage(16),
         ])
         .split(area);
 
@@ -2306,6 +2382,12 @@ fn render_dashboard_stack(frame: &mut Frame, area: Rect, data: &UsageData, state
         &data.models,
         FocusCtx::for_panel(state, UsagePanel::ByModel),
     );
+    render_branch_panel(
+        frame,
+        chunks[5],
+        &data.branches,
+        FocusCtx::for_panel(state, UsagePanel::ByBranch),
+    );
 }
 
 fn three_columns(area: Rect) -> std::rc::Rc<[Rect]> {
@@ -2315,6 +2397,18 @@ fn three_columns(area: Rect) -> std::rc::Rc<[Rect]> {
             Constraint::Percentage(34),
             Constraint::Percentage(33),
             Constraint::Percentage(33),
+        ])
+        .split(area)
+}
+
+fn four_columns(area: Rect) -> std::rc::Rc<[Rect]> {
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
         ])
         .split(area)
 }
@@ -2413,8 +2507,12 @@ fn build_period_provider_strip(state: &UsageViewState) -> Vec<Line<'static>> {
     // regardless of which entry point selected the period.
     let simple: [(&str, char, fn(&UsagePeriod) -> bool); 5] = [
         ("Today", '1', |p| matches!(p, UsagePeriod::Today)),
-        ("7d", '2', |p| matches!(p, UsagePeriod::Week | UsagePeriod::LastNDays(7))),
-        ("30d", '3', |p| matches!(p, UsagePeriod::ThirtyDays | UsagePeriod::LastNDays(30))),
+        ("7d", '2', |p| {
+            matches!(p, UsagePeriod::Week | UsagePeriod::LastNDays(7))
+        }),
+        ("30d", '3', |p| {
+            matches!(p, UsagePeriod::ThirtyDays | UsagePeriod::LastNDays(30))
+        }),
         ("90d", '4', |p| matches!(p, UsagePeriod::LastNDays(90))),
         ("YTD", '5', |p| matches!(p, UsagePeriod::YearToDate)),
     ];
@@ -2722,6 +2820,56 @@ fn render_project_panel(frame: &mut Frame, area: Rect, rows: &[ProjectUsage], fo
         })
         .collect();
     render_panel_lines_with_focus(frame, area, "By Project", lines, focus);
+}
+
+/// Per-branch cost bars. Mirrors `render_project_panel` (same gradient
+/// layout / column widths) but skips the worktree-aware project label
+/// massaging — branch names are short already, so plain truncation is
+/// fine. Branchless calls were already dropped during aggregation
+/// (`UsageData.branches` only contains `Some(branch)` rows), so this
+/// panel never grows a misleading "(no branch)" bucket.
+fn render_branch_panel(frame: &mut Frame, area: Rect, rows: &[BranchUsage], focus: FocusCtx) {
+    let cap = area.height.saturating_sub(2) as usize;
+    let inner_w = area.width.saturating_sub(2) as usize;
+    if cap == 0 || inner_w < 16 {
+        render_panel_lines_with_focus(frame, area, "By Branch", vec![], focus);
+        return;
+    }
+    let max = rows
+        .iter()
+        .map(|row| row.bucket.cost_usd.unwrap_or(0.0))
+        .fold(0.0_f64, f64::max)
+        .max(1.0);
+    let value_w = rows
+        .iter()
+        .take(cap)
+        .map(|r| format_cost(r.bucket.cost_usd).chars().count())
+        .max()
+        .unwrap_or(7)
+        .max(7);
+    let label_w = ((inner_w as i32 - value_w as i32 - 4) / 2).clamp(10, 24) as usize;
+    let bar_w = inner_w.saturating_sub(1 + label_w + 1 + value_w + 1).max(4);
+    let lines: Vec<Line> = rows
+        .iter()
+        .take(cap)
+        .map(|row| {
+            let cost = row.bucket.cost_usd.unwrap_or(0.0);
+            let label = truncate_string(&row.branch, label_w);
+            let mut spans = vec![
+                Span::raw(" "),
+                Span::styled(pad_label(&label, label_w), Style::default().fg(SOFT_WHITE)),
+                Span::raw(" "),
+            ];
+            spans.extend(ratio_gradient_spans(cost, max, bar_w));
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                format!("{:>w$}", format_cost(row.bucket.cost_usd), w = value_w),
+                Style::default().fg(TERMINAL_ACCENT),
+            ));
+            Line::from(spans)
+        })
+        .collect();
+    render_panel_lines_with_focus(frame, area, "By Branch", lines, focus);
 }
 
 fn render_session_panel(frame: &mut Frame, area: Rect, rows: &[SessionUsage], focus: FocusCtx) {
@@ -3994,6 +4142,78 @@ mod cross_filter_tests {
         assert!(state.filters.is_empty());
     }
 
+    /// Tab traversal contract: ByBranch sits immediately after ByProject
+    /// in the focusable-panel sequence so the row 0 "where my tokens
+    /// went" cluster (Daily Activity → By Project → By Branch) reads
+    /// left-to-right when users walk the dashboard with Tab.
+    #[test]
+    fn branch_panel_in_panel_all_after_by_project() {
+        let proj_idx = UsagePanel::ALL
+            .iter()
+            .position(|p| *p == UsagePanel::ByProject)
+            .expect("ByProject in ALL");
+        assert_eq!(
+            UsagePanel::ALL[proj_idx + 1],
+            UsagePanel::ByBranch,
+            "ByBranch must follow ByProject in the traversal order"
+        );
+    }
+
+    #[test]
+    fn tab_traversal_visits_branch_panel_after_project() {
+        let mut state = UsageViewState::default();
+        state.focused_panel = Some(UsagePanel::ByProject);
+        state.focus_next_panel();
+        assert_eq!(state.focused_panel, Some(UsagePanel::ByBranch));
+    }
+
+    /// Brief: branches are display-only for this PR — no chip pivot.
+    #[test]
+    fn enter_on_by_branch_row_is_noop() {
+        let mut state = UsageViewState::default();
+        state.data = Some(fixture());
+        state.focused_panel = Some(UsagePanel::ByBranch);
+        state.focus_row = 0;
+        assert!(!state.commit_focused_row());
+        assert!(state.filters.is_empty());
+    }
+
+    /// Smoke test: render_branch_panel must not panic on a small frame
+    /// with a couple of synthetic BranchUsage rows, and must produce a
+    /// non-empty buffer (i.e. it actually drew something).
+    #[test]
+    fn render_branch_panel_smoke() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let rows = vec![
+            BranchUsage {
+                branch: "main".to_string(),
+                bucket: bucket(3),
+            },
+            BranchUsage {
+                branch: "feat/burndown-branches-panel".to_string(),
+                bucket: bucket(2),
+            },
+        ];
+
+        let backend = TestBackend::new(60, 8);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|frame| {
+                let area = frame.size();
+                render_branch_panel(frame, area, &rows, FocusCtx::unfocused());
+            })
+            .expect("render_branch_panel must not panic");
+
+        let buffer = terminal.backend().buffer();
+        let flat: String = (0..buffer.area().height)
+            .flat_map(|y| (0..buffer.area().width).map(move |x| (x, y)))
+            .map(|(x, y)| buffer.get(x, y).symbol().to_string())
+            .collect();
+        assert!(flat.contains("By Branch"), "panel title missing: {flat}");
+        assert!(flat.contains("main"), "branch label missing: {flat}");
+    }
+
     #[test]
     fn enter_on_leaderboard_maps_to_project_filter() {
         let mut state = UsageViewState::default();
@@ -4059,14 +4279,20 @@ mod cross_filter_tests {
 
         let line = build_filter_chip_line(&state);
         let flat: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        for needle in ["project=p", "model=m", "activity=Coding", "session=s", "branch=b"] {
+        for needle in [
+            "project=p",
+            "model=m",
+            "activity=Coding",
+            "session=s",
+            "branch=b",
+        ] {
             assert!(flat.contains(needle), "chip strip missing {needle}: {flat}");
         }
     }
 
     #[test]
     fn x_on_by_project_row_adds_exclude_chip_and_filter_drops_project() {
-        use crate::models::usage::{filter_usage_data, UsageData, UsageFilters};
+        use crate::models::usage::{UsageData, UsageFilters, filter_usage_data};
         use crate::test_support::ProviderCallBuilder;
         use std::collections::HashMap;
 
@@ -4076,7 +4302,10 @@ mod cross_filter_tests {
         state.focus_row = 1; // beta
         assert!(state.commit_focused_row_exclude());
         assert_eq!(state.filters.exclude_project, vec!["beta".to_string()]);
-        assert!(state.filters.project.is_empty(), "include side must be untouched");
+        assert!(
+            state.filters.project.is_empty(),
+            "include side must be untouched"
+        );
 
         // End-to-end: filter_usage_data must drop calls matching the
         // exclude project, leaving only the alpha call.
@@ -4119,7 +4348,10 @@ mod cross_filter_tests {
         state.oldest_call_day = NaiveDate::from_ymd_opt(2026, 4, 1);
         state.period = UsagePeriod::SpecificMonth(NaiveDate::from_ymd_opt(2026, 5, 1).unwrap());
 
-        assert!(state.step_period_back(), "April is in range; back must succeed");
+        assert!(
+            state.step_period_back(),
+            "April is in range; back must succeed"
+        );
         assert_eq!(
             state.period,
             UsagePeriod::SpecificMonth(NaiveDate::from_ymd_opt(2026, 4, 1).unwrap()),
@@ -4135,7 +4367,10 @@ mod cross_filter_tests {
         state.oldest_call_day = NaiveDate::from_ymd_opt(2026, 5, 15);
         state.period = UsagePeriod::SpecificMonth(NaiveDate::from_ymd_opt(2026, 5, 1).unwrap());
 
-        assert!(!state.step_period_back(), "April predates oldest May 15; back must fail");
+        assert!(
+            !state.step_period_back(),
+            "April predates oldest May 15; back must fail"
+        );
         assert_eq!(
             state.period,
             UsagePeriod::SpecificMonth(NaiveDate::from_ymd_opt(2026, 5, 1).unwrap()),
