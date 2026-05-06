@@ -373,11 +373,19 @@ main() {
 
     # Reindex if anything succeeded.
     if [[ "$ok" -gt 0 ]]; then
-        log "running reflect reindex (incremental)"
-        if timeout 300 reflect reindex >>"$LOG_FILE" 2>&1; then
-            log "reindex OK"
+        if ! command -v reflect >/dev/null 2>&1; then
+            log "reindex SKIP: 'reflect' CLI not on PATH"
+            log "  → install reflect-kb to enable GraphRAG reindex of new learnings:"
+            log "      uv tool install --upgrade 'git+https://github.com/stevengonsalvez/reflect-kb.git[graph]'"
+            log "  → without it, learnings are still captured to disk; just won't appear in /recall"
+            log "    until a manual 'reflect reindex' runs"
         else
-            log "reindex returned non-zero (continuing; not fatal)"
+            log "running reflect reindex (incremental)"
+            if timeout 300 reflect reindex >>"$LOG_FILE" 2>&1; then
+                log "reindex OK"
+            else
+                log "reindex returned non-zero (continuing; not fatal)"
+            fi
         fi
     fi
 
