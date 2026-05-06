@@ -1,74 +1,72 @@
 {
-  "_comment": "LEGACY/REFERENCE — as of plugin 3.2.0, `claude plugin install reflect@agents-in-a-box` auto-wires SessionStart (recall + reflect-drain-bg.sh) and PreCompact hooks via plugin.json. This snippet is retained for (a) Codex/Copilot adapter consumers that don't speak the Claude plugin runtime, and (b) showing alternative PreCompact variants (`_PreCompact_full`, `_PreCompact_auto`). Do NOT copy SessionStart blocks here into Claude Code settings.json — they are duplicates of the auto-wired hooks.",
+  "_about": "Optional add-ons for the reflect plugin's auto-wired hooks. Plugin 3.2.0+ already wires (via plugin.json): SessionStart -> recall + reflect-drain-bg.sh; PreCompact -> precompact_reflect.py --auto --verbose. Each named variant below is an OPT-IN extension or replacement. To use, copy the inner `hooks` object into ~/.claude/settings.json (or your tool's equivalent).",
+  "_for_non_claude_tools": "Codex / Copilot adapter consumers don't run the Claude plugin runtime, so they need to copy the `non-claude-tools` variant verbatim — that's the manual fallback for the plugin's auto-wired defaults.",
 
-  "hooks": {
-    "SessionStart": [
-      {
-        "_comment": "Phase 2: inject top-3 relevant learnings into new session context",
-        "matcher": "",
-        "hooks": [
+  "variants": {
+    "with-handover-and-backup": {
+      "_purpose": "Adds /handover trigger + transcript backup to PreCompact, RUNNING ALONGSIDE the auto-wired --auto reflection (both fire). Useful if you want a recoverable pre-compaction snapshot and a structured handover doc.",
+      "_requires": "{{HOME_TOOL_DIR}}/hooks/pre_compact.py — ships with the agents-in-a-box toolkit (not the reflect plugin alone). Verify it exists before enabling.",
+      "_merge_target": "Append this PreCompact block to settings.json `hooks.PreCompact` (does NOT replace the auto-wired one).",
+      "hooks": {
+        "PreCompact": [
           {
-            "type": "command",
-            "command": "uv run {{HOME_TOOL_DIR}}/skills/recall/hooks/session_start_recall.py"
+            "matcher": "",
+            "hooks": [
+              {
+                "type": "command",
+                "command": "uv run {{HOME_TOOL_DIR}}/hooks/pre_compact.py --handover --backup --verbose"
+              }
+            ]
           }
         ]
       }
-    ],
+    },
 
-    "PreCompact": [
-      {
-        "matcher": "",
-        "hooks": [
+    "remind-only": {
+      "_purpose": "REPLACE the auto-wired --auto reflection with a non-blocking --remind. Use this if you'd rather invoke /reflect manually instead of having the bg drainer process queued transcripts.",
+      "_merge_target": "Disable the plugin's PreCompact (remove from settings.json or fork the plugin) and copy this in.",
+      "hooks": {
+        "PreCompact": [
           {
-            "_comment": "Option 1: reminder-only (non-blocking nudge)",
-            "type": "command",
-            "command": "uv run {{HOME_TOOL_DIR}}/skills/reflect/hooks/precompact_reflect.py --remind"
+            "matcher": "",
+            "hooks": [
+              {
+                "type": "command",
+                "command": "uv run {{HOME_TOOL_DIR}}/skills/reflect/hooks/precompact_reflect.py --remind"
+              }
+            ]
           }
         ]
       }
-    ],
+    },
 
-    "_PreCompact_auto": [
-      {
-        "matcher": "",
-        "hooks": [
+    "non-claude-tools": {
+      "_purpose": "Manual fallback for tools that don't run the Claude plugin runtime (Codex, Copilot, custom harnesses). Reproduces what plugin.json auto-wires for Claude Code.",
+      "_merge_target": "Replace your tool's settings hooks block entirely with this.",
+      "hooks": {
+        "SessionStart": [
           {
-            "_comment": "Option 2: Auto-reflect — queues the transcript so the *next* SessionStart agent runs /reflect on it. Requires the SessionStart drain hook below.",
-            "type": "command",
-            "command": "uv run {{HOME_TOOL_DIR}}/skills/reflect/hooks/precompact_reflect.py --auto --verbose"
+            "matcher": "",
+            "hooks": [
+              {
+                "type": "command",
+                "command": "uv run {{HOME_TOOL_DIR}}/skills/recall/hooks/session_start_recall.py"
+              }
+            ]
+          }
+        ],
+        "PreCompact": [
+          {
+            "matcher": "",
+            "hooks": [
+              {
+                "type": "command",
+                "command": "uv run {{HOME_TOOL_DIR}}/skills/reflect/hooks/precompact_reflect.py --auto --verbose"
+              }
+            ]
           }
         ]
       }
-    ],
-
-    "_PreCompact_full": [
-      {
-        "_comment": "Option 3: Handover + backup + auto-reflect. CRITICAL: each command MUST be a separate hooks-array entry, NOT chained with &&. Hook stdin is consumed by the first reader, so chained commands silently lose the JSON event payload (only the last command sees stdin in a shell pipeline).",
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "uv run {{HOME_TOOL_DIR}}/hooks/pre_compact.py --handover --backup --verbose"
-          },
-          {
-            "type": "command",
-            "command": "uv run {{HOME_TOOL_DIR}}/skills/reflect/hooks/precompact_reflect.py --auto --verbose"
-          }
-        ]
-      }
-    ],
-
-    "SessionStart": [
-      {
-        "_comment": "Drain hook for Option 2/3 above: surfaces queued auto-reflections to the new agent via additionalContext, so the agent (which IS an LLM) can run /reflect on each transcript. Exits silently when the queue is empty.",
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "uv run {{HOME_TOOL_DIR}}/skills/reflect/hooks/sessionstart_drain_reflections.py"
-          }
-        ]
-      }
-    ]
+    }
   }
 }
