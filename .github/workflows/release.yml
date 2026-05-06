@@ -281,19 +281,20 @@ jobs:
             *Intel Mac users: Use `cargo install` or run the Linux binary via Rosetta 2*
 
   homebrew:
-    name: Update Homebrew Formula
+    name: Update Homebrew Tap
     needs: [prepare, build, release]
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout tap repo
+        uses: actions/checkout@v4
         with:
-          ref: main
-          token: ${{ secrets.GITHUB_TOKEN }}
+          repository: stevengonsalvez/homebrew-agents-in-a-box
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
 
       - name: Configure git
+        working-directory: tap
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -307,27 +308,15 @@ jobs:
         run: |
           VERSION="${{ needs.prepare.outputs.version }}"
 
-          # Debug: show artifacts structure
-          echo "Artifacts structure:"
-          ls -la artifacts/ || true
-          ls -la artifacts/*/ || true
-
-          # Calculate SHA256 for macOS ARM binary
           MAC_SHA=$(cat artifacts/aarch64-apple-darwin/*.sha256 | awk '{print $1}')
-          echo "MAC_SHA: $MAC_SHA"
-
-          # Calculate SHA256 for Linux binary
           LINUX_SHA=$(cat artifacts/x86_64-unknown-linux-gnu/*.sha256 | awk '{print $1}')
-          echo "LINUX_SHA: $LINUX_SHA"
-
-          # Validate SHA values are not empty
           if [ -z "$MAC_SHA" ] || [ -z "$LINUX_SHA" ]; then
             echo "Error: Failed to extract SHA256 values"
             exit 1
           fi
 
-          # Update Formula/ainb.rb
-          cat > Formula/ainb.rb << 'FORMULA'
+          mkdir -p tap/Formula
+          cat > tap/Formula/ainb.rb << 'FORMULA'
           class Ainb < Formula
             desc "Terminal-based development environment manager for Claude Code agents"
             homepage "https://github.com/stevengonsalvez/agents-in-a-box"
@@ -358,17 +347,17 @@ jobs:
           end
           FORMULA
 
-          # Replace placeholders
-          sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" Formula/ainb.rb
-          sed -i "s/MAC_SHA_PLACEHOLDER/${MAC_SHA}/g" Formula/ainb.rb
-          sed -i "s/LINUX_SHA_PLACEHOLDER/${LINUX_SHA}/g" Formula/ainb.rb
+          sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" tap/Formula/ainb.rb
+          sed -i "s/MAC_SHA_PLACEHOLDER/${MAC_SHA}/g" tap/Formula/ainb.rb
+          sed -i "s/LINUX_SHA_PLACEHOLDER/${LINUX_SHA}/g" tap/Formula/ainb.rb
 
-          echo "Updated Formula/ainb.rb to version ${VERSION}"
-          cat Formula/ainb.rb
+          echo "Updated tap/Formula/ainb.rb to version ${VERSION}"
+          cat tap/Formula/ainb.rb
 
       - name: Commit and push Formula update
+        working-directory: tap
         run: |
           VERSION="${{ needs.prepare.outputs.version }}"
           git add Formula/ainb.rb
-          git commit -m "chore(homebrew): update formula to v${VERSION}" || echo "No changes to commit"
-          git push origin main
+          git commit -m "chore: update ainb formula to v${VERSION}" || echo "No changes to commit"
+          git push
