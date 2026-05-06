@@ -118,7 +118,7 @@ update_nanoclaw() {
 # fallback for Codex/Copilot which lack plugin runtime parity.
 update_reflect() {
   section "reflect plugin (claude plugin install via in-repo marketplace)"
-  run "claude plugin marketplace add stevengonsalvez/ai-coder-rules"
+  run "claude plugin marketplace add stevengonsalvez/agents-in-a-box"
   run "claude plugin install reflect@agents-in-a-box"
   echo "  Sub-skills deployed: reflect, reflect:consolidate, reflect:ingest, recall, reflect-status"
   echo "  (Codex/Copilot still use the python adapter — see"

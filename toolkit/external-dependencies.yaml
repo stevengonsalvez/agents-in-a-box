@@ -371,11 +371,11 @@ claude-plugins:
     docs: "https://github.com/anthropics/claude-plugins-official/tree/main/plugins/playground"
 
   - name: reflect
-    marketplace: stevengonsalvez/ai-coder-rules
+    marketplace: stevengonsalvez/agents-in-a-box
     marketplace_id: agents-in-a-box
     version: "3.1.0"
     install: |
-      claude plugin marketplace add stevengonsalvez/ai-coder-rules
+      claude plugin marketplace add stevengonsalvez/agents-in-a-box
       claude plugin install reflect@agents-in-a-box
     purpose: "Agent self-improvement + retrieval (GraphRAG-backed learnings KB)"
     has_skills: true  # Plugin ships skills/ tree (reflect, recall, consolidate, ingest, reflect-status)
@@ -387,7 +387,7 @@ claude-plugins:
       - PreCompact hook queues a reflection on every conversation compaction
       - Background drainer processes queued reflections without blocking the agent
       - Sub-skills: reflect, reflect:consolidate, reflect:ingest, reflect:recall, reflect-status
-    in-repo-marketplace: ".claude-plugin/marketplace.json (lives at the root of stevengonsalvez/ai-coder-rules)"
+    in-repo-marketplace: ".claude-plugin/marketplace.json (at the root of stevengonsalvez/agents-in-a-box)"
     plugin-source: "toolkit/packages/plugins/reflect/.claude-plugin/plugin.json"
 
   - name: dev-browser
