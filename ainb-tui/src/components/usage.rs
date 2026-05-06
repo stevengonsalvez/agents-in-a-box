@@ -2131,7 +2131,10 @@ fn render_dashboard_grid(
         ])
         .split(area);
 
-    let top = three_columns(rows[0]);
+    // Row 0 widens to four columns so the headline "where my tokens
+    // went" cluster (Daily Activity | By Project | By Branch | Live)
+    // reads left-to-right. Rows 1–3 stay 3-column.
+    let top = four_columns(rows[0]);
     render_daily_activity_panel(
         frame,
         top[0],
@@ -2144,9 +2147,15 @@ fn render_dashboard_grid(
         &data.projects,
         FocusCtx::for_panel(state, UsagePanel::ByProject),
     );
-    render_live_panel(
+    render_branch_panel(
         frame,
         top[2],
+        &data.branches,
+        FocusCtx::for_panel(state, UsagePanel::ByBranch),
+    );
+    render_live_panel(
+        frame,
+        top[3],
         &data.sessions,
         FocusCtx::for_panel(state, UsagePanel::Live),
     );
@@ -2276,11 +2285,25 @@ fn render_dashboard_compact(
         &data.activities,
         FocusCtx::for_panel(state, UsagePanel::ByActivity),
     );
+    // Compact grid (≥96w, <120w): split row 1 of the right column to
+    // host By Model and By Branch side-by-side. Branches typically have
+    // few rows so a half-width column reads fine without redistributing
+    // the existing four-row vertical budget.
+    let row1 = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(right[1]);
     render_model_panel(
         frame,
-        right[1],
+        row1[0],
         &data.models,
         FocusCtx::for_panel(state, UsagePanel::ByModel),
+    );
+    render_branch_panel(
+        frame,
+        row1[1],
+        &data.branches,
+        FocusCtx::for_panel(state, UsagePanel::ByBranch),
     );
     render_optimize_compact_panel(
         frame,
@@ -2313,14 +2336,19 @@ fn render_dashboard_compact(
 }
 
 fn render_dashboard_stack(frame: &mut Frame, area: Rect, data: &UsageData, state: &UsageViewState) {
+    // Narrow-width stack (<96w): six equal-ish rows. ByBranch sits at
+    // the bottom so the pre-existing top-of-stack reading order
+    // (activity → projects → sessions → activity → models) is
+    // preserved.
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage(20),
-            Constraint::Percentage(20),
-            Constraint::Percentage(20),
-            Constraint::Percentage(20),
-            Constraint::Percentage(20),
+            Constraint::Percentage(17),
+            Constraint::Percentage(17),
+            Constraint::Percentage(17),
+            Constraint::Percentage(17),
+            Constraint::Percentage(16),
+            Constraint::Percentage(16),
         ])
         .split(area);
 
@@ -2354,6 +2382,12 @@ fn render_dashboard_stack(frame: &mut Frame, area: Rect, data: &UsageData, state
         &data.models,
         FocusCtx::for_panel(state, UsagePanel::ByModel),
     );
+    render_branch_panel(
+        frame,
+        chunks[5],
+        &data.branches,
+        FocusCtx::for_panel(state, UsagePanel::ByBranch),
+    );
 }
 
 fn three_columns(area: Rect) -> std::rc::Rc<[Rect]> {
@@ -2363,6 +2397,18 @@ fn three_columns(area: Rect) -> std::rc::Rc<[Rect]> {
             Constraint::Percentage(34),
             Constraint::Percentage(33),
             Constraint::Percentage(33),
+        ])
+        .split(area)
+}
+
+fn four_columns(area: Rect) -> std::rc::Rc<[Rect]> {
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
         ])
         .split(area)
 }
