@@ -21,13 +21,6 @@
         "memory",
         "recall",
         "retrieval"
-      ],
-      "skills": [
-        "./toolkit/packages/plugins/reflect/skills/reflect",
-        "./toolkit/packages/plugins/reflect/skills/recall",
-        "./toolkit/packages/plugins/reflect/skills/consolidate",
-        "./toolkit/packages/plugins/reflect/skills/ingest",
-        "./toolkit/packages/plugins/reflect/skills/reflect-status"
       ]
     }
   ]
