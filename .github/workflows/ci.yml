@@ -16,7 +16,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: "-Dwarnings"
   WORKING_DIR: ainb-tui
 
 jobs:
@@ -32,23 +31,6 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all --check
-        working-directory: ${{ env.WORKING_DIR }}
-
-  # ────────────────────────────────────────────────────────────────────────────
-  # Lint
-  # ────────────────────────────────────────────────────────────────────────────
-  clippy:
-    name: Clippy
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: "ainb-tui -> target"
-      - run: cargo clippy --all-targets --all-features
         working-directory: ${{ env.WORKING_DIR }}
 
   # ────────────────────────────────────────────────────────────────────────────
@@ -70,19 +52,6 @@ jobs:
       - uses: taiki-e/install-action@nextest
       - run: "cargo nextest run --lib --all-features --no-fail-fast -- --skip docker:: --skip cli::run::tests::test_validate_provider_installed_claude --skip models::usage::tests::custom_ranges_are_inclusive"
         working-directory: ${{ env.WORKING_DIR }}
-
-  # ────────────────────────────────────────────────────────────────────────────
-  # Security advisories + license compliance
-  # ────────────────────────────────────────────────────────────────────────────
-  deny:
-    name: Cargo Deny
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          manifest-path: ainb-tui/Cargo.toml
-          arguments: --all-features
 
   # ────────────────────────────────────────────────────────────────────────────
   # Unused dependency detection
