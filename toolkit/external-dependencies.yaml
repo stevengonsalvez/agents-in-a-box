@@ -13,7 +13,15 @@
 # =============================================================================
 
 version: "1.0.0"
-updated: "2026-04-27"
+updated: "2026-05-07"
+
+# Internal toolkit components (skills, plugins, agents, workflows, utilities)
+# are catalogued in toolkit/catalog.yaml — auto-generated from filesystem
+# by `bash toolkit/bin/generate-catalog.sh`. This file tracks ONLY external
+# dependencies (plugins, npx skills, nanoclaw skills, MCP servers).
+# The legacy `bundled-skills:` section below is kept as install metadata
+# for skills with non-trivial setup (e.g. media-processing's apt deps);
+# the canonical "what we ship" list is catalog.yaml.
 
 # =============================================================================
 # EXTERNAL PACKAGES (Python/Node packages installed globally per machine)
