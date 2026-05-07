@@ -829,12 +829,14 @@ impl UsageViewState {
 }
 
 /// Render the usage analytics screen
-pub fn render(frame: &mut Frame, area: Rect, state: &UsageViewState) {
+pub fn render(frame: &mut Frame, area: Rect, state: &UsageViewState, ctx: EnableCardCtx) {
     // The enable card is hoisted above the panel grid when the Claude
     // Code statusline isn't wired. Once Tier1 cache is flowing the card
     // disappears and the rest of the screen takes the freed space.
-    let show_enable_card = should_show_enable_card();
-    let enable_card_h: u16 = if show_enable_card { 5 } else { 0 };
+    let show_enable_card = should_show_enable_card_inner(ctx);
+    // Body is two lines + rounded borders top/bottom = 4 rows total.
+    // No padding — the card is meant to be tight, not airy.
+    let enable_card_h: u16 = if show_enable_card { 4 } else { 0 };
 
     // Main layout: optional enable card + header + provider selector
     // + tabs + content + help bar.
@@ -877,37 +879,43 @@ pub fn render(frame: &mut Frame, area: Rect, state: &UsageViewState) {
     render_help_bar(frame, layout[5], state);
 }
 
-/// True when the Stats screen should hoist the "Press W to wire" enable
-/// card above the panel grid. We show it when the live window has *no*
-/// data at all (Source::None) and the user's settings.json doesn't
-/// already carry our block.
-///
-/// Tier2Local is intentionally treated as "card hidden" — at that point
-/// the user is already getting the 5h burn estimate, so the contextual
-/// hint inside the Burndown Budget panel (which mentions the missing 7d
-/// data) is a better fit than a top-of-screen alarm.
-fn should_show_enable_card() -> bool {
-    use crate::cli::statusline_install::detect_statusline_status;
-    use crate::models::live_window::current;
-
-    let status = detect_statusline_status().ok();
-    should_show_enable_card_inner(current().source, status.as_ref())
+/// Inputs the Stats screen needs to decide whether to hoist the enable
+/// card above the panel grid. The caller (`layout.rs`) computes these
+/// once per frame from the cached statusline detection so this code path
+/// never touches the filesystem.
+#[derive(Debug, Clone)]
+pub struct EnableCardCtx {
+    pub live_source: crate::models::live_window::Source,
+    pub statusline_status: Option<crate::cli::statusline_install::StatuslineStatus>,
+    pub statusline_decision: crate::config::StatuslineDecision,
 }
 
-/// Pure decision logic for `should_show_enable_card`. Split out for
-/// unit testing without touching the live cache or filesystem.
-fn should_show_enable_card_inner(
-    live_source: crate::models::live_window::Source,
-    statusline_status: Option<&crate::cli::statusline_install::StatuslineStatus>,
-) -> bool {
+/// Pure decision logic for whether the Stats screen should hoist the
+/// "Press W to wire" enable card above the panel grid.
+///
+/// Visibility rule:
+/// - Live window source must be `None` — Tier1Cache means data is
+///   already flowing; Tier2Local intentionally hides the card so the
+///   Burndown Budget panel's contextual hint stays the canonical
+///   surface for the "5h works, 7d doesn't" state.
+/// - Statusline must not already carry our block (NotConfigured or
+///   `Other` — i.e. there's something for `W` to do).
+/// - User must not have explicitly declined in the init wizard. The
+///   top-bar CTA already respects this; the Stats card mirrors it so
+///   the two surfaces never disagree.
+pub(crate) fn should_show_enable_card_inner(ctx: EnableCardCtx) -> bool {
     use crate::cli::statusline_install::StatuslineStatus;
+    use crate::config::StatuslineDecision;
     use crate::models::live_window::Source;
 
-    if live_source != Source::None {
+    if ctx.statusline_decision == StatuslineDecision::Declined {
+        return false;
+    }
+    if ctx.live_source != Source::None {
         return false;
     }
     matches!(
-        statusline_status,
+        ctx.statusline_status,
         Some(StatuslineStatus::NotConfigured) | Some(StatuslineStatus::Other(_))
     )
 }
@@ -938,7 +946,10 @@ fn build_enable_card_lines() -> Vec<Line<'static>> {
                 Style::default().fg(red).add_modifier(Modifier::BOLD),
             ),
             Span::styled(" — Press ", Style::default().fg(MUTED_GRAY)),
-            Span::styled("[W]", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[W]",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" to wire up", Style::default().fg(MUTED_GRAY)),
         ]),
         Line::from(Span::styled(
@@ -3422,7 +3433,10 @@ fn budget_live_header_lines(
             )));
             out.push(Line::from(vec![
                 Span::styled("    Press ", Style::default().fg(MUTED_GRAY)),
-                Span::styled("[W]", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "[W]",
+                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(
                     " to wire up Claude Code statusline.",
                     Style::default().fg(MUTED_GRAY),
@@ -4993,89 +5007,125 @@ mod enable_card_tests {
                 if span.content.contains("[W]") && span.style.fg == Some(GOLD) {
                     found_gold_w = true;
                 }
-                if span.content.contains("⚠") && span.style.fg == Some(Color::Rgb(230, 100, 100)) {
+                if span.content.contains("⚠") && span.style.fg == Some(Color::Rgb(230, 100, 100))
+                {
                     found_red_warning = true;
                 }
             }
         }
-        assert!(found_gold_w, "[W] should be styled GOLD per tui-style-guide");
+        assert!(
+            found_gold_w,
+            "[W] should be styled GOLD per tui-style-guide"
+        );
         assert!(found_red_warning, "warning glyph should use the CTA red");
     }
 
     #[test]
     fn card_is_two_lines_for_compact_layout() {
-        // The enable-card row is `Constraint::Length(5)` (4 inner + 2
-        // border ~= 4 lines visible incl. padding). Body must stay at
-        // two text lines so it fits without scroll.
+        // The enable-card row is `Constraint::Length(4)` (2 borders +
+        // 2 body lines, no padding). Body must stay at two text lines
+        // so it fits without scroll.
         let lines = build_enable_card_lines();
         assert_eq!(
             lines.len(),
             2,
-            "enable card body must remain two lines; layout reserves only 5 rows"
+            "enable card body must remain two lines; layout reserves only 4 rows"
         );
+    }
+
+    use crate::cli::statusline_install::StatuslineStatus;
+    use crate::config::StatuslineDecision;
+    use crate::models::live_window::Source;
+
+    fn ctx(
+        live_source: Source,
+        statusline_status: Option<StatuslineStatus>,
+        statusline_decision: StatuslineDecision,
+    ) -> EnableCardCtx {
+        EnableCardCtx {
+            live_source,
+            statusline_status,
+            statusline_decision,
+        }
     }
 
     #[test]
     fn card_visible_when_source_none_and_statusline_unconfigured() {
-        use crate::cli::statusline_install::StatuslineStatus;
-        use crate::models::live_window::Source;
-        assert!(should_show_enable_card_inner(
+        assert!(should_show_enable_card_inner(ctx(
             Source::None,
-            Some(&StatuslineStatus::NotConfigured),
-        ));
+            Some(StatuslineStatus::NotConfigured),
+            StatuslineDecision::Unset,
+        )));
     }
 
     #[test]
     fn card_visible_when_source_none_and_other_command_present() {
-        use crate::cli::statusline_install::StatuslineStatus;
-        use crate::models::live_window::Source;
-        assert!(should_show_enable_card_inner(
+        assert!(should_show_enable_card_inner(ctx(
             Source::None,
-            Some(&StatuslineStatus::Other("ccusage statusline".into())),
-        ));
+            Some(StatuslineStatus::Other("ccusage statusline".into())),
+            StatuslineDecision::Unset,
+        )));
+    }
+
+    #[test]
+    fn card_hidden_when_user_declined_in_init_wizard() {
+        // Mirrors the top-bar CTA logic. If the user explicitly opted
+        // out, the Stats screen must respect the decision — anything
+        // else is two surfaces disagreeing about the same setting.
+        assert!(!should_show_enable_card_inner(ctx(
+            Source::None,
+            Some(StatuslineStatus::NotConfigured),
+            StatuslineDecision::Declined,
+        )));
+        assert!(!should_show_enable_card_inner(ctx(
+            Source::None,
+            Some(StatuslineStatus::Other("ccusage statusline".into())),
+            StatuslineDecision::Declined,
+        )));
     }
 
     #[test]
     fn card_hidden_when_tier1_cache_active() {
-        use crate::cli::statusline_install::StatuslineStatus;
-        use crate::models::live_window::Source;
-        assert!(!should_show_enable_card_inner(
+        assert!(!should_show_enable_card_inner(ctx(
             Source::Tier1Cache,
-            Some(&StatuslineStatus::Configured),
-        ));
+            Some(StatuslineStatus::Configured),
+            StatuslineDecision::Installed,
+        )));
         // Even if settings.json was hand-edited away, Tier1Cache means
         // data is flowing — don't shout.
-        assert!(!should_show_enable_card_inner(
+        assert!(!should_show_enable_card_inner(ctx(
             Source::Tier1Cache,
-            Some(&StatuslineStatus::NotConfigured),
-        ));
+            Some(StatuslineStatus::NotConfigured),
+            StatuslineDecision::Unset,
+        )));
     }
 
     #[test]
     fn card_hidden_when_tier2_local_active() {
         // Burndown panel's own contextual hint is the right surface
         // for Tier2 — top-of-Stats card would be redundant.
-        use crate::cli::statusline_install::StatuslineStatus;
-        use crate::models::live_window::Source;
-        assert!(!should_show_enable_card_inner(
+        assert!(!should_show_enable_card_inner(ctx(
             Source::Tier2Local,
-            Some(&StatuslineStatus::NotConfigured),
-        ));
+            Some(StatuslineStatus::NotConfigured),
+            StatuslineDecision::Unset,
+        )));
     }
 
     #[test]
     fn card_hidden_when_already_configured() {
-        use crate::cli::statusline_install::StatuslineStatus;
-        use crate::models::live_window::Source;
-        assert!(!should_show_enable_card_inner(
+        assert!(!should_show_enable_card_inner(ctx(
             Source::None,
-            Some(&StatuslineStatus::Configured),
-        ));
+            Some(StatuslineStatus::Configured),
+            StatuslineDecision::Installed,
+        )));
     }
 
     #[test]
     fn card_hidden_when_status_detection_failed() {
-        use crate::models::live_window::Source;
-        assert!(!should_show_enable_card_inner(Source::None, None));
+        assert!(!should_show_enable_card_inner(ctx(
+            Source::None,
+            None,
+            StatuslineDecision::Unset,
+        )));
     }
 }

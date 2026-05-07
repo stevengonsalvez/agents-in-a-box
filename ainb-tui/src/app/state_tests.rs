@@ -4,7 +4,7 @@
 mod tests {
     use super::*;
     use crate::app::state::{AppState, NewSessionState, NewSessionStep, SessionAgentOption};
-    use crate::models::{SessionMode, SessionAgentType};
+    use crate::models::{SessionAgentType, SessionMode};
     use std::path::PathBuf;
 
     /// Test that pressing 'n' for new session should go through mode selection
@@ -423,9 +423,7 @@ mod tests {
     // Stop / Resume coverage
     // ========================================================================
 
-    use crate::app::state::{
-        ConfirmAction, ConfirmationDialog, DialogOption,
-    };
+    use crate::app::state::{ConfirmAction, ConfirmationDialog, DialogOption};
 
     /// Verify the tri-option dialog defaults to Stop and cycles forward through
     /// all three options before wrapping back to Stop.
@@ -436,10 +434,7 @@ mod tests {
 
         state.show_delete_or_stop_confirmation(session_id);
 
-        let dialog = state
-            .confirmation_dialog
-            .as_ref()
-            .expect("Dialog should be present");
+        let dialog = state.confirmation_dialog.as_ref().expect("Dialog should be present");
         let opts = dialog.options.as_ref().expect("Tri-option dialog");
         assert_eq!(opts.len(), 3, "Stop / Delete / Cancel");
         assert_eq!(opts[0].label, "Stop");
@@ -467,9 +462,18 @@ mod tests {
             selected_option: false,
             warning: None,
             options: Some(vec![
-                DialogOption { label: "A".into(), action: ConfirmAction::Cancel },
-                DialogOption { label: "B".into(), action: ConfirmAction::Cancel },
-                DialogOption { label: "C".into(), action: ConfirmAction::Cancel },
+                DialogOption {
+                    label: "A".into(),
+                    action: ConfirmAction::Cancel,
+                },
+                DialogOption {
+                    label: "B".into(),
+                    action: ConfirmAction::Cancel,
+                },
+                DialogOption {
+                    label: "C".into(),
+                    action: ConfirmAction::Cancel,
+                },
             ]),
             selected_index: 0,
         };
@@ -609,7 +613,10 @@ mod tests {
         let session = AppState::stopped_session_from_metadata(&metadata);
         assert_eq!(session.id, metadata.session_id);
         assert!(matches!(session.status, SessionStatus::Stopped));
-        assert_eq!(session.tmux_session_name.as_deref(), Some("tmux_some_branch"));
+        assert_eq!(
+            session.tmux_session_name.as_deref(),
+            Some("tmux_some_branch")
+        );
         assert_eq!(session.workspace_path, "/tmp/work-stopped");
         assert_eq!(session.agent_type, SessionAgentType::Claude);
     }
@@ -652,10 +659,7 @@ mod tests {
         for mode in [SessionMode::Interactive, SessionMode::Boss] {
             for status in [Status::Running, Status::Stopped, Status::Idle] {
                 assert!(
-                    state.session_passes_filter(&make_filter_session(
-                        mode.clone(),
-                        status.clone()
-                    )),
+                    state.session_passes_filter(&make_filter_session(mode.clone(), status.clone())),
                     "All should pass mode={:?} status={:?}",
                     mode,
                     status
@@ -680,10 +684,9 @@ mod tests {
             Status::Running
         )));
         // Boss-mode Stopped → still passes (filter only touches Interactive)
-        assert!(state.session_passes_filter(&make_filter_session(
-            SessionMode::Boss,
-            Status::Stopped
-        )));
+        assert!(
+            state.session_passes_filter(&make_filter_session(SessionMode::Boss, Status::Stopped))
+        );
     }
 
     #[test]
@@ -700,10 +703,9 @@ mod tests {
             Status::Running
         )));
         // Boss-mode is exempt — always passes regardless of filter mode.
-        assert!(state.session_passes_filter(&make_filter_session(
-            SessionMode::Boss,
-            Status::Running
-        )));
+        assert!(
+            state.session_passes_filter(&make_filter_session(SessionMode::Boss, Status::Running))
+        );
     }
 
     #[test]
@@ -725,7 +727,10 @@ mod tests {
         let may = NaiveDate::from_ymd_opt(2026, 5, 1).unwrap();
 
         // First load establishes the anchor.
-        assert_eq!(crate::app::state::merge_oldest_call_day(None, Some(april)), Some(april));
+        assert_eq!(
+            crate::app::state::merge_oldest_call_day(None, Some(april)),
+            Some(april)
+        );
 
         // Reproduces the reported defect: a wide load establishes April,
         // a subsequent narrow (May-only) load must NOT raise the anchor.
@@ -749,5 +754,165 @@ mod tests {
 
         // Empty existing + empty candidate stays None.
         assert_eq!(crate::app::state::merge_oldest_call_day(None, None), None);
+    }
+
+    // -- statusline status TTL cache --------------------------------
+    //
+    // The cache backs both the global `W` shortcut (settings.json read on
+    // every keystroke before this PR) and the top-of-Stats enable card
+    // (settings.json read on every render frame). The tests below exercise
+    // the pure inner helper with an injected clock + detector counter so
+    // they're hermetic — no temp dirs or HOME mutation needed.
+
+    use std::cell::Cell;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn statusline_cache_returns_value_on_first_call_and_records_time() {
+        use crate::cli::statusline_install::StatuslineStatus;
+
+        let mut cache = None;
+        let calls = Cell::new(0u32);
+        let now = Instant::now();
+        let detect = || {
+            calls.set(calls.get() + 1);
+            Ok(StatuslineStatus::NotConfigured)
+        };
+
+        let result = AppState::statusline_status_cached_inner(
+            &mut cache,
+            Duration::from_secs(15),
+            now,
+            detect,
+        );
+
+        assert_eq!(result, Some(StatuslineStatus::NotConfigured));
+        assert_eq!(calls.get(), 1, "first call must hit the detector");
+        assert!(cache.is_some(), "cache must be populated after first call");
+    }
+
+    #[test]
+    fn statusline_cache_coalesces_within_ttl() {
+        use crate::cli::statusline_install::StatuslineStatus;
+
+        let mut cache = None;
+        let calls = Cell::new(0u32);
+        let t0 = Instant::now();
+        let detect_first = || {
+            calls.set(calls.get() + 1);
+            Ok(StatuslineStatus::Configured)
+        };
+        let _ = AppState::statusline_status_cached_inner(
+            &mut cache,
+            Duration::from_secs(15),
+            t0,
+            detect_first,
+        );
+        assert_eq!(calls.get(), 1);
+
+        // Second call 5 seconds later — still inside the 15s TTL window.
+        // Must serve from cache without invoking the detector.
+        let t1 = t0 + Duration::from_secs(5);
+        let detect_must_not_run = || -> anyhow::Result<StatuslineStatus> {
+            panic!("detector must not run while cache is fresh");
+        };
+        let result = AppState::statusline_status_cached_inner(
+            &mut cache,
+            Duration::from_secs(15),
+            t1,
+            detect_must_not_run,
+        );
+        assert_eq!(
+            result,
+            Some(StatuslineStatus::Configured),
+            "fresh cache hit must return the original value"
+        );
+        assert_eq!(calls.get(), 1, "second call inside TTL must not re-detect");
+    }
+
+    #[test]
+    fn statusline_cache_re_detects_after_ttl_expires() {
+        use crate::cli::statusline_install::StatuslineStatus;
+
+        let mut cache = None;
+        let calls = Cell::new(0u32);
+        let ttl = Duration::from_secs(15);
+        let t0 = Instant::now();
+        let detect = || {
+            calls.set(calls.get() + 1);
+            Ok(StatuslineStatus::NotConfigured)
+        };
+        let _ = AppState::statusline_status_cached_inner(&mut cache, ttl, t0, detect);
+        assert_eq!(calls.get(), 1);
+
+        // 30 seconds later: well past the 15s TTL — detector must run.
+        let t1 = t0 + Duration::from_secs(30);
+        let detect_again = || {
+            calls.set(calls.get() + 1);
+            Ok(StatuslineStatus::Configured)
+        };
+        let result = AppState::statusline_status_cached_inner(&mut cache, ttl, t1, detect_again);
+        assert_eq!(result, Some(StatuslineStatus::Configured));
+        assert_eq!(calls.get(), 2, "expired cache must re-detect");
+    }
+
+    #[test]
+    fn statusline_cache_stores_detector_failure_to_avoid_retry_storm() {
+        // A failing detector returns None and the cache records None +
+        // the timestamp. A subsequent call within TTL serves the None
+        // from cache without re-hitting the detector — otherwise an IO
+        // error on settings.json would translate into one filesystem
+        // probe per render frame.
+        let mut cache = None;
+        let calls = Cell::new(0u32);
+        let t0 = Instant::now();
+        let detect_err = || -> anyhow::Result<crate::cli::statusline_install::StatuslineStatus> {
+            calls.set(calls.get() + 1);
+            anyhow::bail!("simulated read failure")
+        };
+        let result = AppState::statusline_status_cached_inner(
+            &mut cache,
+            Duration::from_secs(15),
+            t0,
+            detect_err,
+        );
+        assert_eq!(result, None);
+        assert_eq!(calls.get(), 1);
+
+        // Within TTL, the cached None is returned without re-detecting.
+        let t1 = t0 + Duration::from_secs(2);
+        let detect_must_not_run =
+            || -> anyhow::Result<crate::cli::statusline_install::StatuslineStatus> {
+                panic!("detector must not run while cache is fresh, even when value is None");
+            };
+        let result = AppState::statusline_status_cached_inner(
+            &mut cache,
+            Duration::from_secs(15),
+            t1,
+            detect_must_not_run,
+        );
+        assert_eq!(result, None);
+        assert_eq!(
+            calls.get(),
+            1,
+            "cached None must not retrigger the detector"
+        );
+    }
+
+    #[test]
+    fn invalidate_statusline_status_cache_forces_refresh() {
+        use crate::cli::statusline_install::StatuslineStatus;
+
+        let mut state = AppState::new();
+        // Seed the cache directly with a stale value.
+        state.statusline_status_cache =
+            Some((Some(StatuslineStatus::NotConfigured), Instant::now()));
+        assert!(state.statusline_status_cache.is_some());
+
+        state.invalidate_statusline_status_cache();
+        assert!(
+            state.statusline_status_cache.is_none(),
+            "invalidation must drop the cached entry"
+        );
     }
 }

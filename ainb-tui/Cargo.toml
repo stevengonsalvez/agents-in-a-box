@@ -42,14 +42,12 @@ toml = "0.8"
 
 # Claude API integration
 reqwest = { version = "0.11", default-features = false, features = ["json", "stream", "rustls-tls"] }
-async-stream = "0.3"
 tokio-stream = "0.1"
 
 # Utils
 shell-escape = "0.1"  # Safe shell escaping for paths
 anyhow = "1.0"
 thiserror = "1.0"
-directories = "5.0"
 dirs = "5.0"
 uuid = { version = "1.5", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }

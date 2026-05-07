@@ -6,7 +6,9 @@ use crate::app::{
     AppState,
     state::{AsyncAction, AuthMethod, ConfigPane, View},
 };
+use crate::cli::statusline_install::{InstallOutcome, StatuslineStatus, install_statusline};
 use crate::credentials;
+use crate::models::live_window::Source as LiveSource;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tracing::info;
 
@@ -50,10 +52,22 @@ pub enum AppEvent {
     ScrollLogsToBottom,
     ToggleAutoScroll, // Toggle auto-scroll mode in live logs
     // Mouse events
-    MouseClick { x: u16, y: u16 },
-    MouseDragStart { x: u16, y: u16 },
-    MouseDragEnd { x: u16, y: u16 },
-    MouseDragging { x: u16, y: u16 },
+    MouseClick {
+        x: u16,
+        y: u16,
+    },
+    MouseDragStart {
+        x: u16,
+        y: u16,
+    },
+    MouseDragEnd {
+        x: u16,
+        y: u16,
+    },
+    MouseDragging {
+        x: u16,
+        y: u16,
+    },
     // New session creation events
     NewSessionCancel,
     NewSessionNextRepo,
@@ -506,13 +520,10 @@ impl EventHandler {
     /// already flowing from the Tier1 cache *and* the user's
     /// `~/.claude/settings.json` doesn't already carry our block.
     fn should_wire_statusline_inner(
-        live_source: crate::models::live_window::Source,
-        statusline_status: Option<&crate::cli::statusline_install::StatuslineStatus>,
+        live_source: LiveSource,
+        statusline_status: Option<&StatuslineStatus>,
     ) -> bool {
-        use crate::cli::statusline_install::StatuslineStatus;
-        use crate::models::live_window::Source;
-
-        if live_source == Source::Tier1Cache {
+        if live_source == LiveSource::Tier1Cache {
             return false;
         }
         matches!(
@@ -525,12 +536,14 @@ impl EventHandler {
     /// Drives the global `W` shortcut. When this is `false` the keystroke
     /// is ignored at the global layer and falls through to the active
     /// view's normal handling.
-    fn should_wire_statusline() -> bool {
-        use crate::cli::statusline_install::detect_statusline_status;
-        use crate::models::live_window::current;
-
-        let status = detect_statusline_status().ok();
-        Self::should_wire_statusline_inner(current().source, status.as_ref())
+    ///
+    /// The settings.json read goes through [`AppState::statusline_status_cached`]
+    /// so that holding `W` (or rapid keystrokes elsewhere) doesn't hammer
+    /// the filesystem.
+    fn should_wire_statusline(state: &mut AppState) -> bool {
+        let live_source = crate::models::live_window::current().source;
+        let status = state.statusline_status_cached();
+        Self::should_wire_statusline_inner(live_source, status.as_ref())
     }
 
     pub fn handle_key_event(key_event: KeyEvent, state: &mut AppState) -> Option<AppEvent> {
@@ -612,14 +625,34 @@ impl EventHandler {
             return Some(AppEvent::ToggleHelp);
         }
 
-        // Global `W`: wire Claude Code statusline. Active from any non-text
-        // view when the statusline is unwired or stale (live data isn't
-        // coming from the Tier1 cache). The CTA in the top status bar
-        // points users here, so the shortcut must work everywhere — not
-        // just from the Burndown panel where it originally lived.
+        // Global `W`: wire Claude Code statusline. Active from any
+        // non-text-input context when the statusline is unwired or
+        // stale (live data isn't coming from the Tier1 cache). The CTA
+        // in the top status bar points users here, so the shortcut
+        // must work everywhere — not just from the Burndown panel
+        // where it originally lived.
         //
-        // Suppressed in views that take free-form character input so an
-        // accidental Shift+W during typing doesn't trigger an install.
+        // The suppress list below covers two kinds of context:
+        //   (a) views that fundamentally accept free-form character
+        //       input (NewSession's prompt/branch/repo entry,
+        //       SearchWorkspace, ClaudeChat, AuthSetup, the Config
+        //       editor, the AttachedTerminal pass-through, the auth
+        //       provider popup),
+        //   (b) per-view text-entry overlays toggled inside otherwise
+        //       navigable screens (GitView's commit message, the
+        //       Analytics input/zoom-search modes, the Skills search
+        //       overlay).
+        //
+        // Modal text inputs that already early-return at the top of
+        // `handle_key_event` (confirmation dialog, OtherTmux/SshSession
+        // rename, onboarding/setup menus, quick-commit) don't reach
+        // this block, so they don't need entries here.
+        let analytics_text_active = state.current_view == View::Analytics
+            && (state.usage_state.input_mode.is_some() || state.usage_state.zoom_search_active);
+        let skills_text_active =
+            state.current_view == View::Skills && state.skills_state.search_active;
+        let git_view_text_active = state.current_view == View::GitView
+            && state.git_view_state.as_ref().map(|gv| gv.is_in_commit_mode()).unwrap_or(false);
         let suppress_global_w = matches!(
             state.current_view,
             View::NewSession
@@ -628,10 +661,13 @@ impl EventHandler {
                 | View::AuthSetup
                 | View::Config
                 | View::AttachedTerminal
-        ) || state.auth_provider_popup_state.show_popup;
+        ) || state.auth_provider_popup_state.show_popup
+            || analytics_text_active
+            || skills_text_active
+            || git_view_text_active;
         if !suppress_global_w
             && matches!(key_event.code, KeyCode::Char('W'))
-            && Self::should_wire_statusline()
+            && Self::should_wire_statusline(state)
         {
             return Some(AppEvent::UsageWireStatusline);
         }
@@ -4439,18 +4475,20 @@ impl EventHandler {
                 // already carry our block. This event is reachable from the
                 // global `W` shortcut as well as the legacy Burndown route,
                 // so the guard lives here rather than at the keymap.
-                use crate::cli::statusline_install::{StatuslineStatus, detect_statusline_status};
-                let live_source = crate::models::live_window::current().source;
-                if live_source == crate::models::live_window::Source::Tier1Cache {
+                if crate::models::live_window::current().source == LiveSource::Tier1Cache {
                     return;
                 }
-                match detect_statusline_status() {
-                    Ok(StatuslineStatus::Configured) => return,
-                    Ok(_) => {}
-                    Err(_) => return,
+                match state.statusline_status_cached() {
+                    Some(StatuslineStatus::Configured) => return,
+                    Some(_) => {}
+                    None => return,
                 }
-                match crate::cli::statusline_install::install_statusline() {
-                    Ok(crate::cli::statusline_install::InstallOutcome::Installed) => {
+                let outcome = install_statusline();
+                // Any successful install path mutates settings.json, so
+                // drop the cached detection result before the next read.
+                state.invalidate_statusline_status_cache();
+                match outcome {
+                    Ok(InstallOutcome::Installed) => {
                         state.app_config.ui_preferences.statusline_decision =
                             crate::config::StatuslineDecision::Installed;
                         let _ = state.app_config.save();
@@ -4459,7 +4497,7 @@ impl EventHandler {
                                 .to_string(),
                         );
                     }
-                    Ok(crate::cli::statusline_install::InstallOutcome::AlreadyInstalled) => {
+                    Ok(InstallOutcome::AlreadyInstalled) => {
                         state.app_config.ui_preferences.statusline_decision =
                             crate::config::StatuslineDecision::Installed;
                         let _ = state.app_config.save();
@@ -4468,7 +4506,7 @@ impl EventHandler {
                                 .to_string(),
                         );
                     }
-                    Ok(crate::cli::statusline_install::InstallOutcome::Migrated) => {
+                    Ok(InstallOutcome::Migrated) => {
                         // Legacy `ainb statusline` was rewritten in
                         // place to `ainb claudecode statusline`. The
                         // user already opted in; surface as a success.
@@ -4480,17 +4518,13 @@ impl EventHandler {
                                 .to_string(),
                         );
                     }
-                    Ok(crate::cli::statusline_install::InstallOutcome::ExistingDifferent {
-                        current_command,
-                    }) => {
+                    Ok(InstallOutcome::ExistingDifferent { current_command }) => {
                         state.add_warning_notification(format!(
                             "Existing statusline detected: {current_command}. Run `ainb init` for keep/replace."
                         ));
                     }
                     Err(e) => {
-                        state.add_error_notification(format!(
-                            "Failed to install statusline: {e}"
-                        ));
+                        state.add_error_notification(format!("Failed to install statusline: {e}"));
                     }
                 }
             }
