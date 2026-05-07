@@ -184,7 +184,17 @@ pub enum ClaudeCodeCmd {
     /// Statusline hook: read JSON on stdin, cache rate-limit windows for
     /// the TUI, and emit a powerline status string on stdout. Wire into
     /// `~/.claude/settings.json` as `statusLine.command`.
-    Statusline,
+    Statusline {
+        /// Side-channel mode: write the cache only and emit nothing on
+        /// stdout. Use this when chaining ainb behind your own statusline
+        /// renderer (Claude Code only allows one `statusLine.command`,
+        /// so a custom script can pipe the same JSON to ainb in the
+        /// background to keep the TUI Live Window's Tier1 cache fresh).
+        /// Errors (malformed JSON, unwritable cache) still surface on
+        /// stderr with a non-zero exit so silent breakage is impossible.
+        #[arg(long)]
+        cache_only: bool,
+    },
 }
 
 /// Arguments for the run command
@@ -318,7 +328,21 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(Commands::Claudecode {
-                cmd: ClaudeCodeCmd::Statusline
+                cmd: ClaudeCodeCmd::Statusline { cache_only: false }
+            })
+        ));
+    }
+
+    /// `--cache-only` is a side-channel mode for users running their own
+    /// statusline renderer who still want ainb's Tier1 cache fresh.
+    #[test]
+    fn statusline_cache_only_flag_parses() {
+        let cli = Cli::try_parse_from(["ainb", "claudecode", "statusline", "--cache-only"])
+            .expect("--cache-only must parse");
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Claudecode {
+                cmd: ClaudeCodeCmd::Statusline { cache_only: true }
             })
         ));
     }

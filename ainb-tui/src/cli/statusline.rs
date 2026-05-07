@@ -214,27 +214,79 @@ fn pct_color(pct: u8, amber_at: u8, red_at: u8) -> (u8, u8, u8) {
 }
 
 /// Subcommand entry point. Reads stdin to EOF, persists the cache, and
-/// prints a status string to stdout. Catches all errors and degrades to
-/// an empty line — the statusline runs every prompt render.
-pub fn execute() -> Result<()> {
+/// (in default render mode) prints a powerline status string on stdout.
+///
+/// Two modes:
+///
+/// * `cache_only = false` (default): write cache + emit powerline string.
+///   All errors are swallowed and degrade to an empty line — the
+///   statusline runs every prompt render and must never break the user's
+///   shell.
+/// * `cache_only = true`: side-channel mode for users running their own
+///   statusline. Write cache + emit nothing on stdout. Surfaces malformed
+///   JSON / cache-write failures on stderr with a non-zero exit so a
+///   broken pipeline is visible instead of silently rotting the cache.
+pub fn execute(cache_only: bool) -> Result<()> {
     let mut buf = Vec::new();
     let _ = std::io::stdin().read_to_end(&mut buf);
 
-    match parse_payload(&buf) {
-        Some(cache) => {
-            if let Some(path) = cache_path() {
-                let _ = write_cache(&path, &cache);
-            }
+    match run_with(&buf, cache_path().as_deref(), cache_only) {
+        Ok(Some(line)) => {
             // Newline so it integrates cleanly with shell prompt drawing.
-            println!("{}", render_powerline(&cache));
+            println!("{line}");
+            Ok(())
         }
-        None => {
-            // Empty stdin or malformed JSON — emit nothing rather than
-            // pollute the user's prompt.
+        Ok(None) => Ok(()),
+        Err(e) if cache_only => {
+            // Surface the failure so the calling script (and the user)
+            // can see why the cache isn't refreshing. stderr only —
+            // stdout stays silent in cache-only mode by contract.
+            // Exit directly so `anyhow::Error`'s default "Error: ..."
+            // chain doesn't double-print on top of our message.
+            eprintln!("ainb statusline --cache-only: {e}");
+            std::process::exit(1);
+        }
+        Err(_) => {
+            // Default render mode: degrade to an empty line so we never
+            // break the user's shell prompt.
             println!();
+            Ok(())
         }
     }
-    Ok(())
+}
+
+/// Pure core. Parses `buf`, writes the cache (if `cache_path` is
+/// `Some`), and returns what should be written to stdout.
+///
+/// Returned values:
+/// * `Ok(Some(line))` — print `line` then newline (default render mode).
+/// * `Ok(None)`       — print nothing (cache-only mode happy path).
+/// * `Err(e)`         — caller decides whether to surface (cache-only)
+///   or swallow (default render mode).
+///
+/// Splitting parse + write + render away from stdin/stdout lets us
+/// exercise both modes against an in-memory buffer and a temp cache
+/// path in tests.
+pub fn run_with(
+    buf: &[u8],
+    cache_path: Option<&std::path::Path>,
+    cache_only: bool,
+) -> Result<Option<String>> {
+    let cache = parse_payload(buf)
+        .ok_or_else(|| anyhow::anyhow!("malformed or empty statusline JSON payload on stdin"))?;
+
+    // Always attempt the cache write (the whole point of both modes).
+    // In cache-only mode we surface errors; in render mode the wrapper
+    // swallows them so the prompt keeps working.
+    if let Some(path) = cache_path {
+        write_cache(path, &cache)?;
+    }
+
+    if cache_only {
+        Ok(None)
+    } else {
+        Ok(Some(render_powerline(&cache)))
+    }
 }
 
 #[cfg(test)]
@@ -395,6 +447,75 @@ mod tests {
         };
         // Just don't panic; result may be empty string.
         let _ = render_powerline(&cache);
+    }
+
+    /// `--cache-only`: cache is written, stdout payload is `None`
+    /// (i.e. the wrapper prints nothing).
+    #[test]
+    fn cache_only_mode_writes_cache_and_emits_nothing_on_stdout() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("live.json");
+        let raw = br#"{
+            "model": {"display_name": "Opus 4.7"},
+            "rate_limits": {"five_hour": {"used_percentage": 42}}
+        }"#;
+
+        let out = run_with(raw, Some(&path), true).expect("cache-only must succeed");
+        assert!(out.is_none(), "cache-only must emit nothing on stdout");
+
+        let cache = read_cache(&path).expect("cache file must exist and be parseable");
+        assert_eq!(cache.model.as_deref(), Some("Opus 4.7"));
+        assert_eq!(cache.five_hour.unwrap().pct, 42);
+    }
+
+    /// `--cache-only` is the only mode that surfaces errors. A malformed
+    /// payload must return `Err` so the wrapper can exit non-zero and
+    /// log to stderr — silent rot would defeat the whole purpose of the
+    /// flag (users can't tell their pipeline broke).
+    #[test]
+    fn cache_only_mode_returns_error_on_malformed_json() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("live.json");
+
+        let err = run_with(b"not json at all", Some(&path), true)
+            .expect_err("malformed JSON must error in cache-only mode");
+        let msg = format!("{err}");
+        assert!(msg.contains("malformed"), "error must explain cause: got {msg}");
+        assert!(!path.exists(), "no cache file should be written on parse failure");
+    }
+
+    /// Both modes share a single parse + write path, so the bytes on
+    /// disk must be identical except for the `updated_at` timestamp
+    /// (which is intrinsically time-dependent — we normalize it before
+    /// comparing).
+    #[test]
+    fn cache_only_mode_writes_same_schema_as_full_mode() {
+        let dir = tempdir().unwrap();
+        let render_path = dir.path().join("render.json");
+        let cache_only_path = dir.path().join("cache_only.json");
+        let raw = br#"{
+            "model": {"display_name": "Sonnet 4.5"},
+            "context_window": {"used_percentage": 40},
+            "rate_limits": {
+                "five_hour": {"used_percentage": 12, "resets_at": "2026-05-07T05:00:00Z"},
+                "seven_day": {"used_percentage": 3,  "resets_at": "2026-05-13T00:00:00Z"}
+            },
+            "cost": {"total_cost_usd": 4.21}
+        }"#;
+
+        let line = run_with(raw, Some(&render_path), false).expect("render mode must succeed");
+        assert!(line.is_some(), "render mode must produce a powerline string");
+
+        let none = run_with(raw, Some(&cache_only_path), true).expect("cache-only must succeed");
+        assert!(none.is_none(), "cache-only must produce no stdout");
+
+        let mut a = read_cache(&render_path).expect("render cache exists");
+        let mut b = read_cache(&cache_only_path).expect("cache-only cache exists");
+        // Normalize the only field that differs between two real-time
+        // writes: the wall-clock timestamp.
+        a.updated_at.clear();
+        b.updated_at.clear();
+        assert_eq!(a, b, "both modes must persist byte-identical schema");
     }
 
     #[test]
