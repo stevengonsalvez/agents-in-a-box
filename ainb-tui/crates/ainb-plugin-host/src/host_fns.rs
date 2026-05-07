@@ -172,7 +172,13 @@ fn link_wasi_preview1_stubs(linker: &mut Linker<HostState>) -> anyhow::Result<()
         },
     )?;
 
-    // clock_time_get(clock_id, precision, time_ptr) -> errno. Always 0.
+    // clock_time_get(clock_id, precision, time_ptr) -> errno.
+    // Writes wall-clock nanoseconds since UNIX epoch. The plugin uses this
+    // through std's `SystemTime::now()` (chrono::Local::now() chains through)
+    // — without a real reading the burndown UI would render fixed dates
+    // (1970) and break the tripwire. CLOCK_REALTIME is the only id we
+    // actually need; CLOCK_MONOTONIC also flows here and gets the same
+    // (close-enough) reading.
     linker.func_wrap(
         WASI,
         "clock_time_get",
@@ -189,7 +195,10 @@ fn link_wasi_preview1_stubs(linker: &mut Linker<HostState>) -> anyhow::Result<()
                 Ok(n) => n,
                 Err(_) => return 28,
             };
-            let _ = memory.write(&mut caller, off, &[0_u8; 8]);
+            let nanos: u64 = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
+            let _ = memory.write(&mut caller, off, &nanos.to_le_bytes());
             0
         },
     )?;

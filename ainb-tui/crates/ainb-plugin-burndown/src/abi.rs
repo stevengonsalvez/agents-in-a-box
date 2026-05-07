@@ -183,13 +183,58 @@ mod host {
 }
 
 #[no_mangle]
-pub extern "C" fn _handle_event(_ptr: i32, _len: i32) -> i32 {
+pub extern "C" fn _handle_event(ptr: i32, len: i32) -> i32 {
     if !READY.load(Ordering::Acquire) {
         return 1;
     }
-    // Event payload decoding (msgpack -> PluginEvent) lands when
-    // ainb-core's event bus wires us in. For now, accept all events
-    // as a no-op so the host's pump_events loop doesn't see traps.
+    // SAFETY: ptr/len come from the host's `_alloc` + `dispatch_event_bytes`
+    // pipeline; the host owns the buffer's lifetime up to and including
+    // this call. We read it as a slice for the duration of the call.
+    let bytes = unsafe {
+        if ptr <= 0 || len <= 0 {
+            return 0;
+        }
+        let p = ptr as usize as *const u8;
+        let n = len as usize;
+        core::slice::from_raw_parts(p, n)
+    };
+    let ev: ainb_plugin_api::PluginEvent = match rmp_serde::from_slice(bytes) {
+        Ok(e) => e,
+        Err(_) => return 0, // bad payload — silent drop, host already logged
+    };
+    if let ainb_plugin_api::PluginEvent::Custom { topic, payload } = ev {
+        match topic.as_str() {
+            "burndown.usage_data" => {
+                if let Ok(data) = serde_json::from_value::<UsageData>(payload) {
+                    unsafe {
+                        if let Some(state) = STATE.as_mut() {
+                            state.data = Some(data);
+                        }
+                    }
+                }
+            }
+            "burndown.set_tab" => {
+                // Payload: {"tab":"daily"|"weekly"|"projects"|"burndown"|"optimize"}
+                let tab_name = payload.get("tab").and_then(|v| v.as_str()).unwrap_or("");
+                let tab = match tab_name {
+                    "daily" => Some(crate::ui::UsageTab::Daily),
+                    "weekly" => Some(crate::ui::UsageTab::Weekly),
+                    "projects" => Some(crate::ui::UsageTab::Projects),
+                    "burndown" => Some(crate::ui::UsageTab::Burndown),
+                    "optimize" => Some(crate::ui::UsageTab::Optimize),
+                    _ => None,
+                };
+                if let Some(t) = tab {
+                    unsafe {
+                        if let Some(state) = STATE.as_mut() {
+                            state.ui.active_tab = t;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
     0
 }
 

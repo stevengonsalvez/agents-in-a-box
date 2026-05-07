@@ -272,6 +272,51 @@ impl PluginHost {
         self.shared.take_render(plugin_id, target)
     }
 
+    /// Hand a raw, pre-encoded msgpack payload directly to a plugin's
+    /// `_handle_event` export. Skips the publish/subscribe queue — useful
+    /// when the host needs to push state into a single plugin
+    /// (e.g. a UsageData snapshot for the burndown plugin).
+    ///
+    /// The plugin must export `_alloc` so the host can carve a buffer in
+    /// guest memory; missing `_alloc` is a hard error.
+    pub fn dispatch_event_bytes(&mut self, plugin_id: &str, payload: &[u8]) -> Result<()> {
+        let plugin = self.find_mut(plugin_id)?;
+        if plugin.degraded {
+            return Ok(());
+        }
+        let len_i32 = i32::try_from(payload.len()).context("payload too large")?;
+        let alloc = plugin
+            .instance
+            .get_typed_func::<i32, i32>(&plugin.store, "_alloc")
+            .context("_alloc missing")?;
+        let ptr = alloc
+            .call(&mut plugin.store, len_i32)
+            .context("_alloc trapped")?;
+        anyhow::ensure!(ptr > 0, "_alloc returned null");
+
+        let memory = plugin
+            .instance
+            .get_export(&plugin.store, "memory")
+            .and_then(wasmi::Extern::into_memory)
+            .ok_or_else(|| anyhow!("plugin has no exported memory"))?;
+        let off = usize::try_from(ptr).context("alloc ptr negative")?;
+        memory
+            .write(&mut plugin.store, off, payload)
+            .context("write event payload")?;
+
+        let handler = plugin
+            .instance
+            .get_typed_func::<(i32, i32), i32>(&plugin.store, "_handle_event")
+            .context("_handle_event missing")?;
+        match handler.call(&mut plugin.store, (ptr, len_i32)) {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                plugin.degraded = true;
+                Err(anyhow::Error::new(e).context("_handle_event trapped"))
+            }
+        }
+    }
+
     fn find_mut(&mut self, plugin_id: &str) -> Result<&mut LoadedPlugin> {
         self.plugins
             .iter_mut()

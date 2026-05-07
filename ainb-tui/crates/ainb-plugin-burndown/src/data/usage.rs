@@ -29,7 +29,7 @@ use crate::cache::{Cache, ParseHint, ParseResult};
 /// `LastNDays`) to keep the existing CLI `PeriodArg` enum, JSON
 /// serialisation, and downstream tests stable.
 #[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UsagePeriod {
     Today,
@@ -80,7 +80,7 @@ impl UsageProviderFilter {
 
 /// Deterministic activity categories. Phase 2 fills these from turn classification.
 #[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActivityCategory {
     Coding,
@@ -357,7 +357,7 @@ impl UsageFilterChip {
 }
 
 /// Token counts for a single usage bucket, provider call, or aggregate row.
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct TokenBucket {
     pub input_tokens: u64,
     pub cache_creation_tokens: u64,
@@ -478,7 +478,7 @@ impl ProviderCall {
 
 /// Daily dashboard row.
 #[allow(dead_code)]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DailyUsage {
     pub date: NaiveDate,
     pub bucket: TokenBucket,
@@ -497,7 +497,7 @@ pub struct DailyUsage {
 /// `ProjectUsage` row because they share the same `name`. Chip filters
 /// match on `name`, so the filter UI follows the same rule.
 #[allow(dead_code)]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectUsage {
     pub name: String,
     pub path: String,
@@ -510,7 +510,7 @@ pub struct ProjectUsage {
 
 /// Per-session summary.
 #[allow(dead_code)]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionUsage {
     pub provider: String,
     pub project: String,
@@ -522,7 +522,7 @@ pub struct SessionUsage {
 
 /// Per-model summary.
 #[allow(dead_code)]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelUsage {
     pub model: String,
     pub bucket: TokenBucket,
@@ -531,7 +531,7 @@ pub struct ModelUsage {
 /// Per-branch summary. Built only from calls whose `branch` is `Some`;
 /// branchless calls (codex, non-git Claude turns) are dropped from this
 /// view so the panel never grows a misleading "(no branch)" bucket.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BranchUsage {
     pub branch: String,
     pub bucket: TokenBucket,
@@ -539,7 +539,7 @@ pub struct BranchUsage {
 
 /// Activity summary with classified turns and retry counts.
 #[allow(dead_code)]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActivityUsage {
     pub category: ActivityCategory,
     pub bucket: TokenBucket,
@@ -551,7 +551,7 @@ pub struct ActivityUsage {
 
 /// Tool/MCP/shell breakdown row.
 #[allow(dead_code)]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NamedUsage {
     pub name: String,
     pub calls: usize,
@@ -559,7 +559,7 @@ pub struct NamedUsage {
 
 /// Complete parsed usage data.
 #[allow(dead_code)]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageData {
     pub daily: Vec<(NaiveDate, TokenBucket)>,
     pub weekly: Vec<(NaiveDate, TokenBucket)>,
@@ -583,7 +583,7 @@ pub struct UsageData {
     pub model_project_counts: HashMap<String, Vec<(String, usize)>>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageOverview {
     pub calls: usize,
     pub sessions: usize,
@@ -2032,7 +2032,7 @@ fn activity_rank(category: ActivityCategory) -> usize {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlanStatus {
     Under,
@@ -2040,7 +2040,7 @@ pub enum PlanStatus {
     Over,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanProjection {
     pub period_start: NaiveDate,
     pub period_end: NaiveDate,
@@ -2152,7 +2152,7 @@ fn add_months(date: NaiveDate, months: i32) -> NaiveDate {
     NaiveDate::from_ymd_opt(year, month, date.day()).unwrap_or(date)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Impact {
     High,
@@ -2160,7 +2160,7 @@ pub enum Impact {
     Low,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HealthGrade {
     A,
     B,
@@ -2169,13 +2169,13 @@ pub enum HealthGrade {
     F,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WasteAction {
     pub label: String,
     pub command: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WasteFinding {
     pub id: String,
     pub title: String,
@@ -2185,7 +2185,7 @@ pub struct WasteFinding {
     pub actions: Vec<WasteAction>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OptimizeResult {
     pub score: u8,
     pub grade: HealthGrade,
@@ -2307,7 +2307,7 @@ fn health_grade(score: u8) -> HealthGrade {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelComparison {
     pub model: String,
     pub bucket: TokenBucket,
@@ -2319,7 +2319,7 @@ pub struct ModelComparison {
     pub tokens_per_call: u64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompareResult {
     pub models: Vec<ModelComparison>,
     pub winner: Option<String>,
@@ -2375,7 +2375,7 @@ pub fn compare_models(data: &UsageData) -> CompareResult {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct YieldResult {
     pub productive_usd: f64,
     pub reverted_usd: f64,
