@@ -12,14 +12,22 @@ pub trait SlashCommand: Send + Sync {
 
 pub struct HelpCommand;
 impl SlashCommand for HelpCommand {
-    fn name(&self) -> &'static str { "help" }
-    fn description(&self) -> &'static str { "Show help" }
+    fn name(&self) -> &'static str {
+        "help"
+    }
+    fn description(&self) -> &'static str {
+        "Show help"
+    }
 }
 
 pub struct QuitCommand;
 impl SlashCommand for QuitCommand {
-    fn name(&self) -> &'static str { "quit" }
-    fn description(&self) -> &'static str { "Quit ainb" }
+    fn name(&self) -> &'static str {
+        "quit"
+    }
+    fn description(&self) -> &'static str {
+        "Quit ainb"
+    }
 }
 
 /// Registry of built-in + plugin-contributed slash commands.
@@ -29,7 +37,11 @@ pub struct SlashCommandRegistry {
 }
 
 impl SlashCommandRegistry {
-    pub fn new() -> Self { Self { commands: Vec::new() } }
+    pub fn new() -> Self {
+        Self {
+            commands: Vec::new(),
+        }
+    }
 
     /// Built-ins: `/help`, `/quit`. Plugins extend via `register()` in Phase 4.
     pub fn built_ins() -> Self {
@@ -81,11 +93,19 @@ pub struct SlashPalette {
 
 impl SlashPalette {
     pub fn new(registry: SlashCommandRegistry) -> Self {
-        Self { open: false, input: String::new(), registry }
+        Self {
+            open: false,
+            input: String::new(),
+            registry,
+        }
     }
 
-    pub fn is_open(&self) -> bool { self.open }
-    pub fn input(&self) -> &str { &self.input }
+    pub fn is_open(&self) -> bool {
+        self.open
+    }
+    pub fn input(&self) -> &str {
+        &self.input
+    }
 
     pub fn open(&mut self) {
         self.open = true;
@@ -159,16 +179,28 @@ mod tests {
     fn registry_built_ins_contain_help_and_quit() {
         let r = SlashCommandRegistry::built_ins();
         let names = r.names();
-        assert!(names.contains(&"help"), "expected /help in built-ins, got {:?}", names);
-        assert!(names.contains(&"quit"), "expected /quit in built-ins, got {:?}", names);
+        assert!(
+            names.contains(&"help"),
+            "expected /help in built-ins, got {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"quit"),
+            "expected /quit in built-ins, got {:?}",
+            names
+        );
     }
 
     #[test]
     fn registry_register_appends_command() {
         struct Foo;
         impl SlashCommand for Foo {
-            fn name(&self) -> &'static str { "foo" }
-            fn description(&self) -> &'static str { "" }
+            fn name(&self) -> &'static str {
+                "foo"
+            }
+            fn description(&self) -> &'static str {
+                ""
+            }
         }
         let mut r = SlashCommandRegistry::new();
         r.register(Box::new(Foo));

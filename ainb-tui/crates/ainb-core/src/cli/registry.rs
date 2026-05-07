@@ -75,7 +75,9 @@ impl CommandRegistry {
     /// Empty registry. Useful for tests.
     #[must_use]
     pub fn new() -> Self {
-        Self { entries: Vec::new() }
+        Self {
+            entries: Vec::new(),
+        }
     }
 
     /// Registry pre-populated with every built-in CLI command. Order here is
@@ -125,10 +127,7 @@ impl CommandRegistry {
     }
 
     pub fn find(&self, name: &str) -> Option<&dyn CliCommand> {
-        self.entries
-            .iter()
-            .find(|c| c.name() == name)
-            .map(|c| &**c as &dyn CliCommand)
+        self.entries.iter().find(|c| c.name() == name).map(|c| &**c as &dyn CliCommand)
     }
 
     /// Build the root `clap::Command` by folding every registered impl's
@@ -143,15 +142,8 @@ impl CommandRegistry {
     /// `Err` for unknown names so the caller can surface a clap-style error
     /// (clap normally rejects unknown subcommands at parse time, but we keep
     /// a fallback for the runtime path).
-    pub async fn dispatch(
-        &self,
-        name: &str,
-        matches: &ArgMatches,
-        ctx: CliContext,
-    ) -> Result<()> {
-        let cmd = self
-            .find(name)
-            .with_context(|| format!("unknown subcommand: {name}"))?;
+    pub async fn dispatch(&self, name: &str, matches: &ArgMatches, ctx: CliContext) -> Result<()> {
+        let cmd = self.find(name).with_context(|| format!("unknown subcommand: {name}"))?;
         cmd.run(matches, ctx).await
     }
 }
@@ -173,13 +165,13 @@ fn boxed_err(e: clap::Error) -> Pin<Box<dyn std::future::Future<Output = Result<
 
 pub struct RunCommand;
 impl CliCommand for RunCommand {
-    fn name(&self) -> &'static str { "run" }
+    fn name(&self) -> &'static str {
+        "run"
+    }
     fn build(&self, app: Command) -> Command {
-        app.subcommand(
-            <crate::cli::RunArgs as clap::Args>::augment_args(
-                Command::new(self.name()).about("Spawn a new AI coding session"),
-            ),
-        )
+        app.subcommand(<crate::cli::RunArgs as clap::Args>::augment_args(
+            Command::new(self.name()).about("Spawn a new AI coding session"),
+        ))
     }
     fn run(&self, matches: &ArgMatches, _ctx: CliContext) -> BoxFuture<'static, Result<()>> {
         match crate::cli::RunArgs::from_arg_matches(matches) {
@@ -191,13 +183,13 @@ impl CliCommand for RunCommand {
 
 pub struct ListCommand;
 impl CliCommand for ListCommand {
-    fn name(&self) -> &'static str { "list" }
+    fn name(&self) -> &'static str {
+        "list"
+    }
     fn build(&self, app: Command) -> Command {
-        app.subcommand(
-            <crate::cli::ListArgs as clap::Args>::augment_args(
-                Command::new(self.name()).about("List all sessions"),
-            ),
-        )
+        app.subcommand(<crate::cli::ListArgs as clap::Args>::augment_args(
+            Command::new(self.name()).about("List all sessions"),
+        ))
     }
     fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
         match crate::cli::ListArgs::from_arg_matches(matches) {
@@ -209,13 +201,13 @@ impl CliCommand for ListCommand {
 
 pub struct LogsCommand;
 impl CliCommand for LogsCommand {
-    fn name(&self) -> &'static str { "logs" }
+    fn name(&self) -> &'static str {
+        "logs"
+    }
     fn build(&self, app: Command) -> Command {
-        app.subcommand(
-            <crate::cli::LogsArgs as clap::Args>::augment_args(
-                Command::new(self.name()).about("View session output/logs"),
-            ),
-        )
+        app.subcommand(<crate::cli::LogsArgs as clap::Args>::augment_args(
+            Command::new(self.name()).about("View session output/logs"),
+        ))
     }
     fn run(&self, matches: &ArgMatches, _ctx: CliContext) -> BoxFuture<'static, Result<()>> {
         match crate::cli::LogsArgs::from_arg_matches(matches) {
@@ -227,13 +219,13 @@ impl CliCommand for LogsCommand {
 
 pub struct AttachCommand;
 impl CliCommand for AttachCommand {
-    fn name(&self) -> &'static str { "attach" }
+    fn name(&self) -> &'static str {
+        "attach"
+    }
     fn build(&self, app: Command) -> Command {
-        app.subcommand(
-            <crate::cli::AttachArgs as clap::Args>::augment_args(
-                Command::new(self.name()).about("Attach to a session (drops into tmux)"),
-            ),
-        )
+        app.subcommand(<crate::cli::AttachArgs as clap::Args>::augment_args(
+            Command::new(self.name()).about("Attach to a session (drops into tmux)"),
+        ))
     }
     fn run(&self, matches: &ArgMatches, _ctx: CliContext) -> BoxFuture<'static, Result<()>> {
         match crate::cli::AttachArgs::from_arg_matches(matches) {
@@ -245,17 +237,19 @@ impl CliCommand for AttachCommand {
 
 pub struct StatusCommand;
 impl CliCommand for StatusCommand {
-    fn name(&self) -> &'static str { "status" }
+    fn name(&self) -> &'static str {
+        "status"
+    }
     fn build(&self, app: Command) -> Command {
-        app.subcommand(
-            <crate::cli::StatusArgs as clap::Args>::augment_args(
-                Command::new(self.name()).about("Check session status"),
-            ),
-        )
+        app.subcommand(<crate::cli::StatusArgs as clap::Args>::augment_args(
+            Command::new(self.name()).about("Check session status"),
+        ))
     }
     fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
         match crate::cli::StatusArgs::from_arg_matches(matches) {
-            Ok(args) => Box::pin(async move { crate::cli::status::execute(args, ctx.format).await }),
+            Ok(args) => {
+                Box::pin(async move { crate::cli::status::execute(args, ctx.format).await })
+            }
             Err(e) => boxed_err(e),
         }
     }
@@ -263,13 +257,13 @@ impl CliCommand for StatusCommand {
 
 pub struct KillCommand;
 impl CliCommand for KillCommand {
-    fn name(&self) -> &'static str { "kill" }
+    fn name(&self) -> &'static str {
+        "kill"
+    }
     fn build(&self, app: Command) -> Command {
-        app.subcommand(
-            <crate::cli::KillArgs as clap::Args>::augment_args(
-                Command::new(self.name()).about("Kill a session"),
-            ),
-        )
+        app.subcommand(<crate::cli::KillArgs as clap::Args>::augment_args(
+            Command::new(self.name()).about("Kill a session"),
+        ))
     }
     fn run(&self, matches: &ArgMatches, _ctx: CliContext) -> BoxFuture<'static, Result<()>> {
         match crate::cli::KillArgs::from_arg_matches(matches) {
@@ -281,7 +275,9 @@ impl CliCommand for KillCommand {
 
 pub struct AuthCommand;
 impl CliCommand for AuthCommand {
-    fn name(&self) -> &'static str { "auth" }
+    fn name(&self) -> &'static str {
+        "auth"
+    }
     fn build(&self, app: Command) -> Command {
         app.subcommand(Command::new(self.name()).about("Set up authentication"))
     }
@@ -292,13 +288,17 @@ impl CliCommand for AuthCommand {
 
 pub struct RecoverCommand;
 impl CliCommand for RecoverCommand {
-    fn name(&self) -> &'static str { "recover" }
+    fn name(&self) -> &'static str {
+        "recover"
+    }
     fn build(&self, app: Command) -> Command {
-        app.subcommand(<crate::cli::recover::RecoverCommands as Subcommand>::augment_subcommands(
-            Command::new(self.name())
-                .about("Recover orphaned or crashed sessions")
-                .subcommand_required(true),
-        ))
+        app.subcommand(
+            <crate::cli::recover::RecoverCommands as Subcommand>::augment_subcommands(
+                Command::new(self.name())
+                    .about("Recover orphaned or crashed sessions")
+                    .subcommand_required(true),
+            ),
+        )
     }
     fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
         match crate::cli::recover::RecoverCommands::from_arg_matches(matches) {
@@ -310,13 +310,17 @@ impl CliCommand for RecoverCommand {
 
 pub struct ConfigCommand;
 impl CliCommand for ConfigCommand {
-    fn name(&self) -> &'static str { "config" }
+    fn name(&self) -> &'static str {
+        "config"
+    }
     fn build(&self, app: Command) -> Command {
-        app.subcommand(<crate::cli::config_cmd::ConfigCommands as Subcommand>::augment_subcommands(
-            Command::new(self.name())
-                .about("Manage configuration")
-                .subcommand_required(true),
-        ))
+        app.subcommand(
+            <crate::cli::config_cmd::ConfigCommands as Subcommand>::augment_subcommands(
+                Command::new(self.name())
+                    .about("Manage configuration")
+                    .subcommand_required(true),
+            ),
+        )
     }
     fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
         match crate::cli::config_cmd::ConfigCommands::from_arg_matches(matches) {
@@ -328,13 +332,17 @@ impl CliCommand for ConfigCommand {
 
 pub struct GitCommand;
 impl CliCommand for GitCommand {
-    fn name(&self) -> &'static str { "git" }
+    fn name(&self) -> &'static str {
+        "git"
+    }
     fn build(&self, app: Command) -> Command {
-        app.subcommand(<crate::cli::git_cmd::GitCommands as Subcommand>::augment_subcommands(
-            Command::new(self.name())
-                .about("Git worktree operations")
-                .subcommand_required(true),
-        ))
+        app.subcommand(
+            <crate::cli::git_cmd::GitCommands as Subcommand>::augment_subcommands(
+                Command::new(self.name())
+                    .about("Git worktree operations")
+                    .subcommand_required(true),
+            ),
+        )
     }
     fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
         match crate::cli::git_cmd::GitCommands::from_arg_matches(matches) {
@@ -346,13 +354,17 @@ impl CliCommand for GitCommand {
 
 pub struct FavoritesCommand;
 impl CliCommand for FavoritesCommand {
-    fn name(&self) -> &'static str { "favorites" }
+    fn name(&self) -> &'static str {
+        "favorites"
+    }
     fn build(&self, app: Command) -> Command {
-        app.subcommand(<crate::cli::favorites::FavoritesCommands as Subcommand>::augment_subcommands(
-            Command::new(self.name())
-                .about("Manage favorite repositories")
-                .subcommand_required(true),
-        ))
+        app.subcommand(
+            <crate::cli::favorites::FavoritesCommands as Subcommand>::augment_subcommands(
+                Command::new(self.name())
+                    .about("Manage favorite repositories")
+                    .subcommand_required(true),
+            ),
+        )
     }
     fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
         match crate::cli::favorites::FavoritesCommands::from_arg_matches(matches) {
@@ -364,13 +376,13 @@ impl CliCommand for FavoritesCommand {
 
 pub struct InitCommand;
 impl CliCommand for InitCommand {
-    fn name(&self) -> &'static str { "init" }
+    fn name(&self) -> &'static str {
+        "init"
+    }
     fn build(&self, app: Command) -> Command {
-        app.subcommand(
-            <crate::cli::init::InitArgs as clap::Args>::augment_args(
-                Command::new(self.name()).about("First-time setup and prerequisite checking"),
-            ),
-        )
+        app.subcommand(<crate::cli::init::InitArgs as clap::Args>::augment_args(
+            Command::new(self.name()).about("First-time setup and prerequisite checking"),
+        ))
     }
     fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
         match crate::cli::init::InitArgs::from_arg_matches(matches) {
@@ -382,13 +394,17 @@ impl CliCommand for InitCommand {
 
 pub struct PresetsCommand;
 impl CliCommand for PresetsCommand {
-    fn name(&self) -> &'static str { "presets" }
+    fn name(&self) -> &'static str {
+        "presets"
+    }
     fn build(&self, app: Command) -> Command {
-        app.subcommand(<crate::cli::presets::PresetsCommands as Subcommand>::augment_subcommands(
-            Command::new(self.name())
-                .about("Manage session presets")
-                .subcommand_required(true),
-        ))
+        app.subcommand(
+            <crate::cli::presets::PresetsCommands as Subcommand>::augment_subcommands(
+                Command::new(self.name())
+                    .about("Manage session presets")
+                    .subcommand_required(true),
+            ),
+        )
     }
     fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
         match crate::cli::presets::PresetsCommands::from_arg_matches(matches) {
@@ -400,13 +416,17 @@ impl CliCommand for PresetsCommand {
 
 pub struct UsageCommand;
 impl CliCommand for UsageCommand {
-    fn name(&self) -> &'static str { "usage" }
+    fn name(&self) -> &'static str {
+        "usage"
+    }
     fn build(&self, app: Command) -> Command {
-        app.subcommand(<crate::cli::usage::UsageCommands as Subcommand>::augment_subcommands(
-            Command::new(self.name())
-                .about("Usage analytics, reports, export, and optimization")
-                .subcommand_required(true),
-        ))
+        app.subcommand(
+            <crate::cli::usage::UsageCommands as Subcommand>::augment_subcommands(
+                Command::new(self.name())
+                    .about("Usage analytics, reports, export, and optimization")
+                    .subcommand_required(true),
+            ),
+        )
     }
     fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
         match crate::cli::usage::UsageCommands::from_arg_matches(matches) {
@@ -418,7 +438,9 @@ impl CliCommand for UsageCommand {
 
 pub struct StatuslineCommand;
 impl CliCommand for StatuslineCommand {
-    fn name(&self) -> &'static str { "statusline" }
+    fn name(&self) -> &'static str {
+        "statusline"
+    }
     fn build(&self, app: Command) -> Command {
         app.subcommand(Command::new(self.name()).about(
             "Claude Code statusline hook: read JSON on stdin, cache rate-limit \
@@ -432,7 +454,9 @@ impl CliCommand for StatuslineCommand {
 
 pub struct CompletionCommand;
 impl CliCommand for CompletionCommand {
-    fn name(&self) -> &'static str { "completion" }
+    fn name(&self) -> &'static str {
+        "completion"
+    }
     fn build(&self, app: Command) -> Command {
         let shell_arg = clap::Arg::new("shell")
             .required(true)
@@ -467,11 +491,17 @@ impl CliCommand for CompletionCommand {
 /// the surface today.
 pub struct PluginCommand;
 impl CliCommand for PluginCommand {
-    fn name(&self) -> &'static str { "plugin" }
+    fn name(&self) -> &'static str {
+        "plugin"
+    }
     fn build(&self, app: Command) -> Command {
         let install = Command::new("install")
             .about("Install a plugin from a marketplace (Phase 4)")
-            .arg(clap::Arg::new("plugin").required(true).help("plugin id, e.g. stevengonsalvez/burndown"));
+            .arg(
+                clap::Arg::new("plugin")
+                    .required(true)
+                    .help("plugin id, e.g. stevengonsalvez/burndown"),
+            );
         let list = Command::new("list").about("List installed plugins (Phase 4)");
         let update = Command::new("update")
             .about("Update an installed plugin (Phase 4)")
@@ -539,7 +569,10 @@ mod tests {
             "completion",
             "plugin",
         ] {
-            assert!(names.contains(&required), "missing required command: {required}");
+            assert!(
+                names.contains(&required),
+                "missing required command: {required}"
+            );
         }
     }
 
@@ -593,7 +626,12 @@ mod tests {
             .enable_all()
             .build()
             .expect("tokio runtime");
-        let result = rt.block_on(cmd.run(sub, CliContext { format: OutputFormat::Text }));
+        let result = rt.block_on(cmd.run(
+            sub,
+            CliContext {
+                format: OutputFormat::Text,
+            },
+        ));
         let err = result.expect_err("plugin loader is deferred");
         assert!(format!("{err}").to_lowercase().contains("phase 4"));
     }
