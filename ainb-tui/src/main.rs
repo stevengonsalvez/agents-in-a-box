@@ -117,7 +117,14 @@ async fn main() -> Result<()> {
             cli::presets::execute(command, args.format).await
         }
         Some(cli::Commands::Usage { command }) => cli::usage::execute(command, args.format).await,
-        Some(cli::Commands::Statusline) => cli::statusline::execute(),
+        // New canonical namespace: `ainb claudecode statusline`. Legacy
+        // top-level `Statusline` dispatches to the same handler so
+        // existing `~/.claude/settings.json` entries keep working
+        // unchanged.
+        Some(cli::Commands::Claudecode {
+            cmd: cli::ClaudeCodeCmd::Statusline,
+        })
+        | Some(cli::Commands::Statusline) => cli::statusline::execute(),
         Some(cli::Commands::Completion { shell }) => {
             use clap::CommandFactory;
             let mut cmd = cli::Cli::command();

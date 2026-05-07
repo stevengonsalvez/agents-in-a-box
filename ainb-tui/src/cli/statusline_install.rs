@@ -11,8 +11,19 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
-/// Command we install into Claude Code's `statusLine.command`.
+/// Legacy command we used to install into Claude Code's
+/// `statusLine.command`. Retained for migration detection — fresh installs
+/// write [`AINB_CLAUDECODE_STATUSLINE_CMD`] instead.
 pub const AINB_STATUSLINE_CMD: &str = "ainb statusline";
+
+/// Canonical command we install into Claude Code's `statusLine.command`.
+/// Provider-namespaced so that other providers (Codex et al.) can grow
+/// their own equivalents without lying at the top level. Wired into the
+/// install/migrate path in the next commit; declared here so the clap
+/// surface and the install helper land in atomic, independently-testable
+/// steps.
+#[allow(dead_code)]
+pub const AINB_CLAUDECODE_STATUSLINE_CMD: &str = "ainb claudecode statusline";
 
 /// Outcome of an `install_statusline()` call.
 #[derive(Debug, Clone, PartialEq, Eq)]
