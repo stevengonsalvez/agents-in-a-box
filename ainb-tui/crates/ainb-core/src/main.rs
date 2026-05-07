@@ -42,6 +42,7 @@ mod editors;
 mod git;
 mod interactive;
 mod models;
+mod plugins;
 mod providers;
 mod tmux;
 mod usage_cache;

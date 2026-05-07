@@ -77,6 +77,10 @@ rusqlite = { workspace = true }
 blake3 = { workspace = true }
 bincode = { workspace = true }
 
+# Plugin host (Phase 3 Wave 3 wiring — loads bundled burndown.wasm at startup)
+ainb-plugin-api = { path = "../ainb-plugin-api", version = "0.1.0" }
+ainb-plugin-host = { path = "../ainb-plugin-host", version = "0.1.0" }
+
 # Fuzzy search
 nucleo-matcher = { workspace = true }
 

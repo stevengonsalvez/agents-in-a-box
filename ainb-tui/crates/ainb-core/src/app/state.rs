@@ -9678,16 +9678,35 @@ impl AppState {
 
 pub struct App {
     pub state: AppState,
+    /// Plugin host loaded at app startup. `None` while the structural
+    /// host wiring is still in flight (Phase 3 Wave 3 partial cutover) and
+    /// during contexts where the wasmi runtime would be wasteful (CLI
+    /// subcommand dispatch). Built lazily by [`App::init`].
+    pub plugin_host: Option<ainb_plugin_host::PluginHost>,
 }
 
 impl App {
     pub fn new() -> Self {
         Self {
             state: AppState::new(),
+            plugin_host: None,
         }
     }
 
     pub async fn init(&mut self) {
+        // Discover + load bundled plugins (best-effort). The Phase 1.5 host
+        // stubs mean a loaded plugin's _render is currently a no-op, so
+        // analytics still flows through state.usage_state until the real
+        // render channel lands. This block stays minimal until then.
+        let (host, outcome) = crate::plugins::init_plugin_host();
+        if !outcome.loaded.is_empty() {
+            info!(loaded = ?outcome.loaded, "plugin host initialised");
+        }
+        for (name, err) in &outcome.failed {
+            warn!(plugin = %name, error = %err, "plugin failed to load");
+        }
+        self.plugin_host = Some(host);
+
         // Initialize log streaming coordinator
         let (mut coordinator, log_sender) = LogStreamingCoordinator::new();
 
