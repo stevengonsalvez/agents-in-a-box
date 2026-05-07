@@ -6,8 +6,12 @@
 //! follow-up commits per the Phase 3 atomic-commit plan.
 
 #![allow(clippy::missing_safety_doc)]
+#![allow(dead_code)] // Phase 3 in flight — large surface area lifted from core
 
 mod abi;
+pub mod cache;
+pub mod config;
+pub mod data;
 
 /// Host ABI version this plugin targets, exposed as a `[u32; 3]` so the
 /// host can read it directly via `Memory::read` without going through
