@@ -899,6 +899,121 @@ fn collect_claude_jsonl_files(project_dir: &Path) -> Vec<PathBuf> {
     files
 }
 
+/// Collect Claude assistant calls whose timestamp is `>= cutoff`,
+/// skipping files whose mtime falls before `cutoff - grace`. This is the
+/// hot-path the live-window 5h aggregator relies on — it intentionally
+/// does *not* go through the usage cache because we only need a tight
+/// time slice, not the full history.
+///
+/// `grace` widens the mtime filter to forgive clock skew between
+/// timestamp comparisons (real-world JSONL files have been seen with
+/// mtime trailing the last entry's timestamp by a few seconds).
+///
+/// Returns an empty vec if the projects dir is missing.
+pub(crate) fn collect_recent_claude_calls_within(
+    cutoff: DateTime<Utc>,
+    grace: Duration,
+) -> Vec<ProviderCall> {
+    let roots = UsageSourceRoots::default();
+    let Some(projects_dir) = roots.claude_projects_dir.as_deref() else {
+        return Vec::new();
+    };
+    collect_recent_claude_calls_within_at(projects_dir, cutoff, grace)
+}
+
+/// Test seam for `collect_recent_claude_calls_within` — accepts an
+/// explicit `projects_dir` so tests can drive the walker against a
+/// tempdir without mutating environment variables.
+pub(crate) fn collect_recent_claude_calls_within_at(
+    projects_dir: &Path,
+    cutoff: DateTime<Utc>,
+    grace: Duration,
+) -> Vec<ProviderCall> {
+    if !projects_dir.is_dir() {
+        return Vec::new();
+    }
+    let username = whoami_username();
+    let mtime_floor = std::time::SystemTime::UNIX_EPOCH
+        + std::time::Duration::from_secs((cutoff - grace).timestamp().max(0) as u64);
+
+    let mut calls = Vec::new();
+    let Ok(project_dirs) = std::fs::read_dir(projects_dir) else {
+        return calls;
+    };
+    for entry in project_dirs.filter_map(Result::ok) {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let raw_name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+        let project = clean_project_name(raw_name, &username);
+        let project_path = unsanitize_project_path(raw_name);
+
+        for jsonl_path in collect_claude_jsonl_files(&path) {
+            // mtime gate — skip files that haven't been touched in the
+            // window. Cheap and avoids opening cold archives.
+            if let Ok(meta) = std::fs::metadata(&jsonl_path) {
+                if let Ok(mtime) = meta.modified() {
+                    if mtime < mtime_floor {
+                        continue;
+                    }
+                }
+            }
+            parse_claude_jsonl_within(
+                &jsonl_path,
+                &project,
+                &project_path,
+                cutoff,
+                &mut calls,
+            );
+        }
+    }
+    calls
+}
+
+/// Stream a single Claude JSONL file and append calls whose timestamp
+/// is `>= cutoff` to `out`. JSONL files are append-only with
+/// monotonically increasing timestamps, so once we have collected at
+/// least one call inside the window and then encounter a call before
+/// the window we know the rest of the file is older too — but the
+/// converse is not guaranteed (header lines, "user"-typed lines, etc.
+/// have no usage data and emit `None`). To stay correct we just walk
+/// to EOF and filter; the mtime gate already keeps the per-file work
+/// bounded.
+fn parse_claude_jsonl_within(
+    path: &Path,
+    project: &str,
+    project_path: &str,
+    cutoff: DateTime<Utc>,
+    out: &mut Vec<ProviderCall>,
+) {
+    let Ok(file) = std::fs::File::open(path) else {
+        return;
+    };
+    let reader = BufReader::new(file);
+    let mut current_user_message = String::new();
+    let mut offset: u64 = 0;
+    for line in reader.lines() {
+        let Ok(line) = line else { return };
+        let line_offset = offset;
+        // Reconstruct byte advance: line bytes + the trailing newline
+        // we stripped (BufRead::lines drops the terminator).
+        offset += line.len() as u64 + 1;
+        if let Some(call) = parse_claude_line(
+            &line,
+            path,
+            project,
+            project_path,
+            &mut current_user_message,
+            line_offset,
+        ) {
+            if call.timestamp >= cutoff {
+                out.push(call);
+            }
+        }
+    }
+}
+
 /// Full parse of a Claude JSONL session file. Returns the complete
 /// `Vec<ProviderCall>` and the byte offset where parsing stopped (typically
 /// the file size at open time — note this is best-effort: if the file is
@@ -3778,5 +3893,94 @@ mod tests {
         let proj = &data.projects[0];
         assert_eq!(proj.name, "plain-folder");
         assert!(proj.repo.is_none());
+    }
+
+    #[test]
+    fn collect_recent_within_keeps_only_entries_inside_cutoff() {
+        // Two assistant lines: one inside the 5h window, one well
+        // outside it. The walker must return only the inside-window
+        // call.
+        let temp = tempdir().unwrap();
+        let claude_projects = temp.path().join("projects");
+        let project_dir = claude_projects.join("-Users-stevie-fixture");
+        let now = Utc::now();
+        let inside = (now - Duration::hours(2)).to_rfc3339();
+        let outside = (now - Duration::hours(8)).to_rfc3339();
+        let payload = format!(
+            "{}\n{}\n",
+            format!(
+                r#"{{"type":"assistant","timestamp":"{outside}","sessionId":"s1","message":{{"role":"assistant","model":"claude-sonnet-4-5","content":[],"usage":{{"input_tokens":100,"output_tokens":50}}}}}}"#,
+            ),
+            format!(
+                r#"{{"type":"assistant","timestamp":"{inside}","sessionId":"s1","message":{{"role":"assistant","model":"claude-sonnet-4-5","content":[],"usage":{{"input_tokens":200,"output_tokens":75}}}}}}"#,
+            ),
+        );
+        write_file(&project_dir.join("session.jsonl"), &payload);
+
+        let cutoff = now - Duration::hours(5);
+        let calls = collect_recent_claude_calls_within_at(
+            &claude_projects,
+            cutoff,
+            Duration::hours(1),
+        );
+
+        assert_eq!(calls.len(), 1, "only the in-window call should survive");
+        let call = &calls[0];
+        assert_eq!(call.input_tokens, 200);
+        assert!(
+            call.timestamp >= cutoff,
+            "kept call must be within cutoff"
+        );
+    }
+
+    #[test]
+    fn collect_recent_within_skips_files_below_mtime_floor() {
+        // File with one in-window assistant entry, but its mtime is
+        // older than the (cutoff - grace) floor. Expectation: skipped.
+        let temp = tempdir().unwrap();
+        let claude_projects = temp.path().join("projects");
+        let project_dir = claude_projects.join("-Users-stevie-stale");
+        let now = Utc::now();
+        // Even though the line itself is in-window, an old mtime
+        // proves the file hasn't been written to recently — Claude
+        // would have updated mtime if it were still appending. The
+        // walker treats stale-mtime files as cold archives.
+        let in_window = (now - Duration::minutes(30)).to_rfc3339();
+        let payload = format!(
+            r#"{{"type":"assistant","timestamp":"{in_window}","sessionId":"s1","message":{{"role":"assistant","model":"claude-sonnet-4-5","content":[],"usage":{{"input_tokens":99,"output_tokens":1}}}}}}"#
+        );
+        let session = project_dir.join("session.jsonl");
+        write_file(&session, &payload);
+        // Backdate mtime to 24h ago — well past the (5h + 1h) gate.
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&session)
+            .unwrap();
+        let twenty_four_hours_ago = std::time::SystemTime::now()
+            - std::time::Duration::from_secs(60 * 60 * 24);
+        f.set_modified(twenty_four_hours_ago).unwrap();
+
+        let cutoff = now - Duration::hours(5);
+        let calls = collect_recent_claude_calls_within_at(
+            &claude_projects,
+            cutoff,
+            Duration::hours(1),
+        );
+        assert!(
+            calls.is_empty(),
+            "files older than (cutoff - grace) should be skipped",
+        );
+    }
+
+    #[test]
+    fn collect_recent_within_returns_empty_when_dir_missing() {
+        let temp = tempdir().unwrap();
+        let projects = temp.path().join("does-not-exist");
+        let calls = collect_recent_claude_calls_within_at(
+            &projects,
+            Utc::now() - Duration::hours(5),
+            Duration::hours(1),
+        );
+        assert!(calls.is_empty());
     }
 }

@@ -265,21 +265,19 @@ fn time_until_block_end(block: &ActiveBlock, now: DateTime<Utc>) -> Duration {
 }
 
 /// Pull recent Claude calls (last 5h) without re-parsing the entire
-/// history. Mirrors `parse_usage_for` but with a tight time filter.
-fn collect_recent_claude_calls() -> Vec<ProviderCall> {
-    use crate::models::UsagePeriod;
-    use crate::models::usage::{UsageProviderFilter, UsageQuery, parse_usage_for};
+/// history. Goes through `collect_recent_claude_calls_within` which
+/// mtime-filters the JSONL files and keeps only entries inside the
+/// active 5-hour window — avoids the full-history walk that
+/// `parse_usage_for` does on every render.
+///
+/// `MTIME_GRACE_HOURS` widens the mtime filter to forgive small clock
+/// drift between the JSONL writer (Claude Code) and the filesystem.
+const MTIME_GRACE_HOURS: i64 = 1;
 
-    let query = UsageQuery {
-        period: UsagePeriod::Today,
-        provider_filter: UsageProviderFilter::Claude,
-        include_projects: Vec::new(),
-        exclude_projects: Vec::new(),
-        filters: Default::default(),
-    };
-    let data = parse_usage_for(query);
+fn collect_recent_claude_calls() -> Vec<ProviderCall> {
     let cutoff = Utc::now() - chrono::Duration::hours(5);
-    data.calls.into_iter().filter(|c| c.timestamp >= cutoff).collect()
+    let grace = chrono::Duration::hours(MTIME_GRACE_HOURS);
+    crate::models::usage::collect_recent_claude_calls_within(cutoff, grace)
 }
 
 #[cfg(test)]
