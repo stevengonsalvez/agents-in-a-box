@@ -757,7 +757,7 @@ fn print_top_models(data: &UsageData) {
     }
 }
 
-fn report_json(data: &UsageData) -> serde_json::Value {
+pub(crate) fn report_json(data: &UsageData) -> serde_json::Value {
     json!({
         "overview": data.overview(),
         "daily": data.daily,

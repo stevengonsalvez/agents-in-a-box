@@ -94,6 +94,7 @@ mockall = { workspace = true }
 pretty_assertions = { workspace = true }
 rexpect = { workspace = true }
 vt100 = { workspace = true }
+insta = { version = "1.40", features = ["json"] }
 
 [lints]
 workspace = true

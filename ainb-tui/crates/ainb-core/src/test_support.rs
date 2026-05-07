@@ -249,3 +249,11 @@ pub fn claude_jsonl_turn(
         r#"{{"type":"assistant","timestamp":"2026-04-10T09:00:00Z","sessionId":"s1"{branch_field},"message":{{"role":"assistant","model":"{model}","content":[{{"type":"text","text":"x"}}],"usage":{{"input_tokens":{in_tok},"output_tokens":{out_tok}}}}}}}"#
     )
 }
+
+/// Public wrapper around the `cli::usage::report_json` helper. Exposed
+/// here (rather than making the CLI fn `pub`) so integration tests in
+/// `tests/` can capture the canonical JSON shape without leaking module
+/// internals from `cli::usage`.
+pub fn cli_usage_report_json(data: &UsageData) -> serde_json::Value {
+    crate::cli::usage::report_json(data)
+}

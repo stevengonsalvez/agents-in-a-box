@@ -1,0 +1,115 @@
+---
+source: crates/ainb-core/tests/snapshot_baselines.rs
+---
+{
+  "activities": [
+    {
+      "bucket": {
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0,
+        "call_count": 2,
+        "cost_usd": 0.42,
+        "input_tokens": 100,
+        "output_tokens": 50,
+        "project_count": 1,
+        "reasoning_tokens": 0,
+        "session_count": 1
+      },
+      "category": "feature",
+      "edit_turns": 1,
+      "one_shot_turns": 1,
+      "retries": 0,
+      "turns": 2
+    }
+  ],
+  "daily": [
+    [
+      "2026-04-29",
+      {
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0,
+        "call_count": 2,
+        "cost_usd": 0.42,
+        "input_tokens": 100,
+        "output_tokens": 50,
+        "project_count": 1,
+        "reasoning_tokens": 0,
+        "session_count": 1
+      }
+    ]
+  ],
+  "mcp_servers": [],
+  "models": [
+    {
+      "bucket": {
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0,
+        "call_count": 2,
+        "cost_usd": 0.42,
+        "input_tokens": 100,
+        "output_tokens": 50,
+        "project_count": 1,
+        "reasoning_tokens": 0,
+        "session_count": 1
+      },
+      "model": "claude-sonnet-4-5"
+    }
+  ],
+  "overview": {
+    "calls": 2,
+    "cost_usd": 0.42,
+    "projects": 1,
+    "sessions": 1,
+    "tokens": 150
+  },
+  "projects": [
+    {
+      "bucket": {
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0,
+        "call_count": 2,
+        "cost_usd": 0.42,
+        "input_tokens": 100,
+        "output_tokens": 50,
+        "project_count": 1,
+        "reasoning_tokens": 0,
+        "session_count": 1
+      },
+      "name": "agents-in-a-box",
+      "path": "/tmp/agents-in-a-box",
+      "repo": null
+    }
+  ],
+  "sessions": [
+    {
+      "bucket": {
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0,
+        "call_count": 2,
+        "cost_usd": 0.42,
+        "input_tokens": 100,
+        "output_tokens": 50,
+        "project_count": 1,
+        "reasoning_tokens": 0,
+        "session_count": 1
+      },
+      "first_timestamp": "2026-04-29T10:00:00Z",
+      "last_timestamp": "2026-04-29T10:00:00Z",
+      "project": "agents-in-a-box",
+      "provider": "claude",
+      "session_id": "s1"
+    }
+  ],
+  "shell_commands": [
+    {
+      "calls": 1,
+      "name": "cargo test"
+    }
+  ],
+  "tools": [
+    {
+      "calls": 1,
+      "name": "Edit"
+    }
+  ]
+}
