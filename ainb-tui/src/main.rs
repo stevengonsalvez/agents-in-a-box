@@ -117,6 +117,7 @@ async fn main() -> Result<()> {
             cli::presets::execute(command, args.format).await
         }
         Some(cli::Commands::Usage { command }) => cli::usage::execute(command, args.format).await,
+        Some(cli::Commands::Statusline) => cli::statusline::execute(),
         Some(cli::Commands::Completion { shell }) => {
             use clap::CommandFactory;
             let mut cmd = cli::Cli::command();

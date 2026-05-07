@@ -17,6 +17,7 @@ pub mod presets;
 pub mod recover;
 pub mod run;
 pub mod status;
+pub mod statusline;
 pub mod usage;
 pub mod util;
 
@@ -146,6 +147,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: usage::UsageCommands,
     },
+
+    /// Claude Code statusline hook: read JSON on stdin, cache rate-limit
+    /// windows for the TUI, and emit a powerline status string on stdout.
+    /// Wire into `~/.claude/settings.json` as the `statusLine.command`.
+    Statusline,
 
     /// Generate shell completions (bash, zsh, fish, powershell, elvish)
     Completion {
