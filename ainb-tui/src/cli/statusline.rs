@@ -2,8 +2,10 @@
 //
 // Reads JSON on stdin (the statusline payload Claude Code feeds to its
 // statusLine.command), persists the rate-limit window data to a cache file
-// at `~/.cache/ainb/live.json`, and emits a single-line powerline-styled
-// status string on stdout for the user's prompt.
+// in the OS-specific cache dir (via `dirs::cache_dir()`, e.g.
+// `~/.cache/ainb/live.json` on Linux, `~/Library/Caches/ainb/live.json`
+// on macOS), and emits a single-line powerline-styled status string on
+// stdout for the user's prompt.
 //
 // Design constraints (the statusline runs on every prompt render):
 //   - Must NEVER panic. All fallible operations swallow errors and emit
@@ -20,7 +22,8 @@ use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
-/// Schema version for `~/.cache/ainb/live.json`.
+/// Schema version for the live cache file (resolved via
+/// [`cache_path`] — OS-specific cache dir).
 pub const CACHE_SCHEMA_VERSION: u32 = 1;
 
 /// One side of a rate-limit window (used twice: 5h + 7d).
@@ -33,7 +36,9 @@ pub struct RateWindow {
     pub resets_at: Option<String>,
 }
 
-/// On-disk cache schema for `~/.cache/ainb/live.json`.
+/// On-disk cache schema for the live cache file (resolved via
+/// [`cache_path`] — OS-specific cache dir, e.g. `~/.cache/ainb/live.json`
+/// on Linux, `~/Library/Caches/ainb/live.json` on macOS).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LiveCache {
     pub version: u32,
@@ -51,8 +56,10 @@ pub struct LiveCache {
     pub model: Option<String>,
 }
 
-/// Resolve `~/.cache/ainb/live.json`. Returns `None` if no cache dir is
-/// available (mostly a guard for sandbox environments without a HOME).
+/// Resolve the OS-specific cache file path (via `dirs::cache_dir()`,
+/// e.g. `~/.cache/ainb/live.json` on Linux, `~/Library/Caches/ainb/live.json`
+/// on macOS). Returns `None` if no cache dir is available (mostly a
+/// guard for sandbox environments without a HOME).
 pub fn cache_path() -> Option<PathBuf> {
     let dir = dirs::cache_dir().or_else(|| dirs::home_dir().map(|h| h.join(".cache")))?;
     Some(dir.join("ainb").join("live.json"))

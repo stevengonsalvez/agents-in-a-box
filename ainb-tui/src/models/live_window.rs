@@ -1,8 +1,11 @@
 // ABOUTME: Live OAuth-window reader with three-tier fallback.
 //
-// Tier 1 (Cache):    `~/.cache/ainb/live.json` written by the
-//                    `ainb statusline` hook. Authoritative — Claude Code
-//                    only exposes rate_limits to statusline subprocesses.
+// Tier 1 (Cache):    OS-specific cache dir (via `dirs::cache_dir()`,
+//                    e.g. `~/.cache/ainb/live.json` on Linux,
+//                    `~/Library/Caches/ainb/live.json` on macOS) written
+//                    by the `ainb statusline` hook. Authoritative —
+//                    Claude Code only exposes rate_limits to statusline
+//                    subprocesses.
 // Tier 2 (Local):    Native 5-hour-block aggregation over the local
 //                    Claude JSONL transcripts (mirrors `ccusage blocks
 //                    --active --json` logic). Provides 5h burn but not
