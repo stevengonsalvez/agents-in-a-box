@@ -20,7 +20,7 @@ const MUTED_GRAY: Color = Color::Rgb(120, 120, 140);
 const PROGRESS_CYAN: Color = Color::Rgb(100, 200, 230);
 
 /// Embed the changelog at compile time
-const CHANGELOG_CONTENT: &str = include_str!("../../CHANGELOG.md");
+const CHANGELOG_CONTENT: &str = include_str!("../../../../CHANGELOG.md");
 
 /// A line of rendered markdown content
 #[derive(Debug, Clone)]

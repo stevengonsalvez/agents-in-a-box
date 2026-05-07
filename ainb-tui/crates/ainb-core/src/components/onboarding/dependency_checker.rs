@@ -380,7 +380,7 @@ impl DependencyChecker {
         let tmux_conf_path = home.join(".tmux.conf");
 
         // Embedded tmux config content (from ainb-tui/config/tmux.conf)
-        let tmux_config = include_str!("../../../config/tmux.conf");
+        let tmux_config = include_str!("../../../../../config/tmux.conf");
 
         // Backup existing config if it exists
         if tmux_conf_path.exists() {
