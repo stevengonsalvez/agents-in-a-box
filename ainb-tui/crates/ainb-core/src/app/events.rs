@@ -4935,12 +4935,127 @@ impl EventHandler {
                 );
             }
             AppEvent::NavigateTo(screen_id) => {
-                tracing::debug!(
-                    target: "navigation",
-                    screen_id = %screen_id,
-                    "received AppEvent::NavigateTo (Phase 2c stub — ScreenRegistry dispatch lands once Phase 2a merges)",
-                );
+                // Phase 2c integration step: route through the screen-id table
+                // landed by Phase 2a. We validate against the built-in `ids`
+                // constants statically; layout dispatch reads
+                // `state.current_screen` and looks up the matching `Screen`
+                // impl in `LayoutComponent::screens` (the in-tree
+                // `ScreenRegistry`). Plugin-supplied screens (Phase 4) will
+                // register additional ids into that same registry, at which
+                // point this validation switches to a registry probe.
+                if is_known_screen_id(&screen_id) {
+                    state.previous_screen = Some(state.current_screen.clone());
+                    state.current_screen = screen_id;
+                } else {
+                    tracing::warn!(
+                        target: "navigation",
+                        screen_id = %screen_id,
+                        "AppEvent::NavigateTo for unknown screen id — ignoring",
+                    );
+                }
             }
         }
+    }
+}
+
+/// `true` if `id` matches one of the built-in screen ids declared in
+/// `crate::app::screens::ids`. Phase 4 will replace this with a probe into
+/// the live `ScreenRegistry` so plugin-supplied ids resolve too.
+fn is_known_screen_id(id: &str) -> bool {
+    use crate::app::screens::ids;
+    matches!(
+        id,
+        ids::HOME
+            | ids::AGENT_SELECTION
+            | ids::CONFIG
+            | ids::CATALOG
+            | ids::ANALYTICS
+            | ids::SESSION_LIST
+            | ids::LOGS
+            | ids::LOG_HISTORY
+            | ids::TERMINAL
+            | ids::HELP
+            | ids::NEW_SESSION
+            | ids::SEARCH_WORKSPACE
+            | ids::NON_GIT_NOTIFICATION
+            | ids::ATTACHED_TERMINAL
+            | ids::AUTH_SETUP
+            | ids::CLAUDE_CHAT
+            | ids::GIT_VIEW
+            | ids::ONBOARDING
+            | ids::SETUP_MENU
+            | ids::CHANGELOG
+            | ids::SESSION_RECOVERY
+            | ids::SKILLS
+    )
+}
+
+#[cfg(test)]
+mod navigate_to_tests {
+    use super::*;
+    use crate::app::screens::ids;
+
+    fn fresh_state() -> AppState {
+        AppState::default()
+    }
+
+    #[test]
+    fn navigate_to_known_screen_updates_current() {
+        let mut state = fresh_state();
+        let starting = state.current_screen.clone();
+        EventHandler::process_event(
+            AppEvent::NavigateTo(ids::ANALYTICS.to_string()),
+            &mut state,
+        );
+        assert_eq!(state.current_screen, ids::ANALYTICS);
+        assert_eq!(state.previous_screen.as_deref(), Some(starting.as_str()));
+    }
+
+    #[test]
+    fn navigate_to_unknown_screen_does_not_change_current() {
+        let mut state = fresh_state();
+        let starting = state.current_screen.clone();
+        EventHandler::process_event(
+            AppEvent::NavigateTo("definitely-not-a-real-screen".to_string()),
+            &mut state,
+        );
+        assert_eq!(state.current_screen, starting);
+    }
+
+    #[test]
+    fn is_known_screen_id_accepts_all_builtin_ids() {
+        for id in [
+            ids::HOME,
+            ids::AGENT_SELECTION,
+            ids::CONFIG,
+            ids::CATALOG,
+            ids::ANALYTICS,
+            ids::SESSION_LIST,
+            ids::LOGS,
+            ids::LOG_HISTORY,
+            ids::TERMINAL,
+            ids::HELP,
+            ids::NEW_SESSION,
+            ids::SEARCH_WORKSPACE,
+            ids::NON_GIT_NOTIFICATION,
+            ids::ATTACHED_TERMINAL,
+            ids::AUTH_SETUP,
+            ids::CLAUDE_CHAT,
+            ids::GIT_VIEW,
+            ids::ONBOARDING,
+            ids::SETUP_MENU,
+            ids::CHANGELOG,
+            ids::SESSION_RECOVERY,
+            ids::SKILLS,
+        ] {
+            assert!(is_known_screen_id(id), "{id} should be recognised");
+        }
+    }
+
+    #[test]
+    fn is_known_screen_id_rejects_garbage() {
+        assert!(!is_known_screen_id(""));
+        assert!(!is_known_screen_id("not-a-screen"));
+        assert!(!is_known_screen_id("home2"));
     }
 }
