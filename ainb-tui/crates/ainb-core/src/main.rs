@@ -375,7 +375,7 @@ async fn run_tui_loop(
                             let (col, row) = (mouse_event.column, mouse_event.row);
 
                             // Handle log history view clicks directly
-                            if app.state.current_view == crate::app::state::View::LogHistory {
+                            if app.state.current_screen == crate::app::screens::ids::LOG_HISTORY {
                                 // Log history viewer takes full screen, starts at (0, 0)
                                 app.state.log_history_state.handle_click(col, row, 0, 0);
                             } else if let Some(app_event) = EventHandler::handle_mouse_event(
@@ -387,11 +387,11 @@ async fn run_tui_loop(
                         }
                         MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
                             // Handle mouse scroll based on current view
-                            use crate::app::state::View;
+                            use crate::app::screens::ids as screen_ids;
                             const SCROLL_LINES: usize = 3; // Lines per mouse wheel tick
                             let is_down = matches!(mouse_event.kind, MouseEventKind::ScrollDown);
 
-                            if app.state.current_view == View::HomeScreen {
+                            if app.state.current_screen == screen_ids::HOME {
                                 // Scroll welcome panel on home screen (right side only)
                                 // Sidebar is ~26 chars wide, so anything beyond that is the welcome panel
                                 let sidebar_width = 26u16;
@@ -404,7 +404,7 @@ async fn run_tui_loop(
                                         }
                                     }
                                 }
-                            } else if app.state.current_view == View::GitView {
+                            } else if app.state.current_screen == screen_ids::GIT_VIEW {
                                 // Scroll git view content (markdown or diff)
                                 if let Some(ref mut git_state) = app.state.git_view_state {
                                     match git_state.active_tab {
@@ -425,7 +425,7 @@ async fn run_tui_loop(
                                         _ => {}
                                     }
                                 }
-                            } else if app.state.current_view == View::LogHistory {
+                            } else if app.state.current_screen == screen_ids::LOG_HISTORY {
                                 // Scroll log history viewer
                                 // Shift+Scroll = horizontal, normal scroll = vertical
                                 if mouse_event
@@ -465,7 +465,7 @@ async fn run_tui_loop(
                             let (col, row) = (mouse_event.column, mouse_event.row);
 
                             // Handle log history text selection drag
-                            if app.state.current_view == crate::app::state::View::LogHistory {
+                            if app.state.current_screen == crate::app::screens::ids::LOG_HISTORY {
                                 app.state.log_history_state.update_selection(col, row);
                             } else if let Some(app_event) = EventHandler::handle_mouse_event(
                                 AppEvent::MouseDragging { x: col, y: row },
@@ -478,7 +478,7 @@ async fn run_tui_loop(
                             let (col, row) = (mouse_event.column, mouse_event.row);
 
                             // Handle log history text selection end
-                            if app.state.current_view == crate::app::state::View::LogHistory {
+                            if app.state.current_screen == crate::app::screens::ids::LOG_HISTORY {
                                 app.state.log_history_state.end_selection();
                             } else if let Some(app_event) = EventHandler::handle_mouse_event(
                                 AppEvent::MouseDragEnd { x: col, y: row },
@@ -928,7 +928,7 @@ async fn run_tui_loop(
 
                         // Clear new session state
                         app.state.new_session_state = None;
-                        app.state.current_view = crate::app::state::View::SessionList;
+                        app.state.current_screen = crate::app::screens::ids::SESSION_LIST.to_string();
 
                         if let Some(target) = ssh_target {
                             let ssh_cmd = target.to_ssh_command();

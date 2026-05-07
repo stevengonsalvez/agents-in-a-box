@@ -4,7 +4,8 @@
 
 use crate::app::{
     AppState,
-    state::{AsyncAction, AuthMethod, ConfigPane, View},
+    screens::ids as screen_ids,
+    state::{AsyncAction, AuthMethod, ConfigPane},
 };
 use crate::credentials;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -437,7 +438,7 @@ impl EventHandler {
                 let split_point = (term_width as f32 * SESSIONS_PANE_WIDTH_PERCENTAGE) as u16;
 
                 // Check if we're in the main view (not in overlays)
-                if state.current_view == View::SessionList && !state.help_visible {
+                if state.current_screen == screen_ids::SESSION_LIST && !state.help_visible {
                     if x < split_point {
                         // Clicked in sessions pane
                         if state.focused_pane != crate::app::state::FocusedPane::Sessions {
@@ -512,7 +513,7 @@ impl EventHandler {
     }
 
     pub fn handle_key_event(key_event: KeyEvent, state: &mut AppState) -> Option<AppEvent> {
-        use crate::app::state::View;
+        use crate::app::screens::ids as screen_ids;
 
         // Handle confirmation dialog first (highest priority)
         if let Some(ref dialog) = state.confirmation_dialog {
@@ -561,12 +562,12 @@ impl EventHandler {
 
         // Handle onboarding wizard view FIRST (before any other handlers)
         // Onboarding is a modal experience that should not be interrupted by global keybinds
-        if state.current_view == View::Onboarding {
+        if state.current_screen == screen_ids::ONBOARDING {
             return Self::handle_onboarding_keys(key_event, state);
         }
 
         // Handle setup menu view (same priority as onboarding)
-        if state.current_view == View::SetupMenu {
+        if state.current_screen == screen_ids::SETUP_MENU {
             return Self::handle_setup_menu_keys(key_event, state);
         }
 
@@ -591,12 +592,12 @@ impl EventHandler {
         }
 
         // AINB 2.0: Handle home screen view
-        if state.current_view == View::HomeScreen {
+        if state.current_screen == screen_ids::HOME {
             return Self::handle_home_screen_keys(key_event, state);
         }
 
         // AINB 2.0: Handle agent selection view
-        if state.current_view == View::AgentSelection {
+        if state.current_screen == screen_ids::AGENT_SELECTION {
             return Self::handle_agent_selection_keys(key_event, state);
         }
 
@@ -606,37 +607,37 @@ impl EventHandler {
         }
 
         // AINB 2.0: Handle config screen view
-        if state.current_view == View::Config {
+        if state.current_screen == screen_ids::CONFIG {
             return Self::handle_config_screen_keys(key_event, state);
         }
 
         // Handle new session creation view
-        if state.current_view == View::NewSession {
+        if state.current_screen == screen_ids::NEW_SESSION {
             return Self::handle_new_session_keys(key_event, state);
         }
 
         // Handle search workspace view
-        if state.current_view == View::SearchWorkspace {
+        if state.current_screen == screen_ids::SEARCH_WORKSPACE {
             return Self::handle_search_workspace_keys(key_event, state);
         }
 
         // Handle non-git notification view
-        if state.current_view == View::NonGitNotification {
+        if state.current_screen == screen_ids::NON_GIT_NOTIFICATION {
             return Self::handle_non_git_notification_keys(key_event, state);
         }
 
         // Handle Claude chat popup view
-        if state.current_view == View::ClaudeChat {
+        if state.current_screen == screen_ids::CLAUDE_CHAT {
             return Self::handle_claude_chat_keys(key_event, state);
         }
 
         // Handle attached terminal view
-        if state.current_view == View::AttachedTerminal {
+        if state.current_screen == screen_ids::ATTACHED_TERMINAL {
             return Self::handle_attached_terminal_keys(key_event, state);
         }
 
         // Handle auth setup view
-        if state.current_view == View::AuthSetup {
+        if state.current_screen == screen_ids::AUTH_SETUP {
             return Self::handle_auth_setup_keys(key_event, state);
         }
 
@@ -654,37 +655,37 @@ impl EventHandler {
         }
 
         // Handle git view
-        if state.current_view == View::GitView {
+        if state.current_screen == screen_ids::GIT_VIEW {
             tracing::debug!("In git view, handling git view keys");
             return Self::handle_git_view_keys(key_event, state);
         }
 
         // Handle log history view
-        if state.current_view == View::LogHistory {
+        if state.current_screen == screen_ids::LOG_HISTORY {
             tracing::debug!("In log history view, handling log history keys");
             return Self::handle_log_history_keys(key_event, state);
         }
 
         // Handle changelog view
-        if state.current_view == View::Changelog {
+        if state.current_screen == screen_ids::CHANGELOG {
             tracing::debug!("In changelog view, handling changelog keys");
             return Self::handle_changelog_keys(key_event, state);
         }
 
         // Handle usage analytics view
-        if state.current_view == View::Analytics {
+        if state.current_screen == screen_ids::ANALYTICS {
             tracing::debug!("In usage analytics view, handling usage keys");
             return Self::handle_usage_keys(key_event, state);
         }
 
         // Handle skills browser view
-        if state.current_view == View::Skills {
+        if state.current_screen == screen_ids::SKILLS {
             tracing::debug!("In skills view, handling skills keys");
             return Self::handle_skills_keys(key_event, state);
         }
 
         // Handle session recovery view
-        if state.current_view == View::SessionRecovery {
+        if state.current_screen == screen_ids::SESSION_RECOVERY {
             tracing::debug!("In session recovery view, handling session recovery keys");
             return Self::handle_session_recovery_keys(key_event, state);
         }
@@ -2091,7 +2092,7 @@ impl EventHandler {
             AppEvent::Quit => state.quit(),
             AppEvent::GoToHomeScreen => {
                 tracing::info!("Navigating to HomeScreen");
-                state.current_view = View::HomeScreen;
+                state.current_screen = screen_ids::HOME.to_string();
             }
             AppEvent::ToggleHelp => state.toggle_help(),
             AppEvent::ToggleClaudeChat => state.toggle_claude_chat(),
@@ -2361,7 +2362,7 @@ impl EventHandler {
                         }
                     }
                     state.new_session_state = None;
-                    state.current_view = crate::app::state::View::SessionList;
+                    state.current_screen = crate::app::screens::ids::SESSION_LIST.to_string();
                 }
             }
             AppEvent::NewSessionOpenShell => {
@@ -2376,7 +2377,7 @@ impl EventHandler {
                     }
                 }
                 state.new_session_state = None;
-                state.current_view = crate::app::state::View::SessionList;
+                state.current_screen = crate::app::screens::ids::SESSION_LIST.to_string();
             }
             // SSH configuration events
             AppEvent::NewSessionSshNextField => {
@@ -2533,7 +2534,7 @@ impl EventHandler {
             AppEvent::DetachSession => {
                 // Clear attached session and return to home screen
                 state.attached_session_id = None;
-                state.current_view = View::HomeScreen;
+                state.current_screen = screen_ids::HOME.to_string();
                 state.ui_needs_refresh = true;
             }
             AppEvent::DetachTmuxSession => {
@@ -2871,7 +2872,7 @@ impl EventHandler {
                         AuthMethod::Skip => {
                             // Skip auth setup and go to home screen
                             state.auth_setup_state = None;
-                            state.current_view = View::HomeScreen;
+                            state.current_screen = screen_ids::HOME.to_string();
                             state.check_current_directory_status();
                             state.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
                         }
@@ -2881,7 +2882,7 @@ impl EventHandler {
             AppEvent::AuthSetupCancel => {
                 // Same as skip - go to home screen without auth
                 state.auth_setup_state = None;
-                state.current_view = View::HomeScreen;
+                state.current_screen = screen_ids::HOME.to_string();
                 state.check_current_directory_status();
                 state.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
             }
@@ -2905,7 +2906,7 @@ impl EventHandler {
                 if state.auth_setup_state.is_some() && !AppState::is_first_time_setup() {
                     // Authentication completed!
                     state.auth_setup_state = None;
-                    state.current_view = View::HomeScreen;
+                    state.current_screen = screen_ids::HOME.to_string();
                     state.check_current_directory_status();
                     state.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
                 }
@@ -2916,7 +2917,7 @@ impl EventHandler {
                     if !AppState::is_first_time_setup() {
                         // Authentication completed!
                         state.auth_setup_state = None;
-                        state.current_view = View::HomeScreen;
+                        state.current_screen = screen_ids::HOME.to_string();
                         state.check_current_directory_status();
                         state.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
                     } else {
@@ -2985,8 +2986,8 @@ impl EventHandler {
                 tracing::info!("Showing git view");
                 state.show_git_view();
                 tracing::info!(
-                    "Git view state after show: current_view = {:?}, git_state = {}",
-                    state.current_view,
+                    "Git view state after show: current_screen = {:?}, git_state = {}",
+                    state.current_screen,
                     state.git_view_state.is_some()
                 );
             }
@@ -3088,8 +3089,8 @@ impl EventHandler {
             }
             AppEvent::GitViewBack => {
                 // Return to the previous view (where user was before opening Git view)
-                state.current_view =
-                    state.previous_view.take().unwrap_or(crate::app::state::View::SessionList);
+                state.current_screen =
+                    state.previous_screen.take().unwrap_or(crate::app::screens::ids::SESSION_LIST.to_string());
                 state.git_view_state = None;
             }
             // Commit message input events
@@ -3164,7 +3165,7 @@ impl EventHandler {
                 // Add success notification
                 state.add_success_notification(format!("✅ {}", message));
                 // Exit git view and return to home screen
-                state.current_view = crate::app::state::View::HomeScreen;
+                state.current_screen = crate::app::screens::ids::HOME.to_string();
                 state.git_view_state = None;
                 tracing::info!("Returned to home screen after successful commit");
             }
@@ -3177,11 +3178,11 @@ impl EventHandler {
                     match tile {
                         HomeTile::Agents => {
                             tracing::info!("Navigating to AgentSelection view");
-                            state.current_view = View::AgentSelection;
+                            state.current_screen = screen_ids::AGENT_SELECTION.to_string();
                         }
                         HomeTile::Sessions => {
                             tracing::info!("Navigating to SessionList view");
-                            state.current_view = View::SessionList;
+                            state.current_screen = screen_ids::SESSION_LIST.to_string();
                         }
                         HomeTile::Help => {
                             tracing::info!("Toggling help overlay visible");
@@ -3189,11 +3190,11 @@ impl EventHandler {
                         }
                         HomeTile::Config => {
                             tracing::info!("Navigating to Config view");
-                            state.current_view = View::Config;
+                            state.current_screen = screen_ids::CONFIG.to_string();
                         }
                         HomeTile::Recovery => {
                             tracing::info!("Navigating to SessionRecovery view");
-                            state.current_view = View::SessionRecovery;
+                            state.current_screen = screen_ids::SESSION_RECOVERY.to_string();
                         }
                         HomeTile::Catalog | HomeTile::Stats => {
                             tracing::info!("Tile {:?} - Coming Soon", tile);
@@ -3240,20 +3241,20 @@ impl EventHandler {
                 let selected = state.home_screen_v2_state.sidebar.selected_item();
                 match selected {
                     SidebarItem::Agents => {
-                        state.current_view = View::AgentSelection;
+                        state.current_screen = screen_ids::AGENT_SELECTION.to_string();
                     }
                     SidebarItem::Catalog => {
                         state.add_info_notification("Skill catalog coming soon!".to_string());
                     }
                     SidebarItem::Config => {
-                        state.current_view = View::Config;
+                        state.current_screen = screen_ids::CONFIG.to_string();
                     }
                     SidebarItem::Sessions => {
-                        state.current_view = View::SessionList;
+                        state.current_screen = screen_ids::SESSION_LIST.to_string();
                     }
                     SidebarItem::Recovery => {
                         state.session_recovery_state.refresh();
-                        state.current_view = View::SessionRecovery;
+                        state.current_screen = screen_ids::SESSION_RECOVERY.to_string();
                     }
                     SidebarItem::Logs => {
                         // Initialize log history viewer with log directory
@@ -3261,23 +3262,23 @@ impl EventHandler {
                             state.log_history_state.set_log_dir(log_dir);
                         }
                         state.log_history_state.show();
-                        state.current_view = View::LogHistory;
+                        state.current_screen = screen_ids::LOG_HISTORY.to_string();
                     }
                     SidebarItem::Stats => {
                         tracing::info!("Navigating to Usage Analytics from sidebar");
-                        state.current_view = View::Analytics;
+                        state.current_screen = screen_ids::ANALYTICS.to_string();
                         state.start_background_usage_load(false);
                     }
                     SidebarItem::Skills => {
                         tracing::info!("Navigating to Skills from sidebar");
-                        state.current_view = View::Skills;
+                        state.current_screen = screen_ids::SKILLS.to_string();
                         state.start_background_skills_load(false);
                     }
                     SidebarItem::Changelog => {
-                        state.current_view = View::Changelog;
+                        state.current_screen = screen_ids::CHANGELOG.to_string();
                     }
                     SidebarItem::Setup => {
-                        state.current_view = View::SetupMenu;
+                        state.current_screen = screen_ids::SETUP_MENU.to_string();
                     }
                     SidebarItem::Help => {
                         state.help_visible = true;
@@ -3458,37 +3459,37 @@ impl EventHandler {
             }
             AppEvent::GoToAgentSelection => {
                 tracing::info!("Navigating to AgentSelection");
-                state.current_view = View::AgentSelection;
+                state.current_screen = screen_ids::AGENT_SELECTION.to_string();
             }
             AppEvent::GoToCatalog => {
                 state.add_info_notification("Skill catalog coming soon!".to_string());
             }
             AppEvent::GoToConfig => {
                 tracing::info!("Navigating to Config");
-                state.current_view = View::Config;
+                state.current_screen = screen_ids::CONFIG.to_string();
             }
             AppEvent::GoToSessionList => {
                 tracing::info!("Navigating to SessionList");
-                state.current_view = View::SessionList;
+                state.current_screen = screen_ids::SESSION_LIST.to_string();
             }
             AppEvent::GoToStats => {
                 tracing::info!("Navigating to Usage Analytics");
-                state.current_view = View::Analytics;
+                state.current_screen = screen_ids::ANALYTICS.to_string();
                 state.start_background_usage_load(false);
             }
             AppEvent::GoToSkills => {
                 tracing::info!("Navigating to Skills");
-                state.current_view = View::Skills;
+                state.current_screen = screen_ids::SKILLS.to_string();
                 state.start_background_skills_load(false);
             }
             AppEvent::GoToRecovery => {
                 tracing::info!("Navigating to Session Recovery");
                 state.session_recovery_state.refresh();
-                state.current_view = View::SessionRecovery;
+                state.current_screen = screen_ids::SESSION_RECOVERY.to_string();
             }
             // AINB 2.0: Agent selection events
             AppEvent::AgentSelectionBack => {
-                state.current_view = View::HomeScreen;
+                state.current_screen = screen_ids::HOME.to_string();
             }
             AppEvent::AgentSelectionNextProvider => {
                 state.agent_selection_state.select_next_provider();
@@ -3522,7 +3523,7 @@ impl EventHandler {
                             .unwrap_or("Unknown")
                     ));
                     // Go to session list or new session
-                    state.current_view = View::SessionList;
+                    state.current_screen = screen_ids::SESSION_LIST.to_string();
                 } else {
                     state.add_warning_notification("This agent is not available yet.".to_string());
                 }
@@ -3530,7 +3531,7 @@ impl EventHandler {
             // AINB 2.0: Config screen events
             AppEvent::ConfigBack => {
                 tracing::info!("Navigating back from Config to HomeScreen");
-                state.current_view = View::HomeScreen;
+                state.current_screen = screen_ids::HOME.to_string();
             }
             AppEvent::ConfigNextCategory => {
                 let num_categories = state.config_screen_state.categories.len();
@@ -4089,7 +4090,7 @@ impl EventHandler {
             AppEvent::LogHistoryBack => {
                 tracing::debug!("Log history back");
                 state.log_history_state.hide();
-                state.current_view = View::HomeScreen;
+                state.current_screen = screen_ids::HOME.to_string();
             }
             AppEvent::LogHistoryNextSession => {
                 tracing::debug!("Log history next session");
@@ -4166,11 +4167,11 @@ impl EventHandler {
             // Changelog viewer events
             AppEvent::ShowChangelog => {
                 tracing::debug!("Show changelog");
-                state.current_view = View::Changelog;
+                state.current_screen = screen_ids::CHANGELOG.to_string();
             }
             AppEvent::ChangelogBack => {
                 tracing::debug!("Changelog back");
-                state.current_view = View::HomeScreen;
+                state.current_screen = screen_ids::HOME.to_string();
             }
             AppEvent::ChangelogScrollUp => {
                 tracing::debug!("Changelog scroll up");
@@ -4200,7 +4201,7 @@ impl EventHandler {
             // Usage analytics events
             AppEvent::UsageBack => {
                 tracing::debug!("Usage analytics back");
-                state.current_view = View::HomeScreen;
+                state.current_screen = screen_ids::HOME.to_string();
             }
             AppEvent::UsageNextProvider => {
                 state.usage_state.next_provider();
@@ -4470,7 +4471,7 @@ impl EventHandler {
             // Skills browser events
             AppEvent::SkillsBack => {
                 tracing::debug!("Skills back");
-                state.current_view = View::HomeScreen;
+                state.current_screen = screen_ids::HOME.to_string();
             }
             AppEvent::SkillsNextProvider => {
                 state.skills_state.next_provider();
@@ -4547,7 +4548,7 @@ impl EventHandler {
                     state.session_recovery_state.dismiss_overlay();
                 } else {
                     tracing::debug!("Session recovery back");
-                    state.current_view = View::HomeScreen;
+                    state.current_screen = screen_ids::HOME.to_string();
                 }
             }
             AppEvent::SessionRecoveryNext => {
@@ -4836,7 +4837,7 @@ impl EventHandler {
                 if state.setup_menu_state.showing_confirmation {
                     state.setup_menu_state.cancel_action();
                 } else {
-                    state.current_view = View::HomeScreen;
+                    state.current_screen = screen_ids::HOME.to_string();
                 }
             }
             AppEvent::SetupMenuSelect => {

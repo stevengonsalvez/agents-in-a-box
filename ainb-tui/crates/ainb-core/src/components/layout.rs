@@ -19,13 +19,13 @@ const MUTED_GRAY: Color = Color::Rgb(120, 120, 140);
 const SUBDUED_BORDER: Color = Color::Rgb(60, 60, 80);
 
 use super::{
-    AgentSelectionComponent, AttachedTerminalComponent, AuthProviderPopupComponent,
-    AuthSetupComponent, ClaudeChatComponent, ConfigPopupComponent, ConfigScreenComponent,
-    ConfirmationDialogComponent, HelpComponent, HomeScreenComponent, HomeScreenV2Component,
-    LiveLogsStreamComponent, LogHistoryViewerComponent, LogsViewerComponent, NewSessionComponent,
-    OnboardingComponent, SessionListComponent, SetupMenuComponent, TmuxPreviewPane,
+    ClaudeChatComponent, ConfirmationDialogComponent, HelpComponent, LiveLogsStreamComponent,
+    LogsViewerComponent, NewSessionComponent, SessionListComponent, TmuxPreviewPane,
 };
-use crate::app::{AppState, state::View};
+use crate::app::{
+    AppState, ScreenRegistry,
+    screens::{builtin::register_builtins, ids as screen_ids},
+};
 
 pub struct LayoutComponent {
     session_list: SessionListComponent,
@@ -35,23 +35,17 @@ pub struct LayoutComponent {
     help: HelpComponent,
     new_session: NewSessionComponent,
     confirmation_dialog: ConfirmationDialogComponent,
-    attached_terminal: AttachedTerminalComponent,
-    auth_setup: AuthSetupComponent,
     tmux_preview: TmuxPreviewPane,
-    // AINB 2.0 components
-    home_screen: HomeScreenComponent,
-    home_screen_v2: HomeScreenV2Component,
-    agent_selection: AgentSelectionComponent,
-    config_screen: ConfigScreenComponent,
-    auth_provider_popup: AuthProviderPopupComponent,
-    config_popup: ConfigPopupComponent,
-    log_history_viewer: LogHistoryViewerComponent,
-    onboarding: OnboardingComponent,
-    setup_menu: SetupMenuComponent,
+    /// Built-in screens (full-screen views). Split-pane fallback (SessionList,
+    /// Logs, NewSession, ClaudeChat, SearchWorkspace, NonGitNotification) is
+    /// not in the registry; layout's split-pane path renders those.
+    screens: ScreenRegistry,
 }
 
 impl LayoutComponent {
     pub fn new() -> Self {
+        let mut screens = ScreenRegistry::new();
+        register_builtins(&mut screens);
         Self {
             session_list: SessionListComponent::new(),
             logs_viewer: LogsViewerComponent::new(),
@@ -60,188 +54,23 @@ impl LayoutComponent {
             help: HelpComponent::new(),
             new_session: NewSessionComponent::new(),
             confirmation_dialog: ConfirmationDialogComponent::new(),
-            attached_terminal: AttachedTerminalComponent::new(),
-            auth_setup: AuthSetupComponent::new(),
             tmux_preview: TmuxPreviewPane::new(),
-            // AINB 2.0 components
-            home_screen: HomeScreenComponent::new(),
-            home_screen_v2: HomeScreenV2Component::new(),
-            agent_selection: AgentSelectionComponent::new(),
-            config_screen: ConfigScreenComponent::new(),
-            auth_provider_popup: AuthProviderPopupComponent::new(),
-            config_popup: ConfigPopupComponent::new(),
-            log_history_viewer: LogHistoryViewerComponent::new(),
-            onboarding: OnboardingComponent::new(),
-            setup_menu: SetupMenuComponent::new(),
+            screens,
         }
     }
 
     pub fn render(&mut self, frame: &mut Frame, state: &mut AppState) {
-        // Special handling for onboarding wizard view (full screen)
-        if state.current_view == View::Onboarding {
-            if let Some(ref onboarding_state) = state.onboarding_state {
-                tracing::debug!("Rendering Onboarding view");
-                self.onboarding.render(frame, frame.size(), onboarding_state);
-            }
-            return;
-        }
-
-        // Special handling for setup menu view (overlay on home screen)
-        if state.current_view == View::SetupMenu {
-            tracing::debug!("Rendering SetupMenu view");
-            // First render the home screen as background
-            self.home_screen_v2.render_with_loading(
-                frame,
-                frame.size(),
-                &mut state.home_screen_v2_state,
-                &state.workspaces,
-                state.is_loading_workspaces,
-            );
-            // Then render setup menu as overlay
-            self.setup_menu.render(frame, frame.size(), &state.setup_menu_state);
-            return;
-        }
-
-        // Special handling for auth setup view (full screen)
-        if state.current_view == View::AuthSetup {
-            let centered_area = centered_rect(60, 60, frame.size());
-            self.auth_setup.render(frame, centered_area, state);
-            return;
-        }
-
-        // Special handling for attached terminal view (full screen)
-        if state.current_view == View::AttachedTerminal {
-            self.attached_terminal.render(frame, frame.size(), state);
-            return;
-        }
-
-        // Special handling for git view (full screen)
-        if state.current_view == View::GitView {
-            if let Some(ref git_state) = state.git_view_state {
-                crate::components::GitViewComponent::render(frame, frame.size(), git_state);
-            }
-            return;
-        }
-
-        // AINB 2.0: Home screen (full screen) - Now using V2 with sidebar and mascot
-        if state.current_view == View::HomeScreen {
-            tracing::debug!("Rendering HomeScreen V2 view");
-            self.home_screen_v2.render_with_loading(
-                frame,
-                frame.size(),
-                &mut state.home_screen_v2_state,
-                &state.workspaces,
-                state.is_loading_workspaces,
-            );
-            // Render help overlay on top if visible
+        // Full-screen views go through the screen registry. Each Screen impl
+        // owns its component(s) and renders any screen-specific overlays
+        // (e.g. Config's auth-provider/config popups). Help overlay is
+        // rendered post-screen as it's universal across full-screen views.
+        let frame_size = frame.size();
+        if let Some(screen) = self.screens.get_mut(&state.current_screen) {
+            tracing::debug!("Rendering screen via registry: {}", state.current_screen);
+            screen.render(frame, frame_size, state);
             if state.help_visible {
-                tracing::debug!("Rendering help overlay on HomeScreen");
-                self.help.render(frame, frame.size());
-            }
-            return;
-        }
-
-        // AINB 2.0: Agent selection (full screen)
-        if state.current_view == View::AgentSelection {
-            tracing::debug!("Rendering AgentSelection view");
-            self.agent_selection.render(frame, frame.size(), state);
-            // Render help overlay on top if visible
-            if state.help_visible {
-                tracing::debug!("Rendering help overlay on AgentSelection");
-                self.help.render(frame, frame.size());
-            }
-            return;
-        }
-
-        // AINB 2.0: Config screen (full screen)
-        if state.current_view == View::Config {
-            tracing::debug!("Rendering Config view");
-            self.config_screen.render(frame, frame.size(), state);
-
-            // Render auth provider popup on top if visible
-            if state.auth_provider_popup_state.show_popup {
-                tracing::debug!("Rendering auth provider popup");
-                self.auth_provider_popup.render(frame, frame.size(), state);
-            }
-
-            // Render config popup on top if visible (for choice/text input)
-            if state.config_popup_state.show_popup {
-                tracing::debug!("Rendering config popup");
-                self.config_popup.render(frame, frame.size(), &state.config_popup_state);
-            }
-
-            // Render help overlay on top if visible
-            if state.help_visible {
-                tracing::debug!("Rendering help overlay on Config");
-                self.help.render(frame, frame.size());
-            }
-            return;
-        }
-
-        // AINB 2.0: Log history viewer (full screen)
-        if state.current_view == View::LogHistory {
-            tracing::debug!("Rendering LogHistory view");
-            self.log_history_viewer
-                .render(frame, frame.size(), &mut state.log_history_state);
-            // Render help overlay on top if visible
-            if state.help_visible {
-                tracing::debug!("Rendering help overlay on LogHistory");
-                self.help.render(frame, frame.size());
-            }
-            return;
-        }
-
-        // Changelog viewer (full screen)
-        if state.current_view == View::Changelog {
-            tracing::debug!("Rendering Changelog view");
-            crate::components::ChangelogComponent::render(
-                frame,
-                frame.size(),
-                &state.changelog_state,
-            );
-            // Render help overlay on top if visible
-            if state.help_visible {
-                tracing::debug!("Rendering help overlay on Changelog");
-                self.help.render(frame, frame.size());
-            }
-            return;
-        }
-
-        // Usage analytics view (full screen)
-        if state.current_view == View::Analytics {
-            tracing::debug!("Rendering Usage Analytics view");
-            crate::components::usage::render(frame, frame.size(), &state.usage_state);
-            // Render help overlay on top if visible
-            if state.help_visible {
-                tracing::debug!("Rendering help overlay on Analytics");
-                self.help.render(frame, frame.size());
-            }
-            return;
-        }
-
-        // Skills browser view (full screen)
-        if state.current_view == View::Skills {
-            tracing::debug!("Rendering Skills view");
-            crate::components::skills::render(frame, frame.size(), &state.skills_state);
-            if state.help_visible {
-                tracing::debug!("Rendering help overlay on Skills");
-                self.help.render(frame, frame.size());
-            }
-            return;
-        }
-
-        // Session recovery view (full screen)
-        if state.current_view == View::SessionRecovery {
-            tracing::debug!("Rendering SessionRecovery view");
-            crate::components::SessionRecovery::render(
-                frame,
-                frame.size(),
-                &mut state.session_recovery_state,
-            );
-            // Render help overlay on top if visible
-            if state.help_visible {
-                tracing::debug!("Rendering help overlay on SessionRecovery");
-                self.help.render(frame, frame.size());
+                tracing::debug!("Rendering help overlay on {}", state.current_screen);
+                self.help.render(frame, frame_size);
             }
             return;
         }
@@ -299,12 +128,12 @@ impl LayoutComponent {
         }
 
         // Render new session overlay if visible
-        if state.current_view == View::NewSession || state.current_view == View::SearchWorkspace {
+        if state.current_screen == screen_ids::NEW_SESSION || state.current_screen == screen_ids::SEARCH_WORKSPACE {
             self.new_session.render(frame, frame.size(), state);
         }
 
         // Render Claude chat popup if visible
-        if state.current_view == View::ClaudeChat {
+        if state.current_screen == screen_ids::CLAUDE_CHAT {
             let popup_area = centered_rect(80, 80, frame.size());
             self.claude_chat.render(frame, popup_area, state);
         }
