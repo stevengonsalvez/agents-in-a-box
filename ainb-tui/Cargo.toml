@@ -1,6 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["crates/ainb-core"]
+members = [
+    "crates/ainb-core",
+    "crates/ainb-plugin-api",
+    "crates/ainb-plugin-host",
+]
 default-members = ["crates/ainb-core"]
 
 [workspace.package]
