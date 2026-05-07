@@ -76,7 +76,18 @@ Analyze the plan for:
 
 ### Step 2: Conduct the Interview
 
-Use the AskUserQuestion tool (or equivalent) to ask probing questions. Interview categories:
+**MANDATORY: use a structured user-prompt tool. Do NOT dump questions in plaintext chat.**
+
+Pick the tool in this order — first match wins:
+
+1. **Claude Code**: `AskUserQuestion` (questions array, supports `multiSelect`).
+2. **Codex / OpenAI Agents SDK**: `user_prompt` / `prompt_user` / `Prompt` / `ask_user` — whichever the host harness exposes natively. Codex CLI calls this differently across versions; use the version present in your tool list.
+3. **Cursor / Windsurf / other coding agents**: their built-in user-question primitive (typically `request_input`, `ask`, or similar).
+4. **Generic LLMs / no native tool**: only as last resort, fall back to a clearly-formatted plaintext block (`### Question 1: ...` / `### Question 2: ...`) and ask the user to answer inline.
+
+Why this is forced: free-form plaintext questioning is unreliable across runs — agents skip the structured tool when given an "or equivalent" out, which produces lower-quality interviews and bad follow-up. The tool produces typed answers the agent can branch on; plaintext does not.
+
+Interview categories:
 
 #### Technical Implementation
 - Architecture choices and trade-offs
@@ -271,14 +282,19 @@ Example: `project-plan.md` → `project-plan-spec.md`
 
 ## Portability Notes
 
+The skill enforces a **structured user-prompt tool** (see Step 2 for the priority order). Detailed per-host notes:
+
 ### Claude Code
-Uses `AskUserQuestion` tool with `questions` array supporting `multiSelect`.
+Use `AskUserQuestion` with a `questions` array. Set `multiSelect: true` when the user can pick multiple options. 2–4 questions per round.
 
-### Codex (OpenAI)
-Uses equivalent questioning mechanism. Adapt tool calls as needed for the specific Codex interface.
+### Codex (OpenAI Agents SDK / Codex CLI)
+Use whichever native user-prompt primitive the harness exposes. The exact name has shifted across Codex CLI versions (`user_prompt`, `prompt_user`, `ask_user`, `Prompt`). Check the available tool list at runtime and pick the one whose schema matches "ask the user a question and wait for an answer". Do **not** simulate it via plaintext output — Codex agents have a real one.
 
-### Generic LLMs
-Can be adapted to use standard prompting with explicit "please answer these questions" format if no native questioning tool is available.
+### Cursor / Windsurf / Aider / other coding agents
+Each agent has its own user-input primitive (`request_input`, `ask`, etc.). Use whichever is available; do not fall through to plaintext if a structured one exists.
+
+### Generic LLMs (no native questioning tool)
+Last-resort fallback only. Format questions as a numbered list with clear "Question N:" headers and explicit "please answer inline before continuing" instructions. Do not interleave questions with other content.
 
 ## Tips for Best Results
 
