@@ -4411,6 +4411,18 @@ impl EventHandler {
                                 .to_string(),
                         );
                     }
+                    Ok(crate::cli::statusline_install::InstallOutcome::Migrated) => {
+                        // Legacy `ainb statusline` was rewritten in
+                        // place to `ainb claudecode statusline`. The
+                        // user already opted in; surface as a success.
+                        state.app_config.ui_preferences.statusline_decision =
+                            crate::config::StatuslineDecision::Installed;
+                        let _ = state.app_config.save();
+                        state.add_success_notification(
+                            "Migrated existing ainb statusline → ainb claudecode statusline."
+                                .to_string(),
+                        );
+                    }
                     Ok(crate::cli::statusline_install::InstallOutcome::ExistingDifferent {
                         current_command,
                     }) => {
