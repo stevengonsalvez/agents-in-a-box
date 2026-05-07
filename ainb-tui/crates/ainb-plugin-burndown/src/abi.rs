@@ -20,6 +20,8 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use ainb_plugin_api::{RenderTarget, WireBuffer, WireCell};
+
 use crate::data::usage::UsageData;
 use crate::ui::UsageViewState;
 
@@ -58,11 +60,68 @@ pub extern "C" fn _render() -> i32 {
     if !READY.load(Ordering::Acquire) {
         return 1;
     }
-    // Phase 1.5: ainb_render_buffer is still a host-side stub (no-op),
-    // and the WireBuffer round-trip lands when the host wires the
-    // render channel. Until then, _render is a successful no-op so the
-    // host's per-frame call doesn't degrade the plugin.
+    // Wire-format render path: build a WireBuffer, msgpack-encode it, hand
+    // the bytes to the host via `ainb_render_buffer`. The host stashes the
+    // buffer keyed by (plugin_id, RenderTarget::Screen); ainb-core's
+    // PluginScreen wrapper drains it on the next frame.
+    //
+    // Phase 3-cutover: this is intentionally a placeholder paint —
+    // "burndown plugin: <data status>". Full fidelity Analytics rendering
+    // (ratatui Frame -> WireBuffer adaptation of `crate::ui::render`) is
+    // staged separately so the round-trip can be verified end-to-end first.
+    let buf = build_placeholder_buffer();
+    let bytes = match rmp_serde::to_vec_named(&buf) {
+        Ok(b) => b,
+        Err(_) => return 2, // encoding failure — host marks plugin degraded
+    };
+    let len = match i32::try_from(bytes.len()) {
+        Ok(n) => n,
+        Err(_) => return 3,
+    };
+    let ptr = bytes.as_ptr() as i32;
+    // SAFETY: the host reads `len` bytes starting at `ptr` from this
+    // module's exported memory. `bytes` is alive for the duration of this
+    // call; the host copies before returning.
+    unsafe {
+        host::ainb_render_buffer(RenderTarget::Screen as i32, ptr, len);
+    }
     0
+}
+
+fn build_placeholder_buffer() -> WireBuffer {
+    // Small, deterministic buffer so tests can observe the round-trip
+    // without depending on real terminal dimensions.
+    let mut buf = WireBuffer::empty(40, 1);
+    let label = "burndown plugin (Phase 3 cutover) ✓";
+    for (i, ch) in label.chars().enumerate() {
+        if i >= buf.cells.len() {
+            break;
+        }
+        buf.cells[i] = WireCell {
+            symbol: ch.to_string(),
+            fg: 15,
+            bg: 0xFF,
+            modifiers: 1,
+        };
+    }
+    buf
+}
+
+/// Host-fn imports the plugin uses at runtime. `extern "C"` block lives in
+/// `ainb_plugin_api::host` for plugin authors but the SDK only exposes them
+/// behind `#[cfg(target_arch = "wasm32")]` (so the host build of the SDK
+/// keeps compiling). Re-declared here to keep the surface tiny + visible.
+#[cfg(target_arch = "wasm32")]
+mod host {
+    extern "C" {
+        pub fn ainb_render_buffer(target: i32, ptr: i32, len: i32);
+    }
+}
+#[cfg(not(target_arch = "wasm32"))]
+mod host {
+    /// Host-target stub so the plugin's lib still compiles for tests/clippy
+    /// run on the build machine. Never actually called — wasm-only.
+    pub unsafe fn ainb_render_buffer(_target: i32, _ptr: i32, _len: i32) {}
 }
 
 #[no_mangle]

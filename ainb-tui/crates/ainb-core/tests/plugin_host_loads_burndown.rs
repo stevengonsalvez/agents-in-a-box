@@ -22,7 +22,7 @@ fn loads_burndown_plugin_when_dist_present() {
     }
 
     std::env::set_var("AINB_PLUGIN_ROOT", &dist);
-    let (host, outcome) = ainb::plugins::init_plugin_host();
+    let (mut host, outcome) = ainb::plugins::init_plugin_host();
 
     assert!(
         outcome.failed.is_empty(),
@@ -42,6 +42,24 @@ fn loads_burndown_plugin_when_dist_present() {
     assert!(
         host.get("burndown").is_some(),
         "host should expose the loaded plugin by id"
+    );
+
+    // Drive the plugin's `_render` end-to-end and assert the host stashed
+    // a Screen-target WireBuffer. This is the round-trip the cutover relies
+    // on: plugin builds buffer → ainb_render_buffer → host stash → take_render.
+    host.render_plugin("burndown").expect("_render runs cleanly");
+    let buf = host
+        .take_render("burndown", ainb_plugin_api::RenderTarget::Screen)
+        .expect("plugin painted to Screen target");
+    assert!(buf.is_consistent(), "WireBuffer width*height matches cells.len()");
+    let painted: String = buf
+        .cells
+        .iter()
+        .map(|c| c.symbol.as_str())
+        .collect::<String>();
+    assert!(
+        painted.contains("burndown plugin"),
+        "expected placeholder paint, got: {painted:?}"
     );
 
     std::env::remove_var("AINB_PLUGIN_ROOT");
