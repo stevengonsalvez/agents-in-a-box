@@ -22,11 +22,11 @@ pub enum AppEvent {
     NextWorkspace,
     PreviousWorkspace,
     ToggleHelp,
-    RefreshWorkspaces, // Manual refresh of workspace data
+    RefreshWorkspaces,  // Manual refresh of workspace data
     CycleSessionFilter, // Cycle Interactive session filter (Shift+F): All → ActiveOnly → StoppedOnly
-    ToggleClaudeChat,  // Toggle Claude chat visibility
-    NewSession,        // Create session in current directory
-    SearchWorkspace,   // Search all workspaces
+    ToggleClaudeChat,   // Toggle Claude chat visibility
+    NewSession,         // Create session in current directory
+    SearchWorkspace,    // Search all workspaces
     AttachSession,
     DetachSession,
     KillContainer,
@@ -362,23 +362,26 @@ pub enum AppEvent {
     UsageInputSubmit,         // Submit usage input
     UsageInputCancel,         // Cancel usage input
     // Cross-filter (Grafana-style dashboard pivot) on Burndown view
-    UsageFocusNextPanel, // Tab while on Burndown
-    UsageFocusPrevPanel, // Shift+Tab while on Burndown
-    UsageFocusRowUp,     // Up/k while a panel is focused
-    UsageFocusRowDown,   // Down/j while a panel is focused
-    UsageCommitFilter,   // Enter on focused row -> add include chip
+    UsageFocusNextPanel,      // Tab while on Burndown
+    UsageFocusPrevPanel,      // Shift+Tab while on Burndown
+    UsageFocusRowUp,          // Up/k while a panel is focused
+    UsageFocusRowDown,        // Down/j while a panel is focused
+    UsageCommitFilter,        // Enter on focused row -> add include chip
     UsageCommitExcludeFilter, // Shift+X on focused row -> add exclude chip
-    UsagePopFilterChip,  // Esc when chips exist
-    UsageClearAllChips,  // C — drop every chip in one shot
+    UsagePopFilterChip,       // Esc when chips exist
+    UsageClearAllChips,       // C — drop every chip in one shot
+    /// W on the Burndown view when the Budget panel is focused and live
+    /// data is unavailable: triggers the statusline install confirmation.
+    UsageWireStatusline,
     // Zoom mode (PR-C)
-    UsageToggleZoom,         // z — toggle fullscreen panel zoom on Burndown
-    UsageZoomStartSearch,    // / inside zoom — begin fuzzy search
-    UsageZoomCommitSearch,   // Enter inside zoom search
-    UsageZoomCancelSearch,   // Esc inside zoom search
-    UsageZoomSearchChar(char),  // typed char in zoom search input
-    UsageZoomSearchBackspace,   // Backspace in zoom search input
-    UsageZoomToggleDetail,   // d inside zoom — toggle detail drawer
-    UsageZoomEsc,            // Esc inside zoom — detail-close > zoom-exit
+    UsageToggleZoom,           // z — toggle fullscreen panel zoom on Burndown
+    UsageZoomStartSearch,      // / inside zoom — begin fuzzy search
+    UsageZoomCommitSearch,     // Enter inside zoom search
+    UsageZoomCancelSearch,     // Esc inside zoom search
+    UsageZoomSearchChar(char), // typed char in zoom search input
+    UsageZoomSearchBackspace,  // Backspace in zoom search input
+    UsageZoomToggleDetail,     // d inside zoom — toggle detail drawer
+    UsageZoomEsc,              // Esc inside zoom — detail-close > zoom-exit
     // Skills browser events
     SkillsBack,             // Return to home screen (Esc)
     SkillsNextProvider,     // Next provider (Right arrow)
@@ -1729,6 +1732,10 @@ impl EventHandler {
                 // Capital X (Shift+x) only — lowercase x is reserved for
                 // future scope and must NOT trigger the exclude commit.
                 KeyCode::Char('X') => return Some(AppEvent::UsageCommitExcludeFilter),
+                // W wires up the Claude Code statusline. Only meaningful
+                // on the Budget panel when live data is unavailable; the
+                // handler enforces both checks before doing anything.
+                KeyCode::Char('W') => return Some(AppEvent::UsageWireStatusline),
                 KeyCode::Esc if state.usage_state.filters.any() => {
                     return Some(AppEvent::UsagePopFilterChip);
                 }
@@ -4358,12 +4365,70 @@ impl EventHandler {
             }
             AppEvent::UsagePopFilterChip => {
                 if let Some(chip) = state.usage_state.pop_filter_chip() {
-                    let kind = if chip.is_exclude() { "exclude" } else { "include" };
+                    let kind = if chip.is_exclude() {
+                        "exclude"
+                    } else {
+                        "include"
+                    };
                     state.add_success_notification(format!(
                         "Removed {kind} {}={}",
                         chip.label(),
                         chip.value()
                     ));
+                }
+            }
+            AppEvent::UsageWireStatusline => {
+                // Only act when (a) Budget panel is focused and (b) live
+                // data is unavailable. Either condition unmet → no-op so
+                // a stray `W` keystroke doesn't surprise the user.
+                let on_budget = matches!(
+                    state.usage_state.focused_panel,
+                    Some(crate::components::usage::UsagePanel::Budget)
+                );
+                let no_live = matches!(
+                    crate::models::live_window::current().source,
+                    crate::models::live_window::Source::None
+                );
+                if !on_budget || !no_live {
+                    return;
+                }
+                match crate::cli::statusline_install::install_statusline() {
+                    Ok(crate::cli::statusline_install::InstallOutcome::Installed) => {
+                        state.app_config.ui_preferences.statusline_decision =
+                            crate::config::StatuslineDecision::Installed;
+                        let _ = state.app_config.save();
+                        state.add_success_notification(
+                            "Wired Claude Code statusline. Live data appears next prompt render."
+                                .to_string(),
+                        );
+                    }
+                    Ok(crate::cli::statusline_install::InstallOutcome::AlreadyInstalled) => {
+                        state.app_config.ui_preferences.statusline_decision =
+                            crate::config::StatuslineDecision::Installed;
+                        let _ = state.app_config.save();
+                        state.add_success_notification(
+                            "Statusline already wired — waiting for first prompt render."
+                                .to_string(),
+                        );
+                    }
+                    Ok(crate::cli::statusline_install::InstallOutcome::ExistingDifferent {
+                        current_command,
+                    }) => {
+                        state.add_warning_notification(format!(
+                            "Existing statusline detected: {current_command}. Run `ainb init` for keep/replace/chain."
+                        ));
+                    }
+                    Ok(crate::cli::statusline_install::InstallOutcome::Chained) => {
+                        state.app_config.ui_preferences.statusline_decision =
+                            crate::config::StatuslineDecision::Chained;
+                        let _ = state.app_config.save();
+                        state.add_success_notification("Chained ainb statusline.".to_string());
+                    }
+                    Err(e) => {
+                        state.add_error_notification(format!(
+                            "Failed to install statusline: {e}"
+                        ));
+                    }
                 }
             }
             AppEvent::UsageClearAllChips => {

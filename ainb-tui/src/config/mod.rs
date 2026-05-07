@@ -390,6 +390,29 @@ pub struct UiPreferences {
     /// If None, falls back to: code -> $EDITOR -> error
     #[serde(default)]
     pub preferred_editor: Option<String>,
+
+    /// User's response to the "wire up Claude Code statusline" prompt.
+    /// `Unset` means we'll prompt again (init wizard) and surface the
+    /// CTA in the Budget panel. `Declined` suppresses the top-bar CTA
+    /// (the Budget-panel CTA remains visible for power users).
+    #[serde(default)]
+    pub statusline_decision: StatuslineDecision,
+}
+
+/// The user's recorded decision on the Claude Code statusline wiring.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum StatuslineDecision {
+    /// User has never been asked, or has dismissed the prompt without
+    /// accepting or declining.
+    #[default]
+    Unset,
+    /// User explicitly opted out — suppress top-bar CTA.
+    Declined,
+    /// User accepted; we have written our block.
+    Installed,
+    /// User accepted "chain" — we appended ourselves to an existing cmd.
+    Chained,
 }
 
 impl Default for UiPreferences {
@@ -399,6 +422,7 @@ impl Default for UiPreferences {
             show_container_status: true,
             show_git_status: true,
             preferred_editor: None,
+            statusline_decision: StatuslineDecision::default(),
         }
     }
 }
@@ -984,6 +1008,7 @@ mod old_config_tests {
                 show_container_status: false,
                 show_git_status: false,
                 preferred_editor: None,
+                statusline_decision: StatuslineDecision::default(),
             },
             docker: DockerConfig {
                 host: None,
@@ -1023,6 +1048,7 @@ mod old_config_tests {
                 show_container_status: false,
                 show_git_status: false,
                 preferred_editor: None,
+                statusline_decision: StatuslineDecision::default(),
             },
             docker: DockerConfig {
                 host: None,
