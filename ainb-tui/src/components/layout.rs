@@ -817,7 +817,7 @@ fn build_cta_spans() -> Vec<Span<'static>> {
     vec![
         Span::styled("⚠ ", Style::default().fg(red).add_modifier(Modifier::BOLD)),
         Span::styled("Live Claude Code usage off", Style::default().fg(red)),
-        Span::styled(" · go to Stats to enable", Style::default().fg(MUTED_GRAY)),
+        Span::styled(" · press W to enable", Style::default().fg(MUTED_GRAY)),
     ]
 }
 
@@ -878,11 +878,14 @@ mod live_widget_tests {
     }
 
     #[test]
-    fn cta_spans_contain_warning_and_stats_hint() {
+    fn cta_spans_contain_warning_and_w_shortcut_hint() {
         let spans = build_cta_spans();
         let text = flatten(&spans);
         assert!(text.contains("Live Claude Code usage off"));
-        assert!(text.contains("Stats"));
+        // The CTA points at the global `W` shortcut so the keystroke is
+        // discoverable without navigating into Stats first.
+        assert!(text.contains("press W"));
+        assert!(!text.contains("Stats"), "stale Stats hint must be gone");
     }
 
     #[test]
