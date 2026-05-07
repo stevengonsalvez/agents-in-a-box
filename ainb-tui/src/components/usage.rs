@@ -830,40 +830,122 @@ impl UsageViewState {
 
 /// Render the usage analytics screen
 pub fn render(frame: &mut Frame, area: Rect, state: &UsageViewState) {
-    // Main layout: header + provider selector + tabs + content + help bar
+    // The enable card is hoisted above the panel grid when the Claude
+    // Code statusline isn't wired. Once Tier1 cache is flowing the card
+    // disappears and the rest of the screen takes the freed space.
+    let show_enable_card = should_show_enable_card();
+    let enable_card_h: u16 = if show_enable_card { 5 } else { 0 };
+
+    // Main layout: optional enable card + header + provider selector
+    // + tabs + content + help bar.
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Summary bar
-            Constraint::Length(3), // Provider selector
-            Constraint::Length(3), // Tab bar
-            Constraint::Min(0),    // Table content
-            Constraint::Length(2), // Help bar
+            Constraint::Length(enable_card_h), // Enable card (0 when wired)
+            Constraint::Length(3),             // Summary bar
+            Constraint::Length(3),             // Provider selector
+            Constraint::Length(3),             // Tab bar
+            Constraint::Min(0),                // Table content
+            Constraint::Length(2),             // Help bar
         ])
         .split(area);
 
-    render_summary_bar(frame, layout[0], state);
-    render_provider_bar(frame, layout[1], state);
-    render_tab_bar(frame, layout[2], state);
+    if show_enable_card {
+        render_enable_card(frame, layout[0]);
+    }
+    render_summary_bar(frame, layout[1], state);
+    render_provider_bar(frame, layout[2], state);
+    render_tab_bar(frame, layout[3], state);
 
     if state.loading || state.data.is_none() {
-        render_loading(frame, layout[3]);
+        render_loading(frame, layout[4]);
     } else {
         let data = state.data.as_ref().unwrap();
         if data.calls.is_empty() && !state.provider.has_data() {
-            render_no_data(frame, layout[3], state);
+            render_no_data(frame, layout[4], state);
         } else {
             match state.active_tab {
-                UsageTab::Daily => render_daily(frame, layout[3], data, state.scroll_offset),
-                UsageTab::Weekly => render_weekly(frame, layout[3], data, state.scroll_offset),
-                UsageTab::Projects => render_projects(frame, layout[3], data, state.scroll_offset),
-                UsageTab::Burndown => render_burndown(frame, layout[3], data, state),
-                UsageTab::Optimize => render_optimize(frame, layout[3], data),
+                UsageTab::Daily => render_daily(frame, layout[4], data, state.scroll_offset),
+                UsageTab::Weekly => render_weekly(frame, layout[4], data, state.scroll_offset),
+                UsageTab::Projects => render_projects(frame, layout[4], data, state.scroll_offset),
+                UsageTab::Burndown => render_burndown(frame, layout[4], data, state),
+                UsageTab::Optimize => render_optimize(frame, layout[4], data),
             }
         }
     }
 
-    render_help_bar(frame, layout[4], state);
+    render_help_bar(frame, layout[5], state);
+}
+
+/// True when the Stats screen should hoist the "Press W to wire" enable
+/// card above the panel grid. We show it when the live window has *no*
+/// data at all (Source::None) and the user's settings.json doesn't
+/// already carry our block.
+///
+/// Tier2Local is intentionally treated as "card hidden" — at that point
+/// the user is already getting the 5h burn estimate, so the contextual
+/// hint inside the Burndown Budget panel (which mentions the missing 7d
+/// data) is a better fit than a top-of-screen alarm.
+fn should_show_enable_card() -> bool {
+    use crate::cli::statusline_install::detect_statusline_status;
+    use crate::models::live_window::current;
+
+    let status = detect_statusline_status().ok();
+    should_show_enable_card_inner(current().source, status.as_ref())
+}
+
+/// Pure decision logic for `should_show_enable_card`. Split out for
+/// unit testing without touching the live cache or filesystem.
+fn should_show_enable_card_inner(
+    live_source: crate::models::live_window::Source,
+    statusline_status: Option<&crate::cli::statusline_install::StatuslineStatus>,
+) -> bool {
+    use crate::cli::statusline_install::StatuslineStatus;
+    use crate::models::live_window::Source;
+
+    if live_source != Source::None {
+        return false;
+    }
+    matches!(
+        statusline_status,
+        Some(StatuslineStatus::NotConfigured) | Some(StatuslineStatus::Other(_))
+    )
+}
+
+fn render_enable_card(frame: &mut Frame, area: Rect) {
+    let lines = build_enable_card_lines();
+    let paragraph = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Rgb(230, 100, 100)))
+                .style(Style::default().bg(DARK_BG)),
+        )
+        .alignment(ratatui::layout::Alignment::Left);
+    frame.render_widget(paragraph, area);
+}
+
+/// Pure helper for the enable-card body. Pulled out so tests can assert
+/// the exact copy and styling without driving a Frame.
+fn build_enable_card_lines() -> Vec<Line<'static>> {
+    let red = Color::Rgb(230, 100, 100);
+    vec![
+        Line::from(vec![
+            Span::styled(" ⚠ ", Style::default().fg(red).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Live Claude Code usage off",
+                Style::default().fg(red).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" — Press ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("[W]", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(" to wire up", Style::default().fg(MUTED_GRAY)),
+        ]),
+        Line::from(Span::styled(
+            "    Provides 5h burn, 7d window, cost, reset times",
+            Style::default().fg(MUTED_GRAY),
+        )),
+    ]
 }
 
 fn render_summary_bar(frame: &mut Frame, area: Rect, state: &UsageViewState) {
@@ -4871,5 +4953,129 @@ mod budget_live_header_tests {
     #[test]
     fn format_hms_pads_minutes_when_hours_present() {
         assert_eq!(format_hms(Duration::from_secs(3 * 3600 + 5 * 60)), "3h 05m");
+    }
+}
+
+#[cfg(test)]
+mod enable_card_tests {
+    use super::*;
+
+    fn flat(lines: &[Line<'static>]) -> String {
+        lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    #[test]
+    fn card_copy_mentions_w_key_and_value_proposition() {
+        let lines = build_enable_card_lines();
+        let text = flat(&lines);
+        assert!(text.contains("Live Claude Code usage off"));
+        assert!(text.contains("[W]"));
+        assert!(text.contains("wire up"));
+        // Tagline lists what wiring unlocks so users know what they get.
+        assert!(text.contains("5h burn"));
+        assert!(text.contains("7d window"));
+        assert!(text.contains("cost"));
+        assert!(text.contains("reset"));
+    }
+
+    #[test]
+    fn card_uses_warning_red_and_gold_w_per_style_guide() {
+        let lines = build_enable_card_lines();
+        // Find the [W] span and confirm gold styling.
+        let mut found_gold_w = false;
+        let mut found_red_warning = false;
+        for line in &lines {
+            for span in &line.spans {
+                if span.content.contains("[W]") && span.style.fg == Some(GOLD) {
+                    found_gold_w = true;
+                }
+                if span.content.contains("⚠") && span.style.fg == Some(Color::Rgb(230, 100, 100)) {
+                    found_red_warning = true;
+                }
+            }
+        }
+        assert!(found_gold_w, "[W] should be styled GOLD per tui-style-guide");
+        assert!(found_red_warning, "warning glyph should use the CTA red");
+    }
+
+    #[test]
+    fn card_is_two_lines_for_compact_layout() {
+        // The enable-card row is `Constraint::Length(5)` (4 inner + 2
+        // border ~= 4 lines visible incl. padding). Body must stay at
+        // two text lines so it fits without scroll.
+        let lines = build_enable_card_lines();
+        assert_eq!(
+            lines.len(),
+            2,
+            "enable card body must remain two lines; layout reserves only 5 rows"
+        );
+    }
+
+    #[test]
+    fn card_visible_when_source_none_and_statusline_unconfigured() {
+        use crate::cli::statusline_install::StatuslineStatus;
+        use crate::models::live_window::Source;
+        assert!(should_show_enable_card_inner(
+            Source::None,
+            Some(&StatuslineStatus::NotConfigured),
+        ));
+    }
+
+    #[test]
+    fn card_visible_when_source_none_and_other_command_present() {
+        use crate::cli::statusline_install::StatuslineStatus;
+        use crate::models::live_window::Source;
+        assert!(should_show_enable_card_inner(
+            Source::None,
+            Some(&StatuslineStatus::Other("ccusage statusline".into())),
+        ));
+    }
+
+    #[test]
+    fn card_hidden_when_tier1_cache_active() {
+        use crate::cli::statusline_install::StatuslineStatus;
+        use crate::models::live_window::Source;
+        assert!(!should_show_enable_card_inner(
+            Source::Tier1Cache,
+            Some(&StatuslineStatus::Configured),
+        ));
+        // Even if settings.json was hand-edited away, Tier1Cache means
+        // data is flowing — don't shout.
+        assert!(!should_show_enable_card_inner(
+            Source::Tier1Cache,
+            Some(&StatuslineStatus::NotConfigured),
+        ));
+    }
+
+    #[test]
+    fn card_hidden_when_tier2_local_active() {
+        // Burndown panel's own contextual hint is the right surface
+        // for Tier2 — top-of-Stats card would be redundant.
+        use crate::cli::statusline_install::StatuslineStatus;
+        use crate::models::live_window::Source;
+        assert!(!should_show_enable_card_inner(
+            Source::Tier2Local,
+            Some(&StatuslineStatus::NotConfigured),
+        ));
+    }
+
+    #[test]
+    fn card_hidden_when_already_configured() {
+        use crate::cli::statusline_install::StatuslineStatus;
+        use crate::models::live_window::Source;
+        assert!(!should_show_enable_card_inner(
+            Source::None,
+            Some(&StatuslineStatus::Configured),
+        ));
+    }
+
+    #[test]
+    fn card_hidden_when_status_detection_failed() {
+        use crate::models::live_window::Source;
+        assert!(!should_show_enable_card_inner(Source::None, None));
     }
 }
