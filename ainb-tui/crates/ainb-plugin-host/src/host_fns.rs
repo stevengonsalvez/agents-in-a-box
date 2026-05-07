@@ -35,10 +35,40 @@ pub fn link_baseline(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
     linker.func_wrap(
         HOST_MODULE,
         "ainb_render_buffer",
-        |_caller: Caller<'_, HostState>, _target: i32, _ptr: i32, _len: i32| {
-            // Phase 1 stub: render channel real impl lands with the screen
-            // registry in Phase 2a. Discarding the payload is safe — the
-            // host-side registries are still empty.
+        |mut caller: Caller<'_, HostState>, target: i32, ptr: i32, len: i32| {
+            // Plugin has serialised its WireBuffer (msgpack) into its memory
+            // at [ptr, ptr+len). Decode + stash under (plugin_id, target);
+            // ainb-core drains it on the next render tick.
+            let Some(target) = ainb_plugin_api::RenderTarget::from_i32(target) else {
+                caller.data_mut().last_error =
+                    Some(format!("ainb_render_buffer: invalid target {target}"));
+                return;
+            };
+            let bytes = match read_bytes(&mut caller, ptr, len) {
+                Ok(b) => b,
+                Err(e) => {
+                    caller.data_mut().last_error = Some(format!("ainb_render_buffer: {e}"));
+                    return;
+                }
+            };
+            let buf: ainb_plugin_api::WireBuffer = match rmp_serde::from_slice(&bytes) {
+                Ok(b) => b,
+                Err(e) => {
+                    caller.data_mut().last_error =
+                        Some(format!("ainb_render_buffer decode: {e}"));
+                    return;
+                }
+            };
+            if !buf.is_consistent() {
+                caller.data_mut().last_error = Some(format!(
+                    "ainb_render_buffer: width*height={} but cells={}",
+                    usize::from(buf.width) * usize::from(buf.height),
+                    buf.cells.len()
+                ));
+                return;
+            }
+            let plugin_id = caller.data().plugin_id.clone();
+            caller.data().shared.store_render(&plugin_id, target, buf);
         },
     )?;
 

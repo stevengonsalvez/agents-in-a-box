@@ -20,7 +20,7 @@ pub mod runtime;
 use std::path::Path;
 use std::sync::Arc;
 
-use ainb_plugin_api::Manifest;
+use ainb_plugin_api::{Manifest, RenderTarget, WireBuffer};
 use anyhow::{anyhow, Context, Result};
 
 pub use loader::{LoadedPlugin, PluginId};
@@ -261,6 +261,15 @@ impl PluginHost {
                 Err(anyhow::Error::new(e).context("_handle_event trapped"))
             }
         }
+    }
+
+    /// Take (and clear) the most recent `WireBuffer` a plugin painted for
+    /// the given target. Returns `None` when nothing has been painted since
+    /// the previous take. ainb-core's screen layer calls this right after
+    /// [`Self::render_plugin`] returns.
+    #[must_use]
+    pub fn take_render(&self, plugin_id: &str, target: RenderTarget) -> Option<WireBuffer> {
+        self.shared.take_render(plugin_id, target)
     }
 
     fn find_mut(&mut self, plugin_id: &str) -> Result<&mut LoadedPlugin> {
