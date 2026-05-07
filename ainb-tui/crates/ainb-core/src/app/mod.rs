@@ -1,10 +1,12 @@
 // ABOUTME: Main application structure and state management for the TUI
 
 pub mod attach_handler;
+pub mod event_bus;
 pub mod events;
 pub mod session_loader;
 pub mod snapshot;
 pub mod state;
+pub mod usage_event_bridge;
 
 pub use attach_handler::AttachHandler;
 pub use events::EventHandler;

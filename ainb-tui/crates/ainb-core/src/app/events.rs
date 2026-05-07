@@ -16,6 +16,16 @@ const SESSIONS_PANE_WIDTH_PERCENTAGE: f32 = 0.4;
 #[derive(Debug, Clone)]
 pub enum AppEvent {
     Quit,
+    /// Plugin-scoped event — opaque rmp-serde payload destined for the plugin
+    /// identified by `plugin_id`. Phase 2c added this variant; the
+    /// `usage_event_bridge` module decodes legacy `Usage*` variants through
+    /// it pre-Phase-3 (when burndown is extracted into a real plugin).
+    Plugin { plugin_id: String, payload: Vec<u8> },
+    /// Navigate to a registered screen by id. Phase 2c added this variant to
+    /// collapse the per-screen `GoTo*` variants behind one dispatch path —
+    /// existing `GoTo*` variants are kept for now and translate through this
+    /// at the layout layer.
+    NavigateTo(String),
     GoToHomeScreen, // Return to home screen from any view
     NextSession,
     PreviousSession,
@@ -4909,6 +4919,26 @@ impl EventHandler {
             | AppEvent::MouseDragEnd { .. }
             | AppEvent::MouseDragging { .. } => {
                 // These are processed by handle_mouse_event
+            }
+            // Phase 2c plugin-shaped variants. Today the in-core burndown
+            // handlers still drive Analytics directly through the legacy
+            // `Usage*` variants; the bridge module is responsible for
+            // round-tripping `AppEvent::Plugin` payloads when Phase 3 swaps
+            // the dispatch path into the burndown plugin.
+            AppEvent::Plugin { plugin_id, payload } => {
+                tracing::debug!(
+                    target: "plugin_event",
+                    plugin_id = %plugin_id,
+                    payload_len = payload.len(),
+                    "received AppEvent::Plugin (Phase 2c stub — bridge dispatch lands in Phase 3)",
+                );
+            }
+            AppEvent::NavigateTo(screen_id) => {
+                tracing::debug!(
+                    target: "navigation",
+                    screen_id = %screen_id,
+                    "received AppEvent::NavigateTo (Phase 2c stub — ScreenRegistry dispatch lands once Phase 2a merges)",
+                );
             }
         }
     }
