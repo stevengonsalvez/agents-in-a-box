@@ -4,6 +4,8 @@ use ratatui::{Frame, layout::Rect};
 
 use crate::app::AppState;
 
+pub mod builtin;
+
 /// Stable string identifier for a screen.
 ///
 /// Replaces the prior `View` enum (state.rs) with a string-keyed identifier so
