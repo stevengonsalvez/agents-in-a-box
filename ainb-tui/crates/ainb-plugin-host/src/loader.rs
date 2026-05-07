@@ -8,6 +8,7 @@
 
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
 use ainb_plugin_api::CapabilitySet;
 use ainb_plugin_api::Manifest;
@@ -16,7 +17,7 @@ use wasmi::{Engine, Instance, Module, Store};
 
 use crate::host_fns::{link_baseline, link_capabilities};
 use crate::manifest_validate::validate;
-use crate::runtime::HostState;
+use crate::runtime::{HostShared, HostState};
 
 /// Stable identifier for a loaded plugin (the `plugin.name` from its manifest).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -31,8 +32,12 @@ impl std::fmt::Display for PluginId {
 /// One plugin instance after `_init` has run successfully.
 pub struct LoadedPlugin {
     manifest: Manifest,
-    store: Store<HostState>,
-    instance: Instance,
+    pub(crate) store: Store<HostState>,
+    pub(crate) instance: Instance,
+    /// Set when the plugin trapped during a runtime call (`_render`, `_tick`,
+    /// `_handle_event`). Subsequent calls become no-ops so a single bad plugin
+    /// can't bring down the host's frame loop.
+    pub(crate) degraded: bool,
 }
 
 impl LoadedPlugin {
@@ -53,9 +58,17 @@ impl LoadedPlugin {
         self.store.data()
     }
 
+    #[must_use]
+    pub fn is_degraded(&self) -> bool {
+        self.degraded
+    }
+
     /// Call the plugin's `_shutdown` export if present, then drop the store
     /// when this `LoadedPlugin` is dropped.
     pub fn shutdown(&mut self) -> Result<()> {
+        if self.degraded {
+            return Ok(());
+        }
         if let Ok(f) = self
             .instance
             .get_typed_func::<(), ()>(&self.store, "_shutdown")
@@ -68,7 +81,11 @@ impl LoadedPlugin {
 }
 
 /// Load a plugin from `<dir>/plugin.toml` + `<dir>/plugin.wasm`.
-pub fn load_from_dir(engine: &Engine, dir: &Path) -> Result<LoadedPlugin> {
+pub fn load_from_dir(
+    engine: &Engine,
+    shared: Arc<HostShared>,
+    dir: &Path,
+) -> Result<LoadedPlugin> {
     let toml_path = dir.join("plugin.toml");
     let wasm_path = dir.join("plugin.wasm");
     let toml_src = fs::read_to_string(&toml_path)
@@ -77,7 +94,7 @@ pub fn load_from_dir(engine: &Engine, dir: &Path) -> Result<LoadedPlugin> {
         Manifest::from_toml(&toml_src).with_context(|| format!("parse {}", toml_path.display()))?;
     let wasm =
         fs::read(&wasm_path).with_context(|| format!("read {}", wasm_path.display()))?;
-    load_from_bytes(engine, manifest, &wasm)
+    load_from_bytes(engine, shared, manifest, &wasm)
 }
 
 /// Load a plugin from already-resolved manifest + bytes.
@@ -91,7 +108,12 @@ pub fn load_from_dir(engine: &Engine, dir: &Path) -> Result<LoadedPlugin> {
 ///    are simply absent → wasmi reports an unresolved-import error at step 4.
 /// 4. Instantiate. This is where the capability gate fires.
 /// 5. Call `_init` if exported and check its return code.
-pub fn load_from_bytes(engine: &Engine, manifest: Manifest, wasm: &[u8]) -> Result<LoadedPlugin> {
+pub fn load_from_bytes(
+    engine: &Engine,
+    shared: Arc<HostShared>,
+    manifest: Manifest,
+    wasm: &[u8],
+) -> Result<LoadedPlugin> {
     validate(&manifest).with_context(|| {
         format!("manifest validation for {}", manifest.plugin.name)
     })?;
@@ -99,7 +121,7 @@ pub fn load_from_bytes(engine: &Engine, manifest: Manifest, wasm: &[u8]) -> Resu
     let caps = CapabilitySet::from_manifest_table(&manifest.capabilities);
     let module = Module::new(engine, wasm).context("compile WASM")?;
 
-    let host_state = HostState::new(manifest.plugin.name.clone(), caps.clone());
+    let host_state = HostState::new(manifest.plugin.name.clone(), caps.clone(), shared);
     let mut store = Store::new(engine, host_state);
 
     let mut linker = <wasmi::Linker<HostState>>::new(engine);
@@ -122,5 +144,6 @@ pub fn load_from_bytes(engine: &Engine, manifest: Manifest, wasm: &[u8]) -> Resu
         manifest,
         store,
         instance,
+        degraded: false,
     })
 }

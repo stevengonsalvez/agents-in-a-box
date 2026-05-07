@@ -101,16 +101,28 @@ pub fn link_capabilities(
         linker.func_wrap(
             HOST_MODULE,
             "ainb_event_subscribe",
-            |_: Caller<'_, HostState>, _topic_ptr: i32, _topic_len: i32| {},
+            |mut caller: Caller<'_, HostState>, topic_ptr: i32, topic_len: i32| {
+                let topic = read_string(&mut caller, topic_ptr, topic_len)
+                    .unwrap_or_default();
+                let plugin_id = caller.data().plugin_id.clone();
+                caller.data().shared.subscribe(&plugin_id, topic);
+            },
         )?;
         linker.func_wrap(
             HOST_MODULE,
             "ainb_event_publish",
-            |_: Caller<'_, HostState>,
-             _topic_ptr: i32,
-             _topic_len: i32,
-             _payload_ptr: i32,
-             _payload_len: i32| {},
+            |mut caller: Caller<'_, HostState>,
+             topic_ptr: i32,
+             topic_len: i32,
+             payload_ptr: i32,
+             payload_len: i32| {
+                let topic = read_string(&mut caller, topic_ptr, topic_len)
+                    .unwrap_or_default();
+                let payload = read_bytes(&mut caller, payload_ptr, payload_len)
+                    .unwrap_or_default();
+                let plugin_id = caller.data().plugin_id.clone();
+                caller.data().shared.publish(&plugin_id, topic, payload);
+            },
         )?;
     }
 
@@ -153,12 +165,12 @@ pub fn link_capabilities(
     Ok(())
 }
 
-/// Read a UTF-8 string out of the plugin's exported `memory`.
-fn read_string(
+/// Read raw bytes out of the plugin's exported `memory`.
+pub(crate) fn read_bytes(
     caller: &mut Caller<'_, HostState>,
     ptr: i32,
     len: i32,
-) -> Result<String, String> {
+) -> Result<Vec<u8>, String> {
     let memory = caller
         .get_export("memory")
         .and_then(wasmi::Extern::into_memory)
@@ -169,5 +181,14 @@ fn read_string(
     memory
         .read(&caller, off_usize, &mut buf)
         .map_err(|e| e.to_string())?;
-    String::from_utf8(buf).map_err(|e| e.to_string())
+    Ok(buf)
+}
+
+/// Read a UTF-8 string out of the plugin's exported `memory`.
+fn read_string(
+    caller: &mut Caller<'_, HostState>,
+    ptr: i32,
+    len: i32,
+) -> Result<String, String> {
+    String::from_utf8(read_bytes(caller, ptr, len)?).map_err(|e| e.to_string())
 }
