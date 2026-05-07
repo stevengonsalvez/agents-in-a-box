@@ -205,22 +205,26 @@ pub fn link_capabilities(
         linker.func_wrap(
             HOST_MODULE,
             "ainb_data_read",
-            |_: Caller<'_, HostState>,
-             _key_ptr: i32,
-             _key_len: i32,
-             _out_ptr: i32,
-             _out_len: i32|
-             -> i32 { HostStatus::HostError as i32 },
+            |mut caller: Caller<'_, HostState>,
+             key_ptr: i32,
+             key_len: i32,
+             out_ptr: i32,
+             out_len: i32|
+             -> i32 {
+                data_read_impl(&mut caller, key_ptr, key_len, out_ptr, out_len)
+            },
         )?;
         linker.func_wrap(
             HOST_MODULE,
             "ainb_data_write",
-            |_: Caller<'_, HostState>,
-             _key_ptr: i32,
-             _key_len: i32,
-             _val_ptr: i32,
-             _val_len: i32|
-             -> i32 { HostStatus::HostError as i32 },
+            |mut caller: Caller<'_, HostState>,
+             key_ptr: i32,
+             key_len: i32,
+             val_ptr: i32,
+             val_len: i32|
+             -> i32 {
+                data_write_impl(&mut caller, key_ptr, key_len, val_ptr, val_len)
+            },
         )?;
     }
 
@@ -281,8 +285,19 @@ pub fn link_capabilities(
                 fs_read_impl(&mut caller, &allow_for_read, path_ptr, path_len, out_ptr, out_len)
             },
         )?;
-        // ainb_fs_glob lands when a plugin actually uses it. Burndown reads
-        // pre-known JSONL paths, so we keep the link list minimal until then.
+        let allow_for_glob = allowlist.clone();
+        linker.func_wrap(
+            HOST_MODULE,
+            "ainb_fs_glob",
+            move |mut caller: Caller<'_, HostState>,
+                  pat_ptr: i32,
+                  pat_len: i32,
+                  out_ptr: i32,
+                  out_len: i32|
+                  -> i32 {
+                fs_glob_impl(&mut caller, &allow_for_glob, pat_ptr, pat_len, out_ptr, out_len)
+            },
+        )?;
     }
 
     Ok(())
@@ -411,6 +426,221 @@ fn fs_read_impl(
         Err(_) => return HostStatus::InvalidArgument as i32,
     };
     if memory.write(&mut *caller, off, &bytes).is_err() {
+        return HostStatus::HostError as i32;
+    }
+    i32::try_from(bytes.len()).unwrap_or(HostStatus::HostError as i32)
+}
+
+/// Per-plugin scoped data path: `~/.agents-in-a-box/plugins/data/<id>/<id>.db`.
+/// Created on first write; missing source on read returns `HostStatus::Ok`
+/// with zero bytes written so plugins can probe for existence cheaply.
+fn plugin_data_db_path(plugin_id: &str) -> Option<std::path::PathBuf> {
+    let home = dirs::home_dir()?;
+    let dir = home
+        .join(".agents-in-a-box")
+        .join("plugins")
+        .join("data")
+        .join(plugin_id);
+    Some(dir.join(format!("{plugin_id}.db")))
+}
+
+/// Open the plugin's KV DB, creating the parent dir + `kv` table on first
+/// touch. The KV store is intentionally simple (TEXT key, BLOB value) —
+/// plugins that need richer queries can layer on top using their own keys.
+fn open_plugin_kv(plugin_id: &str) -> rusqlite::Result<rusqlite::Connection> {
+    let path = plugin_data_db_path(plugin_id)
+        .ok_or_else(|| rusqlite::Error::InvalidPath("$HOME unresolvable".into()))?;
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let conn = rusqlite::Connection::open(&path)?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v BLOB NOT NULL)",
+        [],
+    )?;
+    Ok(conn)
+}
+
+/// `ainb_data_read(key, out)` — look up `key` in the plugin's KV DB.
+/// Returns the byte count on success, `0` when the key isn't set,
+/// `BufferTooSmall` when `out_len` is too small for the value.
+fn data_read_impl(
+    caller: &mut Caller<'_, HostState>,
+    key_ptr: i32,
+    key_len: i32,
+    out_ptr: i32,
+    out_len: i32,
+) -> i32 {
+    use ainb_plugin_api::host::HostStatus;
+
+    let key = match read_string(caller, key_ptr, key_len) {
+        Ok(s) => s,
+        Err(e) => {
+            caller.data_mut().last_error = Some(format!("ainb_data_read: bad key utf8: {e}"));
+            return HostStatus::InvalidArgument as i32;
+        }
+    };
+    let plugin_id = caller.data().plugin_id.clone();
+    let conn = match open_plugin_kv(&plugin_id) {
+        Ok(c) => c,
+        Err(e) => {
+            caller.data_mut().last_error = Some(format!("ainb_data_read: open db: {e}"));
+            return HostStatus::HostError as i32;
+        }
+    };
+    let bytes: Option<Vec<u8>> = match conn.query_row(
+        "SELECT v FROM kv WHERE k = ?1",
+        [&key],
+        |row| row.get::<_, Vec<u8>>(0),
+    ) {
+        Ok(b) => Some(b),
+        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(e) => {
+            caller.data_mut().last_error = Some(format!("ainb_data_read: select: {e}"));
+            return HostStatus::HostError as i32;
+        }
+    };
+    let Some(bytes) = bytes else {
+        // Key not present — convention: return 0 bytes (Ok) so the plugin
+        // can distinguish "no value" from "denied" without an extra probe.
+        return 0;
+    };
+    let cap = match usize::try_from(out_len) {
+        Ok(n) => n,
+        Err(_) => return HostStatus::InvalidArgument as i32,
+    };
+    if bytes.len() > cap {
+        return HostStatus::BufferTooSmall as i32;
+    }
+    let memory = match caller.get_export("memory").and_then(wasmi::Extern::into_memory) {
+        Some(m) => m,
+        None => return HostStatus::HostError as i32,
+    };
+    let off = match usize::try_from(out_ptr) {
+        Ok(n) => n,
+        Err(_) => return HostStatus::InvalidArgument as i32,
+    };
+    if memory.write(&mut *caller, off, &bytes).is_err() {
+        return HostStatus::HostError as i32;
+    }
+    i32::try_from(bytes.len()).unwrap_or(HostStatus::HostError as i32)
+}
+
+/// `ainb_data_write(key, value)` — upsert into the plugin's KV DB.
+fn data_write_impl(
+    caller: &mut Caller<'_, HostState>,
+    key_ptr: i32,
+    key_len: i32,
+    val_ptr: i32,
+    val_len: i32,
+) -> i32 {
+    use ainb_plugin_api::host::HostStatus;
+
+    let key = match read_string(caller, key_ptr, key_len) {
+        Ok(s) => s,
+        Err(e) => {
+            caller.data_mut().last_error = Some(format!("ainb_data_write: bad key utf8: {e}"));
+            return HostStatus::InvalidArgument as i32;
+        }
+    };
+    let val = match read_bytes(caller, val_ptr, val_len) {
+        Ok(b) => b,
+        Err(e) => {
+            caller.data_mut().last_error =
+                Some(format!("ainb_data_write: read value: {e}"));
+            return HostStatus::InvalidArgument as i32;
+        }
+    };
+    let plugin_id = caller.data().plugin_id.clone();
+    let conn = match open_plugin_kv(&plugin_id) {
+        Ok(c) => c,
+        Err(e) => {
+            caller.data_mut().last_error = Some(format!("ainb_data_write: open db: {e}"));
+            return HostStatus::HostError as i32;
+        }
+    };
+    if let Err(e) = conn.execute(
+        "INSERT INTO kv (k, v) VALUES (?1, ?2) \
+         ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+        rusqlite::params![&key, &val],
+    ) {
+        caller.data_mut().last_error = Some(format!("ainb_data_write: upsert: {e}"));
+        return HostStatus::HostError as i32;
+    }
+    0
+}
+
+/// Real impl of `ainb_fs_glob`. Plugin hands a glob pattern as a UTF-8
+/// string; host expands it (with `~/` resolution), drops every match that
+/// isn't under the plugin's allowlist, joins the rest with `\n`, and writes
+/// the bytes back into plugin memory.
+///
+/// The wire shape is intentionally ASCII-newline-delimited so plugins
+/// don't have to ship a serde dep just to read directory listings.
+fn fs_glob_impl(
+    caller: &mut Caller<'_, HostState>,
+    allowlist: &[std::path::PathBuf],
+    pat_ptr: i32,
+    pat_len: i32,
+    out_ptr: i32,
+    out_len: i32,
+) -> i32 {
+    use ainb_plugin_api::host::HostStatus;
+
+    let pat = match read_string(caller, pat_ptr, pat_len) {
+        Ok(s) => s,
+        Err(e) => {
+            caller.data_mut().last_error = Some(format!("ainb_fs_glob: bad pattern utf8: {e}"));
+            return HostStatus::InvalidArgument as i32;
+        }
+    };
+    let expanded_pat = if let Some(rest) = pat.strip_prefix("~/") {
+        dirs::home_dir()
+            .map(|h| h.join(rest).to_string_lossy().into_owned())
+            .unwrap_or(pat.clone())
+    } else {
+        pat.clone()
+    };
+
+    let entries = match glob::glob(&expanded_pat) {
+        Ok(it) => it,
+        Err(e) => {
+            caller.data_mut().last_error =
+                Some(format!("ainb_fs_glob: bad pattern {expanded_pat}: {e}"));
+            return HostStatus::InvalidArgument as i32;
+        }
+    };
+
+    // Filter to entries inside the plugin's allowlist; bad entries are
+    // skipped, not surfaced (a glob with permission errors elsewhere
+    // shouldn't fail the whole call).
+    let mut paths: Vec<String> = Vec::new();
+    for entry in entries.flatten() {
+        let canonical = entry.canonicalize().unwrap_or(entry.clone());
+        if allowlist.iter().any(|root| canonical.starts_with(root)) {
+            paths.push(canonical.to_string_lossy().into_owned());
+        }
+    }
+    let joined = paths.join("\n");
+    let bytes = joined.as_bytes();
+
+    let cap = match usize::try_from(out_len) {
+        Ok(n) => n,
+        Err(_) => return HostStatus::InvalidArgument as i32,
+    };
+    if bytes.len() > cap {
+        return HostStatus::BufferTooSmall as i32;
+    }
+
+    let memory = match caller.get_export("memory").and_then(wasmi::Extern::into_memory) {
+        Some(m) => m,
+        None => return HostStatus::HostError as i32,
+    };
+    let off = match usize::try_from(out_ptr) {
+        Ok(n) => n,
+        Err(_) => return HostStatus::InvalidArgument as i32,
+    };
+    if memory.write(&mut *caller, off, bytes).is_err() {
         return HostStatus::HostError as i32;
     }
     i32::try_from(bytes.len()).unwrap_or(HostStatus::HostError as i32)
