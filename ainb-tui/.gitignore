@@ -4,6 +4,10 @@ Cargo.lock
 *.rs.bk
 *.pdb
 
+# CTS canary artifacts — built on demand via `cargo xtask build-canaries`
+crates/ainb-plugin-host/tests/cts/canaries/target/
+crates/ainb-plugin-host/tests/cts/fixtures/
+
 # IDE
 .vscode/
 .idea/
