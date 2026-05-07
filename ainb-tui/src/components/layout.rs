@@ -210,7 +210,23 @@ impl LayoutComponent {
         // Usage analytics view (full screen)
         if state.current_view == View::Analytics {
             tracing::debug!("Rendering Usage Analytics view");
-            crate::components::usage::render(frame, frame.size(), &state.usage_state);
+            // Compute the enable-card visibility inputs once per frame
+            // through the AppState cache so we don't re-read settings.json
+            // on every refresh tick.
+            let live_source = crate::models::live_window::current().source;
+            let statusline_status = state.statusline_status_cached();
+            let statusline_decision = state.app_config.ui_preferences.statusline_decision;
+            let enable_card_ctx = crate::components::usage::EnableCardCtx {
+                live_source,
+                statusline_status,
+                statusline_decision,
+            };
+            crate::components::usage::render(
+                frame,
+                frame.size(),
+                &state.usage_state,
+                enable_card_ctx,
+            );
             // Render help overlay on top if visible
             if state.help_visible {
                 tracing::debug!("Rendering help overlay on Analytics");
@@ -437,7 +453,7 @@ impl LayoutComponent {
         frame.render_widget(menu, area);
     }
 
-    fn render_status_bar(&self, frame: &mut Frame, area: Rect, state: &AppState) {
+    fn render_status_bar(&self, frame: &mut Frame, area: Rect, state: &mut AppState) {
         let mut status_spans: Vec<Span> = vec![];
 
         // Current workspace/repo info
@@ -531,13 +547,13 @@ impl LayoutComponent {
         // measure the existing content first and drop the live widget if
         // it wouldn't fit.
         let live_spans = build_live_status_spans(state);
-        let existing_w: usize = status_spans
+        let existing_w: usize = status_spans.iter().map(|s| s.content.chars().count()).sum();
+        // 4 chars for the " │  " separator we'd add
+        let live_w: usize = live_spans
             .iter()
             .map(|s| s.content.chars().count())
-            .sum();
-        // 4 chars for the " │  " separator we'd add
-        let live_w: usize =
-            live_spans.iter().map(|s| s.content.chars().count()).sum::<usize>().saturating_add(5);
+            .sum::<usize>()
+            .saturating_add(5);
         let area_inner_w = area.width.saturating_sub(2) as usize; // borders
         if !live_spans.is_empty() && existing_w + live_w <= area_inner_w {
             if !status_spans.is_empty() {
@@ -744,12 +760,16 @@ impl Default for LayoutComponent {
 /// Build the compact "live OAuth window" spans appended to the top status
 /// bar. Returns an empty vec when nothing should render (statusline
 /// unwired AND user declined, or status detection failed).
-pub fn build_live_status_spans(state: &AppState) -> Vec<Span<'static>> {
-    use crate::cli::statusline_install::{StatuslineStatus, detect_statusline_status};
+///
+/// The settings.json read goes through [`AppState::statusline_status_cached`]
+/// so the top bar's 30-60Hz redraws don't translate into 30-60Hz
+/// filesystem reads.
+pub fn build_live_status_spans(state: &mut AppState) -> Vec<Span<'static>> {
+    use crate::cli::statusline_install::StatuslineStatus;
     use crate::config::StatuslineDecision;
     use crate::models::live_window::{Source, current};
 
-    let status = detect_statusline_status().ok();
+    let status = state.statusline_status_cached();
     let decision = state.app_config.ui_preferences.statusline_decision;
 
     match status {
@@ -776,7 +796,10 @@ fn build_live_widget_spans(live: &crate::models::live_window::LiveWindow) -> Vec
 
     if let Some(pct) = live.five_hour_pct {
         out.push(Span::styled("5h ", Style::default().fg(MUTED_GRAY)));
-        out.push(Span::styled(mini_bar(pct), Style::default().fg(bar_color_5h(pct))));
+        out.push(Span::styled(
+            mini_bar(pct),
+            Style::default().fg(bar_color_5h(pct)),
+        ));
         out.push(Span::styled(
             format!(" {pct}%"),
             Style::default().fg(bar_color_5h(pct)).add_modifier(Modifier::BOLD),
@@ -787,7 +810,10 @@ fn build_live_widget_spans(live: &crate::models::live_window::LiveWindow) -> Vec
             out.push(Span::styled(" · ", Style::default().fg(SUBDUED_BORDER)));
         }
         out.push(Span::styled("wk ", Style::default().fg(MUTED_GRAY)));
-        out.push(Span::styled(mini_bar(pct), Style::default().fg(bar_color_7d(pct))));
+        out.push(Span::styled(
+            mini_bar(pct),
+            Style::default().fg(bar_color_7d(pct)),
+        ));
         out.push(Span::styled(
             format!(" {pct}%"),
             Style::default().fg(bar_color_7d(pct)).add_modifier(Modifier::BOLD),
@@ -817,7 +843,7 @@ fn build_cta_spans() -> Vec<Span<'static>> {
     vec![
         Span::styled("⚠ ", Style::default().fg(red).add_modifier(Modifier::BOLD)),
         Span::styled("Live Claude Code usage off", Style::default().fg(red)),
-        Span::styled(" · go to Stats to enable", Style::default().fg(MUTED_GRAY)),
+        Span::styled(" · press W to enable", Style::default().fg(MUTED_GRAY)),
     ]
 }
 
@@ -878,11 +904,14 @@ mod live_widget_tests {
     }
 
     #[test]
-    fn cta_spans_contain_warning_and_stats_hint() {
+    fn cta_spans_contain_warning_and_w_shortcut_hint() {
         let spans = build_cta_spans();
         let text = flatten(&spans);
         assert!(text.contains("Live Claude Code usage off"));
-        assert!(text.contains("Stats"));
+        // The CTA points at the global `W` shortcut so the keystroke is
+        // discoverable without navigating into Stats first.
+        assert!(text.contains("press W"));
+        assert!(!text.contains("Stats"), "stale Stats hint must be gone");
     }
 
     #[test]
