@@ -29,6 +29,7 @@ pub mod new_session;
 pub mod onboarding;
 pub mod session_list;
 pub mod session_recovery;
+pub mod slash;
 pub mod setup_menu;
 pub mod sidebar;
 pub mod skills;

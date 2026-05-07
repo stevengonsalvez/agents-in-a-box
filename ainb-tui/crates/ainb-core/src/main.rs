@@ -50,6 +50,7 @@ mod test_support;
 
 use app::{App, EventHandler};
 use components::LayoutComponent;
+use components::slash::{SlashAction, SlashCommandRegistry, SlashPalette};
 
 /// Terminal cleanup utility to ensure proper restoration
 fn cleanup_terminal() {
@@ -207,6 +208,8 @@ async fn run_tui_loop(
     let startup_time = Instant::now();
     const STARTUP_GUARD_MS: u64 = 100;
 
+    let mut slash_palette = SlashPalette::new(SlashCommandRegistry::built_ins());
+
     loop {
         terminal.draw(|frame| {
             layout.render(frame, &mut app.state);
@@ -234,8 +237,27 @@ async fn run_tui_loop(
                         continue;
                     }
 
-                    // Intercept keys when tmux preview is in scroll mode
                     use crossterm::event::KeyCode;
+
+                    // Slash-command palette: `:` opens it; while open, all
+                    // keypresses go to the palette. Plugin-contributed slash
+                    // commands hook in here in Phase 4.
+                    if slash_palette.is_open() || matches!(key_event.code, KeyCode::Char(':')) {
+                        match slash_palette.handle_key(key_event) {
+                            SlashAction::Execute(cmd) => {
+                                tracing::info!(
+                                    "slash command requested (stub, no dispatch yet): /{}",
+                                    cmd
+                                );
+                            }
+                            SlashAction::Opened
+                            | SlashAction::Closed
+                            | SlashAction::None => {}
+                        }
+                        continue;
+                    }
+
+                    // Intercept keys when tmux preview is in scroll mode
                     let preview = layout.tmux_preview_mut();
                     if preview.is_scroll_mode() {
                         match key_event.code {
