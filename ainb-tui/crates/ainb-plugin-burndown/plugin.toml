@@ -1,0 +1,31 @@
+# ainb plugin manifest — burndown.
+#
+# Loaded by ainb-plugin-host's manifest_validate at install time. Schema
+# matches ainb-plugin-api::Manifest; capability flags are checked against
+# the host capability gate before any host fn is exposed to the wasm
+# instance.
+
+[plugin]
+name = "burndown"
+version = "0.1.0"
+ainb_min_version = "1.1.0"
+description = "Daily/weekly/project usage burndown panels"
+author = "stevengonsalvez"
+license = "MIT"
+
+[capabilities]
+# Read raw Claude / Codex JSONL session histories for cost aggregation.
+read_claude_logs    = true
+read_codex_logs     = true
+# Read ainb session metadata to attribute usage to sessions/workspaces.
+read_sessions       = true
+# Persist the aggregated cache (SQLite) under the plugin data dir.
+write_plugin_data   = true
+# No network egress; no subprocess spawn.
+network             = []
+spawn_subprocess    = false
+
+[provides]
+screens    = ["analytics"]
+commands   = ["/usage", "/burndown"]
+statusline = ["budget-bar"]

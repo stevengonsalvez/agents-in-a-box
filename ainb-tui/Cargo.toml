@@ -12,7 +12,15 @@ default-members = ["crates/ainb-core"]
 # `[workspace]` declared on their root Cargo.toml). Excluding here
 # keeps `cargo build --workspace` from trying to compile cdylibs for
 # the host target.
-exclude = ["crates/ainb-plugin-host/tests/cts/canaries"]
+exclude = [
+    "crates/ainb-plugin-host/tests/cts/canaries",
+    # ainb-plugin-burndown is a wasm32-wasip1 cdylib. Excluded so root
+    # `cargo build`/`cargo test` (host target) doesn't try to compile it
+    # for the wrong target. Build via `./scripts/build-plugins.sh` which
+    # sources scripts/wasi-env.sh to wire WASI_SDK_PATH + emulated libs
+    # rusqlite-bundled needs (mman/getpid/process_clocks/signal).
+    "crates/ainb-plugin-burndown",
+]
 
 [workspace.package]
 version = "1.0.0"
