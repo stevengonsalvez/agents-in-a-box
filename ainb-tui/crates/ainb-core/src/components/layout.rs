@@ -25,7 +25,7 @@ use super::{
     LiveLogsStreamComponent, LogHistoryViewerComponent, LogsViewerComponent, NewSessionComponent,
     OnboardingComponent, SessionListComponent, SetupMenuComponent, TmuxPreviewPane,
 };
-use crate::app::{AppState, state::View};
+use crate::app::{AppState, screens::ids as screen_ids};
 
 pub struct LayoutComponent {
     session_list: SessionListComponent,
@@ -78,7 +78,7 @@ impl LayoutComponent {
 
     pub fn render(&mut self, frame: &mut Frame, state: &mut AppState) {
         // Special handling for onboarding wizard view (full screen)
-        if state.current_view == View::Onboarding {
+        if state.current_screen == screen_ids::ONBOARDING {
             if let Some(ref onboarding_state) = state.onboarding_state {
                 tracing::debug!("Rendering Onboarding view");
                 self.onboarding.render(frame, frame.size(), onboarding_state);
@@ -87,7 +87,7 @@ impl LayoutComponent {
         }
 
         // Special handling for setup menu view (overlay on home screen)
-        if state.current_view == View::SetupMenu {
+        if state.current_screen == screen_ids::SETUP_MENU {
             tracing::debug!("Rendering SetupMenu view");
             // First render the home screen as background
             self.home_screen_v2.render_with_loading(
@@ -103,20 +103,20 @@ impl LayoutComponent {
         }
 
         // Special handling for auth setup view (full screen)
-        if state.current_view == View::AuthSetup {
+        if state.current_screen == screen_ids::AUTH_SETUP {
             let centered_area = centered_rect(60, 60, frame.size());
             self.auth_setup.render(frame, centered_area, state);
             return;
         }
 
         // Special handling for attached terminal view (full screen)
-        if state.current_view == View::AttachedTerminal {
+        if state.current_screen == screen_ids::ATTACHED_TERMINAL {
             self.attached_terminal.render(frame, frame.size(), state);
             return;
         }
 
         // Special handling for git view (full screen)
-        if state.current_view == View::GitView {
+        if state.current_screen == screen_ids::GIT_VIEW {
             if let Some(ref git_state) = state.git_view_state {
                 crate::components::GitViewComponent::render(frame, frame.size(), git_state);
             }
@@ -124,7 +124,7 @@ impl LayoutComponent {
         }
 
         // AINB 2.0: Home screen (full screen) - Now using V2 with sidebar and mascot
-        if state.current_view == View::HomeScreen {
+        if state.current_screen == screen_ids::HOME {
             tracing::debug!("Rendering HomeScreen V2 view");
             self.home_screen_v2.render_with_loading(
                 frame,
@@ -142,7 +142,7 @@ impl LayoutComponent {
         }
 
         // AINB 2.0: Agent selection (full screen)
-        if state.current_view == View::AgentSelection {
+        if state.current_screen == screen_ids::AGENT_SELECTION {
             tracing::debug!("Rendering AgentSelection view");
             self.agent_selection.render(frame, frame.size(), state);
             // Render help overlay on top if visible
@@ -154,7 +154,7 @@ impl LayoutComponent {
         }
 
         // AINB 2.0: Config screen (full screen)
-        if state.current_view == View::Config {
+        if state.current_screen == screen_ids::CONFIG {
             tracing::debug!("Rendering Config view");
             self.config_screen.render(frame, frame.size(), state);
 
@@ -179,7 +179,7 @@ impl LayoutComponent {
         }
 
         // AINB 2.0: Log history viewer (full screen)
-        if state.current_view == View::LogHistory {
+        if state.current_screen == screen_ids::LOG_HISTORY {
             tracing::debug!("Rendering LogHistory view");
             self.log_history_viewer
                 .render(frame, frame.size(), &mut state.log_history_state);
@@ -192,7 +192,7 @@ impl LayoutComponent {
         }
 
         // Changelog viewer (full screen)
-        if state.current_view == View::Changelog {
+        if state.current_screen == screen_ids::CHANGELOG {
             tracing::debug!("Rendering Changelog view");
             crate::components::ChangelogComponent::render(
                 frame,
@@ -208,7 +208,7 @@ impl LayoutComponent {
         }
 
         // Usage analytics view (full screen)
-        if state.current_view == View::Analytics {
+        if state.current_screen == screen_ids::ANALYTICS {
             tracing::debug!("Rendering Usage Analytics view");
             crate::components::usage::render(frame, frame.size(), &state.usage_state);
             // Render help overlay on top if visible
@@ -220,7 +220,7 @@ impl LayoutComponent {
         }
 
         // Skills browser view (full screen)
-        if state.current_view == View::Skills {
+        if state.current_screen == screen_ids::SKILLS {
             tracing::debug!("Rendering Skills view");
             crate::components::skills::render(frame, frame.size(), &state.skills_state);
             if state.help_visible {
@@ -231,7 +231,7 @@ impl LayoutComponent {
         }
 
         // Session recovery view (full screen)
-        if state.current_view == View::SessionRecovery {
+        if state.current_screen == screen_ids::SESSION_RECOVERY {
             tracing::debug!("Rendering SessionRecovery view");
             crate::components::SessionRecovery::render(
                 frame,
@@ -299,12 +299,12 @@ impl LayoutComponent {
         }
 
         // Render new session overlay if visible
-        if state.current_view == View::NewSession || state.current_view == View::SearchWorkspace {
+        if state.current_screen == screen_ids::NEW_SESSION || state.current_screen == screen_ids::SEARCH_WORKSPACE {
             self.new_session.render(frame, frame.size(), state);
         }
 
         // Render Claude chat popup if visible
-        if state.current_view == View::ClaudeChat {
+        if state.current_screen == screen_ids::CLAUDE_CHAT {
             let popup_area = centered_rect(80, 80, frame.size());
             self.claude_chat.render(frame, popup_area, state);
         }

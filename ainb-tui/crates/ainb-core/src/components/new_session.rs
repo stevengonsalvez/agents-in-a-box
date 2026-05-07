@@ -46,7 +46,7 @@ impl NewSessionComponent {
                     self.render_branch_selection(frame, popup_area, session_state)
                 }
                 NewSessionStep::SelectRepo => {
-                    if state.current_view == crate::app::state::View::SearchWorkspace {
+                    if state.current_screen == crate::app::screens::ids::SEARCH_WORKSPACE {
                         self.render_search_workspace(frame, popup_area, session_state)
                     } else {
                         self.render_repo_selection(frame, popup_area, session_state)

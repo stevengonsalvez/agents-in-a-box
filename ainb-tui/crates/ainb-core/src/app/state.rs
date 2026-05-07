@@ -393,31 +393,10 @@ pub enum FocusedPane {
     LiveLogs, // Right pane - live logs
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum View {
-    HomeScreen,     // Default landing page with tile navigation
-    AgentSelection, // Choose agent provider and model
-    Config,         // Settings and configuration
-    Catalog,        // Browse marketplace/catalog
-    Analytics,      // Usage statistics and cost tracking
-    SessionList,
-    Logs,
-    LogHistory, // Historical JSONL log viewer
-    Terminal,
-    Help,
-    NewSession,
-    SearchWorkspace,
-    NonGitNotification,
-    AttachedTerminal,
-    AuthSetup,       // New view for authentication setup
-    ClaudeChat,      // Claude chat popup overlay
-    GitView,         // Git status and diff view
-    Onboarding,      // First-time setup wizard
-    SetupMenu,       // Setup menu with factory reset option
-    Changelog,       // Version history viewer
-    SessionRecovery, // Recover orphaned agent sessions after crash/shutdown
-    Skills,          // Per-agent skills + agents browser
-}
+// View enum was replaced in Phase 2a by ScreenId (String) + the screens::ids
+// constants module. Layout dispatch now goes through app::ScreenRegistry; see
+// `crate::app::screens` for the trait + identifier constants.
+pub use crate::app::screens::{Screen, ScreenId, ids as screen_ids};
 
 #[derive(Debug, Clone)]
 pub struct ConfirmationDialog {
@@ -2003,7 +1982,7 @@ pub struct AppState {
     pub selected_sessions: HashSet<Uuid>, // Multi-selected session IDs for bulk operations
     pub expand_all_workspaces: bool, // When true, show all sessions across all workspaces
     pub session_filter: SessionFilter, // View filter for Interactive sessions (Shift+F to cycle)
-    pub current_view: View,
+    pub current_screen: ScreenId,
     pub should_quit: bool,
     pub logs: HashMap<Uuid, Vec<String>>,
     pub help_visible: bool,
@@ -2050,7 +2029,7 @@ pub struct AppState {
     // Git view state
     pub git_view_state: Option<crate::components::GitViewState>,
     // Previous view for navigation (e.g., to return from GitView)
-    pub previous_view: Option<View>,
+    pub previous_screen: Option<ScreenId>,
     // Notification system
     pub notifications: Vec<Notification>,
     // Pending event to be processed in next loop iteration
@@ -2607,7 +2586,7 @@ impl Default for AppState {
             selected_sessions: HashSet::new(),
             expand_all_workspaces: true, // Default to expanded view
             session_filter: SessionFilter::All,
-            current_view: View::HomeScreen,
+            current_screen: screen_ids::HOME.to_string(),
             should_quit: false,
             logs: HashMap::new(),
             help_visible: false,
@@ -2631,7 +2610,7 @@ impl Default for AppState {
             log_streaming_coordinator: None,
             log_sender: None,
             git_view_state: None,
-            previous_view: None,
+            previous_screen: None,
             notifications: Vec::new(),
             pending_event: None,
 
@@ -3067,7 +3046,7 @@ impl AppState {
         }
 
         self.onboarding_state = Some(state);
-        self.current_view = View::Onboarding;
+        self.current_screen = screen_ids::ONBOARDING.to_string();
     }
 
     /// Complete the onboarding process
@@ -3100,7 +3079,7 @@ impl AppState {
 
         // Clean up and return to home
         self.onboarding_state = None;
-        self.current_view = View::HomeScreen;
+        self.current_screen = screen_ids::HOME.to_string();
 
         Ok(())
     }
@@ -3108,7 +3087,7 @@ impl AppState {
     /// Cancel onboarding and return to home (for factory reset scenario)
     pub fn cancel_onboarding(&mut self) {
         self.onboarding_state = None;
-        self.current_view = View::HomeScreen;
+        self.current_screen = screen_ids::HOME.to_string();
     }
 
     /// Refresh OAuth tokens using the refresh token
@@ -4754,13 +4733,13 @@ impl AppState {
     }
 
     pub fn toggle_claude_chat(&mut self) {
-        if self.current_view == View::ClaudeChat {
+        if self.current_screen == screen_ids::CLAUDE_CHAT {
             // Close Claude chat popup and return to main view
-            self.current_view = View::SessionList;
+            self.current_screen = screen_ids::SESSION_LIST.to_string();
             self.claude_chat_visible = false;
         } else {
             // Open Claude chat popup
-            self.current_view = View::ClaudeChat;
+            self.current_screen = screen_ids::CLAUDE_CHAT.to_string();
             self.claude_chat_visible = true;
         }
     }
@@ -5055,7 +5034,7 @@ impl AppState {
             // Clear attached session if we're currently attached to this session
             if self.attached_session_id == Some(session_id) {
                 self.attached_session_id = None;
-                self.current_view = crate::app::state::View::SessionList;
+                self.current_screen = crate::app::screens::ids::SESSION_LIST.to_string();
                 self.ui_needs_refresh = true;
             }
 
@@ -5237,7 +5216,7 @@ impl AppState {
             ..Default::default()
         });
 
-        self.current_view = View::NewSession;
+        self.current_screen = screen_ids::NEW_SESSION.to_string();
 
         info!(
             "Successfully created normal new session state with branch: {}",
@@ -5251,7 +5230,7 @@ impl AppState {
 
         // Create new session state with SelectSource step (default)
         self.new_session_state = Some(NewSessionState::default());
-        self.current_view = View::NewSession;
+        self.current_screen = screen_ids::NEW_SESSION.to_string();
         info!("New session state created with SelectSource step");
     }
 
@@ -5655,7 +5634,7 @@ impl AppState {
         // Check if authentication is set up first
         if Self::is_first_time_setup() {
             info!("Authentication not set up, switching to auth setup view");
-            self.current_view = View::AuthSetup;
+            self.current_screen = screen_ids::AUTH_SETUP.to_string();
             self.auth_setup_state = Some(AuthSetupState {
                 selected_method: AuthMethod::OAuth,
                 api_key_input: String::new(),
@@ -5721,7 +5700,7 @@ impl AppState {
             ..Default::default()
         });
 
-        self.current_view = View::NewSession;
+        self.current_screen = screen_ids::NEW_SESSION.to_string();
 
         info!(
             "Successfully created new session state with branch: {}",
@@ -5734,8 +5713,8 @@ impl AppState {
 
         // Only transition to SessionList if coming from NonGitNotification
         // (preserve current view for new session flow which handles its own transitions)
-        if self.current_view == View::NonGitNotification {
-            self.current_view = View::SessionList;
+        if self.current_screen == screen_ids::NON_GIT_NOTIFICATION {
+            self.current_screen = screen_ids::SESSION_LIST.to_string();
         }
 
         // Scan for repositories directly without Docker dependency.
@@ -5813,7 +5792,7 @@ impl AppState {
             ..Default::default()
         });
 
-        self.current_view = View::SearchWorkspace;
+        self.current_screen = screen_ids::SEARCH_WORKSPACE.to_string();
         info!("Successfully transitioned to SearchWorkspace view");
     }
 
@@ -5857,12 +5836,12 @@ impl AppState {
             selected_repo_index: if has_repos { Some(0) } else { None },
             ..Default::default()
         });
-        self.current_view = View::NewSession;
+        self.current_screen = screen_ids::NEW_SESSION.to_string();
     }
 
     pub fn cancel_new_session(&mut self) {
         self.new_session_state = None;
-        self.current_view = View::SessionList;
+        self.current_screen = screen_ids::SESSION_LIST.to_string();
         // Also clear any pending async actions to prevent race conditions
         self.pending_async_action = None;
         // Set cancellation flag to prevent race conditions
@@ -5925,7 +5904,7 @@ impl AppState {
                 state.step = NewSessionStep::InputBranch;
 
                 // Change view from SearchWorkspace to NewSession
-                self.current_view = View::NewSession;
+                self.current_screen = screen_ids::NEW_SESSION.to_string();
                 tracing::info!(
                     "Repository confirmed (agent: {:?}, model: {:?}), transitioning to branch input",
                     state.selected_agent,
@@ -7020,7 +6999,7 @@ impl AppState {
                 info!(
                     "Boss mode selected but authentication not set up, switching to auth setup view"
                 );
-                self.current_view = View::AuthSetup;
+                self.current_screen = screen_ids::AUTH_SETUP.to_string();
                 self.auth_setup_state = Some(AuthSetupState {
                     selected_method: AuthMethod::OAuth,
                     api_key_input: String::new(),
@@ -8583,7 +8562,7 @@ impl AppState {
                             warn!("Workspace search timed out after 10 seconds");
                             // Return to safe state
                             self.new_session_state = None;
-                            self.current_view = View::SessionList;
+                            self.current_screen = screen_ids::SESSION_LIST.to_string();
                             return Err(anyhow::anyhow!("Workspace search timed out"));
                         }
                     }
@@ -8914,7 +8893,7 @@ impl AppState {
 
             // Success - transition to main view
             self.auth_setup_state = None;
-            self.current_view = View::SessionList;
+            self.current_screen = screen_ids::SESSION_LIST.to_string();
             self.check_current_directory_status();
             self.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
         } else {
@@ -9051,7 +9030,7 @@ impl AppState {
 
         // Success - transition to main view
         self.auth_setup_state = None;
-        self.current_view = View::SessionList;
+        self.current_screen = screen_ids::SESSION_LIST.to_string();
         self.check_current_directory_status();
         self.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
 
@@ -9096,7 +9075,7 @@ impl AppState {
                         running_session_count
                     )),
                 });
-                self.current_view = View::AuthSetup;
+                self.current_screen = screen_ids::AUTH_SETUP.to_string();
             }
             return Ok(());
         }
@@ -9146,7 +9125,7 @@ impl AppState {
                 "🔄 Previous credentials cleared - please authenticate again".to_string(),
             ),
         });
-        self.current_view = View::AuthSetup;
+        self.current_screen = screen_ids::AUTH_SETUP.to_string();
 
         info!("Re-authentication initiated - switched to auth setup view");
         Ok(())
@@ -9176,7 +9155,7 @@ impl AppState {
                     );
 
                     // Start the new session UI flow with pre-populated data from the existing session
-                    self.current_view = View::NewSession;
+                    self.current_screen = screen_ids::NEW_SESSION.to_string();
                     self.new_session_state = Some(NewSessionState {
                         available_repos: vec![workspace.path.clone()],
                         filtered_repos: vec![(0, workspace.path.clone())],
@@ -9263,8 +9242,8 @@ impl AppState {
 
             self.git_view_state = Some(git_state);
             // Store current view so we can return to it
-            self.previous_view = Some(self.current_view.clone());
-            self.current_view = View::GitView;
+            self.previous_screen = Some(self.current_screen.clone());
+            self.current_screen = screen_ids::GIT_VIEW.to_string();
         } else {
             tracing::warn!("No session selected for git view");
         }
@@ -10005,11 +9984,11 @@ impl App {
                 warn!("Error processing async action: {}", e);
                 // Return to safe state if there was an error
                 // BUT don't interrupt onboarding wizard or setup menu
-                if self.state.current_view != View::Onboarding
-                    && self.state.current_view != View::SetupMenu
+                if self.state.current_screen != screen_ids::ONBOARDING
+                    && self.state.current_screen != screen_ids::SETUP_MENU
                 {
                     self.state.new_session_state = None;
-                    self.state.current_view = View::SessionList;
+                    self.state.current_screen = screen_ids::SESSION_LIST.to_string();
                 }
                 self.state.pending_async_action = None;
             }
