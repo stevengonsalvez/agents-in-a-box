@@ -1,0 +1,10 @@
+[plugin]
+name = "cts-eb102a73-pair-b"
+version = "0.0.1"
+ainb_min_version = "1.0.0"
+description = "CTS canary 12b: subscribes to cts.ping and logs each delivery."
+
+[capabilities]
+event_bus = true
+
+[provides]
