@@ -11,8 +11,15 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
-/// Command we install into Claude Code's `statusLine.command`.
+/// Legacy command we used to install into Claude Code's
+/// `statusLine.command`. Retained for migration detection — fresh installs
+/// write [`AINB_CLAUDECODE_STATUSLINE_CMD`] instead.
 pub const AINB_STATUSLINE_CMD: &str = "ainb statusline";
+
+/// Canonical command we install into Claude Code's `statusLine.command`.
+/// Provider-namespaced so that other providers (Codex et al.) can grow
+/// their own equivalents without lying at the top level.
+pub const AINB_CLAUDECODE_STATUSLINE_CMD: &str = "ainb claudecode statusline";
 
 /// Outcome of an `install_statusline()` call.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +31,11 @@ pub enum InstallOutcome {
     /// A different statusLine command was present; we did NOT overwrite.
     /// The caller decides keep / replace based on the value.
     ExistingDifferent { current_command: String },
+    /// The legacy `ainb statusline` command was present and we rewrote it
+    /// in place to the new `ainb claudecode statusline` form. Treated as
+    /// a successful upgrade — the user already opted in to ainb owning
+    /// the statusline; namespace is an internal concern.
+    Migrated,
 }
 
 /// Status of the user's statusline configuration.
@@ -73,7 +85,19 @@ fn classify_status(value: &serde_json::Value) -> StatuslineStatus {
     }
 }
 
+/// True if `cmd` is *either* the legacy `ainb statusline` or the new
+/// canonical `ainb claudecode statusline` form. Used to decide whether
+/// the on-disk config is "owned by ainb" — separately, the legacy form
+/// is detected via [`is_legacy_command`] to drive the in-place migration.
 fn command_is_ours(cmd: &str) -> bool {
+    let trimmed = cmd.trim();
+    trimmed == AINB_STATUSLINE_CMD || trimmed == AINB_CLAUDECODE_STATUSLINE_CMD
+}
+
+/// True if `cmd` is the legacy top-level `ainb statusline` form. Drives
+/// the migration branch in `install_statusline_at` so existing settings
+/// land on the new namespaced command on the next install/init.
+fn is_legacy_command(cmd: &str) -> bool {
     cmd.trim() == AINB_STATUSLINE_CMD
 }
 
@@ -131,7 +155,25 @@ pub fn install_statusline_at(path: &Path) -> Result<InstallOutcome> {
         .with_context(|| format!("failed to parse {}", path.display()))?;
 
     match classify_status(&value) {
-        StatuslineStatus::Configured => Ok(InstallOutcome::AlreadyInstalled),
+        StatuslineStatus::Configured => {
+            // Both legacy and new forms classify as `Configured`. If the
+            // user is on the legacy form, rewrite in place to the new
+            // namespaced command — they already opted in to ainb owning
+            // the statusline; the old name is just a stale label.
+            let current = value
+                .pointer("/statusLine/command")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if is_legacy_command(current) {
+                if let Some(obj) = value.as_object_mut() {
+                    obj.insert("statusLine".to_string(), block);
+                }
+                write_with_backup(path, &bytes, &value)?;
+                Ok(InstallOutcome::Migrated)
+            } else {
+                Ok(InstallOutcome::AlreadyInstalled)
+            }
+        }
         StatuslineStatus::Other(current) => Ok(InstallOutcome::ExistingDifferent {
             current_command: current,
         }),
@@ -174,7 +216,7 @@ pub fn install_statusline_replace_at(path: &Path) -> Result<InstallOutcome> {
 fn our_block() -> serde_json::Value {
     serde_json::json!({
         "type": "command",
-        "command": AINB_STATUSLINE_CMD,
+        "command": AINB_CLAUDECODE_STATUSLINE_CMD,
         "padding": 0,
     })
 }
@@ -297,12 +339,27 @@ mod tests {
     }
 
     #[test]
-    fn detect_status_returns_configured_for_our_command() {
+    fn detect_status_returns_configured_for_legacy_command() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("settings.json");
         std::fs::write(
             &path,
             br#"{"statusLine":{"type":"command","command":"ainb statusline"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            detect_statusline_status_at(&path).unwrap(),
+            StatuslineStatus::Configured
+        );
+    }
+
+    #[test]
+    fn detect_status_returns_configured_for_new_namespaced_command() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            br#"{"statusLine":{"type":"command","command":"ainb claudecode statusline"}}"#,
         )
         .unwrap();
         assert_eq!(
@@ -374,7 +431,7 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["theme"], "dark");
         assert!(v["mcpServers"].is_object());
-        assert_eq!(v["statusLine"]["command"], "ainb statusline");
+        assert_eq!(v["statusLine"]["command"], AINB_CLAUDECODE_STATUSLINE_CMD);
 
         // Backup created
         let bak_count = std::fs::read_dir(dir.path())
@@ -386,12 +443,12 @@ mod tests {
     }
 
     #[test]
-    fn install_is_idempotent_when_already_ours() {
+    fn install_is_idempotent_when_already_on_new_command() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("settings.json");
         std::fs::write(
             &path,
-            br#"{"statusLine":{"type":"command","command":"ainb statusline","padding":0}}"#,
+            br#"{"statusLine":{"type":"command","command":"ainb claudecode statusline","padding":0}}"#,
         )
         .unwrap();
         let outcome = install_statusline_at(&path).unwrap();
@@ -404,6 +461,54 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().starts_with("settings.json.bak."))
             .count();
         assert_eq!(bak_count, 0);
+    }
+
+    #[test]
+    fn install_migrates_legacy_command_to_namespaced_form() {
+        // Existing settings.json carrying the pre-namespacing command
+        // must be rewritten in place on the next install/init pass.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            br#"{"theme":"dark","statusLine":{"type":"command","command":"ainb statusline","padding":0}}"#,
+        )
+        .unwrap();
+
+        let outcome = install_statusline_at(&path).unwrap();
+        assert_eq!(outcome, InstallOutcome::Migrated);
+
+        // Other keys preserved, command rewritten.
+        let v: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(v["theme"], "dark");
+        assert_eq!(v["statusLine"]["command"], AINB_CLAUDECODE_STATUSLINE_CMD);
+
+        // Migration is a real write — it must produce a backup so the
+        // user can revert if the rewrite was unwanted.
+        let bak_count = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("settings.json.bak."))
+            .count();
+        assert_eq!(bak_count, 1, "migration must record a backup");
+    }
+
+    #[test]
+    fn is_legacy_command_only_matches_old_top_level_form() {
+        assert!(is_legacy_command("ainb statusline"));
+        assert!(is_legacy_command("  ainb statusline\n"));
+        assert!(!is_legacy_command(AINB_CLAUDECODE_STATUSLINE_CMD));
+        assert!(!is_legacy_command("ainb usage"));
+        assert!(!is_legacy_command(""));
+    }
+
+    #[test]
+    fn command_is_ours_accepts_both_legacy_and_new() {
+        assert!(command_is_ours("ainb statusline"));
+        assert!(command_is_ours(AINB_CLAUDECODE_STATUSLINE_CMD));
+        assert!(!command_is_ours("~/bin/foo"));
+        assert!(!command_is_ours("~/bin/foo | ainb statusline"));
     }
 
     #[test]

@@ -458,7 +458,7 @@ pub fn run_statusline_step<R: std::io::BufRead, W: std::io::Write>(
 ) -> Result<StatuslineStepOutcome> {
     use crate::cli::statusline_install::{
         InstallOutcome, StatuslineStatus, detect_statusline_status, install_statusline,
-        install_statusline_replace_at, settings_path,
+        install_statusline_at, install_statusline_replace_at, settings_path,
     };
     use crate::config::StatuslineDecision;
 
@@ -472,7 +472,25 @@ pub fn run_statusline_step<R: std::io::BufRead, W: std::io::Write>(
 
     match status {
         StatuslineStatus::Configured => {
-            writeln!(out, "  ✓ Claude Code statusline already wired.").ok();
+            // Already wired. If on the legacy `ainb statusline` form,
+            // silently migrate to the new namespaced command — the user
+            // already opted in; the rename is an internal concern. Both
+            // legacy and new forms classify as Configured, so we have to
+            // call into install to do the in-place rewrite and read its
+            // outcome to differentiate.
+            let path = settings_path()?;
+            match install_statusline_at(&path)? {
+                InstallOutcome::Migrated => {
+                    writeln!(
+                        out,
+                        "  ✓ Migrated existing ainb statusline → ainb claudecode statusline."
+                    )
+                    .ok();
+                }
+                _ => {
+                    writeln!(out, "  ✓ Claude Code statusline already wired.").ok();
+                }
+            }
             app_config.ui_preferences.statusline_decision = StatuslineDecision::Installed;
             let _ = app_config.save();
             Ok(StatuslineStepOutcome::Skipped)
@@ -482,7 +500,7 @@ pub fn run_statusline_step<R: std::io::BufRead, W: std::io::Write>(
             writeln!(out, "Existing Claude Code statusline detected: {cmd}").ok();
             writeln!(
                 out,
-                "  [k]eep your current command  [r]eplace with ainb statusline  [s]kip for now"
+                "  [k]eep your current command  [r]eplace with ainb claudecode statusline  [s]kip for now"
             )
             .ok();
             write!(out, "Choice [k/r/s]: ").ok();
@@ -546,6 +564,22 @@ pub fn run_statusline_step<R: std::io::BufRead, W: std::io::Write>(
                                 StatuslineDecision::Installed;
                             let _ = app_config.save();
                             writeln!(out, "  ✓ Wired Claude Code statusline.").ok();
+                            Ok(StatuslineStepOutcome::Installed)
+                        }
+                        InstallOutcome::Migrated => {
+                            // Race: between detect (which classified as
+                            // NotConfigured) and install, the legacy
+                            // form appeared and was migrated in place.
+                            // Surface it the same as a fresh install so
+                            // the user knows the statusline is wired.
+                            app_config.ui_preferences.statusline_decision =
+                                StatuslineDecision::Installed;
+                            let _ = app_config.save();
+                            writeln!(
+                                out,
+                                "  ✓ Migrated existing ainb statusline → ainb claudecode statusline."
+                            )
+                            .ok();
                             Ok(StatuslineStepOutcome::Installed)
                         }
                         InstallOutcome::ExistingDifferent { current_command } => {
@@ -879,7 +913,10 @@ mod tests {
         let settings = home.join(".claude").join("settings.json");
         assert!(settings.exists());
         let contents = std::fs::read_to_string(&settings).unwrap();
-        assert!(contents.contains("ainb statusline"));
+        assert!(
+            contents.contains("ainb claudecode statusline"),
+            "expected new namespaced command, got: {contents}"
+        );
 
         let _ = std::fs::remove_dir_all(&home);
     }

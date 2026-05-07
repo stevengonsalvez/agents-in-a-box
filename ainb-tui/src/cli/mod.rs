@@ -149,9 +149,21 @@ pub enum Commands {
         command: usage::UsageCommands,
     },
 
-    /// Claude Code statusline hook: read JSON on stdin, cache rate-limit
-    /// windows for the TUI, and emit a powerline status string on stdout.
-    /// Wire into `~/.claude/settings.json` as the `statusLine.command`.
+    /// Claude Code-specific commands (statusline, etc.)
+    ///
+    /// Provider-namespaced commands that only apply to the Claude Code CLI
+    /// — e.g. wiring its statusline hook so OAuth-grade rate-limit windows
+    /// flow into ainb-tui's Burndown panel.
+    Claudecode {
+        #[command(subcommand)]
+        cmd: ClaudeCodeCmd,
+    },
+
+    /// (Legacy alias) Claude Code statusline hook. Prefer
+    /// `ainb claudecode statusline`. Kept so existing
+    /// `~/.claude/settings.json` entries keep working unchanged; new
+    /// installs write the new path and migrate on next `ainb init`.
+    #[command(hide = true)]
     Statusline,
 
     /// Generate shell completions (bash, zsh, fish, powershell, elvish)
@@ -159,6 +171,20 @@ pub enum Commands {
         /// Shell to generate completions for
         shell: clap_complete::Shell,
     },
+}
+
+/// Claude Code provider-specific subcommands.
+///
+/// New surface area for anything tied to the Claude Code CLI specifically
+/// (statusline hook today; doctor / config introspection in the future).
+/// Kept in a dedicated namespace so that other providers (e.g. Codex) can
+/// grow their own equivalents without lying at the top level.
+#[derive(clap::Subcommand)]
+pub enum ClaudeCodeCmd {
+    /// Statusline hook: read JSON on stdin, cache rate-limit windows for
+    /// the TUI, and emit a powerline status string on stdout. Wire into
+    /// `~/.claude/settings.json` as `statusLine.command`.
+    Statusline,
 }
 
 /// Arguments for the run command
@@ -268,4 +294,39 @@ pub struct KillArgs {
     /// Force kill without confirmation
     #[arg(long, short)]
     pub force: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    /// Both `ainb statusline` (legacy) and `ainb claudecode statusline`
+    /// (new canonical) must parse successfully so existing
+    /// `~/.claude/settings.json` entries keep working unchanged while new
+    /// installs migrate to the namespaced form.
+    #[test]
+    fn statusline_legacy_alias_still_parses() {
+        let cli = Cli::try_parse_from(["ainb", "statusline"]).expect("legacy alias must parse");
+        assert!(matches!(cli.command, Some(Commands::Statusline)));
+    }
+
+    #[test]
+    fn statusline_new_namespaced_path_parses() {
+        let cli = Cli::try_parse_from(["ainb", "claudecode", "statusline"])
+            .expect("namespaced path must parse");
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Claudecode {
+                cmd: ClaudeCodeCmd::Statusline
+            })
+        ));
+    }
+
+    /// The namespace is provider-specific; bare `ainb claudecode` without
+    /// a subcommand must fail rather than silently doing nothing.
+    #[test]
+    fn claudecode_without_subcommand_is_rejected() {
+        assert!(Cli::try_parse_from(["ainb", "claudecode"]).is_err());
+    }
 }

@@ -249,6 +249,18 @@ brew install stevengonsalvez/agents-in-a-box/ainb
 - **git** — worktree operations
 - **Claude Code CLI** — the `claude` command
 
+### Live window source matrix
+
+| Provider | 5h burn | 7d window | Cost | Reset times | Source |
+|---|---|---|---|---|---|
+| Claude Code (Pro/Max OAuth + statusline wired) | ✓ | ✓ | ✓ | ✓ | OAuth-grade via Claude Code |
+| Claude Code (API key) | ✓ | — | ✓ | — | local JSONL fallback |
+| Claude Code (statusline not wired) | ✓ | — | ✓ | — | local JSONL fallback |
+| Codex | ✓ | — | ✓ | — | local JSONL fallback |
+| Other agents | — | — | — | — | not supported |
+
+**Why the asymmetry**: only Anthropic publishes rate-limit windows over OAuth, and only the Claude Code CLI exposes them to statusline hooks. Wiring `ainb claudecode statusline` brings the OAuth-grade signal into ainb-tui's Burndown panel and session-window top bar.
+
 ---
 
 ## Toolkit

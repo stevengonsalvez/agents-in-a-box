@@ -3329,7 +3329,7 @@ fn budget_live_header_lines(
                 out.push(live_bar_line("5h burn ", pct, bar_w));
             }
             out.push(Line::from(Span::styled(
-                " Wire statusline (W) for 7d window + cost",
+                " Wire Claude Code statusline (W) for 7d window + cost",
                 Style::default().fg(MUTED_GRAY),
             )));
         }
@@ -4855,7 +4855,7 @@ mod budget_live_header_tests {
         let text = flat(&lines);
         assert!(text.contains("5h burn"));
         assert!(!text.contains("7d wnd"));
-        assert!(text.contains("Wire statusline"));
+        assert!(text.contains("Wire Claude Code statusline"));
     }
 
     #[test]
