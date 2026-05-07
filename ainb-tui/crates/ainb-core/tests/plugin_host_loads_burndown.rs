@@ -52,15 +52,13 @@ fn loads_burndown_plugin_when_dist_present() {
         .take_render("burndown", ainb_plugin_api::RenderTarget::Screen)
         .expect("plugin painted to Screen target");
     assert!(buf.is_consistent(), "WireBuffer width*height matches cells.len()");
-    let painted: String = buf
-        .cells
-        .iter()
-        .map(|c| c.symbol.as_str())
-        .collect::<String>();
-    assert!(
-        painted.contains("burndown plugin"),
-        "expected placeholder paint, got: {painted:?}"
-    );
+    // _render targets 80x24 (matches snapshot baselines). The plugin paints
+    // through `crate::ui::render`; without a UsageData snapshot pushed in
+    // via `_handle_event`, the screen renders the loading state — which
+    // still produces a fully-populated 80*24 buffer.
+    assert_eq!(buf.width, 80, "wire buffer width matches plugin render area");
+    assert_eq!(buf.height, 24, "wire buffer height matches plugin render area");
+    assert_eq!(buf.cells.len(), 80 * 24, "buffer cell count");
 
     std::env::remove_var("AINB_PLUGIN_ROOT");
 }

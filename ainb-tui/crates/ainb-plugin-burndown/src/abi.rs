@@ -21,6 +21,8 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use ainb_plugin_api::{RenderTarget, WireBuffer, WireCell};
+use ratatui::buffer::Buffer as RBuffer;
+use ratatui::layout::Rect as RRect;
 
 use crate::data::usage::UsageData;
 use crate::ui::UsageViewState;
@@ -60,51 +62,107 @@ pub extern "C" fn _render() -> i32 {
     if !READY.load(Ordering::Acquire) {
         return 1;
     }
-    // Wire-format render path: build a WireBuffer, msgpack-encode it, hand
-    // the bytes to the host via `ainb_render_buffer`. The host stashes the
-    // buffer keyed by (plugin_id, RenderTarget::Screen); ainb-core's
-    // PluginScreen wrapper drains it on the next frame.
+    // Snapshot the (UI, data) pair, then construct an offline ratatui
+    // Buffer at the host-requested size and let `ui::render` paint into
+    // it exactly the way the legacy in-tree screen used to. Convert the
+    // resulting Buffer to a WireBuffer + msgpack-encode + hand to the
+    // host via `ainb_render_buffer`.
     //
-    // Phase 3-cutover: this is intentionally a placeholder paint —
-    // "burndown plugin: <data status>". Full fidelity Analytics rendering
-    // (ratatui Frame -> WireBuffer adaptation of `crate::ui::render`) is
-    // staged separately so the round-trip can be verified end-to-end first.
-    let buf = build_placeholder_buffer();
-    let bytes = match rmp_serde::to_vec_named(&buf) {
+    // Render dimensions: 80x24 default (matches the snapshot baselines).
+    // A future PluginHost::render(plugin, area) call signature can carry
+    // the real terminal size; for now we keep the size locked so the
+    // tripwire stays deterministic.
+    let area = RRect { x: 0, y: 0, width: 80, height: 24 };
+    let mut rbuf = RBuffer::empty(area);
+
+    // SAFETY: STATE is mutated only inside the four ABI exports, which
+    // run single-threaded inside wasmi.
+    let snapshot: Option<(UsageViewState, Option<UsageData>)> = unsafe {
+        STATE.as_ref().map(|s| (s.ui.clone(), s.data.clone()))
+    };
+    if let Some((mut ui, data)) = snapshot {
+        ui.data = data;
+        crate::ui::render(&mut rbuf, area, &ui);
+    } else {
+        // Pre-init: paint nothing — host receives an empty buffer.
+    }
+
+    let wire = buffer_to_wire(&rbuf, area);
+    let bytes = match rmp_serde::to_vec_named(&wire) {
         Ok(b) => b,
-        Err(_) => return 2, // encoding failure — host marks plugin degraded
+        Err(_) => return 2,
     };
     let len = match i32::try_from(bytes.len()) {
         Ok(n) => n,
         Err(_) => return 3,
     };
     let ptr = bytes.as_ptr() as i32;
-    // SAFETY: the host reads `len` bytes starting at `ptr` from this
-    // module's exported memory. `bytes` is alive for the duration of this
-    // call; the host copies before returning.
     unsafe {
         host::ainb_render_buffer(RenderTarget::Screen as i32, ptr, len);
     }
     0
 }
 
-fn build_placeholder_buffer() -> WireBuffer {
-    // Small, deterministic buffer so tests can observe the round-trip
-    // without depending on real terminal dimensions.
-    let mut buf = WireBuffer::empty(40, 1);
-    let label = "burndown plugin (Phase 3 cutover) ✓";
-    for (i, ch) in label.chars().enumerate() {
-        if i >= buf.cells.len() {
-            break;
+/// Convert a ratatui Buffer to the on-the-wire WireBuffer the host expects.
+///
+/// Cells are emitted in row-major order. Colors are mapped down from
+/// ratatui's `Color` enum to 8-bit ANSI indices (0xFF = inherit/default)
+/// so the wire-format payload stays small. `Reset`/`Indexed`/`Rgb` cover
+/// the cases the burndown UI actually emits.
+fn buffer_to_wire(rbuf: &RBuffer, area: RRect) -> WireBuffer {
+    let mut wire = WireBuffer::empty(area.width, area.height);
+    for y in 0..area.height {
+        for x in 0..area.width {
+            let cell = rbuf.get(area.x + x, area.y + y);
+            let i = usize::from(y) * usize::from(area.width) + usize::from(x);
+            wire.cells[i] = WireCell {
+                symbol: cell.symbol().to_string(),
+                fg: color_to_ansi(cell.fg),
+                bg: color_to_ansi(cell.bg),
+                modifiers: modifiers_to_byte(cell.modifier),
+            };
         }
-        buf.cells[i] = WireCell {
-            symbol: ch.to_string(),
-            fg: 15,
-            bg: 0xFF,
-            modifiers: 1,
-        };
     }
-    buf
+    wire
+}
+
+fn color_to_ansi(c: ratatui::style::Color) -> u8 {
+    use ratatui::style::Color;
+    match c {
+        Color::Reset => 0xFF,
+        Color::Black => 0,
+        Color::Red => 1,
+        Color::Green => 2,
+        Color::Yellow => 3,
+        Color::Blue => 4,
+        Color::Magenta => 5,
+        Color::Cyan => 6,
+        Color::Gray => 7,
+        Color::DarkGray => 8,
+        Color::LightRed => 9,
+        Color::LightGreen => 10,
+        Color::LightYellow => 11,
+        Color::LightBlue => 12,
+        Color::LightMagenta => 13,
+        Color::LightCyan => 14,
+        Color::White => 15,
+        Color::Indexed(i) => i,
+        // Truecolor doesn't fit 8-bit; fold to a 6-cube approximation.
+        // The byte-identical tripwire only inspects symbols, so the lossy
+        // mapping is acceptable here. A future ABI bump can carry RGB.
+        Color::Rgb(r, g, b) => 16 + 36 * (r / 51) + 6 * (g / 51) + (b / 51),
+    }
+}
+
+fn modifiers_to_byte(m: ratatui::style::Modifier) -> u8 {
+    use ratatui::style::Modifier;
+    let mut out = 0_u8;
+    if m.contains(Modifier::BOLD) { out |= 1; }
+    if m.contains(Modifier::DIM) { out |= 2; }
+    if m.contains(Modifier::ITALIC) { out |= 4; }
+    if m.contains(Modifier::UNDERLINED) { out |= 8; }
+    if m.contains(Modifier::REVERSED) { out |= 16; }
+    out
 }
 
 /// Host-fn imports the plugin uses at runtime. `extern "C"` block lives in

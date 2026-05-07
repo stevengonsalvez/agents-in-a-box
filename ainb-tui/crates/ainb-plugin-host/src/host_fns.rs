@@ -142,6 +142,89 @@ fn link_wasi_preview1_stubs(linker: &mut Linker<HostState>) -> anyhow::Result<()
     }
     linker.func_wrap(WASI, "proc_exit", proc_exit_stub)?;
 
+    // Plugins that link rusqlite or other std-fs paths import a wider
+    // wasi-preview1 surface even if the runtime path doesn't actually
+    // open files (DCE keeps the imports if the symbols are referenced).
+    // Stub the rest so instantiation succeeds; calls at runtime return
+    // ENOSYS-style errno (52). path_open *traps* via a panic so a plugin
+    // that genuinely wants raw fs surfaces a clear error.
+
+    // random_get(buf, len) -> errno. Fill with zeros for determinism.
+    linker.func_wrap(
+        WASI,
+        "random_get",
+        |mut caller: Caller<'_, HostState>, buf_ptr: i32, buf_len: i32| -> i32 {
+            let memory = match caller.get_export("memory").and_then(wasmi::Extern::into_memory) {
+                Some(m) => m,
+                None => return 8, // EBADF — no memory exported
+            };
+            let len = match usize::try_from(buf_len) {
+                Ok(n) => n,
+                Err(_) => return 28, // EINVAL
+            };
+            let off = match usize::try_from(buf_ptr) {
+                Ok(n) => n,
+                Err(_) => return 28,
+            };
+            let zeros = vec![0_u8; len];
+            let _ = memory.write(&mut caller, off, &zeros);
+            0
+        },
+    )?;
+
+    // clock_time_get(clock_id, precision, time_ptr) -> errno. Always 0.
+    linker.func_wrap(
+        WASI,
+        "clock_time_get",
+        |mut caller: Caller<'_, HostState>,
+         _clock_id: i32,
+         _precision: i64,
+         time_ptr: i32|
+         -> i32 {
+            let memory = match caller.get_export("memory").and_then(wasmi::Extern::into_memory) {
+                Some(m) => m,
+                None => return 8,
+            };
+            let off = match usize::try_from(time_ptr) {
+                Ok(n) => n,
+                Err(_) => return 28,
+            };
+            let _ = memory.write(&mut caller, off, &[0_u8; 8]);
+            0
+        },
+    )?;
+
+    // fd_* / path_* fns: return ENOSYS (52). A plugin that actually
+    // exercises these (rather than just having them imported by
+    // dead-code-prone std paths) should switch to ainb_fs_read /
+    // ainb_data_read.
+    fn errno_nosys_4(_: Caller<'_, HostState>, _: i32, _: i32, _: i32, _: i32) -> i32 { 52 }
+    fn errno_nosys_5(_: Caller<'_, HostState>, _: i32, _: i32, _: i32, _: i32, _: i32) -> i32 { 52 }
+    fn errno_nosys_6(_: Caller<'_, HostState>, _: i32, _: i32, _: i32, _: i32, _: i32, _: i32) -> i32 { 52 }
+    fn errno_nosys_2(_: Caller<'_, HostState>, _: i32, _: i32) -> i32 { 52 }
+    fn errno_nosys_3(_: Caller<'_, HostState>, _: i32, _: i32, _: i32) -> i32 { 52 }
+    fn errno_nosys_1(_: Caller<'_, HostState>, _: i32) -> i32 { 52 }
+
+    linker.func_wrap(WASI, "fd_close", errno_nosys_1)?;
+    linker.func_wrap(WASI, "fd_fdstat_get", errno_nosys_2)?;
+    linker.func_wrap(WASI, "fd_filestat_get", errno_nosys_2)?;
+    linker.func_wrap(WASI, "fd_prestat_get", errno_nosys_2)?;
+    linker.func_wrap(WASI, "fd_prestat_dir_name", errno_nosys_3)?;
+    linker.func_wrap(WASI, "fd_read", errno_nosys_4)?;
+    linker.func_wrap(WASI, "fd_seek", |_: Caller<'_, HostState>, _: i32, _: i64, _: i32, _: i32| -> i32 { 52 })?;
+    linker.func_wrap(WASI, "path_filestat_get", errno_nosys_5)?;
+    // path_open: 9 args. Plugin shouldn't call it; return ENOSYS so it
+    // surfaces as an io error instead of trapping the whole instance.
+    linker.func_wrap(
+        WASI,
+        "path_open",
+        |_: Caller<'_, HostState>,
+         _: i32, _: i32, _: i32, _: i32, _: i32,
+         _: i64, _: i64, _: i32, _: i32|
+         -> i32 { 52 },
+    )?;
+    linker.func_wrap(WASI, "path_readlink", errno_nosys_6)?;
+
     Ok(())
 }
 
