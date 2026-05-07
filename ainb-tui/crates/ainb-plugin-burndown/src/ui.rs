@@ -3,7 +3,7 @@
 
 use chrono::{Datelike, Local, NaiveDate};
 use ratatui::{
-    Frame,
+    buffer::Buffer,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -829,7 +829,7 @@ impl UsageViewState {
 }
 
 /// Render the usage analytics screen
-pub fn render(frame: &mut Frame, area: Rect, state: &UsageViewState) {
+pub fn render(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
     // Main layout: header + provider selector + tabs + content + help bar
     let layout = Layout::default()
         .direction(Direction::Vertical)
@@ -842,31 +842,31 @@ pub fn render(frame: &mut Frame, area: Rect, state: &UsageViewState) {
         ])
         .split(area);
 
-    render_summary_bar(frame, layout[0], state);
-    render_provider_bar(frame, layout[1], state);
-    render_tab_bar(frame, layout[2], state);
+    render_summary_bar(buf, layout[0], state);
+    render_provider_bar(buf, layout[1], state);
+    render_tab_bar(buf, layout[2], state);
 
     if state.loading || state.data.is_none() {
-        render_loading(frame, layout[3]);
+        render_loading(buf, layout[3]);
     } else {
         let data = state.data.as_ref().unwrap();
         if data.calls.is_empty() && !state.provider.has_data() {
-            render_no_data(frame, layout[3], state);
+            render_no_data(buf, layout[3], state);
         } else {
             match state.active_tab {
-                UsageTab::Daily => render_daily(frame, layout[3], data, state.scroll_offset),
-                UsageTab::Weekly => render_weekly(frame, layout[3], data, state.scroll_offset),
-                UsageTab::Projects => render_projects(frame, layout[3], data, state.scroll_offset),
-                UsageTab::Burndown => render_burndown(frame, layout[3], data, state),
-                UsageTab::Optimize => render_optimize(frame, layout[3], data),
+                UsageTab::Daily => render_daily(buf, layout[3], data, state.scroll_offset),
+                UsageTab::Weekly => render_weekly(buf, layout[3], data, state.scroll_offset),
+                UsageTab::Projects => render_projects(buf, layout[3], data, state.scroll_offset),
+                UsageTab::Burndown => render_burndown(buf, layout[3], data, state),
+                UsageTab::Optimize => render_optimize(buf, layout[3], data),
             }
         }
     }
 
-    render_help_bar(frame, layout[4], state);
+    render_help_bar(buf, layout[4], state);
 }
 
-fn render_summary_bar(frame: &mut Frame, area: Rect, state: &UsageViewState) {
+fn render_summary_bar(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
     let mut spans = vec![
         Span::styled("📊 ", Style::default().fg(GOLD)),
         Span::styled(
@@ -916,10 +916,10 @@ fn render_summary_bar(frame: &mut Frame, area: Rect, state: &UsageViewState) {
         .style(Style::default().bg(DARK_BG));
 
     let paragraph = Paragraph::new(Line::from(spans)).block(block);
-    frame.render_widget(paragraph, area);
+    ratatui::widgets::Widget::render(paragraph, area, buf);
 }
 
-fn render_provider_bar(frame: &mut Frame, area: Rect, state: &UsageViewState) {
+fn render_provider_bar(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
     let mut spans: Vec<Span> = vec![Span::styled(
         "  Provider: ",
         Style::default().fg(MUTED_GRAY),
@@ -979,10 +979,10 @@ fn render_provider_bar(frame: &mut Frame, area: Rect, state: &UsageViewState) {
         .style(Style::default().bg(DARK_BG));
 
     let paragraph = Paragraph::new(Line::from(spans)).block(block);
-    frame.render_widget(paragraph, area);
+    ratatui::widgets::Widget::render(paragraph, area, buf);
 }
 
-fn render_no_data(frame: &mut Frame, area: Rect, state: &UsageViewState) {
+fn render_no_data(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -990,7 +990,7 @@ fn render_no_data(frame: &mut Frame, area: Rect, state: &UsageViewState) {
         .style(Style::default().bg(DARK_BG));
 
     let inner = block.inner(area);
-    frame.render_widget(block, area);
+    ratatui::widgets::Widget::render(block, area, buf);
 
     let lines = vec![
         Line::from(""),
@@ -1018,10 +1018,10 @@ fn render_no_data(frame: &mut Frame, area: Rect, state: &UsageViewState) {
     ];
 
     let paragraph = Paragraph::new(lines);
-    frame.render_widget(paragraph, inner);
+    ratatui::widgets::Widget::render(paragraph, inner, buf);
 }
 
-fn render_tab_bar(frame: &mut Frame, area: Rect, state: &UsageViewState) {
+fn render_tab_bar(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
     let titles: Vec<Line> = UsageTab::all()
         .iter()
         .map(|t| {
@@ -1047,10 +1047,10 @@ fn render_tab_bar(frame: &mut Frame, area: Rect, state: &UsageViewState) {
                 .style(Style::default().bg(DARK_BG)),
         );
 
-    frame.render_widget(tabs, area);
+    ratatui::widgets::Widget::render(tabs, area, buf);
 }
 
-fn render_loading(frame: &mut Frame, area: Rect) {
+fn render_loading(buf: &mut Buffer, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -1062,10 +1062,10 @@ fn render_loading(frame: &mut Frame, area: Rect) {
         Style::default().fg(MUTED_GRAY),
     )]))
     .block(block);
-    frame.render_widget(paragraph, area);
+    ratatui::widgets::Widget::render(paragraph, area, buf);
 }
 
-fn render_daily(frame: &mut Frame, area: Rect, data: &UsageData, scroll_offset: usize) {
+fn render_daily(buf: &mut Buffer, area: Rect, data: &UsageData, scroll_offset: usize) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -1073,11 +1073,11 @@ fn render_daily(frame: &mut Frame, area: Rect, data: &UsageData, scroll_offset: 
         .style(Style::default().bg(DARK_BG));
 
     let inner = block.inner(area);
-    frame.render_widget(block, area);
+    ratatui::widgets::Widget::render(block, area, buf);
 
     if data.daily.is_empty() {
         let p = Paragraph::new("  No usage data found.").style(Style::default().fg(MUTED_GRAY));
-        frame.render_widget(p, inner);
+        ratatui::widgets::Widget::render(p, inner, buf);
         return;
     }
 
@@ -1132,13 +1132,13 @@ fn render_daily(frame: &mut Frame, area: Rect, data: &UsageData, scroll_offset: 
 
     let table = Table::new(rows, widths).header(header).column_spacing(1);
 
-    frame.render_widget(table, chunks[0]);
+    ratatui::widgets::Widget::render(table, chunks[0], buf);
 
     // Bar chart (last N days that fit)
-    render_bar_chart(frame, chunks[1], data);
+    render_bar_chart(buf, chunks[1], data);
 }
 
-fn render_weekly(frame: &mut Frame, area: Rect, data: &UsageData, scroll_offset: usize) {
+fn render_weekly(buf: &mut Buffer, area: Rect, data: &UsageData, scroll_offset: usize) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -1146,11 +1146,11 @@ fn render_weekly(frame: &mut Frame, area: Rect, data: &UsageData, scroll_offset:
         .style(Style::default().bg(DARK_BG));
 
     let inner = block.inner(area);
-    frame.render_widget(block, area);
+    ratatui::widgets::Widget::render(block, area, buf);
 
     if data.weekly.is_empty() {
         let p = Paragraph::new("  No usage data found.").style(Style::default().fg(MUTED_GRAY));
-        frame.render_widget(p, inner);
+        ratatui::widgets::Widget::render(p, inner, buf);
         return;
     }
 
@@ -1205,10 +1205,10 @@ fn render_weekly(frame: &mut Frame, area: Rect, data: &UsageData, scroll_offset:
 
     let table = Table::new(rows, widths).header(header).column_spacing(1);
 
-    frame.render_widget(table, inner);
+    ratatui::widgets::Widget::render(table, inner, buf);
 }
 
-fn render_projects(frame: &mut Frame, area: Rect, data: &UsageData, scroll_offset: usize) {
+fn render_projects(buf: &mut Buffer, area: Rect, data: &UsageData, scroll_offset: usize) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -1216,11 +1216,11 @@ fn render_projects(frame: &mut Frame, area: Rect, data: &UsageData, scroll_offse
         .style(Style::default().bg(DARK_BG));
 
     let inner = block.inner(area);
-    frame.render_widget(block, area);
+    ratatui::widgets::Widget::render(block, area, buf);
 
     if data.projects.is_empty() {
         let p = Paragraph::new("  No usage data found.").style(Style::default().fg(MUTED_GRAY));
-        frame.render_widget(p, inner);
+        ratatui::widgets::Widget::render(p, inner, buf);
         return;
     }
 
@@ -1265,10 +1265,10 @@ fn render_projects(frame: &mut Frame, area: Rect, data: &UsageData, scroll_offse
 
     let table = Table::new(rows, widths).header(header).column_spacing(1);
 
-    frame.render_widget(table, inner);
+    ratatui::widgets::Widget::render(table, inner, buf);
 }
 
-fn render_burndown(frame: &mut Frame, area: Rect, data: &UsageData, state: &UsageViewState) {
+fn render_burndown(buf: &mut Buffer, area: Rect, data: &UsageData, state: &UsageViewState) {
     let block = Block::default()
         .title(" [ Burndown ] ")
         .borders(Borders::ALL)
@@ -1277,12 +1277,12 @@ fn render_burndown(frame: &mut Frame, area: Rect, data: &UsageData, state: &Usag
         .style(Style::default().bg(TERMINAL_BG));
 
     let inner = block.inner(area);
-    frame.render_widget(block, area);
+    ratatui::widgets::Widget::render(block, area, buf);
 
     if data.calls.is_empty() {
         let p = Paragraph::new("  No usage data found for selected period/provider/filter.")
             .style(Style::default().fg(MUTED_GRAY));
-        frame.render_widget(p, inner);
+        ratatui::widgets::Widget::render(p, inner, buf);
         return;
     }
 
@@ -1295,7 +1295,7 @@ fn render_burndown(frame: &mut Frame, area: Rect, data: &UsageData, state: &Usag
     // Zoom takes the full inner area minus a small breadcrumb and an
     // optional search box. Skip the dashboard grid entirely.
     if let Some(panel) = state.zoom {
-        render_burndown_zoomed(frame, inner, view_data, state, panel);
+        render_burndown_zoomed(buf, inner, view_data, state, panel);
         return;
     }
 
@@ -1313,16 +1313,16 @@ fn render_burndown(frame: &mut Frame, area: Rect, data: &UsageData, state: &Usag
         ])
         .split(inner);
 
-    render_burndown_header(frame, vertical[0], view_data, &state.period);
-    render_period_row(frame, vertical[1], state);
-    render_filter_chip_strip(frame, vertical[2], state);
+    render_burndown_header(buf, vertical[0], view_data, &state.period);
+    render_period_row(buf, vertical[1], state);
+    render_filter_chip_strip(buf, vertical[2], state);
 
     if vertical[3].width >= 120 && vertical[3].height >= 22 {
-        render_dashboard_grid(frame, vertical[3], view_data, &state.period, state);
+        render_dashboard_grid(buf, vertical[3], view_data, &state.period, state);
     } else if vertical[3].width >= 96 {
-        render_dashboard_compact(frame, vertical[3], view_data, state);
+        render_dashboard_compact(buf, vertical[3], view_data, state);
     } else {
-        render_dashboard_stack(frame, vertical[3], view_data, state);
+        render_dashboard_stack(buf, vertical[3], view_data, state);
     }
 }
 
@@ -1339,7 +1339,7 @@ fn render_burndown(frame: &mut Frame, area: Rect, data: &UsageData, state: &Usag
 /// └──────────────────────────────────────────────────────────────┘
 /// ```
 fn render_burndown_zoomed(
-    frame: &mut Frame,
+    buf: &mut Buffer,
     area: Rect,
     data: &UsageData,
     state: &UsageViewState,
@@ -1359,9 +1359,9 @@ fn render_burndown_zoomed(
         ])
         .split(area);
 
-    render_zoom_breadcrumb(frame, vertical[0], panel);
+    render_zoom_breadcrumb(buf, vertical[0], panel);
     if search_h > 0 {
-        render_zoom_search_bar(frame, vertical[1], state);
+        render_zoom_search_bar(buf, vertical[1], state);
     }
 
     // Optional 60/40 vertical split when the detail drawer is open.
@@ -1376,14 +1376,14 @@ fn render_burndown_zoomed(
         (body_area, None)
     };
 
-    render_zoom_panel_body(frame, panel_area, data, state, panel);
+    render_zoom_panel_body(buf, panel_area, data, state, panel);
 
     if let Some(detail) = detail_area {
-        render_zoom_detail_drawer(frame, detail, data, state, panel);
+        render_zoom_detail_drawer(buf, detail, data, state, panel);
     }
 }
 
-fn render_zoom_breadcrumb(frame: &mut Frame, area: Rect, panel: UsagePanel) {
+fn render_zoom_breadcrumb(buf: &mut Buffer, area: Rect, panel: UsagePanel) {
     let line = Line::from(vec![
         Span::styled(
             format!(" [ Zoomed: {} ] ", panel.title()),
@@ -1392,7 +1392,7 @@ fn render_zoom_breadcrumb(frame: &mut Frame, area: Rect, panel: UsagePanel) {
         Span::styled("   ", Style::default()),
         Span::styled("◀ Esc back ▶", Style::default().fg(MUTED_GRAY)),
     ]);
-    frame.render_widget(Paragraph::new(line), area);
+    ratatui::widgets::Widget::render(Paragraph::new(line), area, buf);
 }
 
 /// Score `haystack` against `query` with nucleo-matcher; `None` means
@@ -1460,7 +1460,7 @@ where
         .collect()
 }
 
-fn render_zoom_search_bar(frame: &mut Frame, area: Rect, state: &UsageViewState) {
+fn render_zoom_search_bar(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
     let cursor = if state.zoom_search_active { "_" } else { "" };
     let line = Line::from(vec![
         Span::styled(
@@ -1473,7 +1473,7 @@ fn render_zoom_search_bar(frame: &mut Frame, area: Rect, state: &UsageViewState)
         ),
         Span::styled(cursor, Style::default().fg(GOLD)),
     ]);
-    frame.render_widget(Paragraph::new(line), area);
+    ratatui::widgets::Widget::render(Paragraph::new(line), area, buf);
 }
 
 /// Render the body of a zoomed panel — all rows visible, primary
@@ -1486,7 +1486,7 @@ fn render_zoom_search_bar(frame: &mut Frame, area: Rect, state: &UsageViewState)
 /// focus-aware frame used by the dashboard renderers.
 #[allow(clippy::too_many_lines)]
 fn render_zoom_panel_body(
-    frame: &mut Frame,
+    buf: &mut Buffer,
     area: Rect,
     data: &UsageData,
     state: &UsageViewState,
@@ -1494,19 +1494,19 @@ fn render_zoom_panel_body(
 ) {
     let q = state.zoom_search_query.as_str();
     match panel {
-        UsagePanel::ByProject => render_zoom_by_project(frame, area, data, state, q),
-        UsagePanel::ByBranch => render_zoom_by_branch(frame, area, data, state, q),
-        UsagePanel::TopSessions => render_zoom_top_sessions(frame, area, data, state, q),
-        UsagePanel::Live => render_zoom_top_sessions(frame, area, data, state, q),
-        UsagePanel::ByModel => render_zoom_by_model(frame, area, data, state, q),
-        UsagePanel::ByActivity => render_zoom_by_activity(frame, area, data, state, q),
-        UsagePanel::DailyActivity => render_zoom_daily_activity(frame, area, data, state, q),
-        UsagePanel::Leaderboard => render_zoom_by_project(frame, area, data, state, q),
+        UsagePanel::ByProject => render_zoom_by_project(buf, area, data, state, q),
+        UsagePanel::ByBranch => render_zoom_by_branch(buf, area, data, state, q),
+        UsagePanel::TopSessions => render_zoom_top_sessions(buf, area, data, state, q),
+        UsagePanel::Live => render_zoom_top_sessions(buf, area, data, state, q),
+        UsagePanel::ByModel => render_zoom_by_model(buf, area, data, state, q),
+        UsagePanel::ByActivity => render_zoom_by_activity(buf, area, data, state, q),
+        UsagePanel::DailyActivity => render_zoom_daily_activity(buf, area, data, state, q),
+        UsagePanel::Leaderboard => render_zoom_by_project(buf, area, data, state, q),
         UsagePanel::CoreTools => {
-            render_zoom_named(frame, area, "Core Tools", &data.tools, state, q)
+            render_zoom_named(buf, area, "Core Tools", &data.tools, state, q)
         }
         UsagePanel::ShellCommands => render_zoom_named(
-            frame,
+            buf,
             area,
             "Shell Commands",
             &data.shell_commands,
@@ -1514,16 +1514,16 @@ fn render_zoom_panel_body(
             q,
         ),
         UsagePanel::McpServers => {
-            render_zoom_named(frame, area, "MCP Servers", &data.mcp_servers, state, q)
+            render_zoom_named(buf, area, "MCP Servers", &data.mcp_servers, state, q)
         }
         UsagePanel::Optimize | UsagePanel::Budget => {
             // These panels are summary cards rather than row lists. We
             // reuse the standard renderers in a fullscreen frame.
             let focus = FocusCtx::for_panel(state, panel);
             if matches!(panel, UsagePanel::Optimize) {
-                render_optimize_compact_panel(frame, area, data, focus);
+                render_optimize_compact_panel(buf, area, data, focus);
             } else {
-                render_budget_panel(frame, area, data, &state.period, focus);
+                render_budget_panel(buf, area, data, &state.period, focus);
             }
         }
     }
@@ -1536,7 +1536,7 @@ fn render_zoom_panel_body(
 // exist to assert visual identity — without them a refactor risks
 // silent column-spacing/header-style drift.
 fn render_zoom_by_project(
-    frame: &mut Frame,
+    buf: &mut Buffer,
     area: Rect,
     data: &UsageData,
     _state: &UsageViewState,
@@ -1589,7 +1589,7 @@ fn render_zoom_by_project(
         Constraint::Length(11),
     ];
     let table = Table::new(table_rows, widths).header(header).column_spacing(1);
-    frame.render_widget(table, area);
+    ratatui::widgets::Widget::render(table, area, buf);
 }
 
 /// Zoom view for the By Branch panel. `BranchUsage` carries only the
@@ -1597,7 +1597,7 @@ fn render_zoom_by_project(
 /// narrow — `Branch | Tokens | Cost` is everything we have. Search
 /// matches on the branch name.
 fn render_zoom_by_branch(
-    frame: &mut Frame,
+    buf: &mut Buffer,
     area: Rect,
     data: &UsageData,
     _state: &UsageViewState,
@@ -1632,11 +1632,11 @@ fn render_zoom_by_branch(
         Constraint::Length(10),
     ];
     let table = Table::new(table_rows, widths).header(header).column_spacing(1);
-    frame.render_widget(table, area);
+    ratatui::widgets::Widget::render(table, area, buf);
 }
 
 fn render_zoom_top_sessions(
-    frame: &mut Frame,
+    buf: &mut Buffer,
     area: Rect,
     data: &UsageData,
     _state: &UsageViewState,
@@ -1690,11 +1690,11 @@ fn render_zoom_top_sessions(
         Constraint::Length(11),
     ];
     let table = Table::new(table_rows, widths).header(header).column_spacing(1);
-    frame.render_widget(table, area);
+    ratatui::widgets::Widget::render(table, area, buf);
 }
 
 fn render_zoom_by_model(
-    frame: &mut Frame,
+    buf: &mut Buffer,
     area: Rect,
     data: &UsageData,
     _state: &UsageViewState,
@@ -1749,11 +1749,11 @@ fn render_zoom_by_model(
         Constraint::Min(20),
     ];
     let table = Table::new(table_rows, widths).header(header).column_spacing(1);
-    frame.render_widget(table, area);
+    ratatui::widgets::Widget::render(table, area, buf);
 }
 
 fn render_zoom_by_activity(
-    frame: &mut Frame,
+    buf: &mut Buffer,
     area: Rect,
     data: &UsageData,
     _state: &UsageViewState,
@@ -1793,11 +1793,11 @@ fn render_zoom_by_activity(
         Constraint::Length(10),
     ];
     let table = Table::new(table_rows, widths).header(header).column_spacing(1);
-    frame.render_widget(table, area);
+    ratatui::widgets::Widget::render(table, area, buf);
 }
 
 fn render_zoom_daily_activity(
-    frame: &mut Frame,
+    buf: &mut Buffer,
     area: Rect,
     data: &UsageData,
     _state: &UsageViewState,
@@ -1843,11 +1843,11 @@ fn render_zoom_daily_activity(
         Constraint::Length(10),
     ];
     let table = Table::new(table_rows, widths).header(header).column_spacing(1);
-    frame.render_widget(table, area);
+    ratatui::widgets::Widget::render(table, area, buf);
 }
 
 fn render_zoom_named(
-    frame: &mut Frame,
+    buf: &mut Buffer,
     area: Rect,
     title: &str,
     rows: &[NamedUsage],
@@ -1869,13 +1869,13 @@ fn render_zoom_named(
         .collect();
     let widths = [Constraint::Min(20), Constraint::Length(10)];
     let table = Table::new(table_rows, widths).header(header).column_spacing(1);
-    frame.render_widget(table, area);
+    ratatui::widgets::Widget::render(table, area, buf);
 }
 
 /// Render the detail drawer for the currently-selected row in the
 /// zoomed panel. Static info card; no extra fetching for PR-C.
 fn render_zoom_detail_drawer(
-    frame: &mut Frame,
+    buf: &mut Buffer,
     area: Rect,
     data: &UsageData,
     state: &UsageViewState,
@@ -1888,11 +1888,11 @@ fn render_zoom_detail_drawer(
         .border_style(Style::default().fg(GOLD))
         .style(Style::default().bg(TERMINAL_PANEL));
     let inner = block.inner(area);
-    frame.render_widget(block, area);
+    ratatui::widgets::Widget::render(block, area, buf);
 
     let lines = build_detail_lines(data, state, panel);
     let paragraph = Paragraph::new(lines).style(Style::default().fg(SOFT_WHITE));
-    frame.render_widget(paragraph, inner);
+    ratatui::widgets::Widget::render(paragraph, inner, buf);
 }
 
 fn build_detail_lines(
@@ -2115,7 +2115,7 @@ impl FocusCtx {
 }
 
 fn render_dashboard_grid(
-    frame: &mut Frame,
+    buf: &mut Buffer,
     area: Rect,
     data: &UsageData,
     period: &UsagePeriod,
@@ -2136,25 +2136,25 @@ fn render_dashboard_grid(
     // reads left-to-right. Rows 1–3 stay 3-column.
     let top = four_columns(rows[0]);
     render_daily_activity_panel(
-        frame,
+        buf,
         top[0],
         data,
         FocusCtx::for_panel(state, UsagePanel::DailyActivity),
     );
     render_project_panel(
-        frame,
+        buf,
         top[1],
         &data.projects,
         FocusCtx::for_panel(state, UsagePanel::ByProject),
     );
     render_branch_panel(
-        frame,
+        buf,
         top[2],
         &data.branches,
         FocusCtx::for_panel(state, UsagePanel::ByBranch),
     );
     render_live_panel(
-        frame,
+        buf,
         top[3],
         &data.sessions,
         FocusCtx::for_panel(state, UsagePanel::Live),
@@ -2162,19 +2162,19 @@ fn render_dashboard_grid(
 
     let middle = three_columns(rows[1]);
     render_session_panel(
-        frame,
+        buf,
         middle[0],
         &data.sessions,
         FocusCtx::for_panel(state, UsagePanel::TopSessions),
     );
     render_activity_panel(
-        frame,
+        buf,
         middle[1],
         &data.activities,
         FocusCtx::for_panel(state, UsagePanel::ByActivity),
     );
     render_model_panel(
-        frame,
+        buf,
         middle[2],
         &data.models,
         FocusCtx::for_panel(state, UsagePanel::ByModel),
@@ -2182,21 +2182,21 @@ fn render_dashboard_grid(
 
     let lower = three_columns(rows[2]);
     render_named_panel(
-        frame,
+        buf,
         lower[0],
         "Core Tools",
         &data.tools,
         FocusCtx::for_panel(state, UsagePanel::CoreTools),
     );
     render_named_panel(
-        frame,
+        buf,
         lower[1],
         "Shell Commands",
         &data.shell_commands,
         FocusCtx::for_panel(state, UsagePanel::ShellCommands),
     );
     render_named_panel(
-        frame,
+        buf,
         lower[2],
         "MCP Servers",
         &data.mcp_servers,
@@ -2205,19 +2205,19 @@ fn render_dashboard_grid(
 
     let bottom = three_columns(rows[3]);
     render_optimize_compact_panel(
-        frame,
+        buf,
         bottom[0],
         data,
         FocusCtx::for_panel(state, UsagePanel::Optimize),
     );
     render_leaderboard_panel(
-        frame,
+        buf,
         bottom[1],
         data,
         FocusCtx::for_panel(state, UsagePanel::Leaderboard),
     );
     render_budget_panel(
-        frame,
+        buf,
         bottom[2],
         data,
         period,
@@ -2226,7 +2226,7 @@ fn render_dashboard_grid(
 }
 
 fn render_dashboard_compact(
-    frame: &mut Frame,
+    buf: &mut Buffer,
     area: Rect,
     data: &UsageData,
     state: &UsageViewState,
@@ -2255,32 +2255,32 @@ fn render_dashboard_compact(
         .split(columns[1]);
 
     render_daily_activity_panel(
-        frame,
+        buf,
         left[0],
         data,
         FocusCtx::for_panel(state, UsagePanel::DailyActivity),
     );
     render_project_panel(
-        frame,
+        buf,
         left[1],
         &data.projects,
         FocusCtx::for_panel(state, UsagePanel::ByProject),
     );
     render_session_panel(
-        frame,
+        buf,
         left[2],
         &data.sessions,
         FocusCtx::for_panel(state, UsagePanel::TopSessions),
     );
     render_live_panel(
-        frame,
+        buf,
         left[3],
         &data.sessions,
         FocusCtx::for_panel(state, UsagePanel::Live),
     );
 
     render_activity_panel(
-        frame,
+        buf,
         right[0],
         &data.activities,
         FocusCtx::for_panel(state, UsagePanel::ByActivity),
@@ -2294,40 +2294,40 @@ fn render_dashboard_compact(
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(right[1]);
     render_model_panel(
-        frame,
+        buf,
         row1[0],
         &data.models,
         FocusCtx::for_panel(state, UsagePanel::ByModel),
     );
     render_branch_panel(
-        frame,
+        buf,
         row1[1],
         &data.branches,
         FocusCtx::for_panel(state, UsagePanel::ByBranch),
     );
     render_optimize_compact_panel(
-        frame,
+        buf,
         right[2],
         data,
         FocusCtx::for_panel(state, UsagePanel::Optimize),
     );
     let tools = three_columns(right[3]);
     render_named_panel(
-        frame,
+        buf,
         tools[0],
         "Core Tools",
         &data.tools,
         FocusCtx::for_panel(state, UsagePanel::CoreTools),
     );
     render_named_panel(
-        frame,
+        buf,
         tools[1],
         "Shell Commands",
         &data.shell_commands,
         FocusCtx::for_panel(state, UsagePanel::ShellCommands),
     );
     render_named_panel(
-        frame,
+        buf,
         tools[2],
         "MCP Servers",
         &data.mcp_servers,
@@ -2335,7 +2335,7 @@ fn render_dashboard_compact(
     );
 }
 
-fn render_dashboard_stack(frame: &mut Frame, area: Rect, data: &UsageData, state: &UsageViewState) {
+fn render_dashboard_stack(buf: &mut Buffer, area: Rect, data: &UsageData, state: &UsageViewState) {
     // Narrow-width stack (<96w): six equal-ish rows. ByBranch sits at
     // the bottom so the pre-existing top-of-stack reading order
     // (activity → projects → sessions → activity → models) is
@@ -2353,37 +2353,37 @@ fn render_dashboard_stack(frame: &mut Frame, area: Rect, data: &UsageData, state
         .split(area);
 
     render_daily_activity_panel(
-        frame,
+        buf,
         chunks[0],
         data,
         FocusCtx::for_panel(state, UsagePanel::DailyActivity),
     );
     render_project_panel(
-        frame,
+        buf,
         chunks[1],
         &data.projects,
         FocusCtx::for_panel(state, UsagePanel::ByProject),
     );
     render_session_panel(
-        frame,
+        buf,
         chunks[2],
         &data.sessions,
         FocusCtx::for_panel(state, UsagePanel::TopSessions),
     );
     render_activity_panel(
-        frame,
+        buf,
         chunks[3],
         &data.activities,
         FocusCtx::for_panel(state, UsagePanel::ByActivity),
     );
     render_model_panel(
-        frame,
+        buf,
         chunks[4],
         &data.models,
         FocusCtx::for_panel(state, UsagePanel::ByModel),
     );
     render_branch_panel(
-        frame,
+        buf,
         chunks[5],
         &data.branches,
         FocusCtx::for_panel(state, UsagePanel::ByBranch),
@@ -2413,7 +2413,7 @@ fn four_columns(area: Rect) -> std::rc::Rc<[Rect]> {
         .split(area)
 }
 
-fn render_burndown_header(frame: &mut Frame, area: Rect, data: &UsageData, period: &UsagePeriod) {
+fn render_burndown_header(buf: &mut Buffer, area: Rect, data: &UsageData, period: &UsagePeriod) {
     let cost = format_cost(data.grand_total.cost_usd);
     let cache_hit = cache_hit_percent(data);
     let projected = projected_month_cost(data, period);
@@ -2481,7 +2481,7 @@ fn render_burndown_header(frame: &mut Frame, area: Rect, data: &UsageData, perio
             Span::styled(format_cost(projected), Style::default().fg(TERMINAL_ACCENT)),
         ]),
     ];
-    frame.render_widget(Paragraph::new(lines), area);
+    ratatui::widgets::Widget::render(Paragraph::new(lines), area, buf);
 }
 
 /// Build the "Period: …  Provider: …" labelled strip.
@@ -2646,9 +2646,9 @@ fn provider_chip_span(label: &str, active: bool) -> Span<'static> {
     }
 }
 
-fn render_period_row(frame: &mut Frame, area: Rect, state: &UsageViewState) {
+fn render_period_row(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
     let lines = build_period_provider_strip(state);
-    frame.render_widget(Paragraph::new(lines), area);
+    ratatui::widgets::Widget::render(Paragraph::new(lines), area, buf);
 }
 
 /// Build the chip strip line shown directly under the period+provider
@@ -2716,16 +2716,16 @@ fn push_exclude_chip_group(spans: &mut Vec<Span<'static>>, label: &str, values: 
     }
 }
 
-fn render_filter_chip_strip(frame: &mut Frame, area: Rect, state: &UsageViewState) {
+fn render_filter_chip_strip(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
     let line = build_filter_chip_line(state);
-    frame.render_widget(Paragraph::new(line), area);
+    ratatui::widgets::Widget::render(Paragraph::new(line), area, buf);
 }
 
-fn render_daily_activity_panel(frame: &mut Frame, area: Rect, data: &UsageData, focus: FocusCtx) {
+fn render_daily_activity_panel(buf: &mut Buffer, area: Rect, data: &UsageData, focus: FocusCtx) {
     let cap = area.height.saturating_sub(2) as usize;
     let inner_w = area.width.saturating_sub(2) as usize;
     if cap == 0 || inner_w < 16 {
-        render_panel_lines_with_focus(frame, area, "Daily Activity", vec![], focus);
+        render_panel_lines_with_focus(buf, area, "Daily Activity", vec![], focus);
         return;
     }
     let max = data
@@ -2775,14 +2775,14 @@ fn render_daily_activity_panel(frame: &mut Frame, area: Rect, data: &UsageData, 
             Line::from(spans)
         })
         .collect();
-    render_panel_lines_with_focus(frame, area, "Daily Activity", lines, focus);
+    render_panel_lines_with_focus(buf, area, "Daily Activity", lines, focus);
 }
 
-fn render_project_panel(frame: &mut Frame, area: Rect, rows: &[ProjectUsage], focus: FocusCtx) {
+fn render_project_panel(buf: &mut Buffer, area: Rect, rows: &[ProjectUsage], focus: FocusCtx) {
     let cap = area.height.saturating_sub(2) as usize;
     let inner_w = area.width.saturating_sub(2) as usize;
     if cap == 0 || inner_w < 16 {
-        render_panel_lines_with_focus(frame, area, "By Project", vec![], focus);
+        render_panel_lines_with_focus(buf, area, "By Project", vec![], focus);
         return;
     }
     let max = rows
@@ -2819,7 +2819,7 @@ fn render_project_panel(frame: &mut Frame, area: Rect, rows: &[ProjectUsage], fo
             Line::from(spans)
         })
         .collect();
-    render_panel_lines_with_focus(frame, area, "By Project", lines, focus);
+    render_panel_lines_with_focus(buf, area, "By Project", lines, focus);
 }
 
 /// Per-branch cost bars. Mirrors `render_project_panel` (same gradient
@@ -2828,11 +2828,11 @@ fn render_project_panel(frame: &mut Frame, area: Rect, rows: &[ProjectUsage], fo
 /// fine. Branchless calls were already dropped during aggregation
 /// (`UsageData.branches` only contains `Some(branch)` rows), so this
 /// panel never grows a misleading "(no branch)" bucket.
-fn render_branch_panel(frame: &mut Frame, area: Rect, rows: &[BranchUsage], focus: FocusCtx) {
+fn render_branch_panel(buf: &mut Buffer, area: Rect, rows: &[BranchUsage], focus: FocusCtx) {
     let cap = area.height.saturating_sub(2) as usize;
     let inner_w = area.width.saturating_sub(2) as usize;
     if cap == 0 || inner_w < 16 {
-        render_panel_lines_with_focus(frame, area, "By Branch", vec![], focus);
+        render_panel_lines_with_focus(buf, area, "By Branch", vec![], focus);
         return;
     }
     let max = rows
@@ -2869,14 +2869,14 @@ fn render_branch_panel(frame: &mut Frame, area: Rect, rows: &[BranchUsage], focu
             Line::from(spans)
         })
         .collect();
-    render_panel_lines_with_focus(frame, area, "By Branch", lines, focus);
+    render_panel_lines_with_focus(buf, area, "By Branch", lines, focus);
 }
 
-fn render_session_panel(frame: &mut Frame, area: Rect, rows: &[SessionUsage], focus: FocusCtx) {
+fn render_session_panel(buf: &mut Buffer, area: Rect, rows: &[SessionUsage], focus: FocusCtx) {
     let cap = area.height.saturating_sub(2) as usize;
     let inner_w = area.width.saturating_sub(2) as usize;
     if cap == 0 || inner_w < 16 {
-        render_panel_lines_with_focus(frame, area, "Top Sessions", vec![], focus);
+        render_panel_lines_with_focus(buf, area, "Top Sessions", vec![], focus);
         return;
     }
     let max = rows.iter().map(|row| row.bucket.total()).max().unwrap_or(1);
@@ -2912,14 +2912,14 @@ fn render_session_panel(frame: &mut Frame, area: Rect, rows: &[SessionUsage], fo
             Line::from(spans)
         })
         .collect();
-    render_panel_lines_with_focus(frame, area, "Top Sessions", lines, focus);
+    render_panel_lines_with_focus(buf, area, "Top Sessions", lines, focus);
 }
 
-fn render_live_panel(frame: &mut Frame, area: Rect, rows: &[SessionUsage], focus: FocusCtx) {
+fn render_live_panel(buf: &mut Buffer, area: Rect, rows: &[SessionUsage], focus: FocusCtx) {
     let cap = area.height.saturating_sub(2) as usize;
     let inner_w = area.width.saturating_sub(2) as usize;
     if cap == 0 || inner_w < 16 {
-        render_panel_lines_with_focus(frame, area, "Live Session Ticker", vec![], focus);
+        render_panel_lines_with_focus(buf, area, "Live Session Ticker", vec![], focus);
         return;
     }
     let value_w = rows
@@ -2957,14 +2957,14 @@ fn render_live_panel(frame: &mut Frame, area: Rect, rows: &[SessionUsage], focus
             ])
         })
         .collect();
-    render_panel_lines_with_focus(frame, area, "Live Session Ticker", lines, focus);
+    render_panel_lines_with_focus(buf, area, "Live Session Ticker", lines, focus);
 }
 
-fn render_activity_panel(frame: &mut Frame, area: Rect, rows: &[ActivityUsage], focus: FocusCtx) {
+fn render_activity_panel(buf: &mut Buffer, area: Rect, rows: &[ActivityUsage], focus: FocusCtx) {
     let cap = area.height.saturating_sub(2) as usize;
     let inner_w = area.width.saturating_sub(2) as usize;
     if cap == 0 || inner_w < 16 {
-        render_panel_lines_with_focus(frame, area, "By Activity", vec![], focus);
+        render_panel_lines_with_focus(buf, area, "By Activity", vec![], focus);
         return;
     }
     let max = rows.iter().map(|row| row.bucket.total()).max().unwrap_or(1);
@@ -3008,14 +3008,14 @@ fn render_activity_panel(frame: &mut Frame, area: Rect, rows: &[ActivityUsage], 
             Line::from(spans)
         })
         .collect();
-    render_panel_lines_with_focus(frame, area, "By Activity", lines, focus);
+    render_panel_lines_with_focus(buf, area, "By Activity", lines, focus);
 }
 
-fn render_model_panel(frame: &mut Frame, area: Rect, rows: &[ModelUsage], focus: FocusCtx) {
+fn render_model_panel(buf: &mut Buffer, area: Rect, rows: &[ModelUsage], focus: FocusCtx) {
     let cap = area.height.saturating_sub(2) as usize;
     let inner_w = area.width.saturating_sub(2) as usize;
     if cap == 0 || inner_w < 16 {
-        render_panel_lines_with_focus(frame, area, "By Model", vec![], focus);
+        render_panel_lines_with_focus(buf, area, "By Model", vec![], focus);
         return;
     }
     let max = rows.iter().map(|row| row.bucket.total()).max().unwrap_or(1);
@@ -3051,11 +3051,11 @@ fn render_model_panel(frame: &mut Frame, area: Rect, rows: &[ModelUsage], focus:
             Line::from(spans)
         })
         .collect();
-    render_panel_lines_with_focus(frame, area, "By Model", lines, focus);
+    render_panel_lines_with_focus(buf, area, "By Model", lines, focus);
 }
 
 fn render_named_panel(
-    frame: &mut Frame,
+    buf: &mut Buffer,
     area: Rect,
     title: &str,
     rows: &[NamedUsage],
@@ -3064,7 +3064,7 @@ fn render_named_panel(
     let cap = area.height.saturating_sub(2) as usize;
     let inner_w = area.width.saturating_sub(2) as usize;
     if cap == 0 || inner_w < 14 {
-        render_panel_lines_with_focus(frame, area, title, vec![], focus);
+        render_panel_lines_with_focus(buf, area, title, vec![], focus);
         return;
     }
     let max = rows.iter().map(|row| row.calls as u64).max().unwrap_or(1);
@@ -3096,14 +3096,14 @@ fn render_named_panel(
             Line::from(spans)
         })
         .collect();
-    render_panel_lines_with_focus(frame, area, title, lines, focus);
+    render_panel_lines_with_focus(buf, area, title, lines, focus);
 }
 
-fn render_optimize_compact_panel(frame: &mut Frame, area: Rect, data: &UsageData, focus: FocusCtx) {
+fn render_optimize_compact_panel(buf: &mut Buffer, area: Rect, data: &UsageData, focus: FocusCtx) {
     let cap = area.height.saturating_sub(2) as usize;
     let inner_w = area.width.saturating_sub(2) as usize;
     if cap == 0 {
-        render_panel_lines_with_focus(frame, area, "Optimization Recommendations", vec![], focus);
+        render_panel_lines_with_focus(buf, area, "Optimization Recommendations", vec![], focus);
         return;
     }
     let result = optimize_usage(data);
@@ -3145,14 +3145,14 @@ fn render_optimize_compact_panel(frame: &mut Frame, area: Rect, data: &UsageData
             Span::styled(title, Style::default().fg(SOFT_WHITE)),
         ]));
     }
-    render_panel_lines_with_focus(frame, area, "Optimization Recommendations", lines, focus);
+    render_panel_lines_with_focus(buf, area, "Optimization Recommendations", lines, focus);
 }
 
-fn render_leaderboard_panel(frame: &mut Frame, area: Rect, data: &UsageData, focus: FocusCtx) {
+fn render_leaderboard_panel(buf: &mut Buffer, area: Rect, data: &UsageData, focus: FocusCtx) {
     let cap = area.height.saturating_sub(2) as usize;
     let inner_w = area.width.saturating_sub(2) as usize;
     if cap == 0 || inner_w < 16 {
-        render_panel_lines_with_focus(frame, area, "Agent Leaderboard", vec![], focus);
+        render_panel_lines_with_focus(buf, area, "Agent Leaderboard", vec![], focus);
         return;
     }
     let max = data
@@ -3207,11 +3207,11 @@ fn render_leaderboard_panel(frame: &mut Frame, area: Rect, data: &UsageData, foc
             Line::from(spans)
         })
         .collect();
-    render_panel_lines_with_focus(frame, area, "Agent Leaderboard", lines, focus);
+    render_panel_lines_with_focus(buf, area, "Agent Leaderboard", lines, focus);
 }
 
 fn render_budget_panel(
-    frame: &mut Frame,
+    buf: &mut Buffer,
     area: Rect,
     data: &UsageData,
     period: &UsagePeriod,
@@ -3280,7 +3280,7 @@ fn render_budget_panel(
             Span::styled(" days sampled", Style::default().fg(MUTED_GRAY)),
         ]),
     ]);
-    render_panel_lines_with_focus(frame, area, "Budget · Alerts", lines, focus);
+    render_panel_lines_with_focus(buf, area, "Budget · Alerts", lines, focus);
 }
 
 /// Build the live-window header injected at the top of the Budget panel.
@@ -3388,7 +3388,7 @@ fn format_hms(d: std::time::Duration) -> String {
     }
 }
 
-fn render_optimize(frame: &mut Frame, area: Rect, data: &UsageData) {
+fn render_optimize(buf: &mut Buffer, area: Rect, data: &UsageData) {
     let result = optimize_usage(data);
     let mut lines = vec![
         format!("Health {:?} ({}/100)", result.grade, result.score),
@@ -3408,10 +3408,10 @@ fn render_optimize(frame: &mut Frame, area: Rect, data: &UsageData) {
             ));
         }
     }
-    render_panel(frame, area, "Optimize Findings", lines);
+    render_panel(buf, area, "Optimize Findings", lines);
 }
 
-fn render_panel(frame: &mut Frame, area: Rect, title: &str, rows: Vec<String>) {
+fn render_panel(buf: &mut Buffer, area: Rect, title: &str, rows: Vec<String>) {
     let lines: Vec<Line> = if rows.is_empty() {
         Vec::new()
     } else {
@@ -3424,11 +3424,11 @@ fn render_panel(frame: &mut Frame, area: Rect, title: &str, rows: Vec<String>) {
             })
             .collect()
     };
-    render_panel_lines(frame, area, title, lines);
+    render_panel_lines(buf, area, title, lines);
 }
 
-fn render_panel_lines(frame: &mut Frame, area: Rect, title: &str, lines: Vec<Line<'_>>) {
-    render_panel_lines_with_focus(frame, area, title, lines, FocusCtx::unfocused());
+fn render_panel_lines(buf: &mut Buffer, area: Rect, title: &str, lines: Vec<Line<'_>>) {
+    render_panel_lines_with_focus(buf, area, title, lines, FocusCtx::unfocused());
 }
 
 /// Render variant that knows about focus: highlights the border in
@@ -3437,7 +3437,7 @@ fn render_panel_lines(frame: &mut Frame, area: Rect, title: &str, lines: Vec<Lin
 /// only knows about logical row index, not how many rows the panel is
 /// currently displaying.
 fn render_panel_lines_with_focus(
-    frame: &mut Frame,
+    buf: &mut Buffer,
     area: Rect,
     title: &str,
     mut lines: Vec<Line<'_>>,
@@ -3475,7 +3475,7 @@ fn render_panel_lines_with_focus(
     } else {
         lines
     };
-    frame.render_widget(Paragraph::new(final_lines).block(block), area);
+    ratatui::widgets::Widget::render(Paragraph::new(final_lines).block(block), area, buf);
 }
 
 /// Replace the very first character of the line (which renderers
@@ -3755,7 +3755,7 @@ fn elapsed_days_for_period(period: &UsagePeriod, data: &UsageData) -> Option<u64
     }
 }
 
-fn render_bar_chart(frame: &mut Frame, area: Rect, data: &UsageData) {
+fn render_bar_chart(buf: &mut Buffer, area: Rect, data: &UsageData) {
     if area.width < 4 || area.height < 4 {
         return;
     }
@@ -3816,10 +3816,10 @@ fn render_bar_chart(frame: &mut Frame, area: Rect, data: &UsageData) {
     lines.push(Line::from(label_spans));
 
     let paragraph = Paragraph::new(lines);
-    frame.render_widget(paragraph, area);
+    ratatui::widgets::Widget::render(paragraph, area, buf);
 }
 
-fn render_help_bar(frame: &mut Frame, area: Rect, state: &UsageViewState) {
+fn render_help_bar(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
     // When zoomed, swap to a focused help string so the user has the
     // zoom-only affordances visible.
     if state.is_zoomed() {
@@ -3834,7 +3834,7 @@ fn render_help_bar(frame: &mut Frame, area: Rect, state: &UsageViewState) {
             Span::styled(" row  ", Style::default().fg(MUTED_GRAY)),
         ];
         let paragraph = Paragraph::new(Line::from(spans)).style(Style::default().bg(DARK_BG));
-        frame.render_widget(paragraph, area);
+        ratatui::widgets::Widget::render(paragraph, area, buf);
         return;
     }
 
@@ -3878,7 +3878,7 @@ fn render_help_bar(frame: &mut Frame, area: Rect, state: &UsageViewState) {
         Span::styled(" back", Style::default().fg(MUTED_GRAY)),
     ]);
     let paragraph = Paragraph::new(Line::from(spans)).style(Style::default().bg(DARK_BG));
-    frame.render_widget(paragraph, area);
+    ratatui::widgets::Widget::render(paragraph, area, buf);
 }
 
 fn truncate_string(s: &str, max_len: usize) -> String {
@@ -4309,9 +4309,9 @@ mod cross_filter_tests {
         let backend = TestBackend::new(60, 8);
         let mut terminal = Terminal::new(backend).expect("test backend");
         terminal
-            .draw(|frame| {
-                let area = frame.size();
-                render_branch_panel(frame, area, &rows, FocusCtx::unfocused());
+            .draw(|buf| {
+                let area = *buf.area();
+                render_branch_panel(buf, area, &rows, FocusCtx::unfocused());
             })
             .expect("render_branch_panel must not panic");
 
