@@ -14,7 +14,6 @@
 #![allow(missing_docs)]
 
 use anyhow::Result;
-use clap::Parser;
 use crossterm::{
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
@@ -84,63 +83,46 @@ async fn main() -> Result<()> {
     setup_logging();
     setup_panic_handler();
 
-    let args = cli::Cli::parse();
+    // Build the clap surface from the CommandRegistry. The base `ainb` command
+    // (--format, after-help, etc.) lives in cli::root_clap_command(); each
+    // built-in subcommand registers itself via CommandRegistry::built_ins().
+    // Adding plugin-supplied subcommands later = registering an extra
+    // CliCommand impl (Phase 4); no changes here required.
+    let registry = cli::registry::CommandRegistry::built_ins();
+    let mut app = cli::root_clap_command();
+    // `tui` is handled inline in this function (it owns the alternate-screen
+    // setup + cleanup), so it sits outside the registry. Declare it on the
+    // base command so help/completion still list it.
+    app = app.subcommand(clap::Command::new("tui").about("Launch the TUI (default if no command given)"));
+    app = registry.build_clap(app);
+    let matches = app.get_matches();
+    let format = matches
+        .get_one::<cli::OutputFormat>("format")
+        .copied()
+        .unwrap_or_default();
+    let ctx = cli::registry::CliContext { format };
 
     // Track whether we entered TUI mode so we only clean up terminal in that case.
     // CLI commands never touch the alternate screen; emitting LeaveAlternateScreen
     // would leak raw escape codes into the user's terminal.
     let mut entered_tui = false;
 
-    let result = match args.command {
-        // CLI commands
-        Some(cli::Commands::Run(run_args)) => cli::run::execute(run_args).await,
-        Some(cli::Commands::List(list_args)) => cli::list::execute(list_args, args.format).await,
-        Some(cli::Commands::Logs(logs_args)) => cli::logs::execute(logs_args).await,
-        Some(cli::Commands::Attach(attach_args)) => cli::attach::execute(attach_args).await,
-        Some(cli::Commands::Status(status_args)) => {
-            cli::status::execute(status_args, args.format).await
-        }
-        Some(cli::Commands::Kill(kill_args)) => cli::status::kill(kill_args).await,
-        Some(cli::Commands::Auth) => run_auth_setup().await,
-        Some(cli::Commands::Recover { command }) => {
-            cli::recover::execute(command, args.format).await
-        }
-        Some(cli::Commands::Config { command }) => {
-            cli::config_cmd::execute(command, args.format).await
-        }
-        Some(cli::Commands::Git { command }) => cli::git_cmd::execute(command, args.format).await,
-        Some(cli::Commands::Favorites { command }) => {
-            cli::favorites::execute(command, args.format).await
-        }
-        Some(cli::Commands::Init(init_args)) => cli::init::execute(init_args, args.format).await,
-        Some(cli::Commands::Presets { command }) => {
-            cli::presets::execute(command, args.format).await
-        }
-        Some(cli::Commands::Usage { command }) => cli::usage::execute(command, args.format).await,
-        Some(cli::Commands::Statusline) => cli::statusline::execute(),
-        Some(cli::Commands::Completion { shell }) => {
-            use clap::CommandFactory;
-            let mut cmd = cli::Cli::command();
-            let name = cmd.get_name().to_string();
-            clap_complete::generate(shell, &mut cmd, name, &mut std::io::stdout());
-            Ok(())
-        }
-
-        // TUI mode (explicit or default)
-        Some(cli::Commands::Tui) | None => {
+    let result = match matches.subcommand() {
+        // TUI: explicit `tui` subcommand or no subcommand at all.
+        Some(("tui", _)) | None => {
             entered_tui = true;
-            let mut app = App::new();
-            app.init().await;
+            let mut app_state = App::new();
+            app_state.init().await;
             let mut layout = LayoutComponent::new();
 
             // Check if first-time setup is needed
             if app::state::AppState::needs_onboarding() {
                 tracing::info!("First-time setup detected - starting onboarding wizard");
-                app.state.start_onboarding(false, None);
+                app_state.state.start_onboarding(false, None);
             }
 
             // Always clear pending async actions after init to ensure clean startup
-            app.state.pending_async_action = None;
+            app_state.state.pending_async_action = None;
 
             // Flush any pending terminal events to prevent stray keypresses
             // from interfering with onboarding or initial view
@@ -148,8 +130,11 @@ async fn main() -> Result<()> {
                 let _ = crossterm::event::read();
             }
 
-            run_tui(&mut app, &mut layout).await
+            run_tui(&mut app_state, &mut layout).await
         }
+
+        // Every other subcommand routes through the registry.
+        Some((name, sub)) => registry.dispatch(name, sub, ctx).await,
     };
 
     // Only clean up terminal if we entered TUI mode. For CLI commands, calling
@@ -160,107 +145,6 @@ async fn main() -> Result<()> {
     }
 
     result
-}
-
-async fn run_auth_setup() -> Result<()> {
-    println!("🔐 Setting up Claude authentication for agents-in-a-box...");
-    println!();
-
-    // Create the auth directory structure
-    let home_dir =
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
-    let claude_box_dir = home_dir.join(".agents-in-a-box");
-    let auth_dir = claude_box_dir.join("auth");
-
-    std::fs::create_dir_all(&auth_dir)
-        .map_err(|e| anyhow::anyhow!("Failed to create auth directory: {}", e))?;
-
-    // Check if credentials already exist
-    let credentials_path = auth_dir.join(".credentials.json");
-    if credentials_path.exists() {
-        println!("✅ Authentication already set up!");
-        println!("   Credentials found at: {}", credentials_path.display());
-        println!();
-        println!("To re-authenticate, delete the credentials file and run this command again:");
-        println!("   rm {}", credentials_path.display());
-        return Ok(());
-    }
-
-    println!("📁 Creating auth directories...");
-    println!("   Auth directory: {}", auth_dir.display());
-
-    // Check if Docker is available
-    let docker_version =
-        std::process::Command::new("docker").args(["--version"]).output().map_err(|e| {
-            anyhow::anyhow!(
-                "Docker not found: {}. Please install Docker and try again.",
-                e
-            )
-        })?;
-
-    if !docker_version.status.success() {
-        return Err(anyhow::anyhow!(
-            "Docker is not running. Please start Docker and try again."
-        ));
-    }
-
-    println!("🏗️  Building authentication container (agents-dev)...");
-    let build_status = std::process::Command::new("docker")
-        .args(["build", "-t", "agents-box:agents-dev", "docker/agents-dev"])
-        .status()
-        .map_err(|e| anyhow::anyhow!("Failed to build container: {}", e))?;
-
-    if !build_status.success() {
-        return Err(anyhow::anyhow!(
-            "Container build failed. Please check Docker and try again."
-        ));
-    }
-
-    // Execute the auth container
-    println!();
-    println!("🚀 Running authentication setup...");
-    println!("   This will prompt you to enter your Anthropic API token.");
-    println!();
-
-    let status = std::process::Command::new("docker")
-        .args([
-            "run",
-            "--rm",
-            "-it",
-            "-v",
-            &format!("{}:/home/claude-user/.claude", auth_dir.display()),
-            "-e",
-            "PATH=/home/claude-user/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-            "-e",
-            "HOME=/home/claude-user",
-            "-w",
-            "/home/claude-user",
-            "--user",
-            "claude-user",
-            "--entrypoint",
-            "bash",
-            "agents-box:agents-dev",
-            "-c",
-            "/app/scripts/auth-setup.sh",
-        ])
-        .status()
-        .map_err(|e| anyhow::anyhow!("Failed to run auth container: {}", e))?;
-
-    if status.success() {
-        println!();
-        println!("🎉 Authentication setup complete!");
-        println!("   Credentials saved to: {}", credentials_path.display());
-        println!();
-        println!("You can now create agents-box development sessions with:");
-        println!("   agents-box");
-    } else {
-        println!();
-        println!("❌ Authentication setup failed!");
-        println!("   Please check the output above for errors and try again.");
-        std::process::exit(1);
-    }
-
-    Ok(())
 }
 
 async fn run_tui(app: &mut App, layout: &mut LayoutComponent) -> Result<()> {

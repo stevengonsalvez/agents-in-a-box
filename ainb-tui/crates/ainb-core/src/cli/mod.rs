@@ -7,6 +7,7 @@
 // - Launching TUI (tui, default)
 
 pub mod attach;
+pub mod auth;
 pub mod config_cmd;
 pub mod favorites;
 pub mod git_cmd;
@@ -15,6 +16,7 @@ pub mod list;
 pub mod logs;
 pub mod presets;
 pub mod recover;
+pub mod registry;
 pub mod run;
 pub mod status;
 pub mod statusline;
@@ -22,7 +24,7 @@ pub mod statusline_install;
 pub mod usage;
 pub mod util;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Command, ValueEnum};
 use std::path::PathBuf;
 
 const EXAMPLES: &str = "\
@@ -37,18 +39,27 @@ EXAMPLES:
   ainb recover list               Find orphaned sessions
   ainb completion zsh > _ainb     Generate zsh completions";
 
-/// AI agents in a box - spawn and manage AI coding sessions
-#[derive(Parser)]
-#[command(name = "ainb")]
-#[command(author, version, about, long_about = None)]
-#[command(after_help = EXAMPLES)]
-pub struct Cli {
-    #[command(subcommand)]
-    pub command: Option<Commands>,
-
-    /// Output format
-    #[arg(long, global = true, default_value = "text")]
-    pub format: OutputFormat,
+/// Build the root `clap::Command` for the `ainb` binary.
+///
+/// Used by both `main.rs` (real dispatch) and `registry.rs` (tests + the
+/// `completion` subcommand, which needs the full surface to generate shell
+/// completions). Keeps the `--format` global arg + `EXAMPLES` after-help in
+/// one place; subcommands are added on top via `CommandRegistry::build_clap`.
+#[must_use]
+pub fn root_clap_command() -> Command {
+    Command::new("ainb")
+        .author(env!("CARGO_PKG_AUTHORS"))
+        .version(env!("CARGO_PKG_VERSION"))
+        .about("AI agents in a box - spawn and manage AI coding sessions")
+        .after_help(EXAMPLES)
+        .arg(
+            clap::Arg::new("format")
+                .long("format")
+                .global(true)
+                .value_parser(clap::builder::EnumValueParser::<OutputFormat>::new())
+                .default_value("text")
+                .help("Output format"),
+        )
 }
 
 /// AI CLI provider to use for a session
@@ -75,90 +86,12 @@ impl Tool {
 }
 
 /// Output format for commands
-#[derive(Clone, Copy, Default, ValueEnum)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub enum OutputFormat {
     #[default]
     Text,
     Json,
     Csv,
-}
-
-/// Available CLI commands
-#[derive(Subcommand)]
-pub enum Commands {
-    /// Launch the TUI (default if no command given)
-    Tui,
-
-    /// Spawn a new AI coding session
-    Run(RunArgs),
-
-    /// List all sessions
-    List(ListArgs),
-
-    /// View session output/logs
-    Logs(LogsArgs),
-
-    /// Attach to a session (drops into tmux)
-    Attach(AttachArgs),
-
-    /// Check session status
-    Status(StatusArgs),
-
-    /// Kill a session
-    Kill(KillArgs),
-
-    /// Set up authentication
-    Auth,
-
-    /// Recover orphaned or crashed sessions
-    Recover {
-        #[command(subcommand)]
-        command: recover::RecoverCommands,
-    },
-
-    /// Manage configuration
-    Config {
-        #[command(subcommand)]
-        command: config_cmd::ConfigCommands,
-    },
-
-    /// Git worktree operations
-    Git {
-        #[command(subcommand)]
-        command: git_cmd::GitCommands,
-    },
-
-    /// Manage favorite repositories
-    Favorites {
-        #[command(subcommand)]
-        command: favorites::FavoritesCommands,
-    },
-
-    /// First-time setup and prerequisite checking
-    Init(init::InitArgs),
-
-    /// Manage session presets
-    Presets {
-        #[command(subcommand)]
-        command: presets::PresetsCommands,
-    },
-
-    /// Usage analytics, reports, export, and optimization
-    Usage {
-        #[command(subcommand)]
-        command: usage::UsageCommands,
-    },
-
-    /// Claude Code statusline hook: read JSON on stdin, cache rate-limit
-    /// windows for the TUI, and emit a powerline status string on stdout.
-    /// Wire into `~/.claude/settings.json` as the `statusLine.command`.
-    Statusline,
-
-    /// Generate shell completions (bash, zsh, fish, powershell, elvish)
-    Completion {
-        /// Shell to generate completions for
-        shell: clap_complete::Shell,
-    },
 }
 
 /// Arguments for the run command

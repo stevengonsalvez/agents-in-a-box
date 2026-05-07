@@ -1076,12 +1076,9 @@ mod tests {
 
     #[test]
     fn month_and_quarter_are_mutually_exclusive_at_clap_parse_time() {
-        use clap::CommandFactory;
-        // We exercise the conflicts_with_all groups by parsing a synthetic
-        // argv. Reach for the cli::Cli struct so the full subcommand
-        // routing is exercised — this gives us the realistic error path
-        // a user would hit.
-        let result = crate::cli::Cli::command().try_get_matches_from([
+        let app = crate::cli::registry::CommandRegistry::built_ins()
+            .build_clap(crate::cli::root_clap_command());
+        let result = app.try_get_matches_from([
             "ainb",
             "usage",
             "report",
@@ -1098,8 +1095,9 @@ mod tests {
 
     #[test]
     fn last_n_days_conflicts_with_ytd_at_clap_parse_time() {
-        use clap::CommandFactory;
-        let result = crate::cli::Cli::command().try_get_matches_from([
+        let app = crate::cli::registry::CommandRegistry::built_ins()
+            .build_clap(crate::cli::root_clap_command());
+        let result = app.try_get_matches_from([
             "ainb",
             "usage",
             "report",
@@ -1115,8 +1113,9 @@ mod tests {
 
     #[test]
     fn from_to_conflicts_with_month_at_clap_parse_time() {
-        use clap::CommandFactory;
-        let result = crate::cli::Cli::command().try_get_matches_from([
+        let app = crate::cli::registry::CommandRegistry::built_ins()
+            .build_clap(crate::cli::root_clap_command());
+        let result = app.try_get_matches_from([
             "ainb",
             "usage",
             "report",
