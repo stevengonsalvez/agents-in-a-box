@@ -3240,7 +3240,12 @@ fn render_budget_panel(
             .add_modifier(Modifier::BOLD),
     ));
 
-    let lines: Vec<Line> = vec![
+    // Live OAuth-window header. Renders above the existing monthly-cap
+    // content. Drives the W keybind's CTA when no source is available.
+    let live = crate::models::live_window::current();
+    let mut lines: Vec<Line> = budget_live_header_lines(&live, inner_w);
+
+    lines.extend(vec![
         Line::from(vec![
             Span::styled(" Monthly cap ", Style::default().fg(MUTED_GRAY)),
             Span::styled(
@@ -3274,8 +3279,113 @@ fn render_budget_panel(
             ),
             Span::styled(" days sampled", Style::default().fg(MUTED_GRAY)),
         ]),
-    ];
+    ]);
     render_panel_lines_with_focus(frame, area, "Budget · Alerts", lines, focus);
+}
+
+/// Build the live-window header injected at the top of the Budget panel.
+/// Tier1 → two gradient bars + cost + reset countdown; Tier2 → 5h bar +
+/// upgrade hint; None → CTA pointing at the W keybind.
+fn budget_live_header_lines(
+    live: &crate::models::live_window::LiveWindow,
+    inner_w: usize,
+) -> Vec<Line<'static>> {
+    use crate::models::live_window::Source;
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let bar_w = inner_w.saturating_sub(12).max(8);
+
+    match live.source {
+        Source::Tier1Cache => {
+            if let Some(pct) = live.five_hour_pct {
+                out.push(live_bar_line("5h burn ", pct, bar_w));
+            }
+            if let Some(pct) = live.seven_day_pct {
+                out.push(live_bar_line("7d wnd  ", pct, bar_w));
+            }
+            let mut footer: Vec<Span<'static>> = Vec::new();
+            if let Some(cost) = live.today_cost_usd {
+                footer.push(Span::styled(" Today ", Style::default().fg(MUTED_GRAY)));
+                footer.push(Span::styled(
+                    format!("${cost:.2}"),
+                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                ));
+            }
+            if let Some(d) = live.resets_in {
+                if !footer.is_empty() {
+                    footer.push(Span::styled(" · ", Style::default().fg(MUTED_GRAY)));
+                }
+                footer.push(Span::styled(" Resets in ", Style::default().fg(MUTED_GRAY)));
+                footer.push(Span::styled(
+                    format_hms(d),
+                    Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
+                ));
+            }
+            if !footer.is_empty() {
+                out.push(Line::from(footer));
+            }
+        }
+        Source::Tier2Local => {
+            if let Some(pct) = live.five_hour_pct {
+                out.push(live_bar_line("5h burn ", pct, bar_w));
+            }
+            out.push(Line::from(Span::styled(
+                " Wire statusline (W) for 7d window + cost",
+                Style::default().fg(MUTED_GRAY),
+            )));
+        }
+        Source::None => {
+            out.push(Line::from(Span::styled(
+                " ⓘ Live OAuth window data not available.",
+                Style::default().fg(MUTED_GRAY),
+            )));
+            out.push(Line::from(vec![
+                Span::styled("    Press ", Style::default().fg(MUTED_GRAY)),
+                Span::styled("[W]", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " to wire up Claude Code statusline.",
+                    Style::default().fg(MUTED_GRAY),
+                ),
+            ]));
+            out.push(Line::from(Span::styled(
+                "    (Provides 5h burn, 7d window, cost, reset times)",
+                Style::default().fg(MUTED_GRAY),
+            )));
+        }
+    }
+    out
+}
+
+fn live_bar_line(label: &'static str, pct: u8, bar_w: usize) -> Line<'static> {
+    let mut spans = vec![Span::styled(
+        format!(" {label}"),
+        Style::default().fg(MUTED_GRAY),
+    )];
+    spans.extend(ratio_gradient_spans(pct as f64, 100.0, bar_w));
+    spans.push(Span::raw(" "));
+    spans.push(Span::styled(
+        format!("{pct:>3}%"),
+        Style::default()
+            .fg(if pct >= 85 {
+                BAR_HIGH
+            } else if pct >= 60 {
+                TERMINAL_ACCENT
+            } else {
+                TERMINAL_GOOD
+            })
+            .add_modifier(Modifier::BOLD),
+    ));
+    Line::from(spans)
+}
+
+fn format_hms(d: std::time::Duration) -> String {
+    let total = d.as_secs();
+    let h = total / 3600;
+    let m = (total % 3600) / 60;
+    if h > 0 {
+        format!("{h}h {m:02}m")
+    } else {
+        format!("{m}m")
+    }
 }
 
 fn render_optimize(frame: &mut Frame, area: Rect, data: &UsageData) {
@@ -4685,5 +4795,81 @@ mod cli_parity_tests {
         _: SessionUsage,
         _: TokenBucket,
     ) {
+    }
+}
+
+#[cfg(test)]
+mod budget_live_header_tests {
+    use super::*;
+    use crate::models::live_window::{LiveWindow, Source};
+    use std::time::Duration;
+
+    fn flat(lines: &[Line<'_>]) -> String {
+        lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref().to_string()))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    #[test]
+    fn cta_lines_rendered_when_source_is_none() {
+        let live = LiveWindow::empty();
+        let lines = budget_live_header_lines(&live, 60);
+        let text = flat(&lines);
+        assert!(text.contains("[W]"), "CTA must mention W key: {text}");
+        assert!(text.contains("statusline"), "CTA copy missing: {text}");
+    }
+
+    #[test]
+    fn tier1_renders_two_bars_plus_cost_and_reset() {
+        let live = LiveWindow {
+            five_hour_pct: Some(40),
+            seven_day_pct: Some(8),
+            today_cost_usd: Some(3.21),
+            resets_in: Some(Duration::from_secs(2 * 3600 + 30 * 60)),
+            context_pct: None,
+            model: None,
+            source: Source::Tier1Cache,
+        };
+        let lines = budget_live_header_lines(&live, 60);
+        let text = flat(&lines);
+        assert!(text.contains("5h burn"));
+        assert!(text.contains("7d wnd"));
+        assert!(text.contains("$3.21"));
+        assert!(text.contains("2h 30m"));
+    }
+
+    #[test]
+    fn tier2_renders_5h_bar_and_upgrade_hint_only() {
+        let live = LiveWindow {
+            five_hour_pct: Some(20),
+            seven_day_pct: None,
+            today_cost_usd: None,
+            resets_in: None,
+            context_pct: None,
+            model: None,
+            source: Source::Tier2Local,
+        };
+        let lines = budget_live_header_lines(&live, 60);
+        let text = flat(&lines);
+        assert!(text.contains("5h burn"));
+        assert!(!text.contains("7d wnd"));
+        assert!(text.contains("Wire statusline"));
+    }
+
+    #[test]
+    fn format_hms_zero_yields_zero_minutes() {
+        assert_eq!(format_hms(Duration::ZERO), "0m");
+    }
+
+    #[test]
+    fn format_hms_under_one_hour_omits_h_field() {
+        assert_eq!(format_hms(Duration::from_secs(45 * 60)), "45m");
+    }
+
+    #[test]
+    fn format_hms_pads_minutes_when_hours_present() {
+        assert_eq!(format_hms(Duration::from_secs(3 * 3600 + 5 * 60)), "3h 05m");
     }
 }
