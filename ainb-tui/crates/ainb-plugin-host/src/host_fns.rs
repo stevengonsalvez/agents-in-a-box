@@ -42,7 +42,104 @@ pub fn link_baseline(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         },
     )?;
 
+    link_wasi_preview1_stubs(linker)?;
+
     Ok(())
+}
+
+/// Link minimal `wasi_snapshot_preview1` stubs so any plugin built against
+/// `wasm32-wasip1` (i.e. anything with a Rust std dep — the panic handler
+/// pulls in `fd_write`/`environ_*`/`proc_exit`) can satisfy its imports.
+///
+/// Phase 3 reality: wasmi 0.40 ships no wasi-preview1 host. Without these
+/// stubs every linked-against-std plugin fails at instantiation time. The
+/// real plugin host gets a wasi-preview1 backend later (filesystem +
+/// preopens etc.); until then these stubs are the floor that lets a plugin
+/// load at all.
+///
+/// Semantics:
+/// * `environ_*`: report zero env vars and zero buffer bytes — plugins see
+///   an empty environment.
+/// * `fd_write`: pretend the entire iovec was written without actually
+///   doing IO. Keeps `println!` / panic output silent rather than trapping.
+/// * `proc_exit`: trap with a descriptive error so a plugin invoking it
+///   degrades cleanly instead of taking down the host.
+fn link_wasi_preview1_stubs(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
+    const WASI: &str = "wasi_snapshot_preview1";
+
+    // i32 environ_count_ptr, i32 environ_buf_size_ptr -> i32 errno.
+    // Write zeros so the caller thinks the environment is empty.
+    linker.func_wrap(
+        WASI,
+        "environ_sizes_get",
+        |mut caller: Caller<'_, HostState>, count_ptr: i32, buf_size_ptr: i32| -> i32 {
+            let _ = write_le_u32(&mut caller, count_ptr, 0);
+            let _ = write_le_u32(&mut caller, buf_size_ptr, 0);
+            0
+        },
+    )?;
+
+    // i32 environ_ptr_ptr, i32 environ_buf_ptr -> i32 errno. No-op success.
+    linker.func_wrap(
+        WASI,
+        "environ_get",
+        |_caller: Caller<'_, HostState>, _environ: i32, _buf: i32| -> i32 { 0 },
+    )?;
+
+    // i32 fd, i32 iovs_ptr, i32 iovs_len, i32 nwritten_ptr -> i32 errno.
+    // Sum the iovec lengths and tell the plugin we wrote them all. Avoids
+    // panic-handler retry loops without performing real IO.
+    linker.func_wrap(
+        WASI,
+        "fd_write",
+        |mut caller: Caller<'_, HostState>,
+         _fd: i32,
+         iovs_ptr: i32,
+         iovs_len: i32,
+         nwritten_ptr: i32|
+         -> i32 {
+            let total = sum_iovec_len(&mut caller, iovs_ptr, iovs_len).unwrap_or(0);
+            let _ = write_le_u32(&mut caller, nwritten_ptr, total);
+            0
+        },
+    )?;
+
+    // i32 exit_code -> (). We trap (via panic, which wasmi turns into a
+    // host trap) so the offending plugin gets marked degraded by the host
+    // instead of std::process::exit-ing the whole ainb process.
+    fn proc_exit_stub(_caller: Caller<'_, HostState>, code: i32) {
+        panic!("plugin called proc_exit({code}) — degraded");
+    }
+    linker.func_wrap(WASI, "proc_exit", proc_exit_stub)?;
+
+    Ok(())
+}
+
+fn write_le_u32(caller: &mut Caller<'_, HostState>, ptr: i32, value: u32) -> Option<()> {
+    let memory = caller.get_export("memory").and_then(wasmi::Extern::into_memory)?;
+    let off = usize::try_from(ptr).ok()?;
+    memory.write(caller, off, &value.to_le_bytes()).ok()
+}
+
+/// Walk an iovec array (each entry: `(buf_ptr: u32, buf_len: u32)` little-endian
+/// in linear memory) and sum the lengths. Returns `None` on bad memory access.
+fn sum_iovec_len(
+    caller: &mut Caller<'_, HostState>,
+    iovs_ptr: i32,
+    iovs_len: i32,
+) -> Option<u32> {
+    let memory = caller.get_export("memory").and_then(wasmi::Extern::into_memory)?;
+    let count = u32::try_from(iovs_len).ok()?;
+    let base = usize::try_from(iovs_ptr).ok()?;
+    let mut total: u32 = 0;
+    for i in 0..count {
+        let off = base.checked_add((i as usize).checked_mul(8)?)?;
+        let mut entry = [0_u8; 8];
+        memory.read(&caller, off, &mut entry).ok()?;
+        let len = u32::from_le_bytes([entry[4], entry[5], entry[6], entry[7]]);
+        total = total.checked_add(len)?;
+    }
+    Some(total)
 }
 
 /// Link host-fns the plugin's manifest grants. Must be called *after*

@@ -17,11 +17,14 @@ build_plugin() {
     local crate="$1"
     local plugin_id="$2"
 
-    cargo build -p "$crate" --target "$TARGET" --profile "$PROFILE"
+    # Plugin crate lives in [workspace.exclude] (own sub-workspace) so it
+    # must be built from inside its own directory; root `-p` won't see it.
+    (cd "crates/$crate" && cargo build --target "$TARGET" --profile "$PROFILE")
 
     local out_dir="dist/plugins/$plugin_id"
     mkdir -p "$out_dir"
-    cp "target/$TARGET/$PROFILE/${crate//-/_}.wasm" "$out_dir/plugin.wasm"
+    cp "crates/$crate/target/$TARGET/$PROFILE/${crate//-/_}.wasm" \
+       "$out_dir/plugin.wasm"
     if [[ -f "crates/$crate/plugin.toml" ]]; then
         cp "crates/$crate/plugin.toml" "$out_dir/"
     fi
