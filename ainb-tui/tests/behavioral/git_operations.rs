@@ -77,10 +77,7 @@ fn test_repository_detects_new_files() -> Result<()> {
         "Expected at least 2 added files, got {}",
         changes.added
     );
-    assert!(
-        changes.total() >= 2,
-        "Total changes should be at least 2"
-    );
+    assert!(changes.total() >= 2, "Total changes should be at least 2");
 
     Ok(())
 }
@@ -90,7 +87,11 @@ fn test_repository_detects_new_files() -> Result<()> {
 fn test_repository_detects_deleted_files() -> Result<()> {
     // Arrange: Create repo with multiple committed files
     let repo = TestRepo::new()?;
-    repo.add_commit("to_delete.txt", "This will be deleted", "Add file to delete")?;
+    repo.add_commit(
+        "to_delete.txt",
+        "This will be deleted",
+        "Add file to delete",
+    )?;
     repo.add_commit("also_delete.txt", "Also going away", "Add another file")?;
 
     // Verify files exist before deletion
@@ -164,7 +165,11 @@ fn test_git_changes_total_and_format() -> Result<()> {
         deleted: 2,
     };
     assert_eq!(changes.total(), 10, "Total should be 3+5+2=10");
-    assert_eq!(changes.format(), "+3 ~5 -2", "Format should show +added ~modified -deleted");
+    assert_eq!(
+        changes.format(),
+        "+3 ~5 -2",
+        "Format should show +added ~modified -deleted"
+    );
 
     // Test with only one type of change
     let only_added = GitChanges {
@@ -204,7 +209,10 @@ fn test_repository_status_after_staging() -> Result<()> {
     // Verify initial state shows as added (untracked)
     let manager = RepositoryManager::open(repo.path())?;
     let before_stage = manager.get_status()?;
-    assert!(before_stage.added >= 1, "Should detect untracked file as added");
+    assert!(
+        before_stage.added >= 1,
+        "Should detect untracked file as added"
+    );
 
     // Act: Stage the file
     Command::new("git")
@@ -238,10 +246,7 @@ fn test_repository_is_clean_after_commit() -> Result<()> {
     assert!(!manager.is_clean()?, "Should not be clean");
 
     // Act: Stage and commit all changes
-    Command::new("git")
-        .args(["add", "."])
-        .current_dir(repo.path())
-        .output()?;
+    Command::new("git").args(["add", "."]).current_dir(repo.path()).output()?;
 
     Command::new("git")
         .args(["commit", "-m", "Commit all changes"])

@@ -36,10 +36,7 @@ pub struct JsonlLogEntry {
 
 impl JsonlLogEntry {
     /// Create from a LogEntry
-    pub fn from_log_entry(
-        entry: &super::live_logs_stream::LogEntry,
-        session_id: Uuid,
-    ) -> Self {
+    pub fn from_log_entry(entry: &super::live_logs_stream::LogEntry, session_id: Uuid) -> Self {
         let level = match entry.level {
             LogEntryLevel::Debug => "debug",
             LogEntryLevel::Info => "info",
@@ -153,22 +150,16 @@ impl JsonlLogWriter {
     }
 
     /// Write a raw JSONL entry
-    pub fn write_jsonl_entry(
-        &mut self,
-        session_id: Uuid,
-        entry: &JsonlLogEntry,
-    ) -> Result<()> {
+    pub fn write_jsonl_entry(&mut self, session_id: Uuid, entry: &JsonlLogEntry) -> Result<()> {
         if !self.enabled {
             return Ok(());
         }
 
         let writer = self.get_or_create_writer(session_id)?;
 
-        let json = serde_json::to_string(entry)
-            .context("Failed to serialize log entry")?;
+        let json = serde_json::to_string(entry).context("Failed to serialize log entry")?;
 
-        writeln!(writer, "{}", json)
-            .context("Failed to write log entry")?;
+        writeln!(writer, "{}", json).context("Failed to write log entry")?;
 
         Ok(())
     }
@@ -192,7 +183,8 @@ impl JsonlLogWriter {
     /// Flush all buffered writes to disk
     pub fn flush(&mut self) -> Result<()> {
         for (session_id, writer) in &mut self.session_files {
-            writer.flush()
+            writer
+                .flush()
                 .with_context(|| format!("Failed to flush logs for session {}", session_id))?;
         }
         Ok(())
@@ -201,7 +193,8 @@ impl JsonlLogWriter {
     /// Close the log file for a session
     pub fn close_session(&mut self, session_id: Uuid) -> Result<()> {
         if let Some(mut writer) = self.session_files.remove(&session_id) {
-            writer.flush()
+            writer
+                .flush()
                 .with_context(|| format!("Failed to flush logs for session {}", session_id))?;
         }
         Ok(())

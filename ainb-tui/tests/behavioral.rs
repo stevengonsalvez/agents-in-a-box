@@ -24,7 +24,7 @@ mod session_persistence;
 mod git_operations;
 
 // P2 priority - placeholder modules
-#[path = "behavioral/session_lifecycle.rs"]
-mod session_lifecycle;
 #[path = "behavioral/config_loading.rs"]
 mod config_loading;
+#[path = "behavioral/session_lifecycle.rs"]
+mod session_lifecycle;

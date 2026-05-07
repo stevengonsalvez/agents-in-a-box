@@ -8,13 +8,13 @@
 
 #![allow(dead_code)]
 
-use crate::tmux::capture::{capture_pane, CaptureOptions};
+use crate::tmux::capture::{CaptureOptions, capture_pane};
 use crate::tmux::pty_wrapper::PtyWrapper;
 use anyhow::{Context, Result};
 use std::path::Path;
 use tokio::process::Command;
 use tokio::sync::mpsc;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 /// Attach state for a tmux session
 #[derive(Debug, Clone)]
@@ -76,9 +76,7 @@ impl TmuxSession {
     /// # Returns
     /// * A sanitized name with "tmux_" prefix and invalid characters replaced
     fn sanitize_name(name: &str) -> String {
-        let base_name = name
-            .strip_prefix("tmux_")
-            .unwrap_or(name);
+        let base_name = name.strip_prefix("tmux_").unwrap_or(name);
 
         let cleaned = base_name
             .replace(' ', "_")
@@ -284,10 +282,7 @@ mod tests {
 
     #[test]
     fn test_sanitize_name() {
-        assert_eq!(
-            TmuxSession::sanitize_name("my session"),
-            "tmux_my_session"
-        );
+        assert_eq!(TmuxSession::sanitize_name("my session"), "tmux_my_session");
         assert_eq!(
             TmuxSession::sanitize_name("test.name/with:chars"),
             "tmux_test_name_with_chars"

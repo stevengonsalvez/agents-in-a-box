@@ -2,11 +2,11 @@
 // Inspired by VS Code, Discord, and Slack sidebar patterns with enhanced selection styling
 
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph},
-    Frame,
 };
 
 // Color palette from TUI style guide
@@ -354,8 +354,7 @@ impl SidebarComponent {
             main_spans.push(Span::styled("]", Style::default().fg(SUBDUED_BORDER)));
         }
 
-        let main_line = Paragraph::new(Line::from(main_spans))
-            .style(Style::default().bg(bg_color));
+        let main_line = Paragraph::new(Line::from(main_spans)).style(Style::default().bg(bg_color));
         frame.render_widget(main_line, item_layout[0]);
 
         // Description line (only when selected and space available)
@@ -368,8 +367,8 @@ impl SidebarComponent {
                     Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
                 ),
             ];
-            let desc_line = Paragraph::new(Line::from(desc_spans))
-                .style(Style::default().bg(bg_color));
+            let desc_line =
+                Paragraph::new(Line::from(desc_spans)).style(Style::default().bg(bg_color));
             frame.render_widget(desc_line, item_layout[1]);
         } else {
             // Empty line with background

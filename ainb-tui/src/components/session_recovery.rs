@@ -3,11 +3,11 @@
 // Allows resume/cleanup actions for both types
 
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph, Tabs, Wrap},
-    Frame,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -17,7 +17,6 @@ use uuid::Uuid;
 
 use crate::interactive::session_manager::{SessionMetadata, SessionStore};
 use crate::models::SessionAgentType;
-
 
 // Color palette (matching TUI style guide)
 const CORNFLOWER_BLUE: Color = Color::Rgb(100, 149, 237);
@@ -225,13 +224,20 @@ impl SessionRecoveryState {
         match self.view_mode {
             RecoveryViewMode::Sessions => self.orphaned_sessions.len(),
             RecoveryViewMode::Worktrees => self.orphaned_worktrees.len(),
-            RecoveryViewMode::All => self.orphaned_sessions.len() + self.orphaned_worktrees.len() + self.separator_offset(),
+            RecoveryViewMode::All => {
+                self.orphaned_sessions.len()
+                    + self.orphaned_worktrees.len()
+                    + self.separator_offset()
+            }
         }
     }
 
     /// Returns 1 if a separator exists in All view (both sessions and worktrees present), 0 otherwise
     fn separator_offset(&self) -> usize {
-        if self.view_mode == RecoveryViewMode::All && !self.orphaned_sessions.is_empty() && !self.orphaned_worktrees.is_empty() {
+        if self.view_mode == RecoveryViewMode::All
+            && !self.orphaned_sessions.is_empty()
+            && !self.orphaned_worktrees.is_empty()
+        {
             1
         } else {
             0
@@ -253,7 +259,9 @@ impl SessionRecoveryState {
         match self.view_mode {
             RecoveryViewMode::Sessions => false,
             RecoveryViewMode::Worktrees => true,
-            RecoveryViewMode::All => self.selected_index > self.orphaned_sessions.len() + self.separator_offset() - 1,
+            RecoveryViewMode::All => {
+                self.selected_index > self.orphaned_sessions.len() + self.separator_offset() - 1
+            }
         }
     }
 
@@ -264,7 +272,9 @@ impl SessionRecoveryState {
         }
         match self.view_mode {
             RecoveryViewMode::Worktrees => Some(self.selected_index),
-            RecoveryViewMode::All => Some(self.selected_index - self.orphaned_sessions.len() - self.separator_offset()),
+            RecoveryViewMode::All => {
+                Some(self.selected_index - self.orphaned_sessions.len() - self.separator_offset())
+            }
             RecoveryViewMode::Sessions => None,
         }
     }
@@ -374,7 +384,8 @@ impl SessionRecoveryState {
                         }
 
                         // Check for transcript
-                        let transcript_path = meta["transcript_path"].as_str().map(|s| s.to_string());
+                        let transcript_path =
+                            meta["transcript_path"].as_str().map(|s| s.to_string());
                         let can_resume = transcript_path
                             .as_ref()
                             .map(|p| PathBuf::from(p).exists())
@@ -428,7 +439,8 @@ impl SessionRecoveryState {
         let by_name = worktrees_dir.join("by-name");
 
         // Track which worktrees are referenced by valid symlinks
-        let mut referenced_worktrees: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+        let mut referenced_worktrees: std::collections::HashSet<PathBuf> =
+            std::collections::HashSet::new();
 
         // 1. Scan by-session/ for broken symlinks and valid symlinks to inactive worktrees
         if by_session.exists() {
@@ -437,9 +449,9 @@ impl SessionRecoveryState {
                     let path = entry.path();
 
                     // Check if it's a symlink
-                    if path.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
-                        let session_id = path.file_name()
-                            .map(|n| n.to_string_lossy().to_string());
+                    if path.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false)
+                    {
+                        let session_id = path.file_name().map(|n| n.to_string_lossy().to_string());
 
                         match std::fs::read_link(&path) {
                             Ok(target) => {
@@ -455,7 +467,8 @@ impl SessionRecoveryState {
                                     orphaned.push(OrphanedWorktree {
                                         id: session_id,
                                         path: target,
-                                        name: path.file_name()
+                                        name: path
+                                            .file_name()
                                             .map(|n| n.to_string_lossy().to_string())
                                             .unwrap_or_default(),
                                         orphan_type: OrphanType::BrokenSymlink,
@@ -477,7 +490,7 @@ impl SessionRecoveryState {
                                             if let Some(worktree) = Self::extract_worktree_info(
                                                 &resolved_target,
                                                 session_id.clone(),
-                                                OrphanType::NoTmux
+                                                OrphanType::NoTmux,
                                             ) {
                                                 orphaned.push(worktree);
                                             }
@@ -499,17 +512,16 @@ impl SessionRecoveryState {
                     let path = entry.path();
 
                     // Only check directories that look like git worktrees
-                    if path.is_dir() && (path.join(".git").exists() || path.join(".git").is_file()) {
+                    if path.is_dir() && (path.join(".git").exists() || path.join(".git").is_file())
+                    {
                         // Canonicalize to compare properly
                         let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
 
                         // Check if this worktree is referenced by any by-session symlink
                         if !referenced_worktrees.contains(&canonical) {
-                            if let Some(worktree) = Self::extract_worktree_info(
-                                &path,
-                                None,
-                                OrphanType::NoMetadata
-                            ) {
+                            if let Some(worktree) =
+                                Self::extract_worktree_info(&path, None, OrphanType::NoMetadata)
+                            {
                                 orphaned.push(worktree);
                             }
                         }
@@ -532,12 +544,8 @@ impl SessionRecoveryState {
 
         // Sort by time_ago (most recent first based on directory mtime)
         orphaned.sort_by(|a, b| {
-            let a_mtime = std::fs::metadata(&a.path)
-                .and_then(|m| m.modified())
-                .ok();
-            let b_mtime = std::fs::metadata(&b.path)
-                .and_then(|m| m.modified())
-                .ok();
+            let a_mtime = std::fs::metadata(&a.path).and_then(|m| m.modified()).ok();
+            let b_mtime = std::fs::metadata(&b.path).and_then(|m| m.modified()).ok();
             b_mtime.cmp(&a_mtime)
         });
 
@@ -550,7 +558,8 @@ impl SessionRecoveryState {
         session_id: Option<String>,
         orphan_type: OrphanType,
     ) -> Option<OrphanedWorktree> {
-        let name = path.file_name()
+        let name = path
+            .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
@@ -582,8 +591,7 @@ impl SessionRecoveryState {
                 if o.status.success() {
                     let url = String::from_utf8_lossy(&o.stdout).trim().to_string();
                     // Extract just the repo name from URL
-                    url.split('/').last()
-                        .map(|s| s.trim_end_matches(".git").to_string())
+                    url.split('/').last().map(|s| s.trim_end_matches(".git").to_string())
                 } else {
                     None
                 }
@@ -611,9 +619,7 @@ impl SessionRecoveryState {
             .ok()
             .map(|mtime| {
                 use std::time::SystemTime;
-                let elapsed = SystemTime::now()
-                    .duration_since(mtime)
-                    .unwrap_or_default();
+                let elapsed = SystemTime::now().duration_since(mtime).unwrap_or_default();
                 let hours = elapsed.as_secs() / 3600;
                 if hours < 1 {
                     let minutes = elapsed.as_secs() / 60;
@@ -671,9 +677,7 @@ impl SessionRecoveryState {
             .ok()?;
 
         if output.status.success() {
-            let branch = String::from_utf8_lossy(&output.stdout)
-                .trim()
-                .to_string();
+            let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !branch.is_empty() {
                 return Some(branch);
             }
@@ -687,9 +691,7 @@ impl SessionRecoveryState {
             .ok()?;
 
         if output.status.success() {
-            let branch = String::from_utf8_lossy(&output.stdout)
-                .trim()
-                .to_string();
+            let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !branch.is_empty() && branch != "HEAD" {
                 return Some(branch);
             }
@@ -757,16 +759,10 @@ impl SessionRecoveryState {
     /// Generate a tmux-compatible session name from folder and branch
     /// Matches the naming convention in InteractiveSessionManager
     fn generate_tmux_name(folder: &str, branch: &str) -> String {
-        let sanitized_folder = folder
-            .replace(' ', "_")
-            .replace('.', "_")
-            .replace('/', "_")
-            .replace(':', "_");
-        let sanitized_branch = branch
-            .replace(' ', "_")
-            .replace('.', "_")
-            .replace('/', "_")
-            .replace(':', "_");
+        let sanitized_folder =
+            folder.replace(' ', "_").replace('.', "_").replace('/', "_").replace(':', "_");
+        let sanitized_branch =
+            branch.replace(' ', "_").replace('.', "_").replace('/', "_").replace(':', "_");
         format!("tmux_{}_{}", sanitized_folder, sanitized_branch)
     }
 
@@ -785,7 +781,8 @@ impl SessionRecoveryState {
         }
 
         // Extract worktree folder name and branch for proper tmux naming
-        let worktree_folder = worktree.path
+        let worktree_folder = worktree
+            .path
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("session")
@@ -797,19 +794,22 @@ impl SessionRecoveryState {
         let new_session = Self::generate_tmux_name(&worktree_folder, &branch);
 
         // Check if session with this name already exists and kill it
-        let check_result = Command::new("tmux")
-            .args(["has-session", "-t", &new_session])
-            .output();
+        let check_result = Command::new("tmux").args(["has-session", "-t", &new_session]).output();
         if check_result.map(|o| o.status.success()).unwrap_or(false) {
             // Kill existing session to avoid conflicts
-            let _ = Command::new("tmux")
-                .args(["kill-session", "-t", &new_session])
-                .output();
+            let _ = Command::new("tmux").args(["kill-session", "-t", &new_session]).output();
         }
 
         // Create new tmux session in the worktree directory
         let create_result = Command::new("tmux")
-            .args(["new-session", "-d", "-s", &new_session, "-c", &worktree.path.to_string_lossy()])
+            .args([
+                "new-session",
+                "-d",
+                "-s",
+                &new_session,
+                "-c",
+                &worktree.path.to_string_lossy(),
+            ])
             .output()
             .map_err(|e| e.to_string())?;
 
@@ -821,7 +821,9 @@ impl SessionRecoveryState {
         }
 
         // Parse or generate session UUID
-        let session_id = worktree.id.as_ref()
+        let session_id = worktree
+            .id
+            .as_ref()
             .and_then(|id| Uuid::parse_str(id).ok())
             .unwrap_or_else(Uuid::new_v4);
 
@@ -832,8 +834,7 @@ impl SessionRecoveryState {
             session_id,
             tmux_session_name: new_session.clone(),
             worktree_path: worktree.path.clone(),
-            workspace_name: worktree.source_repo.clone()
-                .unwrap_or_else(|| worktree.name.clone()),
+            workspace_name: worktree.source_repo.clone().unwrap_or_else(|| worktree.name.clone()),
             created_at: chrono::Utc::now(),
             agent_type,
         };
@@ -847,10 +848,7 @@ impl SessionRecoveryState {
 
         // Ensure symlink exists in by-session/ for session discovery
         if let Some(home) = dirs::home_dir() {
-            let by_session_dir = home
-                .join(".agents-in-a-box")
-                .join("worktrees")
-                .join("by-session");
+            let by_session_dir = home.join(".agents-in-a-box").join("worktrees").join("by-session");
             let symlink_path = by_session_dir.join(session_id.to_string());
 
             // Create/update symlink if needed
@@ -877,7 +875,10 @@ impl SessionRecoveryState {
             _ => {
                 // Claude (default)
                 if let Some(transcript) = transcript_path {
-                    format!("claude --dangerously-skip-permissions --resume \"{}\"", transcript)
+                    format!(
+                        "claude --dangerously-skip-permissions --resume \"{}\"",
+                        transcript
+                    )
                 } else {
                     "claude --dangerously-skip-permissions".to_string()
                 }
@@ -914,7 +915,10 @@ impl SessionRecoveryState {
 
     /// Recover all orphaned worktrees in bulk (skipping broken symlinks)
     pub fn recover_all_worktrees(&mut self) -> BulkRecoveryResult {
-        let mut result = BulkRecoveryResult { succeeded: vec![], failed: vec![] };
+        let mut result = BulkRecoveryResult {
+            succeeded: vec![],
+            failed: vec![],
+        };
         let worktrees: Vec<_> = self.orphaned_worktrees.clone();
         for worktree in &worktrees {
             if worktree.orphan_type == OrphanType::BrokenSymlink {
@@ -934,10 +938,7 @@ impl SessionRecoveryState {
         // Strategy 1: Check ~/.claude/agents/<session-id>.json for transcript_path
         if let Some(ref id) = worktree.id {
             if let Some(home) = dirs::home_dir() {
-                let meta_file = home
-                    .join(".claude")
-                    .join("agents")
-                    .join(format!("{}.json", id));
+                let meta_file = home.join(".claude").join("agents").join(format!("{}.json", id));
                 if meta_file.exists() {
                     if let Ok(content) = std::fs::read_to_string(&meta_file) {
                         if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&content) {
@@ -1087,12 +1088,13 @@ impl SessionRecoveryState {
             return Err("Cannot resume: no transcript found".to_string());
         }
 
-        let transcript = session
-            .transcript_path
-            .as_ref()
-            .ok_or("No transcript path")?;
+        let transcript = session.transcript_path.as_ref().ok_or("No transcript path")?;
 
-        let new_session = format!("{}-resumed-{}", session.session, chrono::Utc::now().timestamp());
+        let new_session = format!(
+            "{}-resumed-{}",
+            session.session,
+            chrono::Utc::now().timestamp()
+        );
         let directory = &session.directory;
 
         let create_result = Command::new("tmux")
@@ -1145,14 +1147,17 @@ impl SessionRecoveryState {
                             Ok(tmux_name) => {
                                 resumed += 1;
                                 results.push(RecoveryResultLine {
-                                    name, success: true,
+                                    name,
+                                    success: true,
                                     detail: format!("→ {}", tmux_name),
                                 });
                             }
                             Err(e) => {
                                 failed += 1;
                                 results.push(RecoveryResultLine {
-                                    name, success: false, detail: e,
+                                    name,
+                                    success: false,
+                                    detail: e,
                                 });
                             }
                         }
@@ -1166,14 +1171,17 @@ impl SessionRecoveryState {
                             Ok(tmux_name) => {
                                 resumed += 1;
                                 results.push(RecoveryResultLine {
-                                    name, success: true,
+                                    name,
+                                    success: true,
                                     detail: format!("→ {}", tmux_name),
                                 });
                             }
                             Err(e) => {
                                 failed += 1;
                                 results.push(RecoveryResultLine {
-                                    name, success: false, detail: e,
+                                    name,
+                                    success: false,
+                                    detail: e,
                                 });
                             }
                         }
@@ -1189,14 +1197,17 @@ impl SessionRecoveryState {
                             Ok(tmux_name) => {
                                 resumed += 1;
                                 results.push(RecoveryResultLine {
-                                    name, success: true,
+                                    name,
+                                    success: true,
                                     detail: format!("→ {}", tmux_name),
                                 });
                             }
                             Err(e) => {
                                 failed += 1;
                                 results.push(RecoveryResultLine {
-                                    name, success: false, detail: e,
+                                    name,
+                                    success: false,
+                                    detail: e,
                                 });
                             }
                         }
@@ -1209,14 +1220,17 @@ impl SessionRecoveryState {
                                 Ok(tmux_name) => {
                                     resumed += 1;
                                     results.push(RecoveryResultLine {
-                                        name, success: true,
+                                        name,
+                                        success: true,
                                         detail: format!("→ {}", tmux_name),
                                     });
                                 }
                                 Err(e) => {
                                     failed += 1;
                                     results.push(RecoveryResultLine {
-                                        name, success: false, detail: e,
+                                        name,
+                                        success: false,
+                                        detail: e,
                                     });
                                 }
                             }
@@ -1369,7 +1383,8 @@ impl SessionRecoveryState {
         // Remove from sessions.json
         let mut store = SessionStore::load();
         // Find and remove by worktree path
-        let keys_to_remove: Vec<String> = store.sessions()
+        let keys_to_remove: Vec<String> = store
+            .sessions()
             .iter()
             .filter(|(_, m)| m.worktree_path == worktree.path)
             .map(|(k, _)| k.clone())
@@ -1447,7 +1462,10 @@ impl SessionRecovery {
                 ),
             ]))
             .title_bottom(Line::from(vec![
-                Span::styled("Tab", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Tab",
+                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" view ", Style::default().fg(MUTED_GRAY)),
                 Span::styled("|", Style::default().fg(SUBDUED_BORDER)),
                 Span::styled(" r", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
@@ -1462,7 +1480,10 @@ impl SessionRecovery {
                 Span::styled(" A", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
                 Span::styled(" recover all ", Style::default().fg(MUTED_GRAY)),
                 Span::styled("|", Style::default().fg(SUBDUED_BORDER)),
-                Span::styled(" Space", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " Space",
+                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" select ", Style::default().fg(MUTED_GRAY)),
                 Span::styled("|", Style::default().fg(SUBDUED_BORDER)),
                 Span::styled(" D", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
@@ -1483,8 +1504,7 @@ impl SessionRecovery {
 
         // Loading state
         if state.loading {
-            let loading = Paragraph::new("Loading...")
-                .style(Style::default().fg(MUTED_GRAY));
+            let loading = Paragraph::new("Loading...").style(Style::default().fg(MUTED_GRAY));
             frame.render_widget(loading, layout[1]);
             return;
         }
@@ -1537,7 +1557,11 @@ impl SessionRecovery {
         frame.render_widget(ratatui::widgets::Clear, popup_area);
 
         let has_failures = overlay.results.iter().any(|r| !r.success);
-        let border_color = if has_failures { WARNING_ORANGE } else { SELECTION_GREEN };
+        let border_color = if has_failures {
+            WARNING_ORANGE
+        } else {
+            SELECTION_GREEN
+        };
 
         let block = Block::default()
             .borders(Borders::ALL)
@@ -1546,11 +1570,17 @@ impl SessionRecovery {
             .style(Style::default().bg(PANEL_BG))
             .title(Line::from(vec![
                 Span::styled(" ", Style::default()),
-                Span::styled(&overlay.title, Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    &overlay.title,
+                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" ", Style::default()),
             ]))
             .title_bottom(Line::from(vec![
-                Span::styled(" Esc", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " Esc",
+                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" dismiss ", Style::default().fg(MUTED_GRAY)),
             ]));
 
@@ -1576,7 +1606,10 @@ impl SessionRecovery {
             };
 
             lines.push(Line::from(vec![
-                Span::styled(format!("  {} ", icon), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!("  {} ", icon),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(display_name, Style::default().fg(SOFT_WHITE)),
             ]));
 
@@ -1590,7 +1623,10 @@ impl SessionRecovery {
                 };
                 lines.push(Line::from(vec![
                     Span::styled("      ", Style::default()),
-                    Span::styled(detail, Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC)),
+                    Span::styled(
+                        detail,
+                        Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+                    ),
                 ]));
             }
         }
@@ -1636,7 +1672,10 @@ impl SessionRecovery {
         let mut current_idx = 0;
 
         // Add sessions if in Sessions or All view
-        if matches!(state.view_mode, RecoveryViewMode::Sessions | RecoveryViewMode::All) {
+        if matches!(
+            state.view_mode,
+            RecoveryViewMode::Sessions | RecoveryViewMode::All
+        ) {
             for session in &state.orphaned_sessions {
                 let is_selected = current_idx == state.selected_index;
                 let is_marked = state.selected_items.contains(&current_idx);
@@ -1646,12 +1685,21 @@ impl SessionRecovery {
         }
 
         // Add worktrees if in Worktrees or All view
-        if matches!(state.view_mode, RecoveryViewMode::Worktrees | RecoveryViewMode::All) {
+        if matches!(
+            state.view_mode,
+            RecoveryViewMode::Worktrees | RecoveryViewMode::All
+        ) {
             // Add separator in All view
-            if state.view_mode == RecoveryViewMode::All && !state.orphaned_sessions.is_empty() && !state.orphaned_worktrees.is_empty() {
+            if state.view_mode == RecoveryViewMode::All
+                && !state.orphaned_sessions.is_empty()
+                && !state.orphaned_worktrees.is_empty()
+            {
                 items.push(ListItem::new(Line::from(vec![
                     Span::styled("── ", Style::default().fg(SUBDUED_BORDER)),
-                    Span::styled("Worktrees ", Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC)),
+                    Span::styled(
+                        "Worktrees ",
+                        Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+                    ),
                     Span::styled("──────────────────", Style::default().fg(SUBDUED_BORDER)),
                 ])));
                 current_idx += 1; // Separator occupies a list position
@@ -1669,7 +1717,11 @@ impl SessionRecovery {
     }
 
     /// Render a single session list item
-    fn render_session_item(session: &OrphanedSession, is_selected: bool, is_marked: bool) -> ListItem<'static> {
+    fn render_session_item(
+        session: &OrphanedSession,
+        is_selected: bool,
+        is_marked: bool,
+    ) -> ListItem<'static> {
         let resume_indicator = if session.can_resume { "📄" } else { "⚠" };
         let time_indicator = if session.time_ago.is_empty() {
             String::new()
@@ -1677,12 +1729,8 @@ impl SessionRecovery {
             format!(" ({})", session.time_ago)
         };
 
-        let task_preview: String = session
-            .task
-            .chars()
-            .take(30)
-            .collect::<String>()
-            .replace('\n', " ");
+        let task_preview: String =
+            session.task.chars().take(30).collect::<String>().replace('\n', " ");
 
         let mut spans = vec![];
         // Cursor indicator
@@ -1693,7 +1741,10 @@ impl SessionRecovery {
         }
         // Multi-select checkbox
         if is_marked {
-            spans.push(Span::styled("[x] ", Style::default().fg(WARNING_ORANGE).add_modifier(Modifier::BOLD)));
+            spans.push(Span::styled(
+                "[x] ",
+                Style::default().fg(WARNING_ORANGE).add_modifier(Modifier::BOLD),
+            ));
         } else {
             spans.push(Span::styled("[ ] ", Style::default().fg(MUTED_GRAY)));
         }
@@ -1711,9 +1762,7 @@ impl SessionRecovery {
         spans.push(Span::styled(
             session.session.clone(),
             if is_selected {
-                Style::default()
-                    .fg(SELECTION_GREEN)
-                    .add_modifier(Modifier::BOLD)
+                Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(SOFT_WHITE)
             },
@@ -1734,14 +1783,21 @@ impl SessionRecovery {
             Line::from(spans),
             Line::from(vec![
                 Span::raw("    "),
-                Span::styled(format!("{}...", task_preview), Style::default().fg(MUTED_GRAY)),
+                Span::styled(
+                    format!("{}...", task_preview),
+                    Style::default().fg(MUTED_GRAY),
+                ),
             ]),
         ])
         .style(base_style)
     }
 
     /// Render a single worktree list item
-    fn render_worktree_item(worktree: &OrphanedWorktree, is_selected: bool, is_marked: bool) -> ListItem<'static> {
+    fn render_worktree_item(
+        worktree: &OrphanedWorktree,
+        is_selected: bool,
+        is_marked: bool,
+    ) -> ListItem<'static> {
         // Determine if worktree is resumable (not a broken symlink)
         let can_resume = worktree.orphan_type != OrphanType::BrokenSymlink;
         let resume_indicator = if can_resume { "▶" } else { "✗" };
@@ -1760,7 +1816,10 @@ impl SessionRecovery {
         }
         // Multi-select checkbox
         if is_marked {
-            spans.push(Span::styled("[x] ", Style::default().fg(WARNING_ORANGE).add_modifier(Modifier::BOLD)));
+            spans.push(Span::styled(
+                "[x] ",
+                Style::default().fg(WARNING_ORANGE).add_modifier(Modifier::BOLD),
+            ));
         } else {
             spans.push(Span::styled("[ ] ", Style::default().fg(MUTED_GRAY)));
         }
@@ -1781,9 +1840,7 @@ impl SessionRecovery {
         spans.push(Span::styled(
             display_name,
             if is_selected {
-                Style::default()
-                    .fg(SELECTION_GREEN)
-                    .add_modifier(Modifier::BOLD)
+                Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(SOFT_WHITE)
             },
@@ -1931,9 +1988,10 @@ impl SessionRecovery {
                 },
             ]),
             Line::from(""),
-            Line::from(vec![
-                Span::styled("Directory:", Style::default().fg(MUTED_GRAY)),
-            ]),
+            Line::from(vec![Span::styled(
+                "Directory:",
+                Style::default().fg(MUTED_GRAY),
+            )]),
             Line::from(vec![
                 Span::styled("  ", Style::default()),
                 Span::styled(&session.directory, Style::default().fg(CORNFLOWER_BLUE)),
@@ -1942,10 +2000,7 @@ impl SessionRecovery {
             Line::from(vec![
                 Span::styled("Branch:   ", Style::default().fg(MUTED_GRAY)),
                 if let Some(ref branch) = session.worktree_branch {
-                    Span::styled(
-                        format!(" {}", branch),
-                        Style::default().fg(SELECTION_GREEN),
-                    )
+                    Span::styled(format!(" {}", branch), Style::default().fg(SELECTION_GREEN))
                 } else {
                     Span::styled(
                         " Unknown",
@@ -1954,9 +2009,7 @@ impl SessionRecovery {
                 },
             ]),
             Line::from(""),
-            Line::from(vec![
-                Span::styled("Task:", Style::default().fg(MUTED_GRAY)),
-            ]),
+            Line::from(vec![Span::styled("Task:", Style::default().fg(MUTED_GRAY))]),
             Line::from(vec![
                 Span::styled("  ", Style::default()),
                 Span::styled(
@@ -1983,14 +2036,16 @@ impl SessionRecovery {
             Line::from(vec![
                 Span::styled("Type:     ", Style::default().fg(MUTED_GRAY)),
                 Span::styled(
-                    format!("{} {}", worktree.orphan_type.icon(), worktree.orphan_type.label()),
+                    format!(
+                        "{} {}",
+                        worktree.orphan_type.icon(),
+                        worktree.orphan_type.label()
+                    ),
                     Style::default().fg(WARNING_ORANGE),
                 ),
             ]),
             Line::from(""),
-            Line::from(vec![
-                Span::styled("Path:", Style::default().fg(MUTED_GRAY)),
-            ]),
+            Line::from(vec![Span::styled("Path:", Style::default().fg(MUTED_GRAY))]),
             Line::from(vec![
                 Span::styled("  ", Style::default()),
                 Span::styled(
@@ -2005,10 +2060,7 @@ impl SessionRecovery {
         lines.push(Line::from(vec![
             Span::styled("Branch:   ", Style::default().fg(MUTED_GRAY)),
             if let Some(ref branch) = worktree.branch {
-                Span::styled(
-                    format!(" {}", branch),
-                    Style::default().fg(SELECTION_GREEN),
-                )
+                Span::styled(format!(" {}", branch), Style::default().fg(SELECTION_GREEN))
             } else {
                 Span::styled(
                     " Unknown",
@@ -2029,9 +2081,10 @@ impl SessionRecovery {
 
         // Last commit
         if let Some(ref commit) = worktree.last_commit {
-            lines.push(Line::from(vec![
-                Span::styled("Commit:   ", Style::default().fg(MUTED_GRAY)),
-            ]));
+            lines.push(Line::from(vec![Span::styled(
+                "Commit:   ",
+                Style::default().fg(MUTED_GRAY),
+            )]));
             lines.push(Line::from(vec![
                 Span::styled("  ", Style::default()),
                 Span::styled(

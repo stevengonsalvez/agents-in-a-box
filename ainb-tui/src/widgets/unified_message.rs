@@ -55,28 +55,40 @@ impl From<AgentEvent> for UnifiedMessage {
         let mut metadata = HashMap::new();
 
         let (message_type, content_blocks) = match &event {
-            AgentEvent::SessionInfo { model, tools, session_id, mcp_servers } => {
+            AgentEvent::SessionInfo {
+                model,
+                tools,
+                session_id,
+                mcp_servers,
+            } => {
                 metadata.insert("model".to_string(), Value::String(model.clone()));
                 metadata.insert("session_id".to_string(), Value::String(session_id.clone()));
-                metadata.insert("tools".to_string(), Value::Array(tools.iter().map(|t| Value::String(t.clone())).collect()));
+                metadata.insert(
+                    "tools".to_string(),
+                    Value::Array(tools.iter().map(|t| Value::String(t.clone())).collect()),
+                );
                 if let Some(servers) = mcp_servers {
-                    metadata.insert("mcp_servers".to_string(), serde_json::to_value(servers).unwrap_or(Value::Null));
+                    metadata.insert(
+                        "mcp_servers".to_string(),
+                        serde_json::to_value(servers).unwrap_or(Value::Null),
+                    );
                 }
 
                 (
                     MessageType::System,
-                    vec![ContentBlock::Text(format!("Session started with model: {}", model))],
+                    vec![ContentBlock::Text(format!(
+                        "Session started with model: {}",
+                        model
+                    ))],
                 )
             }
 
-            AgentEvent::Thinking { content } => {
-                (
-                    MessageType::Thinking,
-                    vec![ContentBlock::Thinking {
-                        content: content.clone(),
-                    }],
-                )
-            }
+            AgentEvent::Thinking { content } => (
+                MessageType::Thinking,
+                vec![ContentBlock::Thinking {
+                    content: content.clone(),
+                }],
+            ),
 
             AgentEvent::Message { content, id } => {
                 if let Some(msg_id) = id {
@@ -101,7 +113,12 @@ impl From<AgentEvent> for UnifiedMessage {
                 )
             }
 
-            AgentEvent::ToolCall { id, name, input, description } => {
+            AgentEvent::ToolCall {
+                id,
+                name,
+                input,
+                description,
+            } => {
                 metadata.insert("tool_id".to_string(), Value::String(id.clone()));
                 metadata.insert("tool_name".to_string(), Value::String(name.clone()));
                 if let Some(desc) = description {
@@ -118,8 +135,15 @@ impl From<AgentEvent> for UnifiedMessage {
                 )
             }
 
-            AgentEvent::ToolResult { tool_use_id, content, is_error } => {
-                metadata.insert("tool_use_id".to_string(), Value::String(tool_use_id.clone()));
+            AgentEvent::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                metadata.insert(
+                    "tool_use_id".to_string(),
+                    Value::String(tool_use_id.clone()),
+                );
                 metadata.insert("is_error".to_string(), Value::Bool(*is_error));
 
                 (
@@ -143,14 +167,34 @@ impl From<AgentEvent> for UnifiedMessage {
                 )
             }
 
-            AgentEvent::Usage { input_tokens, output_tokens, cache_tokens, total_cost } => {
-                metadata.insert("input_tokens".to_string(), Value::Number(serde_json::Number::from(*input_tokens)));
-                metadata.insert("output_tokens".to_string(), Value::Number(serde_json::Number::from(*output_tokens)));
+            AgentEvent::Usage {
+                input_tokens,
+                output_tokens,
+                cache_tokens,
+                total_cost,
+            } => {
+                metadata.insert(
+                    "input_tokens".to_string(),
+                    Value::Number(serde_json::Number::from(*input_tokens)),
+                );
+                metadata.insert(
+                    "output_tokens".to_string(),
+                    Value::Number(serde_json::Number::from(*output_tokens)),
+                );
                 if let Some(cache) = cache_tokens {
-                    metadata.insert("cache_tokens".to_string(), Value::Number(serde_json::Number::from(*cache)));
+                    metadata.insert(
+                        "cache_tokens".to_string(),
+                        Value::Number(serde_json::Number::from(*cache)),
+                    );
                 }
                 if let Some(cost) = total_cost {
-                    metadata.insert("total_cost".to_string(), Value::Number(serde_json::Number::from_f64(*cost).unwrap_or(serde_json::Number::from(0))));
+                    metadata.insert(
+                        "total_cost".to_string(),
+                        Value::Number(
+                            serde_json::Number::from_f64(*cost)
+                                .unwrap_or(serde_json::Number::from(0)),
+                        ),
+                    );
                 }
                 (MessageType::System, vec![])
             }
@@ -165,45 +209,61 @@ impl From<AgentEvent> for UnifiedMessage {
                 )
             }
 
-            AgentEvent::Structured(payload) => {
-                match payload {
-                    StructuredPayload::TodoList { title, items: _, pending, in_progress, done } => {
-                        metadata.insert("structured_type".to_string(), Value::String("todo_list".to_string()));
-                        metadata.insert("pending".to_string(), Value::Number((*pending).into()));
-                        metadata.insert("in_progress".to_string(), Value::Number((*in_progress).into()));
-                        metadata.insert("done".to_string(), Value::Number((*done).into()));
+            AgentEvent::Structured(payload) => match payload {
+                StructuredPayload::TodoList {
+                    title,
+                    items: _,
+                    pending,
+                    in_progress,
+                    done,
+                } => {
+                    metadata.insert(
+                        "structured_type".to_string(),
+                        Value::String("todo_list".to_string()),
+                    );
+                    metadata.insert("pending".to_string(), Value::Number((*pending).into()));
+                    metadata.insert(
+                        "in_progress".to_string(),
+                        Value::Number((*in_progress).into()),
+                    );
+                    metadata.insert("done".to_string(), Value::Number((*done).into()));
 
-                        let summary = if let Some(t) = title {
-                            format!("Todo List: {} ({} pending, {} in progress, {} done)", t, pending, in_progress, done)
-                        } else {
-                            format!("Todo List: {} pending, {} in progress, {} done", pending, in_progress, done)
-                        };
-
-                        (
-                            MessageType::Summary,
-                            vec![ContentBlock::Text(summary)],
+                    let summary = if let Some(t) = title {
+                        format!(
+                            "Todo List: {} ({} pending, {} in progress, {} done)",
+                            t, pending, in_progress, done
                         )
-                    }
-                    StructuredPayload::GlobResults { paths: _, total } => {
-                        metadata.insert("structured_type".to_string(), Value::String("glob_results".to_string()));
-                        metadata.insert("total".to_string(), Value::Number((*total).into()));
-
-                        let summary = format!("Found {} file(s)", total);
-                        (
-                            MessageType::Summary,
-                            vec![ContentBlock::Text(summary)],
+                    } else {
+                        format!(
+                            "Todo List: {} pending, {} in progress, {} done",
+                            pending, in_progress, done
                         )
-                    }
-                    StructuredPayload::PrettyJson(json_str) => {
-                        metadata.insert("structured_type".to_string(), Value::String("pretty_json".to_string()));
+                    };
 
-                        (
-                            MessageType::System,
-                            vec![ContentBlock::Text(json_str.clone())],
-                        )
-                    }
+                    (MessageType::Summary, vec![ContentBlock::Text(summary)])
                 }
-            }
+                StructuredPayload::GlobResults { paths: _, total } => {
+                    metadata.insert(
+                        "structured_type".to_string(),
+                        Value::String("glob_results".to_string()),
+                    );
+                    metadata.insert("total".to_string(), Value::Number((*total).into()));
+
+                    let summary = format!("Found {} file(s)", total);
+                    (MessageType::Summary, vec![ContentBlock::Text(summary)])
+                }
+                StructuredPayload::PrettyJson(json_str) => {
+                    metadata.insert(
+                        "structured_type".to_string(),
+                        Value::String("pretty_json".to_string()),
+                    );
+
+                    (
+                        MessageType::System,
+                        vec![ContentBlock::Text(json_str.clone())],
+                    )
+                }
+            },
         };
 
         UnifiedMessage {
@@ -218,12 +278,9 @@ impl From<AgentEvent> for UnifiedMessage {
 impl UnifiedMessage {
     /// Check if this message contains text content
     pub fn has_text_content(&self) -> bool {
-        self.content_blocks.iter().any(|block| {
-            matches!(
-                block,
-                ContentBlock::Text(_) | ContentBlock::Thinking { .. }
-            )
-        })
+        self.content_blocks
+            .iter()
+            .any(|block| matches!(block, ContentBlock::Text(_) | ContentBlock::Thinking { .. }))
     }
 
     /// Get all text content from the message
@@ -250,9 +307,10 @@ impl UnifiedMessage {
     /// Check if this is an error message
     pub fn is_error(&self) -> bool {
         self.message_type == MessageType::Error
-            || self.content_blocks.iter().any(|block| {
-                matches!(block, ContentBlock::Result { is_error: true, .. })
-            })
+            || self
+                .content_blocks
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Result { is_error: true, .. }))
     }
 
     /// Check if this is a system control message
@@ -294,8 +352,8 @@ impl UnifiedMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
     use crate::agent_parsers::types::TodoItem;
+    use serde_json::json;
 
     #[test]
     fn test_message_conversion() {
@@ -346,7 +404,10 @@ mod tests {
         assert_eq!(unified.message_type, MessageType::ToolUse);
         assert!(unified.is_tool_message());
         assert_eq!(unified.metadata.get("tool_name").unwrap(), "calculator");
-        assert_eq!(unified.metadata.get("description").unwrap(), "Calculate sum");
+        assert_eq!(
+            unified.metadata.get("description").unwrap(),
+            "Calculate sum"
+        );
         assert_eq!(unified.routing_key(), "tool.use");
 
         assert!(matches!(
@@ -452,14 +513,8 @@ mod tests {
 
         assert_eq!(unified.message_type, MessageType::Error);
         assert!(unified.is_error());
-        assert_eq!(
-            unified.metadata.get("error").unwrap(),
-            "Connection timeout"
-        );
-        assert_eq!(
-            unified.metadata.get("error_code").unwrap(),
-            "TIMEOUT"
-        );
+        assert_eq!(unified.metadata.get("error").unwrap(), "Connection timeout");
+        assert_eq!(unified.metadata.get("error_code").unwrap(), "TIMEOUT");
         assert!(unified.primary_content().unwrap().contains("Error:"));
         assert_eq!(unified.routing_key(), "error");
     }
@@ -469,8 +524,14 @@ mod tests {
         let event = AgentEvent::Structured(StructuredPayload::TodoList {
             title: Some("My Tasks".to_string()),
             items: vec![
-                TodoItem { text: "Task 1".to_string(), status: "pending".to_string() },
-                TodoItem { text: "Task 2".to_string(), status: "in_progress".to_string() },
+                TodoItem {
+                    text: "Task 1".to_string(),
+                    status: "pending".to_string(),
+                },
+                TodoItem {
+                    text: "Task 2".to_string(),
+                    status: "in_progress".to_string(),
+                },
             ],
             pending: 1,
             in_progress: 1,
@@ -495,7 +556,10 @@ mod tests {
         let unified = UnifiedMessage::from(event.clone());
 
         assert_eq!(unified.message_type, MessageType::Summary);
-        assert_eq!(unified.primary_content(), Some("Found 2 file(s)".to_string()));
+        assert_eq!(
+            unified.primary_content(),
+            Some("Found 2 file(s)".to_string())
+        );
         assert_eq!(unified.metadata.get("total").unwrap(), &json!(2));
     }
 
@@ -510,7 +574,10 @@ mod tests {
 
         assert_eq!(unified.message_type, MessageType::System);
         assert!(unified.is_system_control());
-        assert_eq!(unified.primary_content(), Some("Custom event: special_event".to_string()));
+        assert_eq!(
+            unified.primary_content(),
+            Some("Custom event: special_event".to_string())
+        );
         assert_eq!(unified.metadata.get("event_type").unwrap(), "special_event");
     }
 
@@ -529,14 +596,8 @@ mod tests {
         let unified = UnifiedMessage::from(event.clone());
 
         assert_eq!(unified.metadata.len(), 2);
-        assert_eq!(
-            unified.metadata.get("tool_id").unwrap(),
-            "complex-tool"
-        );
-        assert_eq!(
-            unified.metadata.get("tool_name").unwrap(),
-            "data_processor"
-        );
+        assert_eq!(unified.metadata.get("tool_id").unwrap(), "complex-tool");
+        assert_eq!(unified.metadata.get("tool_name").unwrap(), "data_processor");
     }
 
     #[test]

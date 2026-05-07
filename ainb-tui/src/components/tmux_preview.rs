@@ -13,7 +13,10 @@ use ratatui::{
     prelude::*,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, BorderType, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
+    widgets::{
+        Block, BorderType, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+        Wrap,
+    },
 };
 
 // Premium color palette (TUI Style Guide)
@@ -98,7 +101,7 @@ impl TmuxPreviewPane {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(0),   // Content
+                Constraint::Min(0),    // Content
                 Constraint::Length(1), // Footer
             ])
             .split(area);
@@ -119,7 +122,12 @@ impl TmuxPreviewPane {
     }
 
     /// Render the preview content for a shell session (workspace shell)
-    fn render_shell_preview(&mut self, frame: &mut Frame, area: Rect, shell_session: &ShellSession) {
+    fn render_shell_preview(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        shell_session: &ShellSession,
+    ) {
         let title = match self.preview_mode {
             PreviewMode::Normal => format!("Shell: {}", shell_session.name),
             PreviewMode::Scroll => format!("Shell: {} [SCROLL MODE]", shell_session.name),
@@ -135,7 +143,7 @@ impl TmuxPreviewPane {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(0),   // Content
+                Constraint::Min(0),    // Content
                 Constraint::Length(1), // Footer
             ])
             .split(area);
@@ -197,9 +205,7 @@ impl TmuxPreviewPane {
         };
 
         // Convert ANSI escape sequences to ratatui styled text for colored output
-        let styled_text = display_text
-            .into_text()
-            .unwrap_or_else(|_| Text::raw(&display_text));
+        let styled_text = display_text.into_text().unwrap_or_else(|_| Text::raw(&display_text));
 
         let paragraph = Paragraph::new(styled_text)
             .block(
@@ -276,7 +282,10 @@ impl TmuxPreviewPane {
             Line::from(""),
             Line::from(vec![
                 Span::styled("To detach: ", Style::default().fg(SOFT_WHITE)),
-                Span::styled("Ctrl+B", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Ctrl+B",
+                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" then ", Style::default().fg(SOFT_WHITE)),
                 Span::styled("D", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
             ]),
@@ -296,8 +305,14 @@ impl TmuxPreviewPane {
                     .style(Style::default().bg(DARK_BG))
                     .title(Line::from(vec![
                         Span::styled(" 🔗 ", Style::default().fg(GOLD)),
-                        Span::styled("Session Preview ", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
-                        Span::styled("[ATTACHED]", Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            "Session Preview ",
+                            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            "[ATTACHED]",
+                            Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
+                        ),
                     ])),
             )
             .alignment(Alignment::Center)
@@ -313,23 +328,38 @@ impl TmuxPreviewPane {
                 Span::styled("a", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
                 Span::styled(" attach ", Style::default().fg(SOFT_WHITE)),
                 Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
-                Span::styled(" Shift+↑↓", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " Shift+↑↓",
+                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" scroll mode ", Style::default().fg(SOFT_WHITE)),
                 Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
-                Span::styled(" k", Style::default().fg(Color::Rgb(230, 100, 100)).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " k",
+                    Style::default().fg(Color::Rgb(230, 100, 100)).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" kill ", Style::default().fg(SOFT_WHITE)),
                 Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
-                Span::styled(" Ctrl+B D", Style::default().fg(CORNFLOWER_BLUE).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " Ctrl+B D",
+                    Style::default().fg(CORNFLOWER_BLUE).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" detach from tmux", Style::default().fg(MUTED_GRAY)),
             ]),
             PreviewMode::Scroll => Line::from(vec![
                 Span::styled("↑↓", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
                 Span::styled(" scroll ", Style::default().fg(SOFT_WHITE)),
                 Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
-                Span::styled(" PgUp/PgDn", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " PgUp/PgDn",
+                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" fast scroll ", Style::default().fg(SOFT_WHITE)),
                 Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
-                Span::styled(" Esc", Style::default().fg(WARNING_ORANGE).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " Esc",
+                    Style::default().fg(WARNING_ORANGE).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" exit scroll mode", Style::default().fg(SOFT_WHITE)),
             ]),
         };

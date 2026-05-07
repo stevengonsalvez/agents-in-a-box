@@ -1,9 +1,9 @@
 // ABOUTME: State management for onboarding wizard
 // Tracks current step, user inputs, and validation results
 
-use std::path::PathBuf;
 use super::dependency_checker::DependencyStatus;
 use crate::editors;
+use std::path::PathBuf;
 
 /// Steps in the onboarding wizard
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,9 +87,7 @@ impl OnboardingStep {
             Self::Welcome => true,
             Self::DependencyCheck => {
                 // Can advance if mandatory deps are met
-                state.dependency_status.as_ref()
-                    .map(|s| s.mandatory_met)
-                    .unwrap_or(false)
+                state.dependency_status.as_ref().map(|s| s.mandatory_met).unwrap_or(false)
             }
             Self::GitDirectories => {
                 // Can advance if at least one valid directory
@@ -294,11 +292,8 @@ impl OnboardingState {
         if self.available_editors.is_empty() {
             self.available_editors = Self::detect_available_editors();
             // Select first available editor by default
-            self.selected_editor_index = self
-                .available_editors
-                .iter()
-                .position(|e| e.available)
-                .unwrap_or(0);
+            self.selected_editor_index =
+                self.available_editors.iter().position(|e| e.available).unwrap_or(0);
         }
     }
 
@@ -345,16 +340,14 @@ impl OnboardingState {
 
     /// Validate the current git directories input
     pub fn validate_git_directories(&mut self) {
-        let paths: Vec<&str> = self.git_directories_input
+        let paths: Vec<&str> = self
+            .git_directories_input
             .split(',')
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
             .collect();
 
-        self.validated_directories = paths
-            .iter()
-            .map(|p| ValidatedPath::from_string(p))
-            .collect();
+        self.validated_directories = paths.iter().map(|p| ValidatedPath::from_string(p)).collect();
     }
 
     /// Get valid directories only
@@ -376,8 +369,8 @@ impl OnboardingState {
                 self.error_message = None;
 
                 // Auto-trigger dependency check when entering DependencyCheck step
-                let trigger_dep_check = next == OnboardingStep::DependencyCheck
-                    && self.dependency_status.is_none();
+                let trigger_dep_check =
+                    next == OnboardingStep::DependencyCheck && self.dependency_status.is_none();
 
                 return (true, trigger_dep_check);
             }

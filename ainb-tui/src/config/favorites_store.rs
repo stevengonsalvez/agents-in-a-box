@@ -233,10 +233,7 @@ impl FavoritesStore {
 
     /// Search favorites by query
     pub fn search(&self, query: &str) -> Vec<&Favorite> {
-        self.favorites
-            .iter()
-            .filter(|f| f.matches_query(query))
-            .collect()
+        self.favorites.iter().filter(|f| f.matches_query(query)).collect()
     }
 
     /// Get all favorites sorted by use count (most used first)
@@ -422,6 +419,9 @@ mod tests {
 
         let loaded: FavoritesStore = serde_yaml::from_str(&yaml).unwrap();
         assert!(loaded.has_alias("test"));
-        assert_eq!(loaded.get("test").unwrap().display_name, Some("Test Repo".to_string()));
+        assert_eq!(
+            loaded.get("test").unwrap().display_name,
+            Some("Test Repo".to_string())
+        );
     }
 }

@@ -2,11 +2,11 @@
 // Renders step-based wizard UI following premium TUI style guide
 
 use ratatui::{
+    Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph},
-    Frame,
 };
 
 use super::dependency_checker::DependencyChecker;
@@ -38,17 +38,16 @@ impl OnboardingComponent {
         frame.render_widget(Clear, area);
 
         // Create main container with dark background
-        let container = Block::default()
-            .style(Style::default().bg(DARK_BG));
+        let container = Block::default().style(Style::default().bg(DARK_BG));
         frame.render_widget(container, area);
 
         // Main layout: header, content, footer
         let layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(5),  // Header with progress
-                Constraint::Min(15),    // Main content
-                Constraint::Length(3),  // Navigation footer
+                Constraint::Length(5), // Header with progress
+                Constraint::Min(15),   // Main content
+                Constraint::Length(3), // Navigation footer
             ])
             .split(area);
 
@@ -86,7 +85,10 @@ impl OnboardingComponent {
 
         let title = Paragraph::new(Line::from(vec![
             Span::styled("🛠️ ", Style::default()),
-            Span::styled("AINB Setup Wizard", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "AINB Setup Wizard",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(reset_indicator, Style::default().fg(WARNING_YELLOW)),
         ]))
         .alignment(Alignment::Center);
@@ -161,9 +163,9 @@ impl OnboardingComponent {
             .direction(Direction::Vertical)
             .margin(2)
             .constraints([
-                Constraint::Length(6),  // Mascot area
-                Constraint::Length(3),  // Welcome text
-                Constraint::Min(5),     // Description
+                Constraint::Length(6), // Mascot area
+                Constraint::Length(3), // Welcome text
+                Constraint::Min(5),    // Description
             ])
             .split(inner);
 
@@ -187,7 +189,10 @@ impl OnboardingComponent {
         // Welcome text
         let welcome = Paragraph::new(Line::from(vec![
             Span::styled("Welcome to ", Style::default().fg(SOFT_WHITE)),
-            Span::styled("Agents in a Box", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Agents in a Box",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ),
             Span::styled("!", Style::default().fg(SOFT_WHITE)),
         ]))
         .alignment(Alignment::Center);
@@ -241,7 +246,10 @@ impl OnboardingComponent {
             // Show loading state
             let loading = Paragraph::new(vec![
                 Line::from(""),
-                Line::from(Span::styled("🔄 Checking dependencies...", Style::default().fg(GOLD))),
+                Line::from(Span::styled(
+                    "🔄 Checking dependencies...",
+                    Style::default().fg(GOLD),
+                )),
                 Line::from(""),
                 Line::from(Span::styled("Please wait", Style::default().fg(MUTED_GRAY))),
             ])
@@ -254,7 +262,10 @@ impl OnboardingComponent {
             // No status yet - show initial message
             let msg = Paragraph::new(vec![
                 Line::from(""),
-                Line::from(Span::styled("Press Enter to check dependencies", Style::default().fg(SOFT_WHITE))),
+                Line::from(Span::styled(
+                    "Press Enter to check dependencies",
+                    Style::default().fg(SOFT_WHITE),
+                )),
             ])
             .alignment(Alignment::Center);
             frame.render_widget(msg, inner);
@@ -266,9 +277,9 @@ impl OnboardingComponent {
             .direction(Direction::Vertical)
             .margin(1)
             .constraints([
-                Constraint::Length(2),  // Status summary
-                Constraint::Min(10),    // Dependency list
-                Constraint::Length(2),  // Instructions
+                Constraint::Length(2), // Status summary
+                Constraint::Min(10),   // Dependency list
+                Constraint::Length(2), // Instructions
             ])
             .split(inner);
 
@@ -277,7 +288,11 @@ impl OnboardingComponent {
             if status.recommended_met {
                 ("✅", "All dependencies ready!", SELECTION_GREEN)
             } else {
-                ("⚠️", "Core dependencies ready (some optional missing)", WARNING_YELLOW)
+                (
+                    "⚠️",
+                    "Core dependencies ready (some optional missing)",
+                    WARNING_YELLOW,
+                )
             }
         } else {
             ("❌", "Missing required dependencies", ERROR_RED)
@@ -307,7 +322,10 @@ impl OnboardingComponent {
             // Category header
             items.push(ListItem::new(Line::from(vec![
                 Span::styled("─── ", Style::default().fg(SUBDUED_BORDER)),
-                Span::styled(category.label(), Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    category.label(),
+                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" ───", Style::default().fg(SUBDUED_BORDER)),
             ])));
 
@@ -321,7 +339,9 @@ impl OnboardingComponent {
                     ("○", WARNING_YELLOW)
                 };
 
-                let version_text = check.version.as_ref()
+                let version_text = check
+                    .version
+                    .as_ref()
                     .map(|v| format!(" ({})", v.chars().take(20).collect::<String>()))
                     .unwrap_or_default();
 
@@ -370,8 +390,9 @@ impl OnboardingComponent {
             "Install required dependencies and press R to re-check"
         };
 
-        let instr_widget = Paragraph::new(Span::styled(instructions, Style::default().fg(MUTED_GRAY)))
-            .alignment(Alignment::Center);
+        let instr_widget =
+            Paragraph::new(Span::styled(instructions, Style::default().fg(MUTED_GRAY)))
+                .alignment(Alignment::Center);
         frame.render_widget(instr_widget, content_layout[2]);
     }
 
@@ -392,17 +413,20 @@ impl OnboardingComponent {
             .direction(Direction::Vertical)
             .margin(2)
             .constraints([
-                Constraint::Length(2),  // Description
-                Constraint::Length(3),  // Input field
-                Constraint::Length(1),  // Spacer
-                Constraint::Min(5),     // Validation results
-                Constraint::Length(2),  // Instructions
+                Constraint::Length(2), // Description
+                Constraint::Length(3), // Input field
+                Constraint::Length(1), // Spacer
+                Constraint::Min(5),    // Validation results
+                Constraint::Length(2), // Instructions
             ])
             .split(inner);
 
         // Description
         let desc = Paragraph::new(Line::from(vec![
-            Span::styled("Enter paths to your git project directories ", Style::default().fg(SOFT_WHITE)),
+            Span::styled(
+                "Enter paths to your git project directories ",
+                Style::default().fg(SOFT_WHITE),
+            ),
             Span::styled("(comma-separated)", Style::default().fg(MUTED_GRAY)),
         ]))
         .alignment(Alignment::Center);
@@ -416,15 +440,13 @@ impl OnboardingComponent {
             state.git_directories_input.clone()
         };
 
-        let input = Paragraph::new(input_text)
-            .style(Style::default().fg(SOFT_WHITE))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(GOLD))
-                    .style(Style::default().bg(DARK_BG)),
-            );
+        let input = Paragraph::new(input_text).style(Style::default().fg(SOFT_WHITE)).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(GOLD))
+                .style(Style::default().bg(DARK_BG)),
+        );
         frame.render_widget(input, content_layout[1]);
 
         // Validation results
@@ -438,9 +460,8 @@ impl OnboardingComponent {
                     ("✗", ERROR_RED)
                 };
 
-                let error_text = validated.error.as_ref()
-                    .map(|e| format!(" - {}", e))
-                    .unwrap_or_default();
+                let error_text =
+                    validated.error.as_ref().map(|e| format!(" - {}", e)).unwrap_or_default();
 
                 items.push(ListItem::new(Line::from(vec![
                     Span::styled("  ", Style::default()),
@@ -464,13 +485,11 @@ impl OnboardingComponent {
 
         // Instructions
         let valid_count = state.validated_directories.iter().filter(|v| v.is_valid).count();
-        let instructions = format!(
-            "{} valid path(s) • Press Enter to continue",
-            valid_count
-        );
+        let instructions = format!("{} valid path(s) • Press Enter to continue", valid_count);
 
-        let instr_widget = Paragraph::new(Span::styled(instructions, Style::default().fg(MUTED_GRAY)))
-            .alignment(Alignment::Center);
+        let instr_widget =
+            Paragraph::new(Span::styled(instructions, Style::default().fg(MUTED_GRAY)))
+                .alignment(Alignment::Center);
         frame.render_widget(instr_widget, content_layout[4]);
     }
 
@@ -490,21 +509,36 @@ impl OnboardingComponent {
         let content = if state.auth_completed {
             vec![
                 Line::from(""),
-                Line::from(Span::styled("✅ Authentication configured!", Style::default().fg(SELECTION_GREEN))),
+                Line::from(Span::styled(
+                    "✅ Authentication configured!",
+                    Style::default().fg(SELECTION_GREEN),
+                )),
                 Line::from(""),
                 Line::from(Span::styled(
-                    format!("Method: {}", state.auth_method.as_deref().unwrap_or("Unknown")),
+                    format!(
+                        "Method: {}",
+                        state.auth_method.as_deref().unwrap_or("Unknown")
+                    ),
                     Style::default().fg(MUTED_GRAY),
                 )),
                 Line::from(""),
-                Line::from(Span::styled("Press Enter to continue", Style::default().fg(MUTED_GRAY))),
+                Line::from(Span::styled(
+                    "Press Enter to continue",
+                    Style::default().fg(MUTED_GRAY),
+                )),
             ]
         } else {
             vec![
                 Line::from(""),
-                Line::from(Span::styled("AI agent authentication", Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD))),
+                Line::from(Span::styled(
+                    "AI agent authentication",
+                    Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
+                )),
                 Line::from(""),
-                Line::from(Span::styled("Each agent uses its own auth method:", Style::default().fg(MUTED_GRAY))),
+                Line::from(Span::styled(
+                    "Each agent uses its own auth method:",
+                    Style::default().fg(MUTED_GRAY),
+                )),
                 Line::from(""),
                 Line::from(vec![
                     Span::styled("  Claude  ", Style::default().fg(GOLD)),
@@ -519,12 +553,18 @@ impl OnboardingComponent {
                     Span::styled("copilot login", Style::default().fg(MUTED_GRAY)),
                 ]),
                 Line::from(""),
-                Line::from(Span::styled("Configure auth per-agent before first use.", Style::default().fg(MUTED_GRAY))),
+                Line::from(Span::styled(
+                    "Configure auth per-agent before first use.",
+                    Style::default().fg(MUTED_GRAY),
+                )),
                 Line::from(""),
                 Line::from(vec![
                     Span::styled("Press ", Style::default().fg(MUTED_GRAY)),
                     Span::styled("S", Style::default().fg(GOLD)),
-                    Span::styled(" to skip (configure later)", Style::default().fg(MUTED_GRAY)),
+                    Span::styled(
+                        " to skip (configure later)",
+                        Style::default().fg(MUTED_GRAY),
+                    ),
                 ]),
             ]
         };
@@ -550,9 +590,9 @@ impl OnboardingComponent {
             .direction(Direction::Vertical)
             .margin(2)
             .constraints([
-                Constraint::Length(3),  // Description
-                Constraint::Min(10),    // Editor list
-                Constraint::Length(2),  // Instructions
+                Constraint::Length(3), // Description
+                Constraint::Min(10),   // Editor list
+                Constraint::Length(2), // Instructions
             ])
             .split(inner);
 
@@ -574,7 +614,10 @@ impl OnboardingComponent {
         if state.available_editors.is_empty() {
             let msg = Paragraph::new(vec![
                 Line::from(""),
-                Line::from(Span::styled("No editors detected", Style::default().fg(MUTED_GRAY))),
+                Line::from(Span::styled(
+                    "No editors detected",
+                    Style::default().fg(MUTED_GRAY),
+                )),
                 Line::from(Span::styled(
                     "Will fall back to $EDITOR or 'code' if available",
                     Style::default().fg(MUTED_GRAY),
@@ -616,17 +659,20 @@ impl OnboardingComponent {
                     Style::default()
                 };
 
-                items.push(ListItem::new(Line::from(vec![
-                    Span::styled("  ", Style::default()),
-                    Span::styled(icon, Style::default().fg(icon_color)),
-                    Span::styled(" ", Style::default()),
-                    Span::styled(&editor.name, name_style),
-                    Span::styled(
-                        format!(" ({})", editor.command),
-                        Style::default().fg(MUTED_GRAY),
-                    ),
-                    availability,
-                ])).style(bg_style));
+                items.push(
+                    ListItem::new(Line::from(vec![
+                        Span::styled("  ", Style::default()),
+                        Span::styled(icon, Style::default().fg(icon_color)),
+                        Span::styled(" ", Style::default()),
+                        Span::styled(&editor.name, name_style),
+                        Span::styled(
+                            format!(" ({})", editor.command),
+                            Style::default().fg(MUTED_GRAY),
+                        ),
+                        availability,
+                    ]))
+                    .style(bg_style),
+                );
             }
 
             let list = List::new(items).style(Style::default().bg(PANEL_BG));
@@ -636,16 +682,22 @@ impl OnboardingComponent {
         // Instructions
         let selected_editor = state.get_selected_editor();
         let instructions = if selected_editor.is_some() {
-            format!("Selected: {} • Press Enter to continue, or skip to use defaults",
-                    state.available_editors.get(state.selected_editor_index)
-                        .map(|e| e.name.as_str())
-                        .unwrap_or("None"))
+            format!(
+                "Selected: {} • Press Enter to continue, or skip to use defaults",
+                state
+                    .available_editors
+                    .get(state.selected_editor_index)
+                    .map(|e| e.name.as_str())
+                    .unwrap_or("None")
+            )
         } else {
-            "No available editor selected • Press Enter to use fallback (code → $EDITOR)".to_string()
+            "No available editor selected • Press Enter to use fallback (code → $EDITOR)"
+                .to_string()
         };
 
-        let instr_widget = Paragraph::new(Span::styled(instructions, Style::default().fg(MUTED_GRAY)))
-            .alignment(Alignment::Center);
+        let instr_widget =
+            Paragraph::new(Span::styled(instructions, Style::default().fg(MUTED_GRAY)))
+                .alignment(Alignment::Center);
         frame.render_widget(instr_widget, content_layout[2]);
     }
 
@@ -666,16 +718,19 @@ impl OnboardingComponent {
             .direction(Direction::Vertical)
             .margin(2)
             .constraints([
-                Constraint::Length(4),  // Success message
-                Constraint::Min(8),     // Summary items
-                Constraint::Length(3),  // Finish button
+                Constraint::Length(4), // Success message
+                Constraint::Min(8),    // Summary items
+                Constraint::Length(3), // Finish button
             ])
             .split(inner);
 
         // Success message
         let success = vec![
             Line::from(Span::styled("🎉", Style::default())),
-            Line::from(Span::styled("You're all set!", Style::default().fg(GOLD).add_modifier(Modifier::BOLD))),
+            Line::from(Span::styled(
+                "You're all set!",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            )),
         ];
         let success_widget = Paragraph::new(success).alignment(Alignment::Center);
         frame.render_widget(success_widget, content_layout[0]);
@@ -689,7 +744,11 @@ impl OnboardingComponent {
                 Span::styled("  ✓ ", Style::default().fg(SELECTION_GREEN)),
                 Span::styled("Dependencies: ", Style::default().fg(SOFT_WHITE)),
                 Span::styled(
-                    format!("{}/{} installed", status.installed_count(), status.total_count()),
+                    format!(
+                        "{}/{} installed",
+                        status.installed_count(),
+                        status.total_count()
+                    ),
                     Style::default().fg(MUTED_GRAY),
                 ),
             ]));
@@ -708,23 +767,37 @@ impl OnboardingComponent {
 
         // Auth
         let auth_status = if state.auth_completed {
-            format!("configured ({})", state.auth_method.as_deref().unwrap_or("unknown"))
+            format!(
+                "configured ({})",
+                state.auth_method.as_deref().unwrap_or("unknown")
+            )
         } else {
             "skipped".to_string()
         };
         summary_items.push(Line::from(vec![
             Span::styled(
-                if state.auth_completed { "  ✓ " } else { "  ○ " },
-                Style::default().fg(if state.auth_completed { SELECTION_GREEN } else { WARNING_YELLOW }),
+                if state.auth_completed {
+                    "  ✓ "
+                } else {
+                    "  ○ "
+                },
+                Style::default().fg(if state.auth_completed {
+                    SELECTION_GREEN
+                } else {
+                    WARNING_YELLOW
+                }),
             ),
             Span::styled("Authentication: ", Style::default().fg(SOFT_WHITE)),
             Span::styled(auth_status, Style::default().fg(MUTED_GRAY)),
         ]));
 
         // Editor
-        let editor_status = state.get_selected_editor()
+        let editor_status = state
+            .get_selected_editor()
             .map(|cmd| {
-                state.available_editors.iter()
+                state
+                    .available_editors
+                    .iter()
                     .find(|e| e.command == cmd)
                     .map(|e| format!("{} ({})", e.name, e.command))
                     .unwrap_or(cmd)
@@ -732,8 +805,16 @@ impl OnboardingComponent {
             .unwrap_or_else(|| "fallback (code → $EDITOR)".to_string());
         summary_items.push(Line::from(vec![
             Span::styled(
-                if state.get_selected_editor().is_some() { "  ✓ " } else { "  ○ " },
-                Style::default().fg(if state.get_selected_editor().is_some() { SELECTION_GREEN } else { WARNING_YELLOW }),
+                if state.get_selected_editor().is_some() {
+                    "  ✓ "
+                } else {
+                    "  ○ "
+                },
+                Style::default().fg(if state.get_selected_editor().is_some() {
+                    SELECTION_GREEN
+                } else {
+                    WARNING_YELLOW
+                }),
             ),
             Span::styled("Editor: ", Style::default().fg(SOFT_WHITE)),
             Span::styled(editor_status, Style::default().fg(MUTED_GRAY)),
@@ -745,8 +826,14 @@ impl OnboardingComponent {
         // Finish button
         let finish = Paragraph::new(Line::from(vec![
             Span::styled("Press ", Style::default().fg(MUTED_GRAY)),
-            Span::styled("Enter", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
-            Span::styled(" to finish and start using AINB", Style::default().fg(MUTED_GRAY)),
+            Span::styled(
+                "Enter",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " to finish and start using AINB",
+                Style::default().fg(MUTED_GRAY),
+            ),
         ]))
         .alignment(Alignment::Center);
         frame.render_widget(finish, content_layout[2]);
@@ -776,7 +863,11 @@ impl OnboardingComponent {
 
         // Next/Finish button
         let can_advance = state.current_step.can_advance(state);
-        let button_text = if state.is_final_step() { "Finish" } else { "Next" };
+        let button_text = if state.is_final_step() {
+            "Finish"
+        } else {
+            "Next"
+        };
 
         spans.push(Span::styled("[", Style::default().fg(SUBDUED_BORDER)));
         spans.push(Span::styled(

@@ -69,10 +69,7 @@ impl RemoteRepoManager {
 
     /// Get the cache path for a parsed repo (standard clone, not bare)
     pub fn get_cache_path(&self, parsed: &ParsedRepo) -> PathBuf {
-        self.cache_dir
-            .join(&parsed.host)
-            .join(&parsed.owner)
-            .join(&parsed.repo_name)
+        self.cache_dir.join(&parsed.host).join(&parsed.owner).join(&parsed.repo_name)
     }
 
     /// Check if a repo is already cached (standard clone with .git subdirectory)
@@ -296,7 +293,8 @@ impl RemoteRepoManager {
                 let available = branches_output
                     .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
                     .unwrap_or_default();
-                let branch_list: Vec<&str> = available.lines()
+                let branch_list: Vec<&str> = available
+                    .lines()
                     .map(|s| s.trim())
                     .filter(|s| !s.is_empty() && !s.contains("->"))
                     .collect();
@@ -304,7 +302,11 @@ impl RemoteRepoManager {
                 return Err(RemoteRepoError::InvalidRepo(format!(
                     "Base branch 'origin/{}' not found. Available branches: {}",
                     base_branch,
-                    if branch_list.is_empty() { "(none)".to_string() } else { branch_list.join(", ") }
+                    if branch_list.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        branch_list.join(", ")
+                    }
                 )));
             }
 
@@ -375,8 +377,10 @@ impl RemoteRepoManager {
                 // Checkout files with filter bypass (transcrypt uses 'crypt' filter)
                 let checkout_output = Command::new("git")
                     .args([
-                        "-c", "filter.crypt.smudge=cat",
-                        "-c", "filter.crypt.clean=cat",
+                        "-c",
+                        "filter.crypt.smudge=cat",
+                        "-c",
+                        "filter.crypt.clean=cat",
                         "checkout",
                         "--force",
                     ])
@@ -385,7 +389,10 @@ impl RemoteRepoManager {
 
                 if !checkout_output.status.success() {
                     let checkout_stderr = String::from_utf8_lossy(&checkout_output.stderr);
-                    warn!("Checkout with filter bypass had issues: {}", checkout_stderr);
+                    warn!(
+                        "Checkout with filter bypass had issues: {}",
+                        checkout_stderr
+                    );
                     // Continue anyway - the worktree exists, files just might not be checked out
                 }
 
@@ -495,8 +502,10 @@ impl RemoteRepoManager {
                 // Checkout files with filter bypass (transcrypt uses 'crypt' filter)
                 let checkout_output = Command::new("git")
                     .args([
-                        "-c", "filter.crypt.smudge=cat",
-                        "-c", "filter.crypt.clean=cat",
+                        "-c",
+                        "filter.crypt.smudge=cat",
+                        "-c",
+                        "filter.crypt.clean=cat",
                         "checkout",
                         "--force",
                     ])
@@ -505,7 +514,10 @@ impl RemoteRepoManager {
 
                 if !checkout_output.status.success() {
                     let checkout_stderr = String::from_utf8_lossy(&checkout_output.stderr);
-                    warn!("Checkout with filter bypass had issues: {}", checkout_stderr);
+                    warn!(
+                        "Checkout with filter bypass had issues: {}",
+                        checkout_stderr
+                    );
                     // Continue anyway - the worktree exists, files just might not be checked out
                 }
 
@@ -525,10 +537,12 @@ impl RemoteRepoManager {
                 let suffixed_branch = format!("{}-{}", remote_branch, suffix);
 
                 // Generate suffixed worktree path
-                let worktree_dir = worktree_path.file_name()
+                let worktree_dir = worktree_path
+                    .file_name()
                     .map(|n| format!("{}-{}", n.to_string_lossy(), suffix))
                     .unwrap_or_else(|| format!("worktree-{}", suffix));
-                let suffixed_worktree_path = worktree_path.parent()
+                let suffixed_worktree_path = worktree_path
+                    .parent()
                     .map(|p| p.join(&worktree_dir))
                     .unwrap_or_else(|| PathBuf::from(&worktree_dir));
 
@@ -549,7 +563,9 @@ impl RemoteRepoManager {
                     let retry_stderr = String::from_utf8_lossy(&retry_output.stderr);
 
                     // Check if failure is due to smudge/clean filter (e.g., transcrypt)
-                    if retry_stderr.contains("smudge filter") || retry_stderr.contains("clean filter") {
+                    if retry_stderr.contains("smudge filter")
+                        || retry_stderr.contains("clean filter")
+                    {
                         warn!(
                             "Suffixed worktree creation failed due to filter issue, retrying with --no-checkout: {}",
                             retry_stderr
@@ -579,7 +595,8 @@ impl RemoteRepoManager {
                             .output()?;
 
                         if !no_checkout_output.status.success() {
-                            let no_checkout_stderr = String::from_utf8_lossy(&no_checkout_output.stderr);
+                            let no_checkout_stderr =
+                                String::from_utf8_lossy(&no_checkout_output.stderr);
 
                             // Check if the suffixed branch already exists
                             if no_checkout_stderr.contains("already exists") {
@@ -589,7 +606,9 @@ impl RemoteRepoManager {
                                 );
 
                                 // Find worktree for this branch
-                                if let Some(result) = find_worktree_for_branch(cache_path, &suffixed_branch)? {
+                                if let Some(result) =
+                                    find_worktree_for_branch(cache_path, &suffixed_branch)?
+                                {
                                     return Ok(Some(result));
                                 }
 
@@ -602,12 +621,16 @@ impl RemoteRepoManager {
 
                                 if delete_orphaned_branch(cache_path, &suffixed_branch)? {
                                     // Generate a new suffix and retry
-                                    let new_suffix: String = uuid::Uuid::new_v4().to_string().chars().take(8).collect();
-                                    let new_suffixed_branch = format!("{}-{}", remote_branch, new_suffix);
-                                    let new_worktree_dir = worktree_path.file_name()
+                                    let new_suffix: String =
+                                        uuid::Uuid::new_v4().to_string().chars().take(8).collect();
+                                    let new_suffixed_branch =
+                                        format!("{}-{}", remote_branch, new_suffix);
+                                    let new_worktree_dir = worktree_path
+                                        .file_name()
                                         .map(|n| format!("{}-{}", n.to_string_lossy(), new_suffix))
                                         .unwrap_or_else(|| format!("worktree-{}", new_suffix));
-                                    let new_suffixed_worktree_path = worktree_path.parent()
+                                    let new_suffixed_worktree_path = worktree_path
+                                        .parent()
                                         .map(|p| p.join(&new_worktree_dir))
                                         .unwrap_or_else(|| PathBuf::from(&new_worktree_dir));
 
@@ -633,13 +656,25 @@ impl RemoteRepoManager {
                                     if retry2_output.status.success() {
                                         // Checkout with filter bypass
                                         let _ = Command::new("git")
-                                            .args(["-c", "filter.crypt.smudge=cat", "-c", "filter.crypt.clean=cat", "checkout", "--force"])
+                                            .args([
+                                                "-c",
+                                                "filter.crypt.smudge=cat",
+                                                "-c",
+                                                "filter.crypt.clean=cat",
+                                                "checkout",
+                                                "--force",
+                                            ])
                                             .current_dir(&new_suffixed_worktree_path)
                                             .output();
 
                                         // Set up tracking
                                         let _ = Command::new("git")
-                                            .args(["branch", "--set-upstream-to", &remote_ref, &new_suffixed_branch])
+                                            .args([
+                                                "branch",
+                                                "--set-upstream-to",
+                                                &remote_ref,
+                                                &new_suffixed_branch,
+                                            ])
                                             .current_dir(&new_suffixed_worktree_path)
                                             .output();
 
@@ -648,7 +683,10 @@ impl RemoteRepoManager {
                                             new_suffixed_branch,
                                             new_suffixed_worktree_path.display()
                                         );
-                                        return Ok(Some((new_suffixed_worktree_path, new_suffixed_branch)));
+                                        return Ok(Some((
+                                            new_suffixed_worktree_path,
+                                            new_suffixed_branch,
+                                        )));
                                     }
                                 }
 
@@ -669,8 +707,10 @@ impl RemoteRepoManager {
                         // Checkout files with filter bypass
                         let checkout_output = Command::new("git")
                             .args([
-                                "-c", "filter.crypt.smudge=cat",
-                                "-c", "filter.crypt.clean=cat",
+                                "-c",
+                                "filter.crypt.smudge=cat",
+                                "-c",
+                                "filter.crypt.clean=cat",
                                 "checkout",
                                 "--force",
                             ])
@@ -679,7 +719,10 @@ impl RemoteRepoManager {
 
                         if !checkout_output.status.success() {
                             let checkout_stderr = String::from_utf8_lossy(&checkout_output.stderr);
-                            warn!("Checkout with filter bypass had issues: {}", checkout_stderr);
+                            warn!(
+                                "Checkout with filter bypass had issues: {}",
+                                checkout_stderr
+                            );
                         }
 
                         info!(
@@ -694,7 +737,9 @@ impl RemoteRepoManager {
                             suffixed_branch
                         );
 
-                        if let Some(result) = find_worktree_for_branch(cache_path, &suffixed_branch)? {
+                        if let Some(result) =
+                            find_worktree_for_branch(cache_path, &suffixed_branch)?
+                        {
                             return Ok(Some(result));
                         }
 
@@ -707,12 +752,15 @@ impl RemoteRepoManager {
 
                         if delete_orphaned_branch(cache_path, &suffixed_branch)? {
                             // Generate a new suffix and retry
-                            let new_suffix: String = uuid::Uuid::new_v4().to_string().chars().take(8).collect();
+                            let new_suffix: String =
+                                uuid::Uuid::new_v4().to_string().chars().take(8).collect();
                             let new_suffixed_branch = format!("{}-{}", remote_branch, new_suffix);
-                            let new_worktree_dir = worktree_path.file_name()
+                            let new_worktree_dir = worktree_path
+                                .file_name()
                                 .map(|n| format!("{}-{}", n.to_string_lossy(), new_suffix))
                                 .unwrap_or_else(|| format!("worktree-{}", new_suffix));
-                            let new_suffixed_worktree_path = worktree_path.parent()
+                            let new_suffixed_worktree_path = worktree_path
+                                .parent()
                                 .map(|p| p.join(&new_worktree_dir))
                                 .unwrap_or_else(|| PathBuf::from(&new_worktree_dir));
 
@@ -737,7 +785,12 @@ impl RemoteRepoManager {
                             if retry2_output.status.success() {
                                 // Set up tracking
                                 let _ = Command::new("git")
-                                    .args(["branch", "--set-upstream-to", &remote_ref, &new_suffixed_branch])
+                                    .args([
+                                        "branch",
+                                        "--set-upstream-to",
+                                        &remote_ref,
+                                        &new_suffixed_branch,
+                                    ])
                                     .current_dir(&new_suffixed_worktree_path)
                                     .output();
 
@@ -827,7 +880,8 @@ impl RemoteRepoManager {
 
                                 // Check for standard clone (.git subdirectory)
                                 if repo_path.join(".git").exists() {
-                                    let repo_name = repo_entry.file_name().to_string_lossy().to_string();
+                                    let repo_name =
+                                        repo_entry.file_name().to_string_lossy().to_string();
                                     let url = format!("https://{}/{}/{}", host, owner, repo_name);
                                     repos.push(ParsedRepo {
                                         source: RepoSource::HttpsUrl(url),
@@ -926,10 +980,7 @@ fn delete_orphaned_branch(cache_path: &Path, branch_name: &str) -> Result<bool, 
     );
 
     // First prune any stale worktree references
-    let _ = Command::new("git")
-        .args(["worktree", "prune"])
-        .current_dir(cache_path)
-        .output();
+    let _ = Command::new("git").args(["worktree", "prune"]).current_dir(cache_path).output();
 
     // Delete the branch
     let output = Command::new("git")
@@ -1020,13 +1071,19 @@ mod tests {
 
     #[test]
     fn test_error_classification_auth() {
-        let err = classify_git_error("fatal: Authentication failed for 'https://github.com/private/repo'", "url");
+        let err = classify_git_error(
+            "fatal: Authentication failed for 'https://github.com/private/repo'",
+            "url",
+        );
         assert!(matches!(err, RemoteRepoError::AuthFailed));
     }
 
     #[test]
     fn test_error_classification_not_found() {
-        let err = classify_git_error("fatal: repository 'https://github.com/user/nonexistent' not found", "url");
+        let err = classify_git_error(
+            "fatal: repository 'https://github.com/user/nonexistent' not found",
+            "url",
+        );
         assert!(matches!(err, RemoteRepoError::NotFound(_)));
     }
 

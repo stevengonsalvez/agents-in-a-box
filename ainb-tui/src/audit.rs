@@ -190,11 +190,7 @@ pub fn audit_config_saved(
 }
 
 /// Log orphaned containers cleanup
-pub fn audit_orphaned_cleanup(
-    trigger: AuditTrigger,
-    result: AuditResult,
-    details: String,
-) {
+pub fn audit_orphaned_cleanup(trigger: AuditTrigger, result: AuditResult, details: String) {
     info!(
         target: "audit",
         action = %AuditAction::OrphanedContainersCleanup,
@@ -211,21 +207,36 @@ mod tests {
 
     #[test]
     fn test_action_display() {
-        assert_eq!(format!("{}", AuditAction::SessionDeleted), "SESSION_DELETED");
-        assert_eq!(format!("{}", AuditAction::SessionStopped), "SESSION_STOPPED");
-        assert_eq!(format!("{}", AuditAction::SessionResumed), "SESSION_RESUMED");
+        assert_eq!(
+            format!("{}", AuditAction::SessionDeleted),
+            "SESSION_DELETED"
+        );
+        assert_eq!(
+            format!("{}", AuditAction::SessionStopped),
+            "SESSION_STOPPED"
+        );
+        assert_eq!(
+            format!("{}", AuditAction::SessionResumed),
+            "SESSION_RESUMED"
+        );
         assert_eq!(format!("{}", AuditAction::ConfigSaved), "CONFIG_SAVED");
     }
 
     #[test]
     fn test_result_display() {
         assert_eq!(format!("{}", AuditResult::Success), "success");
-        assert_eq!(format!("{}", AuditResult::Failed("oops".into())), "failed: oops");
+        assert_eq!(
+            format!("{}", AuditResult::Failed("oops".into())),
+            "failed: oops"
+        );
     }
 
     #[test]
     fn test_trigger_display() {
-        assert_eq!(format!("{}", AuditTrigger::UserKeypress("D".into())), "keypress:D");
+        assert_eq!(
+            format!("{}", AuditTrigger::UserKeypress("D".into())),
+            "keypress:D"
+        );
         assert_eq!(format!("{}", AuditTrigger::Automatic), "automatic");
     }
 }

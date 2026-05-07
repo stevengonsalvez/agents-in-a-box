@@ -188,8 +188,10 @@ impl SessionLoader {
                         debug!("Found orphaned worktree for session {}", session_id);
 
                         // Skip Interactive (tmux-managed) sessions - those are loaded separately
-                        let tmux_probe =
-                            TmuxSession::new(worktree_info.branch_name.clone(), "claude".to_string());
+                        let tmux_probe = TmuxSession::new(
+                            worktree_info.branch_name.clone(),
+                            "claude".to_string(),
+                        );
                         if tmux_probe.does_session_exist().await {
                             info!(
                                 "Skipping tmux-managed Interactive session {} ({}) in Boss mode loader",
@@ -247,12 +249,8 @@ impl SessionLoader {
         let max_repos = self.config.workspace_defaults.max_repositories;
         let total_found = scan_result.workspaces.len();
 
-        let repos: Vec<PathBuf> = scan_result
-            .workspaces
-            .into_iter()
-            .map(|w| w.path)
-            .take(max_repos)
-            .collect();
+        let repos: Vec<PathBuf> =
+            scan_result.workspaces.into_iter().map(|w| w.path).take(max_repos).collect();
 
         info!(
             "Found {} repositories (showing {} of {}, limit: {})",

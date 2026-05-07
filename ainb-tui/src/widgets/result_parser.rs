@@ -1,10 +1,10 @@
 // ABOUTME: Markdown parsing and result formatting for TUI display
 // Converts markdown content and tool results into TUI-friendly formatted text
 
-use pulldown_cmark::{Parser, Event, Tag, CodeBlockKind};
-use crate::components::live_logs_stream::{LogEntry, LogEntryLevel};
-use uuid::Uuid;
 use super::syntax_highlighter;
+use crate::components::live_logs_stream::{LogEntry, LogEntryLevel};
+use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag};
+use uuid::Uuid;
 
 /// Parse markdown content and convert to log entries for TUI display
 pub fn parse_markdown_to_logs(
@@ -192,7 +192,7 @@ fn format_code_block(
                 format!("  {}", badge),
             )
             .with_session(session_id)
-            .with_metadata("code_lang", lang)
+            .with_metadata("code_lang", lang),
         );
     }
 
@@ -204,7 +204,7 @@ fn format_code_block(
             "  ┌────────────────────────────────────────".to_string(),
         )
         .with_session(session_id)
-        .with_metadata("code_border", "top")
+        .with_metadata("code_border", "top"),
     );
 
     // Check if we should use highlighting (only for known languages)
@@ -232,7 +232,7 @@ fn format_code_block(
                 format!("  {}", line),
             )
             .with_session(session_id)
-            .with_metadata("code_line", "true")
+            .with_metadata("code_line", "true"),
         );
     }
 
@@ -244,7 +244,7 @@ fn format_code_block(
             "  └────────────────────────────────────────".to_string(),
         )
         .with_session(session_id)
-        .with_metadata("code_border", "bottom")
+        .with_metadata("code_border", "bottom"),
     );
 
     entries
@@ -308,12 +308,7 @@ mod tests {
     #[test]
     fn test_parse_simple_markdown() {
         let markdown = "# Hello World\n\nThis is a paragraph.";
-        let entries = parse_markdown_to_logs(
-            markdown,
-            "test",
-            Uuid::nil(),
-            LogEntryLevel::Info,
-        );
+        let entries = parse_markdown_to_logs(markdown, "test", Uuid::nil(), LogEntryLevel::Info);
 
         assert!(!entries.is_empty());
         assert!(entries.iter().any(|e| e.message.contains("# Hello World")));
@@ -323,12 +318,7 @@ mod tests {
     #[test]
     fn test_parse_code_block() {
         let markdown = "```rust\nfn main() {\n    println!(\"Hello\");\n}\n```";
-        let entries = parse_markdown_to_logs(
-            markdown,
-            "test",
-            Uuid::nil(),
-            LogEntryLevel::Info,
-        );
+        let entries = parse_markdown_to_logs(markdown, "test", Uuid::nil(), LogEntryLevel::Info);
 
         // Now uses language badges instead of ```rust
         assert!(entries.iter().any(|e| e.message.contains("[RUST]")));

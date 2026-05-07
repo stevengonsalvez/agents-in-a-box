@@ -9,9 +9,9 @@
 use anyhow::{Context, Result};
 use crossterm::{
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::{Terminal, backend::CrosstermBackend};
 use std::io::Stdout;
 use tokio::process::Command;
 
@@ -107,7 +107,10 @@ impl<'a> AttachHandler<'a> {
     /// # Returns
     /// * `Result<()>` - Success or an error
     async fn execute_tmux_attach(&self, session_name: &str) -> Result<()> {
-        tracing::info!("[ATTACH] Executing tmux attach-session for '{}'", session_name);
+        tracing::info!(
+            "[ATTACH] Executing tmux attach-session for '{}'",
+            session_name
+        );
 
         // First verify the session exists
         let check = Command::new("tmux")
@@ -120,7 +123,11 @@ impl<'a> AttachHandler<'a> {
 
         if !check.status.success() {
             let stderr = String::from_utf8_lossy(&check.stderr);
-            tracing::error!("[ATTACH] tmux session '{}' does not exist: {}", session_name, stderr);
+            tracing::error!(
+                "[ATTACH] tmux session '{}' does not exist: {}",
+                session_name,
+                stderr
+            );
             anyhow::bail!("tmux session '{}' does not exist", session_name);
         }
 
@@ -137,14 +144,20 @@ impl<'a> AttachHandler<'a> {
             .context("Failed to execute tmux attach-session")?;
 
         if !status.success() {
-            tracing::error!("[ATTACH] tmux attach-session failed with exit code: {:?}", status.code());
+            tracing::error!(
+                "[ATTACH] tmux attach-session failed with exit code: {:?}",
+                status.code()
+            );
             anyhow::bail!(
                 "tmux attach-session failed with exit code: {:?}",
                 status.code()
             );
         }
 
-        tracing::info!("[ATTACH] Successfully detached from tmux session: {}", session_name);
+        tracing::info!(
+            "[ATTACH] Successfully detached from tmux session: {}",
+            session_name
+        );
         Ok(())
     }
 }

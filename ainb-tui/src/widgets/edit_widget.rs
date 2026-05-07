@@ -1,7 +1,7 @@
 // ABOUTME: Widget for rendering Edit tool calls as diff views
 // Shows file changes with additions and deletions highlighted
 
-use super::{MessageWidget, WidgetOutput, ToolResult, helpers, result_parser};
+use super::{MessageWidget, ToolResult, WidgetOutput, helpers, result_parser};
 use crate::agent_parsers::AgentEvent;
 use crate::components::live_logs_stream::{LogEntry, LogEntryLevel};
 use uuid::Uuid;
@@ -27,22 +27,30 @@ impl EditWidget {
         // Show removed lines
         if !old_str.is_empty() {
             diff_lines.push("  ➖ Removed:".to_string());
-            for line in old_str.lines().take(5) { // Limit preview
+            for line in old_str.lines().take(5) {
+                // Limit preview
                 diff_lines.push(format!("    - {}", line));
             }
             if old_str.lines().count() > 5 {
-                diff_lines.push(format!("    ... ({} more lines)", old_str.lines().count() - 5));
+                diff_lines.push(format!(
+                    "    ... ({} more lines)",
+                    old_str.lines().count() - 5
+                ));
             }
         }
 
         // Show added lines
         if !new_str.is_empty() {
             diff_lines.push("  ➕ Added:".to_string());
-            for line in new_str.lines().take(5) { // Limit preview
+            for line in new_str.lines().take(5) {
+                // Limit preview
                 diff_lines.push(format!("    + {}", line));
             }
             if new_str.lines().count() > 5 {
-                diff_lines.push(format!("    ... ({} more lines)", new_str.lines().count() - 5));
+                diff_lines.push(format!(
+                    "    ... ({} more lines)",
+                    new_str.lines().count() - 5
+                ));
             }
         }
 
@@ -56,7 +64,13 @@ impl MessageWidget for EditWidget {
     }
 
     fn render(&self, event: AgentEvent, container_name: &str, session_id: Uuid) -> WidgetOutput {
-        if let AgentEvent::ToolCall { id, name, input, description } = event {
+        if let AgentEvent::ToolCall {
+            id,
+            name,
+            input,
+            description,
+        } = event
+        {
             let mut entries = Vec::new();
 
             // Handle single Edit
@@ -77,15 +91,11 @@ impl MessageWidget for EditWidget {
                             LogEntryLevel::Debug
                         };
 
-                        let entry = LogEntry::new(
-                            level,
-                            container_name.to_string(),
-                            line.clone(),
-                        )
-                        .with_session(session_id)
-                        .with_metadata("event_type", "edit_diff")
-                        .with_metadata("tool_id", &id)
-                        .with_metadata("tool_name", &name);
+                        let entry = LogEntry::new(level, container_name.to_string(), line.clone())
+                            .with_session(session_id)
+                            .with_metadata("event_type", "edit_diff")
+                            .with_metadata("tool_id", &id)
+                            .with_metadata("tool_name", &name);
 
                         entries.push(entry);
                     }
@@ -124,7 +134,7 @@ impl MessageWidget for EditWidget {
                             "multi_edit",
                         )
                         .with_metadata("tool_id", &id)
-                        .with_metadata("tool_name", &name)
+                        .with_metadata("tool_name", &name),
                     );
 
                     // Show summary of edits
@@ -151,7 +161,7 @@ impl MessageWidget for EditWidget {
                                 )
                                 .with_session(session_id)
                                 .with_metadata("event_type", "edit_summary")
-                                .with_metadata("tool_id", &id)
+                                .with_metadata("tool_id", &id),
                             );
                         }
                     }
@@ -166,7 +176,7 @@ impl MessageWidget for EditWidget {
                             )
                             .with_session(session_id)
                             .with_metadata("event_type", "edit_more")
-                            .with_metadata("tool_id", &id)
+                            .with_metadata("tool_id", &id),
                         );
                     }
                 }
@@ -175,7 +185,8 @@ impl MessageWidget for EditWidget {
             // Add description if present
             if let Some(desc) = description {
                 if !desc.is_empty() {
-                    entries.insert(0,
+                    entries.insert(
+                        0,
                         helpers::create_log_entry(
                             LogEntryLevel::Info,
                             container_name,
@@ -184,7 +195,7 @@ impl MessageWidget for EditWidget {
                             "tool_call",
                         )
                         .with_metadata("tool_id", &id)
-                        .with_metadata("tool_name", &name)
+                        .with_metadata("tool_name", &name),
                     );
                 }
             }
@@ -200,26 +211,36 @@ impl MessageWidget for EditWidget {
                         "tool_call",
                     )
                     .with_metadata("tool_id", &id)
-                    .with_metadata("tool_name", &name)
+                    .with_metadata("tool_name", &name),
                 );
             }
 
             WidgetOutput::MultiLine(entries)
         } else {
-            WidgetOutput::Simple(
-                helpers::create_log_entry(
-                    LogEntryLevel::Error,
-                    container_name,
-                    "Invalid event for EditWidget".to_string(),
-                    session_id,
-                    "error",
-                )
-            )
+            WidgetOutput::Simple(helpers::create_log_entry(
+                LogEntryLevel::Error,
+                container_name,
+                "Invalid event for EditWidget".to_string(),
+                session_id,
+                "error",
+            ))
         }
     }
 
-    fn render_with_result(&self, event: AgentEvent, result: Option<ToolResult>, container_name: &str, session_id: Uuid) -> WidgetOutput {
-        if let AgentEvent::ToolCall { id, name, input, description } = event {
+    fn render_with_result(
+        &self,
+        event: AgentEvent,
+        result: Option<ToolResult>,
+        container_name: &str,
+        session_id: Uuid,
+    ) -> WidgetOutput {
+        if let AgentEvent::ToolCall {
+            id,
+            name,
+            input,
+            description,
+        } = event
+        {
             let mut header_entries = Vec::new();
             let mut content_entries = Vec::new();
 
@@ -270,7 +291,8 @@ impl MessageWidget for EditWidget {
                     let diff_lines = Self::create_diff_view(old_str, new_str, file_path);
 
                     // Add diff lines to content
-                    for line in diff_lines.iter().skip(2) { // Skip header and separator
+                    for line in diff_lines.iter().skip(2) {
+                        // Skip header and separator
                         let entry = LogEntry::new(
                             LogEntryLevel::Info,
                             container_name.to_string(),
@@ -308,14 +330,11 @@ impl MessageWidget for EditWidget {
                 ) {
                     // Show file path and edit count in header
                     let edit_header = format!("📁 {} ({} changes)", file_path, edits.len());
-                    let file_entry = LogEntry::new(
-                        LogEntryLevel::Info,
-                        container_name.to_string(),
-                        edit_header,
-                    )
-                    .with_session(session_id)
-                    .with_metadata("event_type", "multi_edit_file")
-                    .with_metadata("tool_id", &id);
+                    let file_entry =
+                        LogEntry::new(LogEntryLevel::Info, container_name.to_string(), edit_header)
+                            .with_session(session_id)
+                            .with_metadata("event_type", "multi_edit_file")
+                            .with_metadata("tool_id", &id);
 
                     header_entries.push(file_entry);
 
@@ -343,7 +362,7 @@ impl MessageWidget for EditWidget {
                                 )
                                 .with_session(session_id)
                                 .with_metadata("event_type", "edit_summary")
-                                .with_metadata("tool_id", &id)
+                                .with_metadata("tool_id", &id),
                             );
                         }
                     }
@@ -360,17 +379,17 @@ impl MessageWidget for EditWidget {
                             container_name.to_string(),
                             "".to_string(),
                         )
-                        .with_session(session_id)
+                        .with_session(session_id),
                     );
                 }
 
                 // Extract result content
                 if let Some(content_str) = result_parser::format_tool_result(&tool_result.content) {
                     // Check if the content looks like markdown
-                    let is_markdown = content_str.contains('#') ||
-                                     content_str.contains('*') ||
-                                     content_str.contains('`') ||
-                                     content_str.contains('\n');
+                    let is_markdown = content_str.contains('#')
+                        || content_str.contains('*')
+                        || content_str.contains('`')
+                        || content_str.contains('\n');
 
                     if is_markdown {
                         // Parse as markdown
@@ -378,7 +397,11 @@ impl MessageWidget for EditWidget {
                             &content_str,
                             container_name,
                             session_id,
-                            if tool_result.is_error { LogEntryLevel::Error } else { LogEntryLevel::Info },
+                            if tool_result.is_error {
+                                LogEntryLevel::Error
+                            } else {
+                                LogEntryLevel::Info
+                            },
                         );
                         content_entries.extend(parsed_entries);
                     } else {
@@ -396,13 +419,9 @@ impl MessageWidget for EditWidget {
                         };
 
                         content_entries.push(
-                            LogEntry::new(
-                                level,
-                                container_name.to_string(),
-                                status_msg,
-                            )
-                            .with_session(session_id)
-                            .with_metadata("edit_result", "true")
+                            LogEntry::new(level, container_name.to_string(), status_msg)
+                                .with_session(session_id)
+                                .with_metadata("edit_result", "true"),
                         );
                     }
                 } else if tool_result.is_error {
@@ -413,7 +432,7 @@ impl MessageWidget for EditWidget {
                             container_name.to_string(),
                             "❌ Edit failed with no output".to_string(),
                         )
-                        .with_session(session_id)
+                        .with_session(session_id),
                     );
                 } else {
                     // Success with no specific content
@@ -423,7 +442,7 @@ impl MessageWidget for EditWidget {
                             container_name.to_string(),
                             "✅ Edit completed successfully".to_string(),
                         )
-                        .with_session(session_id)
+                        .with_session(session_id),
                     );
                 }
 
@@ -447,15 +466,13 @@ impl MessageWidget for EditWidget {
             }
         } else {
             // Should not happen if can_handle works correctly
-            WidgetOutput::Simple(
-                helpers::create_log_entry(
-                    LogEntryLevel::Error,
-                    container_name,
-                    "Invalid event for EditWidget".to_string(),
-                    session_id,
-                    "error",
-                )
-            )
+            WidgetOutput::Simple(helpers::create_log_entry(
+                LogEntryLevel::Error,
+                container_name,
+                "Invalid event for EditWidget".to_string(),
+                session_id,
+                "error",
+            ))
         }
     }
 

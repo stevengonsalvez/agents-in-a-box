@@ -7,8 +7,8 @@
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::TempDir;
 
 use rusqlite::Connection;
@@ -16,7 +16,7 @@ use rusqlite::Connection;
 use crate::models::usage::ProviderCall;
 use crate::usage_cache::db::SCHEMA_VERSION;
 use crate::usage_cache::fingerprint::{
-    classify, verify_append_safe, FileFingerprint, FingerprintAction, SUFFIX_HASH_BYTES,
+    FileFingerprint, FingerprintAction, SUFFIX_HASH_BYTES, classify, verify_append_safe,
 };
 use crate::usage_cache::store::{Cache, ParseHint, ParseResult};
 
@@ -46,9 +46,7 @@ fn schema_open_creates_files_table_and_records_version() {
     drop(cache);
 
     let conn = Connection::open(&db).unwrap();
-    let count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
-        .unwrap();
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0)).unwrap();
     assert_eq!(count, 0);
     let v: i64 = conn
         .query_row("SELECT version FROM schema_version", [], |row| row.get(0))
@@ -80,9 +78,7 @@ fn schema_bump_drops_and_rebuilds() {
         .query_row("SELECT version FROM schema_version", [], |row| row.get(0))
         .unwrap();
     assert_eq!(v, SCHEMA_VERSION);
-    let count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
-        .unwrap();
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0)).unwrap();
     assert_eq!(count, 0, "legacy row must not survive a schema bump");
 }
 
@@ -98,7 +94,10 @@ fn fingerprint_unchanged_when_size_and_suffix_match() {
         mtime_nanos: 2_000, // mtime changed but size + suffix identical
         suffix_blake3: [0xAB; 32],
     };
-    assert_eq!(classify(&prior, &current, 100), FingerprintAction::Unchanged);
+    assert_eq!(
+        classify(&prior, &current, 100),
+        FingerprintAction::Unchanged
+    );
 }
 
 #[test]
@@ -113,7 +112,10 @@ fn fingerprint_truncate_forces_full_reparse() {
         mtime_nanos: 2_000,
         suffix_blake3: [0xCD; 32],
     };
-    assert_eq!(classify(&prior, &current, 100), FingerprintAction::FullReparse);
+    assert_eq!(
+        classify(&prior, &current, 100),
+        FingerprintAction::FullReparse
+    );
 }
 
 #[test]
@@ -292,7 +294,10 @@ fn fingerprint_full_reparse_when_size_equal_but_suffix_differs() {
         mtime_nanos: 2_000,
         suffix_blake3: [0xBB; 32],
     };
-    assert_eq!(classify(&prior, &current, 100), FingerprintAction::FullReparse);
+    assert_eq!(
+        classify(&prior, &current, 100),
+        FingerprintAction::FullReparse
+    );
 }
 
 /// Layout-stability tripwire for the bincode-encoded `Vec<ProviderCall>`

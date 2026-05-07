@@ -23,12 +23,12 @@ impl TestRepo {
         let path = dir.path().to_path_buf();
 
         // Initialize git repo
-        let output = Command::new("git")
-            .args(["init"])
-            .current_dir(&path)
-            .output()?;
+        let output = Command::new("git").args(["init"]).current_dir(&path).output()?;
         if !output.status.success() {
-            anyhow::bail!("git init failed: {}", String::from_utf8_lossy(&output.stderr));
+            anyhow::bail!(
+                "git init failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
 
         // Configure git user for commits
@@ -37,7 +37,10 @@ impl TestRepo {
             .current_dir(&path)
             .output()?;
         if !output.status.success() {
-            anyhow::bail!("git config email failed: {}", String::from_utf8_lossy(&output.stderr));
+            anyhow::bail!(
+                "git config email failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
 
         let output = Command::new("git")
@@ -45,18 +48,21 @@ impl TestRepo {
             .current_dir(&path)
             .output()?;
         if !output.status.success() {
-            anyhow::bail!("git config name failed: {}", String::from_utf8_lossy(&output.stderr));
+            anyhow::bail!(
+                "git config name failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
 
         // Create initial file and commit
         std::fs::write(path.join("README.md"), "# Test Repo\n")?;
 
-        let output = Command::new("git")
-            .args(["add", "."])
-            .current_dir(&path)
-            .output()?;
+        let output = Command::new("git").args(["add", "."]).current_dir(&path).output()?;
         if !output.status.success() {
-            anyhow::bail!("git add failed: {}", String::from_utf8_lossy(&output.stderr));
+            anyhow::bail!(
+                "git add failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
 
         let output = Command::new("git")
@@ -64,7 +70,10 @@ impl TestRepo {
             .current_dir(&path)
             .output()?;
         if !output.status.success() {
-            anyhow::bail!("git commit failed: {}", String::from_utf8_lossy(&output.stderr));
+            anyhow::bail!(
+                "git commit failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
 
         Ok(Self { dir, path })
@@ -79,12 +88,13 @@ impl TestRepo {
     pub fn add_commit(&self, filename: &str, content: &str, message: &str) -> Result<()> {
         std::fs::write(self.path.join(filename), content)?;
 
-        let output = Command::new("git")
-            .args(["add", filename])
-            .current_dir(&self.path)
-            .output()?;
+        let output =
+            Command::new("git").args(["add", filename]).current_dir(&self.path).output()?;
         if !output.status.success() {
-            anyhow::bail!("git add failed: {}", String::from_utf8_lossy(&output.stderr));
+            anyhow::bail!(
+                "git add failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
 
         let output = Command::new("git")
@@ -92,7 +102,10 @@ impl TestRepo {
             .current_dir(&self.path)
             .output()?;
         if !output.status.success() {
-            anyhow::bail!("git commit failed: {}", String::from_utf8_lossy(&output.stderr));
+            anyhow::bail!(
+                "git commit failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
 
         Ok(())
@@ -106,7 +119,10 @@ impl TestRepo {
             .output()?;
 
         if !output.status.success() {
-            anyhow::bail!("git branch failed: {}", String::from_utf8_lossy(&output.stderr));
+            anyhow::bail!(
+                "git branch failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
 
         Ok(String::from_utf8(output.stdout)?.trim().to_string())
@@ -119,7 +135,10 @@ impl TestRepo {
             .current_dir(&self.path)
             .output()?;
         if !output.status.success() {
-            anyhow::bail!("git checkout -b failed: {}", String::from_utf8_lossy(&output.stderr));
+            anyhow::bail!(
+                "git checkout -b failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
         Ok(())
     }
@@ -131,7 +150,10 @@ impl TestRepo {
             .current_dir(&self.path)
             .output()?;
         if !output.status.success() {
-            anyhow::bail!("git checkout failed: {}", String::from_utf8_lossy(&output.stderr));
+            anyhow::bail!(
+                "git checkout failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
         Ok(())
     }
@@ -159,9 +181,7 @@ macro_rules! require_tmux {
 
 /// Helper to clean up a tmux session by name
 pub fn cleanup_tmux_session(name: &str) {
-    let _ = Command::new("tmux")
-        .args(["kill-session", "-t", name])
-        .output();
+    let _ = Command::new("tmux").args(["kill-session", "-t", name]).output();
 }
 
 /// Check if a tmux session exists
@@ -175,18 +195,14 @@ pub fn tmux_session_exists(name: &str) -> bool {
 
 /// Capture tmux pane content
 pub fn capture_tmux_pane(session_name: &str) -> Result<String> {
-    let output = Command::new("tmux")
-        .args(["capture-pane", "-t", session_name, "-p"])
-        .output()?;
+    let output = Command::new("tmux").args(["capture-pane", "-t", session_name, "-p"]).output()?;
 
     Ok(String::from_utf8(output.stdout)?)
 }
 
 /// Send keys to a tmux session
 pub fn send_tmux_keys(session_name: &str, keys: &str) -> Result<()> {
-    Command::new("tmux")
-        .args(["send-keys", "-t", session_name, keys])
-        .output()?;
+    Command::new("tmux").args(["send-keys", "-t", session_name, keys]).output()?;
     Ok(())
 }
 

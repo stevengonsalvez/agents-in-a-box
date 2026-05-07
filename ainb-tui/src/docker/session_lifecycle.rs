@@ -760,10 +760,7 @@ impl SessionLifecycleManager {
         // This allows pay-as-you-go API usage instead of Pro/Max subscription
         match credentials::get_anthropic_api_key() {
             Ok(Some(api_key)) => {
-                config.environment_vars.insert(
-                    "ANTHROPIC_API_KEY".to_string(),
-                    api_key,
-                );
+                config.environment_vars.insert("ANTHROPIC_API_KEY".to_string(), api_key);
                 info!(
                     "Set ANTHROPIC_API_KEY from keychain for session {}",
                     request.session_id

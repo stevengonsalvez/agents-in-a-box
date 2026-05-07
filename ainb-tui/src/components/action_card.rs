@@ -1,11 +1,11 @@
 // ABOUTME: Reusable action card widget for the AINB home screen grid
 
 use ratatui::{
+    Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph},
-    Frame,
 };
 
 // Color palette from TUI style guide
@@ -39,12 +39,12 @@ pub struct ActionCard {
 /// Card identifiers for the home screen - matches HomeTile
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActionCardId {
-    Agents,    // Agent selection
-    Catalog,   // Browse catalog/marketplace
-    Config,    // Settings & presets
-    Sessions,  // Session manager
-    Stats,     // Analytics & usage
-    Help,      // Docs & guides
+    Agents,   // Agent selection
+    Catalog,  // Browse catalog/marketplace
+    Config,   // Settings & presets
+    Sessions, // Session manager
+    Stats,    // Analytics & usage
+    Help,     // Docs & guides
 }
 
 impl ActionCardId {
@@ -148,10 +148,7 @@ pub struct ActionCardGridState {
 
 impl ActionCardGridState {
     pub fn new() -> Self {
-        let cards = ActionCardId::all()
-            .iter()
-            .map(|id| id.to_card())
-            .collect();
+        let cards = ActionCardId::all().iter().map(|id| id.to_card()).collect();
 
         Self {
             selected_position: (0, 0),
@@ -268,7 +265,11 @@ pub fn render_action_card(
     title_spans.push(Span::styled(
         card.shortcut,
         Style::default()
-            .fg(if card.disabled { MUTED_GRAY } else { SOFT_WHITE })
+            .fg(if card.disabled {
+                MUTED_GRAY
+            } else {
+                SOFT_WHITE
+            })
             .add_modifier(Modifier::BOLD),
     ));
     title_spans.push(Span::styled("]", Style::default().fg(MUTED_GRAY)));
@@ -297,7 +298,11 @@ pub fn render_action_card(
 
         let description = Paragraph::new(Line::from(vec![Span::styled(
             card.description,
-            Style::default().fg(if card.disabled { MUTED_GRAY } else { SOFT_WHITE }),
+            Style::default().fg(if card.disabled {
+                MUTED_GRAY
+            } else {
+                SOFT_WHITE
+            }),
         )]))
         .alignment(Alignment::Center);
 
@@ -306,18 +311,11 @@ pub fn render_action_card(
 }
 
 /// Render the full action card grid (2x3)
-pub fn render_action_card_grid(
-    frame: &mut Frame,
-    area: Rect,
-    state: &ActionCardGridState,
-) {
+pub fn render_action_card_grid(frame: &mut Frame, area: Rect, state: &ActionCardGridState) {
     // Split into 2 rows
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage(50),
-            Constraint::Percentage(50),
-        ])
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(area);
 
     // For each row, split into 3 columns
@@ -334,8 +332,7 @@ pub fn render_action_card_grid(
         for (col_idx, col_area) in cols.iter().enumerate() {
             let card_idx = row_idx * 3 + col_idx;
             if let Some(card) = state.cards.get(card_idx) {
-                let is_selected =
-                    state.selected_position == (row_idx, col_idx);
+                let is_selected = state.selected_position == (row_idx, col_idx);
                 render_action_card(frame, *col_area, card, is_selected, state.is_focused);
             }
         }
@@ -366,7 +363,10 @@ mod tests {
 
     #[test]
     fn test_card_id_from_position() {
-        assert_eq!(ActionCardId::from_position(0, 0), Some(ActionCardId::Agents));
+        assert_eq!(
+            ActionCardId::from_position(0, 0),
+            Some(ActionCardId::Agents)
+        );
         assert_eq!(ActionCardId::from_position(1, 2), Some(ActionCardId::Help));
         assert_eq!(ActionCardId::from_position(2, 0), None);
     }

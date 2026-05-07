@@ -66,10 +66,7 @@ impl SnapshotManager {
     }
 
     pub async fn save_snapshot(snapshot: &SessionSnapshot) -> Result<PathBuf> {
-        let base = dirs::home_dir()
-            .unwrap_or_default()
-            .join(".agents-in-a-box")
-            .join("snapshots");
+        let base = dirs::home_dir().unwrap_or_default().join(".agents-in-a-box").join("snapshots");
         let dirname = snapshot.timestamp.format("%Y-%m-%d-%H%M%S").to_string();
         let dir = base.join(&dirname);
         tokio::fs::create_dir_all(&dir).await?;
@@ -97,10 +94,7 @@ impl SnapshotManager {
     }
 
     pub async fn prune_snapshots(keep: usize) -> Result<usize> {
-        let base = dirs::home_dir()
-            .unwrap_or_default()
-            .join(".agents-in-a-box")
-            .join("snapshots");
+        let base = dirs::home_dir().unwrap_or_default().join(".agents-in-a-box").join("snapshots");
         if !base.exists() {
             return Ok(0);
         }
@@ -143,7 +137,12 @@ impl SnapshotManager {
 
     async fn get_git_branch(worktree_path: &PathBuf) -> Option<String> {
         Command::new("git")
-            .args(["-C", &worktree_path.to_string_lossy(), "branch", "--show-current"])
+            .args([
+                "-C",
+                &worktree_path.to_string_lossy(),
+                "branch",
+                "--show-current",
+            ])
             .output()
             .await
             .ok()
@@ -158,7 +157,12 @@ impl SnapshotManager {
 
     async fn get_git_dirty_files(worktree_path: &PathBuf) -> Vec<String> {
         Command::new("git")
-            .args(["-C", &worktree_path.to_string_lossy(), "diff", "--name-only"])
+            .args([
+                "-C",
+                &worktree_path.to_string_lossy(),
+                "diff",
+                "--name-only",
+            ])
             .output()
             .await
             .ok()

@@ -37,10 +37,14 @@ impl ClaudeProcessDetector {
     /// * `Ok(false)` - Claude is not running (tmux exists but no Claude status bar)
     /// * `Err(_)` - Error capturing pane or tmux session doesn't exist
     pub fn is_claude_running(&self, tmux_session_name: &str) -> Result<bool> {
-        debug!("Checking if Claude is running in tmux session: {}", tmux_session_name);
+        debug!(
+            "Checking if Claude is running in tmux session: {}",
+            tmux_session_name
+        );
 
         // Capture the tmux pane content
-        let pane_content = self.capture_pane_content(tmux_session_name)
+        let pane_content = self
+            .capture_pane_content(tmux_session_name)
             .context("Failed to capture tmux pane content")?;
 
         // Look for Claude's status bar indicators
@@ -62,10 +66,10 @@ impl ClaudeProcessDetector {
         let output = Command::new("tmux")
             .args(&[
                 "capture-pane",
-                "-p",  // Print to stdout
-                "-e",  // Include escape sequences
-                "-J",  // Join wrapped lines
-                "-t",  // Target session
+                "-p", // Print to stdout
+                "-e", // Include escape sequences
+                "-J", // Join wrapped lines
+                "-t", // Target session
                 tmux_session_name,
             ])
             .output()
@@ -103,15 +107,16 @@ impl ClaudeProcessDetector {
 
         // Require at least 2 indicators to confirm Claude is running
         // This reduces false positives while being resilient to UI changes
-        let indicator_count = [has_model, has_cost, has_session, has_ctx]
-            .iter()
-            .filter(|&&x| x)
-            .count();
+        let indicator_count =
+            [has_model, has_cost, has_session, has_ctx].iter().filter(|&&x| x).count();
 
         let is_claude_running = indicator_count >= 2;
 
         if is_claude_running {
-            debug!("Claude status bar detected (indicators: {})", indicator_count);
+            debug!(
+                "Claude status bar detected (indicators: {})",
+                indicator_count
+            );
         } else {
             debug!(
                 "Claude status bar NOT detected (indicators: {}, need >= 2)",

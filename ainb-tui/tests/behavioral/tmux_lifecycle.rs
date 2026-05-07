@@ -3,9 +3,7 @@
 // Tests verify correct behavior for session creation, cleanup, content capture,
 // and Claude process detection. All tests are conditional on tmux availability.
 
-use super::fixtures::{
-    cleanup_tmux_session, send_tmux_keys, tmux_available, tmux_session_exists,
-};
+use super::fixtures::{cleanup_tmux_session, send_tmux_keys, tmux_available, tmux_session_exists};
 use crate::require_tmux;
 use ainb::tmux::{CaptureOptions, ClaudeProcessDetector, TmuxSession};
 use anyhow::Result;
@@ -14,7 +12,11 @@ use uuid::Uuid;
 
 /// Generate a unique test session name to avoid conflicts
 fn unique_session_name(prefix: &str) -> String {
-    format!("test_{}_{}", prefix, Uuid::new_v4().to_string()[..8].to_string())
+    format!(
+        "test_{}_{}",
+        prefix,
+        Uuid::new_v4().to_string()[..8].to_string()
+    )
 }
 
 /// Test that tmux sessions can be created and cleaned up properly
@@ -71,7 +73,10 @@ async fn test_tmux_session_name_sanitization() -> Result<()> {
         ("test.name", "tmux_test_name"),
         ("path/to/thing", "tmux_path_to_thing"),
         ("colon:separated", "tmux_colon_separated"),
-        ("complex.name/with:all chars", "tmux_complex_name_with_all_chars"),
+        (
+            "complex.name/with:all chars",
+            "tmux_complex_name_with_all_chars",
+        ),
         // Already prefixed should not double-prefix
         ("tmux_already_prefixed", "tmux_already_prefixed"),
     ];
@@ -152,7 +157,10 @@ async fn test_tmux_session_idempotent_start() -> Result<()> {
 
     // First start
     session.start(temp_dir.path()).await?;
-    assert!(session.does_session_exist().await, "Session should exist after first start");
+    assert!(
+        session.does_session_exist().await,
+        "Session should exist after first start"
+    );
 
     // Second start should not fail (implementation kills and recreates)
     session.start(temp_dir.path()).await?;
@@ -283,10 +291,22 @@ async fn test_tmux_capture_options_visible_vs_full_history() -> Result<()> {
 
     // Test visible capture options
     let visible_opts = CaptureOptions::visible();
-    assert!(visible_opts.start_line.is_none(), "Visible capture should have no start line");
-    assert!(visible_opts.end_line.is_none(), "Visible capture should have no end line");
-    assert!(visible_opts.include_escape_sequences, "Should include escape sequences by default");
-    assert!(visible_opts.join_wrapped_lines, "Should join wrapped lines by default");
+    assert!(
+        visible_opts.start_line.is_none(),
+        "Visible capture should have no start line"
+    );
+    assert!(
+        visible_opts.end_line.is_none(),
+        "Visible capture should have no end line"
+    );
+    assert!(
+        visible_opts.include_escape_sequences,
+        "Should include escape sequences by default"
+    );
+    assert!(
+        visible_opts.join_wrapped_lines,
+        "Should join wrapped lines by default"
+    );
 
     // Test full history capture options
     let history_opts = CaptureOptions::full_history();

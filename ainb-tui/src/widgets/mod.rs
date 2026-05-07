@@ -5,54 +5,54 @@
 
 use crate::agent_parsers::AgentEvent;
 use crate::components::live_logs_stream::{LogEntry, LogEntryLevel};
+use crossterm::terminal;
 use serde_json::Value;
 use uuid::Uuid;
-use crossterm::terminal;
 
 pub mod bash_widget;
-pub mod edit_widget;
-pub mod todo_widget;
 pub mod default_widget;
-pub mod read_widget;
-pub mod write_widget;
-pub mod grep_widget;
+pub mod edit_widget;
 pub mod glob_widget;
-pub mod task_widget;
-pub mod websearch_widget;
-pub mod webfetch_widget;
-pub mod thinking_widget;
-pub mod result_parser;
-pub mod syntax_highlighter;
+pub mod grep_widget;
+pub mod ls_result_widget;
+pub mod mcp_widget;
 pub mod message_router;
 pub mod multiedit_widget;
-pub mod mcp_widget;
-pub mod ls_result_widget;
+pub mod read_widget;
+pub mod reminder_filter;
+pub mod result_parser;
+pub mod syntax_highlighter;
 pub mod system_reminder_widget;
+pub mod task_widget;
+pub mod thinking_widget;
+pub mod todo_widget;
 pub mod tool_result_store;
 pub mod unified_message;
-pub mod reminder_filter;
+pub mod webfetch_widget;
+pub mod websearch_widget;
+pub mod write_widget;
 
 pub use bash_widget::BashWidget;
-pub use edit_widget::EditWidget;
-pub use todo_widget::TodoWidget;
 pub use default_widget::DefaultWidget;
-pub use read_widget::ReadWidget;
-pub use write_widget::WriteWidget;
-pub use grep_widget::GrepWidget;
+pub use edit_widget::EditWidget;
 pub use glob_widget::GlobWidget;
-pub use task_widget::TaskWidget;
-pub use websearch_widget::WebSearchWidget;
-pub use webfetch_widget::WebFetchWidget;
-pub use thinking_widget::ThinkingWidget;
+pub use grep_widget::GrepWidget;
+pub use ls_result_widget::LsResultWidget;
+pub use mcp_widget::McpWidget;
 pub use message_router::MessageRouter;
 pub use multiedit_widget::MultiEditWidget;
-pub use mcp_widget::McpWidget;
-pub use ls_result_widget::LsResultWidget;
+pub use read_widget::ReadWidget;
+pub use reminder_filter::ReminderFilter;
 pub use system_reminder_widget::SystemReminderWidget;
+pub use task_widget::TaskWidget;
+pub use thinking_widget::ThinkingWidget;
+pub use todo_widget::TodoWidget;
 pub use tool_result_store::ToolResultStore;
 #[allow(unused_imports)]
-pub use unified_message::{UnifiedMessage, MessageType, ContentBlock};
-pub use reminder_filter::ReminderFilter;
+pub use unified_message::{ContentBlock, MessageType, UnifiedMessage};
+pub use webfetch_widget::WebFetchWidget;
+pub use websearch_widget::WebSearchWidget;
+pub use write_widget::WriteWidget;
 
 /// Truncate a string to at most `max_chars` displayed characters,
 /// appending the ellipsis glyph `…` when truncation occurs. Returns
@@ -128,7 +128,13 @@ pub trait MessageWidget: Send + Sync {
     fn render(&self, event: AgentEvent, container_name: &str, session_id: Uuid) -> WidgetOutput;
 
     /// Render the event with an associated tool result
-    fn render_with_result(&self, event: AgentEvent, _result: Option<ToolResult>, container_name: &str, session_id: Uuid) -> WidgetOutput {
+    fn render_with_result(
+        &self,
+        event: AgentEvent,
+        _result: Option<ToolResult>,
+        container_name: &str,
+        session_id: Uuid,
+    ) -> WidgetOutput {
         // Default implementation just calls render without result
         self.render(event, container_name, session_id)
     }
@@ -171,7 +177,12 @@ impl WidgetRegistry {
     }
 
     /// Render an event using the appropriate widget
-    pub fn render(&self, event: AgentEvent, container_name: &str, session_id: Uuid) -> WidgetOutput {
+    pub fn render(
+        &self,
+        event: AgentEvent,
+        container_name: &str,
+        session_id: Uuid,
+    ) -> WidgetOutput {
         // Find the first widget that can handle this event
         for widget in &self.widgets {
             if widget.can_handle(&event) {
@@ -227,7 +238,7 @@ pub mod helpers {
         LogEntry::new(
             LogEntryLevel::Debug,
             container_name.to_string(),
-            String::new(),  // Empty line for spacing
+            String::new(), // Empty line for spacing
         )
         .with_session(session_id)
         .with_metadata("event_type", "separator")
@@ -236,9 +247,7 @@ pub mod helpers {
     /// Generate a dynamic separator line based on terminal width
     pub fn create_dynamic_separator(label: &str, min_width: usize) -> String {
         // Try to get terminal width, fallback to 80 if unable
-        let terminal_width = terminal::size()
-            .map(|(width, _)| width as usize)
-            .unwrap_or(80);
+        let terminal_width = terminal::size().map(|(width, _)| width as usize).unwrap_or(80);
 
         // Ensure we have a minimum width to work with
         let effective_width = terminal_width.max(min_width);
@@ -271,7 +280,11 @@ impl WidgetOutput {
         match self {
             WidgetOutput::Simple(entry) => vec![entry],
             WidgetOutput::MultiLine(entries) => entries,
-            WidgetOutput::Hierarchical { header, content, collapsed } => {
+            WidgetOutput::Hierarchical {
+                header,
+                content,
+                collapsed,
+            } => {
                 let mut entries = header;
                 if !collapsed && !content.is_empty() {
                     // Add visual separator and content box with dynamic width
