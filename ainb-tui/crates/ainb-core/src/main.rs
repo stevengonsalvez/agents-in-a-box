@@ -29,6 +29,7 @@ use std::{
 };
 
 mod agent_parsers;
+mod agents;
 mod app;
 mod audit;
 mod claude;
@@ -41,6 +42,7 @@ mod editors;
 mod git;
 mod interactive;
 mod models;
+mod providers;
 mod tmux;
 mod usage_cache;
 mod widgets;

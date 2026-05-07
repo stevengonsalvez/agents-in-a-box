@@ -3,6 +3,7 @@
 #![allow(missing_docs)]
 
 pub mod agent_parsers;
+pub mod agents;
 pub mod app;
 pub mod audit;
 pub mod claude;
@@ -15,6 +16,7 @@ pub mod docker;
 pub mod git;
 pub mod interactive;
 pub mod models;
+pub mod providers;
 pub mod tmux;
 pub mod usage_cache;
 pub mod widgets;

@@ -75,7 +75,18 @@ impl ClaudeAuthProvider {
     }
 }
 
-/// CLI provider for agent sessions
+/// CLI provider for agent sessions.
+///
+/// **Phase 2c note:** The canonical provider surface now lives in
+/// `crate::providers` (trait `Provider` + `ProviderRegistry`). This enum is
+/// retained as the serialisation type for `~/.agents-in-a-box/config/config.toml`
+/// — `serde(rename_all = "snake_case")` already gives us "claude" / "codex" /
+/// "gemini" / "copilot" string tags, which match the registry ids 1:1, so
+/// configs round-trip without migration.
+///
+/// Use `CliProvider::as_provider(&self)` to look up the trait object and
+/// dispatch through the registry. New plugin-supplied providers register
+/// directly with `ProviderRegistry` and have no `CliProvider` variant.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CliProvider {
@@ -147,6 +158,15 @@ impl CliProvider {
             CliProvider::Gemini => "-y",
             CliProvider::Copilot => "--yolo",
         }
+    }
+
+    /// Look up the matching `Provider` trait object from a built-in registry.
+    /// Lets call sites move to the registry-keyed dispatch path incrementally;
+    /// new code should prefer `ProviderRegistry` directly.
+    pub fn as_provider(&self) -> std::sync::Arc<dyn crate::providers::Provider> {
+        crate::providers::ProviderRegistry::built_ins()
+            .get(self.as_str())
+            .expect("built-in provider registry is missing a known provider id")
     }
 }
 

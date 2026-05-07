@@ -18,7 +18,14 @@ impl Default for SessionMode {
     }
 }
 
-/// Agent type for the session - which AI agent or shell to use
+/// Agent type for the session - which AI agent or shell to use.
+///
+/// **Phase 2c note:** The canonical session-agent surface now lives in
+/// `crate::agents` (trait `SessionAgent` + `SessionAgentRegistry`). This
+/// enum is retained as the serialisation type for `~/.agents-in-a-box/
+/// sessions.json` — its existing tags ("Claude", "Shell", …) are remapped
+/// to lowercase ids by the registry. Plugin-supplied session agents in
+/// Phase 4 register straight into the registry without an enum variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum SessionAgentType {
     #[default]
@@ -78,6 +85,29 @@ impl SessionAgentType {
             | SessionAgentType::Copilot => true,
             SessionAgentType::Kiro => false,
         }
+    }
+
+    /// Stable string id matching the agent's entry in
+    /// `crate::agents::SessionAgentRegistry`.
+    pub fn id(&self) -> &'static str {
+        match self {
+            SessionAgentType::Claude => "claude",
+            SessionAgentType::Shell => "shell",
+            SessionAgentType::Ssh => "ssh",
+            SessionAgentType::Codex => "codex",
+            SessionAgentType::Gemini => "gemini",
+            SessionAgentType::Copilot => "copilot",
+            SessionAgentType::Kiro => "kiro",
+        }
+    }
+
+    /// Look up the matching `SessionAgent` trait object via the built-in
+    /// registry. Lets call sites move to registry-keyed dispatch
+    /// incrementally; new code should prefer `SessionAgentRegistry` directly.
+    pub fn as_session_agent(&self) -> std::sync::Arc<dyn crate::agents::SessionAgent> {
+        crate::agents::SessionAgentRegistry::built_ins()
+            .get(self.id())
+            .expect("built-in session-agent registry is missing a known id")
     }
 }
 
