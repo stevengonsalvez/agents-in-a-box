@@ -281,6 +281,13 @@ fn cmd_setup(format: OutputFormat) -> Result<()> {
     onboarding.mark_completed();
     onboarding.save().context("Failed to save onboarding config")?;
 
+    // Statusline wiring step. Only prompts in interactive Text mode AND
+    // only when the user hasn't already made a decision — `Unset` is the
+    // only state that re-prompts on a follow-up `ainb init` run.
+    if matches!(format, OutputFormat::Text) {
+        let _ = run_statusline_step(&mut std::io::stdin().lock(), &mut std::io::stdout().lock());
+    }
+
     match format {
         OutputFormat::Json => {
             let output = serde_json::json!({
@@ -426,6 +433,209 @@ fn cmd_reset(force: bool, format: OutputFormat) -> Result<()> {
     }
 
     Ok(())
+}
+
+// --- Statusline prompt -------------------------------------------------------
+
+/// Outcome of the statusline wizard step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StatuslineStepOutcome {
+    /// Step skipped entirely (already wired, or user previously decided).
+    Skipped,
+    /// User accepted; we ran the install.
+    Installed,
+    /// User accepted "chain" against an existing command.
+    Chained,
+    /// User declined; we record `Declined` so we don't re-prompt.
+    Declined,
+    /// User chose "keep" their existing different statusline.
+    Kept,
+}
+
+/// Drive the statusline wizard step against a `BufRead` + `Write` pair.
+/// Pure on its IO so tests can drive it with in-memory buffers.
+pub fn run_statusline_step<R: std::io::BufRead, W: std::io::Write>(
+    input: &mut R,
+    out: &mut W,
+) -> Result<StatuslineStepOutcome> {
+    use crate::cli::statusline_install::{
+        InstallOutcome, StatuslineStatus, detect_statusline_status, install_statusline,
+        install_statusline_chained_at, install_statusline_replace_at, settings_path,
+    };
+    use crate::config::StatuslineDecision;
+
+    let mut app_config = AppConfig::load().unwrap_or_default();
+    if app_config.ui_preferences.statusline_decision != StatuslineDecision::Unset {
+        // User already made a choice — don't re-prompt.
+        return Ok(StatuslineStepOutcome::Skipped);
+    }
+
+    let status = detect_statusline_status().unwrap_or(StatuslineStatus::NotConfigured);
+
+    match status {
+        StatuslineStatus::Configured => {
+            writeln!(out, "  ✓ Claude Code statusline already wired.").ok();
+            app_config.ui_preferences.statusline_decision = StatuslineDecision::Installed;
+            let _ = app_config.save();
+            Ok(StatuslineStepOutcome::Skipped)
+        }
+        StatuslineStatus::Other(cmd) => {
+            writeln!(out).ok();
+            writeln!(out, "Existing Claude Code statusline detected: {cmd}").ok();
+            writeln!(
+                out,
+                "  [k]eep your current command  [r]eplace with ainb statusline"
+            )
+            .ok();
+            writeln!(
+                out,
+                "  [c]hain ('{cmd} | ainb statusline')   [s]kip for now"
+            )
+            .ok();
+            write!(out, "Choice [k/r/c/s]: ").ok();
+            out.flush().ok();
+            let choice = read_choice(input)?;
+            let path = settings_path()?;
+            match choice.as_str() {
+                "r" => {
+                    install_statusline_replace_at(&path)?;
+                    app_config.ui_preferences.statusline_decision = StatuslineDecision::Installed;
+                    let _ = app_config.save();
+                    writeln!(out, "  ✓ Replaced existing statusline.").ok();
+                    Ok(StatuslineStepOutcome::Installed)
+                }
+                "c" => {
+                    install_statusline_chained_at(&path)?;
+                    app_config.ui_preferences.statusline_decision = StatuslineDecision::Chained;
+                    let _ = app_config.save();
+                    writeln!(
+                        out,
+                        "  ✓ Chained ainb statusline onto your existing command."
+                    )
+                    .ok();
+                    Ok(StatuslineStepOutcome::Chained)
+                }
+                "k" => {
+                    // Treat "keep" as Declined for top-bar suppression
+                    // but leave settings.json untouched.
+                    app_config.ui_preferences.statusline_decision = StatuslineDecision::Declined;
+                    let _ = app_config.save();
+                    writeln!(out, "  Keeping your existing statusline. (You can wire ainb later via the Budget panel.)").ok();
+                    Ok(StatuslineStepOutcome::Kept)
+                }
+                _ => {
+                    writeln!(out, "  Skipped — leave decision unset.").ok();
+                    Ok(StatuslineStepOutcome::Skipped)
+                }
+            }
+        }
+        StatuslineStatus::NotConfigured => {
+            print_install_offer(out);
+            write!(out, "Install? [Y/n/s] (s = show example): ").ok();
+            out.flush().ok();
+            let mut choice = read_choice(input)?;
+            // Loop the "show me" path a single time; defensible UX.
+            if choice == "s" {
+                writeln!(out).ok();
+                writeln!(out, "Example powerline output:").ok();
+                writeln!(
+                    out,
+                    "  {}",
+                    crate::cli::statusline::render_powerline(&example_cache())
+                )
+                .ok();
+                writeln!(out).ok();
+                write!(out, "Install? [Y/n]: ").ok();
+                out.flush().ok();
+                choice = read_choice(input)?;
+            }
+            match choice.as_str() {
+                "n" => {
+                    app_config.ui_preferences.statusline_decision = StatuslineDecision::Declined;
+                    let _ = app_config.save();
+                    writeln!(out, "  Skipped statusline wiring.").ok();
+                    Ok(StatuslineStepOutcome::Declined)
+                }
+                _ => {
+                    // Default to install on empty input or "y".
+                    match install_statusline()? {
+                        InstallOutcome::Installed | InstallOutcome::AlreadyInstalled => {
+                            app_config.ui_preferences.statusline_decision =
+                                StatuslineDecision::Installed;
+                            let _ = app_config.save();
+                            writeln!(out, "  ✓ Wired Claude Code statusline.").ok();
+                            Ok(StatuslineStepOutcome::Installed)
+                        }
+                        InstallOutcome::Chained => {
+                            app_config.ui_preferences.statusline_decision =
+                                StatuslineDecision::Chained;
+                            let _ = app_config.save();
+                            writeln!(out, "  ✓ Chained ainb statusline.").ok();
+                            Ok(StatuslineStepOutcome::Chained)
+                        }
+                        InstallOutcome::ExistingDifferent { current_command } => {
+                            // Race: someone wrote a different statusLine
+                            // between our detect and install. Don't
+                            // overwrite without consent.
+                            writeln!(
+                                out,
+                                "  Detected a foreign statusline ({current_command}); skipping."
+                            )
+                            .ok();
+                            Ok(StatuslineStepOutcome::Skipped)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn print_install_offer<W: std::io::Write>(out: &mut W) {
+    writeln!(out).ok();
+    writeln!(out, "Claude Code statusline").ok();
+    writeln!(out, "  ainb can install a statusline that shows live:").ok();
+    writeln!(out, "    - Current model + context %").ok();
+    writeln!(out, "    - 5-hour rate window % + 7-day window %").ok();
+    writeln!(out, "    - Today's spend (USD)").ok();
+    writeln!(out, "    - Reset countdown").ok();
+    writeln!(out).ok();
+    writeln!(
+        out,
+        "  Same data as Claude Code's /usage, rendered live in your terminal prompt."
+    )
+    .ok();
+    writeln!(
+        out,
+        "  ainb-tui's Budget panel + session window read from the same cache."
+    )
+    .ok();
+    writeln!(out).ok();
+}
+
+fn example_cache() -> crate::cli::statusline::LiveCache {
+    use crate::cli::statusline::{CACHE_SCHEMA_VERSION, LiveCache, RateWindow};
+    LiveCache {
+        version: CACHE_SCHEMA_VERSION,
+        updated_at: chrono::Utc::now().to_rfc3339(),
+        five_hour: Some(RateWindow {
+            pct: 12,
+            resets_at: None,
+        }),
+        seven_day: Some(RateWindow {
+            pct: 3,
+            resets_at: None,
+        }),
+        today_cost_usd: Some(4.21),
+        context_pct: Some(32),
+        model: Some("Opus 4.7".to_string()),
+    }
+}
+
+fn read_choice<R: std::io::BufRead>(input: &mut R) -> Result<String> {
+    let mut line = String::new();
+    input.read_line(&mut line)?;
+    Ok(line.trim().to_lowercase())
 }
 
 // --- Tests ------------------------------------------------------------------
@@ -612,5 +822,99 @@ mod tests {
         assert_eq!(json["status"], "ok");
         assert_eq!(json["path"], "/fake/bin/tmux");
         assert_eq!(json["required"], true);
+    }
+
+    // --- statusline wizard step ---
+
+    /// Helper: run `run_statusline_step` with a HOME pointing at a tmpdir
+    /// so settings.json mutations don't touch the real ~/.claude.
+    fn run_step_with_home(input: &str) -> (StatuslineStepOutcome, String, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let prev_home = std::env::var("HOME").ok();
+        // Single-process tests: HOME is process-global so this races
+        // with parallel tests. Tests in this module that mutate HOME
+        // are gated behind a shared mutex below.
+        let _guard = HOME_MUTEX.lock().unwrap();
+        std::env::set_var("HOME", dir.path());
+        // Also redirect XDG_CACHE_HOME if it would otherwise leak.
+        let prev_xdg = std::env::var("XDG_CACHE_HOME").ok();
+        std::env::set_var("XDG_CACHE_HOME", dir.path().join("cache"));
+        // Keep tmpdir alive for duration of test
+        let path = dir.path().to_path_buf();
+        std::mem::forget(dir);
+        let mut input_buf = std::io::Cursor::new(input.as_bytes().to_vec());
+        let mut out = Vec::new();
+        let outcome = run_statusline_step(&mut input_buf, &mut out).unwrap();
+        // Restore env to avoid leaking into other tests.
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        match prev_xdg {
+            Some(v) => std::env::set_var("XDG_CACHE_HOME", v),
+            None => std::env::remove_var("XDG_CACHE_HOME"),
+        }
+        (outcome, String::from_utf8(out).unwrap(), path)
+    }
+
+    static HOME_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn print_install_offer_mentions_all_promised_fields() {
+        let mut buf = Vec::new();
+        print_install_offer(&mut buf);
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains("model"));
+        assert!(s.contains("context"));
+        assert!(s.contains("5-hour"));
+        assert!(s.contains("7-day"));
+        assert!(s.contains("spend"));
+        assert!(s.contains("Reset"));
+    }
+
+    #[test]
+    fn read_choice_lowercases_and_trims() {
+        let mut input = std::io::Cursor::new(b"  Y \n".to_vec());
+        let v = read_choice(&mut input).unwrap();
+        assert_eq!(v, "y");
+    }
+
+    #[test]
+    fn statusline_step_decline_path_persists_decision() {
+        let (outcome, output, home) = run_step_with_home("n\n");
+        assert_eq!(outcome, StatuslineStepOutcome::Declined);
+        assert!(output.contains("Skipped"));
+
+        // settings.json should NOT have been written
+        let settings = home.join(".claude").join("settings.json");
+        assert!(
+            !settings.exists(),
+            "decline path must not write settings.json"
+        );
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn statusline_step_install_path_writes_settings() {
+        let (outcome, output, home) = run_step_with_home("y\n");
+        assert_eq!(outcome, StatuslineStepOutcome::Installed);
+        assert!(output.contains("Wired"));
+        let settings = home.join(".claude").join("settings.json");
+        assert!(settings.exists());
+        let contents = std::fs::read_to_string(&settings).unwrap();
+        assert!(contents.contains("ainb statusline"));
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn statusline_step_show_example_then_install() {
+        // First "s" shows example, second "y" installs.
+        let (outcome, output, home) = run_step_with_home("s\ny\n");
+        assert_eq!(outcome, StatuslineStepOutcome::Installed);
+        assert!(output.contains("Example powerline"));
+        let _ = std::fs::remove_dir_all(&home);
     }
 }
