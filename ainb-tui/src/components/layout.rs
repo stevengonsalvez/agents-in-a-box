@@ -816,7 +816,7 @@ fn build_cta_spans() -> Vec<Span<'static>> {
     let red = Color::Rgb(230, 100, 100);
     vec![
         Span::styled("⚠ ", Style::default().fg(red).add_modifier(Modifier::BOLD)),
-        Span::styled("Live CC usage off", Style::default().fg(red)),
+        Span::styled("Live Claude Code usage off", Style::default().fg(red)),
         Span::styled(" · go to Stats to enable", Style::default().fg(MUTED_GRAY)),
     ]
 }
@@ -881,7 +881,7 @@ mod live_widget_tests {
     fn cta_spans_contain_warning_and_stats_hint() {
         let spans = build_cta_spans();
         let text = flatten(&spans);
-        assert!(text.contains("Live CC usage off"));
+        assert!(text.contains("Live Claude Code usage off"));
         assert!(text.contains("Stats"));
     }
 
