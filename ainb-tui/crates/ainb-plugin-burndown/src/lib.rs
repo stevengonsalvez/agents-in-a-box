@@ -10,9 +10,11 @@
 
 mod abi;
 pub mod cache;
+pub mod cli;
 pub mod config;
 pub mod data;
 pub mod live_window;
+pub mod output_format;
 pub mod ui;
 mod ui_helpers;
 

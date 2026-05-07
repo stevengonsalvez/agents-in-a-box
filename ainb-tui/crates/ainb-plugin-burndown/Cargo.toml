@@ -31,6 +31,8 @@ tracing = "0.1"
 bincode = "1.3"
 dirs = "5.0"
 nucleo-matcher = "0.3"
+clap = { version = "4.5", features = ["derive"] }
+toml = "0.8"
 
 # UI: ratatui without termion/crossterm backends — we paint into a Buffer
 # and the host translates to a WireBuffer for compositing.
