@@ -12,6 +12,9 @@ mod abi;
 pub mod cache;
 pub mod config;
 pub mod data;
+pub mod live_window;
+pub mod ui;
+mod ui_helpers;
 
 /// Host ABI version this plugin targets, exposed as a `[u32; 3]` so the
 /// host can read it directly via `Memory::read` without going through
