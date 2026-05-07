@@ -266,30 +266,154 @@ pub fn link_capabilities(
         )?;
     }
 
-    if !caps.filesystem.is_empty() {
+    let allowlist = build_fs_allowlist(caps);
+    if !allowlist.is_empty() {
+        let allow_for_read = allowlist.clone();
         linker.func_wrap(
             HOST_MODULE,
             "ainb_fs_read",
-            |_: Caller<'_, HostState>,
-             _path_ptr: i32,
-             _path_len: i32,
-             _out_ptr: i32,
-             _out_len: i32|
-             -> i32 { HostStatus::HostError as i32 },
+            move |mut caller: Caller<'_, HostState>,
+                  path_ptr: i32,
+                  path_len: i32,
+                  out_ptr: i32,
+                  out_len: i32|
+                  -> i32 {
+                fs_read_impl(&mut caller, &allow_for_read, path_ptr, path_len, out_ptr, out_len)
+            },
         )?;
-        linker.func_wrap(
-            HOST_MODULE,
-            "ainb_fs_glob",
-            |_: Caller<'_, HostState>,
-             _pat_ptr: i32,
-             _pat_len: i32,
-             _out_ptr: i32,
-             _out_len: i32|
-             -> i32 { HostStatus::HostError as i32 },
-        )?;
+        // ainb_fs_glob lands when a plugin actually uses it. Burndown reads
+        // pre-known JSONL paths, so we keep the link list minimal until then.
     }
 
     Ok(())
+}
+
+/// Resolve which filesystem roots a plugin's capabilities grant. Returns
+/// canonicalised `PathBuf`s rooted at the user's home directory; unresolvable
+/// entries (no `$HOME`, missing dir) are silently dropped.
+///
+/// Capability → root mapping:
+/// * `read_claude_logs`  → `$HOME/.claude`
+/// * `read_codex_logs`   → `$HOME/.codex`
+/// * `filesystem = [...]` → each entry, with `~` expanded and trailing
+///   `/**` / `/*` stripped (treat as a prefix root).
+pub(crate) fn build_fs_allowlist(caps: &CapabilitySet) -> Vec<std::path::PathBuf> {
+    use std::path::PathBuf;
+    let mut roots: Vec<PathBuf> = Vec::new();
+
+    let push_under_home = |roots: &mut Vec<PathBuf>, sub: &str| {
+        if let Some(home) = dirs::home_dir() {
+            let p = home.join(sub);
+            if let Ok(canon) = p.canonicalize() {
+                roots.push(canon);
+            } else {
+                // Fall back to the un-canonicalised path so the allowlist
+                // still applies even if the dir doesn't exist yet.
+                roots.push(p);
+            }
+        }
+    };
+
+    if caps.read_claude_logs {
+        push_under_home(&mut roots, ".claude");
+    }
+    if caps.read_codex_logs {
+        push_under_home(&mut roots, ".codex");
+    }
+    for entry in &caps.filesystem {
+        // Strip trailing glob suffixes — we model the allowlist as path
+        // prefixes (the glob match itself is the plugin's responsibility).
+        let trimmed = entry.trim_end_matches("/**").trim_end_matches("/*");
+        let expanded = if let Some(rest) = trimmed.strip_prefix("~/") {
+            dirs::home_dir().map(|h| h.join(rest))
+        } else if trimmed == "~" {
+            dirs::home_dir()
+        } else {
+            Some(std::path::PathBuf::from(trimmed))
+        };
+        if let Some(p) = expanded {
+            if let Ok(canon) = p.canonicalize() {
+                roots.push(canon);
+            } else {
+                roots.push(p);
+            }
+        }
+    }
+    roots
+}
+
+/// Real impl of the `ainb_fs_read` host-fn. Validates the requested path is
+/// under one of the plugin's allowlisted roots, reads the file, and copies it
+/// into the plugin's pre-allocated output buffer.
+fn fs_read_impl(
+    caller: &mut Caller<'_, HostState>,
+    allowlist: &[std::path::PathBuf],
+    path_ptr: i32,
+    path_len: i32,
+    out_ptr: i32,
+    out_len: i32,
+) -> i32 {
+    use ainb_plugin_api::host::HostStatus;
+
+    let path_str = match read_string(caller, path_ptr, path_len) {
+        Ok(s) => s,
+        Err(e) => {
+            caller.data_mut().last_error = Some(format!("ainb_fs_read: bad path utf8: {e}"));
+            return HostStatus::InvalidArgument as i32;
+        }
+    };
+
+    // Expand a leading `~/` so plugins can write portable paths.
+    let raw = std::path::PathBuf::from(if let Some(rest) = path_str.strip_prefix("~/") {
+        dirs::home_dir()
+            .map(|h| h.join(rest).to_string_lossy().into_owned())
+            .unwrap_or(path_str.clone())
+    } else {
+        path_str.clone()
+    });
+    // Canonicalise the requested path so `..` traversal can't escape the
+    // allowlisted root. Files that don't exist canonicalise via parent +
+    // file_name, mirroring std::fs::canonicalize semantics for missing tails.
+    let canonical = raw.canonicalize().unwrap_or(raw);
+    let permitted = allowlist.iter().any(|root| canonical.starts_with(root));
+    if !permitted {
+        caller.data_mut().last_error =
+            Some(format!("ainb_fs_read denied: {} not under allowlist", canonical.display()));
+        return HostStatus::NotPermitted as i32;
+    }
+
+    let bytes = match std::fs::read(&canonical) {
+        Ok(b) => b,
+        Err(e) => {
+            caller.data_mut().last_error =
+                Some(format!("ainb_fs_read: {} ({e})", canonical.display()));
+            return HostStatus::HostError as i32;
+        }
+    };
+
+    let cap = match usize::try_from(out_len) {
+        Ok(n) => n,
+        Err(_) => return HostStatus::InvalidArgument as i32,
+    };
+    if bytes.len() > cap {
+        // Tell the caller exactly how big a buffer they need by returning
+        // BufferTooSmall; the plugin re-allocs and retries. We deliberately
+        // do NOT write a partial payload — keeps the read atomic.
+        return HostStatus::BufferTooSmall as i32;
+    }
+
+    let memory = match caller.get_export("memory").and_then(wasmi::Extern::into_memory) {
+        Some(m) => m,
+        None => return HostStatus::HostError as i32,
+    };
+    let off = match usize::try_from(out_ptr) {
+        Ok(n) => n,
+        Err(_) => return HostStatus::InvalidArgument as i32,
+    };
+    if memory.write(&mut *caller, off, &bytes).is_err() {
+        return HostStatus::HostError as i32;
+    }
+    i32::try_from(bytes.len()).unwrap_or(HostStatus::HostError as i32)
 }
 
 /// Read raw bytes out of the plugin's exported `memory`.
