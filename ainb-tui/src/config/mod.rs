@@ -411,8 +411,6 @@ pub enum StatuslineDecision {
     Declined,
     /// User accepted; we have written our block.
     Installed,
-    /// User accepted "chain" — we appended ourselves to an existing cmd.
-    Chained,
 }
 
 impl Default for UiPreferences {

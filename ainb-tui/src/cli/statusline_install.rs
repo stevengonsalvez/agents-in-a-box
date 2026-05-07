@@ -4,7 +4,7 @@
 // Idempotency story:
 //   - If our block is already present we no-op (`AlreadyInstalled`).
 //   - If a different statusLine command is present we report it and let
-//     the caller decide keep/replace/chain — we never silently overwrite.
+//     the caller decide keep/replace — we never silently overwrite.
 //   - All writes are preceded by a backup at `settings.json.bak.<unix-ts>`
 //     so the user can always restore the prior config.
 
@@ -22,17 +22,14 @@ pub enum InstallOutcome {
     /// Our block was already present; nothing changed.
     AlreadyInstalled,
     /// A different statusLine command was present; we did NOT overwrite.
-    /// The caller decides keep / replace / chain based on the value.
+    /// The caller decides keep / replace based on the value.
     ExistingDifferent { current_command: String },
-    /// We chained our command onto the existing one (`existing | ainb ...`).
-    /// Returned only by `install_statusline_chained`.
-    Chained,
 }
 
 /// Status of the user's statusline configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StatuslineStatus {
-    /// Either `ainb statusline` is wired, or our chained variant is.
+    /// `ainb statusline` is wired as the sole statusLine command.
     Configured,
     /// No statusLine block at all.
     NotConfigured,
@@ -77,11 +74,7 @@ fn classify_status(value: &serde_json::Value) -> StatuslineStatus {
 }
 
 fn command_is_ours(cmd: &str) -> bool {
-    let trimmed = cmd.trim();
-    trimmed == AINB_STATUSLINE_CMD
-        // Chained variant: `existing | ainb statusline`
-        || trimmed.ends_with(&format!("| {AINB_STATUSLINE_CMD}"))
-        || trimmed.ends_with(&format!("|{AINB_STATUSLINE_CMD}"))
+    cmd.trim() == AINB_STATUSLINE_CMD
 }
 
 /// Has the cache file been written within `max_age_secs`?
@@ -159,7 +152,7 @@ pub fn install_statusline_at(path: &Path) -> Result<InstallOutcome> {
 }
 
 /// Replace whatever is in `statusLine.command` with our command. Caller
-/// must have made the keep/replace/chain decision; this is the "replace"
+/// must have made the keep/replace decision; this is the "replace"
 /// branch. Backs up first.
 pub fn install_statusline_replace_at(path: &Path) -> Result<InstallOutcome> {
     if !path.exists() {
@@ -177,48 +170,6 @@ pub fn install_statusline_replace_at(path: &Path) -> Result<InstallOutcome> {
     }
     atomic_write_json(path, &value)?;
     Ok(InstallOutcome::Installed)
-}
-
-/// Chain mode: rewrite `statusLine.command` to `<existing> | ainb statusline`.
-/// No-ops with `AlreadyInstalled` if we're already chained or already the
-/// sole command.
-pub fn install_statusline_chained_at(path: &Path) -> Result<InstallOutcome> {
-    if !path.exists() {
-        return install_statusline_at(path);
-    }
-    let bytes =
-        std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let mut value: serde_json::Value = serde_json::from_slice(&bytes)
-        .with_context(|| format!("failed to parse {}", path.display()))?;
-
-    let current = value
-        .pointer("/statusLine/command")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-
-    let Some(current) = current else {
-        // Nothing to chain onto — fall back to plain install.
-        return install_statusline_at(path);
-    };
-
-    if command_is_ours(&current) {
-        return Ok(InstallOutcome::AlreadyInstalled);
-    }
-
-    backup(path)?;
-    let chained = format!("{current} | {AINB_STATUSLINE_CMD}");
-    if let Some(obj) = value.as_object_mut() {
-        obj.insert(
-            "statusLine".to_string(),
-            serde_json::json!({
-                "type": "command",
-                "command": chained,
-                "padding": 0,
-            }),
-        );
-    }
-    atomic_write_json(path, &value)?;
-    Ok(InstallOutcome::Chained)
 }
 
 fn our_block() -> serde_json::Value {
@@ -291,7 +242,9 @@ mod tests {
     }
 
     #[test]
-    fn detect_status_returns_configured_for_chained_variant() {
+    fn detect_status_returns_other_for_chained_command() {
+        // After dropping chain mode, a piped command is treated as a
+        // foreign command — caller must explicitly replace.
         let dir = tempdir().unwrap();
         let path = dir.path().join("settings.json");
         std::fs::write(
@@ -301,7 +254,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             detect_statusline_status_at(&path).unwrap(),
-            StatuslineStatus::Configured
+            StatuslineStatus::Other("~/bin/my-line.sh | ainb statusline".to_string())
         );
     }
 
@@ -415,26 +368,6 @@ mod tests {
         .unwrap();
         let outcome = install_statusline_replace_at(&path).unwrap();
         assert_eq!(outcome, InstallOutcome::Installed);
-        assert_eq!(
-            detect_statusline_status_at(&path).unwrap(),
-            StatuslineStatus::Configured
-        );
-    }
-
-    #[test]
-    fn chain_appends_pipe_to_existing() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("settings.json");
-        std::fs::write(
-            &path,
-            br#"{"statusLine":{"type":"command","command":"~/bin/foo"}}"#,
-        )
-        .unwrap();
-        let outcome = install_statusline_chained_at(&path).unwrap();
-        assert_eq!(outcome, InstallOutcome::Chained);
-        let bytes = std::fs::read(&path).unwrap();
-        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(v["statusLine"]["command"], "~/bin/foo | ainb statusline");
         assert_eq!(
             detect_statusline_status_at(&path).unwrap(),
             StatuslineStatus::Configured

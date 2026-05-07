@@ -444,8 +444,6 @@ pub enum StatuslineStepOutcome {
     Skipped,
     /// User accepted; we ran the install.
     Installed,
-    /// User accepted "chain" against an existing command.
-    Chained,
     /// User declined; we record `Declined` so we don't re-prompt.
     Declined,
     /// User chose "keep" their existing different statusline.
@@ -460,7 +458,7 @@ pub fn run_statusline_step<R: std::io::BufRead, W: std::io::Write>(
 ) -> Result<StatuslineStepOutcome> {
     use crate::cli::statusline_install::{
         InstallOutcome, StatuslineStatus, detect_statusline_status, install_statusline,
-        install_statusline_chained_at, install_statusline_replace_at, settings_path,
+        install_statusline_replace_at, settings_path,
     };
     use crate::config::StatuslineDecision;
 
@@ -484,15 +482,10 @@ pub fn run_statusline_step<R: std::io::BufRead, W: std::io::Write>(
             writeln!(out, "Existing Claude Code statusline detected: {cmd}").ok();
             writeln!(
                 out,
-                "  [k]eep your current command  [r]eplace with ainb statusline"
+                "  [k]eep your current command  [r]eplace with ainb statusline  [s]kip for now"
             )
             .ok();
-            writeln!(
-                out,
-                "  [c]hain ('{cmd} | ainb statusline')   [s]kip for now"
-            )
-            .ok();
-            write!(out, "Choice [k/r/c/s]: ").ok();
+            write!(out, "Choice [k/r/s]: ").ok();
             out.flush().ok();
             let choice = read_choice(input)?;
             let path = settings_path()?;
@@ -503,17 +496,6 @@ pub fn run_statusline_step<R: std::io::BufRead, W: std::io::Write>(
                     let _ = app_config.save();
                     writeln!(out, "  ✓ Replaced existing statusline.").ok();
                     Ok(StatuslineStepOutcome::Installed)
-                }
-                "c" => {
-                    install_statusline_chained_at(&path)?;
-                    app_config.ui_preferences.statusline_decision = StatuslineDecision::Chained;
-                    let _ = app_config.save();
-                    writeln!(
-                        out,
-                        "  ✓ Chained ainb statusline onto your existing command."
-                    )
-                    .ok();
-                    Ok(StatuslineStepOutcome::Chained)
                 }
                 "k" => {
                     // Treat "keep" as Declined for top-bar suppression
@@ -565,13 +547,6 @@ pub fn run_statusline_step<R: std::io::BufRead, W: std::io::Write>(
                             let _ = app_config.save();
                             writeln!(out, "  ✓ Wired Claude Code statusline.").ok();
                             Ok(StatuslineStepOutcome::Installed)
-                        }
-                        InstallOutcome::Chained => {
-                            app_config.ui_preferences.statusline_decision =
-                                StatuslineDecision::Chained;
-                            let _ = app_config.save();
-                            writeln!(out, "  ✓ Chained ainb statusline.").ok();
-                            Ok(StatuslineStepOutcome::Chained)
                         }
                         InstallOutcome::ExistingDifferent { current_command } => {
                             // Race: someone wrote a different statusLine

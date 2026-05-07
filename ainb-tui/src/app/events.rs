@@ -4415,14 +4415,8 @@ impl EventHandler {
                         current_command,
                     }) => {
                         state.add_warning_notification(format!(
-                            "Existing statusline detected: {current_command}. Run `ainb init` for keep/replace/chain."
+                            "Existing statusline detected: {current_command}. Run `ainb init` for keep/replace."
                         ));
-                    }
-                    Ok(crate::cli::statusline_install::InstallOutcome::Chained) => {
-                        state.app_config.ui_preferences.statusline_decision =
-                            crate::config::StatuslineDecision::Chained;
-                        let _ = state.app_config.save();
-                        state.add_success_notification("Chained ainb statusline.".to_string());
                     }
                     Err(e) => {
                         state.add_error_notification(format!(
