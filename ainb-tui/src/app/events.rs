@@ -501,6 +501,38 @@ impl EventHandler {
         }
     }
 
+    /// Pure decision logic shared between the production global-`W`
+    /// shortcut and tests. Wiring is productive when live data isn't
+    /// already flowing from the Tier1 cache *and* the user's
+    /// `~/.claude/settings.json` doesn't already carry our block.
+    fn should_wire_statusline_inner(
+        live_source: crate::models::live_window::Source,
+        statusline_status: Option<&crate::cli::statusline_install::StatuslineStatus>,
+    ) -> bool {
+        use crate::cli::statusline_install::StatuslineStatus;
+        use crate::models::live_window::Source;
+
+        if live_source == Source::Tier1Cache {
+            return false;
+        }
+        matches!(
+            statusline_status,
+            Some(StatuslineStatus::NotConfigured) | Some(StatuslineStatus::Other(_))
+        )
+    }
+
+    /// True when wiring the Claude Code statusline would be productive.
+    /// Drives the global `W` shortcut. When this is `false` the keystroke
+    /// is ignored at the global layer and falls through to the active
+    /// view's normal handling.
+    fn should_wire_statusline() -> bool {
+        use crate::cli::statusline_install::detect_statusline_status;
+        use crate::models::live_window::current;
+
+        let status = detect_statusline_status().ok();
+        Self::should_wire_statusline_inner(current().source, status.as_ref())
+    }
+
     pub fn handle_key_event(key_event: KeyEvent, state: &mut AppState) -> Option<AppEvent> {
         use crate::app::state::View;
 
@@ -578,6 +610,30 @@ impl EventHandler {
         // Supports both '?' and Shift+H
         if matches!(key_event.code, KeyCode::Char('?' | 'H')) {
             return Some(AppEvent::ToggleHelp);
+        }
+
+        // Global `W`: wire Claude Code statusline. Active from any non-text
+        // view when the statusline is unwired or stale (live data isn't
+        // coming from the Tier1 cache). The CTA in the top status bar
+        // points users here, so the shortcut must work everywhere — not
+        // just from the Burndown panel where it originally lived.
+        //
+        // Suppressed in views that take free-form character input so an
+        // accidental Shift+W during typing doesn't trigger an install.
+        let suppress_global_w = matches!(
+            state.current_view,
+            View::NewSession
+                | View::SearchWorkspace
+                | View::ClaudeChat
+                | View::AuthSetup
+                | View::Config
+                | View::AttachedTerminal
+        ) || state.auth_provider_popup_state.show_popup;
+        if !suppress_global_w
+            && matches!(key_event.code, KeyCode::Char('W'))
+            && Self::should_wire_statusline()
+        {
+            return Some(AppEvent::UsageWireStatusline);
         }
 
         // AINB 2.0: Handle home screen view
@@ -1732,10 +1788,10 @@ impl EventHandler {
                 // Capital X (Shift+x) only — lowercase x is reserved for
                 // future scope and must NOT trigger the exclude commit.
                 KeyCode::Char('X') => return Some(AppEvent::UsageCommitExcludeFilter),
-                // W wires up the Claude Code statusline. Only meaningful
-                // on the Budget panel when live data is unavailable; the
-                // handler enforces both checks before doing anything.
-                KeyCode::Char('W') => return Some(AppEvent::UsageWireStatusline),
+                // `W` (wire Claude Code statusline) is now a global
+                // shortcut handled at the top of `handle_key_event`. The
+                // local arm has been removed so there is exactly one
+                // dispatch path; the global handler covers Burndown too.
                 KeyCode::Esc if state.usage_state.filters.any() => {
                     return Some(AppEvent::UsagePopFilterChip);
                 }
@@ -4378,19 +4434,20 @@ impl EventHandler {
                 }
             }
             AppEvent::UsageWireStatusline => {
-                // Only act when (a) Budget panel is focused and (b) live
-                // data is unavailable. Either condition unmet → no-op so
-                // a stray `W` keystroke doesn't surprise the user.
-                let on_budget = matches!(
-                    state.usage_state.focused_panel,
-                    Some(crate::components::usage::UsagePanel::Budget)
-                );
-                let no_live = matches!(
-                    crate::models::live_window::current().source,
-                    crate::models::live_window::Source::None
-                );
-                if !on_budget || !no_live {
+                // Fire when the statusline isn't already serving fresh data
+                // from the Tier1 cache *and* the user's settings.json doesn't
+                // already carry our block. This event is reachable from the
+                // global `W` shortcut as well as the legacy Burndown route,
+                // so the guard lives here rather than at the keymap.
+                use crate::cli::statusline_install::{StatuslineStatus, detect_statusline_status};
+                let live_source = crate::models::live_window::current().source;
+                if live_source == crate::models::live_window::Source::Tier1Cache {
                     return;
+                }
+                match detect_statusline_status() {
+                    Ok(StatuslineStatus::Configured) => return,
+                    Ok(_) => {}
+                    Err(_) => return,
                 }
                 match crate::cli::statusline_install::install_statusline() {
                     Ok(crate::cli::statusline_install::InstallOutcome::Installed) => {
@@ -4923,5 +4980,72 @@ impl EventHandler {
                 // These are processed by handle_mouse_event
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod global_w_tests {
+    use super::*;
+    use crate::cli::statusline_install::StatuslineStatus;
+    use crate::models::live_window::Source;
+
+    #[test]
+    fn fires_when_source_is_none_and_statusline_unconfigured() {
+        assert!(EventHandler::should_wire_statusline_inner(
+            Source::None,
+            Some(&StatuslineStatus::NotConfigured),
+        ));
+    }
+
+    #[test]
+    fn fires_when_tier2_local_and_statusline_unconfigured() {
+        // Tier2Local means ainb is reading JSONL fallback — not the
+        // Tier1 cache the statusline would write to. Wiring is still
+        // productive.
+        assert!(EventHandler::should_wire_statusline_inner(
+            Source::Tier2Local,
+            Some(&StatuslineStatus::NotConfigured),
+        ));
+    }
+
+    #[test]
+    fn fires_when_other_command_present() {
+        assert!(EventHandler::should_wire_statusline_inner(
+            Source::None,
+            Some(&StatuslineStatus::Other("ccusage statusline".into())),
+        ));
+    }
+
+    #[test]
+    fn no_op_when_tier1_cache_active() {
+        // Already wired and fresh — `W` should fall through and not
+        // re-trigger the install.
+        assert!(!EventHandler::should_wire_statusline_inner(
+            Source::Tier1Cache,
+            Some(&StatuslineStatus::Configured),
+        ));
+        assert!(!EventHandler::should_wire_statusline_inner(
+            Source::Tier1Cache,
+            Some(&StatuslineStatus::NotConfigured),
+        ));
+    }
+
+    #[test]
+    fn no_op_when_already_configured_even_without_fresh_cache() {
+        // Settings.json has our block but the cache hasn't been written
+        // yet (statusline hasn't run). Re-installing wouldn't help.
+        assert!(!EventHandler::should_wire_statusline_inner(
+            Source::None,
+            Some(&StatuslineStatus::Configured),
+        ));
+    }
+
+    #[test]
+    fn no_op_when_status_detection_failed() {
+        // IO failure reading settings.json — refuse to install blindly.
+        assert!(!EventHandler::should_wire_statusline_inner(
+            Source::None,
+            None,
+        ));
     }
 }
