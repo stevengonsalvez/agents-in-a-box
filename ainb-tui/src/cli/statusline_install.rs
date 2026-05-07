@@ -136,7 +136,6 @@ pub fn install_statusline_at(path: &Path) -> Result<InstallOutcome> {
             current_command: current,
         }),
         StatuslineStatus::NotConfigured => {
-            backup(path)?;
             // Preserve every other key — only set `statusLine`.
             if let Some(obj) = value.as_object_mut() {
                 obj.insert("statusLine".to_string(), block);
@@ -145,7 +144,7 @@ pub fn install_statusline_at(path: &Path) -> Result<InstallOutcome> {
                 // is malformed config from the user's POV).
                 value = serde_json::json!({ "statusLine": block });
             }
-            atomic_write_json(path, &value)?;
+            write_with_backup(path, &bytes, &value)?;
             Ok(InstallOutcome::Installed)
         }
     }
@@ -153,7 +152,8 @@ pub fn install_statusline_at(path: &Path) -> Result<InstallOutcome> {
 
 /// Replace whatever is in `statusLine.command` with our command. Caller
 /// must have made the keep/replace decision; this is the "replace"
-/// branch. Backs up first.
+/// branch. Backup is written *after* the new file lands successfully so
+/// a failed write cannot leave a stray `.bak` with no rewrite.
 pub fn install_statusline_replace_at(path: &Path) -> Result<InstallOutcome> {
     if !path.exists() {
         return install_statusline_at(path);
@@ -162,13 +162,12 @@ pub fn install_statusline_replace_at(path: &Path) -> Result<InstallOutcome> {
         std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
     let mut value: serde_json::Value = serde_json::from_slice(&bytes)
         .with_context(|| format!("failed to parse {}", path.display()))?;
-    backup(path)?;
     if let Some(obj) = value.as_object_mut() {
         obj.insert("statusLine".to_string(), our_block());
     } else {
         value = serde_json::json!({ "statusLine": our_block() });
     }
-    atomic_write_json(path, &value)?;
+    write_with_backup(path, &bytes, &value)?;
     Ok(InstallOutcome::Installed)
 }
 
@@ -186,14 +185,43 @@ fn our_block() -> serde_json::Value {
 /// time.
 const MAX_BACKUPS: usize = 3;
 
-fn backup(path: &Path) -> Result<()> {
+/// Write `new_value` to `path` atomically, then write `prev_bytes` (the
+/// in-memory snapshot of the previous on-disk contents) to a sibling
+/// `<path>.bak.<unix-ts>` and prune older backups.
+///
+/// Backup-after-write ordering matters: if the new write fails (disk
+/// full, permissions, rename race), no `.bak` is left behind. If the
+/// new write succeeds but the backup write fails we swallow the error
+/// and log — the new file is the important artefact, and a missing
+/// backup is recoverable through normal version control.
+fn write_with_backup(
+    path: &Path,
+    prev_bytes: &[u8],
+    new_value: &serde_json::Value,
+) -> Result<()> {
+    atomic_write_json(path, new_value)?;
+    if let Err(e) = write_backup_from_bytes(path, prev_bytes) {
+        tracing::warn!(
+            "wrote {} but failed to record backup: {}",
+            path.display(),
+            e
+        );
+    }
+    Ok(())
+}
+
+/// Write `prev_bytes` to a `<path>.bak.<unix-ts>` file and prune older
+/// backups. Used by `write_with_backup` after a successful new-file
+/// write — the bytes are the *previous* on-disk contents captured
+/// before the write.
+fn write_backup_from_bytes(path: &Path, prev_bytes: &[u8]) -> Result<()> {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let bak = path.with_extension(format!("json.bak.{ts}"));
-    std::fs::copy(path, &bak)
-        .with_context(|| format!("failed to back up {} -> {}", path.display(), bak.display()))?;
+    std::fs::write(&bak, prev_bytes)
+        .with_context(|| format!("failed to write backup {}", bak.display()))?;
     prune_old_backups(path, MAX_BACKUPS);
     Ok(())
 }
