@@ -1,5 +1,6 @@
 // ABOUTME: Core data models for Claude-in-a-Box sessions, workspaces, and state management
 
+pub mod live_window;
 pub mod other_tmux;
 pub mod repo_lookup;
 pub mod session;
