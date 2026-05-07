@@ -1,7 +1,7 @@
 // ABOUTME: Widget for rendering Grep tool calls showing search results
 // Displays search patterns and matching files with context
 
-use super::{MessageWidget, WidgetOutput, ToolResult, helpers, result_parser};
+use super::{MessageWidget, ToolResult, WidgetOutput, helpers, result_parser};
 use crate::agent_parsers::AgentEvent;
 use crate::components::live_logs_stream::{LogEntry, LogEntryLevel};
 use uuid::Uuid;
@@ -20,13 +20,17 @@ impl MessageWidget for GrepWidget {
     }
 
     fn render(&self, event: AgentEvent, container_name: &str, session_id: Uuid) -> WidgetOutput {
-        if let AgentEvent::ToolCall { id, name: _, input, description } = event {
+        if let AgentEvent::ToolCall {
+            id,
+            name: _,
+            input,
+            description,
+        } = event
+        {
             let mut entries = Vec::new();
 
             // Extract search parameters
-            let pattern = input.get("pattern")
-                .and_then(|v| v.as_str())
-                .unwrap_or("*");
+            let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("*");
 
             // Build the main message
             let mut main_msg = String::new();
@@ -65,9 +69,7 @@ impl MessageWidget for GrepWidget {
             entries.push(pattern_entry);
 
             // Add search location if not current directory
-            let path = input.get("path")
-                .and_then(|v| v.as_str())
-                .unwrap_or(".");
+            let path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 
             if path != "." {
                 entries.push(
@@ -77,7 +79,7 @@ impl MessageWidget for GrepWidget {
                         format!("  📁 Path: {}", path),
                     )
                     .with_session(session_id)
-                    .with_metadata("event_type", "grep_path")
+                    .with_metadata("event_type", "grep_path"),
                 );
             }
 
@@ -100,7 +102,7 @@ impl MessageWidget for GrepWidget {
                         format!("  🗂️  Files: {}", glob),
                     )
                     .with_session(session_id)
-                    .with_metadata("event_type", "grep_glob")
+                    .with_metadata("event_type", "grep_glob"),
                 );
             }
 
@@ -112,7 +114,7 @@ impl MessageWidget for GrepWidget {
                         format!("  📝 Type: {}", file_type),
                     )
                     .with_session(session_id)
-                    .with_metadata("event_type", "grep_type")
+                    .with_metadata("event_type", "grep_type"),
                 );
             }
 
@@ -124,12 +126,13 @@ impl MessageWidget for GrepWidget {
                         format!("  ⚙️ Options: {}", options.join(", ")),
                     )
                     .with_session(session_id)
-                    .with_metadata("event_type", "grep_options")
+                    .with_metadata("event_type", "grep_options"),
                 );
             }
 
             // Add output mode
-            let output_mode = input.get("output_mode")
+            let output_mode = input
+                .get("output_mode")
                 .and_then(|v| v.as_str())
                 .unwrap_or("files_with_matches");
 
@@ -146,32 +149,40 @@ impl MessageWidget for GrepWidget {
                     format!("  {} Mode: {}", mode_icon, output_mode),
                 )
                 .with_session(session_id)
-                .with_metadata("event_type", "grep_mode")
+                .with_metadata("event_type", "grep_mode"),
             );
 
             WidgetOutput::MultiLine(entries)
         } else {
-            WidgetOutput::Simple(
-                helpers::create_log_entry(
-                    LogEntryLevel::Error,
-                    container_name,
-                    "Invalid event for GrepWidget".to_string(),
-                    session_id,
-                    "error",
-                )
-            )
+            WidgetOutput::Simple(helpers::create_log_entry(
+                LogEntryLevel::Error,
+                container_name,
+                "Invalid event for GrepWidget".to_string(),
+                session_id,
+                "error",
+            ))
         }
     }
 
-    fn render_with_result(&self, event: AgentEvent, result: Option<ToolResult>, container_name: &str, session_id: Uuid) -> WidgetOutput {
-        if let AgentEvent::ToolCall { id, name: _, input, description } = event {
+    fn render_with_result(
+        &self,
+        event: AgentEvent,
+        result: Option<ToolResult>,
+        container_name: &str,
+        session_id: Uuid,
+    ) -> WidgetOutput {
+        if let AgentEvent::ToolCall {
+            id,
+            name: _,
+            input,
+            description,
+        } = event
+        {
             let mut header_entries = Vec::new();
             let mut content_entries = Vec::new();
 
             // Extract search parameters
-            let pattern = input.get("pattern")
-                .and_then(|v| v.as_str())
-                .unwrap_or("*");
+            let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("*");
 
             // Build the main header message
             let mut main_msg = String::new();
@@ -224,13 +235,9 @@ impl MessageWidget for GrepWidget {
                         };
 
                         content_entries.push(
-                            LogEntry::new(
-                                level,
-                                container_name.to_string(),
-                                formatted_line,
-                            )
-                            .with_session(session_id)
-                            .with_metadata("grep_result", "true")
+                            LogEntry::new(level, container_name.to_string(), formatted_line)
+                                .with_session(session_id)
+                                .with_metadata("grep_result", "true"),
                         );
                     }
                 } else if tool_result.is_error {
@@ -241,7 +248,7 @@ impl MessageWidget for GrepWidget {
                             container_name.to_string(),
                             "❌ Search failed with no output".to_string(),
                         )
-                        .with_session(session_id)
+                        .with_session(session_id),
                     );
                 }
 
@@ -257,15 +264,13 @@ impl MessageWidget for GrepWidget {
             }
         } else {
             // Should not happen if can_handle works correctly
-            WidgetOutput::Simple(
-                helpers::create_log_entry(
-                    LogEntryLevel::Error,
-                    container_name,
-                    "Invalid event for GrepWidget".to_string(),
-                    session_id,
-                    "error",
-                )
-            )
+            WidgetOutput::Simple(helpers::create_log_entry(
+                LogEntryLevel::Error,
+                container_name,
+                "Invalid event for GrepWidget".to_string(),
+                session_id,
+                "error",
+            ))
         }
     }
 
@@ -283,7 +288,8 @@ fn format_grep_results(content: &str, input: &serde_json::Value) -> Vec<String> 
         return results;
     }
 
-    let output_mode = input.get("output_mode")
+    let output_mode = input
+        .get("output_mode")
         .and_then(|v| v.as_str())
         .unwrap_or("files_with_matches");
 
@@ -317,7 +323,7 @@ fn format_grep_results(content: &str, input: &serde_json::Value) -> Vec<String> 
                     results.push(format!("   {}", line));
                 }
             }
-        },
+        }
         "count" => {
             // Format count results
             for line in content.lines() {
@@ -333,7 +339,7 @@ fn format_grep_results(content: &str, input: &serde_json::Value) -> Vec<String> 
                     results.push(format!("📊 {}", line));
                 }
             }
-        },
+        }
         _ => {
             // files_with_matches or default
             for line in content.lines() {
@@ -422,10 +428,15 @@ mod tests {
             is_error: false,
         };
 
-        let output = widget.render_with_result(event, Some(tool_result), "test-container", Uuid::nil());
+        let output =
+            widget.render_with_result(event, Some(tool_result), "test-container", Uuid::nil());
 
         match output {
-            WidgetOutput::Hierarchical { header, content, collapsed } => {
+            WidgetOutput::Hierarchical {
+                header,
+                content,
+                collapsed,
+            } => {
                 assert!(!header.is_empty());
                 assert!(!content.is_empty());
                 assert!(!collapsed);
@@ -456,10 +467,15 @@ mod tests {
             is_error: false,
         };
 
-        let output = widget.render_with_result(event, Some(tool_result), "test-container", Uuid::nil());
+        let output =
+            widget.render_with_result(event, Some(tool_result), "test-container", Uuid::nil());
 
         match output {
-            WidgetOutput::Hierarchical { header, content, collapsed: _ } => {
+            WidgetOutput::Hierarchical {
+                header,
+                content,
+                collapsed: _,
+            } => {
                 assert!(!header.is_empty());
                 assert!(header[0].message.contains("🔍 Grep"));
                 assert!(content.iter().any(|e| e.message.contains("📭 No matches found")));

@@ -11,4 +11,6 @@
 pub mod session_manager;
 
 #[allow(unused_imports)]
-pub use session_manager::{InteractiveSession, InteractiveSessionManager, SessionMetadata, SessionStore};
+pub use session_manager::{
+    InteractiveSession, InteractiveSessionManager, SessionMetadata, SessionStore,
+};

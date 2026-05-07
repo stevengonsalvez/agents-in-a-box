@@ -394,7 +394,6 @@ agents-in-a-box/
 │   │   ├── claude/             #   Claude API client
 │   │   ├── models/             #   Data models
 │   │   └── config/             #   Configuration handling
-│   ├── deny.toml               #   License & security policy
 │   ├── Formula/                #   Homebrew formula
 │   └── install.sh              #   One-liner installer
 │

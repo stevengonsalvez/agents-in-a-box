@@ -3,11 +3,11 @@
 
 #![allow(dead_code)]
 
+use lazy_static::lazy_static;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
-use syntect::util::{as_24_bit_terminal_escaped, LinesWithEndings};
-use lazy_static::lazy_static;
+use syntect::util::{LinesWithEndings, as_24_bit_terminal_escaped};
 
 lazy_static! {
     static ref SYNTAX_SET: SyntaxSet = SyntaxSet::load_defaults_newlines();
@@ -86,7 +86,8 @@ pub fn highlight_code(code: &str, language: Option<&str>) -> String {
         SYNTAX_SET.find_syntax_by_token(lang)
     } else {
         None
-    }.unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
+    }
+    .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
 
     let theme = &THEME_SET.themes["base16-ocean.dark"];
     let mut highlighter = HighlightLines::new(syntax, theme);
@@ -105,21 +106,21 @@ pub fn highlight_code(code: &str, language: Option<&str>) -> String {
 /// Get a simple color code for a language (for basic TUI coloring)
 pub fn get_language_color(language: &str) -> &'static str {
     match language {
-        "rust" => "\x1b[38;5;208m",      // Orange
-        "python" => "\x1b[38;5;226m",    // Yellow
+        "rust" => "\x1b[38;5;208m",                      // Orange
+        "python" => "\x1b[38;5;226m",                    // Yellow
         "javascript" | "typescript" => "\x1b[38;5;220m", // Gold
-        "java" => "\x1b[38;5;202m",      // Red-orange
-        "go" => "\x1b[38;5;51m",         // Cyan
-        "ruby" => "\x1b[38;5;196m",      // Red
-        "php" => "\x1b[38;5;99m",        // Purple
-        "c" | "cpp" => "\x1b[38;5;33m",  // Blue
-        "bash" | "sh" => "\x1b[38;5;46m", // Green
-        "sql" => "\x1b[38;5;214m",       // Orange-yellow
-        "html" => "\x1b[38;5;202m",      // HTML orange
-        "css" => "\x1b[38;5;39m",        // CSS blue
-        "json" | "yaml" | "toml" => "\x1b[38;5;35m", // Data green
-        "markdown" => "\x1b[38;5;250m",  // Gray
-        _ => "\x1b[38;5;255m",           // White (default)
+        "java" => "\x1b[38;5;202m",                      // Red-orange
+        "go" => "\x1b[38;5;51m",                         // Cyan
+        "ruby" => "\x1b[38;5;196m",                      // Red
+        "php" => "\x1b[38;5;99m",                        // Purple
+        "c" | "cpp" => "\x1b[38;5;33m",                  // Blue
+        "bash" | "sh" => "\x1b[38;5;46m",                // Green
+        "sql" => "\x1b[38;5;214m",                       // Orange-yellow
+        "html" => "\x1b[38;5;202m",                      // HTML orange
+        "css" => "\x1b[38;5;39m",                        // CSS blue
+        "json" | "yaml" | "toml" => "\x1b[38;5;35m",     // Data green
+        "markdown" => "\x1b[38;5;250m",                  // Gray
+        _ => "\x1b[38;5;255m",                           // White (default)
     }
 }
 

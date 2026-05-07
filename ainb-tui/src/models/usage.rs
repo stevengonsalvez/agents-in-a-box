@@ -48,7 +48,10 @@ pub enum UsagePeriod {
     YearToDate,
     Month,
     All,
-    Custom { from: NaiveDate, to: NaiveDate },
+    Custom {
+        from: NaiveDate,
+        to: NaiveDate,
+    },
 }
 
 impl Default for UsagePeriod {
@@ -812,9 +815,7 @@ pub fn parse_usage_for_with_roots_and_cache(
         // re-aggregated the filtered subset. The TUI hot path keeps
         // calling filter_usage_data over cached UsageData and is
         // unaffected.
-        .filter(|call| {
-            !filters_active || query.filters.matches(call, classify_activity(call))
-        })
+        .filter(|call| !filters_active || query.filters.matches(call, classify_activity(call)))
         .collect();
 
     aggregate_calls(filtered)
@@ -959,13 +960,7 @@ pub(crate) fn collect_recent_claude_calls_within_at(
                     }
                 }
             }
-            parse_claude_jsonl_within(
-                &jsonl_path,
-                &project,
-                &project_path,
-                cutoff,
-                &mut calls,
-            );
+            parse_claude_jsonl_within(&jsonl_path, &project, &project_path, cutoff, &mut calls);
         }
     }
     calls
@@ -1161,10 +1156,7 @@ fn parse_claude_source_append(
 /// string and the next assistant turn's `user_message` is empty (same
 /// fallback as before this fix). Leaves the file cursor at an
 /// undefined offset; the caller must re-seek to `from_offset`.
-fn recover_user_message_before(
-    file: &mut std::fs::File,
-    from_offset: u64,
-) -> String {
+fn recover_user_message_before(file: &mut std::fs::File, from_offset: u64) -> String {
     if from_offset == 0 {
         return String::new();
     }
@@ -1774,9 +1766,7 @@ fn aggregate_calls_with_analysis(
 /// Build the `model -> [(project, count), ...]` index used by the
 /// burndown render path's "top N projects for model X" lookup. Sorted
 /// desc by count so the render call is `take(n)` with no extra work.
-fn build_model_project_counts(
-    calls: &[ProviderCall],
-) -> HashMap<String, Vec<(String, usize)>> {
+fn build_model_project_counts(calls: &[ProviderCall]) -> HashMap<String, Vec<(String, usize)>> {
     let mut by_model: HashMap<String, HashMap<String, usize>> = HashMap::new();
     for call in calls {
         *by_model
@@ -2833,9 +2823,7 @@ fn sort_by_bucket_desc<T, F>(rows: &mut Vec<T>, key: F)
 where
     F: Fn(&T) -> &TokenBucket,
 {
-    rows.sort_by(|a, b| {
-        bucket_sort_value(key(b)).total_cmp(&bucket_sort_value(key(a)))
-    });
+    rows.sort_by(|a, b| bucket_sort_value(key(b)).total_cmp(&bucket_sort_value(key(a))));
 }
 
 /// Merge `bucket` into the entry at `key` in a `String -> TokenBucket`
@@ -3040,7 +3028,11 @@ mod tests {
         bash_commands: &[&str],
         input_tokens: u64,
     ) -> ProviderCall {
-        let model = if provider == "codex" { "gpt-5" } else { "claude-sonnet-4-5" };
+        let model = if provider == "codex" {
+            "gpt-5"
+        } else {
+            "claude-sonnet-4-5"
+        };
         crate::test_support::ProviderCallBuilder::new()
             .with_id(next_test_call_id())
             .with_provider(provider)
@@ -3721,23 +3713,17 @@ mod tests {
     #[test]
     fn last_n_days_period_covers_n_calendar_days() {
         for n in [1u32, 7, 14, 90] {
-            let (start, end) =
-                date_range_for_period(&UsagePeriod::LastNDays(n)).unwrap();
+            let (start, end) = date_range_for_period(&UsagePeriod::LastNDays(n)).unwrap();
             let start_d = start.with_timezone(&Local).date_naive();
             let end_d = end.with_timezone(&Local).date_naive();
-            assert_eq!(
-                (end_d - start_d).num_days() + 1,
-                i64::from(n),
-                "n={n}"
-            );
+            assert_eq!((end_d - start_d).num_days() + 1, i64::from(n), "n={n}");
         }
     }
 
     #[test]
     fn specific_month_period_starts_on_day_one_and_ends_on_last_day() {
         let anchor = NaiveDate::from_ymd_opt(2026, 4, 17).unwrap();
-        let (start, end) =
-            date_range_for_period(&UsagePeriod::SpecificMonth(anchor)).unwrap();
+        let (start, end) = date_range_for_period(&UsagePeriod::SpecificMonth(anchor)).unwrap();
         assert_eq!(
             start.with_timezone(&Local).date_naive(),
             NaiveDate::from_ymd_opt(2026, 4, 1).unwrap()
@@ -3775,7 +3761,10 @@ mod tests {
         assert_eq!(quarter_of(NaiveDate::from_ymd_opt(2026, 3, 31).unwrap()), 1);
         assert_eq!(quarter_of(NaiveDate::from_ymd_opt(2026, 4, 1).unwrap()), 2);
         assert_eq!(quarter_of(NaiveDate::from_ymd_opt(2026, 7, 1).unwrap()), 3);
-        assert_eq!(quarter_of(NaiveDate::from_ymd_opt(2026, 12, 31).unwrap()), 4);
+        assert_eq!(
+            quarter_of(NaiveDate::from_ymd_opt(2026, 12, 31).unwrap()),
+            4
+        );
     }
 
     #[test]
@@ -3918,19 +3907,13 @@ mod tests {
         write_file(&project_dir.join("session.jsonl"), &payload);
 
         let cutoff = now - Duration::hours(5);
-        let calls = collect_recent_claude_calls_within_at(
-            &claude_projects,
-            cutoff,
-            Duration::hours(1),
-        );
+        let calls =
+            collect_recent_claude_calls_within_at(&claude_projects, cutoff, Duration::hours(1));
 
         assert_eq!(calls.len(), 1, "only the in-window call should survive");
         let call = &calls[0];
         assert_eq!(call.input_tokens, 200);
-        assert!(
-            call.timestamp >= cutoff,
-            "kept call must be within cutoff"
-        );
+        assert!(call.timestamp >= cutoff, "kept call must be within cutoff");
     }
 
     #[test]
@@ -3952,20 +3935,14 @@ mod tests {
         let session = project_dir.join("session.jsonl");
         write_file(&session, &payload);
         // Backdate mtime to 24h ago — well past the (5h + 1h) gate.
-        let f = std::fs::OpenOptions::new()
-            .write(true)
-            .open(&session)
-            .unwrap();
-        let twenty_four_hours_ago = std::time::SystemTime::now()
-            - std::time::Duration::from_secs(60 * 60 * 24);
+        let f = std::fs::OpenOptions::new().write(true).open(&session).unwrap();
+        let twenty_four_hours_ago =
+            std::time::SystemTime::now() - std::time::Duration::from_secs(60 * 60 * 24);
         f.set_modified(twenty_four_hours_ago).unwrap();
 
         let cutoff = now - Duration::hours(5);
-        let calls = collect_recent_claude_calls_within_at(
-            &claude_projects,
-            cutoff,
-            Duration::hours(1),
-        );
+        let calls =
+            collect_recent_claude_calls_within_at(&claude_projects, cutoff, Duration::hours(1));
         assert!(
             calls.is_empty(),
             "files older than (cutoff - grace) should be skipped",

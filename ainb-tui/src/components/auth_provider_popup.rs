@@ -1,11 +1,11 @@
 // ABOUTME: Auth provider selection popup for configuring Claude authentication method
 
 use ratatui::{
+    Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, Paragraph},
-    Frame,
 };
 
 use crate::app::state::AppState;
@@ -88,9 +88,7 @@ impl AuthProviderPopupComponent {
             let name_style = if !is_available {
                 Style::default().fg(COMING_SOON_GRAY)
             } else if is_selected {
-                Style::default()
-                    .fg(SELECTION_GREEN)
-                    .add_modifier(Modifier::BOLD)
+                Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(SOFT_WHITE)
             };
@@ -104,7 +102,10 @@ impl AuthProviderPopupComponent {
                         Style::default()
                     },
                 ),
-                Span::styled(&provider.icon, Style::default().fg(if is_available { GOLD } else { COMING_SOON_GRAY })),
+                Span::styled(
+                    &provider.icon,
+                    Style::default().fg(if is_available { GOLD } else { COMING_SOON_GRAY }),
+                ),
                 Span::styled(" ", Style::default()),
                 Span::styled(&provider.name, name_style),
             ];
@@ -145,8 +146,7 @@ impl AuthProviderPopupComponent {
             lines.push(Line::from(""));
         }
 
-        let paragraph = Paragraph::new(lines)
-            .style(Style::default().bg(PANEL_BG));
+        let paragraph = Paragraph::new(lines).style(Style::default().bg(PANEL_BG));
 
         frame.render_widget(paragraph, area);
     }
@@ -162,7 +162,15 @@ impl AuthProviderPopupComponent {
             // Show current API key status or hint
             let status_text = if is_api_key {
                 let masked = crate::credentials::get_anthropic_api_key_masked();
-                format!("API Key: {} (Press Enter to {})", masked, if masked == "Not configured" { "configure" } else { "update" })
+                format!(
+                    "API Key: {} (Press Enter to {})",
+                    masked,
+                    if masked == "Not configured" {
+                        "configure"
+                    } else {
+                        "update"
+                    }
+                )
             } else {
                 String::new()
             };
@@ -179,10 +187,7 @@ impl AuthProviderPopupComponent {
 
         // API key input mode
         let input_block = Block::default()
-            .title(Span::styled(
-                " Enter API Key ",
-                Style::default().fg(GOLD),
-            ))
+            .title(Span::styled(" Enter API Key ", Style::default().fg(GOLD)))
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(CORNFLOWER_BLUE))
@@ -193,14 +198,19 @@ impl AuthProviderPopupComponent {
 
         // Mask the API key input (show only first 7 chars + dots)
         let display_key = if popup_state.api_key_input.len() > 7 {
-            format!("{}{}|", &popup_state.api_key_input[..7], "•".repeat(popup_state.api_key_input.len() - 7))
+            format!(
+                "{}{}|",
+                &popup_state.api_key_input[..7],
+                "•".repeat(popup_state.api_key_input.len() - 7)
+            )
         } else {
             format!("{}|", &popup_state.api_key_input)
         };
 
-        let input_text = Paragraph::new(Line::from(vec![
-            Span::styled(&display_key, Style::default().fg(SOFT_WHITE)),
-        ]))
+        let input_text = Paragraph::new(Line::from(vec![Span::styled(
+            &display_key,
+            Style::default().fg(SOFT_WHITE),
+        )]))
         .alignment(Alignment::Left)
         .style(Style::default().bg(LIST_HIGHLIGHT_BG));
 
@@ -211,10 +221,7 @@ impl AuthProviderPopupComponent {
         let popup_state = &state.auth_provider_popup_state;
 
         let help_items = if popup_state.is_entering_key {
-            vec![
-                ("Enter", "save"),
-                ("Esc", "cancel"),
-            ]
+            vec![("Enter", "save"), ("Esc", "cancel")]
         } else {
             vec![
                 ("", "navigate"),

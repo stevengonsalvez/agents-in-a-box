@@ -74,13 +74,9 @@ impl MessageWidget for SystemReminderWidget {
     fn can_handle(&self, event: &AgentEvent) -> bool {
         match event {
             // Check if this is a custom system reminder event
-            AgentEvent::Custom { event_type, .. } => {
-                event_type == "system_reminder"
-            }
+            AgentEvent::Custom { event_type, .. } => event_type == "system_reminder",
             // Check for system reminders embedded in tool results
-            AgentEvent::ToolResult { content, .. } => {
-                content.contains("<system-reminder>")
-            }
+            AgentEvent::ToolResult { content, .. } => content.contains("<system-reminder>"),
             _ => false,
         }
     }

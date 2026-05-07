@@ -30,9 +30,7 @@ impl TodoWidget {
         let mut done = 0u32;
 
         for todo in todos {
-            let status = todo.get("status")
-                .and_then(|x| x.as_str())
-                .unwrap_or("pending");
+            let status = todo.get("status").and_then(|x| x.as_str()).unwrap_or("pending");
 
             match status {
                 "completed" | "done" => done += 1,
@@ -49,7 +47,8 @@ impl MessageWidget for TodoWidget {
     fn can_handle(&self, event: &AgentEvent) -> bool {
         matches!(event,
             AgentEvent::ToolCall { name, .. } if name == "TodoWrite"
-        ) || matches!(event,
+        ) || matches!(
+            event,
             AgentEvent::Structured(StructuredPayload::TodoList { .. })
         )
     }
@@ -59,7 +58,12 @@ impl MessageWidget for TodoWidget {
 
         match event {
             // Handle TodoWrite tool call
-            AgentEvent::ToolCall { id, name: _, input, description: _ } => {
+            AgentEvent::ToolCall {
+                id,
+                name: _,
+                input,
+                description: _,
+            } => {
                 // Extract todos and create summary
                 if let Some(todos_val) = input.get("todos").and_then(|t| t.as_array()) {
                     let (pending, in_progress, done) = Self::count_todos(todos_val);
@@ -82,19 +86,19 @@ impl MessageWidget for TodoWidget {
                         .with_session(session_id)
                         .with_metadata("event_type", "tool_call")
                         .with_metadata("tool_id", &id)
-                        .with_metadata("tool_name", "TodoWrite")
+                        .with_metadata("tool_name", "TodoWrite"),
                     );
 
                     // Show all todos neatly formatted
                     for (idx, todo) in todos_val.iter().enumerate() {
-                        if let Some(content) = todo.get("content")
+                        if let Some(content) = todo
+                            .get("content")
                             .or_else(|| todo.get("text"))
                             .or_else(|| todo.get("task"))
                             .and_then(|v| v.as_str())
                         {
-                            let status = todo.get("status")
-                                .and_then(|x| x.as_str())
-                                .unwrap_or("pending");
+                            let status =
+                                todo.get("status").and_then(|x| x.as_str()).unwrap_or("pending");
 
                             let icon = Self::get_status_icon(status);
                             let todo_line = format!("    {} {}", icon, content);
@@ -128,14 +132,11 @@ impl MessageWidget for TodoWidget {
             }) => {
                 // Title
                 let title_text = title.unwrap_or_else(|| "📝 Todos".to_string());
-                let title_entry = LogEntry::new(
-                    LogEntryLevel::Info,
-                    container_name.to_string(),
-                    title_text,
-                )
-                .with_session(session_id)
-                .with_metadata("event_type", "structured")
-                .with_metadata("icon", "📝");
+                let title_entry =
+                    LogEntry::new(LogEntryLevel::Info, container_name.to_string(), title_text)
+                        .with_session(session_id)
+                        .with_metadata("event_type", "structured")
+                        .with_metadata("icon", "📝");
 
                 entries.push(title_entry);
 
@@ -144,15 +145,12 @@ impl MessageWidget for TodoWidget {
                     let icon = Self::get_status_icon(&item.status);
                     let item_line = format!("  {} {}", icon, item.text);
 
-                    let item_entry = LogEntry::new(
-                        LogEntryLevel::Info,
-                        container_name.to_string(),
-                        item_line,
-                    )
-                    .with_session(session_id)
-                    .with_metadata("event_type", "todo_item")
-                    .with_metadata("todo_index", &idx.to_string())
-                    .with_metadata("todo_status", &item.status);
+                    let item_entry =
+                        LogEntry::new(LogEntryLevel::Info, container_name.to_string(), item_line)
+                            .with_session(session_id)
+                            .with_metadata("event_type", "todo_item")
+                            .with_metadata("todo_index", &idx.to_string())
+                            .with_metadata("todo_status", &item.status);
 
                     entries.push(item_entry);
                 }
@@ -166,28 +164,23 @@ impl MessageWidget for TodoWidget {
                     done
                 );
 
-                let summary_entry = LogEntry::new(
-                    LogEntryLevel::Info,
-                    container_name.to_string(),
-                    summary,
-                )
-                .with_session(session_id)
-                .with_metadata("event_type", "todo_summary");
+                let summary_entry =
+                    LogEntry::new(LogEntryLevel::Info, container_name.to_string(), summary)
+                        .with_session(session_id)
+                        .with_metadata("event_type", "todo_summary");
 
                 entries.push(summary_entry);
             }
 
             _ => {
                 // Should not happen if can_handle works correctly
-                entries.push(
-                    helpers::create_log_entry(
-                        LogEntryLevel::Error,
-                        container_name,
-                        "Invalid event for TodoWidget".to_string(),
-                        session_id,
-                        "error",
-                    )
-                );
+                entries.push(helpers::create_log_entry(
+                    LogEntryLevel::Error,
+                    container_name,
+                    "Invalid event for TodoWidget".to_string(),
+                    session_id,
+                    "error",
+                ));
             }
         }
 
@@ -202,8 +195,8 @@ impl MessageWidget for TodoWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
     use crate::agent_parsers::types::TodoItem;
+    use serde_json::json;
 
     #[test]
     fn test_todo_widget_can_handle() {
@@ -279,9 +272,18 @@ mod tests {
         let event = AgentEvent::Structured(StructuredPayload::TodoList {
             title: Some("My Tasks".to_string()),
             items: vec![
-                TodoItem { text: "Task 1".to_string(), status: "pending".to_string() },
-                TodoItem { text: "Task 2".to_string(), status: "in_progress".to_string() },
-                TodoItem { text: "Task 3".to_string(), status: "done".to_string() },
+                TodoItem {
+                    text: "Task 1".to_string(),
+                    status: "pending".to_string(),
+                },
+                TodoItem {
+                    text: "Task 2".to_string(),
+                    status: "in_progress".to_string(),
+                },
+                TodoItem {
+                    text: "Task 3".to_string(),
+                    status: "done".to_string(),
+                },
             ],
             pending: 1,
             in_progress: 1,

@@ -1,8 +1,8 @@
 // ABOUTME: Dependency checker for onboarding wizard
 // Checks for required and optional dependencies with install suggestions
 
-use std::process::Command;
 use std::fs;
+use std::process::Command;
 
 /// Categories of dependencies
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,10 +103,7 @@ impl DependencyStatus {
 
     /// Get checks by category
     pub fn by_category(&self, category: DependencyCategory) -> Vec<&DependencyCheckResult> {
-        self.checks
-            .iter()
-            .filter(|c| c.dependency.category == category)
-            .collect()
+        self.checks.iter().filter(|c| c.dependency.category == category).collect()
     }
 
     /// Count of installed dependencies
@@ -248,7 +245,10 @@ impl DependencyChecker {
             Dependency {
                 name: "tmux optimized config",
                 check_cmd: "sh",
-                check_args: &["-c", "grep -q 'set-clipboard on' ~/.tmux.conf 2>/dev/null && grep -q 'escape-time 0' ~/.tmux.conf 2>/dev/null"],
+                check_args: &[
+                    "-c",
+                    "grep -q 'set-clipboard on' ~/.tmux.conf 2>/dev/null && grep -q 'escape-time 0' ~/.tmux.conf 2>/dev/null",
+                ],
                 install_hint: "Press 'I' to install recommended tmux.conf",
                 is_mandatory: false,
                 category: DependencyCategory::Configuration,
@@ -259,9 +259,7 @@ impl DependencyChecker {
 
     /// Check if a single dependency is installed
     pub fn check_dependency(dep: &Dependency) -> DependencyCheckResult {
-        let output = Command::new(dep.check_cmd)
-            .args(dep.check_args)
-            .output();
+        let output = Command::new(dep.check_cmd).args(dep.check_args).output();
 
         match output {
             Ok(out) if out.status.success() => {
@@ -287,15 +285,11 @@ impl DependencyChecker {
     /// Check all dependencies synchronously
     pub fn check_all() -> DependencyStatus {
         let dependencies = Self::all_dependencies();
-        let checks: Vec<DependencyCheckResult> = dependencies
-            .iter()
-            .map(Self::check_dependency)
-            .collect();
+        let checks: Vec<DependencyCheckResult> =
+            dependencies.iter().map(Self::check_dependency).collect();
 
-        let mandatory_met = checks
-            .iter()
-            .filter(|c| c.dependency.is_mandatory)
-            .all(|c| c.is_installed);
+        let mandatory_met =
+            checks.iter().filter(|c| c.dependency.is_mandatory).all(|c| c.is_installed);
 
         // For container runtime, at least one should be installed
         let container_checks: Vec<_> = checks
@@ -306,9 +300,7 @@ impl DependencyChecker {
         let has_container = container_checks.iter().any(|c| c.is_installed);
 
         // Recommended = mandatory + at least one container runtime + tmux
-        let has_tmux = checks
-            .iter()
-            .any(|c| c.dependency.name == "tmux" && c.is_installed);
+        let has_tmux = checks.iter().any(|c| c.dependency.name == "tmux" && c.is_installed);
 
         let recommended_met = mandatory_met && has_container && has_tmux;
 
@@ -342,7 +334,10 @@ impl DependencyChecker {
             } else if hint.starts_with("npm install -g ") {
                 let pkg = hint.strip_prefix("npm install -g ").unwrap();
                 npm_packages.push(pkg.to_string());
-            } else if !hint.is_empty() && !hint.starts_with("http") && !hint.starts_with("Comes with") {
+            } else if !hint.is_empty()
+                && !hint.starts_with("http")
+                && !hint.starts_with("Comes with")
+            {
                 commands.push(hint.to_string());
             }
         }
@@ -484,7 +479,11 @@ mod tests {
 
         let commands = DependencyChecker::get_install_commands(&status, true);
         // Should combine into single brew command
-        assert!(commands.iter().any(|c| c.contains("brew install") && c.contains("git") && c.contains("tmux")));
+        assert!(
+            commands
+                .iter()
+                .any(|c| c.contains("brew install") && c.contains("git") && c.contains("tmux"))
+        );
     }
 
     #[test]
@@ -499,7 +498,10 @@ mod tests {
         // Verify it's in Session category and optional
         let reattach = deps.iter().find(|d| d.name == "reattach-to-user-namespace").unwrap();
         assert_eq!(reattach.category, DependencyCategory::Session);
-        assert!(!reattach.is_mandatory, "reattach-to-user-namespace should be optional");
+        assert!(
+            !reattach.is_mandatory,
+            "reattach-to-user-namespace should be optional"
+        );
     }
 
     #[test]

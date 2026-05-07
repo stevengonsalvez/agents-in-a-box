@@ -607,7 +607,9 @@ mod tests {
 
         // Initialize tracing to capture all logs
         let _ = tracing_subscriber::fmt()
-            .with_env_filter(EnvFilter::from_default_env().add_directive(tracing::Level::DEBUG.into()))
+            .with_env_filter(
+                EnvFilter::from_default_env().add_directive(tracing::Level::DEBUG.into()),
+            )
             .with_test_writer()
             .try_init();
 
@@ -624,8 +626,14 @@ mod tests {
         ui.press_key(KeyCode::Char('n')).unwrap();
 
         eprintln!("After key press - view: {:?}", ui.current_view());
-        eprintln!("After key press - has_new_session_state: {}", ui.has_new_session_state());
-        eprintln!("After key press - pending_async_action: {:?}", ui.app.state.pending_async_action);
+        eprintln!(
+            "After key press - has_new_session_state: {}",
+            ui.has_new_session_state()
+        );
+        eprintln!(
+            "After key press - pending_async_action: {:?}",
+            ui.app.state.pending_async_action
+        );
 
         // Process async action
         eprintln!("\n>>> Processing async action...");
@@ -637,7 +645,10 @@ mod tests {
         eprintln!("\nAfter process_async:");
         eprintln!("  View: {:?}", ui.current_view());
         eprintln!("  Has new_session_state: {}", ui.has_new_session_state());
-        eprintln!("  Pending async action: {:?}", ui.app.state.pending_async_action);
+        eprintln!(
+            "  Pending async action: {:?}",
+            ui.app.state.pending_async_action
+        );
 
         if let Some(ref session_state) = ui.app.state.new_session_state {
             eprintln!("  New session step: {:?}", session_state.step);
@@ -646,7 +657,10 @@ mod tests {
         // This assertion should pass if the bug is fixed
         eprintln!("\n>>> Checking assertions...");
         if ui.current_view() != &View::NewSession {
-            eprintln!("FAIL: Expected NewSession view, got: {:?}", ui.current_view());
+            eprintln!(
+                "FAIL: Expected NewSession view, got: {:?}",
+                ui.current_view()
+            );
             eprintln!("This is the bug we're debugging!");
         }
 
@@ -658,6 +672,9 @@ mod tests {
         // For now, let's not assert - just capture the output
         eprintln!("\n=== Test complete ===");
         eprintln!("Expected view: NewSession, Actual: {:?}", ui.current_view());
-        eprintln!("Expected new_session_state: true, Actual: {}", ui.has_new_session_state());
+        eprintln!(
+            "Expected new_session_state: true, Actual: {}",
+            ui.has_new_session_state()
+        );
     }
 }

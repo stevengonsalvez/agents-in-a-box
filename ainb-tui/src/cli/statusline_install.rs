@@ -160,10 +160,8 @@ pub fn install_statusline_at(path: &Path) -> Result<InstallOutcome> {
             // user is on the legacy form, rewrite in place to the new
             // namespaced command — they already opted in to ainb owning
             // the statusline; the old name is just a stale label.
-            let current = value
-                .pointer("/statusLine/command")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let current =
+                value.pointer("/statusLine/command").and_then(|v| v.as_str()).unwrap_or("");
             if is_legacy_command(current) {
                 if let Some(obj) = value.as_object_mut() {
                     obj.insert("statusLine".to_string(), block);
@@ -236,11 +234,7 @@ const MAX_BACKUPS: usize = 3;
 /// new write succeeds but the backup write fails we swallow the error
 /// and log — the new file is the important artefact, and a missing
 /// backup is recoverable through normal version control.
-fn write_with_backup(
-    path: &Path,
-    prev_bytes: &[u8],
-    new_value: &serde_json::Value,
-) -> Result<()> {
+fn write_with_backup(path: &Path, prev_bytes: &[u8], new_value: &serde_json::Value) -> Result<()> {
     atomic_write_json(path, new_value)?;
     if let Err(e) = write_backup_from_bytes(path, prev_bytes) {
         tracing::warn!(
@@ -479,8 +473,7 @@ mod tests {
         assert_eq!(outcome, InstallOutcome::Migrated);
 
         // Other keys preserved, command rewritten.
-        let v: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(v["theme"], "dark");
         assert_eq!(v["statusLine"]["command"], AINB_CLAUDECODE_STATUSLINE_CMD);
 
@@ -564,10 +557,7 @@ mod tests {
             std::fs::write(&bak, b"{}").unwrap();
             // Older backups get older mtimes (i=0 oldest, i=4 newest).
             let mtime = now - std::time::Duration::from_secs(60 * (5 - i as u64));
-            let f = std::fs::OpenOptions::new()
-                .write(true)
-                .open(&bak)
-                .unwrap();
+            let f = std::fs::OpenOptions::new().write(true).open(&bak).unwrap();
             f.set_modified(mtime).unwrap();
             paths.push(bak);
         }

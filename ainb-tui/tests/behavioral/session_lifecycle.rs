@@ -424,12 +424,12 @@ fn test_session_error_status_preserves_message() {
     // Assert: Different error messages are distinct
     let error1 = SessionStatus::Error("Error A".to_string());
     let error2 = SessionStatus::Error("Error B".to_string());
-    assert_ne!(error1, error2, "Different error messages should not be equal");
+    assert_ne!(
+        error1, error2,
+        "Different error messages should not be equal"
+    );
 
     // Assert: Same error messages are equal
     let error3 = SessionStatus::Error("Error A".to_string());
-    assert_eq!(
-        error1, error3,
-        "Same error messages should be equal"
-    );
+    assert_eq!(error1, error3, "Same error messages should be equal");
 }

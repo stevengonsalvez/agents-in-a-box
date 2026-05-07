@@ -25,7 +25,12 @@ impl MessageWidget for DefaultWidget {
         // but restructured for the widget pattern
 
         let log_entry = match event {
-            AgentEvent::SessionInfo { model, tools, session_id: sid, mcp_servers } => {
+            AgentEvent::SessionInfo {
+                model,
+                tools,
+                session_id: sid,
+                mcp_servers,
+            } => {
                 let mut info = format!("📊 Session: {} | {} tools available", model, tools.len());
                 if let Some(servers) = mcp_servers {
                     info.push_str(&format!(
@@ -43,26 +48,22 @@ impl MessageWidget for DefaultWidget {
                     .with_metadata("session_id", &sid)
             }
 
-            AgentEvent::Thinking { content } => {
-                LogEntry::new(
-                    LogEntryLevel::Debug,
-                    container_name.to_string(),
-                    format!("💭 {}", content),
-                )
-                .with_session(session_id)
-                .with_metadata("event_type", "thinking")
-            }
+            AgentEvent::Thinking { content } => LogEntry::new(
+                LogEntryLevel::Debug,
+                container_name.to_string(),
+                format!("💭 {}", content),
+            )
+            .with_session(session_id)
+            .with_metadata("event_type", "thinking"),
 
-            AgentEvent::Message { content, id } => {
-                LogEntry::new(
-                    LogEntryLevel::Info,
-                    container_name.to_string(),
-                    format!("Claude: {}", content),
-                )
-                .with_session(session_id)
-                .with_metadata("event_type", "message")
-                .with_metadata("message_id", &id.unwrap_or_default())
-            }
+            AgentEvent::Message { content, id } => LogEntry::new(
+                LogEntryLevel::Info,
+                container_name.to_string(),
+                format!("Claude: {}", content),
+            )
+            .with_session(session_id)
+            .with_metadata("event_type", "message")
+            .with_metadata("message_id", &id.unwrap_or_default()),
 
             AgentEvent::StreamingText { delta, message_id } => {
                 LogEntry::new(LogEntryLevel::Info, container_name.to_string(), delta)
@@ -71,7 +72,12 @@ impl MessageWidget for DefaultWidget {
                     .with_metadata("message_id", &message_id.unwrap_or_default())
             }
 
-            AgentEvent::ToolCall { id, name, input, description } => {
+            AgentEvent::ToolCall {
+                id,
+                name,
+                input,
+                description,
+            } => {
                 // Generic tool call formatting
                 let mut msg = String::new();
                 let desc = description.unwrap_or_default();
@@ -98,7 +104,11 @@ impl MessageWidget for DefaultWidget {
                     .with_metadata("tool_name", &name)
             }
 
-            AgentEvent::ToolResult { tool_use_id, content, is_error } => {
+            AgentEvent::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
                 let (level, prefix) = if is_error {
                     (LogEntryLevel::Error, "❌")
                 } else {
@@ -117,31 +127,27 @@ impl MessageWidget for DefaultWidget {
                 .with_metadata("tool_use_id", &tool_use_id)
             }
 
-            AgentEvent::Error { message, code } => {
-                LogEntry::new(
-                    LogEntryLevel::Error,
-                    container_name.to_string(),
-                    format!("❌ Error: {}", message),
-                )
-                .with_session(session_id)
-                .with_metadata("event_type", "error")
-                .with_metadata("error_code", &code.unwrap_or_default())
-            }
+            AgentEvent::Error { message, code } => LogEntry::new(
+                LogEntryLevel::Error,
+                container_name.to_string(),
+                format!("❌ Error: {}", message),
+            )
+            .with_session(session_id)
+            .with_metadata("event_type", "error")
+            .with_metadata("error_code", &code.unwrap_or_default()),
 
             AgentEvent::Usage { .. } => {
                 return WidgetOutput::MultiLine(vec![]);
             }
 
-            AgentEvent::Custom { event_type, data } => {
-                LogEntry::new(
-                    LogEntryLevel::Info,
-                    container_name.to_string(),
-                    format!("📌 {}: {}", event_type, data),
-                )
-                .with_session(session_id)
-                .with_metadata("event_type", "custom")
-                .with_metadata("custom_type", &event_type)
-            }
+            AgentEvent::Custom { event_type, data } => LogEntry::new(
+                LogEntryLevel::Info,
+                container_name.to_string(),
+                format!("📌 {}: {}", event_type, data),
+            )
+            .with_session(session_id)
+            .with_metadata("event_type", "custom")
+            .with_metadata("custom_type", &event_type),
 
             AgentEvent::Structured(payload) => {
                 // Handle structured payloads not caught by specialized widgets
@@ -163,27 +169,23 @@ impl MessageWidget for DefaultWidget {
                             .with_metadata("icon", "📂")
                     }
 
-                    StructuredPayload::PrettyJson(json_str) => {
-                        LogEntry::new(
-                            LogEntryLevel::Info,
-                            container_name.to_string(),
-                            format!("📋 Data:\n{}", json_str),
-                        )
-                        .with_session(session_id)
-                        .with_metadata("event_type", "structured")
-                        .with_metadata("icon", "📋")
-                    }
+                    StructuredPayload::PrettyJson(json_str) => LogEntry::new(
+                        LogEntryLevel::Info,
+                        container_name.to_string(),
+                        format!("📋 Data:\n{}", json_str),
+                    )
+                    .with_session(session_id)
+                    .with_metadata("event_type", "structured")
+                    .with_metadata("icon", "📋"),
 
                     // TodoList should be handled by TodoWidget, but include as fallback
-                    StructuredPayload::TodoList { .. } => {
-                        LogEntry::new(
-                            LogEntryLevel::Info,
-                            container_name.to_string(),
-                            "📝 Todo list (use TodoWidget for rich display)".to_string(),
-                        )
-                        .with_session(session_id)
-                        .with_metadata("event_type", "structured")
-                    }
+                    StructuredPayload::TodoList { .. } => LogEntry::new(
+                        LogEntryLevel::Info,
+                        container_name.to_string(),
+                        "📝 Todo list (use TodoWidget for rich display)".to_string(),
+                    )
+                    .with_session(session_id)
+                    .with_metadata("event_type", "structured"),
                 }
             }
         };

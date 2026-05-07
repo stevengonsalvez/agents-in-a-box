@@ -29,7 +29,7 @@ fn test_e2e_new_session_flow() -> Result<(), Box<dyn std::error::Error>> {
 
     // Wait for terminal to initialize (look for alternate screen buffer activation)
     println!("⏳ Waiting for app to initialize terminal...");
-    session.exp_string("\x1b[?1049h")?;  // Alternate screen buffer
+    session.exp_string("\x1b[?1049h")?; // Alternate screen buffer
     println!("✅ Terminal initialized!");
 
     // Wait a moment for UI to render

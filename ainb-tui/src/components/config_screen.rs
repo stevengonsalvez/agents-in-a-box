@@ -1,11 +1,11 @@
 // ABOUTME: Configuration screen component with split-pane layout for AINB 2.0
 
 use ratatui::{
+    Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, List, ListItem, Paragraph},
-    Frame,
 };
 
 use crate::app::state::{AppState, ConfigPane};
@@ -144,9 +144,7 @@ impl ConfigScreenComponent {
             })
             .collect();
 
-        let list = List::new(items)
-            .block(block)
-            .style(Style::default().bg(PANEL_BG));
+        let list = List::new(items).block(block).style(Style::default().bg(PANEL_BG));
 
         frame.render_widget(list, area);
     }
@@ -181,19 +179,21 @@ impl ConfigScreenComponent {
         if let Some(settings) = config_state.settings.get(current_category) {
             let settings_layout = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints(
-                    settings
-                        .iter()
-                        .map(|_| Constraint::Length(4))
-                        .collect::<Vec<_>>(),
-                )
+                .constraints(settings.iter().map(|_| Constraint::Length(4)).collect::<Vec<_>>())
                 .split(inner);
 
             for (i, setting) in settings.iter().enumerate() {
                 if i >= settings_layout.len() {
                     break;
                 }
-                self.render_setting(frame, settings_layout[i], setting, i == config_state.selected_setting, config_state.editing && i == config_state.selected_setting, &config_state.edit_buffer);
+                self.render_setting(
+                    frame,
+                    settings_layout[i],
+                    setting,
+                    i == config_state.selected_setting,
+                    config_state.editing && i == config_state.selected_setting,
+                    &config_state.edit_buffer,
+                );
             }
         }
     }
@@ -233,9 +233,7 @@ impl ConfigScreenComponent {
         };
 
         let value_style = if is_editing {
-            Style::default()
-                .fg(GOLD)
-                .add_modifier(Modifier::UNDERLINED)
+            Style::default().fg(GOLD).add_modifier(Modifier::UNDERLINED)
         } else {
             Style::default().fg(SOFT_WHITE)
         };
@@ -246,9 +244,7 @@ impl ConfigScreenComponent {
             Span::styled(
                 &setting.label,
                 if is_selected {
-                    Style::default()
-                        .fg(SELECTION_GREEN)
-                        .add_modifier(Modifier::BOLD)
+                    Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(SOFT_WHITE)
                 },
@@ -279,10 +275,7 @@ impl ConfigScreenComponent {
         let config_state = &state.config_screen_state;
 
         let help_items = if config_state.editing {
-            vec![
-                ("Enter", "save"),
-                ("Esc", "cancel"),
-            ]
+            vec![("Enter", "save"), ("Esc", "cancel")]
         } else {
             vec![
                 ("↑↓", "navigate"),

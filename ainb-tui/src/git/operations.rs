@@ -45,9 +45,7 @@ fn commit_and_push_cli(worktree_path: &Path, commit_message: &str) -> Result<Str
 
         // Add all changes
         debug!("Adding all changes...");
-        let add_output = Command::new("git")
-            .args(&["add", "."])
-            .output()?;
+        let add_output = Command::new("git").args(&["add", "."]).output()?;
 
         if !add_output.status.success() {
             let stderr = String::from_utf8_lossy(&add_output.stderr);
@@ -72,9 +70,7 @@ fn commit_and_push_cli(worktree_path: &Path, commit_message: &str) -> Result<Str
         // Push changes - let git use its configured credential helper
         // Don't set GIT_TERMINAL_PROMPT=0 as it breaks credential helpers
         debug!("Pushing changes...");
-        let push_output = Command::new("git")
-            .args(&["push"])
-            .output()?;
+        let push_output = Command::new("git").args(&["push"]).output()?;
 
         if !push_output.status.success() {
             let stderr = String::from_utf8_lossy(&push_output.stderr);
@@ -83,7 +79,9 @@ fn commit_and_push_cli(worktree_path: &Path, commit_message: &str) -> Result<Str
             error!("git push failed - stdout: {}", stdout);
 
             // Provide user-friendly error messages
-            if stderr.contains("Authentication failed") || stderr.contains("could not read Username") {
+            if stderr.contains("Authentication failed")
+                || stderr.contains("could not read Username")
+            {
                 return Err(anyhow::anyhow!(
                     "Push failed: Authentication required. Please configure git credentials:\n\
                      • For HTTPS: Run 'git config --global credential.helper osxkeychain' (macOS) or 'git config --global credential.helper cache' (Linux)\n\
@@ -104,7 +102,7 @@ fn commit_and_push_cli(worktree_path: &Path, commit_message: &str) -> Result<Str
 }
 
 fn commit_and_push_git2(worktree_path: &Path, commit_message: &str) -> Result<String> {
-    use git2::{Repository, Signature, CredentialType};
+    use git2::{CredentialType, Repository, Signature};
 
     let repo = Repository::open(worktree_path)?;
 
@@ -165,8 +163,10 @@ fn commit_and_push_git2(worktree_path: &Path, commit_message: &str) -> Result<St
     // Set up credentials callback that handles both SSH and HTTPS
     let mut callbacks = git2::RemoteCallbacks::new();
     callbacks.credentials(|url, username_from_url, allowed_types| {
-        debug!("Credential callback: url={}, username={:?}, allowed={:?}",
-               url, username_from_url, allowed_types);
+        debug!(
+            "Credential callback: url={}, username={:?}, allowed={:?}",
+            url, username_from_url, allowed_types
+        );
 
         // Try SSH key from agent first (for git@github.com URLs)
         if allowed_types.contains(CredentialType::SSH_KEY) {

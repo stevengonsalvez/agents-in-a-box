@@ -6,18 +6,15 @@
 use crate::agent_parsers::{AgentEvent, types::StructuredPayload};
 use crate::components::live_logs_stream::LogEntryLevel;
 use serde_json::Value;
-use uuid::Uuid;
 use tracing::debug;
+use uuid::Uuid;
 
 use super::{
-    MessageWidget, WidgetOutput, ToolResult, ToolResultStore,
-    BashWidget, EditWidget, TodoWidget, DefaultWidget,
-    ReadWidget, WriteWidget, GrepWidget, GlobWidget,
-    TaskWidget, WebSearchWidget, WebFetchWidget, ThinkingWidget,
-    MultiEditWidget, McpWidget, LsResultWidget, SystemReminderWidget,
-    ReminderFilter, helpers,
+    BashWidget, DefaultWidget, EditWidget, GlobWidget, GrepWidget, LsResultWidget, McpWidget,
+    MessageWidget, MultiEditWidget, ReadWidget, ReminderFilter, SystemReminderWidget, TaskWidget,
+    ThinkingWidget, TodoWidget, ToolResult, ToolResultStore, WebFetchWidget, WebSearchWidget,
+    WidgetOutput, WriteWidget, helpers,
 };
-
 
 /// Central message router that processes AgentEvents and tool results
 pub struct MessageRouter {
@@ -102,17 +99,20 @@ impl MessageRouter {
         session_id: Uuid,
     ) -> WidgetOutput {
         match event {
-            AgentEvent::SessionInfo { model, tools, session_id: sid, mcp_servers } => {
+            AgentEvent::SessionInfo {
+                model,
+                tools,
+                session_id: sid,
+                mcp_servers,
+            } => {
                 self.render_session_info(model, tools, sid, mcp_servers, container_name, session_id)
             }
 
-            AgentEvent::Thinking { content } => {
-                self.thinking_widget.render(
-                    AgentEvent::Thinking { content },
-                    container_name,
-                    session_id
-                )
-            }
+            AgentEvent::Thinking { content } => self.thinking_widget.render(
+                AgentEvent::Thinking { content },
+                container_name,
+                session_id,
+            ),
 
             AgentEvent::Message { content, id } => {
                 self.render_assistant_message(content, id, container_name, session_id)
@@ -122,14 +122,25 @@ impl MessageRouter {
                 self.render_streaming_text(delta, message_id, container_name, session_id)
             }
 
-            AgentEvent::ToolCall { id, name, input, description } => {
-                self.route_tool_call(id, name, input, description, container_name, session_id)
-            }
+            AgentEvent::ToolCall {
+                id,
+                name,
+                input,
+                description,
+            } => self.route_tool_call(id, name, input, description, container_name, session_id),
 
-            AgentEvent::ToolResult { tool_use_id, content, is_error } => {
+            AgentEvent::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
                 // Store the result using ToolResultStore
                 let content_value = Value::String(content.clone());
-                if let Err(e) = self.tool_result_store.store_result(tool_use_id.clone(), content_value, is_error) {
+                if let Err(e) = self.tool_result_store.store_result(
+                    tool_use_id.clone(),
+                    content_value,
+                    is_error,
+                ) {
                     debug!("Failed to store tool result: {}", e);
                 }
 
@@ -137,18 +148,28 @@ impl MessageRouter {
                 if self.ls_result_widget.can_handle(&AgentEvent::ToolResult {
                     tool_use_id: tool_use_id.clone(),
                     content: content.clone(),
-                    is_error
+                    is_error,
                 }) {
                     self.ls_result_widget.render(
-                        AgentEvent::ToolResult { tool_use_id, content, is_error },
+                        AgentEvent::ToolResult {
+                            tool_use_id,
+                            content,
+                            is_error,
+                        },
                         container_name,
-                        session_id
+                        session_id,
                     )
                 } else if content.contains("<system-reminder>") {
                     // Filter out all system reminders completely
                     WidgetOutput::MultiLine(vec![])
                 } else {
-                    self.render_tool_result(tool_use_id, content, is_error, container_name, session_id)
+                    self.render_tool_result(
+                        tool_use_id,
+                        content,
+                        is_error,
+                        container_name,
+                        session_id,
+                    )
                 }
             }
 
@@ -199,84 +220,144 @@ impl MessageRouter {
         let widget_output = match name.to_lowercase().as_str() {
             "bash" => {
                 if let Some(result) = result {
-                    self.bash_widget.render_with_result(event, Some(result), container_name, session_id)
+                    self.bash_widget.render_with_result(
+                        event,
+                        Some(result),
+                        container_name,
+                        session_id,
+                    )
                 } else {
                     self.bash_widget.render(event, container_name, session_id)
                 }
             }
             "edit" => {
                 if let Some(result) = result {
-                    self.edit_widget.render_with_result(event, Some(result), container_name, session_id)
+                    self.edit_widget.render_with_result(
+                        event,
+                        Some(result),
+                        container_name,
+                        session_id,
+                    )
                 } else {
                     self.edit_widget.render(event, container_name, session_id)
                 }
             }
             "multiedit" => {
                 if let Some(result) = result {
-                    self.multiedit_widget.render_with_result(event, Some(result), container_name, session_id)
+                    self.multiedit_widget.render_with_result(
+                        event,
+                        Some(result),
+                        container_name,
+                        session_id,
+                    )
                 } else {
                     self.multiedit_widget.render(event, container_name, session_id)
                 }
             }
             "todowrite" => {
                 if let Some(result) = result {
-                    self.todo_widget.render_with_result(event, Some(result), container_name, session_id)
+                    self.todo_widget.render_with_result(
+                        event,
+                        Some(result),
+                        container_name,
+                        session_id,
+                    )
                 } else {
                     self.todo_widget.render(event, container_name, session_id)
                 }
             }
             "read" => {
                 if let Some(result) = result {
-                    self.read_widget.render_with_result(event, Some(result), container_name, session_id)
+                    self.read_widget.render_with_result(
+                        event,
+                        Some(result),
+                        container_name,
+                        session_id,
+                    )
                 } else {
                     self.read_widget.render(event, container_name, session_id)
                 }
             }
             "write" => {
                 if let Some(result) = result {
-                    self.write_widget.render_with_result(event, Some(result), container_name, session_id)
+                    self.write_widget.render_with_result(
+                        event,
+                        Some(result),
+                        container_name,
+                        session_id,
+                    )
                 } else {
                     self.write_widget.render(event, container_name, session_id)
                 }
             }
             "grep" => {
                 if let Some(result) = result {
-                    self.grep_widget.render_with_result(event, Some(result), container_name, session_id)
+                    self.grep_widget.render_with_result(
+                        event,
+                        Some(result),
+                        container_name,
+                        session_id,
+                    )
                 } else {
                     self.grep_widget.render(event, container_name, session_id)
                 }
             }
             "glob" => {
                 if let Some(result) = result {
-                    self.glob_widget.render_with_result(event, Some(result), container_name, session_id)
+                    self.glob_widget.render_with_result(
+                        event,
+                        Some(result),
+                        container_name,
+                        session_id,
+                    )
                 } else {
                     self.glob_widget.render(event, container_name, session_id)
                 }
             }
             "task" => {
                 if let Some(result) = result {
-                    self.task_widget.render_with_result(event, Some(result), container_name, session_id)
+                    self.task_widget.render_with_result(
+                        event,
+                        Some(result),
+                        container_name,
+                        session_id,
+                    )
                 } else {
                     self.task_widget.render(event, container_name, session_id)
                 }
             }
             "websearch" => {
                 if let Some(result) = result {
-                    self.websearch_widget.render_with_result(event, Some(result), container_name, session_id)
+                    self.websearch_widget.render_with_result(
+                        event,
+                        Some(result),
+                        container_name,
+                        session_id,
+                    )
                 } else {
                     self.websearch_widget.render(event, container_name, session_id)
                 }
             }
             "webfetch" => {
                 if let Some(result) = result {
-                    self.webfetch_widget.render_with_result(event, Some(result), container_name, session_id)
+                    self.webfetch_widget.render_with_result(
+                        event,
+                        Some(result),
+                        container_name,
+                        session_id,
+                    )
                 } else {
                     self.webfetch_widget.render(event, container_name, session_id)
                 }
             }
             name if name.starts_with("mcp__") => {
                 if let Some(result) = result {
-                    self.mcp_widget.render_with_result(event, Some(result), container_name, session_id)
+                    self.mcp_widget.render_with_result(
+                        event,
+                        Some(result),
+                        container_name,
+                        session_id,
+                    )
                 } else {
                     self.mcp_widget.render(event, container_name, session_id)
                 }
@@ -508,11 +589,8 @@ impl MessageRouter {
     ) -> WidgetOutput {
         match payload {
             StructuredPayload::TodoList { .. } => {
-                self.todo_widget.render(
-                    AgentEvent::Structured(payload),
-                    container_name,
-                    session_id
-                )
+                self.todo_widget
+                    .render(AgentEvent::Structured(payload), container_name, session_id)
             }
             StructuredPayload::GlobResults { paths, total } => {
                 let mut entries = Vec::new();

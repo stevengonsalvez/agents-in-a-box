@@ -1,9 +1,7 @@
 // ABOUTME: Behavioral tests for configuration loading and provider enums
 // Verifies config defaults, serialization roundtrips, and enum variant coverage
 
-use ainb::config::{
-    AppConfig, AuthenticationConfig, ClaudeAuthProvider, CliProvider,
-};
+use ainb::config::{AppConfig, AuthenticationConfig, ClaudeAuthProvider, CliProvider};
 
 /// Test that default config has sensible values for immediate usability
 #[test]
@@ -30,7 +28,8 @@ fn test_default_config_has_sensible_values() {
     // empty string. This tests current behavior - consider if this should be fixed in
     // AuthenticationConfig by implementing Default manually.
     assert!(
-        config.authentication.default_model.is_empty() || config.authentication.default_model == "sonnet",
+        config.authentication.default_model.is_empty()
+            || config.authentication.default_model == "sonnet",
         "Default model should be empty (from derive) or 'sonnet' (from manual impl)"
     );
 
@@ -43,8 +42,7 @@ fn test_default_config_has_sensible_values() {
 
     // Default container template should be set
     assert_eq!(
-        config.default_container_template,
-        "claude-dev",
+        config.default_container_template, "claude-dev",
         "Default container template should be 'claude-dev'"
     );
 
@@ -70,8 +68,7 @@ fn test_config_serialization_roundtrip() {
     config.workspace_defaults.branch_prefix = "feature/".to_string();
 
     // Serialize to TOML
-    let toml_str = toml::to_string_pretty(&config)
-        .expect("Config should serialize to TOML");
+    let toml_str = toml::to_string_pretty(&config).expect("Config should serialize to TOML");
 
     // Verify TOML contains expected values
     assert!(
@@ -88,8 +85,8 @@ fn test_config_serialization_roundtrip() {
     );
 
     // Deserialize back
-    let loaded: AppConfig = toml::from_str(&toml_str)
-        .expect("TOML should deserialize back to AppConfig");
+    let loaded: AppConfig =
+        toml::from_str(&toml_str).expect("TOML should deserialize back to AppConfig");
 
     // Verify all values survived roundtrip
     assert_eq!(
@@ -103,13 +100,11 @@ fn test_config_serialization_roundtrip() {
         "Claude auth provider should survive roundtrip"
     );
     assert_eq!(
-        loaded.authentication.default_model,
-        "opus",
+        loaded.authentication.default_model, "opus",
         "Default model should survive roundtrip"
     );
     assert_eq!(
-        loaded.workspace_defaults.branch_prefix,
-        "feature/",
+        loaded.workspace_defaults.branch_prefix, "feature/",
         "Branch prefix should survive roundtrip"
     );
 }
@@ -118,11 +113,7 @@ fn test_config_serialization_roundtrip() {
 #[test]
 fn test_cli_provider_variants() {
     // All variants should have non-empty display names
-    let variants = [
-        CliProvider::Claude,
-        CliProvider::Codex,
-        CliProvider::Gemini,
-    ];
+    let variants = [CliProvider::Claude, CliProvider::Codex, CliProvider::Gemini];
 
     for variant in &variants {
         let display_name = variant.display_name();
@@ -190,11 +181,9 @@ fn test_claude_auth_provider_variants() {
         // Test from_id roundtrip
         let roundtripped = ClaudeAuthProvider::from_id(expected_str);
         assert_eq!(
-            &roundtripped,
-            variant,
+            &roundtripped, variant,
             "ClaudeAuthProvider::from_id('{}') should return {:?}",
-            expected_str,
-            variant
+            expected_str, variant
         );
 
         // Test TOML serialization via AuthenticationConfig
@@ -205,8 +194,8 @@ fn test_claude_auth_provider_variants() {
             github_method: None,
         };
 
-        let toml_str = toml::to_string(&auth_config)
-            .expect("AuthenticationConfig should serialize to TOML");
+        let toml_str =
+            toml::to_string(&auth_config).expect("AuthenticationConfig should serialize to TOML");
 
         assert!(
             toml_str.contains(expected_str),
@@ -220,8 +209,7 @@ fn test_claude_auth_provider_variants() {
             .expect("TOML should deserialize back to AuthenticationConfig");
 
         assert_eq!(
-            loaded.claude_provider,
-            *variant,
+            loaded.claude_provider, *variant,
             "ClaudeAuthProvider::{:?} should survive TOML roundtrip",
             variant
         );

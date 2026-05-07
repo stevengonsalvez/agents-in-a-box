@@ -64,13 +64,12 @@ impl LogsViewerComponent {
 
         let info_line = Line::from(info_spans);
 
-        let info_paragraph = Paragraph::new(info_line)
-            .block(
-                Block::default()
-                    .title("Session Info")
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Cyan)),
-            );
+        let info_paragraph = Paragraph::new(info_line).block(
+            Block::default()
+                .title("Session Info")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)),
+        );
 
         frame.render_widget(info_paragraph, area);
     }
@@ -133,7 +132,8 @@ impl LogsViewerComponent {
             crate::models::SessionStatus::Idle => vec![
                 ListItem::new("Tmux session active").style(Style::default().fg(Color::Yellow)),
                 ListItem::new("Claude CLI stopped").style(Style::default().fg(Color::Yellow)),
-                ListItem::new("Press 'r' to restart Claude").style(Style::default().fg(Color::Cyan)),
+                ListItem::new("Press 'r' to restart Claude")
+                    .style(Style::default().fg(Color::Cyan)),
             ],
             crate::models::SessionStatus::Error(ref err) => vec![
                 ListItem::new("Starting Claude Code environment...")

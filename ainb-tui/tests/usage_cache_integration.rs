@@ -169,12 +169,7 @@ fn truncate_triggers_full_reparse() {
 
 /// Append a user line + assistant turn with a chosen `user_text`. Used
 /// to assert user_message attribution survives an append-from-cache path.
-fn append_pair_with_user(
-    path: &Path,
-    session_id: &str,
-    timestamp: &str,
-    user_text: &str,
-) {
+fn append_pair_with_user(path: &Path, session_id: &str, timestamp: &str, user_text: &str) {
     let user = serde_json::json!({
         "type": "user",
         "sessionId": session_id,
@@ -220,8 +215,7 @@ fn append_path_recovers_user_message_from_prefix() {
     // cached) keeps its original user_message.
     append_pair_with_user(&session, "sess-um", "2026-05-01T12:30:00Z", "second turn");
 
-    let cached =
-        parse_usage_for_with_roots_and_cache(query_all(), &roots, cache.clone());
+    let cached = parse_usage_for_with_roots_and_cache(query_all(), &roots, cache.clone());
     let fresh =
         parse_usage_for_with_roots_and_cache(query_all(), &roots, Arc::new(Cache::disabled()));
 
@@ -229,10 +223,8 @@ fn append_path_recovers_user_message_from_prefix() {
     assert_eq!(fresh.calls.len(), 2);
     // Per-row user_message must agree between cached-append and full
     // reparse — that's the contract the recovery path restores.
-    let cached_msgs: Vec<&str> =
-        cached.calls.iter().map(|c| c.user_message.as_str()).collect();
-    let fresh_msgs: Vec<&str> =
-        fresh.calls.iter().map(|c| c.user_message.as_str()).collect();
+    let cached_msgs: Vec<&str> = cached.calls.iter().map(|c| c.user_message.as_str()).collect();
+    let fresh_msgs: Vec<&str> = fresh.calls.iter().map(|c| c.user_message.as_str()).collect();
     assert_eq!(cached_msgs, fresh_msgs);
 }
 
@@ -263,7 +255,12 @@ fn append_only_assistant_recovers_user_message_from_prefix_walk() {
     let work = TempDir::new().unwrap();
     let projects = build_claude_root(work.path());
     let session = projects.join("-Users-test-myrepo").join("sess-um-prefix.jsonl");
-    append_pair_with_user(&session, "sess-um-prefix", "2026-05-01T12:00:00Z", "first turn");
+    append_pair_with_user(
+        &session,
+        "sess-um-prefix",
+        "2026-05-01T12:00:00Z",
+        "first turn",
+    );
 
     let roots = UsageSourceRoots {
         claude_projects_dir: Some(projects.clone()),
@@ -277,18 +274,15 @@ fn append_only_assistant_recovers_user_message_from_prefix_walk() {
     // Append assistant-only — no preceding user line in the window.
     append_assistant_only(&session, "sess-um-prefix", "2026-05-01T12:30:00Z");
 
-    let cached =
-        parse_usage_for_with_roots_and_cache(query_all(), &roots, cache.clone());
+    let cached = parse_usage_for_with_roots_and_cache(query_all(), &roots, cache.clone());
     let fresh =
         parse_usage_for_with_roots_and_cache(query_all(), &roots, Arc::new(Cache::disabled()));
 
     assert_eq!(cached.calls.len(), 2);
     assert_eq!(fresh.calls.len(), 2);
 
-    let cached_msgs: Vec<&str> =
-        cached.calls.iter().map(|c| c.user_message.as_str()).collect();
-    let fresh_msgs: Vec<&str> =
-        fresh.calls.iter().map(|c| c.user_message.as_str()).collect();
+    let cached_msgs: Vec<&str> = cached.calls.iter().map(|c| c.user_message.as_str()).collect();
+    let fresh_msgs: Vec<&str> = fresh.calls.iter().map(|c| c.user_message.as_str()).collect();
     // Both rows must carry "first turn" — the second from prefix recovery.
     assert_eq!(cached_msgs, fresh_msgs);
     assert_eq!(

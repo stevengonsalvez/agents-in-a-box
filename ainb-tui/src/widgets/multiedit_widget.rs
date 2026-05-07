@@ -5,7 +5,7 @@ use crate::agent_parsers::AgentEvent;
 use crate::components::live_logs_stream::LogEntryLevel;
 use uuid::Uuid;
 
-use super::{MessageWidget, WidgetOutput, ToolResult, helpers};
+use super::{MessageWidget, ToolResult, WidgetOutput, helpers};
 
 pub struct MultiEditWidget;
 
@@ -27,14 +27,17 @@ impl MessageWidget for MultiEditWidget {
         let mut entries = Vec::new();
 
         match event {
-            AgentEvent::ToolCall { id: _, name: _, input, description: _ } => {
+            AgentEvent::ToolCall {
+                id: _,
+                name: _,
+                input,
+                description: _,
+            } => {
                 // Extract file path and edits from the input
-                let file_path = input.get("file_path")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("<unknown file>");
+                let file_path =
+                    input.get("file_path").and_then(|v| v.as_str()).unwrap_or("<unknown file>");
 
-                let edits = input.get("edits")
-                    .and_then(|v| v.as_array());
+                let edits = input.get("edits").and_then(|v| v.as_array());
 
                 // Header
                 entries.push(helpers::create_log_entry(
@@ -56,21 +59,22 @@ impl MessageWidget for MultiEditWidget {
                     ));
 
                     for (idx, edit) in edits_array.iter().enumerate() {
-                        let old_string = edit.get("old_string")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("<unknown>");
-                        let new_string = edit.get("new_string")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("<unknown>");
-                        let replace_all = edit.get("replace_all")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false);
+                        let old_string =
+                            edit.get("old_string").and_then(|v| v.as_str()).unwrap_or("<unknown>");
+                        let new_string =
+                            edit.get("new_string").and_then(|v| v.as_str()).unwrap_or("<unknown>");
+                        let replace_all =
+                            edit.get("replace_all").and_then(|v| v.as_bool()).unwrap_or(false);
 
                         // Edit number
                         entries.push(helpers::create_log_entry(
                             LogEntryLevel::Debug,
                             container_name,
-                            format!("   Edit {}{}:", idx + 1, if replace_all { " (replace all)" } else { "" }),
+                            format!(
+                                "   Edit {}{}:",
+                                idx + 1,
+                                if replace_all { " (replace all)" } else { "" }
+                            ),
                             session_id,
                             "multiedit",
                         ));

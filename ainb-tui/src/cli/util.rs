@@ -3,7 +3,7 @@
 // Provides consistent session finding logic across all CLI commands.
 // Uses prefix matching for both UUID and workspace name for user convenience.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use uuid::Uuid;
 
 use crate::interactive::session_manager::{SessionMetadata, SessionStore};
@@ -26,7 +26,9 @@ pub fn find_session(id_or_name: &str) -> Result<SessionMetadata> {
 /// This function accepts a store reference for easier unit testing.
 pub fn find_session_in_store(id_or_name: &str, store: &SessionStore) -> Result<SessionMetadata> {
     if store.sessions.is_empty() {
-        return Err(anyhow!("No sessions found. Run 'ainb run' to create a session."));
+        return Err(anyhow!(
+            "No sessions found. Run 'ainb run' to create a session."
+        ));
     }
 
     // First, try exact UUID match
@@ -51,7 +53,13 @@ pub fn find_session_in_store(id_or_name: &str, store: &SessionStore) -> Result<S
         n if n > 1 => {
             let ids: Vec<String> = uuid_matches
                 .iter()
-                .map(|s| format!("  {} ({})", &s.session_id.to_string()[..8], s.workspace_name))
+                .map(|s| {
+                    format!(
+                        "  {} ({})",
+                        &s.session_id.to_string()[..8],
+                        s.workspace_name
+                    )
+                })
                 .collect();
             return Err(anyhow!(
                 "Ambiguous session ID prefix '{id_or_name}'. Matches:\n{}",
@@ -73,7 +81,13 @@ pub fn find_session_in_store(id_or_name: &str, store: &SessionStore) -> Result<S
         n if n > 1 => {
             let names: Vec<String> = name_matches
                 .iter()
-                .map(|s| format!("  {} ({})", s.workspace_name, &s.session_id.to_string()[..8]))
+                .map(|s| {
+                    format!(
+                        "  {} ({})",
+                        s.workspace_name,
+                        &s.session_id.to_string()[..8]
+                    )
+                })
                 .collect();
             return Err(anyhow!(
                 "Ambiguous session name prefix '{id_or_name}'. Matches:\n{}",
@@ -87,11 +101,19 @@ pub fn find_session_in_store(id_or_name: &str, store: &SessionStore) -> Result<S
     let available: Vec<String> = store
         .sessions
         .values()
-        .map(|s| format!("  {} ({})", &s.session_id.to_string()[..8], s.workspace_name))
+        .map(|s| {
+            format!(
+                "  {} ({})",
+                &s.session_id.to_string()[..8],
+                s.workspace_name
+            )
+        })
         .collect();
 
     if available.is_empty() {
-        Err(anyhow!("No sessions found. Run 'ainb run' to create a session."))
+        Err(anyhow!(
+            "No sessions found. Run 'ainb run' to create a session."
+        ))
     } else {
         Err(anyhow!(
             "No session found matching '{id_or_name}'. Available sessions:\n{}",
@@ -103,8 +125,8 @@ pub fn find_session_in_store(id_or_name: &str, store: &SessionStore) -> Result<S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
     use crate::models::session::SessionAgentType;
+    use chrono::Utc;
     use std::path::PathBuf;
 
     fn create_test_store() -> SessionStore {

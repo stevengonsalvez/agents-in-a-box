@@ -97,7 +97,10 @@ fn test_worktree_removal_cleans_up_symlink_and_directory() -> Result<()> {
     let session_path = worktree_info.session_path.clone();
 
     // Verify worktree was created
-    assert!(worktree_path.exists(), "Worktree should exist before removal");
+    assert!(
+        worktree_path.exists(),
+        "Worktree should exist before removal"
+    );
     assert!(
         session_path.exists(),
         "Session symlink should exist before removal"
@@ -283,15 +286,9 @@ fn test_worktree_duplicate_creation_fails() -> Result<()> {
     );
 
     if let Err(WorktreeError::AlreadyExists(path)) = second_result {
-        assert!(
-            !path.is_empty(),
-            "AlreadyExists error should include path"
-        );
+        assert!(!path.is_empty(), "AlreadyExists error should include path");
     } else {
-        panic!(
-            "Expected AlreadyExists error, got: {:?}",
-            second_result
-        );
+        panic!("Expected AlreadyExists error, got: {:?}", second_result);
     }
 
     Ok(())
@@ -379,12 +376,7 @@ fn test_worktree_path_generation_is_deterministic() -> Result<()> {
     let test_repo = TestRepo::new()?;
 
     // WHEN: Creating a worktree (to test path generation)
-    let worktree_info = manager.create_worktree(
-        session_id,
-        test_repo.path(),
-        branch_name,
-        None,
-    );
+    let worktree_info = manager.create_worktree(session_id, test_repo.path(), branch_name, None);
 
     // For path format testing, verify the generated path follows expected pattern
     // The path should be in: base_dir/by-name/{repo_name}--{branch_name}--{short_uuid}
@@ -493,13 +485,16 @@ fn test_worktree_info_contains_correct_metadata() -> Result<()> {
     assert_eq!(retrieved_info.branch_name, worktree_info.branch_name);
 
     // Compare canonicalized paths to handle macOS /var -> /private/var symlink
-    let retrieved_source = retrieved_info.source_repository.canonicalize()
+    let retrieved_source = retrieved_info
+        .source_repository
+        .canonicalize()
         .unwrap_or_else(|_| retrieved_info.source_repository.clone());
-    let original_source = worktree_info.source_repository.canonicalize()
+    let original_source = worktree_info
+        .source_repository
+        .canonicalize()
         .unwrap_or_else(|_| worktree_info.source_repository.clone());
     assert_eq!(
-        retrieved_source,
-        original_source,
+        retrieved_source, original_source,
         "Source repository should match (canonicalized)"
     );
 

@@ -118,8 +118,8 @@ pub struct JsonlLogReader;
 impl JsonlLogReader {
     /// Read all logs from a session log file
     pub fn read_session_logs(path: &Path) -> Result<Vec<LogEntry>> {
-        let file = File::open(path)
-            .with_context(|| format!("Failed to open log file: {:?}", path))?;
+        let file =
+            File::open(path).with_context(|| format!("Failed to open log file: {:?}", path))?;
 
         let reader = BufReader::new(file);
         let mut entries = Vec::new();
@@ -154,8 +154,8 @@ impl JsonlLogReader {
 
     /// Read logs from a session log file with a limit
     pub fn read_session_logs_limited(path: &Path, limit: usize) -> Result<Vec<LogEntry>> {
-        let file = File::open(path)
-            .with_context(|| format!("Failed to open log file: {:?}", path))?;
+        let file =
+            File::open(path).with_context(|| format!("Failed to open log file: {:?}", path))?;
 
         let reader = BufReader::new(file);
         let mut entries = Vec::new();
@@ -276,24 +276,22 @@ impl JsonlLogReader {
 
     /// Stream logs from a file as an iterator
     pub fn stream_logs(path: &Path) -> Result<impl Iterator<Item = Result<LogEntry>>> {
-        let file = File::open(path)
-            .with_context(|| format!("Failed to open log file: {:?}", path))?;
+        let file =
+            File::open(path).with_context(|| format!("Failed to open log file: {:?}", path))?;
 
         let reader = BufReader::new(file);
 
-        Ok(reader.lines().filter_map(|line_result| {
-            match line_result {
-                Ok(line) => {
-                    if line.trim().is_empty() {
-                        return None;
-                    }
-                    match serde_json::from_str::<JsonlLogEntry>(&line) {
-                        Ok(entry) => Some(Ok(entry.to_log_entry())),
-                        Err(e) => Some(Err(anyhow::anyhow!("Parse error: {}", e))),
-                    }
+        Ok(reader.lines().filter_map(|line_result| match line_result {
+            Ok(line) => {
+                if line.trim().is_empty() {
+                    return None;
                 }
-                Err(e) => Some(Err(e.into())),
+                match serde_json::from_str::<JsonlLogEntry>(&line) {
+                    Ok(entry) => Some(Ok(entry.to_log_entry())),
+                    Err(e) => Some(Err(anyhow::anyhow!("Parse error: {}", e))),
+                }
             }
+            Err(e) => Some(Err(e.into())),
         }))
     }
 
@@ -314,13 +312,13 @@ impl JsonlLogReader {
     /// Filter logs by level
     pub fn filter_by_level(logs: &[LogEntry], min_level: LogEntryLevel) -> Vec<&LogEntry> {
         logs.iter()
-            .filter(|entry| {
-                match min_level {
-                    LogEntryLevel::Debug => true,
-                    LogEntryLevel::Info => !matches!(entry.level, LogEntryLevel::Debug),
-                    LogEntryLevel::Warn => matches!(entry.level, LogEntryLevel::Warn | LogEntryLevel::Error),
-                    LogEntryLevel::Error => matches!(entry.level, LogEntryLevel::Error),
+            .filter(|entry| match min_level {
+                LogEntryLevel::Debug => true,
+                LogEntryLevel::Info => !matches!(entry.level, LogEntryLevel::Debug),
+                LogEntryLevel::Warn => {
+                    matches!(entry.level, LogEntryLevel::Warn | LogEntryLevel::Error)
                 }
+                LogEntryLevel::Error => matches!(entry.level, LogEntryLevel::Error),
             })
             .collect()
     }
@@ -331,8 +329,8 @@ impl JsonlLogReader {
 
     /// Read application tracing logs (tracing-subscriber JSON format)
     pub fn read_tracing_logs(path: &Path) -> Result<Vec<LogEntry>> {
-        let file = File::open(path)
-            .with_context(|| format!("Failed to open log file: {:?}", path))?;
+        let file =
+            File::open(path).with_context(|| format!("Failed to open log file: {:?}", path))?;
 
         let reader = BufReader::new(file);
         let mut entries = Vec::new();
@@ -466,9 +464,7 @@ impl JsonlLogReader {
     /// Parse filename to human-readable display name
     fn parse_filename_to_display(filename: &str) -> String {
         // agents-in-a-box-YYYYMMDD-HHMMSS.jsonl -> YYYY-MM-DD HH:MM:SS
-        let stripped = filename
-            .strip_prefix("agents-in-a-box-")
-            .unwrap_or(filename);
+        let stripped = filename.strip_prefix("agents-in-a-box-").unwrap_or(filename);
         let stripped = stripped
             .strip_suffix(".jsonl")
             .or_else(|| stripped.strip_suffix(".log"))
@@ -476,18 +472,18 @@ impl JsonlLogReader {
 
         // Parse YYYYMMDD-HHMMSS
         if stripped.len() >= 15 {
-            let date_part = &stripped[0..8];   // YYYYMMDD
-            let time_part = &stripped[9..15];  // HHMMSS
+            let date_part = &stripped[0..8]; // YYYYMMDD
+            let time_part = &stripped[9..15]; // HHMMSS
 
             if date_part.len() == 8 && time_part.len() == 6 {
                 return format!(
                     "{}-{}-{} {}:{}:{}",
-                    &date_part[0..4],  // YYYY
-                    &date_part[4..6],  // MM
-                    &date_part[6..8],  // DD
-                    &time_part[0..2],  // HH
-                    &time_part[2..4],  // MM
-                    &time_part[4..6],  // SS
+                    &date_part[0..4], // YYYY
+                    &date_part[4..6], // MM
+                    &date_part[6..8], // DD
+                    &time_part[0..2], // HH
+                    &time_part[2..4], // MM
+                    &time_part[4..6], // SS
                 );
             }
         }
@@ -587,9 +583,21 @@ mod tests {
         let mut writer = JsonlLogWriter::new(log_dir.clone()).unwrap();
         let session_id = Uuid::new_v4();
 
-        let entry1 = LogEntry::new(LogEntryLevel::Info, "test".to_string(), "Message 1".to_string());
-        let entry2 = LogEntry::new(LogEntryLevel::Error, "test".to_string(), "Error message".to_string());
-        let entry3 = LogEntry::new(LogEntryLevel::Warn, "test".to_string(), "Warning".to_string());
+        let entry1 = LogEntry::new(
+            LogEntryLevel::Info,
+            "test".to_string(),
+            "Message 1".to_string(),
+        );
+        let entry2 = LogEntry::new(
+            LogEntryLevel::Error,
+            "test".to_string(),
+            "Error message".to_string(),
+        );
+        let entry3 = LogEntry::new(
+            LogEntryLevel::Warn,
+            "test".to_string(),
+            "Warning".to_string(),
+        );
 
         writer.write_entry(session_id, &entry1).unwrap();
         writer.write_entry(session_id, &entry2).unwrap();
@@ -613,9 +621,28 @@ mod tests {
         let mut writer = JsonlLogWriter::new(log_dir.clone()).unwrap();
         let session_id = Uuid::new_v4();
 
-        writer.write_entry(session_id, &LogEntry::new(LogEntryLevel::Info, "test".to_string(), "Info".to_string())).unwrap();
-        writer.write_entry(session_id, &LogEntry::new(LogEntryLevel::Error, "test".to_string(), "Error".to_string())).unwrap();
-        writer.write_entry(session_id, &LogEntry::new(LogEntryLevel::Warn, "test".to_string(), "Warn".to_string())).unwrap();
+        writer
+            .write_entry(
+                session_id,
+                &LogEntry::new(LogEntryLevel::Info, "test".to_string(), "Info".to_string()),
+            )
+            .unwrap();
+        writer
+            .write_entry(
+                session_id,
+                &LogEntry::new(
+                    LogEntryLevel::Error,
+                    "test".to_string(),
+                    "Error".to_string(),
+                ),
+            )
+            .unwrap();
+        writer
+            .write_entry(
+                session_id,
+                &LogEntry::new(LogEntryLevel::Warn, "test".to_string(), "Warn".to_string()),
+            )
+            .unwrap();
         writer.flush().unwrap();
 
         let log_path = writer.session_log_path(session_id);
@@ -638,8 +665,26 @@ mod tests {
         let session1 = Uuid::new_v4();
         let session2 = Uuid::new_v4();
 
-        writer.write_entry(session1, &LogEntry::new(LogEntryLevel::Info, "s1".to_string(), "Session 1".to_string())).unwrap();
-        writer.write_entry(session2, &LogEntry::new(LogEntryLevel::Info, "s2".to_string(), "Session 2".to_string())).unwrap();
+        writer
+            .write_entry(
+                session1,
+                &LogEntry::new(
+                    LogEntryLevel::Info,
+                    "s1".to_string(),
+                    "Session 1".to_string(),
+                ),
+            )
+            .unwrap();
+        writer
+            .write_entry(
+                session2,
+                &LogEntry::new(
+                    LogEntryLevel::Info,
+                    "s2".to_string(),
+                    "Session 2".to_string(),
+                ),
+            )
+            .unwrap();
         writer.flush().unwrap();
 
         let sessions = JsonlLogReader::list_sessions(&log_dir).unwrap();
@@ -654,9 +699,36 @@ mod tests {
         let mut writer = JsonlLogWriter::new(log_dir).unwrap();
         let session_id = Uuid::new_v4();
 
-        writer.write_entry(session_id, &LogEntry::new(LogEntryLevel::Info, "test".to_string(), "Hello world".to_string())).unwrap();
-        writer.write_entry(session_id, &LogEntry::new(LogEntryLevel::Info, "test".to_string(), "Goodbye world".to_string())).unwrap();
-        writer.write_entry(session_id, &LogEntry::new(LogEntryLevel::Info, "test".to_string(), "Something else".to_string())).unwrap();
+        writer
+            .write_entry(
+                session_id,
+                &LogEntry::new(
+                    LogEntryLevel::Info,
+                    "test".to_string(),
+                    "Hello world".to_string(),
+                ),
+            )
+            .unwrap();
+        writer
+            .write_entry(
+                session_id,
+                &LogEntry::new(
+                    LogEntryLevel::Info,
+                    "test".to_string(),
+                    "Goodbye world".to_string(),
+                ),
+            )
+            .unwrap();
+        writer
+            .write_entry(
+                session_id,
+                &LogEntry::new(
+                    LogEntryLevel::Info,
+                    "test".to_string(),
+                    "Something else".to_string(),
+                ),
+            )
+            .unwrap();
         writer.flush().unwrap();
 
         let log_path = writer.session_log_path(session_id);

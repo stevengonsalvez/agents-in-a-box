@@ -4,7 +4,7 @@
 
 use anyhow::{Context, Result};
 use git2::{BranchType, Repository};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use thiserror::Error;
@@ -153,10 +153,11 @@ impl WorktreeManager {
 
         // Read existing claude.json or create default structure
         let mut config: Value = if claude_json_path.exists() {
-            let content = std::fs::read_to_string(&claude_json_path)
-                .map_err(|e| WorktreeError::Io(e))?;
-            serde_json::from_str(&content)
-                .map_err(|e| WorktreeError::CommandFailed(format!("Invalid JSON in claude.json: {}", e)))?
+            let content =
+                std::fs::read_to_string(&claude_json_path).map_err(|e| WorktreeError::Io(e))?;
+            serde_json::from_str(&content).map_err(|e| {
+                WorktreeError::CommandFailed(format!("Invalid JSON in claude.json: {}", e))
+            })?
         } else {
             json!({ "projects": {} })
         };
@@ -174,16 +175,16 @@ impl WorktreeManager {
         });
 
         // Write back to claude.json
-        let content = serde_json::to_string_pretty(&config)
-            .map_err(|e| WorktreeError::CommandFailed(format!("Failed to serialize JSON: {}", e)))?;
+        let content = serde_json::to_string_pretty(&config).map_err(|e| {
+            WorktreeError::CommandFailed(format!("Failed to serialize JSON: {}", e))
+        })?;
 
         // Ensure .claude directory exists
         if let Some(parent) = claude_json_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
-        std::fs::write(&claude_json_path, content)
-            .map_err(|e| WorktreeError::Io(e))?;
+        std::fs::write(&claude_json_path, content).map_err(|e| WorktreeError::Io(e))?;
 
         info!("Added Claude trust for worktree: {}", path_str);
         Ok(())
@@ -534,7 +535,12 @@ impl WorktreeManager {
     }
 
     /// Set a git config value
-    fn set_git_config(&self, repo_path: &Path, key: &str, value: &str) -> Result<(), WorktreeError> {
+    fn set_git_config(
+        &self,
+        repo_path: &Path,
+        key: &str,
+        value: &str,
+    ) -> Result<(), WorktreeError> {
         let output = Command::new("git")
             .current_dir(repo_path)
             .args(["config", "--local", key, value])

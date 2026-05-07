@@ -5,33 +5,33 @@
 
 use anyhow::Result;
 use git2::{DiffFormat, DiffOptions, Repository};
-use pulldown_cmark::{Event, Parser, Tag, CodeBlockKind, HeadingLevel};
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Parser, Tag};
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, BorderType, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
 
 // Premium color palette (TUI Style Guide)
-const CORNFLOWER_BLUE: Color = Color::Rgb(100, 149, 237);  // Primary accent, borders
-const GOLD: Color = Color::Rgb(255, 215, 0);               // Important CTAs, emphasis
-const SELECTION_GREEN: Color = Color::Rgb(100, 200, 100);  // Active selections
-const WARNING_ORANGE: Color = Color::Rgb(255, 165, 0);     // Warnings
+const CORNFLOWER_BLUE: Color = Color::Rgb(100, 149, 237); // Primary accent, borders
+const GOLD: Color = Color::Rgb(255, 215, 0); // Important CTAs, emphasis
+const SELECTION_GREEN: Color = Color::Rgb(100, 200, 100); // Active selections
+const WARNING_ORANGE: Color = Color::Rgb(255, 165, 0); // Warnings
 
 // Background colors
-const DARK_BG: Color = Color::Rgb(25, 25, 35);             // Main UI background
-const PANEL_BG: Color = Color::Rgb(30, 30, 40);            // Panel backgrounds
-const LIST_HIGHLIGHT_BG: Color = Color::Rgb(40, 40, 60);   // Selection background
+const DARK_BG: Color = Color::Rgb(25, 25, 35); // Main UI background
+const PANEL_BG: Color = Color::Rgb(30, 30, 40); // Panel backgrounds
+const LIST_HIGHLIGHT_BG: Color = Color::Rgb(40, 40, 60); // Selection background
 
 // Text colors
-const SOFT_WHITE: Color = Color::Rgb(220, 220, 230);       // Primary text
-const MUTED_GRAY: Color = Color::Rgb(120, 120, 140);       // Secondary text
-const SUBDUED_BORDER: Color = Color::Rgb(60, 60, 80);      // Secondary borders
+const SOFT_WHITE: Color = Color::Rgb(220, 220, 230); // Primary text
+const MUTED_GRAY: Color = Color::Rgb(120, 120, 140); // Secondary text
+const SUBDUED_BORDER: Color = Color::Rgb(60, 60, 80); // Secondary borders
 
 // Status colors
-const PROGRESS_CYAN: Color = Color::Rgb(100, 200, 230);    // Loading/processing
+const PROGRESS_CYAN: Color = Color::Rgb(100, 200, 230); // Loading/processing
 use std::collections::HashSet;
 use std::path::PathBuf;
 use tracing::{debug, error};
@@ -49,11 +49,11 @@ pub struct GitViewState {
     pub commit_message_input: Option<String>, // None = not in commit mode, Some = commit message being entered
     pub commit_message_cursor: usize,         // Cursor position in commit message
     // File tree state
-    pub expanded_folders: HashSet<String>,    // Tracks which folders are expanded
-    pub file_tree_items: Vec<FileTreeItem>,   // Flattened tree for rendering
-    pub selected_tree_index: usize,           // Index in the flattened tree
+    pub expanded_folders: HashSet<String>, // Tracks which folders are expanded
+    pub file_tree_items: Vec<FileTreeItem>, // Flattened tree for rendering
+    pub selected_tree_index: usize,        // Index in the flattened tree
     // Markdown viewer state
-    pub markdown_content: Vec<MarkdownLine>,  // Rendered markdown lines
+    pub markdown_content: Vec<MarkdownLine>, // Rendered markdown lines
     pub markdown_scroll_offset: usize,
     // Commits tab state
     pub commits: Vec<crate::git::operations::CommitInfo>,
@@ -63,14 +63,14 @@ pub struct GitViewState {
 /// Represents an item in the file tree (either a folder or file)
 #[derive(Debug, Clone)]
 pub struct FileTreeItem {
-    pub display_name: String,        // Just the filename or folder name
-    pub full_path: String,           // Full path for file operations
-    pub depth: usize,                // Indentation level
-    pub is_folder: bool,             // true = folder, false = file
+    pub display_name: String,          // Just the filename or folder name
+    pub full_path: String,             // Full path for file operations
+    pub depth: usize,                  // Indentation level
+    pub is_folder: bool,               // true = folder, false = file
     pub status: Option<GitFileStatus>, // Only for files
-    pub is_last_in_group: bool,      // For tree line characters (└─ vs ├─)
-    pub is_expanded: bool,           // Only meaningful for folders
-    pub file_count: usize,           // Number of changed files in folder (for folders only)
+    pub is_last_in_group: bool,        // For tree line characters (└─ vs ├─)
+    pub is_expanded: bool,             // Only meaningful for folders
+    pub file_count: usize,             // Number of changed files in folder (for folders only)
 }
 
 /// A line of rendered markdown content
@@ -231,7 +231,9 @@ impl GitViewState {
         self.build_file_tree();
 
         // Reset selection if needed
-        if self.selected_tree_index >= self.file_tree_items.len() && !self.file_tree_items.is_empty() {
+        if self.selected_tree_index >= self.file_tree_items.len()
+            && !self.file_tree_items.is_empty()
+        {
             self.selected_tree_index = 0;
         }
 
@@ -249,8 +251,8 @@ impl GitViewState {
         }
 
         // Load branch commits (commits since diverging from main)
-        self.commits = crate::git::operations::get_branch_commits(&self.worktree_path, 50)
-            .unwrap_or_default();
+        self.commits =
+            crate::git::operations::get_branch_commits(&self.worktree_path, 50).unwrap_or_default();
         self.selected_commit_index = 0;
 
         Ok(())
@@ -332,7 +334,8 @@ impl GitViewState {
                     processed_folders.insert(folder_path.clone());
 
                     let base_depth = parts.len().saturating_sub(1);
-                    let display_name = parts.last()
+                    let display_name = parts
+                        .last()
                         .filter(|s| !s.is_empty())
                         .map(|s| s.to_string())
                         .unwrap_or_else(|| file.path.clone());
@@ -371,7 +374,8 @@ impl GitViewState {
                 // Regular file
                 let depth = parts.len().saturating_sub(1);
                 // Use the last part as filename, fallback to full path if empty
-                let display_name = parts.last()
+                let display_name = parts
+                    .last()
                     .filter(|s| !s.is_empty())
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| file.path.clone());
@@ -620,7 +624,8 @@ impl GitViewState {
         if let Some(item) = self.file_tree_items.get(self.selected_tree_index) {
             if !item.is_folder {
                 // Find this file in changed_files
-                if let Some(idx) = self.changed_files.iter().position(|f| f.path == item.full_path) {
+                if let Some(idx) = self.changed_files.iter().position(|f| f.path == item.full_path)
+                {
                     self.selected_file_index = idx;
                 }
             }
@@ -629,9 +634,13 @@ impl GitViewState {
 
     /// Load markdown content if the selected file is a .md file
     fn load_markdown_if_applicable(&mut self) {
-        let file_path = self.file_tree_items
+        let file_path = self
+            .file_tree_items
             .get(self.selected_tree_index)
-            .filter(|item| !item.is_folder && (item.full_path.ends_with(".md") || item.full_path.ends_with(".markdown")))
+            .filter(|item| {
+                !item.is_folder
+                    && (item.full_path.ends_with(".md") || item.full_path.ends_with(".markdown"))
+            })
             .map(|item| item.full_path.clone());
 
         if let Some(path) = file_path {
@@ -900,7 +909,11 @@ impl GitViewState {
                     if let Ok(entries) = std::fs::read_dir(&file_path) {
                         for entry in entries.flatten() {
                             let name = entry.file_name().to_string_lossy().to_string();
-                            let prefix = if entry.path().is_dir() { "📁" } else { "📄" };
+                            let prefix = if entry.path().is_dir() {
+                                "📁"
+                            } else {
+                                "📄"
+                            };
                             diff_content.push(format!("  {} {}", prefix, name));
                         }
                     }
@@ -1037,7 +1050,10 @@ impl GitViewState {
     pub fn is_selected_markdown(&self) -> bool {
         self.file_tree_items
             .get(self.selected_tree_index)
-            .map(|item| !item.is_folder && (item.full_path.ends_with(".md") || item.full_path.ends_with(".markdown")))
+            .map(|item| {
+                !item.is_folder
+                    && (item.full_path.ends_with(".md") || item.full_path.ends_with(".markdown"))
+            })
             .unwrap_or(false)
     }
 
@@ -1193,17 +1209,24 @@ impl GitViewComponent {
             .split(area);
 
         // Render raised tab style - dynamically include Markdown tab if applicable
-        let tab_titles: Vec<&str> = if git_state.is_selected_markdown() && !git_state.markdown_content.is_empty() {
-            vec!["Files", "Diff", "Commits", "Markdown"]
-        } else {
-            vec!["Files", "Diff", "Commits"]
-        };
+        let tab_titles: Vec<&str> =
+            if git_state.is_selected_markdown() && !git_state.markdown_content.is_empty() {
+                vec!["Files", "Diff", "Commits", "Markdown"]
+            } else {
+                vec!["Files", "Diff", "Commits"]
+            };
 
         let selected_tab = match git_state.active_tab {
             GitTab::Files => 0,
             GitTab::Diff => 1,
             GitTab::Commits => 2,
-            GitTab::Markdown => if tab_titles.len() > 3 { 3 } else { 0 },
+            GitTab::Markdown => {
+                if tab_titles.len() > 3 {
+                    3
+                } else {
+                    0
+                }
+            }
         };
 
         Self::render_raised_tabs(frame, chunks[0], &tab_titles, selected_tab);
@@ -1246,12 +1269,15 @@ impl GitViewComponent {
         // We use: 3 chars before name + name + 1 char after for inactive
         // We use: 1 bar + 1 space + name + 1 space + 1 bar for active (= 4 + name)
         // Make them equal by using max
-        let tab_cell_widths: Vec<usize> = tabs.iter().map(|t| {
-            let name_len = t.chars().count();
-            // Cell width = separator space (3) + name + trailing space (1) = name + 4
-            // This matches active: │(1) + space(1) + name + space(1) + │(1) = name + 4
-            name_len + 4
-        }).collect();
+        let tab_cell_widths: Vec<usize> = tabs
+            .iter()
+            .map(|t| {
+                let name_len = t.chars().count();
+                // Cell width = separator space (3) + name + trailing space (1) = name + 4
+                // This matches active: │(1) + space(1) + name + space(1) + │(1) = name + 4
+                name_len + 4
+            })
+            .collect();
 
         let icon_width = 4; // "[G] "
 
@@ -1263,7 +1289,10 @@ impl GitViewComponent {
             if i == selected {
                 // Active tab top: ╭───────╮
                 top_spans.push(Span::styled("╭", Style::default().fg(GOLD)));
-                top_spans.push(Span::styled("─".repeat(cell_width - 2), Style::default().fg(GOLD)));
+                top_spans.push(Span::styled(
+                    "─".repeat(cell_width - 2),
+                    Style::default().fg(GOLD),
+                ));
                 top_spans.push(Span::styled("╮", Style::default().fg(GOLD)));
             } else {
                 // Inactive: just spaces
@@ -1279,7 +1308,10 @@ impl GitViewComponent {
 
         // Line 2: Tab names - │ Name │ for active, " · Name" for inactive
         let mut mid_spans: Vec<Span> = vec![];
-        mid_spans.push(Span::styled("[G] ", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)));
+        mid_spans.push(Span::styled(
+            "[G] ",
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ));
 
         for (i, &tab_name) in tabs.iter().enumerate() {
             let cell_width = tab_cell_widths[i];
@@ -1293,14 +1325,20 @@ impl GitViewComponent {
 
                 mid_spans.push(Span::styled("│", Style::default().fg(GOLD)));
                 mid_spans.push(Span::raw(" ".repeat(left_pad)));
-                mid_spans.push(Span::styled(tab_name.to_string(), Style::default().fg(GOLD).add_modifier(Modifier::BOLD)));
+                mid_spans.push(Span::styled(
+                    tab_name.to_string(),
+                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                ));
                 mid_spans.push(Span::raw(" ".repeat(right_pad)));
                 mid_spans.push(Span::styled("│", Style::default().fg(GOLD)));
             } else {
                 // Inactive: " · Name " (total = cell_width)
                 let remaining = cell_width - 3 - name_len; // 3 for " · "
                 mid_spans.push(Span::styled(" · ", Style::default().fg(SUBDUED_BORDER)));
-                mid_spans.push(Span::styled(tab_name.to_string(), Style::default().fg(MUTED_GRAY)));
+                mid_spans.push(Span::styled(
+                    tab_name.to_string(),
+                    Style::default().fg(MUTED_GRAY),
+                ));
                 if remaining > 0 {
                     mid_spans.push(Span::raw(" ".repeat(remaining)));
                 }
@@ -1314,13 +1352,19 @@ impl GitViewComponent {
         if mid_used + hint_len < area_width {
             let padding = area_width - mid_used - hint_len;
             mid_spans.push(Span::raw(" ".repeat(padding)));
-            mid_spans.push(Span::styled("Tab", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)));
+            mid_spans.push(Span::styled(
+                "Tab",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ));
             mid_spans.push(Span::styled(" switch", Style::default().fg(MUTED_GRAY)));
         }
 
         // Line 3: Bottom border - ─── for inactive, ┘   └ for active
         let mut bot_spans: Vec<Span> = vec![];
-        bot_spans.push(Span::styled("─".repeat(icon_width), Style::default().fg(CORNFLOWER_BLUE)));
+        bot_spans.push(Span::styled(
+            "─".repeat(icon_width),
+            Style::default().fg(CORNFLOWER_BLUE),
+        ));
 
         for (i, &cell_width) in tab_cell_widths.iter().enumerate() {
             if i == selected {
@@ -1331,14 +1375,20 @@ impl GitViewComponent {
                 bot_spans.push(Span::styled("└", Style::default().fg(GOLD)));
             } else {
                 // Inactive: continuous line
-                bot_spans.push(Span::styled("─".repeat(cell_width), Style::default().fg(CORNFLOWER_BLUE)));
+                bot_spans.push(Span::styled(
+                    "─".repeat(cell_width),
+                    Style::default().fg(CORNFLOWER_BLUE),
+                ));
             }
         }
 
         // Fill remaining with line
         let bot_used: usize = icon_width + tab_cell_widths.iter().sum::<usize>();
         if bot_used < area_width {
-            bot_spans.push(Span::styled("─".repeat(area_width - bot_used), Style::default().fg(CORNFLOWER_BLUE)));
+            bot_spans.push(Span::styled(
+                "─".repeat(area_width - bot_used),
+                Style::default().fg(CORNFLOWER_BLUE),
+            ));
         }
 
         // Render
@@ -1348,8 +1398,7 @@ impl GitViewComponent {
             Line::from(bot_spans),
         ];
 
-        let tab_paragraph = Paragraph::new(tab_lines)
-            .style(Style::default().bg(DARK_BG));
+        let tab_paragraph = Paragraph::new(tab_lines).style(Style::default().bg(DARK_BG));
 
         frame.render_widget(tab_paragraph, area);
     }
@@ -1357,9 +1406,15 @@ impl GitViewComponent {
     fn render_files_tab(frame: &mut Frame, area: Rect, git_state: &GitViewState) {
         if git_state.file_tree_items.is_empty() {
             let no_changes = Paragraph::new(vec![
-                Line::from(Span::styled("✨ No changes detected", Style::default().fg(MUTED_GRAY))),
+                Line::from(Span::styled(
+                    "✨ No changes detected",
+                    Style::default().fg(MUTED_GRAY),
+                )),
                 Line::from(""),
-                Line::from(Span::styled("Working directory is clean", Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC))),
+                Line::from(Span::styled(
+                    "Working directory is clean",
+                    Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+                )),
             ])
             .block(
                 Block::default()
@@ -1369,8 +1424,11 @@ impl GitViewComponent {
                     .style(Style::default().bg(DARK_BG))
                     .title(Line::from(vec![
                         Span::styled(" 📁 ", Style::default().fg(GOLD)),
-                        Span::styled("Changed Files", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
-                    ]))
+                        Span::styled(
+                            "Changed Files",
+                            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                        ),
+                    ])),
             )
             .wrap(Wrap { trim: true });
             frame.render_widget(no_changes, area);
@@ -1413,7 +1471,8 @@ impl GitViewComponent {
 
                     // Show status badge for untracked directories
                     let status_prefix = if let Some(ref status) = item.status {
-                        let status_style = Style::default().fg(status.color()).add_modifier(Modifier::BOLD);
+                        let status_style =
+                            Style::default().fg(status.color()).add_modifier(Modifier::BOLD);
                         vec![
                             Span::styled(format!("[{}]", status.symbol()), status_style),
                             Span::raw(" "),
@@ -1424,9 +1483,7 @@ impl GitViewComponent {
 
                     let folder_icon = if item.is_expanded { "📂" } else { "📁" };
 
-                    let mut spans = vec![
-                        Span::styled(indent, indent_style),
-                    ];
+                    let mut spans = vec![Span::styled(indent, indent_style)];
                     if is_selected {
                         spans.insert(0, Span::styled("▶ ", Style::default().fg(SELECTION_GREEN)));
                     } else {
@@ -1452,7 +1509,8 @@ impl GitViewComponent {
                 } else {
                     // File rendering with premium styling
                     let status = item.status.as_ref().unwrap_or(&GitFileStatus::Modified);
-                    let status_style = Style::default().fg(status.color()).add_modifier(Modifier::BOLD);
+                    let status_style =
+                        Style::default().fg(status.color()).add_modifier(Modifier::BOLD);
 
                     // Use display_name, fallback to full_path if empty
                     let filename = if item.display_name.is_empty() {
@@ -1503,14 +1561,20 @@ impl GitViewComponent {
                     .style(Style::default().bg(DARK_BG))
                     .title(Line::from(vec![
                         Span::styled(" 📁 ", Style::default().fg(GOLD)),
-                        Span::styled("Changed Files ", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            "Changed Files ",
+                            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                        ),
                         Span::styled(
                             format!("({})", git_state.changed_files.len()),
-                            Style::default().fg(CORNFLOWER_BLUE).add_modifier(Modifier::BOLD)
+                            Style::default().fg(CORNFLOWER_BLUE).add_modifier(Modifier::BOLD),
                         ),
                     ]))
                     .title_bottom(Line::from(vec![
-                        Span::styled(" Enter", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            " Enter",
+                            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                        ),
                         Span::styled(" toggle ", Style::default().fg(MUTED_GRAY)),
                         Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
                         Span::styled(" e", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
@@ -1519,9 +1583,12 @@ impl GitViewComponent {
                         Span::styled(" E", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
                         Span::styled(" collapse ", Style::default().fg(MUTED_GRAY)),
                         Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
-                        Span::styled(" Tab", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            " Tab",
+                            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                        ),
                         Span::styled(" switch tab ", Style::default().fg(MUTED_GRAY)),
-                    ]))
+                    ])),
             )
             .highlight_style(Style::default().bg(LIST_HIGHLIGHT_BG));
 
@@ -1565,7 +1632,10 @@ impl GitViewComponent {
             "📝"
         } else if filename.ends_with(".json") {
             "📋"
-        } else if filename.ends_with(".toml") || filename.ends_with(".yaml") || filename.ends_with(".yml") {
+        } else if filename.ends_with(".toml")
+            || filename.ends_with(".yaml")
+            || filename.ends_with(".yml")
+        {
             "⚙️"
         } else if filename.ends_with(".sh") || filename.ends_with(".bash") {
             "🖥️"
@@ -1585,9 +1655,15 @@ impl GitViewComponent {
     fn render_diff_tab(frame: &mut Frame, area: Rect, git_state: &GitViewState) {
         if git_state.diff_content.is_empty() {
             let no_diff = Paragraph::new(vec![
-                Line::from(Span::styled("📋 No diff available", Style::default().fg(MUTED_GRAY))),
+                Line::from(Span::styled(
+                    "📋 No diff available",
+                    Style::default().fg(MUTED_GRAY),
+                )),
                 Line::from(""),
-                Line::from(Span::styled("Select a file in the Files tab to view its diff", Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC))),
+                Line::from(Span::styled(
+                    "Select a file in the Files tab to view its diff",
+                    Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+                )),
             ])
             .block(
                 Block::default()
@@ -1597,8 +1673,11 @@ impl GitViewComponent {
                     .style(Style::default().bg(DARK_BG))
                     .title(Line::from(vec![
                         Span::styled(" 📋 ", Style::default().fg(GOLD)),
-                        Span::styled("Diff", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
-                    ]))
+                        Span::styled(
+                            "Diff",
+                            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                        ),
+                    ])),
             )
             .wrap(Wrap { trim: true });
             frame.render_widget(no_diff, area);
@@ -1611,8 +1690,8 @@ impl GitViewComponent {
         let end_line = (start_line + content_height).min(git_state.diff_content.len());
 
         // Diff colors (enhanced for visibility)
-        let addition_color = Color::Rgb(100, 200, 100);    // Softer green
-        let deletion_color = Color::Rgb(230, 100, 100);    // Softer red
+        let addition_color = Color::Rgb(100, 200, 100); // Softer green
+        let deletion_color = Color::Rgb(230, 100, 100); // Softer red
         let hunk_color = PROGRESS_CYAN;
         let file_header_color = WARNING_ORANGE;
 
@@ -1656,17 +1735,26 @@ impl GitViewComponent {
                     .style(Style::default().bg(DARK_BG))
                     .title(Line::from(vec![
                         Span::styled(" 📋 ", Style::default().fg(GOLD)),
-                        Span::styled("Diff: ", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            "Diff: ",
+                            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                        ),
                         Span::styled(selected_file_name, Style::default().fg(SOFT_WHITE)),
                         Span::styled(scroll_info, Style::default().fg(MUTED_GRAY)),
                     ]))
                     .title_bottom(Line::from(vec![
-                        Span::styled(" j/k", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            " j/k",
+                            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                        ),
                         Span::styled(" scroll ", Style::default().fg(MUTED_GRAY)),
                         Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
-                        Span::styled(" Tab", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            " Tab",
+                            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                        ),
                         Span::styled(" switch tab ", Style::default().fg(MUTED_GRAY)),
-                    ]))
+                    ])),
             )
             .wrap(Wrap { trim: false });
 
@@ -1681,7 +1769,10 @@ impl GitViewComponent {
             .style(Style::default().bg(DARK_BG))
             .title(Line::from(vec![
                 Span::styled(" 📜 ", Style::default().fg(GOLD)),
-                Span::styled("Branch Commits", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Branch Commits",
+                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                ),
             ]));
 
         let inner = block.inner(area);
@@ -1689,47 +1780,60 @@ impl GitViewComponent {
 
         if git_state.commits.is_empty() {
             let msg = Paragraph::new(vec![
-                Line::from(Span::styled("No commits on this branch yet", Style::default().fg(MUTED_GRAY))),
+                Line::from(Span::styled(
+                    "No commits on this branch yet",
+                    Style::default().fg(MUTED_GRAY),
+                )),
                 Line::from(""),
-                Line::from(Span::styled("Commits since diverging from main/master will appear here", Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC))),
+                Line::from(Span::styled(
+                    "Commits since diverging from main/master will appear here",
+                    Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+                )),
             ]);
             frame.render_widget(msg, inner);
             return;
         }
 
         // Build list items
-        let items: Vec<ListItem> = git_state.commits.iter().enumerate().map(|(i, commit)| {
-            let is_selected = i == git_state.selected_commit_index;
-            let prefix = if is_selected { "▶ " } else { "  " };
+        let items: Vec<ListItem> = git_state
+            .commits
+            .iter()
+            .enumerate()
+            .map(|(i, commit)| {
+                let is_selected = i == git_state.selected_commit_index;
+                let prefix = if is_selected { "▶ " } else { "  " };
 
-            let line = Line::from(vec![
-                Span::raw(prefix),
-                Span::styled(&commit.hash_short, Style::default().fg(GOLD)),
-                Span::raw(" "),
-                Span::styled(
-                    truncate_string(&commit.message, 50),
-                    Style::default().fg(SOFT_WHITE)
-                ),
-                Span::raw(" - "),
-                Span::styled(&commit.author, Style::default().fg(MUTED_GRAY)),
-                Span::raw(" "),
-                Span::styled(&commit.date, Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC)),
-            ]);
+                let line = Line::from(vec![
+                    Span::raw(prefix),
+                    Span::styled(&commit.hash_short, Style::default().fg(GOLD)),
+                    Span::raw(" "),
+                    Span::styled(
+                        truncate_string(&commit.message, 50),
+                        Style::default().fg(SOFT_WHITE),
+                    ),
+                    Span::raw(" - "),
+                    Span::styled(&commit.author, Style::default().fg(MUTED_GRAY)),
+                    Span::raw(" "),
+                    Span::styled(
+                        &commit.date,
+                        Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+                    ),
+                ]);
 
-            let style = if is_selected {
-                Style::default().bg(LIST_HIGHLIGHT_BG)
-            } else {
-                Style::default()
-            };
+                let style = if is_selected {
+                    Style::default().bg(LIST_HIGHLIGHT_BG)
+                } else {
+                    Style::default()
+                };
 
-            ListItem::new(line).style(style)
-        }).collect();
+                ListItem::new(line).style(style)
+            })
+            .collect();
 
         let mut list_state = ListState::default();
         list_state.select(Some(git_state.selected_commit_index));
 
-        let list = List::new(items)
-            .highlight_style(Style::default().bg(LIST_HIGHLIGHT_BG));
+        let list = List::new(items).highlight_style(Style::default().bg(LIST_HIGHLIGHT_BG));
 
         frame.render_stateful_widget(list, inner, &mut list_state);
     }
@@ -1737,9 +1841,15 @@ impl GitViewComponent {
     fn render_markdown_tab(frame: &mut Frame, area: Rect, git_state: &GitViewState) {
         if git_state.markdown_content.is_empty() {
             let no_content = Paragraph::new(vec![
-                Line::from(Span::styled("📝 No markdown content available", Style::default().fg(MUTED_GRAY))),
+                Line::from(Span::styled(
+                    "📝 No markdown content available",
+                    Style::default().fg(MUTED_GRAY),
+                )),
                 Line::from(""),
-                Line::from(Span::styled("Select a .md file in the Files tab", Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC))),
+                Line::from(Span::styled(
+                    "Select a .md file in the Files tab",
+                    Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+                )),
             ])
             .block(
                 Block::default()
@@ -1749,8 +1859,11 @@ impl GitViewComponent {
                     .style(Style::default().bg(DARK_BG))
                     .title(Line::from(vec![
                         Span::styled(" 📝 ", Style::default().fg(GOLD)),
-                        Span::styled("Markdown Preview", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
-                    ]))
+                        Span::styled(
+                            "Markdown Preview",
+                            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                        ),
+                    ])),
             )
             .wrap(Wrap { trim: true });
             frame.render_widget(no_content, area);
@@ -1778,35 +1891,33 @@ impl GitViewComponent {
                     MarkdownStyle::Heading1 => Style::default()
                         .fg(heading1_color)
                         .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-                    MarkdownStyle::Heading2 => Style::default()
-                        .fg(heading2_color)
-                        .add_modifier(Modifier::BOLD),
-                    MarkdownStyle::Heading3 => Style::default()
-                        .fg(heading3_color)
-                        .add_modifier(Modifier::BOLD),
+                    MarkdownStyle::Heading2 => {
+                        Style::default().fg(heading2_color).add_modifier(Modifier::BOLD)
+                    }
+                    MarkdownStyle::Heading3 => {
+                        Style::default().fg(heading3_color).add_modifier(Modifier::BOLD)
+                    }
                     MarkdownStyle::Paragraph => Style::default().fg(SOFT_WHITE),
-                    MarkdownStyle::CodeBlock => Style::default()
-                        .fg(code_fg)
-                        .bg(code_bg),
-                    MarkdownStyle::CodeBlockHeader(_) => Style::default()
-                        .fg(GOLD)
-                        .add_modifier(Modifier::BOLD),
+                    MarkdownStyle::CodeBlock => Style::default().fg(code_fg).bg(code_bg),
+                    MarkdownStyle::CodeBlockHeader(_) => {
+                        Style::default().fg(GOLD).add_modifier(Modifier::BOLD)
+                    }
                     MarkdownStyle::ListItem => Style::default().fg(SOFT_WHITE),
-                    MarkdownStyle::Bold => Style::default()
-                        .fg(SOFT_WHITE)
-                        .add_modifier(Modifier::BOLD),
-                    MarkdownStyle::Italic => Style::default()
-                        .fg(SOFT_WHITE)
-                        .add_modifier(Modifier::ITALIC),
-                    MarkdownStyle::InlineCode => Style::default()
-                        .fg(Color::Rgb(220, 150, 220))
-                        .bg(code_bg),
-                    MarkdownStyle::Link => Style::default()
-                        .fg(link_color)
-                        .add_modifier(Modifier::UNDERLINED),
-                    MarkdownStyle::BlockQuote => Style::default()
-                        .fg(quote_color)
-                        .add_modifier(Modifier::ITALIC),
+                    MarkdownStyle::Bold => {
+                        Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD)
+                    }
+                    MarkdownStyle::Italic => {
+                        Style::default().fg(SOFT_WHITE).add_modifier(Modifier::ITALIC)
+                    }
+                    MarkdownStyle::InlineCode => {
+                        Style::default().fg(Color::Rgb(220, 150, 220)).bg(code_bg)
+                    }
+                    MarkdownStyle::Link => {
+                        Style::default().fg(link_color).add_modifier(Modifier::UNDERLINED)
+                    }
+                    MarkdownStyle::BlockQuote => {
+                        Style::default().fg(quote_color).add_modifier(Modifier::ITALIC)
+                    }
                 };
 
                 Line::from(Span::styled(md_line.content.clone(), style))
@@ -1835,16 +1946,25 @@ impl GitViewComponent {
                     .style(Style::default().bg(DARK_BG))
                     .title(Line::from(vec![
                         Span::styled(" 📝 ", Style::default().fg(GOLD)),
-                        Span::styled(file_name, Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            file_name,
+                            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                        ),
                         Span::styled(scroll_info, Style::default().fg(MUTED_GRAY)),
                     ]))
                     .title_bottom(Line::from(vec![
-                        Span::styled(" j/k", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            " j/k",
+                            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                        ),
                         Span::styled(" scroll ", Style::default().fg(MUTED_GRAY)),
                         Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
-                        Span::styled(" Tab", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            " Tab",
+                            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                        ),
                         Span::styled(" switch tab ", Style::default().fg(MUTED_GRAY)),
-                    ]))
+                    ])),
             )
             .wrap(Wrap { trim: false });
 
@@ -1856,9 +1976,8 @@ impl GitViewComponent {
         let commit_message = git_state.commit_message_input.as_ref().unwrap_or(&empty_string);
 
         // Create spans with cursor visualization
-        let (before_cursor, after_cursor) = commit_message.split_at(
-            git_state.commit_message_cursor.min(commit_message.len())
-        );
+        let (before_cursor, after_cursor) =
+            commit_message.split_at(git_state.commit_message_cursor.min(commit_message.len()));
 
         let input_line = Line::from(vec![
             Span::styled(before_cursor, Style::default().fg(SOFT_WHITE)),
@@ -1875,18 +1994,30 @@ impl GitViewComponent {
                     .style(Style::default().bg(Color::Rgb(35, 35, 45)))
                     .title(Line::from(vec![
                         Span::styled(" ✏️ ", Style::default().fg(GOLD)),
-                        Span::styled("Commit Message", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            "Commit Message",
+                            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                        ),
                     ]))
                     .title_bottom(Line::from(vec![
-                        Span::styled(" Enter", Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            " Enter",
+                            Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
+                        ),
                         Span::styled(" commit ", Style::default().fg(MUTED_GRAY)),
                         Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
-                        Span::styled(" Esc", Style::default().fg(WARNING_ORANGE).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            " Esc",
+                            Style::default().fg(WARNING_ORANGE).add_modifier(Modifier::BOLD),
+                        ),
                         Span::styled(" cancel ", Style::default().fg(MUTED_GRAY)),
                         Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
-                        Span::styled(" ←/→", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            " ←/→",
+                            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                        ),
                         Span::styled(" cursor ", Style::default().fg(MUTED_GRAY)),
-                    ]))
+                    ])),
             )
             .wrap(Wrap { trim: false });
 
@@ -1895,7 +2026,11 @@ impl GitViewComponent {
 
     fn render_status_bar(frame: &mut Frame, area: Rect, git_state: &GitViewState) {
         let (status_icon, status_text, status_color) = if git_state.is_dirty {
-            ("🔄", format!("{} files changed", git_state.changed_files.len()), WARNING_ORANGE)
+            (
+                "🔄",
+                format!("{} files changed", git_state.changed_files.len()),
+                WARNING_ORANGE,
+            )
         } else {
             ("✓", "Working directory clean".to_string(), SELECTION_GREEN)
         };
@@ -1908,7 +2043,10 @@ impl GitViewComponent {
 
         // Build the status line with rich formatting
         let status_line = Line::from(vec![
-            Span::styled(format!(" {} ", status_icon), Style::default().fg(status_color)),
+            Span::styled(
+                format!(" {} ", status_icon),
+                Style::default().fg(status_color),
+            ),
             Span::styled(&status_text, Style::default().fg(status_color)),
             Span::styled("  │  ", Style::default().fg(SUBDUED_BORDER)),
             Span::styled(format!("{} ", push_icon), Style::default().fg(push_color)),
@@ -1917,7 +2055,10 @@ impl GitViewComponent {
             Span::styled("p", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
             Span::styled(" push ", Style::default().fg(MUTED_GRAY)),
             Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
-            Span::styled(" Esc", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " Esc",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" back ", Style::default().fg(MUTED_GRAY)),
         ]);
 
@@ -1927,7 +2068,7 @@ impl GitViewComponent {
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
                     .border_style(Style::default().fg(SUBDUED_BORDER))
-                    .style(Style::default().bg(PANEL_BG))
+                    .style(Style::default().bg(PANEL_BG)),
             )
             .wrap(Wrap { trim: true });
 

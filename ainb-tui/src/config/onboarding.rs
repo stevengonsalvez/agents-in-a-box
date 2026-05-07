@@ -72,8 +72,9 @@ impl OnboardingConfig {
         let content = fs::read_to_string(&path)
             .with_context(|| format!("Failed to read onboarding config from {}", path.display()))?;
 
-        let config: OnboardingConfig = toml::from_str(&content)
-            .with_context(|| format!("Failed to parse onboarding config from {}", path.display()))?;
+        let config: OnboardingConfig = toml::from_str(&content).with_context(|| {
+            format!("Failed to parse onboarding config from {}", path.display())
+        })?;
 
         Ok(config)
     }
@@ -84,12 +85,13 @@ impl OnboardingConfig {
 
         // Ensure parent directories exist
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create config directory: {}", parent.display()))?;
+            fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create config directory: {}", parent.display())
+            })?;
         }
 
-        let content = toml::to_string_pretty(self)
-            .context("Failed to serialize onboarding config")?;
+        let content =
+            toml::to_string_pretty(self).context("Failed to serialize onboarding config")?;
 
         fs::write(&path, content)
             .with_context(|| format!("Failed to write onboarding config to {}", path.display()))?;
@@ -114,10 +116,7 @@ impl OnboardingConfig {
         }
 
         // Check for major version change
-        let current_major = env!("CARGO_PKG_VERSION")
-            .split('.')
-            .next()
-            .unwrap_or("0");
+        let current_major = env!("CARGO_PKG_VERSION").split('.').next().unwrap_or("0");
 
         let saved_major = self.version.split('.').next().unwrap_or("0");
 

@@ -32,10 +32,7 @@ pub fn editor_name_to_command(name: &str) -> Option<&'static str> {
 /// Convert command to editor display name.
 #[must_use]
 pub fn editor_command_to_name(command: &str) -> Option<&'static str> {
-    EDITORS
-        .iter()
-        .find(|(_, cmd)| *cmd == command)
-        .map(|(name, _)| *name)
+    EDITORS.iter().find(|(_, cmd)| *cmd == command).map(|(name, _)| *name)
 }
 
 /// Detect which editors are available on the system.

@@ -58,12 +58,9 @@ impl CredentialKey {
 
 /// Store a credential in the system keychain
 pub fn store_credential(key: CredentialKey, value: &str) -> Result<()> {
-    let entry = Entry::new(SERVICE_NAME, key.as_str())
-        .context("Failed to create keyring entry")?;
+    let entry = Entry::new(SERVICE_NAME, key.as_str()).context("Failed to create keyring entry")?;
 
-    entry
-        .set_password(value)
-        .context("Failed to store credential in keychain")?;
+    entry.set_password(value).context("Failed to store credential in keychain")?;
 
     tracing::info!("Stored credential: {}", key.as_str());
     Ok(())
@@ -71,8 +68,7 @@ pub fn store_credential(key: CredentialKey, value: &str) -> Result<()> {
 
 /// Retrieve a credential from the system keychain
 pub fn get_credential(key: CredentialKey) -> Result<Option<String>> {
-    let entry = Entry::new(SERVICE_NAME, key.as_str())
-        .context("Failed to create keyring entry")?;
+    let entry = Entry::new(SERVICE_NAME, key.as_str()).context("Failed to create keyring entry")?;
 
     match entry.get_password() {
         Ok(password) => {
@@ -92,8 +88,7 @@ pub fn get_credential(key: CredentialKey) -> Result<Option<String>> {
 
 /// Delete a credential from the system keychain
 pub fn delete_credential(key: CredentialKey) -> Result<()> {
-    let entry = Entry::new(SERVICE_NAME, key.as_str())
-        .context("Failed to create keyring entry")?;
+    let entry = Entry::new(SERVICE_NAME, key.as_str()).context("Failed to create keyring entry")?;
 
     match entry.delete_credential() {
         Ok(()) => {
@@ -104,9 +99,7 @@ pub fn delete_credential(key: CredentialKey) -> Result<()> {
             // Already doesn't exist, that's fine
             Ok(())
         }
-        Err(e) => {
-            Err(anyhow::anyhow!("Failed to delete credential: {}", e))
-        }
+        Err(e) => Err(anyhow::anyhow!("Failed to delete credential: {}", e)),
     }
 }
 

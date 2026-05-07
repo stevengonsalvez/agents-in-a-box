@@ -147,7 +147,11 @@ impl NewSessionComponent {
                 Span::styled(
                     "[L] Local Repository",
                     Style::default()
-                        .fg(if is_local { Color::Rgb(100, 200, 100) } else { Color::Rgb(200, 200, 200) })
+                        .fg(if is_local {
+                            Color::Rgb(100, 200, 100)
+                        } else {
+                            Color::Rgb(200, 200, 200)
+                        })
                         .add_modifier(Modifier::BOLD),
                 ),
                 if is_local {
@@ -158,18 +162,20 @@ impl NewSessionComponent {
             ]),
             Line::from(vec![
                 Span::styled("      ", Style::default()),
-                Span::styled("Browse and select from local repositories", Style::default().fg(Color::Rgb(180, 180, 180))),
+                Span::styled(
+                    "Browse and select from local repositories",
+                    Style::default().fg(Color::Rgb(180, 180, 180)),
+                ),
             ]),
         ];
 
-        let local_para = Paragraph::new(local_text)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(local_border_color))
-                    .style(Style::default().bg(local_bg)),
-            );
+        let local_para = Paragraph::new(local_text).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(local_border_color))
+                .style(Style::default().bg(local_bg)),
+        );
         frame.render_widget(local_para, chunks[0]);
 
         // Remote option card
@@ -195,7 +201,11 @@ impl NewSessionComponent {
                 Span::styled(
                     "[R] Remote URL",
                     Style::default()
-                        .fg(if is_remote { Color::Rgb(100, 149, 237) } else { Color::Rgb(200, 200, 200) })
+                        .fg(if is_remote {
+                            Color::Rgb(100, 149, 237)
+                        } else {
+                            Color::Rgb(200, 200, 200)
+                        })
                         .add_modifier(Modifier::BOLD),
                 ),
                 if is_remote {
@@ -206,18 +216,20 @@ impl NewSessionComponent {
             ]),
             Line::from(vec![
                 Span::styled("      ", Style::default()),
-                Span::styled("Clone from GitHub, GitLab, or any Git URL", Style::default().fg(Color::Rgb(180, 180, 180))),
+                Span::styled(
+                    "Clone from GitHub, GitLab, or any Git URL",
+                    Style::default().fg(Color::Rgb(180, 180, 180)),
+                ),
             ]),
         ];
 
-        let remote_para = Paragraph::new(remote_text)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(remote_border_color))
-                    .style(Style::default().bg(remote_bg)),
-            );
+        let remote_para = Paragraph::new(remote_text).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(remote_border_color))
+                .style(Style::default().bg(remote_bg)),
+        );
         frame.render_widget(remote_para, chunks[2]);
 
         // SSH option card
@@ -243,7 +255,11 @@ impl NewSessionComponent {
                 Span::styled(
                     "[S] SSH Connection",
                     Style::default()
-                        .fg(if is_ssh { Color::Rgb(200, 150, 100) } else { Color::Rgb(200, 200, 200) })
+                        .fg(if is_ssh {
+                            Color::Rgb(200, 150, 100)
+                        } else {
+                            Color::Rgb(200, 200, 200)
+                        })
                         .add_modifier(Modifier::BOLD),
                 ),
                 if is_ssh {
@@ -254,18 +270,20 @@ impl NewSessionComponent {
             ]),
             Line::from(vec![
                 Span::styled("      ", Style::default()),
-                Span::styled("Connect to a remote server via SSH", Style::default().fg(Color::Rgb(180, 180, 180))),
+                Span::styled(
+                    "Connect to a remote server via SSH",
+                    Style::default().fg(Color::Rgb(180, 180, 180)),
+                ),
             ]),
         ];
 
-        let ssh_para = Paragraph::new(ssh_text)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(ssh_border_color))
-                    .style(Style::default().bg(ssh_bg)),
-            );
+        let ssh_para = Paragraph::new(ssh_text).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(ssh_border_color))
+                .style(Style::default().bg(ssh_bg)),
+        );
         frame.render_widget(ssh_para, chunks[4]);
 
         // Favorites option card
@@ -291,7 +309,11 @@ impl NewSessionComponent {
                 Span::styled(
                     "[F] Favorites",
                     Style::default()
-                        .fg(if is_favorites { Color::Rgb(255, 215, 0) } else { Color::Rgb(200, 200, 200) })
+                        .fg(if is_favorites {
+                            Color::Rgb(255, 215, 0)
+                        } else {
+                            Color::Rgb(200, 200, 200)
+                        })
                         .add_modifier(Modifier::BOLD),
                 ),
                 if is_favorites {
@@ -302,18 +324,20 @@ impl NewSessionComponent {
             ]),
             Line::from(vec![
                 Span::styled("      ", Style::default()),
-                Span::styled("Quick access to saved repositories", Style::default().fg(Color::Rgb(180, 180, 180))),
+                Span::styled(
+                    "Quick access to saved repositories",
+                    Style::default().fg(Color::Rgb(180, 180, 180)),
+                ),
             ]),
         ];
 
-        let favorites_para = Paragraph::new(favorites_text)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(favorites_border_color))
-                    .style(Style::default().bg(favorites_bg)),
-            );
+        let favorites_para = Paragraph::new(favorites_text).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(favorites_border_color))
+                .style(Style::default().bg(favorites_bg)),
+        );
         frame.render_widget(favorites_para, chunks[6]);
 
         // Styled instructions footer
@@ -360,7 +384,10 @@ impl NewSessionComponent {
         // Main dialog with rounded border
         let title_line = Line::from(vec![
             Span::styled(" 🌐 ", Style::default().fg(gold)),
-            Span::styled("New Session", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "New Session",
+                Style::default().fg(gold).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" ", Style::default()),
         ]);
 
@@ -377,26 +404,31 @@ impl NewSessionComponent {
         let inner = block.inner(area);
 
         // Use taller box when showing error to accommodate wrapped text
-        let hints_height = if session_state.repo_validation_error.is_some() { 8 } else { 6 };
+        let hints_height = if session_state.repo_validation_error.is_some() {
+            8
+        } else {
+            6
+        };
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .margin(1)
             .constraints(vec![
-                Constraint::Length(2), // Subtitle
-                Constraint::Length(1), // Spacer
-                Constraint::Length(3), // Input field
-                Constraint::Length(1), // Spacer
+                Constraint::Length(2),            // Subtitle
+                Constraint::Length(1),            // Spacer
+                Constraint::Length(3),            // Input field
+                Constraint::Length(1),            // Spacer
                 Constraint::Length(hints_height), // Examples/hints (taller for errors)
-                Constraint::Length(1), // Spacer
-                Constraint::Min(0),    // Recent repos (if any)
-                Constraint::Length(2), // Footer
+                Constraint::Length(1),            // Spacer
+                Constraint::Min(0),               // Recent repos (if any)
+                Constraint::Length(2),            // Footer
             ])
             .split(inner);
 
         // Subtitle
-        let subtitle = Paragraph::new(Line::from(vec![
-            Span::styled("Enter a repository URL, GitHub shorthand, or local path", Style::default().fg(muted_gray)),
-        ]))
+        let subtitle = Paragraph::new(Line::from(vec![Span::styled(
+            "Enter a repository URL, GitHub shorthand, or local path",
+            Style::default().fg(muted_gray),
+        )]))
         .alignment(Alignment::Center);
         frame.render_widget(subtitle, chunks[0]);
 
@@ -427,15 +459,17 @@ impl NewSessionComponent {
             selection_green
         };
 
-        let input = Paragraph::new(input_text)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(input_border_color))
-                    .title(Span::styled(" Repository ", Style::default().fg(input_border_color)))
-                    .style(Style::default().bg(Color::Rgb(35, 35, 45))),
-            );
+        let input = Paragraph::new(input_text).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(input_border_color))
+                .title(Span::styled(
+                    " Repository ",
+                    Style::default().fg(input_border_color),
+                ))
+                .style(Style::default().bg(Color::Rgb(35, 35, 45))),
+        );
         frame.render_widget(input, chunks[2]);
 
         // Examples/hints box
@@ -443,7 +477,10 @@ impl NewSessionComponent {
             vec![
                 Line::from(vec![
                     Span::styled("  ❌ ", Style::default().fg(Color::Rgb(255, 100, 100))),
-                    Span::styled("Error", Style::default().fg(Color::Rgb(255, 100, 100)).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "Error",
+                        Style::default().fg(Color::Rgb(255, 100, 100)).add_modifier(Modifier::BOLD),
+                    ),
                 ]),
                 Line::from(""),
                 Line::from(vec![
@@ -536,25 +573,30 @@ impl NewSessionComponent {
                 subdued_border
             };
 
-            let favorites_para = Paragraph::new(favorite_items)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_type(BorderType::Rounded)
-                        .border_style(Style::default().fg(favorites_border))
-                        .title(Span::styled(" ⭐ Favorites ", Style::default().fg(gold)))
-                        .style(Style::default().bg(dark_bg)),
-                );
+            let favorites_para = Paragraph::new(favorite_items).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(favorites_border))
+                    .title(Span::styled(" ⭐ Favorites ", Style::default().fg(gold)))
+                    .style(Style::default().bg(dark_bg)),
+            );
             frame.render_widget(favorites_para, chunks[6]);
         }
 
         // Footer - show different hints based on whether favorites exist
         let footer_spans = if sorted_favorites.is_empty() {
             vec![
-                Span::styled("Type", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Type",
+                    Style::default().fg(gold).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" Input", Style::default().fg(muted_gray)),
                 Span::styled("  │  ", Style::default().fg(subdued_border)),
-                Span::styled("Enter", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Enter",
+                    Style::default().fg(gold).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" Submit", Style::default().fg(muted_gray)),
                 Span::styled("  │  ", Style::default().fg(subdued_border)),
                 Span::styled("^S", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
@@ -568,7 +610,10 @@ impl NewSessionComponent {
                 Span::styled("↑↓", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
                 Span::styled(" Favorites", Style::default().fg(muted_gray)),
                 Span::styled("  │  ", Style::default().fg(subdued_border)),
-                Span::styled("Enter", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Enter",
+                    Style::default().fg(gold).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" Select", Style::default().fg(muted_gray)),
                 Span::styled("  │  ", Style::default().fg(subdued_border)),
                 Span::styled("^S", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
@@ -579,8 +624,7 @@ impl NewSessionComponent {
             ]
         };
 
-        let footer = Paragraph::new(Line::from(footer_spans))
-            .alignment(Alignment::Center);
+        let footer = Paragraph::new(Line::from(footer_spans)).alignment(Alignment::Center);
         frame.render_widget(footer, chunks[7]);
     }
 
@@ -606,7 +650,10 @@ impl NewSessionComponent {
         // Main dialog with rounded border
         let title_line = Line::from(vec![
             Span::styled(" ⏳ ", Style::default().fg(progress_cyan)),
-            Span::styled("Validating Repository", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Validating Repository",
+                Style::default().fg(gold).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" ", Style::default()),
         ]);
 
@@ -633,14 +680,18 @@ impl NewSessionComponent {
             .split(inner);
 
         // Subtitle - show what we're checking
-        let repo_display = session_state.repo_source
+        let repo_display = session_state
+            .repo_source
             .as_ref()
             .map(|s| s.display_name())
             .unwrap_or_else(|| session_state.repo_input.clone());
 
         let subtitle = Paragraph::new(Line::from(vec![
             Span::styled("Checking ", Style::default().fg(muted_gray)),
-            Span::styled(&repo_display, Style::default().fg(cornflower_blue).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                &repo_display,
+                Style::default().fg(cornflower_blue).add_modifier(Modifier::BOLD),
+            ),
         ]))
         .alignment(Alignment::Center);
         frame.render_widget(subtitle, chunks[0]);
@@ -650,28 +701,34 @@ impl NewSessionComponent {
             Line::from(""),
             Line::from(vec![
                 Span::styled("  🔄 ", Style::default().fg(progress_cyan)),
-                Span::styled("Connecting to repository...", Style::default().fg(soft_white)),
+                Span::styled(
+                    "Connecting to repository...",
+                    Style::default().fg(soft_white),
+                ),
             ]),
             Line::from(""),
             Line::from(vec![
                 Span::styled("  📡 ", Style::default().fg(cornflower_blue)),
-                Span::styled("Fetching branch information...", Style::default().fg(soft_white)),
+                Span::styled(
+                    "Fetching branch information...",
+                    Style::default().fg(soft_white),
+                ),
             ]),
             Line::from(""),
             Line::from(""),
-            Line::from(vec![
-                Span::styled("       This may take a moment...", Style::default().fg(muted_gray).add_modifier(Modifier::ITALIC)),
-            ]),
+            Line::from(vec![Span::styled(
+                "       This may take a moment...",
+                Style::default().fg(muted_gray).add_modifier(Modifier::ITALIC),
+            )]),
         ];
 
-        let progress = Paragraph::new(progress_lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(Color::Rgb(60, 60, 80)))
-                    .style(Style::default().bg(dark_bg)),
-            );
+        let progress = Paragraph::new(progress_lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Rgb(60, 60, 80)))
+                .style(Style::default().bg(dark_bg)),
+        );
         frame.render_widget(progress, chunks[1]);
 
         // Footer
@@ -679,7 +736,10 @@ impl NewSessionComponent {
             Span::styled("⏳ ", Style::default().fg(progress_cyan)),
             Span::styled("Please wait", Style::default().fg(muted_gray)),
             Span::styled("  │  ", Style::default().fg(Color::Rgb(60, 60, 80))),
-            Span::styled("Esc", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Esc",
+                Style::default().fg(gold).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" Cancel", Style::default().fg(muted_gray)),
         ]))
         .alignment(Alignment::Center);
@@ -708,14 +768,15 @@ impl NewSessionComponent {
         frame.render_widget(background, area);
 
         // Main dialog with rounded border
-        let repo_display = session_state.repo_source
-            .as_ref()
-            .map(|s| s.display_name())
-            .unwrap_or_default();
+        let repo_display =
+            session_state.repo_source.as_ref().map(|s| s.display_name()).unwrap_or_default();
 
         let title_line = Line::from(vec![
             Span::styled(" 🌿 ", Style::default().fg(gold)),
-            Span::styled("Select Branch", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Select Branch",
+                Style::default().fg(gold).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" ", Style::default()),
         ]);
 
@@ -750,7 +811,10 @@ impl NewSessionComponent {
         };
         let repo_info = Paragraph::new(Line::from(vec![
             Span::styled("📁 ", Style::default()),
-            Span::styled(&repo_display, Style::default().fg(cornflower_blue).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                &repo_display,
+                Style::default().fg(cornflower_blue).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" → ", Style::default().fg(muted_gray)),
             Span::styled(guidance_text, Style::default().fg(muted_gray)),
         ]))
@@ -758,7 +822,10 @@ impl NewSessionComponent {
         frame.render_widget(repo_info, chunks[0]);
 
         // Mode toggle - radio-style options (both visible)
-        let create_selected = matches!(session_state.branch_checkout_mode, BranchCheckoutMode::CreateNew);
+        let create_selected = matches!(
+            session_state.branch_checkout_mode,
+            BranchCheckoutMode::CreateNew
+        );
         let existing_selected = !create_selected;
 
         let create_indicator = if create_selected { "◉" } else { "○" };
@@ -777,48 +844,72 @@ impl NewSessionComponent {
 
         let mode_lines = vec![
             Line::from(vec![
-                Span::styled(format!(" {} ", create_indicator), Style::default().fg(if create_selected { selection_green } else { muted_gray })),
+                Span::styled(
+                    format!(" {} ", create_indicator),
+                    Style::default().fg(if create_selected {
+                        selection_green
+                    } else {
+                        muted_gray
+                    }),
+                ),
                 Span::styled("🌱 ", Style::default().fg(selection_green)),
                 Span::styled("Create new branch", create_style),
                 Span::styled(" — ", Style::default().fg(muted_gray)),
                 Span::styled("create worktree from base", Style::default().fg(muted_gray)),
             ]),
             Line::from(vec![
-                Span::styled(format!(" {} ", existing_indicator), Style::default().fg(if existing_selected { cornflower_blue } else { muted_gray })),
+                Span::styled(
+                    format!(" {} ", existing_indicator),
+                    Style::default().fg(if existing_selected {
+                        cornflower_blue
+                    } else {
+                        muted_gray
+                    }),
+                ),
                 Span::styled("📥 ", Style::default().fg(cornflower_blue)),
                 Span::styled("Checkout existing", existing_style),
                 Span::styled(" — ", Style::default().fg(muted_gray)),
                 Span::styled("use remote branch as-is", Style::default().fg(muted_gray)),
             ]),
             Line::from(vec![
-                Span::styled("Tab", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Tab",
+                    Style::default().fg(gold).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" to switch mode", Style::default().fg(muted_gray)),
             ]),
         ];
 
         let mode_title = Line::from(vec![
             Span::styled(" 🔀 ", Style::default().fg(gold)),
-            Span::styled("Branch Checkout Mode", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Branch Checkout Mode",
+                Style::default().fg(gold).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" ", Style::default()),
         ]);
 
-        let mode_widget = Paragraph::new(mode_lines)
-            .alignment(Alignment::Left)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(subdued_border))
-                    .title(mode_title)
-                    .style(Style::default().bg(dark_bg)),
-            );
+        let mode_widget = Paragraph::new(mode_lines).alignment(Alignment::Left).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(subdued_border))
+                .title(mode_title)
+                .style(Style::default().bg(dark_bg)),
+        );
         frame.render_widget(mode_widget, chunks[1]);
 
         // Filter input
         let filter_text = if session_state.branch_filter_text.is_empty() {
-            Span::styled("Type to filter branches...", Style::default().fg(muted_gray).add_modifier(Modifier::ITALIC))
+            Span::styled(
+                "Type to filter branches...",
+                Style::default().fg(muted_gray).add_modifier(Modifier::ITALIC),
+            )
         } else {
-            Span::styled(&session_state.branch_filter_text, Style::default().fg(soft_white))
+            Span::styled(
+                &session_state.branch_filter_text,
+                Style::default().fg(soft_white),
+            )
         };
         let filter_input = Paragraph::new(Line::from(vec![
             Span::styled("🔍 ", Style::default()),
@@ -876,7 +967,10 @@ impl NewSessionComponent {
 
                 // Commit hash (truncated)
                 spans.push(Span::styled(
-                    format!("  {}", &branch.commit_hash[..7.min(branch.commit_hash.len())]),
+                    format!(
+                        "  {}",
+                        &branch.commit_hash[..7.min(branch.commit_hash.len())]
+                    ),
                     Style::default().fg(muted_gray),
                 ));
 
@@ -917,21 +1011,29 @@ impl NewSessionComponent {
             Span::styled("↑↓", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
             Span::styled(" Nav", Style::default().fg(muted_gray)),
             Span::styled("  │  ", Style::default().fg(subdued_border)),
-            Span::styled("Tab", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Tab",
+                Style::default().fg(gold).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" Mode", Style::default().fg(muted_gray)),
             Span::styled("  │  ", Style::default().fg(subdued_border)),
-            Span::styled("Type", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Type",
+                Style::default().fg(gold).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" Filter", Style::default().fg(muted_gray)),
             Span::styled("  │  ", Style::default().fg(subdued_border)),
-            Span::styled("Enter", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Enter",
+                Style::default().fg(gold).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" Select", Style::default().fg(muted_gray)),
             Span::styled("  │  ", Style::default().fg(subdued_border)),
             Span::styled("Esc", Style::default().fg(Color::Rgb(255, 100, 100))),
             Span::styled(" Back", Style::default().fg(muted_gray)),
         ];
 
-        let footer = Paragraph::new(Line::from(footer_spans))
-            .alignment(Alignment::Center);
+        let footer = Paragraph::new(Line::from(footer_spans)).alignment(Alignment::Center);
         frame.render_widget(footer, chunks[4]);
     }
 
@@ -958,7 +1060,10 @@ impl NewSessionComponent {
         // Main dialog with rounded border
         let title_line = Line::from(vec![
             Span::styled(" 📁 ", Style::default().fg(gold)),
-            Span::styled("Select Repository", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Select Repository",
+                Style::default().fg(gold).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" ", Style::default()),
         ]);
 
@@ -986,9 +1091,10 @@ impl NewSessionComponent {
             .split(inner);
 
         // Subtitle
-        let subtitle = Paragraph::new(Line::from(vec![
-            Span::styled("Choose a repository to create a new session", Style::default().fg(muted_gray)),
-        ]))
+        let subtitle = Paragraph::new(Line::from(vec![Span::styled(
+            "Choose a repository to create a new session",
+            Style::default().fg(muted_gray),
+        )]))
         .alignment(Alignment::Center);
         frame.render_widget(subtitle, chunks[0]);
 
@@ -997,17 +1103,25 @@ impl NewSessionComponent {
             vec![
                 ListItem::new(Line::from(vec![
                     Span::styled("  ⚠️  ", Style::default().fg(gold)),
-                    Span::styled("No repositories found in default paths", Style::default().fg(muted_gray)),
+                    Span::styled(
+                        "No repositories found in default paths",
+                        Style::default().fg(muted_gray),
+                    ),
                 ])),
-                ListItem::new(Line::from(vec![
-                    Span::styled("     Try searching in common directories like:", Style::default().fg(muted_gray)),
-                ])),
-                ListItem::new(Line::from(vec![
-                    Span::styled("     ~/projects, ~/code, ~/dev, ~/src", Style::default().fg(cornflower_blue)),
-                ])),
+                ListItem::new(Line::from(vec![Span::styled(
+                    "     Try searching in common directories like:",
+                    Style::default().fg(muted_gray),
+                )])),
+                ListItem::new(Line::from(vec![Span::styled(
+                    "     ~/projects, ~/code, ~/dev, ~/src",
+                    Style::default().fg(cornflower_blue),
+                )])),
                 ListItem::new(Line::from(vec![
                     Span::styled("  💡 ", Style::default().fg(gold)),
-                    Span::styled("Type to filter or add custom paths", Style::default().fg(gold)),
+                    Span::styled(
+                        "Type to filter or add custom paths",
+                        Style::default().fg(gold),
+                    ),
                 ])),
             ]
         } else {
@@ -1032,7 +1146,10 @@ impl NewSessionComponent {
                         ListItem::new(Line::from(vec![
                             Span::styled("▶ ", Style::default().fg(selection_green)),
                             Span::styled(star, Style::default().fg(gold)),
-                            Span::styled(repo_name, Style::default().fg(selection_green).add_modifier(Modifier::BOLD)),
+                            Span::styled(
+                                repo_name,
+                                Style::default().fg(selection_green).add_modifier(Modifier::BOLD),
+                            ),
                         ]))
                     } else {
                         ListItem::new(Line::from(vec![
@@ -1048,7 +1165,10 @@ impl NewSessionComponent {
         let repo_count = session_state.filtered_repos.len();
         let list_title = Line::from(vec![
             Span::styled(" ", Style::default()),
-            Span::styled(format!("Repositories ({})", repo_count), Style::default().fg(cornflower_blue)),
+            Span::styled(
+                format!("Repositories ({})", repo_count),
+                Style::default().fg(cornflower_blue),
+            ),
             Span::styled(" ", Style::default()),
         ]);
 
@@ -1072,17 +1192,28 @@ impl NewSessionComponent {
             .and_then(|idx| session_state.filtered_repos.get(idx))
             .map(|(_, repo)| {
                 let repo_path_str = repo.display().to_string();
-                session_state.favorites_store.favorites.iter().any(|f| f.source == repo_path_str)
+                session_state
+                    .favorites_store
+                    .favorites
+                    .iter()
+                    .any(|f| f.source == repo_path_str)
             })
             .unwrap_or(false);
 
-        let star_action = if is_selected_favorite { " ★ Unstar" } else { " ☆ Star" };
+        let star_action = if is_selected_favorite {
+            " ★ Unstar"
+        } else {
+            " ☆ Star"
+        };
 
         let footer_spans = vec![
             Span::styled("↑↓", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
             Span::styled(" Repos", Style::default().fg(muted_gray)),
             Span::styled("  │  ", Style::default().fg(subdued_border)),
-            Span::styled("Enter", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Enter",
+                Style::default().fg(gold).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" Select", Style::default().fg(muted_gray)),
             Span::styled("  │  ", Style::default().fg(subdued_border)),
             Span::styled("s", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
@@ -1095,8 +1226,7 @@ impl NewSessionComponent {
             Span::styled(" Cancel", Style::default().fg(muted_gray)),
         ];
 
-        let footer = Paragraph::new(Line::from(footer_spans))
-            .alignment(Alignment::Center);
+        let footer = Paragraph::new(Line::from(footer_spans)).alignment(Alignment::Center);
         frame.render_widget(footer, chunks[3]);
     }
 
@@ -1124,7 +1254,10 @@ impl NewSessionComponent {
         // Main dialog with rounded border
         let title_line = Line::from(vec![
             Span::styled(" ⭐ ", Style::default().fg(gold)),
-            Span::styled("Favorites", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Favorites",
+                Style::default().fg(gold).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" ", Style::default()),
         ]);
 
@@ -1152,9 +1285,10 @@ impl NewSessionComponent {
             .split(inner);
 
         // Subtitle
-        let subtitle = Paragraph::new(Line::from(vec![
-            Span::styled("Select a saved repository", Style::default().fg(muted_gray)),
-        ]))
+        let subtitle = Paragraph::new(Line::from(vec![Span::styled(
+            "Select a saved repository",
+            Style::default().fg(muted_gray),
+        )]))
         .alignment(Alignment::Center);
         frame.render_widget(subtitle, chunks[0]);
 
@@ -1170,7 +1304,10 @@ impl NewSessionComponent {
                 ListItem::new(Line::from(vec![
                     Span::styled("     ", Style::default()),
                     Span::styled("Mark repos with ", Style::default().fg(muted_gray)),
-                    Span::styled("Ctrl+F", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "Ctrl+F",
+                        Style::default().fg(gold).add_modifier(Modifier::BOLD),
+                    ),
                     Span::styled(" in Remote or Local views", Style::default().fg(muted_gray)),
                 ])),
             ]
@@ -1191,7 +1328,10 @@ impl NewSessionComponent {
                         ListItem::new(Line::from(vec![
                             Span::styled("▶ ", Style::default().fg(selection_green)),
                             Span::styled(format!("{} ", type_icon), Style::default()),
-                            Span::styled(&fav.alias, Style::default().fg(selection_green).add_modifier(Modifier::BOLD)),
+                            Span::styled(
+                                &fav.alias,
+                                Style::default().fg(selection_green).add_modifier(Modifier::BOLD),
+                            ),
                             Span::styled(" → ", Style::default().fg(muted_gray)),
                             Span::styled(
                                 truncate_string(&fav.source, 40),
@@ -1225,7 +1365,10 @@ impl NewSessionComponent {
         let favorites_count = sorted_favorites.len();
         let list_title = Line::from(vec![
             Span::styled(" ", Style::default()),
-            Span::styled(format!("Saved Repositories ({})", favorites_count), Style::default().fg(cornflower_blue)),
+            Span::styled(
+                format!("Saved Repositories ({})", favorites_count),
+                Style::default().fg(cornflower_blue),
+            ),
             Span::styled(" ", Style::default()),
         ]);
 
@@ -1247,18 +1390,23 @@ impl NewSessionComponent {
             Span::styled("↑↓", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
             Span::styled(" Navigate", Style::default().fg(muted_gray)),
             Span::styled("  │  ", Style::default().fg(subdued_border)),
-            Span::styled("Enter", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Enter",
+                Style::default().fg(gold).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" Select", Style::default().fg(muted_gray)),
             Span::styled("  │  ", Style::default().fg(subdued_border)),
-            Span::styled("d", Style::default().fg(Color::Rgb(255, 100, 100)).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "d",
+                Style::default().fg(Color::Rgb(255, 100, 100)).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" Delete", Style::default().fg(muted_gray)),
             Span::styled("  │  ", Style::default().fg(subdued_border)),
             Span::styled("Esc", Style::default().fg(Color::Rgb(255, 100, 100))),
             Span::styled(" Back", Style::default().fg(muted_gray)),
         ];
 
-        let footer = Paragraph::new(Line::from(footer_spans))
-            .alignment(Alignment::Center);
+        let footer = Paragraph::new(Line::from(footer_spans)).alignment(Alignment::Center);
         frame.render_widget(footer, chunks[3]);
     }
 
@@ -1284,9 +1432,7 @@ impl NewSessionComponent {
             .border_style(Style::default().fg(cornflower_blue))
             .title(Span::styled(
                 " 🔍 Search Repositories ",
-                Style::default()
-                    .fg(gold)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(gold).add_modifier(Modifier::BOLD),
             ))
             .title_alignment(Alignment::Center)
             .style(Style::default().bg(dark_bg));
@@ -1327,14 +1473,13 @@ impl NewSessionComponent {
             ])
         };
 
-        let search_input = Paragraph::new(search_text)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(ratatui::widgets::BorderType::Rounded)
-                    .border_style(Style::default().fg(selection_green))
-                    .style(Style::default().bg(Color::Rgb(35, 35, 45))),
-            );
+        let search_input = Paragraph::new(search_text).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(ratatui::widgets::BorderType::Rounded)
+                .border_style(Style::default().fg(selection_green))
+                .style(Style::default().bg(Color::Rgb(35, 35, 45))),
+        );
         frame.render_widget(search_input, chunks[0]);
 
         // Repository list with enhanced styling
@@ -1347,12 +1492,13 @@ impl NewSessionComponent {
             .enumerate()
             .map(|(display_idx, (_, repo))| {
                 let repo_name = repo.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
-                let parent_path = repo.parent()
+                let parent_path = repo
+                    .parent()
                     .and_then(|p| p.to_str())
                     .map(|s| {
                         // Truncate long paths
                         if s.len() > 50 {
-                            format!("...{}", &s[s.len()-47..])
+                            format!("...{}", &s[s.len() - 47..])
                         } else {
                             s.to_string()
                         }
@@ -1369,16 +1515,16 @@ impl NewSessionComponent {
                             Span::styled("📁 ", Style::default()),
                             Span::styled(
                                 repo_name,
-                                Style::default()
-                                    .fg(gold)
-                                    .add_modifier(Modifier::BOLD),
+                                Style::default().fg(gold).add_modifier(Modifier::BOLD),
                             ),
                         ]),
                         Line::from(vec![
                             Span::styled("      ", Style::default()),
                             Span::styled(
                                 parent_path,
-                                Style::default().fg(Color::Rgb(150, 150, 150)).add_modifier(Modifier::ITALIC),
+                                Style::default()
+                                    .fg(Color::Rgb(150, 150, 150))
+                                    .add_modifier(Modifier::ITALIC),
                             ),
                         ]),
                     ];
@@ -1389,10 +1535,7 @@ impl NewSessionComponent {
                         Line::from(vec![
                             Span::styled("    ", Style::default()),
                             Span::styled("📂 ", Style::default()),
-                            Span::styled(
-                                repo_name,
-                                Style::default().fg(Color::Rgb(200, 200, 200)),
-                            ),
+                            Span::styled(repo_name, Style::default().fg(Color::Rgb(200, 200, 200))),
                         ]),
                         Line::from(vec![
                             Span::styled("      ", Style::default()),
@@ -1415,7 +1558,10 @@ impl NewSessionComponent {
         };
 
         let title_spans = vec![
-            Span::styled(" Repositories ", Style::default().fg(Color::Rgb(200, 200, 200))),
+            Span::styled(
+                " Repositories ",
+                Style::default().fg(Color::Rgb(200, 200, 200)),
+            ),
             Span::styled(
                 format!("({}/{})", filtered_count, total_repos),
                 count_style.add_modifier(Modifier::BOLD),
@@ -1423,15 +1569,14 @@ impl NewSessionComponent {
             Span::raw(" "),
         ];
 
-        let repo_list = List::new(repos)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(ratatui::widgets::BorderType::Rounded)
-                    .border_style(Style::default().fg(subdued_border))
-                    .title(Line::from(title_spans))
-                    .style(Style::default().bg(Color::Rgb(30, 30, 40))),
-            );
+        let repo_list = List::new(repos).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(ratatui::widgets::BorderType::Rounded)
+                .border_style(Style::default().fg(subdued_border))
+                .title(Line::from(title_spans))
+                .style(Style::default().bg(Color::Rgb(30, 30, 40))),
+        );
 
         // Update the list state to match the current selection
         self.search_list_state.select(session_state.selected_repo_index);
@@ -1469,13 +1614,21 @@ impl NewSessionComponent {
         session_state: &NewSessionState,
         colors: &[Color],
     ) {
-        let [gold, soft_white, muted_gray, selection_green, _list_highlight_bg] = colors[..] else {
+        let [
+            gold,
+            soft_white,
+            muted_gray,
+            selection_green,
+            _list_highlight_bg,
+        ] = colors[..]
+        else {
             return;
         };
 
-        let mut spans = vec![
-            Span::styled("Agent: ", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
-        ];
+        let mut spans = vec![Span::styled(
+            "Agent: ",
+            Style::default().fg(gold).add_modifier(Modifier::BOLD),
+        )];
 
         for (idx, option) in session_state.agent_options.iter().enumerate() {
             let is_selected = idx == session_state.selected_agent_index;
@@ -1509,8 +1662,7 @@ impl NewSessionComponent {
             }
         }
 
-        let agent_line = Paragraph::new(Line::from(spans))
-            .alignment(Alignment::Center);
+        let agent_line = Paragraph::new(Line::from(spans)).alignment(Alignment::Center);
         frame.render_widget(agent_line, area);
     }
 
@@ -1522,13 +1674,21 @@ impl NewSessionComponent {
         session_state: &NewSessionState,
         colors: &[Color],
     ) {
-        let [gold, soft_white, muted_gray, selection_green, _list_highlight_bg] = colors[..] else {
+        let [
+            gold,
+            soft_white,
+            muted_gray,
+            selection_green,
+            _list_highlight_bg,
+        ] = colors[..]
+        else {
             return;
         };
 
-        let mut spans = vec![
-            Span::styled("Model: ", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
-        ];
+        let mut spans = vec![Span::styled(
+            "Model: ",
+            Style::default().fg(gold).add_modifier(Modifier::BOLD),
+        )];
 
         for (idx, model) in session_state.model_options.iter().enumerate() {
             let is_selected = idx == session_state.selected_model_index;
@@ -1556,18 +1716,12 @@ impl NewSessionComponent {
             }
         }
 
-        let model_line = Paragraph::new(Line::from(spans))
-            .alignment(Alignment::Center);
+        let model_line = Paragraph::new(Line::from(spans)).alignment(Alignment::Center);
         frame.render_widget(model_line, area);
     }
 
     /// Render the SSH connection configuration screen
-    fn render_ssh_config(
-        &self,
-        frame: &mut Frame,
-        area: Rect,
-        session_state: &NewSessionState,
-    ) {
+    fn render_ssh_config(&self, frame: &mut Frame, area: Rect, session_state: &NewSessionState) {
         // Modern color palette (from TUI style guide)
         let cornflower_blue = Color::Rgb(100, 149, 237);
         let dark_bg = Color::Rgb(25, 25, 35);
@@ -1586,9 +1740,7 @@ impl NewSessionComponent {
             .border_style(Style::default().fg(cornflower_blue))
             .title(Span::styled(
                 " 🔐 SSH Connection ",
-                Style::default()
-                    .fg(gold)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(gold).add_modifier(Modifier::BOLD),
             ))
             .title_alignment(Alignment::Center)
             .style(Style::default().bg(dark_bg));
@@ -1615,15 +1767,25 @@ impl NewSessionComponent {
             .split(inner);
 
         // Header text
-        let header = Paragraph::new(Line::from(vec![
-            Span::styled("Configure SSH connection details", Style::default().fg(soft_white)),
-        ]))
+        let header = Paragraph::new(Line::from(vec![Span::styled(
+            "Configure SSH connection details",
+            Style::default().fg(soft_white),
+        )]))
         .alignment(Alignment::Center);
         frame.render_widget(header, chunks[0]);
 
         // Helper to create input field
-        let render_input_field = |frame: &mut Frame, area: Rect, label: &str, value: &str, is_focused: bool, is_required: bool| {
-            let border_color = if is_focused { focus_border } else { subdued_border };
+        let render_input_field = |frame: &mut Frame,
+                                  area: Rect,
+                                  label: &str,
+                                  value: &str,
+                                  is_focused: bool,
+                                  is_required: bool| {
+            let border_color = if is_focused {
+                focus_border
+            } else {
+                subdued_border
+            };
             let label_suffix = if is_required { " *" } else { "" };
 
             let input_block = Block::default()
@@ -1632,7 +1794,11 @@ impl NewSessionComponent {
                 .border_style(Style::default().fg(border_color))
                 .title(Span::styled(
                     format!(" {}{} ", label, label_suffix),
-                    Style::default().fg(if is_focused { selection_green } else { muted_gray }),
+                    Style::default().fg(if is_focused {
+                        selection_green
+                    } else {
+                        muted_gray
+                    }),
                 ))
                 .style(Style::default().bg(input_bg));
 
@@ -1661,9 +1827,7 @@ impl NewSessionComponent {
                 display_value
             };
 
-            let input = Paragraph::new(display_with_cursor)
-                .style(text_style)
-                .block(input_block);
+            let input = Paragraph::new(display_with_cursor).style(text_style).block(input_block);
 
             frame.render_widget(input, area);
         };
@@ -1714,10 +1878,7 @@ impl NewSessionComponent {
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(subdued_border))
-            .title(Span::styled(
-                " Preview ",
-                Style::default().fg(muted_gray),
-            ))
+            .title(Span::styled(" Preview ", Style::default().fg(muted_gray)))
             .style(Style::default().bg(dark_bg));
 
         let preview = Paragraph::new(preview_cmd)
@@ -1727,10 +1888,16 @@ impl NewSessionComponent {
 
         // Instructions
         let instruction_spans = vec![
-            Span::styled(" Tab ", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " Tab ",
+                Style::default().fg(gold).add_modifier(Modifier::BOLD),
+            ),
             Span::styled("Next field  ", Style::default().fg(muted_gray)),
             Span::styled("│", Style::default().fg(subdued_border)),
-            Span::styled(" Enter ", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " Enter ",
+                Style::default().fg(gold).add_modifier(Modifier::BOLD),
+            ),
             Span::styled("Connect  ", Style::default().fg(muted_gray)),
             Span::styled("│", Style::default().fg(subdued_border)),
             Span::styled(" Esc ", Style::default().fg(Color::Rgb(255, 100, 100))),
@@ -1758,8 +1925,15 @@ impl NewSessionComponent {
         }
 
         if !session_state.ssh_user.is_empty() {
-            cmd.push_str(&format!(" {}@{}", session_state.ssh_user,
-                if session_state.ssh_host.is_empty() { "<host>" } else { &session_state.ssh_host }));
+            cmd.push_str(&format!(
+                " {}@{}",
+                session_state.ssh_user,
+                if session_state.ssh_host.is_empty() {
+                    "<host>"
+                } else {
+                    &session_state.ssh_host
+                }
+            ));
         } else if !session_state.ssh_host.is_empty() {
             cmd.push_str(&format!(" {}", session_state.ssh_host));
         } else {
@@ -1793,9 +1967,7 @@ impl NewSessionComponent {
             .border_style(Style::default().fg(cornflower_blue))
             .title(Span::styled(
                 " 🤖 Select Agent ",
-                Style::default()
-                    .fg(gold)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(gold).add_modifier(Modifier::BOLD),
             ))
             .title_alignment(Alignment::Center)
             .style(Style::default().bg(dark_bg));
@@ -1832,45 +2004,78 @@ impl NewSessionComponent {
             .split(inner);
 
         // Header text
-        let header = Paragraph::new(Line::from(vec![
-            Span::styled("Choose an AI agent for this session", Style::default().fg(soft_white)),
-        ]))
+        let header = Paragraph::new(Line::from(vec![Span::styled(
+            "Choose an AI agent for this session",
+            Style::default().fg(soft_white),
+        )]))
         .alignment(Alignment::Center);
         frame.render_widget(header, chunks[0]);
 
         // Agent list
         let agent_area = chunks[2];
-        self.render_agent_list(frame, agent_area, session_state, &[
-            cornflower_blue, dark_bg, gold, soft_white, muted_gray, selection_green,
-            subdued_border, coming_soon_gray, list_highlight_bg,
-        ]);
+        self.render_agent_list(
+            frame,
+            agent_area,
+            session_state,
+            &[
+                cornflower_blue,
+                dark_bg,
+                gold,
+                soft_white,
+                muted_gray,
+                selection_green,
+                subdued_border,
+                coming_soon_gray,
+                list_highlight_bg,
+            ],
+        );
 
         // Model selection bar (if Claude is selected)
         if show_model {
-            self.render_model_selector(frame, chunks[4], session_state, &[
-                cornflower_blue, dark_bg, gold, soft_white, muted_gray, selection_green,
-                subdued_border, list_highlight_bg,
-            ]);
+            self.render_model_selector(
+                frame,
+                chunks[4],
+                session_state,
+                &[
+                    cornflower_blue,
+                    dark_bg,
+                    gold,
+                    soft_white,
+                    muted_gray,
+                    selection_green,
+                    subdued_border,
+                    list_highlight_bg,
+                ],
+            );
         }
 
         // Instructions
         let instruction_area = if show_model { chunks[6] } else { chunks[4] };
         let mut instruction_spans = vec![
-            Span::styled(" ↑↓ ", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " ↑↓ ",
+                Style::default().fg(gold).add_modifier(Modifier::BOLD),
+            ),
             Span::styled("Agent  ", Style::default().fg(muted_gray)),
         ];
 
         if show_model {
             instruction_spans.extend(vec![
                 Span::styled("│", Style::default().fg(subdued_border)),
-                Span::styled(" ←→ ", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " ←→ ",
+                    Style::default().fg(gold).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled("Model  ", Style::default().fg(muted_gray)),
             ]);
         }
 
         instruction_spans.extend(vec![
             Span::styled("│", Style::default().fg(subdued_border)),
-            Span::styled(" Enter ", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " Enter ",
+                Style::default().fg(gold).add_modifier(Modifier::BOLD),
+            ),
             Span::styled("Confirm  ", Style::default().fg(muted_gray)),
             Span::styled("│", Style::default().fg(subdued_border)),
             Span::styled(" Esc ", Style::default().fg(Color::Rgb(255, 100, 100))),
@@ -1891,8 +2096,18 @@ impl NewSessionComponent {
         session_state: &NewSessionState,
         colors: &[Color],
     ) {
-        let [_cornflower_blue, dark_bg, _gold, soft_white, muted_gray, selection_green,
-            subdued_border, coming_soon_gray, list_highlight_bg] = colors[..] else {
+        let [
+            _cornflower_blue,
+            dark_bg,
+            _gold,
+            soft_white,
+            muted_gray,
+            selection_green,
+            subdued_border,
+            coming_soon_gray,
+            list_highlight_bg,
+        ] = colors[..]
+        else {
             return;
         };
 
@@ -1918,7 +2133,11 @@ impl NewSessionComponent {
                 // Icon
                 spans.push(Span::styled(
                     format!("{} ", agent.icon()),
-                    Style::default().fg(if is_available { soft_white } else { coming_soon_gray }),
+                    Style::default().fg(if is_available {
+                        soft_white
+                    } else {
+                        coming_soon_gray
+                    }),
                 ));
 
                 // Name
@@ -1994,8 +2213,17 @@ impl NewSessionComponent {
         session_state: &NewSessionState,
         colors: &[Color],
     ) {
-        let [cornflower_blue, dark_bg, gold, soft_white, muted_gray, selection_green,
-            _subdued_border, list_highlight_bg] = colors[..] else {
+        let [
+            cornflower_blue,
+            dark_bg,
+            gold,
+            soft_white,
+            muted_gray,
+            selection_green,
+            _subdued_border,
+            list_highlight_bg,
+        ] = colors[..]
+        else {
             return;
         };
 
@@ -2029,7 +2257,10 @@ impl NewSessionComponent {
                 ));
                 spans.push(Span::styled(
                     model.display_name(),
-                    Style::default().fg(selection_green).add_modifier(Modifier::BOLD).bg(list_highlight_bg),
+                    Style::default()
+                        .fg(selection_green)
+                        .add_modifier(Modifier::BOLD)
+                        .bg(list_highlight_bg),
                 ));
                 spans.push(Span::styled(" ▶", Style::default().fg(selection_green)));
             } else {
@@ -2068,9 +2299,7 @@ impl NewSessionComponent {
             .border_style(Style::default().fg(cornflower_blue))
             .title(Span::styled(
                 " 🌿 New Session ",
-                Style::default()
-                    .fg(gold)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(gold).add_modifier(Modifier::BOLD),
             ))
             .title_alignment(Alignment::Center)
             .style(Style::default().bg(dark_bg));
@@ -2116,7 +2345,7 @@ impl NewSessionComponent {
                 let path = repo.to_string_lossy().to_string();
                 // Truncate long paths
                 let display_path = if path.len() > 60 {
-                    format!("...{}", &path[path.len()-57..])
+                    format!("...{}", &path[path.len() - 57..])
                 } else {
                     path
                 };
@@ -2168,14 +2397,13 @@ impl NewSessionComponent {
             ]),
         ];
 
-        let repo_display = Paragraph::new(repo_lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(ratatui::widgets::BorderType::Rounded)
-                    .border_style(Style::default().fg(subdued_border))
-                    .style(Style::default().bg(Color::Rgb(30, 30, 40))),
-            );
+        let repo_display = Paragraph::new(repo_lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(ratatui::widgets::BorderType::Rounded)
+                .border_style(Style::default().fg(subdued_border))
+                .style(Style::default().bg(Color::Rgb(30, 30, 40))),
+        );
         frame.render_widget(repo_display, chunks[0]);
 
         // Branch input with icon and cursor
@@ -2199,31 +2427,48 @@ impl NewSessionComponent {
             ])
         };
 
-        let branch_input = Paragraph::new(branch_text)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(ratatui::widgets::BorderType::Rounded)
-                    .border_style(Style::default().fg(selection_green))
-                    .title(Span::styled(
-                        " Branch Name ",
-                        Style::default().fg(selection_green),
-                    ))
-                    .style(Style::default().bg(Color::Rgb(35, 35, 45))),
-            );
+        let branch_input = Paragraph::new(branch_text).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(ratatui::widgets::BorderType::Rounded)
+                .border_style(Style::default().fg(selection_green))
+                .title(Span::styled(
+                    " Branch Name ",
+                    Style::default().fg(selection_green),
+                ))
+                .style(Style::default().bg(Color::Rgb(35, 35, 45))),
+        );
         frame.render_widget(branch_input, chunks[2]);
 
         // Agent selector bar
         let agent_area = chunks[4];
-        self.render_inline_agent_selector(frame, agent_area, session_state, &[
-            gold, soft_white, muted_gray, selection_green, list_highlight_bg,
-        ]);
+        self.render_inline_agent_selector(
+            frame,
+            agent_area,
+            session_state,
+            &[
+                gold,
+                soft_white,
+                muted_gray,
+                selection_green,
+                list_highlight_bg,
+            ],
+        );
 
         // Model selector bar (only if Claude is selected)
         let instruction_area_idx = if show_model {
-            self.render_inline_model_selector(frame, chunks[5], session_state, &[
-                gold, soft_white, muted_gray, selection_green, list_highlight_bg,
-            ]);
+            self.render_inline_model_selector(
+                frame,
+                chunks[5],
+                session_state,
+                &[
+                    gold,
+                    soft_white,
+                    muted_gray,
+                    selection_green,
+                    list_highlight_bg,
+                ],
+            );
             7 // Instructions at index 7
         } else {
             6 // Instructions at index 6
@@ -2285,7 +2530,10 @@ impl NewSessionComponent {
         // Main dialog with rounded border
         let title_line = Line::from(vec![
             Span::styled(" 🔐 ", Style::default().fg(gold)),
-            Span::styled("Permission Settings", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Permission Settings",
+                Style::default().fg(gold).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" ", Style::default()),
         ]);
 
@@ -2313,9 +2561,10 @@ impl NewSessionComponent {
             .split(inner);
 
         // Subtitle
-        let subtitle = Paragraph::new(Line::from(vec![
-            Span::styled("Configure how agents handle command execution", Style::default().fg(muted_gray)),
-        ]))
+        let subtitle = Paragraph::new(Line::from(vec![Span::styled(
+            "Configure how agents handle command execution",
+            Style::default().fg(muted_gray),
+        )]))
         .alignment(Alignment::Center);
         frame.render_widget(subtitle, chunks[0]);
 
@@ -2323,55 +2572,70 @@ impl NewSessionComponent {
         let desc_lines = vec![
             Line::from(vec![
                 Span::styled("  ℹ️  ", Style::default().fg(cornflower_blue)),
-                Span::styled("About Permission Prompts", Style::default().fg(cornflower_blue).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "About Permission Prompts",
+                    Style::default().fg(cornflower_blue).add_modifier(Modifier::BOLD),
+                ),
             ]),
             Line::from(""),
             Line::from(vec![
                 Span::styled("  • ", Style::default().fg(muted_gray)),
                 Span::styled("With prompts: ", Style::default().fg(soft_white)),
-                Span::styled("Agents will ask before running commands", Style::default().fg(muted_gray)),
+                Span::styled(
+                    "Agents will ask before running commands",
+                    Style::default().fg(muted_gray),
+                ),
             ]),
             Line::from(vec![
                 Span::styled("  • ", Style::default().fg(muted_gray)),
                 Span::styled("Without prompts: ", Style::default().fg(soft_white)),
-                Span::styled("Agents run commands immediately (faster)", Style::default().fg(muted_gray)),
+                Span::styled(
+                    "Agents run commands immediately (faster)",
+                    Style::default().fg(muted_gray),
+                ),
             ]),
         ];
 
-        let description = Paragraph::new(desc_lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(Color::Rgb(60, 60, 80)))
-                    .style(Style::default().bg(dark_bg)),
-            );
+        let description = Paragraph::new(desc_lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Rgb(60, 60, 80)))
+                .style(Style::default().bg(dark_bg)),
+        );
         frame.render_widget(description, chunks[1]);
 
         // Options with visual selection
-        let (option_icon, option_color, option_title, option_desc, option_flag) = if session_state.skip_permissions {
-            (
-                "🚀",
-                warning_orange,
-                "Skip Permission Prompts",
-                "Agents will execute commands without asking",
-                "--dangerously-skip-permissions",
-            )
-        } else {
-            (
-                "🛡️",
-                selection_green,
-                "Keep Permission Prompts",
-                "Agents will ask before executing commands",
-                "default",
-            )
-        };
+        let (option_icon, option_color, option_title, option_desc, option_flag) =
+            if session_state.skip_permissions {
+                (
+                    "🚀",
+                    warning_orange,
+                    "Skip Permission Prompts",
+                    "Agents will execute commands without asking",
+                    "--dangerously-skip-permissions",
+                )
+            } else {
+                (
+                    "🛡️",
+                    selection_green,
+                    "Keep Permission Prompts",
+                    "Agents will ask before executing commands",
+                    "default",
+                )
+            };
 
         let option_lines = vec![
             Line::from(""),
             Line::from(vec![
-                Span::styled(format!("    {}  ", option_icon), Style::default().fg(option_color)),
-                Span::styled(option_title, Style::default().fg(option_color).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!("    {}  ", option_icon),
+                    Style::default().fg(option_color),
+                ),
+                Span::styled(
+                    option_title,
+                    Style::default().fg(option_color).add_modifier(Modifier::BOLD),
+                ),
             ]),
             Line::from(""),
             Line::from(vec![
@@ -2380,7 +2644,10 @@ impl NewSessionComponent {
             ]),
             Line::from(vec![
                 Span::styled("       Flag: ", Style::default().fg(muted_gray)),
-                Span::styled(option_flag, Style::default().fg(cornflower_blue).add_modifier(Modifier::ITALIC)),
+                Span::styled(
+                    option_flag,
+                    Style::default().fg(cornflower_blue).add_modifier(Modifier::ITALIC),
+                ),
             ]),
         ];
 
@@ -2390,26 +2657,34 @@ impl NewSessionComponent {
             Span::styled(" ", Style::default()),
         ]);
 
-        let options = Paragraph::new(option_lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(option_color))
-                    .title(option_title_line)
-                    .style(Style::default().bg(dark_bg)),
-            );
+        let options = Paragraph::new(option_lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(option_color))
+                .title(option_title_line)
+                .style(Style::default().bg(dark_bg)),
+        );
         frame.render_widget(options, chunks[2]);
 
         // Modern footer with keyboard hints
         let footer = Paragraph::new(Line::from(vec![
-            Span::styled("Space", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Space",
+                Style::default().fg(gold).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" Toggle", Style::default().fg(muted_gray)),
             Span::styled("  │  ", Style::default().fg(Color::Rgb(60, 60, 80))),
-            Span::styled("Enter", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Enter",
+                Style::default().fg(gold).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" Continue", Style::default().fg(muted_gray)),
             Span::styled("  │  ", Style::default().fg(Color::Rgb(60, 60, 80))),
-            Span::styled("Esc", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Esc",
+                Style::default().fg(gold).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" Cancel", Style::default().fg(muted_gray)),
         ]))
         .alignment(Alignment::Center);
@@ -2432,7 +2707,10 @@ impl NewSessionComponent {
         // Main dialog with rounded border
         let title_line = Line::from(vec![
             Span::styled(" ⚙️  ", Style::default().fg(progress_cyan)),
-            Span::styled("Creating Session", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Creating Session",
+                Style::default().fg(gold).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" ", Style::default()),
         ]);
 
@@ -2459,9 +2737,10 @@ impl NewSessionComponent {
             .split(inner);
 
         // Subtitle
-        let subtitle = Paragraph::new(Line::from(vec![
-            Span::styled("Setting up your development environment...", Style::default().fg(muted_gray)),
-        ]))
+        let subtitle = Paragraph::new(Line::from(vec![Span::styled(
+            "Setting up your development environment...",
+            Style::default().fg(muted_gray),
+        )]))
         .alignment(Alignment::Center);
         frame.render_widget(subtitle, chunks[0]);
 
@@ -2476,29 +2755,35 @@ impl NewSessionComponent {
             Line::from(""),
             Line::from(vec![
                 Span::styled("  🐳 ", Style::default().fg(cornflower_blue)),
-                Span::styled("Initializing Docker container", Style::default().fg(soft_white)),
+                Span::styled(
+                    "Initializing Docker container",
+                    Style::default().fg(soft_white),
+                ),
                 Span::styled(" ...", Style::default().fg(cornflower_blue)),
             ]),
             Line::from(""),
             Line::from(vec![
                 Span::styled("  📦 ", Style::default().fg(gold)),
-                Span::styled("Mounting volumes and configuring environment", Style::default().fg(soft_white)),
+                Span::styled(
+                    "Mounting volumes and configuring environment",
+                    Style::default().fg(soft_white),
+                ),
             ]),
             Line::from(""),
             Line::from(""),
-            Line::from(vec![
-                Span::styled("       This may take a moment...", Style::default().fg(muted_gray).add_modifier(Modifier::ITALIC)),
-            ]),
+            Line::from(vec![Span::styled(
+                "       This may take a moment...",
+                Style::default().fg(muted_gray).add_modifier(Modifier::ITALIC),
+            )]),
         ];
 
-        let progress = Paragraph::new(progress_lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(Color::Rgb(60, 60, 80)))
-                    .style(Style::default().bg(dark_bg)),
-            );
+        let progress = Paragraph::new(progress_lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Rgb(60, 60, 80)))
+                .style(Style::default().bg(dark_bg)),
+        );
         frame.render_widget(progress, chunks[1]);
 
         // Modern footer
@@ -2506,7 +2791,10 @@ impl NewSessionComponent {
             Span::styled("⏳ ", Style::default().fg(progress_cyan)),
             Span::styled("Please wait", Style::default().fg(muted_gray)),
             Span::styled("  │  ", Style::default().fg(Color::Rgb(60, 60, 80))),
-            Span::styled("Esc", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Esc",
+                Style::default().fg(gold).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" Cancel", Style::default().fg(muted_gray)),
         ]))
         .alignment(Alignment::Center);
@@ -2578,7 +2866,11 @@ impl NewSessionComponent {
                 Span::styled(
                     "Interactive Mode",
                     Style::default()
-                        .fg(if is_interactive { Color::Rgb(100, 200, 100) } else { Color::Rgb(200, 200, 200) })
+                        .fg(if is_interactive {
+                            Color::Rgb(100, 200, 100)
+                        } else {
+                            Color::Rgb(200, 200, 200)
+                        })
                         .add_modifier(Modifier::BOLD),
                 ),
                 if is_interactive {
@@ -2591,28 +2883,36 @@ impl NewSessionComponent {
             Line::from(vec![
                 Span::styled("      ", Style::default()),
                 Span::styled("•", Style::default().fg(Color::Rgb(100, 149, 237))),
-                Span::styled(" Traditional development with shell access", Style::default().fg(Color::Rgb(180, 180, 180))),
+                Span::styled(
+                    " Traditional development with shell access",
+                    Style::default().fg(Color::Rgb(180, 180, 180)),
+                ),
             ]),
             Line::from(vec![
                 Span::styled("      ", Style::default()),
                 Span::styled("•", Style::default().fg(Color::Rgb(100, 149, 237))),
-                Span::styled(" Full Claude CLI features and MCP servers", Style::default().fg(Color::Rgb(180, 180, 180))),
+                Span::styled(
+                    " Full Claude CLI features and MCP servers",
+                    Style::default().fg(Color::Rgb(180, 180, 180)),
+                ),
             ]),
             Line::from(vec![
                 Span::styled("      ", Style::default()),
                 Span::styled("•", Style::default().fg(Color::Rgb(100, 149, 237))),
-                Span::styled(" Attach to container for development", Style::default().fg(Color::Rgb(180, 180, 180))),
+                Span::styled(
+                    " Attach to container for development",
+                    Style::default().fg(Color::Rgb(180, 180, 180)),
+                ),
             ]),
         ];
 
-        let interactive_para = Paragraph::new(interactive_text)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(ratatui::widgets::BorderType::Rounded)
-                    .border_style(Style::default().fg(interactive_border_color))
-                    .style(Style::default().bg(interactive_bg)),
-            );
+        let interactive_para = Paragraph::new(interactive_text).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(ratatui::widgets::BorderType::Rounded)
+                .border_style(Style::default().fg(interactive_border_color))
+                .style(Style::default().bg(interactive_bg)),
+        );
         frame.render_widget(interactive_para, chunks[0]);
 
         // Boss mode card
@@ -2644,14 +2944,16 @@ impl NewSessionComponent {
             Line::from(vec![
                 Span::styled(
                     if is_boss { "  ▶ " } else { "    " },
-                    Style::default().fg(if boss_enabled { Color::Rgb(255, 165, 0) } else { Color::Rgb(80, 80, 100) }),
+                    Style::default().fg(if boss_enabled {
+                        Color::Rgb(255, 165, 0)
+                    } else {
+                        Color::Rgb(80, 80, 100)
+                    }),
                 ),
                 Span::styled("🤖 ", Style::default()),
                 Span::styled(
                     "Boss Mode",
-                    Style::default()
-                        .fg(boss_title_color)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(boss_title_color).add_modifier(Modifier::BOLD),
                 ),
                 if is_boss {
                     Span::styled("  ✓", Style::default().fg(Color::Rgb(255, 165, 0)))
@@ -2660,57 +2962,96 @@ impl NewSessionComponent {
                 },
                 Span::styled(
                     "  [ALPHA]",
-                    Style::default()
-                        .fg(Color::Rgb(255, 165, 0))
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(Color::Rgb(255, 165, 0)).add_modifier(Modifier::BOLD),
                 ),
             ]),
             Line::from(""),
             Line::from(vec![
                 Span::styled("      ", Style::default()),
-                Span::styled("ALPHA stage", Style::default().fg(Color::Rgb(255, 165, 0)).add_modifier(Modifier::BOLD)),
-                Span::styled(" — works only for Claude", Style::default().fg(Color::Rgb(150, 150, 170)).add_modifier(Modifier::ITALIC)),
+                Span::styled(
+                    "ALPHA stage",
+                    Style::default().fg(Color::Rgb(255, 165, 0)).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    " — works only for Claude",
+                    Style::default().fg(Color::Rgb(150, 150, 170)).add_modifier(Modifier::ITALIC),
+                ),
             ]),
             Line::from(vec![
                 Span::styled("      ", Style::default()),
-                Span::styled("•", Style::default().fg(if boss_enabled { Color::Rgb(255, 165, 0) } else { Color::Rgb(80, 80, 100) })),
+                Span::styled(
+                    "•",
+                    Style::default().fg(if boss_enabled {
+                        Color::Rgb(255, 165, 0)
+                    } else {
+                        Color::Rgb(80, 80, 100)
+                    }),
+                ),
                 Span::styled(
                     " Non-interactive task execution",
-                    Style::default().fg(if boss_enabled { Color::Rgb(180, 180, 180) } else { Color::Rgb(130, 130, 150) }),
+                    Style::default().fg(if boss_enabled {
+                        Color::Rgb(180, 180, 180)
+                    } else {
+                        Color::Rgb(130, 130, 150)
+                    }),
                 ),
             ]),
             Line::from(vec![
                 Span::styled("      ", Style::default()),
-                Span::styled("•", Style::default().fg(if boss_enabled { Color::Rgb(255, 165, 0) } else { Color::Rgb(80, 80, 100) })),
+                Span::styled(
+                    "•",
+                    Style::default().fg(if boss_enabled {
+                        Color::Rgb(255, 165, 0)
+                    } else {
+                        Color::Rgb(80, 80, 100)
+                    }),
+                ),
                 Span::styled(
                     " Direct prompt execution with text output",
-                    Style::default().fg(if boss_enabled { Color::Rgb(180, 180, 180) } else { Color::Rgb(130, 130, 150) }),
+                    Style::default().fg(if boss_enabled {
+                        Color::Rgb(180, 180, 180)
+                    } else {
+                        Color::Rgb(130, 130, 150)
+                    }),
                 ),
             ]),
             Line::from(vec![
                 Span::styled("      ", Style::default()),
-                Span::styled("•", Style::default().fg(if boss_enabled { Color::Rgb(255, 165, 0) } else { Color::Rgb(80, 80, 100) })),
+                Span::styled(
+                    "•",
+                    Style::default().fg(if boss_enabled {
+                        Color::Rgb(255, 165, 0)
+                    } else {
+                        Color::Rgb(80, 80, 100)
+                    }),
+                ),
                 Span::styled(
                     " Results streamed to TUI logs",
-                    Style::default().fg(if boss_enabled { Color::Rgb(180, 180, 180) } else { Color::Rgb(130, 130, 150) }),
+                    Style::default().fg(if boss_enabled {
+                        Color::Rgb(180, 180, 180)
+                    } else {
+                        Color::Rgb(130, 130, 150)
+                    }),
                 ),
             ]),
         ];
 
-        let boss_para = Paragraph::new(boss_text)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(ratatui::widgets::BorderType::Rounded)
-                    .border_style(Style::default().fg(boss_border_color))
-                    .style(Style::default().bg(boss_bg)),
-            );
+        let boss_para = Paragraph::new(boss_text).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(ratatui::widgets::BorderType::Rounded)
+                .border_style(Style::default().fg(boss_border_color))
+                .style(Style::default().bg(boss_bg)),
+        );
         frame.render_widget(boss_para, chunks[2]);
 
         // Styled instructions footer
         let instructions = Line::from(vec![
             Span::styled("  ↑↓ ", Style::default().fg(Color::Rgb(100, 200, 100))),
-            Span::styled("Switch Mode  ", Style::default().fg(Color::Rgb(128, 128, 128))),
+            Span::styled(
+                "Switch Mode  ",
+                Style::default().fg(Color::Rgb(128, 128, 128)),
+            ),
             Span::styled("│", Style::default().fg(Color::Rgb(70, 70, 90))),
             Span::styled("  ⏎ ", Style::default().fg(Color::Rgb(100, 200, 100))),
             Span::styled("Continue  ", Style::default().fg(Color::Rgb(128, 128, 128))),
@@ -2741,7 +3082,10 @@ impl NewSessionComponent {
         // Main dialog with rounded border
         let title_line = Line::from(vec![
             Span::styled(" 💬 ", Style::default().fg(gold)),
-            Span::styled("Task Prompt", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Task Prompt",
+                Style::default().fg(gold).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" ", Style::default()),
         ]);
 
@@ -2774,9 +3118,10 @@ impl NewSessionComponent {
         } else {
             "Enter the task or prompt for Claude to execute"
         };
-        let subtitle = Paragraph::new(Line::from(vec![
-            Span::styled(subtitle_text, Style::default().fg(muted_gray)),
-        ]))
+        let subtitle = Paragraph::new(Line::from(vec![Span::styled(
+            subtitle_text,
+            Style::default().fg(muted_gray),
+        )]))
         .alignment(Alignment::Center);
         frame.render_widget(subtitle, chunks[0]);
 
@@ -2785,7 +3130,10 @@ impl NewSessionComponent {
             vec![
                 Line::from(vec![
                     Span::styled("  🔍 ", Style::default().fg(file_finder_yellow)),
-                    Span::styled("File Finder Active", Style::default().fg(file_finder_yellow).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "File Finder Active",
+                        Style::default().fg(file_finder_yellow).add_modifier(Modifier::BOLD),
+                    ),
                 ]),
                 Line::from(""),
                 Line::from(vec![
@@ -2810,17 +3158,29 @@ impl NewSessionComponent {
                 Line::from(""),
                 Line::from(vec![
                     Span::styled("  • ", Style::default().fg(muted_gray)),
-                    Span::styled("\"Analyze this codebase and suggest improvements\"", Style::default().fg(soft_white).add_modifier(Modifier::ITALIC)),
+                    Span::styled(
+                        "\"Analyze this codebase and suggest improvements\"",
+                        Style::default().fg(soft_white).add_modifier(Modifier::ITALIC),
+                    ),
                 ]),
                 Line::from(vec![
                     Span::styled("  • ", Style::default().fg(muted_gray)),
-                    Span::styled("\"Review the file ", Style::default().fg(soft_white).add_modifier(Modifier::ITALIC)),
+                    Span::styled(
+                        "\"Review the file ",
+                        Style::default().fg(soft_white).add_modifier(Modifier::ITALIC),
+                    ),
                     Span::styled("@src/main.rs", Style::default().fg(file_finder_yellow)),
-                    Span::styled("\" (type @ for file finder)", Style::default().fg(muted_gray)),
+                    Span::styled(
+                        "\" (type @ for file finder)",
+                        Style::default().fg(muted_gray),
+                    ),
                 ]),
                 Line::from(vec![
                     Span::styled("  • ", Style::default().fg(muted_gray)),
-                    Span::styled("\"Fix issue #123\"", Style::default().fg(soft_white).add_modifier(Modifier::ITALIC)),
+                    Span::styled(
+                        "\"Fix issue #123\"",
+                        Style::default().fg(soft_white).add_modifier(Modifier::ITALIC),
+                    ),
                 ]),
             ]
         };
@@ -2831,14 +3191,13 @@ impl NewSessionComponent {
             Color::Rgb(60, 60, 80)
         };
 
-        let instructions = Paragraph::new(instructions_lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(instructions_border))
-                    .style(Style::default().bg(dark_bg)),
-            );
+        let instructions = Paragraph::new(instructions_lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(instructions_border))
+                .style(Style::default().bg(dark_bg)),
+        );
         frame.render_widget(instructions, chunks[1]);
 
         // Split the prompt input area if file finder is active
@@ -2867,30 +3226,54 @@ impl NewSessionComponent {
                 Span::styled("↑↓", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
                 Span::styled(" Navigate", Style::default().fg(muted_gray)),
                 Span::styled("  │  ", Style::default().fg(Color::Rgb(60, 60, 80))),
-                Span::styled("Enter", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Enter",
+                    Style::default().fg(gold).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" Select", Style::default().fg(muted_gray)),
                 Span::styled("  │  ", Style::default().fg(Color::Rgb(60, 60, 80))),
-                Span::styled("Type", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Type",
+                    Style::default().fg(gold).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" Filter", Style::default().fg(muted_gray)),
                 Span::styled("  │  ", Style::default().fg(Color::Rgb(60, 60, 80))),
-                Span::styled("Esc", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Esc",
+                    Style::default().fg(gold).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" Cancel", Style::default().fg(muted_gray)),
             ]))
         } else {
             Paragraph::new(Line::from(vec![
-                Span::styled("Type", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Type",
+                    Style::default().fg(gold).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" Input", Style::default().fg(muted_gray)),
                 Span::styled("  │  ", Style::default().fg(Color::Rgb(60, 60, 80))),
-                Span::styled("Ctrl+J", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Ctrl+J",
+                    Style::default().fg(gold).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" Newline", Style::default().fg(muted_gray)),
                 Span::styled("  │  ", Style::default().fg(Color::Rgb(60, 60, 80))),
-                Span::styled("@", Style::default().fg(file_finder_yellow).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "@",
+                    Style::default().fg(file_finder_yellow).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" Files", Style::default().fg(muted_gray)),
                 Span::styled("  │  ", Style::default().fg(Color::Rgb(60, 60, 80))),
-                Span::styled("Enter", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Enter",
+                    Style::default().fg(gold).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" Continue", Style::default().fg(muted_gray)),
                 Span::styled("  │  ", Style::default().fg(Color::Rgb(60, 60, 80))),
-                Span::styled("Esc", Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Esc",
+                    Style::default().fg(gold).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" Cancel", Style::default().fg(muted_gray)),
             ]))
         };
@@ -2946,7 +3329,10 @@ impl NewSessionComponent {
                 if idx == session_state.file_finder.selected_index {
                     ListItem::new(Line::from(vec![
                         Span::styled("  ▶ ", Style::default().fg(gold)),
-                        Span::styled(&file_match.relative_path, Style::default().fg(gold).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            &file_match.relative_path,
+                            Style::default().fg(gold).add_modifier(Modifier::BOLD),
+                        ),
                     ]))
                     .style(Style::default().bg(selection_bg))
                 } else {
@@ -2962,7 +3348,10 @@ impl NewSessionComponent {
         let list_title = Line::from(vec![
             Span::styled(" ", Style::default()),
             Span::styled("📄 ", Style::default().fg(muted_gray)),
-            Span::styled(format!("{} matches", match_count), Style::default().fg(muted_gray)),
+            Span::styled(
+                format!("{} matches", match_count),
+                Style::default().fg(muted_gray),
+            ),
             Span::styled(" ", Style::default()),
         ]);
 

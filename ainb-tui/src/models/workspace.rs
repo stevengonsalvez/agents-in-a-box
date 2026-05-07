@@ -93,9 +93,7 @@ impl Workspace {
     pub fn migrate_legacy_shells(&mut self) {
         if self.shell_session.is_none() && !self.shell_sessions.is_empty() {
             // Take the most recently accessed shell session
-            if let Some(shell) = self.shell_sessions.iter()
-                .max_by_key(|s| s.last_accessed)
-                .cloned()
+            if let Some(shell) = self.shell_sessions.iter().max_by_key(|s| s.last_accessed).cloned()
             {
                 self.shell_session = Some(shell);
             }

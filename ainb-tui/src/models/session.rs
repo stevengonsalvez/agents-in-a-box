@@ -34,10 +34,10 @@ pub enum SessionAgentType {
 impl SessionAgentType {
     pub fn icon(&self) -> &'static str {
         match self {
-            SessionAgentType::Claude => "✻",   // Claude's own starburst/pinwheel from its spinner
+            SessionAgentType::Claude => "✻", // Claude's own starburst/pinwheel from its spinner
             SessionAgentType::Shell => "🐚",
             SessionAgentType::Ssh => "🔐",
-            SessionAgentType::Codex => "✦",    // OpenAI geometric 4-pointed star
+            SessionAgentType::Codex => "✦", // OpenAI geometric 4-pointed star
             SessionAgentType::Gemini => "✨",
             SessionAgentType::Copilot => "🐙",
             SessionAgentType::Kiro => "🔮",
@@ -239,7 +239,7 @@ impl Default for SshTarget {
 pub enum SessionStatus {
     Running,
     Stopped,
-    Idle,  // Tmux exists but Claude stopped
+    Idle, // Tmux exists but Claude stopped
     Error(String),
 }
 
@@ -248,7 +248,7 @@ impl SessionStatus {
         match self {
             SessionStatus::Running => "●",
             SessionStatus::Stopped => "⏸",
-            SessionStatus::Idle => "○",  // Empty circle for idle
+            SessionStatus::Idle => "○", // Empty circle for idle
             SessionStatus::Error(_) => "✗",
         }
     }
@@ -336,7 +336,10 @@ impl ShellSessionStatus {
     }
 
     pub fn is_running(&self) -> bool {
-        matches!(self, ShellSessionStatus::Running | ShellSessionStatus::Detached)
+        matches!(
+            self,
+            ShellSessionStatus::Running | ShellSessionStatus::Detached
+        )
     }
 }
 
@@ -350,8 +353,8 @@ impl Default for ShellSessionStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShellSession {
     pub id: Uuid,
-    pub name: String,                    // Display name (e.g., "shell-main", "shell-feature")
-    pub tmux_session_name: String,       // Actual tmux session name
+    pub name: String, // Display name (e.g., "shell-main", "shell-feature")
+    pub tmux_session_name: String, // Actual tmux session name
     pub workspace_path: std::path::PathBuf, // Repo root this shell belongs to
     pub working_dir: std::path::PathBuf, // Directory shell was opened in (could be worktree)
     pub created_at: DateTime<Utc>,
@@ -373,19 +376,11 @@ impl ShellSession {
 
         // Use branch name if provided, otherwise use directory name
         let base_name = branch_name.unwrap_or_else(|| {
-            working_dir
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("shell")
-                .to_string()
+            working_dir.file_name().and_then(|n| n.to_str()).unwrap_or("shell").to_string()
         });
 
         // Clean up branch name (remove slashes, limit length)
-        let clean_name = base_name
-            .replace('/', "-")
-            .chars()
-            .take(30)
-            .collect::<String>();
+        let clean_name = base_name.replace('/', "-").chars().take(30).collect::<String>();
 
         let name = format!("shell-{}", clean_name);
 

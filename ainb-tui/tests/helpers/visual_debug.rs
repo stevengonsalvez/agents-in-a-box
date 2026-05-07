@@ -1,4 +1,4 @@
-use rexpect::session::{spawn_command, PtySession};
+use rexpect::session::{PtySession, spawn_command};
 use std::process::Command;
 
 /// Spawn the application in visual debug mode (opens separate terminal window)
@@ -6,8 +6,7 @@ pub fn spawn_app_visual() -> Result<PtySession, rexpect::error::Error> {
     #[cfg(feature = "visual-debug")]
     {
         // Open in separate terminal window (macOS)
-        let current_dir = std::env::current_dir()
-            .map_err(|e| rexpect::error::Error::Io(e))?;
+        let current_dir = std::env::current_dir().map_err(|e| rexpect::error::Error::Io(e))?;
 
         let script = format!(
             r#"
@@ -74,10 +73,7 @@ pub fn open_terminal(command: &str) {
         command
     );
 
-    let _ = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(&script)
-        .spawn();
+    let _ = std::process::Command::new("osascript").arg("-e").arg(&script).spawn();
 }
 
 #[cfg(target_os = "linux")]
@@ -90,10 +86,7 @@ pub fn open_terminal(command: &str) {
     ];
 
     for (terminal, args) in &terminals {
-        if let Ok(_) = std::process::Command::new(terminal)
-            .args(args)
-            .spawn()
-        {
+        if let Ok(_) = std::process::Command::new(terminal).args(args).spawn() {
             break;
         }
     }

@@ -1,11 +1,11 @@
 // ABOUTME: Agent selection screen for choosing AI provider and model
 
 use ratatui::{
+    Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph},
-    Frame,
 };
 
 use crate::app::state::{AgentProvider, AppState, ProviderStatus};
@@ -31,17 +31,16 @@ impl AgentSelectionComponent {
 
     pub fn render(&self, frame: &mut Frame, area: Rect, state: &AppState) {
         // Main container with dark background
-        let container = Block::default()
-            .style(Style::default().bg(DARK_BG));
+        let container = Block::default().style(Style::default().bg(DARK_BG));
         frame.render_widget(container, area);
 
         // Layout: Title bar, main content, footer
         let layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3),  // Title area
-                Constraint::Min(0),     // Provider list
-                Constraint::Length(2),  // Help bar
+                Constraint::Length(3), // Title area
+                Constraint::Min(0),    // Provider list
+                Constraint::Length(2), // Help bar
             ])
             .split(area);
 
@@ -60,9 +59,10 @@ impl AgentSelectionComponent {
         let inner = title.inner(area);
         frame.render_widget(title, area);
 
-        let title_text = Paragraph::new(Line::from(vec![
-            Span::styled("  Choose Your Agent", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
-        ]))
+        let title_text = Paragraph::new(Line::from(vec![Span::styled(
+            "  Choose Your Agent",
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        )]))
         .alignment(Alignment::Left)
         .style(Style::default().bg(PANEL_BG));
 
@@ -95,20 +95,28 @@ impl AgentSelectionComponent {
             if is_expanded {
                 for (model_idx, model) in provider.models.iter().enumerate() {
                     let is_model_selected = is_selected && model_idx == agent_state.selected_model;
-                    lines.push(self.render_model_line(model, is_model_selected, provider.status == ProviderStatus::ComingSoon));
+                    lines.push(self.render_model_line(
+                        model,
+                        is_model_selected,
+                        provider.status == ProviderStatus::ComingSoon,
+                    ));
                 }
             }
 
             lines.push(Line::from("")); // Spacing between providers
         }
 
-        let content = Paragraph::new(lines)
-            .style(Style::default().bg(PANEL_BG));
+        let content = Paragraph::new(lines).style(Style::default().bg(PANEL_BG));
 
         frame.render_widget(content, inner);
     }
 
-    fn render_provider_line(&self, provider: &AgentProvider, is_selected: bool, is_expanded: bool) -> Line<'static> {
+    fn render_provider_line(
+        &self,
+        provider: &AgentProvider,
+        is_selected: bool,
+        is_expanded: bool,
+    ) -> Line<'static> {
         let selection_indicator = if is_selected { "" } else { "  " };
         let expand_indicator = if is_expanded { "" } else { "" };
 
@@ -132,17 +140,31 @@ impl AgentSelectionComponent {
 
         Line::from(vec![
             Span::styled("  ", Style::default()),
-            Span::styled(selection_indicator.to_string(), Style::default().fg(SELECTION_GREEN)),
+            Span::styled(
+                selection_indicator.to_string(),
+                Style::default().fg(SELECTION_GREEN),
+            ),
             Span::styled(" ", Style::default()),
-            Span::styled(expand_indicator.to_string(), Style::default().fg(MUTED_GRAY)),
+            Span::styled(
+                expand_indicator.to_string(),
+                Style::default().fg(MUTED_GRAY),
+            ),
             Span::styled(" ", Style::default()),
             Span::styled(provider.name.clone(), name_style),
-            Span::styled(format!("                    {}", provider.vendor), Style::default().fg(MUTED_GRAY)),
+            Span::styled(
+                format!("                    {}", provider.vendor),
+                Style::default().fg(MUTED_GRAY),
+            ),
             Span::styled(status_badge.to_string(), status_style),
         ])
     }
 
-    fn render_model_line(&self, model: &crate::app::state::AgentModel, is_selected: bool, is_disabled: bool) -> Line<'static> {
+    fn render_model_line(
+        &self,
+        model: &crate::app::state::AgentModel,
+        is_selected: bool,
+        is_disabled: bool,
+    ) -> Line<'static> {
         let selection_indicator = if is_selected { "" } else { "   " };
 
         let name_style = if is_disabled {
@@ -167,11 +189,17 @@ impl AgentSelectionComponent {
 
         Line::from(vec![
             Span::styled("      ", Style::default()),
-            Span::styled(selection_indicator.to_string(), Style::default().fg(SELECTION_GREEN)),
+            Span::styled(
+                selection_indicator.to_string(),
+                Style::default().fg(SELECTION_GREEN),
+            ),
             Span::styled(" ", Style::default()),
             Span::styled(model.name.clone(), name_style),
             Span::styled(format!("      {}", model.description), desc_style),
-            Span::styled(recommended.to_string(), Style::default().fg(SELECTION_GREEN)),
+            Span::styled(
+                recommended.to_string(),
+                Style::default().fg(SELECTION_GREEN),
+            ),
         ])
     }
 
@@ -190,13 +218,15 @@ impl AgentSelectionComponent {
             if i > 0 {
                 spans.push(Span::styled(" | ", Style::default().fg(MUTED_GRAY)));
             }
-            spans.push(Span::styled(*key, Style::default().fg(GOLD).add_modifier(Modifier::BOLD)));
+            spans.push(Span::styled(
+                *key,
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ));
             spans.push(Span::styled(" ", Style::default()));
             spans.push(Span::styled(*desc, Style::default().fg(MUTED_GRAY)));
         }
 
-        let help_bar = Paragraph::new(Line::from(spans))
-            .style(Style::default().bg(DARK_BG));
+        let help_bar = Paragraph::new(Line::from(spans)).style(Style::default().bg(DARK_BG));
 
         frame.render_widget(help_bar, area);
     }
