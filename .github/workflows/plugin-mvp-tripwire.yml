@@ -1,0 +1,67 @@
+name: Plugin MVP Tripwire
+
+# Runs the host Conformance Test Suite (Phase 1.5) on every PR or push that
+# touches the plugin host, plugin API, the canary plugins, or the xtask
+# helper. Failure here means the host's plugin abstraction has regressed —
+# downstream registry refactors must not merge until the canaries are green
+# again.
+
+on:
+  push:
+    branches: [main, v2, feat/plugin]
+    paths:
+      - "ainb-tui/crates/ainb-plugin-api/**"
+      - "ainb-tui/crates/ainb-plugin-host/**"
+      - "ainb-tui/xtask/**"
+      - "ainb-tui/Cargo.toml"
+      - ".github/workflows/plugin-mvp-tripwire.yml"
+  pull_request:
+    branches: [main, v2, feat/plugin]
+    paths:
+      - "ainb-tui/crates/ainb-plugin-api/**"
+      - "ainb-tui/crates/ainb-plugin-host/**"
+      - "ainb-tui/xtask/**"
+      - "ainb-tui/Cargo.toml"
+      - ".github/workflows/plugin-mvp-tripwire.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+  WORKING_DIR: ainb-tui
+
+jobs:
+  host_cts:
+    name: Host CTS (canary plugins)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both modes — release with optimisations sometimes hides bugs the
+        # debug build catches and vice versa (see CTS spec §anti-cheat).
+        mode: [debug, release]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Cache both the workspace target dir and the canary sub-workspace
+          # target dir; canaries change rarely.
+          workspaces: |
+            ainb-tui -> target
+            ainb-tui/crates/ainb-plugin-host/tests/cts/canaries -> target
+
+      - name: Build canaries (cargo xtask build-canaries)
+        working-directory: ${{ env.WORKING_DIR }}
+        run: cargo xtask build-canaries
+
+      - name: Run host CTS (${{ matrix.mode }})
+        working-directory: ${{ env.WORKING_DIR }}
+        run: |
+          if [ "${{ matrix.mode }}" = "release" ]; then
+            cargo test --release -p ainb-plugin-host --test cts_runner
+          else
+            cargo test -p ainb-plugin-host --test cts_runner
+          fi
