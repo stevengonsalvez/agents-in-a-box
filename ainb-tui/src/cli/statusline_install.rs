@@ -180,6 +180,12 @@ fn our_block() -> serde_json::Value {
     })
 }
 
+/// Maximum number of `settings.json.bak.*` files to retain alongside the
+/// settings file. Older backups are pruned (best-effort) on each new
+/// backup write so the directory does not accumulate stale copies over
+/// time.
+const MAX_BACKUPS: usize = 3;
+
 fn backup(path: &Path) -> Result<()> {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -188,7 +194,43 @@ fn backup(path: &Path) -> Result<()> {
     let bak = path.with_extension(format!("json.bak.{ts}"));
     std::fs::copy(path, &bak)
         .with_context(|| format!("failed to back up {} -> {}", path.display(), bak.display()))?;
+    prune_old_backups(path, MAX_BACKUPS);
     Ok(())
+}
+
+/// Best-effort: keep only the `keep` newest `settings.json.bak.*` files
+/// in `path`'s parent directory. Errors are swallowed — a stale backup
+/// is clutter, not a correctness problem.
+fn prune_old_backups(path: &Path, keep: usize) {
+    let Some(parent) = path.parent() else { return };
+    let Some(stem) = path.file_name().and_then(|n| n.to_str()) else {
+        return;
+    };
+    // Match `<stem>.bak.<digits>` (we own this filename shape).
+    let prefix = format!("{stem}.bak.");
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    let mut backups: Vec<(std::time::SystemTime, std::path::PathBuf)> = entries
+        .filter_map(Result::ok)
+        .filter_map(|e| {
+            let name = e.file_name();
+            let name_str = name.to_str()?;
+            if !name_str.starts_with(&prefix) {
+                return None;
+            }
+            let mtime = e.metadata().ok()?.modified().ok()?;
+            Some((mtime, e.path()))
+        })
+        .collect();
+    if backups.len() <= keep {
+        return;
+    }
+    // Newest first.
+    backups.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, stale) in backups.into_iter().skip(keep) {
+        let _ = std::fs::remove_file(stale);
+    }
 }
 
 fn atomic_write_json(path: &Path, value: &serde_json::Value) -> Result<()> {
@@ -372,6 +414,65 @@ mod tests {
             detect_statusline_status_at(&path).unwrap(),
             StatuslineStatus::Configured
         );
+    }
+
+    #[test]
+    fn prune_keeps_only_three_newest_backups() {
+        let dir = tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        std::fs::write(&settings, b"{}").unwrap();
+
+        // Create five backup files with strictly-increasing mtimes so
+        // the test does not depend on filesystem listing order.
+        let now = std::time::SystemTime::now();
+        let mut paths = Vec::new();
+        for i in 0..5 {
+            let bak = dir.path().join(format!("settings.json.bak.{i}"));
+            std::fs::write(&bak, b"{}").unwrap();
+            // Older backups get older mtimes (i=0 oldest, i=4 newest).
+            let mtime = now - std::time::Duration::from_secs(60 * (5 - i as u64));
+            let f = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&bak)
+                .unwrap();
+            f.set_modified(mtime).unwrap();
+            paths.push(bak);
+        }
+
+        prune_old_backups(&settings, 3);
+
+        // The two oldest (i=0, i=1) should be gone; the three newest
+        // (i=2, i=3, i=4) should remain.
+        assert!(!paths[0].exists(), "oldest backup should be pruned");
+        assert!(!paths[1].exists(), "second-oldest backup should be pruned");
+        assert!(paths[2].exists(), "third-newest backup should remain");
+        assert!(paths[3].exists(), "second-newest backup should remain");
+        assert!(paths[4].exists(), "newest backup should remain");
+
+        // Sanity: only three backups left in the directory.
+        let remaining = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("settings.json.bak."))
+            .count();
+        assert_eq!(remaining, 3);
+    }
+
+    #[test]
+    fn prune_is_noop_when_under_threshold() {
+        let dir = tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        std::fs::write(&settings, b"{}").unwrap();
+        for i in 0..2 {
+            std::fs::write(dir.path().join(format!("settings.json.bak.{i}")), b"{}").unwrap();
+        }
+        prune_old_backups(&settings, 3);
+        let remaining = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("settings.json.bak."))
+            .count();
+        assert_eq!(remaining, 2);
     }
 
     #[test]
