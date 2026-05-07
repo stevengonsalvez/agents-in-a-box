@@ -18,6 +18,7 @@ pub mod recover;
 pub mod run;
 pub mod status;
 pub mod statusline;
+pub mod statusline_install;
 pub mod usage;
 pub mod util;
 
