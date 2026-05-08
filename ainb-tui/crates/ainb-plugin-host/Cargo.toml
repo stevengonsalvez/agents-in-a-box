@@ -24,6 +24,8 @@ tracing = { workspace = true }
 dirs = "5.0"
 glob = "0.3"
 rusqlite = { workspace = true }
+chrono = { workspace = true }
+fs2 = { workspace = true }
 
 [dev-dependencies]
 wat = "1.0"
