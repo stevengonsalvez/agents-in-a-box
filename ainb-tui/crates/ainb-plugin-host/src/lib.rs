@@ -10,6 +10,7 @@
 
 #![allow(clippy::module_name_repetitions)]
 
+pub mod cache_layout;
 pub mod capabilities;
 pub mod host_fns;
 pub mod loader;
