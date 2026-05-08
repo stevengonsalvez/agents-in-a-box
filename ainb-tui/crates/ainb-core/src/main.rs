@@ -214,6 +214,13 @@ async fn run_tui_loop(
     let mut slash_palette = SlashPalette::new(SlashCommandRegistry::built_ins());
 
     loop {
+        // Drive plugin-owned screens before every paint. Pushes any
+        // host-side state into each plugin and drains its painted
+        // WireBuffer into `state.pending_plugin_renders`, so layout's
+        // `PluginScreen` can paint without touching the plugin host
+        // directly.
+        app.tick_plugin_renders();
+
         terminal.draw(|frame| {
             layout.render(frame, &mut app.state);
         })?;
