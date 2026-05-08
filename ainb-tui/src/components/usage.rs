@@ -1099,30 +1099,58 @@ fn render_no_data(frame: &mut Frame, area: Rect, state: &UsageViewState) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let lines = vec![
-        Line::from(""),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("  ", Style::default()),
-            Span::styled(
-                state.provider.label(),
-                Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                " usage tracking is not yet available.",
-                Style::default().fg(MUTED_GRAY),
-            ),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            "  Usage data parsing is currently supported for Claude Code and Codex.",
-            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
-        )),
-        Line::from(Span::styled(
-            "  Other providers will be added as they expose session-level usage data.",
-            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
-        )),
-    ];
+    let lines = if state.provider.has_data() {
+        // Provider IS wired (Claude/Codex), the call set is just empty
+        // for the active period + filters. This is a normal "no
+        // activity in the selected window" state, not an "unsupported
+        // provider" state — wording must reflect that or users on a
+        // fresh install would think Claude usage tracking is broken.
+        vec![
+            Line::from(""),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("  ", Style::default()),
+                Span::styled(
+                    "No usage data",
+                    Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(" for {} in this window.", state.provider.short_label()),
+                    Style::default().fg(MUTED_GRAY),
+                ),
+            ]),
+            Line::from(""),
+            Line::from(Span::styled(
+                "  Try widening the period (Tab) or clearing filters (X).",
+                Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+            )),
+        ]
+    } else {
+        vec![
+            Line::from(""),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("  ", Style::default()),
+                Span::styled(
+                    state.provider.label(),
+                    Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    " usage tracking is not yet available.",
+                    Style::default().fg(MUTED_GRAY),
+                ),
+            ]),
+            Line::from(""),
+            Line::from(Span::styled(
+                "  Usage data parsing is currently supported for Claude Code and Codex.",
+                Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+            )),
+            Line::from(Span::styled(
+                "  Other providers will be added as they expose session-level usage data.",
+                Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+            )),
+        ]
+    };
 
     let paragraph = Paragraph::new(lines);
     frame.render_widget(paragraph, inner);
@@ -3409,18 +3437,12 @@ fn budget_live_header_lines(
             if let Some(pct) = live.seven_day_pct {
                 out.push(live_bar_line("7d wnd  ", pct, bar_w));
             }
+            // today_cost_usd intentionally not rendered: it's the
+            // lifetime cost of one Claude Code session (whichever
+            // invoked the statusline command last), not a daily total
+            // — same reasoning as the Live Window widget in layout.rs.
             let mut footer: Vec<Span<'static>> = Vec::new();
-            if let Some(cost) = live.today_cost_usd {
-                footer.push(Span::styled(" Today ", Style::default().fg(MUTED_GRAY)));
-                footer.push(Span::styled(
-                    format!("${cost:.2}"),
-                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
-                ));
-            }
             if let Some(d) = live.resets_in {
-                if !footer.is_empty() {
-                    footer.push(Span::styled(" · ", Style::default().fg(MUTED_GRAY)));
-                }
                 footer.push(Span::styled(" Resets in ", Style::default().fg(MUTED_GRAY)));
                 footer.push(Span::styled(
                     format_hms(d),
@@ -3436,7 +3458,7 @@ fn budget_live_header_lines(
                 out.push(live_bar_line("5h burn ", pct, bar_w));
             }
             out.push(Line::from(Span::styled(
-                " Wire Claude Code statusline (W) for 7d window + cost",
+                " Wire Claude Code statusline (W) for 7d window data",
                 Style::default().fg(MUTED_GRAY),
             )));
         }
@@ -4932,7 +4954,7 @@ mod budget_live_header_tests {
     }
 
     #[test]
-    fn tier1_renders_two_bars_plus_cost_and_reset() {
+    fn tier1_renders_two_bars_and_reset() {
         let live = LiveWindow {
             five_hour_pct: Some(40),
             seven_day_pct: Some(8),
@@ -4946,7 +4968,9 @@ mod budget_live_header_tests {
         let text = flat(&lines);
         assert!(text.contains("5h burn"));
         assert!(text.contains("7d wnd"));
-        assert!(text.contains("$3.21"));
+        // today_cost_usd is in the cache but intentionally not rendered —
+        // it's a single session's lifetime cost, not today's total.
+        assert!(!text.contains("$"));
         assert!(text.contains("2h 30m"));
     }
 
