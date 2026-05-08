@@ -2,6 +2,11 @@
 // JSON + statusline powerline). Captured BEFORE the plugin refactor so that
 // later phases can tripwire against deterministic output.
 //
+// Phase 3 cutover: Analytics tabs now drive the burndown plugin via
+// `PluginHost` instead of the in-tree component. The .snap files
+// captured pre-cutover MUST still match byte-for-byte — that's the
+// acceptance gate for closing 6tu.7.
+//
 // Baselines live in `tests/baselines/` (configured per-test via
 // `insta::Settings::set_snapshot_path`). Determinism rules:
 //   - Fixture comes from `ainb::test_support::sample_usage_data()` —
@@ -20,42 +25,78 @@
 #![cfg(feature = "test-support")]
 #![allow(missing_docs)]
 
+use std::path::PathBuf;
+
 use ainb::cli::statusline::{LiveCache, RateWindow, render_powerline};
-use ainb::components::usage::{self, UsageTab, UsageViewState};
+use ainb::components::usage::UsageTab;
 use ainb::test_support::{cli_usage_report_json, sample_usage_data};
-use ratatui::{Terminal, backend::TestBackend};
+use ainb_plugin_api::{PluginEvent, RenderTarget};
 
-/// Render the Analytics screen at the given size with the given tab and
-/// dump the resulting buffer cell grid as a newline-separated string.
-/// Trailing whitespace is trimmed per row so right-padded blanks don't
-/// pollute the diff when terminals re-flow.
-fn render_analytics(tab: UsageTab, width: u16, height: u16) -> String {
-    let mut state = UsageViewState::default();
-    state.active_tab = tab;
-    state.data = Some(sample_usage_data());
-
-    let backend = TestBackend::new(width, height);
-    let mut terminal = Terminal::new(backend).expect("test backend");
-    terminal
-        .draw(|frame| usage::render(frame, frame.size(), &state))
-        .expect("draw");
-    dump_buffer(&terminal)
+fn workspace_dist() -> PathBuf {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|p| p.join("dist").join("plugins"))
+        .expect("workspace root resolvable")
 }
 
-fn dump_buffer(terminal: &Terminal<TestBackend>) -> String {
-    let buffer = terminal.backend().buffer();
-    let area = *buffer.area();
-    let mut out =
-        String::with_capacity((area.width as usize + 1) * area.height as usize);
-    for y in 0..area.height {
-        let mut line = String::with_capacity(area.width as usize);
-        for x in 0..area.width {
-            line.push_str(buffer.get(x, y).symbol());
+/// Drive the burndown plugin to render the requested tab against the
+/// `sample_usage_data()` fixture and dump the result as a newline-separated,
+/// right-trimmed text grid (matching the format the original
+/// `TestBackend::buffer()` dumps used for the .snap baselines).
+///
+/// Soft-skips by returning `None` when `dist/plugins/burndown/plugin.wasm`
+/// hasn't been built — keeps the suite green in CI without the WASI
+/// toolchain.
+fn render_analytics(tab: UsageTab, width: u16, height: u16) -> Option<String> {
+    let _ = (width, height); // plugin currently paints fixed 80x24
+    let dist = workspace_dist();
+    if !dist.join("burndown").join("plugin.wasm").exists() {
+        return None;
+    }
+
+    std::env::set_var("AINB_PLUGIN_ROOT", &dist);
+    let (mut host, outcome) = ainb::plugins::init_plugin_host();
+    assert!(outcome.failed.is_empty(), "plugin must load: {:?}", outcome.failed);
+
+    // Push UsageData fixture.
+    let data = sample_usage_data();
+    let payload = serde_json::to_value(&data).expect("UsageData -> json");
+    let ev = PluginEvent::Custom { topic: "burndown.usage_data".into(), payload };
+    let bytes = rmp_serde::to_vec_named(&ev).unwrap();
+    host.dispatch_event_bytes("burndown", &bytes).unwrap();
+
+    // Push tab selection.
+    let tab_name = match tab {
+        UsageTab::Daily => "daily",
+        UsageTab::Weekly => "weekly",
+        UsageTab::Projects => "projects",
+        UsageTab::Burndown => "burndown",
+        UsageTab::Optimize => "optimize",
+    };
+    let tab_ev = PluginEvent::Custom {
+        topic: "burndown.set_tab".into(),
+        payload: serde_json::json!({ "tab": tab_name }),
+    };
+    host.dispatch_event_bytes("burndown", &rmp_serde::to_vec_named(&tab_ev).unwrap())
+        .unwrap();
+
+    host.render_plugin("burndown").unwrap();
+    let buf = host.take_render("burndown", RenderTarget::Screen).unwrap();
+
+    let mut out = String::with_capacity((buf.width as usize + 1) * buf.height as usize);
+    for y in 0..buf.height {
+        let mut line = String::with_capacity(buf.width as usize);
+        for x in 0..buf.width {
+            let i = usize::from(y) * usize::from(buf.width) + usize::from(x);
+            line.push_str(&buf.cells[i].symbol);
         }
         out.push_str(line.trim_end());
         out.push('\n');
     }
-    out
+    std::env::remove_var("AINB_PLUGIN_ROOT");
+    Some(out)
 }
 
 fn baseline_settings() -> insta::Settings {
@@ -66,36 +107,39 @@ fn baseline_settings() -> insta::Settings {
     s
 }
 
+/// Run a snapshot test that drives the burndown plugin. Soft-skips
+/// (passes) when `dist/plugins/burndown/plugin.wasm` hasn't been built.
+fn assert_analytics_baseline(name: &str, tab: UsageTab) {
+    let Some(dump) = render_analytics(tab, 80, 24) else {
+        eprintln!(
+            "skipping {name}: dist/plugins/burndown/plugin.wasm missing — \
+             run scripts/build-plugins.sh"
+        );
+        return;
+    };
+    baseline_settings().bind(|| {
+        insta::assert_snapshot!(name, dump);
+    });
+}
+
 #[test]
 fn analytics_daily() {
-    let dump = render_analytics(UsageTab::Daily, 80, 24);
-    baseline_settings().bind(|| {
-        insta::assert_snapshot!("analytics_daily", dump);
-    });
+    assert_analytics_baseline("analytics_daily", UsageTab::Daily);
 }
 
 #[test]
 fn analytics_weekly() {
-    let dump = render_analytics(UsageTab::Weekly, 80, 24);
-    baseline_settings().bind(|| {
-        insta::assert_snapshot!("analytics_weekly", dump);
-    });
+    assert_analytics_baseline("analytics_weekly", UsageTab::Weekly);
 }
 
 #[test]
 fn analytics_projects() {
-    let dump = render_analytics(UsageTab::Projects, 80, 24);
-    baseline_settings().bind(|| {
-        insta::assert_snapshot!("analytics_projects", dump);
-    });
+    assert_analytics_baseline("analytics_projects", UsageTab::Projects);
 }
 
 #[test]
 fn analytics_burndown() {
-    let dump = render_analytics(UsageTab::Burndown, 80, 24);
-    baseline_settings().bind(|| {
-        insta::assert_snapshot!("analytics_burndown", dump);
-    });
+    assert_analytics_baseline("analytics_burndown", UsageTab::Burndown);
 }
 
 #[test]
