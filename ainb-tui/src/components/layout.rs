@@ -825,15 +825,11 @@ fn build_live_widget_spans(live: &crate::models::live_window::LiveWindow) -> Vec
             Style::default().fg(bar_color_7d(pct)).add_modifier(Modifier::BOLD),
         ));
     }
-    if let Some(cost) = live.today_cost_usd {
-        if !out.is_empty() {
-            out.push(Span::styled(" · ", Style::default().fg(SUBDUED_BORDER)));
-        }
-        out.push(Span::styled(
-            format!("${cost:.2} today"),
-            Style::default().fg(GOLD),
-        ));
-    }
+    // today_cost_usd intentionally not rendered: Claude Code's
+    // /cost/total_cost_usd is the lifetime cost of a *single* session
+    // (whichever invoked the statusline most recently), not today's
+    // total. Misleading at a glance — keep the field on the cache
+    // schema but don't surface it.
     if let Some(d) = live.resets_in {
         if !out.is_empty() {
             out.push(Span::styled(" · ", Style::default().fg(SUBDUED_BORDER)));
@@ -921,7 +917,7 @@ mod live_widget_tests {
     }
 
     #[test]
-    fn live_widget_renders_5h_7d_cost_and_reset() {
+    fn live_widget_renders_5h_7d_and_reset() {
         let live = LiveWindow {
             five_hour_pct: Some(40),
             seven_day_pct: Some(8),
@@ -937,7 +933,10 @@ mod live_widget_tests {
         assert!(text.contains("40%"));
         assert!(text.contains("wk"));
         assert!(text.contains("8%"));
-        assert!(text.contains("$1.50"));
+        // today_cost_usd is in the cache but intentionally not rendered —
+        // it's a single session's lifetime cost, not today's total.
+        assert!(!text.contains("$"));
+        assert!(!text.contains("today"));
         assert!(text.contains("2h 00m"));
     }
 
