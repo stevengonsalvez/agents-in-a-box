@@ -35,6 +35,11 @@ toml = "0.8"
 # and the host translates to a WireBuffer for compositing.
 ratatui = { version = "0.26", default-features = false }
 
+# Dogfood the publishable CTS crate: tests/conformance.rs runs every
+# axis from docs/plugin-spec/v1.md against burndown's own wasm.
+[dev-dependencies]
+ainb-plugin-cts = { path = "../ainb-plugin-cts" }
+
 [profile.release]
 # Trim wasm size — Phase 3 acceptance ceiling is < 5 MB.
 opt-level = "z"
