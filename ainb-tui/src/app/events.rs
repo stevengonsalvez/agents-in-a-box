@@ -541,7 +541,10 @@ impl EventHandler {
     /// so that holding `W` (or rapid keystrokes elsewhere) doesn't hammer
     /// the filesystem.
     fn should_wire_statusline(state: &mut AppState) -> bool {
-        let live_source = crate::models::live_window::current().source;
+        // Read from the background watcher's snapshot — never call
+        // live_window::current() inline; the Tier 2 fallback walks JSONL
+        // transcripts and would stall input handling on every keystroke.
+        let live_source = state.live_window_watcher.snapshot().source;
         let status = state.statusline_status_cached();
         Self::should_wire_statusline_inner(live_source, status.as_ref())
     }
@@ -4477,7 +4480,7 @@ impl EventHandler {
                 // already carry our block. This event is reachable from the
                 // global `W` shortcut as well as the legacy Burndown route,
                 // so the guard lives here rather than at the keymap.
-                if crate::models::live_window::current().source == LiveSource::Tier1Cache {
+                if state.live_window_watcher.snapshot().source == LiveSource::Tier1Cache {
                     return;
                 }
                 match state.statusline_status_cached() {

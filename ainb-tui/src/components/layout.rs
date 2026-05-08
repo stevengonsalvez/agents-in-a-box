@@ -213,7 +213,12 @@ impl LayoutComponent {
             // Compute the enable-card visibility inputs once per frame
             // through the AppState cache so we don't re-read settings.json
             // on every refresh tick.
-            let live_source = crate::models::live_window::current().source;
+            let live = state.live_window_watcher.snapshot();
+            let live_source = live.source;
+            // Hand the snapshot to the usage view so its render path
+            // (Budget panel etc.) reads from cached state instead of
+            // calling live_window::current() inline.
+            state.usage_state.live_window = live;
             let statusline_status = state.statusline_status_cached();
             let statusline_decision = state.app_config.ui_preferences.statusline_decision;
             let enable_card_ctx = crate::components::usage::EnableCardCtx {
@@ -767,7 +772,7 @@ impl Default for LayoutComponent {
 pub fn build_live_status_spans(state: &mut AppState) -> Vec<Span<'static>> {
     use crate::cli::statusline_install::StatuslineStatus;
     use crate::config::StatuslineDecision;
-    use crate::models::live_window::{Source, current};
+    use crate::models::live_window::Source;
 
     let status = state.statusline_status_cached();
     let decision = state.app_config.ui_preferences.statusline_decision;
@@ -777,7 +782,10 @@ pub fn build_live_status_spans(state: &mut AppState) -> Vec<Span<'static>> {
     // custom statusline that side-channels via `ainb claudecode statusline
     // --cache-only` (Other) — show the live widget. The CTA is for the
     // genuinely-unwired case only.
-    let live = current();
+    //
+    // The snapshot is maintained by a background tokio poller so this
+    // hot path never touches the filesystem itself.
+    let live = state.live_window_watcher.snapshot();
     if live.source == Source::Tier1Cache {
         return build_live_widget_spans(&live);
     }

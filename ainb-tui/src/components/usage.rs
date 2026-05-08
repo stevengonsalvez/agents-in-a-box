@@ -319,6 +319,11 @@ pub struct UsageViewState {
     /// so a narrow period (eg. `SpecificMonth(May)`) cannot raise the
     /// anchor above an earlier value seen during a wider load.
     pub oldest_call_day: Option<NaiveDate>,
+    /// Snapshot of the live OAuth-window state, refreshed by the
+    /// `LiveWindowWatcher` background poller and copied here just before
+    /// `usage::render` runs. Lets the Budget panel render Tier 1/2 data
+    /// without doing filesystem I/O on the render thread.
+    pub live_window: crate::models::live_window::LiveWindow,
 }
 
 impl Default for UsageViewState {
@@ -343,6 +348,7 @@ impl Default for UsageViewState {
             zoom_search_query: String::new(),
             zoom_detail_open: false,
             oldest_call_day: None,
+            live_window: crate::models::live_window::LiveWindow::empty(),
         }
     }
 }
@@ -1658,7 +1664,7 @@ fn render_zoom_panel_body(
             if matches!(panel, UsagePanel::Optimize) {
                 render_optimize_compact_panel(frame, area, data, focus);
             } else {
-                render_budget_panel(frame, area, data, &state.period, focus);
+                render_budget_panel(frame, area, data, &state.period, &state.live_window, focus);
             }
         }
     }
@@ -2356,6 +2362,7 @@ fn render_dashboard_grid(
         bottom[2],
         data,
         period,
+        &state.live_window,
         FocusCtx::for_panel(state, UsagePanel::Budget),
     );
 }
@@ -3350,6 +3357,7 @@ fn render_budget_panel(
     area: Rect,
     data: &UsageData,
     period: &UsagePeriod,
+    live: &crate::models::live_window::LiveWindow,
     focus: FocusCtx,
 ) {
     let inner_w = area.width.saturating_sub(2) as usize;
@@ -3377,8 +3385,10 @@ fn render_budget_panel(
 
     // Live OAuth-window header. Renders above the existing monthly-cap
     // content. Drives the W keybind's CTA when no source is available.
-    let live = crate::models::live_window::current();
-    let mut lines: Vec<Line> = budget_live_header_lines(&live, inner_w);
+    // The snapshot is supplied by the caller (sourced from the
+    // background `LiveWindowWatcher`) so this render path never touches
+    // the filesystem.
+    let mut lines: Vec<Line> = budget_live_header_lines(live, inner_w);
 
     lines.extend(vec![
         Line::from(vec![

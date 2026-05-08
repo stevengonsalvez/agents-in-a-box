@@ -2127,6 +2127,12 @@ pub struct AppState {
         Instant,
     )>,
 
+    /// Background poller for the live OAuth-window snapshot. The render
+    /// path reads via `snapshot()` (cheap RwLock read + clone) instead of
+    /// calling `live_window::current()` directly — Tier 2's JSONL walk
+    /// would otherwise stall input handling on every frame.
+    pub live_window_watcher: crate::models::live_window_watcher::LiveWindowWatcher,
+
     // Usage analytics state
     pub usage_state: crate::components::usage::UsageViewState,
     /// Channel receiver for background usage-data parsing.
@@ -2698,6 +2704,9 @@ impl Default for AppState {
             session_recovery_state: crate::components::SessionRecoveryState::default(),
 
             statusline_status_cache: None,
+
+            live_window_watcher:
+                crate::models::live_window_watcher::LiveWindowWatcher::default(),
 
             // Usage analytics state
             usage_state: crate::components::usage::UsageViewState::default(),
@@ -9779,6 +9788,10 @@ impl App {
     }
 
     pub async fn init(&mut self) {
+        // Kick off the live-window background poller. Render path reads
+        // from its snapshot — never calls live_window::current() inline.
+        self.state.live_window_watcher.start();
+
         // Initialize log streaming coordinator
         let (mut coordinator, log_sender) = LogStreamingCoordinator::new();
 
