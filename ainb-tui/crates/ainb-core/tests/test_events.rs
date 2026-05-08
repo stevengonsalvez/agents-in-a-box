@@ -3,7 +3,8 @@
 use ainb::app::events::AppEvent;
 use ainb::app::state::View;
 use ainb::app::{AppState, EventHandler};
-use ainb::models::{UsagePeriod, UsageProviderFilter};
+// UsagePeriod / UsageProviderFilter no longer used in this file —
+// the test that referenced them has moved into the burndown plugin.
 use chrono::NaiveDate;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -225,61 +226,8 @@ fn test_process_help_toggle_event() {
     assert!(state.help_visible);
 }
 
-#[tokio::test]
-async fn test_usage_period_and_provider_events() {
-    // Free-text include/exclude/clear prompts have been removed in
-    // favour of the picker-style chip strip; this test now exercises
-    // the period and provider key bindings only.
-    let mut state = AppState::default();
-    state.current_view = View::Analytics;
-
-    let event = EventHandler::handle_key_event(create_key_event(KeyCode::Char('p')), &mut state);
-    assert!(matches!(event, Some(AppEvent::UsageCycleProviderFilter)));
-    EventHandler::process_event(event.unwrap(), &mut state);
-    assert_eq!(
-        state.usage_state.provider_filter,
-        UsageProviderFilter::Claude
-    );
-
-    let event = EventHandler::handle_key_event(create_key_event(KeyCode::Char('3')), &mut state);
-    assert!(matches!(event, Some(AppEvent::UsageSetPeriod(3))));
-    EventHandler::process_event(event.unwrap(), &mut state);
-    assert!(matches!(state.usage_state.period, UsagePeriod::ThirtyDays));
-
-    // Capital D opens the date-range input (the only surviving free-text
-    // path on the usage screen).
-    let event = EventHandler::handle_key_event(create_key_event(KeyCode::Char('D')), &mut state);
-    assert!(matches!(event, Some(AppEvent::UsageStartDateRange)));
-    EventHandler::process_event(event.unwrap(), &mut state);
-    for ch in "2026-04-01 2026-04-10".chars() {
-        let event = EventHandler::handle_key_event(create_key_event(KeyCode::Char(ch)), &mut state);
-        EventHandler::process_event(event.unwrap(), &mut state);
-    }
-    let event = EventHandler::handle_key_event(create_key_event(KeyCode::Enter), &mut state);
-    EventHandler::process_event(event.unwrap(), &mut state);
-    assert!(matches!(
-        state.usage_state.period,
-        UsagePeriod::Custom { from, to }
-            if from == NaiveDate::from_ymd_opt(2026, 4, 1).unwrap()
-                && to == NaiveDate::from_ymd_opt(2026, 4, 10).unwrap()
-    ));
-
-    // Lowercase `/`, `x`, `c` are intentionally unbound on the burndown
-    // view — the picker (Enter / Shift+X / Shift+C) replaces them.
-    let event = EventHandler::handle_key_event(create_key_event(KeyCode::Char('/')), &mut state);
-    assert!(event.is_none(), "/ must not bind to any usage event");
-    // `c` and `x` may resolve to other unrelated events outside the
-    // burndown filter path. The chip-strip lives on capitals (X / C).
-    // Lowercase must NOT trigger the picker — that asymmetry is the
-    // contract a regression would break.
-    let event = EventHandler::handle_key_event(create_key_event(KeyCode::Char('x')), &mut state);
-    assert!(
-        !matches!(event, Some(AppEvent::UsageCommitExcludeFilter)),
-        "lowercase x must not commit an exclude chip (capital X owns that)"
-    );
-    let event = EventHandler::handle_key_event(create_key_event(KeyCode::Char('c')), &mut state);
-    assert!(
-        !matches!(event, Some(AppEvent::UsageClearAllChips)),
-        "lowercase c must not clear chips (capital C owns that)"
-    );
-}
+// test_usage_period_and_provider_events removed — the burndown plugin
+// owns Analytics-screen key handling now. The host-side AppEvent::Usage*
+// variants and state.usage_state were both removed in Phase 3 cutover.
+// Equivalent coverage (period switch + provider cycle) lives in the
+// plugin's own test suite.
