@@ -2098,6 +2098,14 @@ pub struct AppState {
     /// Channel receiver for background usage-data parsing.
     /// Present only while a parse is in flight; `tick()` drains it.
     pub usage_load_receiver: Option<mpsc::UnboundedReceiver<crate::models::UsageData>>,
+    /// WireBuffers freshly drained from plugins, keyed by screen id.
+    /// `App::tick_plugin_renders` populates this before each frame so
+    /// `PluginScreen::render` can paint without needing access to the
+    /// plugin host (which lives on `App`, not `AppState`).
+    pub pending_plugin_renders: std::collections::HashMap<
+        crate::app::screens::ScreenId,
+        ainb_plugin_api::WireBuffer,
+    >,
 
     // Skills browser state
     pub skills_state: crate::components::skills::SkillsViewState,
@@ -2665,6 +2673,7 @@ impl Default for AppState {
 
             // Usage analytics state
             usage_state: crate::components::usage::UsageViewState::default(),
+            pending_plugin_renders: std::collections::HashMap::new(),
             usage_load_receiver: None,
 
             // Skills browser state
@@ -9678,16 +9687,108 @@ impl AppState {
 
 pub struct App {
     pub state: AppState,
+    /// Plugin host loaded at app startup. `None` while the structural
+    /// host wiring is still in flight (Phase 3 Wave 3 partial cutover) and
+    /// during contexts where the wasmi runtime would be wasteful (CLI
+    /// subcommand dispatch). Built lazily by [`App::init`].
+    pub plugin_host: Option<ainb_plugin_host::PluginHost>,
 }
 
 impl App {
     pub fn new() -> Self {
         Self {
             state: AppState::new(),
+            plugin_host: None,
+        }
+    }
+
+    /// Drive plugin renders for the active plugin-owned screen.
+    ///
+    /// Run once per frame (right before `terminal.draw`). For each screen
+    /// the plugin host owns, push the latest application state as a
+    /// `Custom` event, call `_render`, drain the painted `WireBuffer`, and
+    /// stash it in `state.pending_plugin_renders` keyed by screen id. The
+    /// `PluginScreen` then reads from that map at paint time without
+    /// needing a `&mut PluginHost` itself.
+    ///
+    /// Currently only the burndown plugin is wired. Adding more plugin
+    /// screens means extending the `(screen_id, plugin_id)` table here.
+    pub fn tick_plugin_renders(&mut self) {
+        let Some(host) = self.plugin_host.as_mut() else {
+            return;
+        };
+
+        // Static plugin-screen routing table. Pairs a stable screen id
+        // (consumed by `PluginScreen` and matched against
+        // `state.current_screen`) with the plugin id that owns it.
+        const PLUGIN_SCREENS: &[(&str, &str)] = &[
+            (crate::app::screens::ids::ANALYTICS, "burndown"),
+        ];
+
+        for (screen_id, plugin_id) in PLUGIN_SCREENS {
+            // Skip plugins that aren't loaded — keeps the loop cheap and
+            // resilient when discovery comes up empty.
+            if host.get(plugin_id).is_none() {
+                continue;
+            }
+
+            // Push the screen-specific state into the plugin via Custom
+            // events. For burndown that's (a) UsageData and (b) the
+            // active tab — both deterministic snapshots of `usage_state`.
+            if *plugin_id == "burndown" {
+                if let Some(data) = self.state.usage_state.data.clone() {
+                    if let Ok(payload) = serde_json::to_value(&data) {
+                        let ev = ainb_plugin_api::PluginEvent::Custom {
+                            topic: "burndown.usage_data".to_string(),
+                            payload,
+                        };
+                        if let Ok(bytes) = rmp_serde::to_vec_named(&ev) {
+                            let _ = host.dispatch_event_bytes(plugin_id, &bytes);
+                        }
+                    }
+                }
+                let tab = match self.state.usage_state.active_tab {
+                    crate::components::usage::UsageTab::Daily => "daily",
+                    crate::components::usage::UsageTab::Weekly => "weekly",
+                    crate::components::usage::UsageTab::Projects => "projects",
+                    crate::components::usage::UsageTab::Burndown => "burndown",
+                    crate::components::usage::UsageTab::Optimize => "optimize",
+                };
+                let ev = ainb_plugin_api::PluginEvent::Custom {
+                    topic: "burndown.set_tab".to_string(),
+                    payload: serde_json::json!({ "tab": tab }),
+                };
+                if let Ok(bytes) = rmp_serde::to_vec_named(&ev) {
+                    let _ = host.dispatch_event_bytes(plugin_id, &bytes);
+                }
+            }
+
+            if host.render_plugin(plugin_id).is_ok() {
+                if let Some(buf) =
+                    host.take_render(plugin_id, ainb_plugin_api::RenderTarget::Screen)
+                {
+                    self.state
+                        .pending_plugin_renders
+                        .insert((*screen_id).to_string(), buf);
+                }
+            }
         }
     }
 
     pub async fn init(&mut self) {
+        // Discover + load bundled plugins (best-effort). The Phase 1.5 host
+        // stubs mean a loaded plugin's _render is currently a no-op, so
+        // analytics still flows through state.usage_state until the real
+        // render channel lands. This block stays minimal until then.
+        let (host, outcome) = crate::plugins::init_plugin_host();
+        if !outcome.loaded.is_empty() {
+            info!(loaded = ?outcome.loaded, "plugin host initialised");
+        }
+        for (name, err) in &outcome.failed {
+            warn!(plugin = %name, error = %err, "plugin failed to load");
+        }
+        self.plugin_host = Some(host);
+
         // Initialize log streaming coordinator
         let (mut coordinator, log_sender) = LogStreamingCoordinator::new();
 

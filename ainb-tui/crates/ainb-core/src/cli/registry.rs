@@ -429,11 +429,84 @@ impl CliCommand for UsageCommand {
         )
     }
     fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
-        match crate::cli::usage::UsageCommands::from_arg_matches(matches) {
-            Ok(c) => Box::pin(async move { crate::cli::usage::execute(c, ctx.format).await }),
-            Err(e) => boxed_err(e),
-        }
+        // Phase 3 CLI cutover: route through the burndown plugin via
+        // PluginHost. We rebuild argv from `std::env::args()` rather
+        // than matches (clap-derive doesn't have a `to_args`) — this
+        // is robust because clap already validated the args before
+        // dispatch lands here.
+        // Skip past argv[0] (the binary) and through the "usage" token so
+        // the plugin sees only the subcommand and its flags. The plugin's
+        // own clap parser will add a synthesised "usage" prog-name.
+        let argv: Vec<String> = std::env::args()
+            .skip_while(|a| a != "usage")
+            .skip(1)
+            .collect();
+        let format = ctx.format;
+        let parsed = crate::cli::usage::UsageCommands::from_arg_matches(matches);
+        Box::pin(async move {
+            match dispatch_usage_via_plugin(&argv).await {
+                Ok(()) => Ok(()),
+                Err(plugin_err) => {
+                    // Plugin dispatch failed — fall back to the in-tree
+                    // implementation so a missing plugin build doesn't
+                    // brick the CLI. Surfaces the plugin error in the
+                    // log ring so an operator can debug.
+                    tracing::warn!(
+                        error = %plugin_err,
+                        "usage CLI plugin dispatch failed; falling back to in-tree path"
+                    );
+                    match parsed {
+                        Ok(c) => crate::cli::usage::execute(c, format).await,
+                        Err(e) => Err(anyhow::Error::from(e)),
+                    }
+                }
+            }
+        })
     }
+}
+
+/// Build a fresh `PluginHost`, push the host-side UsageData into the
+/// burndown plugin via a `Custom` event, then `dispatch_cli` the
+/// captured argv. Stdout/stderr the plugin produces flow back through
+/// the host's fd_write capture and out to the user's terminal.
+async fn dispatch_usage_via_plugin(argv: &[String]) -> Result<()> {
+    use std::io::Write;
+
+    let (mut host, outcome) = crate::plugins::init_plugin_host();
+    if outcome.loaded.is_empty() {
+        let detail: String = outcome
+            .failed
+            .iter()
+            .map(|(n, e)| format!("{n}: {e:#}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        anyhow::bail!("burndown plugin not loaded ({detail})");
+    }
+    if host.get("burndown").is_none() {
+        anyhow::bail!("burndown plugin not registered");
+    }
+
+    // Push the host-side UsageData snapshot so the plugin's command
+    // handlers can render against the same data the in-tree path used.
+    let data = crate::cli::usage::load_usage_for_plugin().await?;
+    let payload = serde_json::to_value(&data).context("UsageData -> json")?;
+    let ev = ainb_plugin_api::PluginEvent::Custom {
+        topic: "burndown.usage_data".to_string(),
+        payload,
+    };
+    let bytes = rmp_serde::to_vec_named(&ev).context("encode event")?;
+    host.dispatch_event_bytes("burndown", &bytes)?;
+
+    let (stdout, stderr) = host.dispatch_cli("burndown", "usage", argv)?;
+    if !stdout.is_empty() {
+        let mut out = std::io::stdout().lock();
+        out.write_all(&stdout)?;
+    }
+    if !stderr.is_empty() {
+        let mut err = std::io::stderr().lock();
+        err.write_all(&stderr)?;
+    }
+    Ok(())
 }
 
 pub struct StatuslineCommand;

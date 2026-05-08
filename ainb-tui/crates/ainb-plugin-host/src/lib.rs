@@ -20,7 +20,7 @@ pub mod runtime;
 use std::path::Path;
 use std::sync::Arc;
 
-use ainb_plugin_api::Manifest;
+use ainb_plugin_api::{Manifest, RenderTarget, WireBuffer};
 use anyhow::{anyhow, Context, Result};
 
 pub use loader::{LoadedPlugin, PluginId};
@@ -249,6 +249,93 @@ impl PluginHost {
         memory
             .write(&mut plugin.store, off_usize, &wire)
             .context("write event payload to plugin memory")?;
+
+        let handler = plugin
+            .instance
+            .get_typed_func::<(i32, i32), i32>(&plugin.store, "_handle_event")
+            .context("_handle_event missing")?;
+        match handler.call(&mut plugin.store, (ptr, len_i32)) {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                plugin.degraded = true;
+                Err(anyhow::Error::new(e).context("_handle_event trapped"))
+            }
+        }
+    }
+
+    /// Take (and clear) the most recent `WireBuffer` a plugin painted for
+    /// the given target. Returns `None` when nothing has been painted since
+    /// the previous take. ainb-core's screen layer calls this right after
+    /// [`Self::render_plugin`] returns.
+    #[must_use]
+    pub fn take_render(&self, plugin_id: &str, target: RenderTarget) -> Option<WireBuffer> {
+        self.shared.take_render(plugin_id, target)
+    }
+
+    /// Send a `PluginEvent::Command { name, args }` to the named plugin
+    /// and return whatever bytes it wrote to stdout while handling it.
+    /// Stderr is returned alongside (empty `Vec` on success). Useful for
+    /// CLI dispatch — `ainb usage report --json` ends up running inside
+    /// the burndown plugin instead of in-tree.
+    ///
+    /// The plugin's stdout/stderr buffers are drained before AND after
+    /// the call so consecutive dispatches don't see each other's output.
+    pub fn dispatch_cli(
+        &mut self,
+        plugin_id: &str,
+        name: &str,
+        args: &[String],
+    ) -> Result<(Vec<u8>, Vec<u8>)> {
+        // Reset the plugin's capture buffers so prior renders / log spam
+        // don't bleed into this command's output.
+        {
+            let plugin = self.find_mut(plugin_id)?;
+            plugin.store.data_mut().captured_stdout.clear();
+            plugin.store.data_mut().captured_stderr.clear();
+        }
+        let ev = ainb_plugin_api::PluginEvent::Command {
+            name: name.to_string(),
+            args: args.to_vec(),
+        };
+        let bytes = rmp_serde::to_vec_named(&ev).context("encode command event")?;
+        self.dispatch_event_bytes(plugin_id, &bytes)?;
+        let plugin = self.find_mut(plugin_id)?;
+        let stdout = std::mem::take(&mut plugin.store.data_mut().captured_stdout);
+        let stderr = std::mem::take(&mut plugin.store.data_mut().captured_stderr);
+        Ok((stdout, stderr))
+    }
+
+    /// Hand a raw, pre-encoded msgpack payload directly to a plugin's
+    /// `_handle_event` export. Skips the publish/subscribe queue — useful
+    /// when the host needs to push state into a single plugin
+    /// (e.g. a UsageData snapshot for the burndown plugin).
+    ///
+    /// The plugin must export `_alloc` so the host can carve a buffer in
+    /// guest memory; missing `_alloc` is a hard error.
+    pub fn dispatch_event_bytes(&mut self, plugin_id: &str, payload: &[u8]) -> Result<()> {
+        let plugin = self.find_mut(plugin_id)?;
+        if plugin.degraded {
+            return Ok(());
+        }
+        let len_i32 = i32::try_from(payload.len()).context("payload too large")?;
+        let alloc = plugin
+            .instance
+            .get_typed_func::<i32, i32>(&plugin.store, "_alloc")
+            .context("_alloc missing")?;
+        let ptr = alloc
+            .call(&mut plugin.store, len_i32)
+            .context("_alloc trapped")?;
+        anyhow::ensure!(ptr > 0, "_alloc returned null");
+
+        let memory = plugin
+            .instance
+            .get_export(&plugin.store, "memory")
+            .and_then(wasmi::Extern::into_memory)
+            .ok_or_else(|| anyhow!("plugin has no exported memory"))?;
+        let off = usize::try_from(ptr).context("alloc ptr negative")?;
+        memory
+            .write(&mut plugin.store, off, payload)
+            .context("write event payload")?;
 
         let handler = plugin
             .instance

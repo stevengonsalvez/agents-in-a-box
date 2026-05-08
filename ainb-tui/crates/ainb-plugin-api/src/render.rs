@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Wire-encoded as a `u8` so it can also travel through the `ainb_render_buffer`
 /// host-fn as an `i32` arg without a serde dance.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum RenderTarget {
     /// Full-screen owned by a plugin-defined screen.

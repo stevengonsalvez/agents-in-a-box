@@ -16,6 +16,7 @@ pub mod docker;
 pub mod git;
 pub mod interactive;
 pub mod models;
+pub mod plugins;
 pub mod providers;
 pub mod tmux;
 pub mod usage_cache;

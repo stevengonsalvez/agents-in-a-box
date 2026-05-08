@@ -21,6 +21,9 @@ toml = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+dirs = "5.0"
+glob = "0.3"
+rusqlite = { workspace = true }
 
 [dev-dependencies]
 wat = "1.0"

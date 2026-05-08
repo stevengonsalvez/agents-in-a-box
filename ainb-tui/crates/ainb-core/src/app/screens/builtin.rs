@@ -38,15 +38,93 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 // Stateless screens (delegate to free functions or static methods)
 // ---------------------------------------------------------------------------
 
-#[derive(Default)]
-pub struct AnalyticsScreen;
-impl Screen for AnalyticsScreen {
+/// Plugin-owned screen wrapper. Reads the WireBuffer that
+/// `App::tick_plugin_renders` drained into
+/// `state.pending_plugin_renders[screen_id]` and paints it cell-by-cell
+/// onto the host's ratatui Frame.
+///
+/// Falls back to a single-line "loading" message if the plugin hasn't
+/// painted yet (e.g. the very first frame after startup, before
+/// `tick_plugin_renders` has run).
+pub struct PluginScreen {
+    screen_id: &'static str,
+}
+
+impl PluginScreen {
+    #[must_use]
+    pub fn new(screen_id: &'static str) -> Self {
+        Self { screen_id }
+    }
+}
+
+impl Screen for PluginScreen {
     fn id(&self) -> &str {
-        ids::ANALYTICS
+        self.screen_id
     }
     fn render(&mut self, frame: &mut Frame, area: Rect, state: &mut AppState) {
-        crate::components::usage::render(frame, area, &state.usage_state);
+        let Some(wire) = state.pending_plugin_renders.get(self.screen_id) else {
+            let placeholder = ratatui::widgets::Paragraph::new(format!(
+                "[plugin {}: rendering...]",
+                self.screen_id
+            ));
+            frame.render_widget(placeholder, area);
+            return;
+        };
+        let buf = frame.buffer_mut();
+        // Paint the WireBuffer into the requested area. The plugin paints
+        // at a fixed 80x24 today; clip to the available area when the
+        // terminal is smaller. Larger terminals leave the trailing rows
+        // unpainted (they remain whatever the prior frame drew there).
+        let w = u16::min(wire.width, area.width);
+        let h = u16::min(wire.height, area.height);
+        for y in 0..h {
+            for x in 0..w {
+                let i = usize::from(y) * usize::from(wire.width) + usize::from(x);
+                let Some(cell) = wire.cells.get(i) else { continue };
+                let target = buf.get_mut(area.x + x, area.y + y);
+                target.set_symbol(&cell.symbol);
+                target.set_fg(ansi_to_color(cell.fg));
+                target.set_bg(ansi_to_color(cell.bg));
+                target.set_style(ratatui::style::Style::default()
+                    .add_modifier(byte_to_modifiers(cell.modifiers)));
+            }
+        }
     }
+}
+
+fn ansi_to_color(c: u8) -> ratatui::style::Color {
+    use ratatui::style::Color;
+    match c {
+        0xFF => Color::Reset,
+        0 => Color::Black,
+        1 => Color::Red,
+        2 => Color::Green,
+        3 => Color::Yellow,
+        4 => Color::Blue,
+        5 => Color::Magenta,
+        6 => Color::Cyan,
+        7 => Color::Gray,
+        8 => Color::DarkGray,
+        9 => Color::LightRed,
+        10 => Color::LightGreen,
+        11 => Color::LightYellow,
+        12 => Color::LightBlue,
+        13 => Color::LightMagenta,
+        14 => Color::LightCyan,
+        15 => Color::White,
+        i => Color::Indexed(i),
+    }
+}
+
+fn byte_to_modifiers(b: u8) -> ratatui::style::Modifier {
+    use ratatui::style::Modifier;
+    let mut m = Modifier::empty();
+    if b & 1 != 0 { m |= Modifier::BOLD; }
+    if b & 2 != 0 { m |= Modifier::DIM; }
+    if b & 4 != 0 { m |= Modifier::ITALIC; }
+    if b & 8 != 0 { m |= Modifier::UNDERLINED; }
+    if b & 16 != 0 { m |= Modifier::REVERSED; }
+    m
 }
 
 #[derive(Default)]
@@ -360,7 +438,7 @@ pub fn register_builtins(registry: &mut ScreenRegistry) {
     registry.register(Box::new(ConfigScreen::new()));
     registry.register(Box::new(LogHistoryScreen::new()));
     registry.register(Box::new(ChangelogScreen::default()));
-    registry.register(Box::new(AnalyticsScreen::default()));
+    registry.register(Box::new(PluginScreen::new(ids::ANALYTICS)));
     registry.register(Box::new(SkillsScreen::default()));
     registry.register(Box::new(GitViewScreen::default()));
     registry.register(Box::new(SessionRecoveryScreen::default()));
