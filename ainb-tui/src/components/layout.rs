@@ -312,7 +312,7 @@ impl LayoutComponent {
         self.logs_viewer.render(frame, main_layout[2], state);
 
         // Render bottom menu bar
-        self.render_menu_bar(frame, main_layout[3]);
+        self.render_menu_bar(frame, main_layout[3], state);
 
         // Render help overlay if visible
         if state.help_visible {
@@ -354,7 +354,18 @@ impl LayoutComponent {
         &mut self.tmux_preview
     }
 
-    fn render_menu_bar(&self, frame: &mut Frame, area: Rect) {
+    fn render_menu_bar(&self, frame: &mut Frame, area: Rect, state: &AppState) {
+        // Pure decision for which restart-shaped affordance to surface.
+        // See test below for the truth table.
+        // The session-action group's restart-shaped affordance is split
+        // across two keys with different semantics:
+        //   - `r` resumes a Stopped Interactive (tmux) session in-place.
+        //   - `e` restarts a Boss/Docker session into a fresh container.
+        // Show the binding that actually applies to the highlighted row
+        // so users don't press the wrong one. See events.rs:834 and
+        // events.rs:868 for the dispatch logic.
+        let (restart_key, restart_label) = restart_affordance(state.selected_session());
+
         // Premium styled command bar with separators - 2 lines for better readability
         // Line 1: Navigation, Session Actions
         let line1_spans = vec![
@@ -376,10 +387,10 @@ impl LayoutComponent {
             ),
             Span::styled("ttach ", Style::default().fg(MUTED_GRAY)),
             Span::styled(
-                "e",
+                restart_key,
                 Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" restart ", Style::default().fg(MUTED_GRAY)),
+            Span::styled(restart_label, Style::default().fg(MUTED_GRAY)),
             Span::styled(
                 "d",
                 Style::default().fg(Color::Rgb(230, 100, 100)).add_modifier(Modifier::BOLD),
@@ -756,6 +767,31 @@ impl LayoutComponent {
     }
 }
 
+/// Pick the right restart-shaped affordance to show on the bottom menu
+/// bar for the currently-highlighted session.
+///
+/// `r` resumes a Stopped Interactive (tmux) session in-place — the
+/// recoverable escape hatch added with the soft-stop feature. `e`
+/// restarts a Boss/Docker session into a fresh container.
+///
+/// Showing `e restart` for a stopped Interactive session would point
+/// users at the wrong key — pressing `e` triggers Docker restart logic
+/// that doesn't apply, while `r` is what actually resumes the tmux
+/// pane and relaunches the embedded CLI.
+fn restart_affordance(selected: Option<&crate::models::Session>) -> (&'static str, &'static str) {
+    use crate::models::{SessionMode, SessionStatus};
+    let stopped_interactive = matches!(
+        selected,
+        Some(s) if matches!(s.mode, SessionMode::Interactive)
+            && matches!(s.status, SessionStatus::Stopped)
+    );
+    if stopped_interactive {
+        ("r", " resume ")
+    } else {
+        ("e", " restart ")
+    }
+}
+
 impl Default for LayoutComponent {
     fn default() -> Self {
         Self::new()
@@ -999,6 +1035,59 @@ mod live_widget_tests {
         assert_eq!(format_hms(Duration::ZERO), "0m");
         assert_eq!(format_hms(Duration::from_secs(45 * 60)), "45m");
         assert_eq!(format_hms(Duration::from_secs(3600)), "1h 00m");
+    }
+}
+
+#[cfg(test)]
+mod menu_bar_tests {
+    use super::restart_affordance;
+    use crate::models::{Session, SessionMode, SessionStatus};
+
+    fn stopped_interactive() -> Session {
+        let mut s = Session::new("t".to_string(), "/tmp".to_string());
+        s.mode = SessionMode::Interactive;
+        s.status = SessionStatus::Stopped;
+        s
+    }
+
+    fn running_interactive() -> Session {
+        let mut s = Session::new("t".to_string(), "/tmp".to_string());
+        s.mode = SessionMode::Interactive;
+        s.status = SessionStatus::Running;
+        s
+    }
+
+    fn stopped_boss() -> Session {
+        let mut s = Session::new("t".to_string(), "/tmp".to_string());
+        s.mode = SessionMode::Boss;
+        s.status = SessionStatus::Stopped;
+        s
+    }
+
+    #[test]
+    fn stopped_interactive_shows_r_resume() {
+        let s = stopped_interactive();
+        assert_eq!(restart_affordance(Some(&s)), ("r", " resume "));
+    }
+
+    #[test]
+    fn running_interactive_shows_e_restart() {
+        // `r` is reauth-credentials when the session isn't stopped, so
+        // surfacing `r resume` would be wrong. Fall back to `e restart`.
+        let s = running_interactive();
+        assert_eq!(restart_affordance(Some(&s)), ("e", " restart "));
+    }
+
+    #[test]
+    fn stopped_boss_shows_e_restart() {
+        // Boss/Docker sessions use the Docker container restart path.
+        let s = stopped_boss();
+        assert_eq!(restart_affordance(Some(&s)), ("e", " restart "));
+    }
+
+    #[test]
+    fn no_selection_shows_e_restart() {
+        assert_eq!(restart_affordance(None), ("e", " restart "));
     }
 }
 
