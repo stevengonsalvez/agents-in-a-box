@@ -182,6 +182,61 @@ mod host {
     pub unsafe fn ainb_render_buffer(_target: i32, _ptr: i32, _len: i32) {}
 }
 
+/// Pull the `--format=<text|json|csv>` (or `--format <…>`) global flag
+/// out of an argv vector. Stays in sync with the host CLI's
+/// `cli::root_clap_command` global flag.
+fn extract_format(argv: &[String]) -> crate::output_format::OutputFormat {
+    use crate::output_format::OutputFormat;
+    let mut iter = argv.iter().peekable();
+    while let Some(a) = iter.next() {
+        if let Some(rest) = a.strip_prefix("--format=") {
+            return parse_format(rest);
+        }
+        if a == "--format" {
+            if let Some(next) = iter.peek() {
+                return parse_format(next);
+            }
+        }
+    }
+    OutputFormat::default()
+}
+
+/// Drop any `--format` / `--format=...` token from argv (and its value
+/// when the form is `--format <value>`). The host extracts `--format`
+/// out-of-band via `extract_format`; the plugin's clap parser doesn't
+/// declare it as a global, so it must not see it.
+fn strip_format_flag(argv: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(argv.len());
+    let mut i = 0;
+    while i < argv.len() {
+        let a = &argv[i];
+        if a == "--format" {
+            // Skip the flag and its value (if present).
+            i += 1;
+            if i < argv.len() {
+                i += 1;
+            }
+            continue;
+        }
+        if a.starts_with("--format=") {
+            i += 1;
+            continue;
+        }
+        out.push(a.clone());
+        i += 1;
+    }
+    out
+}
+
+fn parse_format(s: &str) -> crate::output_format::OutputFormat {
+    use crate::output_format::OutputFormat;
+    match s {
+        "json" => OutputFormat::Json,
+        "csv" => OutputFormat::Csv,
+        _ => OutputFormat::Text,
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn _handle_event(ptr: i32, len: i32) -> i32 {
     if !READY.load(Ordering::Acquire) {
@@ -202,6 +257,53 @@ pub extern "C" fn _handle_event(ptr: i32, len: i32) -> i32 {
         Ok(e) => e,
         Err(_) => return 0, // bad payload — silent drop, host already logged
     };
+    // CLI dispatch: host invokes `ainb usage <subcommand>`, the
+    // CommandRegistry layer converts the matched args into a
+    // `PluginEvent::Command { name, args }`, and we re-parse `args`
+    // through clap on the plugin side. Output flows through stdout
+    // (captured by the host's fd_write shim).
+    if let ainb_plugin_api::PluginEvent::Command { name, args } = ev {
+        if name == "usage" {
+            // Snapshot the data — we can't render without it.
+            let data: Option<crate::data::usage::UsageData> = unsafe {
+                STATE.as_ref().and_then(|s| s.data.clone())
+            };
+            let Some(data) = data else {
+                eprintln!("usage cli: no UsageData snapshot pushed yet");
+                return 1;
+            };
+            // Synthesise an argv: clap's `try_parse_from` expects argv[0]
+            // to be the program name; we use "usage" so subcommands like
+            // `report --json` parse naturally.
+            //
+            // `--format` is a host-level global flag. Pull its value out of
+            // argv and then strip it so the plugin's clap (which only knows
+            // the subcommand surface) doesn't reject it as unexpected.
+            let mut argv: Vec<String> = vec!["usage".to_string()];
+            argv.extend(args);
+            let format = extract_format(&argv);
+            argv = strip_format_flag(&argv);
+            use clap::Parser;
+            #[derive(Parser)]
+            #[command(name = "usage")]
+            struct UsageRoot {
+                #[command(subcommand)]
+                cmd: crate::cli::UsageCommands,
+            }
+            let parsed = match UsageRoot::try_parse_from(argv) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("{e}");
+                    return 0;
+                }
+            };
+            if let Err(e) = crate::cli::execute_for_plugin(&data, parsed.cmd, format) {
+                eprintln!("{e}");
+                return 0;
+            }
+        }
+        return 0;
+    }
     if let ainb_plugin_api::PluginEvent::Custom { topic, payload } = ev {
         match topic.as_str() {
             "burndown.usage_data" => {

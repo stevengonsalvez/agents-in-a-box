@@ -23,6 +23,14 @@ pub struct HostState {
     /// Set by any host-fn that returned a negative status; cleared by the
     /// caller before each plugin call.
     pub last_error: Option<String>,
+    /// Bytes the plugin wrote to fd 1 (stdout) via the wasi `fd_write`
+    /// shim. Used by `PluginHost::dispatch_cli` to harvest the output of
+    /// plugin-handled CLI commands. The CLI dispatch path drains this
+    /// before each call; long-running renders never touch it.
+    pub captured_stdout: Vec<u8>,
+    /// Bytes the plugin wrote to fd 2 (stderr). Surfaces via the same
+    /// dispatch_cli path; useful for diagnosing parse errors.
+    pub captured_stderr: Vec<u8>,
     /// Shared cross-plugin state — event bus subscriptions and outbound
     /// queue. Cloning the `Arc` keeps host-fns cheap; the `Mutex` is held
     /// only briefly inside `ainb_event_subscribe` / `ainb_event_publish`.
@@ -49,6 +57,8 @@ impl HostState {
             capabilities: caps,
             log_ring: Vec::new(),
             last_error: None,
+            captured_stdout: Vec::new(),
+            captured_stderr: Vec::new(),
             shared,
         }
     }

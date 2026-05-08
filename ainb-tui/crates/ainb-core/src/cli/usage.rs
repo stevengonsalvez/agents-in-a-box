@@ -596,6 +596,20 @@ fn model_alias_command(args: UsageModelAliasArgs) -> Result<()> {
     }
 }
 
+/// Public entry for plugin-mode CLI dispatch. Loads UsageData via the
+/// host-side cache + parser pipeline so the plugin (which can't open
+/// the SQLite cache from inside wasmi yet) renders against the same
+/// snapshot the in-tree path used to. Defaults to a "wide" query so
+/// every subcommand sees the full data set; the plugin's per-command
+/// filtering happens against that snapshot.
+pub async fn load_usage_for_plugin() -> Result<UsageData> {
+    let args = UsageReportArgs {
+        period: PeriodArg::All,
+        ..UsageReportArgs::default()
+    };
+    load_usage(&args)
+}
+
 fn load_usage(args: &UsageReportArgs) -> Result<UsageData> {
     let query = query_from_args(args)?;
     if args.no_cache {

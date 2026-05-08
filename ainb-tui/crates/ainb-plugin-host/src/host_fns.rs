@@ -117,18 +117,26 @@ fn link_wasi_preview1_stubs(linker: &mut Linker<HostState>) -> anyhow::Result<()
     )?;
 
     // i32 fd, i32 iovs_ptr, i32 iovs_len, i32 nwritten_ptr -> i32 errno.
-    // Sum the iovec lengths and tell the plugin we wrote them all. Avoids
-    // panic-handler retry loops without performing real IO.
+    // For fd 1/2 (stdout/stderr) capture into HostState so the host can
+    // harvest plugin CLI output via PluginHost::dispatch_cli. For other
+    // fds, sum + report-as-written so panic handlers / unrelated writers
+    // don't retry-loop.
     linker.func_wrap(
         WASI,
         "fd_write",
         |mut caller: Caller<'_, HostState>,
-         _fd: i32,
+         fd: i32,
          iovs_ptr: i32,
          iovs_len: i32,
          nwritten_ptr: i32|
          -> i32 {
-            let total = sum_iovec_len(&mut caller, iovs_ptr, iovs_len).unwrap_or(0);
+            let bytes = read_iovecs(&mut caller, iovs_ptr, iovs_len).unwrap_or_default();
+            let total = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
+            match fd {
+                1 => caller.data_mut().captured_stdout.extend_from_slice(&bytes),
+                2 => caller.data_mut().captured_stderr.extend_from_slice(&bytes),
+                _ => {}
+            }
             let _ = write_le_u32(&mut caller, nwritten_ptr, total);
             0
         },
@@ -244,24 +252,28 @@ fn write_le_u32(caller: &mut Caller<'_, HostState>, ptr: i32, value: u32) -> Opt
 }
 
 /// Walk an iovec array (each entry: `(buf_ptr: u32, buf_len: u32)` little-endian
-/// in linear memory) and sum the lengths. Returns `None` on bad memory access.
-fn sum_iovec_len(
+/// in linear memory) and copy out the bytes the plugin asked to write.
+/// Returns the concatenated bytes; returns `None` on bad memory access.
+fn read_iovecs(
     caller: &mut Caller<'_, HostState>,
     iovs_ptr: i32,
     iovs_len: i32,
-) -> Option<u32> {
+) -> Option<Vec<u8>> {
     let memory = caller.get_export("memory").and_then(wasmi::Extern::into_memory)?;
     let count = u32::try_from(iovs_len).ok()?;
     let base = usize::try_from(iovs_ptr).ok()?;
-    let mut total: u32 = 0;
+    let mut out = Vec::new();
     for i in 0..count {
         let off = base.checked_add((i as usize).checked_mul(8)?)?;
         let mut entry = [0_u8; 8];
         memory.read(&caller, off, &mut entry).ok()?;
-        let len = u32::from_le_bytes([entry[4], entry[5], entry[6], entry[7]]);
-        total = total.checked_add(len)?;
+        let buf_ptr = u32::from_le_bytes([entry[0], entry[1], entry[2], entry[3]]) as usize;
+        let buf_len = u32::from_le_bytes([entry[4], entry[5], entry[6], entry[7]]) as usize;
+        let mut chunk = vec![0_u8; buf_len];
+        memory.read(&caller, buf_ptr, &mut chunk).ok()?;
+        out.extend_from_slice(&chunk);
     }
-    Some(total)
+    Some(out)
 }
 
 /// Link host-fns the plugin's manifest grants. Must be called *after*

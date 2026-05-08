@@ -272,6 +272,39 @@ impl PluginHost {
         self.shared.take_render(plugin_id, target)
     }
 
+    /// Send a `PluginEvent::Command { name, args }` to the named plugin
+    /// and return whatever bytes it wrote to stdout while handling it.
+    /// Stderr is returned alongside (empty `Vec` on success). Useful for
+    /// CLI dispatch — `ainb usage report --json` ends up running inside
+    /// the burndown plugin instead of in-tree.
+    ///
+    /// The plugin's stdout/stderr buffers are drained before AND after
+    /// the call so consecutive dispatches don't see each other's output.
+    pub fn dispatch_cli(
+        &mut self,
+        plugin_id: &str,
+        name: &str,
+        args: &[String],
+    ) -> Result<(Vec<u8>, Vec<u8>)> {
+        // Reset the plugin's capture buffers so prior renders / log spam
+        // don't bleed into this command's output.
+        {
+            let plugin = self.find_mut(plugin_id)?;
+            plugin.store.data_mut().captured_stdout.clear();
+            plugin.store.data_mut().captured_stderr.clear();
+        }
+        let ev = ainb_plugin_api::PluginEvent::Command {
+            name: name.to_string(),
+            args: args.to_vec(),
+        };
+        let bytes = rmp_serde::to_vec_named(&ev).context("encode command event")?;
+        self.dispatch_event_bytes(plugin_id, &bytes)?;
+        let plugin = self.find_mut(plugin_id)?;
+        let stdout = std::mem::take(&mut plugin.store.data_mut().captured_stdout);
+        let stderr = std::mem::take(&mut plugin.store.data_mut().captured_stderr);
+        Ok((stdout, stderr))
+    }
+
     /// Hand a raw, pre-encoded msgpack payload directly to a plugin's
     /// `_handle_event` export. Skips the publish/subscribe queue — useful
     /// when the host needs to push state into a single plugin
