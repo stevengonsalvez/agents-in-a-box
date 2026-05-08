@@ -5,12 +5,8 @@
 //! workspace root) and load each one through `ainb_plugin_host::PluginHost`.
 //!
 //! Today the only bundled plugin is `burndown` (`crates/ainb-plugin-burndown`).
-//! Its `_init` returns `Ok` against the Phase 1.5 stubs but `_render` is a
-//! no-op until `ainb_render_buffer` lands as a real host-fn — see
-//! `crates/ainb-plugin-host/src/host_fns.rs:35-43`. While the render channel
-//! is stubbed, `state.usage_state` keeps driving the Analytics screen so the
-//! UI doesn't regress; the field will be deleted in a follow-up commit once
-//! the host renderer can paint the plugin's WireBuffer.
+//! It owns its own UsageData ingest and rendering; the host calls `_render`
+//! once per frame and paints the resulting `WireBuffer` through `PluginScreen`.
 //!
 //! Discovery is best-effort: if no plugin directory exists, the host comes up
 //! empty (loaded.is_empty()) and ainb runs exactly as it did before.
