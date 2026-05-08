@@ -49,6 +49,13 @@ pub struct PluginHost {
     pub sidebar_registry: SidebarRegistry,
     pub statusline_registry: StatuslineRegistry,
     pub provider_registry: ProviderRegistry,
+    /// When `Some(n)`, every `_render`, `_tick`, `_handle_event`, and
+    /// `_alloc` call refuels the plugin's `Store` to `n` units before
+    /// dispatch. A runaway plugin (axis 9) trips wasmi's `OutOfFuel`
+    /// trap, which the host turns into the standard degraded-plugin
+    /// path. `None` (the default) disables metering — useful in tests
+    /// that have no need for a budget.
+    fuel_per_call: Option<u64>,
 }
 
 impl PluginHost {
@@ -63,6 +70,32 @@ impl PluginHost {
             sidebar_registry: SidebarRegistry::default(),
             statusline_registry: StatuslineRegistry::default(),
             provider_registry: ProviderRegistry::default(),
+            fuel_per_call: None,
+        }
+    }
+
+    /// Build a host with per-call fuel metering enabled. `fuel_per_call`
+    /// is the budget refilled before every guest invocation; a plugin
+    /// that exceeds it traps with `OutOfFuel` and is marked degraded.
+    ///
+    /// Tune for the worst legitimate render: 100M units is roughly a
+    /// few milliseconds of dense compute on commodity hardware in
+    /// wasmi 0.40. Keep this opt-in — most hosts (and every existing
+    /// canary except `cts-infinite-tick`) don't need a budget.
+    #[must_use]
+    pub fn with_fuel(fuel_per_call: u64) -> Self {
+        let mut config = wasmi::Config::default();
+        config.consume_fuel(true);
+        Self {
+            engine: wasmi::Engine::new(&config),
+            shared: Arc::new(HostShared::default()),
+            plugins: Vec::new(),
+            screen_registry: ScreenRegistry::default(),
+            command_registry: CommandRegistry::default(),
+            sidebar_registry: SidebarRegistry::default(),
+            statusline_registry: StatuslineRegistry::default(),
+            provider_registry: ProviderRegistry::default(),
+            fuel_per_call: Some(fuel_per_call),
         }
     }
 
@@ -136,9 +169,13 @@ impl PluginHost {
     /// `(target, area, &mut Buffer)` ABI lands with the screen registry in
     /// Phase 2a; this is enough surface to exercise panic isolation.
     pub fn render_plugin(&mut self, plugin_id: &str) -> Result<()> {
+        let fuel = self.fuel_per_call;
         let plugin = self.find_mut(plugin_id)?;
         if plugin.degraded {
             return Ok(());
+        }
+        if let Some(n) = fuel {
+            let _ = plugin.store.set_fuel(n);
         }
         let result = match plugin
             .instance
@@ -163,9 +200,13 @@ impl PluginHost {
     /// Drive a plugin's `_tick() -> i32` export. Same degradation contract as
     /// [`Self::render_plugin`].
     pub fn tick_plugin(&mut self, plugin_id: &str) -> Result<()> {
+        let fuel = self.fuel_per_call;
         let plugin = self.find_mut(plugin_id)?;
         if plugin.degraded {
             return Ok(());
+        }
+        if let Some(n) = fuel {
+            let _ = plugin.store.set_fuel(n);
         }
         let f = match plugin
             .instance

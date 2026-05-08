@@ -136,6 +136,11 @@ pub fn load_from_bytes(
         .context("plugin start function trapped")?;
 
     if let Ok(init) = instance.get_typed_func::<(), i32>(&store, "_init") {
+        // If the engine is fuel-aware, give _init a generous budget so a
+        // well-behaved plugin's one-shot setup never trips the meter.
+        // `set_fuel` errors silently on a non-fuel engine, so this is a
+        // no-op when the host was built with `PluginHost::new()`.
+        let _ = store.set_fuel(u64::MAX);
         let rc = init.call(&mut store, ()).context("_init trapped")?;
         anyhow::ensure!(rc == 0, "_init returned non-zero status {rc}");
     }
