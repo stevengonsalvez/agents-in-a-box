@@ -1,27 +1,32 @@
 name: Plugin MVP Tripwire
 
-# Runs the host Conformance Test Suite (Phase 1.5) on every PR or push that
-# touches the plugin host, plugin API, the canary plugins, or the xtask
-# helper. Failure here means the host's plugin abstraction has regressed —
-# downstream registry refactors must not merge until the canaries are green
-# again.
+# Runs two complementary gates:
+#
+#  * `host_cts` — Phase 1.5 host Conformance Test Suite (canary plugins).
+#    Asserts the plugin host's abstraction hasn't regressed at the wasmi
+#    boundary; trips on any plugin-host / plugin-api / xtask change.
+#
+#  * `mvp_tripwire` — Phase 5 end-to-end gate. Builds the bundled
+#    burndown plugin to wasm32-wasip1, then runs the three directive
+#    tests in `crates/ainb-core/tests/tripwire.rs`. Asserts:
+#      1. AINB_DISABLE_PLUGINS=1 → host comes up empty (graceful disable).
+#      2. Analytics renders byte-identical to the Phase 5-prep baselines
+#         when the plugin is loaded.
+#      3. `ainb usage report --format=json` through the plugin matches the
+#         in-tree path AND the captured baseline.
+#
+# Required check on PRs into main once enabled in branch protection.
 
 on:
   push:
     branches: [main, v2, feat/plugin]
     paths:
-      - "ainb-tui/crates/ainb-plugin-api/**"
-      - "ainb-tui/crates/ainb-plugin-host/**"
-      - "ainb-tui/xtask/**"
-      - "ainb-tui/Cargo.toml"
+      - "ainb-tui/**"
       - ".github/workflows/plugin-mvp-tripwire.yml"
   pull_request:
     branches: [main, v2, feat/plugin]
     paths:
-      - "ainb-tui/crates/ainb-plugin-api/**"
-      - "ainb-tui/crates/ainb-plugin-host/**"
-      - "ainb-tui/xtask/**"
-      - "ainb-tui/Cargo.toml"
+      - "ainb-tui/**"
       - ".github/workflows/plugin-mvp-tripwire.yml"
 
 env:
@@ -65,3 +70,31 @@ jobs:
           else
             cargo test -p ainb-plugin-host --test cts_runner
           fi
+
+  mvp_tripwire:
+    name: MVP end-to-end tripwire
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            ainb-tui -> target
+            ainb-tui/crates/ainb-plugin-burndown -> target
+
+      - name: Build bundled plugins (wasm32-wasip1)
+        working-directory: ${{ env.WORKING_DIR }}
+        run: ./scripts/build-plugins.sh
+
+      # `dist/plugins/burndown/plugin.wasm` is read by tripwire.rs via
+      # AINB_PLUGIN_ROOT; export it once for the test step.
+      - name: Run Phase 5 tripwire
+        working-directory: ${{ env.WORKING_DIR }}
+        env:
+          AINB_PLUGIN_ROOT: ${{ github.workspace }}/ainb-tui/dist
+        run: cargo test -p ainb --features test-support --test tripwire
