@@ -859,11 +859,18 @@ pub fn render(frame: &mut Frame, area: Rect, state: &UsageViewState, ctx: Enable
     render_provider_bar(frame, layout[2], state);
     render_tab_bar(frame, layout[3], state);
 
-    if state.loading || state.data.is_none() {
+    if !state.provider.has_data() {
+        // Provider has no parser wired (Gemini, Copilot). Skip the
+        // loading spinner + cached-from-other-provider data and go
+        // straight to the "not yet wired" empty state. Without this
+        // gate the screen would silently render the previously-loaded
+        // Claude/Codex data while showing the Gemini chip as active.
+        render_no_data(frame, layout[4], state);
+    } else if state.loading || state.data.is_none() {
         render_loading(frame, layout[4]);
     } else {
         let data = state.data.as_ref().unwrap();
-        if data.calls.is_empty() && !state.provider.has_data() {
+        if data.calls.is_empty() {
             render_no_data(frame, layout[4], state);
         } else {
             match state.active_tab {
@@ -1024,15 +1031,27 @@ fn render_provider_bar(frame: &mut Frame, area: Rect, state: &UsageViewState) {
         }
 
         let is_active = *provider == state.provider;
-        let style = if is_active {
-            Style::default().fg(GOLD).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
-        } else if provider.has_data() {
-            Style::default().fg(SOFT_WHITE)
-        } else {
-            Style::default().fg(MUTED_GRAY)
+        let style = match (is_active, provider.has_data()) {
+            // Active + wired: gold bold underline (the canonical selection).
+            (true, true) => Style::default()
+                .fg(GOLD)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            // Active + not wired: keep underline so the user sees they
+            // landed on it, but stay muted to flag it's a placeholder.
+            (true, false) => Style::default()
+                .fg(MUTED_GRAY)
+                .add_modifier(Modifier::UNDERLINED),
+            (false, true) => Style::default().fg(SOFT_WHITE),
+            (false, false) => Style::default().fg(MUTED_GRAY),
         };
 
         spans.push(Span::styled(provider.label(), style));
+        if !provider.has_data() {
+            spans.push(Span::styled(
+                " (soon)",
+                Style::default().fg(MUTED_GRAY),
+            ));
+        }
     }
 
     spans.push(Span::styled("    ", Style::default()));
