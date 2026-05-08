@@ -34,7 +34,8 @@ pub mod setup_menu;
 pub mod sidebar;
 pub mod skills;
 pub mod tmux_preview;
-pub mod usage;
+// `usage` removed in Phase 3 cutover — the burndown plugin owns the
+// Analytics screen UI now. See crates/ainb-plugin-burndown/src/ui.rs.
 pub mod welcome_panel;
 
 pub use action_card::{ActionCard, ActionCardGridState, ActionCardId};

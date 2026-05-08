@@ -28,9 +28,20 @@
 use std::path::PathBuf;
 
 use ainb::cli::statusline::{LiveCache, RateWindow, render_powerline};
-use ainb::components::usage::UsageTab;
 use ainb::test_support::{cli_usage_report_json, sample_usage_data};
 use ainb_plugin_api::{PluginEvent, RenderTarget};
+
+/// Local mirror of the burndown plugin's `UsageTab` for snapshot driving.
+/// Phase 3 cutover removed `ainb::components::usage` (the in-tree
+/// Analytics UI) — these snapshots now drive the plugin via Custom
+/// events, so the test only needs the tab name string.
+#[derive(Clone, Copy)]
+enum UsageTab {
+    Daily,
+    Weekly,
+    Projects,
+    Burndown,
+}
 
 fn workspace_dist() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -73,7 +84,6 @@ fn render_analytics(tab: UsageTab, width: u16, height: u16) -> Option<String> {
         UsageTab::Weekly => "weekly",
         UsageTab::Projects => "projects",
         UsageTab::Burndown => "burndown",
-        UsageTab::Optimize => "optimize",
     };
     let tab_ev = PluginEvent::Custom {
         topic: "burndown.set_tab".into(),
