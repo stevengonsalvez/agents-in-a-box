@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use ainb_plugin_api::Manifest;
+use ainb_plugin_api::{Manifest, RenderTarget};
 use ainb_plugin_host::PluginHost;
 
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/cts/fixtures");
@@ -214,3 +214,200 @@ fn axis_12_pair_publish_and_subscriber_receives() {
         "axis 12: pair-b's _handle_event sentinel must be present after pump_events"
     );
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// Axis 2 — sidebar render: empty WireBuffer is accepted (no-op render)
+// ───────────────────────────────────────────────────────────────────────────
+#[test]
+fn axis_2_sidebar_only_paints_empty_buffer() {
+    let (m, w) = fixture("cts-sidebar-only");
+    let plugin_id = m.plugin.name.clone();
+    let mut host = PluginHost::new();
+
+    host.load_bytes(m, &w).expect("axis 2: sidebar canary loads");
+    assert!(
+        logs_contain(&host, &plugin_id, b"cts-2f08b9c1-sidebar-only-init-OK"),
+        "axis 2: _init sentinel must be present"
+    );
+
+    host.render_plugin(&plugin_id)
+        .expect("axis 2: _render must succeed");
+    let buf = host
+        .take_render(&plugin_id, RenderTarget::Sidebar)
+        .expect("axis 2: host must surface a buffer for the Sidebar slot");
+    assert_eq!(buf.width, 0, "axis 2: empty buffer width is 0");
+    assert_eq!(buf.height, 0, "axis 2: empty buffer height is 0");
+    assert!(buf.cells.is_empty(), "axis 2: empty buffer has no cells");
+    assert!(!host.get(&plugin_id).unwrap().is_degraded());
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Axis 3 — statusline render via _tick (no _render export)
+// ───────────────────────────────────────────────────────────────────────────
+#[test]
+fn axis_3_statusline_only_paints_via_tick() {
+    let (m, w) = fixture("cts-statusline-only");
+    let plugin_id = m.plugin.name.clone();
+    let mut host = PluginHost::new();
+
+    host.load_bytes(m, &w).expect("axis 3: statusline canary loads");
+    assert!(
+        logs_contain(&host, &plugin_id, b"cts-3a14d7e2-statusline-only-init-OK"),
+        "axis 3: _init sentinel must be present"
+    );
+
+    host.tick_plugin(&plugin_id)
+        .expect("axis 3: _tick must succeed");
+    assert!(
+        logs_contain(&host, &plugin_id, b"cts-3a14d7e2-statusline-only-tick-OK"),
+        "axis 3: _tick sentinel must be present"
+    );
+
+    let buf = host
+        .take_render(&plugin_id, RenderTarget::Statusline)
+        .expect("axis 3: host must surface a buffer for the Statusline slot");
+    assert_eq!(buf.width, 0);
+    assert_eq!(buf.height, 0);
+    assert!(buf.cells.is_empty());
+
+    // Sidebar slot must be empty — the plugin only paints Statusline.
+    assert!(host.take_render(&plugin_id, RenderTarget::Sidebar).is_none());
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Axis 4 — command dispatch: PluginEvent::Command round-trips into _handle_event
+// ───────────────────────────────────────────────────────────────────────────
+#[test]
+fn axis_4_command_only_receives_dispatched_command() {
+    let (m, w) = fixture("cts-command-only");
+    let plugin_id = m.plugin.name.clone();
+    let mut host = PluginHost::new();
+
+    host.load_bytes(m, &w).expect("axis 4: command canary loads");
+    assert!(
+        logs_contain(&host, &plugin_id, b"cts-4b5e0d10-command-only-init-OK"),
+        "axis 4: _init sentinel must be present"
+    );
+
+    let (_stdout, _stderr) = host
+        .dispatch_cli(&plugin_id, "cts-cmd", &["--probe".to_string()])
+        .expect("axis 4: dispatch_cli must succeed");
+
+    assert!(
+        logs_contain(
+            &host,
+            &plugin_id,
+            b"cts-4b5e0d10-command-only-received-command"
+        ),
+        "axis 4: plugin must log the received-command sentinel after dispatch_cli"
+    );
+    assert!(!host.get(&plugin_id).unwrap().is_degraded());
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Axis 5 — provides.providers entry round-trips through the manifest
+// ───────────────────────────────────────────────────────────────────────────
+#[test]
+fn axis_5_provider_only_loads_with_no_ui_surface() {
+    let (m, w) = fixture("cts-provider-only");
+    let plugin_id = m.plugin.name.clone();
+
+    // Manifest preserves the provides.providers entry verbatim.
+    assert_eq!(
+        m.provides.providers,
+        vec!["cts-noop-provider".to_string()],
+        "axis 5: manifest must surface the providers entry"
+    );
+    assert!(m.provides.screens.is_empty(), "axis 5: no screens declared");
+    assert!(m.provides.commands.is_empty(), "axis 5: no commands declared");
+
+    let mut host = PluginHost::new();
+    host.load_bytes(m, &w).expect("axis 5: provider canary loads");
+    assert!(
+        logs_contain(&host, &plugin_id, b"cts-5d2c81f6-provider-only-init-OK"),
+        "axis 5: _init sentinel must be present"
+    );
+    assert!(!host.get(&plugin_id).unwrap().is_degraded());
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Axis 9 — runaway _tick is contained by the per-call fuel budget
+// ───────────────────────────────────────────────────────────────────────────
+#[test]
+fn axis_9_infinite_tick_trips_fuel_budget() {
+    let (m, w) = fixture("cts-infinite-tick");
+    let plugin_id = m.plugin.name.clone();
+
+    // Host must opt in to fuel metering — the spec says "per-call wall
+    // budget", and fuel is the host's deterministic stand-in.
+    let mut host = PluginHost::with_fuel(1_000_000);
+    host.load_bytes(m, &w)
+        .expect("axis 9: infinite-tick canary must instantiate (init is bounded)");
+    assert!(
+        logs_contain(&host, &plugin_id, b"cts-9e6f2b30-infinite-tick-init-OK"),
+        "axis 9: _init sentinel must be present"
+    );
+
+    let err = host
+        .tick_plugin(&plugin_id)
+        .expect_err("axis 9: tick must trap when fuel runs out");
+    let chain = format!("{err:?}").to_lowercase();
+    assert!(
+        chain.contains("fuel") || chain.contains("trap"),
+        "axis 9: error chain must explain the fuel exhaustion (got: {chain})"
+    );
+    assert!(
+        host.get(&plugin_id).unwrap().is_degraded(),
+        "axis 9: plugin must be marked degraded after fuel trap"
+    );
+
+    // Subsequent ticks against a degraded plugin must not re-trap.
+    host.tick_plugin(&plugin_id)
+        .expect("axis 9: degraded plugin's _tick is a no-op");
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Axis 10 — malformed WireBuffer is rejected by the host validator
+// ───────────────────────────────────────────────────────────────────────────
+#[test]
+fn axis_10_malformed_buffer_is_rejected() {
+    let (m, w) = fixture("cts-malformed-buffer");
+    let plugin_id = m.plugin.name.clone();
+    let mut host = PluginHost::new();
+
+    host.load_bytes(m, &w).expect("axis 10: canary loads");
+    assert!(
+        logs_contain(&host, &plugin_id, b"cts-a07c4b91-malformed-buffer-init-OK"),
+        "axis 10: _init sentinel must be present"
+    );
+
+    // _render returns Ok — the host's `ainb_render_buffer` host-fn
+    // discards the bad payload silently and records the reason in
+    // last_error. The plugin itself doesn't trap.
+    host.render_plugin(&plugin_id)
+        .expect("axis 10: _render must not trap");
+    assert!(
+        logs_contain(&host, &plugin_id, b"cts-a07c4b91-malformed-buffer-render-OK"),
+        "axis 10: _render sentinel must be present (proves _render fired)"
+    );
+
+    // The malformed buffer must NOT have been stored under the Sidebar slot.
+    assert!(
+        host.take_render(&plugin_id, RenderTarget::Sidebar).is_none(),
+        "axis 10: host must reject the buffer (no surfaced render)"
+    );
+
+    // last_error names the dim/cells mismatch.
+    let last_err = host
+        .get(&plugin_id)
+        .unwrap()
+        .host_state()
+        .last_error
+        .clone()
+        .expect("axis 10: host_state.last_error must be set");
+    assert!(
+        last_err.contains("width*height") && last_err.contains("cells"),
+        "axis 10: last_error must explain the dim/cells mismatch (got: {last_err})"
+    );
+}
+
