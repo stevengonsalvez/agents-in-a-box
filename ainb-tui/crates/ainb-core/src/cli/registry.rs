@@ -558,10 +558,10 @@ impl CliCommand for CompletionCommand {
     }
 }
 
-/// `ainb plugin {marketplace,install,list,update}` — surface reserved for the
-/// Phase 4 plugin loader. Each leaf currently prints the deferred-feature
-/// notice; argument shapes are nailed down here so plugin authors can target
-/// the surface today.
+/// `ainb plugin {marketplace,install,update,remove,list,search}` — Phase 4
+/// marketplace + installer. Argument shapes nailed down in Phase 2b so plugin
+/// authors could target them today; Phase 4 wires the real handlers in
+/// `crate::cli::plugin`.
 pub struct PluginCommand;
 impl CliCommand for PluginCommand {
     fn name(&self) -> &'static str {
@@ -569,42 +569,72 @@ impl CliCommand for PluginCommand {
     }
     fn build(&self, app: Command) -> Command {
         let install = Command::new("install")
-            .about("Install a plugin from a marketplace (Phase 4)")
+            .about("Install a plugin from a marketplace")
             .arg(
                 clap::Arg::new("plugin")
                     .required(true)
-                    .help("plugin id, e.g. stevengonsalvez/burndown"),
+                    .help("plugin id, e.g. burndown or ainb-plugins/burndown@0.1.0"),
+            )
+            .arg(
+                clap::Arg::new("yes")
+                    .long("yes")
+                    .short('y')
+                    .action(clap::ArgAction::SetTrue)
+                    .help("skip the capability approval prompt"),
             );
-        let list = Command::new("list").about("List installed plugins (Phase 4)");
         let update = Command::new("update")
-            .about("Update an installed plugin (Phase 4)")
-            .arg(clap::Arg::new("plugin").required(true));
+            .about("Update an installed plugin to the latest matching version")
+            .arg(clap::Arg::new("plugin").required(true))
+            .arg(
+                clap::Arg::new("yes")
+                    .long("yes")
+                    .short('y')
+                    .action(clap::ArgAction::SetTrue)
+                    .help("skip prompts when new capabilities are requested"),
+            );
+        let remove_cmd = Command::new("remove")
+            .about("Remove an installed plugin")
+            .arg(clap::Arg::new("plugin").required(true))
+            .arg(
+                clap::Arg::new("yes")
+                    .long("yes")
+                    .short('y')
+                    .action(clap::ArgAction::SetTrue)
+                    .help("skip the data-directory deletion prompt"),
+            );
+        let list = Command::new("list").about("List installed plugins");
+        let search = Command::new("search")
+            .about("Search registered marketplaces by plugin name")
+            .arg(clap::Arg::new("query").required(true));
         let marketplace = Command::new("marketplace")
-            .about("Manage marketplace registries (Phase 4)")
+            .about("Manage marketplace registries")
             .subcommand_required(true)
-            .subcommand(Command::new("add").arg(clap::Arg::new("url").required(true)))
-            .subcommand(Command::new("remove").arg(clap::Arg::new("name").required(true)))
-            .subcommand(Command::new("list"));
+            .subcommand(
+                Command::new("add")
+                    .about("Register a marketplace by URL or local path")
+                    .arg(clap::Arg::new("url").required(true)),
+            )
+            .subcommand(
+                Command::new("remove")
+                    .about("Unregister a marketplace by name")
+                    .arg(clap::Arg::new("name").required(true)),
+            )
+            .subcommand(Command::new("list").about("List registered marketplaces"));
         app.subcommand(
             Command::new(self.name())
                 .about("Manage ainb plugins")
                 .subcommand_required(true)
                 .subcommand(install)
-                .subcommand(list)
                 .subcommand(update)
+                .subcommand(remove_cmd)
+                .subcommand(list)
+                .subcommand(search)
                 .subcommand(marketplace),
         )
     }
-    fn run(&self, _matches: &ArgMatches, _ctx: CliContext) -> BoxFuture<'static, Result<()>> {
-        Box::pin(async move {
-            // Phase 4 wires this to PluginHost::discover + cache management.
-            // Print a clear deferred-feature notice rather than silently no-op.
-            anyhow::bail!(
-                "ainb plugin: plugin loader not yet wired (Phase 4). The subcommand surface is \
-                 reserved so plugin authors can target it today; the implementation lands when \
-                 ainb-core wires PluginHost into the runtime."
-            );
-        })
+    fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
+        let matches = matches.clone();
+        Box::pin(async move { crate::cli::plugin::execute(&matches, ctx.format).await })
     }
 }
 
@@ -686,26 +716,39 @@ mod tests {
     }
 
     #[test]
-    fn plugin_subcommand_is_reserved_but_unimplemented() {
+    fn plugin_subcommand_parses_install_with_flags() {
+        // Surface check: the registry-built clap accepts the Phase 4
+        // install shape including `--yes`. Behaviour is exercised via
+        // tests/plugin_install_flow.rs against an isolated $AINB_HOME.
         let r = CommandRegistry::built_ins();
         let app = r.build_clap(root());
         let matches = app
-            .try_get_matches_from(["ainb", "plugin", "list"])
-            .expect("plugin list parses");
-        let (name, sub) = matches.subcommand().expect("subcommand");
-        assert_eq!(name, "plugin");
-        let cmd = r.find(name).unwrap();
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("tokio runtime");
-        let result = rt.block_on(cmd.run(
-            sub,
-            CliContext {
-                format: OutputFormat::Text,
-            },
-        ));
-        let err = result.expect_err("plugin loader is deferred");
-        assert!(format!("{err}").to_lowercase().contains("phase 4"));
+            .try_get_matches_from(["ainb", "plugin", "install", "burndown", "--yes"])
+            .expect("plugin install parses");
+        let (top, sub) = matches.subcommand().expect("subcommand");
+        assert_eq!(top, "plugin");
+        let (sub_name, args) = sub.subcommand().expect("plugin install");
+        assert_eq!(sub_name, "install");
+        assert_eq!(args.get_one::<String>("plugin").map(String::as_str), Some("burndown"));
+        assert!(args.get_flag("yes"));
+    }
+
+    #[test]
+    fn plugin_subcommand_parses_marketplace_add() {
+        let r = CommandRegistry::built_ins();
+        let app = r.build_clap(root());
+        let matches = app
+            .try_get_matches_from(["ainb", "plugin", "marketplace", "add", "file:///tmp/m.json"])
+            .expect("plugin marketplace add parses");
+        let (top, sub) = matches.subcommand().expect("subcommand");
+        assert_eq!(top, "plugin");
+        let (sub_name, mkt_sub) = sub.subcommand().expect("marketplace");
+        assert_eq!(sub_name, "marketplace");
+        let (add_name, add_args) = mkt_sub.subcommand().expect("add");
+        assert_eq!(add_name, "add");
+        assert_eq!(
+            add_args.get_one::<String>("url").map(String::as_str),
+            Some("file:///tmp/m.json")
+        );
     }
 }
