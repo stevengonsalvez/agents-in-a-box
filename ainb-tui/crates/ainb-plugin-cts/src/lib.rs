@@ -322,7 +322,7 @@ fn run_lifecycle(manifest: &Manifest, wasm: &[u8]) -> Vec<AxisOutcome> {
                 out.push(AxisOutcome {
                     id,
                     name: name.to_string(),
-                    result: Err(format!("lifecycle harness failed: {e}")),
+                    result: Err(format!("lifecycle harness failed: {e:#}")),
                 });
             }
         }
@@ -538,29 +538,53 @@ fn link_stubs(linker: &mut Linker<StubHost>, caps: &CapabilitiesTable) -> anyhow
 
 fn link_wasi_floor(linker: &mut Linker<StubHost>) -> anyhow::Result<()> {
     const WASI: &str = "wasi_snapshot_preview1";
-    linker.func_wrap(
-        WASI,
-        "environ_sizes_get",
-        |_: Caller<'_, StubHost>, _: i32, _: i32| -> i32 { 0 },
-    )?;
+    // Each stub is the minimal "errno success" form. Returns 0 (no
+    // error) and writes nothing, which is fine because the CTS only
+    // exercises lifecycle entry points — not real I/O. Plugins that
+    // actually depend on WASI semantics during _init / _shutdown will
+    // surface a logic bug, not a missing-import error.
+    linker.func_wrap(WASI, "environ_sizes_get", |_: Caller<'_, StubHost>, _: i32, _: i32| -> i32 { 0 })?;
     linker.func_wrap(WASI, "environ_get", |_: Caller<'_, StubHost>, _: i32, _: i32| -> i32 { 0 })?;
-    linker.func_wrap(
-        WASI,
-        "fd_write",
-        |_: Caller<'_, StubHost>, _: i32, _: i32, _: i32, _: i32| -> i32 { 0 },
-    )?;
+    linker.func_wrap(WASI, "args_sizes_get", |_: Caller<'_, StubHost>, _: i32, _: i32| -> i32 { 0 })?;
+    linker.func_wrap(WASI, "args_get", |_: Caller<'_, StubHost>, _: i32, _: i32| -> i32 { 0 })?;
+    linker.func_wrap(WASI, "clock_time_get", |_: Caller<'_, StubHost>, _: i32, _: i64, _: i32| -> i32 { 0 })?;
+    linker.func_wrap(WASI, "clock_res_get", |_: Caller<'_, StubHost>, _: i32, _: i32| -> i32 { 0 })?;
+    linker.func_wrap(WASI, "random_get", |_: Caller<'_, StubHost>, _: i32, _: i32| -> i32 { 0 })?;
     linker.func_wrap(WASI, "proc_exit", |_: Caller<'_, StubHost>, _: i32| {})?;
+    linker.func_wrap(WASI, "sched_yield", |_: Caller<'_, StubHost>| -> i32 { 0 })?;
+    linker.func_wrap(WASI, "poll_oneoff", |_: Caller<'_, StubHost>, _: i32, _: i32, _: i32, _: i32| -> i32 { 0 })?;
+
+    // fd_*
     linker.func_wrap(WASI, "fd_close", |_: Caller<'_, StubHost>, _: i32| -> i32 { 0 })?;
-    linker.func_wrap(
-        WASI,
-        "fd_seek",
-        |_: Caller<'_, StubHost>, _: i32, _: i64, _: i32, _: i32| -> i32 { 0 },
-    )?;
-    linker.func_wrap(
-        WASI,
-        "fd_fdstat_get",
-        |_: Caller<'_, StubHost>, _: i32, _: i32| -> i32 { 0 },
-    )?;
+    linker.func_wrap(WASI, "fd_write", |_: Caller<'_, StubHost>, _: i32, _: i32, _: i32, _: i32| -> i32 { 0 })?;
+    linker.func_wrap(WASI, "fd_read", |_: Caller<'_, StubHost>, _: i32, _: i32, _: i32, _: i32| -> i32 { 0 })?;
+    linker.func_wrap(WASI, "fd_pread", |_: Caller<'_, StubHost>, _: i32, _: i32, _: i32, _: i64, _: i32| -> i32 { 0 })?;
+    linker.func_wrap(WASI, "fd_pwrite", |_: Caller<'_, StubHost>, _: i32, _: i32, _: i32, _: i64, _: i32| -> i32 { 0 })?;
+    linker.func_wrap(WASI, "fd_seek", |_: Caller<'_, StubHost>, _: i32, _: i64, _: i32, _: i32| -> i32 { 0 })?;
+    linker.func_wrap(WASI, "fd_tell", |_: Caller<'_, StubHost>, _: i32, _: i32| -> i32 { 0 })?;
+    linker.func_wrap(WASI, "fd_sync", |_: Caller<'_, StubHost>, _: i32| -> i32 { 0 })?;
+    linker.func_wrap(WASI, "fd_datasync", |_: Caller<'_, StubHost>, _: i32| -> i32 { 0 })?;
+    linker.func_wrap(WASI, "fd_fdstat_get", |_: Caller<'_, StubHost>, _: i32, _: i32| -> i32 { 0 })?;
+    linker.func_wrap(WASI, "fd_fdstat_set_flags", |_: Caller<'_, StubHost>, _: i32, _: i32| -> i32 { 0 })?;
+    linker.func_wrap(WASI, "fd_filestat_get", |_: Caller<'_, StubHost>, _: i32, _: i32| -> i32 { 0 })?;
+    linker.func_wrap(WASI, "fd_prestat_get", |_: Caller<'_, StubHost>, _: i32, _: i32| -> i32 { 8 /* WASI_EBADF */ })?;
+    linker.func_wrap(WASI, "fd_prestat_dir_name", |_: Caller<'_, StubHost>, _: i32, _: i32, _: i32| -> i32 { 0 })?;
+    linker.func_wrap(WASI, "fd_readdir", |_: Caller<'_, StubHost>, _: i32, _: i32, _: i32, _: i64, _: i32| -> i32 { 0 })?;
+    linker.func_wrap(WASI, "fd_renumber", |_: Caller<'_, StubHost>, _: i32, _: i32| -> i32 { 0 })?;
+    linker.func_wrap(WASI, "fd_advise", |_: Caller<'_, StubHost>, _: i32, _: i64, _: i64, _: i32| -> i32 { 0 })?;
+    linker.func_wrap(WASI, "fd_allocate", |_: Caller<'_, StubHost>, _: i32, _: i64, _: i64| -> i32 { 0 })?;
+
+    // path_*
+    linker.func_wrap(WASI, "path_open", |_: Caller<'_, StubHost>, _: i32, _: i32, _: i32, _: i32, _: i32, _: i64, _: i64, _: i32, _: i32| -> i32 { 0 })?;
+    linker.func_wrap(WASI, "path_filestat_get", |_: Caller<'_, StubHost>, _: i32, _: i32, _: i32, _: i32, _: i32| -> i32 { 0 })?;
+    linker.func_wrap(WASI, "path_readlink", |_: Caller<'_, StubHost>, _: i32, _: i32, _: i32, _: i32, _: i32, _: i32| -> i32 { 0 })?;
+    linker.func_wrap(WASI, "path_create_directory", |_: Caller<'_, StubHost>, _: i32, _: i32, _: i32| -> i32 { 0 })?;
+    linker.func_wrap(WASI, "path_remove_directory", |_: Caller<'_, StubHost>, _: i32, _: i32, _: i32| -> i32 { 0 })?;
+    linker.func_wrap(WASI, "path_rename", |_: Caller<'_, StubHost>, _: i32, _: i32, _: i32, _: i32, _: i32, _: i32| -> i32 { 0 })?;
+    linker.func_wrap(WASI, "path_unlink_file", |_: Caller<'_, StubHost>, _: i32, _: i32, _: i32| -> i32 { 0 })?;
+    linker.func_wrap(WASI, "path_symlink", |_: Caller<'_, StubHost>, _: i32, _: i32, _: i32, _: i32, _: i32| -> i32 { 0 })?;
+    linker.func_wrap(WASI, "path_link", |_: Caller<'_, StubHost>, _: i32, _: i32, _: i32, _: i32, _: i32, _: i32, _: i32| -> i32 { 0 })?;
+
     Ok(())
 }
 
