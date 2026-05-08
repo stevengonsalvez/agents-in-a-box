@@ -245,6 +245,87 @@ For local development the installer also accepts `file://` URLs and
 bare paths, which is what the integration tests
 (`crates/ainb-core/tests/plugin_install_flow.rs`) use.
 
+## Validating your plugin
+
+Plugins load into a sandboxed wasmi runtime, so a contract breach
+(capability without import, missing `_alloc`, malformed `WireBuffer`)
+only surfaces at host-load time — long after `cargo build` succeeded.
+The publishable [`ainb-plugin-cts`][cts-crates] crate gives you the
+same checks the host runs, plus a few that wouldn't be safe to run
+inside the live TUI.
+
+[cts-crates]: https://crates.io/crates/ainb-plugin-cts
+
+Add it as a dev-dep:
+
+```toml
+[dev-dependencies]
+ainb-plugin-cts = "1"
+```
+
+Drop in `tests/conformance.rs`:
+
+```rust
+//! Run the v1 conformance harness against this plugin's wasm.
+
+use ainb_plugin_cts::run_contract_v1_self_build;
+
+#[test]
+fn passes_v1_contract() {
+    let manifest = include_str!("../plugin.toml");
+    let report = run_contract_v1_self_build("my-plugin", manifest)
+        .expect("self-build harness");
+    assert!(report.is_passing(), "{report}");
+}
+```
+
+`run_contract_v1_self_build` shells out to `cargo build --release
+--target wasm32-wasip1 -p my-plugin`, so the only prerequisite is the
+wasm32-wasip1 toolchain. If you build the wasm separately (e.g. via a
+makefile or shell script), call `run_contract_v1(manifest, &wasm)`
+directly and skip the build step.
+
+The [`ainb-plugin-burndown`][bd-crate] crate in this repo ships a
+working example at
+`crates/ainb-plugin-burndown/tests/conformance.rs`.
+
+[bd-crate]: https://github.com/stevengonsalvez/agents-in-a-box/tree/main/ainb-tui/crates/ainb-plugin-burndown
+
+### What's checked
+
+Eight axes — see [`docs/plugin-spec/v1.md`](plugin-spec/v1.md) for the
+long-form spec.
+
+| Axis | What it asserts                                                                                |
+| ---: | ---------------------------------------------------------------------------------------------- |
+|    1 | `plugin.toml` parses and has the required keys                                                 |
+|    2 | `_init` runs and returns `0`                                                                   |
+|    3 | If you declare a UI surface, you export `_render` or `_tick`; any painted buffer is consistent |
+|    4 | Every host-fn import is in the v1 catalogue, and each gated import has the matching capability |
+|    5 | If you subscribe to events or own commands, `_alloc` + `_handle_event` round-trip a payload    |
+|    6 | `_shutdown` is idempotent (calling it twice doesn't trap)                                      |
+|    7 | `ainb_min_version` parses as semver                                                            |
+|    8 | Stub for "no panics during 100 random event sequences" — lands in v1.1                         |
+
+### Reading the report
+
+```text
+ainb-plugin-cts v1 — 7 pass / 1 fail
+  ✓ axis  1  manifest schema
+  ✓ axis  2  init lifecycle
+  ✓ axis  3  render: buffer dims + encoding
+  ✗ axis  4  capability declarations match imports — import "ainb_event_publish"
+              requires capability EventBus but manifest does not declare it
+  …
+```
+
+Each `✗` line names the axis and the reason — typically a missing
+manifest field, a capability/import mismatch, or a trap during one of
+the lifecycle entry points. The harness stops at axis 1 if the
+manifest doesn't parse but otherwise runs every axis even when earlier
+ones fail, so a single test run gives you the full picture instead of
+one error at a time.
+
 ## Distribution
 
 1. Tag a release (`git tag v0.1.0 && git push --tags`).
