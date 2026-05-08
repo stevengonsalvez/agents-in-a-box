@@ -29,6 +29,12 @@ const CANARIES: &[&str] = &[
     "cts-wrong-min-version",
     "cts-pair-a",
     "cts-pair-b",
+    "cts-sidebar-only",
+    "cts-statusline-only",
+    "cts-command-only",
+    "cts-provider-only",
+    "cts-infinite-tick",
+    "cts-malformed-buffer",
 ];
 
 fn main() -> Result<()> {

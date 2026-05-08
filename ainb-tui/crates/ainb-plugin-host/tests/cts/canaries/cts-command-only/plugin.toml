@@ -1,0 +1,10 @@
+[plugin]
+name = "cts-4b5e0d10-command-only"
+version = "0.0.1"
+ainb_min_version = "1.0.0"
+description = "CTS canary: registers a slash command, no UI."
+
+[capabilities]
+
+[provides]
+commands = ["/cts-cmd"]

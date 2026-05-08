@@ -1,0 +1,10 @@
+[plugin]
+name = "cts-3a14d7e2-statusline-only"
+version = "0.0.1"
+ainb_min_version = "1.0.0"
+description = "CTS canary: smallest possible plugin — single statusline segment."
+
+[capabilities]
+
+[provides]
+statusline = ["cts-3a14d7e2-statusline"]

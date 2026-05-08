@@ -1,0 +1,11 @@
+[plugin]
+name = "cts-2f08b9c1-sidebar-only"
+version = "0.0.1"
+ainb_min_version = "1.0.0"
+description = "CTS canary: sidebar-only plugin (no screen)."
+
+[capabilities]
+write_plugin_data = true
+
+[provides]
+sidebar = ["cts-2f08b9c1-sidebar"]
