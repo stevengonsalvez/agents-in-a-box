@@ -672,11 +672,9 @@ impl EventHandler {
             return Self::handle_changelog_keys(key_event, state);
         }
 
-        // Handle usage analytics view
-        if state.current_screen == screen_ids::ANALYTICS {
-            tracing::debug!("In usage analytics view, handling usage keys");
-            return Self::handle_usage_keys(key_event, state);
-        }
+        // Analytics screen owns its own key handling inside the burndown
+        // plugin. Until plugin-key forwarding is wired, keys on this screen
+        // fall through to the default handler (Esc back to home, etc.).
 
         // Handle skills browser view
         if state.current_screen == screen_ids::SKILLS {
@@ -1671,151 +1669,6 @@ impl EventHandler {
                 KeyCode::Right | KeyCode::Char('l') => Some(AppEvent::LogHistoryScrollRight),
                 _ => None,
             },
-        }
-    }
-
-    // Usage analytics key handling
-    fn handle_usage_keys(key_event: KeyEvent, state: &AppState) -> Option<AppEvent> {
-        tracing::debug!("Usage key handler: {:?}", key_event.code);
-
-        if state.usage_state.input_mode.is_some() {
-            return match key_event.code {
-                KeyCode::Esc => Some(AppEvent::UsageInputCancel),
-                KeyCode::Enter => Some(AppEvent::UsageInputSubmit),
-                KeyCode::Backspace => Some(AppEvent::UsageInputBackspace),
-                KeyCode::Char(ch) => Some(AppEvent::UsageInputChar(ch)),
-                _ => None,
-            };
-        }
-
-        // Zoom-search input mode eats most keys: typing builds the query,
-        // Enter commits, Esc cancels, Backspace edits. Other navigation
-        // keys (Up/Down/Esc-when-no-search etc.) are deferred to the
-        // standard zoom handler below.
-        if state.usage_state.zoom_search_active {
-            return match key_event.code {
-                // Route Esc through the state machine so the documented
-                // detail > search > exit precedence is enforced when both
-                // overlays are open. zoom_handle_esc owns the order.
-                KeyCode::Esc => Some(AppEvent::UsageZoomEsc),
-                KeyCode::Enter => Some(AppEvent::UsageZoomCommitSearch),
-                KeyCode::Backspace => Some(AppEvent::UsageZoomSearchBackspace),
-                KeyCode::Char(ch) => Some(AppEvent::UsageZoomSearchChar(ch)),
-                _ => None,
-            };
-        }
-
-        // Burndown-only cross-filter shortcuts. Tab cycles panel focus
-        // here instead of advancing the outer tab bar so the user can
-        // pivot without losing the dashboard layout. Esc backs out of
-        // the most recent chip when chips exist; otherwise it falls
-        // through to the standard "back to home" handler below.
-        let on_burndown = matches!(
-            state.usage_state.active_tab,
-            crate::components::usage::UsageTab::Burndown
-        );
-        if on_burndown {
-            // Zoom-mode keys take priority over the dashboard cross-filter
-            // shortcuts so `/`, `d`, `Esc` behave as documented in zoom.
-            if state.usage_state.is_zoomed() {
-                match key_event.code {
-                    KeyCode::Char('z') => return Some(AppEvent::UsageToggleZoom),
-                    KeyCode::Esc => return Some(AppEvent::UsageZoomEsc),
-                    KeyCode::Char('/') => return Some(AppEvent::UsageZoomStartSearch),
-                    KeyCode::Char('d') => return Some(AppEvent::UsageZoomToggleDetail),
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        return Some(AppEvent::UsageFocusRowUp);
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        return Some(AppEvent::UsageFocusRowDown);
-                    }
-                    _ => return None,
-                }
-            }
-
-            // Outside zoom: existing burndown shortcuts.
-            match key_event.code {
-                KeyCode::Char('z') => return Some(AppEvent::UsageToggleZoom),
-                KeyCode::Tab => return Some(AppEvent::UsageFocusNextPanel),
-                KeyCode::BackTab => return Some(AppEvent::UsageFocusPrevPanel),
-                KeyCode::Enter => return Some(AppEvent::UsageCommitFilter),
-                KeyCode::Char('C') => return Some(AppEvent::UsageClearAllChips),
-                // Capital X (Shift+x) only — lowercase x is reserved for
-                // future scope and must NOT trigger the exclude commit.
-                KeyCode::Char('X') => return Some(AppEvent::UsageCommitExcludeFilter),
-                // W wires up the Claude Code statusline. Only meaningful
-                // on the Budget panel when live data is unavailable; the
-                // handler enforces both checks before doing anything.
-                KeyCode::Char('W') => return Some(AppEvent::UsageWireStatusline),
-                KeyCode::Esc if state.usage_state.filters.any() => {
-                    return Some(AppEvent::UsagePopFilterChip);
-                }
-                _ => {}
-            }
-            if state.usage_state.focused_panel.is_some() {
-                match key_event.code {
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        return Some(AppEvent::UsageFocusRowUp);
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        return Some(AppEvent::UsageFocusRowDown);
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        // Step Month/Quarter via ◀/▶ when one of those pickers is the
-        // active period. Must run before the generic Left/Right
-        // handler below, otherwise ◀/▶ would walk the provider tab.
-        let stepable = matches!(
-            state.usage_state.period,
-            crate::models::usage::UsagePeriod::SpecificMonth(_)
-                | crate::models::usage::UsagePeriod::SpecificQuarter(..)
-        );
-        if stepable {
-            match key_event.code {
-                KeyCode::Left => return Some(AppEvent::UsagePeriodStepBack),
-                KeyCode::Right => return Some(AppEvent::UsagePeriodStepForward),
-                _ => {}
-            }
-        }
-
-        match key_event.code {
-            KeyCode::Esc => Some(AppEvent::UsageBack),
-            KeyCode::Right | KeyCode::Char('l') => Some(AppEvent::UsageNextProvider),
-            KeyCode::Left | KeyCode::Char('h') => Some(AppEvent::UsagePrevProvider),
-            KeyCode::Tab => Some(AppEvent::UsageNextTab),
-            KeyCode::BackTab => Some(AppEvent::UsagePrevTab),
-            KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::UsageScrollUp),
-            KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::UsageScrollDown),
-            KeyCode::PageUp => Some(AppEvent::UsagePageUp),
-            KeyCode::PageDown => Some(AppEvent::UsagePageDown),
-            KeyCode::Char('g') => Some(AppEvent::UsageToTop),
-            KeyCode::Char('G') => Some(AppEvent::UsageToBottom),
-            KeyCode::Char('r') => Some(AppEvent::UsageRefresh),
-            KeyCode::Char('R') => Some(AppEvent::UsageForceRefresh),
-            KeyCode::Char('p') => Some(AppEvent::UsageCycleProviderFilter),
-            // PR-C period strip mappings:
-            //   1 Today  2 7d  3 30d  4 90d  5 YTD
-            //   m Month (steppable)  q Quarter (steppable)
-            //   a All  D advanced (free-text custom range)
-            //   ◀/▶ step Month or Quarter when one is active (handled above)
-            KeyCode::Char('1') => Some(AppEvent::UsageSetPeriod(1)),
-            KeyCode::Char('2') => Some(AppEvent::UsageSetPeriod(2)),
-            KeyCode::Char('3') => Some(AppEvent::UsageSetPeriod(3)),
-            KeyCode::Char('4') => Some(AppEvent::UsageSetPeriod(4)),
-            KeyCode::Char('5') => Some(AppEvent::UsageSetPeriod(5)),
-            KeyCode::Char('m') => Some(AppEvent::UsageSetPeriodMonth),
-            KeyCode::Char('q') => Some(AppEvent::UsageSetPeriodQuarter),
-            KeyCode::Char('a') => Some(AppEvent::UsageSetPeriodAll),
-            KeyCode::Char('D') => Some(AppEvent::UsageStartDateRange),
-            // `/`, `x`, `c` are intentionally unmapped on the burndown
-            // view — include/exclude/clear are now picker-driven via
-            // the chip strip (Enter / Shift+X / Shift+C). Free-text
-            // prompts violated the project's "no free text in TUI"
-            // principle and were removed.
-            _ => None,
         }
     }
 
