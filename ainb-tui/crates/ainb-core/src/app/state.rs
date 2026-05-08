@@ -2093,8 +2093,6 @@ pub struct AppState {
     // Session recovery state (for orphaned agent sessions)
     pub session_recovery_state: crate::components::SessionRecoveryState,
 
-    // Usage analytics state
-    pub usage_state: crate::components::usage::UsageViewState,
     /// WireBuffers freshly drained from plugins, keyed by screen id.
     /// `App::tick_plugin_renders` populates this before each frame so
     /// `PluginScreen::render` can paint without needing access to the
@@ -2668,8 +2666,6 @@ impl Default for AppState {
             // Session recovery state (lazy-load when entering view)
             session_recovery_state: crate::components::SessionRecoveryState::default(),
 
-            // Usage analytics state
-            usage_state: crate::components::usage::UsageViewState::default(),
             pending_plugin_renders: std::collections::HashMap::new(),
 
             // Skills browser state
@@ -9598,15 +9594,15 @@ impl App {
 
     /// Drive plugin renders for the active plugin-owned screen.
     ///
-    /// Run once per frame (right before `terminal.draw`). For each screen
-    /// the plugin host owns, push the latest application state as a
-    /// `Custom` event, call `_render`, drain the painted `WireBuffer`, and
-    /// stash it in `state.pending_plugin_renders` keyed by screen id. The
-    /// `PluginScreen` then reads from that map at paint time without
-    /// needing a `&mut PluginHost` itself.
+    /// Run once per frame (right before `terminal.draw`). For each
+    /// plugin-owned screen, call `_render`, drain the painted
+    /// `WireBuffer`, and stash it in `state.pending_plugin_renders` keyed
+    /// by screen id. `PluginScreen::render` reads from that map at paint
+    /// time without needing a `&mut PluginHost` itself.
     ///
-    /// Currently only the burndown plugin is wired. Adding more plugin
-    /// screens means extending the `(screen_id, plugin_id)` table here.
+    /// Plugins own their own state (UI + data); the host no longer pushes
+    /// snapshots in. Test harnesses and live data ingest both push state
+    /// through `dispatch_event_bytes` directly.
     pub fn tick_plugin_renders(&mut self) {
         let Some(host) = self.plugin_host.as_mut() else {
             return;
@@ -9626,37 +9622,6 @@ impl App {
                 continue;
             }
 
-            // Push the screen-specific state into the plugin via Custom
-            // events. For burndown that's (a) UsageData and (b) the
-            // active tab — both deterministic snapshots of `usage_state`.
-            if *plugin_id == "burndown" {
-                if let Some(data) = self.state.usage_state.data.clone() {
-                    if let Ok(payload) = serde_json::to_value(&data) {
-                        let ev = ainb_plugin_api::PluginEvent::Custom {
-                            topic: "burndown.usage_data".to_string(),
-                            payload,
-                        };
-                        if let Ok(bytes) = rmp_serde::to_vec_named(&ev) {
-                            let _ = host.dispatch_event_bytes(plugin_id, &bytes);
-                        }
-                    }
-                }
-                let tab = match self.state.usage_state.active_tab {
-                    crate::components::usage::UsageTab::Daily => "daily",
-                    crate::components::usage::UsageTab::Weekly => "weekly",
-                    crate::components::usage::UsageTab::Projects => "projects",
-                    crate::components::usage::UsageTab::Burndown => "burndown",
-                    crate::components::usage::UsageTab::Optimize => "optimize",
-                };
-                let ev = ainb_plugin_api::PluginEvent::Custom {
-                    topic: "burndown.set_tab".to_string(),
-                    payload: serde_json::json!({ "tab": tab }),
-                };
-                if let Ok(bytes) = rmp_serde::to_vec_named(&ev) {
-                    let _ = host.dispatch_event_bytes(plugin_id, &bytes);
-                }
-            }
-
             if host.render_plugin(plugin_id).is_ok() {
                 if let Some(buf) =
                     host.take_render(plugin_id, ainb_plugin_api::RenderTarget::Screen)
@@ -9670,10 +9635,9 @@ impl App {
     }
 
     pub async fn init(&mut self) {
-        // Discover + load bundled plugins (best-effort). The Phase 1.5 host
-        // stubs mean a loaded plugin's _render is currently a no-op, so
-        // analytics still flows through state.usage_state until the real
-        // render channel lands. This block stays minimal until then.
+        // Discover + load bundled plugins (best-effort). Plugins own
+        // their own state and rendering; tick_plugin_renders drives
+        // _render once per frame for any screens this host knows about.
         let (host, outcome) = crate::plugins::init_plugin_host();
         if !outcome.loaded.is_empty() {
             info!(loaded = ?outcome.loaded, "plugin host initialised");
