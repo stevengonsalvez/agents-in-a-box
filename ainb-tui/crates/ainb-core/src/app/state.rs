@@ -2095,9 +2095,6 @@ pub struct AppState {
 
     // Usage analytics state
     pub usage_state: crate::components::usage::UsageViewState,
-    /// Channel receiver for background usage-data parsing.
-    /// Present only while a parse is in flight; `tick()` drains it.
-    pub usage_load_receiver: Option<mpsc::UnboundedReceiver<crate::models::UsageData>>,
     /// WireBuffers freshly drained from plugins, keyed by screen id.
     /// `App::tick_plugin_renders` populates this before each frame so
     /// `PluginScreen::render` can paint without needing access to the
@@ -2674,7 +2671,6 @@ impl Default for AppState {
             // Usage analytics state
             usage_state: crate::components::usage::UsageViewState::default(),
             pending_plugin_renders: std::collections::HashMap::new(),
-            usage_load_receiver: None,
 
             // Skills browser state
             skills_state: crate::components::skills::SkillsViewState::default(),
@@ -3492,108 +3488,6 @@ impl AppState {
             }
         }
         false
-    }
-
-    /// Kick off a background parse of ~/.claude/projects/**/*.jsonl.
-    /// Skipped if already in-flight, or data is cached and `force` is false.
-    /// Returns true if a new parse was spawned, false if a call was coalesced.
-    /// The parse walks ~1GB of jsonl files; keeping it off the event thread
-    /// is what prevents the Stats/Usage screen from hanging on provider switch.
-    pub fn start_background_usage_load(&mut self, force: bool) -> bool {
-        self.start_background_usage_load_with_options(force, false)
-    }
-
-    /// Variant with explicit cache control. `bypass_cache = true` clears the
-    /// persistent usage cache before parsing — used by `Shift+R` (force
-    /// refresh) and the CLI `--no-cache` flag.
-    pub fn start_background_usage_load_with_options(
-        &mut self,
-        force: bool,
-        bypass_cache: bool,
-    ) -> bool {
-        if self.usage_load_receiver.is_some() {
-            return false;
-        }
-        if !force && self.usage_state.data.is_some() {
-            return false;
-        }
-        let (tx, rx) = mpsc::unbounded_channel();
-        self.usage_load_receiver = Some(rx);
-        self.usage_state.loading = true;
-        let query = self.usage_state.query();
-        tokio::spawn(async move {
-            match tokio::task::spawn_blocking(move || {
-                if bypass_cache {
-                    // Wipe persisted rows so future runs start fresh, but
-                    // also bypass the singleton for THIS parse — clear()
-                    // failure (locked DB, IO error) must not silently
-                    // degrade force-refresh into a regular cached refresh.
-                    let clear_failed = crate::models::usage::shared_cache().clear().is_err();
-                    if clear_failed {
-                        warn!(
-                            "Usage cache clear failed during force-refresh; \
-                             parsing with disabled cache to honour bypass"
-                        );
-                    }
-                    crate::models::usage::parse_usage_for_with_roots_and_cache(
-                        query,
-                        &crate::models::usage::UsageSourceRoots::default(),
-                        crate::models::usage::disabled_cache(),
-                    )
-                } else {
-                    crate::models::usage::parse_usage_for(query)
-                }
-            })
-            .await
-            {
-                Ok(data) => {
-                    let _ = tx.send(data);
-                }
-                Err(e) => {
-                    // Dropping tx lets check_usage_load_complete observe
-                    // TryRecvError::Disconnected, which clears `loading`
-                    // without overwriting any cached data.
-                    warn!("Usage parse task failed: {}", e);
-                }
-            }
-        });
-        true
-    }
-
-    /// Poll the background parse. Returns true if data was applied this tick.
-    pub fn check_usage_load_complete(&mut self) -> bool {
-        if let Some(ref mut receiver) = self.usage_load_receiver {
-            match receiver.try_recv() {
-                Ok(data) => {
-                    // Refresh `oldest_call_day` monotonically (only ever
-                    // narrows downward). The call set delivered here is
-                    // already period-filtered, so a narrow period would
-                    // raise the local minimum above an earlier value
-                    // seen on a wider load — we want the absolute oldest
-                    // observed across the session, so we take the min.
-                    use chrono::Local;
-                    let new_oldest = data
-                        .calls
-                        .iter()
-                        .map(|c| c.timestamp.with_timezone(&Local).date_naive())
-                        .min();
-                    self.usage_state.oldest_call_day =
-                        merge_oldest_call_day(self.usage_state.oldest_call_day, new_oldest);
-                    self.usage_state.data = Some(data);
-                    self.usage_state.loading = false;
-                    self.usage_load_receiver = None;
-                    true
-                }
-                Err(mpsc::error::TryRecvError::Empty) => false,
-                Err(mpsc::error::TryRecvError::Disconnected) => {
-                    self.usage_state.loading = false;
-                    self.usage_load_receiver = None;
-                    true
-                }
-            }
-        } else {
-            false
-        }
     }
 
     /// Kick off a background scan of ~/.claude/skills and ~/.claude/agents.
@@ -9949,11 +9843,6 @@ impl App {
             }
             // Also load other tmux sessions (quick operation)
             self.state.load_other_tmux_sessions().await;
-            self.state.ui_needs_refresh = true;
-        }
-
-        // Check for completed background usage-data parsing
-        if self.state.check_usage_load_complete() {
             self.state.ui_needs_refresh = true;
         }
 
