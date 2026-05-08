@@ -480,8 +480,14 @@ mod tests {
         let err = run_with(b"not json at all", Some(&path), true)
             .expect_err("malformed JSON must error in cache-only mode");
         let msg = format!("{err}");
-        assert!(msg.contains("malformed"), "error must explain cause: got {msg}");
-        assert!(!path.exists(), "no cache file should be written on parse failure");
+        assert!(
+            msg.contains("malformed"),
+            "error must explain cause: got {msg}"
+        );
+        assert!(
+            !path.exists(),
+            "no cache file should be written on parse failure"
+        );
     }
 
     /// Both modes share a single parse + write path, so the bytes on
@@ -504,7 +510,10 @@ mod tests {
         }"#;
 
         let line = run_with(raw, Some(&render_path), false).expect("render mode must succeed");
-        assert!(line.is_some(), "render mode must produce a powerline string");
+        assert!(
+            line.is_some(),
+            "render mode must produce a powerline string"
+        );
 
         let none = run_with(raw, Some(&cache_only_path), true).expect("cache-only must succeed");
         assert!(none.is_none(), "cache-only must produce no stdout");
