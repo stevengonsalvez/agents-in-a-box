@@ -4,6 +4,17 @@ Cargo.lock
 *.rs.bk
 *.pdb
 
+# CTS canary artifacts — built on demand via `cargo xtask build-canaries`
+crates/ainb-plugin-host/tests/cts/canaries/target/
+crates/ainb-plugin-host/tests/cts/fixtures/
+
+# ainb-plugin-burndown is a sub-workspace cdylib; its target lives under
+# its own crate dir, separate from the root /target. Built via
+# ./scripts/build-plugins.sh (sources scripts/wasi-env.sh).
+crates/ainb-plugin-burndown/target/
+# Staged plugin .wasm artifacts (output of scripts/build-plugins.sh)
+dist/plugins/
+
 # IDE
 .vscode/
 .idea/
@@ -43,3 +54,4 @@ AmazonQ.md
 # Test artifacts
 test-logs/
 tests/recordings/
+ainb-tui/crates/ainb-plugin-burndown/target/

@@ -1,0 +1,10 @@
+[plugin]
+name = "cts-9e6f2b30-infinite-tick"
+version = "0.0.1"
+ainb_min_version = "1.0.0"
+description = "CTS canary: _tick spins forever to exercise the host fuel budget."
+
+[capabilities]
+
+[provides]
+statusline = ["cts-9e6f2b30-statusline"]

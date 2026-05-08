@@ -1,0 +1,104 @@
+[package]
+name = "ainb"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Terminal-based development environment manager for Claude Code containers"
+keywords = ["claude", "docker", "tui", "development", "containers"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "ainb"
+path = "src/main.rs"
+
+[lib]
+name = "ainb"
+path = "src/lib.rs"
+
+[dependencies]
+# Core
+tokio = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+
+# Docker
+bollard = { workspace = true }
+futures-util = { workspace = true }
+tar = { workspace = true }
+
+# Tmux/PTY support
+portable-pty = { workspace = true }
+
+# Git operations
+git2 = { workspace = true }
+
+# Data persistence
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+toml = { workspace = true }
+rmp-serde = "1.3"
+
+# Claude API integration
+reqwest = { workspace = true }
+async-stream = { workspace = true }
+tokio-stream = { workspace = true }
+
+# Utils
+shell-escape = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+directories = { workspace = true }
+dirs = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+clap_complete = { workspace = true }
+tempfile = { workspace = true }
+nix = { workspace = true }
+arboard = { workspace = true }
+keyring = { workspace = true }
+regex = { workspace = true }
+lazy_static = { workspace = true }
+which = { workspace = true }
+url = { workspace = true }
+
+# Markdown and syntax highlighting
+pulldown-cmark = { workspace = true }
+syntect = { workspace = true }
+ansi-to-tui = { workspace = true }
+
+# Persistent usage analytics cache
+rusqlite = { workspace = true }
+blake3 = { workspace = true }
+bincode = { workspace = true }
+
+# Plugin host (Phase 3 Wave 3 wiring — loads bundled burndown.wasm at startup)
+ainb-plugin-api = { path = "../ainb-plugin-api", version = "0.1.0" }
+ainb-plugin-host = { path = "../ainb-plugin-host", version = "0.1.0" }
+
+# Fuzzy search
+nucleo-matcher = { workspace = true }
+
+[features]
+default = []
+visual-debug = []
+vt100-tests = []
+# Exposes shared test fixtures (test_support module) so integration
+# tests in tests/ can use them. Always enabled under #[cfg(test)] for
+# unit tests; integration tests must opt in via this feature.
+test-support = []
+
+[dev-dependencies]
+mockall = { workspace = true }
+pretty_assertions = { workspace = true }
+rexpect = { workspace = true }
+vt100 = { workspace = true }
+insta = { version = "1.40", features = ["json"] }
+
+[lints]
+workspace = true

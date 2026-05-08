@@ -1,0 +1,11 @@
+[plugin]
+name = "cts-7c8c4f01-minimal-screen"
+version = "0.0.1"
+ainb_min_version = "1.0.0"
+description = "CTS canary: minimal screen registration + render."
+
+[capabilities]
+write_plugin_data = true
+
+[provides]
+screens = ["cts-minimal"]

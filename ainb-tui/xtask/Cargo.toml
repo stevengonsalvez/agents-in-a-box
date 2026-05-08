@@ -1,0 +1,16 @@
+[package]
+name = "xtask"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+description = "Workspace automation: build canary plugins, etc. Run via `cargo xtask <subcommand>`."
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+
+[lints]
+workspace = true
