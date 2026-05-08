@@ -1,23 +1,14 @@
-// ABOUTME: Persistent SQLite-backed cache for parsed usage analytics.
-// Per-file fingerprint + append-only incremental parse so unchanged Claude/Codex
-// JSONL sessions are served instantly and changed files only re-parse new bytes.
+// ABOUTME: No-op cache stub. The plugin's persistent SQLite cache was
+// retired in Phase 3 (host pushes UsageData snapshots; plugin doesn't
+// own its own DB). The surface here keeps `parse_usage_for_*` compiling.
 
-//! Usage analytics cache.
+//! Usage analytics cache — no-op stub.
 //!
-//! Refer to `~/.claude/projects/.../reference_codeburn_caching.md` for the
-//! competitive analysis that motivates this module — codeburn re-parses every
-//! Claude JSONL on every invocation; ainb-tui does not.
-//!
-//! Public surface:
-//! * [`Cache`] — open, query, write, clear the on-disk cache.
-//! * [`store::default_db_path`] — resolve the standard cache location.
+//! Public surface kept for API compatibility:
+//! * [`Cache`] — open / disabled / get_or_parse / clear / info (all no-op).
+//! * [`store::default_db_path`] — resolve the historical cache location
+//!   (only used for `cache info` reporting; nothing is written there).
 
-pub mod db;
-pub mod fingerprint;
 pub mod store;
 
-#[cfg(test)]
-mod tests;
-
-pub use fingerprint::{FileFingerprint, FingerprintAction, SUFFIX_HASH_BYTES};
 pub use store::{BlobFormat, Cache, CacheError, CacheInfo, ParseHint, ParseResult};

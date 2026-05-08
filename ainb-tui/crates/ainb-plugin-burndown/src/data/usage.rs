@@ -2658,16 +2658,22 @@ fn parse_timestamp(timestamp: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(timestamp).map(|dt| dt.with_timezone(&Utc)).ok()
 }
 
-/// Compute the stable per-call id from `(path, offset)`. See the
-/// doc-comment on `ProviderCall.id` for the rationale (reusing blake3 to
-/// avoid pulling in a separate hashing crate).
+/// Compute the stable per-call id from `(path, offset)`.
+///
+/// FNV-1a 64-bit. Stable across runs and platforms, deterministic, and
+/// has no external dependency — that last property matters because the
+/// plugin's persistent SQLite cache (which originally pulled blake3 in)
+/// was retired in Phase 3.
 fn provider_call_id(path: &Path, offset: u64) -> u64 {
     let key = format!("{}:{}", path.to_string_lossy(), offset);
-    let digest = blake3::hash(key.as_bytes());
-    let bytes = digest.as_bytes();
-    u64::from_le_bytes([
-        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-    ])
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = FNV_OFFSET;
+    for byte in key.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
 }
 
 fn extract_claude_user_text(content: Option<&Value>) -> String {
