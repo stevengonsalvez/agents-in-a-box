@@ -4286,16 +4286,18 @@ impl EventHandler {
             }
             AppEvent::UsageNextProvider => {
                 state.usage_state.next_provider();
-                // Data is cached across provider switches; only trigger a load
-                // if we returned to Claude and nothing has been parsed yet.
+                // Force re-parse: each provider scopes the call set
+                // (Claude-only / Codex-only / All) so the cached
+                // UsageData is for the wrong provider after a switch.
+                // Per-file SQLite cache keeps the reparse cheap.
                 if state.usage_state.provider.has_data() {
-                    state.start_background_usage_load(false);
+                    state.start_background_usage_load(true);
                 }
             }
             AppEvent::UsagePrevProvider => {
                 state.usage_state.prev_provider();
                 if state.usage_state.provider.has_data() {
-                    state.start_background_usage_load(false);
+                    state.start_background_usage_load(true);
                 }
             }
             AppEvent::UsageNextTab => {
