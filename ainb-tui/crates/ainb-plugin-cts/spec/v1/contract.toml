@@ -1,0 +1,193 @@
+# Machine-readable form of docs/plugin-spec/v1.md.
+#
+# Loaded by the CTS crate to drive assertions. Keep in lockstep with
+# the human-readable doc — `cargo test -p ainb-plugin-cts` parses this
+# file at build time, so a typo here trips the suite immediately.
+#
+# Schema: every section is one axis. Each axis lists what the CTS
+# checks + the host signature it relies on. Signature vectors are
+# intentionally compact — the goal is "would a re-implementation
+# of the host pass the same vectors?"
+
+contract_version = "v1"
+host_version_floor = "1.1.0"
+
+# ────────────────────────────────────────────────────────────────────────
+# Manifest schema (TOML keys + JSON-schema-style required/optional flags)
+# ────────────────────────────────────────────────────────────────────────
+[manifest.required]
+plugin_name = "string"
+plugin_version = "semver"
+plugin_ainb_min_version = "semver"
+
+[manifest.optional]
+plugin_description = "string"
+plugin_author = "string"
+plugin_license = "string"
+plugin_homepage = "url"
+
+[manifest.capabilities]
+read_sessions = "bool"
+write_plugin_data = "bool"
+event_bus = "bool"
+read_claude_logs = "bool"
+read_codex_logs = "bool"
+spawn_subprocess = "bool"
+network = "list[string]"
+filesystem = "list[string]"
+
+[manifest.provides]
+screens = "list[string]"
+commands = "list[string]"
+sidebar = "list[string]"
+statusline = "list[string]"
+providers = "list[string]"
+
+# ────────────────────────────────────────────────────────────────────────
+# ABI — exported symbols + signatures
+# ────────────────────────────────────────────────────────────────────────
+[[abi.exports]]
+name = "_init"
+sig = "() -> i32"
+required = true
+
+[[abi.exports]]
+name = "_render"
+sig = "() -> i32"
+required = false
+
+[[abi.exports]]
+name = "_tick"
+sig = "() -> i32"
+required = false
+
+[[abi.exports]]
+name = "_handle_event"
+sig = "(i32, i32) -> i32"
+required = false
+
+[[abi.exports]]
+name = "_shutdown"
+sig = "() -> ()"
+required = false
+
+[[abi.exports]]
+name = "_alloc"
+sig = "(i32) -> i32"
+# Required iff the plugin handles events. Treated as a soft gate by
+# the CTS — only enforced when the manifest declares event_bus = true
+# OR when the plugin is shipped via a marketplace catalog (the host
+# pushes Custom events for screen-owning plugins).
+required_if = "any_of:event_bus,screens_nonempty"
+
+# ────────────────────────────────────────────────────────────────────────
+# Host functions — signature vectors
+# ────────────────────────────────────────────────────────────────────────
+[[host_fns]]
+name = "ainb_log"
+module = "ainb"
+sig = "(i32, i32, i32) -> ()"
+capability = "none"
+
+[[host_fns]]
+name = "ainb_now_ms"
+module = "ainb"
+sig = "() -> i64"
+capability = "none"
+
+[[host_fns]]
+name = "ainb_render_buffer"
+module = "ainb"
+sig = "(i32, i32, i32) -> ()"
+capability = "none"
+
+[[host_fns]]
+name = "ainb_fs_read"
+module = "ainb"
+sig = "(i32, i32) -> i32"
+capability = "filesystem"
+
+[[host_fns]]
+name = "ainb_fs_glob"
+module = "ainb"
+sig = "(i32, i32) -> i32"
+capability = "filesystem"
+
+[[host_fns]]
+name = "ainb_data_read"
+module = "ainb"
+sig = "(i32, i32, i32, i32) -> i32"
+capability = "write_plugin_data"
+
+[[host_fns]]
+name = "ainb_data_write"
+module = "ainb"
+sig = "(i32, i32, i32, i32) -> i32"
+capability = "write_plugin_data"
+
+[[host_fns]]
+name = "ainb_event_publish"
+module = "ainb"
+sig = "(i32, i32, i32, i32) -> i32"
+capability = "event_bus"
+
+[[host_fns]]
+name = "ainb_event_subscribe"
+module = "ainb"
+sig = "(i32, i32) -> i32"
+capability = "event_bus"
+
+[[host_fns]]
+name = "ainb_session_get"
+module = "ainb"
+sig = "(i32, i32, i32, i32) -> i32"
+capability = "read_sessions"
+
+[[host_fns]]
+name = "ainb_sessions_list"
+module = "ainb"
+sig = "(i32, i32) -> i32"
+capability = "read_sessions"
+
+[[host_fns]]
+name = "ainb_http_request"
+module = "ainb"
+sig = "(i32, i32, i32, i32) -> i32"
+capability = "network"
+
+# ────────────────────────────────────────────────────────────────────────
+# Resource budgets — see §5 of v1.md
+# ────────────────────────────────────────────────────────────────────────
+[budgets]
+per_call_wall_ms = 50
+render_buffer_bytes_max = 65536
+event_payload_bytes_max = 65536
+alloc_request_bytes_max = 1048576
+
+# ────────────────────────────────────────────────────────────────────────
+# CTS axes — drives the report.
+# ────────────────────────────────────────────────────────────────────────
+[[axes]]
+id = 1
+name = "manifest schema"
+[[axes]]
+id = 2
+name = "init lifecycle"
+[[axes]]
+id = 3
+name = "render: buffer dims + encoding"
+[[axes]]
+id = 4
+name = "capability declarations match imports"
+[[axes]]
+id = 5
+name = "event handling: alloc + handle_event roundtrip"
+[[axes]]
+id = 6
+name = "shutdown idempotent"
+[[axes]]
+id = 7
+name = "version: ainb_min_version is semver"
+[[axes]]
+id = 8
+name = "no panics during 100 random event sequences"
