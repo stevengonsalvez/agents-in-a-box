@@ -26,6 +26,15 @@ pub fn init_plugin_host() -> (PluginHost, LoadOutcome) {
     let mut host = PluginHost::new();
     let mut outcome = LoadOutcome::default();
 
+    // Operator escape hatch — `AINB_DISABLE_PLUGINS=1` skips discovery
+    // entirely so the host comes up plugin-free for debugging,
+    // bisecting plugin-induced regressions, and the Phase 5 tripwire's
+    // "graceful fallback when plugins are disabled" assertion.
+    if plugins_disabled() {
+        info!("AINB_DISABLE_PLUGINS set — skipping plugin discovery");
+        return (host, outcome);
+    }
+
     let Some(root) = discover_plugin_root() else {
         debug!("no plugin root discovered — running with no plugins loaded");
         return (host, outcome);
@@ -63,6 +72,19 @@ pub fn init_plugin_host() -> (PluginHost, LoadOutcome) {
     }
 
     (host, outcome)
+}
+
+/// Operator-controlled kill switch. Recognises `1`, `true`, `yes`, `on`
+/// (case-insensitive) — anything else, including unset, leaves plugins
+/// enabled so a typo doesn't silently disable the host.
+fn plugins_disabled() -> bool {
+    match std::env::var("AINB_DISABLE_PLUGINS") {
+        Ok(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => false,
+    }
 }
 
 /// Search a small list of candidate locations for the plugin staging
@@ -131,5 +153,19 @@ mod tests {
         assert_eq!(outcome.failed.len(), 0, "no plugins should fail (none found)");
         assert!(host.plugins().next().is_none(), "host has zero plugins");
         std::env::remove_var("AINB_PLUGIN_ROOT");
+    }
+
+    #[test]
+    fn plugins_disabled_recognises_truthy_values() {
+        for v in ["1", "true", "TRUE", "yes", "On", "  yes  "] {
+            std::env::set_var("AINB_DISABLE_PLUGINS", v);
+            assert!(plugins_disabled(), "expected disabled for {v:?}");
+        }
+        for v in ["0", "false", "no", "off", "", "maybe"] {
+            std::env::set_var("AINB_DISABLE_PLUGINS", v);
+            assert!(!plugins_disabled(), "expected enabled for {v:?}");
+        }
+        std::env::remove_var("AINB_DISABLE_PLUGINS");
+        assert!(!plugins_disabled(), "unset must leave plugins enabled");
     }
 }
