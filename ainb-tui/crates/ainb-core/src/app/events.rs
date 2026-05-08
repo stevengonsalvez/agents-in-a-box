@@ -3076,7 +3076,9 @@ impl EventHandler {
                     SidebarItem::Stats => {
                         tracing::info!("Navigating to Usage Analytics from sidebar");
                         state.current_screen = screen_ids::ANALYTICS.to_string();
-                        state.start_background_usage_load(false);
+                        // Data load lives inside the burndown plugin
+                        // now (Phase 3 cutover); host no longer
+                        // pre-populates state for the analytics screen.
                     }
                     SidebarItem::Skills => {
                         tracing::info!("Navigating to Skills from sidebar");
@@ -3284,7 +3286,8 @@ impl EventHandler {
             AppEvent::GoToStats => {
                 tracing::info!("Navigating to Usage Analytics");
                 state.current_screen = screen_ids::ANALYTICS.to_string();
-                state.start_background_usage_load(false);
+                // Plugin owns its own data load; host no longer
+                // pre-populates analytics state.
             }
             AppEvent::GoToSkills => {
                 tracing::info!("Navigating to Skills");
