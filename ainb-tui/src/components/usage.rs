@@ -1033,24 +1033,19 @@ fn render_provider_bar(frame: &mut Frame, area: Rect, state: &UsageViewState) {
         let is_active = *provider == state.provider;
         let style = match (is_active, provider.has_data()) {
             // Active + wired: gold bold underline (the canonical selection).
-            (true, true) => Style::default()
-                .fg(GOLD)
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            (true, true) => {
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+            }
             // Active + not wired: keep underline so the user sees they
             // landed on it, but stay muted to flag it's a placeholder.
-            (true, false) => Style::default()
-                .fg(MUTED_GRAY)
-                .add_modifier(Modifier::UNDERLINED),
+            (true, false) => Style::default().fg(MUTED_GRAY).add_modifier(Modifier::UNDERLINED),
             (false, true) => Style::default().fg(SOFT_WHITE),
             (false, false) => Style::default().fg(MUTED_GRAY),
         };
 
         spans.push(Span::styled(provider.label(), style));
         if !provider.has_data() {
-            spans.push(Span::styled(
-                " (soon)",
-                Style::default().fg(MUTED_GRAY),
-            ));
+            spans.push(Span::styled(" (soon)", Style::default().fg(MUTED_GRAY)));
         }
     }
 
