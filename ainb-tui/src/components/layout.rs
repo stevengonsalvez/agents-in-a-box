@@ -772,15 +772,21 @@ pub fn build_live_status_spans(state: &mut AppState) -> Vec<Span<'static>> {
     let status = state.statusline_status_cached();
     let decision = state.app_config.ui_preferences.statusline_decision;
 
+    // Trust the cache: if Tier1 data is flowing — whether it came from
+    // our own command in settings.json (Configured) or from a user's
+    // custom statusline that side-channels via `ainb claudecode statusline
+    // --cache-only` (Other) — show the live widget. The CTA is for the
+    // genuinely-unwired case only.
+    let live = current();
+    if live.source == Source::Tier1Cache {
+        return build_live_widget_spans(&live);
+    }
+
     match status {
         Some(StatuslineStatus::Configured) => {
-            let live = current();
-            if live.source != Source::Tier1Cache {
-                // Wired but no fresh data yet — render nothing rather
-                // than misleading "0%" placeholders.
-                return Vec::new();
-            }
-            build_live_widget_spans(&live)
+            // Wired our command but no fresh data yet — render nothing
+            // rather than misleading "0%" placeholders.
+            Vec::new()
         }
         Some(StatuslineStatus::NotConfigured | StatuslineStatus::Other(_))
             if decision != StatuslineDecision::Declined =>

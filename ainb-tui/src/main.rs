@@ -122,9 +122,12 @@ async fn main() -> Result<()> {
         // existing `~/.claude/settings.json` entries keep working
         // unchanged.
         Some(cli::Commands::Claudecode {
-            cmd: cli::ClaudeCodeCmd::Statusline,
-        })
-        | Some(cli::Commands::Statusline) => cli::statusline::execute(),
+            cmd: cli::ClaudeCodeCmd::Statusline { cache_only },
+        }) => cli::statusline::execute(cache_only),
+        // Legacy top-level alias has no flag — preserves the original
+        // wire-format for `~/.claude/settings.json` entries written
+        // before --cache-only existed.
+        Some(cli::Commands::Statusline) => cli::statusline::execute(false),
         Some(cli::Commands::Completion { shell }) => {
             use clap::CommandFactory;
             let mut cmd = cli::Cli::command();
