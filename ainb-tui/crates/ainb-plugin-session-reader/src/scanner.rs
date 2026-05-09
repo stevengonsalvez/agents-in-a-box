@@ -1,0 +1,462 @@
+//! Per-provider scan orchestrator + UsageData aggregator.
+//!
+//! Walks the four providers in turn, aggregates the resulting calls
+//! into a [`UsageData`] snapshot. Per-provider parser failures are
+//! best-effort: a panic-free `Err` from one provider degrades that
+//! provider to an empty contribution but lets the others through. If
+//! every provider yields an empty result *and* at least one provider
+//! reported an error, the caller treats the run as a failure and
+//! marks the plugin degraded; otherwise the snapshot is published as
+//! whatever data we collected.
+//!
+//! ## Aggregator deviations from the in-tree code
+//!
+//! The plugin produces a `UsageData` whose *shape* matches the host's
+//! existing aggregator but whose *bucketing* differs in two areas
+//! that don't affect the wire schema:
+//!
+//! 1. **Daily / weekly bucketing uses UTC**, not the user's local
+//!    timezone. The wasm sandbox has no `TZ` and the host fn surface
+//!    doesn't expose one — UTC is the only deterministic choice.
+//!    Burndown's display layer can still convert at render time.
+//! 2. **Project key is the call's `project` field as-is.** No
+//!    `repo_lookup` (git2 doesn't compile to wasm32-wasip1). Two
+//!    worktrees of the same upstream stay as separate rows for now;
+//!    Phase 7 can revisit when there's a host fn for it.
+//! 3. **`activities`, `analyze_turns`, `mcp_servers` are empty.**
+//!    The classification heuristics in the host's aggregator depend
+//!    on session-timeline analysis the plugin doesn't replicate
+//!    yet. The wire fields stay populated (empty Vec) so the schema
+//!    is stable for downstream consumers.
+
+use std::collections::{BTreeMap, HashSet};
+
+use ainb_plugin_types_sessions::{
+    BranchUsage, ModelUsage, NamedUsage, ProjectUsage, Provider, ProviderCall, SessionUsage,
+    TokenBucket, UsageData,
+};
+use chrono::{Datelike, Duration, NaiveDate};
+
+/// Source roots for the four providers, after `$HOME` expansion.
+#[derive(Debug, Clone, Default)]
+pub struct ProviderRoots {
+    pub claude_projects: Option<String>,
+    pub codex_sessions: Option<String>,
+    pub gemini_sessions: Option<String>,
+    pub copilot_sessions: Option<String>,
+}
+
+/// Run every provider parser, aggregate, return a snapshot.
+///
+/// Provider results are independent: a failure in one (a parser
+/// panic equivalent — i.e. an unexpected return of an empty Vec
+/// despite the path existing) does NOT block other providers.
+pub fn scan(roots: &ProviderRoots) -> UsageData {
+    let mut all_calls = Vec::new();
+    if let Some(root) = &roots.claude_projects {
+        all_calls.extend(crate::parsers::claude::parse_dir(root));
+    }
+    if let Some(root) = &roots.codex_sessions {
+        all_calls.extend(crate::parsers::codex::parse_dir(root));
+    }
+    if let Some(root) = &roots.gemini_sessions {
+        all_calls.extend(crate::parsers::gemini::parse_dir(root));
+    }
+    if let Some(root) = &roots.copilot_sessions {
+        all_calls.extend(crate::parsers::copilot::parse_dir(root));
+    }
+    aggregate(all_calls)
+}
+
+/// Pure aggregation: `Vec<ProviderCall>` → `UsageData`.
+pub fn aggregate(mut calls: Vec<ProviderCall>) -> UsageData {
+    if calls.is_empty() {
+        return UsageData::default();
+    }
+
+    calls.sort_by_key(|c| c.timestamp);
+
+    let mut daily: BTreeMap<NaiveDate, BucketAccumulator> = BTreeMap::new();
+    let mut weekly: BTreeMap<NaiveDate, BucketAccumulator> = BTreeMap::new();
+    let mut projects: BTreeMap<String, ProjectAccumulator> = BTreeMap::new();
+    let mut sessions: BTreeMap<String, SessionAccumulator> = BTreeMap::new();
+    let mut models: BTreeMap<String, BucketAccumulator> = BTreeMap::new();
+    let mut branches: BTreeMap<String, BucketAccumulator> = BTreeMap::new();
+    let mut tools: BTreeMap<String, usize> = BTreeMap::new();
+    let mut shell_commands: BTreeMap<String, usize> = BTreeMap::new();
+    let mut model_project_counts: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
+    let mut grand_total = TokenBucket::default();
+
+    for call in &calls {
+        let bucket = call_bucket(call);
+        let day = call.timestamp.date_naive();
+        let week = week_start(day);
+        let session_key = format!("{}:{}:{}", call.provider.as_str(), call.project, call.session_id);
+
+        merge(&mut grand_total, &bucket);
+        grand_total.call_count += 1; // already 1 from bucket
+
+        daily
+            .entry(day)
+            .or_default()
+            .ingest(&bucket, &call.project, &session_key);
+        weekly
+            .entry(week)
+            .or_default()
+            .ingest(&bucket, &call.project, &session_key);
+        models
+            .entry(call.model.clone())
+            .or_default()
+            .ingest(&bucket, &call.project, &session_key);
+        if let Some(branch) = call.branch.as_deref().filter(|b| !b.is_empty()) {
+            branches
+                .entry(branch.to_string())
+                .or_default()
+                .ingest(&bucket, &call.project, &session_key);
+        }
+
+        let project = projects.entry(call.project.clone()).or_insert_with(|| {
+            ProjectAccumulator {
+                path: call.project_path.clone(),
+                bucket: TokenBucket::default(),
+                sessions: HashSet::new(),
+            }
+        });
+        project.path = call.project_path.clone();
+        project.sessions.insert(session_key.clone());
+        merge(&mut project.bucket, &bucket);
+
+        let session = sessions
+            .entry(session_key.clone())
+            .or_insert_with(|| SessionAccumulator {
+                provider: call.provider,
+                project: call.project.clone(),
+                session_id: call.session_id.clone(),
+                first_timestamp: call.timestamp,
+                last_timestamp: call.timestamp,
+                bucket: TokenBucket::default(),
+            });
+        if call.timestamp < session.first_timestamp {
+            session.first_timestamp = call.timestamp;
+        }
+        if call.timestamp > session.last_timestamp {
+            session.last_timestamp = call.timestamp;
+        }
+        merge(&mut session.bucket, &bucket);
+
+        for tool in &call.tools {
+            *tools.entry(tool.clone()).or_insert(0) += 1;
+        }
+        for cmd in &call.bash_commands {
+            *shell_commands.entry(cmd.clone()).or_insert(0) += 1;
+        }
+        *model_project_counts
+            .entry(call.model.clone())
+            .or_default()
+            .entry(call.project.clone())
+            .or_insert(0) += 1;
+    }
+
+    // grand_total.call_count is double-counted above (call_bucket's
+    // bucket.call_count = 1 plus the explicit increment). Correct
+    // post-hoc to a clean count.
+    grand_total.call_count = calls.len();
+    grand_total.session_count = sessions.len();
+    grand_total.project_count = projects.len();
+
+    UsageData {
+        daily: daily
+            .into_iter()
+            .map(|(d, mut a)| {
+                a.bucket.session_count = a.sessions.len();
+                a.bucket.project_count = a.projects.len();
+                (d, a.bucket)
+            })
+            .collect(),
+        weekly: weekly
+            .into_iter()
+            .map(|(d, mut a)| {
+                a.bucket.session_count = a.sessions.len();
+                a.bucket.project_count = a.projects.len();
+                (d, a.bucket)
+            })
+            .collect(),
+        projects: sort_by_total_desc(
+            projects
+                .into_iter()
+                .map(|(name, mut p)| {
+                    p.bucket.session_count = p.sessions.len();
+                    p.bucket.project_count = 1;
+                    ProjectUsage {
+                        name,
+                        path: p.path,
+                        bucket: p.bucket,
+                        repo: None,
+                    }
+                })
+                .collect(),
+            |p| p.bucket,
+        ),
+        grand_total,
+        calls: calls.clone(),
+        sessions: sort_sessions_by_recency(
+            sessions
+                .into_iter()
+                .map(|(_k, s)| SessionUsage {
+                    provider: s.provider,
+                    project: s.project,
+                    session_id: s.session_id,
+                    first_timestamp: s.first_timestamp,
+                    last_timestamp: s.last_timestamp,
+                    bucket: s.bucket,
+                })
+                .collect(),
+        ),
+        models: sort_by_total_desc(
+            models
+                .into_iter()
+                .map(|(model, mut a)| {
+                    a.bucket.session_count = a.sessions.len();
+                    a.bucket.project_count = a.projects.len();
+                    ModelUsage { model, bucket: a.bucket }
+                })
+                .collect(),
+            |m| m.bucket,
+        ),
+        // Activities / analyze_turns deferred — see module docs.
+        activities: Vec::new(),
+        tools: map_to_named_usage_sorted(tools),
+        // MCP attribution requires per-call timeline analysis — see
+        // module docs for why it's deferred to a follow-up.
+        mcp_servers: Vec::new(),
+        shell_commands: map_to_named_usage_sorted(shell_commands),
+        branches: sort_by_total_desc(
+            branches
+                .into_iter()
+                .map(|(branch, mut a)| {
+                    a.bucket.session_count = a.sessions.len();
+                    a.bucket.project_count = a.projects.len();
+                    BranchUsage { branch, bucket: a.bucket }
+                })
+                .collect(),
+            |b| b.bucket,
+        ),
+        model_project_counts: model_project_counts
+            .into_iter()
+            .map(|(model, projects)| {
+                let mut rows: Vec<(String, usize)> = projects.into_iter().collect();
+                // Largest count first; ties broken by project name for
+                // deterministic msgpack.
+                rows.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+                (model, rows)
+            })
+            .collect(),
+    }
+}
+
+#[derive(Default)]
+struct BucketAccumulator {
+    bucket: TokenBucket,
+    sessions: HashSet<String>,
+    projects: HashSet<String>,
+}
+
+impl BucketAccumulator {
+    fn ingest(&mut self, bucket: &TokenBucket, project: &str, session_key: &str) {
+        merge(&mut self.bucket, bucket);
+        self.sessions.insert(session_key.to_string());
+        self.projects.insert(project.to_string());
+    }
+}
+
+struct ProjectAccumulator {
+    path: String,
+    bucket: TokenBucket,
+    sessions: HashSet<String>,
+}
+
+struct SessionAccumulator {
+    provider: Provider,
+    project: String,
+    session_id: String,
+    first_timestamp: chrono::DateTime<chrono::Utc>,
+    last_timestamp: chrono::DateTime<chrono::Utc>,
+    bucket: TokenBucket,
+}
+
+fn call_bucket(call: &ProviderCall) -> TokenBucket {
+    TokenBucket {
+        input_tokens: call.input_tokens,
+        cache_creation_tokens: call.cache_creation_tokens,
+        cache_read_tokens: call.cache_read_tokens,
+        output_tokens: call.output_tokens,
+        reasoning_tokens: call.reasoning_tokens,
+        session_count: 0,
+        project_count: 0,
+        call_count: 1,
+        cost_usd: call.cost_usd,
+    }
+}
+
+fn merge(into: &mut TokenBucket, from: &TokenBucket) {
+    into.input_tokens += from.input_tokens;
+    into.cache_creation_tokens += from.cache_creation_tokens;
+    into.cache_read_tokens += from.cache_read_tokens;
+    into.output_tokens += from.output_tokens;
+    into.reasoning_tokens += from.reasoning_tokens;
+    into.call_count += from.call_count;
+    into.cost_usd = match (into.cost_usd, from.cost_usd) {
+        (Some(a), Some(b)) => Some(a + b),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    };
+}
+
+fn week_start(date: NaiveDate) -> NaiveDate {
+    let days = date.weekday().num_days_from_monday();
+    date - Duration::days(i64::from(days))
+}
+
+fn sort_by_total_desc<T, F>(mut rows: Vec<T>, key: F) -> Vec<T>
+where
+    F: Fn(&T) -> TokenBucket,
+{
+    rows.sort_by(|a, b| {
+        let av = key(a).cost_usd.unwrap_or(key(a).total() as f64);
+        let bv = key(b).cost_usd.unwrap_or(key(b).total() as f64);
+        bv.total_cmp(&av)
+    });
+    rows
+}
+
+fn sort_sessions_by_recency(mut rows: Vec<SessionUsage>) -> Vec<SessionUsage> {
+    rows.sort_by(|a, b| b.last_timestamp.cmp(&a.last_timestamp));
+    rows
+}
+
+fn map_to_named_usage_sorted(map: BTreeMap<String, usize>) -> Vec<NamedUsage> {
+    let mut rows: Vec<NamedUsage> = map
+        .into_iter()
+        .map(|(name, calls)| NamedUsage { name, calls })
+        .collect();
+    rows.sort_by(|a, b| b.calls.cmp(&a.calls).then(a.name.cmp(&b.name)));
+    rows
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{DateTime, Utc};
+
+    fn call(
+        provider: Provider,
+        project: &str,
+        session: &str,
+        ts: i64,
+        input: u64,
+        output: u64,
+        cost: Option<f64>,
+    ) -> ProviderCall {
+        ProviderCall {
+            id: ts as u64,
+            provider,
+            model: "m".into(),
+            session_id: session.into(),
+            project: project.into(),
+            project_path: format!("/tmp/{project}"),
+            timestamp: DateTime::<Utc>::from_timestamp(ts, 0).unwrap(),
+            input_tokens: input,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            output_tokens: output,
+            reasoning_tokens: 0,
+            cost_usd: cost,
+            tools: vec!["Read".into()],
+            bash_commands: vec![],
+            user_message: String::new(),
+            branch: Some("main".into()),
+        }
+    }
+
+    #[test]
+    fn empty_input_returns_default_usage_data() {
+        let data = aggregate(Vec::new());
+        assert_eq!(data, UsageData::default());
+    }
+
+    #[test]
+    fn aggregates_grand_total_correctly() {
+        let calls = vec![
+            call(Provider::Claude, "p", "s1", 1_700_000_000, 10, 20, Some(0.001)),
+            call(Provider::Claude, "p", "s1", 1_700_000_001, 30, 40, Some(0.002)),
+        ];
+        let data = aggregate(calls);
+        assert_eq!(data.grand_total.input_tokens, 40);
+        assert_eq!(data.grand_total.output_tokens, 60);
+        assert_eq!(data.grand_total.call_count, 2);
+        assert_eq!(data.grand_total.session_count, 1);
+        assert_eq!(data.grand_total.project_count, 1);
+        assert_eq!(data.grand_total.cost_usd, Some(0.003));
+    }
+
+    #[test]
+    fn projects_sorted_by_cost_descending() {
+        let calls = vec![
+            call(Provider::Claude, "small", "s1", 1, 10, 10, Some(0.001)),
+            call(Provider::Claude, "big", "s2", 2, 1000, 1000, Some(1.0)),
+        ];
+        let data = aggregate(calls);
+        assert_eq!(data.projects.len(), 2);
+        assert_eq!(data.projects[0].name, "big");
+        assert_eq!(data.projects[1].name, "small");
+    }
+
+    #[test]
+    fn sessions_sorted_by_last_timestamp_descending() {
+        let calls = vec![
+            call(Provider::Claude, "p", "old", 1_700_000_000, 1, 1, None),
+            call(Provider::Claude, "p", "new", 1_700_000_500, 1, 1, None),
+        ];
+        let data = aggregate(calls);
+        assert_eq!(data.sessions[0].session_id, "new");
+        assert_eq!(data.sessions[1].session_id, "old");
+    }
+
+    #[test]
+    fn branches_only_track_non_empty_strings() {
+        let mut a = call(Provider::Claude, "p", "s1", 1, 1, 1, None);
+        a.branch = Some(String::new());
+        let calls = vec![a];
+        let data = aggregate(calls);
+        assert!(data.branches.is_empty());
+    }
+
+    #[test]
+    fn model_project_counts_are_deterministically_sorted() {
+        let calls = vec![
+            call(Provider::Claude, "alpha", "s1", 1, 1, 1, None),
+            call(Provider::Claude, "beta", "s2", 2, 1, 1, None),
+            call(Provider::Claude, "alpha", "s3", 3, 1, 1, None),
+        ];
+        let data = aggregate(calls);
+        // Single model "m" with two projects — alpha (2 calls) > beta (1).
+        assert_eq!(data.model_project_counts.len(), 1);
+        let (_, rows) = &data.model_project_counts[0];
+        assert_eq!(rows[0], ("alpha".into(), 2));
+        assert_eq!(rows[1], ("beta".into(), 1));
+    }
+
+    #[test]
+    fn weekly_bucket_groups_by_iso_monday() {
+        // 1700000000 == 2023-11-14 22:13:20 UTC = Tuesday
+        // Week start = 2023-11-13 (Monday).
+        let calls = vec![call(Provider::Claude, "p", "s1", 1_700_000_000, 1, 1, None)];
+        let data = aggregate(calls);
+        assert_eq!(data.weekly.len(), 1);
+        assert_eq!(
+            data.weekly[0].0,
+            NaiveDate::from_ymd_opt(2023, 11, 13).unwrap()
+        );
+    }
+}
