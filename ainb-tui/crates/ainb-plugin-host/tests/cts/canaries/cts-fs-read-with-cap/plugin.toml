@@ -1,0 +1,13 @@
+[plugin]
+name = "cts-13a8e0c4-fs-read-with-cap"
+version = "0.0.1"
+ainb_min_version = "1.2.0"
+description = "CTS canary axis 13: fs_read_dir host fn linked when read_claude_logs cap is declared. _init logs the per-canary sentinel after attempting the call so the runner can confirm the import resolved."
+
+# read_claude_logs grants the new ainb_fs_read_dir host fn. Without
+# this cap declaration, the host's Linker would omit the import and
+# instantiation would fail (axis 14 of the CTS).
+[capabilities]
+read_claude_logs = true
+
+[provides]

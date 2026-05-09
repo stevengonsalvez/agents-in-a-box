@@ -35,6 +35,8 @@ const CANARIES: &[&str] = &[
     "cts-provider-only",
     "cts-infinite-tick",
     "cts-malformed-buffer",
+    "cts-fs-read-with-cap",
+    "cts-fs-read-without-cap",
 ];
 
 fn main() -> Result<()> {

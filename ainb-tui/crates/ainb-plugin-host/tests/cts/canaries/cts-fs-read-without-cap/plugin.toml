@@ -1,0 +1,14 @@
+[plugin]
+name = "cts-14d6b2e8-fs-read-without-cap"
+version = "0.0.1"
+ainb_min_version = "1.2.0"
+description = "CTS canary axis 14: imports ainb_fs_read_dir without declaring read_claude_logs OR read_codex_logs. Host's Linker omits the import → wasmi rejects at instantiation."
+
+# Deliberately omits read_claude_logs and read_codex_logs. The host
+# must not link ainb_fs_read_dir for this manifest, so wasmi rejects
+# the module at instantiation with an unresolved-import error. _init
+# never runs; the SHOULD_NOT_FIRE sentinel never appears.
+[capabilities]
+write_plugin_data = true
+
+[provides]
