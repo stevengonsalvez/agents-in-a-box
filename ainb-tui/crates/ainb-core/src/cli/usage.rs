@@ -228,26 +228,40 @@ pub enum PlanProviderArg {
     Cursor,
 }
 
+/// Phase 6c-cli: host-side `ainb usage <subcommand>` execution.
+///
+/// Plan / Currency / Cache stay in the host (config admin, not
+/// analytics — they don't fit the plugin's data-plane model). The
+/// remaining 9 subcommands now route through the burndown plugin via
+/// `ainb-plugin-host::dispatch_cli`; the in-tree handlers (`print_*`,
+/// `export_usage`, `model_alias_command`) are retained for the byte-
+/// identity baseline tests but no longer reached by the CLI dispatch
+/// path. Phase 6d deletes them once `models/usage/parsers/` goes away.
 pub async fn execute(command: UsageCommands, format: OutputFormat) -> Result<()> {
     match command {
-        UsageCommands::Report(args) => print_report(&args, format, "Usage Report"),
-        UsageCommands::Status(args) => print_status(&args, format),
-        UsageCommands::Today(mut args) => {
-            args.period = PeriodArg::Today;
-            print_report(&args, format, "Today")
-        }
-        UsageCommands::Month(mut args) => {
-            args.period = PeriodArg::Month;
-            print_report(&args, format, "Month")
-        }
-        UsageCommands::Export(args) => export_usage(&args, format),
+        // Host-side admin subcommands.
         UsageCommands::Plan { command } => plan_command(command, format),
         UsageCommands::Currency(args) => currency_command(args),
-        UsageCommands::ModelAlias(args) => model_alias_command(args),
-        UsageCommands::Optimize(args) => print_optimize(&args, format),
-        UsageCommands::Compare(args) => print_compare(&args, format),
-        UsageCommands::Yield(args) => print_yield(&args, format),
         UsageCommands::Cache { command } => cache_command(command, format),
+        // Plugin-routed subcommands. Dispatch using the original argv
+        // captured by the registry-side runner; this branch is reached
+        // only when the host shim's plugin host setup failed (e.g. an
+        // older AINB_DISABLE_PLUGINS=1 path slipped through). The
+        // canonical entry is `crate::cli::registry::UsageCommand::run`.
+        UsageCommands::Report(_)
+        | UsageCommands::Status(_)
+        | UsageCommands::Today(_)
+        | UsageCommands::Month(_)
+        | UsageCommands::Export(_)
+        | UsageCommands::Optimize(_)
+        | UsageCommands::Compare(_)
+        | UsageCommands::Yield(_)
+        | UsageCommands::ModelAlias(_) => {
+            anyhow::bail!(
+                "internal: subcommand dispatched through host fallback — \
+                 burndown plugin should have handled this"
+            )
+        }
     }
 }
 
