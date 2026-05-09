@@ -11,6 +11,8 @@ pub struct Manifest {
     pub capabilities: CapabilitiesTable,
     #[serde(default)]
     pub provides: ProvidesTable,
+    #[serde(default)]
+    pub paths: PathsTable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +66,23 @@ pub struct ProvidesTable {
     pub providers: Vec<String>,
 }
 
+/// `[paths]` table — declared by data-plane plugins (e.g. session-reader)
+/// that walk per-provider log directories. Each field is an optional
+/// path string; `$HOME` is expanded by the host at link time so plugins
+/// don't need to know the user's home directory. A `None` field falls
+/// back to the host's built-in default for that provider.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PathsTable {
+    #[serde(default)]
+    pub claude_projects: Option<String>,
+    #[serde(default)]
+    pub codex_sessions: Option<String>,
+    #[serde(default)]
+    pub gemini_sessions: Option<String>,
+    #[serde(default)]
+    pub copilot_sessions: Option<String>,
+}
+
 impl Manifest {
     /// Parse a `plugin.toml` source. Returns the parsed manifest or a `toml`
     /// error.
@@ -88,6 +107,51 @@ mod tests {
         assert_eq!(m.plugin.name, "hello");
         assert_eq!(m.plugin.version, "0.1.0");
         assert!(!m.capabilities.read_sessions);
+    }
+
+    #[test]
+    fn parses_manifest_with_paths_block() {
+        let src = r#"
+            [plugin]
+            name = "session-reader"
+            version = "0.1.0"
+            ainb_min_version = "1.2.0"
+
+            [capabilities]
+            read_claude_logs = true
+            read_codex_logs = true
+            write_plugin_data = true
+
+            [paths]
+            claude_projects = "$HOME/.claude/projects"
+            codex_sessions  = "$HOME/.codex/sessions"
+        "#;
+        let m = Manifest::from_toml(src).expect("parses");
+        assert_eq!(
+            m.paths.claude_projects.as_deref(),
+            Some("$HOME/.claude/projects")
+        );
+        assert_eq!(
+            m.paths.codex_sessions.as_deref(),
+            Some("$HOME/.codex/sessions")
+        );
+        assert!(m.paths.gemini_sessions.is_none());
+        assert!(m.paths.copilot_sessions.is_none());
+    }
+
+    #[test]
+    fn paths_block_defaults_to_all_none() {
+        let src = r#"
+            [plugin]
+            name = "p"
+            version = "0.1.0"
+            ainb_min_version = "1.2.0"
+        "#;
+        let m = Manifest::from_toml(src).expect("parses");
+        assert!(m.paths.claude_projects.is_none());
+        assert!(m.paths.codex_sessions.is_none());
+        assert!(m.paths.gemini_sessions.is_none());
+        assert!(m.paths.copilot_sessions.is_none());
     }
 
     #[test]
