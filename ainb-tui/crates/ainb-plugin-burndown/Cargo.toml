@@ -17,6 +17,10 @@ crate-type = ["cdylib"]
 [dependencies]
 # Plugin SDK — manifest, capability, and wire types only (no host deps).
 ainb-plugin-api = { path = "../ainb-plugin-api" }
+# Shared session-data wire schema (sessions.usage_data event payload).
+# Burndown subscribes to that topic in TUI mode and synchronously
+# requests it in CLI mode; both decode through this crate's types.
+ainb-plugin-types-sessions = { path = "../ainb-plugin-types-sessions" }
 
 # Data model + cache + reports
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }

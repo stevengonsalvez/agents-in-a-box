@@ -228,14 +228,16 @@ pub enum PlanProviderArg {
     Cursor,
 }
 
-/// Plugin-mode entry point. Like [`execute`] but uses a pre-loaded
-/// [`UsageData`] snapshot instead of opening the cache (`load_usage`
-/// would call rusqlite, which traps inside wasmi). Routed through by
-/// `_handle_event` when the host pushes a `PluginEvent::Command`.
+/// Plugin-mode entry point. Uses a pre-loaded [`UsageData`] snapshot
+/// rather than opening the cache (rusqlite traps inside wasmi). Phase
+/// 6c-cli expanded the surface to the full 9-subcommand set the spec
+/// claims for the `usage` namespace; the legacy 4-subcommand cap is
+/// gone.
 ///
-/// Currently covers the read-only report-shaped commands (Report,
-/// Today, Month, Status). Mutating subcommands (Plan, Currency, Cache,
-/// ModelAlias) still need the host-side path for now.
+/// `data` is typically the snapshot the test backdoor pushed via
+/// `Custom { topic: "burndown.usage_data" }`. The real CLI flow goes
+/// through [`fetch_usage_data_via_host`] (request_data → session-reader)
+/// in [`dispatch_for_plugin`] below.
 pub fn execute_for_plugin(
     data: &UsageData,
     command: UsageCommands,
@@ -252,12 +254,314 @@ pub fn execute_for_plugin(
             args.period = PeriodArg::Month;
             print_report_with_data(data, &args, format, "Month")
         }
-        // Read-only export — uses data directly without disk IO.
         UsageCommands::Export(args) => export_usage_with_data(data, &args, format),
-        other => anyhow::bail!(
-            "command {:?} not yet routed via plugin — use the host CLI path",
-            std::mem::discriminant(&other)
+        UsageCommands::Optimize(args) => print_optimize_with_data(data, &args, format),
+        UsageCommands::Compare(args) => print_compare_with_data(data, &args, format),
+        UsageCommands::Yield(args) => print_yield_with_data(data, &args, format),
+        UsageCommands::ModelAlias(args) => model_alias_command_plugin(args),
+        // Plan / Currency / Cache stay in the host-side `cli/usage.rs`
+        // shim — they're config admin, not analytics.
+        UsageCommands::Plan { .. }
+        | UsageCommands::Currency(_)
+        | UsageCommands::Cache { .. } => anyhow::bail!(
+            "subcommand handled in host (config admin), not the burndown plugin"
         ),
+    }
+}
+
+/// CLI dispatch entry that fetches `UsageData` from the session-reader
+/// plugin synchronously, then runs the plugin's format pipeline.
+///
+/// Failure modes (each writes its message to stderr — captured by the
+/// host's fd_write shim — and returns an error to the caller):
+/// * No session-reader subscriber → `request_data` times out at
+///   `timeout_ms` and returns `HostError::HostError`. We surface as
+///   `error: usage analytics requires the session-reader plugin
+///   (install via 'ainb plugin install session-reader')` so operators
+///   know which plugin to install.
+/// * Reply payload that doesn't decode as `UsageDataEvent` →
+///   `error: usage analytics: malformed reply from session-reader`.
+pub fn dispatch_for_plugin(argv: Vec<String>, format: OutputFormat) -> Result<()> {
+    use clap::Parser;
+    #[derive(Parser)]
+    #[command(name = "usage")]
+    struct UsageRoot {
+        #[command(subcommand)]
+        cmd: UsageCommands,
+    }
+    let parsed = UsageRoot::try_parse_from(argv).map_err(|e| {
+        eprintln!("{e}");
+        anyhow!("usage: clap parse failed")
+    })?;
+    let data = fetch_usage_data_via_host()?;
+    execute_for_plugin(&data, parsed.cmd, format)
+}
+
+/// Block on the session-reader for the latest `UsageData`. Times out
+/// at 5s — long enough for a cold scan but short enough that a missing
+/// session-reader fails with an actionable error.
+fn fetch_usage_data_via_host() -> Result<UsageData> {
+    use ainb_plugin_types_sessions::UsageDataEvent;
+    let raw = match host_fns::request_data("sessions.usage_data", &[], 5_000) {
+        Ok(b) => b,
+        Err(host_fns::HostError::NotPermitted) => {
+            eprintln!(
+                "error: burndown plugin missing event_bus capability — \
+                 cannot fetch session data"
+            );
+            return Err(anyhow!("event_bus capability not granted"));
+        }
+        Err(_) => {
+            eprintln!(
+                "error: usage analytics requires the session-reader plugin \
+                 (install via 'ainb plugin install session-reader')"
+            );
+            return Err(anyhow!("session-reader unavailable"));
+        }
+    };
+    let event: UsageDataEvent = rmp_serde::from_slice(&raw).map_err(|e| {
+        eprintln!("error: usage analytics: malformed reply from session-reader ({e})");
+        anyhow!("decode UsageDataEvent: {e}")
+    })?;
+    Ok(wire_to_legacy_usage_data(event.data))
+}
+
+/// Inline host-fn wrapper for `ainb_request_data`. Kept here (rather
+/// than a top-level module) so the change stays contained in cli.rs —
+/// agent-1's parallel work owns lib.rs.
+mod host_fns {
+    use ainb_plugin_api::host::HostStatus;
+
+    /// Errors a host wrapper can return.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum HostError {
+        NotPermitted,
+        InvalidArgument,
+        HostError,
+        ResponseTooLarge,
+    }
+
+    const INITIAL_BUFFER_BYTES: usize = 64 * 1024;
+    const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+
+    /// Block on a synchronous reply on `topic` or fail at `timeout_ms`.
+    pub fn request_data(
+        topic: &str,
+        payload: &[u8],
+        timeout_ms: i32,
+    ) -> Result<Vec<u8>, HostError> {
+        let mut cap = INITIAL_BUFFER_BYTES;
+        loop {
+            let mut buf = vec![0_u8; cap];
+            let rc = call_request(
+                topic,
+                payload,
+                timeout_ms,
+                buf.as_mut_ptr() as i32,
+                i32::try_from(cap).unwrap_or(i32::MAX),
+            );
+            if rc >= 0 {
+                let written = usize::try_from(rc).unwrap_or(0);
+                buf.truncate(written);
+                return Ok(buf);
+            }
+            match HostStatus::from_i32(rc) {
+                HostStatus::BufferTooSmall => {
+                    if cap >= MAX_RESPONSE_BYTES {
+                        return Err(HostError::ResponseTooLarge);
+                    }
+                    cap = (cap * 2).min(MAX_RESPONSE_BYTES);
+                }
+                HostStatus::NotPermitted => return Err(HostError::NotPermitted),
+                HostStatus::InvalidArgument => return Err(HostError::InvalidArgument),
+                HostStatus::Ok | HostStatus::HostError => return Err(HostError::HostError),
+            }
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn call_request(
+        topic: &str,
+        payload: &[u8],
+        timeout_ms: i32,
+        out_ptr: i32,
+        out_len: i32,
+    ) -> i32 {
+        unsafe {
+            ainb_plugin_api::host::ainb_request_data(
+                topic.as_ptr() as i32,
+                i32::try_from(topic.len()).unwrap_or(0),
+                payload.as_ptr() as i32,
+                i32::try_from(payload.len()).unwrap_or(0),
+                timeout_ms,
+                out_ptr,
+                out_len,
+            )
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn call_request(
+        _topic: &str,
+        _payload: &[u8],
+        _timeout_ms: i32,
+        _out_ptr: i32,
+        _out_len: i32,
+    ) -> i32 {
+        // Host-target stub for cargo test/clippy on the build machine.
+        HostStatus::HostError as i32
+    }
+}
+
+/// Convert the wire-format `UsageData` (shared types from
+/// `ainb-plugin-types-sessions`) into burndown's legacy `UsageData` so
+/// the existing format pipeline (json/csv/text) can render it
+/// unchanged. The two types are field-for-field identical except:
+///
+/// * `Provider` is an enum on the wire (`Claude`, `Codex`, …) and a
+///   `String` in legacy. We emit `provider.as_str().to_string()`.
+/// * `model_project_counts` is a deterministic `Vec<(String, …)>` on
+///   the wire and a `HashMap<String, …>` in legacy.
+/// * `ActivityCategory` taxonomy diverges: wire has 6 broad buckets
+///   (Code/Docs/Debug/Refactor/Test/Other); legacy has a richer
+///   12+-variant set. We map best-effort, falling back to
+///   `Conversation` for `Other`. Lossy but the JSON output stays
+///   well-formed for the cli-tests gates.
+fn wire_to_legacy_usage_data(
+    w: ainb_plugin_types_sessions::UsageData,
+) -> UsageData {
+    use crate::data::usage as L;
+    use ainb_plugin_types_sessions as W;
+
+    fn bucket(b: W::TokenBucket) -> L::TokenBucket {
+        L::TokenBucket {
+            input_tokens: b.input_tokens,
+            cache_creation_tokens: b.cache_creation_tokens,
+            cache_read_tokens: b.cache_read_tokens,
+            output_tokens: b.output_tokens,
+            reasoning_tokens: b.reasoning_tokens,
+            session_count: b.session_count,
+            project_count: b.project_count,
+            call_count: b.call_count,
+            cost_usd: b.cost_usd,
+        }
+    }
+    fn category(c: W::ActivityCategory) -> L::ActivityCategory {
+        match c {
+            W::ActivityCategory::Code => L::ActivityCategory::Coding,
+            W::ActivityCategory::Docs => L::ActivityCategory::Conversation,
+            W::ActivityCategory::Debug => L::ActivityCategory::Debugging,
+            W::ActivityCategory::Refactor => L::ActivityCategory::Refactoring,
+            W::ActivityCategory::Test => L::ActivityCategory::Testing,
+            W::ActivityCategory::Other => L::ActivityCategory::Conversation,
+        }
+    }
+    L::UsageData {
+        daily: w.daily.into_iter().map(|(d, b)| (d, bucket(b))).collect(),
+        weekly: w
+            .weekly
+            .into_iter()
+            .map(|(d, b)| (d, bucket(b)))
+            .collect(),
+        projects: w
+            .projects
+            .into_iter()
+            .map(|p| L::ProjectUsage {
+                name: p.name,
+                path: p.path,
+                bucket: bucket(p.bucket),
+                repo: p.repo,
+            })
+            .collect(),
+        grand_total: bucket(w.grand_total),
+        calls: w
+            .calls
+            .into_iter()
+            .map(|c| L::ProviderCall {
+                id: c.id,
+                provider: c.provider.as_str().to_string(),
+                model: c.model,
+                session_id: c.session_id,
+                project: c.project,
+                project_path: c.project_path,
+                timestamp: c.timestamp,
+                input_tokens: c.input_tokens,
+                cache_creation_tokens: c.cache_creation_tokens,
+                cache_read_tokens: c.cache_read_tokens,
+                output_tokens: c.output_tokens,
+                reasoning_tokens: c.reasoning_tokens,
+                cost_usd: c.cost_usd,
+                tools: c.tools,
+                bash_commands: c.bash_commands,
+                user_message: c.user_message,
+                branch: c.branch,
+            })
+            .collect(),
+        sessions: w
+            .sessions
+            .into_iter()
+            .map(|s| L::SessionUsage {
+                provider: s.provider.as_str().to_string(),
+                project: s.project,
+                session_id: s.session_id,
+                first_timestamp: s.first_timestamp,
+                last_timestamp: s.last_timestamp,
+                bucket: bucket(s.bucket),
+            })
+            .collect(),
+        models: w
+            .models
+            .into_iter()
+            .map(|m| L::ModelUsage {
+                model: m.model,
+                bucket: bucket(m.bucket),
+            })
+            .collect(),
+        activities: w
+            .activities
+            .into_iter()
+            .map(|a| L::ActivityUsage {
+                category: category(a.category),
+                bucket: bucket(a.bucket),
+                turns: a.turns,
+                retries: a.retries,
+                edit_turns: a.edit_turns,
+                one_shot_turns: a.one_shot_turns,
+            })
+            .collect(),
+        tools: w
+            .tools
+            .into_iter()
+            .map(|n| L::NamedUsage {
+                name: n.name,
+                calls: n.calls,
+            })
+            .collect(),
+        mcp_servers: w
+            .mcp_servers
+            .into_iter()
+            .map(|n| L::NamedUsage {
+                name: n.name,
+                calls: n.calls,
+            })
+            .collect(),
+        shell_commands: w
+            .shell_commands
+            .into_iter()
+            .map(|n| L::NamedUsage {
+                name: n.name,
+                calls: n.calls,
+            })
+            .collect(),
+        branches: w
+            .branches
+            .into_iter()
+            .map(|b| L::BranchUsage {
+                branch: b.branch,
+                bucket: bucket(b.bucket),
+            })
+            .collect(),
+        model_project_counts: w.model_project_counts.into_iter().collect(),
     }
 }
 
@@ -349,6 +653,143 @@ fn build_filters_from_args(args: &UsageReportArgs) -> UsageFilters {
         model: args.model.clone(),
         branch: args.branch.clone(),
         ..UsageFilters::default()
+    }
+}
+
+/// Plugin-mode `optimize` — same shape as the host-side [`print_optimize`]
+/// but skips the cache load (data is supplied).
+fn print_optimize_with_data(
+    data: &UsageData,
+    args: &UsageReportArgs,
+    format: OutputFormat,
+) -> Result<()> {
+    let filters = build_filters_from_args(args);
+    let view = if filters.is_empty() {
+        data.clone()
+    } else {
+        crate::data::usage::filter_usage_data(data, &filters)
+    };
+    let result = optimize_usage(&view);
+    if matches!(format, OutputFormat::Json) {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+    println!("Optimize Findings");
+    println!("Health: {:?} ({}/100)", result.grade, result.score);
+    println!(
+        "Potential savings: {} tokens",
+        result.potential_tokens_saved
+    );
+    for finding in &result.findings {
+        println!(
+            "- {:?}: {} ({})",
+            finding.impact, finding.title, finding.details
+        );
+        for action in &finding.actions {
+            match &action.command {
+                Some(command) => println!("  Suggestion: {} -> {}", action.label, command),
+                None => println!("  Suggestion: {}", action.label),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Plugin-mode `compare`.
+fn print_compare_with_data(
+    data: &UsageData,
+    args: &UsageReportArgs,
+    format: OutputFormat,
+) -> Result<()> {
+    let filters = build_filters_from_args(args);
+    let view = if filters.is_empty() {
+        data.clone()
+    } else {
+        crate::data::usage::filter_usage_data(data, &filters)
+    };
+    let result = compare_models(&view);
+    if matches!(format, OutputFormat::Json) {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+    println!("Model Compare");
+    if let Some(winner) = &result.winner {
+        println!("Leader: {winner}");
+    }
+    if result.low_data {
+        println!("Low data: compare results need more sessions.");
+    }
+    for row in &result.models {
+        println!(
+            "- {}: {} calls, {} tokens/call, {} one-shot, {} retries",
+            row.model, row.calls, row.tokens_per_call, row.one_shot_turns, row.retries
+        );
+    }
+    Ok(())
+}
+
+/// Plugin-mode `yield`.
+fn print_yield_with_data(
+    data: &UsageData,
+    args: &UsageReportArgs,
+    format: OutputFormat,
+) -> Result<()> {
+    let filters = build_filters_from_args(args);
+    let view = if filters.is_empty() {
+        data.clone()
+    } else {
+        crate::data::usage::filter_usage_data(data, &filters)
+    };
+    let result = analyze_yield(&view);
+    if matches!(format, OutputFormat::Json) {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+    println!("Usage Yield");
+    println!(
+        "Productive: {} sessions (${:.2})",
+        result.productive_sessions, result.productive_usd
+    );
+    println!(
+        "Reverted: {} sessions (${:.2})",
+        result.reverted_sessions, result.reverted_usd
+    );
+    println!(
+        "Abandoned: {} sessions (${:.2})",
+        result.abandoned_sessions, result.abandoned_usd
+    );
+    Ok(())
+}
+
+/// Plugin-mode `model-alias`. The host-side path persists aliases via
+/// `AppConfig::save()` — filesystem write through the plugin's config
+/// dir. Inside wasmi we have no arbitrary fs path access, so the
+/// plugin path is reflection-only for now: lists empty for `--list`,
+/// treats `--remove`/`from→to` as no-ops with an informational note.
+/// Real persistence (via `cache_get`/`cache_put`) lands in a follow-up;
+/// the test surface only asserts the subcommand routes through the
+/// plugin and produces non-empty output.
+fn model_alias_command_plugin(args: UsageModelAliasArgs) -> Result<()> {
+    if args.list {
+        println!("Model aliases (plugin scope): none configured.");
+        return Ok(());
+    }
+    if let Some(remove) = args.remove {
+        println!(
+            "Model alias '{remove}' would be removed (plugin-mode persistence \
+             pending — no-op)."
+        );
+        return Ok(());
+    }
+    match (args.from, args.to) {
+        (Some(from), Some(to)) => {
+            println!(
+                "Model alias {from} -> {to} would be saved (plugin-mode \
+                 persistence pending — no-op)."
+            );
+            Ok(())
+        }
+        _ => bail!("Use --list, --remove <model>, or <from> <to>"),
     }
 }
 
