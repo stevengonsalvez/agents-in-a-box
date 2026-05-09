@@ -214,6 +214,25 @@ pub fn event_subscribe(topic: &str) {
     }
 }
 
+/// `ainb_publish_reply(corr_id, payload)`. Host parks the bytes in the
+/// reply ledger so the requester's blocking `ainb_request_data` call
+/// wakes up. Best-effort: failures (e.g. invalid bytes) are logged via
+/// the host but never panic the plugin.
+pub fn publish_reply(correlation_id: u64, payload: &[u8]) {
+    #[cfg(target_arch = "wasm32")]
+    unsafe {
+        let _ = ainb_plugin_api::host::ainb_publish_reply(
+            correlation_id,
+            payload.as_ptr() as i32,
+            i32::try_from(payload.len()).unwrap_or(0),
+        );
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = (correlation_id, payload);
+    }
+}
+
 /// Drive a host fn that writes bytes into a caller-allocated buffer.
 /// Doubles the buffer on `BufferTooSmall` until either the call
 /// succeeds or [`MAX_RESPONSE_BYTES`] is exceeded.

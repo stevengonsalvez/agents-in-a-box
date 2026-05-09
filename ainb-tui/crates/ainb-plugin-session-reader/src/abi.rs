@@ -11,7 +11,10 @@
 //! Topics:
 //!
 //! * `sessions.usage_data` — published, payload = msgpack
-//!   [`UsageDataEvent`].
+//!   [`UsageDataEvent`]. Also subscribed: when a CLI consumer
+//!   (burndown) calls `ainb_request_data("sessions.usage_data", …)`
+//!   the host pump delivers a [`PluginEvent::Request`] here and we
+//!   reply with the latest snapshot via `ainb_publish_reply`.
 //! * `sessions.refresh_request` — subscribed; forces a re-scan +
 //!   re-publish on receipt.
 //!
@@ -62,6 +65,11 @@ pub extern "C" fn _init() -> i32 {
     // Subscribe before publishing so consumers' refresh requests are
     // wired the moment the plugin reaches steady state.
     host::event_subscribe(TOPIC_REFRESH_REQUEST);
+    // Also subscribe to our own publish topic so the request/response
+    // pump delivers `req:sessions.usage_data` events here for the
+    // synchronous CLI fetch path. The host's pub/sub side never
+    // delivers a publisher's own publishes back, so this doesn't echo.
+    host::event_subscribe(TOPIC_USAGE_DATA);
 
     // Try cache first. A warm `UsageDataEvent` can be republished
     // immediately while a background tick rescans.
@@ -116,6 +124,30 @@ pub extern "C" fn _handle_event(ptr: i32, len: i32) -> i32 {
             publish(&event);
             cache_put_event(&event);
             set_state(event);
+            0
+        }
+        PluginEvent::Request {
+            topic,
+            correlation_id,
+            ..
+        } if topic == TOPIC_USAGE_DATA => {
+            // Synchronous CLI fetch. Reply with the most recent snapshot
+            // (or scan-on-demand if the plugin somehow has no state yet,
+            // which only happens before _init has finished — guarded by
+            // READY above). msgpack-encoded `UsageDataEvent`.
+            let event = unsafe {
+                STATE
+                    .as_ref()
+                    .and_then(|s| s.last_event.clone())
+                    .unwrap_or_else(|| build_event(false))
+            };
+            match rmp_serde::to_vec_named(&event) {
+                Ok(bytes) => host::publish_reply(correlation_id, &bytes),
+                Err(_) => host::log(
+                    LogLevel::Error,
+                    "session-reader: failed to encode reply for sessions.usage_data",
+                ),
+            }
             0
         }
         PluginEvent::Tick { .. } => 0,

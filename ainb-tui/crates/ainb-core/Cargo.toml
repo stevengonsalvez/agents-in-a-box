@@ -38,6 +38,7 @@ git2 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
+serde_bytes = "0.11"
 toml = { workspace = true }
 rmp-serde = "1.3"
 
@@ -92,6 +93,12 @@ vt100-tests = []
 # tests in tests/ can use them. Always enabled under #[cfg(test)] for
 # unit tests; integration tests must opt in via this feature.
 test-support = []
+# Phase 6c-cli CLI integration tests: spawn the release `ainb`
+# binary as a subprocess and assert exit codes + stdout/stderr
+# against the burndown plugin pipeline. Gated because the tests
+# require both `dist/plugins/burndown/plugin.wasm` and
+# `dist/plugins/session-reader/plugin.wasm` on disk.
+cli-tests = ["test-support"]
 
 [dev-dependencies]
 mockall = { workspace = true }

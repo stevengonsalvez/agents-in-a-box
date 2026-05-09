@@ -12,6 +12,10 @@ crates/ainb-plugin-host/tests/cts/fixtures/
 # its own crate dir, separate from the root /target. Built via
 # ./scripts/build-plugins.sh (sources scripts/wasi-env.sh).
 crates/ainb-plugin-burndown/target/
+# Session-reader is also a sub-workspace cdylib (Phase 6b).
+crates/ainb-plugin-session-reader/target/
+crates/ainb-plugin-session-reader/Cargo.lock
+crates/ainb-plugin-session-reader/logs/
 # Staged plugin .wasm artifacts (output of scripts/build-plugins.sh)
 dist/plugins/
 

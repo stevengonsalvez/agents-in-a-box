@@ -32,9 +32,9 @@ use crate::runtime::HostState;
 
 use super::{read_bytes, read_string};
 
-/// Wire `ainb_request_data` into `linker` if the plugin holds
-/// `event_bus`. Without that capability the import stays unresolved
-/// (axis-6 static refusal).
+/// Wire `ainb_request_data` and `ainb_publish_reply` into `linker` if
+/// the plugin holds `event_bus`. Without that capability the imports
+/// stay unresolved (axis-6 static refusal).
 pub fn link(linker: &mut Linker<HostState>, caps: &CapabilitySet) -> Result<()> {
     if !caps.event_bus {
         return Ok(());
@@ -63,7 +63,37 @@ pub fn link(linker: &mut Linker<HostState>, caps: &CapabilitySet) -> Result<()> 
             )
         },
     )?;
+    linker.func_wrap(
+        HOST_MODULE,
+        "ainb_publish_reply",
+        |mut caller: Caller<'_, HostState>,
+         correlation_id: u64,
+         payload_ptr: i32,
+         payload_len: i32|
+         -> i32 { publish_reply_impl(&mut caller, correlation_id, payload_ptr, payload_len) },
+    )?;
     Ok(())
+}
+
+/// Park a reply payload keyed by `correlation_id` so the requester's
+/// blocking `ainb_request_data` call wakes up. Returns 0 on success or
+/// a negative [`HostStatus`] on bad input.
+fn publish_reply_impl(
+    caller: &mut Caller<'_, HostState>,
+    correlation_id: u64,
+    payload_ptr: i32,
+    payload_len: i32,
+) -> i32 {
+    let payload = match read_bytes(caller, payload_ptr, payload_len) {
+        Ok(b) => b,
+        Err(e) => {
+            caller.data_mut().last_error =
+                Some(format!("ainb_publish_reply: read payload: {e}"));
+            return HostStatus::InvalidArgument as i32;
+        }
+    };
+    caller.data().shared.put_reply(correlation_id, payload);
+    0
 }
 
 fn request_data_impl(

@@ -429,14 +429,15 @@ impl CliCommand for UsageCommand {
         )
     }
     fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
-        // Phase 3 CLI cutover: route through the burndown plugin via
-        // PluginHost. We rebuild argv from `std::env::args()` rather
-        // than matches (clap-derive doesn't have a `to_args`) — this
-        // is robust because clap already validated the args before
-        // dispatch lands here.
-        // Skip past argv[0] (the binary) and through the "usage" token so
-        // the plugin sees only the subcommand and its flags. The plugin's
-        // own clap parser will add a synthesised "usage" prog-name.
+        // Phase 6c-cli: host has no UsageData of its own. Plan, Currency,
+        // and Cache subcommands are config admin (still in-tree). The
+        // remaining 9 subcommands dispatch to the burndown plugin, which
+        // synchronously fetches the snapshot from session-reader via
+        // `ainb_request_data`.
+        //
+        // We rebuild argv from `std::env::args()` rather than `matches`
+        // (clap-derive doesn't have a `to_args`); clap has already
+        // validated the args before dispatch lands here.
         let argv: Vec<String> = std::env::args()
             .skip_while(|a| a != "usage")
             .skip(1)
@@ -444,69 +445,177 @@ impl CliCommand for UsageCommand {
         let format = ctx.format;
         let parsed = crate::cli::usage::UsageCommands::from_arg_matches(matches);
         Box::pin(async move {
-            match dispatch_usage_via_plugin(&argv).await {
-                Ok(()) => Ok(()),
-                Err(plugin_err) => {
-                    // Plugin dispatch failed — fall back to the in-tree
-                    // implementation so a missing plugin build doesn't
-                    // brick the CLI. Surfaces the plugin error in the
-                    // log ring so an operator can debug.
-                    tracing::warn!(
-                        error = %plugin_err,
-                        "usage CLI plugin dispatch failed; falling back to in-tree path"
-                    );
-                    match parsed {
-                        Ok(c) => crate::cli::usage::execute(c, format).await,
-                        Err(e) => Err(anyhow::Error::from(e)),
-                    }
-                }
+            let cmd = parsed.map_err(anyhow::Error::from)?;
+            if is_host_admin_subcommand(&cmd) {
+                return crate::cli::usage::execute(cmd, format).await;
             }
+            dispatch_usage_via_plugin(&argv);
+            // dispatch_usage_via_plugin always exits the process on
+            // both happy and failure paths (process::exit) — return
+            // unreachable Ok to satisfy the type. Matches the
+            // exit-2 contract spelled out in
+            // plans/plugin-phase-6-data-plane.md.
+            #[allow(unreachable_code)]
+            Ok(())
         })
     }
 }
 
-/// Build a fresh `PluginHost`, push the host-side UsageData into the
-/// burndown plugin via a `Custom` event, then `dispatch_cli` the
-/// captured argv. Stdout/stderr the plugin produces flow back through
-/// the host's fd_write capture and out to the user's terminal.
-async fn dispatch_usage_via_plugin(argv: &[String]) -> Result<()> {
+/// Plan / Currency / Cache stay in-tree (config admin, not analytics).
+/// Everything else routes through the burndown plugin.
+fn is_host_admin_subcommand(cmd: &crate::cli::usage::UsageCommands) -> bool {
+    use crate::cli::usage::UsageCommands::*;
+    matches!(cmd, Plan { .. } | Currency(_) | Cache { .. })
+}
+
+/// Drain the most recent `sessions.usage_data` event the session-reader
+/// plugin published into `HostShared.event_queue` and inject it into
+/// burndown via a binary-safe `Request` event. Returns Ok(()) if a
+/// snapshot was found and successfully delivered; Err otherwise.
+///
+/// This is the host-side workaround for the wasmi-sync deadlock: the
+/// plugin's `ainb_request_data` would block its own wasmi store, and
+/// `pump_events` can't run in parallel on the same host thread, so we
+/// broker the cross-plugin handshake from the CLI shim instead.
+fn inject_session_reader_snapshot(host: &mut ainb_plugin_host::PluginHost) -> Result<()> {
+    use ainb_plugin_api::PluginEvent;
+
+    // Lock the queue, find the latest sessions.usage_data event, leave
+    // unrelated events in place so other dispatchers (TUI render path)
+    // can still see them.
+    let bytes_opt = {
+        let mut q = host.shared().event_queue.lock().expect("event_queue poisoned");
+        let mut latest: Option<Vec<u8>> = None;
+        q.retain(|ev| {
+            if ev.topic == "sessions.usage_data" {
+                latest = Some(ev.payload.clone());
+                false // remove from the queue once captured
+            } else {
+                true
+            }
+        });
+        latest
+    };
+
+    let bytes = bytes_opt.ok_or_else(|| {
+        anyhow::anyhow!(
+            "no sessions.usage_data event in queue — session-reader plugin \
+             didn't publish a snapshot during _init"
+        )
+    })?;
+
+    let request = PluginEvent::Request {
+        topic: "sessions.usage_data".to_string(),
+        // CLI broker doesn't need a real correlation id — burndown's
+        // handler doesn't reply to this Request, it just stashes the
+        // payload. Use 0 as the sentinel.
+        correlation_id: 0,
+        payload: serde_bytes::ByteBuf::from(bytes),
+    };
+    let wire = rmp_serde::to_vec_named(&request).context("encode request event")?;
+    host.dispatch_event_bytes("burndown", &wire)
+        .context("inject sessions.usage_data into burndown")?;
+    Ok(())
+}
+
+/// Spin up a fresh `PluginHost`, dispatch `ainb usage <argv>` into the
+/// burndown plugin, stream the plugin's captured stdout/stderr back to
+/// the user's terminal, and exit with a status code that matches the
+/// spec's failure-mode contract:
+///
+/// * `AINB_DISABLE_PLUGINS=1` → exit 2 with stderr
+///   `error: usage analytics requires the burndown plugin
+///   (install via 'ainb plugin install burndown')`.
+/// * Burndown plugin not loaded → same exit 2 + same message
+///   (operator-actionable: install the plugin).
+/// * Burndown loaded but session-reader missing → the plugin's
+///   `ainb_request_data` call times out, the plugin emits
+///   `error: usage analytics requires the session-reader plugin`,
+///   and we exit 2.
+/// * Happy path → exit 0 (or whatever exit code the plugin's
+///   handler bubbles through stderr).
+fn dispatch_usage_via_plugin(argv: &[String]) -> ! {
     use std::io::Write;
 
+    if std::env::var_os("AINB_DISABLE_PLUGINS").is_some() {
+        eprintln!(
+            "error: usage analytics requires the burndown plugin \
+             (install via 'ainb plugin install burndown')"
+        );
+        std::process::exit(2);
+    }
+
     let (mut host, outcome) = crate::plugins::init_plugin_host();
-    if outcome.loaded.is_empty() {
-        let detail: String = outcome
-            .failed
-            .iter()
-            .map(|(n, e)| format!("{n}: {e:#}"))
-            .collect::<Vec<_>>()
-            .join("; ");
-        anyhow::bail!("burndown plugin not loaded ({detail})");
-    }
     if host.get("burndown").is_none() {
-        anyhow::bail!("burndown plugin not registered");
+        let mut msg = String::from(
+            "error: usage analytics requires the burndown plugin \
+             (install via 'ainb plugin install burndown')",
+        );
+        if !outcome.failed.is_empty() {
+            let detail: String = outcome
+                .failed
+                .iter()
+                .map(|(n, e)| format!("{n}: {e:#}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            msg.push_str(&format!(" — load failures: {detail}"));
+        }
+        eprintln!("{msg}");
+        std::process::exit(2);
     }
 
-    // Push the host-side UsageData snapshot so the plugin's command
-    // handlers can render against the same data the in-tree path used.
-    let data = crate::cli::usage::load_usage_for_plugin().await?;
-    let payload = serde_json::to_value(&data).context("UsageData -> json")?;
-    let ev = ainb_plugin_api::PluginEvent::Custom {
-        topic: "burndown.usage_data".to_string(),
-        payload,
+    // The synchronous request_data path can't pump events while a
+    // wasmi call is in flight (single-threaded executor + blocking
+    // host fn). For the CLI scope we work around that by acting as
+    // the cross-plugin broker:
+    //
+    // 1. Session-reader's `_init` already published its first
+    //    `sessions.usage_data` snapshot into `HostShared.event_queue`.
+    // 2. We pluck that event's bytes out of the queue.
+    // 3. Wrap them in `PluginEvent::Request { topic, correlation_id }`
+    //    so the binary msgpack payload survives the trip into burndown
+    //    (Custom { payload: serde_json::Value::String } would utf-8-
+    //    mangle it).
+    // 4. Push directly into burndown via `dispatch_event_bytes` —
+    //    burndown's `_handle_event` decodes the wire UsageDataEvent
+    //    and stashes the legacy `UsageData` snapshot.
+    // 5. `dispatch_cli` then renders against that stashed snapshot.
+    //
+    // Once an async-pump architecture lands (Phase 7+) the dispatch
+    // can collapse back to a single `dispatch_cli` call and burndown's
+    // `request_data` will work end-to-end. The plumbing for that
+    // (Request variant, ainb_publish_reply host fn, pump_events
+    // req:/rep: routing, session-reader's Request handler) is
+    // already in place under this PR.
+    if let Err(e) = inject_session_reader_snapshot(&mut host) {
+        eprintln!("error: usage analytics requires the session-reader plugin: {e}");
+        std::process::exit(2);
+    }
+
+    let exit_code = match host.dispatch_cli("burndown", "usage", argv) {
+        Ok((stdout, stderr)) => {
+            if !stdout.is_empty() {
+                let mut out = std::io::stdout().lock();
+                let _ = out.write_all(&stdout);
+            }
+            if !stderr.is_empty() {
+                let mut err = std::io::stderr().lock();
+                let _ = err.write_all(&stderr);
+                // The plugin printed to stderr — by spec convention any
+                // non-empty plugin stderr means a soft failure (e.g.
+                // "session-reader unavailable"). Exit 2 to match the
+                // host's own "missing plugin" behavior.
+                2
+            } else {
+                0
+            }
+        }
+        Err(e) => {
+            eprintln!("error: usage CLI dispatch failed: {e:#}");
+            2
+        }
     };
-    let bytes = rmp_serde::to_vec_named(&ev).context("encode event")?;
-    host.dispatch_event_bytes("burndown", &bytes)?;
-
-    let (stdout, stderr) = host.dispatch_cli("burndown", "usage", argv)?;
-    if !stdout.is_empty() {
-        let mut out = std::io::stdout().lock();
-        out.write_all(&stdout)?;
-    }
-    if !stderr.is_empty() {
-        let mut err = std::io::stderr().lock();
-        err.write_all(&stderr)?;
-    }
-    Ok(())
+    std::process::exit(exit_code);
 }
 
 pub struct StatuslineCommand;

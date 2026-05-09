@@ -236,9 +236,55 @@ impl PluginHost {
     /// reserve a buffer in plugin memory before writing the payload. Plugins
     /// that don't export `_alloc` skip events silently — this keeps
     /// non-event-bus canaries (which never subscribe) trivially correct.
+    ///
+    /// ### `req:`/`rep:` topic conventions (Phase 6c-cli)
+    ///
+    /// Two topic prefixes have first-class semantics so synchronous
+    /// request/response works over the same queue:
+    ///
+    /// * `req:<topic>` — the wire payload is `<u64 LE corr_id><caller_payload>`.
+    ///   The pump strips the prefix + corr_id, then delivers a
+    ///   [`PluginEvent::Request`] (with the binary payload preserved as
+    ///   `ByteBuf`) to every subscriber of `<topic>`.
+    /// * `rep:<corr_id>` — the wire payload is the raw reply bytes.
+    ///   Plugins emit replies through `ainb_publish_reply` directly into
+    ///   the host's reply ledger, so reaching this branch means a
+    ///   plugin published on a `rep:` topic by hand; we still route it
+    ///   to the ledger for forwards-compat.
     pub fn pump_events(&mut self) -> Result<()> {
         let (events, subs) = self.shared.drain_events();
         for ev in events {
+            // Reply path — strip `rep:`, route bytes into the ledger,
+            // never deliver as a regular event.
+            if let Some(rest) = ev.topic.strip_prefix("rep:") {
+                if let Ok(corr_id) = rest.parse::<u64>() {
+                    self.shared.put_reply(corr_id, ev.payload);
+                }
+                continue;
+            }
+            // Request path — peel off corr_id, deliver as Request to
+            // subscribers of the underlying topic.
+            if let Some(real_topic) = ev.topic.strip_prefix("req:") {
+                if ev.payload.len() < 8 {
+                    continue; // malformed; drop
+                }
+                let mut id_bytes = [0_u8; 8];
+                id_bytes.copy_from_slice(&ev.payload[..8]);
+                let corr_id = u64::from_le_bytes(id_bytes);
+                let caller_payload: Vec<u8> = ev.payload[8..].to_vec();
+                if let Some(subscribers) = subs.get(real_topic) {
+                    for sub_id in subscribers {
+                        if sub_id == &ev.publisher {
+                            continue;
+                        }
+                        let _ = self
+                            .deliver_request(sub_id, real_topic, corr_id, &caller_payload)
+                            .with_context(|| format!("request {} → {sub_id}", real_topic));
+                    }
+                }
+                continue;
+            }
+            // Plain pub/sub path.
             let Some(subscribers) = subs.get(&ev.topic) else {
                 continue;
             };
@@ -303,6 +349,61 @@ impl PluginHost {
             Err(e) => {
                 plugin.degraded = true;
                 Err(anyhow::Error::new(e).context("_handle_event trapped"))
+            }
+        }
+    }
+
+    /// Deliver a synchronous request event to a single subscriber. Used
+    /// by the `req:<topic>` branch in [`Self::pump_events`]; payload is
+    /// passed through as binary bytes (no utf-8 lossiness) via
+    /// [`PluginEvent::Request`].
+    fn deliver_request(
+        &mut self,
+        plugin_id: &str,
+        topic: &str,
+        correlation_id: u64,
+        payload: &[u8],
+    ) -> Result<()> {
+        let plugin = self.find_mut(plugin_id)?;
+        if plugin.degraded {
+            return Ok(());
+        }
+        let wire = rmp_serde::to_vec_named(&ainb_plugin_api::PluginEvent::Request {
+            topic: topic.to_string(),
+            correlation_id,
+            payload: serde_bytes::ByteBuf::from(payload.to_vec()),
+        })
+        .context("encode request event")?;
+        let len_i32 = i32::try_from(wire.len()).context("request payload too large")?;
+        let alloc = match plugin
+            .instance
+            .get_typed_func::<i32, i32>(&plugin.store, "_alloc")
+        {
+            Ok(f) => f,
+            Err(_) => return Ok(()),
+        };
+        let ptr = alloc
+            .call(&mut plugin.store, len_i32)
+            .context("_alloc trapped")?;
+        anyhow::ensure!(ptr > 0, "_alloc returned null");
+        let memory = plugin
+            .instance
+            .get_export(&plugin.store, "memory")
+            .and_then(wasmi::Extern::into_memory)
+            .ok_or_else(|| anyhow!("plugin has no exported memory"))?;
+        let off_usize = usize::try_from(ptr).context("alloc ptr negative")?;
+        memory
+            .write(&mut plugin.store, off_usize, &wire)
+            .context("write request payload to plugin memory")?;
+        let handler = plugin
+            .instance
+            .get_typed_func::<(i32, i32), i32>(&plugin.store, "_handle_event")
+            .context("_handle_event missing")?;
+        match handler.call(&mut plugin.store, (ptr, len_i32)) {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                plugin.degraded = true;
+                Err(anyhow::Error::new(e).context("_handle_event trapped on request"))
             }
         }
     }
@@ -422,5 +523,40 @@ impl Drop for PluginHost {
         if !self.plugins.is_empty() {
             self.shutdown();
         }
+    }
+}
+
+#[cfg(test)]
+mod pump_tests {
+    use super::*;
+
+    #[test]
+    fn rep_topic_routes_payload_into_reply_ledger() {
+        // Empty host (no plugins) is enough — the rep:N branch in
+        // pump_events doesn't call into wasmi.
+        let mut host = PluginHost::new();
+        host.shared
+            .publish("anyone", "rep:42".to_string(), b"hello".to_vec());
+        host.pump_events().expect("pump");
+        assert_eq!(host.shared.take_reply(42), Some(b"hello".to_vec()));
+    }
+
+    #[test]
+    fn rep_topic_with_unparseable_id_is_dropped_silently() {
+        let mut host = PluginHost::new();
+        host.shared
+            .publish("anyone", "rep:not-a-number".to_string(), b"x".to_vec());
+        // Should not panic, should not park anything.
+        host.pump_events().expect("pump");
+        assert!(host.shared.take_reply(0).is_none());
+    }
+
+    #[test]
+    fn req_topic_with_truncated_payload_drops_silently() {
+        // < 8 bytes for the corr_id prefix → malformed; pump must not panic.
+        let mut host = PluginHost::new();
+        host.shared
+            .publish("anyone", "req:foo".to_string(), b"123".to_vec());
+        host.pump_events().expect("pump");
     }
 }
