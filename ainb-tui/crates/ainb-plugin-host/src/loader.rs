@@ -13,6 +13,7 @@ use std::sync::Arc;
 use ainb_plugin_api::CapabilitySet;
 use ainb_plugin_api::Manifest;
 use anyhow::{Context, Result};
+use tracing::debug;
 use wasmi::{Engine, Instance, Module, Store};
 
 use crate::host_fns::{link_baseline, link_capabilities};
@@ -121,7 +122,7 @@ pub fn load_from_bytes(
     let caps = CapabilitySet::from_manifest_table(&manifest.capabilities);
     let module = Module::new(engine, wasm).context("compile WASM")?;
 
-    let host_state = HostState::new(manifest.plugin.name.clone(), caps.clone(), shared);
+    let host_state = HostState::new(manifest.plugin.name.clone(), caps.clone(), Arc::clone(&shared));
     let mut store = Store::new(engine, host_state);
 
     let mut linker = <wasmi::Linker<HostState>>::new(engine);
@@ -143,6 +144,24 @@ pub fn load_from_bytes(
         let _ = store.set_fuel(u64::MAX);
         let rc = init.call(&mut store, ()).context("_init trapped")?;
         anyhow::ensure!(rc == 0, "_init returned non-zero status {rc}");
+    }
+
+    // Auto-subscribe to every topic listed in the manifest's
+    // `[subscribes].topics`. Done after `_init` so a plugin that
+    // initialises lazily still receives the first publish on its
+    // declared topics. The host bypasses the `event_bus` capability
+    // gate here on purpose — declaring `subscribes.topics` IS the
+    // subscriber's contract; calling `ainb_event_subscribe` from
+    // wasm code is for plugins that want to subscribe dynamically
+    // (and so must hold `event_bus`).
+    for topic in &manifest.subscribes.topics {
+        debug!(
+            target = "ainb_plugin_host::loader",
+            plugin = %manifest.plugin.name,
+            topic = %topic,
+            "auto-subscribing per manifest [subscribes]"
+        );
+        shared.subscribe(&manifest.plugin.name, topic.clone());
     }
 
     Ok(LoadedPlugin {

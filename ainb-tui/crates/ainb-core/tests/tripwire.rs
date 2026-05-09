@@ -113,7 +113,7 @@ fn render_tab(host: &mut ainb_plugin_host::PluginHost, tab: Tab) -> String {
     // Push UsageData (idempotent — host re-sends it for each tab so a
     // failure on one tab can't poison the next).
     let data = sample_usage_data();
-    let payload = serde_json::to_value(&data).expect("UsageData -> json");
+    let payload = serde_json::to_vec(&data).expect("UsageData -> json bytes");
     let ev = PluginEvent::Custom {
         topic: "burndown.usage_data".into(),
         payload,
@@ -123,7 +123,7 @@ fn render_tab(host: &mut ainb_plugin_host::PluginHost, tab: Tab) -> String {
 
     let tab_ev = PluginEvent::Custom {
         topic: "burndown.set_tab".into(),
-        payload: serde_json::json!({ "tab": tab.name() }),
+        payload: serde_json::to_vec(&serde_json::json!({ "tab": tab.name() })).expect("tab json bytes"),
     };
     host.dispatch_event_bytes("burndown", &rmp_serde::to_vec_named(&tab_ev).unwrap())
         .expect("plugin handles set_tab");
@@ -236,7 +236,7 @@ fn cli_usage_via_plugin_matches_baseline() {
     assert!(outcome.failed.is_empty(), "plugin must load: {:?}", outcome.failed);
 
     let data = sample_usage_data();
-    let payload = serde_json::to_value(&data).expect("UsageData -> json");
+    let payload = serde_json::to_vec(&data).expect("UsageData -> json bytes");
     let ev = PluginEvent::Custom {
         topic: "burndown.usage_data".into(),
         payload,

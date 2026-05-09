@@ -73,7 +73,7 @@ fn render_analytics(tab: UsageTab, width: u16, height: u16) -> Option<String> {
 
     // Push UsageData fixture.
     let data = sample_usage_data();
-    let payload = serde_json::to_value(&data).expect("UsageData -> json");
+    let payload = serde_json::to_vec(&data).expect("UsageData -> json bytes");
     let ev = PluginEvent::Custom { topic: "burndown.usage_data".into(), payload };
     let bytes = rmp_serde::to_vec_named(&ev).unwrap();
     host.dispatch_event_bytes("burndown", &bytes).unwrap();
@@ -87,7 +87,7 @@ fn render_analytics(tab: UsageTab, width: u16, height: u16) -> Option<String> {
     };
     let tab_ev = PluginEvent::Custom {
         topic: "burndown.set_tab".into(),
-        payload: serde_json::json!({ "tab": tab_name }),
+        payload: serde_json::to_vec(&serde_json::json!({ "tab": tab_name })).expect("tab json bytes"),
     };
     host.dispatch_event_bytes("burndown", &rmp_serde::to_vec_named(&tab_ev).unwrap())
         .unwrap();

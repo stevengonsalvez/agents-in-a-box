@@ -28,6 +28,7 @@ fn fs_manifest(name: &str, root: &std::path::Path) -> Manifest {
         },
         provides: ProvidesTable::default(),
         paths: ainb_plugin_api::PathsTable::default(),
+        subscribes: ainb_plugin_api::SubscribesTable::default(),
     }
 }
 
@@ -159,6 +160,7 @@ fn fs_read_not_linked_when_no_filesystem_capability() {
         capabilities: CapabilitiesTable::default(),
         provides: ProvidesTable::default(),
         paths: ainb_plugin_api::PathsTable::default(),
+        subscribes: ainb_plugin_api::SubscribesTable::default(),
     };
     let wat = build_fs_read_wat("/tmp/whatever", 64);
     let wasm = wat::parse_str(&wat).expect("parse wat");

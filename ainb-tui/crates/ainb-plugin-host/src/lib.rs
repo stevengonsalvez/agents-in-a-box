@@ -305,14 +305,16 @@ impl PluginHost {
         if plugin.degraded {
             return Ok(());
         }
-        // Encode the event payload. Phase 1.5 wire shape: msgpack-encoded
-        // Custom event so `_handle_event` sees a stable PluginEvent.
+        // Encode the event payload. The bus is opaque-bytes-on-wire:
+        // msgpack-encoded Custom event with the raw publisher payload
+        // forwarded as-is. Subscribers decode against the topic's
+        // wire schema (e.g. ainb_plugin_types_sessions::UsageDataEvent
+        // for sessions.usage_data). Earlier shape wrapped payload as
+        // serde_json::Value::String(utf8_lossy(...)) which corrupted
+        // any non-utf8 publisher (rmp-serde, raw binary).
         let wire = rmp_serde::to_vec_named(&ainb_plugin_api::PluginEvent::Custom {
             topic: ev.topic.clone(),
-            payload: serde_json::Value::String(
-                String::from_utf8(ev.payload.clone())
-                    .unwrap_or_else(|_| String::from_utf8_lossy(&ev.payload).into_owned()),
-            ),
+            payload: ev.payload.clone(),
         })
         .context("encode event")?;
 

@@ -13,6 +13,8 @@ pub struct Manifest {
     pub provides: ProvidesTable,
     #[serde(default)]
     pub paths: PathsTable,
+    #[serde(default)]
+    pub subscribes: SubscribesTable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,6 +90,30 @@ pub struct PathsTable {
     pub gemini_sessions: Option<String>,
     #[serde(default)]
     pub copilot_sessions: Option<String>,
+}
+
+/// `[subscribes]` table — declarative event subscriptions.
+///
+/// Plugins listing topics here are auto-subscribed by the host loader
+/// after `_init` runs successfully. Subsequent publishes on those
+/// topics flow through `pump_events` into the plugin's `_handle_event`
+/// export. This avoids forcing every subscriber to declare the
+/// `event_bus` capability just to call `ainb_event_subscribe` once at
+/// startup.
+///
+/// Example:
+///
+/// ```toml
+/// [subscribes]
+/// topics = ["sessions.usage_data", "sessions.partial_progress"]
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubscribesTable {
+    /// Topic names the host should subscribe this plugin to at load
+    /// time. Each must match the publisher's exact topic string —
+    /// no globbing.
+    #[serde(default)]
+    pub topics: Vec<String>,
 }
 
 impl Manifest {

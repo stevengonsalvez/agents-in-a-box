@@ -7,23 +7,31 @@
 
 [plugin]
 name = "burndown"
-version = "0.1.0"
-ainb_min_version = "1.1.0"
+version = "0.2.0"
+ainb_min_version = "1.2.0"
 description = "Daily/weekly/project usage burndown panels"
 author = "stevengonsalvez"
 license = "MIT"
 
 [capabilities]
-# Read raw Claude / Codex JSONL session histories for cost aggregation.
-read_claude_logs    = true
-read_codex_logs     = true
-# Read ainb session metadata to attribute usage to sessions/workspaces.
+# Phase 6c: dropped read_claude_logs + read_codex_logs. Burndown no
+# longer scans session files itself — the session-reader plugin owns
+# the data plane and publishes UsageDataEvent on sessions.usage_data,
+# which we consume via [subscribes] below.
+#
+# read_sessions kept: ainb session metadata (workspace attribution) is
+# still resolved host-side, not via session-reader.
 read_sessions       = true
 # Persist the aggregated cache (SQLite) under the plugin data dir.
 write_plugin_data   = true
 # No network egress; no subprocess spawn.
 network             = []
 spawn_subprocess    = false
+# Required to import ainb_request_data + ainb_publish_reply for the
+# CLI sync-fetch path. The Linker omits these host fns when this flag
+# is false; without them the burndown wasm fails to instantiate. See
+# host_fns/request.rs:38-42 for the cap-gate.
+event_bus           = true
 
 [provides]
 screens        = ["analytics"]
@@ -33,3 +41,11 @@ statusline     = ["budget-bar"]
 # routes `ainb usage <subcommand>` invocations to this plugin via
 # PluginHost::dispatch_cli when "usage" appears here.
 cli_namespaces = ["usage"]
+
+# Auto-subscribed at load time by the host loader. Burndown's
+# _handle_event receives every publish on these topics without needing
+# to call ainb_event_subscribe at runtime (declarative subscribes are
+# gated by the loader, not by event_bus cap which only governs the
+# imperative request_data / publish_reply host fns).
+[subscribes]
+topics = ["sessions.usage_data"]

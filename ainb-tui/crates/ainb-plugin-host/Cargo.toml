@@ -31,6 +31,11 @@ fs2 = { workspace = true }
 [dev-dependencies]
 wat = "1.0"
 tempfile = { workspace = true }
+# Wire schema for sessions.usage_data — used by the burndown subscribe
+# integration test to construct a UsageDataEvent and publish it on the
+# event bus. Dev-only; the host doesn't link the schema crate at
+# runtime (plugins do, on both publisher + subscriber sides).
+ainb-plugin-types-sessions = { path = "../ainb-plugin-types-sessions" }
 
 [lints]
 workspace = true

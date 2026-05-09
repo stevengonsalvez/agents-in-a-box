@@ -25,6 +25,7 @@ fn data_manifest(name: &str) -> Manifest {
         },
         provides: ProvidesTable::default(),
         paths: ainb_plugin_api::PathsTable::default(),
+        subscribes: ainb_plugin_api::SubscribesTable::default(),
     }
 }
 
@@ -192,6 +193,7 @@ fn data_fns_not_linked_without_capability() {
         capabilities: CapabilitiesTable::default(), // write_plugin_data = false
         provides: ProvidesTable::default(),
         paths: ainb_plugin_api::PathsTable::default(),
+        subscribes: ainb_plugin_api::SubscribesTable::default(),
     };
     let wat = build_kv_wat("k", b"v");
     let wasm = wat::parse_str(&wat).expect("parse wat");

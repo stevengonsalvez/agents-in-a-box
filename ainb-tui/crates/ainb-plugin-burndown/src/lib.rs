@@ -21,5 +21,10 @@ mod ui_helpers;
 /// Host ABI version this plugin targets, exposed as a `[u32; 3]` so the
 /// host can read it directly via `Memory::read` without going through
 /// serde / utf-8 decoding.
+///
+/// Phase 6c bump: 1.1.0 → 1.2.0. Matches the manifest's
+/// `ainb_min_version` and reflects burndown's dependency on the host's
+/// auto-subscribe loader (host 1.2.0 reads `[subscribes].topics`) and
+/// the opaque-bytes Custom event payload (so msgpack survives the bus).
 #[no_mangle]
-pub static AINB_PLUGIN_HOST_VERSION: [u32; 3] = [1, 1, 0];
+pub static AINB_PLUGIN_HOST_VERSION: [u32; 3] = [1, 2, 0];

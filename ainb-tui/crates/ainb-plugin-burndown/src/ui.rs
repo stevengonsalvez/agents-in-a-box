@@ -1057,8 +1057,14 @@ fn render_loading(buf: &mut Buffer, area: Rect) {
         .border_style(Style::default().fg(CORNFLOWER_BLUE))
         .style(Style::default().bg(DARK_BG));
 
+    // Phase 6c: burndown no longer scans session files itself — the
+    // session-reader plugin owns the data plane and publishes
+    // `sessions.usage_data`. This empty state is what the user sees
+    // until the first event arrives (cold-cache scan ~5s) or
+    // permanently if session-reader is missing from `dist/plugins/`,
+    // which makes the data-flow gap detectable instead of silent.
     let paragraph = Paragraph::new(Line::from(vec![Span::styled(
-        "  ⏳ Scanning session files...",
+        "  ⏳ Waiting for session-reader plugin...",
         Style::default().fg(MUTED_GRAY),
     )]))
     .block(block);

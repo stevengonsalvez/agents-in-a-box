@@ -43,7 +43,7 @@ fn plugin_cli_report_json_matches_in_tree() {
 
     // Push the same fixture the in-tree path uses.
     let data = sample_usage_data();
-    let payload = serde_json::to_value(&data).expect("UsageData -> json");
+    let payload = serde_json::to_vec(&data).expect("UsageData -> json bytes");
     let ev = PluginEvent::Custom {
         topic: "burndown.usage_data".into(),
         payload,
