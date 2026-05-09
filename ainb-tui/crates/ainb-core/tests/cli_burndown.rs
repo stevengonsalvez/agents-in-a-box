@@ -152,6 +152,7 @@ fn cli_usage_admin_subcommand_works_without_plugins() {
 }
 
 #[test]
+#[ignore = "requires real ~/.claude or ~/.codex session data — run with `cargo test -- --ignored` after populating session fixtures (Phase 6f tightens this with a frozen fixture dir)"]
 fn cli_usage_report_via_plugin_pipeline() {
     if skip_unless_plugins_built() {
         return;
@@ -164,22 +165,14 @@ fn cli_usage_report_via_plugin_pipeline() {
     );
     // The session-reader plugin scans the developer's real ~/.claude
     // / ~/.codex dirs (no fixture override yet — Phase 6f tightens
-    // this with a frozen fixture session dir). On a fresh machine
-    // those dirs may not exist; in that case session-reader publishes
-    // an empty UsageData snapshot but burndown still renders the
-    // empty JSON shape, exiting 0. We accept either:
-    //   * exit 0 + stdout that parses as JSON (happy path)
-    //   * exit 2 + the session-reader error (no snapshot was
-    //     published in the brief window between init_plugin_host
-    //     returning and the host shim draining the queue — flaky on
-    //     slow CI; documented but not yet fixed)
-    if code != Some(0) {
-        eprintln!(
-            "non-zero exit {code:?}; stderr={stderr}; treating as known limitation \
-             of the pre-async-pump shim"
-        );
-        return;
-    }
+    // this with a frozen fixture session dir). The test is gated by
+    // #[ignore] so it never silently passes; running it requires
+    // either real session data on disk or the upcoming fixture path.
+    assert_eq!(
+        code,
+        Some(0),
+        "exit {code:?}; stderr={stderr}; this test requires real session data — see #[ignore] reason"
+    );
     let parsed: serde_json::Value =
         serde_json::from_str(stdout.trim()).expect("plugin stdout is valid JSON");
     // The shape comes from burndown::cli::report_json — a Value::Object
@@ -191,6 +184,7 @@ fn cli_usage_report_via_plugin_pipeline() {
 }
 
 #[test]
+#[ignore = "requires real ~/.claude or ~/.codex session data — run with `cargo test -- --ignored` after populating session fixtures (Phase 6f tightens this with a frozen fixture dir)"]
 fn cli_usage_routes_each_subcommand_to_plugin() {
     if skip_unless_plugins_built() {
         return;
@@ -213,13 +207,11 @@ fn cli_usage_routes_each_subcommand_to_plugin() {
     ];
     for (name, argv) in cases {
         let (code, stdout, stderr) = run_ainb(argv, &[("AINB_PLUGIN_ROOT", &dist_str)]);
-        if code != Some(0) {
-            eprintln!(
-                "{name}: non-zero exit {code:?}; stderr={stderr} \
-                 — known limitation of pre-async-pump shim, skipping shape check"
-            );
-            continue;
-        }
+        assert_eq!(
+            code,
+            Some(0),
+            "{name}: exit {code:?}; stderr={stderr}; this test requires real session data — see #[ignore] reason"
+        );
         // The plugin always emits *some* bytes for these subcommands;
         // an empty stdout would mean the subcommand didn't reach the
         // plugin's println! path.
@@ -231,6 +223,7 @@ fn cli_usage_routes_each_subcommand_to_plugin() {
 }
 
 #[test]
+#[ignore = "requires real ~/.claude or ~/.codex session data — run with `cargo test -- --ignored` after populating session fixtures (Phase 6f tightens this with a frozen fixture dir)"]
 fn cli_usage_report_text_format_routes_to_plugin() {
     if skip_unless_plugins_built() {
         return;
@@ -240,13 +233,15 @@ fn cli_usage_report_text_format_routes_to_plugin() {
     // No --format argument exercises the host-default text path. The
     // plugin's text format prints a "Usage Report" header — even on
     // an empty UsageData snapshot the header appears.
-    let (code, stdout, _stderr) = run_ainb(
+    let (code, stdout, stderr) = run_ainb(
         &["usage", "report"],
         &[("AINB_PLUGIN_ROOT", &dist_str)],
     );
-    if code != Some(0) {
-        return;
-    }
+    assert_eq!(
+        code,
+        Some(0),
+        "exit {code:?}; stderr={stderr}; this test requires real session data — see #[ignore] reason"
+    );
     assert!(
         stdout.contains("Usage Report") || stdout.contains("overview"),
         "plugin text output should include the 'Usage Report' header; got {stdout:?}"
