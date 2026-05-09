@@ -537,6 +537,10 @@ mod pump_tests {
         // Empty host (no plugins) is enough — the rep:N branch in
         // pump_events doesn't call into wasmi.
         let mut host = PluginHost::new();
+        // Mark id 42 in-flight first; without this the new
+        // `put_reply` filter drops the reply as orphaned (the design
+        // is "only park a reply when a request is actually waiting").
+        host.shared.mark_inflight(42);
         host.shared
             .publish("anyone", "rep:42".to_string(), b"hello".to_vec());
         host.pump_events().expect("pump");

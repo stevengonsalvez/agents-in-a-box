@@ -6,7 +6,7 @@
 //! directly; the cross-plugin event bus mutates [`HostShared`] through the
 //! `Arc` each `HostState` holds.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -103,6 +103,18 @@ pub struct HostShared {
     /// land here so Phase 6c-cli can wire the actual pump-driven reply
     /// route without re-touching the wasmi linker.
     pub pending_replies: Mutex<HashMap<u64, Vec<u8>>>,
+    /// Set of correlation ids currently being awaited by an in-flight
+    /// `ainb_request_data` call. Inserted on request, removed on
+    /// completion, timeout, or cancel.
+    ///
+    /// `publish_reply_impl` checks this before inserting into
+    /// `pending_replies` so a late reply (whose requester has already
+    /// timed out) is dropped instead of leaking memory in the ledger
+    /// forever. Replies with `correlation_id == 0` are also dropped
+    /// — registry.rs's `inject_session_reader_snapshot` broker uses 0
+    /// as a sentinel meaning "this is a one-way push, no reply
+    /// expected".
+    pub inflight: Mutex<HashSet<u64>>,
     /// Monotonic counter for correlation ids handed out by
     /// [`Self::next_correlation_id`]. `AtomicU64` so the host-fn closure
     /// can advance it without locking.
@@ -188,7 +200,23 @@ impl HostShared {
     /// Park a reply payload for the request-data host-fn to pick up.
     /// Called from [`crate::PluginHost::pump_events`] when a subscriber
     /// publishes on the `rep:<topic>` channel.
+    ///
+    /// Replies are dropped (not parked) when:
+    /// - `correlation_id == 0`: sentinel used by the
+    ///   `inject_session_reader_snapshot` broker for one-way pushes;
+    ///   no requester is waiting.
+    /// - the id is not in `inflight`: the requester already timed out
+    ///   and gave up on this id, so parking the reply would leak it
+    ///   in `pending_replies` forever.
     pub fn put_reply(&self, correlation_id: u64, payload: Vec<u8>) {
+        if correlation_id == 0 {
+            return;
+        }
+        let inflight = self.inflight.lock().expect("inflight poisoned");
+        if !inflight.contains(&correlation_id) {
+            return;
+        }
+        drop(inflight);
         let mut q = self.pending_replies.lock().expect("pending_replies poisoned");
         q.insert(correlation_id, payload);
     }
@@ -198,6 +226,28 @@ impl HostShared {
     pub fn take_reply(&self, correlation_id: u64) -> Option<Vec<u8>> {
         let mut q = self.pending_replies.lock().expect("pending_replies poisoned");
         q.remove(&correlation_id)
+    }
+
+    /// Mark a correlation id as in-flight. Call when emitting a
+    /// `req:<topic>` event so subsequent `put_reply` calls accept the
+    /// matching reply.
+    pub fn mark_inflight(&self, correlation_id: u64) {
+        let mut inflight = self.inflight.lock().expect("inflight poisoned");
+        inflight.insert(correlation_id);
+    }
+
+    /// Forget a correlation id and discard any parked reply. Call on
+    /// request completion (success or timeout) so a late reply for
+    /// this id is dropped instead of poisoning the next request that
+    /// reuses the slot (counter is monotonic, but defensive cleanup
+    /// is still cheap).
+    pub fn clear_inflight(&self, correlation_id: u64) {
+        {
+            let mut inflight = self.inflight.lock().expect("inflight poisoned");
+            inflight.remove(&correlation_id);
+        }
+        let mut q = self.pending_replies.lock().expect("pending_replies poisoned");
+        q.remove(&correlation_id);
     }
 }
 

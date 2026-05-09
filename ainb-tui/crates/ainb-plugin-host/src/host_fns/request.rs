@@ -180,6 +180,10 @@ fn request_data_impl(
     }
 
     let corr_id = shared.next_correlation_id();
+    // Mark inflight BEFORE publishing the request: a same-thread
+    // pump_events between publish and mark would otherwise drop the
+    // reply on the floor (put_reply rejects unknown corr_ids).
+    shared.mark_inflight(corr_id);
     // Encode the request as `<u64 LE corr_id><payload bytes>` on
     // `req:<topic>` so the pump can route the reply by id.
     let mut wire = Vec::with_capacity(8 + payload.len());
@@ -192,9 +196,11 @@ fn request_data_impl(
     let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
     loop {
         if let Some(reply) = shared.take_reply(corr_id) {
+            shared.clear_inflight(corr_id);
             return write_bytes_to_caller(caller, out_ptr, out_len, &reply);
         }
         if Instant::now() >= deadline {
+            shared.clear_inflight(corr_id);
             caller.data_mut().last_error =
                 Some(format!("ainb_request_data {topic:?}: timeout after {timeout_ms}ms"));
             return HostStatus::HostError as i32;
@@ -255,9 +261,43 @@ mod tests {
     fn put_then_take_reply_round_trips() {
         let s = HostShared::default();
         let id = s.next_correlation_id();
+        // Mark inflight first so put_reply accepts the id.
+        s.mark_inflight(id);
         s.put_reply(id, b"hello".to_vec());
         assert_eq!(s.take_reply(id), Some(b"hello".to_vec()));
         // Second take is empty — replies aren't re-deliverable.
         assert_eq!(s.take_reply(id), None);
+    }
+
+    #[test]
+    fn timeout_clears_inflight_and_drops_late_reply() {
+        let s = HostShared::default();
+        let id = s.next_correlation_id();
+        s.mark_inflight(id);
+        // Simulate timeout: caller gives up and clears its slot.
+        s.clear_inflight(id);
+        // A late reply for the canceled id is dropped.
+        s.put_reply(id, b"late".to_vec());
+        assert_eq!(s.take_reply(id), None);
+    }
+
+    #[test]
+    fn reply_with_corr_id_zero_is_dropped() {
+        let s = HostShared::default();
+        // 0 is the broker sentinel meaning "one-way push, no reply
+        // expected". Even if something marks it inflight, put_reply
+        // rejects it.
+        s.mark_inflight(0);
+        s.put_reply(0, b"sentinel".to_vec());
+        assert_eq!(s.take_reply(0), None);
+    }
+
+    #[test]
+    fn reply_for_uninflight_id_is_dropped() {
+        let s = HostShared::default();
+        // No mark_inflight call: corresponds to a reply landing for a
+        // request the host never made (or already cleared).
+        s.put_reply(42, b"orphan".to_vec());
+        assert_eq!(s.take_reply(42), None);
     }
 }
