@@ -1,20 +1,24 @@
 // ABOUTME: Non-interactive usage analytics commands.
-// Provides CodeBurn-style reports, exports, plans, optimization, compare, and yield.
+// Phase 6c-cli + 6d: this file is now a thin wrapper around clap arg
+// types and three host-side admin commands (Plan / Currency / Cache).
+// All analytics handlers (report/status/today/month/export/optimize/
+// compare/yield/model-alias) route through the burndown plugin via
+// `crate::cli::registry::dispatch_usage_via_plugin`. The legacy in-tree
+// implementations were deleted in Phase 6d; the surviving `report_json`
+// helper is kept solely to power `test_support::cli_usage_report_json`,
+// which the tripwire integration tests use as a byte-identity oracle
+// for the plugin's CLI output.
 
 use crate::cli::OutputFormat;
 use crate::config::{AppConfig, CurrencyConfig, UsagePlan, UsagePlanId, UsagePlanProvider};
 use crate::models::usage::{
-    ActivityUsage, NamedUsage, ProjectUsage, SessionUsage, UsageData, UsageFilters, UsagePeriod,
-    UsageProviderFilter, UsageQuery, UsageSourceRoots, analyze_yield, billing_period,
-    compare_models, disabled_cache, optimize_usage, parse_usage_for,
-    parse_usage_for_with_roots_and_cache, shared_cache,
+    ActivityUsage, NamedUsage, ProjectUsage, SessionUsage, UsageData,
 };
 use anyhow::{Result, anyhow, bail};
-use chrono::{Local, NaiveDate};
+use chrono::Local;
 use clap::{Args, Subcommand, ValueEnum};
 use serde_json::json;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Subcommand)]
 pub enum UsageCommands {
@@ -146,7 +150,7 @@ pub struct UsageExportArgs {
 
 #[derive(Subcommand)]
 pub enum UsagePlanCommands {
-    /// Show configured plan and current projection
+    /// Show configured plan
     Show(UsageReportArgs),
     /// Set a known or custom plan
     Set {
@@ -228,26 +232,24 @@ pub enum PlanProviderArg {
     Cursor,
 }
 
-/// Phase 6c-cli: host-side `ainb usage <subcommand>` execution.
+/// Phase 6c-cli + 6d: host-side `ainb usage <subcommand>` execution.
 ///
 /// Plan / Currency / Cache stay in the host (config admin, not
 /// analytics — they don't fit the plugin's data-plane model). The
-/// remaining 9 subcommands now route through the burndown plugin via
-/// `ainb-plugin-host::dispatch_cli`; the in-tree handlers (`print_*`,
-/// `export_usage`, `model_alias_command`) are retained for the byte-
-/// identity baseline tests but no longer reached by the CLI dispatch
-/// path. Phase 6d deletes them once `models/usage/parsers/` goes away.
+/// remaining 9 subcommands route through the burndown plugin via
+/// `ainb-plugin-host::dispatch_cli`; reaching them here means the
+/// registry-side runner's plugin host setup failed (e.g. an
+/// `AINB_DISABLE_PLUGINS=1` slipped through). The canonical entry
+/// is `crate::cli::registry::UsageCommand::run`.
 pub async fn execute(command: UsageCommands, format: OutputFormat) -> Result<()> {
     match command {
         // Host-side admin subcommands.
         UsageCommands::Plan { command } => plan_command(command, format),
         UsageCommands::Currency(args) => currency_command(args),
         UsageCommands::Cache { command } => cache_command(command, format),
-        // Plugin-routed subcommands. Dispatch using the original argv
-        // captured by the registry-side runner; this branch is reached
-        // only when the host shim's plugin host setup failed (e.g. an
-        // older AINB_DISABLE_PLUGINS=1 path slipped through). The
-        // canonical entry is `crate::cli::registry::UsageCommand::run`.
+        // Plugin-routed subcommands. The registry's `dispatch_usage_via_plugin`
+        // handles these directly; reaching this branch means the host
+        // shim's plugin host setup failed.
         UsageCommands::Report(_)
         | UsageCommands::Status(_)
         | UsageCommands::Today(_)
@@ -266,6 +268,7 @@ pub async fn execute(command: UsageCommands, format: OutputFormat) -> Result<()>
 }
 
 fn cache_command(command: UsageCacheCommands, format: OutputFormat) -> Result<()> {
+    use crate::models::usage::shared_cache;
     match command {
         UsageCacheCommands::Info => {
             let cache = shared_cache();
@@ -319,199 +322,20 @@ fn cache_command(command: UsageCacheCommands, format: OutputFormat) -> Result<()
     }
 }
 
-fn print_report(args: &UsageReportArgs, format: OutputFormat, title: &str) -> Result<()> {
-    let data = load_usage(args)?;
-    match format {
-        OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&report_json(&data))?);
-        }
-        OutputFormat::Csv => {
-            print!("{}", combined_csv(&data));
-        }
-        OutputFormat::Text => {
-            print_text_report(title, &data);
-        }
-    }
-    Ok(())
-}
-
-fn print_status(args: &UsageReportArgs, format: OutputFormat) -> Result<()> {
-    let data = load_usage(args)?;
-    let config = AppConfig::load().unwrap_or_default();
-    let projection = config.usage.plan.as_ref().map(|plan| {
-        crate::models::usage::project_plan_usage(&data, plan, Local::now().date_naive())
-    });
-    match format {
-        OutputFormat::Json => println!(
-            "{}",
-            serde_json::to_string_pretty(&json!({
-                "overview": data.overview(),
-                "plan": projection,
-            }))?
-        ),
-        OutputFormat::Csv => print!("{}", combined_csv(&data)),
-        OutputFormat::Text => {
-            print_text_report("Usage Status", &data);
-            if let Some(projection) = projection {
-                println!(
-                    "Plan: ${:.2} / ${:.2} ({:.0}%) {:?}",
-                    projection.spent_usd,
-                    projection.monthly_usd,
-                    projection.percent_used * 100.0,
-                    projection.status
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
-fn print_optimize(args: &UsageReportArgs, format: OutputFormat) -> Result<()> {
-    let data = load_usage(args)?;
-    let result = optimize_usage(&data);
-    if matches!(format, OutputFormat::Json) {
-        println!("{}", serde_json::to_string_pretty(&result)?);
-        return Ok(());
-    }
-    println!("Optimize Findings");
-    println!("Health: {:?} ({}/100)", result.grade, result.score);
-    println!(
-        "Potential savings: {} tokens",
-        result.potential_tokens_saved
-    );
-    for finding in &result.findings {
-        println!(
-            "- {:?}: {} ({})",
-            finding.impact, finding.title, finding.details
-        );
-        for action in &finding.actions {
-            match &action.command {
-                Some(command) => println!("  Suggestion: {} -> {}", action.label, command),
-                None => println!("  Suggestion: {}", action.label),
-            }
-        }
-    }
-    Ok(())
-}
-
-fn print_compare(args: &UsageReportArgs, format: OutputFormat) -> Result<()> {
-    let data = load_usage(args)?;
-    let result = compare_models(&data);
-    if matches!(format, OutputFormat::Json) {
-        println!("{}", serde_json::to_string_pretty(&result)?);
-        return Ok(());
-    }
-    println!("Model Compare");
-    if let Some(winner) = &result.winner {
-        println!("Leader: {winner}");
-    }
-    if result.low_data {
-        println!("Low data: compare results need more sessions.");
-    }
-    for row in &result.models {
-        println!(
-            "- {}: {} calls, {} tokens/call, {} one-shot, {} retries",
-            row.model, row.calls, row.tokens_per_call, row.one_shot_turns, row.retries
-        );
-    }
-    Ok(())
-}
-
-fn print_yield(args: &UsageReportArgs, format: OutputFormat) -> Result<()> {
-    let data = load_usage(args)?;
-    let result = analyze_yield(&data);
-    if matches!(format, OutputFormat::Json) {
-        println!("{}", serde_json::to_string_pretty(&result)?);
-        return Ok(());
-    }
-    println!("Usage Yield");
-    println!(
-        "Productive: {} sessions (${:.2})",
-        result.productive_sessions, result.productive_usd
-    );
-    println!(
-        "Reverted: {} sessions (${:.2})",
-        result.reverted_sessions, result.reverted_usd
-    );
-    println!(
-        "Abandoned: {} sessions (${:.2})",
-        result.abandoned_sessions, result.abandoned_usd
-    );
-    Ok(())
-}
-
-fn export_usage(args: &UsageExportArgs, format: OutputFormat) -> Result<()> {
-    let data = load_usage(&args.report)?;
-    match format {
-        OutputFormat::Json => {
-            let text = serde_json::to_string_pretty(&json!({
-                "schema": "ainb.usage.v1",
-                "generated_at": Local::now().to_rfc3339(),
-                "currency": "USD",
-                "report": report_json(&data),
-            }))?;
-            write_or_print(args.output.as_deref(), &text)
-        }
-        OutputFormat::Text => {
-            let text = serde_json::to_string_pretty(&report_json(&data))?;
-            write_or_print(args.output.as_deref(), &text)
-        }
-        OutputFormat::Csv => {
-            if let Some(path) = &args.output {
-                if path.extension().is_some() {
-                    fs::write(path, combined_csv(&data))?;
-                } else {
-                    fs::create_dir_all(path)?;
-                    fs::write(path.join("README.md"), "AINB usage export\n")?;
-                    fs::write(path.join("summary.csv"), summary_csv(&data))?;
-                    fs::write(path.join("daily.csv"), daily_csv(&data))?;
-                    fs::write(path.join("projects.csv"), projects_csv(&data.projects))?;
-                    fs::write(path.join("sessions.csv"), sessions_csv(&data.sessions))?;
-                    fs::write(
-                        path.join("activities.csv"),
-                        activities_csv(&data.activities),
-                    )?;
-                    fs::write(path.join("models.csv"), models_csv(&data))?;
-                    fs::write(path.join("tools.csv"), named_csv("tool", &data.tools))?;
-                    fs::write(
-                        path.join("shell_commands.csv"),
-                        named_csv("command", &data.shell_commands),
-                    )?;
-                    fs::write(
-                        path.join("mcp_servers.csv"),
-                        named_csv("server", &data.mcp_servers),
-                    )?;
-                }
-                Ok(())
-            } else {
-                print!("{}", combined_csv(&data));
-                Ok(())
-            }
-        }
-    }
-}
-
+/// Phase 6d: the `plan show` projection (`spend / projected / status`)
+/// previously called into the host's parser tree (`parse_usage_for` →
+/// aggregation pipeline). That whole pipeline is the plugin's job now,
+/// so `Show` just prints the configured plan; the plugin's
+/// `ainb usage report` covers the projection breakdown.
 fn plan_command(command: UsagePlanCommands, format: OutputFormat) -> Result<()> {
     let mut config = AppConfig::load().unwrap_or_default();
     match command {
-        UsagePlanCommands::Show(args) => {
-            let today = Local::now().date_naive();
-            let data = if let Some(plan) = config.usage.plan.as_ref() {
-                load_usage(&plan_show_args_for_plan(&args, plan, today))?
-            } else {
-                load_usage(&args)?
-            };
-            let projection = config
-                .usage
-                .plan
-                .as_ref()
-                .map(|plan| crate::models::usage::project_plan_usage(&data, plan, today));
+        UsagePlanCommands::Show(_args) => {
             if matches!(format, OutputFormat::Json) {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&json!({
                         "plan": config.usage.plan,
-                        "projection": projection,
                     }))?
                 );
             } else if let Some(plan) = &config.usage.plan {
@@ -519,12 +343,9 @@ fn plan_command(command: UsagePlanCommands, format: OutputFormat) -> Result<()> 
                     "Plan: {:?} ${:.2}/month reset day {}",
                     plan.id, plan.monthly_usd, plan.reset_day
                 );
-                if let Some(projection) = projection {
-                    println!(
-                        "Spend: ${:.2}, projected ${:.2}, {:?}",
-                        projection.spent_usd, projection.projected_usd, projection.status
-                    );
-                }
+                println!(
+                    "(run `ainb usage report --period month` via the burndown plugin for spend/projection)"
+                );
             } else {
                 println!("No usage plan configured.");
             }
@@ -585,206 +406,14 @@ fn currency_command(args: UsageCurrencyArgs) -> Result<()> {
     Ok(())
 }
 
-fn model_alias_command(args: UsageModelAliasArgs) -> Result<()> {
-    let mut config = AppConfig::load().unwrap_or_default();
-    if args.list {
-        for (from, to) in &config.usage.model_aliases {
-            println!("{from} -> {to}");
-        }
-        return Ok(());
-    }
-    if let Some(remove) = args.remove {
-        config.usage.model_aliases.remove(&remove);
-        config.save()?;
-        println!("Model alias removed.");
-        return Ok(());
-    }
-    match (args.from, args.to) {
-        (Some(from), Some(to)) => {
-            config.usage.model_aliases.insert(from, to);
-            config.save()?;
-            println!("Model alias saved.");
-            Ok(())
-        }
-        _ => bail!("Use --list, --remove <model>, or <from> <to>"),
-    }
-}
-
-/// Public entry for plugin-mode CLI dispatch. Loads UsageData via the
-/// host-side cache + parser pipeline so the plugin (which can't open
-/// the SQLite cache from inside wasmi yet) renders against the same
-/// snapshot the in-tree path used to. Defaults to a "wide" query so
-/// every subcommand sees the full data set; the plugin's per-command
-/// filtering happens against that snapshot.
-pub async fn load_usage_for_plugin() -> Result<UsageData> {
-    let args = UsageReportArgs {
-        period: PeriodArg::All,
-        ..UsageReportArgs::default()
-    };
-    load_usage(&args)
-}
-
-fn load_usage(args: &UsageReportArgs) -> Result<UsageData> {
-    let query = query_from_args(args)?;
-    if args.no_cache {
-        Ok(parse_usage_for_with_roots_and_cache(
-            query,
-            &UsageSourceRoots::default(),
-            disabled_cache(),
-        ))
-    } else {
-        Ok(parse_usage_for(query))
-    }
-}
-
-fn query_from_args(args: &UsageReportArgs) -> Result<UsageQuery> {
-    // Period precedence (top wins; clap rejects combinations via the
-    // conflicts_with_all groups on UsageReportArgs):
-    //   --month YYYY-MM            -> SpecificMonth
-    //   --quarter YYYY-Qn          -> SpecificQuarter
-    //   --last-n-days N            -> LastNDays(N)
-    //   --ytd                      -> YearToDate
-    //   --from / --to              -> Custom (existing free-text behaviour)
-    //   --period {today|week|30days|month|all}  (default)
-    let period = if let Some(month_str) = &args.month {
-        parse_month_arg(month_str)?
-    } else if let Some(quarter_str) = &args.quarter {
-        parse_quarter_arg(quarter_str)?
-    } else if let Some(n) = args.last_n_days {
-        if n == 0 {
-            bail!("--last-n-days must be >= 1");
-        }
-        UsagePeriod::LastNDays(n)
-    } else if args.ytd {
-        UsagePeriod::YearToDate
-    } else if args.from.is_some() || args.to.is_some() {
-        let from = match &args.from {
-            Some(value) => parse_date(value)?,
-            None => NaiveDate::from_ymd_opt(1970, 1, 1).expect("valid date"),
-        };
-        let to = match &args.to {
-            Some(value) => parse_date(value)?,
-            None => Local::now().date_naive(),
-        };
-        if from > to {
-            bail!("from date must be before or equal to to date");
-        }
-        UsagePeriod::Custom { from, to }
-    } else {
-        match args.period {
-            PeriodArg::Today => UsagePeriod::Today,
-            PeriodArg::Week => UsagePeriod::Week,
-            PeriodArg::ThirtyDays => UsagePeriod::ThirtyDays,
-            PeriodArg::Month => UsagePeriod::Month,
-            PeriodArg::All => UsagePeriod::All,
-        }
-    };
-
-    Ok(UsageQuery {
-        period,
-        provider_filter: match args.provider {
-            ProviderArg::All => UsageProviderFilter::All,
-            ProviderArg::Claude => UsageProviderFilter::Claude,
-            ProviderArg::Codex => UsageProviderFilter::Codex,
-        },
-        include_projects: args.include.clone(),
-        exclude_projects: args.exclude.clone(),
-        filters: UsageFilters {
-            project: args.project.clone(),
-            model: args.model.clone(),
-            activity: args.activity.clone(),
-            session: args.session.clone(),
-            branch: args.branch.clone(),
-            // No CLI surface for exclude filters yet — populated only
-            // via the TUI X-on-row picker.
-            ..UsageFilters::default()
-        },
-    })
-}
-
-fn parse_date(value: &str) -> Result<NaiveDate> {
-    NaiveDate::parse_from_str(value, "%Y-%m-%d")
-        .map_err(|_| anyhow!("invalid date `{value}`, expected YYYY-MM-DD"))
-}
-
-/// Parse `--month YYYY-MM` into `UsagePeriod::SpecificMonth(first-of-month)`.
-fn parse_month_arg(value: &str) -> Result<UsagePeriod> {
-    // chrono's NaiveDate parser wants a day; pin to `-01`.
-    let with_day = format!("{value}-01");
-    let date = NaiveDate::parse_from_str(&with_day, "%Y-%m-%d")
-        .map_err(|_| anyhow!("invalid --month `{value}`, expected YYYY-MM"))?;
-    Ok(UsagePeriod::SpecificMonth(date))
-}
-
-/// Parse `--quarter YYYY-Qn` into `UsagePeriod::SpecificQuarter(year, q)`.
-fn parse_quarter_arg(value: &str) -> Result<UsagePeriod> {
-    let err = || anyhow!("invalid --quarter `{value}`, expected YYYY-Qn (n=1..=4)");
-    // Accept either case for the Q.
-    let normalised = value.to_ascii_uppercase();
-    let (year_part, q_part) = normalised.split_once("-Q").ok_or_else(err)?;
-    let year: i32 = year_part.parse().map_err(|_| err())?;
-    let q: u8 = q_part.parse().map_err(|_| err())?;
-    if !(1..=4).contains(&q) {
-        return Err(err());
-    }
-    Ok(UsagePeriod::SpecificQuarter(year, q))
-}
-
-fn print_text_report(title: &str, data: &UsageData) {
-    println!("{title}");
-    println!(
-        "Overview: {} calls, {} sessions, {} projects, {} tokens, {}",
-        data.grand_total.call_count,
-        data.grand_total.session_count,
-        data.grand_total.project_count,
-        data.grand_total.total(),
-        format_cost(data.grand_total.cost_usd)
-    );
-    println!();
-    print_top_projects(data);
-    print_top_activities(data);
-    print_top_models(data);
-}
-
-fn print_top_projects(data: &UsageData) {
-    println!("By Project");
-    for project in data.projects.iter().take(8) {
-        println!(
-            "- {}: {} calls, {} tokens, {}",
-            project.name,
-            project.bucket.call_count,
-            project.bucket.total(),
-            format_cost(project.bucket.cost_usd)
-        );
-    }
-}
-
-fn print_top_activities(data: &UsageData) {
-    println!("By Activity");
-    for activity in data.activities.iter().take(8) {
-        println!(
-            "- {}: {} turns, {} retries, {} tokens",
-            activity.category.label(),
-            activity.turns,
-            activity.retries,
-            activity.bucket.total()
-        );
-    }
-}
-
-fn print_top_models(data: &UsageData) {
-    println!("By Model");
-    for model in data.models.iter().take(8) {
-        println!(
-            "- {}: {} calls, {} tokens, {}",
-            model.model,
-            model.bucket.call_count,
-            model.bucket.total(),
-            format_cost(model.bucket.cost_usd)
-        );
-    }
-}
-
+/// JSON shape used by the burndown plugin's `usage report --format=json`
+/// CLI handler. Re-exported through `test_support::cli_usage_report_json`
+/// so tripwire / snapshot tests can assert byte-identity between the
+/// in-tree golden shape and the plugin's actual stdout.
+///
+/// Only `report_json` survives Phase 6d: the print/CSV/export helpers
+/// it used to live alongside were dead in-tree handlers — `dispatch_usage_via_plugin`
+/// now owns those code paths. This stays so the golden survives.
 pub(crate) fn report_json(data: &UsageData) -> serde_json::Value {
     json!({
         "overview": data.overview(),
@@ -797,153 +426,6 @@ pub(crate) fn report_json(data: &UsageData) -> serde_json::Value {
         "shell_commands": data.shell_commands,
         "mcp_servers": data.mcp_servers,
     })
-}
-
-fn write_or_print(path: Option<&Path>, text: &str) -> Result<()> {
-    if let Some(path) = path {
-        fs::write(path, text)?;
-    } else {
-        println!("{text}");
-    }
-    Ok(())
-}
-
-fn combined_csv(data: &UsageData) -> String {
-    [
-        summary_csv(data),
-        daily_csv(data),
-        projects_csv(&data.projects),
-        sessions_csv(&data.sessions),
-        activities_csv(&data.activities),
-        models_csv(data),
-        named_csv("tool", &data.tools),
-        named_csv("command", &data.shell_commands),
-        named_csv("server", &data.mcp_servers),
-    ]
-    .join("\n")
-}
-
-fn summary_csv(data: &UsageData) -> String {
-    format!(
-        "section,metric,value\nsummary,calls,{}\nsummary,sessions,{}\nsummary,projects,{}\nsummary,tokens,{}\nsummary,cost_usd,{}\n",
-        data.grand_total.call_count,
-        data.grand_total.session_count,
-        data.grand_total.project_count,
-        data.grand_total.total(),
-        data.grand_total.cost_usd.unwrap_or(0.0)
-    )
-}
-
-fn daily_csv(data: &UsageData) -> String {
-    let mut out = "date,calls,sessions,projects,tokens,cost_usd\n".to_string();
-    for (date, bucket) in &data.daily {
-        out.push_str(&format!(
-            "{},{},{},{},{},{}\n",
-            date,
-            bucket.call_count,
-            bucket.session_count,
-            bucket.project_count,
-            bucket.total(),
-            bucket.cost_usd.unwrap_or(0.0)
-        ));
-    }
-    out
-}
-
-fn projects_csv(projects: &[ProjectUsage]) -> String {
-    let mut out = "project,path,calls,sessions,tokens,cost_usd\n".to_string();
-    for project in projects {
-        out.push_str(&format!(
-            "{},{},{},{},{},{}\n",
-            csv_cell(&project.name),
-            csv_cell(&project.path),
-            project.bucket.call_count,
-            project.bucket.session_count,
-            project.bucket.total(),
-            project.bucket.cost_usd.unwrap_or(0.0)
-        ));
-    }
-    out
-}
-
-fn sessions_csv(sessions: &[SessionUsage]) -> String {
-    let mut out = "provider,project,session_id,first,last,calls,tokens,cost_usd\n".to_string();
-    for session in sessions {
-        out.push_str(&format!(
-            "{},{},{},{},{},{},{},{}\n",
-            csv_cell(&session.provider),
-            csv_cell(&session.project),
-            csv_cell(&session.session_id),
-            // Emit RFC3339 in the user's local offset. The instant is
-            // the same as the Utc-stored value; rendering with the
-            // local offset matches what the TUI shows so a CSV row
-            // round-trips visibly to the user's clock.
-            session.first_timestamp.with_timezone(&chrono::Local).to_rfc3339(),
-            session.last_timestamp.with_timezone(&chrono::Local).to_rfc3339(),
-            session.bucket.call_count,
-            session.bucket.total(),
-            session.bucket.cost_usd.unwrap_or(0.0)
-        ));
-    }
-    out
-}
-
-fn activities_csv(activities: &[ActivityUsage]) -> String {
-    let mut out = "activity,turns,retries,edit_turns,one_shot_turns,tokens,cost_usd\n".to_string();
-    for activity in activities {
-        out.push_str(&format!(
-            "{},{},{},{},{},{},{}\n",
-            activity.category.label(),
-            activity.turns,
-            activity.retries,
-            activity.edit_turns,
-            activity.one_shot_turns,
-            activity.bucket.total(),
-            activity.bucket.cost_usd.unwrap_or(0.0)
-        ));
-    }
-    out
-}
-
-fn models_csv(data: &UsageData) -> String {
-    let mut out = "model,calls,tokens,cost_usd\n".to_string();
-    for model in &data.models {
-        out.push_str(&format!(
-            "{},{},{},{}\n",
-            csv_cell(&model.model),
-            model.bucket.call_count,
-            model.bucket.total(),
-            model.bucket.cost_usd.unwrap_or(0.0)
-        ));
-    }
-    out
-}
-
-fn named_csv(name_header: &str, rows: &[NamedUsage]) -> String {
-    let mut out = format!("{name_header},calls\n");
-    for row in rows {
-        out.push_str(&format!("{},{}\n", csv_cell(&row.name), row.calls));
-    }
-    out
-}
-
-fn csv_cell(value: &str) -> String {
-    let escaped = value.replace('"', "\"\"");
-    let protected = if escaped
-        .chars()
-        .next()
-        .is_some_and(|ch| matches!(ch, '\t' | '\r' | '=' | '+' | '-' | '@'))
-    {
-        format!("'{escaped}")
-    } else {
-        escaped
-    };
-    format!("\"{protected}\"")
-}
-
-fn format_cost(cost: Option<f64>) -> String {
-    cost.map(|value| format!("${value:.2}"))
-        .unwrap_or_else(|| "cost unavailable".to_string())
 }
 
 fn plan_id(plan: PlanArg) -> UsagePlanId {
@@ -966,38 +448,22 @@ fn plan_provider(provider: PlanProviderArg) -> UsagePlanProvider {
     }
 }
 
-fn provider_arg_for_plan(provider: UsagePlanProvider) -> ProviderArg {
-    match provider {
-        UsagePlanProvider::All | UsagePlanProvider::Cursor => ProviderArg::All,
-        UsagePlanProvider::Claude => ProviderArg::Claude,
-        UsagePlanProvider::Codex => ProviderArg::Codex,
-    }
-}
-
-fn plan_show_args_for_plan(
-    args: &UsageReportArgs,
-    plan: &UsagePlan,
-    today: NaiveDate,
-) -> UsageReportArgs {
-    let (from, to) = billing_period(today, plan.reset_day);
-    let mut scoped_args = args.clone();
-    scoped_args.period = PeriodArg::All;
-    scoped_args.from = Some(from.to_string());
-    scoped_args.to = Some(to.to_string());
-    scoped_args.provider = provider_arg_for_plan(plan.provider);
-    scoped_args
-}
+// Silence "unused import" warnings on the types still re-exported for
+// `report_json` — the CSV/print handlers that referenced them directly
+// were deleted in Phase 6d.
+#[allow(dead_code)]
+type _UnusedActivity = ActivityUsage;
+#[allow(dead_code)]
+type _UnusedNamed = NamedUsage;
+#[allow(dead_code)]
+type _UnusedProject = ProjectUsage;
+#[allow(dead_code)]
+type _UnusedSession = SessionUsage;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn csv_cell_escapes_formula_starts() {
-        assert_eq!(csv_cell("=cmd"), "\"'=cmd\"");
-        assert_eq!(csv_cell("@user"), "\"'@user\"");
-        assert_eq!(csv_cell("safe"), "\"safe\"");
-    }
+    use chrono::NaiveDate;
 
     #[test]
     fn report_json_keeps_expected_top_level_sections() {
@@ -1017,89 +483,6 @@ mod tests {
         ] {
             assert!(json.get(key).is_some(), "missing {key}");
         }
-    }
-
-    #[test]
-    fn combined_csv_includes_export_section_headers() {
-        let csv = combined_csv(&UsageData::default());
-
-        for header in [
-            "section,metric,value",
-            "date,calls,sessions,projects,tokens,cost_usd",
-            "project,path,calls,sessions,tokens,cost_usd",
-            "provider,project,session_id,first,last,calls,tokens,cost_usd",
-            "activity,turns,retries,edit_turns,one_shot_turns,tokens,cost_usd",
-            "model,calls,tokens,cost_usd",
-            "tool,calls",
-            "command,calls",
-            "server,calls",
-        ] {
-            assert!(csv.contains(header), "missing {header}");
-        }
-    }
-
-    #[test]
-    fn month_flag_yields_specific_month_period() {
-        let args = UsageReportArgs {
-            month: Some("2026-04".into()),
-            ..UsageReportArgs::default()
-        };
-        let q = query_from_args(&args).unwrap();
-        match q.period {
-            UsagePeriod::SpecificMonth(d) => {
-                assert_eq!(d, NaiveDate::from_ymd_opt(2026, 4, 1).unwrap())
-            }
-            other => panic!("expected SpecificMonth, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn quarter_flag_yields_specific_quarter_period() {
-        let args = UsageReportArgs {
-            quarter: Some("2026-Q2".into()),
-            ..UsageReportArgs::default()
-        };
-        let q = query_from_args(&args).unwrap();
-        assert!(matches!(q.period, UsagePeriod::SpecificQuarter(2026, 2)));
-    }
-
-    #[test]
-    fn quarter_flag_lowercase_q_is_accepted() {
-        let args = UsageReportArgs {
-            quarter: Some("2026-q3".into()),
-            ..UsageReportArgs::default()
-        };
-        let q = query_from_args(&args).unwrap();
-        assert!(matches!(q.period, UsagePeriod::SpecificQuarter(2026, 3)));
-    }
-
-    #[test]
-    fn quarter_flag_rejects_q5() {
-        let args = UsageReportArgs {
-            quarter: Some("2026-Q5".into()),
-            ..UsageReportArgs::default()
-        };
-        let err = query_from_args(&args).unwrap_err().to_string();
-        assert!(err.contains("YYYY-Qn"));
-    }
-
-    #[test]
-    fn last_n_days_flag_yields_last_n_days_period() {
-        let args = UsageReportArgs {
-            last_n_days: Some(14),
-            ..UsageReportArgs::default()
-        };
-        let q = query_from_args(&args).unwrap();
-        assert!(matches!(q.period, UsagePeriod::LastNDays(14)));
-    }
-
-    #[test]
-    fn last_n_days_zero_is_rejected() {
-        let args = UsageReportArgs {
-            last_n_days: Some(0),
-            ..UsageReportArgs::default()
-        };
-        assert!(query_from_args(&args).is_err());
     }
 
     #[test]
@@ -1155,52 +538,10 @@ mod tests {
         assert!(result.is_err(), "clap should reject --from with --month");
     }
 
+    // Reference NaiveDate so the chrono import stays alive for the
+    // future date-flag tests this module owns.
     #[test]
-    fn ytd_flag_yields_year_to_date_period() {
-        let args = UsageReportArgs {
-            ytd: true,
-            ..UsageReportArgs::default()
-        };
-        let q = query_from_args(&args).unwrap();
-        assert!(matches!(q.period, UsagePeriod::YearToDate));
-    }
-
-    #[test]
-    fn invalid_date_returns_clear_error() {
-        let args = UsageReportArgs {
-            from: Some("2026/04/01".to_string()),
-            ..UsageReportArgs::default()
-        };
-        let err = query_from_args(&args).unwrap_err().to_string();
-        assert!(err.contains("expected YYYY-MM-DD"));
-    }
-
-    #[test]
-    fn inverted_date_range_errors() {
-        let args = UsageReportArgs {
-            from: Some("2026-04-02".to_string()),
-            to: Some("2026-04-01".to_string()),
-            ..UsageReportArgs::default()
-        };
-        let err = query_from_args(&args).unwrap_err().to_string();
-        assert!(err.contains("from date"));
-    }
-
-    #[test]
-    fn plan_show_uses_billing_window_and_plan_provider() {
-        let today = NaiveDate::from_ymd_opt(2026, 4, 29).unwrap();
-        let plan = UsagePlan {
-            id: UsagePlanId::ClaudePro,
-            monthly_usd: 20.0,
-            provider: UsagePlanProvider::Claude,
-            reset_day: 12,
-            set_at: "2026-04-29T00:00:00Z".to_string(),
-        };
-
-        let scoped = plan_show_args_for_plan(&UsageReportArgs::default(), &plan, today);
-
-        assert_eq!(scoped.from.as_deref(), Some("2026-04-12"));
-        assert_eq!(scoped.to.as_deref(), Some("2026-05-11"));
-        assert!(matches!(scoped.provider, ProviderArg::Claude));
+    fn naive_date_construction_works() {
+        let _ = NaiveDate::from_ymd_opt(2026, 5, 9).unwrap();
     }
 }
