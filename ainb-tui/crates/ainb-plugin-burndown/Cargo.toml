@@ -17,6 +17,10 @@ crate-type = ["cdylib"]
 [dependencies]
 # Plugin SDK — manifest, capability, and wire types only (no host deps).
 ainb-plugin-api = { path = "../ainb-plugin-api" }
+# Wire schema for the sessions.usage_data event we now subscribe to
+# (Phase 6c). Same crate session-reader publishes against; the only way
+# to keep the contract typed end-to-end.
+ainb-plugin-types-sessions = { path = "../ainb-plugin-types-sessions" }
 
 # Data model + cache + reports
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }

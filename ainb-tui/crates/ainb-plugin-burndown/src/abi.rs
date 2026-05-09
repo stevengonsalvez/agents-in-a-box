@@ -306,8 +306,36 @@ pub extern "C" fn _handle_event(ptr: i32, len: i32) -> i32 {
     }
     if let ainb_plugin_api::PluginEvent::Custom { topic, payload } = ev {
         match topic.as_str() {
+            // Phase 6c subscribe path. session-reader publishes a
+            // msgpack-encoded UsageDataEvent; we decode it, schema-check
+            // the wire version, and convert wire types into burndown's
+            // local UsageData (which the existing render + cli paths
+            // expect). Conversion logic lives in `wire_to_local`.
+            "sessions.usage_data" => {
+                use ainb_plugin_types_sessions::{UsageDataEvent, WIRE_VERSION};
+                let event: UsageDataEvent = match rmp_serde::from_slice(&payload) {
+                    Ok(e) => e,
+                    Err(_) => return 0,
+                };
+                if event.version != WIRE_VERSION {
+                    // Schema drift — surface via log but don't trap;
+                    // the host marks the plugin degraded only on traps,
+                    // and a stale snapshot is recoverable.
+                    return 0;
+                }
+                let local = wire_to_local(event.data);
+                unsafe {
+                    if let Some(state) = STATE.as_mut() {
+                        state.data = Some(local);
+                    }
+                }
+            }
+            // Legacy in-tree CLI path (registry.rs pushes a snapshot
+            // before dispatch_cli). Payload is JSON-encoded
+            // crate::data::usage::UsageData. Kept until 6c-cli rips
+            // out the in-tree route entirely.
             "burndown.usage_data" => {
-                if let Ok(data) = serde_json::from_value::<UsageData>(payload) {
+                if let Ok(data) = serde_json::from_slice::<UsageData>(&payload) {
                     unsafe {
                         if let Some(state) = STATE.as_mut() {
                             state.data = Some(data);
@@ -316,8 +344,10 @@ pub extern "C" fn _handle_event(ptr: i32, len: i32) -> i32 {
                 }
             }
             "burndown.set_tab" => {
-                // Payload: {"tab":"daily"|"weekly"|"projects"|"burndown"|"optimize"}
-                let tab_name = payload.get("tab").and_then(|v| v.as_str()).unwrap_or("");
+                // Payload: JSON-encoded `{"tab":"daily"|"weekly"|...}`.
+                let val: serde_json::Value =
+                    serde_json::from_slice(&payload).unwrap_or(serde_json::Value::Null);
+                let tab_name = val.get("tab").and_then(|v| v.as_str()).unwrap_or("");
                 let tab = match tab_name {
                     "daily" => Some(crate::ui::UsageTab::Daily),
                     "weekly" => Some(crate::ui::UsageTab::Weekly),
@@ -363,4 +393,62 @@ pub extern "C" fn _alloc(size: i32) -> i32 {
     let buf = vec![0_u8; n].into_boxed_slice();
     let ptr = Box::into_raw(buf) as *mut u8 as i32;
     ptr
+}
+
+/// Convert the `sessions.usage_data` wire shape into burndown's local
+/// [`crate::data::usage::UsageData`].
+///
+/// Both crates define a `UsageData` with the same field names + types
+/// for everything *except* `model_project_counts`, which is a
+/// `Vec<(String, Vec<(String, usize)>)>` on the wire (deterministic
+/// ordering for byte-identical msgpack) and a `HashMap<String, …>`
+/// locally (cheap lookup at render time). Everything else round-trips
+/// via msgpack as a serde-bridge so we don't hand-write 12 sub-type
+/// converters that would rot whenever a field is added on either side.
+///
+/// Field-by-field strategy:
+/// * `daily`/`weekly`/`projects`/`grand_total`/`calls`/`sessions`/
+///   `models`/`activities`/`tools`/`mcp_servers`/`shell_commands`/
+///   `branches` — encode wire to msgpack, decode as the local type.
+///   The field names + primitive types match, and externally-tagged
+///   `Provider` round-trips into burndown's `String` field via the
+///   snake_case rename.
+/// * `model_project_counts` — explicit `into_iter().collect()` from
+///   the wire `Vec` into the local `HashMap`.
+fn wire_to_local(
+    wire: ainb_plugin_types_sessions::UsageData,
+) -> crate::data::usage::UsageData {
+    use crate::data::usage as ldu;
+    use std::collections::HashMap;
+
+    fn bridge<W, L>(w: &W) -> L
+    where
+        W: serde::Serialize,
+        L: serde::de::DeserializeOwned + Default,
+    {
+        let bytes = match rmp_serde::to_vec_named(w) {
+            Ok(b) => b,
+            Err(_) => return L::default(),
+        };
+        rmp_serde::from_slice(&bytes).unwrap_or_default()
+    }
+
+    let model_project_counts: HashMap<String, Vec<(String, usize)>> =
+        wire.model_project_counts.into_iter().collect();
+
+    ldu::UsageData {
+        daily: bridge(&wire.daily),
+        weekly: bridge(&wire.weekly),
+        projects: bridge(&wire.projects),
+        grand_total: bridge(&wire.grand_total),
+        calls: bridge(&wire.calls),
+        sessions: bridge(&wire.sessions),
+        models: bridge(&wire.models),
+        activities: bridge(&wire.activities),
+        tools: bridge(&wire.tools),
+        mcp_servers: bridge(&wire.mcp_servers),
+        shell_commands: bridge(&wire.shell_commands),
+        branches: bridge(&wire.branches),
+        model_project_counts,
+    }
 }
