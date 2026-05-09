@@ -14,7 +14,13 @@ use thiserror::Error;
 ///
 /// Bumped when the host-fn ABI changes incompatibly. Plugins whose
 /// `ainb_min_version` is greater than this string are rejected at load.
-pub const HOST_VERSION: &str = "1.1.0";
+///
+/// Phase 6 ABI bump: 1.1.0 → 1.2.0 to advertise the new host fns
+/// (`ainb_fs_read_dir`, `ainb_fs_read_file`, `ainb_cache_get`,
+/// `ainb_cache_put`, `ainb_request_data`). Plugins that need the new
+/// surface declare `ainb_min_version = "1.2.0"`. Older plugins
+/// (existing CTS canaries) keep `1.1.0` and stay compatible.
+pub const HOST_VERSION: &str = "1.2.0";
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ValidateError {

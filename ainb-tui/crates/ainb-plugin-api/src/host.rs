@@ -141,6 +141,53 @@ extern "C" {
         out_ptr: i32,
         out_len: i32,
     ) -> i32;
+
+    // logs read (Phase 6) ───────────────────────────────────────────────────
+    // Gated by `read_claude_logs` *or* `read_codex_logs`. The host derives
+    // an allowlist scoped to `~/.claude/projects/` and/or
+    // `~/.codex/sessions/` from the granted caps.
+    pub fn ainb_fs_read_dir(
+        path_ptr: i32,
+        path_len: i32,
+        out_ptr: i32,
+        out_len: i32,
+    ) -> i32;
+    pub fn ainb_fs_read_file(
+        path_ptr: i32,
+        path_len: i32,
+        out_ptr: i32,
+        out_len: i32,
+    ) -> i32;
+
+    // generic cache (Phase 6) ───────────────────────────────────────────────
+    // Always-on: scoped to `~/.agents-in-a-box/cache/<plugin-id>/<key>`
+    // by the host. Per-plugin and global quotas enforced server-side.
+    pub fn ainb_cache_get(
+        key_ptr: i32,
+        key_len: i32,
+        out_ptr: i32,
+        out_len: i32,
+    ) -> i32;
+    pub fn ainb_cache_put(
+        key_ptr: i32,
+        key_len: i32,
+        val_ptr: i32,
+        val_len: i32,
+        ttl_secs: i64,
+    ) -> i32;
+
+    // synchronous request/response (Phase 6) ────────────────────────────────
+    // Gated by `event_bus`. Publishes on `req:<topic>`, blocks on the
+    // host's reply ledger until a matching reply or `timeout_ms` passes.
+    pub fn ainb_request_data(
+        topic_ptr: i32,
+        topic_len: i32,
+        payload_ptr: i32,
+        payload_len: i32,
+        timeout_ms: i32,
+        out_ptr: i32,
+        out_len: i32,
+    ) -> i32;
 }
 
 /// Catalogue of host-fn import names, paired with the capability that gates
@@ -162,6 +209,12 @@ pub const HOST_FN_CATALOGUE: &[HostFn] = &[
     HostFn::gated("ainb_http_request", GatedBy::Network),
     HostFn::gated("ainb_fs_read", GatedBy::Filesystem),
     HostFn::gated("ainb_fs_glob", GatedBy::Filesystem),
+    // Phase 6 host fns:
+    HostFn::gated("ainb_fs_read_dir", GatedBy::LogsRead),
+    HostFn::gated("ainb_fs_read_file", GatedBy::LogsRead),
+    HostFn::baseline("ainb_cache_get"),
+    HostFn::baseline("ainb_cache_put"),
+    HostFn::gated("ainb_request_data", GatedBy::EventBus),
 ];
 
 /// Catalogue entry: import name + which capability gates it (if any).
@@ -195,6 +248,10 @@ pub enum GatedBy {
     SpawnSubprocess,
     Network,
     Filesystem,
+    /// Granted if either `read_claude_logs` or `read_codex_logs` is set.
+    /// Used by the Phase 6 fs host fns whose allowlist roots resolve
+    /// to specific subdirs of either provider.
+    LogsRead,
 }
 
 #[cfg(test)]
@@ -216,9 +273,18 @@ mod tests {
             .filter(|f| f.gate.is_none())
             .map(|f| f.name)
             .collect();
+        // Phase 6 promoted cache_get/cache_put to baseline: the host
+        // scopes every read/write to `<plugin-id>` so a separate
+        // capability gate would be redundant.
         assert_eq!(
             baselines,
-            vec!["ainb_log", "ainb_now_ms", "ainb_render_buffer"]
+            vec![
+                "ainb_log",
+                "ainb_now_ms",
+                "ainb_render_buffer",
+                "ainb_cache_get",
+                "ainb_cache_put",
+            ]
         );
     }
 

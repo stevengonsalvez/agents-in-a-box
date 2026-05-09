@@ -31,6 +31,7 @@ fn is_granted(g: GatedBy, caps: &CapabilitySet) -> bool {
         GatedBy::SpawnSubprocess => caps.spawn_subprocess,
         GatedBy::Network => !caps.network.is_empty(),
         GatedBy::Filesystem => !caps.filesystem.is_empty(),
+        GatedBy::LogsRead => caps.read_claude_logs || caps.read_codex_logs,
     }
 }
 
@@ -45,9 +46,17 @@ mod tests {
             .iter()
             .map(|f| f.name)
             .collect();
+        // Baseline grew in Phase 6: cache_get/put are always-on (the
+        // per-plugin scoping replaces a capability gate).
         assert_eq!(
             allowed,
-            vec!["ainb_log", "ainb_now_ms", "ainb_render_buffer"]
+            vec![
+                "ainb_log",
+                "ainb_now_ms",
+                "ainb_render_buffer",
+                "ainb_cache_get",
+                "ainb_cache_put",
+            ]
         );
     }
 
