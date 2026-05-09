@@ -188,6 +188,15 @@ extern "C" {
         out_ptr: i32,
         out_len: i32,
     ) -> i32;
+    /// Reply side of the synchronous request/response. The plugin
+    /// receiving a `PluginEvent::Request` must call this with the same
+    /// `correlation_id` before its `_handle_event` returns; otherwise
+    /// the requester blocks until its timeout elapses.
+    pub fn ainb_publish_reply(
+        correlation_id: u64,
+        payload_ptr: i32,
+        payload_len: i32,
+    ) -> i32;
 }
 
 /// Catalogue of host-fn import names, paired with the capability that gates
@@ -215,6 +224,7 @@ pub const HOST_FN_CATALOGUE: &[HostFn] = &[
     HostFn::baseline("ainb_cache_get"),
     HostFn::baseline("ainb_cache_put"),
     HostFn::gated("ainb_request_data", GatedBy::EventBus),
+    HostFn::gated("ainb_publish_reply", GatedBy::EventBus),
 ];
 
 /// Catalogue entry: import name + which capability gates it (if any).

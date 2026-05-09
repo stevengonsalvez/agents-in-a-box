@@ -64,6 +64,13 @@ pub struct ProvidesTable {
     pub statusline: Vec<String>,
     #[serde(default)]
     pub providers: Vec<String>,
+    /// CLI namespaces this plugin claims (e.g. `["usage"]`). The host's
+    /// CLI dispatch shim consults this list to route `ainb <namespace>
+    /// ...` invocations to the plugin's `_handle_event` Command path.
+    /// First-loaded plugin wins on conflicting namespace claims; the
+    /// host logs a warning when it sees a duplicate.
+    #[serde(default)]
+    pub cli_namespaces: Vec<String>,
 }
 
 /// `[paths]` table — declared by data-plane plugins (e.g. session-reader)
