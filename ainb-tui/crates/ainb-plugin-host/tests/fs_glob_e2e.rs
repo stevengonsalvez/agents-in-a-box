@@ -27,6 +27,7 @@ fn fs_manifest(name: &str, root: &std::path::Path) -> Manifest {
             ..CapabilitiesTable::default()
         },
         provides: ProvidesTable::default(),
+        paths: ainb_plugin_api::PathsTable::default(),
     }
 }
 

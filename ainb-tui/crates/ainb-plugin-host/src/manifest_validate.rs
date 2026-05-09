@@ -100,6 +100,7 @@ mod tests {
             },
             capabilities: CapabilitiesTable::default(),
             provides: ProvidesTable::default(),
+            paths: ainb_plugin_api::PathsTable::default(),
         }
     }
 

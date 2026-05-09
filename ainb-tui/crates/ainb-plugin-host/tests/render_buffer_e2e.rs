@@ -21,6 +21,7 @@ fn render_target_manifest() -> Manifest {
         },
         capabilities: CapabilitiesTable::default(),
         provides: ProvidesTable::default(),
+        paths: ainb_plugin_api::PathsTable::default(),
     }
 }
 
