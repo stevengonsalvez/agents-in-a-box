@@ -16,6 +16,7 @@ pub mod host_fns;
 pub mod loader;
 pub mod manifest_validate;
 pub mod marketplace;
+pub mod path_guard;
 pub mod registry;
 pub mod runtime;
 
