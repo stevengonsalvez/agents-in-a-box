@@ -99,6 +99,14 @@ test-support = []
 # require both `dist/plugins/burndown/plugin.wasm` and
 # `dist/plugins/session-reader/plugin.wasm` on disk.
 cli-tests = ["test-support"]
+# Phase 6e tmux end-to-end gate: drive the actual TUI inside a real
+# tmux session, navigate to Analytics, capture the rendered pane,
+# and assert the burndown plugin painted real data through the
+# wasmi -> ratatui -> crossterm stack. Opt-in because it requires
+# `tmux` on PATH and the dist plugin staging dir, and is meant as a
+# pre-merge local gate rather than a default CI check (per memory
+# `feedback_plugin_completion_real_tmux_integration`).
+tmux-tests = ["cli-tests"]
 
 [dev-dependencies]
 mockall = { workspace = true }
