@@ -488,8 +488,11 @@ async fn dispatch_usage_via_plugin(argv: &[String]) -> Result<()> {
 
     // Push the host-side UsageData snapshot so the plugin's command
     // handlers can render against the same data the in-tree path used.
+    // Payload is now opaque bytes (json-encoded UsageData here) — the
+    // plugin's `_handle_event` decodes it against the same wire shape
+    // it always has.
     let data = crate::cli::usage::load_usage_for_plugin().await?;
-    let payload = serde_json::to_value(&data).context("UsageData -> json")?;
+    let payload = serde_json::to_vec(&data).context("UsageData -> json bytes")?;
     let ev = ainb_plugin_api::PluginEvent::Custom {
         topic: "burndown.usage_data".to_string(),
         payload,
