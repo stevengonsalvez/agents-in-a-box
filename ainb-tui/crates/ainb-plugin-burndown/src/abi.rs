@@ -513,34 +513,54 @@ fn wire_to_local(
     use crate::data::usage as ldu;
     use std::collections::HashMap;
 
-    fn bridge<W, L>(w: &W) -> L
+    fn bridge<W, L>(w: &W, field: &'static str) -> L
     where
         W: serde::Serialize,
         L: serde::de::DeserializeOwned + Default,
     {
+        // We've already gated on WIRE_VERSION upstream, so anything
+        // that fails here is a programmer bug (mismatched bridge
+        // types) — surface it via stderr instead of swallowing into
+        // L::default(). We still return default() so the host doesn't
+        // crash; the user sees a partial render with empty fields.
         let bytes = match rmp_serde::to_vec_named(w) {
             Ok(b) => b,
-            Err(_) => return L::default(),
+            Err(e) => {
+                eprintln!(
+                    "burndown: bridge encode failed for field `{}`: {}",
+                    field, e
+                );
+                return L::default();
+            }
         };
-        rmp_serde::from_slice(&bytes).unwrap_or_default()
+        match rmp_serde::from_slice(&bytes) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!(
+                    "burndown: bridge decode failed for field `{}`: {}",
+                    field, e
+                );
+                L::default()
+            }
+        }
     }
 
     let model_project_counts: HashMap<String, Vec<(String, usize)>> =
         wire.model_project_counts.into_iter().collect();
 
     ldu::UsageData {
-        daily: bridge(&wire.daily),
-        weekly: bridge(&wire.weekly),
-        projects: bridge(&wire.projects),
-        grand_total: bridge(&wire.grand_total),
-        calls: bridge(&wire.calls),
-        sessions: bridge(&wire.sessions),
-        models: bridge(&wire.models),
-        activities: bridge(&wire.activities),
-        tools: bridge(&wire.tools),
-        mcp_servers: bridge(&wire.mcp_servers),
-        shell_commands: bridge(&wire.shell_commands),
-        branches: bridge(&wire.branches),
+        daily: bridge(&wire.daily, "daily"),
+        weekly: bridge(&wire.weekly, "weekly"),
+        projects: bridge(&wire.projects, "projects"),
+        grand_total: bridge(&wire.grand_total, "grand_total"),
+        calls: bridge(&wire.calls, "calls"),
+        sessions: bridge(&wire.sessions, "sessions"),
+        models: bridge(&wire.models, "models"),
+        activities: bridge(&wire.activities, "activities"),
+        tools: bridge(&wire.tools, "tools"),
+        mcp_servers: bridge(&wire.mcp_servers, "mcp_servers"),
+        shell_commands: bridge(&wire.shell_commands, "shell_commands"),
+        branches: bridge(&wire.branches, "branches"),
         model_project_counts,
     }
 }
