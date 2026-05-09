@@ -7,6 +7,7 @@
 //! `Arc` each `HostState` holds.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ainb_plugin_api::{CapabilitySet, RenderTarget, WireBuffer};
@@ -93,6 +94,19 @@ pub struct HostShared {
     /// screen layer drains the entry it cares about right after triggering
     /// `PluginHost::render_plugin`. Older buffers are overwritten in place.
     pub pending_renders: Mutex<HashMap<(String, RenderTarget), WireBuffer>>,
+    /// `correlation_id → reply bytes`. Populated by the cross-plugin
+    /// pump when a subscriber publishes on `rep:<topic>` with a known
+    /// correlation id; drained by [`Self::take_reply`] inside the
+    /// `ainb_request_data` host-fn.
+    ///
+    /// Phase 6a foundation only: the host-fn primitive + this ledger
+    /// land here so Phase 6c-cli can wire the actual pump-driven reply
+    /// route without re-touching the wasmi linker.
+    pub pending_replies: Mutex<HashMap<u64, Vec<u8>>>,
+    /// Monotonic counter for correlation ids handed out by
+    /// [`Self::next_correlation_id`]. `AtomicU64` so the host-fn closure
+    /// can advance it without locking.
+    correlation_counter: AtomicU64,
 }
 
 #[derive(Debug, Clone)]
@@ -162,6 +176,28 @@ impl HostShared {
     pub fn take_render(&self, plugin_id: &str, target: RenderTarget) -> Option<WireBuffer> {
         let mut renders = self.pending_renders.lock().expect("pending_renders poisoned");
         renders.remove(&(plugin_id.to_string(), target))
+    }
+
+    /// Hand out the next correlation id for a synchronous request. Counter
+    /// starts at 1 so a 0 id can mean "no request" in plugin-side wire
+    /// formats that need a sentinel.
+    pub fn next_correlation_id(&self) -> u64 {
+        self.correlation_counter.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// Park a reply payload for the request-data host-fn to pick up.
+    /// Called from [`crate::PluginHost::pump_events`] when a subscriber
+    /// publishes on the `rep:<topic>` channel.
+    pub fn put_reply(&self, correlation_id: u64, payload: Vec<u8>) {
+        let mut q = self.pending_replies.lock().expect("pending_replies poisoned");
+        q.insert(correlation_id, payload);
+    }
+
+    /// Drain the reply for `correlation_id`, if any.
+    #[must_use]
+    pub fn take_reply(&self, correlation_id: u64) -> Option<Vec<u8>> {
+        let mut q = self.pending_replies.lock().expect("pending_replies poisoned");
+        q.remove(&correlation_id)
     }
 }
 

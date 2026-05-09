@@ -1,0 +1,37 @@
+# Standalone sub-workspace: this crate targets wasm32-wasip1 only.
+# Excluded from the parent workspace at ../../Cargo.toml so root
+# `cargo build`/`cargo test` (host target) doesn't try to compile it.
+# See reference_cargo_workspace_exclude_wasm.
+[workspace]
+
+[package]
+name = "ainb-plugin-session-reader"
+version = "0.1.0"
+edition = "2021"
+authors = ["stevengonsalvez"]
+license = "MIT"
+description = "Session-reader plugin for ainb — walks per-provider log dirs and publishes sessions.usage_data (wasm32-wasip1 cdylib)"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Plugin SDK — manifest, capability flags, host-fn extern decls.
+ainb-plugin-api = { path = "../ainb-plugin-api" }
+
+# Wire schema for the published event. Co-owned by burndown (consumer)
+# in Phase 6c; lives in its own crate per spec line 38.
+ainb-plugin-types-sessions = { path = "../ainb-plugin-types-sessions" }
+
+# JSONL parsing + msgpack encoding.
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rmp-serde = "1.3"
+
+[profile.release]
+# Trim wasm size aggressively.
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

@@ -269,6 +269,9 @@ fn cap_declared(caps: &CapabilitiesTable, gate: GatedBy) -> bool {
         GatedBy::SpawnSubprocess => caps.spawn_subprocess,
         GatedBy::Network => !caps.network.is_empty(),
         GatedBy::Filesystem => !caps.filesystem.is_empty(),
+        // Phase 6 fs host fns are gated on the union of the two log
+        // caps — same semantics as the host's `build_logs_allowlist`.
+        GatedBy::LogsRead => caps.read_claude_logs || caps.read_codex_logs,
     }
 }
 

@@ -5,6 +5,7 @@ members = [
     "crates/ainb-plugin-api",
     "crates/ainb-plugin-cts",
     "crates/ainb-plugin-host",
+    "crates/ainb-plugin-types-sessions",
     "xtask",
 ]
 default-members = ["crates/ainb-core"]
@@ -21,6 +22,9 @@ exclude = [
     # sources scripts/wasi-env.sh to wire WASI_SDK_PATH + emulated libs
     # rusqlite-bundled needs (mman/getpid/process_clocks/signal).
     "crates/ainb-plugin-burndown",
+    # session-reader is a wasm32-wasip1 cdylib — same exclusion rationale
+    # as burndown. Built via ./scripts/build-plugins.sh.
+    "crates/ainb-plugin-session-reader",
 ]
 
 [workspace.package]

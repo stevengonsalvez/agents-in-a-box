@@ -19,6 +19,6 @@ pub mod render;
 
 pub use capabilities::{Capability, CapabilitySet};
 pub use events::PluginEvent;
-pub use manifest::Manifest;
+pub use manifest::{Manifest, PathsTable};
 pub use plugin::{Plugin, PluginContext, PluginError, PluginResult};
 pub use render::{RenderTarget, Rect, WireBuffer, WireCell};

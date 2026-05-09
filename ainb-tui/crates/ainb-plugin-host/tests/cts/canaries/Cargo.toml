@@ -14,6 +14,8 @@ members = [
     "cts-provider-only",
     "cts-infinite-tick",
     "cts-malformed-buffer",
+    "cts-fs-read-with-cap",
+    "cts-fs-read-without-cap",
 ]
 
 # Canaries are size-tuned: panic = abort drops the unwinding machinery

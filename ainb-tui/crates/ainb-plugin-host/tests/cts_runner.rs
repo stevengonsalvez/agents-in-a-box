@@ -367,6 +367,57 @@ fn axis_9_infinite_tick_trips_fuel_budget() {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
+// Axis 13 — fs_read_dir works WHEN read_claude_logs is declared
+// ───────────────────────────────────────────────────────────────────────────
+#[test]
+fn axis_13_fs_read_with_capability_succeeds() {
+    let (m, w) = fixture("cts-fs-read-with-cap");
+    let plugin_id = m.plugin.name.clone();
+    let mut host = PluginHost::new();
+
+    host.load_bytes(m, &w)
+        .expect("axis 13: instantiation must succeed when read_claude_logs is granted");
+
+    // Behavioural anti-cheat: _init logs the per-canary sentinel only
+    // *after* the ainb_fs_read_dir call resolves. If the host had
+    // refused the cap, instantiation would have failed before _init
+    // ever ran.
+    assert!(
+        logs_contain(&host, &plugin_id, b"cts-13a8e0c4-fs-read-with-cap-init-OK"),
+        "axis 13: expected the canary's _init sentinel in log_ring (proves fs_read_dir was linked + _init ran)"
+    );
+    assert!(!host.get(&plugin_id).unwrap().is_degraded());
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Axis 14 — fs_read_dir is REFUSED when no log-read capability is declared
+// ───────────────────────────────────────────────────────────────────────────
+#[test]
+fn axis_14_fs_read_without_capability_refused() {
+    let (m, w) = fixture("cts-fs-read-without-cap");
+    let mut host = PluginHost::new();
+
+    let err = host
+        .load_bytes(m, &w)
+        .expect_err("axis 14: instantiation must fail when log-read caps are absent");
+    let chain = format!("{err:?}").to_lowercase();
+    assert!(
+        chain.contains("ainb_fs_read_dir")
+            || chain.contains("import")
+            || chain.contains("instantiate"),
+        "axis 14: error chain must explain the unresolved import (got: {chain})"
+    );
+
+    // Anti-cheat: if the host secretly stubbed the host-fn instead of
+    // refusing it, the plugin's _init would have run and emitted this
+    // sentinel. It must NOT appear anywhere.
+    assert!(
+        !any_plugin_logs(&host, b"cts-14d6b2e8-fs-read-without-cap-init-RAN"),
+        "axis 14: sentinel that proves _init illegally ran must not appear"
+    );
+}
+
+// ───────────────────────────────────────────────────────────────────────────
 // Axis 10 — malformed WireBuffer is rejected by the host validator
 // ───────────────────────────────────────────────────────────────────────────
 #[test]

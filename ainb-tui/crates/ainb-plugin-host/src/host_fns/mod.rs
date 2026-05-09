@@ -7,9 +7,22 @@
 //!   signatures so plugins built today keep working when the real impls land
 //!   in Phase 2+. Stubs return [`HostStatus::HostError`] so plugin authors get
 //!   a fast signal instead of silent zero data.
+//!
+//! Phase 6 adds three sub-modules wired by [`link_capabilities`]:
+//! * [`fs`] — `ainb_fs_read_dir` + `ainb_fs_read_file`, scoped to the
+//!   `read_claude_logs` / `read_codex_logs` allowlist roots.
+//! * [`cache`] — generic plugin-scoped KV with TTL + per-plugin quota and
+//!   global LRU eviction.
+//! * [`request`] — synchronous `ainb_request_data(topic, payload, timeout)`
+//!   over the existing event bus.
+
+pub mod cache;
+pub mod fs;
+pub mod request;
 
 use ainb_plugin_api::host::HOST_MODULE;
 use ainb_plugin_api::CapabilitySet;
+use anyhow::Context;
 use wasmi::{Caller, Linker};
 
 use crate::runtime::HostState;
@@ -373,6 +386,12 @@ pub fn link_capabilities(
              -> i32 { HostStatus::HostError as i32 },
         )?;
     }
+
+    // Phase 6 fs/cache/request_data wiring. Each is internally
+    // capability-gated and a no-op when its caps are absent.
+    fs::link(linker, caps).context("link Phase 6 fs host-fns")?;
+    cache::link(linker).context("link Phase 6 cache host-fns")?;
+    request::link(linker, caps).context("link Phase 6 request_data host-fn")?;
 
     let allowlist = build_fs_allowlist(caps);
     if !allowlist.is_empty() {
@@ -770,7 +789,7 @@ pub(crate) fn read_bytes(
 }
 
 /// Read a UTF-8 string out of the plugin's exported `memory`.
-fn read_string(
+pub(crate) fn read_string(
     caller: &mut Caller<'_, HostState>,
     ptr: i32,
     len: i32,
