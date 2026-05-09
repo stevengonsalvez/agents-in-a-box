@@ -314,6 +314,31 @@ pub extern "C" fn _handle_event(ptr: i32, len: i32) -> i32 {
         }
         return 0;
     }
+    // Synchronous data injection for the CLI dispatch path. The host
+    // shim drains session-reader's most recent `sessions.usage_data`
+    // publish and re-wraps it as a `Request` event to preserve the
+    // binary msgpack payload (the `Custom` variant's serde_json::Value
+    // would utf-8-mangle it). We decode the wire `UsageDataEvent`,
+    // convert to legacy `UsageData`, and stash so subsequent
+    // `Command { name: "usage" }` events render against it.
+    if let ainb_plugin_api::PluginEvent::Request {
+        topic, payload, ..
+    } = &ev
+    {
+        if topic == "sessions.usage_data" {
+            if let Ok(event) =
+                rmp_serde::from_slice::<ainb_plugin_types_sessions::UsageDataEvent>(payload)
+            {
+                let legacy = crate::cli::wire_to_legacy_for_abi(event.data);
+                unsafe {
+                    if let Some(state) = STATE.as_mut() {
+                        state.data = Some(legacy);
+                    }
+                }
+            }
+            return 0;
+        }
+    }
     if let ainb_plugin_api::PluginEvent::Custom { topic, payload } = ev {
         match topic.as_str() {
             "burndown.usage_data" => {

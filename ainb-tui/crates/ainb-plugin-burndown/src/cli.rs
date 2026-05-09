@@ -413,6 +413,15 @@ mod host_fns {
     }
 }
 
+/// Re-export under a name that's discoverable from `abi.rs` (which
+/// also calls the converter when the host injects a wire-encoded
+/// snapshot via `Request { topic: "sessions.usage_data" }`).
+pub(crate) fn wire_to_legacy_for_abi(
+    w: ainb_plugin_types_sessions::UsageData,
+) -> UsageData {
+    wire_to_legacy_usage_data(w)
+}
+
 /// Convert the wire-format `UsageData` (shared types from
 /// `ainb-plugin-types-sessions`) into burndown's legacy `UsageData` so
 /// the existing format pipeline (json/csv/text) can render it
