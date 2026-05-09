@@ -1,7 +1,7 @@
 // ABOUTME: Unit tests for event handling to ensure keyboard inputs map to correct app actions
 
 use ainb::app::events::AppEvent;
-use ainb::app::state::View;
+use ainb::app::screens::ids as screen_ids;
 use ainb::app::{AppState, EventHandler};
 // UsagePeriod / UsageProviderFilter no longer used in this file —
 // the test that referenced them has moved into the burndown plugin.
@@ -56,7 +56,7 @@ fn test_navigation_key_events() {
 
 #[tokio::test]
 async fn test_n_key_triggers_new_session() {
-    use ainb::app::state::{AsyncAction, View};
+    use ainb::app::state::AsyncAction;
 
     let mut state = AppState::default();
 
@@ -97,12 +97,12 @@ async fn test_n_key_triggers_new_session() {
     // If it's not, we should be in SearchWorkspace view
     // Or we might still be in SessionList if auth setup is required
     assert!(
-        state.current_view == View::NewSession
-            || state.current_view == View::SearchWorkspace
-            || state.current_view == View::SessionList
-            || state.current_view == View::AuthSetup,
-        "Unexpected view: {:?}",
-        state.current_view
+        state.current_screen == screen_ids::NEW_SESSION
+            || state.current_screen == screen_ids::SEARCH_WORKSPACE
+            || state.current_screen == screen_ids::SESSION_LIST
+            || state.current_screen == screen_ids::AUTH_SETUP,
+        "Unexpected screen: {:?}",
+        state.current_screen
     );
     // The new session state might not be set if auth setup is required
     assert!(state.pending_async_action.is_none());

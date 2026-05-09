@@ -1,10 +1,8 @@
 // ABOUTME: Test specifically for session creation UI refresh bug fix
 
 use ainb::app::events::EventHandler;
-use ainb::app::{
-    App,
-    state::{NewSessionStep, View},
-};
+use ainb::app::screens::ids as screen_ids;
+use ainb::app::{App, state::NewSessionStep};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// Test the specific UI refresh issue where creating a session shows empty homescreen
@@ -32,7 +30,7 @@ async fn test_session_creation_shows_immediately() {
     app.tick().await.expect("Tick should succeed");
 
     // Should now be in NewSession view with state
-    assert_eq!(app.state.current_view, View::NewSession);
+    assert_eq!(app.state.current_screen, screen_ids::NEW_SESSION);
     assert!(app.state.new_session_state.is_some());
 
     // Check that we have session state set up
@@ -86,8 +84,8 @@ async fn test_session_creation_shows_immediately() {
     // CRITICAL TEST: The view should be back to SessionList immediately after creation
     // The bug was that it showed SessionList with old/empty data before refresh completed
     assert_eq!(
-        app.state.current_view,
-        View::SessionList,
+        app.state.current_screen,
+        screen_ids::SESSION_LIST,
         "Should return to SessionList immediately after session creation"
     );
 
@@ -164,7 +162,7 @@ async fn test_workspace_refresh_order() {
     let _ = app.tick().await; // Ignore docker/git errors in test
 
     // After the tick, we should be back in SessionList view with current data
-    assert_eq!(app.state.current_view, View::SessionList);
+    assert_eq!(app.state.current_screen, screen_ids::SESSION_LIST);
     assert!(app.state.new_session_state.is_none());
 
     // The workspace data should be current (in real scenario would include new session)
@@ -178,8 +176,8 @@ async fn test_workspace_refresh_order() {
     // The key test: workspaces should be loaded BEFORE view switches back
     // This ensures users see current data immediately, not stale/empty data
     assert_eq!(
-        app.state.current_view,
-        View::SessionList,
+        app.state.current_screen,
+        screen_ids::SESSION_LIST,
         "Should be in SessionList view with current workspace data loaded"
     );
 }
@@ -226,7 +224,7 @@ async fn test_no_empty_homescreen_after_creation() {
 
     // CRITICAL: After creation, user should see populated homescreen immediately
     // The bug was that homescreen appeared empty until quit/restart
-    assert_eq!(app.state.current_view, View::SessionList);
+    assert_eq!(app.state.current_screen, screen_ids::SESSION_LIST);
 
     // Should have workspace data visible (not empty)
     assert!(
@@ -275,7 +273,7 @@ async fn test_error_handling_with_correct_refresh() {
     let _ = app.tick().await; // Expect failure but should handle gracefully
 
     // Even on error, should return to SessionList with data visible
-    assert_eq!(app.state.current_view, View::SessionList);
+    assert_eq!(app.state.current_screen, screen_ids::SESSION_LIST);
     assert!(
         !app.state.workspaces.is_empty(),
         "Should still show workspace data after error"

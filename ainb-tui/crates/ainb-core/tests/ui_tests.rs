@@ -6,10 +6,8 @@ use std::time::Duration;
 use tokio::time::timeout;
 
 use ainb::app::events::EventHandler;
-use ainb::app::{
-    App,
-    state::{NewSessionStep, View},
-};
+use ainb::app::screens::ids as screen_ids;
+use ainb::app::{App, state::NewSessionStep};
 use ainb::components::LayoutComponent;
 
 pub struct UITestFramework {
@@ -137,8 +135,8 @@ impl UITestFramework {
     }
 
     /// Get the current view
-    pub const fn current_view(&self) -> &View {
-        &self.app.state.current_view
+    pub fn current_screen(&self) -> &str {
+        self.app.state.current_screen.as_str()
     }
 
     /// Check if new session state exists
@@ -171,7 +169,7 @@ mod tests {
         let mut ui = UITestFramework::new().await;
 
         // Initially should be in SessionList view
-        assert_eq!(ui.current_view(), &View::SessionList);
+        assert_eq!(ui.current_screen(), screen_ids::SESSION_LIST);
         assert!(!ui.has_new_session_state());
 
         // Press 's' to enter search workspace mode
@@ -179,14 +177,14 @@ mod tests {
         ui.process_async().await.unwrap();
 
         // Should now be in SearchWorkspace view with session state
-        assert_eq!(ui.current_view(), &View::SearchWorkspace);
+        assert_eq!(ui.current_screen(), screen_ids::SEARCH_WORKSPACE);
         assert!(ui.has_new_session_state());
 
         // Press Escape to cancel
         ui.press_key(KeyCode::Esc).unwrap();
 
         // Should return to SessionList view with no session state
-        assert_eq!(ui.current_view(), &View::SessionList);
+        assert_eq!(ui.current_screen(), screen_ids::SESSION_LIST);
         assert!(!ui.has_new_session_state());
     }
 
@@ -199,14 +197,14 @@ mod tests {
         ui.process_async().await.unwrap();
 
         // Should be in NewSession view
-        assert_eq!(ui.current_view(), &View::NewSession);
+        assert_eq!(ui.current_screen(), screen_ids::NEW_SESSION);
         assert!(ui.has_new_session_state());
 
         // Press Escape to cancel
         ui.press_key(KeyCode::Esc).unwrap();
 
         // Should return to SessionList view
-        assert_eq!(ui.current_view(), &View::SessionList);
+        assert_eq!(ui.current_screen(), screen_ids::SESSION_LIST);
         assert!(!ui.has_new_session_state());
     }
 
@@ -240,14 +238,14 @@ mod tests {
         ui.press_key(KeyCode::Char('s')).unwrap();
         ui.process_async().await.unwrap();
 
-        assert_eq!(ui.current_view(), &View::SearchWorkspace);
+        assert_eq!(ui.current_screen(), screen_ids::SEARCH_WORKSPACE);
 
         // Type some filter text
         ui.type_string("test").unwrap();
 
         // The filtering should work (exact count depends on mock data)
         // Just verify we're still in search mode
-        assert_eq!(ui.current_view(), &View::SearchWorkspace);
+        assert_eq!(ui.current_screen(), screen_ids::SEARCH_WORKSPACE);
         assert!(ui.has_new_session_state());
     }
 
@@ -257,7 +255,7 @@ mod tests {
         let mut ui = UITestFramework::new_with_real_workspaces().await;
 
         // Initially should be in SessionList view
-        assert_eq!(ui.current_view(), &View::SessionList);
+        assert_eq!(ui.current_screen(), screen_ids::SESSION_LIST);
         assert!(!ui.has_new_session_state());
 
         // Press 's' to enter search workspace mode (this will scan real workspaces)
@@ -267,7 +265,7 @@ mod tests {
         match ui.process_async().await {
             Ok(()) => {
                 // Should be in SearchWorkspace view
-                assert_eq!(ui.current_view(), &View::SearchWorkspace);
+                assert_eq!(ui.current_screen(), screen_ids::SEARCH_WORKSPACE);
                 assert!(ui.has_new_session_state());
 
                 // Check that we have repositories (limited to 100)
@@ -279,7 +277,7 @@ mod tests {
                 ui.press_key(KeyCode::Esc).unwrap();
 
                 // Should return to SessionList view
-                assert_eq!(ui.current_view(), &View::SessionList);
+                assert_eq!(ui.current_screen(), screen_ids::SESSION_LIST);
                 assert!(!ui.has_new_session_state());
             }
             Err(e) => {
@@ -297,7 +295,7 @@ mod tests {
         ui.press_key(KeyCode::Char('s')).unwrap();
         ui.process_async().await.unwrap();
 
-        assert_eq!(ui.current_view(), &View::SearchWorkspace);
+        assert_eq!(ui.current_screen(), screen_ids::SEARCH_WORKSPACE);
 
         // Should handle large dataset gracefully
         let repo_count = ui.filtered_repos_count();
@@ -312,17 +310,17 @@ mod tests {
         }
 
         // Should still be in search mode
-        assert_eq!(ui.current_view(), &View::SearchWorkspace);
+        assert_eq!(ui.current_screen(), screen_ids::SEARCH_WORKSPACE);
 
         // Test filtering with large dataset
         ui.type_string("test").unwrap();
 
         // Should still be responsive
-        assert_eq!(ui.current_view(), &View::SearchWorkspace);
+        assert_eq!(ui.current_screen(), screen_ids::SEARCH_WORKSPACE);
 
         // Escape should work even with large dataset
         ui.press_key(KeyCode::Esc).unwrap();
-        assert_eq!(ui.current_view(), &View::SessionList);
+        assert_eq!(ui.current_screen(), screen_ids::SESSION_LIST);
         assert!(!ui.has_new_session_state());
     }
 
@@ -340,16 +338,16 @@ mod tests {
             Ok(())
         ) {
             // If it completes quickly, that's fine - just test escape works
-            if ui.current_view() == &View::SearchWorkspace {
+            if ui.current_screen() == screen_ids::SEARCH_WORKSPACE {
                 ui.press_key(KeyCode::Esc).unwrap();
             }
-            assert_eq!(ui.current_view(), &View::SessionList);
+            assert_eq!(ui.current_screen(), screen_ids::SESSION_LIST);
             assert!(!ui.has_new_session_state());
         } else {
             // Timeout is expected, check that state is safe
             // Note: due to how our test framework works, timeout doesn't change state
             // This test primarily ensures our timeout logic doesn't crash
-            assert_eq!(ui.current_view(), &View::SessionList);
+            assert_eq!(ui.current_screen(), screen_ids::SESSION_LIST);
             assert!(!ui.has_new_session_state());
         }
     }
@@ -359,26 +357,26 @@ mod tests {
         let mut ui = UITestFramework::new().await;
 
         // Start in SessionList
-        assert_eq!(ui.current_view(), &View::SessionList);
+        assert_eq!(ui.current_screen(), screen_ids::SESSION_LIST);
 
         // Go to search workspace
         ui.press_key(KeyCode::Char('s')).unwrap();
         ui.process_async().await.unwrap();
-        assert_eq!(ui.current_view(), &View::SearchWorkspace);
+        assert_eq!(ui.current_screen(), screen_ids::SEARCH_WORKSPACE);
 
         // Escape from search workspace
         ui.press_key(KeyCode::Esc).unwrap();
-        assert_eq!(ui.current_view(), &View::SessionList);
+        assert_eq!(ui.current_screen(), screen_ids::SESSION_LIST);
         assert!(!ui.has_new_session_state());
 
         // Go to new session (current dir mode)
         ui.press_key(KeyCode::Char('n')).unwrap();
         ui.process_async().await.unwrap();
-        assert_eq!(ui.current_view(), &View::NewSession);
+        assert_eq!(ui.current_screen(), screen_ids::NEW_SESSION);
 
         // Escape from new session
         ui.press_key(KeyCode::Esc).unwrap();
-        assert_eq!(ui.current_view(), &View::SessionList);
+        assert_eq!(ui.current_screen(), screen_ids::SESSION_LIST);
         assert!(!ui.has_new_session_state());
     }
 
@@ -408,7 +406,7 @@ mod tests {
         }
 
         // Should always end up in a safe state
-        assert_eq!(ui.current_view(), &View::SessionList);
+        assert_eq!(ui.current_screen(), screen_ids::SESSION_LIST);
         assert!(!ui.has_new_session_state());
         assert!(!ui.is_help_visible());
     }
@@ -442,7 +440,7 @@ mod tests {
 
         // Escape should still work after filtering
         ui.press_key(KeyCode::Esc).unwrap();
-        assert_eq!(ui.current_view(), &View::SessionList);
+        assert_eq!(ui.current_screen(), screen_ids::SESSION_LIST);
     }
 
     #[tokio::test]
@@ -450,7 +448,7 @@ mod tests {
         let mut ui = UITestFramework::new().await;
 
         // Verify initial state
-        assert_eq!(ui.current_view(), &View::SessionList);
+        assert_eq!(ui.current_screen(), screen_ids::SESSION_LIST);
         assert!(!ui.has_new_session_state());
         assert!(!ui.is_help_visible());
 
@@ -458,7 +456,7 @@ mod tests {
         ui.press_key(KeyCode::Char('s')).unwrap();
         ui.process_async().await.unwrap();
 
-        assert_eq!(ui.current_view(), &View::SearchWorkspace);
+        assert_eq!(ui.current_screen(), screen_ids::SEARCH_WORKSPACE);
         assert!(ui.has_new_session_state());
 
         // Interrupt with help
@@ -468,11 +466,11 @@ mod tests {
         // Close help - should return to search state
         ui.press_key(KeyCode::Esc).unwrap();
         assert!(!ui.is_help_visible());
-        assert_eq!(ui.current_view(), &View::SearchWorkspace);
+        assert_eq!(ui.current_screen(), screen_ids::SEARCH_WORKSPACE);
 
         // Now cancel search
         ui.press_key(KeyCode::Esc).unwrap();
-        assert_eq!(ui.current_view(), &View::SessionList);
+        assert_eq!(ui.current_screen(), screen_ids::SESSION_LIST);
         assert!(!ui.has_new_session_state());
     }
 
@@ -488,7 +486,7 @@ mod tests {
             // Enter search workspace
             ui.press_key(KeyCode::Char('s')).unwrap();
             ui.process_async().await.unwrap();
-            assert_eq!(ui.current_view(), &View::SearchWorkspace);
+            assert_eq!(ui.current_screen(), screen_ids::SEARCH_WORKSPACE);
 
             // Do some navigation
             for _ in 0..10 {
@@ -511,8 +509,8 @@ mod tests {
             // CRITICAL: Test escape always works
             ui.press_key(KeyCode::Esc).unwrap();
             assert_eq!(
-                ui.current_view(),
-                &View::SessionList,
+                ui.current_screen(),
+                screen_ids::SESSION_LIST,
                 "Escape failed on iteration {iteration}"
             );
             assert!(
@@ -551,7 +549,7 @@ mod tests {
         }
 
         // Should end up in SessionList regardless of timing
-        assert_eq!(ui.current_view(), &View::SessionList);
+        assert_eq!(ui.current_screen(), screen_ids::SESSION_LIST);
         assert!(!ui.has_new_session_state());
     }
 
@@ -571,11 +569,11 @@ mod tests {
             assert!(repo_count <= 200); // Our test dataset size
 
             ui.press_key(KeyCode::Esc).unwrap();
-            assert_eq!(ui.current_view(), &View::SessionList);
+            assert_eq!(ui.current_screen(), screen_ids::SESSION_LIST);
         }
 
         // Final verification
-        assert_eq!(ui.current_view(), &View::SessionList);
+        assert_eq!(ui.current_screen(), screen_ids::SESSION_LIST);
         assert!(!ui.has_new_session_state());
     }
 
@@ -590,7 +588,7 @@ mod tests {
 
         // Even if there are internal errors, escape should work
         ui.press_key(KeyCode::Esc).unwrap();
-        assert_eq!(ui.current_view(), &View::SessionList);
+        assert_eq!(ui.current_screen(), screen_ids::SESSION_LIST);
         assert!(!ui.has_new_session_state());
 
         // UI should remain responsive
@@ -616,14 +614,14 @@ mod tests {
         // Create UI framework WITHOUT mocking (to test real auth)
         let mut ui = UITestFramework::new().await;
 
-        eprintln!("Initial view: {:?}", ui.current_view());
+        eprintln!("Initial view: {:?}", ui.current_screen());
         eprintln!("Has new_session_state: {}", ui.has_new_session_state());
 
         // Press 'n' key
         eprintln!("\n>>> Pressing 'N' key...");
         ui.press_key(KeyCode::Char('n')).unwrap();
 
-        eprintln!("After key press - view: {:?}", ui.current_view());
+        eprintln!("After key press - view: {:?}", ui.current_screen());
         eprintln!("After key press - has_new_session_state: {}", ui.has_new_session_state());
         eprintln!("After key press - pending_async_action: {:?}", ui.app.state.pending_async_action);
 
@@ -635,7 +633,7 @@ mod tests {
         }
 
         eprintln!("\nAfter process_async:");
-        eprintln!("  View: {:?}", ui.current_view());
+        eprintln!("  View: {:?}", ui.current_screen());
         eprintln!("  Has new_session_state: {}", ui.has_new_session_state());
         eprintln!("  Pending async action: {:?}", ui.app.state.pending_async_action);
 
@@ -645,8 +643,8 @@ mod tests {
 
         // This assertion should pass if the bug is fixed
         eprintln!("\n>>> Checking assertions...");
-        if ui.current_view() != &View::NewSession {
-            eprintln!("FAIL: Expected NewSession view, got: {:?}", ui.current_view());
+        if ui.current_screen() != screen_ids::NEW_SESSION {
+            eprintln!("FAIL: Expected NewSession view, got: {:?}", ui.current_screen());
             eprintln!("This is the bug we're debugging!");
         }
 
@@ -657,7 +655,7 @@ mod tests {
 
         // For now, let's not assert - just capture the output
         eprintln!("\n=== Test complete ===");
-        eprintln!("Expected view: NewSession, Actual: {:?}", ui.current_view());
+        eprintln!("Expected view: NewSession, Actual: {:?}", ui.current_screen());
         eprintln!("Expected new_session_state: true, Actual: {}", ui.has_new_session_state());
     }
 }

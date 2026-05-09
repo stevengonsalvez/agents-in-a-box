@@ -1,10 +1,8 @@
 // ABOUTME: Test manual refresh functionality using 'f' key
 
 use ainb::app::events::{AppEvent, EventHandler};
-use ainb::app::{
-    App,
-    state::{AsyncAction, View},
-};
+use ainb::app::screens::ids as screen_ids;
+use ainb::app::{App, state::AsyncAction};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 #[tokio::test]
@@ -64,7 +62,7 @@ async fn test_refresh_from_session_list_view() {
     let initial_workspace_count = app.state.workspaces.len();
 
     // Ensure we're in SessionList view
-    assert_eq!(app.state.current_view, View::SessionList);
+    assert_eq!(app.state.current_screen, screen_ids::SESSION_LIST);
 
     // Press 'f' to refresh
     let refresh_key = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE);
@@ -76,7 +74,7 @@ async fn test_refresh_from_session_list_view() {
     let _ = app.tick().await; // Ignore result since Docker operations fail in test
 
     // Should still be in SessionList view
-    assert_eq!(app.state.current_view, View::SessionList);
+    assert_eq!(app.state.current_screen, screen_ids::SESSION_LIST);
 
     // In test environment, real workspace loading fails, so we check that
     // the refresh mechanism at least attempted to run by checking the UI refresh flag was used
@@ -135,7 +133,7 @@ async fn test_multiple_refreshes() {
         );
 
         // Verify state is consistent
-        assert_eq!(app.state.current_view, View::SessionList);
+        assert_eq!(app.state.current_screen, screen_ids::SESSION_LIST);
         // After refresh, we might have FetchContainerLogs action queued, which is expected
         match &app.state.pending_async_action {
             None => {}                                     // No action is fine
