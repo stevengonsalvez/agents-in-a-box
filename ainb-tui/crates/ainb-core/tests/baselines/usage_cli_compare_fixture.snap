@@ -1,0 +1,26 @@
+{
+  "models": [
+    {
+      "model": "claude-sonnet-4-5",
+      "bucket": {
+        "input_tokens": 4400,
+        "cache_creation_tokens": 800,
+        "cache_read_tokens": 13500,
+        "output_tokens": 470,
+        "reasoning_tokens": 0,
+        "session_count": 1,
+        "project_count": 1,
+        "call_count": 3,
+        "cost_usd": 0.0273
+      },
+      "calls": 3,
+      "edit_turns": 1,
+      "one_shot_turns": 1,
+      "retries": 0,
+      "cost_per_call": 0.0091,
+      "tokens_per_call": 6390
+    }
+  ],
+  "winner": "claude-sonnet-4-5",
+  "low_data": true
+}

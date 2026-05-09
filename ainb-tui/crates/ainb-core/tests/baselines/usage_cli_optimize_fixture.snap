@@ -1,0 +1,20 @@
+{
+  "score": 97,
+  "grade": "A",
+  "potential_tokens_saved": 715,
+  "findings": [
+    {
+      "id": "cache-bloat",
+      "title": "Large cache footprint",
+      "impact": "low",
+      "tokens_saved": 715,
+      "details": "14K cached tokens",
+      "actions": [
+        {
+          "label": "Keep prompts and context focused for long sessions",
+          "command": null
+        }
+      ]
+    }
+  ]
+}
