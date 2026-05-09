@@ -41,6 +41,13 @@ struct PluginState {
     /// Most recent UsageData snapshot the host pushed in via
     /// `_handle_event(UsageDataLoaded)`. `None` until first load.
     data: Option<UsageData>,
+    /// Set true when a `sessions.usage_data` event was received whose
+    /// `version` field did not match the plugin's compiled
+    /// `WIRE_VERSION`. The render path branches on this to surface a
+    /// human-readable upgrade hint instead of the indefinite wait
+    /// spinner. Latched (never cleared) — once we've seen drift the
+    /// host install is broken until the user upgrades a plugin.
+    schema_mismatch: bool,
 }
 
 #[no_mangle]
@@ -77,12 +84,21 @@ pub extern "C" fn _render() -> i32 {
 
     // SAFETY: STATE is mutated only inside the four ABI exports, which
     // run single-threaded inside wasmi.
-    let snapshot: Option<(UsageViewState, Option<UsageData>)> = unsafe {
-        STATE.as_ref().map(|s| (s.ui.clone(), s.data.clone()))
+    let snapshot: Option<(UsageViewState, Option<UsageData>, bool)> = unsafe {
+        STATE
+            .as_ref()
+            .map(|s| (s.ui.clone(), s.data.clone(), s.schema_mismatch))
     };
-    if let Some((mut ui, data)) = snapshot {
-        ui.data = data;
-        crate::ui::render(&mut rbuf, area, &ui);
+    if let Some((mut ui, data, schema_mismatch)) = snapshot {
+        if schema_mismatch && data.is_none() {
+            // Schema drift detected and we never received a usable
+            // snapshot — overwrite the default wait-spinner with an
+            // upgrade hint so the user sees something actionable.
+            render_schema_mismatch(&mut rbuf, area);
+        } else {
+            ui.data = data;
+            crate::ui::render(&mut rbuf, area, &ui);
+        }
     } else {
         // Pre-init: paint nothing — host receives an empty buffer.
     }
@@ -353,9 +369,24 @@ pub extern "C" fn _handle_event(ptr: i32, len: i32) -> i32 {
                     Err(_) => return 0,
                 };
                 if event.version != WIRE_VERSION {
-                    // Schema drift — surface via log but don't trap;
-                    // the host marks the plugin degraded only on traps,
-                    // and a stale snapshot is recoverable.
+                    // Schema drift — surface via stderr (the host's
+                    // dispatch_cli capture forwards this to the user)
+                    // and latch a flag so the render path can show
+                    // "Schema mismatch — upgrade session-reader/burndown"
+                    // instead of the indefinite wait spinner. We don't
+                    // trap because the host marks plugins degraded only
+                    // on traps, and a stale snapshot is still recoverable
+                    // once the user pins matching versions.
+                    eprintln!(
+                        "burndown: sessions.usage_data wire version mismatch: \
+                         got {}, expected {}",
+                        event.version, WIRE_VERSION
+                    );
+                    unsafe {
+                        if let Some(state) = STATE.as_mut() {
+                            state.schema_mismatch = true;
+                        }
+                    }
                     return 0;
                 }
                 let local = wire_to_local(event.data);
@@ -403,6 +434,32 @@ pub extern "C" fn _handle_event(ptr: i32, len: i32) -> i32 {
         }
     }
     0
+}
+
+/// Paint a single-line "schema mismatch" hint into the render buffer.
+///
+/// Triggered when `_handle_event` saw a `sessions.usage_data` event
+/// whose wire `version` did not match the plugin's compiled
+/// `WIRE_VERSION` and we have no prior snapshot to fall back on.
+/// Overrides the default "Waiting for session-reader plugin..." spinner
+/// so the user gets an actionable message.
+fn render_schema_mismatch(buf: &mut RBuffer, area: RRect) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let msg =
+        "  ⚠ Schema mismatch — upgrade session-reader/burndown plugins to matching versions.";
+    // Cap to area width so we never overflow the wire buffer; the
+    // shared `set_string` helper writes into ratatui's Buffer using
+    // its public API and handles multi-byte chars correctly.
+    let max = area.width as usize;
+    let truncated: String = msg.chars().take(max).collect();
+    buf.set_string(
+        area.x,
+        area.y,
+        truncated,
+        ratatui::style::Style::default(),
+    );
 }
 
 #[no_mangle]
