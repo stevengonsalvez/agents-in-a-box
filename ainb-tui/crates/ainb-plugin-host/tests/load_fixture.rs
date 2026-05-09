@@ -28,6 +28,7 @@ fn baseline_manifest(name: &str) -> Manifest {
         capabilities: CapabilitiesTable::default(),
         provides: ProvidesTable::default(),
         paths: ainb_plugin_api::PathsTable::default(),
+        subscribes: ainb_plugin_api::SubscribesTable::default(),
     }
 }
 

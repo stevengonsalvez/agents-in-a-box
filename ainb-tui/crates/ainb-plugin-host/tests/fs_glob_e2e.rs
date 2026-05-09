@@ -28,6 +28,7 @@ fn fs_manifest(name: &str, root: &std::path::Path) -> Manifest {
         },
         provides: ProvidesTable::default(),
         paths: ainb_plugin_api::PathsTable::default(),
+        subscribes: ainb_plugin_api::SubscribesTable::default(),
     }
 }
 
