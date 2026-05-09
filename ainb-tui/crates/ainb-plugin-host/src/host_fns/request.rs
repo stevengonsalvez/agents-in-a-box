@@ -96,6 +96,33 @@ fn publish_reply_impl(
     0
 }
 
+/// Implements `ainb_request_data`: synchronously emit a `req:<topic>`
+/// event and busy-poll the reply ledger until either a reply lands or
+/// the deadline passes.
+///
+/// ## Limitations
+///
+/// **The busy-poll runs on the same single thread as
+/// [`crate::PluginHost::pump_events`].** That has two consequences:
+///
+/// 1. **Calling this from inside a plugin's `_handle_event` or `_init`
+///    deadlocks.** The host can't drain the event queue while a wasmi
+///    call is in flight, so the `req:<topic>` event sits in the queue
+///    forever and the loop here ticks until `timeout_ms` elapses with
+///    no progress.
+/// 2. The CLI dispatch path **does not call this fn for the
+///    cli↔session-reader handshake**; instead it uses the broker
+///    workaround in
+///    [`ainb_core::cli::registry::inject_session_reader_snapshot`],
+///    which pre-injects the snapshot before the plugin's
+///    `_handle_event` fires. Phase 7+ async pump lifts this constraint
+///    by running `pump_events` on a separate thread.
+///
+/// Safe to call only from the TUI event loop's idle gap (between
+/// frames, after `pump_events` has run at least once). When no other
+/// plugin is subscribed to anything we emit a one-shot `tracing::warn!`
+/// before entering the poll so the user gets a fast signal that the
+/// request will time out.
 fn request_data_impl(
     caller: &mut Caller<'_, HostState>,
     topic_ptr: i32,
@@ -132,6 +159,25 @@ fn request_data_impl(
     };
     let plugin_id = caller.data().plugin_id.clone();
     let shared = caller.data().shared.clone();
+
+    // Fail loud when no other plugin is subscribed to anything: the
+    // poll loop below would otherwise spin until `timeout_ms` elapsed
+    // with no chance of a reply landing. This is the most common
+    // misconfiguration (session-reader missing from `dist/plugins/`)
+    // and surfacing it once at request time saves the user a
+    // multi-second hang.
+    if shared
+        .subscriptions
+        .lock()
+        .map(|m| m.values().all(Vec::is_empty))
+        .unwrap_or(false)
+    {
+        tracing::warn!(
+            requester = %plugin_id,
+            topic = %topic,
+            "ainb_request_data: no subscriptions exist; request will time out"
+        );
+    }
 
     let corr_id = shared.next_correlation_id();
     // Encode the request as `<u64 LE corr_id><payload bytes>` on
