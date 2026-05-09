@@ -7,17 +7,20 @@
 
 [plugin]
 name = "burndown"
-version = "0.1.0"
-ainb_min_version = "1.1.0"
+version = "0.2.0"
+ainb_min_version = "1.2.0"
 description = "Daily/weekly/project usage burndown panels"
 author = "stevengonsalvez"
 license = "MIT"
 
 [capabilities]
-# Read raw Claude / Codex JSONL session histories for cost aggregation.
-read_claude_logs    = true
-read_codex_logs     = true
-# Read ainb session metadata to attribute usage to sessions/workspaces.
+# Phase 6c: dropped read_claude_logs + read_codex_logs. Burndown no
+# longer scans session files itself — the session-reader plugin owns
+# the data plane and publishes UsageDataEvent on sessions.usage_data,
+# which we consume via [subscribes] below.
+#
+# read_sessions kept: ainb session metadata (workspace attribution) is
+# still resolved host-side, not via session-reader.
 read_sessions       = true
 # Persist the aggregated cache (SQLite) under the plugin data dir.
 write_plugin_data   = true
@@ -29,3 +32,10 @@ spawn_subprocess    = false
 screens    = ["analytics"]
 commands   = ["/usage", "/burndown"]
 statusline = ["budget-bar"]
+
+# Auto-subscribed at load time by the host loader. Burndown's
+# _handle_event receives every publish on these topics without needing
+# to call ainb_event_subscribe at runtime (which would require the
+# event_bus capability).
+[subscribes]
+topics = ["sessions.usage_data"]
