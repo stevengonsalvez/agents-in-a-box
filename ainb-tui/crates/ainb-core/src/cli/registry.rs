@@ -480,21 +480,30 @@ fn is_host_admin_subcommand(cmd: &crate::cli::usage::UsageCommands) -> bool {
 fn inject_session_reader_snapshot(host: &mut ainb_plugin_host::PluginHost) -> Result<()> {
     use ainb_plugin_api::PluginEvent;
 
-    // Lock the queue, find the latest sessions.usage_data event, leave
-    // unrelated events in place so other dispatchers (TUI render path)
-    // can still see them.
+    // Contract: this broker only ever touches `sessions.usage_data`
+    // events. Unrelated events (e.g. other plugin publishes destined
+    // for the TUI render path) MUST stay in the queue exactly as they
+    // were so subsequent `pump_events` calls can dispatch them.
+    //
+    // Implementation: scan first to collect indices of ALL matching
+    // events, then remove them by walking the indices in reverse so
+    // each removal is index-stable. Captures the latest payload for
+    // injection. This pattern makes the "we only touch matching
+    // events" invariant obvious — there is no closure-captured
+    // mutation that a future edit could subtly invert into dropping
+    // unrelated events.
     let bytes_opt = {
         let mut q = host.shared().event_queue.lock().expect("event_queue poisoned");
-        let mut latest: Option<Vec<u8>> = None;
-        q.retain(|ev| {
-            if ev.topic == "sessions.usage_data" {
-                latest = Some(ev.payload.clone());
-                false // remove from the queue once captured
-            } else {
-                true
-            }
-        });
-        latest
+        let matching: Vec<usize> = q
+            .iter()
+            .enumerate()
+            .filter_map(|(i, ev)| (ev.topic == "sessions.usage_data").then_some(i))
+            .collect();
+        let latest_payload = matching.last().map(|&i| q[i].payload.clone());
+        for &i in matching.iter().rev() {
+            q.remove(i);
+        }
+        latest_payload
     };
 
     let bytes = bytes_opt.ok_or_else(|| {
