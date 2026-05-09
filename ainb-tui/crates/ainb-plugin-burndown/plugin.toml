@@ -26,6 +26,10 @@ network             = []
 spawn_subprocess    = false
 
 [provides]
-screens    = ["analytics"]
-commands   = ["/usage", "/burndown"]
-statusline = ["budget-bar"]
+screens        = ["analytics"]
+commands       = ["/usage", "/burndown"]
+statusline     = ["budget-bar"]
+# CLI namespaces this plugin claims. The host's `cli/usage.rs` shim
+# routes `ainb usage <subcommand>` invocations to this plugin via
+# PluginHost::dispatch_cli when "usage" appears here.
+cli_namespaces = ["usage"]
