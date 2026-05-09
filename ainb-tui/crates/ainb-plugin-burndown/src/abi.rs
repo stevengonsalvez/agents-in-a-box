@@ -400,6 +400,13 @@ pub extern "C" fn _handle_event(ptr: i32, len: i32) -> i32 {
             // before dispatch_cli). Payload is JSON-encoded
             // crate::data::usage::UsageData. Kept until 6c-cli rips
             // out the in-tree route entirely.
+            //
+            // TODO(post-6c-cli): drop burndown.usage_data + burndown.set_tab
+            // once registry.rs stops pushing snapshots via the
+            // inject_session_reader_snapshot broker (see
+            // crates/ainb-core/src/cli/registry.rs::inject_session_reader_snapshot).
+            // The Phase 7+ async pump removes the synchronous request_data
+            // workaround that motivates these arms.
             "burndown.usage_data" => {
                 if let Ok(data) = serde_json::from_slice::<UsageData>(&payload) {
                     unsafe {
