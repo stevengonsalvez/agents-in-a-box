@@ -5,6 +5,7 @@ members = [
     "crates/ainb-plugin-api",
     "crates/ainb-plugin-cts",
     "crates/ainb-plugin-host",
+    "crates/ainb-plugin-types-sessions",
     "xtask",
 ]
 default-members = ["crates/ainb-core"]
