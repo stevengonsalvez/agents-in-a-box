@@ -158,6 +158,12 @@ fn default_timestamp() -> DateTime<Utc> {
 ///
 /// Collapses three near-identical fixtures that previously lived
 /// inline in `tests/test_ui_display.rs` and `components/usage::fixture()`.
+// TODO(post-6e): wired by cli_burndown fixture tests; once 6e re-enables
+// those (currently `#[ignore]` until a frozen session-data fixture lands)
+// the lib-build "never used" warning goes away on its own. Keep this
+// fixture in sync with `cli/usage.rs::report_json`'s output shape so the
+// tripwire byte-identity assertion stays meaningful.
+#[allow(dead_code)]
 pub fn sample_usage_data() -> UsageData {
     let bucket = TokenBucket {
         input_tokens: 100,
@@ -235,6 +241,10 @@ pub fn sample_usage_data() -> UsageData {
 ///
 /// `branch` is emitted as `gitBranch` when `Some`; omitted when `None`
 /// so the parser exercises the "branchless turn" path.
+// TODO(post-6e): consumed only by integration tests under `tests/` —
+// the lib-build sees it as unused. Keep alive for upcoming session-
+// reader plugin parser fixtures.
+#[allow(dead_code)]
 pub fn claude_jsonl_turn(
     branch: Option<&str>,
     model: &str,
@@ -254,6 +264,11 @@ pub fn claude_jsonl_turn(
 /// here (rather than making the CLI fn `pub`) so integration tests in
 /// `tests/` can capture the canonical JSON shape without leaking module
 /// internals from `cli::usage`.
+// TODO(post-6e): wired by cli_burndown fixture tests; once those
+// re-enable post-6e the lib-build warning evaporates on its own. The
+// function survives Phase 6d because `tripwire.rs` still uses it as the
+// in-tree byte-identity oracle for the plugin's CLI output.
+#[allow(dead_code)]
 pub fn cli_usage_report_json(data: &UsageData) -> serde_json::Value {
     crate::cli::usage::report_json(data)
 }
