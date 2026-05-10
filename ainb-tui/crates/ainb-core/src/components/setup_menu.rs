@@ -2,11 +2,11 @@
 // Provides access to setup wizard, dependency checks, and configuration
 
 use ratatui::{
+    Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, Paragraph},
-    Frame,
 };
 
 // Color palette from TUI style guide
@@ -187,7 +187,10 @@ impl SetupMenuComponent {
         let block = Block::default()
             .title(Line::from(vec![
                 Span::styled(" 🛠️ ", Style::default().fg(GOLD)),
-                Span::styled("Setup ", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Setup ",
+                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                ),
             ]))
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
@@ -201,9 +204,9 @@ impl SetupMenuComponent {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1),  // Top padding
-                Constraint::Min(8),     // Menu items
-                Constraint::Length(2),  // Help bar
+                Constraint::Length(1), // Top padding
+                Constraint::Min(8),    // Menu items
+                Constraint::Length(2), // Help bar
             ])
             .split(inner);
 
@@ -261,18 +264,34 @@ impl SetupMenuComponent {
     }
 
     /// Render a single menu item
-    fn render_menu_item(&self, frame: &mut Frame, area: Rect, item: &SetupMenuItem, is_selected: bool) {
+    fn render_menu_item(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        item: &SetupMenuItem,
+        is_selected: bool,
+    ) {
         let (indicator, label_style, desc_style, bg_color) = if is_selected {
             (
                 "▶ ",
-                Style::default().fg(if item.is_dangerous() { DANGER_RED } else { SOFT_WHITE }).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(if item.is_dangerous() {
+                        DANGER_RED
+                    } else {
+                        SOFT_WHITE
+                    })
+                    .add_modifier(Modifier::BOLD),
                 Style::default().fg(MUTED_GRAY),
                 Color::Rgb(40, 45, 60),
             )
         } else {
             (
                 "  ",
-                Style::default().fg(if item.is_dangerous() { DANGER_RED } else { MUTED_GRAY }),
+                Style::default().fg(if item.is_dangerous() {
+                    DANGER_RED
+                } else {
+                    MUTED_GRAY
+                }),
                 Style::default().fg(Color::Rgb(80, 80, 100)),
                 PANEL_BG,
             )
@@ -281,10 +300,7 @@ impl SetupMenuComponent {
         // Split area for label and description
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1),
-                Constraint::Length(1),
-            ])
+            .constraints([Constraint::Length(1), Constraint::Length(1)])
             .split(area);
 
         // Label line
@@ -295,18 +311,16 @@ impl SetupMenuComponent {
             Span::styled(item.label(), label_style),
         ]);
 
-        let label_para = Paragraph::new(label_line)
-            .style(Style::default().bg(bg_color));
+        let label_para = Paragraph::new(label_line).style(Style::default().bg(bg_color));
         frame.render_widget(label_para, chunks[0]);
 
         // Description line (indented)
         let desc_line = Line::from(vec![
-            Span::styled("     ", Style::default()),  // Indent
+            Span::styled("     ", Style::default()), // Indent
             Span::styled(item.description(), desc_style),
         ]);
 
-        let desc_para = Paragraph::new(desc_line)
-            .style(Style::default().bg(bg_color));
+        let desc_para = Paragraph::new(desc_line).style(Style::default().bg(bg_color));
         frame.render_widget(desc_para, chunks[1]);
     }
 
@@ -348,7 +362,10 @@ impl SetupMenuComponent {
         let block = Block::default()
             .title(Line::from(vec![
                 Span::styled(" ⚠️ ", Style::default().fg(DANGER_RED)),
-                Span::styled("Confirm ", Style::default().fg(DANGER_RED).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Confirm ",
+                    Style::default().fg(DANGER_RED).add_modifier(Modifier::BOLD),
+                ),
             ]))
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
@@ -362,9 +379,9 @@ impl SetupMenuComponent {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(2),  // Message
-                Constraint::Length(1),  // Spacer
-                Constraint::Length(1),  // Buttons
+                Constraint::Length(2), // Message
+                Constraint::Length(1), // Spacer
+                Constraint::Length(1), // Buttons
             ])
             .split(inner);
 
@@ -373,7 +390,7 @@ impl SetupMenuComponent {
                 SetupMenuItem::FactoryReset => {
                     "This will delete all AINB\nconfiguration. Continue?"
                 }
-                _ => "Are you sure?"
+                _ => "Are you sure?",
             }
         } else {
             "Are you sure?"
@@ -385,14 +402,19 @@ impl SetupMenuComponent {
         frame.render_widget(msg_para, chunks[0]);
 
         let buttons = Line::from(vec![
-            Span::styled("[Y]", Style::default().fg(DANGER_RED).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[Y]",
+                Style::default().fg(DANGER_RED).add_modifier(Modifier::BOLD),
+            ),
             Span::styled("es  ", Style::default().fg(MUTED_GRAY)),
-            Span::styled("[N]", Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[N]",
+                Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
+            ),
             Span::styled("o", Style::default().fg(MUTED_GRAY)),
         ]);
 
-        let btn_para = Paragraph::new(buttons)
-            .alignment(Alignment::Center);
+        let btn_para = Paragraph::new(buttons).alignment(Alignment::Center);
         frame.render_widget(btn_para, chunks[2]);
     }
 }

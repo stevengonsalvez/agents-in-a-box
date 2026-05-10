@@ -90,7 +90,10 @@ impl SessionStore {
     pub fn load() -> Self {
         let path = Self::storage_path();
         if !path.exists() {
-            debug!("No sessions.json found at {:?}, returning empty store", path);
+            debug!(
+                "No sessions.json found at {:?}, returning empty store",
+                path
+            );
             return Self::default();
         }
 
@@ -101,7 +104,10 @@ impl SessionStore {
                     store
                 }
                 Err(e) => {
-                    warn!("Failed to parse sessions.json: {}, returning empty store", e);
+                    warn!(
+                        "Failed to parse sessions.json: {}, returning empty store",
+                        e
+                    );
                     Self::default()
                 }
             },
@@ -177,8 +183,12 @@ impl InteractiveSessionManager {
     ///
     /// NOTE: This does NOT require Docker, unlike SessionLifecycleManager
     pub fn new() -> Result<Self, InteractiveSessionError> {
-        let worktree_manager = WorktreeManager::new()
-            .map_err(|e| InteractiveSessionError::InvalidState(format!("Failed to create worktree manager: {}", e)))?;
+        let worktree_manager = WorktreeManager::new().map_err(|e| {
+            InteractiveSessionError::InvalidState(format!(
+                "Failed to create worktree manager: {}",
+                e
+            ))
+        })?;
 
         Ok(Self {
             worktree_manager,
@@ -239,9 +249,22 @@ impl InteractiveSessionManager {
 
         // Step 4: Start CLI in tmux session (for AI agent types)
         match agent_type {
-            SessionAgentType::Claude | SessionAgentType::Codex | SessionAgentType::Gemini | SessionAgentType::Copilot => {
-                info!("Starting {:?} CLI in tmux session (model={:?}, skip_permissions={})", agent_type, model, skip_permissions);
-                self.start_cli_in_tmux(&tmux_session_name, skip_permissions, model, agent_type, None).await?;
+            SessionAgentType::Claude
+            | SessionAgentType::Codex
+            | SessionAgentType::Gemini
+            | SessionAgentType::Copilot => {
+                info!(
+                    "Starting {:?} CLI in tmux session (model={:?}, skip_permissions={})",
+                    agent_type, model, skip_permissions
+                );
+                self.start_cli_in_tmux(
+                    &tmux_session_name,
+                    skip_permissions,
+                    model,
+                    agent_type,
+                    None,
+                )
+                .await?;
             }
             _ => {
                 info!("Skipping CLI for agent type: {:?}", agent_type);
@@ -325,7 +348,10 @@ impl InteractiveSessionManager {
     ) -> Result<InteractiveSession, InteractiveSessionError> {
         info!(
             "Creating Interactive session {} with existing worktree at '{}' (agent={:?}, model={:?})",
-            session_id, existing_worktree_path.display(), agent_type, model
+            session_id,
+            existing_worktree_path.display(),
+            agent_type,
+            model
         );
 
         // Check if session already exists
@@ -336,14 +362,18 @@ impl InteractiveSessionManager {
         // Verify the worktree exists
         if !existing_worktree_path.exists() {
             return Err(InteractiveSessionError::Worktree(
-                crate::git::WorktreeError::NotFound(existing_worktree_path.display().to_string())
+                crate::git::WorktreeError::NotFound(existing_worktree_path.display().to_string()),
             ));
         }
 
-        info!("Using existing worktree at: {}", existing_worktree_path.display());
+        info!(
+            "Using existing worktree at: {}",
+            existing_worktree_path.display()
+        );
 
         // Create session-based symlink for easy lookup
-        let session_path = self.worktree_manager.base_dir().join("by-session").join(session_id.to_string());
+        let session_path =
+            self.worktree_manager.base_dir().join("by-session").join(session_id.to_string());
         if !session_path.exists() {
             if let Some(parent) = session_path.parent() {
                 std::fs::create_dir_all(parent).ok();
@@ -362,9 +392,22 @@ impl InteractiveSessionManager {
 
         // Step 3: Start CLI in tmux session (for AI agent types)
         match agent_type {
-            SessionAgentType::Claude | SessionAgentType::Codex | SessionAgentType::Gemini | SessionAgentType::Copilot => {
-                info!("Starting {:?} CLI in tmux session (model={:?}, skip_permissions={})", agent_type, model, skip_permissions);
-                self.start_cli_in_tmux(&tmux_session_name, skip_permissions, model, agent_type, None).await?;
+            SessionAgentType::Claude
+            | SessionAgentType::Codex
+            | SessionAgentType::Gemini
+            | SessionAgentType::Copilot => {
+                info!(
+                    "Starting {:?} CLI in tmux session (model={:?}, skip_permissions={})",
+                    agent_type, model, skip_permissions
+                );
+                self.start_cli_in_tmux(
+                    &tmux_session_name,
+                    skip_permissions,
+                    model,
+                    agent_type,
+                    None,
+                )
+                .await?;
             }
             _ => {
                 info!("Skipping CLI for agent type: {:?}", agent_type);
@@ -403,7 +446,10 @@ impl InteractiveSessionManager {
             warn!("Failed to persist session metadata: {}", e);
         }
 
-        info!("Successfully created Interactive session {} with existing worktree", session_id);
+        info!(
+            "Successfully created Interactive session {} with existing worktree",
+            session_id
+        );
 
         // Audit log the session creation
         audit::audit_session_created(
@@ -425,7 +471,9 @@ impl InteractiveSessionManager {
     ///
     /// # Returns
     /// * `Result<Vec<InteractiveSession>>` - List of discovered sessions
-    pub async fn list_sessions(&mut self) -> Result<Vec<InteractiveSession>, InteractiveSessionError> {
+    pub async fn list_sessions(
+        &mut self,
+    ) -> Result<Vec<InteractiveSession>, InteractiveSessionError> {
         info!("Discovering Interactive sessions from tmux");
 
         // Get all tmux sessions
@@ -457,7 +505,10 @@ impl InteractiveSessionManager {
             }
         }
 
-        info!("Discovered {} Interactive sessions", discovered_sessions.len());
+        info!(
+            "Discovered {} Interactive sessions",
+            discovered_sessions.len()
+        );
         Ok(discovered_sessions)
     }
 
@@ -466,17 +517,24 @@ impl InteractiveSessionManager {
     /// Uses a two-phase approach:
     /// 1. First, try to find the session in sessions.json (handles branch-mismatch case)
     /// 2. If not found, fall back to reverse-engineering the branch name from tmux session name
-    async fn discover_session_from_tmux(&self, tmux_name: &str) -> Result<InteractiveSession, InteractiveSessionError> {
+    async fn discover_session_from_tmux(
+        &self,
+        tmux_name: &str,
+    ) -> Result<InteractiveSession, InteractiveSessionError> {
         // Phase 1: Try to find session in persisted sessions.json
         // This handles the branch-mismatch case where the user changed branches in the worktree
         let store = SessionStore::load();
         if let Some(metadata) = store.find_by_tmux_name(tmux_name) {
             // Verify the worktree still exists
             if metadata.worktree_path.exists() {
-                debug!("Found session {} in sessions.json for tmux {}", metadata.session_id, tmux_name);
+                debug!(
+                    "Found session {} in sessions.json for tmux {}",
+                    metadata.session_id, tmux_name
+                );
 
                 // Try to get current branch name from the worktree
-                let branch_name = self.get_current_branch(&metadata.worktree_path)
+                let branch_name = self
+                    .get_current_branch(&metadata.worktree_path)
                     .unwrap_or_else(|| "unknown".to_string());
 
                 // Try to get source repository from worktree
@@ -494,10 +552,8 @@ impl InteractiveSessionManager {
                 // Re-derive workspace_name from current paths rather than trusting
                 // the persisted value — older sessions.json entries may carry the
                 // full sanitized worktree dir name as workspace_name.
-                let workspace_name = Self::derive_workspace_name(
-                    &metadata.worktree_path,
-                    &source_repository,
-                );
+                let workspace_name =
+                    Self::derive_workspace_name(&metadata.worktree_path, &source_repository);
 
                 return Ok(InteractiveSession {
                     session_id: metadata.session_id,
@@ -511,8 +567,10 @@ impl InteractiveSessionManager {
                     model: None,
                 });
             } else {
-                debug!("Session {} in sessions.json but worktree no longer exists at {:?}",
-                       metadata.session_id, metadata.worktree_path);
+                debug!(
+                    "Session {} in sessions.json but worktree no longer exists at {:?}",
+                    metadata.session_id, metadata.worktree_path
+                );
             }
         }
 
@@ -523,25 +581,26 @@ impl InteractiveSessionManager {
 
         // Try to find worktree with matching branch
         // Use list_all_worktrees() which scans by-session directory with UUID symlinks
-        let worktrees = self.worktree_manager.list_all_worktrees()
-            .map_err(|e| InteractiveSessionError::InvalidState(format!("Failed to list worktrees: {}", e)))?;
+        let worktrees = self.worktree_manager.list_all_worktrees().map_err(|e| {
+            InteractiveSessionError::InvalidState(format!("Failed to list worktrees: {}", e))
+        })?;
 
         for (session_id, worktree) in worktrees {
             // Try matching both new format (tmux_{folder}_{branch}) and legacy format (tmux_{branch})
             let worktree_folder = Self::extract_worktree_folder(&worktree.path);
-            let matches_new_format = Self::generate_tmux_name(&worktree_folder, &worktree.branch_name) == tmux_name;
-            let matches_legacy_format = Self::generate_tmux_name_legacy(&worktree.branch_name) == tmux_name;
+            let matches_new_format =
+                Self::generate_tmux_name(&worktree_folder, &worktree.branch_name) == tmux_name;
+            let matches_legacy_format =
+                Self::generate_tmux_name_legacy(&worktree.branch_name) == tmux_name;
             let matches_branch_guess = worktree.branch_name.contains(&branch_guess);
 
             if matches_new_format || matches_legacy_format || matches_branch_guess {
-
-                let workspace_name = Self::derive_workspace_name(
-                    &worktree.path,
-                    &worktree.source_repository,
-                );
+                let workspace_name =
+                    Self::derive_workspace_name(&worktree.path, &worktree.source_repository);
 
                 // Try to detect agent from tmux process, default to Claude
-                let agent_type = Self::detect_agent_from_tmux(tmux_name).await
+                let agent_type = Self::detect_agent_from_tmux(tmux_name)
+                    .await
                     .unwrap_or(SessionAgentType::Claude);
 
                 return Ok(InteractiveSession {
@@ -558,9 +617,10 @@ impl InteractiveSessionManager {
             }
         }
 
-        Err(InteractiveSessionError::InvalidState(
-            format!("No matching worktree found for tmux session {}", tmux_name)
-        ))
+        Err(InteractiveSessionError::InvalidState(format!(
+            "No matching worktree found for tmux session {}",
+            tmux_name
+        )))
     }
 
     /// Detect agent type by inspecting the running process in a tmux session
@@ -569,7 +629,13 @@ impl InteractiveSessionManager {
     /// active process, then matches it against known CLI commands.
     async fn detect_agent_from_tmux(tmux_name: &str) -> Option<SessionAgentType> {
         let output = Command::new("tmux")
-            .args(["list-panes", "-t", tmux_name, "-F", "#{pane_current_command}"])
+            .args([
+                "list-panes",
+                "-t",
+                tmux_name,
+                "-F",
+                "#{pane_current_command}",
+            ])
             .output()
             .await
             .ok()?;
@@ -684,8 +750,14 @@ impl InteractiveSessionManager {
     ///
     /// # Returns
     /// * `Result<()>` - Success or an error
-    pub async fn remove_session(&mut self, session_id: Uuid) -> Result<(), InteractiveSessionError> {
-        info!(">>> InteractiveSessionManager::remove_session() START: {}", session_id);
+    pub async fn remove_session(
+        &mut self,
+        session_id: Uuid,
+    ) -> Result<(), InteractiveSessionError> {
+        info!(
+            ">>> InteractiveSessionManager::remove_session() START: {}",
+            session_id
+        );
 
         // Try to get session from active_sessions first
         let session_opt = self.active_sessions.remove(&session_id);
@@ -695,7 +767,10 @@ impl InteractiveSessionManager {
         // If we have the session in memory, use its tmux_session_name
         // Otherwise, try to find it by discovering from worktree
         let tmux_session_name = if let Some(ref session) = session_opt {
-            info!("Using tmux session name from memory: {}", session.tmux_session_name);
+            info!(
+                "Using tmux session name from memory: {}",
+                session.tmux_session_name
+            );
             session.tmux_session_name.clone()
         } else {
             // Try to get worktree info and derive tmux session name
@@ -704,7 +779,8 @@ impl InteractiveSessionManager {
                 Ok(worktree) => {
                     info!("Found worktree with branch: {}", worktree.branch_name);
                     let worktree_folder = Self::extract_worktree_folder(&worktree.path);
-                    let tmux_name = Self::generate_tmux_name(&worktree_folder, &worktree.branch_name);
+                    let tmux_name =
+                        Self::generate_tmux_name(&worktree_folder, &worktree.branch_name);
                     let legacy_name = Self::generate_tmux_name_legacy(&worktree.branch_name);
                     // Check if new format session exists, otherwise try legacy
                     let check_new = std::process::Command::new("tmux")
@@ -741,7 +817,10 @@ impl InteractiveSessionManager {
             info!("Successfully killed tmux session: {}", tmux_session_name);
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!("Failed to kill tmux session '{}': {}", tmux_session_name, stderr);
+            warn!(
+                "Failed to kill tmux session '{}': {}",
+                tmux_session_name, stderr
+            );
             // Continue anyway - session might already be dead
         }
 
@@ -750,7 +829,10 @@ impl InteractiveSessionManager {
         match self.worktree_manager.remove_worktree(session_id) {
             Ok(()) => info!("Successfully removed worktree for session {}", session_id),
             Err(e) => {
-                error!("Failed to remove worktree for session {}: {}", session_id, e);
+                error!(
+                    "Failed to remove worktree for session {}: {}",
+                    session_id, e
+                );
                 return Err(e.into());
             }
         }
@@ -764,7 +846,10 @@ impl InteractiveSessionManager {
             // Continue anyway - removal was successful
         }
 
-        info!("<<< InteractiveSessionManager::remove_session() COMPLETE: {}", session_id);
+        info!(
+            "<<< InteractiveSessionManager::remove_session() COMPLETE: {}",
+            session_id
+        );
         Ok(())
     }
 
@@ -775,8 +860,12 @@ impl InteractiveSessionManager {
     ///
     /// # Returns
     /// * `Result<bool>` - True if session is alive, false otherwise
-    pub async fn is_session_alive(&self, session_id: Uuid) -> Result<bool, InteractiveSessionError> {
-        let session = self.active_sessions
+    pub async fn is_session_alive(
+        &self,
+        session_id: Uuid,
+    ) -> Result<bool, InteractiveSessionError> {
+        let session = self
+            .active_sessions
             .get(&session_id)
             .ok_or(InteractiveSessionError::SessionNotFound(session_id))?;
 
@@ -830,46 +919,49 @@ impl InteractiveSessionManager {
 
     /// Extract folder name from a worktree path
     fn extract_worktree_folder(path: &Path) -> String {
-        path.file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("session")
-            .to_string()
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("session").to_string()
     }
 
     /// Start a new tmux session
-    async fn start_tmux_session(&self, session_name: &str, work_dir: &Path) -> Result<(), InteractiveSessionError> {
+    async fn start_tmux_session(
+        &self,
+        session_name: &str,
+        work_dir: &Path,
+    ) -> Result<(), InteractiveSessionError> {
         // Check if session already exists
-        let check = Command::new("tmux")
-            .args(["has-session", "-t", session_name])
-            .output()
-            .await?;
+        let check = Command::new("tmux").args(["has-session", "-t", session_name]).output().await?;
 
         if check.status.success() {
-            warn!("Tmux session '{}' already exists, killing it first", session_name);
-            Command::new("tmux")
-                .args(["kill-session", "-t", session_name])
-                .output()
-                .await?;
+            warn!(
+                "Tmux session '{}' already exists, killing it first",
+                session_name
+            );
+            Command::new("tmux").args(["kill-session", "-t", session_name]).output().await?;
         }
 
         // Create new detached tmux session
         let output = Command::new("tmux")
             .args([
                 "new-session",
-                "-d",              // Detached
-                "-s", session_name,
-                "-c", work_dir.to_str().context("Invalid work directory path")?,
-                "-x", "120",       // Width
-                "-y", "40",        // Height
+                "-d", // Detached
+                "-s",
+                session_name,
+                "-c",
+                work_dir.to_str().context("Invalid work directory path")?,
+                "-x",
+                "120", // Width
+                "-y",
+                "40", // Height
             ])
             .output()
             .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(InteractiveSessionError::Tmux(
-                format!("Failed to create tmux session '{}': {}", session_name, stderr)
-            ));
+            return Err(InteractiveSessionError::Tmux(format!(
+                "Failed to create tmux session '{}': {}",
+                session_name, stderr
+            )));
         }
 
         // Configure tmux session
@@ -880,37 +972,33 @@ impl InteractiveSessionManager {
     }
 
     /// Configure tmux session settings
-    async fn configure_tmux_session(&self, session_name: &str) -> Result<(), InteractiveSessionError> {
+    async fn configure_tmux_session(
+        &self,
+        session_name: &str,
+    ) -> Result<(), InteractiveSessionError> {
         // Set history limit
         Command::new("tmux")
-            .args([
-                "set-option", "-t", session_name,
-                "history-limit", "50000"
-            ])
+            .args(["set-option", "-t", session_name, "history-limit", "50000"])
             .status()
             .await?;
 
         // Enable mouse scrolling
         Command::new("tmux")
-            .args([
-                "set-option", "-t", session_name,
-                "mouse", "on"
-            ])
+            .args(["set-option", "-t", session_name, "mouse", "on"])
             .status()
             .await?;
 
         // Configure clipboard integration
-        crate::tmux::configure_clipboard(session_name)
-            .await
-            .map_err(|e| InteractiveSessionError::Tmux(format!("Failed to configure clipboard: {}", e)))?;
+        crate::tmux::configure_clipboard(session_name).await.map_err(|e| {
+            InteractiveSessionError::Tmux(format!("Failed to configure clipboard: {}", e))
+        })?;
 
         // macOS: Configure reattach-to-user-namespace for audio/clipboard access
         // Uses centralized function with shell validation and proper error handling
         if let Err(e) = crate::tmux::configure_macos_user_namespace(session_name).await {
             warn!(
                 "Failed to configure macOS user namespace for session {}: {}",
-                session_name,
-                e
+                session_name, e
             );
             // Continue anyway - this is optional functionality
         }
@@ -922,8 +1010,11 @@ impl InteractiveSessionManager {
     ///
     /// Polls the tmux pane content until a shell prompt character appears,
     /// indicating the shell has initialized and is ready to receive commands.
-    async fn wait_for_shell_ready(&self, session_name: &str) -> Result<(), InteractiveSessionError> {
-        use tokio::time::{sleep, Duration};
+    async fn wait_for_shell_ready(
+        &self,
+        session_name: &str,
+    ) -> Result<(), InteractiveSessionError> {
+        use tokio::time::{Duration, sleep};
 
         debug!("Waiting for shell prompt in session {}", session_name);
 
@@ -939,8 +1030,16 @@ impl InteractiveSessionManager {
 
             // Check for common shell prompt indicators ($ % > #)
             // These typically appear at the end of the prompt when shell is ready
-            if content.contains('$') || content.contains('%') || content.contains('>') || content.contains('#') {
-                debug!("Shell prompt detected in session {} after {} attempts", session_name, attempt + 1);
+            if content.contains('$')
+                || content.contains('%')
+                || content.contains('>')
+                || content.contains('#')
+            {
+                debug!(
+                    "Shell prompt detected in session {} after {} attempts",
+                    session_name,
+                    attempt + 1
+                );
                 return Ok(());
             }
 
@@ -948,7 +1047,10 @@ impl InteractiveSessionManager {
         }
 
         // Proceed anyway after timeout - shell might be ready without standard prompt
-        warn!("Timeout waiting for shell prompt in session {}, proceeding anyway", session_name);
+        warn!(
+            "Timeout waiting for shell prompt in session {}, proceeding anyway",
+            session_name
+        );
         Ok(())
     }
 
@@ -1020,28 +1122,40 @@ impl InteractiveSessionManager {
         let cli_cmd = cmd_parts.join(" ");
         let full_cmd = format!("{}{}", env_setup, cli_cmd);
 
-        info!("Starting {} with command: {}", provider.display_name(), cli_cmd);
+        info!(
+            "Starting {} with command: {}",
+            provider.display_name(),
+            cli_cmd
+        );
 
         // Send command to tmux to start CLI - target pane explicitly with :0
         let target = format!("{}:0", session_name);
         let output = Command::new("tmux")
             .args([
-                "send-keys", "-t", &target,
-                &full_cmd, "C-m"  // C-m = Enter key
+                "send-keys",
+                "-t",
+                &target,
+                &full_cmd,
+                "C-m", // C-m = Enter key
             ])
             .output()
             .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(InteractiveSessionError::Tmux(
-                format!("Failed to start {} in tmux: {}", provider.display_name(), stderr)
-            ));
+            return Err(InteractiveSessionError::Tmux(format!(
+                "Failed to start {} in tmux: {}",
+                provider.display_name(),
+                stderr
+            )));
         }
 
         info!(
             "Started {} CLI in tmux session: {} (model={:?}, skip_permissions={})",
-            provider.display_name(), session_name, model, skip_permissions
+            provider.display_name(),
+            session_name,
+            model,
+            skip_permissions
         );
         Ok(())
     }

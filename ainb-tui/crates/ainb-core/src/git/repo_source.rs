@@ -125,11 +125,9 @@ impl RepoSource {
                     url.clone()
                 }
             }
-            RepoSource::LocalPath(path) => path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("unknown")
-                .to_string(),
+            RepoSource::LocalPath(path) => {
+                path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown").to_string()
+            }
             RepoSource::GithubShorthand { owner, repo } => {
                 format!("{}/{}", owner, repo)
             }
@@ -148,11 +146,8 @@ impl RepoSource {
                 repo_name: repo.clone(),
             }),
             RepoSource::LocalPath(path) => {
-                let repo_name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("unknown")
-                    .to_string();
+                let repo_name =
+                    path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown").to_string();
                 Ok(ParsedRepo {
                     source: self.clone(),
                     host: "local".to_string(),
@@ -191,9 +186,7 @@ fn ensure_git_suffix(url: &str) -> String {
 /// Parse HTTPS URL into components
 fn parse_https_url(url: &str, source: RepoSource) -> Result<ParsedRepo, RepoSourceError> {
     // https://github.com/owner/repo.git or https://github.com/owner/repo
-    let url_clean = url
-        .trim_end_matches(".git")
-        .trim_end_matches('/');
+    let url_clean = url.trim_end_matches(".git").trim_end_matches('/');
 
     // Remove protocol
     let without_protocol = url_clean

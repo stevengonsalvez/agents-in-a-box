@@ -51,20 +51,20 @@ pub use confirmation_dialog::ConfirmationDialogComponent;
 pub use git_view::{GitViewComponent, GitViewState};
 pub use help::HelpComponent;
 pub use home_screen::HomeScreenComponent;
-pub use home_screen_v2::{HomeScreenV2Component, HomeScreenV2State, HomeScreenFocus, LayoutMode};
+pub use home_screen_v2::{HomeScreenFocus, HomeScreenV2Component, HomeScreenV2State, LayoutMode};
 pub use layout::LayoutComponent;
 pub use live_logs_stream::{LiveLogsStreamComponent, LogEntry, LogEntryLevel};
 pub use log_history_viewer::{LogHistoryViewerComponent, LogHistoryViewerState, SessionLogSummary};
 pub use log_reader::{AppLogInfo, JsonlLogReader};
-pub use log_writer::{JsonlLogWriter, JsonlLogEntry};
+pub use log_writer::{JsonlLogEntry, JsonlLogWriter};
 pub use logs_viewer::LogsViewerComponent;
 pub use mascot::{MascotAnimation, render_mascot, render_mascot_centered};
 pub use new_session::NewSessionComponent;
 pub use onboarding::{OnboardingComponent, OnboardingState, OnboardingStep};
 pub use session_list::SessionListComponent;
 pub use session_recovery::{
-    OrphanedSession, OrphanedWorktree, OrphanType, RecoveryViewMode,
-    SessionRecovery, SessionRecoveryState,
+    OrphanType, OrphanedSession, OrphanedWorktree, RecoveryViewMode, SessionRecovery,
+    SessionRecoveryState,
 };
 pub use setup_menu::{SetupMenuComponent, SetupMenuItem, SetupMenuState};
 pub use sidebar::{SidebarComponent, SidebarItem, SidebarState};

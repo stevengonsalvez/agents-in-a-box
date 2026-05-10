@@ -3,13 +3,13 @@
 // Captures tmux pane content and displays it to stdout.
 // Supports --follow mode for streaming updates and --lines for limiting output.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::time::Duration;
 use tokio::process::Command;
 
-use super::util::find_session;
 use super::LogsArgs;
-use crate::tmux::capture::{capture_pane, CaptureOptions};
+use super::util::find_session;
+use crate::tmux::capture::{CaptureOptions, capture_pane};
 
 /// Execute the logs command
 ///
@@ -36,10 +36,7 @@ pub async fn execute(args: LogsArgs) -> Result<()> {
 
 /// Check if a tmux session exists
 async fn tmux_session_exists(session_name: &str) -> bool {
-    let output = Command::new("tmux")
-        .args(["has-session", "-t", session_name])
-        .output()
-        .await;
+    let output = Command::new("tmux").args(["has-session", "-t", session_name]).output().await;
 
     matches!(output, Ok(o) if o.status.success())
 }

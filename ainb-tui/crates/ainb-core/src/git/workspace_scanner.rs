@@ -97,7 +97,11 @@ impl RepositoryCache {
         let writer = BufWriter::new(file);
         serde_json::to_writer_pretty(writer, self)?;
 
-        info!("Saved repository cache to {} ({} repos)", path.display(), self.repositories.len());
+        info!(
+            "Saved repository cache to {} ({} repos)",
+            path.display(),
+            self.repositories.len()
+        );
         Ok(())
     }
 
@@ -105,7 +109,11 @@ impl RepositoryCache {
     pub fn is_valid(&self, current_scan_paths: &[PathBuf]) -> bool {
         // 1. Version check
         if self.version != Self::VERSION {
-            debug!("Cache invalid: version mismatch ({} != {})", self.version, Self::VERSION);
+            debug!(
+                "Cache invalid: version mismatch ({} != {})",
+                self.version,
+                Self::VERSION
+            );
             return false;
         }
 
@@ -121,10 +129,8 @@ impl RepositoryCache {
         for (path, cached_mtime) in &self.scan_paths_mtime {
             if let Ok(metadata) = fs::metadata(path) {
                 if let Ok(mtime) = metadata.modified() {
-                    let current_mtime = mtime
-                        .duration_since(UNIX_EPOCH)
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0);
+                    let current_mtime =
+                        mtime.duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
                     if current_mtime != *cached_mtime {
                         debug!("Cache invalid: mtime changed for {}", path.display());
                         return false;
@@ -151,10 +157,8 @@ impl RepositoryCache {
         for path in scan_paths {
             if let Ok(metadata) = fs::metadata(path) {
                 if let Ok(mtime) = metadata.modified() {
-                    let mtime_secs = mtime
-                        .duration_since(UNIX_EPOCH)
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0);
+                    let mtime_secs =
+                        mtime.duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
                     scan_paths_mtime.insert(path.clone(), mtime_secs);
                 }
             }
@@ -305,7 +309,11 @@ impl WorkspaceScanner {
             info!("Scanning path: {}", search_path.display());
             match self.scan_directory(search_path, 0) {
                 Ok(mut found_workspaces) => {
-                    info!("Found {} workspaces in {}", found_workspaces.len(), search_path.display());
+                    info!(
+                        "Found {} workspaces in {}",
+                        found_workspaces.len(),
+                        search_path.display()
+                    );
                     workspaces.append(&mut found_workspaces);
                 }
                 Err(e) => {

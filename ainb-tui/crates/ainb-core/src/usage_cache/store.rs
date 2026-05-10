@@ -135,9 +135,9 @@ fn lock_conn(conn: &Mutex<Connection>) -> std::sync::MutexGuard<'_, Connection> 
 /// paths into one cache key (different `?` byte sequences both render
 /// as `?` in the lossy string).
 fn path_key(path: &Path) -> Result<String, CacheError> {
-    path.to_str().map(str::to_string).ok_or_else(|| {
-        CacheError::Schema(format!("non-UTF8 path: {path:?}"))
-    })
+    path.to_str()
+        .map(str::to_string)
+        .ok_or_else(|| CacheError::Schema(format!("non-UTF8 path: {path:?}")))
 }
 
 impl Cache {
@@ -215,8 +215,10 @@ impl Cache {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 if prior.is_some() {
                     let lock = lock_conn(conn);
-                    let _ = lock
-                        .execute("DELETE FROM files WHERE path = ?1", params![path.to_string_lossy().into_owned()]);
+                    let _ = lock.execute(
+                        "DELETE FROM files WHERE path = ?1",
+                        params![path.to_string_lossy().into_owned()],
+                    );
                 }
                 return Ok(Vec::new());
             }
@@ -334,8 +336,7 @@ impl Cache {
             });
         };
         let lock = lock_conn(conn);
-        let file_count: i64 =
-            lock.query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))?;
+        let file_count: i64 = lock.query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))?;
         let oldest_updated_at: Option<i64> = lock
             .query_row("SELECT MIN(updated_at) FROM files", [], |row| row.get(0))
             .optional()?
@@ -441,11 +442,8 @@ fn load_row(conn: &Connection, path: &Path) -> Result<Option<CacheRow>, CacheErr
     let calls: Vec<crate::models::usage::ProviderCall> = match format {
         BlobFormat::BincodeV3 => bincode::deserialize(&blob)?,
     };
-    let fingerprint = FileFingerprint::from_columns(
-        u64::try_from(size_i).unwrap_or(0),
-        mtime,
-        &suffix,
-    )?;
+    let fingerprint =
+        FileFingerprint::from_columns(u64::try_from(size_i).unwrap_or(0), mtime, &suffix)?;
 
     Ok(Some(CacheRow {
         fingerprint,

@@ -1,7 +1,7 @@
 // ABOUTME: Widget for rendering Read tool calls showing file content operations
 // Displays file paths and content previews with line numbers
 
-use super::{MessageWidget, WidgetOutput, ToolResult, helpers, result_parser};
+use super::{MessageWidget, ToolResult, WidgetOutput, helpers, result_parser};
 use crate::agent_parsers::AgentEvent;
 use crate::components::live_logs_stream::{LogEntry, LogEntryLevel};
 use uuid::Uuid;
@@ -19,7 +19,11 @@ impl ReadWidget {
             "🦀"
         } else if path.ends_with(".py") {
             "🐍"
-        } else if path.ends_with(".js") || path.ends_with(".ts") || path.ends_with(".jsx") || path.ends_with(".tsx") {
+        } else if path.ends_with(".js")
+            || path.ends_with(".ts")
+            || path.ends_with(".jsx")
+            || path.ends_with(".tsx")
+        {
             "📜"
         } else if path.ends_with(".json") {
             "📋"
@@ -74,13 +78,17 @@ impl MessageWidget for ReadWidget {
     }
 
     fn render(&self, event: AgentEvent, container_name: &str, session_id: Uuid) -> WidgetOutput {
-        if let AgentEvent::ToolCall { id, name: _, input, description } = event {
+        if let AgentEvent::ToolCall {
+            id,
+            name: _,
+            input,
+            description,
+        } = event
+        {
             let mut entries = Vec::new();
 
             // Extract file path
-            let file_path = input.get("file_path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
+            let file_path = input.get("file_path").and_then(|v| v.as_str()).unwrap_or("unknown");
 
             // Header with file path
             let header = format!("📖 Reading: {}", Self::format_file_path(file_path));
@@ -94,7 +102,7 @@ impl MessageWidget for ReadWidget {
                 )
                 .with_metadata("tool_id", &id)
                 .with_metadata("tool_name", "Read")
-                .with_metadata("file_path", file_path)
+                .with_metadata("file_path", file_path),
             );
 
             // Add line range if specified
@@ -102,13 +110,9 @@ impl MessageWidget for ReadWidget {
                 let limit = input.get("limit").and_then(|v| v.as_u64()).unwrap_or(2000);
                 let range_msg = format!("  📏 Lines {}-{}", offset + 1, offset + limit);
                 entries.push(
-                    LogEntry::new(
-                        LogEntryLevel::Debug,
-                        container_name.to_string(),
-                        range_msg,
-                    )
-                    .with_session(session_id)
-                    .with_metadata("event_type", "read_range")
+                    LogEntry::new(LogEntryLevel::Debug, container_name.to_string(), range_msg)
+                        .with_session(session_id)
+                        .with_metadata("event_type", "read_range"),
                 );
             }
 
@@ -122,34 +126,42 @@ impl MessageWidget for ReadWidget {
                             format!("  💭 {}", desc),
                         )
                         .with_session(session_id)
-                        .with_metadata("event_type", "read_description")
+                        .with_metadata("event_type", "read_description"),
                     );
                 }
             }
 
             WidgetOutput::MultiLine(entries)
         } else {
-            WidgetOutput::Simple(
-                helpers::create_log_entry(
-                    LogEntryLevel::Error,
-                    container_name,
-                    "Invalid event for ReadWidget".to_string(),
-                    session_id,
-                    "error",
-                )
-            )
+            WidgetOutput::Simple(helpers::create_log_entry(
+                LogEntryLevel::Error,
+                container_name,
+                "Invalid event for ReadWidget".to_string(),
+                session_id,
+                "error",
+            ))
         }
     }
 
-    fn render_with_result(&self, event: AgentEvent, result: Option<ToolResult>, container_name: &str, session_id: Uuid) -> WidgetOutput {
-        if let AgentEvent::ToolCall { id, name: _, input, description } = event {
+    fn render_with_result(
+        &self,
+        event: AgentEvent,
+        result: Option<ToolResult>,
+        container_name: &str,
+        session_id: Uuid,
+    ) -> WidgetOutput {
+        if let AgentEvent::ToolCall {
+            id,
+            name: _,
+            input,
+            description,
+        } = event
+        {
             let mut header_entries = Vec::new();
             let mut content_entries = Vec::new();
 
             // Extract file path
-            let file_path = input.get("file_path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
+            let file_path = input.get("file_path").and_then(|v| v.as_str()).unwrap_or("unknown");
 
             // Header with file path
             let header = format!("📖 Reading: {}", Self::format_file_path(file_path));
@@ -170,14 +182,11 @@ impl MessageWidget for ReadWidget {
             if let Some(offset) = input.get("offset").and_then(|v| v.as_u64()) {
                 let limit = input.get("limit").and_then(|v| v.as_u64()).unwrap_or(2000);
                 let range_msg = format!("📏 Lines {}-{}", offset + 1, offset + limit);
-                let range_entry = LogEntry::new(
-                    LogEntryLevel::Debug,
-                    container_name.to_string(),
-                    range_msg,
-                )
-                .with_session(session_id)
-                .with_metadata("event_type", "read_range")
-                .with_metadata("tool_id", &id);
+                let range_entry =
+                    LogEntry::new(LogEntryLevel::Debug, container_name.to_string(), range_msg)
+                        .with_session(session_id)
+                        .with_metadata("event_type", "read_range")
+                        .with_metadata("tool_id", &id);
 
                 header_entries.push(range_entry);
             }
@@ -202,12 +211,15 @@ impl MessageWidget for ReadWidget {
             if let Some(tool_result) = result {
                 if let Some(content_str) = result_parser::format_tool_result(&tool_result.content) {
                     // Determine if file content should be treated as markdown based on extension
-                    let is_markdown_file = file_path.ends_with(".md") || file_path.ends_with(".markdown");
+                    let is_markdown_file =
+                        file_path.ends_with(".md") || file_path.ends_with(".markdown");
 
                     // Check if content looks like structured markdown or if it's a markdown file
-                    let should_parse_as_markdown = is_markdown_file ||
-                        (content_str.contains('#') &&
-                         (content_str.contains("```") || content_str.contains("*") || content_str.contains("-")));
+                    let should_parse_as_markdown = is_markdown_file
+                        || (content_str.contains('#')
+                            && (content_str.contains("```")
+                                || content_str.contains("*")
+                                || content_str.contains("-")));
 
                     if should_parse_as_markdown {
                         // Parse as markdown
@@ -215,7 +227,11 @@ impl MessageWidget for ReadWidget {
                             &content_str,
                             container_name,
                             session_id,
-                            if tool_result.is_error { LogEntryLevel::Error } else { LogEntryLevel::Info },
+                            if tool_result.is_error {
+                                LogEntryLevel::Error
+                            } else {
+                                LogEntryLevel::Info
+                            },
                         );
                         content_entries.extend(parsed_entries);
                     } else {
@@ -231,26 +247,24 @@ impl MessageWidget for ReadWidget {
 
                         for (line_num, line) in content_str.lines().enumerate() {
                             // Add line numbers if content appears to be from a file read
-                            let formatted_line = if content_str.lines().count() > 1 && line.trim().len() > 0 {
-                                // Check if line already has line numbers (from Read tool output)
-                                if line.chars().take(10).any(|c| c == '\t') {
-                                    // Line already has line numbers, use as-is
-                                    line.to_string()
+                            let formatted_line =
+                                if content_str.lines().count() > 1 && line.trim().len() > 0 {
+                                    // Check if line already has line numbers (from Read tool output)
+                                    if line.chars().take(10).any(|c| c == '\t') {
+                                        // Line already has line numbers, use as-is
+                                        line.to_string()
+                                    } else {
+                                        // Add simple line indicator
+                                        format!("{}:{}", line_num + 1, line)
+                                    }
                                 } else {
-                                    // Add simple line indicator
-                                    format!("{}:{}", line_num + 1, line)
-                                }
-                            } else {
-                                line.to_string()
-                            };
+                                    line.to_string()
+                                };
 
-                            let mut entry = LogEntry::new(
-                                level,
-                                container_name.to_string(),
-                                formatted_line,
-                            )
-                            .with_session(session_id)
-                            .with_metadata("file_content", "true");
+                            let mut entry =
+                                LogEntry::new(level, container_name.to_string(), formatted_line)
+                                    .with_session(session_id)
+                                    .with_metadata("file_content", "true");
 
                             if let Some(ft) = &file_type {
                                 entry = entry.with_metadata("file_type", ft);
@@ -267,7 +281,7 @@ impl MessageWidget for ReadWidget {
                             container_name.to_string(),
                             "❌ Failed to read file".to_string(),
                         )
-                        .with_session(session_id)
+                        .with_session(session_id),
                     );
                 }
 
@@ -283,15 +297,13 @@ impl MessageWidget for ReadWidget {
             }
         } else {
             // Should not happen if can_handle works correctly
-            WidgetOutput::Simple(
-                helpers::create_log_entry(
-                    LogEntryLevel::Error,
-                    container_name,
-                    "Invalid event for ReadWidget".to_string(),
-                    session_id,
-                    "error",
-                )
-            )
+            WidgetOutput::Simple(helpers::create_log_entry(
+                LogEntryLevel::Error,
+                container_name,
+                "Invalid event for ReadWidget".to_string(),
+                session_id,
+                "error",
+            ))
         }
     }
 
@@ -376,7 +388,9 @@ mod tests {
         let output = widget.render_with_result(event, Some(result), "test-container", Uuid::nil());
 
         match output {
-            WidgetOutput::Hierarchical { header, content, .. } => {
+            WidgetOutput::Hierarchical {
+                header, content, ..
+            } => {
                 assert!(!header.is_empty());
                 assert!(header[0].message.contains("📖 Reading"));
                 assert!(header[0].message.contains("🦀")); // Rust file icon
@@ -412,7 +426,9 @@ mod tests {
         let output = widget.render_with_result(event, Some(result), "test-container", Uuid::nil());
 
         match output {
-            WidgetOutput::Hierarchical { header, content, .. } => {
+            WidgetOutput::Hierarchical {
+                header, content, ..
+            } => {
                 assert!(!header.is_empty());
                 assert!(header[0].message.contains("📖 Reading"));
                 assert!(header[0].message.contains("📝")); // Markdown file icon
@@ -427,12 +443,30 @@ mod tests {
 
     #[test]
     fn test_detect_file_type() {
-        assert_eq!(ReadWidget::detect_file_type("file.rs"), Some("rust".to_string()));
-        assert_eq!(ReadWidget::detect_file_type("file.py"), Some("python".to_string()));
-        assert_eq!(ReadWidget::detect_file_type("file.js"), Some("javascript".to_string()));
-        assert_eq!(ReadWidget::detect_file_type("file.ts"), Some("typescript".to_string()));
-        assert_eq!(ReadWidget::detect_file_type("file.json"), Some("json".to_string()));
-        assert_eq!(ReadWidget::detect_file_type("file.md"), Some("markdown".to_string()));
+        assert_eq!(
+            ReadWidget::detect_file_type("file.rs"),
+            Some("rust".to_string())
+        );
+        assert_eq!(
+            ReadWidget::detect_file_type("file.py"),
+            Some("python".to_string())
+        );
+        assert_eq!(
+            ReadWidget::detect_file_type("file.js"),
+            Some("javascript".to_string())
+        );
+        assert_eq!(
+            ReadWidget::detect_file_type("file.ts"),
+            Some("typescript".to_string())
+        );
+        assert_eq!(
+            ReadWidget::detect_file_type("file.json"),
+            Some("json".to_string())
+        );
+        assert_eq!(
+            ReadWidget::detect_file_type("file.md"),
+            Some("markdown".to_string())
+        );
         assert_eq!(ReadWidget::detect_file_type("file.txt"), None);
     }
 }

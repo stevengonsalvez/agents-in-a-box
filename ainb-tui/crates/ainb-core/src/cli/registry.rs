@@ -100,6 +100,7 @@ impl CommandRegistry {
         r.register(PresetsCommand);
         r.register(UsageCommand);
         r.register(StatuslineCommand);
+        r.register(ClaudecodeCommand);
         r.register(CompletionCommand);
         r.register(PluginCommand); // Phase 4 stub — surface reserved now
         r
@@ -627,19 +628,97 @@ fn dispatch_usage_via_plugin(argv: &[String]) -> ! {
     std::process::exit(exit_code);
 }
 
+/// Legacy top-level `ainb statusline`. Kept (hidden) so existing
+/// `~/.claude/settings.json` entries written before the
+/// `claudecode` namespace existed keep working unchanged. New installs
+/// (and `ainb init` migrations) write the canonical `ainb claudecode
+/// statusline` form.
 pub struct StatuslineCommand;
 impl CliCommand for StatuslineCommand {
     fn name(&self) -> &'static str {
         "statusline"
     }
     fn build(&self, app: Command) -> Command {
-        app.subcommand(Command::new(self.name()).about(
-            "Claude Code statusline hook: read JSON on stdin, cache rate-limit \
-             windows for the TUI, and emit a powerline status string on stdout.",
-        ))
+        app.subcommand(
+            Command::new(self.name())
+                .hide(true)
+                .about(
+                    "(Legacy alias) Claude Code statusline hook. Prefer \
+                     `ainb claudecode statusline`. Kept so existing \
+                     `~/.claude/settings.json` entries keep working unchanged.",
+                )
+                .arg(
+                    clap::Arg::new("cache-only")
+                        .long("cache-only")
+                        .action(clap::ArgAction::SetTrue)
+                        .help(
+                            "Side-channel mode: write the cache only and emit nothing on \
+                             stdout.",
+                        ),
+                ),
+        )
     }
-    fn run(&self, _matches: &ArgMatches, _ctx: CliContext) -> BoxFuture<'static, Result<()>> {
-        Box::pin(async move { crate::cli::statusline::execute() })
+    fn run(&self, matches: &ArgMatches, _ctx: CliContext) -> BoxFuture<'static, Result<()>> {
+        let cache_only = matches.get_flag("cache-only");
+        Box::pin(async move { crate::cli::statusline::execute(cache_only) })
+    }
+}
+
+/// Canonical `ainb claudecode <subcmd>` provider-namespaced surface.
+///
+/// Today: only `statusline` (with optional `--cache-only`). Reserved for
+/// other Claude Code-specific commands (doctor, config introspection)
+/// without polluting the top level. Other providers (e.g. Codex) can
+/// grow their own namespace.
+pub struct ClaudecodeCommand;
+impl CliCommand for ClaudecodeCommand {
+    fn name(&self) -> &'static str {
+        "claudecode"
+    }
+    fn build(&self, app: Command) -> Command {
+        app.subcommand(
+            Command::new(self.name())
+                .about(
+                    "Claude Code-specific commands (statusline, etc.). \
+                     Provider-namespaced — other providers grow their own.",
+                )
+                .subcommand_required(true)
+                .arg_required_else_help(true)
+                .subcommand(
+                    Command::new("statusline")
+                        .about(
+                            "Claude Code statusline hook: read JSON on stdin, cache \
+                             rate-limit windows for the TUI, and emit a powerline status \
+                             string on stdout.",
+                        )
+                        .arg(
+                            clap::Arg::new("cache-only")
+                                .long("cache-only")
+                                .action(clap::ArgAction::SetTrue)
+                                .help(
+                                    "Side-channel mode: write the cache only and emit \
+                                     nothing on stdout.",
+                                ),
+                        ),
+                ),
+        )
+    }
+    fn run(&self, matches: &ArgMatches, _ctx: CliContext) -> BoxFuture<'static, Result<()>> {
+        let (sub_name, cache_only) = match matches.subcommand() {
+            Some(("statusline", m)) => (
+                Some("statusline".to_string()),
+                m.get_flag("cache-only"),
+            ),
+            _ => (None, false),
+        };
+        Box::pin(async move {
+            match sub_name.as_deref() {
+                Some("statusline") => crate::cli::statusline::execute(cache_only),
+                _ => Err(anyhow::anyhow!(
+                    "claudecode requires a subcommand (e.g. `statusline`)"
+                )),
+            }
+        })
     }
 }
 

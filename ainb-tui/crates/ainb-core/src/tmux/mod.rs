@@ -73,9 +73,7 @@ fn get_validated_shell() -> Option<String> {
     }
 
     // Also allow if it ends with a known shell name and exists
-    let shell_name = std::path::Path::new(&shell)
-        .file_name()
-        .and_then(|n| n.to_str())?;
+    let shell_name = std::path::Path::new(&shell).file_name().and_then(|n| n.to_str())?;
 
     if ["bash", "zsh", "sh", "fish", "tcsh", "csh", "dash", "ksh"].contains(&shell_name) {
         // Verify the path exists and is executable
@@ -222,8 +220,14 @@ async fn bind_clipboard_for_copy_modes(_session_name: &str, copy_cmd: &str) -> R
     for mode in ["copy-mode-vi", "copy-mode"] {
         let output = Command::new("tmux")
             .args([
-                "bind-key", "-T", mode, "MouseDragEnd1Pane",
-                "send-keys", "-X", "copy-pipe-and-cancel", copy_cmd
+                "bind-key",
+                "-T",
+                mode,
+                "MouseDragEnd1Pane",
+                "send-keys",
+                "-X",
+                "copy-pipe-and-cancel",
+                copy_cmd,
             ])
             .output()
             .await?;

@@ -5,14 +5,14 @@
 // - Welcome panel with getting started guide and architecture overview
 
 use ratatui::{
+    Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph},
-    Frame,
 };
 
-use super::mascot::{render_mascot, MascotAnimation};
+use super::mascot::{MascotAnimation, render_mascot};
 use super::sidebar::{SidebarComponent, SidebarState};
 use super::welcome_panel::{WelcomePanelComponent, WelcomePanelState};
 use crate::models::Workspace;
@@ -129,12 +129,25 @@ impl HomeScreenV2Component {
     }
 
     /// Main render function
-    pub fn render(&self, frame: &mut Frame, area: Rect, state: &mut HomeScreenV2State, workspaces: &[Workspace]) {
+    pub fn render(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        state: &mut HomeScreenV2State,
+        workspaces: &[Workspace],
+    ) {
         self.render_with_loading(frame, area, state, workspaces, false)
     }
 
     /// Main render function with loading indicator support
-    pub fn render_with_loading(&self, frame: &mut Frame, area: Rect, state: &mut HomeScreenV2State, workspaces: &[Workspace], is_loading: bool) {
+    pub fn render_with_loading(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        state: &mut HomeScreenV2State,
+        workspaces: &[Workspace],
+        is_loading: bool,
+    ) {
         let layout_mode = LayoutMode::detect(area);
 
         // Main container with dark background
@@ -155,20 +168,33 @@ impl HomeScreenV2Component {
     }
 
     /// Full layout with sidebar, mascot header, and welcome panel
-    fn render_full_layout(&self, frame: &mut Frame, area: Rect, state: &mut HomeScreenV2State, workspaces: &[Workspace]) {
+    fn render_full_layout(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        state: &mut HomeScreenV2State,
+        workspaces: &[Workspace],
+    ) {
         self.render_full_layout_with_loading(frame, area, state, workspaces, false)
     }
 
     /// Full layout with loading indicator support
-    fn render_full_layout_with_loading(&self, frame: &mut Frame, area: Rect, state: &mut HomeScreenV2State, workspaces: &[Workspace], is_loading: bool) {
+    fn render_full_layout_with_loading(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        state: &mut HomeScreenV2State,
+        workspaces: &[Workspace],
+        is_loading: bool,
+    ) {
         // Vertical layout: header, main content, recent activity, help bar
         let main_layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(7),  // Header with mascot
-                Constraint::Min(20),    // Main content (sidebar + welcome)
-                Constraint::Length(3),  // Recent activity
-                Constraint::Length(2),  // Help bar
+                Constraint::Length(7), // Header with mascot
+                Constraint::Min(20),   // Main content (sidebar + welcome)
+                Constraint::Length(3), // Recent activity
+                Constraint::Length(2), // Help bar
             ])
             .split(area);
 
@@ -210,32 +236,37 @@ impl HomeScreenV2Component {
         let frame_idx = (std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() / 100)
-            .unwrap_or(0) % spinner_frames.len() as u128) as usize;
+            .unwrap_or(0)
+            % spinner_frames.len() as u128) as usize;
         let spinner = spinner_frames[frame_idx];
 
         let loading_text = format!("{} Loading sessions...", spinner);
-        let loading = Paragraph::new(loading_text)
-            .style(Style::default().fg(GOLD))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(CORNFLOWER_BLUE))
-                    .style(Style::default().bg(PANEL_BG))
-            );
+        let loading = Paragraph::new(loading_text).style(Style::default().fg(GOLD)).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(CORNFLOWER_BLUE))
+                .style(Style::default().bg(PANEL_BG)),
+        );
 
         frame.render_widget(loading, area);
     }
 
     /// Compact layout for smaller terminals
-    fn render_compact_layout(&self, frame: &mut Frame, area: Rect, state: &mut HomeScreenV2State, workspaces: &[Workspace]) {
+    fn render_compact_layout(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        state: &mut HomeScreenV2State,
+        workspaces: &[Workspace],
+    ) {
         let layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(4),  // Compact header
-                Constraint::Min(16),    // Content
-                Constraint::Length(2),  // Recent activity
-                Constraint::Length(2),  // Help bar
+                Constraint::Length(4), // Compact header
+                Constraint::Min(16),   // Content
+                Constraint::Length(2), // Recent activity
+                Constraint::Length(2), // Help bar
             ])
             .split(area);
 
@@ -263,14 +294,17 @@ impl HomeScreenV2Component {
         let layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(2),  // Title
-                Constraint::Min(10),    // Sidebar list
-                Constraint::Length(2),  // Help
+                Constraint::Length(2), // Title
+                Constraint::Min(10),   // Sidebar list
+                Constraint::Length(2), // Help
             ])
             .split(area);
 
         let title = Paragraph::new(Line::from(vec![
-            Span::styled(" AINB ", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " AINB ",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ),
             Span::styled("- Agents in a Box", Style::default().fg(SOFT_WHITE)),
         ]))
         .alignment(Alignment::Center)
@@ -319,14 +353,20 @@ impl HomeScreenV2Component {
             .split(header_layout[1]);
 
         let title = Paragraph::new(Line::from(vec![
-            Span::styled("A I N B", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "A I N B",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ),
             Span::styled("  -  ", Style::default().fg(SUBDUED_BORDER)),
             Span::styled("Agents in a Box", Style::default().fg(SOFT_WHITE)),
         ]))
         .style(Style::default().bg(PANEL_BG));
 
         let subtitle = Paragraph::new(Line::from(vec![
-            Span::styled("Your AI-Powered Development Hub", Style::default().fg(MUTED_GRAY)),
+            Span::styled(
+                "Your AI-Powered Development Hub",
+                Style::default().fg(MUTED_GRAY),
+            ),
             Span::styled("                    ", Style::default()),
             Span::styled("v2.0.0", Style::default().fg(MUTED_GRAY)),
         ]))
@@ -354,15 +394,18 @@ impl HomeScreenV2Component {
         let header_layout = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Length(8),  // Mini mascot
-                Constraint::Min(30),    // Title
+                Constraint::Length(8), // Mini mascot
+                Constraint::Min(30),   // Title
             ])
             .split(inner);
 
         render_mascot(frame, header_layout[0], &mascot_copy);
 
         let title = Paragraph::new(Line::from(vec![
-            Span::styled("AINB", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "AINB",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" - Agents in a Box", Style::default().fg(SOFT_WHITE)),
             Span::styled("  v2.0.0", Style::default().fg(MUTED_GRAY)),
         ]))
@@ -399,22 +442,33 @@ impl HomeScreenV2Component {
                         Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
                     ),
                     Span::styled("/", Style::default().fg(MUTED_GRAY)),
-                    Span::styled(session.branch_name.clone(), Style::default().fg(CORNFLOWER_BLUE)),
+                    Span::styled(
+                        session.branch_name.clone(),
+                        Style::default().fg(CORNFLOWER_BLUE),
+                    ),
                     Span::styled("  ", Style::default()),
                     Span::styled(status_icon, Style::default().fg(status_color)),
                     Span::styled(
-                        if session.status.is_running() { " Running" } else { " Stopped" },
+                        if session.status.is_running() {
+                            " Running"
+                        } else {
+                            " Stopped"
+                        },
                         Style::default().fg(status_color),
                     ),
                 ])
             } else {
-                Line::from(vec![
-                    Span::styled("   No recent sessions", Style::default().fg(MUTED_GRAY)),
-                ])
+                Line::from(vec![Span::styled(
+                    "   No recent sessions",
+                    Style::default().fg(MUTED_GRAY),
+                )])
             }
         } else {
             Line::from(vec![
-                Span::styled("   No workspaces configured - press ", Style::default().fg(MUTED_GRAY)),
+                Span::styled(
+                    "   No workspaces configured - press ",
+                    Style::default().fg(MUTED_GRAY),
+                ),
                 Span::styled("s", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
                 Span::styled(" to go to Sessions", Style::default().fg(MUTED_GRAY)),
             ])
@@ -451,7 +505,10 @@ impl HomeScreenV2Component {
             if i > 0 {
                 spans.push(Span::styled(" | ", Style::default().fg(SUBDUED_BORDER)));
             }
-            spans.push(Span::styled(*key, Style::default().fg(GOLD).add_modifier(Modifier::BOLD)));
+            spans.push(Span::styled(
+                *key,
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ));
             spans.push(Span::styled(" ", Style::default()));
             spans.push(Span::styled(*desc, Style::default().fg(MUTED_GRAY)));
         }

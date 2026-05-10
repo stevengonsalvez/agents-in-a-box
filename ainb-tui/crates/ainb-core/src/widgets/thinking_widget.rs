@@ -31,11 +31,12 @@ impl MessageWidget for ThinkingWidget {
                     "💭 Thinking...".to_string(),
                 )
                 .with_session(session_id)
-                .with_metadata("event_type", "thinking")
+                .with_metadata("event_type", "thinking"),
             );
 
             // Split content into lines and display with indentation
-            for line in content.lines().take(10) { // Limit to 10 lines to avoid spam
+            for line in content.lines().take(10) {
+                // Limit to 10 lines to avoid spam
                 let truncated = if line.len() > 100 {
                     format!("{}...", &line[..100])
                 } else {
@@ -49,7 +50,7 @@ impl MessageWidget for ThinkingWidget {
                         format!("  {}", truncated),
                     )
                     .with_session(session_id)
-                    .with_metadata("event_type", "thinking_content")
+                    .with_metadata("event_type", "thinking_content"),
                 );
             }
 
@@ -61,21 +62,19 @@ impl MessageWidget for ThinkingWidget {
                         format!("  ... ({} more lines)", content.lines().count() - 10),
                     )
                     .with_session(session_id)
-                    .with_metadata("event_type", "thinking_more")
+                    .with_metadata("event_type", "thinking_more"),
                 );
             }
 
             WidgetOutput::MultiLine(entries)
         } else {
-            WidgetOutput::Simple(
-                helpers::create_log_entry(
-                    LogEntryLevel::Error,
-                    container_name,
-                    "Invalid event for ThinkingWidget".to_string(),
-                    session_id,
-                    "error",
-                )
-            )
+            WidgetOutput::Simple(helpers::create_log_entry(
+                LogEntryLevel::Error,
+                container_name,
+                "Invalid event for ThinkingWidget".to_string(),
+                session_id,
+                "error",
+            ))
         }
     }
 

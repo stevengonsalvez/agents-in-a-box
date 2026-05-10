@@ -38,10 +38,12 @@ fn list_tmux_sessions() -> Vec<String> {
         .ok()
         .and_then(|output| {
             if output.status.success() {
-                Some(String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .map(|s| s.to_string())
-                    .collect())
+                Some(
+                    String::from_utf8_lossy(&output.stdout)
+                        .lines()
+                        .map(|s| s.to_string())
+                        .collect(),
+                )
             } else {
                 None
             }
@@ -54,9 +56,7 @@ fn cleanup_claude_tmux_sessions() {
     let sessions = list_tmux_sessions();
     for session in sessions {
         if session.starts_with("tmux_") {
-            let _ = Command::new("tmux")
-                .args(["kill-session", "-t", &session])
-                .status();
+            let _ = Command::new("tmux").args(["kill-session", "-t", &session]).status();
         }
     }
 }
@@ -94,7 +94,14 @@ fn test_interactive_session_creation_without_docker() -> Result<(), Box<dyn std:
 
     // Verify Docker is NOT running (or we'll skip Docker check)
     let docker_running = is_docker_running();
-    println!("Docker status: {}", if docker_running { "running" } else { "not running" });
+    println!(
+        "Docker status: {}",
+        if docker_running {
+            "running"
+        } else {
+            "not running"
+        }
+    );
 
     // Verify tmux is installed
     if !is_tmux_installed() {
@@ -278,7 +285,14 @@ fn test_interactive_mode_without_docker() -> Result<(), Box<dyn std::error::Erro
     }
 
     let docker_running = is_docker_running();
-    println!("Docker status: {}", if docker_running { "running" } else { "not running" });
+    println!(
+        "Docker status: {}",
+        if docker_running {
+            "running"
+        } else {
+            "not running"
+        }
+    );
 
     if docker_running {
         println!("ℹ️  Docker is running - test will still verify Interactive mode works");
@@ -320,7 +334,14 @@ fn test_boss_mode_requires_docker() -> Result<(), Box<dyn std::error::Error>> {
     println!("🚀 Testing that Boss mode still requires Docker");
 
     let docker_running = is_docker_running();
-    println!("Docker status: {}", if docker_running { "running" } else { "not running" });
+    println!(
+        "Docker status: {}",
+        if docker_running {
+            "running"
+        } else {
+            "not running"
+        }
+    );
 
     if !docker_running {
         println!("ℹ️  Docker is not running - Boss mode should show appropriate message");

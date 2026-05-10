@@ -47,16 +47,9 @@ fn test_session_store_roundtrip() {
     // Arrange: Create a store with multiple sessions
     let mut store = SessionStore::default();
 
-    let session1 = create_session_metadata(
-        "tmux_feature-auth",
-        "/path/to/worktree1",
-        "my-project",
-    );
-    let session2 = create_session_metadata(
-        "tmux_bugfix-123",
-        "/path/to/worktree2",
-        "another-project",
-    );
+    let session1 = create_session_metadata("tmux_feature-auth", "/path/to/worktree1", "my-project");
+    let session2 =
+        create_session_metadata("tmux_bugfix-123", "/path/to/worktree2", "another-project");
 
     let session1_id = session1.session_id;
     let session2_id = session2.session_id;
@@ -75,15 +68,14 @@ fn test_session_store_roundtrip() {
     // Assert: All data preserved
     assert_eq!(loaded.sessions.len(), 2);
 
-    let loaded_session1 = loaded.find_by_tmux_name("tmux_feature-auth")
-        .expect("session1 not found");
+    let loaded_session1 =
+        loaded.find_by_tmux_name("tmux_feature-auth").expect("session1 not found");
     assert_eq!(loaded_session1.session_id, session1_id);
     assert_eq!(loaded_session1.worktree_path, session1_path);
     assert_eq!(loaded_session1.workspace_name, "my-project");
     assert_eq!(loaded_session1.created_at, session1_created);
 
-    let loaded_session2 = loaded.find_by_tmux_name("tmux_bugfix-123")
-        .expect("session2 not found");
+    let loaded_session2 = loaded.find_by_tmux_name("tmux_bugfix-123").expect("session2 not found");
     assert_eq!(loaded_session2.session_id, session2_id);
     assert_eq!(loaded_session2.worktree_path, session2_path);
     assert_eq!(loaded_session2.workspace_name, "another-project");
@@ -107,14 +99,12 @@ fn test_session_store_json_format_matches_tui() {
 }"#;
 
     // Act: Parse the JSON
-    let store: SessionStore = serde_json::from_str(tui_json)
-        .expect("failed to parse TUI format");
+    let store: SessionStore = serde_json::from_str(tui_json).expect("failed to parse TUI format");
 
     // Assert: All fields parsed correctly
     assert_eq!(store.sessions.len(), 1);
 
-    let session = store.find_by_tmux_name("tmux_session-name")
-        .expect("session not found");
+    let session = store.find_by_tmux_name("tmux_session-name").expect("session not found");
 
     assert_eq!(
         session.session_id.to_string(),
@@ -139,11 +129,7 @@ fn test_session_store_keyed_by_tmux_name() {
     // Arrange: Create store and add sessions
     let mut store = SessionStore::default();
 
-    let session = create_session_metadata(
-        "tmux_my-feature",
-        "/path/to/worktree",
-        "workspace",
-    );
+    let session = create_session_metadata("tmux_my-feature", "/path/to/worktree", "workspace");
 
     store.upsert(session);
 
@@ -200,8 +186,7 @@ fn test_session_store_upsert_updates_existing() {
     // Assert: Still only one session, but with updated values
     assert_eq!(store.sessions.len(), 1);
 
-    let session = store.find_by_tmux_name("tmux_shared-name")
-        .expect("session not found");
+    let session = store.find_by_tmux_name("tmux_shared-name").expect("session not found");
 
     // Should have the NEW values
     assert_eq!(session.session_id, updated_id);
@@ -337,10 +322,19 @@ fn test_session_store_serialization_format() {
     let sessions = parsed.get("sessions").unwrap();
     let session_data = sessions.get("tmux_test-session").unwrap();
 
-    assert_eq!(session_data.get("session_id").unwrap(), "12345678-1234-1234-1234-123456789abc");
-    assert_eq!(session_data.get("tmux_session_name").unwrap(), "tmux_test-session");
+    assert_eq!(
+        session_data.get("session_id").unwrap(),
+        "12345678-1234-1234-1234-123456789abc"
+    );
+    assert_eq!(
+        session_data.get("tmux_session_name").unwrap(),
+        "tmux_test-session"
+    );
     assert_eq!(session_data.get("worktree_path").unwrap(), "/test/path");
-    assert_eq!(session_data.get("workspace_name").unwrap(), "test-workspace");
+    assert_eq!(
+        session_data.get("workspace_name").unwrap(),
+        "test-workspace"
+    );
     assert!(session_data.get("created_at").is_some());
 }
 

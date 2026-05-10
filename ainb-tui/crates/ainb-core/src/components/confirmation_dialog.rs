@@ -97,7 +97,8 @@ impl ConfirmationDialogComponent {
             if let Some(options) = dialog.options.as_ref() {
                 let n = options.len().max(1);
                 let pct = (100u16 / n as u16).max(1);
-                let constraints: Vec<Constraint> = (0..n).map(|_| Constraint::Percentage(pct)).collect();
+                let constraints: Vec<Constraint> =
+                    (0..n).map(|_| Constraint::Percentage(pct)).collect();
                 let button_chunks = Layout::default()
                     .direction(Direction::Horizontal)
                     .constraints(constraints)
@@ -110,9 +111,7 @@ impl ConfirmationDialogComponent {
                         Style::default().fg(Color::White)
                     };
                     let label = format!("[ {} ]", opt.label);
-                    let button = Paragraph::new(label)
-                        .style(style)
-                        .alignment(Alignment::Center);
+                    let button = Paragraph::new(label).style(style).alignment(Alignment::Center);
                     if let Some(area) = button_chunks.get(i) {
                         frame.render_widget(button, *area);
                     }
@@ -130,7 +129,8 @@ impl ConfirmationDialogComponent {
                     Style::default().fg(Color::White)
                 };
 
-                let yes_button = Paragraph::new("Yes").style(yes_style).alignment(Alignment::Center);
+                let yes_button =
+                    Paragraph::new("Yes").style(yes_style).alignment(Alignment::Center);
 
                 frame.render_widget(yes_button, button_chunks[0]);
 

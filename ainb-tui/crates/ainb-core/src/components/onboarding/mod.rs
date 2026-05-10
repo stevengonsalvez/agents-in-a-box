@@ -6,5 +6,7 @@ pub mod dependency_checker;
 pub mod state;
 
 pub use component::OnboardingComponent;
-pub use dependency_checker::{Dependency, DependencyCategory, DependencyChecker, DependencyCheckResult, DependencyStatus};
+pub use dependency_checker::{
+    Dependency, DependencyCategory, DependencyCheckResult, DependencyChecker, DependencyStatus,
+};
 pub use state::{OnboardingFocus, OnboardingState, OnboardingStep, ValidatedPath};

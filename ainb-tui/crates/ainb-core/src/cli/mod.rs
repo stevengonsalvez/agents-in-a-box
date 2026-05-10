@@ -203,3 +203,8 @@ pub struct KillArgs {
     #[arg(long, short)]
     pub force: bool,
 }
+
+// Statusline / claudecode subcommand parse tests removed. The Commands
+// enum they exercised no longer exists (registry pattern owns the
+// surface); equivalent coverage lives in `cli/registry.rs` integration
+// tests against the assembled `clap::Command`.

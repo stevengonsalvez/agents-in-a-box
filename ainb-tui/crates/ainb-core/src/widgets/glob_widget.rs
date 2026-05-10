@@ -1,7 +1,7 @@
 // ABOUTME: Widget for rendering Glob tool calls showing file pattern matching
 // Displays file patterns and matched paths
 
-use super::{MessageWidget, WidgetOutput, ToolResult, helpers, result_parser};
+use super::{MessageWidget, ToolResult, WidgetOutput, helpers, result_parser};
 use crate::agent_parsers::AgentEvent;
 use crate::components::live_logs_stream::{LogEntry, LogEntryLevel};
 use uuid::Uuid;
@@ -16,12 +16,23 @@ impl GlobWidget {
 
 impl MessageWidget for GlobWidget {
     fn can_handle(&self, event: &AgentEvent) -> bool {
-        matches!(event, AgentEvent::ToolCall { name, .. } if name == "Glob") ||
-        matches!(event, AgentEvent::Structured(crate::agent_parsers::types::StructuredPayload::GlobResults { .. }))
+        matches!(event, AgentEvent::ToolCall { name, .. } if name == "Glob")
+            || matches!(
+                event,
+                AgentEvent::Structured(
+                    crate::agent_parsers::types::StructuredPayload::GlobResults { .. }
+                )
+            )
     }
 
     fn render(&self, event: AgentEvent, container_name: &str, session_id: Uuid) -> WidgetOutput {
-        if let AgentEvent::ToolCall { id, name: _, input, description } = event {
+        if let AgentEvent::ToolCall {
+            id,
+            name: _,
+            input,
+            description,
+        } = event
+        {
             let mut entries = Vec::new();
 
             // Build the main message
@@ -29,9 +40,7 @@ impl MessageWidget for GlobWidget {
             let desc = description.as_ref().map(|s| s.as_str()).unwrap_or("");
 
             // Extract pattern for display
-            let pattern = input.get("pattern")
-                .and_then(|v| v.as_str())
-                .unwrap_or("*");
+            let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("*");
 
             // Header line with tool name and description
             if !desc.is_empty() {
@@ -85,20 +94,30 @@ impl MessageWidget for GlobWidget {
             WidgetOutput::MultiLine(entries)
         } else {
             // Should not happen if can_handle works correctly
-            WidgetOutput::Simple(
-                helpers::create_log_entry(
-                    LogEntryLevel::Error,
-                    container_name,
-                    "Invalid event for GlobWidget".to_string(),
-                    session_id,
-                    "error",
-                )
-            )
+            WidgetOutput::Simple(helpers::create_log_entry(
+                LogEntryLevel::Error,
+                container_name,
+                "Invalid event for GlobWidget".to_string(),
+                session_id,
+                "error",
+            ))
         }
     }
 
-    fn render_with_result(&self, event: AgentEvent, result: Option<ToolResult>, container_name: &str, session_id: Uuid) -> WidgetOutput {
-        if let AgentEvent::ToolCall { id, name: _, input, description } = event {
+    fn render_with_result(
+        &self,
+        event: AgentEvent,
+        result: Option<ToolResult>,
+        container_name: &str,
+        session_id: Uuid,
+    ) -> WidgetOutput {
+        if let AgentEvent::ToolCall {
+            id,
+            name: _,
+            input,
+            description,
+        } = event
+        {
             let mut header_entries = Vec::new();
             let mut content_entries = Vec::new();
 
@@ -107,9 +126,7 @@ impl MessageWidget for GlobWidget {
             let desc = description.as_ref().map(|s| s.as_str()).unwrap_or("");
 
             // Extract pattern for display
-            let pattern = input.get("pattern")
-                .and_then(|v| v.as_str())
-                .unwrap_or("*");
+            let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("*");
 
             // Header line with tool name and description
             if !desc.is_empty() {
@@ -175,7 +192,7 @@ impl MessageWidget for GlobWidget {
                                 "No files found matching pattern".to_string(),
                             )
                             .with_session(session_id)
-                            .with_metadata("glob_result", "empty")
+                            .with_metadata("glob_result", "empty"),
                         );
                     } else {
                         // Add count summary
@@ -192,7 +209,7 @@ impl MessageWidget for GlobWidget {
                                 count_msg,
                             )
                             .with_session(session_id)
-                            .with_metadata("glob_count", &lines.len().to_string())
+                            .with_metadata("glob_count", &lines.len().to_string()),
                         );
 
                         // Show files (limit to 20 for display)
@@ -211,7 +228,7 @@ impl MessageWidget for GlobWidget {
                                 )
                                 .with_session(session_id)
                                 .with_metadata("glob_file", "true")
-                                .with_metadata("file_index", &idx.to_string())
+                                .with_metadata("file_index", &idx.to_string()),
                             );
                         }
 
@@ -224,7 +241,7 @@ impl MessageWidget for GlobWidget {
                                     format!("  … and {} more files", lines.len() - 20),
                                 )
                                 .with_session(session_id)
-                                .with_metadata("glob_truncated", "true")
+                                .with_metadata("glob_truncated", "true"),
                             );
                         }
                     }
@@ -236,7 +253,7 @@ impl MessageWidget for GlobWidget {
                             container_name.to_string(),
                             "❌ Glob search failed with no output".to_string(),
                         )
-                        .with_session(session_id)
+                        .with_session(session_id),
                     );
                 }
 
@@ -252,15 +269,13 @@ impl MessageWidget for GlobWidget {
             }
         } else {
             // Should not happen if can_handle works correctly
-            WidgetOutput::Simple(
-                helpers::create_log_entry(
-                    LogEntryLevel::Error,
-                    container_name,
-                    "Invalid event for GlobWidget".to_string(),
-                    session_id,
-                    "error",
-                )
-            )
+            WidgetOutput::Simple(helpers::create_log_entry(
+                LogEntryLevel::Error,
+                container_name,
+                "Invalid event for GlobWidget".to_string(),
+                session_id,
+                "error",
+            ))
         }
     }
 

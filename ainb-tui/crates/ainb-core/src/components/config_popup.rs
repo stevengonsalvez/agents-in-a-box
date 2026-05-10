@@ -2,11 +2,11 @@
 // Follows the same pattern as auth_provider_popup.rs
 
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, Paragraph},
-    Frame,
 };
 
 // Color palette from TUI style guide
@@ -32,14 +32,9 @@ pub enum ConfigPopupType {
         cursor_position: usize,
     },
     /// Boolean toggle (shows Yes/No options)
-    Boolean {
-        value: bool,
-    },
+    Boolean { value: bool },
     /// Number input
-    NumberInput {
-        value: i64,
-        input_buffer: String,
-    },
+    NumberInput { value: i64, input_buffer: String },
 }
 
 /// State for the config popup
@@ -78,7 +73,14 @@ impl ConfigPopupState {
     }
 
     /// Open popup for a choice setting
-    pub fn open_choice(&mut self, title: &str, description: &str, key: &str, options: Vec<String>, current_index: usize) {
+    pub fn open_choice(
+        &mut self,
+        title: &str,
+        description: &str,
+        key: &str,
+        options: Vec<String>,
+        current_index: usize,
+    ) {
         self.show_popup = true;
         self.title = title.to_string();
         self.description = description.to_string();
@@ -108,7 +110,9 @@ impl ConfigPopupState {
         self.title = title.to_string();
         self.description = description.to_string();
         self.setting_key = key.to_string();
-        self.popup_type = ConfigPopupType::Boolean { value: current_value };
+        self.popup_type = ConfigPopupType::Boolean {
+            value: current_value,
+        };
     }
 
     /// Open popup for a number setting
@@ -131,7 +135,10 @@ impl ConfigPopupState {
     /// Navigate up in choice list
     pub fn navigate_up(&mut self) {
         match &mut self.popup_type {
-            ConfigPopupType::Choice { options, selected_index } => {
+            ConfigPopupType::Choice {
+                options,
+                selected_index,
+            } => {
                 if !options.is_empty() {
                     *selected_index = selected_index.checked_sub(1).unwrap_or(options.len() - 1);
                 }
@@ -146,7 +153,10 @@ impl ConfigPopupState {
     /// Navigate down in choice list
     pub fn navigate_down(&mut self) {
         match &mut self.popup_type {
-            ConfigPopupType::Choice { options, selected_index } => {
+            ConfigPopupType::Choice {
+                options,
+                selected_index,
+            } => {
                 if !options.is_empty() {
                     *selected_index = (*selected_index + 1) % options.len();
                 }
@@ -161,7 +171,10 @@ impl ConfigPopupState {
     /// Input character for text/number input
     pub fn input_char(&mut self, c: char) {
         match &mut self.popup_type {
-            ConfigPopupType::TextInput { value, cursor_position } => {
+            ConfigPopupType::TextInput {
+                value,
+                cursor_position,
+            } => {
                 value.insert(*cursor_position, c);
                 *cursor_position += 1;
             }
@@ -177,7 +190,10 @@ impl ConfigPopupState {
     /// Backspace for text/number input
     pub fn backspace(&mut self) {
         match &mut self.popup_type {
-            ConfigPopupType::TextInput { value, cursor_position } => {
+            ConfigPopupType::TextInput {
+                value,
+                cursor_position,
+            } => {
                 if *cursor_position > 0 {
                     *cursor_position -= 1;
                     value.remove(*cursor_position);
@@ -193,16 +209,18 @@ impl ConfigPopupState {
     /// Get the current value to save
     pub fn get_value(&self) -> Option<ConfigPopupValue> {
         match &self.popup_type {
-            ConfigPopupType::Choice { options, selected_index } => {
-                options.get(*selected_index).map(|s| ConfigPopupValue::Choice(s.clone(), *selected_index))
-            }
-            ConfigPopupType::TextInput { value, .. } => {
-                Some(ConfigPopupValue::Text(value.clone()))
-            }
-            ConfigPopupType::Boolean { value } => {
-                Some(ConfigPopupValue::Boolean(*value))
-            }
-            ConfigPopupType::NumberInput { input_buffer, value } => {
+            ConfigPopupType::Choice {
+                options,
+                selected_index,
+            } => options
+                .get(*selected_index)
+                .map(|s| ConfigPopupValue::Choice(s.clone(), *selected_index)),
+            ConfigPopupType::TextInput { value, .. } => Some(ConfigPopupValue::Text(value.clone())),
+            ConfigPopupType::Boolean { value } => Some(ConfigPopupValue::Boolean(*value)),
+            ConfigPopupType::NumberInput {
+                input_buffer,
+                value,
+            } => {
                 let num = input_buffer.parse::<i64>().unwrap_or(*value);
                 Some(ConfigPopupValue::Number(num))
             }
@@ -284,13 +302,19 @@ impl ConfigPopupComponent {
 
         // Content based on type
         match &state.popup_type {
-            ConfigPopupType::Choice { options, selected_index } => {
+            ConfigPopupType::Choice {
+                options,
+                selected_index,
+            } => {
                 self.render_choice(frame, layout[1], options, *selected_index);
             }
             ConfigPopupType::Boolean { value } => {
                 self.render_boolean(frame, layout[1], *value);
             }
-            ConfigPopupType::TextInput { value, cursor_position } => {
+            ConfigPopupType::TextInput {
+                value,
+                cursor_position,
+            } => {
                 self.render_text_input(frame, layout[1], value, *cursor_position);
             }
             ConfigPopupType::NumberInput { input_buffer, .. } => {
@@ -331,22 +355,34 @@ impl ConfigPopupComponent {
     fn render_boolean(&self, frame: &mut Frame, area: Rect, value: bool) {
         let lines = vec![
             Line::from(vec![
-                Span::styled(if value { "▶ " } else { "  " }, Style::default().fg(SELECTION_GREEN)),
+                Span::styled(
+                    if value { "▶ " } else { "  " },
+                    Style::default().fg(SELECTION_GREEN),
+                ),
                 Span::styled(
                     "✓ Enabled",
                     if value {
-                        Style::default().fg(SELECTION_GREEN).bg(LIST_HIGHLIGHT_BG).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .fg(SELECTION_GREEN)
+                            .bg(LIST_HIGHLIGHT_BG)
+                            .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().fg(SOFT_WHITE)
                     },
                 ),
             ]),
             Line::from(vec![
-                Span::styled(if !value { "▶ " } else { "  " }, Style::default().fg(SELECTION_GREEN)),
+                Span::styled(
+                    if !value { "▶ " } else { "  " },
+                    Style::default().fg(SELECTION_GREEN),
+                ),
                 Span::styled(
                     "✗ Disabled",
                     if !value {
-                        Style::default().fg(SELECTION_GREEN).bg(LIST_HIGHLIGHT_BG).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .fg(SELECTION_GREEN)
+                            .bg(LIST_HIGHLIGHT_BG)
+                            .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().fg(SOFT_WHITE)
                     },
@@ -376,9 +412,10 @@ impl ConfigPopupComponent {
             format!("{}|{}", before, after)
         };
 
-        let text = Paragraph::new(Line::from(vec![
-            Span::styled(&display, Style::default().fg(SOFT_WHITE)),
-        ]))
+        let text = Paragraph::new(Line::from(vec![Span::styled(
+            &display,
+            Style::default().fg(SOFT_WHITE),
+        )]))
         .style(Style::default().bg(LIST_HIGHLIGHT_BG));
 
         frame.render_widget(text, inner);
@@ -394,9 +431,10 @@ impl ConfigPopupComponent {
         let inner = input_block.inner(area);
         frame.render_widget(input_block, area);
 
-        let text = Paragraph::new(Line::from(vec![
-            Span::styled(format!("{}|", value), Style::default().fg(SOFT_WHITE)),
-        ]))
+        let text = Paragraph::new(Line::from(vec![Span::styled(
+            format!("{}|", value),
+            Style::default().fg(SOFT_WHITE),
+        )]))
         .style(Style::default().bg(LIST_HIGHLIGHT_BG));
 
         frame.render_widget(text, inner);
@@ -405,17 +443,10 @@ impl ConfigPopupComponent {
     fn render_help_bar(&self, frame: &mut Frame, area: Rect, state: &ConfigPopupState) {
         let help_items = match &state.popup_type {
             ConfigPopupType::Choice { .. } | ConfigPopupType::Boolean { .. } => {
-                vec![
-                    ("↑↓", "select"),
-                    ("Enter", "confirm"),
-                    ("Esc", "cancel"),
-                ]
+                vec![("↑↓", "select"), ("Enter", "confirm"), ("Esc", "cancel")]
             }
             ConfigPopupType::TextInput { .. } | ConfigPopupType::NumberInput { .. } => {
-                vec![
-                    ("Enter", "save"),
-                    ("Esc", "cancel"),
-                ]
+                vec![("Enter", "save"), ("Esc", "cancel")]
             }
         };
 
@@ -426,7 +457,10 @@ impl ConfigPopupComponent {
             if i > 0 {
                 spans.push(Span::styled(" | ", Style::default().fg(MUTED_GRAY)));
             }
-            spans.push(Span::styled(*key, Style::default().fg(GOLD).add_modifier(Modifier::BOLD)));
+            spans.push(Span::styled(
+                *key,
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ));
             spans.push(Span::styled(" ", Style::default()));
             spans.push(Span::styled(*desc, Style::default().fg(MUTED_GRAY)));
         }

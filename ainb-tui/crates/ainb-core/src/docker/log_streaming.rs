@@ -149,7 +149,7 @@ impl DockerLogStreamingManager {
             stdout: true,
             stderr: true,
             follow: true,
-            timestamps: false,  // Disable timestamps for cleaner JSON output
+            timestamps: false,       // Disable timestamps for cleaner JSON output
             tail: "100".to_string(), // Start with last 100 lines
             ..Default::default()
         };
@@ -514,7 +514,8 @@ impl DockerLogStreamingManager {
         // Create a temporary router for backwards compatibility (used only in tests)
         let mut temp_router = crate::widgets::MessageRouter::new();
         // Use the new function and return the first entry
-        let entries = Self::agent_event_to_log_entries(event, container_name, session_id, &mut temp_router);
+        let entries =
+            Self::agent_event_to_log_entries(event, container_name, session_id, &mut temp_router);
         entries.into_iter().next().unwrap_or_else(|| {
             LogEntry::new(
                 LogEntryLevel::Error,
@@ -602,7 +603,8 @@ impl DockerLogStreamingManager {
                         let mut done = 0u32;
 
                         for t in todos_val {
-                            let status = t.get("status").and_then(|x| x.as_str()).unwrap_or("pending");
+                            let status =
+                                t.get("status").and_then(|x| x.as_str()).unwrap_or("pending");
                             match status {
                                 "completed" | "done" => done += 1,
                                 "in_progress" => in_progress += 1,
@@ -697,8 +699,9 @@ impl DockerLogStreamingManager {
                 return LogEntry::new(
                     LogEntryLevel::Debug,
                     container_name.to_string(),
-                    "".to_string()
-                ).with_session(session_id);
+                    "".to_string(),
+                )
+                .with_session(session_id);
             }
 
             AgentEvent::Custom { event_type, data } => LogEntry::new(

@@ -120,7 +120,7 @@ impl LayoutComponent {
         self.logs_viewer.render(frame, main_layout[2], state);
 
         // Render bottom menu bar
-        self.render_menu_bar(frame, main_layout[3]);
+        self.render_menu_bar(frame, main_layout[3], state);
 
         // Render help overlay if visible
         if state.help_visible {
@@ -162,7 +162,18 @@ impl LayoutComponent {
         &mut self.tmux_preview
     }
 
-    fn render_menu_bar(&self, frame: &mut Frame, area: Rect) {
+    fn render_menu_bar(&self, frame: &mut Frame, area: Rect, state: &AppState) {
+        // Pure decision for which restart-shaped affordance to surface.
+        // See test below for the truth table.
+        // The session-action group's restart-shaped affordance is split
+        // across two keys with different semantics:
+        //   - `r` resumes a Stopped Interactive (tmux) session in-place.
+        //   - `e` restarts a Boss/Docker session into a fresh container.
+        // Show the binding that actually applies to the highlighted row
+        // so users don't press the wrong one. See events.rs:834 and
+        // events.rs:868 for the dispatch logic.
+        let (restart_key, restart_label) = restart_affordance(state.selected_session());
+
         // Premium styled command bar with separators - 2 lines for better readability
         // Line 1: Navigation, Session Actions
         let line1_spans = vec![
@@ -184,10 +195,10 @@ impl LayoutComponent {
             ),
             Span::styled("ttach ", Style::default().fg(MUTED_GRAY)),
             Span::styled(
-                "e",
+                restart_key,
                 Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" restart ", Style::default().fg(MUTED_GRAY)),
+            Span::styled(restart_label, Style::default().fg(MUTED_GRAY)),
             Span::styled(
                 "d",
                 Style::default().fg(Color::Rgb(230, 100, 100)).add_modifier(Modifier::BOLD),
@@ -266,7 +277,7 @@ impl LayoutComponent {
         frame.render_widget(menu, area);
     }
 
-    fn render_status_bar(&self, frame: &mut Frame, area: Rect, state: &AppState) {
+    fn render_status_bar(&self, frame: &mut Frame, area: Rect, state: &mut AppState) {
         let mut status_spans: Vec<Span> = vec![];
 
         // Current workspace/repo info
@@ -360,13 +371,13 @@ impl LayoutComponent {
         // measure the existing content first and drop the live widget if
         // it wouldn't fit.
         let live_spans = build_live_status_spans(state);
-        let existing_w: usize = status_spans
+        let existing_w: usize = status_spans.iter().map(|s| s.content.chars().count()).sum();
+        // 4 chars for the " │  " separator we'd add
+        let live_w: usize = live_spans
             .iter()
             .map(|s| s.content.chars().count())
-            .sum();
-        // 4 chars for the " │  " separator we'd add
-        let live_w: usize =
-            live_spans.iter().map(|s| s.content.chars().count()).sum::<usize>().saturating_add(5);
+            .sum::<usize>()
+            .saturating_add(5);
         let area_inner_w = area.width.saturating_sub(2) as usize; // borders
         if !live_spans.is_empty() && existing_w + live_w <= area_inner_w {
             if !status_spans.is_empty() {
@@ -564,6 +575,31 @@ impl LayoutComponent {
     }
 }
 
+/// Pick the right restart-shaped affordance to show on the bottom menu
+/// bar for the currently-highlighted session.
+///
+/// `r` resumes a Stopped Interactive (tmux) session in-place — the
+/// recoverable escape hatch added with the soft-stop feature. `e`
+/// restarts a Boss/Docker session into a fresh container.
+///
+/// Showing `e restart` for a stopped Interactive session would point
+/// users at the wrong key — pressing `e` triggers Docker restart logic
+/// that doesn't apply, while `r` is what actually resumes the tmux
+/// pane and relaunches the embedded CLI.
+fn restart_affordance(selected: Option<&crate::models::Session>) -> (&'static str, &'static str) {
+    use crate::models::{SessionMode, SessionStatus};
+    let stopped_interactive = matches!(
+        selected,
+        Some(s) if matches!(s.mode, SessionMode::Interactive)
+            && matches!(s.status, SessionStatus::Stopped)
+    );
+    if stopped_interactive {
+        ("r", " resume ")
+    } else {
+        ("e", " restart ")
+    }
+}
+
 impl Default for LayoutComponent {
     fn default() -> Self {
         Self::new()
@@ -573,23 +609,36 @@ impl Default for LayoutComponent {
 /// Build the compact "live OAuth window" spans appended to the top status
 /// bar. Returns an empty vec when nothing should render (statusline
 /// unwired AND user declined, or status detection failed).
-pub fn build_live_status_spans(state: &AppState) -> Vec<Span<'static>> {
-    use crate::cli::statusline_install::{StatuslineStatus, detect_statusline_status};
+///
+/// The settings.json read goes through [`AppState::statusline_status_cached`]
+/// so the top bar's 30-60Hz redraws don't translate into 30-60Hz
+/// filesystem reads.
+pub fn build_live_status_spans(state: &mut AppState) -> Vec<Span<'static>> {
+    use crate::cli::statusline_install::StatuslineStatus;
     use crate::config::StatuslineDecision;
-    use crate::models::live_window::{Source, current};
+    use crate::models::live_window::Source;
 
-    let status = detect_statusline_status().ok();
+    let status = state.statusline_status_cached();
     let decision = state.app_config.ui_preferences.statusline_decision;
+
+    // Trust the cache: if Tier1 data is flowing — whether it came from
+    // our own command in settings.json (Configured) or from a user's
+    // custom statusline that side-channels via `ainb claudecode statusline
+    // --cache-only` (Other) — show the live widget. The CTA is for the
+    // genuinely-unwired case only.
+    //
+    // The snapshot is maintained by a background tokio poller so this
+    // hot path never touches the filesystem itself.
+    let live = state.live_window_watcher.snapshot();
+    if live.source == Source::Tier1Cache {
+        return build_live_widget_spans(&live);
+    }
 
     match status {
         Some(StatuslineStatus::Configured) => {
-            let live = current();
-            if live.source != Source::Tier1Cache {
-                // Wired but no fresh data yet — render nothing rather
-                // than misleading "0%" placeholders.
-                return Vec::new();
-            }
-            build_live_widget_spans(&live)
+            // Wired our command but no fresh data yet — render nothing
+            // rather than misleading "0%" placeholders.
+            Vec::new()
         }
         Some(StatuslineStatus::NotConfigured | StatuslineStatus::Other(_))
             if decision != StatuslineDecision::Declined =>
@@ -605,7 +654,10 @@ fn build_live_widget_spans(live: &crate::models::live_window::LiveWindow) -> Vec
 
     if let Some(pct) = live.five_hour_pct {
         out.push(Span::styled("5h ", Style::default().fg(MUTED_GRAY)));
-        out.push(Span::styled(mini_bar(pct), Style::default().fg(bar_color_5h(pct))));
+        out.push(Span::styled(
+            mini_bar(pct),
+            Style::default().fg(bar_color_5h(pct)),
+        ));
         out.push(Span::styled(
             format!(" {pct}%"),
             Style::default().fg(bar_color_5h(pct)).add_modifier(Modifier::BOLD),
@@ -616,21 +668,20 @@ fn build_live_widget_spans(live: &crate::models::live_window::LiveWindow) -> Vec
             out.push(Span::styled(" · ", Style::default().fg(SUBDUED_BORDER)));
         }
         out.push(Span::styled("wk ", Style::default().fg(MUTED_GRAY)));
-        out.push(Span::styled(mini_bar(pct), Style::default().fg(bar_color_7d(pct))));
+        out.push(Span::styled(
+            mini_bar(pct),
+            Style::default().fg(bar_color_7d(pct)),
+        ));
         out.push(Span::styled(
             format!(" {pct}%"),
             Style::default().fg(bar_color_7d(pct)).add_modifier(Modifier::BOLD),
         ));
     }
-    if let Some(cost) = live.today_cost_usd {
-        if !out.is_empty() {
-            out.push(Span::styled(" · ", Style::default().fg(SUBDUED_BORDER)));
-        }
-        out.push(Span::styled(
-            format!("${cost:.2} today"),
-            Style::default().fg(GOLD),
-        ));
-    }
+    // today_cost_usd intentionally not rendered: Claude Code's
+    // /cost/total_cost_usd is the lifetime cost of a *single* session
+    // (whichever invoked the statusline most recently), not today's
+    // total. Misleading at a glance — keep the field on the cache
+    // schema but don't surface it.
     if let Some(d) = live.resets_in {
         if !out.is_empty() {
             out.push(Span::styled(" · ", Style::default().fg(SUBDUED_BORDER)));
@@ -645,8 +696,8 @@ fn build_cta_spans() -> Vec<Span<'static>> {
     let red = Color::Rgb(230, 100, 100);
     vec![
         Span::styled("⚠ ", Style::default().fg(red).add_modifier(Modifier::BOLD)),
-        Span::styled("Live CC usage off", Style::default().fg(red)),
-        Span::styled(" · go to Stats to enable", Style::default().fg(MUTED_GRAY)),
+        Span::styled("Live Claude Code usage off", Style::default().fg(red)),
+        Span::styled(" · press W to enable", Style::default().fg(MUTED_GRAY)),
     ]
 }
 
@@ -707,15 +758,18 @@ mod live_widget_tests {
     }
 
     #[test]
-    fn cta_spans_contain_warning_and_stats_hint() {
+    fn cta_spans_contain_warning_and_w_shortcut_hint() {
         let spans = build_cta_spans();
         let text = flatten(&spans);
-        assert!(text.contains("Live CC usage off"));
-        assert!(text.contains("Stats"));
+        assert!(text.contains("Live Claude Code usage off"));
+        // The CTA points at the global `W` shortcut so the keystroke is
+        // discoverable without navigating into Stats first.
+        assert!(text.contains("press W"));
+        assert!(!text.contains("Stats"), "stale Stats hint must be gone");
     }
 
     #[test]
-    fn live_widget_renders_5h_7d_cost_and_reset() {
+    fn live_widget_renders_5h_7d_and_reset() {
         let live = LiveWindow {
             five_hour_pct: Some(40),
             seven_day_pct: Some(8),
@@ -731,7 +785,10 @@ mod live_widget_tests {
         assert!(text.contains("40%"));
         assert!(text.contains("wk"));
         assert!(text.contains("8%"));
-        assert!(text.contains("$1.50"));
+        // today_cost_usd is in the cache but intentionally not rendered —
+        // it's a single session's lifetime cost, not today's total.
+        assert!(!text.contains("$"));
+        assert!(!text.contains("today"));
         assert!(text.contains("2h 00m"));
     }
 
@@ -786,6 +843,59 @@ mod live_widget_tests {
         assert_eq!(format_hms(Duration::ZERO), "0m");
         assert_eq!(format_hms(Duration::from_secs(45 * 60)), "45m");
         assert_eq!(format_hms(Duration::from_secs(3600)), "1h 00m");
+    }
+}
+
+#[cfg(test)]
+mod menu_bar_tests {
+    use super::restart_affordance;
+    use crate::models::{Session, SessionMode, SessionStatus};
+
+    fn stopped_interactive() -> Session {
+        let mut s = Session::new("t".to_string(), "/tmp".to_string());
+        s.mode = SessionMode::Interactive;
+        s.status = SessionStatus::Stopped;
+        s
+    }
+
+    fn running_interactive() -> Session {
+        let mut s = Session::new("t".to_string(), "/tmp".to_string());
+        s.mode = SessionMode::Interactive;
+        s.status = SessionStatus::Running;
+        s
+    }
+
+    fn stopped_boss() -> Session {
+        let mut s = Session::new("t".to_string(), "/tmp".to_string());
+        s.mode = SessionMode::Boss;
+        s.status = SessionStatus::Stopped;
+        s
+    }
+
+    #[test]
+    fn stopped_interactive_shows_r_resume() {
+        let s = stopped_interactive();
+        assert_eq!(restart_affordance(Some(&s)), ("r", " resume "));
+    }
+
+    #[test]
+    fn running_interactive_shows_e_restart() {
+        // `r` is reauth-credentials when the session isn't stopped, so
+        // surfacing `r resume` would be wrong. Fall back to `e restart`.
+        let s = running_interactive();
+        assert_eq!(restart_affordance(Some(&s)), ("e", " restart "));
+    }
+
+    #[test]
+    fn stopped_boss_shows_e_restart() {
+        // Boss/Docker sessions use the Docker container restart path.
+        let s = stopped_boss();
+        assert_eq!(restart_affordance(Some(&s)), ("e", " restart "));
+    }
+
+    #[test]
+    fn no_selection_shows_e_restart() {
+        assert_eq!(restart_affordance(None), ("e", " restart "));
     }
 }
 

@@ -711,3 +711,7 @@ ast-grep --lang python -p 'class $NAME($$$):'
 **If a CLI tool is not available, install it and use it.**
 </code_search_requirements>
 </tool_selection_hierarchy>
+@~/Developer/browser-harness/SKILL.md
+# graphify
+- **graphify** (`~/.claude/skills/graphify/SKILL.md`) - any input to knowledge graph. Trigger: `/graphify`
+When the user types `/graphify`, invoke the Skill tool with `skill: "graphify"` before doing anything else.

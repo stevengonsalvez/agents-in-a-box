@@ -1,7 +1,7 @@
 // ABOUTME: Widget for rendering Write tool calls showing file creation/update operations
 // Displays file paths and content previews
 
-use super::{MessageWidget, WidgetOutput, ToolResult, helpers, result_parser};
+use super::{MessageWidget, ToolResult, WidgetOutput, helpers, result_parser};
 use crate::agent_parsers::AgentEvent;
 use crate::components::live_logs_stream::{LogEntry, LogEntryLevel};
 use uuid::Uuid;
@@ -19,7 +19,11 @@ impl WriteWidget {
             "🦀"
         } else if path.ends_with(".py") {
             "🐍"
-        } else if path.ends_with(".js") || path.ends_with(".ts") || path.ends_with(".jsx") || path.ends_with(".tsx") {
+        } else if path.ends_with(".js")
+            || path.ends_with(".ts")
+            || path.ends_with(".jsx")
+            || path.ends_with(".tsx")
+        {
             "📜"
         } else if path.ends_with(".json") {
             "📋"
@@ -60,27 +64,36 @@ impl MessageWidget for WriteWidget {
     }
 
     fn render(&self, event: AgentEvent, container_name: &str, session_id: Uuid) -> WidgetOutput {
-        if let AgentEvent::ToolCall { id, name: _, input, description } = event {
+        if let AgentEvent::ToolCall {
+            id,
+            name: _,
+            input,
+            description,
+        } = event
+        {
             let mut entries = Vec::new();
 
             // Extract file path and content
-            let file_path = input.get("file_path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
+            let file_path = input.get("file_path").and_then(|v| v.as_str()).unwrap_or("unknown");
 
-            let content = input.get("content")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let content = input.get("content").and_then(|v| v.as_str()).unwrap_or("");
 
             // Determine if this is creating a new file or updating
-            let action = if file_path.contains("new") || description.as_ref().map_or(false, |d| d.contains("creat")) {
+            let action = if file_path.contains("new")
+                || description.as_ref().map_or(false, |d| d.contains("creat"))
+            {
                 "✨ Creating"
             } else {
                 "✏️ Writing"
             };
 
             // Header with file path
-            let header = format!("{}: {} {}", action, Self::get_file_icon(file_path), file_path);
+            let header = format!(
+                "{}: {} {}",
+                action,
+                Self::get_file_icon(file_path),
+                file_path
+            );
             entries.push(
                 helpers::create_log_entry(
                     LogEntryLevel::Info,
@@ -91,7 +104,7 @@ impl MessageWidget for WriteWidget {
                 )
                 .with_metadata("tool_id", &id)
                 .with_metadata("tool_name", "Write")
-                .with_metadata("file_path", file_path)
+                .with_metadata("file_path", file_path),
             );
 
             // Add content stats
@@ -99,13 +112,9 @@ impl MessageWidget for WriteWidget {
             let bytes = content.len();
             let stats_msg = format!("  📊 {} lines, {} bytes", lines, bytes);
             entries.push(
-                LogEntry::new(
-                    LogEntryLevel::Debug,
-                    container_name.to_string(),
-                    stats_msg,
-                )
-                .with_session(session_id)
-                .with_metadata("event_type", "write_stats")
+                LogEntry::new(LogEntryLevel::Debug, container_name.to_string(), stats_msg)
+                    .with_session(session_id)
+                    .with_metadata("event_type", "write_stats"),
             );
 
             // Add content preview (first few lines)
@@ -117,7 +126,7 @@ impl MessageWidget for WriteWidget {
                         "  📄 Preview:".to_string(),
                     )
                     .with_session(session_id)
-                    .with_metadata("event_type", "write_preview")
+                    .with_metadata("event_type", "write_preview"),
                 );
 
                 for preview_line in Self::create_preview(content, 3) {
@@ -128,38 +137,44 @@ impl MessageWidget for WriteWidget {
                             preview_line,
                         )
                         .with_session(session_id)
-                        .with_metadata("event_type", "write_content")
+                        .with_metadata("event_type", "write_content"),
                     );
                 }
             }
 
             WidgetOutput::MultiLine(entries)
         } else {
-            WidgetOutput::Simple(
-                helpers::create_log_entry(
-                    LogEntryLevel::Error,
-                    container_name,
-                    "Invalid event for WriteWidget".to_string(),
-                    session_id,
-                    "error",
-                )
-            )
+            WidgetOutput::Simple(helpers::create_log_entry(
+                LogEntryLevel::Error,
+                container_name,
+                "Invalid event for WriteWidget".to_string(),
+                session_id,
+                "error",
+            ))
         }
     }
 
-    fn render_with_result(&self, event: AgentEvent, result: Option<ToolResult>, container_name: &str, session_id: Uuid) -> WidgetOutput {
-        if let AgentEvent::ToolCall { id, name: _, input, description: _ } = event {
+    fn render_with_result(
+        &self,
+        event: AgentEvent,
+        result: Option<ToolResult>,
+        container_name: &str,
+        session_id: Uuid,
+    ) -> WidgetOutput {
+        if let AgentEvent::ToolCall {
+            id,
+            name: _,
+            input,
+            description: _,
+        } = event
+        {
             let mut header_entries = Vec::new();
             let mut content_entries = Vec::new();
 
             // Extract file path and content
-            let file_path = input.get("file_path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
+            let file_path = input.get("file_path").and_then(|v| v.as_str()).unwrap_or("unknown");
 
-            let content = input.get("content")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let content = input.get("content").and_then(|v| v.as_str()).unwrap_or("");
 
             // Determine if this is creating a new file or updating
             let action_icon = if std::path::Path::new(file_path).exists() {
@@ -169,7 +184,12 @@ impl MessageWidget for WriteWidget {
             };
 
             // Create header message
-            let header_msg = format!("{} Write: {} {}", action_icon, Self::get_file_icon(file_path), file_path);
+            let header_msg = format!(
+                "{} Write: {} {}",
+                action_icon,
+                Self::get_file_icon(file_path),
+                file_path
+            );
             let header_entry = helpers::create_log_entry(
                 LogEntryLevel::Info,
                 container_name,
@@ -201,7 +221,9 @@ impl MessageWidget for WriteWidget {
             if let Some(tool_result) = result {
                 if tool_result.is_error {
                     // Show error
-                    if let Some(content_str) = result_parser::format_tool_result(&tool_result.content) {
+                    if let Some(content_str) =
+                        result_parser::format_tool_result(&tool_result.content)
+                    {
                         let error_lines: Vec<&str> = content_str.lines().collect();
                         for line in error_lines {
                             content_entries.push(
@@ -211,7 +233,7 @@ impl MessageWidget for WriteWidget {
                                     format!("❌ {}", line),
                                 )
                                 .with_session(session_id)
-                                .with_metadata("write_error", "true")
+                                .with_metadata("write_error", "true"),
                             );
                         }
                     } else {
@@ -222,7 +244,7 @@ impl MessageWidget for WriteWidget {
                                 "❌ Write operation failed".to_string(),
                             )
                             .with_session(session_id)
-                            .with_metadata("write_error", "true")
+                            .with_metadata("write_error", "true"),
                         );
                     }
                 } else {
@@ -234,11 +256,13 @@ impl MessageWidget for WriteWidget {
                             "✅ File written successfully".to_string(),
                         )
                         .with_session(session_id)
-                        .with_metadata("write_success", "true")
+                        .with_metadata("write_success", "true"),
                     );
 
                     // Show result details if available
-                    if let Some(content_str) = result_parser::format_tool_result(&tool_result.content) {
+                    if let Some(content_str) =
+                        result_parser::format_tool_result(&tool_result.content)
+                    {
                         if !content_str.is_empty() && content_str.trim() != "null" {
                             for line in content_str.lines() {
                                 if !line.is_empty() {
@@ -249,7 +273,7 @@ impl MessageWidget for WriteWidget {
                                             format!("  {}", line),
                                         )
                                         .with_session(session_id)
-                                        .with_metadata("write_result", "true")
+                                        .with_metadata("write_result", "true"),
                                     );
                                 }
                             }
@@ -268,15 +292,13 @@ impl MessageWidget for WriteWidget {
                 WidgetOutput::MultiLine(header_entries)
             }
         } else {
-            WidgetOutput::Simple(
-                helpers::create_log_entry(
-                    LogEntryLevel::Error,
-                    container_name,
-                    "Invalid event for WriteWidget".to_string(),
-                    session_id,
-                    "error",
-                )
-            )
+            WidgetOutput::Simple(helpers::create_log_entry(
+                LogEntryLevel::Error,
+                container_name,
+                "Invalid event for WriteWidget".to_string(),
+                session_id,
+                "error",
+            ))
         }
     }
 
@@ -360,7 +382,11 @@ mod tests {
         let output = widget.render_with_result(event, result, "test-container", Uuid::nil());
 
         match output {
-            WidgetOutput::Hierarchical { header, content, collapsed } => {
+            WidgetOutput::Hierarchical {
+                header,
+                content,
+                collapsed,
+            } => {
                 assert!(!header.is_empty());
                 assert!(header[0].message.contains("🦀")); // Rust file icon
                 assert!(header[0].message.contains("test.rs"));
@@ -396,13 +422,21 @@ mod tests {
         let output = widget.render_with_result(event, result, "test-container", Uuid::nil());
 
         match output {
-            WidgetOutput::Hierarchical { header, content, collapsed: _ } => {
+            WidgetOutput::Hierarchical {
+                header,
+                content,
+                collapsed: _,
+            } => {
                 assert!(!header.is_empty());
                 assert!(header[0].message.contains("📄")); // Generic file icon
                 assert!(header[0].message.contains("/root/test.txt"));
 
                 assert!(!content.is_empty());
-                assert!(content.iter().any(|e| e.message.contains("❌") && e.message.contains("Permission denied")));
+                assert!(
+                    content.iter().any(
+                        |e| e.message.contains("❌") && e.message.contains("Permission denied")
+                    )
+                );
             }
             _ => panic!("Expected Hierarchical output"),
         }

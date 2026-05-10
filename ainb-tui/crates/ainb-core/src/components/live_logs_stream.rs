@@ -201,7 +201,9 @@ impl LiveLogsStreamComponent {
                 all_lines.push(self.log_formatter.format_log(parsed_data));
             } else {
                 // Check if this is a structured message with multiple lines
-                if log.message.contains('\n') && log.metadata.get("event_type") == Some(&"structured".to_string()) {
+                if log.message.contains('\n')
+                    && log.metadata.get("event_type") == Some(&"structured".to_string())
+                {
                     // Split multi-line messages (like todos) into separate lines
                     for (idx, line_str) in log.message.lines().enumerate() {
                         if idx == 0 {

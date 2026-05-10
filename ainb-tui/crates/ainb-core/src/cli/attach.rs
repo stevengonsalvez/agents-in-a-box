@@ -7,8 +7,8 @@ use anyhow::Result;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
-use super::util::find_session;
 use super::AttachArgs;
+use super::util::find_session;
 
 /// Execute the attach command
 #[allow(clippy::unused_async)]
@@ -32,9 +32,7 @@ pub async fn execute(args: AttachArgs) -> Result<()> {
     println!();
 
     // Exec replaces the current process with tmux attach
-    let err = Command::new("tmux")
-        .args(["attach-session", "-t", tmux_name])
-        .exec();
+    let err = Command::new("tmux").args(["attach-session", "-t", tmux_name]).exec();
 
     // If we get here, exec failed
     Err(anyhow::anyhow!("Failed to attach: {err}"))

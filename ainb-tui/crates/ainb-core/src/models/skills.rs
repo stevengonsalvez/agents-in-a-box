@@ -107,19 +107,12 @@ fn scan_skills(root: &Path) -> Vec<Skill> {
         let name = fm
             .get("name")
             .cloned()
-            .unwrap_or_else(|| {
-                path.file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("")
-                    .to_string()
-            });
+            .unwrap_or_else(|| path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string());
         if name.is_empty() {
             continue;
         }
         let description = fm.get("description").cloned().unwrap_or_default();
-        let user_invocable = fm
-            .get("user-invocable")
-            .map(|s| parse_bool(s));
+        let user_invocable = fm.get("user-invocable").map(|s| parse_bool(s));
 
         out.push(Skill {
             name,
@@ -152,12 +145,10 @@ fn scan_agents(root: &Path) -> Vec<ScannedAgent> {
             // Not a frontmatter-style agent file; skip.
             continue;
         }
-        let name = fm.get("name").cloned().unwrap_or_else(|| {
-            path.file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_string()
-        });
+        let name = fm
+            .get("name")
+            .cloned()
+            .unwrap_or_else(|| path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string());
         if name.is_empty() {
             continue;
         }
@@ -192,11 +183,7 @@ fn collect_agent_files(dir: &Path, out: &mut Vec<PathBuf>) {
     };
     for entry in entries.filter_map(Result::ok) {
         let path = entry.path();
-        let name = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_string();
+        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
         if path.is_dir() {
             // Skip noisy / non-agent subdirs.
             if matches!(name.as_str(), "archived" | "swarm") {
@@ -204,11 +191,7 @@ fn collect_agent_files(dir: &Path, out: &mut Vec<PathBuf>) {
             }
             collect_agent_files(&path, out);
         } else if path.is_file() {
-            let ext = path
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("")
-                .to_lowercase();
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
             if ext == "md" {
                 out.push(path);
             }
@@ -216,10 +199,7 @@ fn collect_agent_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-fn build_associations(
-    skills: &[Skill],
-    agents: &[ScannedAgent],
-) -> HashMap<String, Vec<String>> {
+fn build_associations(skills: &[Skill], agents: &[ScannedAgent]) -> HashMap<String, Vec<String>> {
     let mut map: HashMap<String, Vec<String>> = HashMap::new();
 
     for skill in skills {
@@ -458,8 +438,7 @@ fn split_frontmatter(content: &str) -> (HashMap<String, String>, String) {
 fn strip_quotes(s: &str) -> String {
     let t = s.trim();
     if t.len() >= 2
-        && ((t.starts_with('"') && t.ends_with('"'))
-            || (t.starts_with('\'') && t.ends_with('\'')))
+        && ((t.starts_with('"') && t.ends_with('"')) || (t.starts_with('\'') && t.ends_with('\'')))
     {
         t[1..t.len() - 1].to_string()
     } else {
@@ -524,8 +503,7 @@ fn contains_word(haystack_lower: &str, needle_lower: &str) -> bool {
         if &hay_bytes[i..i + needle_bytes.len()] == needle_bytes {
             let before_ok = i == 0 || !is_word_char(hay_bytes[i - 1]);
             let after_idx = i + needle_bytes.len();
-            let after_ok =
-                after_idx >= hay_bytes.len() || !is_word_char(hay_bytes[after_idx]);
+            let after_ok = after_idx >= hay_bytes.len() || !is_word_char(hay_bytes[after_idx]);
             if before_ok && after_ok {
                 return true;
             }

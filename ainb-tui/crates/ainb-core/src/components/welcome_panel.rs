@@ -2,11 +2,13 @@
 // Displays getting started info, can be focused and scrolled
 
 use ratatui::{
+    Frame,
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
-    Frame,
+    widgets::{
+        Block, BorderType, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+    },
 };
 
 // Color palette from TUI style guide
@@ -228,9 +230,10 @@ impl WelcomePanelComponent {
 
         // Show focus indicator
         if state.is_focused {
-            let indicator = Paragraph::new(Line::from(vec![
-                Span::styled(" ↑↓ scroll ", Style::default().fg(ACCENT_CYAN)),
-            ]))
+            let indicator = Paragraph::new(Line::from(vec![Span::styled(
+                " ↑↓ scroll ",
+                Style::default().fg(ACCENT_CYAN),
+            )]))
             .style(Style::default().bg(PANEL_BG));
 
             // Position at bottom right of the block
@@ -293,9 +296,10 @@ impl WelcomePanelComponent {
 
         // Horizontal rule
         if trimmed == "---" {
-            return Line::from(vec![
-                Span::styled("  ─────────────────────────────────────────", Style::default().fg(SUBDUED_BORDER)),
-            ]);
+            return Line::from(vec![Span::styled(
+                "  ─────────────────────────────────────────",
+                Style::default().fg(SUBDUED_BORDER),
+            )]);
         }
 
         // Code blocks (simplified - just style the whole line)
@@ -317,13 +321,17 @@ impl WelcomePanelComponent {
         }
 
         // Numbered list items
-        if trimmed.len() > 2 && trimmed.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+        if trimmed.len() > 2 && trimmed.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
+        {
             if let Some(dot_pos) = trimmed.find(". ") {
                 let number = &trimmed[..dot_pos + 1];
                 let rest = &trimmed[dot_pos + 2..];
                 return Line::from(vec![
                     Span::styled("  ", Style::default()),
-                    Span::styled(number.to_string(), Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        number.to_string(),
+                        Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                    ),
                     Span::styled(" ", Style::default()),
                     Span::styled(self.style_inline(rest), Style::default().fg(SOFT_WHITE)),
                 ]);

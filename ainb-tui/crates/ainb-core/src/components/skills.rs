@@ -3,11 +3,11 @@
 // pattern so provider switches never block the event thread.
 
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph, Row, Table, Tabs},
-    Frame,
 };
 
 use crate::models::skills::{AgentDef, Skill, SkillsData};
@@ -84,7 +84,11 @@ pub enum SkillsTab {
 
 impl SkillsTab {
     fn all() -> &'static [SkillsTab] {
-        &[SkillsTab::Skills, SkillsTab::Agents, SkillsTab::Associations]
+        &[
+            SkillsTab::Skills,
+            SkillsTab::Agents,
+            SkillsTab::Associations,
+        ]
     }
 
     fn title(&self) -> &'static str {
@@ -313,11 +317,7 @@ fn render_summary_bar(frame: &mut Frame, area: Rect, state: &SkillsViewState) {
     ];
 
     if let Some(data) = &state.data {
-        let linked = data
-            .associations
-            .values()
-            .filter(|v| !v.is_empty())
-            .count();
+        let linked = data.associations.values().filter(|v| !v.is_empty()).count();
         spans.extend_from_slice(&[
             Span::styled("  │  ", Style::default().fg(MUTED_GRAY)),
             Span::styled(
@@ -370,8 +370,10 @@ fn render_summary_bar(frame: &mut Frame, area: Rect, state: &SkillsViewState) {
 }
 
 fn render_provider_bar(frame: &mut Frame, area: Rect, state: &SkillsViewState) {
-    let mut spans: Vec<Span> =
-        vec![Span::styled("  Provider: ", Style::default().fg(MUTED_GRAY))];
+    let mut spans: Vec<Span> = vec![Span::styled(
+        "  Provider: ",
+        Style::default().fg(MUTED_GRAY),
+    )];
 
     for (i, provider) in SkillsProvider::all().iter().enumerate() {
         if i > 0 {
@@ -379,9 +381,7 @@ fn render_provider_bar(frame: &mut Frame, area: Rect, state: &SkillsViewState) {
         }
         let is_active = *provider == state.provider;
         let style = if is_active {
-            Style::default()
-                .fg(GOLD)
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
         } else if provider.has_data() {
             Style::default().fg(SOFT_WHITE)
         } else {
@@ -412,9 +412,7 @@ fn render_tab_bar(frame: &mut Frame, area: Rect, state: &SkillsViewState) {
         .iter()
         .map(|t| {
             let style = if *t == state.active_tab {
-                Style::default()
-                    .fg(GOLD)
-                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
             } else {
                 Style::default().fg(MUTED_GRAY)
             };
@@ -422,10 +420,7 @@ fn render_tab_bar(frame: &mut Frame, area: Rect, state: &SkillsViewState) {
         })
         .collect();
 
-    let idx = SkillsTab::all()
-        .iter()
-        .position(|t| *t == state.active_tab)
-        .unwrap_or(0);
+    let idx = SkillsTab::all().iter().position(|t| *t == state.active_tab).unwrap_or(0);
     let tabs = Tabs::new(titles)
         .select(idx)
         .highlight_style(Style::default().fg(GOLD).add_modifier(Modifier::BOLD))
@@ -467,15 +462,11 @@ fn render_no_data(frame: &mut Frame, area: Rect, state: &SkillsViewState) {
         Line::from(""),
         Line::from(Span::styled(
             "  Skills parsing is currently supported for Claude Code only.",
-            Style::default()
-                .fg(MUTED_GRAY)
-                .add_modifier(Modifier::ITALIC),
+            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
         )),
         Line::from(Span::styled(
             "  Other providers will be added as they expose a skills surface.",
-            Style::default()
-                .fg(MUTED_GRAY)
-                .add_modifier(Modifier::ITALIC),
+            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
         )),
     ];
     let paragraph = Paragraph::new(lines);
@@ -594,12 +585,7 @@ fn render_skills_tab(
     render_skill_detail(frame, detail_area, current, data);
 }
 
-fn render_skill_detail(
-    frame: &mut Frame,
-    area: Rect,
-    skill: Option<&Skill>,
-    data: &SkillsData,
-) {
+fn render_skill_detail(frame: &mut Frame, area: Rect, skill: Option<&Skill>, data: &SkillsData) {
     let block = detail_block("Skill");
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -643,11 +629,8 @@ fn render_skill_detail(
     }
     lines.push(Line::from(""));
 
-    let agents_for_skill: &[String] = data
-        .associations
-        .get(&skill.name)
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
+    let agents_for_skill: &[String] =
+        data.associations.get(&skill.name).map(Vec::as_slice).unwrap_or(&[]);
     lines.push(Line::from(Span::styled(
         format!("Used by {} agent(s)", agents_for_skill.len()),
         Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
@@ -655,9 +638,7 @@ fn render_skill_detail(
     if agents_for_skill.is_empty() {
         lines.push(Line::from(Span::styled(
             "  (no references found)",
-            Style::default()
-                .fg(MUTED_GRAY)
-                .add_modifier(Modifier::ITALIC),
+            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
         )));
     } else {
         for name in agents_for_skill {
@@ -777,9 +758,7 @@ fn render_agent_detail(frame: &mut Frame, area: Rect, agent: Option<&AgentDef>) 
     if agent.tools.is_empty() {
         lines.push(Line::from(Span::styled(
             "  (none listed)",
-            Style::default()
-                .fg(MUTED_GRAY)
-                .add_modifier(Modifier::ITALIC),
+            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
         )));
     } else {
         for t in &agent.tools {
@@ -808,8 +787,7 @@ fn render_associations_tab(
     frame.render_widget(list_inner_block, list_area);
 
     if rows.is_empty() {
-        let p = Paragraph::new("  No associations found.")
-            .style(Style::default().fg(MUTED_GRAY));
+        let p = Paragraph::new("  No associations found.").style(Style::default().fg(MUTED_GRAY));
         frame.render_widget(p, list_inner);
         render_empty_detail(frame, detail_area, "Association");
         return;
@@ -914,9 +892,7 @@ fn render_empty_detail(frame: &mut Frame, area: Rect, label: &str) {
 fn render_empty_detail_inner(frame: &mut Frame, area: Rect) {
     let p = Paragraph::new(Line::from(Span::styled(
         "  Nothing selected.",
-        Style::default()
-            .fg(MUTED_GRAY)
-            .add_modifier(Modifier::ITALIC),
+        Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
     )));
     frame.render_widget(p, area);
 }
@@ -947,8 +923,7 @@ fn render_help_bar(frame: &mut Frame, area: Rect, state: &SkillsViewState) {
             Span::styled(" back", Style::default().fg(MUTED_GRAY)),
         ]
     };
-    let paragraph =
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(DARK_BG));
+    let paragraph = Paragraph::new(Line::from(spans)).style(Style::default().bg(DARK_BG));
     frame.render_widget(paragraph, area);
 }
 

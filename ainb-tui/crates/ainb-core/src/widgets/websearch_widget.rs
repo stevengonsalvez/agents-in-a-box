@@ -1,7 +1,7 @@
 // ABOUTME: Widget for rendering WebSearch tool calls showing web search operations
 // Displays search queries and domains
 
-use super::{MessageWidget, WidgetOutput, ToolResult, helpers, result_parser};
+use super::{MessageWidget, ToolResult, WidgetOutput, helpers, result_parser};
 use crate::agent_parsers::AgentEvent;
 use crate::components::live_logs_stream::{LogEntry, LogEntryLevel};
 use uuid::Uuid;
@@ -20,13 +20,17 @@ impl MessageWidget for WebSearchWidget {
     }
 
     fn render(&self, event: AgentEvent, container_name: &str, session_id: Uuid) -> WidgetOutput {
-        if let AgentEvent::ToolCall { id, name: _, input, description } = event {
+        if let AgentEvent::ToolCall {
+            id,
+            name: _,
+            input,
+            description,
+        } = event
+        {
             let mut entries = Vec::new();
 
             // Extract search query
-            let query = input.get("query")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let query = input.get("query").and_then(|v| v.as_str()).unwrap_or("");
 
             // Header with search query
             let header = format!("🌐 Web Search: \"{}\"", query);
@@ -40,16 +44,14 @@ impl MessageWidget for WebSearchWidget {
                 )
                 .with_metadata("tool_id", &id)
                 .with_metadata("tool_name", "WebSearch")
-                .with_metadata("query", query)
+                .with_metadata("query", query),
             );
 
             // Add allowed domains if specified
             if let Some(allowed) = input.get("allowed_domains").and_then(|v| v.as_array()) {
                 if !allowed.is_empty() {
-                    let domains: Vec<String> = allowed.iter()
-                        .filter_map(|d| d.as_str())
-                        .map(|s| s.to_string())
-                        .collect();
+                    let domains: Vec<String> =
+                        allowed.iter().filter_map(|d| d.as_str()).map(|s| s.to_string()).collect();
 
                     entries.push(
                         LogEntry::new(
@@ -58,7 +60,7 @@ impl MessageWidget for WebSearchWidget {
                             format!("  ✅ Allowed domains: {}", domains.join(", ")),
                         )
                         .with_session(session_id)
-                        .with_metadata("event_type", "search_allowed_domains")
+                        .with_metadata("event_type", "search_allowed_domains"),
                     );
                 }
             }
@@ -66,10 +68,8 @@ impl MessageWidget for WebSearchWidget {
             // Add blocked domains if specified
             if let Some(blocked) = input.get("blocked_domains").and_then(|v| v.as_array()) {
                 if !blocked.is_empty() {
-                    let domains: Vec<String> = blocked.iter()
-                        .filter_map(|d| d.as_str())
-                        .map(|s| s.to_string())
-                        .collect();
+                    let domains: Vec<String> =
+                        blocked.iter().filter_map(|d| d.as_str()).map(|s| s.to_string()).collect();
 
                     entries.push(
                         LogEntry::new(
@@ -78,7 +78,7 @@ impl MessageWidget for WebSearchWidget {
                             format!("  ❌ Blocked domains: {}", domains.join(", ")),
                         )
                         .with_session(session_id)
-                        .with_metadata("event_type", "search_blocked_domains")
+                        .with_metadata("event_type", "search_blocked_domains"),
                     );
                 }
             }
@@ -91,7 +91,7 @@ impl MessageWidget for WebSearchWidget {
                     "  🔍 Searching the web...".to_string(),
                 )
                 .with_session(session_id)
-                .with_metadata("event_type", "search_status")
+                .with_metadata("event_type", "search_status"),
             );
 
             // Add description if present
@@ -104,34 +104,42 @@ impl MessageWidget for WebSearchWidget {
                             format!("  💭 {}", desc),
                         )
                         .with_session(session_id)
-                        .with_metadata("event_type", "search_description")
+                        .with_metadata("event_type", "search_description"),
                     );
                 }
             }
 
             WidgetOutput::MultiLine(entries)
         } else {
-            WidgetOutput::Simple(
-                helpers::create_log_entry(
-                    LogEntryLevel::Error,
-                    container_name,
-                    "Invalid event for WebSearchWidget".to_string(),
-                    session_id,
-                    "error",
-                )
-            )
+            WidgetOutput::Simple(helpers::create_log_entry(
+                LogEntryLevel::Error,
+                container_name,
+                "Invalid event for WebSearchWidget".to_string(),
+                session_id,
+                "error",
+            ))
         }
     }
 
-    fn render_with_result(&self, event: AgentEvent, result: Option<ToolResult>, container_name: &str, session_id: Uuid) -> WidgetOutput {
-        if let AgentEvent::ToolCall { id, name: _, input, description: _ } = event {
+    fn render_with_result(
+        &self,
+        event: AgentEvent,
+        result: Option<ToolResult>,
+        container_name: &str,
+        session_id: Uuid,
+    ) -> WidgetOutput {
+        if let AgentEvent::ToolCall {
+            id,
+            name: _,
+            input,
+            description: _,
+        } = event
+        {
             let mut header_entries = Vec::new();
             let mut content_entries = Vec::new();
 
             // Extract search query
-            let query = input.get("query")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let query = input.get("query").and_then(|v| v.as_str()).unwrap_or("");
 
             // Header with search query
             let header = format!("🌐 Web Search: \"{}\"", query);
@@ -151,10 +159,8 @@ impl MessageWidget for WebSearchWidget {
             // Add allowed domains if specified
             if let Some(allowed) = input.get("allowed_domains").and_then(|v| v.as_array()) {
                 if !allowed.is_empty() {
-                    let domains: Vec<String> = allowed.iter()
-                        .filter_map(|d| d.as_str())
-                        .map(|s| s.to_string())
-                        .collect();
+                    let domains: Vec<String> =
+                        allowed.iter().filter_map(|d| d.as_str()).map(|s| s.to_string()).collect();
 
                     header_entries.push(
                         LogEntry::new(
@@ -164,7 +170,7 @@ impl MessageWidget for WebSearchWidget {
                         )
                         .with_session(session_id)
                         .with_metadata("event_type", "search_allowed_domains")
-                        .with_metadata("tool_id", &id)
+                        .with_metadata("tool_id", &id),
                     );
                 }
             }
@@ -172,10 +178,8 @@ impl MessageWidget for WebSearchWidget {
             // Add blocked domains if specified
             if let Some(blocked) = input.get("blocked_domains").and_then(|v| v.as_array()) {
                 if !blocked.is_empty() {
-                    let domains: Vec<String> = blocked.iter()
-                        .filter_map(|d| d.as_str())
-                        .map(|s| s.to_string())
-                        .collect();
+                    let domains: Vec<String> =
+                        blocked.iter().filter_map(|d| d.as_str()).map(|s| s.to_string()).collect();
 
                     header_entries.push(
                         LogEntry::new(
@@ -185,7 +189,7 @@ impl MessageWidget for WebSearchWidget {
                         )
                         .with_session(session_id)
                         .with_metadata("event_type", "search_blocked_domains")
-                        .with_metadata("tool_id", &id)
+                        .with_metadata("tool_id", &id),
                     );
                 }
             }
@@ -195,10 +199,10 @@ impl MessageWidget for WebSearchWidget {
                 // Extract result content
                 if let Some(content_str) = result_parser::format_tool_result(&tool_result.content) {
                     // Check if the content looks like markdown
-                    let is_markdown = content_str.contains('#') ||
-                                     content_str.contains('*') ||
-                                     content_str.contains('`') ||
-                                     content_str.contains('\n');
+                    let is_markdown = content_str.contains('#')
+                        || content_str.contains('*')
+                        || content_str.contains('`')
+                        || content_str.contains('\n');
 
                     if is_markdown {
                         // Parse as markdown
@@ -206,7 +210,11 @@ impl MessageWidget for WebSearchWidget {
                             &content_str,
                             container_name,
                             session_id,
-                            if tool_result.is_error { LogEntryLevel::Error } else { LogEntryLevel::Info },
+                            if tool_result.is_error {
+                                LogEntryLevel::Error
+                            } else {
+                                LogEntryLevel::Info
+                            },
                         );
                         content_entries.extend(parsed_entries);
                     } else {
@@ -219,13 +227,9 @@ impl MessageWidget for WebSearchWidget {
 
                         for line in content_str.lines() {
                             content_entries.push(
-                                LogEntry::new(
-                                    level,
-                                    container_name.to_string(),
-                                    line.to_string(),
-                                )
-                                .with_session(session_id)
-                                .with_metadata("websearch_output", "true")
+                                LogEntry::new(level, container_name.to_string(), line.to_string())
+                                    .with_session(session_id)
+                                    .with_metadata("websearch_output", "true"),
                             );
                         }
                     }
@@ -237,7 +241,7 @@ impl MessageWidget for WebSearchWidget {
                             container_name.to_string(),
                             "❌ Search failed with no output".to_string(),
                         )
-                        .with_session(session_id)
+                        .with_session(session_id),
                     );
                 }
 
@@ -253,15 +257,13 @@ impl MessageWidget for WebSearchWidget {
             }
         } else {
             // Should not happen if can_handle works correctly
-            WidgetOutput::Simple(
-                helpers::create_log_entry(
-                    LogEntryLevel::Error,
-                    container_name,
-                    "Invalid event for WebSearchWidget".to_string(),
-                    session_id,
-                    "error",
-                )
-            )
+            WidgetOutput::Simple(helpers::create_log_entry(
+                LogEntryLevel::Error,
+                container_name,
+                "Invalid event for WebSearchWidget".to_string(),
+                session_id,
+                "error",
+            ))
         }
     }
 
@@ -345,7 +347,11 @@ mod tests {
         let output = widget.render_with_result(event, Some(result), "test-container", Uuid::nil());
 
         match output {
-            WidgetOutput::Hierarchical { header, content, collapsed } => {
+            WidgetOutput::Hierarchical {
+                header,
+                content,
+                collapsed,
+            } => {
                 assert!(!header.is_empty());
                 assert!(header[0].message.contains("🌐 Web Search"));
                 assert!(header[0].message.contains("Rust async programming"));

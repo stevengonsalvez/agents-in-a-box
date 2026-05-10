@@ -13,7 +13,15 @@
 # =============================================================================
 
 version: "1.0.0"
-updated: "2026-04-27"
+updated: "2026-05-08"
+
+# Internal toolkit components (skills, plugins, agents, workflows, utilities)
+# are catalogued in toolkit/catalog.yaml — auto-generated from filesystem
+# by `bash toolkit/bin/generate-catalog.sh`. This file tracks ONLY external
+# dependencies (plugins, npx skills, nanoclaw skills, MCP servers).
+# The legacy `bundled-skills:` section below is kept as install metadata
+# for skills with non-trivial setup (e.g. media-processing's apt deps);
+# the canonical "what we ship" list is catalog.yaml.
 
 # =============================================================================
 # EXTERNAL PACKAGES (Python/Node packages installed globally per machine)
@@ -542,6 +550,19 @@ npx-skills:
     persona_count: 10
     includes_recipes: true
     recipe_count: 41
+
+  - name: obsidian-skills
+    repo: kepano/obsidian-skills
+    install: "npx skills add https://github.com/kepano/obsidian-skills --yes"
+    purpose: "Obsidian vault skill family — markdown, bases, canvas, CLI, web extraction"
+    multi-skill: true
+    skills:
+      - obsidian-markdown: "Create and edit Obsidian Flavored Markdown (wikilinks, embeds, callouts, properties)"
+      - obsidian-bases: "Create and edit Obsidian Bases (.base) with views, filters, formulas, summaries"
+      - obsidian-cli: "Interact with Obsidian vaults via the Obsidian CLI (plugin/theme dev included)"
+      - json-canvas: "Create and edit JSON Canvas (.canvas) files — nodes, edges, groups"
+      - defuddle: "Extract clean markdown from web pages via defuddle CLI (token-saving alternative to WebFetch)"
+    docs: "https://github.com/kepano/obsidian-skills"
 
   - name: here-now
     source: "npx add-skill"

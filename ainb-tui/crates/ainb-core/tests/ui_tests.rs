@@ -605,7 +605,9 @@ mod tests {
 
         // Initialize tracing to capture all logs
         let _ = tracing_subscriber::fmt()
-            .with_env_filter(EnvFilter::from_default_env().add_directive(tracing::Level::DEBUG.into()))
+            .with_env_filter(
+                EnvFilter::from_default_env().add_directive(tracing::Level::DEBUG.into()),
+            )
             .with_test_writer()
             .try_init();
 
@@ -635,7 +637,10 @@ mod tests {
         eprintln!("\nAfter process_async:");
         eprintln!("  View: {:?}", ui.current_screen());
         eprintln!("  Has new_session_state: {}", ui.has_new_session_state());
-        eprintln!("  Pending async action: {:?}", ui.app.state.pending_async_action);
+        eprintln!(
+            "  Pending async action: {:?}",
+            ui.app.state.pending_async_action
+        );
 
         if let Some(ref session_state) = ui.app.state.new_session_state {
             eprintln!("  New session step: {:?}", session_state.step);

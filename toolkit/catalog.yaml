@@ -1,101 +1,129 @@
+# AUTO-GENERATED — do not edit by hand.
+# Source of truth: filesystem. Regenerate with:
+#   bash toolkit/bin/generate-catalog.sh
+#
+# This file lists everything THIS REPO owns (the "internal" set). Anything
+# installed into ~/.{claude,codex,copilot}/skills/ that does not appear here
+# is external (plugin / nanoclaw / npx / personal). External installation
+# reproducibility lives in toolkit/external-dependencies.yaml.
+#
 apiVersion: catalog/v1
 metadata:
-  name: claudecode-bootstrap
-  version: 2.0.0
-  description: Complete AI coding agent toolkit with skills, workflows, and agents
-  author: stevengonsalvez
-  repository: https://github.com/stevengonsalvez/ai-coder-rules
-  license: Apache-2.0
+  name: agents-in-a-box
+  description: Filesystem-derived manifest of toolkit-owned skills, plugins, agents, workflows, and utilities
+  generator: bin/generate-catalog.sh
 
 components:
+
   skills:
-    - name: webapp-testing
-      path: packages/skills/webapp-testing
-      version: 1.2.0
-      description: Playwright-based toolkit for testing local web applications
+    - agent-ops
+    - ats-resume-matcher
+    - attach-agent-worktree
+    - autonomous-loops
+    - brainstorm
+    - browser-verify
+    - claude-langfuse
+    - cleanup-agent-worktree
+    - coding-agent
+    - commit
+    - compound-docs
+    - cost-aware-pipeline
+    - critique
+    - crypto-research
+    - debug-bridge
+    - design-md
+    - discuss
+    - do-issues
+    - enhance-prompt
+    - expect-test
+    - expose
+    - find-missing-tests
+    - frontend-design
+    - frontend-slides
+    - gh-issue
+    - git-history-surgery
+    - global-learnings
+    - handover
+    - health-check
+    - implement
+    - instincts
+    - interview
+    - langfuse-setup
+    - liquid-glass
+    - list-agent-worktrees
+    - make-github-issues
+    - media-processing
+    - merge-agent-work
+    - mobile-e2e-mcp
+    - nano-banana-pro
+    - notebooklm
+    - oracle
+    - plan
+    - plan-gh
+    - plan-tdd
+    - plugins
+    - posthog-replay-analysis
+    - prime
+    - react-components
+    - recover-sessions
+    - remotion
+    - remotion-best-practices
+    - research
+    - research-cache
+    - resume-formatter
+    - retro-pdf
+    - scrapling-official
+    - security-audit
+    - security-scan
+    - sentry-cli
+    - session-info
+    - session-metrics
+    - session-summary
+    - shadcn-ui
+    - skill-creator
+    - spawn-agent
+    - start-android
+    - start-ios
+    - start-local
+    - stitch-design
+    - stitch-loop
+    - swarm-agent-troubleshooting
+    - swarm-create
+    - swarm-inbox
+    - swarm-join
+    - swarm-orchestration
+    - swarm-shutdown
+    - swarm-status
+    - sync-learnings
+    - test-driven-development
+    - tmux-message
+    - tmux-monitor
+    - tmux-status
+    - token-usage
+    - tui-style-guide
+    - ui-ux-pro-max
+    - validate
+    - webapp-testing
+    - workflow
 
-    - name: crypto-research
-      path: packages/skills/crypto-research
-      version: 1.0.0
-      description: Cryptocurrency market research using specialized AI agents
-
-    - name: tmux-monitor
-      path: packages/skills/tmux-monitor
-      version: 1.0.0
-      description: Monitor and report status of all tmux sessions
-
-    - name: frontend-design
-      path: packages/skills/frontend-design
-      version: 1.0.0
-      description: Generate distinctive, production-grade frontend interfaces
-
-    - name: retro-pdf
-      path: packages/skills/retro-pdf
-      version: 1.0.0
-      description: Convert markdown to professional LaTeX-style PDFs
-
-    - name: interview
-      path: packages/skills/interview
-      version: 1.0.0
-      description: Interview users about plans to generate comprehensive specifications
-
+  plugins:
     - name: reflect
-      path: packages/skills/reflect
-      version: 2.0.0
-      description: Self-improvement through conversation analysis and learning extraction
-
-    - name: oracle
-      path: packages/skills/oracle
-      version: 0.8.5
-      description: Bundle prompt + files for second-model review via API or browser (GPT-5.x, Gemini, Claude)
-      source: https://github.com/steipete/oracle
+      skills:
+        - consolidate
+        - ingest
+        - recall
+        - reflect
+        - reflect-status
 
   workflows:
-    - name: single-agent-workflow
-      path: packages/workflows/single-agent
-      version: 1.0.0
-      description: Sequential research-plan-implement-validate pipeline
-      commands:
-        - research
-        - plan
-        - implement
-        - validate
-        - workflow
-
-    - name: multi-agent-workflow
-      path: packages/workflows/multi-agent
-      version: 1.0.0
-      description: DAG-based parallel agent execution with wave orchestration
-      commands:
-        - m-plan
-        - m-implement
-        - m-monitor
-        - m-workflow
-        - spawn-agent
-        - attach-agent-worktree
-        - cleanup-agent-worktree
-        - list-agent-worktrees
-        - merge-agent-work
+    - name: single-agent
 
   agents:
-    # Agents use flat file structure: category/agent-name.md
-    # Root-level agents are at packages/agents/*.md
-    path: packages/agents
-
     root:
       - distinguished-engineer
       - web-search-researcher
-
-    universal:
-      - backend-developer
-      - frontend-developer
-      - superstar-engineer
-
-    orchestrators:
-      - tech-lead-orchestrator
-      - project-analyst
-      - team-configurator
-
+    design:
+      - ui-designer
     engineering:
       - api-architect
       - architecture-reviewer
@@ -104,6 +132,7 @@ components:
       - dev-cleanup-wizard
       - devops-automator
       - documentation-specialist
+      - focused-repository-analyzer
       - gatekeeper
       - integration-tests
       - lead-orchestrator
@@ -116,75 +145,56 @@ components:
       - security-agent
       - service-codegen
       - solution-architect
+      - supabase-security-reviewer
       - tailwind-css-expert
       - test-analyser
       - test-writer-fixer
-
-    design:
-      - ui-designer
-
     meta:
       - agentmaker
+      - reflect
+    orchestrators:
+      - project-analyst
+      - team-configurator
+      - tech-lead-orchestrator
+    swarm:
+      - leader
+      - worker
+    universal:
+      - backend-developer
+      - frontend-developer
+      - superstar-engineer
 
   utilities:
-    templates:
-      - codereview-checklist-template
-      - handover-template
-
+    hooks:
+      - compile-statusline
+      - cost_tracker
+      - dev_server_tmux
+      - notification
+      - post_tool_use
+      - pre_compact
+      - pre_tool_use
+      - README
+      - run_with_profile
+      - session_start
+      - statusline
+      - stop
+      - subagent_stop
+      - test_hooks
+      - ts_check
+      - user_prompt_submit
     output-styles:
       - direct-objective
       - fun-casual
-
-    reflections:
-      - index
-
-    commands:
-      session:
-        - prime
-        - health-check
-        - session-metrics
-        - session-summary
-        - handover
-      git:
-        - commit
-      github:
-        - gh-issue
-        - do-issues
-        - make-github-issues
-        - find-missing-tests
-        - plan-gh
-        - plan-tdd
-      ideation:
-        - brainstorm
-        - critique
-      devenv:
-        - start-local
-        - start-ios
-        - start-android
-        - expose
-        - tmux-status
-      crypto:
-        - crypto_research
-        - crypto_research_haiku
-        - cook_crypto_research_only
-
-    hooks:
-      lifecycle:
-        - session_start
-        - stop
-        - subagent_stop
-      tool:
-        - pre_tool_use
-        - post_tool_use
-      compact:
-        - pre_compact
-      prompt:
-        - user_prompt_submit
-      display:
-        - statusline
-        - combined-statusline
-        - action-summary
-      notification:
-        - notification
-      usage:
-        - usage_sync  # openclaw-agents (opt-in, requires Convex deployment)
+    utils:
+      - build-analyzer-prompt
+      - cleanup-handler
+      - clone-external-repo
+      - detect-repo-urls
+      - generate-external-permalinks
+      - git-worktree-utils
+      - parallel-repo-clone
+      - repo-analysis-cache
+      - search-learnings
+      - session-registry
+      - spawn-agent-lib
+      - swarm-lib

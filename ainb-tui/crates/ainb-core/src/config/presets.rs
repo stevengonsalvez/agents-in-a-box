@@ -111,8 +111,7 @@ impl PresetManager {
 
         // Ensure presets directory exists
         if !presets_dir.exists() {
-            fs::create_dir_all(&presets_dir)
-                .context("Failed to create presets directory")?;
+            fs::create_dir_all(&presets_dir).context("Failed to create presets directory")?;
         }
 
         let mut manager = Self {
@@ -128,8 +127,7 @@ impl PresetManager {
 
     /// Get the presets directory path
     fn presets_dir() -> Result<PathBuf> {
-        let home = dirs::home_dir()
-            .context("Failed to determine home directory")?;
+        let home = dirs::home_dir().context("Failed to determine home directory")?;
         Ok(home.join(".agents-in-a-box").join("presets"))
     }
 
@@ -155,11 +153,11 @@ impl PresetManager {
 
     /// Load a single preset from a TOML file
     fn load_preset(&self, path: &Path) -> Result<RepositoryPreset> {
-        let content = fs::read_to_string(path)
-            .context(format!("Failed to read preset file: {:?}", path))?;
+        let content =
+            fs::read_to_string(path).context(format!("Failed to read preset file: {:?}", path))?;
 
-        let preset: RepositoryPreset = toml::from_str(&content)
-            .context(format!("Failed to parse preset file: {:?}", path))?;
+        let preset: RepositoryPreset =
+            toml::from_str(&content).context(format!("Failed to parse preset file: {:?}", path))?;
 
         Ok(preset)
     }
@@ -168,11 +166,9 @@ impl PresetManager {
     pub fn save_preset(&self, preset: &RepositoryPreset) -> Result<()> {
         let path = self.presets_dir.join(format!("{}.toml", preset.name));
 
-        let content = toml::to_string_pretty(preset)
-            .context("Failed to serialize preset")?;
+        let content = toml::to_string_pretty(preset).context("Failed to serialize preset")?;
 
-        fs::write(&path, content)
-            .context(format!("Failed to write preset file: {:?}", path))?;
+        fs::write(&path, content).context(format!("Failed to write preset file: {:?}", path))?;
 
         Ok(())
     }
@@ -197,8 +193,7 @@ impl PresetManager {
         let path = self.presets_dir.join(format!("{}.toml", name));
 
         if path.exists() {
-            fs::remove_file(&path)
-                .context(format!("Failed to delete preset file: {:?}", path))?;
+            fs::remove_file(&path).context(format!("Failed to delete preset file: {:?}", path))?;
         }
 
         self.presets.remove(name);
@@ -213,11 +208,11 @@ impl PresetManager {
             return Ok(None);
         }
 
-        let content = fs::read_to_string(&preset_path)
-            .context("Failed to read repo preset file")?;
+        let content =
+            fs::read_to_string(&preset_path).context("Failed to read repo preset file")?;
 
-        let preset: RepositoryPreset = toml::from_str(&content)
-            .context("Failed to parse repo preset file")?;
+        let preset: RepositoryPreset =
+            toml::from_str(&content).context("Failed to parse repo preset file")?;
 
         Ok(Some(preset))
     }
@@ -269,7 +264,9 @@ pub fn create_default_presets() -> Vec<RepositoryPreset> {
                 network: true,
                 skip_all: false,
             },
-            custom_rules: Some("Use TypeScript strict mode. Prefer functional components.".to_string()),
+            custom_rules: Some(
+                "Use TypeScript strict mode. Prefer functional components.".to_string(),
+            ),
             environment: HashMap::new(),
         },
         RepositoryPreset {

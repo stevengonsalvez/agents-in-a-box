@@ -39,42 +39,61 @@ impl ToolResultStore {
 
     /// Register a new tool call that we're waiting for results from
     pub fn register_tool_call(&self, id: String, name: String, input: Value) -> Result<(), String> {
-        let mut pending = self.pending.write()
+        let mut pending = self
+            .pending
+            .write()
             .map_err(|e| format!("Failed to acquire write lock on pending: {}", e))?;
 
-        let mut timestamps = self.timestamps.write()
+        let mut timestamps = self
+            .timestamps
+            .write()
             .map_err(|e| format!("Failed to acquire write lock on timestamps: {}", e))?;
 
         let now = Instant::now();
-        pending.insert(id.clone(), PendingToolCall {
-            id: id.clone(),
-            name,
-            input,
-            timestamp: now,
-        });
+        pending.insert(
+            id.clone(),
+            PendingToolCall {
+                id: id.clone(),
+                name,
+                input,
+                timestamp: now,
+            },
+        );
         timestamps.insert(id, now);
 
         Ok(())
     }
 
     /// Store a tool result
-    pub fn store_result(&self, tool_use_id: String, content: Value, is_error: bool) -> Result<(), String> {
+    pub fn store_result(
+        &self,
+        tool_use_id: String,
+        content: Value,
+        is_error: bool,
+    ) -> Result<(), String> {
         // Remove from pending if it exists
         if let Ok(mut pending) = self.pending.write() {
             pending.remove(&tool_use_id);
         }
 
-        let mut results = self.results.write()
+        let mut results = self
+            .results
+            .write()
             .map_err(|e| format!("Failed to acquire write lock on results: {}", e))?;
 
-        let mut timestamps = self.timestamps.write()
+        let mut timestamps = self
+            .timestamps
+            .write()
             .map_err(|e| format!("Failed to acquire write lock on timestamps: {}", e))?;
 
-        results.insert(tool_use_id.clone(), ToolResult {
-            tool_use_id: tool_use_id.clone(),
-            content,
-            is_error,
-        });
+        results.insert(
+            tool_use_id.clone(),
+            ToolResult {
+                tool_use_id: tool_use_id.clone(),
+                content,
+                is_error,
+            },
+        );
 
         timestamps.insert(tool_use_id, Instant::now());
 
@@ -83,21 +102,18 @@ impl ToolResultStore {
 
     /// Get a tool result by ID
     pub fn get_result(&self, tool_use_id: &str) -> Option<ToolResult> {
-        self.results.read()
-            .ok()
-            .and_then(|results| results.get(tool_use_id).cloned())
+        self.results.read().ok().and_then(|results| results.get(tool_use_id).cloned())
     }
 
     /// Get a pending tool call by ID
     pub fn get_pending(&self, tool_use_id: &str) -> Option<PendingToolCall> {
-        self.pending.read()
-            .ok()
-            .and_then(|pending| pending.get(tool_use_id).cloned())
+        self.pending.read().ok().and_then(|pending| pending.get(tool_use_id).cloned())
     }
 
     /// Check if a tool call is pending
     pub fn is_pending(&self, tool_use_id: &str) -> bool {
-        self.pending.read()
+        self.pending
+            .read()
             .ok()
             .map(|pending| pending.contains_key(tool_use_id))
             .unwrap_or(false)
@@ -105,7 +121,8 @@ impl ToolResultStore {
 
     /// Get all pending tool calls
     pub fn get_all_pending(&self) -> Vec<PendingToolCall> {
-        self.pending.read()
+        self.pending
+            .read()
             .ok()
             .map(|pending| pending.values().cloned().collect())
             .unwrap_or_default()
@@ -113,7 +130,8 @@ impl ToolResultStore {
 
     /// Get all stored results
     pub fn get_all_results(&self) -> Vec<ToolResult> {
-        self.results.read()
+        self.results
+            .read()
             .ok()
             .map(|results| results.values().cloned().collect())
             .unwrap_or_default()
@@ -123,7 +141,9 @@ impl ToolResultStore {
     pub fn clear_old_results(&self, max_age: Duration) -> Result<usize, String> {
         let now = Instant::now();
 
-        let timestamps = self.timestamps.read()
+        let timestamps = self
+            .timestamps
+            .read()
             .map_err(|e| format!("Failed to acquire read lock on timestamps: {}", e))?;
 
         // Find IDs to remove
@@ -143,11 +163,17 @@ impl ToolResultStore {
         let count = ids_to_remove.len();
 
         if count > 0 {
-            let mut results = self.results.write()
+            let mut results = self
+                .results
+                .write()
                 .map_err(|e| format!("Failed to acquire write lock on results: {}", e))?;
-            let mut pending = self.pending.write()
+            let mut pending = self
+                .pending
+                .write()
                 .map_err(|e| format!("Failed to acquire write lock on pending: {}", e))?;
-            let mut timestamps = self.timestamps.write()
+            let mut timestamps = self
+                .timestamps
+                .write()
                 .map_err(|e| format!("Failed to acquire write lock on timestamps: {}", e))?;
 
             for id in ids_to_remove {
@@ -162,11 +188,17 @@ impl ToolResultStore {
 
     /// Clear all stored data
     pub fn clear_all(&self) -> Result<(), String> {
-        let mut results = self.results.write()
+        let mut results = self
+            .results
+            .write()
             .map_err(|e| format!("Failed to acquire write lock on results: {}", e))?;
-        let mut pending = self.pending.write()
+        let mut pending = self
+            .pending
+            .write()
             .map_err(|e| format!("Failed to acquire write lock on pending: {}", e))?;
-        let mut timestamps = self.timestamps.write()
+        let mut timestamps = self
+            .timestamps
+            .write()
             .map_err(|e| format!("Failed to acquire write lock on timestamps: {}", e))?;
 
         results.clear();
@@ -178,18 +210,12 @@ impl ToolResultStore {
 
     /// Get the count of stored results
     pub fn result_count(&self) -> usize {
-        self.results.read()
-            .ok()
-            .map(|results| results.len())
-            .unwrap_or(0)
+        self.results.read().ok().map(|results| results.len()).unwrap_or(0)
     }
 
     /// Get the count of pending tool calls
     pub fn pending_count(&self) -> usize {
-        self.pending.read()
-            .ok()
-            .map(|pending| pending.len())
-            .unwrap_or(0)
+        self.pending.read().ok().map(|pending| pending.len()).unwrap_or(0)
     }
 }
 
@@ -239,20 +265,19 @@ mod tests {
         let store = ToolResultStore::new();
 
         // Register a tool call
-        store.register_tool_call(
-            "test-id-1".to_string(),
-            "TestTool".to_string(),
-            json!({"param": "value"}),
-        ).unwrap();
+        store
+            .register_tool_call(
+                "test-id-1".to_string(),
+                "TestTool".to_string(),
+                json!({"param": "value"}),
+            )
+            .unwrap();
 
         assert_eq!(store.pending_count(), 1);
 
         // Store the result
-        let result = store.store_result(
-            "test-id-1".to_string(),
-            json!({"output": "success"}),
-            false,
-        );
+        let result =
+            store.store_result("test-id-1".to_string(), json!({"output": "success"}), false);
 
         assert!(result.is_ok());
         assert_eq!(store.result_count(), 1);
@@ -272,11 +297,13 @@ mod tests {
     fn test_store_error_result() {
         let store = ToolResultStore::new();
 
-        store.store_result(
-            "error-id".to_string(),
-            json!({"error": "Something went wrong"}),
-            true,
-        ).unwrap();
+        store
+            .store_result(
+                "error-id".to_string(),
+                json!({"error": "Something went wrong"}),
+                true,
+            )
+            .unwrap();
 
         let result = store.get_result("error-id");
         assert!(result.is_some());
@@ -289,17 +316,13 @@ mod tests {
     fn test_get_all_pending() {
         let store = ToolResultStore::new();
 
-        store.register_tool_call(
-            "id-1".to_string(),
-            "Tool1".to_string(),
-            json!({"a": 1}),
-        ).unwrap();
+        store
+            .register_tool_call("id-1".to_string(), "Tool1".to_string(), json!({"a": 1}))
+            .unwrap();
 
-        store.register_tool_call(
-            "id-2".to_string(),
-            "Tool2".to_string(),
-            json!({"b": 2}),
-        ).unwrap();
+        store
+            .register_tool_call("id-2".to_string(), "Tool2".to_string(), json!({"b": 2}))
+            .unwrap();
 
         let pending = store.get_all_pending();
         assert_eq!(pending.len(), 2);
@@ -313,17 +336,9 @@ mod tests {
     fn test_get_all_results() {
         let store = ToolResultStore::new();
 
-        store.store_result(
-            "id-1".to_string(),
-            json!({"result": 1}),
-            false,
-        ).unwrap();
+        store.store_result("id-1".to_string(), json!({"result": 1}), false).unwrap();
 
-        store.store_result(
-            "id-2".to_string(),
-            json!({"result": 2}),
-            false,
-        ).unwrap();
+        store.store_result("id-2".to_string(), json!({"result": 2}), false).unwrap();
 
         let results = store.get_all_results();
         assert_eq!(results.len(), 2);
@@ -338,27 +353,17 @@ mod tests {
         let store = ToolResultStore::new();
 
         // Add some results
-        store.store_result(
-            "old-1".to_string(),
-            json!({"data": "old"}),
-            false,
-        ).unwrap();
+        store.store_result("old-1".to_string(), json!({"data": "old"}), false).unwrap();
 
-        store.register_tool_call(
-            "old-pending".to_string(),
-            "OldTool".to_string(),
-            json!({}),
-        ).unwrap();
+        store
+            .register_tool_call("old-pending".to_string(), "OldTool".to_string(), json!({}))
+            .unwrap();
 
         // Wait a bit
         thread::sleep(Duration::from_millis(100));
 
         // Add a newer result
-        store.store_result(
-            "new-1".to_string(),
-            json!({"data": "new"}),
-            false,
-        ).unwrap();
+        store.store_result("new-1".to_string(), json!({"data": "new"}), false).unwrap();
 
         // Clear results older than 50ms
         let cleared = store.clear_old_results(Duration::from_millis(50)).unwrap();
@@ -374,17 +379,13 @@ mod tests {
     fn test_clear_all() {
         let store = ToolResultStore::new();
 
-        store.register_tool_call(
-            "pending-1".to_string(),
-            "Tool".to_string(),
-            json!({}),
-        ).unwrap();
+        store
+            .register_tool_call("pending-1".to_string(), "Tool".to_string(), json!({}))
+            .unwrap();
 
-        store.store_result(
-            "result-1".to_string(),
-            json!({"data": "test"}),
-            false,
-        ).unwrap();
+        store
+            .store_result("result-1".to_string(), json!({"data": "test"}), false)
+            .unwrap();
 
         assert_eq!(store.pending_count(), 1);
         assert_eq!(store.result_count(), 1);
@@ -406,17 +407,17 @@ mod tests {
             let handle = thread::spawn(move || {
                 for j in 0..10 {
                     let id = format!("thread-{}-item-{}", i, j);
-                    store_clone.register_tool_call(
-                        id.clone(),
-                        format!("Tool-{}", i),
-                        json!({"thread": i, "item": j}),
-                    ).unwrap();
+                    store_clone
+                        .register_tool_call(
+                            id.clone(),
+                            format!("Tool-{}", i),
+                            json!({"thread": i, "item": j}),
+                        )
+                        .unwrap();
 
-                    store_clone.store_result(
-                        id,
-                        json!({"result": format!("{}-{}", i, j)}),
-                        false,
-                    ).unwrap();
+                    store_clone
+                        .store_result(id, json!({"result": format!("{}-{}", i, j)}), false)
+                        .unwrap();
                 }
             });
             handles.push(handle);
@@ -460,18 +461,10 @@ mod tests {
         let store = ToolResultStore::new();
 
         // Store initial result
-        store.store_result(
-            "id-1".to_string(),
-            json!({"version": 1}),
-            false,
-        ).unwrap();
+        store.store_result("id-1".to_string(), json!({"version": 1}), false).unwrap();
 
         // Overwrite with new result
-        store.store_result(
-            "id-1".to_string(),
-            json!({"version": 2}),
-            true,
-        ).unwrap();
+        store.store_result("id-1".to_string(), json!({"version": 2}), true).unwrap();
 
         let result = store.get_result("id-1").unwrap();
         assert_eq!(result.content, json!({"version": 2}));

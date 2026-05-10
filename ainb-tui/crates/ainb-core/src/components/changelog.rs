@@ -3,11 +3,11 @@
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Parser, Tag};
 use ratatui::{
+    Frame,
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph, Wrap},
-    Frame,
 };
 
 // Color palette from TUI style guide
@@ -298,24 +298,24 @@ impl ChangelogComponent {
                     MarkdownStyle::Heading1 => Style::default()
                         .fg(heading1_color)
                         .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-                    MarkdownStyle::Heading2 => Style::default()
-                        .fg(heading2_color)
-                        .add_modifier(Modifier::BOLD),
-                    MarkdownStyle::Heading3 => Style::default()
-                        .fg(heading3_color)
-                        .add_modifier(Modifier::BOLD),
+                    MarkdownStyle::Heading2 => {
+                        Style::default().fg(heading2_color).add_modifier(Modifier::BOLD)
+                    }
+                    MarkdownStyle::Heading3 => {
+                        Style::default().fg(heading3_color).add_modifier(Modifier::BOLD)
+                    }
                     MarkdownStyle::Paragraph => Style::default().fg(SOFT_WHITE),
                     MarkdownStyle::CodeBlock => Style::default().fg(code_fg).bg(code_bg),
                     MarkdownStyle::CodeBlockHeader(_) => {
                         Style::default().fg(GOLD).add_modifier(Modifier::BOLD)
                     }
                     MarkdownStyle::ListItem => Style::default().fg(SOFT_WHITE),
-                    MarkdownStyle::Bold => Style::default()
-                        .fg(SOFT_WHITE)
-                        .add_modifier(Modifier::BOLD),
-                    MarkdownStyle::BlockQuote => Style::default()
-                        .fg(MUTED_GRAY)
-                        .add_modifier(Modifier::ITALIC),
+                    MarkdownStyle::Bold => {
+                        Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD)
+                    }
+                    MarkdownStyle::BlockQuote => {
+                        Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC)
+                    }
                 };
 
                 Line::from(Span::styled(md_line.content.clone(), style))
@@ -345,7 +345,10 @@ impl ChangelogComponent {
                         Span::styled(scroll_info, Style::default().fg(MUTED_GRAY)),
                     ]))
                     .title_bottom(Line::from(vec![
-                        Span::styled(" ↑↓", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            " ↑↓",
+                            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                        ),
                         Span::styled(" scroll ", Style::default().fg(MUTED_GRAY)),
                         Span::styled("│", Style::default().fg(Color::Rgb(60, 60, 80))),
                         Span::styled(
@@ -354,10 +357,16 @@ impl ChangelogComponent {
                         ),
                         Span::styled(" page ", Style::default().fg(MUTED_GRAY)),
                         Span::styled("│", Style::default().fg(Color::Rgb(60, 60, 80))),
-                        Span::styled(" g/G", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            " g/G",
+                            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                        ),
                         Span::styled(" top/bottom ", Style::default().fg(MUTED_GRAY)),
                         Span::styled("│", Style::default().fg(Color::Rgb(60, 60, 80))),
-                        Span::styled(" Esc", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            " Esc",
+                            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                        ),
                         Span::styled(" back ", Style::default().fg(MUTED_GRAY)),
                     ])),
             )

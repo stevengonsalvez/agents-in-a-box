@@ -40,7 +40,9 @@ impl ScreenCapture {
         assert!(
             actual.contains(expected),
             "Expected '{}' at row {}, but got: '{}'",
-            expected, row, actual
+            expected,
+            row,
+            actual
         );
     }
 

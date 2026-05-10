@@ -403,7 +403,7 @@ pub struct ConfirmationDialog {
     pub title: String,
     pub message: String,
     pub confirm_action: ConfirmAction,
-    pub selected_option: bool, // true = Yes, false = No (binary mode)
+    pub selected_option: bool,   // true = Yes, false = No (binary mode)
     pub warning: Option<String>, // Optional warning (e.g., uncommitted files in worktree)
     // Tri-option mode: when `options` is `Some`, the dialog renders one button per
     // entry and Left/Right cycles `selected_index`. The final-option index is
@@ -422,10 +422,10 @@ pub struct DialogOption {
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
     DeleteSession(Uuid),
-    StopSession(Uuid),         // Soft-stop interactive session (tmux only; preserves worktree)
-    KillOtherTmux(String),     // Kill a non-agents-in-a-box tmux session by name
+    StopSession(Uuid), // Soft-stop interactive session (tmux only; preserves worktree)
+    KillOtherTmux(String), // Kill a non-agents-in-a-box tmux session by name
     KillWorkspaceShell(usize), // Kill workspace shell by workspace index
-    Cancel,                    // No-op terminator for tri-option dialogs
+    Cancel,            // No-op terminator for tri-option dialogs
 }
 
 // ============================================================================
@@ -2102,6 +2102,31 @@ pub struct AppState {
         ainb_plugin_api::WireBuffer,
     >,
 
+    /// Cached result of `detect_statusline_status()` paired with the time
+    /// it was read. Refreshed lazily through
+    /// [`AppState::statusline_status_cached`] on a 15s TTL so the global
+    /// `W` shortcut and host-side statusline CTAs don't re-read
+    /// `~/.claude/settings.json` on every render or keystroke.
+    ///
+    /// Invalidated explicitly after the install event fires so the CTA
+    /// flips state on the very next frame instead of waiting out the TTL.
+    pub statusline_status_cache: Option<(
+        Option<crate::cli::statusline_install::StatuslineStatus>,
+        Instant,
+    )>,
+
+    /// Background poller for the live OAuth-window snapshot. The render
+    /// path reads via `snapshot()` (cheap RwLock read + clone) instead of
+    /// calling `live_window::current()` directly — Tier 2's JSONL walk
+    /// would otherwise stall input handling on every frame.
+    pub live_window_watcher: crate::models::live_window_watcher::LiveWindowWatcher,
+
+    // Usage analytics state: removed. Burndown plugin owns usage state
+    // (provider, period, filters, zoom). Host no longer reads or writes
+    // `usage_state` / `usage_load_receiver`. Statusline-related state
+    // (live_window_watcher, statusline_status_cache) stays in core
+    // because that's a host CLI install concern, not a plugin one.
+
     // Skills browser state
     pub skills_state: crate::components::skills::SkillsViewState,
     /// Channel receiver for background skills+agents scan.
@@ -2541,23 +2566,23 @@ pub enum AsyncAction {
     CloneRemoteRepo,         // NEW: Clone remote repo to cache
     FetchRemoteBranches,     // NEW: Get branch list from remote
     CreateNewSession,
-    DeleteSession(Uuid),         // New - delete session with container cleanup
-    StopSession(Uuid),           // Soft-stop interactive session (kill tmux only)
+    DeleteSession(Uuid),           // New - delete session with container cleanup
+    StopSession(Uuid),             // Soft-stop interactive session (kill tmux only)
     ResumeSession(Uuid, String), // Recreate tmux for a Stopped interactive session; String is the trigger key for audit
     BulkDeleteSessions(Vec<Uuid>), // Bulk delete multiple sessions
-    RefreshWorkspaces,             // Manual refresh of workspace data
-    FetchContainerLogs(Uuid),      // Fetch container logs for a session
-    AttachToContainer(Uuid),       // Attach to a container session
-    AttachToTmuxSession(Uuid),     // Attach to a tmux session
-    KillContainer(Uuid),           // Kill container for a session
-    AuthSetupOAuth,                // Run OAuth authentication setup
-    AuthSetupApiKey,               // Save API key authentication
-    ReauthenticateCredentials,     // Re-authenticate Claude credentials
-    RestartSession(Uuid),          // Restart a stopped session with new container
-    CleanupOrphaned,               // Clean up orphaned containers without worktrees
-    AttachToOtherTmux(String),     // Attach to a non-agents-in-a-box tmux session by name
-    KillOtherTmux(String),         // Kill a non-agents-in-a-box tmux session by name
-    ConfirmOtherTmuxRename,        // Confirm and execute rename for "Other tmux" session
+    RefreshWorkspaces,           // Manual refresh of workspace data
+    FetchContainerLogs(Uuid),    // Fetch container logs for a session
+    AttachToContainer(Uuid),     // Attach to a container session
+    AttachToTmuxSession(Uuid),   // Attach to a tmux session
+    KillContainer(Uuid),         // Kill container for a session
+    AuthSetupOAuth,              // Run OAuth authentication setup
+    AuthSetupApiKey,             // Save API key authentication
+    ReauthenticateCredentials,   // Re-authenticate Claude credentials
+    RestartSession(Uuid),        // Restart a stopped session with new container
+    CleanupOrphaned,             // Clean up orphaned containers without worktrees
+    AttachToOtherTmux(String),   // Attach to a non-agents-in-a-box tmux session by name
+    KillOtherTmux(String),       // Kill a non-agents-in-a-box tmux session by name
+    ConfirmOtherTmuxRename,      // Confirm and execute rename for "Other tmux" session
     // Shell session actions (one shell per workspace)
     OpenWorkspaceShell {
         workspace_index: usize,                 // Index of workspace to open shell for
@@ -2668,6 +2693,11 @@ impl Default for AppState {
 
             pending_plugin_renders: std::collections::HashMap::new(),
 
+            statusline_status_cache: None,
+
+            live_window_watcher:
+                crate::models::live_window_watcher::LiveWindowWatcher::default(),
+
             // Skills browser state
             skills_state: crate::components::skills::SkillsViewState::default(),
             skills_load_receiver: None,
@@ -2704,9 +2734,68 @@ fn merge_oldest_call_day(
     }
 }
 
+/// TTL for the cached `detect_statusline_status()` result. The Stats
+/// screen re-renders at ~30-60Hz and the global `W` shortcut runs on
+/// every keystroke; without a cache each frame pays a settings.json
+/// read. 15s is short enough that a manual edit of `~/.claude/settings.json`
+/// is reflected almost immediately, long enough to coalesce normal
+/// scrolling activity.
+pub(crate) const STATUSLINE_STATUS_CACHE_TTL_SECS: u64 = 15;
+
 impl AppState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Read the statusline status with a TTL-bounded cache.
+    ///
+    /// The first call (or any call after the cache has expired) re-reads
+    /// `~/.claude/settings.json`; subsequent calls within
+    /// [`STATUSLINE_STATUS_CACHE_TTL_SECS`] return the memoised value.
+    /// Returns `None` only when status detection itself failed (IO/JSON
+    /// error) — in that case both the global `W` shortcut and the
+    /// top-of-Stats card no-op rather than guessing.
+    pub fn statusline_status_cached(
+        &mut self,
+    ) -> Option<crate::cli::statusline_install::StatuslineStatus> {
+        Self::statusline_status_cached_inner(
+            &mut self.statusline_status_cache,
+            std::time::Duration::from_secs(STATUSLINE_STATUS_CACHE_TTL_SECS),
+            Instant::now(),
+            crate::cli::statusline_install::detect_statusline_status,
+        )
+    }
+
+    /// Test seam for [`statusline_status_cached`]. Lets unit tests inject
+    /// a clock and a fake detector to verify TTL coalescing without
+    /// touching the filesystem.
+    pub(crate) fn statusline_status_cached_inner<F>(
+        cache: &mut Option<(
+            Option<crate::cli::statusline_install::StatuslineStatus>,
+            Instant,
+        )>,
+        ttl: std::time::Duration,
+        now: Instant,
+        detect: F,
+    ) -> Option<crate::cli::statusline_install::StatuslineStatus>
+    where
+        F: FnOnce() -> anyhow::Result<crate::cli::statusline_install::StatuslineStatus>,
+    {
+        if let Some((value, written)) = cache {
+            if now.saturating_duration_since(*written) < ttl {
+                return value.clone();
+            }
+        }
+        let fresh = detect().ok();
+        *cache = Some((fresh.clone(), now));
+        fresh
+    }
+
+    /// Drop the cached statusline status so the next reader re-detects.
+    /// Called after the install event lands so the CTA flips on the very
+    /// next frame instead of waiting out the TTL.
+    pub fn invalidate_statusline_status_cache(&mut self) {
+        self.statusline_status_cache = None;
     }
 
     /// Get the log directory path for the log history viewer
@@ -3702,8 +3791,7 @@ impl AppState {
                         &metadata.worktree_path,
                         &source_repo,
                     );
-                let mut workspace =
-                    crate::models::Workspace::new(workspace_name, workspace_path);
+                let mut workspace = crate::models::Workspace::new(workspace_name, workspace_path);
                 workspace.sessions.push(stopped);
                 self.workspaces.push(workspace);
             }
@@ -3712,7 +3800,9 @@ impl AppState {
 
     /// Build a `Session` model in `Stopped` state from persisted metadata.
     /// Used to render sessions whose tmux is dead but whose worktree is alive.
-    pub(crate) fn stopped_session_from_metadata(metadata: &crate::interactive::SessionMetadata) -> crate::models::Session {
+    pub(crate) fn stopped_session_from_metadata(
+        metadata: &crate::interactive::SessionMetadata,
+    ) -> crate::models::Session {
         use crate::models::{Session, SessionMode, SessionStatus};
 
         let mut session = Session::new_with_options(
@@ -4187,10 +4277,8 @@ impl AppState {
                         self.move_to_next_workspace_first_item(workspace_idx);
                     }
                 } else {
-                    let first_visible = workspace
-                        .sessions
-                        .iter()
-                        .position(|s| self.session_passes_filter(s));
+                    let first_visible =
+                        workspace.sessions.iter().position(|s| self.session_passes_filter(s));
                     if let Some(first_idx) = first_visible {
                         self.selected_session_index = Some(first_idx);
                         self.queue_logs_fetch();
@@ -4427,7 +4515,8 @@ impl AppState {
             if self.workspaces.get(idx).map(|w| {
                 w.sessions.iter().any(|s| self.session_passes_filter(s))
                     || w.shell_session.is_some()
-            }) != Some(true) {
+            }) != Some(true)
+            {
                 let new_idx = self.workspaces.iter().position(|w| {
                     w.sessions.iter().any(|s| self.session_passes_filter(s))
                         || w.shell_session.is_some()
@@ -4673,7 +4762,10 @@ impl AppState {
     /// worktree, sessions.json entry, and `by-session/<uuid>` symlink intact.
     /// Delete maps to the existing destructive flow.
     pub fn show_delete_or_stop_confirmation(&mut self, session_id: Uuid) {
-        info!("Showing Stop/Delete/Cancel dialog for session: {}", session_id);
+        info!(
+            "Showing Stop/Delete/Cancel dialog for session: {}",
+            session_id
+        );
 
         let warning = self.check_session_uncommitted_warning(session_id);
 
@@ -4694,7 +4786,8 @@ impl AppState {
 
         self.confirmation_dialog = Some(ConfirmationDialog {
             title: "Stop or Delete Session".to_string(),
-            message: "Stop keeps the worktree and resumes later. Delete removes the worktree.".to_string(),
+            message: "Stop keeps the worktree and resumes later. Delete removes the worktree."
+                .to_string(),
             // confirm_action mirrors the default (Stop) so the legacy ConfirmationConfirm
             // handler still has something sensible if it ever runs without options.
             confirm_action: ConfirmAction::StopSession(session_id),
@@ -8099,10 +8192,7 @@ impl AppState {
             .tmux_sessions
             .get(&session_id)
             .map(|t| t.name().to_string())
-            .or_else(|| {
-                self.find_session(session_id)
-                    .and_then(|s| s.tmux_session_name.clone())
-            })
+            .or_else(|| self.find_session(session_id).and_then(|s| s.tmux_session_name.clone()))
             .or_else(|| {
                 let store = SessionStore::load();
                 store
@@ -8112,9 +8202,7 @@ impl AppState {
                     .map(|m| m.tmux_session_name.clone())
             });
 
-        let worktree_path = self
-            .find_session(session_id)
-            .map(|s| s.workspace_path.clone());
+        let worktree_path = self.find_session(session_id).map(|s| s.workspace_path.clone());
 
         let result: anyhow::Result<()> = if let Some(ref name) = tmux_name {
             // Hard constraint: kill only the exact named session. NEVER kill-server.
@@ -8189,15 +8277,14 @@ impl AppState {
         use crate::interactive::{InteractiveSessionManager, SessionStore};
         use crate::models::SessionStatus;
 
-        info!("Resuming interactive session: {} (trigger={})", session_id, trigger_key);
+        info!(
+            "Resuming interactive session: {} (trigger={})",
+            session_id, trigger_key
+        );
 
         // Resolve metadata up-front so we can audit even if subsequent steps fail.
         let store = SessionStore::load();
-        let metadata = store
-            .sessions()
-            .values()
-            .find(|m| m.session_id == session_id)
-            .cloned();
+        let metadata = store.sessions().values().find(|m| m.session_id == session_id).cloned();
 
         // Pull skip_permissions and model from the in-memory Session if available.
         let (skip_permissions, model) = self
@@ -8208,9 +8295,7 @@ impl AppState {
         // Capture audit context before any fallible step so we can record both
         // success and failure with the same fields.
         let tmux_name_for_audit = metadata.as_ref().map(|m| m.tmux_session_name.clone());
-        let worktree_for_audit = metadata
-            .as_ref()
-            .map(|m| m.worktree_path.display().to_string());
+        let worktree_for_audit = metadata.as_ref().map(|m| m.worktree_path.display().to_string());
 
         let mut transcript: Option<PathBuf> = None;
         let result: anyhow::Result<()> = async {
@@ -9608,6 +9693,20 @@ impl App {
             return;
         };
 
+        // Drain the host's event broker once per frame so cross-plugin
+        // pub/sub actually moves. Without this call, session-reader's
+        // `event_publish("sessions.usage_data")` from `_init` queues
+        // forever and burndown's `_handle_event` never sees the
+        // UsageData snapshot, leaving the analytics screen stuck on
+        // "Waiting for session-reader plugin...". The CLI path works
+        // because `inject_session_reader_snapshot` in cli/registry.rs
+        // hand-brokers the same handshake; this call is the TUI's
+        // equivalent. Errors are logged and ignored — a poisoned
+        // broker on one frame must not freeze the UI.
+        if let Err(e) = host.pump_events() {
+            warn!("plugin event pump failed: {e}");
+        }
+
         // Static plugin-screen routing table. Pairs a stable screen id
         // (consumed by `PluginScreen` and matched against
         // `state.current_screen`) with the plugin id that owns it.
@@ -9646,6 +9745,10 @@ impl App {
             warn!(plugin = %name, error = %err, "plugin failed to load");
         }
         self.plugin_host = Some(host);
+
+        // Kick off the live-window background poller. Render path reads
+        // from its snapshot — never calls live_window::current() inline.
+        self.state.live_window_watcher.start();
 
         // Initialize log streaming coordinator
         let (mut coordinator, log_sender) = LogStreamingCoordinator::new();

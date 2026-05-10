@@ -1,11 +1,11 @@
 // ABOUTME: Animated mascot component "Boxy" for the AINB home screen
 
 use ratatui::{
+    Frame,
     layout::{Alignment, Rect},
     style::{Color, Style},
     text::{Line, Span},
     widgets::Paragraph,
-    Frame,
 };
 use std::time::{Duration, Instant};
 
@@ -67,11 +67,7 @@ const MASCOT_FRAME_HAPPY: &[&str] = &[
 ];
 
 /// Compact mascot for smaller screens (3 lines)
-const MASCOT_MINI: &[&str] = &[
-    "╭─◉◉─╮",
-    "│ ── │",
-    "╰────╯",
-];
+const MASCOT_MINI: &[&str] = &["╭─◉◉─╮", "│ ── │", "╰────╯"];
 
 /// Animation frame types
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -120,7 +116,8 @@ impl MascotAnimation {
             self.last_update = now;
             self.blink_timer = now;
             // Randomize next blink interval (3-6 seconds)
-            self.blink_interval = Duration::from_millis(3000 + (now.elapsed().as_millis() % 3000) as u64);
+            self.blink_interval =
+                Duration::from_millis(3000 + (now.elapsed().as_millis() % 3000) as u64);
         } else if now.duration_since(self.last_update) > self.frame_duration {
             // Return to neutral after blink
             if self.current_frame == MascotFrame::Blink {

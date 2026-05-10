@@ -1,7 +1,7 @@
 // ABOUTME: Widget for rendering Bash/shell command executions with rich formatting
 // Displays commands with syntax highlighting and structured output
 
-use super::{MessageWidget, WidgetOutput, ToolResult, helpers, result_parser};
+use super::{MessageWidget, ToolResult, WidgetOutput, helpers, result_parser};
 use crate::agent_parsers::AgentEvent;
 use crate::components::live_logs_stream::{LogEntry, LogEntryLevel};
 use uuid::Uuid;
@@ -20,7 +20,13 @@ impl MessageWidget for BashWidget {
     }
 
     fn render(&self, event: AgentEvent, container_name: &str, session_id: Uuid) -> WidgetOutput {
-        if let AgentEvent::ToolCall { id, name: _, input, description } = event {
+        if let AgentEvent::ToolCall {
+            id,
+            name: _,
+            input,
+            description,
+        } = event
+        {
             let mut entries = Vec::new();
 
             // Build the main message
@@ -82,7 +88,8 @@ impl MessageWidget for BashWidget {
 
             // Add timeout if specified
             if let Some(timeout) = input.get("timeout").and_then(|v| v.as_u64()) {
-                if timeout != 120000 { // Don't show default timeout
+                if timeout != 120000 {
+                    // Don't show default timeout
                     let timeout_entry = LogEntry::new(
                         LogEntryLevel::Debug,
                         container_name.to_string(),
@@ -99,20 +106,30 @@ impl MessageWidget for BashWidget {
             WidgetOutput::MultiLine(entries)
         } else {
             // Should not happen if can_handle works correctly
-            WidgetOutput::Simple(
-                helpers::create_log_entry(
-                    LogEntryLevel::Error,
-                    container_name,
-                    "Invalid event for BashWidget".to_string(),
-                    session_id,
-                    "error",
-                )
-            )
+            WidgetOutput::Simple(helpers::create_log_entry(
+                LogEntryLevel::Error,
+                container_name,
+                "Invalid event for BashWidget".to_string(),
+                session_id,
+                "error",
+            ))
         }
     }
 
-    fn render_with_result(&self, event: AgentEvent, result: Option<ToolResult>, container_name: &str, session_id: Uuid) -> WidgetOutput {
-        if let AgentEvent::ToolCall { id, name: _, input, description } = event {
+    fn render_with_result(
+        &self,
+        event: AgentEvent,
+        result: Option<ToolResult>,
+        container_name: &str,
+        session_id: Uuid,
+    ) -> WidgetOutput {
+        if let AgentEvent::ToolCall {
+            id,
+            name: _,
+            input,
+            description,
+        } = event
+        {
             let mut entries = Vec::new();
 
             // Build the main header message
@@ -169,13 +186,9 @@ impl MessageWidget for BashWidget {
                     // Process each line with simple indentation
                     for line in content_str.lines() {
                         entries.push(
-                            LogEntry::new(
-                                level,
-                                container_name.to_string(),
-                                format!("  {}", line),
-                            )
-                            .with_session(session_id)
-                            .with_metadata("bash_output", "true")
+                            LogEntry::new(level, container_name.to_string(), format!("  {}", line))
+                                .with_session(session_id)
+                                .with_metadata("bash_output", "true"),
                         );
                     }
                 } else if tool_result.is_error {
@@ -186,7 +199,7 @@ impl MessageWidget for BashWidget {
                             container_name.to_string(),
                             "  Command failed with no output".to_string(),
                         )
-                        .with_session(session_id)
+                        .with_session(session_id),
                     );
                 }
             }
@@ -195,15 +208,13 @@ impl MessageWidget for BashWidget {
             WidgetOutput::MultiLine(entries)
         } else {
             // Should not happen if can_handle works correctly
-            WidgetOutput::Simple(
-                helpers::create_log_entry(
-                    LogEntryLevel::Error,
-                    container_name,
-                    "Invalid event for BashWidget".to_string(),
-                    session_id,
-                    "error",
-                )
-            )
+            WidgetOutput::Simple(helpers::create_log_entry(
+                LogEntryLevel::Error,
+                container_name,
+                "Invalid event for BashWidget".to_string(),
+                session_id,
+                "error",
+            ))
         }
     }
 

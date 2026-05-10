@@ -6,7 +6,7 @@ use ratatui::{
     prelude::*,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, BorderType, List, ListItem, ListState},
+    widgets::{Block, BorderType, Borders, List, ListItem, ListState},
 };
 
 // Premium color palette (TUI Style Guide)
@@ -67,10 +67,19 @@ impl SessionListComponent {
 
         let mut title_spans = vec![
             Span::styled(" 📁 ", Style::default().fg(GOLD)),
-            Span::styled("Workspaces ", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Workspaces ",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(
                 format!("({})", workspace_count),
-                Style::default().fg(if is_focused { CORNFLOWER_BLUE } else { MUTED_GRAY }).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(if is_focused {
+                        CORNFLOWER_BLUE
+                    } else {
+                        MUTED_GRAY
+                    })
+                    .add_modifier(Modifier::BOLD),
             ),
         ];
         if let Some(label) = state.session_filter.title_label() {
@@ -89,51 +98,87 @@ impl SessionListComponent {
                     .border_style(Style::default().fg(border_color))
                     .style(Style::default().bg(DARK_BG))
                     .title(Line::from(title_spans))
-                    .title_bottom(if state.ssh_session_rename_mode || state.other_tmux_rename_mode {
-                        // Rename mode help (SSH or Other tmux)
-                        Line::from(vec![
-                            Span::styled(" Enter", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
-                            Span::styled(" confirm ", Style::default().fg(MUTED_GRAY)),
-                            Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
-                            Span::styled(" Esc", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
-                            Span::styled(" cancel ", Style::default().fg(MUTED_GRAY)),
-                        ])
-                    } else if state.is_ssh_session_selected() || state.is_other_tmux_selected() {
-                        // SSH or Other tmux selected help
-                        Line::from(vec![
-                            Span::styled(" j/k", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
-                            Span::styled(" nav ", Style::default().fg(MUTED_GRAY)),
-                            Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
-                            Span::styled(" a", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
-                            Span::styled(" attach ", Style::default().fg(MUTED_GRAY)),
-                            Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
-                            Span::styled(" F2", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
-                            Span::styled(" rename ", Style::default().fg(MUTED_GRAY)),
-                        ])
-                    } else {
-                        // Default help — `j/k` nav segment dropped: arrow keys
-                        // also navigate, and the panel was overflowing once
-                        // `F filter` was added.
-                        Line::from(vec![
-                            Span::styled(" Enter", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
-                            Span::styled(" select ", Style::default().fg(MUTED_GRAY)),
-                            Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
-                            Span::styled(" s", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
-                            Span::styled(" ⭐ ", Style::default().fg(MUTED_GRAY)),
-                            Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
-                            Span::styled(" $", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
-                            Span::styled(" shell ", Style::default().fg(MUTED_GRAY)),
-                            Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
-                            Span::styled(" Space", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
-                            Span::styled(" mark ", Style::default().fg(MUTED_GRAY)),
-                            Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
-                            Span::styled(" D", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
-                            Span::styled(" del marked ", Style::default().fg(MUTED_GRAY)),
-                            Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
-                            Span::styled(" F", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
-                            Span::styled(" filter ", Style::default().fg(MUTED_GRAY)),
-                        ])
-                    }),
+                    .title_bottom(
+                        if state.ssh_session_rename_mode || state.other_tmux_rename_mode {
+                            // Rename mode help (SSH or Other tmux)
+                            Line::from(vec![
+                                Span::styled(
+                                    " Enter",
+                                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(" confirm ", Style::default().fg(MUTED_GRAY)),
+                                Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
+                                Span::styled(
+                                    " Esc",
+                                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(" cancel ", Style::default().fg(MUTED_GRAY)),
+                            ])
+                        } else if state.is_ssh_session_selected() || state.is_other_tmux_selected()
+                        {
+                            // SSH or Other tmux selected help
+                            Line::from(vec![
+                                Span::styled(
+                                    " j/k",
+                                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(" nav ", Style::default().fg(MUTED_GRAY)),
+                                Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
+                                Span::styled(
+                                    " a",
+                                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(" attach ", Style::default().fg(MUTED_GRAY)),
+                                Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
+                                Span::styled(
+                                    " F2",
+                                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(" rename ", Style::default().fg(MUTED_GRAY)),
+                            ])
+                        } else {
+                            // Default help — `j/k` nav segment dropped: arrow keys
+                            // also navigate, and the panel was overflowing once
+                            // `F filter` was added.
+                            Line::from(vec![
+                                Span::styled(
+                                    " Enter",
+                                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(" select ", Style::default().fg(MUTED_GRAY)),
+                                Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
+                                Span::styled(
+                                    " s",
+                                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(" ⭐ ", Style::default().fg(MUTED_GRAY)),
+                                Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
+                                Span::styled(
+                                    " $",
+                                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(" shell ", Style::default().fg(MUTED_GRAY)),
+                                Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
+                                Span::styled(
+                                    " Space",
+                                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(" mark ", Style::default().fg(MUTED_GRAY)),
+                                Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
+                                Span::styled(
+                                    " D",
+                                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(" del marked ", Style::default().fg(MUTED_GRAY)),
+                                Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
+                                Span::styled(
+                                    " F",
+                                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(" filter ", Style::default().fg(MUTED_GRAY)),
+                            ])
+                        },
+                    ),
             )
             .highlight_style(Style::default().bg(LIST_HIGHLIGHT_BG))
             .highlight_symbol("▶ ");
@@ -152,11 +197,8 @@ impl SessionListComponent {
             // Apply the session filter (Shift+F cycles): only count sessions
             // that pass the predicate so the workspace `(N)` matches what the
             // user actually sees rendered below.
-            let session_count = workspace
-                .sessions
-                .iter()
-                .filter(|s| state.session_passes_filter(s))
-                .count();
+            let session_count =
+                workspace.sessions.iter().filter(|s| state.session_passes_filter(s)).count();
             let has_shell = workspace.shell_session.is_some();
             let total_count = session_count + if has_shell { 1 } else { 0 };
 
@@ -195,25 +237,22 @@ impl SessionListComponent {
             let workspace_path_str = workspace.path.display().to_string();
             let is_favorite = {
                 // First check local path
-                let by_path = favorites
-                    .favorites
-                    .iter()
-                    .any(|f| f.source == workspace_path_str);
+                let by_path = favorites.favorites.iter().any(|f| f.source == workspace_path_str);
                 if by_path {
                     true
                 } else {
                     // Also check by remote URL (owner/repo format)
                     if let Ok(git_repo) = crate::git::RepositoryManager::open(&workspace.path) {
                         if let Ok(Some(remote_url)) = git_repo.get_remote_url() {
-                            if let Ok(repo_source) =
-                                crate::git::RepoSource::from_input(&remote_url)
+                            if let Ok(repo_source) = crate::git::RepoSource::from_input(&remote_url)
                             {
                                 if let Ok(parsed) = repo_source.parse_components() {
                                     let shorthand =
                                         format!("{}/{}", parsed.owner, parsed.repo_name);
-                                    favorites.favorites.iter().any(|f| {
-                                        f.source == shorthand || f.source == remote_url
-                                    })
+                                    favorites
+                                        .favorites
+                                        .iter()
+                                        .any(|f| f.source == shorthand || f.source == remote_url)
                                 } else {
                                     favorites.favorites.iter().any(|f| f.source == remote_url)
                                 }
@@ -232,9 +271,23 @@ impl SessionListComponent {
 
             let workspace_line = Line::from(vec![
                 Span::styled(workspace_symbol, Style::default().fg(symbol_color)),
-                Span::styled(" 📁 ", Style::default().fg(if is_selected_workspace { GOLD } else { CORNFLOWER_BLUE })),
+                Span::styled(
+                    " 📁 ",
+                    Style::default().fg(if is_selected_workspace {
+                        GOLD
+                    } else {
+                        CORNFLOWER_BLUE
+                    }),
+                ),
                 Span::styled(star_indicator, Style::default().fg(GOLD)),
-                Span::styled(workspace.name.clone(), Style::default().fg(name_color).add_modifier(if is_selected_workspace { Modifier::BOLD } else { Modifier::empty() })),
+                Span::styled(
+                    workspace.name.clone(),
+                    Style::default().fg(name_color).add_modifier(if is_selected_workspace {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+                ),
                 Span::styled(count_display, Style::default().fg(MUTED_GRAY)),
             ]);
 
@@ -253,7 +306,8 @@ impl SessionListComponent {
                     .collect();
                 let visible_len = visible.len();
                 for (visible_pos, &(session_idx, session)) in visible.iter().enumerate() {
-                    let is_selected_session = is_selected_workspace && state.selected_session_index == Some(session_idx);
+                    let is_selected_session =
+                        is_selected_workspace && state.selected_session_index == Some(session_idx);
                     let is_last_session = visible_pos == visible_len - 1;
 
                     // Tree line characters with subdued color
@@ -281,7 +335,9 @@ impl SessionListComponent {
                     };
 
                     // Git changes (controlled by show_git_status config)
-                    let changes_text = if state.app_config.ui_preferences.show_git_status && session.git_changes.total() > 0 {
+                    let changes_text = if state.app_config.ui_preferences.show_git_status
+                        && session.git_changes.total() > 0
+                    {
                         format!(" ({})", session.git_changes.format())
                     } else {
                         String::new()
@@ -303,7 +359,10 @@ impl SessionListComponent {
                     let is_multi_selected = state.selected_sessions.contains(&session.id);
 
                     let checkbox = if is_multi_selected {
-                        Span::styled("[x]", Style::default().fg(WARNING_ORANGE).add_modifier(Modifier::BOLD))
+                        Span::styled(
+                            "[x]",
+                            Style::default().fg(WARNING_ORANGE).add_modifier(Modifier::BOLD),
+                        )
                     } else {
                         Span::styled("[ ]", Style::default().fg(MUTED_GRAY))
                     };
@@ -315,8 +374,20 @@ impl SessionListComponent {
                         Span::styled(format!(" {} ", status_indicator), Style::default()),
                         Span::styled(mode_indicator.to_string(), Style::default()),
                         Span::styled(format!("{} ", agent_icon), Style::default()),
-                        Span::styled(format!("{} ", tmux_indicator), Style::default().fg(tmux_color)),
-                        Span::styled(session.branch_name.clone(), Style::default().fg(branch_color).add_modifier(if is_selected_session { Modifier::BOLD } else { Modifier::empty() })),
+                        Span::styled(
+                            format!("{} ", tmux_indicator),
+                            Style::default().fg(tmux_color),
+                        ),
+                        Span::styled(
+                            session.branch_name.clone(),
+                            Style::default().fg(branch_color).add_modifier(
+                                if is_selected_session {
+                                    Modifier::BOLD
+                                } else {
+                                    Modifier::empty()
+                                },
+                            ),
+                        ),
                         Span::styled(changes_text, Style::default().fg(WARNING_ORANGE)),
                     ]);
 
@@ -347,10 +418,17 @@ impl SessionListComponent {
                     let shell_line = Line::from(vec![
                         Span::styled("  ", Style::default()),
                         Span::styled(tree_prefix, Style::default().fg(SUBDUED_BORDER)),
-                        Span::styled(format!(" {} ", status_indicator), Style::default().fg(name_color)),
+                        Span::styled(
+                            format!(" {} ", status_indicator),
+                            Style::default().fg(name_color),
+                        ),
                         Span::styled(
                             shell_session.name.clone(),
-                            Style::default().fg(name_color).add_modifier(if is_selected_shell { Modifier::BOLD } else { Modifier::empty() })
+                            Style::default().fg(name_color).add_modifier(if is_selected_shell {
+                                Modifier::BOLD
+                            } else {
+                                Modifier::empty()
+                            }),
                         ),
                     ]);
 
@@ -371,10 +449,15 @@ impl SessionListComponent {
                 && state.selected_other_tmux_index.is_none()
                 && state.selected_ssh_session_index.is_some();
 
-            let ssh_symbol = if state.ssh_sessions_expanded { "▼" } else { "▶" };
+            let ssh_symbol = if state.ssh_sessions_expanded {
+                "▼"
+            } else {
+                "▶"
+            };
 
             // Orange color scheme for SSH section
-            let ssh_header_color = if is_selected_ssh || state.selected_ssh_session_index.is_some() {
+            let ssh_header_color = if is_selected_ssh || state.selected_ssh_session_index.is_some()
+            {
                 WARNING_ORANGE
             } else {
                 MUTED_GRAY
@@ -385,11 +468,16 @@ impl SessionListComponent {
                 Span::styled(" 🔐 ", Style::default().fg(ssh_header_color)),
                 Span::styled(
                     "SSH Sessions ",
-                    Style::default()
-                        .fg(ssh_header_color)
-                        .add_modifier(if is_selected_ssh { Modifier::BOLD } else { Modifier::empty() }),
+                    Style::default().fg(ssh_header_color).add_modifier(if is_selected_ssh {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
                 ),
-                Span::styled(format!("({})", session_count), Style::default().fg(MUTED_GRAY)),
+                Span::styled(
+                    format!("({})", session_count),
+                    Style::default().fg(MUTED_GRAY),
+                ),
             ]);
 
             items.push(ListItem::new(ssh_header));
@@ -398,7 +486,8 @@ impl SessionListComponent {
             if state.ssh_sessions_expanded {
                 let session_len = state.ssh_sessions.len();
                 for (idx, ssh_session) in state.ssh_sessions.iter().enumerate() {
-                    let is_selected = is_selected_ssh && state.selected_ssh_session_index == Some(idx);
+                    let is_selected =
+                        is_selected_ssh && state.selected_ssh_session_index == Some(idx);
                     let is_last = idx == session_len - 1;
                     let is_being_renamed = is_selected && state.ssh_session_rename_mode;
 
@@ -441,9 +530,13 @@ impl SessionListComponent {
                         Span::styled(format!(" {} ", status_icon), Style::default()),
                         Span::styled(
                             display_text,
-                            Style::default()
-                                .fg(name_color)
-                                .add_modifier(if is_selected || is_being_renamed { Modifier::BOLD } else { Modifier::empty() }),
+                            Style::default().fg(name_color).add_modifier(
+                                if is_selected || is_being_renamed {
+                                    Modifier::BOLD
+                                } else {
+                                    Modifier::empty()
+                                },
+                            ),
                         ),
                     ]);
 
@@ -463,7 +556,11 @@ impl SessionListComponent {
             let is_selected_other = state.selected_workspace_index.is_none()
                 && state.selected_other_tmux_index.is_some();
 
-            let other_symbol = if state.other_tmux_expanded { "▼" } else { "▶" };
+            let other_symbol = if state.other_tmux_expanded {
+                "▼"
+            } else {
+                "▶"
+            };
 
             let header_color = if state.selected_workspace_index.is_none() {
                 CORNFLOWER_BLUE
@@ -474,8 +571,18 @@ impl SessionListComponent {
             let other_header = Line::from(vec![
                 Span::styled(other_symbol, Style::default().fg(header_color)),
                 Span::styled(" 🖥️ ", Style::default().fg(header_color)),
-                Span::styled("Other tmux ", Style::default().fg(header_color).add_modifier(if is_selected_other { Modifier::BOLD } else { Modifier::empty() })),
-                Span::styled(format!("({})", session_count), Style::default().fg(MUTED_GRAY)),
+                Span::styled(
+                    "Other tmux ",
+                    Style::default().fg(header_color).add_modifier(if is_selected_other {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+                ),
+                Span::styled(
+                    format!("({})", session_count),
+                    Style::default().fg(MUTED_GRAY),
+                ),
             ]);
 
             items.push(ListItem::new(other_header));
@@ -484,7 +591,8 @@ impl SessionListComponent {
             if state.other_tmux_expanded {
                 let session_len = state.other_tmux_sessions.len();
                 for (idx, other_session) in state.other_tmux_sessions.iter().enumerate() {
-                    let is_selected = is_selected_other && state.selected_other_tmux_index == Some(idx);
+                    let is_selected =
+                        is_selected_other && state.selected_other_tmux_index == Some(idx);
                     let is_last = idx == session_len - 1;
 
                     let tree_prefix = if is_last { "└─" } else { "├─" };
@@ -516,7 +624,7 @@ impl SessionListComponent {
                             Span::styled("✏️ ", Style::default()),
                             Span::styled(
                                 format!("{}_", state.other_tmux_rename_buffer),
-                                Style::default().fg(GOLD).add_modifier(Modifier::BOLD)
+                                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
                             ),
                         ])
                     } else {
@@ -524,7 +632,14 @@ impl SessionListComponent {
                             Span::styled("  ", Style::default()),
                             Span::styled(tree_prefix, Style::default().fg(SUBDUED_BORDER)),
                             Span::styled(format!(" {} ", status), Style::default()),
-                            Span::styled(other_session.name.clone(), Style::default().fg(name_color).add_modifier(if is_selected { Modifier::BOLD } else { Modifier::empty() })),
+                            Span::styled(
+                                other_session.name.clone(),
+                                Style::default().fg(name_color).add_modifier(if is_selected {
+                                    Modifier::BOLD
+                                } else {
+                                    Modifier::empty()
+                                }),
+                            ),
                             Span::styled(windows_text, Style::default().fg(MUTED_GRAY)),
                         ])
                     };
@@ -537,7 +652,10 @@ impl SessionListComponent {
         if items.is_empty() {
             let empty_line = Line::from(vec![
                 Span::styled("✨ ", Style::default().fg(MUTED_GRAY)),
-                Span::styled("No workspaces found", Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC)),
+                Span::styled(
+                    "No workspaces found",
+                    Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+                ),
             ]);
             items.push(ListItem::new(empty_line));
         }

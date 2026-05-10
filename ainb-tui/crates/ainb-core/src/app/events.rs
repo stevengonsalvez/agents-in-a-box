@@ -7,7 +7,9 @@ use crate::app::{
     screens::ids as screen_ids,
     state::{AsyncAction, AuthMethod, ConfigPane},
 };
+use crate::cli::statusline_install::{InstallOutcome, StatuslineStatus, install_statusline};
 use crate::credentials;
+use crate::models::live_window::Source as LiveSource;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tracing::info;
 
@@ -61,10 +63,22 @@ pub enum AppEvent {
     ScrollLogsToBottom,
     ToggleAutoScroll, // Toggle auto-scroll mode in live logs
     // Mouse events
-    MouseClick { x: u16, y: u16 },
-    MouseDragStart { x: u16, y: u16 },
-    MouseDragEnd { x: u16, y: u16 },
-    MouseDragging { x: u16, y: u16 },
+    MouseClick {
+        x: u16,
+        y: u16,
+    },
+    MouseDragStart {
+        x: u16,
+        y: u16,
+    },
+    MouseDragEnd {
+        x: u16,
+        y: u16,
+    },
+    MouseDragging {
+        x: u16,
+        y: u16,
+    },
     // New session creation events
     NewSessionCancel,
     NewSessionNextRepo,
@@ -349,6 +363,13 @@ pub enum AppEvent {
     // Usage analytics: variants removed. The burndown plugin owns these
     // events now; future host→plugin key forwarding flows through
     // AppEvent::Plugin{plugin_id="burndown", payload}.
+    //
+    // Exception: UsageWireStatusline stays in core. It's a host-side
+    // helper that installs the Claude Code statusline (mutates
+    // ~/.claude/settings.json) — it has nothing to do with the
+    // analytics plugin and is reachable via the global `W` shortcut
+    // and the slash command palette.
+    UsageWireStatusline,
     // Skills browser events
     SkillsBack,             // Return to home screen (Esc)
     SkillsNextProvider,     // Next provider (Right arrow)
@@ -468,6 +489,40 @@ impl EventHandler {
         }
     }
 
+    /// Pure decision logic shared between the production global-`W`
+    /// shortcut and tests. Wiring is productive when live data isn't
+    /// already flowing from the Tier1 cache *and* the user's
+    /// `~/.claude/settings.json` doesn't already carry our block.
+    fn should_wire_statusline_inner(
+        live_source: LiveSource,
+        statusline_status: Option<&StatuslineStatus>,
+    ) -> bool {
+        if live_source == LiveSource::Tier1Cache {
+            return false;
+        }
+        matches!(
+            statusline_status,
+            Some(StatuslineStatus::NotConfigured) | Some(StatuslineStatus::Other(_))
+        )
+    }
+
+    /// True when wiring the Claude Code statusline would be productive.
+    /// Drives the global `W` shortcut. When this is `false` the keystroke
+    /// is ignored at the global layer and falls through to the active
+    /// view's normal handling.
+    ///
+    /// The settings.json read goes through [`AppState::statusline_status_cached`]
+    /// so that holding `W` (or rapid keystrokes elsewhere) doesn't hammer
+    /// the filesystem.
+    fn should_wire_statusline(state: &mut AppState) -> bool {
+        // Read from the background watcher's snapshot — never call
+        // live_window::current() inline; the Tier 2 fallback walks JSONL
+        // transcripts and would stall input handling on every keystroke.
+        let live_source = state.live_window_watcher.snapshot().source;
+        let status = state.statusline_status_cached();
+        Self::should_wire_statusline_inner(live_source, status.as_ref())
+    }
+
     pub fn handle_key_event(key_event: KeyEvent, state: &mut AppState) -> Option<AppEvent> {
         use crate::app::screens::ids as screen_ids;
 
@@ -545,6 +600,60 @@ impl EventHandler {
         // Supports both '?' and Shift+H
         if matches!(key_event.code, KeyCode::Char('?' | 'H')) {
             return Some(AppEvent::ToggleHelp);
+        }
+
+        // Global `W`: wire Claude Code statusline. Active from any
+        // non-text-input context when the statusline is unwired or
+        // stale (live data isn't coming from the Tier1 cache). The CTA
+        // in the top status bar points users here, so the shortcut
+        // must work everywhere — not just from the Burndown panel
+        // where it originally lived.
+        //
+        // The suppress list below covers two kinds of context:
+        //   (a) views that fundamentally accept free-form character
+        //       input (NewSession's prompt/branch/repo entry,
+        //       SearchWorkspace, ClaudeChat, AuthSetup, the Config
+        //       editor, the AttachedTerminal pass-through, the auth
+        //       provider popup),
+        //   (b) per-view text-entry overlays toggled inside otherwise
+        //       navigable screens (GitView's commit message, the
+        //       Analytics input/zoom-search modes, the Skills search
+        //       overlay).
+        //
+        // Modal text inputs that already early-return at the top of
+        // `handle_key_event` (confirmation dialog, OtherTmux/SshSession
+        // rename, onboarding/setup menus, quick-commit) don't reach
+        // this block, so they don't need entries here.
+        // Analytics is plugin-owned now; host can't introspect the
+        // burndown plugin's input modes. The plugin must handle its
+        // own W-suppression by intercepting key events before they
+        // reach this global handler. Until plugin key forwarding is
+        // wired (Phase 4+), `W` on the analytics screen does fire the
+        // host install path — the plugin's input modes don't conflict
+        // with it because they're modal and consume Escape/Enter, not
+        // capital W.
+        let analytics_text_active = false;
+        let skills_text_active =
+            state.current_screen == screen_ids::SKILLS && state.skills_state.search_active;
+        let git_view_text_active = state.current_screen == screen_ids::GIT_VIEW
+            && state.git_view_state.as_ref().map(|gv| gv.is_in_commit_mode()).unwrap_or(false);
+        let suppress_global_w = matches!(
+            state.current_screen.as_str(),
+            screen_ids::NEW_SESSION
+                | screen_ids::SEARCH_WORKSPACE
+                | screen_ids::CLAUDE_CHAT
+                | screen_ids::AUTH_SETUP
+                | screen_ids::CONFIG
+                | screen_ids::ATTACHED_TERMINAL
+        ) || state.auth_provider_popup_state.show_popup
+            || analytics_text_active
+            || skills_text_active
+            || git_view_text_active;
+        if !suppress_global_w
+            && matches!(key_event.code, KeyCode::Char('W'))
+            && Self::should_wire_statusline(state)
+        {
+            return Some(AppEvent::UsageWireStatusline);
         }
 
         // AINB 2.0: Handle home screen view
@@ -4017,6 +4126,65 @@ impl EventHandler {
             // AppEvent::Plugin{plugin_id, payload} rather than mutate
             // host-side state. UsageWireStatusline (host CLI install
             // helper) remains in core via the slash command palette.
+            AppEvent::UsageWireStatusline => {
+                // Fire when the statusline isn't already serving fresh data
+                // from the Tier1 cache *and* the user's settings.json doesn't
+                // already carry our block. This event is reachable from the
+                // global `W` shortcut as well as the legacy Burndown route,
+                // so the guard lives here rather than at the keymap.
+                if state.live_window_watcher.snapshot().source == LiveSource::Tier1Cache {
+                    return;
+                }
+                match state.statusline_status_cached() {
+                    Some(StatuslineStatus::Configured) => return,
+                    Some(_) => {}
+                    None => return,
+                }
+                let outcome = install_statusline();
+                // Any successful install path mutates settings.json, so
+                // drop the cached detection result before the next read.
+                state.invalidate_statusline_status_cache();
+                match outcome {
+                    Ok(InstallOutcome::Installed) => {
+                        state.app_config.ui_preferences.statusline_decision =
+                            crate::config::StatuslineDecision::Installed;
+                        let _ = state.app_config.save();
+                        state.add_success_notification(
+                            "Wired Claude Code statusline. Live data appears next prompt render."
+                                .to_string(),
+                        );
+                    }
+                    Ok(InstallOutcome::AlreadyInstalled) => {
+                        state.app_config.ui_preferences.statusline_decision =
+                            crate::config::StatuslineDecision::Installed;
+                        let _ = state.app_config.save();
+                        state.add_success_notification(
+                            "Statusline already wired — waiting for first prompt render."
+                                .to_string(),
+                        );
+                    }
+                    Ok(InstallOutcome::Migrated) => {
+                        // Legacy `ainb statusline` was rewritten in
+                        // place to `ainb claudecode statusline`. The
+                        // user already opted in; surface as a success.
+                        state.app_config.ui_preferences.statusline_decision =
+                            crate::config::StatuslineDecision::Installed;
+                        let _ = state.app_config.save();
+                        state.add_success_notification(
+                            "Migrated existing ainb statusline → ainb claudecode statusline."
+                                .to_string(),
+                        );
+                    }
+                    Ok(InstallOutcome::ExistingDifferent { current_command }) => {
+                        state.add_warning_notification(format!(
+                            "Existing statusline detected: {current_command}. Run `ainb init` for keep/replace."
+                        ));
+                    }
+                    Err(e) => {
+                        state.add_error_notification(format!("Failed to install statusline: {e}"));
+                    }
+                }
+            }
             // Skills browser events
             AppEvent::SkillsBack => {
                 tracing::debug!("Skills back");
@@ -4606,5 +4774,72 @@ mod navigate_to_tests {
         assert!(!is_known_screen_id(""));
         assert!(!is_known_screen_id("not-a-screen"));
         assert!(!is_known_screen_id("home2"));
+    }
+}
+
+#[cfg(test)]
+mod global_w_tests {
+    use super::*;
+    use crate::cli::statusline_install::StatuslineStatus;
+    use crate::models::live_window::Source;
+
+    #[test]
+    fn fires_when_source_is_none_and_statusline_unconfigured() {
+        assert!(EventHandler::should_wire_statusline_inner(
+            Source::None,
+            Some(&StatuslineStatus::NotConfigured),
+        ));
+    }
+
+    #[test]
+    fn fires_when_tier2_local_and_statusline_unconfigured() {
+        // Tier2Local means ainb is reading JSONL fallback — not the
+        // Tier1 cache the statusline would write to. Wiring is still
+        // productive.
+        assert!(EventHandler::should_wire_statusline_inner(
+            Source::Tier2Local,
+            Some(&StatuslineStatus::NotConfigured),
+        ));
+    }
+
+    #[test]
+    fn fires_when_other_command_present() {
+        assert!(EventHandler::should_wire_statusline_inner(
+            Source::None,
+            Some(&StatuslineStatus::Other("ccusage statusline".into())),
+        ));
+    }
+
+    #[test]
+    fn no_op_when_tier1_cache_active() {
+        // Already wired and fresh — `W` should fall through and not
+        // re-trigger the install.
+        assert!(!EventHandler::should_wire_statusline_inner(
+            Source::Tier1Cache,
+            Some(&StatuslineStatus::Configured),
+        ));
+        assert!(!EventHandler::should_wire_statusline_inner(
+            Source::Tier1Cache,
+            Some(&StatuslineStatus::NotConfigured),
+        ));
+    }
+
+    #[test]
+    fn no_op_when_already_configured_even_without_fresh_cache() {
+        // Settings.json has our block but the cache hasn't been written
+        // yet (statusline hasn't run). Re-installing wouldn't help.
+        assert!(!EventHandler::should_wire_statusline_inner(
+            Source::None,
+            Some(&StatuslineStatus::Configured),
+        ));
+    }
+
+    #[test]
+    fn no_op_when_status_detection_failed() {
+        // IO failure reading settings.json — refuse to install blindly.
+        assert!(!EventHandler::should_wire_statusline_inner(
+            Source::None,
+            None,
+        ));
     }
 }

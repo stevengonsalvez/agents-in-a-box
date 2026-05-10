@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use std::path::PathBuf;
 use tokio::process::Command;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -44,12 +44,13 @@ pub async fn execute(args: RunArgs) -> Result<()> {
 
     // Step 3: Create worktree if requested
     if args.worktree || args.create_branch.is_some() {
-        let worktree_manager = WorktreeManager::new()
-            .context("Failed to initialize worktree manager")?;
+        let worktree_manager =
+            WorktreeManager::new().context("Failed to initialize worktree manager")?;
 
-        let branch = args.create_branch.clone().unwrap_or_else(|| {
-            format!("ainb/session-{}", &session_id.to_string()[..8])
-        });
+        let branch = args
+            .create_branch
+            .clone()
+            .unwrap_or_else(|| format!("ainb/session-{}", &session_id.to_string()[..8]));
 
         info!("Creating worktree for branch: {}", branch);
 
@@ -226,12 +227,7 @@ async fn clone_remote_repo(remote: &str) -> Result<PathBuf> {
         }
     } else {
         println!("Cloning {url}...");
-        let output = Command::new("git")
-            .arg("clone")
-            .arg(&url)
-            .arg(&repo_path)
-            .output()
-            .await?;
+        let output = Command::new("git").arg("clone").arg(&url).arg(&repo_path).output().await?;
 
         if !output.status.success() {
             anyhow::bail!(
@@ -420,8 +416,15 @@ mod tests {
         };
 
         let cmd = build_agent_command(&args, Some(ClaudeModel::Sonnet));
-        assert!(cmd.starts_with("codex"), "Command should start with codex, got: {}", cmd);
-        assert!(!cmd.contains("--model"), "Codex should not have --model flag");
+        assert!(
+            cmd.starts_with("codex"),
+            "Command should start with codex, got: {}",
+            cmd
+        );
+        assert!(
+            !cmd.contains("--model"),
+            "Codex should not have --model flag"
+        );
     }
 
     #[test]
@@ -441,7 +444,11 @@ mod tests {
         };
 
         let cmd = build_agent_command(&args, Some(ClaudeModel::Sonnet));
-        assert!(cmd.starts_with("codex"), "Command should start with codex, got: {}", cmd);
+        assert!(
+            cmd.starts_with("codex"),
+            "Command should start with codex, got: {}",
+            cmd
+        );
         assert!(
             cmd.contains("--dangerously-bypass-approvals-and-sandbox"),
             "Codex skip permissions should use --dangerously-bypass-approvals-and-sandbox, got: {}",
@@ -470,8 +477,15 @@ mod tests {
         };
 
         let cmd = build_agent_command(&args, Some(ClaudeModel::Sonnet));
-        assert!(cmd.starts_with("gemini"), "Command should start with gemini, got: {}", cmd);
-        assert!(!cmd.contains("--model"), "Gemini should not have --model flag");
+        assert!(
+            cmd.starts_with("gemini"),
+            "Command should start with gemini, got: {}",
+            cmd
+        );
+        assert!(
+            !cmd.contains("--model"),
+            "Gemini should not have --model flag"
+        );
     }
 
     #[test]
@@ -491,7 +505,11 @@ mod tests {
         };
 
         let cmd = build_agent_command(&args, Some(ClaudeModel::Sonnet));
-        assert!(cmd.starts_with("copilot"), "Command should start with copilot, got: {}", cmd);
+        assert!(
+            cmd.starts_with("copilot"),
+            "Command should start with copilot, got: {}",
+            cmd
+        );
     }
 
     #[test]
@@ -511,7 +529,10 @@ mod tests {
         };
 
         let cmd = build_agent_command(&args, None);
-        assert_eq!(cmd, "copilot", "Copilot with no flags should just be 'copilot'");
+        assert_eq!(
+            cmd, "copilot",
+            "Copilot with no flags should just be 'copilot'"
+        );
     }
 
     #[test]
@@ -519,7 +540,11 @@ mod tests {
         // Claude CLI should be installed on this machine
         let provider = CliProvider::Claude;
         let result = validate_provider_installed(&provider);
-        assert!(result.is_ok(), "Claude CLI should be found in PATH: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Claude CLI should be found in PATH: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -531,9 +556,21 @@ mod tests {
         // The important thing is the function doesn't panic
         if result.is_err() {
             let err = result.unwrap_err().to_string();
-            assert!(err.contains("not found in PATH"), "Error should mention PATH, got: {}", err);
-            assert!(err.contains("GitHub Copilot"), "Error should mention provider name, got: {}", err);
-            assert!(err.contains("githubnext.com"), "Error should include install URL, got: {}", err);
+            assert!(
+                err.contains("not found in PATH"),
+                "Error should mention PATH, got: {}",
+                err
+            );
+            assert!(
+                err.contains("GitHub Copilot"),
+                "Error should mention provider name, got: {}",
+                err
+            );
+            assert!(
+                err.contains("githubnext.com"),
+                "Error should include install URL, got: {}",
+                err
+            );
         }
     }
 }

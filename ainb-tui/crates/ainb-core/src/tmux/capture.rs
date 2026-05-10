@@ -111,15 +111,35 @@ fn filter_claude_ui_noise(content: &str) -> String {
             || clean_line.contains("Yes, continue")
             || clean_line.contains("No, exit")
             || clean_line.contains("Enter to confirm")
-            || clean_line.contains("Esc to exit") {
+            || clean_line.contains("Esc to exit")
+        {
             skip_until_blank = true;
             continue;
         }
 
         // Skip box-drawing lines (often part of dialogs)
         if clean_line.chars().all(|c| {
-            matches!(c, '─' | '│' | '┌' | '┐' | '└' | '┘' | '├' | '┤' | '┬' | '┴' | '┼' | ' ' | '>' | '1' | '2' | '.' | ',')
-        }) && !clean_line.trim().is_empty() {
+            matches!(
+                c,
+                '─' | '│'
+                    | '┌'
+                    | '┐'
+                    | '└'
+                    | '┘'
+                    | '├'
+                    | '┤'
+                    | '┬'
+                    | '┴'
+                    | '┼'
+                    | ' '
+                    | '>'
+                    | '1'
+                    | '2'
+                    | '.'
+                    | ','
+            )
+        }) && !clean_line.trim().is_empty()
+        {
             continue;
         }
 
@@ -273,7 +293,8 @@ More output"#;
 
     #[test]
     fn test_filter_claude_ui_noise_with_ansi() {
-        let input = "\x1b[38;5;123mColored\x1b[0m text\nDo you want to work in this folder?\n\nMore text";
+        let input =
+            "\x1b[38;5;123mColored\x1b[0m text\nDo you want to work in this folder?\n\nMore text";
         let result = filter_claude_ui_noise(input);
         // ANSI codes are preserved (per function docstring)
         assert!(result.contains("\x1b[38;5;123mColored\x1b[0m text"));

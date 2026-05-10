@@ -21,16 +21,14 @@ impl LsResultWidget {
 
         // Look for tree-like indentation patterns
         let has_tree_structure = lines.iter().any(|line| {
-            line.starts_with("├──") ||
-            line.starts_with("└──") ||
-            line.starts_with("│   ") ||
-            line.trim().starts_with("- ")
+            line.starts_with("├──")
+                || line.starts_with("└──")
+                || line.starts_with("│   ")
+                || line.trim().starts_with("- ")
         });
 
         // Look for the note at the end
-        let has_note = lines.iter().any(|line|
-            line.contains("NOTE: do any of the files")
-        );
+        let has_note = lines.iter().any(|line| line.contains("NOTE: do any of the files"));
 
         has_tree_structure || has_note
     }

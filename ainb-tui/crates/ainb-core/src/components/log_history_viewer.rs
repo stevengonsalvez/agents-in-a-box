@@ -3,11 +3,11 @@
 // Supports both JSONL (new) and plain text (legacy) log formats
 
 use ratatui::{
+    Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph},
-    Frame,
 };
 use std::path::PathBuf;
 
@@ -33,10 +33,7 @@ const WARN_YELLOW: Color = Color::Rgb(255, 200, 100);
 /// Convert a character index to a byte index in a UTF-8 string
 /// Returns the byte offset of the nth character, or the string length if n exceeds char count
 fn char_to_byte_index(s: &str, char_idx: usize) -> usize {
-    s.char_indices()
-        .nth(char_idx)
-        .map(|(byte_idx, _)| byte_idx)
-        .unwrap_or(s.len())
+    s.char_indices().nth(char_idx).map(|(byte_idx, _)| byte_idx).unwrap_or(s.len())
 }
 const INFO_BLUE: Color = Color::Rgb(100, 149, 237);
 const DEBUG_GRAY: Color = Color::Rgb(120, 120, 140);
@@ -311,7 +308,11 @@ impl LogHistoryViewerState {
 
         let current = self.session_list_state.selected().unwrap_or(0);
         let max_idx = self.sessions.len().saturating_sub(1);
-        let new_idx = if current < max_idx { current + 1 } else { max_idx };
+        let new_idx = if current < max_idx {
+            current + 1
+        } else {
+            max_idx
+        };
         self.session_list_state.select(Some(new_idx));
     }
 
@@ -389,7 +390,12 @@ impl LogHistoryViewerState {
     }
 
     /// Convert screen coordinates to log line index and character offset
-    fn screen_to_log_position(&self, x: u16, y: u16, area: ratatui::layout::Rect) -> Option<(usize, usize)> {
+    fn screen_to_log_position(
+        &self,
+        x: u16,
+        y: u16,
+        area: ratatui::layout::Rect,
+    ) -> Option<(usize, usize)> {
         // Check if coordinates are within the log entries area
         if x < area.x || x >= area.x + area.width || y < area.y || y >= area.y + area.height {
             return None;
@@ -471,8 +477,7 @@ impl LogHistoryViewerState {
     /// Copy selected text to clipboard
     pub fn copy_selection_to_clipboard(&self) -> Result<(), String> {
         // Get text from cached selection or compute it fresh
-        let text = self.selection.selected_text.clone()
-            .or_else(|| self.get_selected_text());
+        let text = self.selection.selected_text.clone().or_else(|| self.get_selected_text());
 
         if let Some(text) = text {
             use arboard::Clipboard;
@@ -494,15 +499,27 @@ impl LogHistoryViewerState {
     }
 
     /// Get selection range for a specific line (returns char start/end or None)
-    pub fn get_line_selection_range(&self, line_idx: usize, line_len: usize) -> Option<(usize, usize)> {
+    pub fn get_line_selection_range(
+        &self,
+        line_idx: usize,
+        line_len: usize,
+    ) -> Option<(usize, usize)> {
         let ((start_line, start_char), (end_line, end_char)) = self.selection.normalized()?;
 
         if line_idx < start_line || line_idx > end_line {
             return None;
         }
 
-        let sel_start = if line_idx == start_line { start_char } else { 0 };
-        let sel_end = if line_idx == end_line { end_char.min(line_len) } else { line_len };
+        let sel_start = if line_idx == start_line {
+            start_char
+        } else {
+            0
+        };
+        let sel_end = if line_idx == end_line {
+            end_char.min(line_len)
+        } else {
+            line_len
+        };
 
         if sel_start < sel_end {
             Some((sel_start, sel_end))
@@ -711,9 +728,18 @@ impl LogHistoryViewerComponent {
     }
 
     /// Render the session list
-    fn render_session_list(&self, frame: &mut Frame, area: Rect, state: &mut LogHistoryViewerState) {
+    fn render_session_list(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        state: &mut LogHistoryViewerState,
+    ) {
         let is_focused = state.focus == LogViewerFocus::SessionList;
-        let border_color = if is_focused { CORNFLOWER_BLUE } else { SUBDUED_BORDER };
+        let border_color = if is_focused {
+            CORNFLOWER_BLUE
+        } else {
+            SUBDUED_BORDER
+        };
 
         // Build title with directory path (replace $HOME with ~)
         let dir_display = state
@@ -760,10 +786,7 @@ impl LogHistoryViewerComponent {
                     Span::styled("● ", Style::default().fg(SELECTION_GREEN))
                 };
 
-                let name = Span::styled(
-                    &session.display_name,
-                    Style::default().fg(SOFT_WHITE),
-                );
+                let name = Span::styled(&session.display_name, Style::default().fg(SOFT_WHITE));
 
                 let count = Span::styled(
                     format!(" ({})", session.log_count),
@@ -790,7 +813,11 @@ impl LogHistoryViewerComponent {
     /// Render the log entries
     fn render_log_entries(&self, frame: &mut Frame, area: Rect, state: &LogHistoryViewerState) {
         let is_focused = state.focus == LogViewerFocus::LogEntries;
-        let border_color = if is_focused { CORNFLOWER_BLUE } else { SUBDUED_BORDER };
+        let border_color = if is_focused {
+            CORNFLOWER_BLUE
+        } else {
+            SUBDUED_BORDER
+        };
 
         let filtered_logs = state.filtered_logs();
         let total_count = state.current_logs.len();
@@ -808,12 +835,10 @@ impl LogHistoryViewerComponent {
         };
 
         let block = Block::default()
-            .title(Line::from(vec![
-                Span::styled(
-                    title,
-                    Style::default().fg(if is_focused { GOLD } else { MUTED_GRAY }),
-                ),
-            ]))
+            .title(Line::from(vec![Span::styled(
+                title,
+                Style::default().fg(if is_focused { GOLD } else { MUTED_GRAY }),
+            )]))
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(border_color))
@@ -887,7 +912,10 @@ impl LogHistoryViewerComponent {
             // Before selection
             if byte_start > 0 {
                 let before = &line_text[..byte_start];
-                spans.push(Span::styled(before.to_string(), self.get_base_style_for_segment(before, &timestamp, icon, color)));
+                spans.push(Span::styled(
+                    before.to_string(),
+                    self.get_base_style_for_segment(before, &timestamp, icon, color),
+                ));
             }
 
             // Selected portion
@@ -902,17 +930,17 @@ impl LogHistoryViewerComponent {
             // After selection
             if byte_end < line_text.len() {
                 let after = &line_text[byte_end..];
-                spans.push(Span::styled(after.to_string(), self.get_base_style_for_segment(after, &timestamp, icon, color)));
+                spans.push(Span::styled(
+                    after.to_string(),
+                    self.get_base_style_for_segment(after, &timestamp, icon, color),
+                ));
             }
 
             Line::from(spans)
         } else {
             // No selection - use original formatting
             Line::from(vec![
-                Span::styled(
-                    format!("{} ", timestamp),
-                    Style::default().fg(MUTED_GRAY),
-                ),
+                Span::styled(format!("{} ", timestamp), Style::default().fg(MUTED_GRAY)),
                 Span::styled(format!("{} ", icon), Style::default().fg(color)),
                 Span::styled(entry.message.clone(), Style::default().fg(SOFT_WHITE)),
             ])
@@ -920,7 +948,13 @@ impl LogHistoryViewerComponent {
     }
 
     /// Get base style for a text segment (simplified - just returns white for now)
-    fn get_base_style_for_segment(&self, _segment: &str, _timestamp: &str, _icon: &str, _color: Color) -> Style {
+    fn get_base_style_for_segment(
+        &self,
+        _segment: &str,
+        _timestamp: &str,
+        _icon: &str,
+        _color: Color,
+    ) -> Style {
         // Simplified: just return soft white for selected portions
         Style::default().fg(SOFT_WHITE)
     }
