@@ -319,11 +319,6 @@ pub struct UsageViewState {
     /// so a narrow period (eg. `SpecificMonth(May)`) cannot raise the
     /// anchor above an earlier value seen during a wider load.
     pub oldest_call_day: Option<NaiveDate>,
-    /// Snapshot of the live OAuth-window state, refreshed by the
-    /// `LiveWindowWatcher` background poller and copied here just before
-    /// `usage::render` runs. Lets the Budget panel render Tier 1/2 data
-    /// without doing filesystem I/O on the render thread.
-    pub live_window: crate::live_window::LiveWindow,
 }
 
 impl Default for UsageViewState {
@@ -348,7 +343,6 @@ impl Default for UsageViewState {
             zoom_search_query: String::new(),
             zoom_detail_open: false,
             oldest_call_day: None,
-            live_window: crate::live_window::LiveWindow::empty(),
         }
     }
 }
@@ -834,24 +828,17 @@ impl UsageViewState {
     }
 }
 
-// TODO(post-rebase): The enable card ("Press W to wire Claude Code
-// statusline") that origin/main introduced on the legacy in-tree
-// `usage.rs` cannot live in the plugin — its decision inputs
-// (`StatuslineStatus`, `StatuslineDecision`) are host types, and the
-// plugin paints into a `Buffer`, not a `Frame`. Reintroduce as a host-
-// owned overlay above the plugin's analytics screen (or as a top-bar
-// CTA) so the visible feature regression is recovered without violating
-// the plugin boundary.
+/// Render the usage analytics screen
 pub fn render(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
     // Main layout: header + provider selector + tabs + content + help bar
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),             // Summary bar
-            Constraint::Length(3),             // Provider selector
-            Constraint::Length(3),             // Tab bar
-            Constraint::Min(0),                // Table content
-            Constraint::Length(2),             // Help bar
+            Constraint::Length(3), // Summary bar
+            Constraint::Length(3), // Provider selector
+            Constraint::Length(3), // Tab bar
+            Constraint::Min(0),    // Table content
+            Constraint::Length(2), // Help bar
         ])
         .split(area);
 
@@ -944,24 +931,15 @@ fn render_provider_bar(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
         }
 
         let is_active = *provider == state.provider;
-        let style = match (is_active, provider.has_data()) {
-            // Active + wired: gold bold underline (the canonical selection).
-            (true, true) => {
-                Style::default().fg(GOLD).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
-            }
-            // Active + not wired: keep underline so the user sees they
-            // landed on it, but stay muted to flag it's a placeholder.
-            (true, false) => Style::default().fg(MUTED_GRAY).add_modifier(Modifier::UNDERLINED),
-            (false, true) => Style::default().fg(SOFT_WHITE),
-            (false, false) => Style::default().fg(MUTED_GRAY),
+        let style = if is_active {
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+        } else if provider.has_data() {
+            Style::default().fg(SOFT_WHITE)
+        } else {
+            Style::default().fg(MUTED_GRAY)
         };
 
         spans.push(Span::styled(provider.label(), style));
-        // PR #89 (`fix(usage): be honest about Gemini/Copilot stub state`):
-        // the trailing "(soon)" badge was misleading — Gemini and Copilot
-        // genuinely have no parser wired and the chip styling alone (gold
-        // when wired, muted when not) communicates the placeholder state.
-        // Re-baselining the analytics tripwire snapshots was deliberate.
     }
 
     spans.push(Span::styled("    ", Style::default()));
@@ -1014,58 +992,30 @@ fn render_no_data(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
     let inner = block.inner(area);
     ratatui::widgets::Widget::render(block, area, buf);
 
-    let lines = if state.provider.has_data() {
-        // Provider IS wired (Claude/Codex), the call set is just empty
-        // for the active period + filters. This is a normal "no
-        // activity in the selected window" state, not an "unsupported
-        // provider" state — wording must reflect that or users on a
-        // fresh install would think Claude usage tracking is broken.
-        vec![
-            Line::from(""),
-            Line::from(""),
-            Line::from(vec![
-                Span::styled("  ", Style::default()),
-                Span::styled(
-                    "No usage data",
-                    Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!(" for {} in this window.", state.provider.short_label()),
-                    Style::default().fg(MUTED_GRAY),
-                ),
-            ]),
-            Line::from(""),
-            Line::from(Span::styled(
-                "  Try widening the period (Tab) or clearing filters (X).",
-                Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
-            )),
-        ]
-    } else {
-        vec![
-            Line::from(""),
-            Line::from(""),
-            Line::from(vec![
-                Span::styled("  ", Style::default()),
-                Span::styled(
-                    state.provider.label(),
-                    Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    " usage tracking is not yet available.",
-                    Style::default().fg(MUTED_GRAY),
-                ),
-            ]),
-            Line::from(""),
-            Line::from(Span::styled(
-                "  Usage data parsing is currently supported for Claude Code and Codex.",
-                Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
-            )),
-            Line::from(Span::styled(
-                "  Other providers will be added as they expose session-level usage data.",
-                Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
-            )),
-        ]
-    };
+    let lines = vec![
+        Line::from(""),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(
+                state.provider.label(),
+                Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " usage tracking is not yet available.",
+                Style::default().fg(MUTED_GRAY),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Usage data parsing is currently supported for Claude Code and Codex.",
+            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+        )),
+        Line::from(Span::styled(
+            "  Other providers will be added as they expose session-level usage data.",
+            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+        )),
+    ];
 
     let paragraph = Paragraph::new(lines);
     ratatui::widgets::Widget::render(paragraph, inner, buf);
@@ -1579,7 +1529,7 @@ fn render_zoom_panel_body(
             if matches!(panel, UsagePanel::Optimize) {
                 render_optimize_compact_panel(buf, area, data, focus);
             } else {
-                render_budget_panel(buf, area, data, &state.period, &state.live_window, focus);
+                render_budget_panel(buf, area, data, &state.period, focus);
             }
         }
     }
@@ -2277,7 +2227,6 @@ fn render_dashboard_grid(
         bottom[2],
         data,
         period,
-        &state.live_window,
         FocusCtx::for_panel(state, UsagePanel::Budget),
     );
 }
@@ -3272,7 +3221,6 @@ fn render_budget_panel(
     area: Rect,
     data: &UsageData,
     period: &UsagePeriod,
-    live: &crate::live_window::LiveWindow,
     focus: FocusCtx,
 ) {
     let inner_w = area.width.saturating_sub(2) as usize;
@@ -3300,10 +3248,8 @@ fn render_budget_panel(
 
     // Live OAuth-window header. Renders above the existing monthly-cap
     // content. Drives the W keybind's CTA when no source is available.
-    // The snapshot is supplied by the caller (sourced from the
-    // background `LiveWindowWatcher`) so this render path never touches
-    // the filesystem.
-    let mut lines: Vec<Line> = budget_live_header_lines(live, inner_w);
+    let live = crate::live_window::current();
+    let mut lines: Vec<Line> = budget_live_header_lines(&live, inner_w);
 
     lines.extend(vec![
         Line::from(vec![
@@ -3362,12 +3308,18 @@ fn budget_live_header_lines(
             if let Some(pct) = live.seven_day_pct {
                 out.push(live_bar_line("7d wnd  ", pct, bar_w));
             }
-            // today_cost_usd intentionally not rendered: it's the
-            // lifetime cost of one Claude Code session (whichever
-            // invoked the statusline command last), not a daily total
-            // — same reasoning as the Live Window widget in layout.rs.
             let mut footer: Vec<Span<'static>> = Vec::new();
+            if let Some(cost) = live.today_cost_usd {
+                footer.push(Span::styled(" Today ", Style::default().fg(MUTED_GRAY)));
+                footer.push(Span::styled(
+                    format!("${cost:.2}"),
+                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                ));
+            }
             if let Some(d) = live.resets_in {
+                if !footer.is_empty() {
+                    footer.push(Span::styled(" · ", Style::default().fg(MUTED_GRAY)));
+                }
                 footer.push(Span::styled(" Resets in ", Style::default().fg(MUTED_GRAY)));
                 footer.push(Span::styled(
                     format_hms(d),
@@ -3383,7 +3335,7 @@ fn budget_live_header_lines(
                 out.push(live_bar_line("5h burn ", pct, bar_w));
             }
             out.push(Line::from(Span::styled(
-                " Wire Claude Code statusline (W) for 7d window data",
+                " Wire statusline (W) for 7d window + cost",
                 Style::default().fg(MUTED_GRAY),
             )));
         }
@@ -3394,10 +3346,7 @@ fn budget_live_header_lines(
             )));
             out.push(Line::from(vec![
                 Span::styled("    Press ", Style::default().fg(MUTED_GRAY)),
-                Span::styled(
-                    "[W]",
-                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
-                ),
+                Span::styled("[W]", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
                 Span::styled(
                     " to wire up Claude Code statusline.",
                     Style::default().fg(MUTED_GRAY),
@@ -4879,7 +4828,7 @@ mod budget_live_header_tests {
     }
 
     #[test]
-    fn tier1_renders_two_bars_and_reset() {
+    fn tier1_renders_two_bars_plus_cost_and_reset() {
         let live = LiveWindow {
             five_hour_pct: Some(40),
             seven_day_pct: Some(8),
@@ -4893,9 +4842,7 @@ mod budget_live_header_tests {
         let text = flat(&lines);
         assert!(text.contains("5h burn"));
         assert!(text.contains("7d wnd"));
-        // today_cost_usd is in the cache but intentionally not rendered —
-        // it's a single session's lifetime cost, not today's total.
-        assert!(!text.contains("$"));
+        assert!(text.contains("$3.21"));
         assert!(text.contains("2h 30m"));
     }
 
@@ -4914,7 +4861,7 @@ mod budget_live_header_tests {
         let text = flat(&lines);
         assert!(text.contains("5h burn"));
         assert!(!text.contains("7d wnd"));
-        assert!(text.contains("Wire Claude Code statusline"));
+        assert!(text.contains("Wire statusline"));
     }
 
     #[test]
@@ -4930,165 +4877,5 @@ mod budget_live_header_tests {
     #[test]
     fn format_hms_pads_minutes_when_hours_present() {
         assert_eq!(format_hms(Duration::from_secs(3 * 3600 + 5 * 60)), "3h 05m");
-    }
-}
-
-#[cfg(test)]
-mod enable_card_tests {
-    use super::*;
-
-    fn flat(lines: &[Line<'static>]) -> String {
-        lines
-            .iter()
-            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
-            .collect::<Vec<_>>()
-            .join("")
-    }
-
-    #[test]
-    fn card_copy_mentions_w_key_and_value_proposition() {
-        let lines = build_enable_card_lines();
-        let text = flat(&lines);
-        assert!(text.contains("Live Claude Code usage off"));
-        assert!(text.contains("[W]"));
-        assert!(text.contains("wire up"));
-        // Tagline lists what wiring unlocks so users know what they get.
-        assert!(text.contains("5h burn"));
-        assert!(text.contains("7d window"));
-        assert!(text.contains("cost"));
-        assert!(text.contains("reset"));
-    }
-
-    #[test]
-    fn card_uses_warning_red_and_gold_w_per_style_guide() {
-        let lines = build_enable_card_lines();
-        // Find the [W] span and confirm gold styling.
-        let mut found_gold_w = false;
-        let mut found_red_warning = false;
-        for line in &lines {
-            for span in &line.spans {
-                if span.content.contains("[W]") && span.style.fg == Some(GOLD) {
-                    found_gold_w = true;
-                }
-                if span.content.contains("⚠") && span.style.fg == Some(Color::Rgb(230, 100, 100))
-                {
-                    found_red_warning = true;
-                }
-            }
-        }
-        assert!(
-            found_gold_w,
-            "[W] should be styled GOLD per tui-style-guide"
-        );
-        assert!(found_red_warning, "warning glyph should use the CTA red");
-    }
-
-    #[test]
-    fn card_is_two_lines_for_compact_layout() {
-        // The enable-card row is `Constraint::Length(4)` (2 borders +
-        // 2 body lines, no padding). Body must stay at two text lines
-        // so it fits without scroll.
-        let lines = build_enable_card_lines();
-        assert_eq!(
-            lines.len(),
-            2,
-            "enable card body must remain two lines; layout reserves only 4 rows"
-        );
-    }
-
-    use crate::cli::statusline_install::StatuslineStatus;
-    use crate::config::StatuslineDecision;
-    use crate::live_window::Source;
-
-    fn ctx(
-        live_source: Source,
-        statusline_status: Option<StatuslineStatus>,
-        statusline_decision: StatuslineDecision,
-    ) -> EnableCardCtx {
-        EnableCardCtx {
-            live_source,
-            statusline_status,
-            statusline_decision,
-        }
-    }
-
-    #[test]
-    fn card_visible_when_source_none_and_statusline_unconfigured() {
-        assert!(should_show_enable_card_inner(ctx(
-            Source::None,
-            Some(StatuslineStatus::NotConfigured),
-            StatuslineDecision::Unset,
-        )));
-    }
-
-    #[test]
-    fn card_visible_when_source_none_and_other_command_present() {
-        assert!(should_show_enable_card_inner(ctx(
-            Source::None,
-            Some(StatuslineStatus::Other("ccusage statusline".into())),
-            StatuslineDecision::Unset,
-        )));
-    }
-
-    #[test]
-    fn card_hidden_when_user_declined_in_init_wizard() {
-        // Mirrors the top-bar CTA logic. If the user explicitly opted
-        // out, the Stats screen must respect the decision — anything
-        // else is two surfaces disagreeing about the same setting.
-        assert!(!should_show_enable_card_inner(ctx(
-            Source::None,
-            Some(StatuslineStatus::NotConfigured),
-            StatuslineDecision::Declined,
-        )));
-        assert!(!should_show_enable_card_inner(ctx(
-            Source::None,
-            Some(StatuslineStatus::Other("ccusage statusline".into())),
-            StatuslineDecision::Declined,
-        )));
-    }
-
-    #[test]
-    fn card_hidden_when_tier1_cache_active() {
-        assert!(!should_show_enable_card_inner(ctx(
-            Source::Tier1Cache,
-            Some(StatuslineStatus::Configured),
-            StatuslineDecision::Installed,
-        )));
-        // Even if settings.json was hand-edited away, Tier1Cache means
-        // data is flowing — don't shout.
-        assert!(!should_show_enable_card_inner(ctx(
-            Source::Tier1Cache,
-            Some(StatuslineStatus::NotConfigured),
-            StatuslineDecision::Unset,
-        )));
-    }
-
-    #[test]
-    fn card_hidden_when_tier2_local_active() {
-        // Burndown panel's own contextual hint is the right surface
-        // for Tier2 — top-of-Stats card would be redundant.
-        assert!(!should_show_enable_card_inner(ctx(
-            Source::Tier2Local,
-            Some(StatuslineStatus::NotConfigured),
-            StatuslineDecision::Unset,
-        )));
-    }
-
-    #[test]
-    fn card_hidden_when_already_configured() {
-        assert!(!should_show_enable_card_inner(ctx(
-            Source::None,
-            Some(StatuslineStatus::Configured),
-            StatuslineDecision::Installed,
-        )));
-    }
-
-    #[test]
-    fn card_hidden_when_status_detection_failed() {
-        assert!(!should_show_enable_card_inner(ctx(
-            Source::None,
-            None,
-            StatuslineDecision::Unset,
-        )));
     }
 }
