@@ -1331,6 +1331,13 @@ fn setup_logging() {
 
     let _ = std::fs::create_dir_all(&log_dir);
 
+    // Best-effort janitor: every TUI startup, prune zero-byte JSONL
+    // files older than 24h. The bug that produced 2,999 empty files
+    // (filter mismatch + per-invocation file open) is fixed, but old
+    // installs accumulate cruft and even now a crash before the first
+    // log event leaves an empty file behind.
+    purge_empty_log_files(&log_dir);
+
     // Create JSONL log file with timestamp
     let log_file = log_dir.join(format!(
         "agents-in-a-box-{}.jsonl",
@@ -1365,6 +1372,35 @@ fn setup_logging() {
                 .unwrap_or_else(|_| "ainb=debug,warn".into()),
         )
         .init();
+}
+
+/// Remove zero-byte `agents-in-a-box-*.jsonl` files older than 24h.
+/// Best-effort — any IO error is silently swallowed so log
+/// initialisation always proceeds.
+fn purge_empty_log_files(log_dir: &std::path::Path) {
+    use std::time::{Duration, SystemTime};
+
+    const STALE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
+
+    let Ok(entries) = std::fs::read_dir(log_dir) else {
+        return;
+    };
+    let now = SystemTime::now();
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() || meta.len() != 0 {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("agents-in-a-box-") || !name.ends_with(".jsonl") {
+            continue;
+        }
+        let age = meta.modified().ok().and_then(|m| now.duration_since(m).ok());
+        if age.is_some_and(|a| a >= STALE_AFTER) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 fn setup_panic_handler() {
