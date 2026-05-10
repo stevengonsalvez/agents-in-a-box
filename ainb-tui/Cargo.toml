@@ -7,6 +7,7 @@ members = [
     "crates/ainb-plugin-runtime",
     "crates/ainb-plugin-sdk-rust",
     "crates/ainb-plugin-session-reader",
+    "crates/ainb-plugin-testkit",
     "crates/ainb-plugin-types-sessions",
     "xtask",
 ]
