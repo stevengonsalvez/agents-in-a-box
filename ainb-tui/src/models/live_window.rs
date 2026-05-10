@@ -16,6 +16,7 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Datelike, Timelike, Utc};
+use tracing::debug;
 
 use crate::cli::statusline::{LiveCache, cache_path, read_cache};
 use crate::models::usage::ProviderCall;
@@ -73,11 +74,15 @@ impl Default for Source {
 /// JSONL files (filtered by mtime).
 pub fn current() -> LiveWindow {
     if let Some(window) = current_tier1() {
+        debug!(source = ?window.source, "live_window: tier1 (statusline cache) hit");
         return window;
     }
+    debug!("live_window: tier1 miss/stale, falling through to tier2");
     if let Some(window) = current_tier2() {
+        debug!(source = ?window.source, "live_window: tier2 (local JSONL) hit");
         return window;
     }
+    debug!("live_window: tier2 miss, returning empty (CTA)");
     LiveWindow::empty()
 }
 
