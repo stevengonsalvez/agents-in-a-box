@@ -1,0 +1,37 @@
+# ainb session-reader plugin manifest (ABI v2 / subprocess).
+#
+# Pure data-plane plugin: walks per-provider session logs, aggregates a
+# UsageData snapshot, publishes it on the `sessions.usage_data` topic.
+# No UI surface and no CLI namespace — downstream plugins (burndown)
+# consume the snapshot via `host/snapshot/get` or `plugin/handle_event`.
+
+[plugin]
+name = "session-reader"
+version = "0.2.0"
+abi_version = 2
+description = "Walks per-provider session logs and publishes sessions.usage_data"
+
+[capabilities]
+# Read raw Claude / Codex / Gemini / Copilot session histories.
+read_claude_logs = true
+read_codex_logs = true
+# Publish on the snapshot bus.
+event_bus = true
+# Cache the parsed snapshot under the plugin's own data dir.
+write_plugin_data = true
+# No network. No subprocess.
+network = []
+spawn_subprocess = false
+
+[provides]
+# No screens, no slash commands, no CLI namespaces. Pure data plane.
+snapshots = ["sessions.usage_data"]
+
+[subscribes]
+# Refresh trigger: any publisher on this topic prompts a re-scan.
+snapshots = ["sessions.refresh_request"]
+
+[lifecycle]
+# Eager: the host needs the first snapshot ready before burndown asks.
+spawn = "eager"
+idle_reap_secs = 600
