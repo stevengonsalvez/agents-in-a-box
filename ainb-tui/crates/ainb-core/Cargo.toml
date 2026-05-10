@@ -109,6 +109,7 @@ pretty_assertions = { workspace = true }
 rexpect = { workspace = true }
 vt100 = { workspace = true }
 insta = { version = "1.40", features = ["json"] }
+bytes = "1.6"
 
 [lints]
 workspace = true
