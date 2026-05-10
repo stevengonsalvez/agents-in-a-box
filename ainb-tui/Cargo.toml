@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/ainb-core",
+    "crates/ainb-plugin-burndown",
     "crates/ainb-plugin-protocol",
     "crates/ainb-plugin-runtime",
     "crates/ainb-plugin-sdk-rust",
@@ -10,10 +11,9 @@ members = [
     "xtask",
 ]
 default-members = ["crates/ainb-core"]
-# Phase 7b: wasmi host + v1 plugins removed in this PR. The legacy
-# CTS canaries, burndown, session-reader, and v1 plugin-host/plugin-api
-# crates were deleted entirely. Re-shipped subprocess plugins land in
-# Phase 7c — until then this workspace ships zero plugins.
+# Phase 7c: burndown returns as a subprocess plugin (native binary,
+# stdio JSON-RPC over the SDK). session-reader is being re-shipped in
+# parallel under agents-in-a-box-4is.
 
 [workspace.package]
 version = "1.1.0"
