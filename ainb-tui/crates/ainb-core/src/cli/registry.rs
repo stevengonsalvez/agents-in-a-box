@@ -703,12 +703,13 @@ mod tests {
     }
 
     #[test]
-    fn built_ins_registers_seventeen_commands() {
+    fn built_ins_registers_eighteen_commands() {
         let r = CommandRegistry::built_ins();
         let names = r.names();
-        // 16 user-facing built-ins + plugin stub = 17. The TUI is NOT in the
-        // registry — main.rs handles `tui` / no-subcommand inline.
-        assert_eq!(names.len(), 17, "expected 17 entries, got {names:?}");
+        // 16 user-facing built-ins + claudecode namespace + plugin stub = 18.
+        // The TUI is NOT in the registry — main.rs handles `tui` /
+        // no-subcommand inline.
+        assert_eq!(names.len(), 18, "expected 18 entries, got {names:?}");
         for required in [
             "run",
             "list",
@@ -725,6 +726,7 @@ mod tests {
             "presets",
             "usage",
             "statusline",
+            "claudecode",
             "completion",
             "plugin",
         ] {
