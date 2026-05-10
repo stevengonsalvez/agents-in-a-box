@@ -1330,8 +1330,16 @@ fn setup_logging() {
                 .with_ansi(false),
         )
         .with(
+            // Comprehensive default: `ainb` (this crate) at debug so
+            // every traced event from our own code lands in the JSONL,
+            // and `warn` globally so noisy dependencies (bollard, hyper,
+            // tokio, etc.) only surface real problems. Override at any
+            // time with `RUST_LOG`. The previous default,
+            // `agents_box=info`, never matched — the crate was renamed
+            // to `ainb` years ago — so log files were empty by
+            // construction.
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "agents_box=info".into()),
+                .unwrap_or_else(|_| "ainb=debug,warn".into()),
         )
         .init();
 }
