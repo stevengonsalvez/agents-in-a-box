@@ -1,0 +1,98 @@
+[package]
+name = "ainb-plugin-session-reader"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Session-reader plugin for ainb — walks per-provider log dirs and publishes sessions.usage_data over JSON-RPC stdio."
+categories = ["development-tools"]
+keywords = ["ainb", "plugin", "session", "usage"]
+
+[[bin]]
+name = "ainb-plugin-session-reader"
+path = "src/main.rs"
+
+[dependencies]
+ainb-plugin-sdk-rust = { path = "../ainb-plugin-sdk-rust" }
+ainb-plugin-types-sessions = { path = "../ainb-plugin-types-sessions" }
+
+tokio = { workspace = true }
+async-trait = "0.1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+rmp-serde = "1.3"
+bytes = { version = "1.6", features = ["serde"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+toml = { workspace = true }
+ainb-plugin-protocol = { path = "../ainb-plugin-protocol" }
+
+[[test]]
+name = "subprocess_smoke"
+path = "tests/subprocess_smoke.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unused_imports = "warn"
+unused_variables = "warn"
+dead_code = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+similar_names = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+# Ported parser/aggregator code: precision-loss casts on cumulative
+# token counts and cost USD computations are intentional (we don't
+# need 64-bit integer dollars).
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+cast_possible_truncation = "allow"
+# `let X = match Y { Some(x) => x, _ => continue }` pattern reads
+# more naturally than `let-else` for the codex multi-arm streaming
+# parser.
+single_match_else = "allow"
+option_if_let_else = "allow"
+# Nursery's `missing_const_for_fn` flags every constructor; not
+# worth the per-method tagging.
+missing_const_for_fn = "allow"
+# The aggregator function fans out by design — splitting it would
+# obscure the merge order rather than clarify it.
+too_many_lines = "allow"
+# `field: tokens` postfix is the wire-schema name; can't rename.
+struct_field_names = "allow"
+# Plain `a * b + c` is more readable than `f64::mul_add` for cost.
+suboptimal_flops = "allow"
+# Ported parser code uses idioms (let-Some, manual map_or, Clone::clone
+# on String fields, .ends_with(".jsonl") on file extensions) that
+# pre-date these clippy lints. Preferring no-op style churn to a
+# blanket allow keeps the diff vs. the 6b cdylib readable.
+single_match = "allow"
+manual_let_else = "allow"
+case_sensitive_file_extension_comparisons = "allow"
+assigning_clones = "allow"
+or_fun_call = "allow"
+unnecessary_sort_by = "allow"
+iter_kv_map = "allow"
+manual_map = "allow"
+pub_use = "allow"
+redundant_pub_crate = "allow"
+manual_unwrap_or = "allow"
+manual_unwrap_or_default = "allow"
+map_unwrap_or = "allow"
+doc_markdown = "allow"
+unnecessary_map_or = "allow"
+# Smoke test panics inside `if let` branches when the plugin emits
+# unexpected frames — that's intentional, the test is the assertion.
+panic_in_result_fn = "allow"
+manual_assert = "allow"
+if_then_some_else_none = "allow"
