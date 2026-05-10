@@ -11,14 +11,37 @@
 //! - [`error`]       — SDK [`SdkError`] and the [`Result`] alias
 //! - [`plugin`]      — the [`Plugin`] trait every plugin implements
 //! - [`host_client`] — [`HostClient`] is the plugin's outbound JSON-RPC client
-//! - [`server`]      — [`Server`] runs the dispatcher loop over an [`AsyncRead`]/[`AsyncWrite`] pair
+//! - `server`        — [`Server`] runs the dispatcher loop (added in a follow-up commit)
 //!
 //! ## Wire types
 //!
 //! Wire types are re-exported from [`ainb_plugin_protocol`] — the SDK
-//! never duplicates them.
-//!
-//! [`AsyncRead`]: tokio::io::AsyncRead
-//! [`AsyncWrite`]: tokio::io::AsyncWrite
+//! never duplicates them. A plugin that needs `WireBuffer`, `RpcError`,
+//! `LogLevel`, etc. imports them from this crate.
 
-// Module declarations are added in subsequent commits as each piece lands.
+pub mod error;
+pub mod host_client;
+pub mod plugin;
+
+pub use error::{Result, SdkError};
+pub use host_client::HostClient;
+pub use plugin::{CliOutput, Plugin};
+
+// Re-export wire types so plugin authors only need this crate.
+pub use ainb_plugin_protocol::{
+    errors::{
+        ACTION_TIMEOUT, CAPABILITY_DENIED, INVALID_PARAMS, MANIFEST_VALIDATION, METHOD_NOT_FOUND,
+        ProtocolError, RpcError,
+    },
+    manifest::Manifest,
+    methods,
+    params::{
+        ActionInvokeParams, ActionInvokeResult, CliDispatchParams, CliDispatchResult,
+        FsDirEntry, FsReadDirParams, FsReadDirResult, FsReadFileParams, FsReadFileResult,
+        HandleEventParams, LogLevel, LogParams, NetworkFetchParams, NetworkFetchResult,
+        PluginInitParams, PluginInitResult, PluginShutdownParams, PluginShutdownResult,
+        RenderParams, RenderResult, SnapshotGetParams, SnapshotGetResult, SnapshotPublishParams,
+        SnapshotSubscribeParams, SnapshotSubscribeResult, Viewport,
+    },
+    wire_buffer::{Cell, Color, Coord, WireBuffer},
+};
