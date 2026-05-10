@@ -17,6 +17,7 @@ env:
   CARGO_TERM_COLOR: always
   BINARY_NAME: ainb
   WORKING_DIR: ainb-tui
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
 jobs:
   prepare:
