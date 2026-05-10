@@ -8,4 +8,5 @@ pub mod errors;
 pub mod framing;
 pub mod manifest;
 pub mod methods;
+pub mod params;
 pub mod wire_buffer;
