@@ -25,6 +25,8 @@ use anyhow::{anyhow, bail, Result};
 
 use crate::cli::OutputFormat;
 
+pub mod lint;
+
 /// Top-level dispatcher for `ainb plugin <subcommand>`.
 pub async fn execute(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
     match matches.subcommand() {
@@ -37,6 +39,13 @@ pub async fn execute(matches: &clap::ArgMatches, format: OutputFormat) -> Result
         | Some(("remove", _))
         | Some(("search", _)) => not_yet_ported(),
         Some(("list", _)) => list_installed(format),
+        Some(("lint", sub)) => {
+            let arg = sub
+                .get_one::<String>("plugin")
+                .ok_or_else(|| anyhow!("missing <plugin>"))?
+                .clone();
+            lint::run(&arg, format)
+        }
         _ => bail!("unknown plugin subcommand"),
     }
 }

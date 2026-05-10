@@ -676,6 +676,14 @@ impl CliCommand for PluginCommand {
                     .arg(clap::Arg::new("name").required(true)),
             )
             .subcommand(Command::new("list").about("List registered marketplaces"));
+        // Phase 7d-cli — DevX subcommands for the subprocess plugin runtime.
+        let lint_cmd = Command::new("lint")
+            .about("Validate a plugin manifest + binary (ABI 2.0 sanity checks)")
+            .arg(
+                clap::Arg::new("plugin")
+                    .required(true)
+                    .help("plugin id, staging dir, or manifest.toml path"),
+            );
         app.subcommand(
             Command::new(self.name())
                 .about("Manage ainb plugins")
@@ -685,7 +693,8 @@ impl CliCommand for PluginCommand {
                 .subcommand(remove_cmd)
                 .subcommand(list)
                 .subcommand(search)
-                .subcommand(marketplace),
+                .subcommand(marketplace)
+                .subcommand(lint_cmd),
         )
     }
     fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
@@ -789,6 +798,24 @@ mod tests {
         assert_eq!(sub_name, "install");
         assert_eq!(args.get_one::<String>("plugin").map(String::as_str), Some("burndown"));
         assert!(args.get_flag("yes"));
+    }
+
+    #[test]
+    fn plugin_subcommand_parses_lint() {
+        // Phase 7d-cli surface check: `ainb plugin lint <arg>`.
+        let r = CommandRegistry::built_ins();
+        let app = r.build_clap(root());
+        let matches = app
+            .try_get_matches_from(["ainb", "plugin", "lint", "/tmp/some-plugin"])
+            .expect("plugin lint parses");
+        let (top, sub) = matches.subcommand().expect("subcommand");
+        assert_eq!(top, "plugin");
+        let (sub_name, args) = sub.subcommand().expect("plugin lint");
+        assert_eq!(sub_name, "lint");
+        assert_eq!(
+            args.get_one::<String>("plugin").map(String::as_str),
+            Some("/tmp/some-plugin")
+        );
     }
 
     #[test]
