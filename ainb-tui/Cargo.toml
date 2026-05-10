@@ -1,6 +1,6 @@
 [package]
 name = "ainb"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 authors = ["Agents-in-a-Box Team"]
 description = "Terminal-based development environment manager for Claude Code containers"

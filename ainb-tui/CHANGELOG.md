@@ -7,6 +7,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-05-10
+### Added
+- Merge pull request #80 from stevengonsalvez/feat/burndown-default-stats
+- Merge pull request #81 from stevengonsalvez/feat/usage-aggregate-by-repo
+- Merge pull request #82 from stevengonsalvez/feat/reflect-plugin-auto-wire-hooks
+- Merge pull request #83 from stevengonsalvez/feat/burndown-branches-panel
+- Merge pull request #84 from stevengonsalvez/feat/live-window-statusline
+- Merge pull request #86 from stevengonsalvez/feat/statusline-discoverability
+- Merge pull request #88 from stevengonsalvez/feat/statusline-cache-only
+- **cli**: add ainb statusline subcommand for Claude Code hook
+- **cli**: extract install_statusline() helper with idempotent settings.json merge
+- **deps**: track reflect as a claude-plugins entry
+- **init**: offer statusline install during ainb init wizard
+- **layout**: global W shortcut to wire Claude Code statusline
+- **layout**: top-bar live window display + red CTA when not wired
+- **marketplace**: add Claude plugin marketplace manifest
+- **reflect**: auto-wire SessionStart and PreCompact hooks via plugin.json
+- **reflect**: stub v2 telemetry artifacts so they can't mislead future investigators
+- **reflect**: vendor reflect-drain-bg.sh into plugin tree
+- **scripts**: add update-externals.sh
+- **scripts/update-externals**: wire reflect plugin, mcporter, graphify
+- **skill/research**: consolidate prior-art check on recall preamble
+- **skills**: sync-learnings filters orphans against filesystem-derived internal set
+- **statusline**: add --cache-only flag for side-channel cache writes
+- **statusline**: auto-migrate legacy ainb statusline command on install
+- **toolkit**: add generate-catalog.sh + regenerate catalog.yaml
+- **usage**: Budget panel live bars + W keybind triggers install
+- **usage**: add render_branch_panel and ByBranch to UsagePanel enum
+- **usage**: add repo_lookup helper to resolve cwd to upstream repo id
+- **usage**: aggregate stats by upstream repo, fall back to folder
+- **usage**: hoist enable card to top of Stats screen
+- **usage**: live_window reader with three-tier fallback
+- **usage**: make Burndown the default stats tab
+- **usage**: wire ByBranch into Burndown grid/compact/stack/zoom layouts
+
+### Fixed
+- Merge pull request #75 from stevengonsalvez/fix/marketplace-skills-conflict
+- Merge pull request #78 from stevengonsalvez/chore/release-tap-push
+- Merge pull request #89 from stevengonsalvez/fix/usage-provider-switch
+- **layout**: show 'r resume' instead of 'e restart' for stopped interactive sessions
+- **layout**: show live widget when Tier1Cache flowing, regardless of source
+- **live-window**: drop misleading $today price
+- **manifest**: mcporter is openclaw/mcporter, not nanoclaw
+- **marketplace**: canonical repo name is agents-in-a-box, not ai-coder-rules
+- **marketplace**: drop skills array — plugin.json self-declares
+- **reflect**: graceful skip + clear log when reflect-kb is missing
+- **release**: push Homebrew formula to dedicated tap repo
+- **skills**: re-templatize 16 synced skills that lost {{HOME_TOOL_DIR}}
+- **skills**: use {{TOOL_DIR}} placeholder for tool-relative paths
+- **statusline**: address PR #86 review findings
+- **statusline**: drop chain-mode install path
+- **statusline**: prune old settings.json backups
+- **statusline**: write backup after settings.json lands
+- **sync-learnings**: restore placeholders + fix reverse-interp regex
+- **usage**: be honest about Gemini/Copilot stub state
+- **usage**: force reparse on provider switch
+- **usage**: split empty-state copy + drop budget cost render
+
+### Documentation
+- Merge pull request #74 from stevengonsalvez/docs/readme-homebrew-primary
+- Merge pull request #77 from stevengonsalvez/docs/pr-b-reflect-readme
+- **contributing**: qualify the test step — Jest suite has stale assertions
+- **layout**: point top-bar CTA at the W shortcut
+- **readme**: make Homebrew the primary install path
+- **reflect**: add public-facing README with mermaid diagram
+- **reflect**: mark settings-snippet.json as legacy/non-Claude fallback
+- **reflect**: restructure settings-snippet around named opt-in variants
+- **statusline**: clarify cache path is OS-specific
+- clarify Claude Code scope in CTA copy and README
+
+### Other
+- Merge pull request #70 from stevengonsalvez/chore/sync-learnings-2026-05-04
+- Merge pull request #76 from stevengonsalvez/chore/pr-a-hygiene
+- Merge pull request #79 from stevengonsalvez/refactor/pr-c-toolkit-reorg
+- Merge pull request #85 from stevengonsalvez/feat/cli-claudecode-namespace
+- Merge pull request #87 from stevengonsalvez/chore/ci-greenup
+- **ci**: remove Clippy and Cargo-Deny jobs
+- **ci**: scope CI tests to library, skip Docker integration tests
+- **claude-code-4.5**: add browser-harness + graphify references to CLAUDE.md
+- **deps**: point external-dependencies.yaml at catalog.yaml
+- **deps**: track kepano/obsidian-skills bundle (5 npx skills)
+- **homebrew**: update formula to v1.0.0
+- **manifest**: move caveman from npx-skills to claude-plugins
+- **manifest**: track shape, mcporter, graphify; enumerate reflect plugin
+- **repo**: add LICENSE, CONTRIBUTING, SECURITY; clean tracked junk
+- **skills**: add tmux-message skill
+- **skills**: sync home-newer skill edits back to packages
+- **skills**: sync interview skill from user level
+- cargo fmt across workspace
+- **live-window**: move live_window::current() off the render thread
+- **live-window**: tighten Tier 2 active-block parser to last 5h
+- **cli**: namespace statusline under claudecode subcommand
+- **externals**: switch reflect to claude marketplace install
+- **toolkit**: rename clawdhub-skills→clawdhub, test→bootstrap.test.js, add per-dir READMEs
+
+
 ## [1.0.0] - 2026-05-05
 ### Added
 - Merge pull request #52 from stevengonsalvez/feat/codeburn
