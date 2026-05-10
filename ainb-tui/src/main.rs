@@ -1301,13 +1301,38 @@ fn setup_logging() {
     use std::path::PathBuf;
     use tracing_subscriber::prelude::*;
 
-    // High-frequency CLI subcommands (the statusline hook fires on
-    // every Claude Code prompt render) must NOT open a JSONL file —
-    // it'd litter `~/.agents-in-a-box/logs/` with one empty file per
-    // invocation. For these short-lived commands, install a
-    // stderr-only subscriber so explicit warns/errors still surface
-    // when invoked synchronously from a shell.
-    let is_short_lived_cli = std::env::args().any(|a| a == "statusline");
+    // Short-lived CLI subcommands (one-shot utilities, the statusline
+    // hook that fires on every Claude Code prompt render, completion
+    // generation, `--help`, etc.) must NOT open a JSONL file — it'd
+    // litter `~/.agents-in-a-box/logs/` with one empty file per
+    // invocation. For these commands, install a stderr-only subscriber
+    // so explicit warns/errors still surface when invoked synchronously
+    // from a shell. Long-running commands (TUI, `run`, `attach`,
+    // `auth`, `recover`) fall through to the JSONL file path.
+    let first_arg = std::env::args().nth(1);
+    let is_short_lived_cli = matches!(
+        first_arg.as_deref(),
+        Some(
+            "list"
+                | "logs"
+                | "status"
+                | "kill"
+                | "config"
+                | "git"
+                | "favorites"
+                | "init"
+                | "presets"
+                | "usage"
+                | "claudecode"
+                | "statusline"
+                | "completion"
+                | "--help"
+                | "-h"
+                | "--version"
+                | "-V"
+                | "help"
+        )
+    );
     if is_short_lived_cli {
         tracing_subscriber::registry()
             .with(
