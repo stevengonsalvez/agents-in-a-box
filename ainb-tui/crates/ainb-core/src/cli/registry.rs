@@ -684,6 +684,19 @@ impl CliCommand for PluginCommand {
                     .required(true)
                     .help("plugin id, staging dir, or manifest.toml path"),
             );
+        let watch_cmd = Command::new("watch")
+            .about("Live-tail lifecycle + snapshot events for a registered plugin")
+            .arg(
+                clap::Arg::new("plugin")
+                    .required(true)
+                    .help("plugin id (matches `ainb plugin list`)"),
+            )
+            .arg(
+                clap::Arg::new("duration")
+                    .long("duration")
+                    .value_parser(clap::value_parser!(u64))
+                    .help("seconds to watch before exiting (default 30)"),
+            );
         app.subcommand(
             Command::new(self.name())
                 .about("Manage ainb plugins")
@@ -694,7 +707,8 @@ impl CliCommand for PluginCommand {
                 .subcommand(list)
                 .subcommand(search)
                 .subcommand(marketplace)
-                .subcommand(lint_cmd),
+                .subcommand(lint_cmd)
+                .subcommand(watch_cmd),
         )
     }
     fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
@@ -816,6 +830,25 @@ mod tests {
             args.get_one::<String>("plugin").map(String::as_str),
             Some("/tmp/some-plugin")
         );
+    }
+
+    #[test]
+    fn plugin_subcommand_parses_watch_with_duration() {
+        // Phase 7d-cli surface check: `ainb plugin watch <id> --duration N`.
+        let r = CommandRegistry::built_ins();
+        let app = r.build_clap(root());
+        let matches = app
+            .try_get_matches_from(["ainb", "plugin", "watch", "burndown", "--duration", "5"])
+            .expect("plugin watch parses");
+        let (top, sub) = matches.subcommand().expect("subcommand");
+        assert_eq!(top, "plugin");
+        let (sub_name, args) = sub.subcommand().expect("plugin watch");
+        assert_eq!(sub_name, "watch");
+        assert_eq!(
+            args.get_one::<String>("plugin").map(String::as_str),
+            Some("burndown")
+        );
+        assert_eq!(args.get_one::<u64>("duration").copied(), Some(5));
     }
 
     #[test]
