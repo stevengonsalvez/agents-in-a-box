@@ -1301,6 +1301,29 @@ fn setup_logging() {
     use std::path::PathBuf;
     use tracing_subscriber::prelude::*;
 
+    // High-frequency CLI subcommands (the statusline hook fires on
+    // every Claude Code prompt render) must NOT open a JSONL file —
+    // it'd litter `~/.agents-in-a-box/logs/` with one empty file per
+    // invocation. For these short-lived commands, install a
+    // stderr-only subscriber so explicit warns/errors still surface
+    // when invoked synchronously from a shell.
+    let is_short_lived_cli = std::env::args().any(|a| a == "statusline");
+    if is_short_lived_cli {
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(std::io::stderr)
+                    .with_ansi(false)
+                    .compact(),
+            )
+            .with(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "ainb=warn".into()),
+            )
+            .init();
+        return;
+    }
+
     // Create log directory if it doesn't exist
     let log_dir = std::env::var("HOME")
         .map(|home| PathBuf::from(home).join(".agents-in-a-box").join("logs"))
