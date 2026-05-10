@@ -96,7 +96,7 @@ impl Runtime {
             arc.clone(),
             self.snapshots.clone(),
             self.config,
-            self.tokio.handle().clone(),
+            self.tokio.handle(),
         );
         let handle = Arc::new(PluginHandle {
             inbox,
@@ -115,7 +115,7 @@ impl Runtime {
 
     /// Snapshot store reference for tests.
     #[must_use]
-    pub fn snapshots(&self) -> &SnapshotStore {
+    pub const fn snapshots(&self) -> &SnapshotStore {
         &self.snapshots
     }
 }

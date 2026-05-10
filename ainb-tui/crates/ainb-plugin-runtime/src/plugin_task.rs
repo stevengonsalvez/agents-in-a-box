@@ -130,7 +130,7 @@ pub fn spawn(
     plugin: Arc<RegisteredPlugin>,
     snapshots: SnapshotStore,
     config: RuntimeConfig,
-    handle: tokio::runtime::Handle,
+    handle: &tokio::runtime::Handle,
 ) -> (Inbox, RenderCache, Arc<parking_lot::RwLock<LifecycleState>>) {
     let (tx, rx) = mpsc::unbounded_channel();
     let cache = RenderCache::new();
@@ -198,9 +198,8 @@ impl PluginTask {
         loop {
             tokio::select! {
                 cmd = self.rx.recv() => match cmd {
-                    Some(Command::Shutdown) => { self.shutdown().await; break; }
+                    Some(Command::Shutdown) | None => { self.shutdown().await; break; }
                     Some(c) => self.handle_command(c).await,
-                    None => { self.shutdown().await; break; }
                 },
                 inbound = read_inbound(&mut self.child) => {
                     match inbound {
@@ -333,10 +332,11 @@ impl PluginTask {
             .stderr
             .take()
             .ok_or_else(|| RuntimeError::Wire("stderr pipe missing".into()))?;
-        let pid = child
+        let pid_u32 = child
             .id()
-            .ok_or_else(|| RuntimeError::Wire("child pid unavailable".into()))?
-            as i32;
+            .ok_or_else(|| RuntimeError::Wire("child pid unavailable".into()))?;
+        let pid = i32::try_from(pid_u32)
+            .map_err(|_| RuntimeError::Wire(format!("pid {pid_u32} doesn't fit in i32")))?;
         let plugin_name = self.plugin.id.clone();
         let stderr_drain = tokio::spawn(drain_stderr(plugin_name, stderr));
         self.child = Some(ChildState {
@@ -400,7 +400,7 @@ impl PluginTask {
                 self.handle_host_request(id, &method, params).await;
             }
             Inbound::Notification { method, params } => {
-                self.handle_host_notification(&method, params).await;
+                self.handle_host_notification(&method, params);
             }
         }
     }
@@ -470,8 +470,8 @@ impl PluginTask {
 
     async fn handle_host_request(&mut self, id: u64, method: &str, params: Value) {
         let result = match method {
-            methods::HOST_SNAPSHOT_GET => self.host_snapshot_get(params).map(value_or_null),
-            methods::HOST_SNAPSHOT_SUBSCRIBE => self.host_snapshot_subscribe(params).map(value_or_null),
+            methods::HOST_SNAPSHOT_GET => self.host_snapshot_get(params),
+            methods::HOST_SNAPSHOT_SUBSCRIBE => self.host_snapshot_subscribe(params),
             // host/action/invoke arriving FROM the plugin would be cross-plugin
             // routing — out of scope for the per-plugin task; rejected.
             other => Err(RpcError::method_not_found(other)),
@@ -520,7 +520,7 @@ impl PluginTask {
             .expect("SnapshotSubscribeResult serializable"))
     }
 
-    async fn handle_host_notification(&mut self, method: &str, params: Value) {
+    fn handle_host_notification(&self, method: &str, params: Value) {
         match method {
             methods::HOST_SNAPSHOT_PUBLISH => {
                 let Ok(p) = serde_json::from_value::<SnapshotPublishParams>(params) else {
@@ -559,7 +559,7 @@ impl PluginTask {
             }
         }
         if let Some(cs) = self.child.take() {
-            let _ = cs.stderr_drain.abort();
+            cs.stderr_drain.abort();
         }
         self.record_failure();
         if self.is_quarantine_due() {
@@ -644,7 +644,7 @@ impl PluginTask {
         if let Some(mut cs) = self.child.take() {
             let _ = cs.child.start_kill();
             let _ = cs.child.wait().await;
-            let _ = cs.stderr_drain.abort();
+            cs.stderr_drain.abort();
         }
         self.snapshots.unsubscribe_all(&self.plugin.id);
     }
@@ -661,10 +661,6 @@ fn collect_granted_capabilities(m: &ainb_plugin_protocol::manifest::Manifest) ->
     if c.read_claude_logs.is_granted() { out.push("read_claude_logs".into()); }
     if c.read_codex_logs.is_granted() { out.push("read_codex_logs".into()); }
     out
-}
-
-fn value_or_null(v: Value) -> Value {
-    v
 }
 
 /// What `read_inbound` returns. Single non-async classification; the

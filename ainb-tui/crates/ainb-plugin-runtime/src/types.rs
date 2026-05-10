@@ -101,7 +101,7 @@ pub enum RenderOutcome {
 /// Outcome of a `plugin/cli_dispatch` request.
 #[derive(Debug)]
 pub enum CliOutcome {
-    /// Plugin executed; payload is the captured stdout/stderr/exit_code.
+    /// Plugin executed; payload is the captured `stdout`/`stderr`/`exit_code`.
     Ok(CliDispatchResult),
     /// Plugin returned an error envelope.
     PluginError {
@@ -170,7 +170,7 @@ pub struct RuntimeConfig {
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
-            idle_reap: Duration::from_secs(600),
+            idle_reap: Duration::from_secs(10 * 60),
             respawn_backoff: [
                 Duration::from_secs(1),
                 Duration::from_secs(4),

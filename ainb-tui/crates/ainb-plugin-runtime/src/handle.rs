@@ -47,7 +47,7 @@ pub struct RuntimeHandle {
 }
 
 impl RuntimeHandle {
-    pub(crate) fn new(inner: HandleInner) -> Self {
+    pub(crate) const fn new(inner: HandleInner) -> Self {
         Self { inner }
     }
 
@@ -181,13 +181,12 @@ impl RuntimeHandle {
             return v;
         }
         let plugins = self.inner.plugins.clone();
-        let topic_for_task = topic_owned.clone();
         self.inner.tokio.spawn(async move {
             let map = plugins.read();
             for sub in subs {
                 if let Some(handle) = map.get(&sub) {
                     let _ = handle.inbox.send(Command::HandleEvent {
-                        topic: topic_for_task.clone(),
+                        topic: topic_owned.clone(),
                         payload: payload.clone(),
                     });
                 }
@@ -223,7 +222,7 @@ impl RuntimeHandle {
                 arc.clone(),
                 self.inner.snapshots.clone(),
                 self.inner.config,
-                self.inner.tokio.clone(),
+                &self.inner.tokio,
             );
             self.inner.plugins.write().insert(
                 arc.id.clone(),

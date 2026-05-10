@@ -100,13 +100,7 @@ impl ChannelRegistry {
     /// `action` field is the only routing input we have today).
     pub fn register(&self, plugin: RegisteredPlugin) {
         let id = plugin.id.clone();
-        let actions: Vec<String> = plugin
-            .manifest
-            .provides
-            .cli_namespaces
-            .iter()
-            .cloned()
-            .collect();
+        let actions: Vec<String> = plugin.manifest.provides.cli_namespaces.clone();
         let arc = Arc::new(plugin);
         let mut inner = self.inner.write();
         inner.plugins.insert(id.clone(), arc);

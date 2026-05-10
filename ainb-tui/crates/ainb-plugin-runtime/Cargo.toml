@@ -54,3 +54,6 @@ missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 significant_drop_tightening = "allow"
 significant_drop_in_scrutinee = "allow"
+# `Duration::from_mins` isn't stable on the Rust we target; keep the
+# explicit `from_secs` form so the workspace builds on older toolchains.
+duration_suboptimal_units = "allow"
