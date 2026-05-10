@@ -6,6 +6,7 @@ members = [
     "crates/ainb-plugin-cts",
     "crates/ainb-plugin-host",
     "crates/ainb-plugin-protocol",
+    "crates/ainb-plugin-runtime",
     "crates/ainb-plugin-types-sessions",
     "xtask",
 ]
