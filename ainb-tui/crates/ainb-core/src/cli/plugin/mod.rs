@@ -3,7 +3,7 @@
 //! Phase 4 shipped a marketplace + installer surface coupled to the wasmi
 //! `.wasm` packaging. Phase 7b deletes the wasmi host; the marketplace
 //! flow needs to be re-cut against the subprocess ABI 2.0 manifest
-//! (`ainb-plugin-protocol::manifest::ManifestV2`) and the new on-disk
+//! (`ainb-plugin-protocol::manifest::Manifest`) and the new on-disk
 //! cache layout (`<root>/<name>/manifest.toml` + `<root>/<name>/<name>`
 //! binary). That work lives under Phase 7c.
 //!
@@ -17,6 +17,9 @@
 //! When 7c lands, restore the install/update/remove/marketplace handlers
 //! against `ainb-plugin-installer` (TBD crate) which will own the new
 //! cache_layout + marketplace primitives without any wasmi coupling.
+//!
+//! Phase 7d-cli grows three live-DevX subcommands on top of the install
+//! flow — `lint`, `watch`, and `tail` — each in its own submodule below.
 
 use anyhow::{anyhow, bail, Result};
 
