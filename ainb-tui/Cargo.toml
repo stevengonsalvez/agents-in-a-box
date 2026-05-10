@@ -2,9 +2,6 @@
 resolver = "2"
 members = [
     "crates/ainb-core",
-    "crates/ainb-plugin-api",
-    "crates/ainb-plugin-cts",
-    "crates/ainb-plugin-host",
     "crates/ainb-plugin-protocol",
     "crates/ainb-plugin-runtime",
     "crates/ainb-plugin-sdk-rust",
@@ -12,23 +9,10 @@ members = [
     "xtask",
 ]
 default-members = ["crates/ainb-core"]
-# The CTS canaries live under crates/ainb-plugin-host/tests/cts/canaries
-# as their own sub-workspace (target = wasm32-wasip1, panic = abort,
-# `[workspace]` declared on their root Cargo.toml). Excluding here
-# keeps `cargo build --workspace` from trying to compile cdylibs for
-# the host target.
-exclude = [
-    "crates/ainb-plugin-host/tests/cts/canaries",
-    # ainb-plugin-burndown is a wasm32-wasip1 cdylib. Excluded so root
-    # `cargo build`/`cargo test` (host target) doesn't try to compile it
-    # for the wrong target. Build via `./scripts/build-plugins.sh` which
-    # sources scripts/wasi-env.sh to wire WASI_SDK_PATH + emulated libs
-    # rusqlite-bundled needs (mman/getpid/process_clocks/signal).
-    "crates/ainb-plugin-burndown",
-    # session-reader is a wasm32-wasip1 cdylib — same exclusion rationale
-    # as burndown. Built via ./scripts/build-plugins.sh.
-    "crates/ainb-plugin-session-reader",
-]
+# Phase 7b: wasmi host + v1 plugins removed in this PR. The legacy
+# CTS canaries, burndown, session-reader, and v1 plugin-host/plugin-api
+# crates were deleted entirely. Re-shipped subprocess plugins land in
+# Phase 7c — until then this workspace ships zero plugins.
 
 [workspace.package]
 version = "1.1.0"

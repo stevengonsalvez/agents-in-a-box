@@ -78,9 +78,9 @@ rusqlite = { workspace = true }
 blake3 = { workspace = true }
 bincode = { workspace = true }
 
-# Plugin host (Phase 3 Wave 3 wiring — loads bundled burndown.wasm at startup)
-ainb-plugin-api = { path = "../ainb-plugin-api", version = "0.1.0" }
-ainb-plugin-host = { path = "../ainb-plugin-host", version = "0.1.0" }
+# Plugin runtime (Phase 7 — subprocess + JSON-RPC, replaces wasmi host).
+ainb-plugin-runtime = { path = "../ainb-plugin-runtime", version = "0.1.0" }
+ainb-plugin-protocol = { path = "../ainb-plugin-protocol", version = "0.1.0" }
 
 # Fuzzy search
 nucleo-matcher = { workspace = true }
@@ -93,19 +93,14 @@ vt100-tests = []
 # tests in tests/ can use them. Always enabled under #[cfg(test)] for
 # unit tests; integration tests must opt in via this feature.
 test-support = []
-# Phase 6c-cli CLI integration tests: spawn the release `ainb`
-# binary as a subprocess and assert exit codes + stdout/stderr
-# against the burndown plugin pipeline. Gated because the tests
-# require both `dist/plugins/burndown/plugin.wasm` and
-# `dist/plugins/session-reader/plugin.wasm` on disk.
+# CLI integration tests opt-in flag. The Phase 6c burndown/session-reader
+# subprocess assertions died with the wasmi removal in Phase 7b; the flag
+# stays so Phase 7c can hang the new CTS-driven gates off it without a
+# Cargo.toml round-trip.
 cli-tests = ["test-support"]
-# Phase 6e tmux end-to-end gate: drive the actual TUI inside a real
-# tmux session, navigate to Analytics, capture the rendered pane,
-# and assert the burndown plugin painted real data through the
-# wasmi -> ratatui -> crossterm stack. Opt-in because it requires
-# `tmux` on PATH and the dist plugin staging dir, and is meant as a
-# pre-merge local gate rather than a default CI check (per memory
-# `feedback_plugin_completion_real_tmux_integration`).
+# Tmux end-to-end opt-in. Same status as cli-tests — the burndown E2E
+# binding was deleted in Phase 7b; new subprocess-plugin tmux gates land
+# in Phase 7c.
 tmux-tests = ["cli-tests"]
 
 [dev-dependencies]

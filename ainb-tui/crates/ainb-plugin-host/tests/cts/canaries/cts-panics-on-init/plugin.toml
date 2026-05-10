@@ -1,9 +1,0 @@
-[plugin]
-name = "cts-d31abe45-panics-on-init"
-version = "0.0.1"
-ainb_min_version = "1.0.0"
-description = "CTS canary: _init traps. Host must mark plugin failed and continue."
-
-[capabilities]
-
-[provides]
