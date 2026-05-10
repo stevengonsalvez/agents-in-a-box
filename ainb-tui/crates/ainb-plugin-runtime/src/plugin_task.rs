@@ -117,8 +117,9 @@ pub enum Command {
     /// Clear quarantine + allow respawn.
     Reload,
     /// Test aid: force the child to be `kill -9`'d to exercise
-    /// crash-recovery code paths.
-    #[cfg(test)]
+    /// crash-recovery code paths. Hidden from rustdoc — this is not
+    /// part of the public API surface.
+    #[doc(hidden)]
     InjectKill,
 }
 
@@ -291,7 +292,6 @@ impl PluginTask {
                 }
             }
             Command::Shutdown => unreachable!("handled in run() loop"),
-            #[cfg(test)]
             Command::InjectKill => {
                 if let Some(cs) = &mut self.child {
                     let _ = cs.child.start_kill();

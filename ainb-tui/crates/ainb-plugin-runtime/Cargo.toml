@@ -31,6 +31,14 @@ libc = "0.2"
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true }
+ainb-plugin-protocol = { path = "../ainb-plugin-protocol" }
+
+[[bin]]
+name = "ainb-fixture-plugin"
+path = "tests/fixtures/fixture_plugin.rs"
+test = false
+doc = false
+required-features = []
 
 [[test]]
 name = "fixture_e2e"

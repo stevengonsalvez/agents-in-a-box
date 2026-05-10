@@ -37,7 +37,7 @@ pub use handle::RuntimeHandle;
 pub use registry::RegisteredPlugin;
 pub use runtime::Runtime;
 pub use types::{
-    CliOutcome, LifecycleState, PluginId, RenderOutcome, RuntimeConfig, Topic,
+    ActionOutcome, CliOutcome, LifecycleState, PluginId, RenderOutcome, RuntimeConfig, Topic,
 };
 
 // Re-export wire types so callers don't need to depend on the protocol

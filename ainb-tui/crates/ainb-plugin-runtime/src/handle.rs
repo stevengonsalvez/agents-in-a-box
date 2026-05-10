@@ -248,8 +248,10 @@ impl RuntimeHandle {
         Ok(())
     }
 
-    /// Test-only: force `SIGKILL` to exercise crash recovery.
-    #[cfg(test)]
+    /// Test/debug aid: force `SIGKILL` on the plugin process to
+    /// exercise the crash-recovery code path. Hidden from rustdoc;
+    /// not part of the stable surface.
+    #[doc(hidden)]
     pub fn inject_kill(&self, plugin_id: &PluginId) -> Result<(), RuntimeError> {
         let h = self
             .lookup(plugin_id)
