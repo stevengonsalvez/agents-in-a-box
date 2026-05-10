@@ -17,7 +17,7 @@
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use tracing::{debug, warn};
+use tracing::{trace, warn};
 
 use crate::models::live_window::{self, LiveWindow};
 
@@ -66,7 +66,10 @@ impl LiveWindowWatcher {
                 };
                 match fresh {
                     Ok(value) => {
-                        debug!(source = ?value.source, "live_window_watcher: refresh ok");
+                        // Heartbeat — fires every REFRESH_INTERVAL (5s).
+                        // At debug it'd be 17K events/day; trace keeps
+                        // it gated behind explicit `RUST_LOG=ainb=trace`.
+                        trace!(source = ?value.source, "live_window_watcher: refresh ok");
                         match strong.write() {
                             Ok(mut guard) => *guard = value,
                             Err(err) => warn!(
