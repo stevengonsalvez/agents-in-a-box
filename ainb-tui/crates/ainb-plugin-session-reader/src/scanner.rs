@@ -15,7 +15,7 @@
 //!   classification pass that operates over session timelines.
 
 use std::collections::{BTreeMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use ainb_plugin_types_sessions::{
     BranchUsage, ModelUsage, NamedUsage, ProjectUsage, Provider, ProviderCall, SessionUsage,
@@ -353,12 +353,6 @@ fn map_to_named_usage_sorted(map: BTreeMap<String, usize>) -> Vec<NamedUsage> {
         .collect();
     rows.sort_by(|a, b| b.calls.cmp(&a.calls).then(a.name.cmp(&b.name)));
     rows
-}
-
-// Silences the unused-import lint on Path when only PathBuf is used in tests.
-#[allow(dead_code)]
-fn _path_in_scope(p: &Path) -> &Path {
-    p
 }
 
 #[cfg(test)]

@@ -54,10 +54,10 @@ impl SessionReader {
         }
     }
 
-    /// Construct with explicit roots — used by integration tests that
-    /// need to point the plugin at a tempdir fixture instead of `$HOME`.
+    /// Construct with explicit roots — used by unit tests.
+    #[cfg(test)]
     #[must_use]
-    pub fn with_roots(roots: ProviderRoots) -> Self {
+    pub(crate) fn with_roots(roots: ProviderRoots) -> Self {
         Self {
             last_event: None,
             roots,

@@ -8,7 +8,7 @@
 //! Layout: `<projects_root>/<project>/<session>.jsonl`. Two-level walk:
 //! outer dir lists per-project subdirs; inner dir lists session files.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use ainb_plugin_types_sessions::{Provider, ProviderCall};
 use serde::Deserialize;
@@ -247,12 +247,6 @@ fn path_basename(path: &Path) -> String {
 fn path_filestem(path: &str) -> Option<String> {
     let name = Path::new(path).file_name()?.to_str()?;
     Some(name.split('.').next().unwrap_or(name).to_string())
-}
-
-// Silences the unused-import lint if no tests reference PathBuf.
-#[allow(dead_code)]
-fn _unused() -> Option<PathBuf> {
-    None
 }
 
 #[cfg(test)]
