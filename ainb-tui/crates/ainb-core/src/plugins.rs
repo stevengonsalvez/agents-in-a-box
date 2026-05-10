@@ -90,7 +90,7 @@ fn plugins_disabled() -> bool {
 /// 3. `<exe-dir>/../dist/plugins/`      (cargo run from `target/<profile>/`).
 /// 4. `<cwd>/dist/plugins/`             (workspace dev layout).
 /// 5. `~/.agents-in-a-box/plugins/cache/` (installed plugins).
-fn discover_plugin_root() -> Option<PathBuf> {
+pub(crate) fn discover_plugin_root() -> Option<PathBuf> {
     if let Ok(env_root) = std::env::var("AINB_PLUGIN_ROOT") {
         let p = PathBuf::from(env_root);
         if p.exists() {

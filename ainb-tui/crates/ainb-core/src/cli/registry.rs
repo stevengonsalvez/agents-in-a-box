@@ -676,6 +676,50 @@ impl CliCommand for PluginCommand {
                     .arg(clap::Arg::new("name").required(true)),
             )
             .subcommand(Command::new("list").about("List registered marketplaces"));
+        // Phase 7d-cli — DevX subcommands for the subprocess plugin runtime.
+        let lint_cmd = Command::new("lint")
+            .about("Validate a plugin manifest + binary (ABI 2.0 sanity checks)")
+            .arg(
+                clap::Arg::new("plugin")
+                    .required(true)
+                    .help("plugin id, staging dir, or manifest.toml path"),
+            );
+        let watch_cmd = Command::new("watch")
+            .about("Live-tail lifecycle + snapshot events for a registered plugin")
+            .arg(
+                clap::Arg::new("plugin")
+                    .required(true)
+                    .help("plugin id (matches `ainb plugin list`)"),
+            )
+            .arg(
+                clap::Arg::new("duration")
+                    .long("duration")
+                    .value_parser(clap::value_parser!(u64))
+                    .help("seconds to watch before exiting (default 30)"),
+            );
+        let tail_cmd = Command::new("tail")
+            .about("Stream the host's tracing layer filtered to a single plugin id")
+            .arg(
+                clap::Arg::new("plugin")
+                    .required(true)
+                    .help("plugin id (matches `ainb plugin list`)"),
+            )
+            .arg(
+                clap::Arg::new("level")
+                    .long("level")
+                    .help("min log level: trace|debug|info|warn|error (default debug)"),
+            )
+            .arg(
+                clap::Arg::new("since")
+                    .long("since")
+                    .help("RFC-3339 timestamp; suppresses events older than this"),
+            )
+            .arg(
+                clap::Arg::new("duration")
+                    .long("duration")
+                    .value_parser(clap::value_parser!(u64))
+                    .help("seconds to tail before exiting (default 30)"),
+            );
         app.subcommand(
             Command::new(self.name())
                 .about("Manage ainb plugins")
@@ -685,7 +729,10 @@ impl CliCommand for PluginCommand {
                 .subcommand(remove_cmd)
                 .subcommand(list)
                 .subcommand(search)
-                .subcommand(marketplace),
+                .subcommand(marketplace)
+                .subcommand(lint_cmd)
+                .subcommand(watch_cmd)
+                .subcommand(tail_cmd),
         )
     }
     fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
@@ -789,6 +836,81 @@ mod tests {
         assert_eq!(sub_name, "install");
         assert_eq!(args.get_one::<String>("plugin").map(String::as_str), Some("burndown"));
         assert!(args.get_flag("yes"));
+    }
+
+    #[test]
+    fn plugin_subcommand_parses_lint() {
+        // Phase 7d-cli surface check: `ainb plugin lint <arg>`.
+        let r = CommandRegistry::built_ins();
+        let app = r.build_clap(root());
+        let matches = app
+            .try_get_matches_from(["ainb", "plugin", "lint", "/tmp/some-plugin"])
+            .expect("plugin lint parses");
+        let (top, sub) = matches.subcommand().expect("subcommand");
+        assert_eq!(top, "plugin");
+        let (sub_name, args) = sub.subcommand().expect("plugin lint");
+        assert_eq!(sub_name, "lint");
+        assert_eq!(
+            args.get_one::<String>("plugin").map(String::as_str),
+            Some("/tmp/some-plugin")
+        );
+    }
+
+    #[test]
+    fn plugin_subcommand_parses_watch_with_duration() {
+        // Phase 7d-cli surface check: `ainb plugin watch <id> --duration N`.
+        let r = CommandRegistry::built_ins();
+        let app = r.build_clap(root());
+        let matches = app
+            .try_get_matches_from(["ainb", "plugin", "watch", "burndown", "--duration", "5"])
+            .expect("plugin watch parses");
+        let (top, sub) = matches.subcommand().expect("subcommand");
+        assert_eq!(top, "plugin");
+        let (sub_name, args) = sub.subcommand().expect("plugin watch");
+        assert_eq!(sub_name, "watch");
+        assert_eq!(
+            args.get_one::<String>("plugin").map(String::as_str),
+            Some("burndown")
+        );
+        assert_eq!(args.get_one::<u64>("duration").copied(), Some(5));
+    }
+
+    #[test]
+    fn plugin_subcommand_parses_tail_with_level_and_since() {
+        // Phase 7d-cli surface check: every flag the dispatcher reads.
+        let r = CommandRegistry::built_ins();
+        let app = r.build_clap(root());
+        let matches = app
+            .try_get_matches_from([
+                "ainb",
+                "plugin",
+                "tail",
+                "burndown",
+                "--level",
+                "warn",
+                "--since",
+                "2026-05-10T20:00:00Z",
+                "--duration",
+                "10",
+            ])
+            .expect("plugin tail parses");
+        let (top, sub) = matches.subcommand().expect("subcommand");
+        assert_eq!(top, "plugin");
+        let (sub_name, args) = sub.subcommand().expect("plugin tail");
+        assert_eq!(sub_name, "tail");
+        assert_eq!(
+            args.get_one::<String>("plugin").map(String::as_str),
+            Some("burndown")
+        );
+        assert_eq!(
+            args.get_one::<String>("level").map(String::as_str),
+            Some("warn")
+        );
+        assert_eq!(
+            args.get_one::<String>("since").map(String::as_str),
+            Some("2026-05-10T20:00:00Z")
+        );
+        assert_eq!(args.get_one::<u64>("duration").copied(), Some(10));
     }
 
     #[test]
