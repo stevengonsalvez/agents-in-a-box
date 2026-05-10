@@ -11,7 +11,10 @@
 //! - [`error`]       — SDK [`SdkError`] and the [`Result`] alias
 //! - [`plugin`]      — the [`Plugin`] trait every plugin implements
 //! - [`host_client`] — [`HostClient`] is the plugin's outbound JSON-RPC client
-//! - `server`        — [`Server`] runs the dispatcher loop (added in a follow-up commit)
+//! - [`server`]      — [`Server`] runs the dispatcher loop over an [`AsyncRead`]/[`AsyncWrite`] pair
+//!
+//! [`AsyncRead`]: tokio::io::AsyncRead
+//! [`AsyncWrite`]: tokio::io::AsyncWrite
 //!
 //! ## Wire types
 //!
@@ -22,10 +25,12 @@
 pub mod error;
 pub mod host_client;
 pub mod plugin;
+pub mod server;
 
 pub use error::{Result, SdkError};
 pub use host_client::HostClient;
 pub use plugin::{CliOutput, Plugin};
+pub use server::Server;
 
 // Re-export wire types so plugin authors only need this crate.
 pub use ainb_plugin_protocol::{
