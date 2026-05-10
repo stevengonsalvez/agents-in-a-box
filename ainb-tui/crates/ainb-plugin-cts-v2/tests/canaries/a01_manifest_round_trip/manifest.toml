@@ -1,0 +1,20 @@
+[plugin]
+name = "cts-a01"
+version = "0.0.1"
+abi_version = 2
+description = "CTS A1: manifest v2 round-trip"
+
+[capabilities]
+read_sessions = false
+
+[provides]
+screens = ["test"]
+cli_namespaces = ["a01"]
+snapshots = ["a01.topic"]
+
+[subscribes]
+snapshots = ["a01.topic"]
+
+[lifecycle]
+spawn = "lazy"
+idle_reap_secs = 600
