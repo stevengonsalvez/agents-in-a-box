@@ -97,14 +97,14 @@ pub(crate) async fn tail_with_handle(
 
     let layer = PluginTailLayer::new(plugin_id.to_string(), level, since);
     let subscriber = Registry::default().with(layer);
-    let _guard = tracing::subscriber::set_default(subscriber);
+    let guard = tracing::subscriber::set_default(subscriber);
 
     println!(
         "tailing plugin {plugin_id} level>={level} for {duration:?} (Ctrl-C to exit)",
     );
 
     tokio::time::sleep(duration).await;
-    drop(_guard);
+    drop(guard);
     Ok(())
 }
 
@@ -192,7 +192,7 @@ impl Visit for FieldVisitor {
     fn record_str(&mut self, field: &Field, value: &str) {
         match field.name() {
             "plugin" => self.plugin = Some(value.to_owned()),
-            "message" => self.message = value.to_owned(),
+            "message" => value.clone_into(&mut self.message),
             other => self.extras.push((other.to_owned(), value.to_owned())),
         }
     }

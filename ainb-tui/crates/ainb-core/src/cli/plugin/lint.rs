@@ -164,7 +164,7 @@ struct LintReport {
 }
 
 impl LintReport {
-    fn is_clean(&self) -> bool {
+    const fn is_clean(&self) -> bool {
         self.errors.is_empty()
     }
 }
@@ -430,7 +430,7 @@ fn run_with_timeout(
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            bail!("timed out after {:?}", timeout);
+            bail!("timed out after {timeout:?}");
         }
         std::thread::sleep(Duration::from_millis(25));
     }

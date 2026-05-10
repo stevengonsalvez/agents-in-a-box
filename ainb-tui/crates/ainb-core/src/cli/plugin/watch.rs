@@ -162,8 +162,8 @@ async fn poll_loop(
         // Lifecycle transitions.
         let now_state = handle.lifecycle_state(pid);
         if now_state != last_state {
-            let from = last_state.map(|s| format!("{s:?}")).unwrap_or_else(|| "<gone>".into());
-            let to = now_state.map(|s| format!("{s:?}")).unwrap_or_else(|| "<gone>".into());
+            let from = last_state.map_or_else(|| "<gone>".into(), |s| format!("{s:?}"));
+            let to = now_state.map_or_else(|| "<gone>".into(), |s| format!("{s:?}"));
             emit_event(pid, "lifecycle", &format!("{from} -> {to}"));
             last_state = now_state;
         }
