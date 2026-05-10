@@ -5,4 +5,5 @@
 //! framed stdio. Zero host dependencies — no tokio, no ratatui, no clap.
 
 pub mod errors;
+pub mod manifest;
 pub mod methods;
