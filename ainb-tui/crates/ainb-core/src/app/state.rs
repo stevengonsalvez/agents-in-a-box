@@ -2096,10 +2096,10 @@ pub struct AppState {
     /// WireBuffers freshly drained from plugins, keyed by screen id.
     /// `App::tick_plugin_renders` populates this before each frame so
     /// `PluginScreen::render` can paint without needing access to the
-    /// plugin host (which lives on `App`, not `AppState`).
+    /// plugin runtime (which lives on `App`, not `AppState`).
     pub pending_plugin_renders: std::collections::HashMap<
         crate::app::screens::ScreenId,
-        ainb_plugin_api::WireBuffer,
+        ainb_plugin_runtime::WireBuffer,
     >,
 
     /// Cached result of `detect_statusline_status()` paired with the time
@@ -9662,50 +9662,44 @@ impl AppState {
 
 pub struct App {
     pub state: AppState,
-    /// Plugin host loaded at app startup. `None` while the structural
-    /// host wiring is still in flight (Phase 3 Wave 3 partial cutover) and
-    /// during contexts where the wasmi runtime would be wasteful (CLI
-    /// subcommand dispatch). Built lazily by [`App::init`].
-    pub plugin_host: Option<ainb_plugin_host::PluginHost>,
+    /// Owning handle to the plugin runtime's tokio executor. Held by `App`
+    /// so dropping `App` joins every plugin task and tears down the runtime.
+    /// `None` until [`App::init`] runs. Kept private — the TUI always goes
+    /// through `plugin_runtime` (the cheap Send + Clone façade).
+    plugin_runtime_owner: Option<ainb_plugin_runtime::Runtime>,
+    /// Send + Clone runtime handle the TUI render thread holds. Every
+    /// surface method on this is non-blocking (`try_recv_render`,
+    /// `snapshot_get`) so the ratatui draw thread never `.await`s.
+    pub plugin_runtime: Option<ainb_plugin_runtime::RuntimeHandle>,
 }
 
 impl App {
     pub fn new() -> Self {
         Self {
             state: AppState::new(),
-            plugin_host: None,
+            plugin_runtime_owner: None,
+            plugin_runtime: None,
         }
     }
 
-    /// Drive plugin renders for the active plugin-owned screen.
+    /// Drain any freshly-painted plugin frames into
+    /// `state.pending_plugin_renders` so the next `terminal.draw` paints
+    /// the latest buffer per plugin-owned screen.
     ///
-    /// Run once per frame (right before `terminal.draw`). For each
-    /// plugin-owned screen, call `_render`, drain the painted
-    /// `WireBuffer`, and stash it in `state.pending_plugin_renders` keyed
-    /// by screen id. `PluginScreen::render` reads from that map at paint
-    /// time without needing a `&mut PluginHost` itself.
+    /// Architectural contract (enforced by `build.rs` lint): this method
+    /// stays *synchronous* — plugin tasks render on the tokio runtime in
+    /// the background, the TUI thread only ever `try_recv`s the cached
+    /// frame and dispatches a fresh render request. No `.await` on the
+    /// render thread, ever.
     ///
-    /// Plugins own their own state (UI + data); the host no longer pushes
-    /// snapshots in. Test harnesses and live data ingest both push state
-    /// through `dispatch_event_bytes` directly.
+    /// Phase 7b: no subprocess plugins are packaged yet (Phase 7c reships
+    /// burndown + session-reader as Rust subprocess binaries). Loop is
+    /// no-op when discovery returned empty; once 7c lands, the screen
+    /// routing table below populates again.
     pub fn tick_plugin_renders(&mut self) {
-        let Some(host) = self.plugin_host.as_mut() else {
+        let Some(handle) = self.plugin_runtime.as_ref() else {
             return;
         };
-
-        // Drain the host's event broker once per frame so cross-plugin
-        // pub/sub actually moves. Without this call, session-reader's
-        // `event_publish("sessions.usage_data")` from `_init` queues
-        // forever and burndown's `_handle_event` never sees the
-        // UsageData snapshot, leaving the analytics screen stuck on
-        // "Waiting for session-reader plugin...". The CLI path works
-        // because `inject_session_reader_snapshot` in cli/registry.rs
-        // hand-brokers the same handshake; this call is the TUI's
-        // equivalent. Errors are logged and ignored — a poisoned
-        // broker on one frame must not freeze the UI.
-        if let Err(e) = host.pump_events() {
-            warn!("plugin event pump failed: {e}");
-        }
 
         // Static plugin-screen routing table. Pairs a stable screen id
         // (consumed by `PluginScreen` and matched against
@@ -9715,36 +9709,54 @@ impl App {
         ];
 
         for (screen_id, plugin_id) in PLUGIN_SCREENS {
-            // Skip plugins that aren't loaded — keeps the loop cheap and
-            // resilient when discovery comes up empty.
-            if host.get(plugin_id).is_none() {
+            let pid = ainb_plugin_runtime::PluginId::from(*plugin_id);
+
+            // Skip plugins the runtime doesn't know about — keeps the
+            // loop cheap and resilient when discovery comes up empty.
+            if handle.lifecycle_state(&pid).is_none() {
                 continue;
             }
 
-            if host.render_plugin(plugin_id).is_ok() {
-                if let Some(buf) =
-                    host.take_render(plugin_id, ainb_plugin_api::RenderTarget::Screen)
-                {
-                    self.state
-                        .pending_plugin_renders
-                        .insert((*screen_id).to_string(), buf);
-                }
+            // Drain the cached frame (if any) into the screen map. The
+            // plugin task pushes a fresh frame each time it returns from
+            // `plugin/render`; `try_recv_render` is the non-blocking
+            // hand-off the render thread relies on.
+            if let Some(buf) = handle.try_recv_render(&pid) {
+                self.state
+                    .pending_plugin_renders
+                    .insert((*screen_id).to_string(), buf);
             }
+
+            // Kick off the next render so the frame is ready by the
+            // following tick. The returned oneshot is intentionally
+            // dropped — the cache pickup happens via `try_recv_render`.
+            let viewport = ainb_plugin_runtime::Viewport {
+                width: 0,
+                height: 0,
+            };
+            let _ = handle.render(&pid, viewport, 0);
         }
     }
 
     pub async fn init(&mut self) {
-        // Discover + load bundled plugins (best-effort). Plugins own
-        // their own state and rendering; tick_plugin_renders drives
-        // _render once per frame for any screens this host knows about.
-        let (host, outcome) = crate::plugins::init_plugin_host();
-        if !outcome.loaded.is_empty() {
-            info!(loaded = ?outcome.loaded, "plugin host initialised");
+        // Discover + register bundled plugins (best-effort). Each plugin
+        // task lazy-spawns its subprocess on first command; the runtime
+        // comes up cheap and stays empty when no plugins are installed.
+        match crate::plugins::init_plugin_runtime() {
+            Ok((runtime, handle, outcome)) => {
+                if !outcome.loaded.is_empty() {
+                    info!(loaded = ?outcome.loaded, "plugin runtime initialised");
+                }
+                for (name, err) in &outcome.failed {
+                    warn!(plugin = %name, error = %err, "plugin failed to load");
+                }
+                self.plugin_runtime_owner = Some(runtime);
+                self.plugin_runtime = Some(handle);
+            }
+            Err(e) => {
+                warn!(error = %e, "plugin runtime init failed — running plugin-free");
+            }
         }
-        for (name, err) in &outcome.failed {
-            warn!(plugin = %name, error = %err, "plugin failed to load");
-        }
-        self.plugin_host = Some(host);
 
         // Kick off the live-window background poller. Render path reads
         // from its snapshot — never calls live_window::current() inline.

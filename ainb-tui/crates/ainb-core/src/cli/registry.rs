@@ -469,163 +469,22 @@ fn is_host_admin_subcommand(cmd: &crate::cli::usage::UsageCommands) -> bool {
     matches!(cmd, Plan { .. } | Currency(_) | Cache { .. })
 }
 
-/// Drain the most recent `sessions.usage_data` event the session-reader
-/// plugin published into `HostShared.event_queue` and inject it into
-/// burndown via a binary-safe `Request` event. Returns Ok(()) if a
-/// snapshot was found and successfully delivered; Err otherwise.
+/// `ainb usage` shim.
 ///
-/// This is the host-side workaround for the wasmi-sync deadlock: the
-/// plugin's `ainb_request_data` would block its own wasmi store, and
-/// `pump_events` can't run in parallel on the same host thread, so we
-/// broker the cross-plugin handshake from the CLI shim instead.
-fn inject_session_reader_snapshot(host: &mut ainb_plugin_host::PluginHost) -> Result<()> {
-    use ainb_plugin_api::PluginEvent;
-
-    // Contract: this broker only ever touches `sessions.usage_data`
-    // events. Unrelated events (e.g. other plugin publishes destined
-    // for the TUI render path) MUST stay in the queue exactly as they
-    // were so subsequent `pump_events` calls can dispatch them.
-    //
-    // Implementation: scan first to collect indices of ALL matching
-    // events, then remove them by walking the indices in reverse so
-    // each removal is index-stable. Captures the latest payload for
-    // injection. This pattern makes the "we only touch matching
-    // events" invariant obvious — there is no closure-captured
-    // mutation that a future edit could subtly invert into dropping
-    // unrelated events.
-    let bytes_opt = {
-        let mut q = host.shared().event_queue.lock().expect("event_queue poisoned");
-        let matching: Vec<usize> = q
-            .iter()
-            .enumerate()
-            .filter_map(|(i, ev)| (ev.topic == "sessions.usage_data").then_some(i))
-            .collect();
-        let latest_payload = matching.last().map(|&i| q[i].payload.clone());
-        for &i in matching.iter().rev() {
-            q.remove(i);
-        }
-        latest_payload
-    };
-
-    let bytes = bytes_opt.ok_or_else(|| {
-        anyhow::anyhow!(
-            "no sessions.usage_data event in queue — session-reader plugin \
-             didn't publish a snapshot during _init"
-        )
-    })?;
-
-    let request = PluginEvent::Request {
-        topic: "sessions.usage_data".to_string(),
-        // CLI broker doesn't need a real correlation id — burndown's
-        // handler doesn't reply to this Request, it just stashes the
-        // payload. Use 0 as the sentinel.
-        correlation_id: 0,
-        payload: serde_bytes::ByteBuf::from(bytes),
-    };
-    let wire = rmp_serde::to_vec_named(&request).context("encode request event")?;
-    host.dispatch_event_bytes("burndown", &wire)
-        .context("inject sessions.usage_data into burndown")?;
-    Ok(())
-}
-
-/// Spin up a fresh `PluginHost`, dispatch `ainb usage <argv>` into the
-/// burndown plugin, stream the plugin's captured stdout/stderr back to
-/// the user's terminal, and exit with a status code that matches the
-/// spec's failure-mode contract:
-///
-/// * `AINB_DISABLE_PLUGINS=1` → exit 2 with stderr
-///   `error: usage analytics requires the burndown plugin
-///   (install via 'ainb plugin install burndown')`.
-/// * Burndown plugin not loaded → same exit 2 + same message
-///   (operator-actionable: install the plugin).
-/// * Burndown loaded but session-reader missing → the plugin's
-///   `ainb_request_data` call times out, the plugin emits
-///   `error: usage analytics requires the session-reader plugin`,
-///   and we exit 2.
-/// * Happy path → exit 0 (or whatever exit code the plugin's
-///   handler bubbles through stderr).
-fn dispatch_usage_via_plugin(argv: &[String]) -> ! {
-    use std::io::Write;
-
-    if std::env::var_os("AINB_DISABLE_PLUGINS").is_some() {
-        eprintln!(
-            "error: usage analytics requires the burndown plugin \
-             (install via 'ainb plugin install burndown')"
-        );
-        std::process::exit(2);
-    }
-
-    let (mut host, outcome) = crate::plugins::init_plugin_host();
-    if host.get("burndown").is_none() {
-        let mut msg = String::from(
-            "error: usage analytics requires the burndown plugin \
-             (install via 'ainb plugin install burndown')",
-        );
-        if !outcome.failed.is_empty() {
-            let detail: String = outcome
-                .failed
-                .iter()
-                .map(|(n, e)| format!("{n}: {e:#}"))
-                .collect::<Vec<_>>()
-                .join("; ");
-            msg.push_str(&format!(" — load failures: {detail}"));
-        }
-        eprintln!("{msg}");
-        std::process::exit(2);
-    }
-
-    // The synchronous request_data path can't pump events while a
-    // wasmi call is in flight (single-threaded executor + blocking
-    // host fn). For the CLI scope we work around that by acting as
-    // the cross-plugin broker:
-    //
-    // 1. Session-reader's `_init` already published its first
-    //    `sessions.usage_data` snapshot into `HostShared.event_queue`.
-    // 2. We pluck that event's bytes out of the queue.
-    // 3. Wrap them in `PluginEvent::Request { topic, correlation_id }`
-    //    so the binary msgpack payload survives the trip into burndown
-    //    (Custom { payload: serde_json::Value::String } would utf-8-
-    //    mangle it).
-    // 4. Push directly into burndown via `dispatch_event_bytes` —
-    //    burndown's `_handle_event` decodes the wire UsageDataEvent
-    //    and stashes the legacy `UsageData` snapshot.
-    // 5. `dispatch_cli` then renders against that stashed snapshot.
-    //
-    // Once an async-pump architecture lands (Phase 7+) the dispatch
-    // can collapse back to a single `dispatch_cli` call and burndown's
-    // `request_data` will work end-to-end. The plumbing for that
-    // (Request variant, ainb_publish_reply host fn, pump_events
-    // req:/rep: routing, session-reader's Request handler) is
-    // already in place under this PR.
-    if let Err(e) = inject_session_reader_snapshot(&mut host) {
-        eprintln!("error: usage analytics requires the session-reader plugin: {e}");
-        std::process::exit(2);
-    }
-
-    let exit_code = match host.dispatch_cli("burndown", "usage", argv) {
-        Ok((stdout, stderr)) => {
-            if !stdout.is_empty() {
-                let mut out = std::io::stdout().lock();
-                let _ = out.write_all(&stdout);
-            }
-            if !stderr.is_empty() {
-                let mut err = std::io::stderr().lock();
-                let _ = err.write_all(&stderr);
-                // The plugin printed to stderr — by spec convention any
-                // non-empty plugin stderr means a soft failure (e.g.
-                // "session-reader unavailable"). Exit 2 to match the
-                // host's own "missing plugin" behavior.
-                2
-            } else {
-                0
-            }
-        }
-        Err(e) => {
-            eprintln!("error: usage CLI dispatch failed: {e:#}");
-            2
-        }
-    };
-    std::process::exit(exit_code);
+/// Phase 6 wired this through the wasmi-based burndown plugin with a
+/// cross-plugin broker hack (`inject_session_reader_snapshot`) to side-step
+/// the wasmi single-threaded deadlock. Phase 7b deletes the wasmi host
+/// entirely; the subprocess-Rust replacement plugins (burndown +
+/// session-reader) are tracked under Phase 7c. Until those land, the
+/// burndown shim returns the operator-actionable error every existing
+/// caller already handled (exit 2, "install via 'ainb plugin install').
+fn dispatch_usage_via_plugin(_argv: &[String]) -> ! {
+    eprintln!(
+        "error: usage analytics requires the burndown plugin \
+         (install via 'ainb plugin install burndown') — \
+         subprocess port pending under Phase 7c"
+    );
+    std::process::exit(2);
 }
 
 /// Legacy top-level `ainb statusline`. Kept (hidden) so existing
@@ -844,12 +703,13 @@ mod tests {
     }
 
     #[test]
-    fn built_ins_registers_seventeen_commands() {
+    fn built_ins_registers_eighteen_commands() {
         let r = CommandRegistry::built_ins();
         let names = r.names();
-        // 16 user-facing built-ins + plugin stub = 17. The TUI is NOT in the
-        // registry — main.rs handles `tui` / no-subcommand inline.
-        assert_eq!(names.len(), 17, "expected 17 entries, got {names:?}");
+        // 16 user-facing built-ins + claudecode namespace + plugin stub = 18.
+        // The TUI is NOT in the registry — main.rs handles `tui` /
+        // no-subcommand inline.
+        assert_eq!(names.len(), 18, "expected 18 entries, got {names:?}");
         for required in [
             "run",
             "list",
@@ -866,6 +726,7 @@ mod tests {
             "presets",
             "usage",
             "statusline",
+            "claudecode",
             "completion",
             "plugin",
         ] {

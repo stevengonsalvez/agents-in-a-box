@@ -2,9 +2,9 @@
 //!
 //! Minimal surface for the Phase 3 burndown plugin to subscribe to host
 //! lifecycle events (`session.started`, `session.closed`) without coupling
-//! the host to the plugin's event names. The plugin host's own cross-plugin
-//! event dispatch lives in `ainb_plugin_host::HostShared`; this bus is the
-//! in-core complement that hosts use to publish *to* plugins.
+//! the host to the plugin's event names. Cross-plugin pub/sub now lives
+//! in `ainb_plugin_runtime::SnapshotStore`; this in-core bus is the
+//! complement that hosts use to publish *to* plugins.
 //!
 //! ## Wire format
 //!

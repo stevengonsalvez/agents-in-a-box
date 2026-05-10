@@ -1,82 +1,76 @@
-//! Plugin host integration for ainb-core.
+//! Plugin runtime integration for ainb-core (Phase 7 cutover).
 //!
-//! Phase 3 Wave 3 — minimum viable host wiring. On app startup we discover
-//! bundled plugins under `dist/plugins/` (next to the running binary or
-//! workspace root) and load each one through `ainb_plugin_host::PluginHost`.
+//! Replaces the Phase 3 wasmi-based [`ainb_plugin_host::PluginHost`] with the
+//! subprocess + JSON-RPC runtime in `ainb-plugin-runtime`. App startup builds a
+//! tokio-backed [`ainb_plugin_runtime::Runtime`] and hands the TUI a
+//! Send + Clone [`ainb_plugin_runtime::RuntimeHandle`] whose surface methods
+//! never `.await` — `try_recv_render`, `snapshot_get`, `invoke_action`.
 //!
-//! Today the only bundled plugin is `burndown` (`crates/ainb-plugin-burndown`).
-//! It owns its own UsageData ingest and rendering; the host calls `_render`
-//! once per frame and paints the resulting `WireBuffer` through `PluginScreen`.
-//!
-//! Discovery is best-effort: if no plugin directory exists, the host comes up
-//! empty (loaded.is_empty()) and ainb runs exactly as it did before.
+//! Phase 7b ships the runtime cutover only. The legacy in-tree wasmi plugins
+//! (`burndown`, `session-reader`) are not yet repackaged as subprocess Rust
+//! binaries — that work lives in Phase 7c. While 7c is in flight the runtime
+//! comes up empty (zero registered plugins) and the TUI degrades exactly the
+//! same way it did when discovery returned no `dist/plugins/` directory under
+//! the old host.
 
 use std::path::{Path, PathBuf};
 
-use ainb_plugin_host::{LoadOutcome, PluginHost};
+use ainb_plugin_runtime::{Runtime, RuntimeError, RuntimeHandle};
 use tracing::{debug, info, warn};
 
-/// Build a `PluginHost` and load every bundled plugin we can locate.
+/// Outcome of [`init_plugin_runtime`] — kept for parity with the previous
+/// `LoadOutcome` type so callers (CLI, smoke tests) can log discovery results
+/// without short-circuiting the whole app on a single bad plugin.
+#[derive(Debug, Default)]
+pub struct LoadOutcome {
+    pub loaded: Vec<String>,
+    pub failed: Vec<(String, RuntimeError)>,
+}
+
+/// Build the plugin runtime, discover any installed plugins, and return the
+/// owning [`Runtime`] alongside a [`RuntimeHandle`] for the TUI thread.
 ///
-/// Returns `(host, outcome)` so the caller can log/assert on which plugins
-/// loaded vs. failed without short-circuiting the whole app on a single
-/// degraded plugin.
-#[must_use]
-pub fn init_plugin_host() -> (PluginHost, LoadOutcome) {
-    let mut host = PluginHost::new();
+/// Returns `(runtime, handle, outcome)`. The caller MUST keep `runtime` alive
+/// for the lifetime of the app — dropping it joins every plugin task and tears
+/// down the tokio executor.
+pub fn init_plugin_runtime() -> Result<(Runtime, RuntimeHandle, LoadOutcome), RuntimeError> {
+    let (runtime, handle) = Runtime::new()?;
     let mut outcome = LoadOutcome::default();
 
     // Operator escape hatch — `AINB_DISABLE_PLUGINS=1` skips discovery
-    // entirely so the host comes up plugin-free for debugging,
-    // bisecting plugin-induced regressions, and the Phase 5 tripwire's
+    // entirely so the runtime comes up plugin-free for debugging,
+    // bisecting plugin-induced regressions, and the tripwire's
     // "graceful fallback when plugins are disabled" assertion.
     if plugins_disabled() {
         info!("AINB_DISABLE_PLUGINS set — skipping plugin discovery");
-        return (host, outcome);
+        return Ok((runtime, handle, outcome));
     }
 
     let Some(root) = discover_plugin_root() else {
         debug!("no plugin root discovered — running with no plugins loaded");
-        return (host, outcome);
+        return Ok((runtime, handle, outcome));
     };
 
-    info!(plugin_root = %root.display(), "loading bundled plugins");
-    let entries = match std::fs::read_dir(&root) {
-        Ok(it) => it,
+    info!(plugin_root = %root.display(), "discovering subprocess plugins");
+    match handle.discover(&root) {
+        Ok(plugins) => {
+            for p in plugins {
+                info!(plugin = %p.id, "registered plugin");
+                outcome.loaded.push(p.id.to_string());
+            }
+        }
         Err(e) => {
-            warn!(error = %e, root = %root.display(), "could not read plugin root");
-            return (host, outcome);
-        }
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let name = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("<unknown>")
-            .to_string();
-        match host.load_dir(&path) {
-            Ok(id) => {
-                info!(plugin = %id, dir = %path.display(), "loaded plugin");
-                outcome.loaded.push(id);
-            }
-            Err(e) => {
-                warn!(plugin = %name, error = %e, "failed to load plugin (continuing)");
-                outcome.failed.push((name, e));
-            }
+            warn!(error = %e, root = %root.display(), "plugin discovery failed");
+            outcome.failed.push(("<discovery>".into(), e));
         }
     }
 
-    (host, outcome)
+    Ok((runtime, handle, outcome))
 }
 
 /// Operator-controlled kill switch. Recognises `1`, `true`, `yes`, `on`
 /// (case-insensitive) — anything else, including unset, leaves plugins
-/// enabled so a typo doesn't silently disable the host.
+/// enabled so a typo doesn't silently disable the runtime.
 fn plugins_disabled() -> bool {
     match std::env::var("AINB_DISABLE_PLUGINS") {
         Ok(v) => matches!(
@@ -111,7 +105,6 @@ fn discover_plugin_root() -> Option<PathBuf> {
             if here.exists() {
                 return Some(here);
             }
-            // `cargo run` lands in target/<profile>/ainb — bubble up two.
             let up = d.join("..").join("..").join("dist").join("plugins");
             if up.exists() {
                 return Some(up.canonicalize().ok()?);
@@ -127,10 +120,7 @@ fn discover_plugin_root() -> Option<PathBuf> {
     }
 
     if let Some(home) = dirs::home_dir() {
-        let installed = home
-            .join(".agents-in-a-box")
-            .join("plugins")
-            .join("cache");
+        let installed = home.join(".agents-in-a-box").join("plugins").join("cache");
         if installed.exists() {
             return Some(installed);
         }
@@ -145,13 +135,19 @@ mod tests {
 
     #[test]
     fn empty_root_returns_no_loaded_plugins() {
-        // Force a non-existent root so discovery falls through every branch
-        // and returns None — the host should still construct cleanly.
         std::env::set_var("AINB_PLUGIN_ROOT", "/definitely/not/a/real/path");
-        let (host, outcome) = init_plugin_host();
+        let (_runtime, handle, outcome) =
+            init_plugin_runtime().expect("runtime init must succeed even with no plugin root");
         assert_eq!(outcome.loaded.len(), 0, "no plugins should load");
-        assert_eq!(outcome.failed.len(), 0, "no plugins should fail (none found)");
-        assert!(host.plugins().next().is_none(), "host has zero plugins");
+        assert_eq!(
+            outcome.failed.len(),
+            0,
+            "no plugins should fail (none found)"
+        );
+        assert!(
+            handle.registered_plugins().is_empty(),
+            "runtime has zero plugins"
+        );
         std::env::remove_var("AINB_PLUGIN_ROOT");
     }
 

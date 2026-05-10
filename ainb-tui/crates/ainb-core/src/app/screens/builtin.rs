@@ -71,52 +71,35 @@ impl Screen for PluginScreen {
             return;
         };
         let buf = frame.buffer_mut();
-        // Paint the WireBuffer into the requested area. The plugin paints
-        // at a fixed 80x24 today; clip to the available area when the
-        // terminal is smaller. Larger terminals leave the trailing rows
-        // unpainted (they remain whatever the prior frame drew there).
-        let w = u16::min(wire.width, area.width);
-        let h = u16::min(wire.height, area.height);
-        for y in 0..h {
-            for x in 0..w {
-                let i = usize::from(y) * usize::from(wire.width) + usize::from(x);
-                let Some(cell) = wire.cells.get(i) else { continue };
-                let target = buf.get_mut(area.x + x, area.y + y);
-                target.set_symbol(&cell.symbol);
-                target.set_fg(ansi_to_color(cell.fg));
-                target.set_bg(ansi_to_color(cell.bg));
-                target.set_style(ratatui::style::Style::default()
-                    .add_modifier(byte_to_modifiers(cell.modifiers)));
+        // ABI 2.0 cells are sparse `Vec<(Coord, Cell)>` — iterate the
+        // painted set rather than indexing a dense grid. Anything
+        // outside the area is silently clipped (matches the v1 paint
+        // contract).
+        for (coord, cell) in &wire.cells {
+            if coord.x >= area.width || coord.y >= area.height {
+                continue;
             }
+            let target = buf.get_mut(area.x + coord.x, area.y + coord.y);
+            target.set_symbol(&cell.symbol);
+            target.set_fg(rgb_to_color(cell.fg));
+            target.set_bg(rgb_to_color(cell.bg));
+            target.set_style(
+                ratatui::style::Style::default()
+                    .add_modifier(modifier_bits_to_modifiers(cell.modifier)),
+            );
         }
     }
 }
 
-fn ansi_to_color(c: u8) -> ratatui::style::Color {
+fn rgb_to_color(c: Option<ainb_plugin_protocol::wire_buffer::Color>) -> ratatui::style::Color {
     use ratatui::style::Color;
     match c {
-        0xFF => Color::Reset,
-        0 => Color::Black,
-        1 => Color::Red,
-        2 => Color::Green,
-        3 => Color::Yellow,
-        4 => Color::Blue,
-        5 => Color::Magenta,
-        6 => Color::Cyan,
-        7 => Color::Gray,
-        8 => Color::DarkGray,
-        9 => Color::LightRed,
-        10 => Color::LightGreen,
-        11 => Color::LightYellow,
-        12 => Color::LightBlue,
-        13 => Color::LightMagenta,
-        14 => Color::LightCyan,
-        15 => Color::White,
-        i => Color::Indexed(i),
+        None => Color::Reset,
+        Some(rgb) => Color::Rgb(rgb.r, rgb.g, rgb.b),
     }
 }
 
-fn byte_to_modifiers(b: u8) -> ratatui::style::Modifier {
+fn modifier_bits_to_modifiers(b: u16) -> ratatui::style::Modifier {
     use ratatui::style::Modifier;
     let mut m = Modifier::empty();
     if b & 1 != 0 { m |= Modifier::BOLD; }
