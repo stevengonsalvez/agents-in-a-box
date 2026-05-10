@@ -697,6 +697,29 @@ impl CliCommand for PluginCommand {
                     .value_parser(clap::value_parser!(u64))
                     .help("seconds to watch before exiting (default 30)"),
             );
+        let tail_cmd = Command::new("tail")
+            .about("Stream the host's tracing layer filtered to a single plugin id")
+            .arg(
+                clap::Arg::new("plugin")
+                    .required(true)
+                    .help("plugin id (matches `ainb plugin list`)"),
+            )
+            .arg(
+                clap::Arg::new("level")
+                    .long("level")
+                    .help("min log level: trace|debug|info|warn|error (default debug)"),
+            )
+            .arg(
+                clap::Arg::new("since")
+                    .long("since")
+                    .help("RFC-3339 timestamp; suppresses events older than this"),
+            )
+            .arg(
+                clap::Arg::new("duration")
+                    .long("duration")
+                    .value_parser(clap::value_parser!(u64))
+                    .help("seconds to tail before exiting (default 30)"),
+            );
         app.subcommand(
             Command::new(self.name())
                 .about("Manage ainb plugins")
@@ -708,7 +731,8 @@ impl CliCommand for PluginCommand {
                 .subcommand(search)
                 .subcommand(marketplace)
                 .subcommand(lint_cmd)
-                .subcommand(watch_cmd),
+                .subcommand(watch_cmd)
+                .subcommand(tail_cmd),
         )
     }
     fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
@@ -849,6 +873,44 @@ mod tests {
             Some("burndown")
         );
         assert_eq!(args.get_one::<u64>("duration").copied(), Some(5));
+    }
+
+    #[test]
+    fn plugin_subcommand_parses_tail_with_level_and_since() {
+        // Phase 7d-cli surface check: every flag the dispatcher reads.
+        let r = CommandRegistry::built_ins();
+        let app = r.build_clap(root());
+        let matches = app
+            .try_get_matches_from([
+                "ainb",
+                "plugin",
+                "tail",
+                "burndown",
+                "--level",
+                "warn",
+                "--since",
+                "2026-05-10T20:00:00Z",
+                "--duration",
+                "10",
+            ])
+            .expect("plugin tail parses");
+        let (top, sub) = matches.subcommand().expect("subcommand");
+        assert_eq!(top, "plugin");
+        let (sub_name, args) = sub.subcommand().expect("plugin tail");
+        assert_eq!(sub_name, "tail");
+        assert_eq!(
+            args.get_one::<String>("plugin").map(String::as_str),
+            Some("burndown")
+        );
+        assert_eq!(
+            args.get_one::<String>("level").map(String::as_str),
+            Some("warn")
+        );
+        assert_eq!(
+            args.get_one::<String>("since").map(String::as_str),
+            Some("2026-05-10T20:00:00Z")
+        );
+        assert_eq!(args.get_one::<u64>("duration").copied(), Some(10));
     }
 
     #[test]

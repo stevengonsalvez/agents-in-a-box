@@ -26,6 +26,7 @@ use anyhow::{anyhow, bail, Result};
 use crate::cli::OutputFormat;
 
 pub mod lint;
+pub mod tail;
 pub mod watch;
 
 /// Top-level dispatcher for `ainb plugin <subcommand>`.
@@ -54,6 +55,19 @@ pub async fn execute(matches: &clap::ArgMatches, format: OutputFormat) -> Result
                 .clone();
             let duration_secs = sub.get_one::<u64>("duration").copied();
             watch::run(&id, duration_secs).await
+        }
+        Some(("tail", sub)) => {
+            let id = sub
+                .get_one::<String>("plugin")
+                .ok_or_else(|| anyhow!("missing <plugin>"))?
+                .clone();
+            let level = sub
+                .get_one::<String>("level")
+                .cloned()
+                .unwrap_or_else(|| "debug".to_string());
+            let since = sub.get_one::<String>("since").cloned();
+            let duration_secs = sub.get_one::<u64>("duration").copied();
+            tail::run(&id, &level, since.as_deref(), duration_secs).await
         }
         _ => bail!("unknown plugin subcommand"),
     }
