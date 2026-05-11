@@ -11,7 +11,9 @@ use ainb_plugin_sdk::{
     Cell, CliOutput, Color, Coord, HostClient, Plugin, RenderParams, Result, SdkError,
     WireBuffer,
 };
-use ainb_plugin_types_sessions::{UsageDataEvent, WIRE_VERSION};
+use ainb_plugin_types_sessions::{
+    UsageData as WireUsageData, UsageDataEvent, WIRE_VERSION,
+};
 use async_trait::async_trait;
 use ratatui::buffer::Buffer as RBuffer;
 use ratatui::layout::Rect as RRect;
@@ -32,15 +34,34 @@ const MANIFEST_TOML: &str = include_str!("../plugin.toml");
 /// 0×0 ever arrives. Matches the historical 80×24 baseline.
 const FALLBACK_VIEWPORT: (u16, u16) = (80, 24);
 
+/// Disposition of one [`UsageDataEvent`] chunk after
+/// [`BurndownPlugin::apply_chunk_pure`] processes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChunkOutcome {
+    /// Chunk accepted; sequence not yet final.
+    Buffered,
+    /// `is_final = true` chunk completed the sequence; `self.data` is
+    /// now live.
+    Finalised,
+    /// Follow-on chunk arrived without a preceding `chunk_index = 0`
+    /// — dropped, accumulator state unchanged.
+    DroppedFollowOn,
+}
+
 /// Burndown plugin state.
 #[derive(Default)]
 pub struct BurndownPlugin {
     /// In-memory UI state — populated from cached snapshots and
     /// CLI/event-driven tab switches.
     ui: UsageViewState,
-    /// Most recent `UsageData` snapshot decoded from
+    /// Most recent fully-assembled `UsageData` snapshot decoded from
     /// `sessions.usage_data`.
     data: Option<UsageData>,
+    /// Accumulator for the in-flight chunked publish (if any). Reset
+    /// on `chunk_index == 0`, appended-to on follow-on chunks,
+    /// finalised + moved into `self.data` on `is_final = true`. See
+    /// [`UsageDataEvent`] docs for the chunking protocol.
+    pending: Option<WireUsageData>,
     /// Set when the most recent snapshot's wire `version` did not match
     /// the crate's compiled [`WIRE_VERSION`]. Latched — the render path
     /// surfaces an upgrade hint instead of the wait-spinner.
@@ -54,15 +75,22 @@ impl Plugin for BurndownPlugin {
     }
 
     async fn on_init(&mut self, host: &HostClient, _granted: &[String]) -> Result<()> {
-        // Best-effort warm-load: ask the host for any snapshot already
-        // on the bus so the first render doesn't have to wait for the
-        // next publish. Failure is non-fatal — we'll still get pushed
-        // events via `handle_event`.
-        if let Ok(snap) = host.snapshot_get("sessions.usage_data").await {
-            if let Some(payload) = snap.payload {
-                self.ingest_usage_payload(host, &payload).await;
-            }
-        }
+        // Subscribe up front so chunked publishes from session-reader
+        // arrive via `handle_event`. The snapshot store only retains
+        // the most recent publish, so for >1-chunk snapshots a passive
+        // `snapshot_get` would miss every chunk except the last.
+        let _ = host.snapshot_subscribe("sessions.usage_data").await;
+
+        // Trigger a fresh publish. Eager-spawned session-reader runs
+        // its first publish during its own `on_init`, which races
+        // with us — burndown can subscribe mid-stream and end up
+        // missing chunk 0 of the in-flight sequence. Publishing on
+        // the `sessions.refresh_request` topic asks session-reader
+        // to rescan and re-publish from scratch, this time with us
+        // already subscribed. Best-effort: failure is non-fatal.
+        let _ = host
+            .snapshot_publish("sessions.refresh_request", bytes::Bytes::new())
+            .await;
         Ok(())
     }
 
@@ -180,8 +208,13 @@ impl Plugin for BurndownPlugin {
 
 impl BurndownPlugin {
     /// Decode a `sessions.usage_data` payload (msgpack-encoded
-    /// `UsageDataEvent`) and update local state. Notes wire-version
-    /// drift on the latched `schema_mismatch` flag.
+    /// `UsageDataEvent`) and update local state. Handles chunked
+    /// publishes: chunk 0 resets the accumulator, follow-on chunks
+    /// append their `calls` slice, and `is_final = true` moves the
+    /// accumulator into `self.data`. Single-chunk publishes (the v1
+    /// path, plus small `$HOME`s) take exactly the same code path
+    /// because their defaults are `chunk_index = 0, is_final = true`.
+    /// Notes wire-version drift on the latched `schema_mismatch` flag.
     async fn ingest_usage_payload(&mut self, host: &HostClient, payload: &[u8]) {
         let event: UsageDataEvent = match rmp_serde::from_slice(payload) {
             Ok(e) => e,
@@ -204,8 +237,52 @@ impl BurndownPlugin {
                 .await;
             return;
         }
-        self.data = Some(wire_to_local(event.data));
-        self.schema_mismatch = false;
+        self.apply_chunk(event, host).await;
+    }
+
+    /// Drive the chunk accumulator. Logs to `host` on protocol misuse
+    /// (follow-on chunk with no in-flight publish); calls into the
+    /// pure [`Self::apply_chunk_pure`] for the actual state transition
+    /// so unit tests can hit every branch without a `HostClient`.
+    async fn apply_chunk(&mut self, event: UsageDataEvent, host: &HostClient) {
+        let chunk_index = event.chunk_index;
+        let outcome = self.apply_chunk_pure(event);
+        if matches!(outcome, ChunkOutcome::DroppedFollowOn) {
+            let _ = host
+                .log_info(format!(
+                    "burndown: dropped follow-on chunk {chunk_index} (no in-flight publish)"
+                ))
+                .await;
+        }
+    }
+
+    /// Pure version of [`Self::apply_chunk`] — no host I/O. Returns
+    /// the disposition so the async wrapper can log the misuse path.
+    fn apply_chunk_pure(&mut self, event: UsageDataEvent) -> ChunkOutcome {
+        if event.chunk_index == 0 {
+            // Fresh publish sequence — seed the accumulator with the
+            // full aggregates + first call slice. Any prior in-flight
+            // accumulator is discarded (the publisher abandoned it).
+            self.pending = Some(event.data);
+        } else {
+            // Append `calls` onto the in-flight accumulator. If we
+            // missed chunk 0 (subscriber joined late or sequence got
+            // reordered), drop the chunk — partial data without
+            // aggregates is worse than no data.
+            match self.pending.as_mut() {
+                Some(acc) => acc.calls.extend(event.data.calls),
+                None => return ChunkOutcome::DroppedFollowOn,
+            }
+        }
+
+        if event.is_final {
+            if let Some(assembled) = self.pending.take() {
+                self.data = Some(wire_to_local(assembled));
+                self.schema_mismatch = false;
+                return ChunkOutcome::Finalised;
+            }
+        }
+        ChunkOutcome::Buffered
     }
 
     /// Pull the latest snapshot synchronously. Used by `cli_dispatch`
@@ -430,5 +507,128 @@ impl BurndownPlugin {
     #[allow(dead_code)]
     pub fn set_active_tab(&mut self, tab: UsageTab) {
         self.ui.active_tab = tab;
+    }
+}
+
+#[cfg(test)]
+mod chunk_accumulator_tests {
+    use super::*;
+    use ainb_plugin_types_sessions::{
+        ProjectUsage, Provider, ProviderCall, TokenBucket, WIRE_VERSION,
+    };
+    use chrono::{DateTime, Utc};
+
+    fn fake_call(id: u64) -> ProviderCall {
+        ProviderCall {
+            id,
+            provider: Provider::Claude,
+            model: "claude-sonnet".into(),
+            session_id: "s".into(),
+            project: "p".into(),
+            project_path: "/tmp".into(),
+            timestamp: DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap(),
+            input_tokens: 1,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            output_tokens: 1,
+            reasoning_tokens: 0,
+            cost_usd: None,
+            tools: vec![],
+            bash_commands: vec![],
+            user_message: String::new(),
+            branch: None,
+        }
+    }
+
+    fn chunk(idx: u32, is_final: bool, calls: Vec<ProviderCall>) -> UsageDataEvent {
+        let mut data = WireUsageData::default();
+        data.calls = calls;
+        if idx == 0 {
+            // Plant an aggregate so we can assert chunk 0 seeds the
+            // accumulator with the full payload.
+            data.projects = vec![ProjectUsage {
+                name: "p".into(),
+                path: "/tmp".into(),
+                bucket: TokenBucket::default(),
+                repo: None,
+            }];
+        }
+        UsageDataEvent {
+            version: WIRE_VERSION,
+            published_ns: 0,
+            partial: false,
+            chunk_index: idx,
+            is_final,
+            data,
+        }
+    }
+
+    #[test]
+    fn single_chunk_finalises_immediately() {
+        let mut p = BurndownPlugin::default();
+        let outcome =
+            p.apply_chunk_pure(chunk(0, true, vec![fake_call(1), fake_call(2)]));
+        assert_eq!(outcome, ChunkOutcome::Finalised);
+        assert!(p.pending.is_none());
+        let d = p.data.as_ref().expect("snapshot finalised");
+        assert_eq!(d.calls.len(), 2);
+    }
+
+    #[test]
+    fn three_chunk_sequence_accumulates_then_finalises() {
+        let mut p = BurndownPlugin::default();
+        assert_eq!(
+            p.apply_chunk_pure(chunk(0, false, vec![fake_call(1)])),
+            ChunkOutcome::Buffered
+        );
+        assert_eq!(
+            p.apply_chunk_pure(chunk(1, false, vec![fake_call(2)])),
+            ChunkOutcome::Buffered
+        );
+        // Mid-flight: no live data yet.
+        assert!(p.data.is_none());
+        assert_eq!(
+            p.apply_chunk_pure(chunk(2, true, vec![fake_call(3)])),
+            ChunkOutcome::Finalised
+        );
+        let d = p.data.as_ref().expect("snapshot finalised");
+        assert_eq!(d.calls.len(), 3);
+        // Calls arrive in chunk order.
+        assert_eq!(d.calls[0].id, 1);
+        assert_eq!(d.calls[2].id, 3);
+    }
+
+    #[test]
+    fn follow_on_chunk_without_chunk_zero_is_dropped() {
+        let mut p = BurndownPlugin::default();
+        assert_eq!(
+            p.apply_chunk_pure(chunk(1, true, vec![fake_call(1)])),
+            ChunkOutcome::DroppedFollowOn
+        );
+        assert!(p.data.is_none(), "must not finalise from a stray chunk");
+        assert!(p.pending.is_none());
+    }
+
+    #[test]
+    fn new_chunk_zero_discards_in_flight_accumulator() {
+        let mut p = BurndownPlugin::default();
+        let _ = p.apply_chunk_pure(chunk(0, false, vec![fake_call(1)]));
+        let _ = p.apply_chunk_pure(chunk(1, false, vec![fake_call(2)]));
+        // Publisher abandoned and started over.
+        assert_eq!(
+            p.apply_chunk_pure(chunk(0, true, vec![fake_call(99)])),
+            ChunkOutcome::Finalised
+        );
+        let d = p.data.as_ref().unwrap();
+        assert_eq!(d.calls.len(), 1, "old accumulator was discarded");
+        assert_eq!(d.calls[0].id, 99);
+    }
+
+    #[test]
+    fn finalising_clears_schema_mismatch_flag() {
+        let mut p = BurndownPlugin::default();
+        p.schema_mismatch = true;
+        let _ = p.apply_chunk_pure(chunk(0, true, vec![fake_call(1)]));
+        assert!(!p.schema_mismatch);
     }
 }
