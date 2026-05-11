@@ -58,13 +58,50 @@ impl ProviderRoots {
 }
 
 /// Run every provider parser, aggregate, return a snapshot.
+///
+/// Cache-less convenience wrapper around [`scan_with_cache`] for
+/// callers that don't want persistence (tests, the wasm32 build).
 pub fn scan(roots: &ProviderRoots) -> UsageData {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        scan_with_cache(roots, &mut None)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let mut all_calls = Vec::new();
+        if let Some(root) = &roots.claude_projects {
+            all_calls.extend(crate::parsers::claude::parse_dir(root));
+        }
+        if let Some(root) = &roots.codex_sessions {
+            all_calls.extend(crate::parsers::codex::parse_dir(root));
+        }
+        if let Some(root) = &roots.gemini_sessions {
+            all_calls.extend(crate::parsers::gemini::parse_dir(root));
+        }
+        if let Some(root) = &roots.copilot_sessions {
+            all_calls.extend(crate::parsers::copilot::parse_dir(root));
+        }
+        aggregate(all_calls)
+    }
+}
+
+/// Cache-aware scan. Pass `Some(cache)` to short-circuit per-file parses
+/// when `(mtime, size)` matches the previous run; `None` is equivalent
+/// to the legacy [`scan`] call site.
+///
+/// Gemini and Copilot parsers are stubs that don't read files; they're
+/// invoked without the cache.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn scan_with_cache(
+    roots: &ProviderRoots,
+    cache: &mut Option<crate::cache::UsageCache>,
+) -> UsageData {
     let mut all_calls = Vec::new();
     if let Some(root) = &roots.claude_projects {
-        all_calls.extend(crate::parsers::claude::parse_dir(root));
+        all_calls.extend(crate::parsers::claude::parse_dir_cached(root, cache));
     }
     if let Some(root) = &roots.codex_sessions {
-        all_calls.extend(crate::parsers::codex::parse_dir(root));
+        all_calls.extend(crate::parsers::codex::parse_dir_cached(root, cache));
     }
     if let Some(root) = &roots.gemini_sessions {
         all_calls.extend(crate::parsers::gemini::parse_dir(root));
