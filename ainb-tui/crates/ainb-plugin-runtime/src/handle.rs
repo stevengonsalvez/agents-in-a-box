@@ -20,7 +20,7 @@ use parking_lot::RwLock;
 use tokio::sync::oneshot;
 
 use crate::error::RuntimeError;
-use crate::plugin_task::Command;
+use crate::plugin_task::{Command, InboxMap};
 use crate::registry::{ChannelRegistry, RegisteredPlugin};
 use crate::runtime::PluginHandle;
 use crate::snapshot::SnapshotStore;
@@ -36,6 +36,9 @@ pub(crate) struct HandleInner {
     pub(crate) snapshots: SnapshotStore,
     pub(crate) channels: ChannelRegistry,
     pub(crate) plugins: Arc<RwLock<HashMap<PluginId, Arc<PluginHandle>>>>,
+    /// Lightweight fan-out map (plugin_id → Inbox). Mirrors `plugins`
+    /// for the publish path; see [`crate::plugin_task::InboxMap`].
+    pub(crate) inboxes: InboxMap,
     pub(crate) config: RuntimeConfig,
 }
 
@@ -229,12 +232,17 @@ impl RuntimeHandle {
             let (inbox, cache, state) = crate::plugin_task::spawn(
                 arc.clone(),
                 self.inner.snapshots.clone(),
+                self.inner.inboxes.clone(),
                 self.inner.config,
                 &self.inner.tokio,
             );
             if eager {
                 let _ = inbox.send(crate::plugin_task::Command::EnsureSpawned);
             }
+            self.inner
+                .inboxes
+                .write()
+                .insert(arc.id.clone(), inbox.clone());
             self.inner.plugins.write().insert(
                 arc.id.clone(),
                 Arc::new(PluginHandle {

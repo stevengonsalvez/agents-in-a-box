@@ -10,7 +10,7 @@ use tokio::runtime::Runtime as TokioRuntime;
 
 use crate::error::RuntimeError;
 use crate::handle::{HandleInner, RuntimeHandle};
-use crate::plugin_task::{self, Inbox, RenderCache};
+use crate::plugin_task::{self, Inbox, InboxMap, RenderCache};
 use crate::registry::{self, ChannelRegistry, RegisteredPlugin};
 use crate::snapshot::SnapshotStore;
 use crate::types::{LifecycleState, PluginId, RuntimeConfig};
@@ -35,6 +35,11 @@ pub struct Runtime {
     channels: ChannelRegistry,
     /// Per-plugin handles.
     plugins: Arc<RwLock<HashMap<PluginId, Arc<PluginHandle>>>>,
+    /// Lightweight fan-out map: `plugin_id → Inbox`. Kept in sync with
+    /// `plugins`. Plugin tasks hold a clone so they can deliver
+    /// `Command::HandleEvent` to subscribers on `host/snapshot/publish`
+    /// without taking a dependency on the public `PluginHandle` type.
+    inboxes: InboxMap,
     /// Tunables.
     config: RuntimeConfig,
 }
@@ -56,11 +61,13 @@ impl Runtime {
         let channels = ChannelRegistry::new();
         let plugins: Arc<RwLock<HashMap<PluginId, Arc<PluginHandle>>>> =
             Arc::new(RwLock::new(HashMap::new()));
+        let inboxes: InboxMap = Arc::new(parking_lot::RwLock::new(HashMap::new()));
         let handle = RuntimeHandle::new(HandleInner {
             tokio: tokio.handle().clone(),
             snapshots: snapshots.clone(),
             channels: channels.clone(),
             plugins: plugins.clone(),
+            inboxes: inboxes.clone(),
             config,
         });
         Ok((
@@ -69,6 +76,7 @@ impl Runtime {
                 snapshots,
                 channels,
                 plugins,
+                inboxes,
                 config,
             },
             handle,
@@ -103,12 +111,14 @@ impl Runtime {
         let (inbox, cache, state) = plugin_task::spawn(
             arc.clone(),
             self.snapshots.clone(),
+            self.inboxes.clone(),
             self.config,
             self.tokio.handle(),
         );
         if eager {
             let _ = inbox.send(plugin_task::Command::EnsureSpawned);
         }
+        self.inboxes.write().insert(arc.id.clone(), inbox.clone());
         let handle = Arc::new(PluginHandle {
             inbox,
             cache,
