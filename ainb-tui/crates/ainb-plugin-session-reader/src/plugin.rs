@@ -55,9 +55,19 @@ mod manifest_text {
 /// follow-up render or refresh can republish without re-running the
 /// scan if no source files changed (rescan is still cheap on the
 /// freshness path — we always rescan on `sessions.refresh_request`).
+///
+/// `cache` is opened lazily on the first publish so a host that grants
+/// the plugin without `write_plugin_data` (or where the DB path can't
+/// be resolved) still functions — every scan just runs uncached.
 pub struct SessionReader {
     last_event: Option<UsageDataEvent>,
     roots: ProviderRoots,
+    #[cfg(not(target_arch = "wasm32"))]
+    cache: Option<crate::cache::UsageCache>,
+    /// Set to `true` once we've attempted (and possibly failed) to open
+    /// the cache so we don't retry on every publish.
+    #[cfg(not(target_arch = "wasm32"))]
+    cache_init: bool,
 }
 
 impl SessionReader {
@@ -67,6 +77,10 @@ impl SessionReader {
         Self {
             last_event: None,
             roots: ProviderRoots::defaults(),
+            #[cfg(not(target_arch = "wasm32"))]
+            cache: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            cache_init: false,
         }
     }
 
@@ -77,6 +91,39 @@ impl SessionReader {
         Self {
             last_event: None,
             roots,
+            #[cfg(not(target_arch = "wasm32"))]
+            cache: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            cache_init: false,
+        }
+    }
+
+    /// Open the cache on first use, swallowing any error so the scan
+    /// still runs cache-less. Subsequent calls are a no-op.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn ensure_cache(&mut self) {
+        if self.cache_init {
+            return;
+        }
+        self.cache_init = true;
+        let Some(path) = crate::cache::default_db_path() else {
+            tracing::warn!(
+                "session-reader: cache path unresolved (AINB_HOME / XDG_DATA_HOME / HOME all unset); scanning uncached"
+            );
+            return;
+        };
+        match crate::cache::UsageCache::open(&path) {
+            Ok(cache) => {
+                tracing::debug!(path = %path.display(), "session-reader cache opened");
+                self.cache = Some(cache);
+            }
+            Err(err) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %err,
+                    "session-reader: cache open failed; scanning uncached"
+                );
+            }
         }
     }
 
@@ -95,6 +142,22 @@ impl SessionReader {
             chunk_index: 0,
             is_final: true,
             data,
+        }
+    }
+
+    /// Cache-aware scan helper used by [`Self::publish`]. Lazily opens
+    /// the on-disk cache (best-effort) and threads it through the
+    /// per-file parse path; on wasm32 the cache module is absent so we
+    /// fall through to the uncached `scanner::scan`.
+    fn scan_now(&mut self) -> ainb_plugin_types_sessions::UsageData {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.ensure_cache();
+            scanner::scan_with_cache(&self.roots, &mut self.cache)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            scanner::scan(&self.roots)
         }
     }
 
@@ -121,7 +184,7 @@ impl SessionReader {
     /// carry only the remaining calls. The last chunk is flagged
     /// `is_final = true`.
     async fn publish(&mut self, host: &HostClient) -> Result<()> {
-        let data = scanner::scan(&self.roots);
+        let data = self.scan_now();
         let published_ns = now_ns();
         let chunks =
             chunk_usage_data(data, published_ns, false, CHUNK_TARGET_BYTES);
