@@ -79,6 +79,20 @@ pub fn parse_dir_cached(
     sessions_root: &Path,
     cache: &mut Option<crate::cache::UsageCache>,
 ) -> Vec<ProviderCall> {
+    let mut reporter = crate::scanner::ProgressReporter::noop();
+    parse_dir_cached_with_progress(sessions_root, cache, &mut reporter)
+}
+
+/// Cache + progress-aware walk. Drives `reporter.note_file` once per
+/// `rollout-*.jsonl` file. The `current_project` label is the rollout
+/// date directory (`YYYY/MM/DD`), which is the best per-file group
+/// available in the Codex layout.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn parse_dir_cached_with_progress(
+    sessions_root: &Path,
+    cache: &mut Option<crate::cache::UsageCache>,
+    reporter: &mut crate::scanner::ProgressReporter,
+) -> Vec<ProviderCall> {
     let mut calls = Vec::new();
     let years = match std::fs::read_dir(sessions_root) {
         Ok(d) => d,
@@ -115,6 +129,12 @@ pub fn parse_dir_cached(
                 if !is_date_component(&day_path, 2) {
                     continue;
                 }
+                let day_label = day_path
+                    .strip_prefix(sessions_root)
+                    .ok()
+                    .and_then(|p| p.to_str())
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_else(|| day_path.to_string_lossy().into_owned());
                 let Ok(files) = std::fs::read_dir(&day_path) else {
                     continue;
                 };
@@ -128,6 +148,7 @@ pub fn parse_dir_cached(
                         continue;
                     }
                     let path_str = path.to_string_lossy().into_owned();
+                    reporter.note_file(&day_label);
                     let file_calls = super::read_file_cached(&path, cache, |content| {
                         if !is_valid_codex_session(content) {
                             return Vec::new();
