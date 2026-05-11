@@ -141,14 +141,31 @@ where
             }
         };
 
-        if value.get("method").is_some() {
+        if let Some(method) = value.get("method").and_then(Value::as_str) {
             // host -> plugin request or notification.
-            let plugin = plugin.clone();
-            let host_client = host_client.clone();
-            let frames_tx = frames_tx.clone();
-            dispatch_tasks.push(tokio::spawn(async move {
-                dispatch_incoming(plugin, host_client, frames_tx, value).await;
-            }));
+            //
+            // `plugin/handle_event` MUST run in receive order — chunked
+            // publishes (e.g. `sessions.usage_data`) rely on the
+            // consumer seeing `chunk_index = 0` before any follow-on
+            // chunk. Spawning each event onto its own task lets tokio
+            // re-order them through the per-plugin mutex, so we serve
+            // events inline and only spawn for other methods.
+            if method == methods::PLUGIN_HANDLE_EVENT {
+                dispatch_incoming(
+                    plugin.clone(),
+                    host_client.clone(),
+                    frames_tx.clone(),
+                    value,
+                )
+                .await;
+            } else {
+                let plugin = plugin.clone();
+                let host_client = host_client.clone();
+                let frames_tx = frames_tx.clone();
+                dispatch_tasks.push(tokio::spawn(async move {
+                    dispatch_incoming(plugin, host_client, frames_tx, value).await;
+                }));
+            }
         } else if let Some(id) = value.get("id").and_then(Value::as_i64) {
             // Response to a plugin-initiated request.
             let outcome = parse_response(&value);
