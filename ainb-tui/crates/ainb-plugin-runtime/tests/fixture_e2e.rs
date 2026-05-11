@@ -266,3 +266,120 @@ fn handle_is_send_and_clone() {
     assert_send_clone::<ainb_plugin_runtime::RuntimeHandle>();
     let _: Arc<dyn Send + Sync> = Arc::new(()) as Arc<dyn Send + Sync>;
 }
+
+// Eager-spawn regression: manifest declaring `spawn = "eager"` must
+// cause the runtime to launch the plugin process immediately at
+// registration time, without waiting for a first request. Without
+// this guarantee any pure-publisher plugin (e.g. session-reader)
+// never starts and downstream consumers stall on snapshot fetch.
+#[test]
+fn eager_spawn_starts_process_without_first_request() {
+    let (rt, handle) = build_runtime();
+    let mut manifest = fixture_manifest();
+    manifest.lifecycle.spawn = SpawnMode::Eager;
+    manifest.plugin.name = "fixture-eager".into();
+    let plugin = RegisteredPlugin::new(
+        manifest,
+        fixture_path(),
+        PathBuf::from("/dev/null/manifest.toml"),
+    );
+    let id = plugin.id.clone();
+    rt.register(plugin);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while std::time::Instant::now() < deadline {
+        if matches!(handle.lifecycle_state(&id), Some(LifecycleState::Running)) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!(
+        "eager plugin never reached Running; state = {:?}",
+        handle.lifecycle_state(&id)
+    );
+}
+
+// Same guarantee via the `RuntimeHandle::discover` codepath — the
+// real ainb-core ingress point. The handle clones the discovery for
+// each plugin under the root, so this exercises the parallel branch
+// of the eager-spawn fix.
+#[test]
+fn eager_spawn_via_handle_discover_starts_process() {
+    use std::fs;
+    let (_rt, handle) = build_runtime();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let plugin_dir = tmp.path().join("fixture-eager-discover");
+    fs::create_dir_all(&plugin_dir).unwrap();
+
+    // Copy the fixture binary into the discoverable layout.
+    let bin_dst = plugin_dir.join("fixture-eager-discover");
+    fs::copy(fixture_path(), &bin_dst).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut p = fs::metadata(&bin_dst).unwrap().permissions();
+        p.set_mode(0o755);
+        fs::set_permissions(&bin_dst, p).unwrap();
+    }
+
+    // Manifest the registry expects at `<root>/<name>/manifest.toml`.
+    let manifest_toml = r#"
+[plugin]
+name = "fixture-eager-discover"
+version = "0.1.0"
+abi_version = 2
+description = "eager-spawn discover regression"
+
+[capabilities]
+[provides]
+screens = []
+commands = []
+cli_namespaces = ["echo"]
+snapshots = ["fixture.greeting"]
+[subscribes]
+[lifecycle]
+spawn = "eager"
+idle_reap_secs = 600
+"#;
+    fs::write(plugin_dir.join("manifest.toml"), manifest_toml).unwrap();
+
+    let plugins = handle.discover(tmp.path()).expect("discover");
+    assert_eq!(plugins.len(), 1, "expected single plugin discovered");
+    let id = plugins[0].id.clone();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while std::time::Instant::now() < deadline {
+        if matches!(handle.lifecycle_state(&id), Some(LifecycleState::Running)) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!(
+        "eager plugin (via discover) never reached Running; state = {:?}",
+        handle.lifecycle_state(&id)
+    );
+}
+
+// Inverse guarantee: lazy plugins must stay Idle until a request arrives.
+#[test]
+fn lazy_spawn_stays_idle_without_request() {
+    let (rt, handle) = build_runtime();
+    let mut manifest = fixture_manifest();
+    manifest.lifecycle.spawn = SpawnMode::Lazy;
+    manifest.plugin.name = "fixture-lazy".into();
+    let plugin = RegisteredPlugin::new(
+        manifest,
+        fixture_path(),
+        PathBuf::from("/dev/null/manifest.toml"),
+    );
+    let id = plugin.id.clone();
+    rt.register(plugin);
+
+    // Give the runtime a moment to settle.
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        matches!(handle.lifecycle_state(&id), Some(LifecycleState::Idle)),
+        "lazy plugin must remain Idle without a request; state = {:?}",
+        handle.lifecycle_state(&id)
+    );
+}
