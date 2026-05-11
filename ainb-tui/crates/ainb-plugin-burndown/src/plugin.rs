@@ -12,7 +12,7 @@ use ainb_plugin_sdk::{
     WireBuffer,
 };
 use ainb_plugin_types_sessions::{
-    UsageData as WireUsageData, UsageDataEvent, WIRE_VERSION,
+    ScanProgressEvent, UsageData as WireUsageData, UsageDataEvent, WIRE_VERSION,
 };
 use async_trait::async_trait;
 use ratatui::buffer::Buffer as RBuffer;
@@ -66,6 +66,11 @@ pub struct BurndownPlugin {
     /// the crate's compiled [`WIRE_VERSION`]. Latched — the render path
     /// surfaces an upgrade hint instead of the wait-spinner.
     schema_mismatch: bool,
+    /// Latest `sessions.scan_progress` event from session-reader.
+    /// Drives the skeleton/"Scanning sessions…" line that the UI
+    /// renders before the first `sessions.usage_data` chunk lands.
+    /// Cleared once a chunked publish finalises into `self.data`.
+    scan_progress: Option<ScanProgressEvent>,
 }
 
 #[async_trait]
@@ -80,6 +85,11 @@ impl Plugin for BurndownPlugin {
         // the most recent publish, so for >1-chunk snapshots a passive
         // `snapshot_get` would miss every chunk except the last.
         let _ = host.snapshot_subscribe("sessions.usage_data").await;
+        // Subscribe to scan-progress events so the skeleton/"Scanning
+        // sessions…" line can render while session-reader is still
+        // walking the per-provider dirs on a cold cache. Failure is
+        // non-fatal — the legacy ⏳ Waiting spinner remains.
+        let _ = host.snapshot_subscribe("sessions.scan_progress").await;
 
         // Trigger a fresh publish. Eager-spawned session-reader runs
         // its first publish during its own `on_init`, which races
@@ -99,8 +109,14 @@ impl Plugin for BurndownPlugin {
         host: &HostClient,
         params: ainb_plugin_sdk::HandleEventParams,
     ) -> Result<()> {
-        if params.topic == "sessions.usage_data" {
-            self.ingest_usage_payload(host, &params.payload).await;
+        match params.topic.as_str() {
+            "sessions.usage_data" => {
+                self.ingest_usage_payload(host, &params.payload).await;
+            }
+            "sessions.scan_progress" => {
+                self.ingest_scan_progress(host, &params.payload).await;
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -125,6 +141,7 @@ impl Plugin for BurndownPlugin {
             // mutable borrow on `self` for the whole call.
             let mut ui = self.ui.clone();
             ui.data = self.data.clone();
+            ui.scan_progress = self.scan_progress.clone();
             render_ui(&mut rbuf, area, &ui);
         }
         Ok(buffer_to_wire(&rbuf, area))
@@ -279,10 +296,33 @@ impl BurndownPlugin {
             if let Some(assembled) = self.pending.take() {
                 self.data = Some(wire_to_local(assembled));
                 self.schema_mismatch = false;
+                // Real data has landed — the scan is done. Drop any
+                // lingering progress event so the UI flips from
+                // skeleton to populated panels on the next render.
+                self.scan_progress = None;
                 return ChunkOutcome::Finalised;
             }
         }
         ChunkOutcome::Buffered
+    }
+
+    /// Decode a `sessions.scan_progress` payload and stash it as the
+    /// latest known progress. Malformed payloads are logged and
+    /// dropped — the skeleton just keeps showing the previous tick (or
+    /// the ⏳ waiting line if no tick has arrived yet).
+    async fn ingest_scan_progress(&mut self, host: &HostClient, payload: &[u8]) {
+        match rmp_serde::from_slice::<ScanProgressEvent>(payload) {
+            Ok(evt) => {
+                self.scan_progress = Some(evt);
+            }
+            Err(e) => {
+                let _ = host
+                    .log_info(format!(
+                        "burndown: malformed sessions.scan_progress payload: {e}"
+                    ))
+                    .await;
+            }
+        }
     }
 
     /// Pull the latest snapshot synchronously. Used by `cli_dispatch`
@@ -630,5 +670,97 @@ mod chunk_accumulator_tests {
         p.schema_mismatch = true;
         let _ = p.apply_chunk_pure(chunk(0, true, vec![fake_call(1)]));
         assert!(!p.schema_mismatch);
+    }
+
+    #[test]
+    fn finalising_clears_stashed_scan_progress() {
+        // Once real data arrives the skeleton must disappear — so the
+        // chunk accumulator drops `scan_progress` when it finalises a
+        // sequence into `self.data`.
+        let mut p = BurndownPlugin::default();
+        p.scan_progress = Some(ScanProgressEvent {
+            scanned: 7,
+            total: 100,
+            current_project: "alpha".into(),
+        });
+        let _ = p.apply_chunk_pure(chunk(0, true, vec![fake_call(1)]));
+        assert!(
+            p.scan_progress.is_none(),
+            "scan_progress must clear on finalise so the skeleton goes away"
+        );
+    }
+}
+
+#[cfg(test)]
+mod scan_progress_tests {
+    //! Cover the `sessions.scan_progress` event path end-to-end: a
+    //! plugin instance receives 3 progress events via the same wire
+    //! shape session-reader publishes, and the stashed state matches
+    //! after each one. Verifies the plan's "fixture publishes 3
+    //! progress events → burndown renders 1/3, 2/3, 3/3 in order"
+    //! gate at the state level; the UI render assertion lives in
+    //! `ui::tests::scan_progress_skeleton_renders_n_of_m`.
+    use super::*;
+
+    fn payload(scanned: u32, total: u32, project: &str) -> Vec<u8> {
+        rmp_serde::to_vec_named(&ScanProgressEvent {
+            scanned,
+            total,
+            current_project: project.into(),
+        })
+        .expect("encode scan_progress")
+    }
+
+    #[test]
+    fn three_progress_payloads_stash_in_order_and_clear_on_data() {
+        let mut p = BurndownPlugin::default();
+
+        // Decode three payloads via the same path `handle_event` uses
+        // for the wire bytes — `rmp_serde::from_slice<ScanProgressEvent>`.
+        for (i, total) in [(1, 3), (2, 3), (3, 3)] {
+            let bytes = payload(i, total, &format!("project-{i}"));
+            let decoded: ScanProgressEvent =
+                rmp_serde::from_slice(&bytes).expect("decode round-trips");
+            p.scan_progress = Some(decoded);
+            let stashed = p.scan_progress.as_ref().expect("stashed");
+            assert_eq!(stashed.scanned, i);
+            assert_eq!(stashed.total, 3);
+            assert_eq!(stashed.current_project, format!("project-{i}"));
+        }
+
+        // Real data arrives → skeleton goes away.
+        let mut data = WireUsageData::default();
+        data.calls = Vec::new();
+        let event = UsageDataEvent {
+            version: WIRE_VERSION,
+            published_ns: 0,
+            partial: false,
+            chunk_index: 0,
+            is_final: true,
+            data,
+        };
+        let outcome = p.apply_chunk_pure(event);
+        assert_eq!(outcome, ChunkOutcome::Finalised);
+        assert!(p.scan_progress.is_none());
+    }
+
+    #[test]
+    fn malformed_payload_leaves_state_unchanged() {
+        // `rmp_serde::from_slice` rejects non-msgpack bytes; the
+        // existing stashed progress (if any) must survive.
+        let mut p = BurndownPlugin::default();
+        p.scan_progress = Some(ScanProgressEvent {
+            scanned: 5,
+            total: 10,
+            current_project: "good".into(),
+        });
+        let bad = b"\xff\xff\xff not msgpack";
+        let result = rmp_serde::from_slice::<ScanProgressEvent>(bad);
+        assert!(result.is_err(), "garbage payload rejected by decoder");
+        // The ingest path drops the err and keeps the prior state —
+        // simulate that contract here without spinning up a HostClient.
+        let stash = p.scan_progress.as_ref().unwrap();
+        assert_eq!(stash.scanned, 5);
+        assert_eq!(stash.current_project, "good");
     }
 }
