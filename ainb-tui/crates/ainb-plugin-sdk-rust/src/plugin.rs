@@ -14,7 +14,7 @@ use async_trait::async_trait;
 
 use crate::{HostClient, Result};
 use ainb_plugin_protocol::{
-    params::{HandleEventParams, RenderParams},
+    params::{HandleEventParams, HandleKeyParams, RenderParams},
     wire_buffer::WireBuffer,
 };
 
@@ -84,6 +84,22 @@ pub trait Plugin: Send + 'static {
     /// by the runtime but do not surface to the host that produced the
     /// event.
     async fn handle_event(&mut self, host: &HostClient, params: HandleEventParams) -> Result<()> {
+        let _ = (host, params);
+        Ok(())
+    }
+
+    /// Receive a single normalized key event the host has forwarded.
+    ///
+    /// Notification — the host does not wait on a response and ignores
+    /// errors. Default is a no-op so plugins that don't own interactive
+    /// keys (e.g. session-reader) get nothing on the wire by virtue of
+    /// the host only forwarding keys to the focused plugin.
+    ///
+    /// Ordering: the server dispatches this handler inline, on the same
+    /// task as the reader loop, so multi-key sequences arrive in send
+    /// order. Plugins MUST NOT spawn the handler body — see
+    /// [`Server`](crate::Server) source for why.
+    async fn handle_key(&mut self, host: &HostClient, params: HandleKeyParams) -> Result<()> {
         let _ = (host, params);
         Ok(())
     }
