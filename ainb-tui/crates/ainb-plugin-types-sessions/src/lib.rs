@@ -29,7 +29,14 @@ use serde::{Deserialize, Serialize};
 /// Wire-format schema version for [`UsageDataEvent`]. Bump on any
 /// breaking change. Consumers compare `event.version == WIRE_VERSION`
 /// before trusting the payload.
-pub const WIRE_VERSION: u32 = 1;
+///
+/// v2: added `chunk_index` + `is_final` so a single logical snapshot
+/// can be split into N envelopes — required because the full snapshot
+/// of a real `$HOME` (~2 GB / ~40k provider calls) encodes to ~110 MB
+/// of msgpack, blowing past the host framer's 16 MiB body cap. Older
+/// peers reading the new wire see defaults (`chunk_index = 0`,
+/// `is_final = true`) — which is exactly the single-chunk path.
+pub const WIRE_VERSION: u32 = 2;
 
 /// Top-level envelope published on the `sessions.usage_data` topic.
 ///
@@ -37,6 +44,17 @@ pub const WIRE_VERSION: u32 = 1;
 /// time (via `ainb_now_ms` or equivalent). `partial = true` flags a
 /// snapshot whose scan was budget-truncated — burndown shows a
 /// "partial" badge and re-asks on the next refresh.
+///
+/// **Chunked publishes**: a single logical snapshot may be split into
+/// N envelopes. Chunk 0 carries the full aggregates plus the first
+/// slice of [`UsageData::calls`]; chunks 1..N carry the remaining
+/// `calls` only (every other field is empty/default). The last chunk
+/// sets `is_final = true`; consumers concat the call slices and treat
+/// the snapshot as live once they see `is_final`.
+///
+/// Single-chunk publishes use `chunk_index = 0, is_final = true` — the
+/// defaults — so old publishers and small snapshots keep working
+/// unchanged.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UsageDataEvent {
     /// Schema version. Equals [`WIRE_VERSION`] when the publisher and
@@ -46,8 +64,23 @@ pub struct UsageDataEvent {
     pub published_ns: u64,
     /// `true` if scan was truncated by fuel budget; `false` if complete.
     pub partial: bool,
-    /// Aggregated snapshot.
+    /// 0 = first chunk (carries aggregates); increments per follow-on
+    /// chunk. Optional on the wire — defaults to `0` for old
+    /// publishers / single-chunk snapshots.
+    #[serde(default)]
+    pub chunk_index: u32,
+    /// `true` on the last chunk of a publish sequence (or on a
+    /// single-chunk snapshot). Optional on the wire — defaults to
+    /// `true` so a v1-era publisher reads as a complete single chunk.
+    #[serde(default = "default_true")]
+    pub is_final: bool,
+    /// Aggregated snapshot. On chunks `> 0`, only the [`UsageData::calls`]
+    /// vec is populated; every other field is default/empty.
     pub data: UsageData,
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 /// Provider — externally-tagged so unit variants serialise as plain
@@ -451,6 +484,8 @@ mod tests {
             version: WIRE_VERSION,
             published_ns: 1_700_000_000_000_000_000,
             partial: false,
+            chunk_index: 0,
+            is_final: true,
             data: fixture_data(),
         };
         let bytes = rmp_serde::to_vec_named(&env).unwrap();
@@ -467,12 +502,47 @@ mod tests {
             version: WIRE_VERSION + 1,
             published_ns: 0,
             partial: true,
+            chunk_index: 0,
+            is_final: true,
             data: UsageData::default(),
         };
         let bytes = rmp_serde::to_vec_named(&env).unwrap();
         let back: UsageDataEvent = rmp_serde::from_slice(&bytes).unwrap();
         assert_eq!(back.version, WIRE_VERSION + 1);
         assert!(back.partial);
+    }
+
+    #[test]
+    fn chunked_envelope_roundtrip() {
+        // Chunk 0 of a hypothetical 2-chunk publish.
+        let chunk0 = UsageDataEvent {
+            version: WIRE_VERSION,
+            published_ns: 1_700_000_000_000_000_000,
+            partial: false,
+            chunk_index: 0,
+            is_final: false,
+            data: fixture_data(),
+        };
+        let bytes = rmp_serde::to_vec_named(&chunk0).unwrap();
+        let back: UsageDataEvent = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(chunk0, back);
+        assert_eq!(back.chunk_index, 0);
+        assert!(!back.is_final);
+
+        // Chunk 1 (final) carries only the remaining calls.
+        let mut calls_only = UsageData::default();
+        calls_only.calls = vec![fixture_call()];
+        let chunk1 = UsageDataEvent {
+            version: WIRE_VERSION,
+            published_ns: 1_700_000_000_000_000_000,
+            partial: false,
+            chunk_index: 1,
+            is_final: true,
+            data: calls_only,
+        };
+        let bytes = rmp_serde::to_vec_named(&chunk1).unwrap();
+        let back: UsageDataEvent = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(chunk1, back);
     }
 
     #[test]
