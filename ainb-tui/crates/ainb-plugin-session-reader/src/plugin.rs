@@ -98,14 +98,27 @@ impl Plugin for SessionReader {
     }
 
     async fn on_init(&mut self, host: &HostClient, _granted: &[String]) -> Result<()> {
-        // Subscribe to the refresh topic so the host wakes us up via
-        // `plugin/handle_event` whenever a downstream consumer
-        // publishes a refresh signal.
-        host.snapshot_subscribe(TOPIC_REFRESH_REQUEST).await?;
-        // First scan + publish so consumers have data to bind to as
-        // soon as they ask. Errors are surfaced because a startup
-        // failure is meaningful to the host.
-        self.publish(host).await
+        // Diagnostic probes via host.log() — tagged with plugin name on
+        // the host side. Used to bisect the subscribe-response stall;
+        // remove once Bug 2 is conclusively fixed.
+        let _ = host.log_info("on_init: entering, about to call snapshot_subscribe").await;
+        let sub_res = host.snapshot_subscribe(TOPIC_REFRESH_REQUEST).await;
+        let _ = host
+            .log_info(format!(
+                "on_init: snapshot_subscribe returned ok={}",
+                sub_res.is_ok()
+            ))
+            .await;
+        sub_res?;
+        let _ = host.log_info("on_init: about to call publish").await;
+        let pub_res = self.publish(host).await;
+        let _ = host
+            .log_info(format!(
+                "on_init: publish returned ok={}",
+                pub_res.is_ok()
+            ))
+            .await;
+        pub_res
     }
 
     async fn render(
