@@ -23,6 +23,11 @@ pub const PLUGIN_RENDER: &str = "plugin/render";
 /// Host pushes a snapshot/event update. Notification — no response expected.
 pub const PLUGIN_HANDLE_EVENT: &str = "plugin/handle_event";
 
+/// Host forwards a single key event to the plugin owning the focused screen.
+/// Notification — no response expected. Ordering is preserved across the same
+/// transport as `plugin/handle_event` so key sequences arrive in send order.
+pub const PLUGIN_HANDLE_KEY: &str = "plugin/handle_key";
+
 /// Host dispatches a CLI namespace + argv to the plugin; plugin replies with stdout/stderr/exit.
 pub const PLUGIN_CLI_DISPATCH: &str = "plugin/cli_dispatch";
 
@@ -66,6 +71,7 @@ pub const ALL_METHODS: &[&str] = &[
     PLUGIN_SHUTDOWN,
     PLUGIN_RENDER,
     PLUGIN_HANDLE_EVENT,
+    PLUGIN_HANDLE_KEY,
     PLUGIN_CLI_DISPATCH,
     HOST_SNAPSHOT_GET,
     HOST_SNAPSHOT_PUBLISH,
@@ -95,10 +101,20 @@ mod tests {
             PLUGIN_SHUTDOWN,
             PLUGIN_RENDER,
             PLUGIN_HANDLE_EVENT,
+            PLUGIN_HANDLE_KEY,
             PLUGIN_CLI_DISPATCH,
         ] {
             assert!(m.starts_with("plugin/"), "{m} missing plugin/ namespace");
         }
+    }
+
+    #[test]
+    fn all_methods_contains_plugin_handle_key() {
+        assert!(
+            ALL_METHODS.contains(&PLUGIN_HANDLE_KEY),
+            "PLUGIN_HANDLE_KEY missing from ALL_METHODS registry"
+        );
+        assert_eq!(PLUGIN_HANDLE_KEY, "plugin/handle_key");
     }
 
     #[test]
