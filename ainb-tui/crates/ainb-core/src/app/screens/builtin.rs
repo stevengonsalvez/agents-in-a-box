@@ -62,6 +62,14 @@ impl Screen for PluginScreen {
         self.screen_id
     }
     fn render(&mut self, frame: &mut Frame, area: Rect, state: &mut AppState) {
+        // Stash the allocated size so the next tick of
+        // `App::tick_plugin_renders` can ask the plugin for a buffer that
+        // actually fills this area. Without this the plugin renders into
+        // its fallback (80×24) and everything outside that rect stays blank.
+        state
+            .plugin_render_areas
+            .insert(self.screen_id.to_string(), (area.width, area.height));
+
         let Some(wire) = state.pending_plugin_renders.get(self.screen_id) else {
             let placeholder = ratatui::widgets::Paragraph::new(format!(
                 "[plugin {}: rendering...]",
