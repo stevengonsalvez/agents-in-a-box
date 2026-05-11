@@ -2488,6 +2488,19 @@ fn project_matches(call: &ProviderCall, include: &[String], exclude: &[String]) 
     true
 }
 
+/// "Now" anchor used for period filtering. Reads `AINB_NOW`
+/// (RFC 3339, e.g. `2026-05-11T00:00:00Z`) when set so deterministic
+/// tripwire fixtures can pin the calendar day; otherwise falls back to
+/// the real local clock.
+fn local_now() -> DateTime<Local> {
+    if let Ok(raw) = std::env::var("AINB_NOW") {
+        if let Ok(parsed) = DateTime::parse_from_rfc3339(raw.trim()) {
+            return parsed.with_timezone(&Local);
+        }
+    }
+    Local::now()
+}
+
 /// Returns the inclusive `(start, end)` instants for `period`, expressed
 /// in UTC for direct comparison against `ProviderCall.timestamp`.
 ///
@@ -2496,7 +2509,7 @@ fn project_matches(call: &ProviderCall, include: &[String], exclude: &[String]) 
 /// `start_of_day` / `end_of_day` build a local-midnight / local-23:59
 /// datetime first, then convert to UTC for the comparison surface.
 fn date_range_for_period(period: &UsagePeriod) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
-    let now = Local::now();
+    let now = local_now();
     let today = now.date_naive();
 
     match period {
@@ -2968,7 +2981,13 @@ pub fn format_tokens_commas(n: u64) -> String {
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::Mutex;
     use tempfile::tempdir;
+
+    // Serialise tests that mutate AINB_NOW so parallel runs inside the
+    // same process don't read each other's env. Defined here rather
+    // than via lazy_static so the lock has no init-order surprises.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn last_day_of_month_handles_leap_years() {
@@ -3773,6 +3792,54 @@ mod tests {
         let start_d = start.with_timezone(&Local).date_naive();
         assert_eq!(start_d.month(), 1);
         assert_eq!(start_d.day(), 1);
+    }
+
+    #[test]
+    fn ainb_now_overrides_today_anchor_for_period_filter() {
+        // Pin "now" to a date well outside the natural Local::now() window
+        // so the override is unambiguously responsible for the answer.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let prev = std::env::var("AINB_NOW").ok();
+        std::env::set_var("AINB_NOW", "2026-05-11T00:00:00Z");
+
+        let (today_start, today_end) =
+            date_range_for_period(&UsagePeriod::Today).expect("today range");
+        let today_anchor = today_start.with_timezone(&Local).date_naive();
+        assert_eq!(today_anchor.year(), 2026);
+        assert_eq!(today_anchor.month(), 5);
+        assert_eq!(today_anchor.day(), 11);
+        assert_eq!(today_end.with_timezone(&Local).date_naive(), today_anchor);
+
+        let (ytd_start, _) =
+            date_range_for_period(&UsagePeriod::YearToDate).expect("ytd range");
+        let ytd_start_d = ytd_start.with_timezone(&Local).date_naive();
+        assert_eq!(ytd_start_d, NaiveDate::from_ymd_opt(2026, 1, 1).unwrap());
+
+        match prev {
+            Some(v) => std::env::set_var("AINB_NOW", v),
+            None => std::env::remove_var("AINB_NOW"),
+        }
+    }
+
+    #[test]
+    fn ainb_now_invalid_value_falls_back_to_real_clock() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let prev = std::env::var("AINB_NOW").ok();
+        std::env::set_var("AINB_NOW", "not-a-timestamp");
+
+        let (today_start, _) =
+            date_range_for_period(&UsagePeriod::Today).expect("today range");
+        let today_anchor = today_start.with_timezone(&Local).date_naive();
+        // Anchor should be within a day of real now — i.e. the override
+        // didn't accidentally swap to epoch or 1970.
+        let actual_today = Local::now().date_naive();
+        let drift = (today_anchor - actual_today).num_days().abs();
+        assert!(drift <= 1, "anchor drifted {drift} days from real today");
+
+        match prev {
+            Some(v) => std::env::set_var("AINB_NOW", v),
+            None => std::env::remove_var("AINB_NOW"),
+        }
     }
 
     #[test]
