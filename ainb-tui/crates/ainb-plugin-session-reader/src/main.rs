@@ -13,6 +13,8 @@
 
 use ainb_plugin_sdk::{Server, SdkError};
 
+#[cfg(not(target_arch = "wasm32"))]
+mod cache;
 mod fnv;
 mod parsers;
 mod plugin;
