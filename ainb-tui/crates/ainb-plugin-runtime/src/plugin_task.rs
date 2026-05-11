@@ -405,11 +405,16 @@ impl PluginTask {
             }
         };
         match parsed {
-            Inbound::Response { id, result } => self.handle_response(id, result).await,
+            Inbound::Response { id, result } => {
+                debug!(plugin = %self.plugin.id, id, ok = result.is_ok(), "inbound response");
+                self.handle_response(id, result).await;
+            }
             Inbound::Request { id, method, params } => {
+                debug!(plugin = %self.plugin.id, id, method = %method, "inbound request");
                 self.handle_host_request(id, &method, params).await;
             }
             Inbound::Notification { method, params } => {
+                debug!(plugin = %self.plugin.id, method = %method, "inbound notification");
                 self.handle_host_notification(&method, params);
             }
         }
@@ -503,9 +508,13 @@ impl PluginTask {
             },
         };
         if let Some(cs) = &mut self.child {
-            if let Err(e) = write_frame(&mut cs.stdin, &body).await {
-                warn!(plugin = %self.plugin.id, "write response: {e}");
+            debug!(plugin = %self.plugin.id, id, bytes = body.len(), "host->plugin response: writing");
+            match write_frame(&mut cs.stdin, &body).await {
+                Ok(()) => debug!(plugin = %self.plugin.id, id, "host->plugin response: write_frame OK"),
+                Err(e) => warn!(plugin = %self.plugin.id, id, "write response: {e}"),
             }
+        } else {
+            warn!(plugin = %self.plugin.id, id, "host->plugin response: child missing, dropping response");
         }
     }
 
@@ -702,6 +711,10 @@ async fn read_inbound(child: &mut Option<ChildState>) -> InboundEvent {
 async fn drain_stderr(plugin: PluginId, stderr: tokio::process::ChildStderr) {
     let mut reader = BufReader::new(stderr).lines();
     while let Ok(Some(line)) = reader.next_line().await {
-        debug!(plugin = %plugin, stream = "stderr", "{line}");
+        // info! so plugin stderr (e.g. eprintln from session-reader)
+        // surfaces in the host JSONL by default. Plugins are expected
+        // to use host.log() for normal logging — stderr is for unstructured
+        // diagnostics that should not be filtered out.
+        info!(plugin = %plugin, stream = "stderr", "{line}");
     }
 }
