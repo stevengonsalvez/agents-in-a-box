@@ -212,18 +212,29 @@ impl RuntimeHandle {
             .collect()
     }
 
-    /// Discover plugins under `root` and register each.
+    /// Discover plugins under `root` and register each. When a
+    /// plugin's manifest declares `[lifecycle].spawn = "eager"` the
+    /// task is poked with `EnsureSpawned` so the child process is
+    /// launched immediately — required for pure-publisher plugins
+    /// (e.g. session-reader) that no caller drives directly.
     pub fn discover(&self, root: &Path) -> Result<Vec<RegisteredPlugin>, RuntimeError> {
         let plugins = crate::registry::discover(root)?;
         for p in &plugins {
             self.inner.channels.register(p.clone());
             let arc = Arc::new(p.clone());
+            let eager = matches!(
+                arc.manifest.lifecycle.spawn,
+                ainb_plugin_protocol::manifest::SpawnMode::Eager
+            );
             let (inbox, cache, state) = crate::plugin_task::spawn(
                 arc.clone(),
                 self.inner.snapshots.clone(),
                 self.inner.config,
                 &self.inner.tokio,
             );
+            if eager {
+                let _ = inbox.send(crate::plugin_task::Command::EnsureSpawned);
+            }
             self.inner.plugins.write().insert(
                 arc.id.clone(),
                 Arc::new(PluginHandle {

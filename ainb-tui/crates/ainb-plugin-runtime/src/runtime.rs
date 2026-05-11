@@ -88,16 +88,27 @@ impl Runtime {
 
     /// Register an already-resolved [`RegisteredPlugin`]. Spawns its
     /// per-plugin task in `Idle` state — first request lazy-spawns
-    /// the process.
+    /// the process. When the manifest declares
+    /// `[lifecycle].spawn = "eager"`, an `EnsureSpawned` command is
+    /// dispatched immediately so the child is launched without
+    /// waiting for a first request. Required for pure-publisher
+    /// plugins (e.g. session-reader) that no caller drives directly.
     pub fn register(&self, plugin: RegisteredPlugin) {
         let arc = Arc::new(plugin);
         self.channels.register((*arc).clone());
+        let eager = matches!(
+            arc.manifest.lifecycle.spawn,
+            ainb_plugin_protocol::manifest::SpawnMode::Eager
+        );
         let (inbox, cache, state) = plugin_task::spawn(
             arc.clone(),
             self.snapshots.clone(),
             self.config,
             self.tokio.handle(),
         );
+        if eager {
+            let _ = inbox.send(plugin_task::Command::EnsureSpawned);
+        }
         let handle = Arc::new(PluginHandle {
             inbox,
             cache,

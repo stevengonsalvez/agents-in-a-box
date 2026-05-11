@@ -121,6 +121,11 @@ pub enum Command {
     /// part of the public API surface.
     #[doc(hidden)]
     InjectKill,
+    /// Best-effort wake: spawn the child if not already running. Used
+    /// by `Runtime::register` to honour `manifest.lifecycle.spawn = "eager"`.
+    /// No reply — failures are recorded on the task's failure ledger
+    /// and surface through `RuntimeHandle::lifecycle_state`.
+    EnsureSpawned,
 }
 
 /// Inbox a [`crate::RuntimeHandle`] uses to drive the task.
@@ -295,6 +300,11 @@ impl PluginTask {
             Command::InjectKill => {
                 if let Some(cs) = &mut self.child {
                     let _ = cs.child.start_kill();
+                }
+            }
+            Command::EnsureSpawned => {
+                if let Err(e) = self.ensure_running().await {
+                    warn!(plugin = %self.plugin.id, "eager spawn failed: {e}");
                 }
             }
         }
