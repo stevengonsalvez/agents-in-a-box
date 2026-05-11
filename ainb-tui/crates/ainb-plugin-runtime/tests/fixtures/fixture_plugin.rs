@@ -29,7 +29,8 @@ use std::io::{BufReader, Write};
 use ainb_plugin_protocol::framing::{encode, MAX_BODY_BYTES};
 use ainb_plugin_protocol::methods;
 use ainb_plugin_protocol::params::{
-    ActionInvokeResult, CliDispatchResult, PluginInitResult, RenderResult, SnapshotPublishParams,
+    ActionInvokeParams, ActionInvokeResult, CliDispatchResult, PluginInitResult, RenderResult,
+    SnapshotPublishParams,
 };
 use ainb_plugin_protocol::wire_buffer::{Cell, Coord, WireBuffer};
 use serde_json::{json, Value};
@@ -103,18 +104,12 @@ fn main() {
                 eprintln!("fixture: handle_event {params}");
             }
             methods::HOST_ACTION_INVOKE => {
-                // Echo the payload back as the action result.
+                // Echo the payload back as the action result. `payload`
+                // is wire-encoded as a base64 string (post-v1 wire), but
+                // we also accept the legacy JSON-array-of-bytes form so
+                // older runtimes paired with this fixture keep working.
                 if let Some(id) = id {
-                    let payload = params
-                        .get("payload")
-                        .and_then(Value::as_array)
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(serde_json::Value::as_u64)
-                                .map(|n| u8::try_from(n).unwrap_or(0))
-                                .collect::<Vec<u8>>()
-                        })
-                        .unwrap_or_default();
+                    let payload = decode_action_invoke_params(params.clone());
                     let result = serde_json::to_value(ActionInvokeResult {
                         payload: bytes::Bytes::from(payload),
                     })
@@ -139,6 +134,15 @@ fn main() {
             }
         }
     }
+}
+
+/// Decode a `host/action/invoke` params block. Defers binary decoding
+/// to the protocol's `ActionInvokeParams`, which already accepts both
+/// the base64-string and legacy-byte-array forms for `payload`.
+fn decode_action_invoke_params(value: Value) -> Vec<u8> {
+    serde_json::from_value::<ActionInvokeParams>(value)
+        .map(|p| p.payload.to_vec())
+        .unwrap_or_default()
 }
 
 fn init_result() -> Value {
