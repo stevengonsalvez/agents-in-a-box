@@ -79,6 +79,24 @@ git_directories = []
         ver = env!("CARGO_PKG_VERSION"),
     );
     fs::write(cfg.join("onboarding.toml"), onboarding).expect("seed onboarding.toml");
+
+    // Seed one synthetic claude session so session-reader has real data
+    // to publish. Without this, burndown still renders (zero state) and
+    // the placeholder is gone — that proves the plugin pipeline — but
+    // we want the strict-mode assertion to bite: real `$N.NN` cost
+    // strings can only show up when there are non-zero tokens to price.
+    let proj_dir = home
+        .join(".claude")
+        .join("projects")
+        .join("-tripwire-fixture-project");
+    fs::create_dir_all(&proj_dir).expect("create claude project dir");
+    let session_jsonl = r#"{"type":"assistant","timestamp":"2026-05-10T12:00:00.000Z","sessionId":"fixture-session-1","cwd":"/tmp/x","message":{"model":"claude-sonnet-4-5","usage":{"input_tokens":1000,"output_tokens":500,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}
+"#;
+    fs::write(
+        proj_dir.join("fixture-session-1.jsonl"),
+        session_jsonl,
+    )
+    .expect("seed synthetic claude jsonl");
 }
 
 fn capture_pane(session: &str) -> String {
@@ -109,19 +127,21 @@ fn kill_session(session: &str) {
         .status();
 }
 
-// Currently red because of a second Phase 7 bug uncovered alongside
-// the eager-spawn miss: session-reader sends host/snapshot/subscribe
-// during its own on_init, the host receives the request, but the
-// plugin never observes the subscribe-response and consequently
-// never reaches its first publish — burndown stays on
-// "Waiting for session-reader plugin..." forever.
+// The "Waiting for session-reader plugin..." stall was two layered bugs:
+//   1. The runtime ignored `manifest.lifecycle.spawn = "eager"`, so
+//      session-reader was never started (fixed in plugin_task.rs via
+//      `Command::EnsureSpawned`).
+//   2. macOS AMFI silently SIGKILLed every staged plugin binary at exec
+//      (exit 137, no stderr) because cargo's ad-hoc linker signature is
+//      bound to the original build path; `cp` to dist/plugins/ broke it.
+//      Fixed by `scripts/build-plugins.sh` re-signing after stage (via
+//      `codesign --remove-signature` + `codesign --sign -`).
 //
-// The eager-spawn fix in this PR is necessary scaffolding (without
-// it, session-reader never even starts). The remaining stall is a
-// host→plugin response-delivery defect that is out of scope for the
-// eager-spawn change. Drop the `#[ignore]` once that bug is fixed.
+// Asserts the panel renders real-data chrome (Total Calls / Total Cost /
+// `$<digit>`) and crucially is NOT stuck on the placeholder. Requires
+// `just stage-plugins` (or `./scripts/build-plugins.sh`) so dist/plugins/
+// contains the AMFI-friendly re-signed binaries.
 #[test]
-#[ignore = "BUG: session-reader subscribe-response delivery stalls — host/snapshot/subscribe request reaches host but response never reaches plugin, blocking on_init publish"]
 fn tui_renders_real_analytics_data_after_pressing_i() {
     if !tmux_available() {
         eprintln!("SKIP: tmux not available");
