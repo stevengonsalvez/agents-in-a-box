@@ -38,6 +38,30 @@ use serde::{Deserialize, Serialize};
 /// `is_final = true`) — which is exactly the single-chunk path.
 pub const WIRE_VERSION: u32 = 2;
 
+/// Per-file scan progress payload published on the
+/// `sessions.scan_progress` topic.
+///
+/// `scanned` is the running count of files visited; `total` is the
+/// pre-walk file count when known, or `0` during the initial walk (the
+/// scanner emits `total = 0` until/unless it has cheaply enumerated the
+/// full set). `current_project` is the project label of the most
+/// recently scanned file — burndown surfaces it in the skeleton line.
+///
+/// Schema is intentionally unversioned: it's a soft-realtime
+/// notification, not an authoritative snapshot. New fields are added
+/// with `#[serde(default)]` so older subscribers keep decoding cleanly.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScanProgressEvent {
+    /// Number of files visited so far. Monotonic within one scan.
+    pub scanned: u32,
+    /// Total file count if known, else `0` (UI renders without the
+    /// `/M` suffix).
+    pub total: u32,
+    /// Project label (basename of the project dir or rollout date) for
+    /// the most recently scanned file.
+    pub current_project: String,
+}
+
 /// Top-level envelope published on the `sessions.usage_data` topic.
 ///
 /// `published_ns` is filled in from the host's wall-clock at publish

@@ -16,7 +16,7 @@
 use ainb_plugin_sdk::{
     HandleEventParams, HostClient, Plugin, RenderParams, Result, SdkError, WireBuffer,
 };
-use ainb_plugin_types_sessions::{UsageData, UsageDataEvent, WIRE_VERSION};
+use ainb_plugin_types_sessions::{ScanProgressEvent, UsageData, UsageDataEvent, WIRE_VERSION};
 use async_trait::async_trait;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -44,6 +44,11 @@ pub const TOPIC_USAGE_DATA: &str = "sessions.usage_data";
 
 /// Topic any consumer can publish to to force a re-scan + re-publish.
 pub const TOPIC_REFRESH_REQUEST: &str = "sessions.refresh_request";
+
+/// Topic the plugin publishes per-file scan progress on. Burndown
+/// subscribes here to render the skeleton/`Scanning sessions…` line
+/// while the cold scan is in flight.
+pub const TOPIC_SCAN_PROGRESS: &str = "sessions.scan_progress";
 
 mod manifest_text {
     pub const TOML: &str = include_str!("../manifest.toml");
@@ -149,6 +154,10 @@ impl SessionReader {
     /// the on-disk cache (best-effort) and threads it through the
     /// per-file parse path; on wasm32 the cache module is absent so we
     /// fall through to the uncached `scanner::scan`.
+    ///
+    /// Cache-less + no-progress fallback used by tests and the wasm32
+    /// build. Production publishes go through [`Self::scan_streaming`]
+    /// which threads progress events to the host.
     fn scan_now(&mut self) -> ainb_plugin_types_sessions::UsageData {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -158,6 +167,84 @@ impl SessionReader {
         #[cfg(target_arch = "wasm32")]
         {
             scanner::scan(&self.roots)
+        }
+    }
+
+    /// Run the scan on a blocking task and publish progress events to
+    /// `host` as they arrive. Returns the assembled `UsageData` once
+    /// the scan task completes.
+    ///
+    /// The blocking task owns the cache for the duration of the scan
+    /// (moved out of `self.cache`), then hands it back so the plugin
+    /// can reuse it on the next publish. Progress events flow over a
+    /// `tokio::sync::mpsc::unbounded` channel: the rate-limit lives in
+    /// the [`scanner::ProgressReporter`] inside the blocking task, so
+    /// the async drain loop never sees more than ~10 events/s.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn scan_streaming(&mut self, host: &HostClient) -> ainb_plugin_types_sessions::UsageData {
+        self.ensure_cache();
+        let roots = self.roots.clone();
+        let cache = self.cache.take();
+
+        let (tx, mut rx) =
+            tokio::sync::mpsc::unbounded_channel::<ScanProgressEvent>();
+
+        let scan_handle = tokio::task::spawn_blocking(move || {
+            let mut cache_opt = cache;
+            let mut reporter = scanner::ProgressReporter::new(move |evt| {
+                // Send is unbounded + non-blocking; failures only happen
+                // when the receiver has been dropped (impossible here —
+                // we hold `rx` until `scan_handle` resolves).
+                let _ = tx.send(evt);
+            });
+            let data = scanner::scan_with_cache_and_progress(
+                &roots,
+                &mut cache_opt,
+                &mut reporter,
+            );
+            (data, cache_opt)
+        });
+
+        // Drain progress events. `rx.recv()` returns `None` once the
+        // scan task drops its `Sender` (i.e. when the closure +
+        // reporter are dropped at the end of the blocking work).
+        while let Some(evt) = rx.recv().await {
+            match rmp_serde::to_vec_named(&evt) {
+                Ok(bytes) => {
+                    if let Err(err) =
+                        host.snapshot_publish(TOPIC_SCAN_PROGRESS, bytes).await
+                    {
+                        let _ = host
+                            .log_info(format!(
+                                "session-reader: scan_progress publish failed: {err}"
+                            ))
+                            .await;
+                    }
+                }
+                Err(err) => {
+                    let _ = host
+                        .log_info(format!(
+                            "session-reader: scan_progress encode failed: {err}"
+                        ))
+                        .await;
+                }
+            }
+        }
+
+        match scan_handle.await {
+            Ok((data, cache_opt)) => {
+                self.cache = cache_opt;
+                data
+            }
+            Err(err) => {
+                let _ = host
+                    .log_info(format!(
+                        "session-reader: scan task join error: {err}; \
+                        falling back to in-line scan"
+                    ))
+                    .await;
+                self.scan_now()
+            }
         }
     }
 
@@ -184,6 +271,9 @@ impl SessionReader {
     /// carry only the remaining calls. The last chunk is flagged
     /// `is_final = true`.
     async fn publish(&mut self, host: &HostClient) -> Result<()> {
+        #[cfg(not(target_arch = "wasm32"))]
+        let data = self.scan_streaming(host).await;
+        #[cfg(target_arch = "wasm32")]
         let data = self.scan_now();
         let published_ns = now_ns();
         let chunks =

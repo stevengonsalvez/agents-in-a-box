@@ -68,6 +68,19 @@ pub fn parse_dir_cached(
     projects_root: &Path,
     cache: &mut Option<crate::cache::UsageCache>,
 ) -> Vec<ProviderCall> {
+    let mut reporter = crate::scanner::ProgressReporter::noop();
+    parse_dir_cached_with_progress(projects_root, cache, &mut reporter)
+}
+
+/// Cache + progress-aware walk. Drives `reporter.note_file` once per
+/// `.jsonl` file (whether the call is satisfied by the cache or by a
+/// fresh parse).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn parse_dir_cached_with_progress(
+    projects_root: &Path,
+    cache: &mut Option<crate::cache::UsageCache>,
+    reporter: &mut crate::scanner::ProgressReporter,
+) -> Vec<ProviderCall> {
     let mut calls = Vec::new();
     let project_entries = match std::fs::read_dir(projects_root) {
         Ok(entries) => entries,
@@ -99,9 +112,10 @@ pub fn parse_dir_cached(
             }
             let path_str = path.to_string_lossy().into_owned();
             let project_path_str = project_path.to_string_lossy().into_owned();
-            let project = project.clone();
+            let project_owned = project.clone();
+            reporter.note_file(&project_owned);
             let file_calls = super::read_file_cached(&path, cache, |content| {
-                parse_source(&path_str, &project, &project_path_str, content)
+                parse_source(&path_str, &project_owned, &project_path_str, content)
             });
             calls.extend(file_calls);
         }
