@@ -8,9 +8,10 @@
 //! arrived yet.
 
 use ainb_plugin_sdk::{
-    Cell, CliOutput, Color, Coord, HostClient, Plugin, RenderParams, Result, SdkError,
-    WireBuffer,
+    Cell, CliOutput, Color, Coord, HandleKeyParams, HostClient, KeyCode, Plugin, RenderParams,
+    Result, SdkError, WireBuffer,
 };
+use crate::data::usage::UsagePeriod;
 use ainb_plugin_types_sessions::{
     ScanProgressEvent, UsageData as WireUsageData, UsageDataEvent, WIRE_VERSION,
 };
@@ -71,6 +72,13 @@ pub struct BurndownPlugin {
     /// renders before the first `sessions.usage_data` chunk lands.
     /// Cleared once a chunked publish finalises into `self.data`.
     scan_progress: Option<ScanProgressEvent>,
+    /// Freshness witness — bumped once per `handle_key` invocation
+    /// that actually mutated `self.ui`. The host's next
+    /// `plugin/render` will see the updated state. Future host
+    /// versions may echo this value via `RenderParams.generation`
+    /// so the host can prove the keystroke landed before the frame
+    /// was painted; today the plugin keeps it as private bookkeeping.
+    generation: u64,
 }
 
 #[async_trait]
@@ -117,6 +125,53 @@ impl Plugin for BurndownPlugin {
                 self.ingest_scan_progress(host, &params.payload).await;
             }
             _ => {}
+        }
+        Ok(())
+    }
+
+    /// Dispatch a single keystroke forwarded by the host's
+    /// `PluginScreen::handle_key`.
+    ///
+    /// The plan in `ainb-tui/plans/plugin-interactive-keys-and-cache.md`
+    /// §Phase 4 enumerates the canonical key → UI binding. A few binds
+    /// were renamed during implementation to match what actually
+    /// exists in `ui.rs`:
+    ///
+    /// - `Esc` → `pop_filter_chip` (plan: `pop_filter`).
+    /// - `C`   → `clear_all_filter_chips` (plan: `clear_filters`).
+    /// - `d` when zoomed → `toggle_zoom_detail` (plan: `zoom_toggle_detail`).
+    ///
+    /// Two bindings were dropped because the existing UI API needs
+    /// context the dispatch can't provide without inventing new
+    /// methods:
+    ///
+    /// - `j` scroll-down: `scroll_down(max_rows)` is row-count-aware.
+    /// - `D` advanced custom period: `UsagePeriod::Custom { from, to }`
+    ///   has no sensible default range from a single key press.
+    ///
+    /// Generation is bumped only when the dispatch matched a binding,
+    /// so unmapped keys won't trigger an avoidable re-render.
+    async fn handle_key(&mut self, host: &HostClient, params: HandleKeyParams) -> Result<()> {
+        // Refresh is the one binding that needs the host. Everything
+        // else mutates `self.ui` only, so it lives in the pure helper
+        // below for testability.
+        let handled = match params.key.code {
+            KeyCode::Char { ch: 'r' | 'R' } => {
+                // Ask session-reader to re-publish from scratch. Best
+                // effort — failure is silently dropped, the existing
+                // snapshot stays on screen.
+                let _ = host
+                    .snapshot_publish("sessions.refresh_request", bytes::Bytes::new())
+                    .await;
+                true
+            }
+            _ => self.dispatch_key_pure(&params.key.code),
+        };
+        // Plan-mandated invariant: only bump generation when the
+        // dispatch matched a binding, so unmapped keys can't trigger
+        // an avoidable re-render.
+        if handled {
+            self.generation = self.generation.wrapping_add(1);
         }
         Ok(())
     }
@@ -547,6 +602,62 @@ impl BurndownPlugin {
     #[allow(dead_code)]
     pub fn set_active_tab(&mut self, tab: UsageTab) {
         self.ui.active_tab = tab;
+    }
+
+    /// Pure version of the `handle_key` match — applies every
+    /// non-host-touching binding to `self.ui` and returns whether
+    /// the key was claimed. Lets unit tests exercise the dispatch
+    /// without spinning up a `HostClient`.
+    ///
+    /// The `r`/`R` refresh binding is intentionally NOT here; it
+    /// lives in the async `handle_key` because it needs the host.
+    fn dispatch_key_pure(&mut self, code: &KeyCode) -> bool {
+        use chrono::{Datelike, Local};
+
+        match *code {
+            KeyCode::Char { ch: '1' } => self.ui.set_period(UsagePeriod::Today),
+            KeyCode::Char { ch: '2' } => self.ui.set_period(UsagePeriod::Week),
+            KeyCode::Char { ch: '3' } => self.ui.set_period(UsagePeriod::ThirtyDays),
+            KeyCode::Char { ch: '4' } => self.ui.set_period(UsagePeriod::LastNDays(90)),
+            KeyCode::Char { ch: '5' } => self.ui.set_period(UsagePeriod::YearToDate),
+            KeyCode::Char { ch: 'm' } => self.ui.set_period(UsagePeriod::Month),
+            KeyCode::Char { ch: 'q' } => {
+                // No plain `Quarter` variant exists — use today's
+                // calendar quarter as the anchor, matching how the
+                // chip-row picker visualises the active quarter.
+                let today = Local::now().date_naive();
+                let year = today.year();
+                // `Datelike::month()` is 1..=12 → quarter 1..=4.
+                let q = u8::try_from((today.month() - 1) / 3 + 1).unwrap_or(1);
+                self.ui.set_period(UsagePeriod::SpecificQuarter(year, q));
+            }
+            KeyCode::Char { ch: 'a' } => self.ui.set_period(UsagePeriod::All),
+            KeyCode::Left => self.ui.prev_provider(),
+            KeyCode::Right => self.ui.next_provider(),
+            KeyCode::Tab => self.ui.focus_next_panel(),
+            KeyCode::BackTab => self.ui.focus_prev_panel(),
+            KeyCode::Char { ch: 'z' } => self.ui.toggle_zoom(),
+            KeyCode::Char { ch: '/' } if self.ui.is_zoomed() => self.ui.zoom_begin_search(),
+            KeyCode::Char { ch: 'd' } if self.ui.is_zoomed() => self.ui.toggle_zoom_detail(),
+            KeyCode::Enter => {
+                let _ = self.ui.commit_focused_row();
+            }
+            KeyCode::Char { ch: 'X' } => {
+                let _ = self.ui.commit_focused_row_exclude();
+            }
+            KeyCode::Char { ch: 'C' } => self.ui.clear_all_filter_chips(),
+            KeyCode::Esc => {
+                if self.ui.is_zoomed() {
+                    let _ = self.ui.zoom_handle_esc();
+                } else {
+                    let _ = self.ui.pop_filter_chip();
+                }
+            }
+            KeyCode::Char { ch: 'p' } => self.ui.cycle_provider_filter(),
+            KeyCode::Char { ch: 'k' } => self.ui.scroll_up(),
+            _ => return false,
+        }
+        true
     }
 }
 
