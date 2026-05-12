@@ -103,6 +103,16 @@ fn main() {
                 // Notification — log to stderr so the host's stderr drain sees it.
                 eprintln!("fixture: handle_event {params}");
             }
+            methods::PLUGIN_HANDLE_KEY => {
+                // Notification — re-publish the raw params as a
+                // snapshot the host integration test can poll. The
+                // shape is exactly what came in over the wire so the
+                // test can assert byte-for-byte equality without
+                // round-tripping any types.
+                eprintln!("fixture: handle_key {params}");
+                let bytes = serde_json::to_vec(&params).expect("params re-serialise");
+                publish_snapshot(&mut writer, "fixture.last_key", &bytes);
+            }
             methods::HOST_ACTION_INVOKE => {
                 // Echo the payload back as the action result. `payload`
                 // is wire-encoded as a base64 string (post-v1 wire), but

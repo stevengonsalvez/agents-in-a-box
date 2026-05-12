@@ -129,6 +129,55 @@ fn render_and_cli_round_trip() {
 }
 
 #[test]
+fn send_key_forwards_handle_key_notification() {
+    let (rt, handle) = build_runtime();
+    let id = register_fixture(&rt);
+
+    // Lazy-spawn the plugin so there's a stdin to write to.
+    drop(handle.render(&id, Viewport::new(20, 5), 0));
+
+    // Send a single key. Fixture re-publishes the params as a snapshot.
+    let key = ainb_plugin_runtime::KeyEvent {
+        code: ainb_plugin_runtime::KeyCode::Char { ch: '1' },
+        mods: 0,
+        kind: ainb_plugin_runtime::KeyKind::Press,
+    };
+    // Retry briefly in case the spawn hasn't completed yet — `send_key`
+    // drops on idle (the plugin task hasn't transitioned to Running),
+    // which would race with the lazy-spawn we just kicked off.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if handle.send_key(&id, "ainb_analytics", key.clone()) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut payload = None;
+    while std::time::Instant::now() < deadline {
+        if let Some(p) = handle.snapshot_get("fixture.last_key") {
+            payload = Some(p);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let bytes = payload.expect("fixture never re-published last_key snapshot");
+    let decoded: serde_json::Value =
+        serde_json::from_slice(&bytes).expect("fixture payload is JSON");
+
+    // Wire shape: { screen_id, key: { code: {type:"char", ch:"1"}, mods, kind }, generation }
+    assert_eq!(decoded["screen_id"], "ainb_analytics");
+    assert_eq!(decoded["key"]["code"]["type"], "char");
+    assert_eq!(decoded["key"]["code"]["ch"], "1");
+    assert_eq!(decoded["key"]["kind"], "press");
+    assert!(
+        decoded["generation"].is_u64(),
+        "generation should be present and numeric"
+    );
+}
+
+#[test]
 fn snapshot_round_trip() {
     let (rt, handle) = build_runtime();
     let id = register_fixture(&rt);
