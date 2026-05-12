@@ -69,6 +69,7 @@ impl Runtime {
             plugins: plugins.clone(),
             inboxes: inboxes.clone(),
             config,
+            key_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         });
         Ok((
             Self {
