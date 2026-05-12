@@ -2,7 +2,7 @@
 
 use ratatui::{Frame, layout::Rect};
 
-use super::{Screen, ids};
+use super::{EventOutcome, Screen, ids};
 use crate::app::AppState;
 use crate::components::{
     AgentSelectionComponent, AttachedTerminalComponent, AuthProviderPopupComponent,
@@ -57,11 +57,146 @@ impl PluginScreen {
     }
 }
 
+/// Static screen → plugin routing table. The `state.rs` render tick
+/// already maps the same way; both call sites read this so the
+/// authoritative list lives in one place.
+///
+/// Keep this list in sync with `tick_plugin_renders` in `app/state.rs`.
+pub const PLUGIN_SCREENS: &[(&str, &str)] = &[(ids::ANALYTICS, "burndown")];
+
+/// Resolve the plugin id that owns `screen_id`, if any.
+#[must_use]
+pub fn plugin_id_for_screen(screen_id: &str) -> Option<&'static str> {
+    PLUGIN_SCREENS
+        .iter()
+        .find_map(|(s, p)| (*s == screen_id).then_some(*p))
+}
+
+/// Convert a `crossterm::event::KeyEvent` into the portable wire
+/// shape consumed by `plugin/handle_key`. Returns `None` for keys we
+/// don't model on the wire (e.g. media keys, mouse events surfaced as
+/// `KeyEvent::Modifier`-only no-ops on some terminals) so callers can
+/// silently drop them rather than fabricate a wire shape.
+#[must_use]
+pub fn crossterm_to_protocol_key(
+    key: &crossterm::event::KeyEvent,
+) -> Option<ainb_plugin_runtime::KeyEvent> {
+    use ainb_plugin_runtime::{
+        KEY_MOD_ALT, KEY_MOD_CTRL, KEY_MOD_SHIFT, KEY_MOD_SUPER, KeyCode as ProtocolKey,
+        KeyEvent as ProtocolEvent, KeyKind as ProtocolKind,
+    };
+    use crossterm::event::{KeyCode as CtKey, KeyEventKind as CtKind, KeyModifiers as CtMods};
+
+    let code = match key.code {
+        CtKey::Char(c) => ProtocolKey::Char { ch: c },
+        CtKey::Enter => ProtocolKey::Enter,
+        CtKey::Tab => ProtocolKey::Tab,
+        CtKey::BackTab => ProtocolKey::BackTab,
+        CtKey::Esc => ProtocolKey::Esc,
+        CtKey::Backspace => ProtocolKey::Backspace,
+        CtKey::Delete => ProtocolKey::Delete,
+        CtKey::Up => ProtocolKey::Up,
+        CtKey::Down => ProtocolKey::Down,
+        CtKey::Left => ProtocolKey::Left,
+        CtKey::Right => ProtocolKey::Right,
+        CtKey::Home => ProtocolKey::Home,
+        CtKey::End => ProtocolKey::End,
+        CtKey::PageUp => ProtocolKey::PageUp,
+        CtKey::PageDown => ProtocolKey::PageDown,
+        CtKey::F(n) => ProtocolKey::F { n },
+        _ => return None,
+    };
+
+    let mut mods: u8 = 0;
+    if key.modifiers.contains(CtMods::SHIFT) {
+        mods |= KEY_MOD_SHIFT;
+    }
+    if key.modifiers.contains(CtMods::CONTROL) {
+        mods |= KEY_MOD_CTRL;
+    }
+    if key.modifiers.contains(CtMods::ALT) {
+        mods |= KEY_MOD_ALT;
+    }
+    if key.modifiers.contains(CtMods::SUPER) {
+        mods |= KEY_MOD_SUPER;
+    }
+
+    let kind = match key.kind {
+        CtKind::Press => ProtocolKind::Press,
+        CtKind::Repeat => ProtocolKind::Repeat,
+        CtKind::Release => ProtocolKind::Release,
+    };
+
+    Some(ProtocolEvent { code, mods, kind })
+}
+
+/// `true` if the host reserves this key — it MUST NOT be forwarded to
+/// the plugin and MUST fall through to the central dispatch.
+///
+/// The reservation list is deliberately small:
+///
+/// - `Ctrl+C` → host quit (always).
+/// - `?` / `H` → help toggle (already short-circuited above
+///   `handle_key_event`'s plugin branch, but listed here for parity in
+///   the `PluginScreen` trait impl path).
+///
+/// `Esc`, `q`, `a`, `Tab`, `Enter`, etc. are NOT reserved — the
+/// burndown plugin re-binds them to period switches, filter pops,
+/// panel focus, and zoom toggles. Letting the host swallow them would
+/// make the screen uninteractive.
+#[must_use]
+pub fn is_host_reserved_key(key: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::{KeyCode as CtKey, KeyModifiers as CtMods};
+    match key.code {
+        CtKey::Char('c') if key.modifiers.contains(CtMods::CONTROL) => true,
+        CtKey::Char('?' | 'H') => true,
+        _ => false,
+    }
+}
+
+/// Try to forward `key` to the plugin owning `current_screen`. Returns
+/// `Handled` if the host claimed it (plugin forwarder ran or the host
+/// reservation list bailed us out), `NotHandled` if the caller's
+/// upstream key dispatch should run instead (no plugin owns this
+/// screen, or no plugin runtime is initialised yet).
+pub fn forward_key_to_focused_plugin(
+    state: &mut AppState,
+    key: &crossterm::event::KeyEvent,
+) -> EventOutcome {
+    let Some(plugin_name) = plugin_id_for_screen(&state.current_screen) else {
+        return EventOutcome::NotHandled;
+    };
+    if is_host_reserved_key(key) {
+        // Host claims this key — let the central dispatch in
+        // `events.rs` resolve it to Quit / ToggleHelp / etc.
+        return EventOutcome::NotHandled;
+    }
+    let Some(runtime) = state.plugin_runtime.as_ref() else {
+        return EventOutcome::NotHandled;
+    };
+    let Some(protocol_key) = crossterm_to_protocol_key(key) else {
+        // Unmodelled key (e.g. media keys) — silently drop. Better
+        // than forging a wire shape.
+        return EventOutcome::Handled;
+    };
+    let pid = ainb_plugin_runtime::PluginId::from(plugin_name);
+    let _ = runtime.send_key(&pid, state.current_screen.clone(), protocol_key);
+    EventOutcome::Handled
+}
+
 impl Screen for PluginScreen {
     fn id(&self) -> &str {
         self.screen_id
     }
     fn render(&mut self, frame: &mut Frame, area: Rect, state: &mut AppState) {
+        // Stash the allocated size so the next tick of
+        // `App::tick_plugin_renders` can ask the plugin for a buffer that
+        // actually fills this area. Without this the plugin renders into
+        // its fallback (80×24) and everything outside that rect stays blank.
+        state
+            .plugin_render_areas
+            .insert(self.screen_id.to_string(), (area.width, area.height));
+
         let Some(wire) = state.pending_plugin_renders.get(self.screen_id) else {
             let placeholder = ratatui::widgets::Paragraph::new(format!(
                 "[plugin {}: rendering...]",
@@ -88,6 +223,14 @@ impl Screen for PluginScreen {
                     .add_modifier(modifier_bits_to_modifiers(cell.modifier)),
             );
         }
+    }
+
+    fn handle_key(
+        &mut self,
+        state: &mut AppState,
+        key: &crossterm::event::KeyEvent,
+    ) -> EventOutcome {
+        forward_key_to_focused_plugin(state, key)
     }
 }
 
@@ -462,5 +605,122 @@ mod tests {
         assert!(!r.contains(ids::SESSION_LIST));
         assert!(!r.contains(ids::NEW_SESSION));
         assert!(!r.contains(ids::CLAUDE_CHAT));
+    }
+
+    #[test]
+    fn crossterm_to_protocol_translates_char_and_mods() {
+        use ainb_plugin_runtime::{
+            KEY_MOD_CTRL, KEY_MOD_SHIFT, KeyCode as ProtocolKey, KeyKind as ProtocolKind,
+        };
+        use crossterm::event::{
+            KeyCode as CtKey, KeyEvent as CtEvent, KeyEventKind, KeyEventState, KeyModifiers,
+        };
+
+        // Plain '1' → Char { ch: '1' }, no mods, Press.
+        let ev = CtEvent {
+            code: CtKey::Char('1'),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::empty(),
+        };
+        let p = crossterm_to_protocol_key(&ev).expect("char key translates");
+        assert_eq!(p.code, ProtocolKey::Char { ch: '1' });
+        assert_eq!(p.mods, 0);
+        assert_eq!(p.kind, ProtocolKind::Press);
+
+        // Ctrl+Shift+'z' → Char { ch: 'z' } with both bits set.
+        let ev = CtEvent {
+            code: CtKey::Char('z'),
+            modifiers: KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::empty(),
+        };
+        let p = crossterm_to_protocol_key(&ev).expect("modified char translates");
+        assert_eq!(p.code, ProtocolKey::Char { ch: 'z' });
+        assert_eq!(p.mods, KEY_MOD_CTRL | KEY_MOD_SHIFT);
+    }
+
+    #[test]
+    fn crossterm_to_protocol_translates_named_keys() {
+        use ainb_plugin_runtime::KeyCode as ProtocolKey;
+        use crossterm::event::{
+            KeyCode as CtKey, KeyEvent as CtEvent, KeyEventKind, KeyEventState, KeyModifiers,
+        };
+
+        let cases = [
+            (CtKey::Enter, ProtocolKey::Enter),
+            (CtKey::Tab, ProtocolKey::Tab),
+            (CtKey::BackTab, ProtocolKey::BackTab),
+            (CtKey::Esc, ProtocolKey::Esc),
+            (CtKey::Backspace, ProtocolKey::Backspace),
+            (CtKey::Delete, ProtocolKey::Delete),
+            (CtKey::Up, ProtocolKey::Up),
+            (CtKey::Down, ProtocolKey::Down),
+            (CtKey::Left, ProtocolKey::Left),
+            (CtKey::Right, ProtocolKey::Right),
+            (CtKey::Home, ProtocolKey::Home),
+            (CtKey::End, ProtocolKey::End),
+            (CtKey::PageUp, ProtocolKey::PageUp),
+            (CtKey::PageDown, ProtocolKey::PageDown),
+            (CtKey::F(7), ProtocolKey::F { n: 7 }),
+        ];
+
+        for (ct, expected) in cases {
+            let ev = CtEvent {
+                code: ct,
+                modifiers: KeyModifiers::NONE,
+                kind: KeyEventKind::Press,
+                state: KeyEventState::empty(),
+            };
+            let p = crossterm_to_protocol_key(&ev)
+                .unwrap_or_else(|| panic!("translation missing for {ct:?}"));
+            assert_eq!(p.code, expected, "wrong protocol code for {ct:?}");
+        }
+    }
+
+    #[test]
+    fn host_reserves_ctrl_c_and_help_keys() {
+        use crossterm::event::{
+            KeyCode as CtKey, KeyEvent as CtEvent, KeyEventKind, KeyEventState, KeyModifiers,
+        };
+
+        let mk = |code, mods| CtEvent {
+            code,
+            modifiers: mods,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::empty(),
+        };
+
+        // Reserved.
+        assert!(is_host_reserved_key(&mk(CtKey::Char('c'), KeyModifiers::CONTROL)));
+        assert!(is_host_reserved_key(&mk(CtKey::Char('?'), KeyModifiers::NONE)));
+        assert!(is_host_reserved_key(&mk(CtKey::Char('H'), KeyModifiers::NONE)));
+
+        // NOT reserved — these belong to the plugin on the analytics
+        // screen (period switches, focus, filters, zoom).
+        for k in [
+            CtKey::Esc,
+            CtKey::Char('q'),
+            CtKey::Char('a'),
+            CtKey::Char('1'),
+            CtKey::Char('2'),
+            CtKey::Char('z'),
+            CtKey::Enter,
+            CtKey::Tab,
+            CtKey::BackTab,
+        ] {
+            assert!(
+                !is_host_reserved_key(&mk(k, KeyModifiers::NONE)),
+                "host must not reserve {k:?} — plugin owns it"
+            );
+        }
+    }
+
+    #[test]
+    fn plugin_id_for_screen_resolves_analytics() {
+        assert_eq!(plugin_id_for_screen(ids::ANALYTICS), Some("burndown"));
+        // Non-plugin screens return None so the forwarder bails early.
+        assert_eq!(plugin_id_for_screen(ids::HOME), None);
+        assert_eq!(plugin_id_for_screen("nonsense"), None);
     }
 }

@@ -40,7 +40,13 @@ Thumbs.db
 
 # Agents Box specific
 .agents-box/
-.claude/
+# Override parent .gitignore's blanket `.claude/` ignore so project-local
+# skills travel with the repo. Re-include the directory FIRST (git can't
+# unignore children if the parent is excluded), then ignore everything
+# inside it except `skills/`.
+!.claude/
+.claude/*
+!.claude/skills/
 worktrees/
 
 # Testing

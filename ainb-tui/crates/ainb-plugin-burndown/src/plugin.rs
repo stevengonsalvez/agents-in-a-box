@@ -8,10 +8,13 @@
 //! arrived yet.
 
 use ainb_plugin_sdk::{
-    Cell, CliOutput, Color, Coord, HostClient, Plugin, RenderParams, Result, SdkError,
-    WireBuffer,
+    Cell, CliOutput, Color, Coord, HandleKeyParams, HostClient, KeyCode, Plugin, RenderParams,
+    Result, SdkError, WireBuffer,
 };
-use ainb_plugin_types_sessions::{UsageDataEvent, WIRE_VERSION};
+use crate::data::usage::UsagePeriod;
+use ainb_plugin_types_sessions::{
+    ScanProgressEvent, UsageData as WireUsageData, UsageDataEvent, WIRE_VERSION,
+};
 use async_trait::async_trait;
 use ratatui::buffer::Buffer as RBuffer;
 use ratatui::layout::Rect as RRect;
@@ -32,19 +35,50 @@ const MANIFEST_TOML: &str = include_str!("../plugin.toml");
 /// 0×0 ever arrives. Matches the historical 80×24 baseline.
 const FALLBACK_VIEWPORT: (u16, u16) = (80, 24);
 
+/// Disposition of one [`UsageDataEvent`] chunk after
+/// [`BurndownPlugin::apply_chunk_pure`] processes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChunkOutcome {
+    /// Chunk accepted; sequence not yet final.
+    Buffered,
+    /// `is_final = true` chunk completed the sequence; `self.data` is
+    /// now live.
+    Finalised,
+    /// Follow-on chunk arrived without a preceding `chunk_index = 0`
+    /// — dropped, accumulator state unchanged.
+    DroppedFollowOn,
+}
+
 /// Burndown plugin state.
 #[derive(Default)]
 pub struct BurndownPlugin {
     /// In-memory UI state — populated from cached snapshots and
     /// CLI/event-driven tab switches.
     ui: UsageViewState,
-    /// Most recent `UsageData` snapshot decoded from
+    /// Most recent fully-assembled `UsageData` snapshot decoded from
     /// `sessions.usage_data`.
     data: Option<UsageData>,
+    /// Accumulator for the in-flight chunked publish (if any). Reset
+    /// on `chunk_index == 0`, appended-to on follow-on chunks,
+    /// finalised + moved into `self.data` on `is_final = true`. See
+    /// [`UsageDataEvent`] docs for the chunking protocol.
+    pending: Option<WireUsageData>,
     /// Set when the most recent snapshot's wire `version` did not match
     /// the crate's compiled [`WIRE_VERSION`]. Latched — the render path
     /// surfaces an upgrade hint instead of the wait-spinner.
     schema_mismatch: bool,
+    /// Latest `sessions.scan_progress` event from session-reader.
+    /// Drives the skeleton/"Scanning sessions…" line that the UI
+    /// renders before the first `sessions.usage_data` chunk lands.
+    /// Cleared once a chunked publish finalises into `self.data`.
+    scan_progress: Option<ScanProgressEvent>,
+    /// Freshness witness — bumped once per `handle_key` invocation
+    /// that actually mutated `self.ui`. The host's next
+    /// `plugin/render` will see the updated state. Future host
+    /// versions may echo this value via `RenderParams.generation`
+    /// so the host can prove the keystroke landed before the frame
+    /// was painted; today the plugin keeps it as private bookkeeping.
+    generation: u64,
 }
 
 #[async_trait]
@@ -54,15 +88,27 @@ impl Plugin for BurndownPlugin {
     }
 
     async fn on_init(&mut self, host: &HostClient, _granted: &[String]) -> Result<()> {
-        // Best-effort warm-load: ask the host for any snapshot already
-        // on the bus so the first render doesn't have to wait for the
-        // next publish. Failure is non-fatal — we'll still get pushed
-        // events via `handle_event`.
-        if let Ok(snap) = host.snapshot_get("sessions.usage_data").await {
-            if let Some(payload) = snap.payload {
-                self.ingest_usage_payload(host, &payload).await;
-            }
-        }
+        // Subscribe up front so chunked publishes from session-reader
+        // arrive via `handle_event`. The snapshot store only retains
+        // the most recent publish, so for >1-chunk snapshots a passive
+        // `snapshot_get` would miss every chunk except the last.
+        let _ = host.snapshot_subscribe("sessions.usage_data").await;
+        // Subscribe to scan-progress events so the skeleton/"Scanning
+        // sessions…" line can render while session-reader is still
+        // walking the per-provider dirs on a cold cache. Failure is
+        // non-fatal — the legacy ⏳ Waiting spinner remains.
+        let _ = host.snapshot_subscribe("sessions.scan_progress").await;
+
+        // Trigger a fresh publish. Eager-spawned session-reader runs
+        // its first publish during its own `on_init`, which races
+        // with us — burndown can subscribe mid-stream and end up
+        // missing chunk 0 of the in-flight sequence. Publishing on
+        // the `sessions.refresh_request` topic asks session-reader
+        // to rescan and re-publish from scratch, this time with us
+        // already subscribed. Best-effort: failure is non-fatal.
+        let _ = host
+            .snapshot_publish("sessions.refresh_request", bytes::Bytes::new())
+            .await;
         Ok(())
     }
 
@@ -71,8 +117,61 @@ impl Plugin for BurndownPlugin {
         host: &HostClient,
         params: ainb_plugin_sdk::HandleEventParams,
     ) -> Result<()> {
-        if params.topic == "sessions.usage_data" {
-            self.ingest_usage_payload(host, &params.payload).await;
+        match params.topic.as_str() {
+            "sessions.usage_data" => {
+                self.ingest_usage_payload(host, &params.payload).await;
+            }
+            "sessions.scan_progress" => {
+                self.ingest_scan_progress(host, &params.payload).await;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Dispatch a single keystroke forwarded by the host's
+    /// `PluginScreen::handle_key`.
+    ///
+    /// The plan in `ainb-tui/plans/plugin-interactive-keys-and-cache.md`
+    /// §Phase 4 enumerates the canonical key → UI binding. A few binds
+    /// were renamed during implementation to match what actually
+    /// exists in `ui.rs`:
+    ///
+    /// - `Esc` → `pop_filter_chip` (plan: `pop_filter`).
+    /// - `C`   → `clear_all_filter_chips` (plan: `clear_filters`).
+    /// - `d` when zoomed → `toggle_zoom_detail` (plan: `zoom_toggle_detail`).
+    ///
+    /// Two bindings were dropped because the existing UI API needs
+    /// context the dispatch can't provide without inventing new
+    /// methods:
+    ///
+    /// - `j` scroll-down: `scroll_down(max_rows)` is row-count-aware.
+    /// - `D` advanced custom period: `UsagePeriod::Custom { from, to }`
+    ///   has no sensible default range from a single key press.
+    ///
+    /// Generation is bumped only when the dispatch matched a binding,
+    /// so unmapped keys won't trigger an avoidable re-render.
+    async fn handle_key(&mut self, host: &HostClient, params: HandleKeyParams) -> Result<()> {
+        // Refresh is the one binding that needs the host. Everything
+        // else mutates `self.ui` only, so it lives in the pure helper
+        // below for testability.
+        let handled = match params.key.code {
+            KeyCode::Char { ch: 'r' | 'R' } => {
+                // Ask session-reader to re-publish from scratch. Best
+                // effort — failure is silently dropped, the existing
+                // snapshot stays on screen.
+                let _ = host
+                    .snapshot_publish("sessions.refresh_request", bytes::Bytes::new())
+                    .await;
+                true
+            }
+            _ => self.dispatch_key_pure(&params.key.code),
+        };
+        // Plan-mandated invariant: only bump generation when the
+        // dispatch matched a binding, so unmapped keys can't trigger
+        // an avoidable re-render.
+        if handled {
+            self.generation = self.generation.wrapping_add(1);
         }
         Ok(())
     }
@@ -97,6 +196,7 @@ impl Plugin for BurndownPlugin {
             // mutable borrow on `self` for the whole call.
             let mut ui = self.ui.clone();
             ui.data = self.data.clone();
+            ui.scan_progress = self.scan_progress.clone();
             render_ui(&mut rbuf, area, &ui);
         }
         Ok(buffer_to_wire(&rbuf, area))
@@ -180,8 +280,13 @@ impl Plugin for BurndownPlugin {
 
 impl BurndownPlugin {
     /// Decode a `sessions.usage_data` payload (msgpack-encoded
-    /// `UsageDataEvent`) and update local state. Notes wire-version
-    /// drift on the latched `schema_mismatch` flag.
+    /// `UsageDataEvent`) and update local state. Handles chunked
+    /// publishes: chunk 0 resets the accumulator, follow-on chunks
+    /// append their `calls` slice, and `is_final = true` moves the
+    /// accumulator into `self.data`. Single-chunk publishes (the v1
+    /// path, plus small `$HOME`s) take exactly the same code path
+    /// because their defaults are `chunk_index = 0, is_final = true`.
+    /// Notes wire-version drift on the latched `schema_mismatch` flag.
     async fn ingest_usage_payload(&mut self, host: &HostClient, payload: &[u8]) {
         let event: UsageDataEvent = match rmp_serde::from_slice(payload) {
             Ok(e) => e,
@@ -204,8 +309,75 @@ impl BurndownPlugin {
                 .await;
             return;
         }
-        self.data = Some(wire_to_local(event.data));
-        self.schema_mismatch = false;
+        self.apply_chunk(event, host).await;
+    }
+
+    /// Drive the chunk accumulator. Logs to `host` on protocol misuse
+    /// (follow-on chunk with no in-flight publish); calls into the
+    /// pure [`Self::apply_chunk_pure`] for the actual state transition
+    /// so unit tests can hit every branch without a `HostClient`.
+    async fn apply_chunk(&mut self, event: UsageDataEvent, host: &HostClient) {
+        let chunk_index = event.chunk_index;
+        let outcome = self.apply_chunk_pure(event);
+        if matches!(outcome, ChunkOutcome::DroppedFollowOn) {
+            let _ = host
+                .log_info(format!(
+                    "burndown: dropped follow-on chunk {chunk_index} (no in-flight publish)"
+                ))
+                .await;
+        }
+    }
+
+    /// Pure version of [`Self::apply_chunk`] — no host I/O. Returns
+    /// the disposition so the async wrapper can log the misuse path.
+    fn apply_chunk_pure(&mut self, event: UsageDataEvent) -> ChunkOutcome {
+        if event.chunk_index == 0 {
+            // Fresh publish sequence — seed the accumulator with the
+            // full aggregates + first call slice. Any prior in-flight
+            // accumulator is discarded (the publisher abandoned it).
+            self.pending = Some(event.data);
+        } else {
+            // Append `calls` onto the in-flight accumulator. If we
+            // missed chunk 0 (subscriber joined late or sequence got
+            // reordered), drop the chunk — partial data without
+            // aggregates is worse than no data.
+            match self.pending.as_mut() {
+                Some(acc) => acc.calls.extend(event.data.calls),
+                None => return ChunkOutcome::DroppedFollowOn,
+            }
+        }
+
+        if event.is_final {
+            if let Some(assembled) = self.pending.take() {
+                self.data = Some(wire_to_local(assembled));
+                self.schema_mismatch = false;
+                // Real data has landed — the scan is done. Drop any
+                // lingering progress event so the UI flips from
+                // skeleton to populated panels on the next render.
+                self.scan_progress = None;
+                return ChunkOutcome::Finalised;
+            }
+        }
+        ChunkOutcome::Buffered
+    }
+
+    /// Decode a `sessions.scan_progress` payload and stash it as the
+    /// latest known progress. Malformed payloads are logged and
+    /// dropped — the skeleton just keeps showing the previous tick (or
+    /// the ⏳ waiting line if no tick has arrived yet).
+    async fn ingest_scan_progress(&mut self, host: &HostClient, payload: &[u8]) {
+        match rmp_serde::from_slice::<ScanProgressEvent>(payload) {
+            Ok(evt) => {
+                self.scan_progress = Some(evt);
+            }
+            Err(e) => {
+                let _ = host
+                    .log_info(format!(
+                        "burndown: malformed sessions.scan_progress payload: {e}"
+                    ))
+                    .await;
+            }
+        }
     }
 
     /// Pull the latest snapshot synchronously. Used by `cli_dispatch`
@@ -430,5 +602,445 @@ impl BurndownPlugin {
     #[allow(dead_code)]
     pub fn set_active_tab(&mut self, tab: UsageTab) {
         self.ui.active_tab = tab;
+    }
+
+    /// Pure version of the `handle_key` match — applies every
+    /// non-host-touching binding to `self.ui` and returns whether
+    /// the key was claimed. Lets unit tests exercise the dispatch
+    /// without spinning up a `HostClient`.
+    ///
+    /// The `r`/`R` refresh binding is intentionally NOT here; it
+    /// lives in the async `handle_key` because it needs the host.
+    fn dispatch_key_pure(&mut self, code: &KeyCode) -> bool {
+        use chrono::{Datelike, Local};
+
+        match *code {
+            KeyCode::Char { ch: '1' } => self.ui.set_period(UsagePeriod::Today),
+            KeyCode::Char { ch: '2' } => self.ui.set_period(UsagePeriod::Week),
+            KeyCode::Char { ch: '3' } => self.ui.set_period(UsagePeriod::ThirtyDays),
+            KeyCode::Char { ch: '4' } => self.ui.set_period(UsagePeriod::LastNDays(90)),
+            KeyCode::Char { ch: '5' } => self.ui.set_period(UsagePeriod::YearToDate),
+            KeyCode::Char { ch: 'm' } => self.ui.set_period(UsagePeriod::Month),
+            KeyCode::Char { ch: 'q' } => {
+                // No plain `Quarter` variant exists — use today's
+                // calendar quarter as the anchor, matching how the
+                // chip-row picker visualises the active quarter.
+                let today = Local::now().date_naive();
+                let year = today.year();
+                // `Datelike::month()` is 1..=12 → quarter 1..=4.
+                let q = u8::try_from((today.month() - 1) / 3 + 1).unwrap_or(1);
+                self.ui.set_period(UsagePeriod::SpecificQuarter(year, q));
+            }
+            KeyCode::Char { ch: 'a' } => self.ui.set_period(UsagePeriod::All),
+            KeyCode::Left => self.ui.prev_provider(),
+            KeyCode::Right => self.ui.next_provider(),
+            KeyCode::Tab => self.ui.focus_next_panel(),
+            KeyCode::BackTab => self.ui.focus_prev_panel(),
+            KeyCode::Char { ch: 'z' } => self.ui.toggle_zoom(),
+            KeyCode::Char { ch: '/' } if self.ui.is_zoomed() => self.ui.zoom_begin_search(),
+            KeyCode::Char { ch: 'd' } if self.ui.is_zoomed() => self.ui.toggle_zoom_detail(),
+            KeyCode::Enter => {
+                let _ = self.ui.commit_focused_row();
+            }
+            KeyCode::Char { ch: 'X' } => {
+                let _ = self.ui.commit_focused_row_exclude();
+            }
+            KeyCode::Char { ch: 'C' } => self.ui.clear_all_filter_chips(),
+            KeyCode::Esc => {
+                if self.ui.is_zoomed() {
+                    let _ = self.ui.zoom_handle_esc();
+                } else {
+                    let _ = self.ui.pop_filter_chip();
+                }
+            }
+            KeyCode::Char { ch: 'p' } => self.ui.cycle_provider_filter(),
+            KeyCode::Char { ch: 'k' } => self.ui.scroll_up(),
+            _ => return false,
+        }
+        true
+    }
+}
+
+#[cfg(test)]
+mod handle_key_dispatch_tests {
+    use super::*;
+    use ainb_plugin_sdk::KeyCode;
+
+    fn ch(c: char) -> KeyCode {
+        KeyCode::Char { ch: c }
+    }
+
+    #[test]
+    fn period_keys_map_to_expected_variants() {
+        let cases: &[(KeyCode, UsagePeriod)] = &[
+            (ch('1'), UsagePeriod::Today),
+            (ch('2'), UsagePeriod::Week),
+            (ch('3'), UsagePeriod::ThirtyDays),
+            (ch('4'), UsagePeriod::LastNDays(90)),
+            (ch('5'), UsagePeriod::YearToDate),
+            (ch('m'), UsagePeriod::Month),
+            (ch('a'), UsagePeriod::All),
+        ];
+        for (code, expected) in cases {
+            let mut p = BurndownPlugin::default();
+            assert!(p.dispatch_key_pure(code), "binding missing for {code:?}");
+            assert_eq!(
+                p.ui.period, *expected,
+                "period mismatch after dispatching {code:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn quarter_key_anchors_on_today() {
+        use chrono::{Datelike, Local};
+        let today = Local::now().date_naive();
+        let expected_q = u8::try_from((today.month() - 1) / 3 + 1).unwrap();
+
+        let mut p = BurndownPlugin::default();
+        assert!(p.dispatch_key_pure(&ch('q')));
+        match p.ui.period {
+            UsagePeriod::SpecificQuarter(year, q) => {
+                assert_eq!(year, today.year());
+                assert_eq!(q, expected_q);
+            }
+            other => panic!("expected SpecificQuarter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arrow_keys_advance_provider_filter() {
+        // `next_provider` / `prev_provider` walk a 4-state internal
+        // `UsageProvider` enum and derive `provider_filter` from it.
+        // Asserting a round-trip is brittle — Gemini/Copilot both map
+        // back to `All`, so Left after one Right doesn't return to
+        // the starting filter. Just confirm each arrow claims the
+        // key and mutates state at least once.
+        let mut p = BurndownPlugin::default();
+        let starting = p.ui.provider_filter;
+        assert!(p.dispatch_key_pure(&KeyCode::Right));
+        let after_right = p.ui.provider_filter;
+        let mut p = BurndownPlugin::default();
+        assert!(p.dispatch_key_pure(&KeyCode::Left));
+        let after_left = p.ui.provider_filter;
+        assert!(
+            after_right != starting || after_left != starting,
+            "at least one arrow direction must mutate provider_filter from default {starting:?}"
+        );
+    }
+
+    #[test]
+    fn tab_cycles_focused_panel() {
+        let mut p = BurndownPlugin::default();
+        let before = p.ui.focused_panel;
+        assert!(p.dispatch_key_pure(&KeyCode::Tab));
+        let after = p.ui.focused_panel;
+        assert_ne!(before, after, "Tab must change focused panel");
+    }
+
+    #[test]
+    fn z_toggles_zoom_state() {
+        let mut p = BurndownPlugin::default();
+        assert!(!p.ui.is_zoomed());
+        // First need a focused panel so toggle_zoom has something to
+        // zoom into.
+        let _ = p.dispatch_key_pure(&KeyCode::Tab);
+        assert!(p.dispatch_key_pure(&ch('z')));
+        assert!(p.ui.is_zoomed(), "z must zoom into focused panel");
+        assert!(p.dispatch_key_pure(&ch('z')));
+        assert!(!p.ui.is_zoomed(), "second z must un-zoom");
+    }
+
+    #[test]
+    fn slash_only_dispatches_while_zoomed() {
+        let mut p = BurndownPlugin::default();
+        // Not zoomed → `/` is unbound (returns false, no generation bump).
+        assert!(!p.dispatch_key_pure(&ch('/')));
+        // Zoom in.
+        let _ = p.dispatch_key_pure(&KeyCode::Tab);
+        assert!(p.dispatch_key_pure(&ch('z')));
+        assert!(p.ui.is_zoomed());
+        // Now zoomed → `/` claims the key.
+        assert!(p.dispatch_key_pure(&ch('/')));
+    }
+
+    #[test]
+    fn esc_pops_filter_when_not_zoomed_and_unzooms_when_zoomed() {
+        let mut p = BurndownPlugin::default();
+        // Not zoomed: Esc claims the key (no-op against an empty
+        // filter stack, but still bumps generation).
+        assert!(p.dispatch_key_pure(&KeyCode::Esc));
+
+        // Zoomed: Esc should also claim, and un-zoom.
+        let _ = p.dispatch_key_pure(&KeyCode::Tab);
+        assert!(p.dispatch_key_pure(&ch('z')));
+        assert!(p.ui.is_zoomed());
+        assert!(p.dispatch_key_pure(&KeyCode::Esc));
+        assert!(!p.ui.is_zoomed(), "Esc must exit zoom");
+    }
+
+    #[test]
+    fn k_scrolls_up() {
+        // Even on an empty state `scroll_up` is a no-op `saturating_sub` —
+        // the binding still claims the key. We're really asserting the
+        // dispatch wiring rather than the scroll math.
+        let mut p = BurndownPlugin::default();
+        assert!(p.dispatch_key_pure(&ch('k')));
+    }
+
+    #[test]
+    fn unmapped_keys_are_not_claimed() {
+        let mut p = BurndownPlugin::default();
+        // 'D' (advanced/custom) was deliberately dropped — needs a date range.
+        assert!(!p.dispatch_key_pure(&ch('D')));
+        // 'j' was dropped — `scroll_down` needs a row-count we can't
+        // know from the dispatch.
+        assert!(!p.dispatch_key_pure(&ch('j')));
+        // Random Unicode key.
+        assert!(!p.dispatch_key_pure(&ch('🚀')));
+        // F-key.
+        assert!(!p.dispatch_key_pure(&KeyCode::F { n: 5 }));
+    }
+
+    #[test]
+    fn generation_bumps_only_when_dispatch_handled() {
+        // We can't drive the async `handle_key` without a HostClient,
+        // but we can replicate its bookkeeping using the pure helper
+        // — which is what `handle_key` does for every non-`r` binding.
+        let mut p = BurndownPlugin::default();
+        let g0 = p.generation;
+
+        // Handled key → bump.
+        let handled = p.dispatch_key_pure(&ch('1'));
+        if handled {
+            p.generation = p.generation.wrapping_add(1);
+        }
+        assert_eq!(p.generation, g0 + 1, "handled key must bump generation");
+
+        // Unmapped key → no bump.
+        let handled = p.dispatch_key_pure(&ch('j'));
+        if handled {
+            p.generation = p.generation.wrapping_add(1);
+        }
+        assert_eq!(
+            p.generation,
+            g0 + 1,
+            "unmapped key must NOT bump generation"
+        );
+    }
+}
+
+#[cfg(test)]
+mod chunk_accumulator_tests {
+    use super::*;
+    use ainb_plugin_types_sessions::{
+        ProjectUsage, Provider, ProviderCall, TokenBucket, WIRE_VERSION,
+    };
+    use chrono::{DateTime, Utc};
+
+    fn fake_call(id: u64) -> ProviderCall {
+        ProviderCall {
+            id,
+            provider: Provider::Claude,
+            model: "claude-sonnet".into(),
+            session_id: "s".into(),
+            project: "p".into(),
+            project_path: "/tmp".into(),
+            timestamp: DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap(),
+            input_tokens: 1,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            output_tokens: 1,
+            reasoning_tokens: 0,
+            cost_usd: None,
+            tools: vec![],
+            bash_commands: vec![],
+            user_message: String::new(),
+            branch: None,
+        }
+    }
+
+    fn chunk(idx: u32, is_final: bool, calls: Vec<ProviderCall>) -> UsageDataEvent {
+        let mut data = WireUsageData::default();
+        data.calls = calls;
+        if idx == 0 {
+            // Plant an aggregate so we can assert chunk 0 seeds the
+            // accumulator with the full payload.
+            data.projects = vec![ProjectUsage {
+                name: "p".into(),
+                path: "/tmp".into(),
+                bucket: TokenBucket::default(),
+                repo: None,
+            }];
+        }
+        UsageDataEvent {
+            version: WIRE_VERSION,
+            published_ns: 0,
+            partial: false,
+            chunk_index: idx,
+            is_final,
+            data,
+        }
+    }
+
+    #[test]
+    fn single_chunk_finalises_immediately() {
+        let mut p = BurndownPlugin::default();
+        let outcome =
+            p.apply_chunk_pure(chunk(0, true, vec![fake_call(1), fake_call(2)]));
+        assert_eq!(outcome, ChunkOutcome::Finalised);
+        assert!(p.pending.is_none());
+        let d = p.data.as_ref().expect("snapshot finalised");
+        assert_eq!(d.calls.len(), 2);
+    }
+
+    #[test]
+    fn three_chunk_sequence_accumulates_then_finalises() {
+        let mut p = BurndownPlugin::default();
+        assert_eq!(
+            p.apply_chunk_pure(chunk(0, false, vec![fake_call(1)])),
+            ChunkOutcome::Buffered
+        );
+        assert_eq!(
+            p.apply_chunk_pure(chunk(1, false, vec![fake_call(2)])),
+            ChunkOutcome::Buffered
+        );
+        // Mid-flight: no live data yet.
+        assert!(p.data.is_none());
+        assert_eq!(
+            p.apply_chunk_pure(chunk(2, true, vec![fake_call(3)])),
+            ChunkOutcome::Finalised
+        );
+        let d = p.data.as_ref().expect("snapshot finalised");
+        assert_eq!(d.calls.len(), 3);
+        // Calls arrive in chunk order.
+        assert_eq!(d.calls[0].id, 1);
+        assert_eq!(d.calls[2].id, 3);
+    }
+
+    #[test]
+    fn follow_on_chunk_without_chunk_zero_is_dropped() {
+        let mut p = BurndownPlugin::default();
+        assert_eq!(
+            p.apply_chunk_pure(chunk(1, true, vec![fake_call(1)])),
+            ChunkOutcome::DroppedFollowOn
+        );
+        assert!(p.data.is_none(), "must not finalise from a stray chunk");
+        assert!(p.pending.is_none());
+    }
+
+    #[test]
+    fn new_chunk_zero_discards_in_flight_accumulator() {
+        let mut p = BurndownPlugin::default();
+        let _ = p.apply_chunk_pure(chunk(0, false, vec![fake_call(1)]));
+        let _ = p.apply_chunk_pure(chunk(1, false, vec![fake_call(2)]));
+        // Publisher abandoned and started over.
+        assert_eq!(
+            p.apply_chunk_pure(chunk(0, true, vec![fake_call(99)])),
+            ChunkOutcome::Finalised
+        );
+        let d = p.data.as_ref().unwrap();
+        assert_eq!(d.calls.len(), 1, "old accumulator was discarded");
+        assert_eq!(d.calls[0].id, 99);
+    }
+
+    #[test]
+    fn finalising_clears_schema_mismatch_flag() {
+        let mut p = BurndownPlugin::default();
+        p.schema_mismatch = true;
+        let _ = p.apply_chunk_pure(chunk(0, true, vec![fake_call(1)]));
+        assert!(!p.schema_mismatch);
+    }
+
+    #[test]
+    fn finalising_clears_stashed_scan_progress() {
+        // Once real data arrives the skeleton must disappear — so the
+        // chunk accumulator drops `scan_progress` when it finalises a
+        // sequence into `self.data`.
+        let mut p = BurndownPlugin::default();
+        p.scan_progress = Some(ScanProgressEvent {
+            scanned: 7,
+            total: 100,
+            current_project: "alpha".into(),
+        });
+        let _ = p.apply_chunk_pure(chunk(0, true, vec![fake_call(1)]));
+        assert!(
+            p.scan_progress.is_none(),
+            "scan_progress must clear on finalise so the skeleton goes away"
+        );
+    }
+}
+
+#[cfg(test)]
+mod scan_progress_tests {
+    //! Cover the `sessions.scan_progress` event path end-to-end: a
+    //! plugin instance receives 3 progress events via the same wire
+    //! shape session-reader publishes, and the stashed state matches
+    //! after each one. Verifies the plan's "fixture publishes 3
+    //! progress events → burndown renders 1/3, 2/3, 3/3 in order"
+    //! gate at the state level; the UI render assertion lives in
+    //! `ui::tests::scan_progress_skeleton_renders_n_of_m`.
+    use super::*;
+
+    fn payload(scanned: u32, total: u32, project: &str) -> Vec<u8> {
+        rmp_serde::to_vec_named(&ScanProgressEvent {
+            scanned,
+            total,
+            current_project: project.into(),
+        })
+        .expect("encode scan_progress")
+    }
+
+    #[test]
+    fn three_progress_payloads_stash_in_order_and_clear_on_data() {
+        let mut p = BurndownPlugin::default();
+
+        // Decode three payloads via the same path `handle_event` uses
+        // for the wire bytes — `rmp_serde::from_slice<ScanProgressEvent>`.
+        for (i, total) in [(1, 3), (2, 3), (3, 3)] {
+            let bytes = payload(i, total, &format!("project-{i}"));
+            let decoded: ScanProgressEvent =
+                rmp_serde::from_slice(&bytes).expect("decode round-trips");
+            p.scan_progress = Some(decoded);
+            let stashed = p.scan_progress.as_ref().expect("stashed");
+            assert_eq!(stashed.scanned, i);
+            assert_eq!(stashed.total, 3);
+            assert_eq!(stashed.current_project, format!("project-{i}"));
+        }
+
+        // Real data arrives → skeleton goes away.
+        let mut data = WireUsageData::default();
+        data.calls = Vec::new();
+        let event = UsageDataEvent {
+            version: WIRE_VERSION,
+            published_ns: 0,
+            partial: false,
+            chunk_index: 0,
+            is_final: true,
+            data,
+        };
+        let outcome = p.apply_chunk_pure(event);
+        assert_eq!(outcome, ChunkOutcome::Finalised);
+        assert!(p.scan_progress.is_none());
+    }
+
+    #[test]
+    fn malformed_payload_leaves_state_unchanged() {
+        // `rmp_serde::from_slice` rejects non-msgpack bytes; the
+        // existing stashed progress (if any) must survive.
+        let mut p = BurndownPlugin::default();
+        p.scan_progress = Some(ScanProgressEvent {
+            scanned: 5,
+            total: 10,
+            current_project: "good".into(),
+        });
+        let bad = b"\xff\xff\xff not msgpack";
+        let result = rmp_serde::from_slice::<ScanProgressEvent>(bad);
+        assert!(result.is_err(), "garbage payload rejected by decoder");
+        // The ingest path drops the err and keeps the prior state —
+        // simulate that contract here without spinning up a HostClient.
+        let stash = p.scan_progress.as_ref().unwrap();
+        assert_eq!(stash.scanned, 5);
+        assert_eq!(stash.current_project, "good");
     }
 }

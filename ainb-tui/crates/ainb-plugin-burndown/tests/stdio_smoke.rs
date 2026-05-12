@@ -108,22 +108,67 @@ fn init_render_shutdown_round_trip() {
     stdin.write_all(&encode(&init)).expect("write init");
     stdin.flush().expect("flush init");
 
-    // Burndown's `on_init` calls `host.snapshot_get("sessions.usage_data")`
-    // to warm-load any existing snapshot. The SDK awaits `on_init`
-    // before sending the init reply, so the test sees the reverse-call
-    // *first*. Answer it with an empty payload so init can complete.
-    let rev = read_frame(&mut stdout, deadline).expect("reverse-call request");
-    assert_eq!(rev["method"], "host/snapshot/get", "reverse: {rev}");
-    let rev_id = rev["id"].as_i64().expect("reverse request must have id");
-    let rev_reply = json!({
+    // Burndown's `on_init` issues three reverse calls in order before
+    // returning: (1) `host/snapshot/subscribe` to `sessions.usage_data`
+    // (request — expects a reply), (2) a second `host/snapshot/subscribe`
+    // to `sessions.scan_progress` (request — Phase 6 progress UX), then
+    // (3) `host/snapshot/publish` on the refresh_request topic to kick
+    // session-reader (notification — no reply). The SDK awaits
+    // `on_init` before replying to `plugin/init`, so all three reverse
+    // calls land before the init response.
+    let rev1 = read_frame(&mut stdout, deadline).expect("subscribe reverse-call");
+    assert_eq!(
+        rev1["method"], "host/snapshot/subscribe",
+        "reverse #1: {rev1}"
+    );
+    assert_eq!(
+        rev1["params"]["topic"], "sessions.usage_data",
+        "reverse #1 topic: {rev1}"
+    );
+    let rev1_id = rev1["id"].as_i64().expect("reverse request must have id");
+    let rev1_reply = json!({
         "jsonrpc": "2.0",
-        "id": rev_id,
-        "result": { "payload": null, "version": 0 }
+        "id": rev1_id,
+        "result": {}
     });
     stdin
-        .write_all(&encode(&rev_reply))
-        .expect("write reverse reply");
-    stdin.flush().expect("flush reverse reply");
+        .write_all(&encode(&rev1_reply))
+        .expect("write subscribe reply");
+    stdin.flush().expect("flush subscribe reply");
+
+    let rev2 = read_frame(&mut stdout, deadline).expect("scan-progress subscribe");
+    assert_eq!(
+        rev2["method"], "host/snapshot/subscribe",
+        "reverse #2: {rev2}"
+    );
+    assert_eq!(
+        rev2["params"]["topic"], "sessions.scan_progress",
+        "reverse #2 topic: {rev2}"
+    );
+    let rev2_id = rev2["id"].as_i64().expect("reverse request must have id");
+    let rev2_reply = json!({
+        "jsonrpc": "2.0",
+        "id": rev2_id,
+        "result": {}
+    });
+    stdin
+        .write_all(&encode(&rev2_reply))
+        .expect("write scan_progress subscribe reply");
+    stdin.flush().expect("flush scan_progress subscribe reply");
+
+    let rev3 = read_frame(&mut stdout, deadline).expect("publish notification");
+    assert_eq!(
+        rev3["method"], "host/snapshot/publish",
+        "reverse #3: {rev3}"
+    );
+    assert_eq!(
+        rev3["params"]["topic"], "sessions.refresh_request",
+        "reverse #3 topic: {rev3}"
+    );
+    assert!(
+        rev3.get("id").is_none(),
+        "refresh_request publish must be a notification (no id): {rev3}"
+    );
 
     // Now the init reply itself.
     let resp = read_frame(&mut stdout, deadline).expect("init response");

@@ -35,8 +35,9 @@ use ainb_plugin_protocol::{
     framing,
     methods,
     params::{
-        CliDispatchParams, CliDispatchResult, HandleEventParams, PluginInitParams,
-        PluginInitResult, PluginShutdownParams, PluginShutdownResult, RenderParams, RenderResult,
+        CliDispatchParams, CliDispatchResult, HandleEventParams, HandleKeyParams,
+        PluginInitParams, PluginInitResult, PluginShutdownParams, PluginShutdownResult,
+        RenderParams, RenderResult,
     },
     Manifest, RpcError,
 };
@@ -141,14 +142,34 @@ where
             }
         };
 
-        if value.get("method").is_some() {
+        if let Some(method) = value.get("method").and_then(Value::as_str) {
             // host -> plugin request or notification.
-            let plugin = plugin.clone();
-            let host_client = host_client.clone();
-            let frames_tx = frames_tx.clone();
-            dispatch_tasks.push(tokio::spawn(async move {
-                dispatch_incoming(plugin, host_client, frames_tx, value).await;
-            }));
+            //
+            // `plugin/handle_event` and `plugin/handle_key` MUST run in
+            // receive order — chunked publishes (e.g.
+            // `sessions.usage_data`) rely on the consumer seeing
+            // `chunk_index = 0` before any follow-on chunk, and key
+            // sequences (`1`, `2`, `Tab`, `Esc`) would lose their
+            // semantics if dispatched out of order. Spawning each
+            // notification onto its own task lets tokio re-order them
+            // through the per-plugin mutex, so we serve these inline
+            // and only spawn for other methods.
+            if method == methods::PLUGIN_HANDLE_EVENT || method == methods::PLUGIN_HANDLE_KEY {
+                dispatch_incoming(
+                    plugin.clone(),
+                    host_client.clone(),
+                    frames_tx.clone(),
+                    value,
+                )
+                .await;
+            } else {
+                let plugin = plugin.clone();
+                let host_client = host_client.clone();
+                let frames_tx = frames_tx.clone();
+                dispatch_tasks.push(tokio::spawn(async move {
+                    dispatch_incoming(plugin, host_client, frames_tx, value).await;
+                }));
+            }
         } else if let Some(id) = value.get("id").and_then(Value::as_i64) {
             // Response to a plugin-initiated request.
             let outcome = parse_response(&value);
@@ -389,6 +410,11 @@ async fn handle_method<P: Plugin>(
         methods::PLUGIN_HANDLE_EVENT => {
             let p: HandleEventParams = decode_params(params)?;
             plugin.lock().await.handle_event(host, p).await?;
+            Ok(Value::Null)
+        }
+        methods::PLUGIN_HANDLE_KEY => {
+            let p: HandleKeyParams = decode_params(params)?;
+            plugin.lock().await.handle_key(host, p).await?;
             Ok(Value::Null)
         }
         methods::PLUGIN_CLI_DISPATCH => {

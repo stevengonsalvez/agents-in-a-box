@@ -64,6 +64,21 @@ pub trait Screen: Send {
     fn handle_event(&mut self, _state: &mut AppState) -> EventOutcome {
         EventOutcome::NotHandled
     }
+
+    /// Hook for a screen to consume a single raw key event before the
+    /// global key handler runs. Default: `NotHandled` (screen abstains —
+    /// let the central dispatch in `app::events` do its thing).
+    ///
+    /// Plugin-owned screens (see `PluginScreen`) override this to
+    /// translate the crossterm event into the portable wire shape and
+    /// forward it down `plugin/handle_key`.
+    fn handle_key(
+        &mut self,
+        _state: &mut AppState,
+        _key: &crossterm::event::KeyEvent,
+    ) -> EventOutcome {
+        EventOutcome::NotHandled
+    }
 }
 
 #[cfg(test)]

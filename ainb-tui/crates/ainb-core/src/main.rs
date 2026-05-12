@@ -1236,8 +1236,11 @@ fn setup_logging() {
                 .with_ansi(false),
         )
         .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "agents_box=info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                "info,ainb=info,ainb_core=info,ainb_plugin_runtime=debug,\
+                 ainb_plugin_session_reader=debug,ainb_plugin_burndown=debug"
+                    .into()
+            }),
         )
         .init();
 }

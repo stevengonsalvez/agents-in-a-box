@@ -50,6 +50,37 @@ struct ClaudeUsage {
 /// degrade to an empty result; per-file failures are logged via
 /// `tracing::warn` and skipped.
 pub fn parse_dir(projects_root: &Path) -> Vec<ProviderCall> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        parse_dir_cached(projects_root, &mut None)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        parse_dir_uncached(projects_root)
+    }
+}
+
+/// Cache-aware variant of [`parse_dir`]. `cache: None` is equivalent to
+/// the no-cache path; a `Some(cache)` short-circuits per-file parses
+/// when `(mtime, size)` matches the stored row.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn parse_dir_cached(
+    projects_root: &Path,
+    cache: &mut Option<crate::cache::UsageCache>,
+) -> Vec<ProviderCall> {
+    let mut reporter = crate::scanner::ProgressReporter::noop();
+    parse_dir_cached_with_progress(projects_root, cache, &mut reporter)
+}
+
+/// Cache + progress-aware walk. Drives `reporter.note_file` once per
+/// `.jsonl` file (whether the call is satisfied by the cache or by a
+/// fresh parse).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn parse_dir_cached_with_progress(
+    projects_root: &Path,
+    cache: &mut Option<crate::cache::UsageCache>,
+    reporter: &mut crate::scanner::ProgressReporter,
+) -> Vec<ProviderCall> {
     let mut calls = Vec::new();
     let project_entries = match std::fs::read_dir(projects_root) {
         Ok(entries) => entries,
@@ -79,16 +110,44 @@ pub fn parse_dir(projects_root: &Path) -> Vec<ProviderCall> {
             if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
                 continue;
             }
-            let content = match std::fs::read_to_string(&path) {
-                Ok(c) => c,
-                Err(err) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        error = %err,
-                        "session-reader/claude: skip unreadable file"
-                    );
-                    continue;
-                }
+            let path_str = path.to_string_lossy().into_owned();
+            let project_path_str = project_path.to_string_lossy().into_owned();
+            let project_owned = project.clone();
+            reporter.note_file(&project_owned);
+            let file_calls = super::read_file_cached(&path, cache, |content| {
+                parse_source(&path_str, &project_owned, &project_path_str, content)
+            });
+            calls.extend(file_calls);
+        }
+    }
+    calls
+}
+
+/// Uncached walk used by the wasm32 build (where the cache module is
+/// stubbed out). Kept private; the public API stays `parse_dir`.
+#[cfg(target_arch = "wasm32")]
+fn parse_dir_uncached(projects_root: &Path) -> Vec<ProviderCall> {
+    let mut calls = Vec::new();
+    let project_entries = match std::fs::read_dir(projects_root) {
+        Ok(entries) => entries,
+        Err(_) => return calls,
+    };
+    for project_entry in project_entries.flatten() {
+        let project_path = project_entry.path();
+        if !project_path.is_dir() {
+            continue;
+        }
+        let project = path_basename(&project_path);
+        let Ok(session_entries) = std::fs::read_dir(&project_path) else {
+            continue;
+        };
+        for session_entry in session_entries.flatten() {
+            let path = session_entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                continue;
             };
             let path_str = path.to_string_lossy().into_owned();
             let project_path_str = project_path.to_string_lossy().into_owned();

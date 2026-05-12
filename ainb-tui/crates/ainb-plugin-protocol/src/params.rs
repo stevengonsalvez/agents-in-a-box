@@ -119,6 +119,114 @@ pub struct HandleEventParams {
 }
 
 // =====================================================================
+// plugin/handle_key
+// =====================================================================
+
+/// Normalized key event delivered from host → plugin.
+///
+/// Host translates the terminal-specific event (e.g. `crossterm::event::KeyEvent`)
+/// into this portable representation exactly once, so non-Rust plugins can
+/// participate without depending on crossterm.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyEvent {
+    /// Logical key pressed.
+    pub code: KeyCode,
+    /// Bitmask of active modifiers — see [`KEY_MOD_SHIFT`], [`KEY_MOD_CTRL`],
+    /// [`KEY_MOD_ALT`], [`KEY_MOD_SUPER`].
+    #[serde(default)]
+    pub mods: u8,
+    /// Whether this is the initial press, an auto-repeat, or a release.
+    #[serde(default)]
+    pub kind: KeyKind,
+}
+
+/// Logical key identity. Wire tag is `type`, variants `snake_case` —
+/// `Char { ch }` is `{"type":"char","ch":"1"}`, `BackTab` is `{"type":"back_tab"}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum KeyCode {
+    /// Printable character key.
+    Char {
+        /// The character pressed.
+        ch: char,
+    },
+    /// Enter / Return.
+    Enter,
+    /// Tab.
+    Tab,
+    /// Shift-Tab (reverse tab).
+    BackTab,
+    /// Escape.
+    Esc,
+    /// Backspace.
+    Backspace,
+    /// Delete (forward delete).
+    Delete,
+    /// Up arrow.
+    Up,
+    /// Down arrow.
+    Down,
+    /// Left arrow.
+    Left,
+    /// Right arrow.
+    Right,
+    /// Home.
+    Home,
+    /// End.
+    End,
+    /// Page Up.
+    PageUp,
+    /// Page Down.
+    PageDown,
+    /// Function key F1..F24.
+    F {
+        /// Function number (1-based).
+        n: u8,
+    },
+}
+
+/// Press / repeat / release. `Press` is the default — older peers that
+/// omit the field decode as `Press`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyKind {
+    /// Initial key-down.
+    #[default]
+    Press,
+    /// Auto-repeated key-down while held.
+    Repeat,
+    /// Key-up.
+    Release,
+}
+
+/// Shift modifier bit for [`KeyEvent::mods`].
+pub const KEY_MOD_SHIFT: u8 = 0b0001;
+/// Control modifier bit for [`KeyEvent::mods`].
+pub const KEY_MOD_CTRL: u8 = 0b0010;
+/// Alt / Option modifier bit for [`KeyEvent::mods`].
+pub const KEY_MOD_ALT: u8 = 0b0100;
+/// Super / Command / Windows modifier bit for [`KeyEvent::mods`].
+pub const KEY_MOD_SUPER: u8 = 0b1000;
+
+/// `plugin/handle_key` params (notification). Host forwards keys the
+/// host hasn't reserved (e.g. global navigation) to the plugin owning
+/// the currently focused screen.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandleKeyParams {
+    /// Plugin-defined screen identifier (e.g. `ainb_analytics`). Lets a
+    /// plugin host multiple screens and dispatch by id without extra
+    /// per-key bookkeeping on the host.
+    pub screen_id: String,
+    /// The key event itself.
+    pub key: KeyEvent,
+    /// Monotonic counter the host increments per forwarded key. The plugin
+    /// is expected to echo the value back via [`RenderParams::generation`]
+    /// on the next render, giving the host a freshness witness that the
+    /// key has been observed.
+    pub generation: u64,
+}
+
+// =====================================================================
 // plugin/cli_dispatch
 // =====================================================================
 
@@ -339,34 +447,76 @@ pub struct NetworkFetchResult {
 // (de)serialise bytes::Bytes as a JSON array of u8 (no base64 layer).
 // =====================================================================
 
+/// Binary payloads ride the JSON-RPC envelope as **base64 strings**.
+///
+/// serde_json's default for `&[u8]` (and `Vec<u8>`) is a JSON array of
+/// numbers — `[12, 34, 56, ...]` — which costs 3-4 ASCII chars per
+/// byte. For the session-reader → burndown handoff that ballooned a
+/// ~25 MB msgpack snapshot to ~80 MB of JSON, exceeding the host
+/// framer's `MAX_BODY_BYTES = 16 MiB` and OOMing the plugin process
+/// mid-write. Base64 costs ~1.33 chars per byte — fits the budget and
+/// matches how JSON-RPC servers in the wild ship binary blobs.
+///
+/// The deserializer also accepts the legacy byte-array shape so older
+/// peers (host paired with an older plugin, or vice versa) keep
+/// working across the version bump.
 mod bytes_serde {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
     use bytes::Bytes;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use serde::{de::Error as _, Deserialize, Deserializer, Serializer};
 
     pub(super) fn serialize<S: Serializer>(b: &Bytes, s: S) -> Result<S::Ok, S::Error> {
-        b.as_ref().serialize(s)
+        s.serialize_str(&B64.encode(b.as_ref()))
     }
 
     pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Bytes, D::Error> {
-        let v = Vec::<u8>::deserialize(d)?;
-        Ok(Bytes::from(v))
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            B64(String),
+            Bytes(Vec<u8>),
+        }
+        match Repr::deserialize(d)? {
+            Repr::B64(s) => B64
+                .decode(s.as_bytes())
+                .map(Bytes::from)
+                .map_err(D::Error::custom),
+            Repr::Bytes(v) => Ok(Bytes::from(v)),
+        }
     }
 }
 
 mod opt_bytes_serde {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
     use bytes::Bytes;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use serde::{de::Error as _, Deserialize, Deserializer, Serializer};
 
     // serde's serialize_with signature requires `&Option<T>` here —
     // can't reshape to the otherwise-idiomatic `Option<&T>`.
     #[allow(clippy::ref_option)]
     pub(super) fn serialize<S: Serializer>(b: &Option<Bytes>, s: S) -> Result<S::Ok, S::Error> {
-        b.as_ref().map(bytes::Bytes::as_ref).serialize(s)
+        match b.as_ref() {
+            Some(bytes) => s.serialize_str(&B64.encode(bytes.as_ref())),
+            None => s.serialize_none(),
+        }
     }
 
     pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Bytes>, D::Error> {
-        let v = Option::<Vec<u8>>::deserialize(d)?;
-        Ok(v.map(Bytes::from))
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            B64(String),
+            Bytes(Vec<u8>),
+        }
+        let opt = Option::<Repr>::deserialize(d)?;
+        match opt {
+            None => Ok(None),
+            Some(Repr::B64(s)) => B64
+                .decode(s.as_bytes())
+                .map(|v| Some(Bytes::from(v)))
+                .map_err(D::Error::custom),
+            Some(Repr::Bytes(v)) => Ok(Some(Bytes::from(v))),
+        }
     }
 }
 
@@ -491,5 +641,95 @@ mod tests {
     fn log_level_lowercased_on_wire() {
         let s = serde_json::to_string(&LogLevel::Warn).unwrap();
         assert_eq!(s, "\"warn\"");
+    }
+
+    #[test]
+    fn handle_key_params_round_trip_ctrl_shift_press() {
+        // Plan §Phase 1 gate: HandleKeyParams { Char('1'), SHIFT|CTRL, Press }
+        // round-trips byte-stable.
+        let params = HandleKeyParams {
+            screen_id: "ainb_analytics".into(),
+            key: KeyEvent {
+                code: KeyCode::Char { ch: '1' },
+                mods: KEY_MOD_SHIFT | KEY_MOD_CTRL,
+                kind: KeyKind::Press,
+            },
+            generation: 42,
+        };
+        let json = serde_json::to_string(&params).unwrap();
+        let back: HandleKeyParams = serde_json::from_str(&json).unwrap();
+        assert_eq!(params, back);
+        // Second encode of the decoded value must produce the same bytes.
+        let json2 = serde_json::to_string(&back).unwrap();
+        assert_eq!(json, json2, "encode is not byte-stable across decode");
+    }
+
+    #[test]
+    fn key_code_wire_tag_and_payload() {
+        // Wire tag is `type`, variants snake_case.
+        let s = serde_json::to_string(&KeyCode::Char { ch: 'z' }).unwrap();
+        assert_eq!(s, r#"{"type":"char","ch":"z"}"#);
+        let s = serde_json::to_string(&KeyCode::BackTab).unwrap();
+        assert_eq!(s, r#"{"type":"back_tab"}"#);
+        let s = serde_json::to_string(&KeyCode::PageDown).unwrap();
+        assert_eq!(s, r#"{"type":"page_down"}"#);
+        let s = serde_json::to_string(&KeyCode::F { n: 7 }).unwrap();
+        assert_eq!(s, r#"{"type":"f","n":7}"#);
+    }
+
+    #[test]
+    fn key_kind_defaults_to_press_when_absent() {
+        // Older peers that omit `kind` decode as Press.
+        let j = r#"{"code":{"type":"enter"}}"#;
+        let ev: KeyEvent = serde_json::from_str(j).unwrap();
+        assert_eq!(ev.kind, KeyKind::Press);
+        assert_eq!(ev.mods, 0);
+        assert_eq!(ev.code, KeyCode::Enter);
+    }
+
+    #[test]
+    fn key_mod_bits_are_independent() {
+        // Each modifier occupies its own bit; OR-ing all four is 0b1111.
+        let all = KEY_MOD_SHIFT | KEY_MOD_CTRL | KEY_MOD_ALT | KEY_MOD_SUPER;
+        assert_eq!(all, 0b1111);
+        assert_eq!(KEY_MOD_SHIFT & KEY_MOD_CTRL, 0);
+        assert_eq!(KEY_MOD_ALT & KEY_MOD_SUPER, 0);
+    }
+
+    #[test]
+    fn handle_key_params_round_trip_each_code() {
+        // Exercise the full KeyCode variant matrix through round-trip.
+        let codes = [
+            KeyCode::Char { ch: 'a' },
+            KeyCode::Enter,
+            KeyCode::Tab,
+            KeyCode::BackTab,
+            KeyCode::Esc,
+            KeyCode::Backspace,
+            KeyCode::Delete,
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Left,
+            KeyCode::Right,
+            KeyCode::Home,
+            KeyCode::End,
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+            KeyCode::F { n: 12 },
+        ];
+        for code in codes {
+            let params = HandleKeyParams {
+                screen_id: "s".into(),
+                key: KeyEvent {
+                    code: code.clone(),
+                    mods: 0,
+                    kind: KeyKind::Press,
+                },
+                generation: 1,
+            };
+            let j = serde_json::to_string(&params).unwrap();
+            let back: HandleKeyParams = serde_json::from_str(&j).unwrap();
+            assert_eq!(params, back, "round-trip failed for {code:?}");
+        }
     }
 }

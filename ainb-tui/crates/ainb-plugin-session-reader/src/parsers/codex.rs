@@ -60,6 +60,39 @@ struct CodexTokenUsage {
 
 /// Walk `<sessions_root>/<YYYY>/<MM>/<DD>/rollout-*.jsonl`.
 pub fn parse_dir(sessions_root: &Path) -> Vec<ProviderCall> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        parse_dir_cached(sessions_root, &mut None)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        parse_dir_uncached(sessions_root)
+    }
+}
+
+/// Cache-aware variant of [`parse_dir`]. Per-file cache misses still
+/// run the `is_valid_codex_session` heuristic — non-Codex rollouts
+/// resolve to an empty `Vec` which the cache stores so we don't re-read
+/// the file on the next scan.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn parse_dir_cached(
+    sessions_root: &Path,
+    cache: &mut Option<crate::cache::UsageCache>,
+) -> Vec<ProviderCall> {
+    let mut reporter = crate::scanner::ProgressReporter::noop();
+    parse_dir_cached_with_progress(sessions_root, cache, &mut reporter)
+}
+
+/// Cache + progress-aware walk. Drives `reporter.note_file` once per
+/// `rollout-*.jsonl` file. The `current_project` label is the rollout
+/// date directory (`YYYY/MM/DD`), which is the best per-file group
+/// available in the Codex layout.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn parse_dir_cached_with_progress(
+    sessions_root: &Path,
+    cache: &mut Option<crate::cache::UsageCache>,
+    reporter: &mut crate::scanner::ProgressReporter,
+) -> Vec<ProviderCall> {
     let mut calls = Vec::new();
     let years = match std::fs::read_dir(sessions_root) {
         Ok(d) => d,
@@ -96,6 +129,12 @@ pub fn parse_dir(sessions_root: &Path) -> Vec<ProviderCall> {
                 if !is_date_component(&day_path, 2) {
                     continue;
                 }
+                let day_label = day_path
+                    .strip_prefix(sessions_root)
+                    .ok()
+                    .and_then(|p| p.to_str())
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_else(|| day_path.to_string_lossy().into_owned());
                 let Ok(files) = std::fs::read_dir(&day_path) else {
                     continue;
                 };
@@ -108,16 +147,66 @@ pub fn parse_dir(sessions_root: &Path) -> Vec<ProviderCall> {
                     if !basename.starts_with("rollout-") || !basename.ends_with(".jsonl") {
                         continue;
                     }
-                    let content = match std::fs::read_to_string(&path) {
-                        Ok(c) => c,
-                        Err(err) => {
-                            tracing::warn!(
-                                path = %path.display(),
-                                error = %err,
-                                "session-reader/codex: skip unreadable file"
-                            );
-                            continue;
+                    let path_str = path.to_string_lossy().into_owned();
+                    reporter.note_file(&day_label);
+                    let file_calls = super::read_file_cached(&path, cache, |content| {
+                        if !is_valid_codex_session(content) {
+                            return Vec::new();
                         }
+                        parse_source(&path_str, content)
+                    });
+                    calls.extend(file_calls);
+                }
+            }
+        }
+    }
+    calls
+}
+
+/// Uncached walk used by the wasm32 build (where the cache module is
+/// stubbed out). Kept private; the public API stays `parse_dir`.
+#[cfg(target_arch = "wasm32")]
+fn parse_dir_uncached(sessions_root: &Path) -> Vec<ProviderCall> {
+    let mut calls = Vec::new();
+    let years = match std::fs::read_dir(sessions_root) {
+        Ok(d) => d,
+        Err(_) => return calls,
+    };
+    for year_entry in years.flatten() {
+        let year_path = year_entry.path();
+        if !is_date_component(&year_path, 4) {
+            continue;
+        }
+        let Ok(months) = std::fs::read_dir(&year_path) else {
+            continue;
+        };
+        for month_entry in months.flatten() {
+            let month_path = month_entry.path();
+            if !is_date_component(&month_path, 2) {
+                continue;
+            }
+            let Ok(days) = std::fs::read_dir(&month_path) else {
+                continue;
+            };
+            for day_entry in days.flatten() {
+                let day_path = day_entry.path();
+                if !is_date_component(&day_path, 2) {
+                    continue;
+                }
+                let Ok(files) = std::fs::read_dir(&day_path) else {
+                    continue;
+                };
+                for file_entry in files.flatten() {
+                    let path = file_entry.path();
+                    let basename = path
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or_default();
+                    if !basename.starts_with("rollout-") || !basename.ends_with(".jsonl") {
+                        continue;
+                    }
+                    let Ok(content) = std::fs::read_to_string(&path) else {
+                        continue;
                     };
                     if !is_valid_codex_session(&content) {
                         continue;

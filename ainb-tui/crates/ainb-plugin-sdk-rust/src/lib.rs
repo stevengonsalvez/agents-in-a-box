@@ -43,10 +43,11 @@ pub use ainb_plugin_protocol::{
     params::{
         ActionInvokeParams, ActionInvokeResult, CliDispatchParams, CliDispatchResult,
         FsDirEntry, FsReadDirParams, FsReadDirResult, FsReadFileParams, FsReadFileResult,
-        HandleEventParams, LogLevel, LogParams, NetworkFetchParams, NetworkFetchResult,
-        PluginInitParams, PluginInitResult, PluginShutdownParams, PluginShutdownResult,
-        RenderParams, RenderResult, SnapshotGetParams, SnapshotGetResult, SnapshotPublishParams,
-        SnapshotSubscribeParams, SnapshotSubscribeResult, Viewport,
+        HandleEventParams, HandleKeyParams, KEY_MOD_ALT, KEY_MOD_CTRL, KEY_MOD_SHIFT,
+        KEY_MOD_SUPER, KeyCode, KeyEvent, KeyKind, LogLevel, LogParams, NetworkFetchParams,
+        NetworkFetchResult, PluginInitParams, PluginInitResult, PluginShutdownParams,
+        PluginShutdownResult, RenderParams, RenderResult, SnapshotGetParams, SnapshotGetResult,
+        SnapshotPublishParams, SnapshotSubscribeParams, SnapshotSubscribeResult, Viewport,
     },
     wire_buffer::{Cell, Color, Coord, WireBuffer},
 };

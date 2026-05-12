@@ -16,12 +16,103 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
+use std::time::{Duration as StdDuration, Instant};
 
 use ainb_plugin_types_sessions::{
-    BranchUsage, ModelUsage, NamedUsage, ProjectUsage, Provider, ProviderCall, SessionUsage,
-    TokenBucket, UsageData,
+    BranchUsage, ModelUsage, NamedUsage, ProjectUsage, Provider, ProviderCall, ScanProgressEvent,
+    SessionUsage, TokenBucket, UsageData,
 };
 use chrono::{Datelike, Duration, NaiveDate};
+
+/// Minimum gap between progress emits. Caps emission to 10 events/s and
+/// satisfies the "every 100 ms or every 10 files, whichever first"
+/// trigger from plan §Phase 6 — under the cap the file-count trigger
+/// is naturally subsumed by the time trigger.
+const PROGRESS_MIN_INTERVAL: StdDuration = StdDuration::from_millis(100);
+
+/// Rate-limited progress sink threaded through the parsers.
+///
+/// The scanner constructs a reporter that wraps a closure (typically a
+/// `tokio::sync::mpsc::Sender` adapter from the plugin layer). Each
+/// per-file parse calls [`Self::note_file`]; the reporter throttles to
+/// at most one emit per [`PROGRESS_MIN_INTERVAL`], so the publish side
+/// of the plugin never fires more than 10 `sessions.scan_progress`
+/// publishes per second even on a fully-warm cache that visits
+/// hundreds of files per millisecond.
+///
+/// `noop()` is the default for tests and the un-instrumented `scan`
+/// entry point — no callback runs, no rate-limit state is touched.
+pub struct ProgressReporter {
+    last_emit: Option<Instant>,
+    scanned: u32,
+    total: u32,
+    callback: Box<dyn FnMut(ScanProgressEvent) + Send>,
+}
+
+impl ProgressReporter {
+    /// Build a reporter whose `callback` is invoked once per emit
+    /// (after rate-limit gating). Caller owns whatever channel/host
+    /// adapter the closure dispatches to.
+    pub fn new(callback: impl FnMut(ScanProgressEvent) + Send + 'static) -> Self {
+        Self {
+            last_emit: None,
+            scanned: 0,
+            total: 0,
+            callback: Box::new(callback),
+        }
+    }
+
+    /// No-op reporter — drops every event. Use from tests and from the
+    /// legacy `scan` / `parse_dir_cached` paths that don't want
+    /// realtime UX feedback.
+    #[must_use]
+    pub fn noop() -> Self {
+        Self::new(|_| {})
+    }
+
+    /// Hint the total file count once it's known (e.g. after a cheap
+    /// pre-walk). Optional — when `total = 0` the burndown UI omits
+    /// the `/M` suffix and renders `"Scanning sessions… N files"`.
+    pub fn set_total(&mut self, total: u32) {
+        self.total = total;
+    }
+
+    /// Record one scanned file. Always increments the counter; emits
+    /// only when [`PROGRESS_MIN_INTERVAL`] has elapsed since the last
+    /// emit (or on the very first file).
+    pub fn note_file(&mut self, current_project: &str) {
+        self.scanned = self.scanned.saturating_add(1);
+        let now = Instant::now();
+        let should_emit = match self.last_emit {
+            None => true,
+            Some(last) => now.duration_since(last) >= PROGRESS_MIN_INTERVAL,
+        };
+        if should_emit {
+            (self.callback)(ScanProgressEvent {
+                scanned: self.scanned,
+                total: self.total,
+                current_project: current_project.to_string(),
+            });
+            self.last_emit = Some(now);
+        }
+    }
+
+    /// Force-emit the current counters regardless of the rate-limit
+    /// window. Used at end-of-scan so the burndown sees a final
+    /// `scanned == N` tick if the previous tick fell inside the
+    /// throttle window.
+    pub fn flush(&mut self, current_project: &str) {
+        if self.scanned == 0 {
+            return;
+        }
+        (self.callback)(ScanProgressEvent {
+            scanned: self.scanned,
+            total: self.total,
+            current_project: current_project.to_string(),
+        });
+        self.last_emit = Some(Instant::now());
+    }
+}
 
 /// Source roots for the four providers. `None` skips that provider
 /// entirely; `Some(path)` is walked even if the directory doesn't exist
@@ -58,13 +149,67 @@ impl ProviderRoots {
 }
 
 /// Run every provider parser, aggregate, return a snapshot.
+///
+/// Cache-less convenience wrapper around [`scan_with_cache`] for
+/// callers that don't want persistence (tests, the wasm32 build).
 pub fn scan(roots: &ProviderRoots) -> UsageData {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        scan_with_cache(roots, &mut None)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let mut all_calls = Vec::new();
+        if let Some(root) = &roots.claude_projects {
+            all_calls.extend(crate::parsers::claude::parse_dir(root));
+        }
+        if let Some(root) = &roots.codex_sessions {
+            all_calls.extend(crate::parsers::codex::parse_dir(root));
+        }
+        if let Some(root) = &roots.gemini_sessions {
+            all_calls.extend(crate::parsers::gemini::parse_dir(root));
+        }
+        if let Some(root) = &roots.copilot_sessions {
+            all_calls.extend(crate::parsers::copilot::parse_dir(root));
+        }
+        aggregate(all_calls)
+    }
+}
+
+/// Cache-aware scan. Pass `Some(cache)` to short-circuit per-file parses
+/// when `(mtime, size)` matches the previous run; `None` is equivalent
+/// to the legacy [`scan`] call site.
+///
+/// Gemini and Copilot parsers are stubs that don't read files; they're
+/// invoked without the cache.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn scan_with_cache(
+    roots: &ProviderRoots,
+    cache: &mut Option<crate::cache::UsageCache>,
+) -> UsageData {
+    let mut reporter = ProgressReporter::noop();
+    scan_with_cache_and_progress(roots, cache, &mut reporter)
+}
+
+/// Cache + progress-aware scan. Drives [`ProgressReporter::note_file`]
+/// from each per-file parse so the plugin's async publish loop can
+/// fan progress out to the host without blocking the scan thread.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn scan_with_cache_and_progress(
+    roots: &ProviderRoots,
+    cache: &mut Option<crate::cache::UsageCache>,
+    reporter: &mut ProgressReporter,
+) -> UsageData {
     let mut all_calls = Vec::new();
     if let Some(root) = &roots.claude_projects {
-        all_calls.extend(crate::parsers::claude::parse_dir(root));
+        all_calls.extend(crate::parsers::claude::parse_dir_cached_with_progress(
+            root, cache, reporter,
+        ));
     }
     if let Some(root) = &roots.codex_sessions {
-        all_calls.extend(crate::parsers::codex::parse_dir(root));
+        all_calls.extend(crate::parsers::codex::parse_dir_cached_with_progress(
+            root, cache, reporter,
+        ));
     }
     if let Some(root) = &roots.gemini_sessions {
         all_calls.extend(crate::parsers::gemini::parse_dir(root));
@@ -359,6 +504,85 @@ fn map_to_named_usage_sorted(map: BTreeMap<String, usize>) -> Vec<NamedUsage> {
 mod tests {
     use super::*;
     use chrono::{DateTime, Utc};
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn progress_reporter_emits_on_first_file() {
+        let captured: Arc<Mutex<Vec<ScanProgressEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&captured);
+        let mut reporter = ProgressReporter::new(move |evt| sink.lock().unwrap().push(evt));
+        reporter.note_file("alpha");
+        let evts = captured.lock().unwrap().clone();
+        assert_eq!(evts.len(), 1);
+        assert_eq!(evts[0].scanned, 1);
+        assert_eq!(evts[0].total, 0);
+        assert_eq!(evts[0].current_project, "alpha");
+    }
+
+    #[test]
+    fn progress_reporter_caps_to_ten_per_second() {
+        // 50 back-to-back note_file calls — only the first should emit
+        // because the rate-limit gate prevents another emit until
+        // PROGRESS_MIN_INTERVAL has elapsed (100 ms).
+        let captured: Arc<Mutex<Vec<ScanProgressEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&captured);
+        let mut reporter = ProgressReporter::new(move |evt| sink.lock().unwrap().push(evt));
+        for _ in 0..50 {
+            reporter.note_file("p");
+        }
+        let evts = captured.lock().unwrap().clone();
+        assert_eq!(evts.len(), 1, "rate-limit allows only first emit in <100ms");
+        assert_eq!(evts[0].scanned, 1);
+    }
+
+    #[test]
+    fn progress_reporter_emits_again_after_interval() {
+        let captured: Arc<Mutex<Vec<ScanProgressEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&captured);
+        let mut reporter = ProgressReporter::new(move |evt| sink.lock().unwrap().push(evt));
+        reporter.note_file("a");
+        std::thread::sleep(PROGRESS_MIN_INTERVAL + StdDuration::from_millis(20));
+        reporter.note_file("b");
+        let evts = captured.lock().unwrap().clone();
+        assert_eq!(evts.len(), 2);
+        assert_eq!(evts[1].scanned, 2);
+        assert_eq!(evts[1].current_project, "b");
+    }
+
+    #[test]
+    fn progress_reporter_noop_drops_events() {
+        let mut reporter = ProgressReporter::noop();
+        reporter.note_file("a");
+        reporter.flush("b");
+        // No panic, no observable side effects — by construction
+        // there's nothing to assert beyond "this compiles + runs".
+    }
+
+    #[test]
+    fn progress_reporter_set_total_propagates() {
+        let captured: Arc<Mutex<Vec<ScanProgressEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&captured);
+        let mut reporter = ProgressReporter::new(move |evt| sink.lock().unwrap().push(evt));
+        reporter.set_total(42);
+        reporter.note_file("x");
+        let evts = captured.lock().unwrap().clone();
+        assert_eq!(evts[0].total, 42);
+    }
+
+    #[test]
+    fn progress_reporter_flush_emits_when_throttled() {
+        // A flush should bypass the rate-limit and emit the current
+        // counters — used at end-of-scan to guarantee a final tick.
+        let captured: Arc<Mutex<Vec<ScanProgressEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&captured);
+        let mut reporter = ProgressReporter::new(move |evt| sink.lock().unwrap().push(evt));
+        reporter.note_file("a"); // 1st emit
+        reporter.note_file("b"); // throttled
+        reporter.flush("b"); // bypass throttle
+        let evts = captured.lock().unwrap().clone();
+        assert_eq!(evts.len(), 2);
+        assert_eq!(evts[1].scanned, 2);
+    }
 
     fn call(
         provider: Provider,

@@ -4,9 +4,13 @@
 //! (Content-Length framed), and asserts:
 //!   1. `plugin/init` returns `{name: "session-reader", version: ...}`.
 //!   2. During `on_init` the plugin emits a `host/snapshot/subscribe`
-//!      request for `sessions.refresh_request` (we reply OK).
-//!   3. The plugin publishes an `rmp-serde`-encoded `UsageDataEvent`
-//!      on `sessions.usage_data`.
+//!      request for `sessions.refresh_request` (we reply OK) and then
+//!      returns — it does NOT publish on startup. Publishing is
+//!      gated on a `sessions.refresh_request` event so consumers are
+//!      guaranteed to be subscribed before chunk 0 hits the wire.
+//!   3. A `plugin/handle_event` for `sessions.refresh_request`
+//!      triggers a chunked `rmp-serde`-encoded `UsageDataEvent`
+//!      publish on `sessions.usage_data`.
 //!   4. `plugin/shutdown` returns cleanly and the process exits.
 //!
 //! The fixture sets `HOME` to an empty tempdir so the scan finds no
@@ -154,7 +158,9 @@ fn subprocess_init_publishes_snapshot_then_responds_ok() {
 
     let subscribe_id = subscribe_id.expect("plugin never issued snapshot/subscribe");
 
-    // 3) Reply to subscribe so on_init can finish.
+    // 3) Reply to subscribe so on_init can finish. The plugin should
+    //    NOT publish anything during init — publishing is gated on
+    //    refresh_request (asserted below).
     let subscribe_result = SnapshotSubscribeResult {};
     write_frame(
         &mut stdin,
@@ -164,10 +170,13 @@ fn subprocess_init_publishes_snapshot_then_responds_ok() {
             "result": subscribe_result,
         }),
     );
+    assert!(
+        publish_seen.is_none(),
+        "plugin must not publish during init — gated on refresh_request"
+    );
 
     // 4) Drain outbound frames until we see the plugin/init response.
-    //    A snapshot/publish from the publish() call after subscribe()
-    //    arrives here too.
+    //    No snapshot/publish should arrive in this window.
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut init_response: Option<Value> = None;
     while Instant::now() < deadline {
@@ -175,11 +184,7 @@ fn subprocess_init_publishes_snapshot_then_responds_ok() {
             .expect("plugin closed stdout before init response");
         if let Some(method) = frame.get("method").and_then(Value::as_str) {
             if method == methods::HOST_SNAPSHOT_PUBLISH {
-                let params: SnapshotPublishParams = serde_json::from_value(
-                    frame.get("params").cloned().unwrap_or(Value::Null),
-                )
-                .expect("decode publish params");
-                publish_seen = Some(params);
+                panic!("plugin published during init — expected refresh-gated publish only");
             }
             // ignore other notifications (logs, etc.)
         } else if frame.get("id").and_then(Value::as_i64) == Some(1) {
@@ -196,16 +201,8 @@ fn subprocess_init_publishes_snapshot_then_responds_ok() {
     assert_eq!(init_result.name, "session-reader");
     assert_eq!(init_result.version, "0.2.0");
 
-    let publish_seen =
-        publish_seen.expect("plugin should publish a sessions.usage_data snapshot during init");
-    assert_eq!(publish_seen.topic, "sessions.usage_data");
-    let event: UsageDataEvent = rmp_serde::from_slice(&publish_seen.payload)
-        .expect("snapshot payload is rmp-serde UsageDataEvent");
-    assert_eq!(event.version, WIRE_VERSION);
-    assert!(!event.partial);
-
-    // 5) handle_event for the refresh topic should also trigger a
-    //    fresh publish — sanity-check the wiring.
+    // 5) handle_event for the refresh topic should trigger a publish —
+    //    this is the primary trigger for snapshot delivery.
     write_frame(
         &mut stdin,
         &json!({
@@ -226,13 +223,25 @@ fn subprocess_init_publishes_snapshot_then_responds_ok() {
             None => break,
         };
         if frame.get("method").and_then(Value::as_str) == Some(methods::HOST_SNAPSHOT_PUBLISH) {
+            let params: SnapshotPublishParams = serde_json::from_value(
+                frame.get("params").cloned().unwrap_or(Value::Null),
+            )
+            .expect("decode publish params");
+            assert_eq!(params.topic, "sessions.usage_data");
+            let event: UsageDataEvent = rmp_serde::from_slice(&params.payload)
+                .expect("snapshot payload is rmp-serde UsageDataEvent");
+            assert_eq!(event.version, WIRE_VERSION);
+            assert!(!event.partial);
+            // Empty HOME → single chunk with is_final = true.
+            assert_eq!(event.chunk_index, 0);
+            assert!(event.is_final);
             got_refresh_publish = true;
             break;
         }
     }
     assert!(
         got_refresh_publish,
-        "plugin did not republish snapshot after handle_event(refresh)"
+        "plugin did not publish snapshot after handle_event(refresh)"
     );
 
     // 6) Clean shutdown.

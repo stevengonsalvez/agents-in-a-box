@@ -19,9 +19,9 @@ use ainb_plugin_protocol::errors::RpcError;
 use ainb_plugin_protocol::methods;
 use ainb_plugin_protocol::params::{
     ActionInvokeParams, ActionInvokeResult, CliDispatchParams, CliDispatchResult,
-    HandleEventParams, LogParams, PluginInitParams, PluginInitResult, PluginShutdownParams,
-    RenderParams, RenderResult, SnapshotGetParams, SnapshotGetResult, SnapshotPublishParams,
-    SnapshotSubscribeParams, SnapshotSubscribeResult, Viewport,
+    HandleEventParams, HandleKeyParams, LogParams, PluginInitParams, PluginInitResult,
+    PluginShutdownParams, RenderParams, RenderResult, SnapshotGetParams, SnapshotGetResult,
+    SnapshotPublishParams, SnapshotSubscribeParams, SnapshotSubscribeResult, Viewport,
 };
 use ainb_plugin_protocol::wire_buffer::WireBuffer;
 use bytes::Bytes;
@@ -112,6 +112,18 @@ pub enum Command {
         /// Snapshot bytes.
         payload: Bytes,
     },
+    /// Forward a `plugin/handle_key` notification (single keystroke
+    /// destined for the focused plugin screen). Ordering vs other
+    /// inbox traffic is preserved by the per-plugin mpsc inbox, and
+    /// the SDK server re-uses the inline-dispatch path for the same
+    /// reason — multi-key sequences would lose their semantics
+    /// otherwise. See `plugin_task.rs::handle_command` for the wire
+    /// translation.
+    HandleKey {
+        /// Pre-built params with screen_id, key, and host-allocated
+        /// generation counter.
+        params: HandleKeyParams,
+    },
     /// Send `plugin/shutdown` and reap the process.
     Shutdown,
     /// Clear quarantine + allow respawn.
@@ -121,15 +133,27 @@ pub enum Command {
     /// part of the public API surface.
     #[doc(hidden)]
     InjectKill,
+    /// Best-effort wake: spawn the child if not already running. Used
+    /// by `Runtime::register` to honour `manifest.lifecycle.spawn = "eager"`.
+    /// No reply — failures are recorded on the task's failure ledger
+    /// and surface through `RuntimeHandle::lifecycle_state`.
+    EnsureSpawned,
 }
 
 /// Inbox a [`crate::RuntimeHandle`] uses to drive the task.
 pub type Inbox = mpsc::UnboundedSender<Command>;
 
+/// Map of `plugin_id → inbox` used by [`PluginTask`] to fan out
+/// subscriber notifications when a plugin issues `host/snapshot/publish`.
+/// Shared (clone-able `Arc`) with `Runtime`, which maintains it
+/// alongside the public plugin handle map.
+pub type InboxMap = Arc<parking_lot::RwLock<HashMap<PluginId, Inbox>>>;
+
 /// Spawn a per-plugin task and return its inbox + render cache.
 pub fn spawn(
     plugin: Arc<RegisteredPlugin>,
     snapshots: SnapshotStore,
+    inboxes: InboxMap,
     config: RuntimeConfig,
     handle: &tokio::runtime::Handle,
 ) -> (Inbox, RenderCache, Arc<parking_lot::RwLock<LifecycleState>>) {
@@ -139,6 +163,7 @@ pub fn spawn(
     let task = PluginTask {
         plugin,
         snapshots,
+        inboxes,
         config,
         cache: cache.clone(),
         state: state.clone(),
@@ -168,13 +193,24 @@ struct ChildState {
     pid: i32,
     child: Child,
     stdin: tokio::process::ChildStdin,
-    stdout: BufReader<tokio::process::ChildStdout>,
+    /// Inbound-frame channel filled by [`spawn_stdout_reader`]. We
+    /// can't read from `stdout` inside the per-plugin `tokio::select!`
+    /// loop because `BufReader::read_line` / `read_exact` are NOT
+    /// cancel-safe — a partial body would get re-interpreted as a
+    /// header on the next iteration. See Bug A in
+    /// `fix/runtime-eager-spawn`.
+    inbound_rx: mpsc::UnboundedReceiver<InboundEvent>,
+    stdout_reader: tokio::task::JoinHandle<()>,
     stderr_drain: tokio::task::JoinHandle<()>,
 }
 
 struct PluginTask {
     plugin: Arc<RegisteredPlugin>,
     snapshots: SnapshotStore,
+    /// Subscriber fan-out map (shared with `Runtime`). Used only when
+    /// the plugin issues `host/snapshot/publish` — we look up each
+    /// subscriber's inbox and forward a `Command::HandleEvent`.
+    inboxes: InboxMap,
     config: RuntimeConfig,
     cache: RenderCache,
     state: Arc<parking_lot::RwLock<LifecycleState>>,
@@ -202,7 +238,7 @@ impl PluginTask {
                     Some(Command::Shutdown) | None => { self.shutdown().await; break; }
                     Some(c) => self.handle_command(c).await,
                 },
-                inbound = read_inbound(&mut self.child) => {
+                inbound = next_inbound(&mut self.child) => {
                     match inbound {
                         InboundEvent::Frame(body) => self.handle_inbound(&body).await,
                         InboundEvent::Eof | InboundEvent::Error => self.handle_exit().await,
@@ -284,6 +320,20 @@ impl PluginTask {
                 .expect("HandleEventParams is serializable");
                 let _ = self.send_notification(methods::PLUGIN_HANDLE_EVENT, params).await;
             }
+            Command::HandleKey { params } => {
+                // Drop on idle, same policy as `HandleEvent`. A key
+                // pressed before the plugin process is even spawned
+                // has no plausible destination — the user almost
+                // certainly won't expect it to be replayed once the
+                // process is up.
+                if self.child.is_none() {
+                    debug!(plugin = %self.plugin.id, "handle_key dropped (idle)");
+                    return;
+                }
+                let json = serde_json::to_value(params)
+                    .expect("HandleKeyParams is serializable");
+                let _ = self.send_notification(methods::PLUGIN_HANDLE_KEY, json).await;
+            }
             Command::Reload => {
                 self.failures.clear();
                 self.respawn_attempts = 0;
@@ -295,6 +345,11 @@ impl PluginTask {
             Command::InjectKill => {
                 if let Some(cs) = &mut self.child {
                     let _ = cs.child.start_kill();
+                }
+            }
+            Command::EnsureSpawned => {
+                if let Err(e) = self.ensure_running().await {
+                    warn!(plugin = %self.plugin.id, "eager spawn failed: {e}");
                 }
             }
         }
@@ -339,11 +394,14 @@ impl PluginTask {
             .map_err(|_| RuntimeError::Wire(format!("pid {pid_u32} doesn't fit in i32")))?;
         let plugin_name = self.plugin.id.clone();
         let stderr_drain = tokio::spawn(drain_stderr(plugin_name, stderr));
+        let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
+        let stdout_reader = spawn_stdout_reader(BufReader::new(stdout), inbound_tx);
         self.child = Some(ChildState {
             pid,
             child,
             stdin,
-            stdout: BufReader::new(stdout),
+            inbound_rx,
+            stdout_reader,
             stderr_drain,
         });
         self.send_init().await?;
@@ -395,11 +453,16 @@ impl PluginTask {
             }
         };
         match parsed {
-            Inbound::Response { id, result } => self.handle_response(id, result).await,
+            Inbound::Response { id, result } => {
+                debug!(plugin = %self.plugin.id, id, ok = result.is_ok(), "inbound response");
+                self.handle_response(id, result).await;
+            }
             Inbound::Request { id, method, params } => {
+                debug!(plugin = %self.plugin.id, id, method = %method, "inbound request");
                 self.handle_host_request(id, &method, params).await;
             }
             Inbound::Notification { method, params } => {
+                debug!(plugin = %self.plugin.id, method = %method, "inbound notification");
                 self.handle_host_notification(&method, params);
             }
         }
@@ -493,9 +556,13 @@ impl PluginTask {
             },
         };
         if let Some(cs) = &mut self.child {
-            if let Err(e) = write_frame(&mut cs.stdin, &body).await {
-                warn!(plugin = %self.plugin.id, "write response: {e}");
+            debug!(plugin = %self.plugin.id, id, bytes = body.len(), "host->plugin response: writing");
+            match write_frame(&mut cs.stdin, &body).await {
+                Ok(()) => debug!(plugin = %self.plugin.id, id, "host->plugin response: write_frame OK"),
+                Err(e) => warn!(plugin = %self.plugin.id, id, "write response: {e}"),
             }
+        } else {
+            warn!(plugin = %self.plugin.id, id, "host->plugin response: child missing, dropping response");
         }
     }
 
@@ -527,7 +594,29 @@ impl PluginTask {
                     warn!(plugin = %self.plugin.id, "bad snapshot publish");
                     return;
                 };
-                let _ = self.snapshots.publish(Topic::from(p.topic), p.payload);
+                let topic = Topic::from(p.topic);
+                let payload = p.payload;
+                let _ = self.snapshots.publish(topic.clone(), payload.clone());
+                // Fan out to every subscriber — the snapshot store
+                // only retains the *latest* publish, so chunked publishes
+                // (session-reader → burndown) would lose all but the
+                // last chunk if we relied on a passive snapshot_get.
+                let subs = self.snapshots.subscribers(&topic);
+                if !subs.is_empty() {
+                    let inboxes = self.inboxes.read();
+                    for sub in subs {
+                        // Don't echo back to the publisher.
+                        if sub == self.plugin.id {
+                            continue;
+                        }
+                        if let Some(inbox) = inboxes.get(&sub) {
+                            let _ = inbox.send(Command::HandleEvent {
+                                topic: topic.clone(),
+                                payload: payload.clone(),
+                            });
+                        }
+                    }
+                }
             }
             methods::HOST_LOG => {
                 let Ok(p) = serde_json::from_value::<LogParams>(params) else {
@@ -560,6 +649,7 @@ impl PluginTask {
         }
         if let Some(cs) = self.child.take() {
             cs.stderr_drain.abort();
+            cs.stdout_reader.abort();
         }
         self.record_failure();
         if self.is_quarantine_due() {
@@ -645,6 +735,7 @@ impl PluginTask {
             let _ = cs.child.start_kill();
             let _ = cs.child.wait().await;
             cs.stderr_drain.abort();
+            cs.stdout_reader.abort();
         }
         self.snapshots.unsubscribe_all(&self.plugin.id);
     }
@@ -663,24 +754,56 @@ fn collect_granted_capabilities(m: &ainb_plugin_protocol::manifest::Manifest) ->
     out
 }
 
-/// What `read_inbound` returns. Single non-async classification; the
-/// outer `select!` re-polls.
+/// What the stdout reader pushes into the per-plugin inbound channel.
+/// `mpsc::recv` IS cancel-safe (drops at the start of the await), so
+/// the outer `select!` loop can read these without losing partial-
+/// frame state — unlike `read_line`/`read_exact` on `BufReader`.
+#[derive(Debug)]
 enum InboundEvent {
     Frame(Vec<u8>),
     Eof,
     Error,
 }
 
-async fn read_inbound(child: &mut Option<ChildState>) -> InboundEvent {
-    match child {
-        Some(cs) => match read_frame(&mut cs.stdout).await {
-            Ok(Some(body)) => InboundEvent::Frame(body),
-            Ok(None) => InboundEvent::Eof,
-            Err(e) => {
-                tracing::warn!("frame decode err: {e}");
-                InboundEvent::Error
+/// Spawn a task that reads framed inbounds from `stdout` and pushes
+/// them onto `tx`. Exits on EOF or unrecoverable decode error. Owns
+/// the `BufReader` for its lifetime, which guarantees no cross-await
+/// cancellation can corrupt the framer state — the original culprit
+/// for the "header block exceeded 8192 bytes" stalls under chunked
+/// publish workloads.
+fn spawn_stdout_reader(
+    mut reader: BufReader<tokio::process::ChildStdout>,
+    tx: mpsc::UnboundedSender<InboundEvent>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            match read_frame(&mut reader).await {
+                Ok(Some(body)) => {
+                    if tx.send(InboundEvent::Frame(body)).is_err() {
+                        return;
+                    }
+                }
+                Ok(None) => {
+                    let _ = tx.send(InboundEvent::Eof);
+                    return;
+                }
+                Err(e) => {
+                    tracing::warn!("frame decode err: {e}");
+                    let _ = tx.send(InboundEvent::Error);
+                    return;
+                }
             }
-        },
+        }
+    })
+}
+
+async fn next_inbound(child: &mut Option<ChildState>) -> InboundEvent {
+    match child {
+        Some(cs) => cs
+            .inbound_rx
+            .recv()
+            .await
+            .unwrap_or(InboundEvent::Eof),
         None => {
             // No child — park forever (until select! wakes us via cmd
             // or timer). pending() never resolves.
@@ -692,6 +815,10 @@ async fn read_inbound(child: &mut Option<ChildState>) -> InboundEvent {
 async fn drain_stderr(plugin: PluginId, stderr: tokio::process::ChildStderr) {
     let mut reader = BufReader::new(stderr).lines();
     while let Ok(Some(line)) = reader.next_line().await {
-        debug!(plugin = %plugin, stream = "stderr", "{line}");
+        // info! so plugin stderr (e.g. eprintln from session-reader)
+        // surfaces in the host JSONL by default. Plugins are expected
+        // to use host.log() for normal logging — stderr is for unstructured
+        // diagnostics that should not be filtered out.
+        info!(plugin = %plugin, stream = "stderr", "{line}");
     }
 }
