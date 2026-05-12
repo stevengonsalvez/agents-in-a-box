@@ -662,6 +662,175 @@ impl BurndownPlugin {
 }
 
 #[cfg(test)]
+mod handle_key_dispatch_tests {
+    use super::*;
+    use ainb_plugin_sdk::KeyCode;
+
+    fn ch(c: char) -> KeyCode {
+        KeyCode::Char { ch: c }
+    }
+
+    #[test]
+    fn period_keys_map_to_expected_variants() {
+        let cases: &[(KeyCode, UsagePeriod)] = &[
+            (ch('1'), UsagePeriod::Today),
+            (ch('2'), UsagePeriod::Week),
+            (ch('3'), UsagePeriod::ThirtyDays),
+            (ch('4'), UsagePeriod::LastNDays(90)),
+            (ch('5'), UsagePeriod::YearToDate),
+            (ch('m'), UsagePeriod::Month),
+            (ch('a'), UsagePeriod::All),
+        ];
+        for (code, expected) in cases {
+            let mut p = BurndownPlugin::default();
+            assert!(p.dispatch_key_pure(code), "binding missing for {code:?}");
+            assert_eq!(
+                p.ui.period, *expected,
+                "period mismatch after dispatching {code:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn quarter_key_anchors_on_today() {
+        use chrono::{Datelike, Local};
+        let today = Local::now().date_naive();
+        let expected_q = u8::try_from((today.month() - 1) / 3 + 1).unwrap();
+
+        let mut p = BurndownPlugin::default();
+        assert!(p.dispatch_key_pure(&ch('q')));
+        match p.ui.period {
+            UsagePeriod::SpecificQuarter(year, q) => {
+                assert_eq!(year, today.year());
+                assert_eq!(q, expected_q);
+            }
+            other => panic!("expected SpecificQuarter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arrow_keys_advance_provider_filter() {
+        // `next_provider` / `prev_provider` walk a 4-state internal
+        // `UsageProvider` enum and derive `provider_filter` from it.
+        // Asserting a round-trip is brittle — Gemini/Copilot both map
+        // back to `All`, so Left after one Right doesn't return to
+        // the starting filter. Just confirm each arrow claims the
+        // key and mutates state at least once.
+        let mut p = BurndownPlugin::default();
+        let starting = p.ui.provider_filter;
+        assert!(p.dispatch_key_pure(&KeyCode::Right));
+        let after_right = p.ui.provider_filter;
+        let mut p = BurndownPlugin::default();
+        assert!(p.dispatch_key_pure(&KeyCode::Left));
+        let after_left = p.ui.provider_filter;
+        assert!(
+            after_right != starting || after_left != starting,
+            "at least one arrow direction must mutate provider_filter from default {starting:?}"
+        );
+    }
+
+    #[test]
+    fn tab_cycles_focused_panel() {
+        let mut p = BurndownPlugin::default();
+        let before = p.ui.focused_panel;
+        assert!(p.dispatch_key_pure(&KeyCode::Tab));
+        let after = p.ui.focused_panel;
+        assert_ne!(before, after, "Tab must change focused panel");
+    }
+
+    #[test]
+    fn z_toggles_zoom_state() {
+        let mut p = BurndownPlugin::default();
+        assert!(!p.ui.is_zoomed());
+        // First need a focused panel so toggle_zoom has something to
+        // zoom into.
+        let _ = p.dispatch_key_pure(&KeyCode::Tab);
+        assert!(p.dispatch_key_pure(&ch('z')));
+        assert!(p.ui.is_zoomed(), "z must zoom into focused panel");
+        assert!(p.dispatch_key_pure(&ch('z')));
+        assert!(!p.ui.is_zoomed(), "second z must un-zoom");
+    }
+
+    #[test]
+    fn slash_only_dispatches_while_zoomed() {
+        let mut p = BurndownPlugin::default();
+        // Not zoomed → `/` is unbound (returns false, no generation bump).
+        assert!(!p.dispatch_key_pure(&ch('/')));
+        // Zoom in.
+        let _ = p.dispatch_key_pure(&KeyCode::Tab);
+        assert!(p.dispatch_key_pure(&ch('z')));
+        assert!(p.ui.is_zoomed());
+        // Now zoomed → `/` claims the key.
+        assert!(p.dispatch_key_pure(&ch('/')));
+    }
+
+    #[test]
+    fn esc_pops_filter_when_not_zoomed_and_unzooms_when_zoomed() {
+        let mut p = BurndownPlugin::default();
+        // Not zoomed: Esc claims the key (no-op against an empty
+        // filter stack, but still bumps generation).
+        assert!(p.dispatch_key_pure(&KeyCode::Esc));
+
+        // Zoomed: Esc should also claim, and un-zoom.
+        let _ = p.dispatch_key_pure(&KeyCode::Tab);
+        assert!(p.dispatch_key_pure(&ch('z')));
+        assert!(p.ui.is_zoomed());
+        assert!(p.dispatch_key_pure(&KeyCode::Esc));
+        assert!(!p.ui.is_zoomed(), "Esc must exit zoom");
+    }
+
+    #[test]
+    fn k_scrolls_up() {
+        // Even on an empty state `scroll_up` is a no-op `saturating_sub` —
+        // the binding still claims the key. We're really asserting the
+        // dispatch wiring rather than the scroll math.
+        let mut p = BurndownPlugin::default();
+        assert!(p.dispatch_key_pure(&ch('k')));
+    }
+
+    #[test]
+    fn unmapped_keys_are_not_claimed() {
+        let mut p = BurndownPlugin::default();
+        // 'D' (advanced/custom) was deliberately dropped — needs a date range.
+        assert!(!p.dispatch_key_pure(&ch('D')));
+        // 'j' was dropped — `scroll_down` needs a row-count we can't
+        // know from the dispatch.
+        assert!(!p.dispatch_key_pure(&ch('j')));
+        // Random Unicode key.
+        assert!(!p.dispatch_key_pure(&ch('🚀')));
+        // F-key.
+        assert!(!p.dispatch_key_pure(&KeyCode::F { n: 5 }));
+    }
+
+    #[test]
+    fn generation_bumps_only_when_dispatch_handled() {
+        // We can't drive the async `handle_key` without a HostClient,
+        // but we can replicate its bookkeeping using the pure helper
+        // — which is what `handle_key` does for every non-`r` binding.
+        let mut p = BurndownPlugin::default();
+        let g0 = p.generation;
+
+        // Handled key → bump.
+        let handled = p.dispatch_key_pure(&ch('1'));
+        if handled {
+            p.generation = p.generation.wrapping_add(1);
+        }
+        assert_eq!(p.generation, g0 + 1, "handled key must bump generation");
+
+        // Unmapped key → no bump.
+        let handled = p.dispatch_key_pure(&ch('j'));
+        if handled {
+            p.generation = p.generation.wrapping_add(1);
+        }
+        assert_eq!(
+            p.generation,
+            g0 + 1,
+            "unmapped key must NOT bump generation"
+        );
+    }
+}
+
+#[cfg(test)]
 mod chunk_accumulator_tests {
     use super::*;
     use ainb_plugin_types_sessions::{
