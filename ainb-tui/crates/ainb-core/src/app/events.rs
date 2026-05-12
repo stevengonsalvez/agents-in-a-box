@@ -737,9 +737,20 @@ impl EventHandler {
             return Self::handle_changelog_keys(key_event, state);
         }
 
-        // Analytics screen owns its own key handling inside the burndown
-        // plugin. Until plugin-key forwarding is wired, keys on this screen
-        // fall through to the default handler (Esc back to home, etc.).
+        // Plugin-owned screens (Analytics → burndown today) forward
+        // keystrokes down `plugin/handle_key` so the plugin's own UI
+        // state (period chip, focused panel, zoom, filter stack) can
+        // react. The forwarder returns `Handled` for non-reserved
+        // keys; reserved keys (`Ctrl+C`, `?`, `H`) and screens with
+        // no associated plugin fall through to the global handler
+        // below. See `screens::builtin::forward_key_to_focused_plugin`
+        // for the reservation list and the crossterm → wire
+        // translation.
+        if let crate::app::screens::EventOutcome::Handled =
+            crate::app::screens::builtin::forward_key_to_focused_plugin(state, &key_event)
+        {
+            return None;
+        }
 
         // Handle skills browser view
         if state.current_screen == screen_ids::SKILLS {

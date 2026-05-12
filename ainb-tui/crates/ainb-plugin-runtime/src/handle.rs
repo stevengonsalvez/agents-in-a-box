@@ -11,9 +11,10 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use ainb_plugin_protocol::params::Viewport;
+use ainb_plugin_protocol::params::{HandleKeyParams, Viewport};
 use ainb_plugin_protocol::wire_buffer::WireBuffer;
 use bytes::Bytes;
 use parking_lot::RwLock;
@@ -31,6 +32,7 @@ use crate::types::{
 /// Internal wiring shared between [`crate::Runtime`] and every clone
 /// of [`RuntimeHandle`].
 #[derive(Clone)]
+#[allow(missing_debug_implementations)]
 pub(crate) struct HandleInner {
     pub(crate) tokio: tokio::runtime::Handle,
     pub(crate) snapshots: SnapshotStore,
@@ -40,6 +42,13 @@ pub(crate) struct HandleInner {
     /// for the publish path; see [`crate::plugin_task::InboxMap`].
     pub(crate) inboxes: InboxMap,
     pub(crate) config: RuntimeConfig,
+    /// Monotonic counter the host bumps once per `send_key` call.
+    /// Stamped into `HandleKeyParams.generation`; the plugin echoes it
+    /// back via the next `plugin/render` so the host has a freshness
+    /// witness. Shared across every clone of the handle so the same
+    /// sequence works regardless of which `RuntimeHandle` queued the
+    /// keystroke.
+    pub(crate) key_generation: Arc<AtomicU64>,
 }
 
 /// Send + Clone runtime façade. The TUI thread should hold one of
@@ -47,6 +56,17 @@ pub(crate) struct HandleInner {
 #[derive(Clone)]
 pub struct RuntimeHandle {
     inner: HandleInner,
+}
+
+impl std::fmt::Debug for RuntimeHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Opaque on purpose — the inner has tokio + lock primitives
+        // that aren't `Debug`. Surface the plugin count, which is the
+        // only state likely to be useful in a panic backtrace.
+        f.debug_struct("RuntimeHandle")
+            .field("plugins", &self.inner.plugins.read().len())
+            .finish()
+    }
 }
 
 impl RuntimeHandle {
@@ -172,6 +192,41 @@ impl RuntimeHandle {
     #[must_use]
     pub fn snapshot_get(&self, topic: &str) -> Option<Bytes> {
         self.inner.snapshots.payload(&Topic::from(topic))
+    }
+
+    /// Forward a single normalized key event to the plugin owning the
+    /// focused screen. Non-blocking — the per-plugin tokio task picks
+    /// the command up off its mpsc inbox and writes the
+    /// `plugin/handle_key` notification frame.
+    ///
+    /// The host allocates a monotonic `generation` per call (shared
+    /// across all clones of [`RuntimeHandle`]) so the plugin can echo
+    /// it back via the next `plugin/render` and the host can prove the
+    /// keystroke landed before the frame was painted.
+    ///
+    /// Returns `false` if the plugin is unknown or the task is gone;
+    /// the keystroke is dropped on the floor in either case. Caller is
+    /// expected to surface a soft error or simply ignore — interactive
+    /// keys are tolerant of loss compared to snapshots.
+    pub fn send_key(
+        &self,
+        plugin_id: &PluginId,
+        screen_id: impl Into<String>,
+        key: ainb_plugin_protocol::params::KeyEvent,
+    ) -> bool {
+        let Some(handle) = self.lookup(plugin_id) else {
+            return false;
+        };
+        let generation = self.inner.key_generation.fetch_add(1, Ordering::Relaxed);
+        let params = HandleKeyParams {
+            screen_id: screen_id.into(),
+            key,
+            generation,
+        };
+        handle
+            .inbox
+            .send(Command::HandleKey { params })
+            .is_ok()
     }
 
     /// Publish a snapshot from the host side. Non-blocking. Subscriber

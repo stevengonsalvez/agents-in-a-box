@@ -19,9 +19,9 @@ use ainb_plugin_protocol::errors::RpcError;
 use ainb_plugin_protocol::methods;
 use ainb_plugin_protocol::params::{
     ActionInvokeParams, ActionInvokeResult, CliDispatchParams, CliDispatchResult,
-    HandleEventParams, LogParams, PluginInitParams, PluginInitResult, PluginShutdownParams,
-    RenderParams, RenderResult, SnapshotGetParams, SnapshotGetResult, SnapshotPublishParams,
-    SnapshotSubscribeParams, SnapshotSubscribeResult, Viewport,
+    HandleEventParams, HandleKeyParams, LogParams, PluginInitParams, PluginInitResult,
+    PluginShutdownParams, RenderParams, RenderResult, SnapshotGetParams, SnapshotGetResult,
+    SnapshotPublishParams, SnapshotSubscribeParams, SnapshotSubscribeResult, Viewport,
 };
 use ainb_plugin_protocol::wire_buffer::WireBuffer;
 use bytes::Bytes;
@@ -111,6 +111,18 @@ pub enum Command {
         topic: Topic,
         /// Snapshot bytes.
         payload: Bytes,
+    },
+    /// Forward a `plugin/handle_key` notification (single keystroke
+    /// destined for the focused plugin screen). Ordering vs other
+    /// inbox traffic is preserved by the per-plugin mpsc inbox, and
+    /// the SDK server re-uses the inline-dispatch path for the same
+    /// reason — multi-key sequences would lose their semantics
+    /// otherwise. See `plugin_task.rs::handle_command` for the wire
+    /// translation.
+    HandleKey {
+        /// Pre-built params with screen_id, key, and host-allocated
+        /// generation counter.
+        params: HandleKeyParams,
     },
     /// Send `plugin/shutdown` and reap the process.
     Shutdown,
@@ -307,6 +319,20 @@ impl PluginTask {
                 })
                 .expect("HandleEventParams is serializable");
                 let _ = self.send_notification(methods::PLUGIN_HANDLE_EVENT, params).await;
+            }
+            Command::HandleKey { params } => {
+                // Drop on idle, same policy as `HandleEvent`. A key
+                // pressed before the plugin process is even spawned
+                // has no plausible destination — the user almost
+                // certainly won't expect it to be replayed once the
+                // process is up.
+                if self.child.is_none() {
+                    debug!(plugin = %self.plugin.id, "handle_key dropped (idle)");
+                    return;
+                }
+                let json = serde_json::to_value(params)
+                    .expect("HandleKeyParams is serializable");
+                let _ = self.send_notification(methods::PLUGIN_HANDLE_KEY, json).await;
             }
             Command::Reload => {
                 self.failures.clear();

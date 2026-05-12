@@ -2111,6 +2111,17 @@ pub struct AppState {
     pub plugin_render_areas:
         std::collections::HashMap<crate::app::screens::ScreenId, (u16, u16)>,
 
+    /// Cheap Send + Clone façade onto the plugin runtime, populated by
+    /// `App::init`. `None` when running plugin-free (e.g. tests, or
+    /// installs that haven't completed bundled-plugin discovery yet).
+    ///
+    /// Lives on `AppState` rather than `App` so the key-dispatch path
+    /// in `app::events::handle_key_event` can forward keystrokes to
+    /// the focused plugin without needing access to `App`. `App` still
+    /// owns the underlying `Runtime` via `plugin_runtime_owner` so the
+    /// tokio executor is torn down when `App` drops.
+    pub plugin_runtime: Option<ainb_plugin_runtime::RuntimeHandle>,
+
     /// Cached result of `detect_statusline_status()` paired with the time
     /// it was read. Refreshed lazily through
     /// [`AppState::statusline_status_cached`] on a 15s TTL so the global
@@ -2702,6 +2713,7 @@ impl Default for AppState {
 
             pending_plugin_renders: std::collections::HashMap::new(),
             plugin_render_areas: std::collections::HashMap::new(),
+            plugin_runtime: None,
 
             statusline_status_cache: None,
 
@@ -9674,13 +9686,10 @@ pub struct App {
     pub state: AppState,
     /// Owning handle to the plugin runtime's tokio executor. Held by `App`
     /// so dropping `App` joins every plugin task and tears down the runtime.
-    /// `None` until [`App::init`] runs. Kept private — the TUI always goes
-    /// through `plugin_runtime` (the cheap Send + Clone façade).
+    /// `None` until [`App::init`] runs. The cheap Send + Clone façade lives
+    /// on `state.plugin_runtime` so dispatchers reach it without needing
+    /// access to `App`.
     plugin_runtime_owner: Option<ainb_plugin_runtime::Runtime>,
-    /// Send + Clone runtime handle the TUI render thread holds. Every
-    /// surface method on this is non-blocking (`try_recv_render`,
-    /// `snapshot_get`) so the ratatui draw thread never `.await`s.
-    pub plugin_runtime: Option<ainb_plugin_runtime::RuntimeHandle>,
 }
 
 impl App {
@@ -9688,7 +9697,6 @@ impl App {
         Self {
             state: AppState::new(),
             plugin_runtime_owner: None,
-            plugin_runtime: None,
         }
     }
 
@@ -9707,7 +9715,10 @@ impl App {
     /// no-op when discovery returned empty; once 7c lands, the screen
     /// routing table below populates again.
     pub fn tick_plugin_renders(&mut self) {
-        let Some(handle) = self.plugin_runtime.as_ref() else {
+        // Clone the cheap Send + Clone handle so we can hold a reference
+        // to the runtime while also mutably borrowing the various
+        // `state.*` plugin caches below.
+        let Some(handle) = self.state.plugin_runtime.clone() else {
             return;
         };
 
@@ -9770,7 +9781,7 @@ impl App {
                     warn!(plugin = %name, error = %err, "plugin failed to load");
                 }
                 self.plugin_runtime_owner = Some(runtime);
-                self.plugin_runtime = Some(handle);
+                self.state.plugin_runtime = Some(handle);
             }
             Err(e) => {
                 warn!(error = %e, "plugin runtime init failed — running plugin-free");
