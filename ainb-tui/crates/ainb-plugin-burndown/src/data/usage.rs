@@ -1795,6 +1795,62 @@ fn build_model_project_counts(
         .collect()
 }
 
+/// Re-derive the `activities`, `mcp_servers`, and `tools` columns of an
+/// already-parsed `UsageData` from `data.calls`.
+///
+/// session-reader publishes empty `activities` and `mcp_servers` arrays
+/// on the wire (see the comment in `crates/ainb-plugin-session-reader/
+/// src/scanner.rs`: classification is the consumer's job). It also
+/// emits raw tool names into `tools` without splitting the `mcp__server__*`
+/// prefix into a separate MCP-server row. Burndown owns the richer
+/// activity taxonomy (12+ buckets vs. the wire schema's 6) and the
+/// mcp/tool split, so we recompute those three columns here using the
+/// raw call set the producer ships intact.
+///
+/// Other columns (daily/weekly/projects/sessions/models/branches/
+/// shell_commands/grand_total/model_project_counts) are left as the
+/// producer published them — re-aggregating those would risk
+/// timezone shifts and other cross-platform drift for no gain.
+pub fn rebuild_activity_and_mcp_columns(data: &mut UsageData) {
+    let turn_analysis = analyze_turns(&data.calls);
+    let mut activity_map: HashMap<ActivityCategory, ActivityAccumulator> = HashMap::new();
+    let mut tool_map: HashMap<String, usize> = HashMap::new();
+    let mut mcp_map: HashMap<String, usize> = HashMap::new();
+
+    for call in &data.calls {
+        let bucket = call.bucket();
+        let analysis = turn_analysis.get(&call.id).copied().unwrap_or_else(|| TurnAnalysis {
+            category: classify_activity(call),
+            retries: 0,
+            has_edits: has_edit_tool(&call.tools),
+        });
+        let activity = activity_map.entry(analysis.category).or_default();
+        activity.bucket.merge(&bucket);
+        activity.turns += 1;
+        activity.retries += analysis.retries;
+        if analysis.has_edits {
+            activity.edit_turns += 1;
+            if analysis.retries == 0 {
+                activity.one_shot_turns += 1;
+            }
+        }
+
+        for tool in &call.tools {
+            if let Some(server) =
+                tool.strip_prefix("mcp__").and_then(|rest| rest.split("__").next())
+            {
+                bump(&mut mcp_map, server.to_string());
+            } else {
+                bump(&mut tool_map, tool.clone());
+            }
+        }
+    }
+
+    data.activities = sorted_activities(activity_map);
+    data.mcp_servers = sorted_named_usage(mcp_map);
+    data.tools = sorted_named_usage(tool_map);
+}
+
 /// Filter an already-parsed `UsageData` by exact-match cross-filters.
 ///
 /// Returns a new `UsageData` with `calls`, `daily`, `weekly`, `projects`,
@@ -4218,6 +4274,78 @@ mod tests {
         );
         assert_eq!(filtered.calls.len(), 1, "only id=1 satisfies all 3 filters");
         assert_eq!(filtered.calls[0].id, 1);
+    }
+
+    #[test]
+    fn rebuild_activity_and_mcp_columns_splits_mcp_prefix_from_tools() {
+        // Simulate a wire snapshot where the producer (session-reader)
+        // shipped raw tool names with the mcp__ prefix unsplit. Burndown's
+        // rebuild must route those into mcp_servers and leave only plain
+        // tools in `tools`.
+        let now = Utc::now();
+        let call = ProviderCallBuilder::new()
+            .with_id(1)
+            .with_timestamp(now)
+            .with_input_tokens(10)
+            .with_tools(&["Read", "Bash", "mcp__github__create_issue", "mcp__github__list_prs"])
+            .build();
+        let mut data = UsageData::default();
+        data.calls = vec![call];
+
+        rebuild_activity_and_mcp_columns(&mut data);
+
+        let tool_names: Vec<&str> = data.tools.iter().map(|n| n.name.as_str()).collect();
+        assert!(tool_names.contains(&"Read"), "Read survives as a plain tool");
+        assert!(tool_names.contains(&"Bash"), "Bash survives as a plain tool");
+        assert!(
+            !tool_names.iter().any(|name| name.starts_with("mcp__")),
+            "no mcp__ tools should leak into the tools column: {tool_names:?}"
+        );
+        let mcp_names: Vec<&str> = data.mcp_servers.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(
+            mcp_names,
+            vec!["github"],
+            "two mcp__github__* tools collapse to a single github server row"
+        );
+        assert_eq!(data.mcp_servers[0].calls, 2);
+    }
+
+    #[test]
+    fn rebuild_activity_and_mcp_columns_populates_activities_when_wire_was_empty() {
+        // session-reader publishes activities as Vec::new(). After
+        // rebuild, the call's tools + message should land in a populated
+        // activity row using burndown's richer taxonomy.
+        let now = Utc::now();
+        let call = ProviderCallBuilder::new()
+            .with_id(1)
+            .with_timestamp(now)
+            .with_input_tokens(50)
+            .with_tools(&["Edit", "Write"])
+            .with_user_message("fix the bug in the parser")
+            .build();
+        let mut data = UsageData::default();
+        data.calls = vec![call];
+
+        assert!(data.activities.is_empty(), "wire shipped empty activities");
+        rebuild_activity_and_mcp_columns(&mut data);
+
+        assert!(
+            !data.activities.is_empty(),
+            "rebuild should populate at least one activity row"
+        );
+        let total_turns: usize = data.activities.iter().map(|a| a.turns).sum();
+        assert_eq!(total_turns, 1, "single call should contribute one turn");
+    }
+
+    #[test]
+    fn rebuild_activity_and_mcp_columns_handles_empty_calls() {
+        // Defensive: empty calls (no data yet) must not panic and must
+        // leave all three columns empty.
+        let mut data = UsageData::default();
+        rebuild_activity_and_mcp_columns(&mut data);
+        assert!(data.activities.is_empty());
+        assert!(data.mcp_servers.is_empty());
+        assert!(data.tools.is_empty());
     }
 
     #[test]
