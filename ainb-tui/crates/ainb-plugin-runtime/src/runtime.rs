@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -10,7 +11,7 @@ use tokio::runtime::Runtime as TokioRuntime;
 
 use crate::error::RuntimeError;
 use crate::handle::{HandleInner, RuntimeHandle};
-use crate::plugin_task::{self, Inbox, InboxMap, RenderCache};
+use crate::plugin_task::{self, DirtyMap, Inbox, InboxMap, RenderCache};
 use crate::registry::{self, ChannelRegistry, RegisteredPlugin};
 use crate::snapshot::SnapshotStore;
 use crate::types::{LifecycleState, PluginId, RuntimeConfig};
@@ -21,6 +22,19 @@ pub(crate) struct PluginHandle {
     pub(crate) cache: RenderCache,
     pub(crate) state: Arc<RwLock<LifecycleState>>,
     pub(crate) plugin: Arc<RegisteredPlugin>,
+    /// Render-dirty witness. Set whenever something has happened that
+    /// the plugin's UI state may have observed (`send_key`, an event
+    /// publish landing in its inbox) and the host therefore needs to
+    /// kick a `plugin/render` to repaint. The host's render-tick loop
+    /// drains this with `RuntimeHandle::take_render_dirty` and skips
+    /// the render-kick entirely when it's clean — collapses the
+    /// 250 ms tick-rate idle wait into an event-driven repaint.
+    ///
+    /// Initialised `true` so the first paint after registration always
+    /// fires (the plugin's snapshot bootstrap chunks may or may not
+    /// have landed by then, but either way the host needs an initial
+    /// `plugin/render` to populate the screen).
+    pub(crate) render_dirty: Arc<AtomicBool>,
 }
 
 /// Owns the tokio runtime + per-plugin tasks. Construct with
@@ -40,6 +54,10 @@ pub struct Runtime {
     /// `Command::HandleEvent` to subscribers on `host/snapshot/publish`
     /// without taking a dependency on the public `PluginHandle` type.
     inboxes: InboxMap,
+    /// Parallel `plugin_id → render-dirty` flag map. Kept in sync with
+    /// `plugins`; shared with plugin tasks so plugin→plugin publishes
+    /// can mark subscribers dirty without taking a `PluginHandle` dep.
+    dirty: DirtyMap,
     /// Tunables.
     config: RuntimeConfig,
 }
@@ -62,12 +80,14 @@ impl Runtime {
         let plugins: Arc<RwLock<HashMap<PluginId, Arc<PluginHandle>>>> =
             Arc::new(RwLock::new(HashMap::new()));
         let inboxes: InboxMap = Arc::new(parking_lot::RwLock::new(HashMap::new()));
+        let dirty: DirtyMap = Arc::new(parking_lot::RwLock::new(HashMap::new()));
         let handle = RuntimeHandle::new(HandleInner {
             tokio: tokio.handle().clone(),
             snapshots: snapshots.clone(),
             channels: channels.clone(),
             plugins: plugins.clone(),
             inboxes: inboxes.clone(),
+            dirty: dirty.clone(),
             config,
             key_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         });
@@ -78,6 +98,7 @@ impl Runtime {
                 channels,
                 plugins,
                 inboxes,
+                dirty,
                 config,
             },
             handle,
@@ -113,6 +134,7 @@ impl Runtime {
             arc.clone(),
             self.snapshots.clone(),
             self.inboxes.clone(),
+            self.dirty.clone(),
             self.config,
             self.tokio.handle(),
         );
@@ -120,11 +142,15 @@ impl Runtime {
             let _ = inbox.send(plugin_task::Command::EnsureSpawned);
         }
         self.inboxes.write().insert(arc.id.clone(), inbox.clone());
+        // Start dirty so the first paint after registration kicks a render.
+        let render_dirty = Arc::new(AtomicBool::new(true));
+        self.dirty.write().insert(arc.id.clone(), render_dirty.clone());
         let handle = Arc::new(PluginHandle {
             inbox,
             cache,
             state,
             plugin: arc.clone(),
+            render_dirty,
         });
         self.plugins.write().insert(arc.id.clone(), handle);
     }
