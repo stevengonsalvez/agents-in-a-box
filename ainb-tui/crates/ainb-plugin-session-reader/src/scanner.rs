@@ -11,8 +11,14 @@
 //! - Daily / weekly bucketing is UTC. The display layer can convert.
 //! - Project key is the call's `project` field as-is — no upstream-repo
 //!   resolution; two worktrees of the same upstream stay separate.
-//! - `activities` and `mcp_servers` are intentionally empty pending a
-//!   classification pass that operates over session timelines.
+//! - `activities` and `mcp_servers` are intentionally empty here.
+//!   session-reader publishes the raw call set (with `tools` +
+//!   `bash_commands` per call) and leaves activity classification and
+//!   mcp-server attribution to the consumer. Each subscriber owns
+//!   that taxonomy because the right buckets are consumer-specific
+//!   (burndown uses 12 buckets; the wire schema only carries 6). See
+//!   `ainb-plugin-burndown::data::usage::rebuild_activity_and_mcp_columns`
+//!   for the reference implementation.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
