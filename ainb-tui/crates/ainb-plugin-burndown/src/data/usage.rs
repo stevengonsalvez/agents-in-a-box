@@ -143,7 +143,7 @@ pub struct UsageQuery {
 /// branch (`branch == None`, eg. codex turns or Claude turns made outside a
 /// git repo) are excluded by any non-empty branch filter — there's no way
 /// to ask for "untracked branch" via this struct on purpose.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct UsageFilters {
     pub project: Vec<String>,
     pub model: Vec<String>,

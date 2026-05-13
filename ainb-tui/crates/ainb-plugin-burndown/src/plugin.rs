@@ -79,6 +79,32 @@ pub struct BurndownPlugin {
     /// so the host can prove the keystroke landed before the frame
     /// was painted; today the plugin keeps it as private bookkeeping.
     generation: u64,
+    /// Monotonic data-identity counter. Bumped once per
+    /// `apply_chunk_pure` finalise so the filter cache below can
+    /// invalidate when the underlying call set changes without
+    /// hashing the (potentially huge) `UsageData`.
+    data_generation: u64,
+    /// `filter_usage_data(self.data, ui.filters)` is the dominant
+    /// per-render cost (`analyze_turns` walks every call to build a
+    /// session timeline, then the aggregate pass rebuilds every
+    /// per-day/per-project/per-model rollup). It's also pure: the
+    /// output depends only on `(data, filters)`. We cache the
+    /// most-recent result keyed by `(data_generation, filters_hash)`
+    /// so idle re-renders (between keystrokes) and repeated renders
+    /// on the same filter state are O(1) instead of O(N).
+    filter_cache: Option<FilterCacheEntry>,
+}
+
+/// One-deep filter-cache slot. A single entry is enough because
+/// burndown renders synchronously and a key-press always switches to
+/// at most one filter+period state per render. Keeping the cache size
+/// at 1 avoids invalidation logic and bounds memory at 2× the largest
+/// `UsageData` snapshot.
+#[derive(Debug, Clone)]
+struct FilterCacheEntry {
+    data_generation: u64,
+    filters_hash: u64,
+    filtered: std::sync::Arc<crate::data::usage::UsageData>,
 }
 
 #[async_trait]
@@ -192,11 +218,18 @@ impl Plugin for BurndownPlugin {
         if self.schema_mismatch && self.data.is_none() {
             paint_schema_mismatch(&mut rbuf, area);
         } else {
+            // Resolve the cached filtered view FIRST (mutable
+            // borrow) and only then build the ui snapshot. Doing it
+            // in this order lets `cached_filtered()` mutate
+            // `self.filter_cache` without colliding with the later
+            // immutable read of `self.ui` and `self.data`.
+            let cached_filtered = self.cached_filtered();
             // Snapshot the UI state so we can paint without holding a
             // mutable borrow on `self` for the whole call.
             let mut ui = self.ui.clone();
             ui.data = self.data.clone();
             ui.scan_progress = self.scan_progress.clone();
+            ui.cached_filtered = cached_filtered;
             render_ui(&mut rbuf, area, &ui);
         }
         Ok(buffer_to_wire(&rbuf, area))
@@ -355,10 +388,61 @@ impl BurndownPlugin {
                 // lingering progress event so the UI flips from
                 // skeleton to populated panels on the next render.
                 self.scan_progress = None;
+                // Invalidate the filter cache: the underlying call
+                // set has changed, every cached result is stale.
+                // Bump first, drop second, so any concurrent reader
+                // sees the new generation when checking the entry.
+                self.data_generation = self.data_generation.wrapping_add(1);
+                self.filter_cache = None;
                 return ChunkOutcome::Finalised;
             }
         }
         ChunkOutcome::Buffered
+    }
+
+    /// Hash a `UsageFilters` snapshot to a u64. Used by the filter
+    /// cache key — `UsageFilters` is `Eq + Hash` so this is a pure
+    /// function of the chip set.
+    fn hash_filters(filters: &crate::data::usage::UsageFilters) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        filters.hash(&mut h);
+        h.finish()
+    }
+
+    /// Resolve the filtered view of `self.data` for the current
+    /// `self.ui.filters`. Cached by `(data_generation, filters_hash)`
+    /// — repeated renders on the same key state are O(1).
+    ///
+    /// Returns `None` when there is no data yet (the render path
+    /// already paints the wait/skeleton screen in that case).
+    fn cached_filtered(
+        &mut self,
+    ) -> Option<std::sync::Arc<crate::data::usage::UsageData>> {
+        let data = self.data.as_ref()?;
+        // No-op fast path: empty filter set. The render path falls
+        // back to the raw `data` reference and never consults the
+        // cache, so don't bother building one.
+        if self.ui.filters.is_empty() {
+            return None;
+        }
+        let filters_hash = Self::hash_filters(&self.ui.filters);
+        let key = (self.data_generation, filters_hash);
+        if let Some(entry) = self.filter_cache.as_ref() {
+            if entry.data_generation == key.0 && entry.filters_hash == key.1 {
+                return Some(entry.filtered.clone());
+            }
+        }
+        let filtered = std::sync::Arc::new(crate::data::usage::filter_usage_data(
+            data,
+            &self.ui.filters,
+        ));
+        self.filter_cache = Some(FilterCacheEntry {
+            data_generation: key.0,
+            filters_hash: key.1,
+            filtered: filtered.clone(),
+        });
+        Some(filtered)
     }
 
     /// Decode a `sessions.scan_progress` payload and stash it as the
