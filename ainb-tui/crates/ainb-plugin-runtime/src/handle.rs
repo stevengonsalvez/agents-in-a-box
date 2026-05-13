@@ -42,10 +42,11 @@ pub(crate) struct HandleInner {
     /// for the publish path; see [`crate::plugin_task::InboxMap`].
     pub(crate) inboxes: InboxMap,
     /// Parallel `plugin_id → render-dirty` map. See `runtime::PluginHandle`.
-    /// Held here so `RuntimeHandle::mark_render_dirty` and the host-side
-    /// `publish_snapshot` path can flip a subscriber's flag without
-    /// reaching through `plugins.read()`.
-    #[allow(dead_code)]
+    /// Held here so [`RuntimeHandle::mark_render_dirty`] can flip a
+    /// subscriber's flag through a single `RwLock` read instead of
+    /// reaching through `plugins.read()` + `PluginHandle`. The same
+    /// `Arc<AtomicBool>` lives in both maps — flipping one is visible
+    /// from the other.
     pub(crate) dirty: crate::plugin_task::DirtyMap,
     pub(crate) config: RuntimeConfig,
     /// Monotonic counter the host bumps once per `send_key` call.
@@ -211,10 +212,12 @@ impl RuntimeHandle {
     /// Explicitly mark a plugin's screen as needing a repaint. Used by
     /// the host when something OUTSIDE the runtime (e.g. a viewport
     /// resize) ought to drive a fresh render even though no key or
-    /// event arrived.
+    /// event arrived. Routed through [`HandleInner::dirty`] so the
+    /// host doesn't take a `plugins.read()` lock for a single bit
+    /// flip.
     pub fn mark_render_dirty(&self, plugin_id: &PluginId) {
-        if let Some(p) = self.lookup(plugin_id) {
-            p.render_dirty.store(true, Ordering::Release);
+        if let Some(flag) = self.inner.dirty.read().get(plugin_id) {
+            flag.store(true, Ordering::Release);
         }
     }
 
