@@ -808,6 +808,32 @@ impl EventHandler {
                 tracing::info!("[ACTION] 'a' key pressed - AttachTmuxSession requested");
                 Some(AppEvent::AttachTmuxSession)
             }
+            // The badge-to-position mapping is recomputed on every render —
+            // digit N attaches to whatever is at that position *now*, not a
+            // fixed session ID.
+            KeyCode::Char(d)
+                if matches!(d, '1'..='9')
+                    && !key_event.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key_event.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                let n = (d as u8 - b'0') as usize;
+                let items = state.attachable_items_in_order();
+                if let Some(target) = items.get(n - 1).copied() {
+                    tracing::info!(
+                        "[ACTION] digit '{}' pressed - attach to position {} ({:?})",
+                        d,
+                        n,
+                        target
+                    );
+                    state.select_attachable(target);
+                    Some(AppEvent::AttachTmuxSession)
+                } else {
+                    Some(AppEvent::ShowNotification(format!(
+                        "No session at position {}",
+                        n
+                    )))
+                }
+            }
             KeyCode::Enter => {
                 // Enter on a Stopped interactive session = resume it.
                 // Enter on a Running session = attach (mirrors 'a').
