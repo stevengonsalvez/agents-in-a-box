@@ -905,6 +905,45 @@ mod handle_key_dispatch_tests {
         assert!(p.dispatch_key_pure(&ch('k')));
     }
 
+    /// Regression: `commit_focused_row` reads `self.ui.data`, but the
+    /// plugin parks the parsed snapshot on `self.data`. Before the
+    /// dispatcher started syncing data into `ui` ahead of the commit,
+    /// Enter was a silent no-op — no chip, no error, no log line. This
+    /// test lifts the contract into the dispatcher's surface so the
+    /// sync can't regress without a CI signal.
+    #[test]
+    fn enter_commits_branch_chip_when_only_plugin_data_is_set() {
+        use crate::data::usage::{BranchUsage, TokenBucket, UsageData, UsagePeriod};
+        use crate::ui::UsagePanel;
+
+        let mut p = BurndownPlugin::default();
+        let mut data = UsageData::default();
+        data.branches = vec![BranchUsage {
+            branch: "main".to_string(),
+            bucket: TokenBucket {
+                input_tokens: 100,
+                output_tokens: 100,
+                ..Default::default()
+            },
+        }];
+        // Plugin-level snapshot ONLY — leave self.ui.data as None to
+        // mirror the production state right after `apply_chunk_pure`.
+        p.data = Some(data);
+        p.ui.data = None;
+        p.ui.focused_panel = Some(UsagePanel::ByBranch);
+        p.ui.focus_row = 0;
+        // Bypass period filtering so the synthetic call survives the
+        // re-aggregate in `filter_usage_data_full`.
+        p.ui.period = UsagePeriod::All;
+
+        assert!(p.dispatch_key_pure(&KeyCode::Enter));
+        assert_eq!(
+            p.ui.filters.branch,
+            vec!["main".to_string()],
+            "Enter must commit a chip even when only self.data (not self.ui.data) is set"
+        );
+    }
+
     #[test]
     fn unmapped_keys_are_not_claimed() {
         let mut p = BurndownPlugin::default();
