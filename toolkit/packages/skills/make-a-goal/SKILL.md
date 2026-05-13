@@ -1,22 +1,23 @@
 ---
-name: goal
+name: make-a-goal
 description: |
   Produce a fully-filled autonomous-run mega-prompt at .agents/goals/<slug>.md
   by interviewing the user for the missing context. The output file is the
   "set the goal · walk away · come back to shipped work" prompt — drop it
   into a fresh Claude Code / Codex session to run end-to-end without hand-
-  holding. Use when Stevie says "/goal", "/goal <outcome>", "set a goal",
-  "build me a goal prompt", or similar. The skill does NOT execute the
-  goal — it only produces the artifact.
+  holding. Use when Stevie says "/make-a-goal", "/make-a-goal <outcome>",
+  "make a goal", "set a goal", "build me a goal prompt", or similar. The
+  skill does NOT execute the goal — it only produces the artifact.
+  Named `make-a-goal` (not `goal`) because `/goal` is a reserved system slash.
 argument-hint: "[the final outcome — one line, optional]"
 ---
 
-# /goal — autonomous-run mega-prompt builder
+# /make-a-goal — autonomous-run mega-prompt builder
 
 ## What it does
 
-`/goal [outcome line]` interviews Stevie for the operating context an
-autonomous coding agent needs, then writes a filled mega-prompt to
+`/make-a-goal [outcome line]` interviews Stevie for the operating context
+an autonomous coding agent needs, then writes a filled mega-prompt to
 `.agents/goals/<slug>.md`. Stevie runs the goal by pasting the file
 contents into a fresh session — this skill never executes the run.
 
@@ -25,10 +26,10 @@ plan handed to `/interview` lives at `assets/stub-plan.md.tmpl`.
 
 ## Trigger
 
-- `/goal` — no args, interview asks for the outcome line too
-- `/goal <outcome>` — outcome line pre-fills `{{OUTCOME}}`, interview
-  gathers the rest
-- Natural language: "set a goal", "make a goal prompt"
+- `/make-a-goal` — no args, interview asks for the outcome line too
+- `/make-a-goal <outcome>` — outcome line pre-fills `{{OUTCOME}}`,
+  interview gathers the rest
+- Natural language: "make a goal", "set a goal", "build me a goal prompt"
 
 ## Flow
 
