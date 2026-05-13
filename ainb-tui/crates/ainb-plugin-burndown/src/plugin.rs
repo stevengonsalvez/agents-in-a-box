@@ -749,9 +749,17 @@ impl BurndownPlugin {
             KeyCode::Char { ch: '/' } if self.ui.is_zoomed() => self.ui.zoom_begin_search(),
             KeyCode::Char { ch: 'd' } if self.ui.is_zoomed() => self.ui.toggle_zoom_detail(),
             KeyCode::Enter => {
+                // `commit_focused_row` resolves the row through
+                // `filtered_data()` which reads `self.ui.data`. The
+                // plugin keeps the parsed snapshot on `self.data`
+                // (the render path copies it into `ui.data` only at
+                // render time), so without this sync the commit
+                // would silently return false — drill-down dead.
+                self.ui.data = self.data.clone();
                 let _ = self.ui.commit_focused_row();
             }
             KeyCode::Char { ch: 'X' } => {
+                self.ui.data = self.data.clone();
                 let _ = self.ui.commit_focused_row_exclude();
             }
             KeyCode::Char { ch: 'C' } => self.ui.clear_all_filter_chips(),
@@ -895,6 +903,45 @@ mod handle_key_dispatch_tests {
         // dispatch wiring rather than the scroll math.
         let mut p = BurndownPlugin::default();
         assert!(p.dispatch_key_pure(&ch('k')));
+    }
+
+    /// Regression: `commit_focused_row` reads `self.ui.data`, but the
+    /// plugin parks the parsed snapshot on `self.data`. Before the
+    /// dispatcher started syncing data into `ui` ahead of the commit,
+    /// Enter was a silent no-op — no chip, no error, no log line. This
+    /// test lifts the contract into the dispatcher's surface so the
+    /// sync can't regress without a CI signal.
+    #[test]
+    fn enter_commits_branch_chip_when_only_plugin_data_is_set() {
+        use crate::data::usage::{BranchUsage, TokenBucket, UsageData, UsagePeriod};
+        use crate::ui::UsagePanel;
+
+        let mut p = BurndownPlugin::default();
+        let mut data = UsageData::default();
+        data.branches = vec![BranchUsage {
+            branch: "main".to_string(),
+            bucket: TokenBucket {
+                input_tokens: 100,
+                output_tokens: 100,
+                ..Default::default()
+            },
+        }];
+        // Plugin-level snapshot ONLY — leave self.ui.data as None to
+        // mirror the production state right after `apply_chunk_pure`.
+        p.data = Some(data);
+        p.ui.data = None;
+        p.ui.focused_panel = Some(UsagePanel::ByBranch);
+        p.ui.focus_row = 0;
+        // Bypass period filtering so the synthetic call survives the
+        // re-aggregate in `filter_usage_data_full`.
+        p.ui.period = UsagePeriod::All;
+
+        assert!(p.dispatch_key_pure(&KeyCode::Enter));
+        assert_eq!(
+            p.ui.filters.branch,
+            vec!["main".to_string()],
+            "Enter must commit a chip even when only self.data (not self.ui.data) is set"
+        );
     }
 
     #[test]

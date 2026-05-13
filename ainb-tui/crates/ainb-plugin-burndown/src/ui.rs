@@ -243,12 +243,16 @@ impl UsagePanel {
     /// Whether `Enter` on this panel maps a row onto a cross-filter.
     /// Daily Activity, Optimize, and Budget are read-only — Enter is a
     /// no-op there. Leaderboard maps the focused row onto the Project
-    /// filter (rows are projects).
+    /// filter (rows are projects). Core Tools, Shell Commands, and
+    /// MCP Servers are read-only too: a single call uses many tools,
+    /// so "filter calls where tool = X" doesn't map cleanly onto the
+    /// per-call filter contract.
     pub fn enter_target(self) -> Option<UsageFilterTarget> {
         match self {
             UsagePanel::ByProject | UsagePanel::Leaderboard => Some(UsageFilterTarget::Project),
             UsagePanel::ByActivity => Some(UsageFilterTarget::Activity),
             UsagePanel::ByModel => Some(UsageFilterTarget::Model),
+            UsagePanel::ByBranch => Some(UsageFilterTarget::Branch),
             UsagePanel::TopSessions | UsagePanel::Live => Some(UsageFilterTarget::Session),
             _ => None,
         }
@@ -262,6 +266,7 @@ pub enum UsageFilterTarget {
     Model,
     Activity,
     Session,
+    Branch,
 }
 
 /// View state for the usage analytics screen.
@@ -671,6 +676,9 @@ impl UsageViewState {
                 .sessions
                 .get(row_idx)
                 .map(|s| (target, s.session_id.clone(), Some(s.project.clone()))),
+            (UsageFilterTarget::Branch, _) => {
+                filtered.branches.get(row_idx).map(|b| (target, b.branch.clone(), None))
+            }
             _ => None,
         }
     }
@@ -711,6 +719,11 @@ impl UsageViewState {
                     }
                 }
             }
+            UsageFilterTarget::Branch => {
+                if !self.filters.branch.contains(&value) {
+                    self.filters.branch.push(value);
+                }
+            }
         }
         true
     }
@@ -743,6 +756,11 @@ impl UsageViewState {
             UsageFilterTarget::Session => {
                 if !self.filters.exclude_session.contains(&value) {
                     self.filters.exclude_session.push(value);
+                }
+            }
+            UsageFilterTarget::Branch => {
+                if !self.filters.exclude_branch.contains(&value) {
+                    self.filters.exclude_branch.push(value);
                 }
             }
         }
@@ -4407,15 +4425,47 @@ mod cross_filter_tests {
         assert_eq!(state.focused_panel, Some(UsagePanel::ByBranch));
     }
 
-    /// Brief: branches are display-only for this PR — no chip pivot.
+    /// Grafana-style cross-filter: Enter on a By Branch row commits the
+    /// branch as a chip and propagates the filter to every other widget.
     #[test]
-    fn enter_on_by_branch_row_is_noop() {
+    fn enter_on_by_branch_row_sets_branch_filter() {
+        let mut data = fixture();
+        data.branches = vec![
+            BranchUsage {
+                branch: "main".to_string(),
+                bucket: bucket(3),
+            },
+            BranchUsage {
+                branch: "feat/burndown".to_string(),
+                bucket: bucket(1),
+            },
+        ];
         let mut state = UsageViewState::default();
-        state.data = Some(fixture());
+        state.data = Some(data);
         state.focused_panel = Some(UsagePanel::ByBranch);
         state.focus_row = 0;
-        assert!(!state.commit_focused_row());
-        assert!(state.filters.is_empty());
+        // Bypass period filtering — this test is about Enter→chip dispatch.
+        state.period = UsagePeriod::All;
+        assert!(state.commit_focused_row(), "Enter on a branch row must commit a chip");
+        assert_eq!(state.filters.branch, vec!["main".to_string()]);
+    }
+
+    /// Mirror of the include path: X on a By Branch row commits the
+    /// branch into the exclude_branch list.
+    #[test]
+    fn exclude_on_by_branch_row_sets_exclude_branch_filter() {
+        let mut data = fixture();
+        data.branches = vec![BranchUsage {
+            branch: "main".to_string(),
+            bucket: bucket(3),
+        }];
+        let mut state = UsageViewState::default();
+        state.data = Some(data);
+        state.focused_panel = Some(UsagePanel::ByBranch);
+        state.focus_row = 0;
+        state.period = UsagePeriod::All;
+        assert!(state.commit_focused_row_exclude(), "X on a branch row must commit an exclude chip");
+        assert_eq!(state.filters.exclude_branch, vec!["main".to_string()]);
     }
 
     /// Smoke test: render_branch_panel must not panic on a small frame
