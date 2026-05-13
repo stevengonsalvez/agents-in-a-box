@@ -46,8 +46,15 @@ fn category(c: W::ActivityCategory) -> L::ActivityCategory {
 
 /// Convert a wire `UsageData` (from `sessions.usage_data`) into
 /// burndown's local shape.
+///
+/// After the field-for-field copy, `rebuild_activity_and_mcp_columns`
+/// re-derives the `activities`, `mcp_servers`, and `tools` columns
+/// from `calls`: session-reader ships those three intentionally empty
+/// (or, for `tools`, with the mcp prefix unsplit) because activity
+/// classification + mcp routing live in the consumer's richer
+/// taxonomy. See the helper's docstring for the full rationale.
 pub fn wire_to_local(w: W::UsageData) -> UsageData {
-    L::UsageData {
+    let mut local = L::UsageData {
         daily: w.daily.into_iter().map(|(d, b)| (d, bucket(b))).collect(),
         weekly: w
             .weekly
@@ -153,5 +160,7 @@ pub fn wire_to_local(w: W::UsageData) -> UsageData {
             })
             .collect(),
         model_project_counts: w.model_project_counts.into_iter().collect(),
-    }
+    };
+    L::rebuild_activity_and_mcp_columns(&mut local);
+    local
 }
