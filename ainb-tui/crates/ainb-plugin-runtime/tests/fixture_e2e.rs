@@ -178,6 +178,77 @@ fn send_key_forwards_handle_key_notification() {
 }
 
 #[test]
+fn render_dirty_flag_is_event_driven() {
+    // Verifies the render-dirty gate that drives the host's
+    // event-driven render-tick loop:
+    //
+    //   - Registration seeds the flag to `true` (first paint must fire).
+    //   - One `take_render_dirty` consumes that seed; the next call
+    //     returns `false` because nothing has happened since.
+    //   - `send_key` flips the flag back to `true`.
+    //   - `mark_render_dirty` works as an out-of-band signal (e.g.
+    //     viewport resize) without needing a key event.
+    //
+    // Without this gate `tick_plugin_renders` would kick a
+    // `plugin/render` every tick (~30/s at the 33 ms cadence)
+    // regardless of state changes — the regression we're guarding.
+    let (rt, handle) = build_runtime();
+    let id = register_fixture(&rt);
+
+    // Registration seeds dirty=true so first paint after spawn fires.
+    assert!(
+        handle.take_render_dirty(&id),
+        "registration must seed dirty=true so first paint fires"
+    );
+    // Second call drains nothing — nothing has happened since.
+    assert!(
+        !handle.take_render_dirty(&id),
+        "idle take must return false — render storm regression guard"
+    );
+
+    // Lazy-spawn so `send_key` has somewhere to send.
+    drop(handle.render(&id, Viewport::new(20, 5), 0));
+    // The render kick above also DOESN'T set dirty (renders are
+    // consumers, not producers). Drain anything the spawn-side may
+    // have set so the next assertion is clean.
+    let _ = handle.take_render_dirty(&id);
+
+    // send_key sets dirty=true (retry while lazy-spawn races).
+    let key = ainb_plugin_runtime::KeyEvent {
+        code: ainb_plugin_runtime::KeyCode::Tab,
+        mods: 0,
+        kind: ainb_plugin_runtime::KeyKind::Press,
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if handle.send_key(&id, "ainb_analytics", key.clone()) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        handle.take_render_dirty(&id),
+        "send_key must set dirty=true so a render kick lands"
+    );
+    assert!(
+        !handle.take_render_dirty(&id),
+        "second take after send_key must be false"
+    );
+
+    // mark_render_dirty as an out-of-band signal.
+    handle.mark_render_dirty(&id);
+    assert!(
+        handle.take_render_dirty(&id),
+        "mark_render_dirty must set dirty=true"
+    );
+
+    // Unknown plugins must not panic and must return false.
+    let unknown = PluginId::from("definitely-not-a-plugin");
+    assert!(!handle.take_render_dirty(&unknown));
+    handle.mark_render_dirty(&unknown); // must be a no-op
+}
+
+#[test]
 fn snapshot_round_trip() {
     let (rt, handle) = build_runtime();
     let id = register_fixture(&rt);

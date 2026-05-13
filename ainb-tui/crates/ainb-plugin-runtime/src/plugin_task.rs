@@ -149,11 +149,22 @@ pub type Inbox = mpsc::UnboundedSender<Command>;
 /// alongside the public plugin handle map.
 pub type InboxMap = Arc<parking_lot::RwLock<HashMap<PluginId, Inbox>>>;
 
+/// Map of `plugin_id → render-dirty flag`. Mirrors [`InboxMap`] —
+/// when a plugin's `host/snapshot/publish` fans out to subscribers,
+/// each subscriber's flag is set so the host's render-tick loop knows
+/// to kick a `plugin/render` for it. Without this the dirty bit set
+/// on the host-side `publish_snapshot` path would miss every
+/// plugin→plugin publish (session-reader → burndown is the load-bearing
+/// case).
+pub type DirtyMap =
+    Arc<parking_lot::RwLock<HashMap<PluginId, Arc<std::sync::atomic::AtomicBool>>>>;
+
 /// Spawn a per-plugin task and return its inbox + render cache.
 pub fn spawn(
     plugin: Arc<RegisteredPlugin>,
     snapshots: SnapshotStore,
     inboxes: InboxMap,
+    dirty: DirtyMap,
     config: RuntimeConfig,
     handle: &tokio::runtime::Handle,
 ) -> (Inbox, RenderCache, Arc<parking_lot::RwLock<LifecycleState>>) {
@@ -164,6 +175,7 @@ pub fn spawn(
         plugin,
         snapshots,
         inboxes,
+        dirty,
         config,
         cache: cache.clone(),
         state: state.clone(),
@@ -211,6 +223,12 @@ struct PluginTask {
     /// the plugin issues `host/snapshot/publish` — we look up each
     /// subscriber's inbox and forward a `Command::HandleEvent`.
     inboxes: InboxMap,
+    /// Parallel `plugin_id → render-dirty` map (shared with `Runtime`).
+    /// Set alongside the subscriber inbox dispatch above so the host's
+    /// render-tick loop knows to repaint the subscriber on the next
+    /// tick. Without this the dirty bit set on the host-side
+    /// `publish_snapshot` path would miss every plugin→plugin publish.
+    dirty: DirtyMap,
     config: RuntimeConfig,
     cache: RenderCache,
     state: Arc<parking_lot::RwLock<LifecycleState>>,
@@ -604,10 +622,19 @@ impl PluginTask {
                 let subs = self.snapshots.subscribers(&topic);
                 if !subs.is_empty() {
                     let inboxes = self.inboxes.read();
+                    let dirty = self.dirty.read();
                     for sub in subs {
                         // Don't echo back to the publisher.
                         if sub == self.plugin.id {
                             continue;
+                        }
+                        if let Some(flag) = dirty.get(&sub) {
+                            // Mark dirty BEFORE the inbox send so the
+                            // host's render tick can't drain the flag
+                            // between the event landing and the next
+                            // render kick. Worst case the host fires
+                            // one no-op render — harmless.
+                            flag.store(true, std::sync::atomic::Ordering::Release);
                         }
                         if let Some(inbox) = inboxes.get(&sub) {
                             let _ = inbox.send(Command::HandleEvent {

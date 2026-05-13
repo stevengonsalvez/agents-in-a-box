@@ -327,6 +327,14 @@ pub struct UsageViewState {
     /// `Scanning sessions… N files` when `total = 0`) instead of the
     /// legacy `⏳ Waiting for session-reader plugin…` spinner.
     pub scan_progress: Option<ScanProgressEvent>,
+    /// Pre-computed `filter_usage_data(data, filters)` result, supplied
+    /// by [`crate::plugin::BurndownPlugin`] from its per-plugin filter
+    /// cache. When `Some`, the burndown render path uses this Arc
+    /// directly instead of re-running `analyze_turns` + the aggregate
+    /// pivot on every paint. `None` means "no cache hit available —
+    /// recompute inline" (the default for unit tests and the CLI
+    /// snapshot path, both of which set this to `None`).
+    pub cached_filtered: Option<std::sync::Arc<UsageData>>,
 }
 
 impl Default for UsageViewState {
@@ -352,6 +360,7 @@ impl Default for UsageViewState {
             zoom_detail_open: false,
             oldest_call_day: None,
             scan_progress: None,
+            cached_filtered: None,
         }
     }
 }
@@ -617,8 +626,15 @@ impl UsageViewState {
     }
 
     /// Filtered view of the parsed data, applying the active cross
-    /// filter chips. Cheap when no filters are set (clones the source).
+    /// filter chips. Cheap when no filters are set (clones the
+    /// source). Reuses [`Self::cached_filtered`] when the plugin
+    /// supplied a pre-computed Arc, otherwise recomputes inline —
+    /// callers that need the cache benefit must populate
+    /// `cached_filtered` before invoking this method.
     pub fn filtered_data(&self) -> Option<UsageData> {
+        if let Some(arc) = self.cached_filtered.as_ref() {
+            return Some((**arc).clone());
+        }
         self.data.as_ref().map(|data| filter_usage_data(data, &self.filters))
     }
 
@@ -1357,8 +1373,29 @@ fn render_burndown(buf: &mut Buffer, area: Rect, data: &UsageData, state: &Usage
     // Apply cross-filter chips client-side. With no chips this is a
     // cheap clone; with chips it re-aggregates from the in-memory call
     // set so every panel and the header reflect the active pivot.
-    let filtered = filter_usage_data(data, &state.filters);
-    let view_data: &UsageData = if state.filters.any() { &filtered } else { data };
+    //
+    // Fast path: if the plugin pre-populated `cached_filtered`, reuse
+    // the Arc without re-running `analyze_turns` + the aggregate
+    // pivot. Drops per-render cost from O(N) to O(1) for repeated
+    // renders on the same filter state, which is the steady-state of
+    // any interaction (chord-key resize, redraw on tick, etc).
+    //
+    // Slow path (`filtered_owned` populated): no cache hit, so
+    // recompute inline. Tests and the CLI snapshot path land here.
+    let filtered_owned: Option<UsageData> =
+        if state.filters.any() && state.cached_filtered.is_none() {
+            Some(filter_usage_data(data, &state.filters))
+        } else {
+            None
+        };
+    let view_data: &UsageData = if state.filters.any() {
+        state
+            .cached_filtered
+            .as_deref()
+            .unwrap_or_else(|| filtered_owned.as_ref().expect("filtered_owned set above"))
+    } else {
+        data
+    };
 
     // Zoom takes the full inner area minus a small breadcrumb and an
     // optional search box. Skip the dashboard grid entirely.

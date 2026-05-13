@@ -203,7 +203,15 @@ async fn run_tui_loop(
     layout: &mut LayoutComponent,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) -> Result<()> {
-    let tick_rate = Duration::from_millis(250);
+    // 33 ms ≈ 30 fps. Lower bound on perceived input latency for any
+    // event the loop has to poll for — including plugin re-renders
+    // gated by the per-plugin `take_render_dirty` flag (see
+    // `App::tick_plugin_renders`). At 250 ms (the prior value) a
+    // keystroke that hit a plugin took up to one tick to round-trip
+    // and another tick to repaint, producing 250-500 ms of visible
+    // lag. The dirty-gate keeps the render kick storm-free so this
+    // faster tick is cheap.
+    let tick_rate = Duration::from_millis(33);
     let mut last_tick = Instant::now();
 
     // Startup guard: Ignore key events for the first 100ms to prevent stray keypresses

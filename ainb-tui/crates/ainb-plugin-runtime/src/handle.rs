@@ -41,6 +41,13 @@ pub(crate) struct HandleInner {
     /// Lightweight fan-out map (plugin_id → Inbox). Mirrors `plugins`
     /// for the publish path; see [`crate::plugin_task::InboxMap`].
     pub(crate) inboxes: InboxMap,
+    /// Parallel `plugin_id → render-dirty` map. See `runtime::PluginHandle`.
+    /// Held here so [`RuntimeHandle::mark_render_dirty`] can flip a
+    /// subscriber's flag through a single `RwLock` read instead of
+    /// reaching through `plugins.read()` + `PluginHandle`. The same
+    /// `Arc<AtomicBool>` lives in both maps — flipping one is visible
+    /// from the other.
+    pub(crate) dirty: crate::plugin_task::DirtyMap,
     pub(crate) config: RuntimeConfig,
     /// Monotonic counter the host bumps once per `send_key` call.
     /// Stamped into `HandleKeyParams.generation`; the plugin echoes it
@@ -188,6 +195,32 @@ impl RuntimeHandle {
         self.lookup(plugin_id).and_then(|p| p.cache.try_take())
     }
 
+    /// Atomically check-and-clear the render-dirty flag for a plugin.
+    /// Returns `true` iff the host should kick a fresh `plugin/render`
+    /// this tick because state may have changed since the last paint.
+    ///
+    /// Set by `send_key` and `publish_snapshot` (for each subscriber)
+    /// and initially by plugin registration. The render-tick loop
+    /// calls this once per plugin per tick and skips the render kick
+    /// entirely when the result is `false` — turning the loop from a
+    /// fixed-cadence render storm into an event-driven repaint.
+    pub fn take_render_dirty(&self, plugin_id: &PluginId) -> bool {
+        self.lookup(plugin_id)
+            .is_some_and(|p| p.render_dirty.swap(false, Ordering::AcqRel))
+    }
+
+    /// Explicitly mark a plugin's screen as needing a repaint. Used by
+    /// the host when something OUTSIDE the runtime (e.g. a viewport
+    /// resize) ought to drive a fresh render even though no key or
+    /// event arrived. Routed through [`HandleInner::dirty`] so the
+    /// host doesn't take a `plugins.read()` lock for a single bit
+    /// flip.
+    pub fn mark_render_dirty(&self, plugin_id: &PluginId) {
+        if let Some(flag) = self.inner.dirty.read().get(plugin_id) {
+            flag.store(true, Ordering::Release);
+        }
+    }
+
     /// Read a snapshot bytes payload synchronously.
     #[must_use]
     pub fn snapshot_get(&self, topic: &str) -> Option<Bytes> {
@@ -223,6 +256,10 @@ impl RuntimeHandle {
             key,
             generation,
         };
+        // Mark dirty BEFORE enqueue so the host's next tick can't race
+        // ahead and clear it before the plugin observes the keystroke.
+        // Worst case the host fires one no-op render kick — harmless.
+        handle.render_dirty.store(true, Ordering::Release);
         handle
             .inbox
             .send(Command::HandleKey { params })
@@ -243,6 +280,10 @@ impl RuntimeHandle {
             let map = plugins.read();
             for sub in subs {
                 if let Some(handle) = map.get(&sub) {
+                    // Mark dirty BEFORE the enqueue so the host's
+                    // render tick can't drain the flag between the
+                    // event landing and the next render kick.
+                    handle.render_dirty.store(true, Ordering::Release);
                     let _ = handle.inbox.send(Command::HandleEvent {
                         topic: topic_owned.clone(),
                         payload: payload.clone(),
@@ -288,6 +329,7 @@ impl RuntimeHandle {
                 arc.clone(),
                 self.inner.snapshots.clone(),
                 self.inner.inboxes.clone(),
+                self.inner.dirty.clone(),
                 self.inner.config,
                 &self.inner.tokio,
             );
@@ -298,6 +340,12 @@ impl RuntimeHandle {
                 .inboxes
                 .write()
                 .insert(arc.id.clone(), inbox.clone());
+            // Start dirty so the first paint after registration kicks a render.
+            let render_dirty = Arc::new(std::sync::atomic::AtomicBool::new(true));
+            self.inner
+                .dirty
+                .write()
+                .insert(arc.id.clone(), render_dirty.clone());
             self.inner.plugins.write().insert(
                 arc.id.clone(),
                 Arc::new(PluginHandle {
@@ -305,6 +353,7 @@ impl RuntimeHandle {
                     cache,
                     state,
                     plugin: arc,
+                    render_dirty,
                 }),
             );
         }
