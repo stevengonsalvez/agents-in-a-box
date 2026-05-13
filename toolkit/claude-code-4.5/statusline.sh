@@ -77,6 +77,13 @@ _bar() {
 INPUT=$(cat)
 _jq() { printf '%s' "$INPUT" | jq -r "${1} // empty" 2>/dev/null; }
 
+# Side-channel: feed ainb-tui's Live Window cache so it can surface the
+# OAuth-grade 5h/7d rate-limit window. Background, silent, never blocks render.
+if command -v ainb >/dev/null 2>&1; then
+  printf '%s' "$INPUT" | ainb claudecode statusline --cache-only >/dev/null 2>&1 &
+  disown 2>/dev/null || true
+fi
+
 CACHE_AGE=$(_cache_age)
 
 # ════════════════════════════════════════════════════════════════════════════
