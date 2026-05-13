@@ -9748,10 +9748,23 @@ impl App {
                     .insert((*screen_id).to_string(), buf);
             }
 
-            // Kick off the next render so the frame is ready by the
-            // following tick. The returned oneshot is intentionally
-            // dropped — the cache pickup happens via `try_recv_render`.
+            // Kick the next render ONLY when something has actually
+            // changed since the last paint — a keystroke landed
+            // (`send_key`), a snapshot event arrived (host or plugin
+            // `publish_snapshot`), or the screen has never painted
+            // yet (registration seeds the flag to `true`).
             //
+            // Before this gate the loop fired a render kick every
+            // tick (~4/s at the 250 ms cadence) regardless of state
+            // changes, which compounded with the per-tick `event::poll`
+            // idle wait to produce ~250-300 ms of perceived lag per
+            // keystroke. With the gate the kick is event-driven, so
+            // each key arrives at the plugin within one tick interval
+            // and the response paints on the *next* tick.
+            if !handle.take_render_dirty(&pid) {
+                continue;
+            }
+
             // Viewport comes from the previous frame's allocated area
             // (stashed by `PluginScreen::render`). Falls back to (0, 0)
             // before the first paint — the plugin treats that as "use
@@ -9764,6 +9777,8 @@ impl App {
                 .copied()
                 .unwrap_or((0, 0));
             let viewport = ainb_plugin_runtime::Viewport { width, height };
+            // Returned oneshot is intentionally dropped — the cache
+            // pickup happens via `try_recv_render` next tick.
             let _ = handle.render(&pid, viewport, 0);
         }
     }
