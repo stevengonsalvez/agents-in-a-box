@@ -749,9 +749,17 @@ impl BurndownPlugin {
             KeyCode::Char { ch: '/' } if self.ui.is_zoomed() => self.ui.zoom_begin_search(),
             KeyCode::Char { ch: 'd' } if self.ui.is_zoomed() => self.ui.toggle_zoom_detail(),
             KeyCode::Enter => {
+                // `commit_focused_row` resolves the row through
+                // `filtered_data()` which reads `self.ui.data`. The
+                // plugin keeps the parsed snapshot on `self.data`
+                // (the render path copies it into `ui.data` only at
+                // render time), so without this sync the commit
+                // would silently return false — drill-down dead.
+                self.ui.data = self.data.clone();
                 let _ = self.ui.commit_focused_row();
             }
             KeyCode::Char { ch: 'X' } => {
+                self.ui.data = self.data.clone();
                 let _ = self.ui.commit_focused_row_exclude();
             }
             KeyCode::Char { ch: 'C' } => self.ui.clear_all_filter_chips(),
