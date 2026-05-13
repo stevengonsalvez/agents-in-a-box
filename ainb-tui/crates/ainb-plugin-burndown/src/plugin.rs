@@ -84,26 +84,31 @@ pub struct BurndownPlugin {
     /// invalidate when the underlying call set changes without
     /// hashing the (potentially huge) `UsageData`.
     data_generation: u64,
-    /// `filter_usage_data(self.data, ui.filters)` is the dominant
-    /// per-render cost (`analyze_turns` walks every call to build a
-    /// session timeline, then the aggregate pass rebuilds every
-    /// per-day/per-project/per-model rollup). It's also pure: the
-    /// output depends only on `(data, filters)`. We cache the
-    /// most-recent result keyed by `(data_generation, filters_hash)`
-    /// so idle re-renders (between keystrokes) and repeated renders
-    /// on the same filter state are O(1) instead of O(N).
+    /// `filter_usage_data_full(self.data, ui.filters, ui.period,
+    /// ui.provider_filter)` is the dominant per-render cost
+    /// (`analyze_turns` walks every call to build a session timeline,
+    /// then the aggregate pass rebuilds every per-day/per-project/
+    /// per-model rollup). It's also pure: the output depends only on
+    /// `(data, filters, period, provider_filter)`. We cache the
+    /// most-recent result keyed by `(data_generation, inputs_hash)` —
+    /// inputs_hash mixes filters + period + provider — so idle
+    /// re-renders (between keystrokes) and repeated renders on the
+    /// same filter state are O(1) instead of O(N).
     filter_cache: Option<FilterCacheEntry>,
 }
 
 /// One-deep filter-cache slot. A single entry is enough because
 /// burndown renders synchronously and a key-press always switches to
-/// at most one filter+period state per render. Keeping the cache size
-/// at 1 avoids invalidation logic and bounds memory at 2× the largest
-/// `UsageData` snapshot.
+/// at most one (filters, period, provider) state per render. Keeping
+/// the cache size at 1 avoids invalidation logic and bounds memory at
+/// 2× the largest `UsageData` snapshot.
 #[derive(Debug, Clone)]
 struct FilterCacheEntry {
     data_generation: u64,
-    filters_hash: u64,
+    /// Hash of `(filters, period, provider_filter)` — the full input
+    /// surface to `filter_usage_data_full`. Renamed from `filters_hash`
+    /// when period + provider joined the cache key in PR A.
+    inputs_hash: u64,
     filtered: std::sync::Arc<crate::data::usage::UsageData>,
 }
 
@@ -447,7 +452,7 @@ impl BurndownPlugin {
             Self::hash_filter_inputs(&self.ui.filters, &self.ui.period, self.ui.provider_filter);
         let key = (self.data_generation, inputs_hash);
         if let Some(entry) = self.filter_cache.as_ref() {
-            if entry.data_generation == key.0 && entry.filters_hash == key.1 {
+            if entry.data_generation == key.0 && entry.inputs_hash == key.1 {
                 return Some(entry.filtered.clone());
             }
         }
@@ -459,7 +464,7 @@ impl BurndownPlugin {
         ));
         self.filter_cache = Some(FilterCacheEntry {
             data_generation: key.0,
-            filters_hash: key.1,
+            inputs_hash: key.1,
             filtered: filtered.clone(),
         });
         Some(filtered)
