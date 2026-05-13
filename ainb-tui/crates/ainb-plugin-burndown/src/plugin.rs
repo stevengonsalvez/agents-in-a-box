@@ -402,40 +402,60 @@ impl BurndownPlugin {
 
     /// Hash a `UsageFilters` snapshot to a u64. Used by the filter
     /// cache key — `UsageFilters` is `Eq + Hash` so this is a pure
-    /// function of the chip set.
-    fn hash_filters(filters: &crate::data::usage::UsageFilters) -> u64 {
+    /// function of the chip set, period, and provider filter — all three
+    /// inputs to `filter_usage_data_full` so the cache key invalidates
+    /// when ANY of them change.
+    fn hash_filter_inputs(
+        filters: &crate::data::usage::UsageFilters,
+        period: &crate::data::usage::UsagePeriod,
+        provider_filter: crate::data::usage::UsageProviderFilter,
+    ) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         filters.hash(&mut h);
+        period.hash(&mut h);
+        provider_filter.hash(&mut h);
         h.finish()
     }
 
     /// Resolve the filtered view of `self.data` for the current
-    /// `self.ui.filters`. Cached by `(data_generation, filters_hash)`
-    /// — repeated renders on the same key state are O(1).
+    /// `self.ui.filters` + `self.ui.period` + `self.ui.provider_filter`.
+    /// Cached by `(data_generation, inputs_hash)` — repeated renders
+    /// on the same key state are O(1).
     ///
     /// Returns `None` when there is no data yet (the render path
-    /// already paints the wait/skeleton screen in that case).
+    /// already paints the wait/skeleton screen in that case) or when
+    /// every filter dimension is at its default ("no-op" — render
+    /// path uses the raw `data` reference).
     fn cached_filtered(
         &mut self,
     ) -> Option<std::sync::Arc<crate::data::usage::UsageData>> {
         let data = self.data.as_ref()?;
-        // No-op fast path: empty filter set. The render path falls
+        // No-op fast path: nothing to filter. The render path falls
         // back to the raw `data` reference and never consults the
         // cache, so don't bother building one.
-        if self.ui.filters.is_empty() {
+        let any_active = self.ui.filters.any()
+            || !matches!(self.ui.period, crate::data::usage::UsagePeriod::All)
+            || !matches!(
+                self.ui.provider_filter,
+                crate::data::usage::UsageProviderFilter::All
+            );
+        if !any_active {
             return None;
         }
-        let filters_hash = Self::hash_filters(&self.ui.filters);
-        let key = (self.data_generation, filters_hash);
+        let inputs_hash =
+            Self::hash_filter_inputs(&self.ui.filters, &self.ui.period, self.ui.provider_filter);
+        let key = (self.data_generation, inputs_hash);
         if let Some(entry) = self.filter_cache.as_ref() {
             if entry.data_generation == key.0 && entry.filters_hash == key.1 {
                 return Some(entry.filtered.clone());
             }
         }
-        let filtered = std::sync::Arc::new(crate::data::usage::filter_usage_data(
+        let filtered = std::sync::Arc::new(crate::data::usage::filter_usage_data_full(
             data,
             &self.ui.filters,
+            &self.ui.period,
+            self.ui.provider_filter,
         ));
         self.filter_cache = Some(FilterCacheEntry {
             data_generation: key.0,

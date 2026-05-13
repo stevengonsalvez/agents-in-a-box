@@ -29,7 +29,7 @@ use crate::cache::{Cache, ParseHint, ParseResult};
 /// `LastNDays`) to keep the existing CLI `PeriodArg` enum, JSON
 /// serialisation, and downstream tests stable.
 #[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UsagePeriod {
     Today,
@@ -59,7 +59,7 @@ impl Default for UsagePeriod {
 
 /// Provider filter shared by TUI and CLI report queries.
 #[allow(dead_code)]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UsageProviderFilter {
     #[default]
@@ -1811,7 +1811,31 @@ fn build_model_project_counts(
 /// The activity filter compares against the per-call classified category
 /// label (see `ActivityCategory::label()`), case-sensitive.
 pub fn filter_usage_data(data: &UsageData, filters: &UsageFilters) -> UsageData {
-    if filters.is_empty() {
+    filter_usage_data_full(data, filters, &UsagePeriod::All, UsageProviderFilter::All)
+}
+
+/// Apply the full filter surface — cross-filter chips, period date range,
+/// and provider — in a single re-aggregation pass.
+///
+/// This is the grafana-style pivot the render path uses: period and
+/// provider were UI selectors with no data binding pre-PR A (they
+/// repainted the chip strip but the dashboard widgets ignored them).
+/// Here all three filters compose into the same call-level predicate
+/// and the result is re-aggregated once, so every panel reflects the
+/// active pivot.
+///
+/// The no-op early return covers the common idle case (no chips, no
+/// period selected beyond `All`, provider = All) and keeps that path
+/// at the same cost as the pre-PR-A `filter_usage_data`.
+pub fn filter_usage_data_full(
+    data: &UsageData,
+    filters: &UsageFilters,
+    period: &UsagePeriod,
+    provider_filter: UsageProviderFilter,
+) -> UsageData {
+    let period_range = date_range_for_period(period);
+    let provider_active = !matches!(provider_filter, UsageProviderFilter::All);
+    if filters.is_empty() && period_range.is_none() && !provider_active {
         return data.clone();
     }
     // Precompute analyze_turns once on the *unfiltered* call set so
@@ -1824,7 +1848,23 @@ pub fn filter_usage_data(data: &UsageData, filters: &UsageFilters) -> UsageData 
     let filtered_calls: Vec<ProviderCall> = data
         .calls
         .iter()
-        .filter(|call| filters.matches(call, classify_activity(call)))
+        .filter(|call| {
+            // Chip filters (project / model / activity / session / branch).
+            if !filters.matches(call, classify_activity(call)) {
+                return false;
+            }
+            // Provider filter (Right/Left arrow on the TUI).
+            if !provider_filter.includes(&call.provider) {
+                return false;
+            }
+            // Period filter (1/2/3/a or specific month/quarter).
+            if let Some((start, end)) = period_range {
+                if call.timestamp < start || call.timestamp > end {
+                    return false;
+                }
+            }
+            true
+        })
         .cloned()
         .collect();
     aggregate_calls_with_analysis(filtered_calls, Some(&turn_analysis))
@@ -4055,5 +4095,149 @@ mod tests {
             Duration::hours(1),
         );
         assert!(calls.is_empty());
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // filter_usage_data_full coverage (PR A)
+    //
+    // Pre-PR-A the period & provider selectors were UI-only — they
+    // repainted the chip strip but the dashboard widgets ignored them.
+    // These tests pin the new grafana-style global filter behaviour.
+    // ────────────────────────────────────────────────────────────────
+
+    use crate::test_support::ProviderCallBuilder;
+
+    fn calls_aggregated(calls: Vec<ProviderCall>) -> UsageData {
+        aggregate_calls(calls)
+    }
+
+    #[test]
+    fn filter_usage_data_full_filters_by_provider_for_codex() {
+        let now = Utc::now();
+        let claude_call = ProviderCallBuilder::new()
+            .with_id(1)
+            .with_provider("claude")
+            .with_project("alpha")
+            .with_timestamp(now)
+            .with_input_tokens(100)
+            .with_output_tokens(50)
+            .build();
+        let codex_call = ProviderCallBuilder::new()
+            .with_id(2)
+            .with_provider("codex")
+            .with_project("beta")
+            .with_timestamp(now)
+            .with_input_tokens(200)
+            .with_output_tokens(100)
+            .build();
+        let data = calls_aggregated(vec![claude_call, codex_call]);
+        assert_eq!(data.calls.len(), 2);
+
+        let filtered = filter_usage_data_full(
+            &data,
+            &UsageFilters::default(),
+            &UsagePeriod::All,
+            UsageProviderFilter::Codex,
+        );
+        assert_eq!(filtered.calls.len(), 1, "only codex call should survive");
+        assert_eq!(filtered.calls[0].provider, "codex");
+        assert_eq!(filtered.projects.len(), 1);
+        assert_eq!(filtered.projects[0].name, "beta");
+    }
+
+    #[test]
+    fn filter_usage_data_full_filters_by_period_today_excludes_old_call() {
+        let now = Utc::now();
+        let old = now - Duration::days(40);
+        let recent_call = ProviderCallBuilder::new()
+            .with_id(1)
+            .with_timestamp(now)
+            .with_input_tokens(100)
+            .build();
+        let stale_call = ProviderCallBuilder::new()
+            .with_id(2)
+            .with_timestamp(old)
+            .with_input_tokens(999)
+            .build();
+        let data = calls_aggregated(vec![recent_call, stale_call]);
+        assert_eq!(data.calls.len(), 2);
+
+        let filtered = filter_usage_data_full(
+            &data,
+            &UsageFilters::default(),
+            &UsagePeriod::Today,
+            UsageProviderFilter::All,
+        );
+        assert_eq!(filtered.calls.len(), 1, "only today's call should survive");
+        assert_eq!(filtered.calls[0].id, 1);
+    }
+
+    #[test]
+    fn filter_usage_data_full_composes_chip_period_provider_filters() {
+        let now = Utc::now();
+        let old = now - Duration::days(40);
+        // alpha + claude + today — survives all filters
+        let keep = ProviderCallBuilder::new()
+            .with_id(1)
+            .with_provider("claude")
+            .with_project("alpha")
+            .with_timestamp(now)
+            .build();
+        // alpha + claude + old — dropped by period
+        let drop_period = ProviderCallBuilder::new()
+            .with_id(2)
+            .with_provider("claude")
+            .with_project("alpha")
+            .with_timestamp(old)
+            .build();
+        // beta + claude + today — dropped by project chip
+        let drop_chip = ProviderCallBuilder::new()
+            .with_id(3)
+            .with_provider("claude")
+            .with_project("beta")
+            .with_timestamp(now)
+            .build();
+        // alpha + codex + today — dropped by provider filter
+        let drop_provider = ProviderCallBuilder::new()
+            .with_id(4)
+            .with_provider("codex")
+            .with_project("alpha")
+            .with_timestamp(now)
+            .build();
+        let data = calls_aggregated(vec![keep, drop_period, drop_chip, drop_provider]);
+        assert_eq!(data.calls.len(), 4);
+
+        let mut chip_filters = UsageFilters::default();
+        chip_filters.project.push("alpha".to_string());
+
+        let filtered = filter_usage_data_full(
+            &data,
+            &chip_filters,
+            &UsagePeriod::Today,
+            UsageProviderFilter::Claude,
+        );
+        assert_eq!(filtered.calls.len(), 1, "only id=1 satisfies all 3 filters");
+        assert_eq!(filtered.calls[0].id, 1);
+    }
+
+    #[test]
+    fn filter_usage_data_full_no_op_when_everything_default() {
+        // No chips, period=All, provider=All — the function must return
+        // the data unchanged (cheap clone path) so empty-state callers
+        // hit the fast path.
+        let call = ProviderCallBuilder::new()
+            .with_id(7)
+            .with_timestamp(Utc::now())
+            .with_input_tokens(42)
+            .build();
+        let data = calls_aggregated(vec![call]);
+        let filtered = filter_usage_data_full(
+            &data,
+            &UsageFilters::default(),
+            &UsagePeriod::All,
+            UsageProviderFilter::All,
+        );
+        assert_eq!(filtered.calls.len(), 1);
+        assert_eq!(filtered.calls[0].id, 7);
     }
 }

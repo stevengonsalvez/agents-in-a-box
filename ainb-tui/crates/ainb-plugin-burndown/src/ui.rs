@@ -18,7 +18,7 @@ use crate::data::usage::{
 };
 use crate::data::{
     ActivityUsage, ModelUsage, NamedUsage, ProjectUsage, SessionUsage, UsageData, UsageFilterChip,
-    UsageFilters, UsagePeriod, UsageProviderFilter, UsageQuery, filter_usage_data,
+    UsageFilters, UsagePeriod, UsageProviderFilter, UsageQuery, filter_usage_data_full,
     format_tokens_short, optimize_usage,
 };
 
@@ -625,17 +625,22 @@ impl UsageViewState {
         self.focus_row = self.focus_row.saturating_add(1);
     }
 
-    /// Filtered view of the parsed data, applying the active cross
-    /// filter chips. Cheap when no filters are set (clones the
-    /// source). Reuses [`Self::cached_filtered`] when the plugin
-    /// supplied a pre-computed Arc, otherwise recomputes inline —
-    /// callers that need the cache benefit must populate
-    /// `cached_filtered` before invoking this method.
+    /// Filtered view of the parsed data, applying the full filter
+    /// surface — cross-filter chips, period date range, and provider
+    /// selector — so callers like `resolve_focused_row` see the same
+    /// pivot the dashboard panels render. Cheap when no filters/period/
+    /// provider is active (clones the source). Reuses
+    /// [`Self::cached_filtered`] when the plugin supplied a
+    /// pre-computed Arc, otherwise recomputes inline — callers that
+    /// need the cache benefit must populate `cached_filtered` before
+    /// invoking this method.
     pub fn filtered_data(&self) -> Option<UsageData> {
         if let Some(arc) = self.cached_filtered.as_ref() {
             return Some((**arc).clone());
         }
-        self.data.as_ref().map(|data| filter_usage_data(data, &self.filters))
+        self.data.as_ref().map(|data| {
+            filter_usage_data_full(data, &self.filters, &self.period, self.provider_filter)
+        })
     }
 
     /// Resolve the focused panel row to a `(target, value, owner_project)`
@@ -1370,25 +1375,37 @@ fn render_burndown(buf: &mut Buffer, area: Rect, data: &UsageData, state: &Usage
         return;
     }
 
-    // Apply cross-filter chips client-side. With no chips this is a
-    // cheap clone; with chips it re-aggregates from the in-memory call
-    // set so every panel and the header reflect the active pivot.
+    // Apply the full filter surface client-side: cross-filter chips
+    // (project/model/activity/session/branch), the period date range
+    // (1/2/3/a or specific month/quarter), and the provider selector
+    // (Right/Left arrow). All three feed `filter_usage_data_full`,
+    // which re-aggregates from the in-memory call set so every panel
+    // and the header reflect the active pivot — grafana-style global
+    // filters.
     //
     // Fast path: if the plugin pre-populated `cached_filtered`, reuse
     // the Arc without re-running `analyze_turns` + the aggregate
     // pivot. Drops per-render cost from O(N) to O(1) for repeated
-    // renders on the same filter state, which is the steady-state of
-    // any interaction (chord-key resize, redraw on tick, etc).
+    // renders on the same filter state.
     //
     // Slow path (`filtered_owned` populated): no cache hit, so
     // recompute inline. Tests and the CLI snapshot path land here.
-    let filtered_owned: Option<UsageData> =
-        if state.filters.any() && state.cached_filtered.is_none() {
-            Some(filter_usage_data(data, &state.filters))
-        } else {
-            None
-        };
-    let view_data: &UsageData = if state.filters.any() {
+    let any_filter_active = state.filters.any()
+        || !matches!(state.period, UsagePeriod::All)
+        || !matches!(state.provider_filter, UsageProviderFilter::All);
+    let filtered_owned: Option<UsageData> = if any_filter_active
+        && state.cached_filtered.is_none()
+    {
+        Some(filter_usage_data_full(
+            data,
+            &state.filters,
+            &state.period,
+            state.provider_filter,
+        ))
+    } else {
+        None
+    };
+    let view_data: &UsageData = if any_filter_active {
         state
             .cached_filtered
             .as_deref()
@@ -4267,6 +4284,10 @@ mod cross_filter_tests {
     fn enter_on_by_project_row_sets_project_filter() {
         let mut state = UsageViewState::default();
         state.data = Some(fixture());
+        // Fixture uses pre-aggregated projects/sessions with `calls: vec![]`,
+        // so re-aggregation via the period filter would zero out the rows.
+        // Bypass period filtering — this test is about Enter→chip dispatch.
+        state.period = UsagePeriod::All;
         state.focused_panel = Some(UsagePanel::ByProject);
         state.focus_row = 1; // beta
         assert!(state.commit_focused_row());
@@ -4277,6 +4298,7 @@ mod cross_filter_tests {
     fn enter_on_top_session_row_sets_session_filter() {
         let mut state = UsageViewState::default();
         state.data = Some(fixture());
+        state.period = UsagePeriod::All;
         state.focused_panel = Some(UsagePanel::TopSessions);
         state.focus_row = 0;
         assert!(state.commit_focused_row());
@@ -4312,6 +4334,7 @@ mod cross_filter_tests {
 
         let mut state = UsageViewState::default();
         state.data = Some(data);
+        state.period = UsagePeriod::All;
         state.focused_panel = Some(UsagePanel::TopSessions);
         state.focus_row = 0;
         assert!(state.commit_focused_row());
@@ -4330,6 +4353,7 @@ mod cross_filter_tests {
     fn enter_on_by_model_row_sets_model_filter() {
         let mut state = UsageViewState::default();
         state.data = Some(fixture());
+        state.period = UsagePeriod::All;
         state.focused_panel = Some(UsagePanel::ByModel);
         state.focus_row = 0;
         assert!(state.commit_focused_row());
@@ -4340,6 +4364,7 @@ mod cross_filter_tests {
     fn enter_on_by_activity_row_sets_activity_filter() {
         let mut state = UsageViewState::default();
         state.data = Some(fixture());
+        state.period = UsagePeriod::All;
         state.focused_panel = Some(UsagePanel::ByActivity);
         state.focus_row = 1; // Conversation
         assert!(state.commit_focused_row());
@@ -4433,6 +4458,7 @@ mod cross_filter_tests {
     fn enter_on_leaderboard_maps_to_project_filter() {
         let mut state = UsageViewState::default();
         state.data = Some(fixture());
+        state.period = UsagePeriod::All;
         state.focused_panel = Some(UsagePanel::Leaderboard);
         state.focus_row = 0; // alpha (rendered from filtered_data.projects)
         assert!(state.commit_focused_row());
@@ -4513,6 +4539,7 @@ mod cross_filter_tests {
 
         let mut state = UsageViewState::default();
         state.data = Some(fixture());
+        state.period = UsagePeriod::All;
         state.focused_panel = Some(UsagePanel::ByProject);
         state.focus_row = 1; // beta
         assert!(state.commit_focused_row_exclude());
