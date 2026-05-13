@@ -26,6 +26,16 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
+/// Location of an attachable row inside `AppState`, independent of the
+/// row's current visible position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttachableRef {
+    WorkspaceSession { workspace_idx: usize, session_idx: usize },
+    WorkspaceShell { workspace_idx: usize },
+    SshSession { ssh_idx: usize },
+    OtherTmux { other_idx: usize },
+}
+
 /// Text editor with cursor support for boss mode prompts
 #[derive(Debug, Clone)]
 pub struct TextEditor {
@@ -4228,6 +4238,93 @@ impl AppState {
     pub fn selected_workspace(&self) -> Option<&Workspace> {
         let workspace_idx = self.selected_workspace_index?;
         self.workspaces.get(workspace_idx)
+    }
+
+    /// Every attachable leaf row in the *current* render order.
+    /// Numbers shown next to sessions are 1-based positions into this Vec —
+    /// recomputed on every render, so reordering or filtering refreshes them.
+    pub fn attachable_items_in_order(&self) -> Vec<AttachableRef> {
+        let mut out = Vec::new();
+
+        for (workspace_idx, workspace) in self.workspaces.iter().enumerate() {
+            let is_selected_workspace = self.selected_workspace_index == Some(workspace_idx);
+            let is_expanded = is_selected_workspace || self.expand_all_workspaces;
+
+            // Match session_list: workspaces with no visible content are hidden
+            // entirely, and collapsed workspaces don't contribute their leaves.
+            let any_visible = workspace.sessions.iter().any(|s| self.session_passes_filter(s))
+                || workspace.shell_session.is_some();
+            if !any_visible || !is_expanded {
+                continue;
+            }
+
+            for (session_idx, session) in workspace.sessions.iter().enumerate() {
+                if !self.session_passes_filter(session) {
+                    continue;
+                }
+                out.push(AttachableRef::WorkspaceSession {
+                    workspace_idx,
+                    session_idx,
+                });
+            }
+
+            if workspace.shell_session.is_some() {
+                out.push(AttachableRef::WorkspaceShell { workspace_idx });
+            }
+        }
+
+        if !self.ssh_sessions.is_empty() && self.ssh_sessions_expanded {
+            for ssh_idx in 0..self.ssh_sessions.len() {
+                out.push(AttachableRef::SshSession { ssh_idx });
+            }
+        }
+
+        if !self.other_tmux_sessions.is_empty() && self.other_tmux_expanded {
+            for other_idx in 0..self.other_tmux_sessions.len() {
+                out.push(AttachableRef::OtherTmux { other_idx });
+            }
+        }
+
+        out
+    }
+
+    /// Move the active selection to the referenced attachable item,
+    /// clearing the other section selectors so the exclusive-selection
+    /// invariant holds.
+    pub fn select_attachable(&mut self, target: AttachableRef) {
+        match target {
+            AttachableRef::WorkspaceSession {
+                workspace_idx,
+                session_idx,
+            } => {
+                self.selected_workspace_index = Some(workspace_idx);
+                self.selected_session_index = Some(session_idx);
+                self.shell_selected = false;
+                self.selected_ssh_session_index = None;
+                self.selected_other_tmux_index = None;
+            }
+            AttachableRef::WorkspaceShell { workspace_idx } => {
+                self.selected_workspace_index = Some(workspace_idx);
+                self.selected_session_index = None;
+                self.shell_selected = true;
+                self.selected_ssh_session_index = None;
+                self.selected_other_tmux_index = None;
+            }
+            AttachableRef::SshSession { ssh_idx } => {
+                self.selected_workspace_index = None;
+                self.selected_session_index = None;
+                self.shell_selected = false;
+                self.selected_other_tmux_index = None;
+                self.selected_ssh_session_index = Some(ssh_idx);
+            }
+            AttachableRef::OtherTmux { other_idx } => {
+                self.selected_workspace_index = None;
+                self.selected_session_index = None;
+                self.shell_selected = false;
+                self.selected_ssh_session_index = None;
+                self.selected_other_tmux_index = Some(other_idx);
+            }
+        }
     }
 
     pub fn next_session(&mut self) {
