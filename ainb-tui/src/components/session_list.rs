@@ -23,6 +23,34 @@ const SUBDUED_BORDER: Color = Color::Rgb(60, 60, 80);
 use crate::app::AppState;
 use crate::models::{SessionMode, SessionStatus, ShellSessionStatus, Workspace};
 
+/// Width of the leading badge slot rendered before every list row.
+/// Two characters: a digit (or space) and a trailing space separator.
+const BADGE_SLOT_WIDTH: usize = 2;
+
+/// Highest attach-shortcut index that fits in a single keystroke.
+const MAX_BADGE: usize = 9;
+
+/// Empty slot for non-attachable rows (workspace headers, separators,
+/// section headers) and for attachable rows past `MAX_BADGE`.
+fn empty_badge() -> Span<'static> {
+    Span::raw(" ".repeat(BADGE_SLOT_WIDTH))
+}
+
+/// Gold-bold badge for the next attachable row. Advances the caller's
+/// counter; returns an empty slot once `MAX_BADGE` has been exhausted so
+/// the column position never shifts.
+fn next_badge(attach_no: &mut usize) -> Span<'static> {
+    *attach_no += 1;
+    if *attach_no <= MAX_BADGE {
+        Span::styled(
+            format!("{} ", *attach_no),
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        empty_badge()
+    }
+}
+
 pub struct SessionListComponent {
     list_state: ListState,
 }
@@ -176,6 +204,12 @@ impl SessionListComponent {
                                     Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
                                 ),
                                 Span::styled(" filter ", Style::default().fg(MUTED_GRAY)),
+                                Span::styled("│", Style::default().fg(SUBDUED_BORDER)),
+                                Span::styled(
+                                    " 1-9",
+                                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(" attach ", Style::default().fg(MUTED_GRAY)),
                             ])
                         },
                     ),
@@ -191,6 +225,10 @@ impl SessionListComponent {
 
         // Load favorites to check which workspaces are starred
         let favorites = crate::config::FavoritesStore::load();
+
+        // Must stay in lockstep with AppState::attachable_items_in_order;
+        // divergence would attach the wrong session for a given digit.
+        let mut attach_no: usize = 0;
 
         for (workspace_idx, workspace) in state.workspaces.iter().enumerate() {
             let is_selected_workspace = state.selected_workspace_index == Some(workspace_idx);
@@ -270,6 +308,7 @@ impl SessionListComponent {
             let star_indicator = if is_favorite { "⭐ " } else { "" };
 
             let workspace_line = Line::from(vec![
+                empty_badge(),
                 Span::styled(workspace_symbol, Style::default().fg(symbol_color)),
                 Span::styled(
                     " 📁 ",
@@ -368,7 +407,7 @@ impl SessionListComponent {
                     };
 
                     let session_line = Line::from(vec![
-                        Span::styled(" ", Style::default()),
+                        next_badge(&mut attach_no),
                         checkbox,
                         Span::styled(tree_prefix, Style::default().fg(SUBDUED_BORDER)),
                         Span::styled(format!(" {} ", status_indicator), Style::default()),
@@ -416,6 +455,7 @@ impl SessionListComponent {
                     };
 
                     let shell_line = Line::from(vec![
+                        next_badge(&mut attach_no),
                         Span::styled("  ", Style::default()),
                         Span::styled(tree_prefix, Style::default().fg(SUBDUED_BORDER)),
                         Span::styled(
@@ -464,6 +504,7 @@ impl SessionListComponent {
             };
 
             let ssh_header = Line::from(vec![
+                empty_badge(),
                 Span::styled(ssh_symbol, Style::default().fg(ssh_header_color)),
                 Span::styled(" 🔐 ", Style::default().fg(ssh_header_color)),
                 Span::styled(
@@ -525,6 +566,7 @@ impl SessionListComponent {
                     };
 
                     let session_line = Line::from(vec![
+                        next_badge(&mut attach_no),
                         Span::styled("  ", Style::default()),
                         Span::styled(tree_prefix, Style::default().fg(SUBDUED_BORDER)),
                         Span::styled(format!(" {} ", status_icon), Style::default()),
@@ -569,6 +611,7 @@ impl SessionListComponent {
             };
 
             let other_header = Line::from(vec![
+                empty_badge(),
                 Span::styled(other_symbol, Style::default().fg(header_color)),
                 Span::styled(" 🖥️ ", Style::default().fg(header_color)),
                 Span::styled(
@@ -615,9 +658,11 @@ impl SessionListComponent {
                     // Check if this session is being renamed
                     let is_being_renamed = is_selected && state.other_tmux_rename_mode;
 
+                    let badge = next_badge(&mut attach_no);
                     let session_line = if is_being_renamed {
                         // Show inline rename input
                         Line::from(vec![
+                            badge,
                             Span::styled("  ", Style::default()),
                             Span::styled(tree_prefix, Style::default().fg(SUBDUED_BORDER)),
                             Span::styled(format!(" {} ", status), Style::default()),
@@ -629,6 +674,7 @@ impl SessionListComponent {
                         ])
                     } else {
                         Line::from(vec![
+                            badge,
                             Span::styled("  ", Style::default()),
                             Span::styled(tree_prefix, Style::default().fg(SUBDUED_BORDER)),
                             Span::styled(format!(" {} ", status), Style::default()),
