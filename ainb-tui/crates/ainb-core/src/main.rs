@@ -203,16 +203,25 @@ async fn run_tui_loop(
     layout: &mut LayoutComponent,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) -> Result<()> {
-    // 33 ms ≈ 30 fps. Lower bound on perceived input latency for any
-    // event the loop has to poll for — including plugin re-renders
-    // gated by the per-plugin `take_render_dirty` flag (see
-    // `App::tick_plugin_renders`). At 250 ms (the prior value) a
-    // keystroke that hit a plugin took up to one tick to round-trip
-    // and another tick to repaint, producing 250-500 ms of visible
-    // lag. The dirty-gate keeps the render kick storm-free so this
-    // faster tick is cheap.
+    // Event-poll cadence: how often we wake up to check for a keystroke
+    // or paste event. Drives the "time-to-first-response" for any input
+    // the user generates — including keystrokes routed to plugin
+    // screens via `App::tick_plugin_renders` and its `take_render_dirty`
+    // gate. Set to ~30 fps so a keystroke lands in the next iter
+    // (< 33 ms) rather than the next 250 ms window.
     let tick_rate = Duration::from_millis(33);
+    // App-tick cadence: how often we run the heavy host-side periodic
+    // work (mascot animation, OAuth refresh check, tmux preview
+    // capture, async action dispatch, log streaming refresh,
+    // workspace/skills load checks). These are coarse-grained and
+    // expensive — running them every 33 ms would starve the event
+    // loop, stall key processing, and burn CPU. 250 ms is the
+    // pre-perf-PR cadence; keeping it isolates the tick-rate cut
+    // to only the event-poll path that actually affects perceived
+    // latency. See `last_app_tick` below.
+    let app_tick_rate = Duration::from_millis(250);
     let mut last_tick = Instant::now();
+    let mut last_app_tick = Instant::now();
 
     // Startup guard: Ignore key events for the first 100ms to prevent stray keypresses
     // from triggering actions (e.g., buffered 'n' key opening New Session dialog)
@@ -363,7 +372,7 @@ async fn run_tui_loop(
                                 match app.tick().await {
                                     Ok(()) => {
                                         info!(">>> Immediate tick completed successfully");
-                                        last_tick = Instant::now();
+                                        last_app_tick = Instant::now();
                                         // Force UI refresh
                                         terminal.draw(|frame| {
                                             layout.render(frame, &mut app.state);
@@ -527,7 +536,13 @@ async fn run_tui_loop(
             EventHandler::process_event(pending_event, &mut app.state);
         }
 
-        if last_tick.elapsed() >= tick_rate {
+        // Update last_tick on every iteration so the event-poll timeout
+        // stays accurate. The heavy work below is gated on a SEPARATE
+        // `last_app_tick` so it runs at app_tick_rate (250 ms) even
+        // though the poll cadence is much faster (33 ms).
+        last_tick = Instant::now();
+
+        if last_app_tick.elapsed() >= app_tick_rate {
             // Update mascot animation on home screen
             app.state.home_screen_v2_state.tick_mascot();
 
@@ -1183,7 +1198,7 @@ async fn run_tui_loop(
 
             match app.tick().await {
                 Ok(()) => {
-                    last_tick = Instant::now();
+                    last_app_tick = Instant::now();
 
                     // Check if UI needs immediate refresh after async operations
                     if app.needs_ui_refresh() {
@@ -1197,7 +1212,7 @@ async fn run_tui_loop(
                     use tracing::error;
                     error!("Error during app tick: {}", e);
                     // Continue running instead of crashing
-                    last_tick = Instant::now();
+                    last_app_tick = Instant::now();
                 }
             }
         }
