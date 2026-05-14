@@ -260,10 +260,11 @@ impl RuntimeHandle {
         // ahead and clear it before the plugin observes the keystroke.
         // Worst case the host fires one no-op render kick — harmless.
         handle.render_dirty.store(true, Ordering::Release);
-        handle
-            .inbox
-            .send(Command::HandleKey { params })
-            .is_ok()
+        // Priority channel — bypasses the main FIFO inbox so an Esc
+        // keypress doesn't queue behind chunked `HandleEvent` publishes
+        // (a 50-chunk `sessions.usage_data` refresh was previously
+        // starving Esc on the burndown screen).
+        handle.key_inbox.send(params).is_ok()
     }
 
     /// Publish a snapshot from the host side. Non-blocking. Subscriber
@@ -325,7 +326,7 @@ impl RuntimeHandle {
                 arc.manifest.lifecycle.spawn,
                 ainb_plugin_protocol::manifest::SpawnMode::Eager
             );
-            let (inbox, cache, state) = crate::plugin_task::spawn(
+            let (inbox, key_inbox, cache, state) = crate::plugin_task::spawn(
                 arc.clone(),
                 self.inner.snapshots.clone(),
                 self.inner.inboxes.clone(),
@@ -350,6 +351,7 @@ impl RuntimeHandle {
                 arc.id.clone(),
                 Arc::new(PluginHandle {
                     inbox,
+                    key_inbox,
                     cache,
                     state,
                     plugin: arc,

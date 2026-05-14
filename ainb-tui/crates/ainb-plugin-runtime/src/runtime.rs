@@ -11,7 +11,7 @@ use tokio::runtime::Runtime as TokioRuntime;
 
 use crate::error::RuntimeError;
 use crate::handle::{HandleInner, RuntimeHandle};
-use crate::plugin_task::{self, DirtyMap, Inbox, InboxMap, RenderCache};
+use crate::plugin_task::{self, DirtyMap, Inbox, InboxMap, KeyInbox, RenderCache};
 use crate::registry::{self, ChannelRegistry, RegisteredPlugin};
 use crate::snapshot::SnapshotStore;
 use crate::types::{LifecycleState, PluginId, RuntimeConfig};
@@ -19,6 +19,10 @@ use crate::types::{LifecycleState, PluginId, RuntimeConfig};
 /// Per-plugin handle bundle stored inside the runtime's plugin map.
 pub(crate) struct PluginHandle {
     pub(crate) inbox: Inbox,
+    /// Priority side-channel reserved for `plugin/handle_key`
+    /// notifications. See [`crate::plugin_task::KeyInbox`] for the
+    /// rationale (Esc-during-chunked-publish starvation fix).
+    pub(crate) key_inbox: KeyInbox,
     pub(crate) cache: RenderCache,
     pub(crate) state: Arc<RwLock<LifecycleState>>,
     pub(crate) plugin: Arc<RegisteredPlugin>,
@@ -130,7 +134,7 @@ impl Runtime {
             arc.manifest.lifecycle.spawn,
             ainb_plugin_protocol::manifest::SpawnMode::Eager
         );
-        let (inbox, cache, state) = plugin_task::spawn(
+        let (inbox, key_inbox, cache, state) = plugin_task::spawn(
             arc.clone(),
             self.snapshots.clone(),
             self.inboxes.clone(),
@@ -147,6 +151,7 @@ impl Runtime {
         self.dirty.write().insert(arc.id.clone(), render_dirty.clone());
         let handle = Arc::new(PluginHandle {
             inbox,
+            key_inbox,
             cache,
             state,
             plugin: arc.clone(),
