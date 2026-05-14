@@ -290,6 +290,12 @@ pub struct UsageViewState {
     /// `&UsageData` transparently; writes wrap in `Arc::new` or clone
     /// an existing `Arc` (refcount bump, not a deep copy).
     pub data: Option<std::sync::Arc<UsageData>>,
+    /// True for the single render frame immediately after
+    /// `cached_filtered` did a real recompute (cache miss). Set by the
+    /// plugin's render snapshot — not persisted between frames. The
+    /// chip strip renders a brief `↻ updated` badge while this is on,
+    /// giving the user a visual confirmation that their pivot landed.
+    pub fresh_pivot: bool,
     pub loading: bool,
     pub scroll_offset: usize,
     pub period: UsagePeriod,
@@ -354,6 +360,7 @@ impl Default for UsageViewState {
             provider: UsageProvider::Claude,
             active_tab: UsageTab::Burndown,
             data: None,
+            fresh_pivot: false,
             loading: false,
             scroll_offset: 0,
             period: UsagePeriod::Week,
@@ -2800,6 +2807,12 @@ fn render_period_row(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
 /// Build the chip strip line shown directly under the period+provider
 /// strip. Active chips render as `[label=value]` in GOLD; with no
 /// chips, an instruction hint is shown so users discover the pivot.
+///
+/// When `state.fresh_pivot` is true (set by the plugin's render path on
+/// the single frame after a cache miss), a brief `↻ updated` badge is
+/// appended in `SELECTION_GREEN` so the user sees confirmation their
+/// chip pivot landed even when the wall-clock compute was too fast to
+/// feel like a wait.
 pub fn build_filter_chip_line(state: &UsageViewState) -> Line<'static> {
     let mut spans: Vec<Span<'static>> =
         vec![Span::styled("Filters: ", Style::default().fg(MUTED_GRAY))];
@@ -2808,6 +2821,9 @@ pub fn build_filter_chip_line(state: &UsageViewState) -> Line<'static> {
             "(none)",
             Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
         ));
+        if state.fresh_pivot {
+            push_fresh_pivot_badge(&mut spans);
+        }
         return Line::from(spans);
     }
     push_chip_group(&mut spans, "project", &state.filters.project);
@@ -2834,7 +2850,23 @@ pub fn build_filter_chip_line(state: &UsageViewState) -> Line<'static> {
         Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
     ));
     spans.push(Span::styled(" clear all", Style::default().fg(MUTED_GRAY)));
+    if state.fresh_pivot {
+        push_fresh_pivot_badge(&mut spans);
+    }
     Line::from(spans)
+}
+
+/// Append the fresh-pivot badge to the chip strip. Rendered in green
+/// to visually distinguish from the gold chip group — the eye reads
+/// it as "I just did the thing" rather than another filter state.
+fn push_fresh_pivot_badge(spans: &mut Vec<Span<'static>>) {
+    spans.push(Span::raw("  "));
+    spans.push(Span::styled(
+        "↻ updated",
+        Style::default()
+            .fg(SELECTION_GREEN)
+            .add_modifier(Modifier::BOLD),
+    ));
 }
 
 fn push_chip_group(spans: &mut Vec<Span<'static>>, label: &str, values: &[String]) {
@@ -4585,6 +4617,37 @@ mod cross_filter_tests {
         ] {
             assert!(flat.contains(needle), "chip strip missing {needle}: {flat}");
         }
+    }
+
+    /// The `↻ updated` badge renders only when the plugin's render
+    /// snapshot has flagged this frame as a fresh-pivot frame.
+    #[test]
+    fn chip_strip_shows_fresh_pivot_badge_when_flag_set() {
+        let mut state = UsageViewState::default();
+        state.filters.project.push("p".into());
+
+        state.fresh_pivot = false;
+        let line = build_filter_chip_line(&state);
+        let flat: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(!flat.contains("↻ updated"), "badge must hide when flag is off: {flat}");
+
+        state.fresh_pivot = true;
+        let line = build_filter_chip_line(&state);
+        let flat: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(flat.contains("↻ updated"), "badge must show when flag is on: {flat}");
+    }
+
+    /// Same indicator visibility applies on the no-chip path so the
+    /// user gets confirmation even when they clear chips back to
+    /// `(none)` — that's still a pivot that recomputed.
+    #[test]
+    fn chip_strip_shows_fresh_pivot_badge_with_no_chips() {
+        let mut state = UsageViewState::default();
+        state.fresh_pivot = true;
+        let line = build_filter_chip_line(&state);
+        let flat: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(flat.contains("(none)"), "got {flat}");
+        assert!(flat.contains("↻ updated"), "got {flat}");
     }
 
     #[test]

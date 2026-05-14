@@ -106,6 +106,14 @@ pub struct BurndownPlugin {
     /// model / branch / activity chip is active. Cleared in lockstep
     /// with `filter_cache` on each new ingest.
     indices: Option<crate::data::usage::UsageIndices>,
+    /// Monotonic counter bumped every time `cached_filtered` runs an
+    /// actual recompute (cache miss). Pairs with `displayed_pivot_seq`
+    /// in the render snapshot so the chip strip can flash a brief
+    /// `↻ updated` badge on the first render frame after a pivot
+    /// lands — confirming to the user that their drill-down was
+    /// applied even when the wall-clock compute was fast enough that
+    /// the only visible change is a few panel numbers.
+    pivot_seq: u64,
 }
 
 /// One-deep filter-cache slot. A single entry is enough because
@@ -239,6 +247,7 @@ impl Plugin for BurndownPlugin {
             // in this order lets `cached_filtered()` mutate
             // `self.filter_cache` without colliding with the later
             // immutable read of `self.ui` and `self.data`.
+            let pivot_seq_before = self.pivot_seq;
             let cached_filtered = self.cached_filtered();
             // Snapshot the UI state so we can paint without holding a
             // mutable borrow on `self` for the whole call.
@@ -246,6 +255,11 @@ impl Plugin for BurndownPlugin {
             ui.data = self.data.clone();
             ui.scan_progress = self.scan_progress.clone();
             ui.cached_filtered = cached_filtered;
+            // True iff `cached_filtered` ran an actual recompute this
+            // frame (cache miss). The chip strip uses this to flash a
+            // brief `↻ updated` badge so the user sees confirmation
+            // their pivot landed.
+            ui.fresh_pivot = self.pivot_seq != pivot_seq_before;
             render_ui(&mut rbuf, area, &ui);
         }
         Ok(buffer_to_wire(&rbuf, area))
@@ -488,6 +502,12 @@ impl BurndownPlugin {
             inputs_hash: key.1,
             filtered: filtered.clone(),
         });
+        // Mark this render as the one that landed a fresh pivot. The
+        // render path snapshots this into the UI state and renders the
+        // `↻ updated` chip-strip badge on the first frame after a
+        // cache miss; subsequent idle frames see the same value and
+        // suppress the badge via the `displayed_pivot_seq` compare.
+        self.pivot_seq = self.pivot_seq.wrapping_add(1);
         Some(filtered)
     }
 
