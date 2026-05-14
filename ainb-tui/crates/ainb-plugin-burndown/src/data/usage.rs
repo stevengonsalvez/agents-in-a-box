@@ -66,6 +66,9 @@ pub enum UsageProviderFilter {
     All,
     Claude,
     Codex,
+    Cursor,
+    Copilot,
+    Gemini,
 }
 
 impl UsageProviderFilter {
@@ -74,6 +77,9 @@ impl UsageProviderFilter {
             Self::All => true,
             Self::Claude => provider == "claude",
             Self::Codex => provider == "codex",
+            Self::Cursor => provider == "cursor",
+            Self::Copilot => provider == "copilot",
+            Self::Gemini => provider == "gemini",
         }
     }
 }

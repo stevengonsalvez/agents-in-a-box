@@ -213,6 +213,9 @@ pub enum ProviderArg {
     All,
     Claude,
     Codex,
+    Cursor,
+    Copilot,
+    Gemini,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -1100,6 +1103,9 @@ fn query_from_args(args: &UsageReportArgs) -> Result<UsageQuery> {
             ProviderArg::All => UsageProviderFilter::All,
             ProviderArg::Claude => UsageProviderFilter::Claude,
             ProviderArg::Codex => UsageProviderFilter::Codex,
+            ProviderArg::Cursor => UsageProviderFilter::Cursor,
+            ProviderArg::Copilot => UsageProviderFilter::Copilot,
+            ProviderArg::Gemini => UsageProviderFilter::Gemini,
         },
         include_projects: args.include.clone(),
         exclude_projects: args.exclude.clone(),

@@ -217,6 +217,9 @@ pub enum ProviderArg {
     All,
     Claude,
     Codex,
+    Cursor,
+    Copilot,
+    Gemini,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
