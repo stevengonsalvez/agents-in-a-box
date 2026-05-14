@@ -38,7 +38,6 @@ logs/
 .trae/
 .windsurf/
 skills-lock.json
-skills/
 
 # Bun build artifacts
 *.bun-build
