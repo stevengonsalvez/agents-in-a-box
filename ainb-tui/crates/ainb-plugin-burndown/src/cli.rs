@@ -339,22 +339,156 @@ fn export_usage_with_data(
     args: &UsageExportArgs,
     format: OutputFormat,
 ) -> Result<()> {
-    // Plugin-mode export = dump CSV/JSON to stdout. The host-side path
-    // wrote to disk via fs IO (--out arg); plugin-mode pipes the same
-    // payload to the captured stdout buffer instead so the host can
-    // forward it / write to disk itself if needed.
-    let _ = args;
-    match format {
-        OutputFormat::Json => {
+    // Plugin-mode export. When the user passes `--output <path>` we
+    // mirror the host's fs-write behaviour (path with extension =
+    // single-file dump, path without extension = per-table CSV folder
+    // matching the codeburn-style layout). With no `--output` we keep
+    // the legacy stdout stream so shell pipelines (`| jq`, `| csvkit`)
+    // continue to work.
+    match (&args.output, format) {
+        (Some(path), OutputFormat::Csv) => write_csv_dump(path, data),
+        (Some(path), OutputFormat::Json) => {
+            let text = serde_json::to_string_pretty(&json!({
+                "schema": "ainb.usage.v1",
+                "generated_at": Local::now().to_rfc3339(),
+                "currency": "USD",
+                "report": report_json(data),
+            }))?;
+            write_or_print(Some(path.as_path()), &text)
+        }
+        (Some(path), OutputFormat::Markdown) => {
+            let text = render_markdown_report("Usage Export", data, args.report.top);
+            write_or_print(Some(path.as_path()), &text)
+        }
+        (Some(path), OutputFormat::Text) => {
+            let text = serde_json::to_string_pretty(&report_json(data))?;
+            write_or_print(Some(path.as_path()), &text)
+        }
+        (None, OutputFormat::Json) => {
             println!("{}", serde_json::to_string_pretty(&report_json(data))?);
+            Ok(())
         }
-        OutputFormat::Markdown => {
-            print!("{}", render_markdown_report("Usage Export", data));
+        (None, OutputFormat::Markdown) => {
+            print!("{}", render_markdown_report("Usage Export", data, args.report.top));
+            Ok(())
         }
-        OutputFormat::Csv | OutputFormat::Text => {
+        (None, OutputFormat::Csv | OutputFormat::Text) => {
             print!("{}", combined_csv(data));
+            Ok(())
         }
     }
+}
+
+/// Pick between single-file vs per-table folder dump.
+///
+/// Decision matrix (matches user expectations regardless of path
+/// shape — `mktemp -d` produces paths with what looks like a
+/// file extension, so we can't rely on `extension().is_some()`):
+///
+/// * Path exists & is a directory → per-table folder dump.
+/// * Path exists & is a regular file → overwrite as single inline CSV.
+/// * Path doesn't exist & ends with `/` (or `\\`) → folder dump.
+/// * Path doesn't exist & has a `.csv`/`.tsv`/`.txt` extension → single file.
+/// * Path doesn't exist & otherwise → folder dump (codeburn convention:
+///   `ainb usage export -o ./report` writes a directory).
+fn write_csv_dump(path: &Path, data: &UsageData) -> Result<()> {
+    if path.exists() {
+        if path.is_dir() {
+            return write_csv_folder(path, data);
+        }
+    } else {
+        let raw = path.to_string_lossy();
+        let ends_with_sep = raw.ends_with('/') || raw.ends_with(std::path::MAIN_SEPARATOR);
+        let looks_like_file = matches!(
+            path.extension().and_then(|s| s.to_str()),
+            Some("csv") | Some("tsv") | Some("txt")
+        );
+        if ends_with_sep || !looks_like_file {
+            return write_csv_folder(path, data);
+        }
+    }
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    fs::write(path, combined_csv(data))?;
+    Ok(())
+}
+
+/// Write a codeburn-style per-table CSV export folder at `dir`.
+///
+/// Layout:
+///
+/// ```text
+/// dir/
+///   .ainb-export       (marker so we can safely overwrite next run)
+///   README.txt         (plain-text index of which file holds what)
+///   summary.csv
+///   daily.csv
+///   activity.csv
+///   models.csv
+///   projects.csv
+///   sessions.csv
+///   tools.csv          (only when data.tools is non-empty)
+///   shell-commands.csv (only when data.shell_commands is non-empty)
+///   mcp-servers.csv    (only when data.mcp_servers is non-empty)
+/// ```
+///
+/// Refuses to write into a non-empty directory that lacks the
+/// `.ainb-export` marker so a stray `ainb usage export -o ~/Documents`
+/// doesn't clobber unrelated files. Empty dirs and previously-exported
+/// dirs (marker present) are fine.
+pub(crate) fn write_csv_folder(dir: &Path, data: &UsageData) -> Result<()> {
+    let marker = dir.join(".ainb-export");
+    if dir.exists() {
+        let already_export_dir = marker.exists();
+        let empty = fs::read_dir(dir)
+            .map(|mut d| d.next().is_none())
+            .unwrap_or(true);
+        if !empty && !already_export_dir {
+            bail!(
+                "refusing to overwrite non-empty directory {} (no .ainb-export marker — \
+                 pass an empty path or one previously written by `ainb usage export`)",
+                dir.display()
+            );
+        }
+    } else {
+        fs::create_dir_all(dir)?;
+    }
+    fs::write(&marker, "ainb usage export\n")?;
+    fs::write(dir.join("summary.csv"), summary_csv(data))?;
+    fs::write(dir.join("daily.csv"), daily_csv(data))?;
+    fs::write(dir.join("activity.csv"), activities_csv(&data.activities))?;
+    fs::write(dir.join("models.csv"), models_csv(data))?;
+    fs::write(dir.join("projects.csv"), projects_csv(&data.projects))?;
+    fs::write(dir.join("sessions.csv"), sessions_csv(&data.sessions))?;
+    let mut readme = String::from("ainb usage export\n=================\n\n");
+    readme.push_str("summary.csv       Overview metrics (calls, tokens, cost).\n");
+    readme.push_str("daily.csv         Per-day usage breakdown.\n");
+    readme.push_str("activity.csv      Per-activity-category turn / retry / token counts.\n");
+    readme.push_str("models.csv        Per-model call / token / cost rollups.\n");
+    readme.push_str("projects.csv      Per-project bucket.\n");
+    readme.push_str("sessions.csv      Per-session bucket.\n");
+    if !data.tools.is_empty() {
+        fs::write(dir.join("tools.csv"), named_csv("tool", &data.tools))?;
+        readme.push_str("tools.csv         Per-tool invocation count.\n");
+    }
+    if !data.shell_commands.is_empty() {
+        fs::write(
+            dir.join("shell-commands.csv"),
+            named_csv("command", &data.shell_commands),
+        )?;
+        readme.push_str("shell-commands.csv Per-shell-command invocation count.\n");
+    }
+    if !data.mcp_servers.is_empty() {
+        fs::write(
+            dir.join("mcp-servers.csv"),
+            named_csv("server", &data.mcp_servers),
+        )?;
+        readme.push_str("mcp-servers.csv   Per-MCP-server invocation count.\n");
+    }
+    fs::write(dir.join("README.txt"), readme)?;
     Ok(())
 }
 
@@ -742,31 +876,7 @@ fn export_usage(args: &UsageExportArgs, format: OutputFormat) -> Result<()> {
         }
         OutputFormat::Csv => {
             if let Some(path) = &args.output {
-                if path.extension().is_some() {
-                    fs::write(path, combined_csv(&data))?;
-                } else {
-                    fs::create_dir_all(path)?;
-                    fs::write(path.join("README.md"), "AINB usage export\n")?;
-                    fs::write(path.join("summary.csv"), summary_csv(&data))?;
-                    fs::write(path.join("daily.csv"), daily_csv(&data))?;
-                    fs::write(path.join("projects.csv"), projects_csv(&data.projects))?;
-                    fs::write(path.join("sessions.csv"), sessions_csv(&data.sessions))?;
-                    fs::write(
-                        path.join("activities.csv"),
-                        activities_csv(&data.activities),
-                    )?;
-                    fs::write(path.join("models.csv"), models_csv(&data))?;
-                    fs::write(path.join("tools.csv"), named_csv("tool", &data.tools))?;
-                    fs::write(
-                        path.join("shell_commands.csv"),
-                        named_csv("command", &data.shell_commands),
-                    )?;
-                    fs::write(
-                        path.join("mcp_servers.csv"),
-                        named_csv("server", &data.mcp_servers),
-                    )?;
-                }
-                Ok(())
+                write_csv_dump(path, &data)
             } else {
                 print!("{}", combined_csv(&data));
                 Ok(())
