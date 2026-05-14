@@ -95,6 +95,13 @@ pub struct BurndownPlugin {
     /// re-renders (between keystrokes) and repeated renders on the
     /// same filter state are O(1) instead of O(N).
     filter_cache: Option<FilterCacheEntry>,
+    /// Pre-built dimension indices over `self.data.calls`. Built once
+    /// per `data_generation` bump (i.e. each new wire snapshot) and
+    /// reused across chip pivots so the filter pass is
+    /// `O(candidate_set)` instead of `O(N)` whenever a project /
+    /// model / branch / activity chip is active. Cleared in lockstep
+    /// with `filter_cache` on each new ingest.
+    indices: Option<crate::data::usage::UsageIndices>,
 }
 
 /// One-deep filter-cache slot. A single entry is enough because
@@ -399,6 +406,10 @@ impl BurndownPlugin {
                 // sees the new generation when checking the entry.
                 self.data_generation = self.data_generation.wrapping_add(1);
                 self.filter_cache = None;
+                // Indices are derived from `self.data` and become
+                // stale on every new snapshot. Drop them here; the
+                // next `cached_filtered` call rebuilds lazily.
+                self.indices = None;
                 return ChunkOutcome::Finalised;
             }
         }
@@ -456,8 +467,14 @@ impl BurndownPlugin {
                 return Some(entry.filtered.clone());
             }
         }
-        let filtered = std::sync::Arc::new(crate::data::usage::filter_usage_data_full(
+        // Build pre-dimension indices once per data_generation. Reused
+        // across every chip pivot until the next wire snapshot lands.
+        if self.indices.is_none() {
+            self.indices = Some(crate::data::usage::UsageIndices::from_usage_data(data));
+        }
+        let filtered = std::sync::Arc::new(crate::data::usage::filter_usage_data_indexed(
             data,
+            self.indices.as_ref(),
             &self.ui.filters,
             &self.ui.period,
             self.ui.provider_filter,
