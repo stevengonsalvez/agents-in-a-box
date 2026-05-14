@@ -133,6 +133,12 @@ pub struct UsageReportArgs {
     /// are excluded by any non-empty `--branch` filter.
     #[arg(long)]
     pub branch: Vec<String>,
+    /// Cap the long By-Project / By-Activity / By-Model tables at N rows
+    /// (default 8 mirrors the historical hard-coded slice). Applies to
+    /// report, today, month, and export subcommands across every format.
+    /// 0 means "no cap" — emit every row.
+    #[arg(long, default_value_t = 8)]
+    pub top: usize,
 }
 
 #[derive(Args, Clone, Default)]
@@ -287,10 +293,10 @@ fn print_report_with_data(
             print!("{}", combined_csv(&view));
         }
         OutputFormat::Markdown => {
-            print!("{}", render_markdown_report(title, &view));
+            print!("{}", render_markdown_report(title, &view, args.top));
         }
         OutputFormat::Text => {
-            print_text_report(title, &view);
+            print_text_report(title, &view, args.top);
         }
     }
     Ok(())
@@ -298,7 +304,7 @@ fn print_report_with_data(
 
 fn print_status_with_data(
     data: &UsageData,
-    _args: &UsageReportArgs,
+    args: &UsageReportArgs,
     format: OutputFormat,
 ) -> Result<()> {
     let projection = AppConfig::load()
@@ -319,10 +325,10 @@ fn print_status_with_data(
         ),
         OutputFormat::Csv => print!("{}", combined_csv(data)),
         OutputFormat::Markdown => {
-            print!("{}", render_markdown_report("Usage Status", data));
+            print!("{}", render_markdown_report("Usage Status", data, args.top));
         }
         OutputFormat::Text => {
-            print_text_report("Usage Status", data);
+            print_text_report("Usage Status", data, args.top);
         }
     }
     Ok(())
@@ -588,10 +594,10 @@ fn print_report(args: &UsageReportArgs, format: OutputFormat, title: &str) -> Re
             print!("{}", combined_csv(&data));
         }
         OutputFormat::Markdown => {
-            print!("{}", render_markdown_report(title, &data));
+            print!("{}", render_markdown_report(title, &data, args.top));
         }
         OutputFormat::Text => {
-            print_text_report(title, &data);
+            print_text_report(title, &data, args.top);
         }
     }
     Ok(())
@@ -613,7 +619,7 @@ fn print_status(args: &UsageReportArgs, format: OutputFormat) -> Result<()> {
         ),
         OutputFormat::Csv => print!("{}", combined_csv(&data)),
         OutputFormat::Markdown => {
-            print!("{}", render_markdown_report("Usage Status", &data));
+            print!("{}", render_markdown_report("Usage Status", &data, args.top));
             if let Some(projection) = &projection {
                 println!(
                     "\n## Plan\n\n- **Spent:** ${:.2} / ${:.2} ({:.0}%)\n- **Status:** {:?}\n",
@@ -625,7 +631,7 @@ fn print_status(args: &UsageReportArgs, format: OutputFormat) -> Result<()> {
             }
         }
         OutputFormat::Text => {
-            print_text_report("Usage Status", &data);
+            print_text_report("Usage Status", &data, args.top);
             if let Some(projection) = projection {
                 println!(
                     "Plan: ${:.2} / ${:.2} ({:.0}%) {:?}",
@@ -727,7 +733,7 @@ fn export_usage(args: &UsageExportArgs, format: OutputFormat) -> Result<()> {
             write_or_print(args.output.as_deref(), &text)
         }
         OutputFormat::Markdown => {
-            let text = render_markdown_report("Usage Export", &data);
+            let text = render_markdown_report("Usage Export", &data, args.report.top);
             write_or_print(args.output.as_deref(), &text)
         }
         OutputFormat::Text => {
@@ -994,7 +1000,7 @@ fn parse_quarter_arg(value: &str) -> Result<UsagePeriod> {
     Ok(UsagePeriod::SpecificQuarter(year, q))
 }
 
-fn print_text_report(title: &str, data: &UsageData) {
+fn print_text_report(title: &str, data: &UsageData, top: usize) {
     println!("{title}");
     println!(
         "Overview: {} calls, {} sessions, {} projects, {} tokens, {}",
@@ -1005,14 +1011,21 @@ fn print_text_report(title: &str, data: &UsageData) {
         format_cost(data.grand_total.cost_usd)
     );
     println!();
-    print_top_projects(data);
-    print_top_activities(data);
-    print_top_models(data);
+    print_top_projects(data, top);
+    print_top_activities(data, top);
+    print_top_models(data, top);
 }
 
-fn print_top_projects(data: &UsageData) {
+/// `top == 0` is treated as "no cap" — emit every row. Anything > 0
+/// is the slice length passed to `.take(...)`.
+fn top_iter<T>(slice: &[T], top: usize) -> impl Iterator<Item = &T> {
+    let n = if top == 0 { slice.len() } else { top };
+    slice.iter().take(n)
+}
+
+fn print_top_projects(data: &UsageData, top: usize) {
     println!("By Project");
-    for project in data.projects.iter().take(8) {
+    for project in top_iter(&data.projects, top) {
         println!(
             "- {}: {} calls, {} tokens, {}",
             project.name,
@@ -1023,9 +1036,9 @@ fn print_top_projects(data: &UsageData) {
     }
 }
 
-fn print_top_activities(data: &UsageData) {
+fn print_top_activities(data: &UsageData, top: usize) {
     println!("By Activity");
-    for activity in data.activities.iter().take(8) {
+    for activity in top_iter(&data.activities, top) {
         println!(
             "- {}: {} turns, {} retries, {} tokens",
             activity.category.label(),
@@ -1036,9 +1049,9 @@ fn print_top_activities(data: &UsageData) {
     }
 }
 
-fn print_top_models(data: &UsageData) {
+fn print_top_models(data: &UsageData, top: usize) {
     println!("By Model");
-    for model in data.models.iter().take(8) {
+    for model in top_iter(&data.models, top) {
         println!(
             "- {}: {} calls, {} tokens, {}",
             model.model,
@@ -1056,7 +1069,7 @@ fn print_top_models(data: &UsageData) {
 /// pastes cleanly into READMEs, PR descriptions, and grafana note
 /// panels. Pairs with `--format markdown` (also accepts `md` as an
 /// argv alias for shell-friendliness).
-pub(crate) fn render_markdown_report(title: &str, data: &UsageData) -> String {
+pub(crate) fn render_markdown_report(title: &str, data: &UsageData, top: usize) -> String {
     let mut out = String::new();
     out.push_str(&format!("# {title}\n\n"));
     out.push_str("## Overview\n\n");
@@ -1071,7 +1084,7 @@ pub(crate) fn render_markdown_report(title: &str, data: &UsageData) -> String {
     out.push_str("## By Project\n\n");
     out.push_str("| Project | Calls | Tokens | Cost |\n");
     out.push_str("|---------|------:|-------:|-----:|\n");
-    for project in data.projects.iter().take(8) {
+    for project in top_iter(&data.projects, top) {
         out.push_str(&format!(
             "| {} | {} | {} | {} |\n",
             md_escape(&truncate_label(&project.name, 60)),
@@ -1084,7 +1097,7 @@ pub(crate) fn render_markdown_report(title: &str, data: &UsageData) -> String {
     out.push_str("## By Activity\n\n");
     out.push_str("| Activity | Turns | Retries | Tokens |\n");
     out.push_str("|----------|------:|--------:|-------:|\n");
-    for activity in data.activities.iter().take(8) {
+    for activity in top_iter(&data.activities, top) {
         out.push_str(&format!(
             "| {} | {} | {} | {} |\n",
             md_escape(activity.category.label()),
@@ -1097,7 +1110,7 @@ pub(crate) fn render_markdown_report(title: &str, data: &UsageData) -> String {
     out.push_str("## By Model\n\n");
     out.push_str("| Model | Calls | Tokens | Cost |\n");
     out.push_str("|-------|------:|-------:|-----:|\n");
-    for model in data.models.iter().take(8) {
+    for model in top_iter(&data.models, top) {
         out.push_str(&format!(
             "| {} | {} | {} | {} |\n",
             md_escape(&model.model),
