@@ -106,6 +106,14 @@ pub struct BurndownPlugin {
     /// model / branch / activity chip is active. Cleared in lockstep
     /// with `filter_cache` on each new ingest.
     indices: Option<crate::data::usage::UsageIndices>,
+    /// Monotonic counter bumped every time `cached_filtered` runs an
+    /// actual recompute (cache miss). The render path snapshots this
+    /// before/after calling `cached_filtered`; a delta means the chip
+    /// strip should flash a brief `↻ updated` badge — confirming to
+    /// the user that their drill-down was applied even when the
+    /// wall-clock compute was fast enough that the only visible
+    /// change is a few panel numbers.
+    pivot_seq: u64,
 }
 
 /// One-deep filter-cache slot. A single entry is enough because
@@ -239,6 +247,7 @@ impl Plugin for BurndownPlugin {
             // in this order lets `cached_filtered()` mutate
             // `self.filter_cache` without colliding with the later
             // immutable read of `self.ui` and `self.data`.
+            let pivot_seq_before = self.pivot_seq;
             let cached_filtered = self.cached_filtered();
             // Snapshot the UI state so we can paint without holding a
             // mutable borrow on `self` for the whole call.
@@ -246,6 +255,11 @@ impl Plugin for BurndownPlugin {
             ui.data = self.data.clone();
             ui.scan_progress = self.scan_progress.clone();
             ui.cached_filtered = cached_filtered;
+            // True iff `cached_filtered` ran an actual recompute this
+            // frame (cache miss). The chip strip uses this to flash a
+            // brief `↻ updated` badge so the user sees confirmation
+            // their pivot landed.
+            ui.fresh_pivot = self.pivot_seq != pivot_seq_before;
             render_ui(&mut rbuf, area, &ui);
         }
         Ok(buffer_to_wire(&rbuf, area))
@@ -488,6 +502,13 @@ impl BurndownPlugin {
             inputs_hash: key.1,
             filtered: filtered.clone(),
         });
+        // Mark this render as the one that landed a fresh pivot. The
+        // render path snapshots `pivot_seq` before/after this call and
+        // sets `ui.fresh_pivot` when the seq advanced — driving the
+        // `↻ updated` chip-strip badge on the first frame after a
+        // cache miss. Idle frames hit the cache, skip this bump, and
+        // suppress the badge naturally.
+        self.pivot_seq = self.pivot_seq.wrapping_add(1);
         Some(filtered)
     }
 
@@ -1146,6 +1167,63 @@ mod chunk_accumulator_tests {
         assert!(
             p.scan_progress.is_none(),
             "scan_progress must clear on finalise so the skeleton goes away"
+        );
+    }
+}
+
+#[cfg(test)]
+mod pivot_seq_tests {
+    //! Cover the `pivot_seq` ↔ `fresh_pivot` contract: the seq must bump
+    //! exactly once per `cached_filtered` cache miss, and not bump at
+    //! all on cache hits or no-op (every filter at default) paths. The
+    //! render path's snapshot-before/after compare relies on this to
+    //! decide when to flash the `↻ updated` chip-strip badge.
+    use super::*;
+    use crate::data::usage::{
+        BranchUsage, TokenBucket, UsageData, UsagePeriod,
+    };
+
+    fn plugin_with_one_branch() -> BurndownPlugin {
+        let mut p = BurndownPlugin::default();
+        let mut data = UsageData::default();
+        data.branches = vec![BranchUsage {
+            branch: "main".to_string(),
+            bucket: TokenBucket::default(),
+        }];
+        p.data = Some(std::sync::Arc::new(data));
+        // Period::All bypasses the period predicate so the filter
+        // pass is purely the chip dimension under test.
+        p.ui.period = UsagePeriod::All;
+        p
+    }
+
+    #[test]
+    fn cached_filtered_bumps_seq_on_cache_miss_only() {
+        let mut p = plugin_with_one_branch();
+        let g0 = p.pivot_seq;
+
+        // No active filter, period=All, provider=All → no-op fast path
+        // returns None and must NOT bump the seq.
+        assert!(p.cached_filtered().is_none());
+        assert_eq!(p.pivot_seq, g0, "no-op path must not bump pivot_seq");
+
+        // Activate a chip → cache miss → seq bumps exactly once.
+        p.ui.filters.branch.push("main".to_string());
+        let _ = p.cached_filtered();
+        assert_eq!(p.pivot_seq, g0 + 1, "cache miss must bump pivot_seq by 1");
+
+        // Repeat the same call → cache hit → seq must NOT bump.
+        let _ = p.cached_filtered();
+        assert_eq!(p.pivot_seq, g0 + 1, "cache hit must not bump pivot_seq");
+
+        // Change the filter → cache miss again → seq bumps once more.
+        p.ui.filters.branch.clear();
+        p.ui.filters.branch.push("feature".to_string());
+        let _ = p.cached_filtered();
+        assert_eq!(
+            p.pivot_seq,
+            g0 + 2,
+            "second cache miss must bump pivot_seq again"
         );
     }
 }
