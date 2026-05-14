@@ -439,11 +439,19 @@ impl CliCommand for UsageCommand {
         // We rebuild argv from `std::env::args()` rather than `matches`
         // (clap-derive doesn't have a `to_args`); clap has already
         // validated the args before dispatch lands here.
-        let argv: Vec<String> = std::env::args()
-            .skip_while(|a| a != "usage")
-            .skip(1)
-            .collect();
+        //
+        // Pre-pend `--format <value>` so the plugin sees the host's
+        // global `--format` flag — clap-derive strips global args from
+        // the residual argv before the subcommand sees them, which is
+        // why `ainb --format json usage report` would otherwise reach
+        // the plugin as `report` (no format flag) and render text.
+        // Subcommand-position `--format` (e.g. `ainb usage report
+        // --format json`) is preserved verbatim by `std::env::args`
+        // and the plugin's `extract_format` picks the last occurrence.
         let format = ctx.format;
+        let format_token = output_format_to_token(format);
+        let mut argv: Vec<String> = vec!["--format".to_string(), format_token.to_string()];
+        argv.extend(std::env::args().skip_while(|a| a != "usage").skip(1));
         let parsed = crate::cli::usage::UsageCommands::from_arg_matches(matches);
         Box::pin(async move {
             let cmd = parsed.map_err(anyhow::Error::from)?;
@@ -465,6 +473,21 @@ impl CliCommand for UsageCommand {
 fn is_host_admin_subcommand(cmd: &crate::cli::usage::UsageCommands) -> bool {
     use crate::cli::usage::UsageCommands::*;
     matches!(cmd, Plan { .. } | Currency(_) | Cache { .. })
+}
+
+/// Mirror of clap-derive's lowercased ValueEnum form so we can pass
+/// the host's `OutputFormat` back over argv without re-parsing it
+/// inside the plugin (the plugin reads `--format <token>` via its
+/// own lightweight `extract_format`, which matches on these tokens
+/// verbatim).
+fn output_format_to_token(format: crate::cli::OutputFormat) -> &'static str {
+    use crate::cli::OutputFormat::*;
+    match format {
+        Text => "text",
+        Json => "json",
+        Csv => "csv",
+        Markdown => "markdown",
+    }
 }
 
 /// `ainb usage` shim (Phase 7c).

@@ -73,7 +73,7 @@ pub async fn execute(args: StatusArgs, format: OutputFormat) -> Result<()> {
                 serde_json::to_string_pretty(&output).context("Failed to serialize status")?
             );
         }
-        OutputFormat::Text | OutputFormat::Csv => {
+        OutputFormat::Text | OutputFormat::Csv | OutputFormat::Markdown => {
             let status_text = if is_running {
                 if claude_active {
                     "\x1b[32m●\x1b[0m Running (Claude active)"

@@ -77,7 +77,7 @@ fn cmd_show(format: OutputFormat) -> Result<()> {
                 .context("Failed to serialize config as JSON")?;
             println!("{json}");
         }
-        OutputFormat::Text | OutputFormat::Csv => {
+        OutputFormat::Text | OutputFormat::Csv | OutputFormat::Markdown => {
             let toml_str =
                 toml::to_string_pretty(&config).context("Failed to serialize config as TOML")?;
             println!("{toml_str}");
@@ -101,7 +101,7 @@ fn cmd_get(key: &str, format: OutputFormat) -> Result<()> {
                 .context("Failed to serialize value as JSON")?;
             println!("{json}");
         }
-        OutputFormat::Text | OutputFormat::Csv => {
+        OutputFormat::Text | OutputFormat::Csv | OutputFormat::Markdown => {
             print_toml_value(value);
         }
     }
@@ -186,7 +186,7 @@ fn cmd_path(format: OutputFormat) -> Result<()> {
                 .context("Failed to serialize config paths")?;
             println!("{json}");
         }
-        OutputFormat::Text | OutputFormat::Csv => {
+        OutputFormat::Text | OutputFormat::Csv | OutputFormat::Markdown => {
             let labels = ["Project config", "User config", "System config"];
 
             println!("Configuration file locations (highest precedence first):");

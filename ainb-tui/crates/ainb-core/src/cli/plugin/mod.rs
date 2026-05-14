@@ -106,7 +106,7 @@ fn list_installed(format: OutputFormat) -> Result<()> {
             let out = serde_json::json!({ "plugins": entries });
             println!("{}", serde_json::to_string_pretty(&out)?);
         }
-        OutputFormat::Text | OutputFormat::Csv => {
+        OutputFormat::Text | OutputFormat::Csv | OutputFormat::Markdown => {
             if plugins.is_empty() {
                 println!("(no plugins registered — install via 'ainb plugin install <name>')");
             } else {

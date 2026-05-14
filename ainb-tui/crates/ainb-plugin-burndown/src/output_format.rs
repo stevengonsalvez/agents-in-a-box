@@ -12,4 +12,5 @@ pub enum OutputFormat {
     Text,
     Json,
     Csv,
+    Markdown,
 }

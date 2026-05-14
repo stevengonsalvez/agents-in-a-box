@@ -286,6 +286,9 @@ fn print_report_with_data(
         OutputFormat::Csv => {
             print!("{}", combined_csv(&view));
         }
+        OutputFormat::Markdown => {
+            print!("{}", render_markdown_report(title, &view));
+        }
         OutputFormat::Text => {
             print_text_report(title, &view);
         }
@@ -315,6 +318,9 @@ fn print_status_with_data(
             }))?
         ),
         OutputFormat::Csv => print!("{}", combined_csv(data)),
+        OutputFormat::Markdown => {
+            print!("{}", render_markdown_report("Usage Status", data));
+        }
         OutputFormat::Text => {
             print_text_report("Usage Status", data);
         }
@@ -335,6 +341,9 @@ fn export_usage_with_data(
     match format {
         OutputFormat::Json => {
             println!("{}", serde_json::to_string_pretty(&report_json(data))?);
+        }
+        OutputFormat::Markdown => {
+            print!("{}", render_markdown_report("Usage Export", data));
         }
         OutputFormat::Csv | OutputFormat::Text => {
             print!("{}", combined_csv(data));
@@ -578,6 +587,9 @@ fn print_report(args: &UsageReportArgs, format: OutputFormat, title: &str) -> Re
         OutputFormat::Csv => {
             print!("{}", combined_csv(&data));
         }
+        OutputFormat::Markdown => {
+            print!("{}", render_markdown_report(title, &data));
+        }
         OutputFormat::Text => {
             print_text_report(title, &data);
         }
@@ -600,6 +612,18 @@ fn print_status(args: &UsageReportArgs, format: OutputFormat) -> Result<()> {
             }))?
         ),
         OutputFormat::Csv => print!("{}", combined_csv(&data)),
+        OutputFormat::Markdown => {
+            print!("{}", render_markdown_report("Usage Status", &data));
+            if let Some(projection) = &projection {
+                println!(
+                    "\n## Plan\n\n- **Spent:** ${:.2} / ${:.2} ({:.0}%)\n- **Status:** {:?}\n",
+                    projection.spent_usd,
+                    projection.monthly_usd,
+                    projection.percent_used * 100.0,
+                    projection.status
+                );
+            }
+        }
         OutputFormat::Text => {
             print_text_report("Usage Status", &data);
             if let Some(projection) = projection {
@@ -700,6 +724,10 @@ fn export_usage(args: &UsageExportArgs, format: OutputFormat) -> Result<()> {
                 "currency": "USD",
                 "report": report_json(&data),
             }))?;
+            write_or_print(args.output.as_deref(), &text)
+        }
+        OutputFormat::Markdown => {
+            let text = render_markdown_report("Usage Export", &data);
             write_or_print(args.output.as_deref(), &text)
         }
         OutputFormat::Text => {
@@ -1019,6 +1047,89 @@ fn print_top_models(data: &UsageData) {
             format_cost(model.bucket.cost_usd)
         );
     }
+}
+
+/// Render a `UsageData` snapshot as GitHub-flavored markdown.
+///
+/// Mirrors the text renderer's structure (overview line + three "By X"
+/// sections) but uses `#`/`##` headings and pipe tables so the output
+/// pastes cleanly into READMEs, PR descriptions, and grafana note
+/// panels. Pairs with `--format markdown` (also accepts `md` as an
+/// argv alias for shell-friendliness).
+pub(crate) fn render_markdown_report(title: &str, data: &UsageData) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("# {title}\n\n"));
+    out.push_str("## Overview\n\n");
+    out.push_str(&format!(
+        "- **Calls:** {}\n- **Sessions:** {}\n- **Projects:** {}\n- **Tokens:** {}\n- **Cost:** {}\n\n",
+        data.grand_total.call_count,
+        data.grand_total.session_count,
+        data.grand_total.project_count,
+        data.grand_total.total(),
+        format_cost(data.grand_total.cost_usd)
+    ));
+    out.push_str("## By Project\n\n");
+    out.push_str("| Project | Calls | Tokens | Cost |\n");
+    out.push_str("|---------|------:|-------:|-----:|\n");
+    for project in data.projects.iter().take(8) {
+        out.push_str(&format!(
+            "| {} | {} | {} | {} |\n",
+            md_escape(&truncate_label(&project.name, 60)),
+            project.bucket.call_count,
+            project.bucket.total(),
+            format_cost(project.bucket.cost_usd)
+        ));
+    }
+    out.push('\n');
+    out.push_str("## By Activity\n\n");
+    out.push_str("| Activity | Turns | Retries | Tokens |\n");
+    out.push_str("|----------|------:|--------:|-------:|\n");
+    for activity in data.activities.iter().take(8) {
+        out.push_str(&format!(
+            "| {} | {} | {} | {} |\n",
+            md_escape(activity.category.label()),
+            activity.turns,
+            activity.retries,
+            activity.bucket.total()
+        ));
+    }
+    out.push('\n');
+    out.push_str("## By Model\n\n");
+    out.push_str("| Model | Calls | Tokens | Cost |\n");
+    out.push_str("|-------|------:|-------:|-----:|\n");
+    for model in data.models.iter().take(8) {
+        out.push_str(&format!(
+            "| {} | {} | {} | {} |\n",
+            md_escape(&model.model),
+            model.bucket.call_count,
+            model.bucket.total(),
+            format_cost(model.bucket.cost_usd)
+        ));
+    }
+    out
+}
+
+/// Escape characters that have semantic meaning inside a markdown
+/// table cell. Only `|` and backticks; other markdown specials are
+/// rare in model/project/activity labels and render fine inline.
+fn md_escape(s: &str) -> String {
+    s.replace('|', "\\|").replace('`', "\\`")
+}
+
+/// Char-aware truncation that keeps multi-byte chars intact and
+/// appends an ellipsis when truncated. Used to stop long
+/// directory-flattened project paths (e.g.
+/// `-Users-stevengonsalvez--agents-in-a-box-worktrees-...`) from
+/// blowing out the width of markdown tables when pasted into PR
+/// descriptions and grafana note panels.
+fn truncate_label(s: &str, max_chars: usize) -> String {
+    let count = s.chars().count();
+    if count <= max_chars {
+        return s.to_string();
+    }
+    let keep = max_chars.saturating_sub(1);
+    let head: String = s.chars().take(keep).collect();
+    format!("{head}…")
 }
 
 pub(crate) fn report_json(data: &UsageData) -> serde_json::Value {
