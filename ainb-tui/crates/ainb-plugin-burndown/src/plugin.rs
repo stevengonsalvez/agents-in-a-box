@@ -56,8 +56,12 @@ pub struct BurndownPlugin {
     /// CLI/event-driven tab switches.
     ui: UsageViewState,
     /// Most recent fully-assembled `UsageData` snapshot decoded from
-    /// `sessions.usage_data`.
-    data: Option<UsageData>,
+    /// `sessions.usage_data`. Stored as `Arc` so the per-Enter sync
+    /// into `ui.data` and the per-render snapshot copy are reference-
+    /// count bumps (`O(1)`) instead of full 30K-call deep clones. The
+    /// filter cache holds its own derived `Arc<UsageData>` keyed on
+    /// `(data_generation, inputs_hash)`.
+    data: Option<std::sync::Arc<UsageData>>,
     /// Accumulator for the in-flight chunked publish (if any). Reset
     /// on `chunk_index == 0`, appended-to on follow-on chunks,
     /// finalised + moved into `self.data` on `is_final = true`. See
@@ -394,7 +398,7 @@ impl BurndownPlugin {
 
         if event.is_final {
             if let Some(assembled) = self.pending.take() {
-                self.data = Some(wire_to_local(assembled));
+                self.data = Some(std::sync::Arc::new(wire_to_local(assembled)));
                 self.schema_mismatch = false;
                 // Real data has landed — the scan is done. Drop any
                 // lingering progress event so the UI flips from
@@ -772,6 +776,8 @@ impl BurndownPlugin {
                 // (the render path copies it into `ui.data` only at
                 // render time), so without this sync the commit
                 // would silently return false — drill-down dead.
+                // Now that `self.data` is `Arc<UsageData>`, the sync
+                // is an `Arc::clone` (refcount bump), not a deep copy.
                 self.ui.data = self.data.clone();
                 let _ = self.ui.commit_focused_row();
             }
@@ -945,7 +951,7 @@ mod handle_key_dispatch_tests {
         }];
         // Plugin-level snapshot ONLY — leave self.ui.data as None to
         // mirror the production state right after `apply_chunk_pure`.
-        p.data = Some(data);
+        p.data = Some(std::sync::Arc::new(data));
         p.ui.data = None;
         p.ui.focused_panel = Some(UsagePanel::ByBranch);
         p.ui.focus_row = 0;

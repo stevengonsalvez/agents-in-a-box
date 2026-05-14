@@ -283,7 +283,13 @@ pub enum UsageFilterTarget {
 pub struct UsageViewState {
     pub provider: UsageProvider,
     pub active_tab: UsageTab,
-    pub data: Option<UsageData>,
+    /// Most-recent parsed usage snapshot. Held as `Arc` so the plugin
+    /// can share the same instance across `ui.data` and the cached
+    /// filter results without paying a 30K-call clone on every Enter
+    /// keypress (drill-down) or render-snapshot copy. Reads deref to
+    /// `&UsageData` transparently; writes wrap in `Arc::new` or clone
+    /// an existing `Arc` (refcount bump, not a deep copy).
+    pub data: Option<std::sync::Arc<UsageData>>,
     pub loading: bool,
     pub scroll_offset: usize,
     pub period: UsagePeriod,
@@ -4301,7 +4307,7 @@ mod cross_filter_tests {
     #[test]
     fn enter_on_by_project_row_sets_project_filter() {
         let mut state = UsageViewState::default();
-        state.data = Some(fixture());
+        state.data = Some(std::sync::Arc::new(fixture()));
         // Fixture uses pre-aggregated projects/sessions with `calls: vec![]`,
         // so re-aggregation via the period filter would zero out the rows.
         // Bypass period filtering — this test is about Enter→chip dispatch.
@@ -4315,7 +4321,7 @@ mod cross_filter_tests {
     #[test]
     fn enter_on_top_session_row_sets_session_filter() {
         let mut state = UsageViewState::default();
-        state.data = Some(fixture());
+        state.data = Some(std::sync::Arc::new(fixture()));
         state.period = UsagePeriod::All;
         state.focused_panel = Some(UsagePanel::TopSessions);
         state.focus_row = 0;
@@ -4351,7 +4357,7 @@ mod cross_filter_tests {
         data.sessions = vec![session_alpha, session_beta];
 
         let mut state = UsageViewState::default();
-        state.data = Some(data);
+        state.data = Some(std::sync::Arc::new(data));
         state.period = UsagePeriod::All;
         state.focused_panel = Some(UsagePanel::TopSessions);
         state.focus_row = 0;
@@ -4370,7 +4376,7 @@ mod cross_filter_tests {
     #[test]
     fn enter_on_by_model_row_sets_model_filter() {
         let mut state = UsageViewState::default();
-        state.data = Some(fixture());
+        state.data = Some(std::sync::Arc::new(fixture()));
         state.period = UsagePeriod::All;
         state.focused_panel = Some(UsagePanel::ByModel);
         state.focus_row = 0;
@@ -4381,7 +4387,7 @@ mod cross_filter_tests {
     #[test]
     fn enter_on_by_activity_row_sets_activity_filter() {
         let mut state = UsageViewState::default();
-        state.data = Some(fixture());
+        state.data = Some(std::sync::Arc::new(fixture()));
         state.period = UsagePeriod::All;
         state.focused_panel = Some(UsagePanel::ByActivity);
         state.focus_row = 1; // Conversation
@@ -4393,7 +4399,7 @@ mod cross_filter_tests {
     fn enter_on_daily_activity_row_is_noop() {
         // Brief: read-only panels — Enter is a no-op.
         let mut state = UsageViewState::default();
-        state.data = Some(fixture());
+        state.data = Some(std::sync::Arc::new(fixture()));
         state.focused_panel = Some(UsagePanel::DailyActivity);
         state.focus_row = 0;
         assert!(!state.commit_focused_row());
@@ -4441,7 +4447,7 @@ mod cross_filter_tests {
             },
         ];
         let mut state = UsageViewState::default();
-        state.data = Some(data);
+        state.data = Some(std::sync::Arc::new(data));
         state.focused_panel = Some(UsagePanel::ByBranch);
         state.focus_row = 0;
         // Bypass period filtering — this test is about Enter→chip dispatch.
@@ -4460,7 +4466,7 @@ mod cross_filter_tests {
             bucket: bucket(3),
         }];
         let mut state = UsageViewState::default();
-        state.data = Some(data);
+        state.data = Some(std::sync::Arc::new(data));
         state.focused_panel = Some(UsagePanel::ByBranch);
         state.focus_row = 0;
         state.period = UsagePeriod::All;
@@ -4507,7 +4513,7 @@ mod cross_filter_tests {
     #[test]
     fn enter_on_leaderboard_maps_to_project_filter() {
         let mut state = UsageViewState::default();
-        state.data = Some(fixture());
+        state.data = Some(std::sync::Arc::new(fixture()));
         state.period = UsagePeriod::All;
         state.focused_panel = Some(UsagePanel::Leaderboard);
         state.focus_row = 0; // alpha (rendered from filtered_data.projects)
@@ -4588,7 +4594,7 @@ mod cross_filter_tests {
         use std::collections::HashMap;
 
         let mut state = UsageViewState::default();
-        state.data = Some(fixture());
+        state.data = Some(std::sync::Arc::new(fixture()));
         state.period = UsagePeriod::All;
         state.focused_panel = Some(UsagePanel::ByProject);
         state.focus_row = 1; // beta
