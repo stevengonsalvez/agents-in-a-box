@@ -299,7 +299,7 @@ fn fresh_pivot_badge_appears_on_recompute_and_clears_on_next_render() {
         PIVOT_BADGE,
         Duration::from_secs(3),
     );
-    let Some(_post_pivot) = post_pivot else {
+    if post_pivot.is_none() {
         let last = capture_pane(&session);
         kill_session(&session);
         panic!(
@@ -307,7 +307,7 @@ fn fresh_pivot_badge_appears_on_recompute_and_clears_on_next_render() {
              ThirtyDays), `{PIVOT_BADGE}` badge never appeared within 3s; \
              last capture:\n---\n{last}\n---"
         );
-    };
+    }
 
     // Press Tab — focus shift, no period/filter/provider change.
     // cached_filtered hits the cache, seq doesn't bump, badge clears.
