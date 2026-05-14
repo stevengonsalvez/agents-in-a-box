@@ -285,12 +285,28 @@ impl Plugin for BurndownPlugin {
         let format = extract_format(argv);
         let stripped = strip_format_flag(argv);
 
-        // Make sure we have a snapshot. If the host hasn't pushed one
-        // yet, ask synchronously; bail with an actionable error if the
-        // session-reader plugin isn't installed.
-        if self.data.is_none() {
-            self.refresh_snapshot(host).await;
-        }
+        // The caller (host CLI shim) is responsible for waiting until
+        // `self.data` has been populated via the `sessions.usage_data`
+        // subscription. We deliberately do NOT call `refresh_snapshot`
+        // here: it holds the plugin mutex while awaiting a host RPC
+        // (`host/snapshot/get`). The SDK's `read_loop` services
+        // `plugin/handle_event` *inline* (to preserve chunk order — see
+        // `ainb-plugin-sdk-rust::server::read_loop`), so if a chunk
+        // event arrives while we're holding the mutex on a host RPC,
+        // `dispatch_incoming.await` for the chunk blocks the read loop
+        // on `plugin.lock().await` — and the host's response to our
+        // `host/snapshot/get` can never be read from stdin. Deadlock.
+        //
+        // Skipping the explicit pull is safe here because burndown is
+        // eager-spawned (manifest `[lifecycle].spawn = "eager"`) and
+        // its `on_init` subscribes to `sessions.usage_data` *before*
+        // session-reader publishes — so the chunk push path always
+        // populates `self.data` once the publisher finishes its scan.
+        // First-call races (data not yet populated) surface as the
+        // "install session-reader" hint, and the host CLI shim retries
+        // until it succeeds or the deadline elapses (see
+        // `crates/ainb-core/src/cli/registry.rs::dispatch_inner`).
+        let _ = host;
         let Some(data) = self.data.clone() else {
             return Ok(CliOutput {
                 stdout: Vec::new(),
