@@ -1074,7 +1074,7 @@ pub(crate) fn render_markdown_report(title: &str, data: &UsageData) -> String {
     for project in data.projects.iter().take(8) {
         out.push_str(&format!(
             "| {} | {} | {} | {} |\n",
-            md_escape(&project.name),
+            md_escape(&truncate_label(&project.name, 60)),
             project.bucket.call_count,
             project.bucket.total(),
             format_cost(project.bucket.cost_usd)
@@ -1114,6 +1114,22 @@ pub(crate) fn render_markdown_report(title: &str, data: &UsageData) -> String {
 /// rare in model/project/activity labels and render fine inline.
 fn md_escape(s: &str) -> String {
     s.replace('|', "\\|").replace('`', "\\`")
+}
+
+/// Char-aware truncation that keeps multi-byte chars intact and
+/// appends an ellipsis when truncated. Used to stop long
+/// directory-flattened project paths (e.g.
+/// `-Users-stevengonsalvez--agents-in-a-box-worktrees-...`) from
+/// blowing out the width of markdown tables when pasted into PR
+/// descriptions and grafana note panels.
+fn truncate_label(s: &str, max_chars: usize) -> String {
+    let count = s.chars().count();
+    if count <= max_chars {
+        return s.to_string();
+    }
+    let keep = max_chars.saturating_sub(1);
+    let head: String = s.chars().take(keep).collect();
+    format!("{head}…")
 }
 
 pub(crate) fn report_json(data: &UsageData) -> serde_json::Value {
