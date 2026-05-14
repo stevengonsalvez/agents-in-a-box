@@ -8,8 +8,8 @@ description: |
   chart, status report, slide deck, prototype, editor, etc.), fills it
   with real content, augments with inline diagrams via sister skills
   (/fireworks-tech-graph for architecture / flow / sequence diagrams,
-  /graphify for knowledge graphs, /nano-banana-pro for illustrations
-  when needed), applies a Claude-brand polish layer, and publishes to
+  /graphify for knowledge graphs), applies a Claude-brand polish layer,
+  and publishes to
   here.now at a topic-slug URL so the link is shareable immediately.
   Local-only output is available with --local. Use when Stevie says
   "/explain-to-me", "explain-to-me X", "make me an explainer for X",
@@ -124,7 +124,10 @@ skill rather than hand-drawing SVG:
 |---|---|---|
 | Architecture · data flow · sequence · agent/memory · concept map | `/fireworks-tech-graph` | SVG + PNG (drop SVG inline) |
 | Knowledge graph from code/docs/papers — clustered, communities | `/graphify` | HTML / JSON / SVG |
-| Custom illustration, hero image, conceptual artwork | `/nano-banana-pro` | PNG / JPG |
+
+For small bespoke SVG (decorative icons, hero glyphs, simple
+illustrations) — author the inline SVG directly. You're capable of it
+and it keeps the file self-contained.
 
 Workflow:
 
