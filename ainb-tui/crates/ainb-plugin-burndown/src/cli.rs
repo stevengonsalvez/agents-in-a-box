@@ -48,6 +48,19 @@ pub enum UsageCommands {
         #[command(subcommand)]
         command: UsageCacheCommands,
     },
+    /// Per-model rollup or per-model × per-activity-category matrix
+    Models(UsageModelsArgs),
+}
+
+#[derive(Args, Clone, Default)]
+pub struct UsageModelsArgs {
+    #[command(flatten)]
+    pub report: UsageReportArgs,
+    /// Emit a per-model × per-activity-category matrix instead of the
+    /// flat per-model rollup. Rows = model, columns = activity
+    /// category, cell = (calls, tokens, cost).
+    #[arg(long)]
+    pub by_task: bool,
 }
 
 #[derive(Subcommand)]
@@ -262,6 +275,7 @@ pub fn execute_for_plugin(
         UsageCommands::Compare(args) => print_compare_with_data(data, &args, format),
         UsageCommands::Yield(args) => print_yield_with_data(data, &args, format),
         UsageCommands::ModelAlias(args) => model_alias_command_plugin(args),
+        UsageCommands::Models(args) => print_models_with_data(data, &args, format),
         // Plan / Currency / Cache stay in the host-side `cli/usage.rs`
         // shim — they're config admin, not analytics.
         UsageCommands::Plan { .. }
@@ -698,6 +712,255 @@ pub async fn execute(command: UsageCommands, format: OutputFormat) -> Result<()>
         UsageCommands::Compare(args) => print_compare(&args, format),
         UsageCommands::Yield(args) => print_yield(&args, format),
         UsageCommands::Cache { command } => cache_command(command, format),
+        UsageCommands::Models(args) => {
+            let data = load_usage(&args.report)?;
+            print_models_with_data(&data, &args, format)
+        }
+    }
+}
+
+/// `usage models` — flat per-model rollup by default, per-model × per-
+/// activity-category matrix when `--by-task` is set. Surfaces in
+/// text / json / csv / markdown.
+fn print_models_with_data(
+    data: &UsageData,
+    args: &UsageModelsArgs,
+    format: OutputFormat,
+) -> Result<()> {
+    let filters = build_filters_from_args(&args.report);
+    let view = if filters.is_empty() {
+        data.clone()
+    } else {
+        crate::data::usage::filter_usage_data(data, &filters)
+    };
+    if !args.by_task {
+        return print_models_flat(&view, format, args.report.top);
+    }
+    let matrix = build_models_by_task_matrix(&view);
+    match format {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&matrix_to_json(&matrix))?);
+        }
+        OutputFormat::Csv => {
+            print!("{}", matrix_to_csv(&matrix));
+        }
+        OutputFormat::Markdown => {
+            print!("{}", matrix_to_markdown(&matrix));
+        }
+        OutputFormat::Text => {
+            print!("{}", matrix_to_text(&matrix));
+        }
+    }
+    Ok(())
+}
+
+fn print_models_flat(data: &UsageData, format: OutputFormat, top: usize) -> Result<()> {
+    match format {
+        OutputFormat::Json => {
+            let rows: Vec<_> = top_iter(&data.models, top)
+                .map(|m| {
+                    json!({
+                        "model": m.model,
+                        "calls": m.bucket.call_count,
+                        "tokens": m.bucket.total(),
+                        "cost_usd": m.bucket.cost_usd,
+                    })
+                })
+                .collect();
+            println!("{}", serde_json::to_string_pretty(&json!({"models": rows}))?);
+        }
+        OutputFormat::Csv => {
+            println!("model,calls,tokens,cost_usd");
+            for m in top_iter(&data.models, top) {
+                println!(
+                    "{},{},{},{:.4}",
+                    csv_quote(&m.model),
+                    m.bucket.call_count,
+                    m.bucket.total(),
+                    m.bucket.cost_usd.unwrap_or(0.0)
+                );
+            }
+        }
+        OutputFormat::Markdown => {
+            println!("# Models\n");
+            println!("| Model | Calls | Tokens | Cost |");
+            println!("|-------|------:|-------:|-----:|");
+            for m in top_iter(&data.models, top) {
+                println!(
+                    "| {} | {} | {} | {} |",
+                    md_escape(&m.model),
+                    m.bucket.call_count,
+                    m.bucket.total(),
+                    format_cost(m.bucket.cost_usd)
+                );
+            }
+        }
+        OutputFormat::Text => {
+            print_top_models(data, top);
+        }
+    }
+    Ok(())
+}
+
+/// One row of the per-model × per-activity matrix.
+#[derive(Debug)]
+struct ModelTaskRow {
+    model: String,
+    /// Same column order as [`ActivityCategory`]'s display list.
+    cells: Vec<ModelTaskCell>,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct ModelTaskCell {
+    calls: usize,
+    tokens: u64,
+    cost_usd: f64,
+}
+
+/// Build the matrix from raw `data.activities` + per-call provider
+/// model attribution. Caveat: `UsageData` aggregates activities ×
+/// models in a flat list; this helper buckets the global model list
+/// against each ActivityCategory and emits zeros where data is sparse.
+fn build_models_by_task_matrix(data: &UsageData) -> (Vec<String>, Vec<ModelTaskRow>) {
+    use crate::data::usage::{ActivityCategory, classify_activity};
+    use std::collections::BTreeMap;
+
+    // Column order is deterministic across runs.
+    let categories: Vec<ActivityCategory> = vec![
+        ActivityCategory::Coding,
+        ActivityCategory::Debugging,
+        ActivityCategory::Feature,
+        ActivityCategory::Refactoring,
+        ActivityCategory::Testing,
+        ActivityCategory::Exploration,
+        ActivityCategory::Planning,
+        ActivityCategory::Delegation,
+        ActivityCategory::Git,
+        ActivityCategory::BuildDeploy,
+        ActivityCategory::Brainstorming,
+        ActivityCategory::Conversation,
+        ActivityCategory::General,
+    ];
+    let column_labels: Vec<String> = categories.iter().map(|c| c.label().to_string()).collect();
+
+    // model → (category-index → cell)
+    let mut by_model: BTreeMap<String, Vec<ModelTaskCell>> = BTreeMap::new();
+    for call in &data.calls {
+        let category = classify_activity(call);
+        if let Some(col) = categories.iter().position(|c| *c == category) {
+            let row = by_model
+                .entry(call.model.clone())
+                .or_insert_with(|| vec![ModelTaskCell::default(); categories.len()]);
+            row[col].calls += 1;
+            row[col].tokens += call.input_tokens
+                + call.cache_creation_tokens
+                + call.cache_read_tokens
+                + call.output_tokens
+                + call.reasoning_tokens;
+            if let Some(cost) = call.cost_usd {
+                row[col].cost_usd += cost;
+            }
+        }
+    }
+
+    let rows: Vec<ModelTaskRow> = by_model
+        .into_iter()
+        .map(|(model, cells)| ModelTaskRow { model, cells })
+        .collect();
+
+    (column_labels, rows)
+}
+
+fn matrix_to_json(matrix: &(Vec<String>, Vec<ModelTaskRow>)) -> serde_json::Value {
+    let (cols, rows) = matrix;
+    let rows_json: Vec<_> = rows
+        .iter()
+        .map(|row| {
+            let cells: Vec<_> = row
+                .cells
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    json!({
+                        "activity": cols[i],
+                        "calls": c.calls,
+                        "tokens": c.tokens,
+                        "cost_usd": c.cost_usd,
+                    })
+                })
+                .collect();
+            json!({ "model": row.model, "by_task": cells })
+        })
+        .collect();
+    json!({
+        "schema": "ainb.usage.models_by_task.v1",
+        "columns": cols,
+        "rows": rows_json,
+    })
+}
+
+fn matrix_to_csv(matrix: &(Vec<String>, Vec<ModelTaskRow>)) -> String {
+    let (cols, rows) = matrix;
+    let mut out = String::from("model");
+    for col in cols {
+        out.push_str(&format!(",{}_calls,{}_tokens,{}_cost_usd", col, col, col));
+    }
+    out.push('\n');
+    for row in rows {
+        out.push_str(&csv_quote(&row.model));
+        for c in &row.cells {
+            out.push_str(&format!(",{},{},{:.4}", c.calls, c.tokens, c.cost_usd));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+fn matrix_to_markdown(matrix: &(Vec<String>, Vec<ModelTaskRow>)) -> String {
+    let (cols, rows) = matrix;
+    let mut out = String::from("# Models by Task\n\n");
+    out.push_str("| Model");
+    for col in cols {
+        out.push_str(&format!(" | {} calls | {} tokens | {} cost", col, col, col));
+    }
+    out.push_str(" |\n|------");
+    for _ in cols {
+        out.push_str("|------:|-------:|------:");
+    }
+    out.push_str("|\n");
+    for row in rows {
+        out.push_str(&format!("| {}", md_escape(&row.model)));
+        for c in &row.cells {
+            out.push_str(&format!(" | {} | {} | ${:.2}", c.calls, c.tokens, c.cost_usd));
+        }
+        out.push_str(" |\n");
+    }
+    out
+}
+
+fn matrix_to_text(matrix: &(Vec<String>, Vec<ModelTaskRow>)) -> String {
+    let (cols, rows) = matrix;
+    let mut out = String::from("Models by Task\n");
+    for row in rows {
+        out.push_str(&format!("{}\n", row.model));
+        for (i, c) in row.cells.iter().enumerate() {
+            if c.calls == 0 && c.tokens == 0 {
+                continue;
+            }
+            out.push_str(&format!(
+                "  {}: {} calls, {} tokens, ${:.2}\n",
+                cols[i], c.calls, c.tokens, c.cost_usd
+            ));
+        }
+    }
+    out
+}
+
+fn csv_quote(s: &str) -> String {
+    if s.contains(',') || s.contains('"') || s.contains('\n') {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
     }
 }
 

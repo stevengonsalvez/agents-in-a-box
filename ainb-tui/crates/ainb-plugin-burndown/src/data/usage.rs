@@ -2341,7 +2341,7 @@ fn analyze_turns(calls: &[ProviderCall]) -> HashMap<u64, TurnAnalysis> {
     analysis
 }
 
-fn classify_activity(call: &ProviderCall) -> ActivityCategory {
+pub(crate) fn classify_activity(call: &ProviderCall) -> ActivityCategory {
     let base = if has_tool(&call.tools, &["EnterPlanMode", "TodoWrite", "Plan"]) {
         ActivityCategory::Planning
     } else if has_tool(&call.tools, &["Agent", "Task"]) {
