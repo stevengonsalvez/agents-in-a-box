@@ -500,13 +500,24 @@ async fn dispatch_usage_via_plugin(argv: Vec<String>) -> ! {
     std::process::exit(exit_code);
 }
 
-/// Hard deadline for `ainb usage` to surface output. Generously sized
-/// because the first scan of a large `~/.claude/projects` (100k+ calls,
-/// 50+ msgpack chunks at 2 MB/chunk) takes ~40 s on a cold cache and
-/// must finish *before* burndown's `cli_dispatch` returns useful data.
-/// Subsequent runs hit session-reader's sqlite cache and finish in well
-/// under a second.
-const PLUGIN_DATA_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+/// Default hard deadline for `ainb usage` to surface output. Generously
+/// sized because the first scan of a large `~/.claude/projects` (100k+
+/// calls, 50+ msgpack chunks at 2 MB/chunk) takes ~40 s on a cold cache
+/// and must finish *before* burndown's `cli_dispatch` returns useful
+/// data. Subsequent runs hit session-reader's sqlite cache and finish
+/// in well under a second.
+///
+/// Override via the `AINB_USAGE_TIMEOUT_SECS` env var when running
+/// against very large session archives.
+const PLUGIN_DATA_WAIT_DEFAULT_SECS: u64 = 120;
+
+fn plugin_data_wait() -> std::time::Duration {
+    std::env::var("AINB_USAGE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(std::time::Duration::from_secs)
+        .unwrap_or_else(|| std::time::Duration::from_secs(PLUGIN_DATA_WAIT_DEFAULT_SECS))
+}
 
 /// Pause between retry attempts when burndown still reports
 /// "install session-reader" — long enough that we don't hot-loop
@@ -592,7 +603,8 @@ async fn dispatch_inner(
     // exit 0) breaks out of the retry loop immediately so we don't
     // mask a genuine failure as "still waiting".
     let install_hint_marker = b"install session-reader";
-    let deadline = std::time::Instant::now() + PLUGIN_DATA_WAIT;
+    let wait_budget = plugin_data_wait();
+    let deadline = std::time::Instant::now() + wait_budget;
     let started = std::time::Instant::now();
     let mut last_trace = started;
     let mut attempt: u32 = 0;
@@ -618,7 +630,9 @@ async fn dispatch_inner(
         outcome = handle
             .dispatch_cli(&burndown, "usage", argv.clone())
             .await
-            .map_err(|_| anyhow::anyhow!("burndown plugin task disconnected before replying"))?;
+            .map_err(|e| {
+                anyhow::anyhow!("burndown plugin task disconnected before replying: {e}")
+            })?;
         let should_retry = matches!(
             &outcome,
             CliOutcome::Ok(r)
@@ -641,8 +655,8 @@ async fn dispatch_inner(
             anyhow::bail!(
                 "error: session-reader plugin didn't publish usage data within {}s \
                  — rerun with RUST_LOG=ainb_plugin_runtime=debug,ainb_plugin_session_reader=debug \
-                 to see scan progress",
-                PLUGIN_DATA_WAIT.as_secs()
+                 to see scan progress, or raise the budget via AINB_USAGE_TIMEOUT_SECS=<n>",
+                wait_budget.as_secs()
             );
         }
         if trace {
