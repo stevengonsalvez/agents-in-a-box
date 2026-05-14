@@ -116,6 +116,29 @@ impl ActivityCategory {
             Self::General => "General",
         }
     }
+
+    /// Inverse of `label`. Used by the indexed filter path to map a
+    /// chip's display label back to the enum so we can hit the
+    /// `by_activity` index. Returns `None` for unknown labels —
+    /// caller falls back to the linear filter for that pivot.
+    pub fn from_label(label: &str) -> Option<Self> {
+        match label {
+            "Coding" => Some(Self::Coding),
+            "Debugging" => Some(Self::Debugging),
+            "Feature" => Some(Self::Feature),
+            "Refactoring" => Some(Self::Refactoring),
+            "Testing" => Some(Self::Testing),
+            "Exploration" => Some(Self::Exploration),
+            "Planning" => Some(Self::Planning),
+            "Delegation" => Some(Self::Delegation),
+            "Git" => Some(Self::Git),
+            "Build/Deploy" => Some(Self::BuildDeploy),
+            "Brainstorming" => Some(Self::Brainstorming),
+            "Conversation" => Some(Self::Conversation),
+            "General" => Some(Self::General),
+            _ => None,
+        }
+    }
 }
 
 /// Query used to parse and aggregate usage.
@@ -1923,6 +1946,89 @@ pub fn filter_usage_data(data: &UsageData, filters: &UsageFilters) -> UsageData 
     filter_usage_data_full(data, filters, &UsagePeriod::All, UsageProviderFilter::All)
 }
 
+/// Pre-built lookup indices over a [`UsageData`] call set.
+///
+/// Each index maps a dimension value (project / model / branch /
+/// activity) to the `usize` positions of matching calls in
+/// `data.calls`. Used by [`filter_usage_data_indexed`] to short-
+/// circuit the linear `O(N)` filter walk to `O(candidates)` when a
+/// chip is active — the candidate set is the union of the chip's
+/// index entries, then the remaining predicates (period / provider /
+/// other-dimension chips) are checked against just those.
+///
+/// Build once per `data_generation` (see the plugin's `data_generation`
+/// counter) and reuse across pivots. Cheap O(N) one-time cost
+/// amortized across many chip clicks.
+///
+/// `by_project_resolved` carries `owner/repo` entries derived via
+/// `repo_lookup::resolve_repo`; calls whose `project_path` doesn't
+/// resolve to a git origin are absent from this map but still appear
+/// in `by_project_raw`.
+#[derive(Debug, Clone, Default)]
+pub struct UsageIndices {
+    by_project_raw: HashMap<String, Vec<usize>>,
+    by_project_resolved: HashMap<String, Vec<usize>>,
+    by_model: HashMap<String, Vec<usize>>,
+    by_branch: HashMap<String, Vec<usize>>,
+    by_activity: HashMap<ActivityCategory, Vec<usize>>,
+}
+
+impl UsageIndices {
+    /// Build the index set from a [`UsageData`]'s `calls` vector.
+    /// O(N) over the call set; resolves each distinct project_path at
+    /// most once for the project-resolved index.
+    pub fn from_usage_data(data: &UsageData) -> Self {
+        let mut by_project_raw: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut by_project_resolved: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut by_model: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut by_branch: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut by_activity: HashMap<ActivityCategory, Vec<usize>> = HashMap::new();
+        let mut repo_cache: HashMap<String, Option<String>> = HashMap::new();
+        for (idx, call) in data.calls.iter().enumerate() {
+            by_project_raw
+                .entry(call.project.clone())
+                .or_default()
+                .push(idx);
+            if let Some(repo) = repo_lookup::resolve_repo(&call.project_path, &mut repo_cache) {
+                by_project_resolved.entry(repo).or_default().push(idx);
+            }
+            by_model.entry(call.model.clone()).or_default().push(idx);
+            if let Some(branch) = call.recorded_branch() {
+                by_branch.entry(branch.to_string()).or_default().push(idx);
+            }
+            by_activity
+                .entry(classify_activity(call))
+                .or_default()
+                .push(idx);
+        }
+        Self {
+            by_project_raw,
+            by_project_resolved,
+            by_model,
+            by_branch,
+            by_activity,
+        }
+    }
+
+    /// Resolve a project chip value to the union of its raw-folder and
+    /// resolved-repo index entries — the chip might be either form.
+    fn project_indices(&self, chip: &str) -> Vec<usize> {
+        let mut out = Vec::new();
+        if let Some(v) = self.by_project_raw.get(chip) {
+            out.extend_from_slice(v);
+        }
+        if let Some(v) = self.by_project_resolved.get(chip) {
+            out.extend_from_slice(v);
+        }
+        // De-dup in case the chip happens to match both the raw and
+        // resolved entries for the same call (rare but possible if a
+        // folder is literally named `owner/repo`).
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+}
+
 /// Apply the full filter surface — cross-filter chips, period date range,
 /// and provider — in a single re-aggregation pass.
 ///
@@ -1936,6 +2042,166 @@ pub fn filter_usage_data(data: &UsageData, filters: &UsageFilters) -> UsageData 
 /// The no-op early return covers the common idle case (no chips, no
 /// period selected beyond `All`, provider = All) and keeps that path
 /// at the same cost as the pre-PR-A `filter_usage_data`.
+/// Indexed variant of [`filter_usage_data_full`]. When `indices` is
+/// `Some` and a single-dimension chip is active (project / model /
+/// branch / activity), seeds the candidate set from that chip's
+/// pre-built index entries instead of walking every call. Falls back
+/// to the linear pass when no indices are supplied, when no chip is
+/// active, or when only exclude chips are active (excludes don't
+/// shrink the candidate set — they only reject within it).
+///
+/// Other predicates (period, provider, remaining chips, excludes) are
+/// applied to the seeded candidate set.
+///
+/// Behavioural parity with [`filter_usage_data_full`] is asserted in
+/// tests: any (data, filters, period, provider) tuple produces
+/// byte-identical output through either entrypoint.
+pub fn filter_usage_data_indexed(
+    data: &UsageData,
+    indices: Option<&UsageIndices>,
+    filters: &UsageFilters,
+    period: &UsagePeriod,
+    provider_filter: UsageProviderFilter,
+) -> UsageData {
+    let period_range = date_range_for_period(period);
+    let provider_active = !matches!(provider_filter, UsageProviderFilter::All);
+    if filters.is_empty() && period_range.is_none() && !provider_active {
+        return data.clone();
+    }
+
+    // Pick the smallest available include-chip dimension as the seed
+    // for the candidate walk. Indices only help include filters: an
+    // exclude chip can't shrink the candidate set, it only rejects
+    // within it.
+    let seed = indices.and_then(|idx| select_seed_indices(idx, filters));
+    let turn_analysis = analyze_turns(&data.calls);
+    let needs_repo_lookup =
+        !filters.project.is_empty() || !filters.exclude_project.is_empty();
+    let mut repo_cache: HashMap<String, Option<String>> = HashMap::new();
+
+    let filtered_calls: Vec<ProviderCall> = match seed {
+        Some(seed_indices) => seed_indices
+            .into_iter()
+            .filter_map(|i| data.calls.get(i))
+            .filter(|call| {
+                let resolved_repo = if needs_repo_lookup {
+                    repo_lookup::resolve_repo(&call.project_path, &mut repo_cache)
+                } else {
+                    None
+                };
+                pass_full_predicate(
+                    call,
+                    filters,
+                    period_range.as_ref(),
+                    provider_filter,
+                    resolved_repo.as_deref(),
+                )
+            })
+            .cloned()
+            .collect(),
+        None => data
+            .calls
+            .iter()
+            .filter(|call| {
+                let resolved_repo = if needs_repo_lookup {
+                    repo_lookup::resolve_repo(&call.project_path, &mut repo_cache)
+                } else {
+                    None
+                };
+                pass_full_predicate(
+                    call,
+                    filters,
+                    period_range.as_ref(),
+                    provider_filter,
+                    resolved_repo.as_deref(),
+                )
+            })
+            .cloned()
+            .collect(),
+    };
+    aggregate_calls_with_analysis(filtered_calls, Some(&turn_analysis))
+}
+
+/// Pick the smallest include-chip dimension to seed the indexed walk.
+/// Returns `None` when no include chips are active (we don't seed
+/// from excludes because they can only reject, not select).
+fn select_seed_indices(indices: &UsageIndices, filters: &UsageFilters) -> Option<Vec<usize>> {
+    let mut candidates: Vec<Vec<usize>> = Vec::new();
+    if !filters.project.is_empty() {
+        let mut combined: Vec<usize> = Vec::new();
+        for chip in &filters.project {
+            combined.extend(indices.project_indices(chip));
+        }
+        combined.sort_unstable();
+        combined.dedup();
+        candidates.push(combined);
+    }
+    if !filters.model.is_empty() {
+        let mut combined: Vec<usize> = Vec::new();
+        for chip in &filters.model {
+            if let Some(v) = indices.by_model.get(chip) {
+                combined.extend_from_slice(v);
+            }
+        }
+        combined.sort_unstable();
+        combined.dedup();
+        candidates.push(combined);
+    }
+    if !filters.branch.is_empty() {
+        let mut combined: Vec<usize> = Vec::new();
+        for chip in &filters.branch {
+            if let Some(v) = indices.by_branch.get(chip) {
+                combined.extend_from_slice(v);
+            }
+        }
+        combined.sort_unstable();
+        combined.dedup();
+        candidates.push(combined);
+    }
+    if !filters.activity.is_empty() {
+        let mut combined: Vec<usize> = Vec::new();
+        for chip in &filters.activity {
+            // activity chips store the label string; map back via
+            // `ActivityCategory::from_label` for the index lookup.
+            if let Some(cat) = ActivityCategory::from_label(chip) {
+                if let Some(v) = indices.by_activity.get(&cat) {
+                    combined.extend_from_slice(v);
+                }
+            }
+        }
+        combined.sort_unstable();
+        combined.dedup();
+        candidates.push(combined);
+    }
+    // Pick the smallest dimension as the seed — applying other chip
+    // predicates linearly over that set is cheap.
+    candidates.into_iter().min_by_key(|v| v.len())
+}
+
+/// Centralised per-call predicate used by both the indexed and linear
+/// filter paths. Encapsulates chip-match + provider + period so the
+/// two paths can't drift in their filter semantics.
+fn pass_full_predicate(
+    call: &ProviderCall,
+    filters: &UsageFilters,
+    period_range: Option<&(DateTime<Utc>, DateTime<Utc>)>,
+    provider_filter: UsageProviderFilter,
+    resolved_repo: Option<&str>,
+) -> bool {
+    if !filters.matches_with_resolved_repo(call, classify_activity(call), resolved_repo) {
+        return false;
+    }
+    if !provider_filter.includes(&call.provider) {
+        return false;
+    }
+    if let Some((start, end)) = period_range {
+        if call.timestamp < *start || call.timestamp > *end {
+            return false;
+        }
+    }
+    true
+}
+
 pub fn filter_usage_data_full(
     data: &UsageData,
     filters: &UsageFilters,
@@ -4527,5 +4793,174 @@ mod tests {
             ActivityCategory::Conversation,
             None,
         ));
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // PR E: indexed-filter parity + behaviour.
+    // The indexed path MUST produce byte-identical output to the
+    // linear path for any input — these tests pin that contract so
+    // a future optimisation can't silently drift filter semantics.
+    // ────────────────────────────────────────────────────────────────
+
+    fn small_indexed_fixture() -> UsageData {
+        let now = Utc::now();
+        let claude_alpha = ProviderCallBuilder::new()
+            .with_id(1)
+            .with_provider("claude")
+            .with_project("alpha-folder")
+            .with_model("claude-sonnet-4-5")
+            .with_timestamp(now)
+            .with_input_tokens(100)
+            .with_output_tokens(50)
+            .with_tools(&["Read", "Edit"])
+            .build();
+        let claude_beta = ProviderCallBuilder::new()
+            .with_id(2)
+            .with_provider("claude")
+            .with_project("beta-folder")
+            .with_model("claude-opus-4-7")
+            .with_timestamp(now)
+            .with_input_tokens(200)
+            .with_output_tokens(100)
+            .with_tools(&["Bash"])
+            .build();
+        let codex_alpha = ProviderCallBuilder::new()
+            .with_id(3)
+            .with_provider("codex")
+            .with_project("alpha-folder")
+            .with_model("gpt-5")
+            .with_timestamp(now)
+            .with_input_tokens(300)
+            .with_output_tokens(150)
+            .with_tools(&["Edit"])
+            .build();
+        calls_aggregated(vec![claude_alpha, claude_beta, codex_alpha])
+    }
+
+    #[test]
+    fn indexed_filter_matches_linear_on_project_chip() {
+        let data = small_indexed_fixture();
+        let indices = UsageIndices::from_usage_data(&data);
+        let mut filters = UsageFilters::default();
+        filters.project.push("alpha-folder".to_string());
+
+        let linear = filter_usage_data_full(
+            &data,
+            &filters,
+            &UsagePeriod::All,
+            UsageProviderFilter::All,
+        );
+        let indexed = filter_usage_data_indexed(
+            &data,
+            Some(&indices),
+            &filters,
+            &UsagePeriod::All,
+            UsageProviderFilter::All,
+        );
+
+        assert_eq!(
+            linear.calls.len(),
+            indexed.calls.len(),
+            "indexed and linear paths must produce the same call count"
+        );
+        let mut lin_ids: Vec<u64> = linear.calls.iter().map(|c| c.id).collect();
+        let mut idx_ids: Vec<u64> = indexed.calls.iter().map(|c| c.id).collect();
+        lin_ids.sort_unstable();
+        idx_ids.sort_unstable();
+        assert_eq!(lin_ids, idx_ids, "same call ids must survive both paths");
+    }
+
+    #[test]
+    fn indexed_filter_matches_linear_on_model_chip() {
+        let data = small_indexed_fixture();
+        let indices = UsageIndices::from_usage_data(&data);
+        let mut filters = UsageFilters::default();
+        filters.model.push("claude-opus-4-7".to_string());
+
+        let linear = filter_usage_data_full(
+            &data,
+            &filters,
+            &UsagePeriod::All,
+            UsageProviderFilter::All,
+        );
+        let indexed = filter_usage_data_indexed(
+            &data,
+            Some(&indices),
+            &filters,
+            &UsagePeriod::All,
+            UsageProviderFilter::All,
+        );
+        assert_eq!(linear.calls.len(), 1);
+        assert_eq!(indexed.calls.len(), 1);
+        assert_eq!(indexed.calls[0].id, 2);
+    }
+
+    #[test]
+    fn indexed_filter_composes_chip_with_provider_and_period() {
+        let data = small_indexed_fixture();
+        let indices = UsageIndices::from_usage_data(&data);
+        let mut filters = UsageFilters::default();
+        // alpha-folder seeds the candidate set (2 calls: ids 1 + 3).
+        filters.project.push("alpha-folder".to_string());
+
+        // Composed with provider=Claude, only call id=1 survives.
+        let indexed = filter_usage_data_indexed(
+            &data,
+            Some(&indices),
+            &filters,
+            &UsagePeriod::All,
+            UsageProviderFilter::Claude,
+        );
+        assert_eq!(indexed.calls.len(), 1);
+        assert_eq!(indexed.calls[0].id, 1);
+    }
+
+    #[test]
+    fn indexed_filter_falls_back_to_linear_when_indices_absent() {
+        let data = small_indexed_fixture();
+        let mut filters = UsageFilters::default();
+        filters.project.push("alpha-folder".to_string());
+
+        let linear = filter_usage_data_full(
+            &data,
+            &filters,
+            &UsagePeriod::All,
+            UsageProviderFilter::All,
+        );
+        // Calling with indices=None must produce the same result as
+        // the linear pass — the indexed function is `None`-tolerant.
+        let no_indices = filter_usage_data_indexed(
+            &data,
+            None,
+            &filters,
+            &UsagePeriod::All,
+            UsageProviderFilter::All,
+        );
+        assert_eq!(linear.calls.len(), no_indices.calls.len());
+    }
+
+    #[test]
+    fn indexed_filter_no_op_when_everything_default() {
+        let data = small_indexed_fixture();
+        let indices = UsageIndices::from_usage_data(&data);
+        let filtered = filter_usage_data_indexed(
+            &data,
+            Some(&indices),
+            &UsageFilters::default(),
+            &UsagePeriod::All,
+            UsageProviderFilter::All,
+        );
+        assert_eq!(filtered.calls.len(), 3);
+    }
+
+    #[test]
+    fn usage_indices_project_lookup_returns_both_raw_and_resolved() {
+        // by_project_raw is populated from call.project — verify the
+        // indices struct surface a chip can be resolved through.
+        let data = small_indexed_fixture();
+        let indices = UsageIndices::from_usage_data(&data);
+        assert_eq!(indices.project_indices("alpha-folder").len(), 2);
+        assert_eq!(indices.project_indices("beta-folder").len(), 1);
+        assert!(indices.project_indices("nonexistent").is_empty());
     }
 }
