@@ -133,6 +133,12 @@ pub struct UsageReportArgs {
     /// are excluded by any non-empty `--branch` filter.
     #[arg(long)]
     pub branch: Vec<String>,
+    /// Cap the long By-Project / By-Activity / By-Model tables at N rows
+    /// (default 8 mirrors the historical hard-coded slice). Applies to
+    /// report, today, month, and export subcommands across every format.
+    /// 0 means "no cap" — emit every row.
+    #[arg(long, default_value_t = 8)]
+    pub top: usize,
 }
 
 #[derive(Args, Clone, Default)]
@@ -287,10 +293,10 @@ fn print_report_with_data(
             print!("{}", combined_csv(&view));
         }
         OutputFormat::Markdown => {
-            print!("{}", render_markdown_report(title, &view));
+            print!("{}", render_markdown_report(title, &view, args.top));
         }
         OutputFormat::Text => {
-            print_text_report(title, &view);
+            print_text_report(title, &view, args.top);
         }
     }
     Ok(())
@@ -298,7 +304,7 @@ fn print_report_with_data(
 
 fn print_status_with_data(
     data: &UsageData,
-    _args: &UsageReportArgs,
+    args: &UsageReportArgs,
     format: OutputFormat,
 ) -> Result<()> {
     let projection = AppConfig::load()
@@ -319,10 +325,10 @@ fn print_status_with_data(
         ),
         OutputFormat::Csv => print!("{}", combined_csv(data)),
         OutputFormat::Markdown => {
-            print!("{}", render_markdown_report("Usage Status", data));
+            print!("{}", render_markdown_report("Usage Status", data, args.top));
         }
         OutputFormat::Text => {
-            print_text_report("Usage Status", data);
+            print_text_report("Usage Status", data, args.top);
         }
     }
     Ok(())
@@ -333,23 +339,191 @@ fn export_usage_with_data(
     args: &UsageExportArgs,
     format: OutputFormat,
 ) -> Result<()> {
-    // Plugin-mode export = dump CSV/JSON to stdout. The host-side path
-    // wrote to disk via fs IO (--out arg); plugin-mode pipes the same
-    // payload to the captured stdout buffer instead so the host can
-    // forward it / write to disk itself if needed.
-    let _ = args;
-    match format {
-        OutputFormat::Json => {
+    // Plugin-mode export. When the user passes `--output <path>` we
+    // mirror the host's fs-write behaviour (path with extension =
+    // single-file dump, path without extension = per-table CSV folder
+    // matching the codeburn-style layout). With no `--output` we keep
+    // the legacy stdout stream so shell pipelines (`| jq`, `| csvkit`)
+    // continue to work.
+    match (&args.output, format) {
+        (Some(path), OutputFormat::Csv) => write_csv_dump(path, data),
+        (Some(path), OutputFormat::Json) => {
+            let text = serde_json::to_string_pretty(&json!({
+                "schema": "ainb.usage.v1",
+                "generated_at": Local::now().to_rfc3339(),
+                "currency": "USD",
+                "report": report_json(data),
+            }))?;
+            write_or_print(Some(path.as_path()), &text)
+        }
+        (Some(path), OutputFormat::Markdown) => {
+            let text = render_markdown_report("Usage Export", data, args.report.top);
+            write_or_print(Some(path.as_path()), &text)
+        }
+        (Some(path), OutputFormat::Text) => {
+            let text = serde_json::to_string_pretty(&report_json(data))?;
+            write_or_print(Some(path.as_path()), &text)
+        }
+        (None, OutputFormat::Json) => {
             println!("{}", serde_json::to_string_pretty(&report_json(data))?);
+            Ok(())
         }
-        OutputFormat::Markdown => {
-            print!("{}", render_markdown_report("Usage Export", data));
+        (None, OutputFormat::Markdown) => {
+            print!("{}", render_markdown_report("Usage Export", data, args.report.top));
+            Ok(())
         }
-        OutputFormat::Csv | OutputFormat::Text => {
+        (None, OutputFormat::Csv | OutputFormat::Text) => {
             print!("{}", combined_csv(data));
+            Ok(())
         }
     }
+}
+
+/// Pick between single-file vs per-table folder dump.
+///
+/// Decision matrix (matches user expectations regardless of path
+/// shape — `mktemp -d` produces paths with what looks like a
+/// file extension, so we can't rely on `extension().is_some()`):
+///
+/// * Path exists & is a directory → per-table folder dump.
+/// * Path exists & is a regular file → overwrite as single inline CSV.
+/// * Path doesn't exist & ends with `/` (or `\\`) → folder dump.
+/// * Path doesn't exist & has a `.csv`/`.tsv`/`.txt` extension → single file.
+/// * Path doesn't exist & otherwise → folder dump (codeburn convention:
+///   `ainb usage export -o ./report` writes a directory).
+fn write_csv_dump(path: &Path, data: &UsageData) -> Result<()> {
+    if path.exists() && path.is_dir() {
+        return write_csv_folder(path, data);
+    }
+    if !path.exists() {
+        let raw = path.to_string_lossy();
+        let ends_with_sep = raw.ends_with('/') || raw.ends_with(std::path::MAIN_SEPARATOR);
+        // File-extension allow-list: anything outside this set is
+        // assumed to be a directory name (matches the codeburn
+        // convention `ainb usage export -o ./report`). Inverted vs an
+        // older block-list approach so a stray `mktemp -d` path
+        // (`tmp.pApLlhcpA5`) doesn't get treated as a file by accident.
+        let looks_like_file = matches!(
+            path.extension().and_then(|s| s.to_str()),
+            Some("csv") | Some("tsv") | Some("txt") | Some("tab")
+        );
+        if ends_with_sep || !looks_like_file {
+            return write_csv_folder(path, data);
+        }
+    }
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    fs::write(path, combined_csv(data))?;
     Ok(())
+}
+
+/// Write a codeburn-style per-table CSV export folder at `dir`.
+///
+/// Layout:
+///
+/// ```text
+/// dir/
+///   .ainb-export       (marker so we can safely overwrite next run)
+///   README.txt         (plain-text index of which file holds what)
+///   summary.csv
+///   daily.csv
+///   activity.csv
+///   models.csv
+///   projects.csv
+///   sessions.csv
+///   tools.csv          (only when data.tools is non-empty)
+///   shell-commands.csv (only when data.shell_commands is non-empty)
+///   mcp-servers.csv    (only when data.mcp_servers is non-empty)
+/// ```
+///
+/// Refuses to write into a non-empty directory that lacks the
+/// `.ainb-export` marker so a stray `ainb usage export -o ~/Documents`
+/// doesn't clobber unrelated files. Empty dirs and previously-exported
+/// dirs (marker present) are fine.
+pub(crate) fn write_csv_folder(dir: &Path, data: &UsageData) -> Result<()> {
+    let marker = dir.join(".ainb-export");
+    if dir.exists() {
+        let already_export_dir = marker.exists();
+        let empty = fs::read_dir(dir)
+            .map(|mut d| d.next().is_none())
+            .unwrap_or(true);
+        if !empty && !already_export_dir {
+            bail!(
+                "refusing to overwrite non-empty directory {} (no .ainb-export marker — \
+                 pass an empty path or one previously written by `ainb usage export`)",
+                dir.display()
+            );
+        }
+        if already_export_dir {
+            // Scrub the previous run's outputs so a shrunk dataset
+            // (e.g. tools/shell_commands/mcp_servers now empty) doesn't
+            // leave stale CSVs behind to mislead the next reader. Only
+            // touch our own filenames — anything else stays put.
+            scrub_export_dir(dir);
+        }
+    } else {
+        fs::create_dir_all(dir)?;
+    }
+    fs::write(&marker, "ainb usage export\n")?;
+    fs::write(dir.join("summary.csv"), summary_csv(data))?;
+    fs::write(dir.join("daily.csv"), daily_csv(data))?;
+    fs::write(dir.join("activity.csv"), activities_csv(&data.activities))?;
+    fs::write(dir.join("models.csv"), models_csv(data))?;
+    fs::write(dir.join("projects.csv"), projects_csv(&data.projects))?;
+    fs::write(dir.join("sessions.csv"), sessions_csv(&data.sessions))?;
+    let mut readme = String::from("ainb usage export\n=================\n\n");
+    readme.push_str("summary.csv       Overview metrics (calls, tokens, cost).\n");
+    readme.push_str("daily.csv         Per-day usage breakdown.\n");
+    readme.push_str("activity.csv      Per-activity-category turn / retry / token counts.\n");
+    readme.push_str("models.csv        Per-model call / token / cost rollups.\n");
+    readme.push_str("projects.csv      Per-project bucket.\n");
+    readme.push_str("sessions.csv      Per-session bucket.\n");
+    if !data.tools.is_empty() {
+        fs::write(dir.join("tools.csv"), named_csv("tool", &data.tools))?;
+        readme.push_str("tools.csv         Per-tool invocation count.\n");
+    }
+    if !data.shell_commands.is_empty() {
+        fs::write(
+            dir.join("shell-commands.csv"),
+            named_csv("command", &data.shell_commands),
+        )?;
+        readme.push_str("shell-commands.csv Per-shell-command invocation count.\n");
+    }
+    if !data.mcp_servers.is_empty() {
+        fs::write(
+            dir.join("mcp-servers.csv"),
+            named_csv("server", &data.mcp_servers),
+        )?;
+        readme.push_str("mcp-servers.csv   Per-MCP-server invocation count.\n");
+    }
+    fs::write(dir.join("README.txt"), readme)?;
+    Ok(())
+}
+
+/// Files our exporter is allowed to write inside an `.ainb-export`
+/// folder. Anything matching here gets removed before a fresh export
+/// so a shrunk dataset doesn't leave stale rows behind; anything else
+/// the user has dropped into the folder is left untouched.
+const EXPORT_OWNED_FILES: &[&str] = &[
+    "summary.csv",
+    "daily.csv",
+    "activity.csv",
+    "models.csv",
+    "projects.csv",
+    "sessions.csv",
+    "tools.csv",
+    "shell-commands.csv",
+    "mcp-servers.csv",
+    "README.txt",
+];
+
+fn scrub_export_dir(dir: &Path) {
+    for name in EXPORT_OWNED_FILES {
+        let _ = fs::remove_file(dir.join(name));
+    }
 }
 
 /// Translate the CLI's filter args into a [`UsageFilters`] struct so the
@@ -588,10 +762,10 @@ fn print_report(args: &UsageReportArgs, format: OutputFormat, title: &str) -> Re
             print!("{}", combined_csv(&data));
         }
         OutputFormat::Markdown => {
-            print!("{}", render_markdown_report(title, &data));
+            print!("{}", render_markdown_report(title, &data, args.top));
         }
         OutputFormat::Text => {
-            print_text_report(title, &data);
+            print_text_report(title, &data, args.top);
         }
     }
     Ok(())
@@ -613,7 +787,7 @@ fn print_status(args: &UsageReportArgs, format: OutputFormat) -> Result<()> {
         ),
         OutputFormat::Csv => print!("{}", combined_csv(&data)),
         OutputFormat::Markdown => {
-            print!("{}", render_markdown_report("Usage Status", &data));
+            print!("{}", render_markdown_report("Usage Status", &data, args.top));
             if let Some(projection) = &projection {
                 println!(
                     "\n## Plan\n\n- **Spent:** ${:.2} / ${:.2} ({:.0}%)\n- **Status:** {:?}\n",
@@ -625,7 +799,7 @@ fn print_status(args: &UsageReportArgs, format: OutputFormat) -> Result<()> {
             }
         }
         OutputFormat::Text => {
-            print_text_report("Usage Status", &data);
+            print_text_report("Usage Status", &data, args.top);
             if let Some(projection) = projection {
                 println!(
                     "Plan: ${:.2} / ${:.2} ({:.0}%) {:?}",
@@ -727,7 +901,7 @@ fn export_usage(args: &UsageExportArgs, format: OutputFormat) -> Result<()> {
             write_or_print(args.output.as_deref(), &text)
         }
         OutputFormat::Markdown => {
-            let text = render_markdown_report("Usage Export", &data);
+            let text = render_markdown_report("Usage Export", &data, args.report.top);
             write_or_print(args.output.as_deref(), &text)
         }
         OutputFormat::Text => {
@@ -736,31 +910,7 @@ fn export_usage(args: &UsageExportArgs, format: OutputFormat) -> Result<()> {
         }
         OutputFormat::Csv => {
             if let Some(path) = &args.output {
-                if path.extension().is_some() {
-                    fs::write(path, combined_csv(&data))?;
-                } else {
-                    fs::create_dir_all(path)?;
-                    fs::write(path.join("README.md"), "AINB usage export\n")?;
-                    fs::write(path.join("summary.csv"), summary_csv(&data))?;
-                    fs::write(path.join("daily.csv"), daily_csv(&data))?;
-                    fs::write(path.join("projects.csv"), projects_csv(&data.projects))?;
-                    fs::write(path.join("sessions.csv"), sessions_csv(&data.sessions))?;
-                    fs::write(
-                        path.join("activities.csv"),
-                        activities_csv(&data.activities),
-                    )?;
-                    fs::write(path.join("models.csv"), models_csv(&data))?;
-                    fs::write(path.join("tools.csv"), named_csv("tool", &data.tools))?;
-                    fs::write(
-                        path.join("shell_commands.csv"),
-                        named_csv("command", &data.shell_commands),
-                    )?;
-                    fs::write(
-                        path.join("mcp_servers.csv"),
-                        named_csv("server", &data.mcp_servers),
-                    )?;
-                }
-                Ok(())
+                write_csv_dump(path, &data)
             } else {
                 print!("{}", combined_csv(&data));
                 Ok(())
@@ -994,7 +1144,7 @@ fn parse_quarter_arg(value: &str) -> Result<UsagePeriod> {
     Ok(UsagePeriod::SpecificQuarter(year, q))
 }
 
-fn print_text_report(title: &str, data: &UsageData) {
+fn print_text_report(title: &str, data: &UsageData, top: usize) {
     println!("{title}");
     println!(
         "Overview: {} calls, {} sessions, {} projects, {} tokens, {}",
@@ -1005,14 +1155,21 @@ fn print_text_report(title: &str, data: &UsageData) {
         format_cost(data.grand_total.cost_usd)
     );
     println!();
-    print_top_projects(data);
-    print_top_activities(data);
-    print_top_models(data);
+    print_top_projects(data, top);
+    print_top_activities(data, top);
+    print_top_models(data, top);
 }
 
-fn print_top_projects(data: &UsageData) {
+/// `top == 0` is treated as "no cap" — emit every row. Anything > 0
+/// is the slice length passed to `.take(...)`.
+fn top_iter<T>(slice: &[T], top: usize) -> impl Iterator<Item = &T> {
+    let n = if top == 0 { slice.len() } else { top };
+    slice.iter().take(n)
+}
+
+fn print_top_projects(data: &UsageData, top: usize) {
     println!("By Project");
-    for project in data.projects.iter().take(8) {
+    for project in top_iter(&data.projects, top) {
         println!(
             "- {}: {} calls, {} tokens, {}",
             project.name,
@@ -1023,9 +1180,9 @@ fn print_top_projects(data: &UsageData) {
     }
 }
 
-fn print_top_activities(data: &UsageData) {
+fn print_top_activities(data: &UsageData, top: usize) {
     println!("By Activity");
-    for activity in data.activities.iter().take(8) {
+    for activity in top_iter(&data.activities, top) {
         println!(
             "- {}: {} turns, {} retries, {} tokens",
             activity.category.label(),
@@ -1036,9 +1193,9 @@ fn print_top_activities(data: &UsageData) {
     }
 }
 
-fn print_top_models(data: &UsageData) {
+fn print_top_models(data: &UsageData, top: usize) {
     println!("By Model");
-    for model in data.models.iter().take(8) {
+    for model in top_iter(&data.models, top) {
         println!(
             "- {}: {} calls, {} tokens, {}",
             model.model,
@@ -1056,7 +1213,7 @@ fn print_top_models(data: &UsageData) {
 /// pastes cleanly into READMEs, PR descriptions, and grafana note
 /// panels. Pairs with `--format markdown` (also accepts `md` as an
 /// argv alias for shell-friendliness).
-pub(crate) fn render_markdown_report(title: &str, data: &UsageData) -> String {
+pub(crate) fn render_markdown_report(title: &str, data: &UsageData, top: usize) -> String {
     let mut out = String::new();
     out.push_str(&format!("# {title}\n\n"));
     out.push_str("## Overview\n\n");
@@ -1071,7 +1228,7 @@ pub(crate) fn render_markdown_report(title: &str, data: &UsageData) -> String {
     out.push_str("## By Project\n\n");
     out.push_str("| Project | Calls | Tokens | Cost |\n");
     out.push_str("|---------|------:|-------:|-----:|\n");
-    for project in data.projects.iter().take(8) {
+    for project in top_iter(&data.projects, top) {
         out.push_str(&format!(
             "| {} | {} | {} | {} |\n",
             md_escape(&truncate_label(&project.name, 60)),
@@ -1084,7 +1241,7 @@ pub(crate) fn render_markdown_report(title: &str, data: &UsageData) -> String {
     out.push_str("## By Activity\n\n");
     out.push_str("| Activity | Turns | Retries | Tokens |\n");
     out.push_str("|----------|------:|--------:|-------:|\n");
-    for activity in data.activities.iter().take(8) {
+    for activity in top_iter(&data.activities, top) {
         out.push_str(&format!(
             "| {} | {} | {} | {} |\n",
             md_escape(activity.category.label()),
@@ -1097,7 +1254,7 @@ pub(crate) fn render_markdown_report(title: &str, data: &UsageData) -> String {
     out.push_str("## By Model\n\n");
     out.push_str("| Model | Calls | Tokens | Cost |\n");
     out.push_str("|-------|------:|-------:|-----:|\n");
-    for model in data.models.iter().take(8) {
+    for model in top_iter(&data.models, top) {
         out.push_str(&format!(
             "| {} | {} | {} | {} |\n",
             md_escape(&model.model),
@@ -1507,5 +1664,68 @@ mod tests {
         assert_eq!(scoped.from.as_deref(), Some("2026-04-12"));
         assert_eq!(scoped.to.as_deref(), Some("2026-05-11"));
         assert!(matches!(scoped.provider, ProviderArg::Claude));
+    }
+
+    #[test]
+    fn top_zero_emits_every_row() {
+        // `--top 0` is the documented "no cap" sentinel — top_iter
+        // must return the whole slice, not an empty one.
+        let v: Vec<u32> = (0..7).collect();
+        let n = top_iter(&v, 0).count();
+        assert_eq!(n, 7, "top=0 should be no-cap, got {n}");
+
+        // And `--top 3` still caps.
+        assert_eq!(top_iter(&v, 3).count(), 3);
+    }
+
+    #[test]
+    fn write_csv_dump_picks_folder_for_extensionless_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Path doesn't exist yet, no .csv/.tsv/.txt/.tab → folder.
+        let target = tmp.path().join("report");
+        let data = UsageData::default();
+        write_csv_dump(&target, &data).unwrap();
+        assert!(target.is_dir(), "expected folder write");
+        assert!(target.join(".ainb-export").exists());
+        assert!(target.join("summary.csv").exists());
+    }
+
+    #[test]
+    fn write_csv_dump_picks_single_file_for_csv_extension() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("dump.csv");
+        let data = UsageData::default();
+        write_csv_dump(&target, &data).unwrap();
+        assert!(target.is_file(), "expected single-file write");
+        let contents = std::fs::read_to_string(&target).unwrap();
+        // combined_csv includes the summary section header.
+        assert!(contents.contains("section,metric,value"));
+    }
+
+    #[test]
+    fn rewriting_export_folder_scrubs_stale_csvs() {
+        // Simulate a previous export that included tools.csv (because
+        // data.tools was non-empty), then re-export with empty tools.
+        // tools.csv must not survive the second write.
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("report");
+
+        let mut data = UsageData::default();
+        data.tools.push(crate::data::usage::NamedUsage {
+            name: "Read".into(),
+            calls: 3,
+        });
+        write_csv_dump(&target, &data).unwrap();
+        assert!(target.join("tools.csv").exists());
+
+        // Second pass: tools is now empty. tools.csv should be gone.
+        let empty = UsageData::default();
+        write_csv_dump(&target, &empty).unwrap();
+        assert!(
+            !target.join("tools.csv").exists(),
+            "stale tools.csv should have been scrubbed"
+        );
+        // But the live core files remain rewritten.
+        assert!(target.join("summary.csv").exists());
     }
 }

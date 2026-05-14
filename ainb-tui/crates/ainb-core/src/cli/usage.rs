@@ -137,6 +137,12 @@ pub struct UsageReportArgs {
     /// are excluded by any non-empty `--branch` filter.
     #[arg(long)]
     pub branch: Vec<String>,
+    /// Cap the long By-Project / By-Activity / By-Model tables at N rows
+    /// (default 8 mirrors the historical hard-coded slice). Applies to
+    /// report, today, month, and export subcommands across every format.
+    /// 0 means "no cap" — emit every row.
+    #[arg(long, default_value_t = 8)]
+    pub top: usize,
 }
 
 #[derive(Args, Clone, Default)]
