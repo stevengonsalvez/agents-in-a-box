@@ -450,12 +450,10 @@ impl CliCommand for UsageCommand {
             if is_host_admin_subcommand(&cmd) {
                 return crate::cli::usage::execute(cmd, format).await;
             }
-            dispatch_usage_via_plugin(&argv);
+            dispatch_usage_via_plugin(argv).await;
             // dispatch_usage_via_plugin always exits the process on
-            // both happy and failure paths (process::exit) — return
-            // unreachable Ok to satisfy the type. Matches the
-            // exit-2 contract spelled out in
-            // plans/plugin-phase-6-data-plane.md.
+            // both happy and failure paths (process::exit). Returning
+            // unreachable Ok satisfies the trait's `Result<()>`.
             #[allow(unreachable_code)]
             Ok(())
         })
@@ -469,22 +467,227 @@ fn is_host_admin_subcommand(cmd: &crate::cli::usage::UsageCommands) -> bool {
     matches!(cmd, Plan { .. } | Currency(_) | Cache { .. })
 }
 
-/// `ainb usage` shim.
+/// `ainb usage` shim (Phase 7c).
 ///
-/// Phase 6 wired this through the wasmi-based burndown plugin with a
-/// cross-plugin broker hack (`inject_session_reader_snapshot`) to side-step
-/// the wasmi single-threaded deadlock. Phase 7b deletes the wasmi host
-/// entirely; the subprocess-Rust replacement plugins (burndown +
-/// session-reader) are tracked under Phase 7c. Until those land, the
-/// burndown shim returns the operator-actionable error every existing
-/// caller already handled (exit 2, "install via 'ainb plugin install').
-fn dispatch_usage_via_plugin(_argv: &[String]) -> ! {
-    eprintln!(
-        "error: usage analytics requires the burndown plugin \
-         (install via 'ainb plugin install burndown') — \
-         subprocess port pending under Phase 7c"
-    );
-    std::process::exit(2);
+/// Boots the subprocess plugin runtime, waits for session-reader to publish
+/// the initial `sessions.usage_data` snapshot, dispatches the parsed argv
+/// to the burndown plugin's `cli_dispatch` over JSON-RPC, prints captured
+/// stdout/stderr, then exits with the plugin's reported exit code.
+///
+/// Always exits the process — never returns. Failure modes:
+///
+/// * No `dist/plugins/` discovered → exit 2 with the "install burndown"
+///   hint that pre-7c callers already handle.
+/// * Burndown plugin not registered → same exit-2 hint.
+/// * Session-reader never publishes within
+///   [`PLUGIN_DATA_WAIT`] → exit 1 with a "session-reader didn't publish"
+///   message so the user can rerun with `RUST_LOG=debug` to see the scan
+///   progress.
+/// * Plugin returned a non-zero exit code → exit that code, after writing
+///   its stdout/stderr verbatim.
+///
+/// Cleanup: the owning [`Runtime`] is dropped via `spawn_blocking` so the
+/// tokio "Cannot drop a runtime in a context where blocking is not allowed"
+/// panic from [`ainb plugin list`](crate::cli::plugin) doesn't bite us here.
+async fn dispatch_usage_via_plugin(argv: Vec<String>) -> ! {
+    let exit_code = match run_usage_via_plugin(argv).await {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("{e}");
+            2
+        }
+    };
+    std::process::exit(exit_code);
+}
+
+/// Default hard deadline for `ainb usage` to surface output. Generously
+/// sized because the first scan of a large `~/.claude/projects` (100k+
+/// calls, 50+ msgpack chunks at 2 MB/chunk) takes ~40 s on a cold cache
+/// and must finish *before* burndown's `cli_dispatch` returns useful
+/// data. Subsequent runs hit session-reader's sqlite cache and finish
+/// in well under a second.
+///
+/// Override via the `AINB_USAGE_TIMEOUT_SECS` env var when running
+/// against very large session archives.
+const PLUGIN_DATA_WAIT_DEFAULT_SECS: u64 = 120;
+
+fn plugin_data_wait() -> std::time::Duration {
+    std::env::var("AINB_USAGE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(std::time::Duration::from_secs)
+        .unwrap_or_else(|| std::time::Duration::from_secs(PLUGIN_DATA_WAIT_DEFAULT_SECS))
+}
+
+/// Pause between retry attempts when burndown still reports
+/// "install session-reader" — long enough that we don't hot-loop
+/// against the plugin's mutex while it is processing handle_event
+/// chunks, short enough that we don't add visible tail latency on the
+/// cached path (where the very first dispatch usually succeeds).
+const PLUGIN_DATA_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
+async fn run_usage_via_plugin(argv: Vec<String>) -> anyhow::Result<i32> {
+    // Step 1 — bring up the runtime + discover staged plugins. Mirrors
+    // `crate::cli::plugin::watch`, including the spawn_blocking drop
+    // dance to avoid the tokio "Cannot drop a runtime in a context
+    // where blocking is not allowed" panic on shutdown.
+    let (runtime, handle, _outcome) = crate::plugins::init_plugin_runtime()
+        .map_err(|e| anyhow::anyhow!("plugin runtime init failed: {e}"))?;
+
+    let result = dispatch_inner(&handle, argv).await;
+
+    // Drop the owning runtime off the async context.
+    tokio::task::spawn_blocking(move || drop(runtime))
+        .await
+        .ok();
+
+    result
+}
+
+/// Inner half of [`run_usage_via_plugin`] — does the real work given a
+/// `RuntimeHandle`, leaving the runtime ownership / cleanup dance to the
+/// caller. Split for testability and for the spawn_blocking shutdown
+/// pattern.
+///
+/// Data-flow contract assumed here:
+///
+/// 1. Both `burndown` and `session-reader` are eager-spawned (see
+///    `dist/plugins/burndown/manifest.toml`). The runtime's `discover`
+///    has already sent each plugin task an `EnsureSpawned`, which
+///    triggers `on_init` on the child process.
+/// 2. burndown's `on_init` subscribes to `sessions.usage_data` *before*
+///    publishing `sessions.refresh_request`, guaranteeing it catches
+///    chunk-0 of session-reader's response. Re-publishing
+///    `refresh_request` from this shim is therefore counter-productive
+///    — each republish queues a *fresh* full rescan on session-reader,
+///    and burndown's plugin task processes its inbox serially: the
+///    `cli_dispatch` we are about to send would sit behind every queued
+///    `handle_event` chunk, never reaching `cli_dispatch` before the
+///    deadline.
+/// 3. session-reader chunks the snapshot into ≥1 `UsageDataEvent`
+///    publishes; only the chunk with `is_final = true` causes burndown
+///    to populate `self.data`. burndown's plugin task processes its
+///    inbox serially, so once `cli_dispatch` is queued *after* every
+///    in-flight `handle_event`, it is guaranteed to see populated
+///    `self.data` — except on the very first call where the inbox may
+///    not yet have any chunks (snapshot not yet built). That call
+///    returns the "install session-reader" hint; the retry loop below
+///    re-queues `cli_dispatch` behind whatever chunks have accumulated
+///    since.
+async fn dispatch_inner(
+    handle: &ainb_plugin_runtime::RuntimeHandle,
+    argv: Vec<String>,
+) -> anyhow::Result<i32> {
+    use ainb_plugin_runtime::{CliOutcome, PluginId};
+
+    let trace = std::env::var("AINB_USAGE_TRACE").is_ok();
+    let burndown = PluginId::from("burndown");
+    let registered = handle.registered_plugins();
+    if trace {
+        eprintln!(
+            "[usage-cli] registered plugins: {:?}",
+            registered.iter().map(|p| p.id.to_string()).collect::<Vec<_>>()
+        );
+    }
+    if !registered.iter().any(|p| p.id == burndown) {
+        anyhow::bail!(
+            "error: usage analytics requires the burndown plugin \
+             (install via 'ainb plugin install burndown')"
+        );
+    }
+
+    // Retry contract: burndown reports `exit_code = 1` + empty stdout +
+    // a stderr containing this exact byte sequence when `self.data` is
+    // None. Any *other* exit/stdout/stderr shape (including a real
+    // error from clap, a runtime fault, or a successful report with
+    // exit 0) breaks out of the retry loop immediately so we don't
+    // mask a genuine failure as "still waiting".
+    let install_hint_marker = b"install session-reader";
+    let wait_budget = plugin_data_wait();
+    let deadline = std::time::Instant::now() + wait_budget;
+    let started = std::time::Instant::now();
+    let mut last_trace = started;
+    let mut attempt: u32 = 0;
+    let mut outcome;
+    loop {
+        attempt = attempt.wrapping_add(1);
+        if trace && last_trace.elapsed() >= std::time::Duration::from_secs(2) {
+            // Periodic heartbeat: include plugin lifecycle state so a
+            // user running `AINB_USAGE_TRACE=1` can distinguish "scan
+            // in progress" from "plugin crashed". Mirrors
+            // `ainb plugin watch` semantics.
+            for p in &registered {
+                let state = handle.lifecycle_state(&p.id);
+                eprintln!(
+                    "[usage-cli] @{:.1}s attempt {attempt} plugin {} lifecycle={:?}",
+                    started.elapsed().as_secs_f32(),
+                    p.id,
+                    state
+                );
+            }
+            last_trace = std::time::Instant::now();
+        }
+        outcome = handle
+            .dispatch_cli(&burndown, "usage", argv.clone())
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("burndown plugin task disconnected before replying: {e}")
+            })?;
+        let should_retry = matches!(
+            &outcome,
+            CliOutcome::Ok(r)
+                if r.exit_code == 1
+                    && r.stdout.is_empty()
+                    && r.stderr
+                        .windows(install_hint_marker.len())
+                        .any(|w| w == install_hint_marker)
+        );
+        if !should_retry {
+            if trace {
+                eprintln!(
+                    "[usage-cli] dispatch returned in {:.1}s (attempt {attempt})",
+                    started.elapsed().as_secs_f32()
+                );
+            }
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "error: session-reader plugin didn't publish usage data within {}s \
+                 — rerun with RUST_LOG=ainb_plugin_runtime=debug,ainb_plugin_session_reader=debug \
+                 to see scan progress, or raise the budget via AINB_USAGE_TIMEOUT_SECS=<n>",
+                wait_budget.as_secs()
+            );
+        }
+        if trace {
+            eprintln!(
+                "[usage-cli] attempt {attempt} returned 'install session-reader' \
+                 (snapshot not yet finalised); retrying in {}ms",
+                PLUGIN_DATA_POLL.as_millis()
+            );
+        }
+        tokio::time::sleep(PLUGIN_DATA_POLL).await;
+    }
+
+    let exit = match outcome {
+        CliOutcome::Ok(result) => {
+            use std::io::Write;
+            // Write raw bytes — the plugin owns the format (text /
+            // json / csv per `--format`) and we must not re-encode.
+            let _ = std::io::stdout().write_all(&result.stdout);
+            let _ = std::io::stderr().write_all(&result.stderr);
+            result.exit_code
+        }
+        CliOutcome::PluginError { code, message } => {
+            eprintln!("error: burndown plugin error {code}: {message}");
+            1
+        }
+        CliOutcome::RuntimeError(msg) => {
+            eprintln!("error: plugin runtime: {msg}");
+            1
+        }
+    };
+    Ok(exit)
 }
 
 /// Legacy top-level `ainb statusline`. Kept (hidden) so existing
