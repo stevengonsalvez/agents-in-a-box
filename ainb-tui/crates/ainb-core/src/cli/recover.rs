@@ -308,7 +308,7 @@ fn execute_list(format: OutputFormat) -> Result<()> {
                 .context("Failed to serialize orphan list")?;
             println!("{json}");
         }
-        OutputFormat::Text | OutputFormat::Csv => {
+        OutputFormat::Text | OutputFormat::Csv | OutputFormat::Markdown => {
             if orphans.is_empty() {
                 println!("No orphaned sessions found. Everything looks clean.");
                 return Ok(());

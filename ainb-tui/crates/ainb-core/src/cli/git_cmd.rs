@@ -118,7 +118,7 @@ fn cmd_worktrees(format: OutputFormat) -> Result<()> {
                 .context("Failed to serialize worktree entries")?;
             println!("{json}");
         }
-        OutputFormat::Text | OutputFormat::Csv => {
+        OutputFormat::Text | OutputFormat::Csv | OutputFormat::Markdown => {
             if entries.is_empty() {
                 println!("No managed worktrees found.");
                 return Ok(());
@@ -178,7 +178,7 @@ fn cmd_cleanup(force: bool, dry_run: bool, format: OutputFormat) -> Result<()> {
     if orphans.is_empty() {
         match format {
             OutputFormat::Json => println!("[]"),
-            OutputFormat::Text | OutputFormat::Csv => {
+            OutputFormat::Text | OutputFormat::Csv | OutputFormat::Markdown => {
                 println!("No orphaned worktrees to clean up.")
             }
         }
@@ -192,7 +192,7 @@ fn cmd_cleanup(force: bool, dry_run: bool, format: OutputFormat) -> Result<()> {
                     .context("Failed to serialize orphan entries")?;
                 println!("{json}");
             }
-            OutputFormat::Text | OutputFormat::Csv => {
+            OutputFormat::Text | OutputFormat::Csv | OutputFormat::Markdown => {
                 println!(
                     "Dry run - {} orphaned worktree(s) would be removed:",
                     orphans.len()
@@ -260,7 +260,7 @@ fn cmd_status(session: &str, format: OutputFormat) -> Result<()> {
                 .context("Failed to serialize git status report")?;
             println!("{json}");
         }
-        OutputFormat::Text | OutputFormat::Csv => {
+        OutputFormat::Text | OutputFormat::Csv | OutputFormat::Markdown => {
             let short_id = short_session_id(&report.session_id);
             println!("Session: {} ({})", report.workspace_name, short_id);
             println!("Branch:  {}", report.branch);

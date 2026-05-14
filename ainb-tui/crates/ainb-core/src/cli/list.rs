@@ -83,7 +83,7 @@ pub async fn execute(args: ListArgs, format: OutputFormat) -> Result<()> {
 
     match format {
         OutputFormat::Json => output_json(&sessions)?,
-        OutputFormat::Text | OutputFormat::Csv => output_text(&sessions),
+        OutputFormat::Text | OutputFormat::Csv | OutputFormat::Markdown => output_text(&sessions),
     }
 
     Ok(())

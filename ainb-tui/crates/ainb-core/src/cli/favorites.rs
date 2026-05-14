@@ -101,7 +101,7 @@ fn cmd_list(format: OutputFormat) -> Result<()> {
                 .context("Failed to serialize favorites as JSON")?;
             println!("{json}");
         }
-        OutputFormat::Text | OutputFormat::Csv => {
+        OutputFormat::Text | OutputFormat::Csv | OutputFormat::Markdown => {
             if sorted.is_empty() {
                 println!(
                     "No favorites yet. Add one with 'ainb favorites add <source> --alias <name>'."

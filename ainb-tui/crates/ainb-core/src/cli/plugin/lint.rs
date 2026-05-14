@@ -441,7 +441,7 @@ fn emit_report(report: &LintReport, format: OutputFormat) -> Result<()> {
         OutputFormat::Json => {
             println!("{}", serde_json::to_string_pretty(report)?);
         }
-        OutputFormat::Text | OutputFormat::Csv => {
+        OutputFormat::Text | OutputFormat::Csv | OutputFormat::Markdown => {
             let label = report
                 .plugin_name
                 .as_deref()

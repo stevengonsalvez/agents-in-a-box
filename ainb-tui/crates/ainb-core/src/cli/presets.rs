@@ -98,7 +98,7 @@ fn cmd_list(format: OutputFormat) -> Result<()> {
                 .context("Failed to serialize presets as JSON")?;
             println!("{json}");
         }
-        OutputFormat::Text | OutputFormat::Csv => {
+        OutputFormat::Text | OutputFormat::Csv | OutputFormat::Markdown => {
             println!("Available presets:");
             println!("{}", "\u{2501}".repeat(60));
             for entry in &entries {
@@ -171,7 +171,7 @@ fn cmd_show(name: &str, format: OutputFormat) -> Result<()> {
             });
             println!("{}", serde_json::to_string_pretty(&wrapper)?);
         }
-        OutputFormat::Text | OutputFormat::Csv => {
+        OutputFormat::Text | OutputFormat::Csv | OutputFormat::Markdown => {
             println!("{}", format_preset_text(&preset, builtin));
         }
     }
