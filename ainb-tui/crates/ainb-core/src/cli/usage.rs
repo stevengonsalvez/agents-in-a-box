@@ -52,6 +52,19 @@ pub enum UsageCommands {
         #[command(subcommand)]
         command: UsageCacheCommands,
     },
+    /// Per-model rollup or per-model × per-activity-category matrix
+    Models(UsageModelsArgs),
+}
+
+#[derive(Args, Clone, Default)]
+pub struct UsageModelsArgs {
+    #[command(flatten)]
+    pub report: UsageReportArgs,
+    /// Emit a per-model × per-activity-category matrix instead of the
+    /// flat per-model rollup. Rows = model, columns = activity
+    /// category, cell = (calls, tokens, cost).
+    #[arg(long)]
+    pub by_task: bool,
 }
 
 #[derive(Subcommand)]
@@ -217,6 +230,9 @@ pub enum ProviderArg {
     All,
     Claude,
     Codex,
+    Cursor,
+    Copilot,
+    Gemini,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -264,7 +280,8 @@ pub async fn execute(command: UsageCommands, format: OutputFormat) -> Result<()>
         | UsageCommands::Optimize(_)
         | UsageCommands::Compare(_)
         | UsageCommands::Yield(_)
-        | UsageCommands::ModelAlias(_) => {
+        | UsageCommands::ModelAlias(_)
+        | UsageCommands::Models(_) => {
             anyhow::bail!(
                 "internal: subcommand dispatched through host fallback — \
                  burndown plugin should have handled this"

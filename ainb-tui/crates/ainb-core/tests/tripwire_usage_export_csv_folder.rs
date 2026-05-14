@@ -12,6 +12,15 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
+
+/// Serialize the four `#[test]` cases in this binary. Each subprocess
+/// spawn races against burndown/session-reader's eager startup, and
+/// four parallel ainb invocations can blow past the registry's 120s
+/// deadline when the plugin pool gets queued. The mutex caps inflight
+/// at 1 per test binary; cargo still runs separate binaries in
+/// parallel.
+static SERIAL: Mutex<()> = Mutex::new(());
 
 fn ainb_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_ainb"))
@@ -86,6 +95,7 @@ fn run_export_csv(
 
 #[test]
 fn usage_export_csv_writes_per_table_folder() {
+    let _guard = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     let Some(plugin_root) = plugins_staged() else {
         eprintln!("SKIP: dist/plugins/{{burndown,session-reader}} not staged");
         return;
@@ -153,6 +163,7 @@ fn usage_export_csv_writes_per_table_folder() {
 
 #[test]
 fn usage_export_csv_refuses_to_clobber_unrelated_dir() {
+    let _guard = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     let Some(plugin_root) = plugins_staged() else {
         eprintln!("SKIP: dist/plugins/{{burndown,session-reader}} not staged");
         return;
@@ -184,6 +195,7 @@ fn usage_export_csv_refuses_to_clobber_unrelated_dir() {
 
 #[test]
 fn usage_export_csv_inline_stream_unchanged_without_output() {
+    let _guard = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     let Some(plugin_root) = plugins_staged() else {
         eprintln!("SKIP: dist/plugins/{{burndown,session-reader}} not staged");
         return;
@@ -208,6 +220,7 @@ fn usage_export_csv_inline_stream_unchanged_without_output() {
 
 #[test]
 fn usage_report_top_caps_by_x_sections() {
+    let _guard = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     let Some(plugin_root) = plugins_staged() else {
         eprintln!("SKIP: dist/plugins/{{burndown,session-reader}} not staged");
         return;

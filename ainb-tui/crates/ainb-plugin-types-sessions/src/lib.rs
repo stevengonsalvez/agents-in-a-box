@@ -36,7 +36,13 @@ use serde::{Deserialize, Serialize};
 /// of msgpack, blowing past the host framer's 16 MiB body cap. Older
 /// peers reading the new wire see defaults (`chunk_index = 0`,
 /// `is_final = true`) — which is exactly the single-chunk path.
-pub const WIRE_VERSION: u32 = 2;
+///
+/// v3: added `Provider::Cursor` variant. Producer→consumer messages
+/// from a v3 publisher carrying `"cursor"`-tagged calls fail to
+/// deserialise on v2 consumers (the externally-tagged enum rejects
+/// unknown variants), so receivers MUST check
+/// `event.version == WIRE_VERSION` before trusting the payload.
+pub const WIRE_VERSION: u32 = 3;
 
 /// Per-file scan progress payload published on the
 /// `sessions.scan_progress` topic.
@@ -121,6 +127,8 @@ pub enum Provider {
     Gemini,
     /// GitHub Copilot Chat sessions.
     Copilot,
+    /// Cursor IDE chat sessions.
+    Cursor,
 }
 
 impl Provider {
@@ -132,6 +140,7 @@ impl Provider {
             Self::Codex => "codex",
             Self::Gemini => "gemini",
             Self::Copilot => "copilot",
+            Self::Cursor => "cursor",
         }
     }
 }
@@ -534,6 +543,35 @@ mod tests {
         let back: UsageDataEvent = rmp_serde::from_slice(&bytes).unwrap();
         assert_eq!(back.version, WIRE_VERSION + 1);
         assert!(back.partial);
+    }
+
+    #[test]
+    fn older_wire_version_decodes_so_consumers_can_reject_it() {
+        // An older publisher (v2 of the wire) may still be in flight
+        // when burndown upgrades to v3. The envelope's type-level
+        // decoder must succeed (otherwise the consumer never gets the
+        // chance to compare `event.version` and gracefully fall back
+        // to the schema-mismatch UI). This pins that contract so a
+        // future WIRE_VERSION bump can't silently break it.
+        assert!(
+            WIRE_VERSION >= 2,
+            "test assumes a previous wire generation exists"
+        );
+        let v2_env = UsageDataEvent {
+            version: WIRE_VERSION - 1,
+            published_ns: 0,
+            partial: false,
+            chunk_index: 0,
+            is_final: true,
+            data: UsageData::default(),
+        };
+        let bytes = rmp_serde::to_vec_named(&v2_env).unwrap();
+        let back: UsageDataEvent =
+            rmp_serde::from_slice(&bytes).expect("older wire version must decode cleanly");
+        assert_eq!(back.version, WIRE_VERSION - 1);
+        // Consumer-side gate: this is exactly what burndown's
+        // handle_usage_data_event uses to latch `schema_mismatch`.
+        assert_ne!(back.version, WIRE_VERSION);
     }
 
     #[test]

@@ -28,6 +28,14 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
+
+/// Serialize the four `#[test]` cases — parallel ainb subprocess
+/// spawns race against burndown/session-reader's eager startup and
+/// have hit the registry's 120s deadline in CI under load. The mutex
+/// caps inflight at 1 per test binary; cargo still runs separate
+/// binaries in parallel.
+static SERIAL: Mutex<()> = Mutex::new(());
 
 fn ainb_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_ainb"))
@@ -113,6 +121,7 @@ fn run_usage_report(plugin_root: &Path, home: &Path, format: &str, pre_position:
 
 #[test]
 fn usage_report_format_text_both_positions() {
+    let _guard = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     let Some(plugin_root) = plugins_staged() else {
         eprintln!("SKIP: dist/plugins/{{burndown,session-reader}} not staged");
         return;
@@ -147,6 +156,7 @@ fn usage_report_format_text_both_positions() {
 
 #[test]
 fn usage_report_format_json_both_positions() {
+    let _guard = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     let Some(plugin_root) = plugins_staged() else {
         eprintln!("SKIP: dist/plugins/{{burndown,session-reader}} not staged");
         return;
@@ -174,6 +184,7 @@ fn usage_report_format_json_both_positions() {
 
 #[test]
 fn usage_report_format_csv_both_positions() {
+    let _guard = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     let Some(plugin_root) = plugins_staged() else {
         eprintln!("SKIP: dist/plugins/{{burndown,session-reader}} not staged");
         return;
@@ -193,6 +204,7 @@ fn usage_report_format_csv_both_positions() {
 
 #[test]
 fn usage_report_format_markdown_both_positions() {
+    let _guard = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     let Some(plugin_root) = plugins_staged() else {
         eprintln!("SKIP: dist/plugins/{{burndown,session-reader}} not staged");
         return;

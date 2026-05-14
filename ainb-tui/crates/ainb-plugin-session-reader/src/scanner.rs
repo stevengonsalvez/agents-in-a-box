@@ -21,7 +21,7 @@
 //!   for the reference implementation.
 
 use std::collections::{BTreeMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration as StdDuration, Instant};
 
 use ainb_plugin_types_sessions::{
@@ -120,7 +120,7 @@ impl ProgressReporter {
     }
 }
 
-/// Source roots for the four providers. `None` skips that provider
+/// Source roots for the five providers. `None` skips that provider
 /// entirely; `Some(path)` is walked even if the directory doesn't exist
 /// (parsers degrade to empty in that case).
 #[derive(Debug, Clone, Default)]
@@ -133,6 +133,10 @@ pub struct ProviderRoots {
     pub gemini_sessions: Option<PathBuf>,
     /// `~/.config/github-copilot/sessions/`.
     pub copilot_sessions: Option<PathBuf>,
+    /// Cursor IDE chat sessions. macOS:
+    /// `~/Library/Application Support/Cursor/User/workspaceStorage`;
+    /// linux: `~/.config/Cursor/User/workspaceStorage`.
+    pub cursor_sessions: Option<PathBuf>,
 }
 
 impl ProviderRoots {
@@ -148,9 +152,22 @@ impl ProviderRoots {
                 codex_sessions: Some(home.join(".codex/sessions")),
                 gemini_sessions: Some(home.join(".gemini/sessions")),
                 copilot_sessions: Some(home.join(".config/github-copilot/sessions")),
+                cursor_sessions: Some(cursor_default_root(&home)),
             },
             None => Self::default(),
         }
+    }
+}
+
+/// Pick the right Cursor workspace-storage root for the host OS.
+/// macOS uses `~/Library/Application Support/Cursor/...`; other Unixes
+/// follow XDG and put it under `~/.config/Cursor/...`. Windows isn't
+/// targeted by the v1 release matrix.
+fn cursor_default_root(home: &Path) -> PathBuf {
+    if cfg!(target_os = "macos") {
+        home.join("Library/Application Support/Cursor/User/workspaceStorage")
+    } else {
+        home.join(".config/Cursor/User/workspaceStorage")
     }
 }
 
@@ -177,6 +194,9 @@ pub fn scan(roots: &ProviderRoots) -> UsageData {
         }
         if let Some(root) = &roots.copilot_sessions {
             all_calls.extend(crate::parsers::copilot::parse_dir(root));
+        }
+        if let Some(root) = &roots.cursor_sessions {
+            all_calls.extend(crate::parsers::cursor::parse_dir(root));
         }
         aggregate(all_calls)
     }
@@ -222,6 +242,9 @@ pub fn scan_with_cache_and_progress(
     }
     if let Some(root) = &roots.copilot_sessions {
         all_calls.extend(crate::parsers::copilot::parse_dir(root));
+    }
+    if let Some(root) = &roots.cursor_sessions {
+        all_calls.extend(crate::parsers::cursor::parse_dir(root));
     }
     aggregate(all_calls)
 }

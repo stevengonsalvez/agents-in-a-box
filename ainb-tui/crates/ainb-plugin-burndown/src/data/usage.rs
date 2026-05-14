@@ -66,6 +66,9 @@ pub enum UsageProviderFilter {
     All,
     Claude,
     Codex,
+    Cursor,
+    Copilot,
+    Gemini,
 }
 
 impl UsageProviderFilter {
@@ -74,6 +77,9 @@ impl UsageProviderFilter {
             Self::All => true,
             Self::Claude => provider == "claude",
             Self::Codex => provider == "codex",
+            Self::Cursor => provider == "cursor",
+            Self::Copilot => provider == "copilot",
+            Self::Gemini => provider == "gemini",
         }
     }
 }
@@ -2335,7 +2341,7 @@ fn analyze_turns(calls: &[ProviderCall]) -> HashMap<u64, TurnAnalysis> {
     analysis
 }
 
-fn classify_activity(call: &ProviderCall) -> ActivityCategory {
+pub(crate) fn classify_activity(call: &ProviderCall) -> ActivityCategory {
     let base = if has_tool(&call.tools, &["EnterPlanMode", "TodoWrite", "Plan"]) {
         ActivityCategory::Planning
     } else if has_tool(&call.tools, &["Agent", "Task"]) {

@@ -416,7 +416,10 @@ impl UsageViewState {
         self.provider_filter = match self.provider_filter {
             UsageProviderFilter::All => UsageProviderFilter::Claude,
             UsageProviderFilter::Claude => UsageProviderFilter::Codex,
-            UsageProviderFilter::Codex => UsageProviderFilter::All,
+            UsageProviderFilter::Codex => UsageProviderFilter::Cursor,
+            UsageProviderFilter::Cursor => UsageProviderFilter::Copilot,
+            UsageProviderFilter::Copilot => UsageProviderFilter::Gemini,
+            UsageProviderFilter::Gemini => UsageProviderFilter::All,
         };
         self.scroll_offset = 0;
     }
@@ -4068,6 +4071,9 @@ fn provider_filter_label(filter: UsageProviderFilter) -> &'static str {
         UsageProviderFilter::All => "All",
         UsageProviderFilter::Claude => "Claude",
         UsageProviderFilter::Codex => "Codex",
+        UsageProviderFilter::Cursor => "Cursor",
+        UsageProviderFilter::Copilot => "Copilot",
+        UsageProviderFilter::Gemini => "Gemini",
     }
 }
 
