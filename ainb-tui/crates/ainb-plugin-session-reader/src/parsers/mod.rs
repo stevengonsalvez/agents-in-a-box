@@ -11,6 +11,7 @@ pub mod claude;
 pub mod codex;
 pub mod copilot;
 pub mod cost;
+pub mod cursor;
 pub mod gemini;
 
 pub(crate) use cost::estimate_cost_usd;
