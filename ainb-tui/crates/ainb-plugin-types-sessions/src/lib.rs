@@ -36,7 +36,13 @@ use serde::{Deserialize, Serialize};
 /// of msgpack, blowing past the host framer's 16 MiB body cap. Older
 /// peers reading the new wire see defaults (`chunk_index = 0`,
 /// `is_final = true`) — which is exactly the single-chunk path.
-pub const WIRE_VERSION: u32 = 2;
+///
+/// v3: added `Provider::Cursor` variant. Producer→consumer messages
+/// from a v3 publisher carrying `"cursor"`-tagged calls fail to
+/// deserialise on v2 consumers (the externally-tagged enum rejects
+/// unknown variants), so receivers MUST check
+/// `event.version == WIRE_VERSION` before trusting the payload.
+pub const WIRE_VERSION: u32 = 3;
 
 /// Per-file scan progress payload published on the
 /// `sessions.scan_progress` topic.
@@ -121,6 +127,8 @@ pub enum Provider {
     Gemini,
     /// GitHub Copilot Chat sessions.
     Copilot,
+    /// Cursor IDE chat sessions.
+    Cursor,
 }
 
 impl Provider {
@@ -132,6 +140,7 @@ impl Provider {
             Self::Codex => "codex",
             Self::Gemini => "gemini",
             Self::Copilot => "copilot",
+            Self::Cursor => "cursor",
         }
     }
 }
