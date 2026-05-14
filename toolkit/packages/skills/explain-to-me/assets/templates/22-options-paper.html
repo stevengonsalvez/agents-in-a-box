@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Options paper — Real-time delivery for live updates</title>
+  <style>
+    :root {
+      --ivory:    #FAF9F5;
+      --slate:    #141413;
+      --clay:     #D97757;
+      --clay-d:   #B85C3E;
+      --oat:      #E3DACC;
+      --olive:    #788C5D;
+      --olive-l:  #E7EDDE;
+      --rust:     #B0432D;
+      --rust-l:   #F5DDD4;
+      --sand:     #C2A878;
+      --sky:      #6A8CAF;
+      --sky-l:    #DCE5EF;
+      --plum:     #8A5A78;
+      --plum-l:   #E9D9E3;
+      --gray-150: #F0EEE6;
+      --gray-300: #D1CFC5;
+      --gray-500: #87867F;
+      --gray-700: #3D3D3A;
+      --white:    #FFFFFF;
+      --serif: ui-serif, Georgia, 'Times New Roman', serif;
+      --sans:  system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+      --mono:  ui-monospace, 'SF Mono', Menlo, Monaco, monospace;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: var(--sans); background: var(--ivory); color: var(--gray-700);
+      line-height: 1.55; padding: 56px 32px 120px; -webkit-font-smoothing: antialiased;
+    }
+    .page { max-width: 1180px; margin: 0 auto; }
+
+    header.page-head { margin-bottom: 40px; }
+    .eyebrow {
+      font-family: var(--mono); font-size: 12px; letter-spacing: 0.08em;
+      text-transform: uppercase; color: var(--gray-500); margin-bottom: 10px;
+    }
+    h1 {
+      font-family: var(--serif); font-weight: 500; font-size: 38px; line-height: 1.15;
+      color: var(--slate); letter-spacing: -0.01em; margin-bottom: 14px;
+    }
+    .meta-row { display: flex; flex-wrap: wrap; gap: 18px; align-items: center; font-size: 13px; color: var(--gray-500); }
+    .meta-row .k { font-family: var(--mono); font-size: 11px; color: var(--gray-500); margin-right: 4px; text-transform: uppercase; letter-spacing: 0.06em; }
+    .meta-row .v { color: var(--gray-700); }
+    .status-badge {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
+      padding: 5px 11px; border-radius: 999px;
+      border: 1.5px solid var(--sand); color: #6E5B33; background: #F4ECD9;
+    }
+    .status-badge::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; opacity: 0.85; }
+
+    section { margin-bottom: 56px; }
+    .sec-head { display: flex; align-items: baseline; gap: 14px; margin-bottom: 8px; }
+    .sec-head .num {
+      font-family: var(--mono); font-size: 12px;
+      background: var(--oat); color: var(--slate); padding: 3px 9px; border-radius: 8px;
+    }
+    .sec-head h2 {
+      font-family: var(--serif); font-weight: 500; font-size: 24px;
+      color: var(--slate); letter-spacing: -0.01em;
+    }
+    .sec-intro { font-size: 14.5px; color: var(--gray-500); max-width: 760px; margin-bottom: 24px; }
+    .prose p { font-size: 15px; color: var(--gray-700); margin-bottom: 12px; max-width: 760px; }
+
+    /* criteria with weights */
+    .criteria {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 14px;
+    }
+    @media (max-width: 900px) { .criteria { grid-template-columns: 1fr; } }
+    .crit {
+      background: var(--white); border: 1.5px solid var(--gray-300);
+      border-radius: 10px; padding: 14px 16px;
+      display: grid; grid-template-columns: 1fr 120px 56px; gap: 14px; align-items: center;
+    }
+    .crit .name { font-size: 14px; color: var(--slate); }
+    .crit .name small { display: block; font-size: 12px; color: var(--gray-500); margin-top: 2px; }
+    .crit .wbar { height: 8px; background: var(--gray-150); border-radius: 6px; overflow: hidden; }
+    .crit .wfill { height: 100%; background: var(--clay); border-radius: 6px; }
+    .crit .wval { font-family: var(--mono); font-size: 12px; color: var(--slate); text-align: right; }
+
+    /* options cards (4 wide) */
+    .options { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+    @media (max-width: 1100px) { .options { grid-template-columns: repeat(2, 1fr); } }
+    @media (max-width: 640px)  { .options { grid-template-columns: 1fr; } }
+    .opt {
+      background: var(--white); border: 1.5px solid var(--gray-300);
+      border-radius: 12px; padding: 18px; display: flex; flex-direction: column;
+      border-top: 6px solid var(--gray-300);
+    }
+    .opt[data-color="clay"]  { border-top-color: var(--clay); }
+    .opt[data-color="olive"] { border-top-color: var(--olive); }
+    .opt[data-color="sky"]   { border-top-color: var(--sky); }
+    .opt[data-color="plum"]  { border-top-color: var(--plum); }
+    .opt .opt-label { font-family: var(--mono); font-size: 11px; color: var(--gray-500); letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 6px; }
+    .opt h3 { font-family: var(--serif); font-weight: 500; font-size: 17px; color: var(--slate); margin-bottom: 10px; line-height: 1.25; }
+    .opt .desc { font-size: 13px; color: var(--gray-500); margin-bottom: 14px; min-height: 64px; }
+    .opt .scores { display: grid; gap: 6px; margin-bottom: 14px; }
+    .opt .score-row { display: grid; grid-template-columns: 84px 1fr 28px; align-items: center; gap: 8px; font-size: 11px; }
+    .opt .score-row .label { font-family: var(--mono); color: var(--gray-500); text-transform: uppercase; letter-spacing: 0.05em; }
+    .opt .score-row .bar { height: 6px; background: var(--gray-150); border-radius: 4px; overflow: hidden; }
+    .opt .score-row .fill { height: 100%; border-radius: 4px; }
+    .opt .score-row .val { font-family: var(--mono); color: var(--slate); text-align: right; }
+    .opt[data-color="clay"]  .fill { background: var(--clay); }
+    .opt[data-color="olive"] .fill { background: var(--olive); }
+    .opt[data-color="sky"]   .fill { background: var(--sky); }
+    .opt[data-color="plum"]  .fill { background: var(--plum); }
+    .opt .total {
+      margin-top: auto; padding-top: 12px; border-top: 1px dashed var(--gray-300);
+      display: flex; justify-content: space-between; align-items: baseline;
+    }
+    .opt .total .lab { font-family: var(--mono); font-size: 11px; color: var(--gray-500); text-transform: uppercase; letter-spacing: 0.06em; }
+    .opt .total .num { font-family: var(--serif); font-size: 26px; font-weight: 500; color: var(--slate); }
+    .opt .total .num small { font-size: 14px; color: var(--gray-500); font-family: var(--mono); }
+
+    /* heatmap matrix */
+    .matrix {
+      background: var(--white); border: 1.5px solid var(--gray-300); border-radius: 12px; padding: 24px; overflow-x: auto;
+    }
+    .matrix table { width: 100%; border-collapse: separate; border-spacing: 4px; }
+    .matrix th, .matrix td {
+      padding: 10px 12px; font-size: 13px; text-align: center;
+      border-radius: 6px;
+    }
+    .matrix th { font-family: var(--mono); font-size: 11px; color: var(--gray-500); text-transform: uppercase; letter-spacing: 0.06em; font-weight: 400; }
+    .matrix th.row { text-align: left; padding-left: 0; color: var(--slate); font-size: 13px; text-transform: none; letter-spacing: 0; font-family: var(--sans); }
+    .matrix td { font-family: var(--mono); color: var(--slate); }
+    .matrix td.s1 { background: #F5DDD4; }
+    .matrix td.s2 { background: #F2E8DC; }
+    .matrix td.s3 { background: #E3DACC; }
+    .matrix td.s4 { background: #C9D8B5; }
+    .matrix td.s5 { background: #A8C188; color: var(--white); }
+    .matrix tr.totals td { font-weight: 600; background: var(--gray-150); color: var(--slate); }
+
+    /* radar chart container */
+    .radar-wrap {
+      background: var(--white); border: 1.5px solid var(--gray-300);
+      border-radius: 12px; padding: 32px;
+      display: grid; grid-template-columns: 1fr 220px; gap: 32px; align-items: center;
+    }
+    @media (max-width: 900px) { .radar-wrap { grid-template-columns: 1fr; } }
+    .radar-wrap svg { display: block; width: 100%; max-width: 480px; margin: 0 auto; height: auto; }
+    .radar-legend { font-size: 13px; }
+    .radar-legend ul { list-style: none; padding: 0; }
+    .radar-legend li { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+    .radar-legend .swatch { width: 14px; height: 14px; border-radius: 3px; }
+
+    /* ranking */
+    .rank-strip { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    .rank-item {
+      display: inline-flex; align-items: center; gap: 10px;
+      background: var(--white); border: 1.5px solid var(--gray-300);
+      border-radius: 10px; padding: 10px 14px;
+    }
+    .rank-item .pos { font-family: var(--mono); font-size: 11px; color: var(--gray-500); text-transform: uppercase; letter-spacing: 0.06em; }
+    .rank-item .swatch { width: 12px; height: 12px; border-radius: 3px; }
+    .rank-item .name { font-size: 14px; color: var(--slate); }
+    .rank-item .delta { font-family: var(--mono); font-size: 11px; color: var(--gray-500); }
+    .rank-arrow {
+      width: 16px; height: 2px; background: var(--gray-300); position: relative;
+    }
+    .rank-arrow::after { content: ""; position: absolute; right: -1px; top: -4px; border: 5px solid transparent; border-left-color: var(--gray-300); }
+
+    /* open questions */
+    .qs { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 820px) { .qs { grid-template-columns: 1fr; } }
+    .qcard { background: var(--white); border: 1.5px solid var(--gray-300); border-radius: 12px; padding: 18px; }
+    .qcard h3 { font-family: var(--serif); font-weight: 500; font-size: 17px; color: var(--slate); margin-bottom: 8px; }
+    .qcard p { font-size: 14px; color: var(--gray-500); }
+    .qcard .owner { font-family: var(--mono); font-size: 11px; color: var(--clay-d); margin-top: 8px; display: inline-block; }
+  </style>
+</head>
+<body>
+<div class="page">
+
+  <header class="page-head">
+    <div class="eyebrow">Options Paper · trade-off analysis</div>
+    <h1>Real-time delivery for live updates</h1>
+    <div class="meta-row">
+      <span><span class="k">Date</span><span class="v">2026-05-02</span></span>
+      <span><span class="k">Author</span><span class="v">@stevie</span></span>
+      <span><span class="k">For decision by</span><span class="v">Platform Eng · 2026-05-16</span></span>
+      <span class="status-badge">Draft · for review</span>
+    </div>
+  </header>
+
+  <!-- ───── 1. problem ───── -->
+  <section>
+    <div class="sec-head"><span class="num">01</span><h2>Problem</h2></div>
+    <div class="prose">
+      <p>The current "poll every 2s" path costs us ~38% of API CPU and produces a noticeably stale UI when more than ~200 sessions are active. We need a delivery mechanism that scales to 5k concurrent sessions with sub-second perceived latency, without doubling our paging surface.</p>
+      <p>This paper compares four options against the same scenario: 5k concurrent sessions, 20 events/sec/session at peak, 99% same-region clients, 1% mobile/flaky.</p>
+    </div>
+  </section>
+
+  <!-- ───── 2. evaluation criteria ───── -->
+  <section>
+    <div class="sec-head"><span class="num">02</span><h2>Evaluation criteria</h2></div>
+    <p class="sec-intro">Weights were set by Platform Eng on 2026-04-28. Each criterion scores 1–5; weighted total / 5.0.</p>
+    <div class="criteria">
+      <div class="crit"><div class="name">Perceived latency<small>p95 from event to UI</small></div><div class="wbar"><div class="wfill" style="width:100%"></div></div><div class="wval">0.30</div></div>
+      <div class="crit"><div class="name">Operational simplicity<small>paging surface, runbook count</small></div><div class="wbar"><div class="wfill" style="width:80%"></div></div><div class="wval">0.20</div></div>
+      <div class="crit"><div class="name">Infra cost @ scale<small>5k sessions, 20 ev/s/session</small></div><div class="wbar"><div class="wfill" style="width:70%"></div></div><div class="wval">0.20</div></div>
+      <div class="crit"><div class="name">Resilience<small>recovery from disconnect, dropped events</small></div><div class="wbar"><div class="wfill" style="width:60%"></div></div><div class="wval">0.15</div></div>
+      <div class="crit"><div class="name">Time to ship<small>engineer-weeks to first prod traffic</small></div><div class="wbar"><div class="wfill" style="width:50%"></div></div><div class="wval">0.10</div></div>
+      <div class="crit"><div class="name">Team familiarity<small>existing skills, on-call capacity</small></div><div class="wbar"><div class="wfill" style="width:30%"></div></div><div class="wval">0.05</div></div>
+    </div>
+  </section>
+
+  <!-- ───── 3. options ───── -->
+  <section>
+    <div class="sec-head"><span class="num">03</span><h2>Options</h2></div>
+    <p class="sec-intro">Four delivery shapes prototyped over a one-week spike.</p>
+
+    <div class="options">
+
+      <article class="opt" data-color="clay">
+        <span class="opt-label">Option A</span>
+        <h3>Keep polling, increase frequency</h3>
+        <p class="desc">Bump poll interval to 500ms, add ETag short-circuit. Smallest change.</p>
+        <div class="scores">
+          <div class="score-row"><span class="label">Latency</span><span class="bar"><span class="fill" style="width:40%"></span></span><span class="val">2</span></div>
+          <div class="score-row"><span class="label">Ops simp</span><span class="bar"><span class="fill" style="width:100%"></span></span><span class="val">5</span></div>
+          <div class="score-row"><span class="label">Cost</span><span class="bar"><span class="fill" style="width:20%"></span></span><span class="val">1</span></div>
+          <div class="score-row"><span class="label">Resilience</span><span class="bar"><span class="fill" style="width:80%"></span></span><span class="val">4</span></div>
+          <div class="score-row"><span class="label">Speed</span><span class="bar"><span class="fill" style="width:100%"></span></span><span class="val">5</span></div>
+          <div class="score-row"><span class="label">Familiar</span><span class="bar"><span class="fill" style="width:100%"></span></span><span class="val">5</span></div>
+        </div>
+        <div class="total"><span class="lab">weighted</span><span class="num">2.85<small> / 5</small></span></div>
+      </article>
+
+      <article class="opt" data-color="olive">
+        <span class="opt-label">Option B</span>
+        <h3>Server-Sent Events from edge</h3>
+        <p class="desc">One long-lived HTTP stream per session, fan-out at the edge. Native browser support.</p>
+        <div class="scores">
+          <div class="score-row"><span class="label">Latency</span><span class="bar"><span class="fill" style="width:80%"></span></span><span class="val">4</span></div>
+          <div class="score-row"><span class="label">Ops simp</span><span class="bar"><span class="fill" style="width:80%"></span></span><span class="val">4</span></div>
+          <div class="score-row"><span class="label">Cost</span><span class="bar"><span class="fill" style="width:80%"></span></span><span class="val">4</span></div>
+          <div class="score-row"><span class="label">Resilience</span><span class="bar"><span class="fill" style="width:80%"></span></span><span class="val">4</span></div>
+          <div class="score-row"><span class="label">Speed</span><span class="bar"><span class="fill" style="width:60%"></span></span><span class="val">3</span></div>
+          <div class="score-row"><span class="label">Familiar</span><span class="bar"><span class="fill" style="width:60%"></span></span><span class="val">3</span></div>
+        </div>
+        <div class="total"><span class="lab">weighted</span><span class="num">3.95<small> / 5</small></span></div>
+      </article>
+
+      <article class="opt" data-color="sky">
+        <span class="opt-label">Option C</span>
+        <h3>WebSockets via dedicated gateway</h3>
+        <p class="desc">Bidirectional channel through a new gateway service. Supports client→server too.</p>
+        <div class="scores">
+          <div class="score-row"><span class="label">Latency</span><span class="bar"><span class="fill" style="width:100%"></span></span><span class="val">5</span></div>
+          <div class="score-row"><span class="label">Ops simp</span><span class="bar"><span class="fill" style="width:40%"></span></span><span class="val">2</span></div>
+          <div class="score-row"><span class="label">Cost</span><span class="bar"><span class="fill" style="width:60%"></span></span><span class="val">3</span></div>
+          <div class="score-row"><span class="label">Resilience</span><span class="bar"><span class="fill" style="width:60%"></span></span><span class="val">3</span></div>
+          <div class="score-row"><span class="label">Speed</span><span class="bar"><span class="fill" style="width:40%"></span></span><span class="val">2</span></div>
+          <div class="score-row"><span class="label">Familiar</span><span class="bar"><span class="fill" style="width:40%"></span></span><span class="val">2</span></div>
+        </div>
+        <div class="total"><span class="lab">weighted</span><span class="num">3.40<small> / 5</small></span></div>
+      </article>
+
+      <article class="opt" data-color="plum">
+        <span class="opt-label">Option D</span>
+        <h3>Push via third-party (Pusher / Ably)</h3>
+        <p class="desc">Off-the-shelf realtime backend. Drop in client SDK, pay per message.</p>
+        <div class="scores">
+          <div class="score-row"><span class="label">Latency</span><span class="bar"><span class="fill" style="width:80%"></span></span><span class="val">4</span></div>
+          <div class="score-row"><span class="label">Ops simp</span><span class="bar"><span class="fill" style="width:100%"></span></span><span class="val">5</span></div>
+          <div class="score-row"><span class="label">Cost</span><span class="bar"><span class="fill" style="width:20%"></span></span><span class="val">1</span></div>
+          <div class="score-row"><span class="label">Resilience</span><span class="bar"><span class="fill" style="width:100%"></span></span><span class="val">5</span></div>
+          <div class="score-row"><span class="label">Speed</span><span class="bar"><span class="fill" style="width:100%"></span></span><span class="val">5</span></div>
+          <div class="score-row"><span class="label">Familiar</span><span class="bar"><span class="fill" style="width:40%"></span></span><span class="val">2</span></div>
+        </div>
+        <div class="total"><span class="lab">weighted</span><span class="num">3.45<small> / 5</small></span></div>
+      </article>
+
+    </div>
+  </section>
+
+  <!-- ───── 4. heatmap matrix ───── -->
+  <section>
+    <div class="sec-head"><span class="num">04</span><h2>Comparison matrix</h2></div>
+    <p class="sec-intro">Darker green = stronger fit · rust = weak. Bottom row shows weighted totals.</p>
+    <div class="matrix">
+      <table>
+        <thead>
+          <tr>
+            <th class="row"></th>
+            <th>A · poll faster</th>
+            <th>B · SSE</th>
+            <th>C · WebSockets</th>
+            <th>D · third-party</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><th class="row">Perceived latency (0.30)</th><td class="s2">2</td><td class="s4">4</td><td class="s5">5</td><td class="s4">4</td></tr>
+          <tr><th class="row">Operational simplicity (0.20)</th><td class="s5">5</td><td class="s4">4</td><td class="s2">2</td><td class="s5">5</td></tr>
+          <tr><th class="row">Infra cost (0.20)</th><td class="s1">1</td><td class="s4">4</td><td class="s3">3</td><td class="s1">1</td></tr>
+          <tr><th class="row">Resilience (0.15)</th><td class="s4">4</td><td class="s4">4</td><td class="s3">3</td><td class="s5">5</td></tr>
+          <tr><th class="row">Time to ship (0.10)</th><td class="s5">5</td><td class="s3">3</td><td class="s2">2</td><td class="s5">5</td></tr>
+          <tr><th class="row">Team familiarity (0.05)</th><td class="s5">5</td><td class="s3">3</td><td class="s2">2</td><td class="s2">2</td></tr>
+          <tr class="totals"><th class="row">Weighted total</th><td>2.85</td><td>3.95</td><td>3.40</td><td>3.45</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ───── 5. radar ───── -->
+  <section>
+    <div class="sec-head"><span class="num">05</span><h2>Trade-off radar</h2></div>
+    <p class="sec-intro">Same six criteria projected as a hexagon. Larger area is better fit overall; spikes reveal where each option dominates or fails.</p>
+    <div class="radar-wrap">
+      <svg viewBox="0 0 420 380" aria-label="trade-off radar">
+        <!-- axes -->
+        <g transform="translate(210,200)" font-family="ui-monospace, monospace" font-size="10" fill="#87867F">
+          <!-- 6 axis points: 60° apart, radius 150 -->
+          <!-- precomputed: angle = -90 + i*60 -->
+          <!-- (0): 0,-150 ; (1): 130,-75 ; (2): 130,75 ; (3): 0,150 ; (4): -130,75 ; (5): -130,-75 -->
+          <polygon points="0,-150 130,-75 130,75 0,150 -130,75 -130,-75" fill="none" stroke="#D1CFC5"/>
+          <polygon points="0,-120 104,-60 104,60 0,120 -104,60 -104,-60" fill="none" stroke="#E3DACC"/>
+          <polygon points="0,-90 78,-45 78,45 0,90 -78,45 -78,-45" fill="none" stroke="#E3DACC"/>
+          <polygon points="0,-60 52,-30 52,30 0,60 -52,30 -52,-30" fill="none" stroke="#E3DACC"/>
+          <polygon points="0,-30 26,-15 26,15 0,30 -26,15 -26,-15" fill="none" stroke="#E3DACC"/>
+          <!-- axis labels -->
+          <text x="0"   y="-160" text-anchor="middle">latency</text>
+          <text x="140" y="-78"  text-anchor="start">ops simp</text>
+          <text x="140" y="86"   text-anchor="start">cost</text>
+          <text x="0"   y="168"  text-anchor="middle">resilience</text>
+          <text x="-140" y="86"  text-anchor="end">speed</text>
+          <text x="-140" y="-78" text-anchor="end">familiar</text>
+
+          <!-- option A: poll 2,5,1,4,5,5 -->
+          <polygon points="0,-60 130,-75 26,15 0,120 -130,75 -130,-75" fill="rgba(217,119,87,0.18)" stroke="#D97757" stroke-width="2"/>
+          <!-- option B: SSE 4,4,4,4,3,3 -->
+          <polygon points="0,-120 104,-60 104,60 0,120 -78,45 -78,-45" fill="rgba(120,140,93,0.22)" stroke="#788C5D" stroke-width="2"/>
+          <!-- option C: WS 5,2,3,3,2,2 -->
+          <polygon points="0,-150 52,-30 78,45 0,90 -52,30 -52,-30" fill="rgba(106,140,175,0.18)" stroke="#6A8CAF" stroke-width="2"/>
+          <!-- option D: 3rd party 4,5,1,5,5,2 -->
+          <polygon points="0,-120 130,-75 26,15 0,150 -130,75 -52,-30" fill="rgba(138,90,120,0.18)" stroke="#8A5A78" stroke-width="2"/>
+        </g>
+      </svg>
+      <div class="radar-legend">
+        <ul>
+          <li><span class="swatch" style="background:#D97757"></span><span>A · poll faster</span></li>
+          <li><span class="swatch" style="background:#788C5D"></span><span>B · SSE <strong style="color:#3D3D3A">(leader)</strong></span></li>
+          <li><span class="swatch" style="background:#6A8CAF"></span><span>C · WebSockets</span></li>
+          <li><span class="swatch" style="background:#8A5A78"></span><span>D · third-party</span></li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───── 6. tentative ranking ───── -->
+  <section>
+    <div class="sec-head"><span class="num">06</span><h2>Tentative ranking</h2></div>
+    <p class="sec-intro">Based on the weighted scores. Not a decision — surfaced for discussion.</p>
+    <div class="rank-strip">
+      <div class="rank-item"><span class="pos">1st</span><span class="swatch" style="background:#788C5D"></span><span class="name">B · SSE</span><span class="delta">3.95</span></div>
+      <div class="rank-arrow"></div>
+      <div class="rank-item"><span class="pos">2nd</span><span class="swatch" style="background:#8A5A78"></span><span class="name">D · third-party</span><span class="delta">3.45</span></div>
+      <div class="rank-arrow"></div>
+      <div class="rank-item"><span class="pos">3rd</span><span class="swatch" style="background:#6A8CAF"></span><span class="name">C · WebSockets</span><span class="delta">3.40</span></div>
+      <div class="rank-arrow"></div>
+      <div class="rank-item"><span class="pos">4th</span><span class="swatch" style="background:#D97757"></span><span class="name">A · poll faster</span><span class="delta">2.85</span></div>
+    </div>
+  </section>
+
+  <!-- ───── 7. open questions ───── -->
+  <section>
+    <div class="sec-head"><span class="num">07</span><h2>Open questions</h2></div>
+    <div class="qs">
+      <div class="qcard">
+        <h3>How does SSE behave through our corporate proxies?</h3>
+        <p>Some clients sit behind proxies that buffer responses, defeating the streaming model. Worst-case fallback is long-polling.</p>
+        <span class="owner">@marc · spike by 2026-05-09</span>
+      </div>
+      <div class="qcard">
+        <h3>Is Option D's cost wall really at 5k sessions?</h3>
+        <p>Vendor pricing tiers at 1k connections. Need a binding quote before we can finalise the cost score.</p>
+        <span class="owner">@lin · vendor call this week</span>
+      </div>
+      <div class="qcard">
+        <h3>Mobile / flaky network behaviour</h3>
+        <p>The 1% flaky-network slice can dominate support tickets. Need replay-on-reconnect strategy for B and C.</p>
+        <span class="owner">@stevie · prototype</span>
+      </div>
+      <div class="qcard">
+        <h3>Operational paging surface for B</h3>
+        <p>SSE adds a new long-lived connection class. Decide whether existing alerts cover it or new SLOs are required.</p>
+        <span class="owner">@platform-oncall · 1-pager</span>
+      </div>
+    </div>
+  </section>
+
+</div>
+</body>
+</html>
