@@ -903,7 +903,8 @@ fn matrix_to_csv(matrix: &(Vec<String>, Vec<ModelTaskRow>)) -> String {
     let (cols, rows) = matrix;
     let mut out = String::from("model");
     for col in cols {
-        out.push_str(&format!(",{}_calls,{}_tokens,{}_cost_usd", col, col, col));
+        let slug = column_to_snake(col);
+        out.push_str(&format!(",{slug}_calls,{slug}_tokens,{slug}_cost_usd"));
     }
     out.push('\n');
     for row in rows {
@@ -912,6 +913,35 @@ fn matrix_to_csv(matrix: &(Vec<String>, Vec<ModelTaskRow>)) -> String {
             out.push_str(&format!(",{},{},{:.4}", c.calls, c.tokens, c.cost_usd));
         }
         out.push('\n');
+    }
+    out
+}
+
+/// Turn an activity-category label into a safe CSV column slug.
+///
+/// The wire-level label can contain `/`, spaces, and other glyphs
+/// (e.g. `Build/Deploy`, `Bug Triage`) that produce ugly or
+/// outright invalid header tokens like `Build/Deploy_calls`. The
+/// rule: keep ASCII alphanumerics, lowercase them, collapse every
+/// other run into a single `_`, and trim leading/trailing
+/// underscores. `Build/Deploy` → `build_deploy`.
+fn column_to_snake(label: &str) -> String {
+    let mut out = String::with_capacity(label.len());
+    let mut prev_us = true; // suppress leading underscores
+    for ch in label.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.extend(ch.to_lowercase());
+            prev_us = false;
+        } else if !prev_us {
+            out.push('_');
+            prev_us = true;
+        }
+    }
+    while out.ends_with('_') {
+        out.pop();
+    }
+    if out.is_empty() {
+        out.push_str("col");
     }
     out
 }
@@ -957,7 +987,13 @@ fn matrix_to_text(matrix: &(Vec<String>, Vec<ModelTaskRow>)) -> String {
 }
 
 fn csv_quote(s: &str) -> String {
-    if s.contains(',') || s.contains('"') || s.contains('\n') {
+    // `\r` is included defensively: while activity / model labels
+    // never contain bare CR in practice, RFC 4180 §2.6 requires
+    // quoting whenever a field contains CR, LF, or CRLF — and a
+    // single stray `\r` from an upstream Windows-encoded source would
+    // otherwise split the row in half once a downstream parser saw
+    // it.
+    if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
         format!("\"{}\"", s.replace('"', "\"\""))
     } else {
         s.to_string()
@@ -1969,6 +2005,53 @@ mod tests {
         let contents = std::fs::read_to_string(&target).unwrap();
         // combined_csv includes the summary section header.
         assert!(contents.contains("section,metric,value"));
+    }
+
+    #[test]
+    fn column_to_snake_handles_punctuation_and_spaces() {
+        // The matrix CSV used to emit raw category labels in column
+        // headers (Build/Deploy_calls), which produced invalid /
+        // ugly CSV. Sanitiser keeps ASCII alnum, collapses other runs
+        // into a single underscore.
+        assert_eq!(column_to_snake("Build/Deploy"), "build_deploy");
+        assert_eq!(column_to_snake("Bug Triage"), "bug_triage");
+        assert_eq!(column_to_snake("Plain"), "plain");
+        assert_eq!(column_to_snake("__under__"), "under");
+        // Pathological all-symbol label still produces a sane slug.
+        assert_eq!(column_to_snake("//"), "col");
+    }
+
+    #[test]
+    fn matrix_csv_header_is_snake_case() {
+        let cols = vec!["Build/Deploy".to_string(), "Bug Triage".to_string()];
+        let rows: Vec<ModelTaskRow> = Vec::new();
+        let csv = matrix_to_csv(&(cols, rows));
+        // First line is the header — must contain the snake-cased
+        // forms, must NOT contain the raw label-with-slash form.
+        let first_line = csv.lines().next().unwrap();
+        assert!(
+            first_line.contains("build_deploy_calls"),
+            "header missing slug: {first_line}"
+        );
+        assert!(
+            first_line.contains("bug_triage_tokens"),
+            "header missing slug: {first_line}"
+        );
+        assert!(
+            !first_line.contains("Build/Deploy_calls"),
+            "raw label leaked into header: {first_line}"
+        );
+    }
+
+    #[test]
+    fn csv_quote_escapes_carriage_return() {
+        // RFC 4180 §2.6 — fields containing CR must be quoted,
+        // otherwise a downstream parser sees CRLF and splits the row.
+        assert_eq!(csv_quote("plain"), "plain");
+        assert_eq!(csv_quote("has\rcr"), "\"has\rcr\"");
+        // The other gated chars stay covered.
+        assert_eq!(csv_quote("a,b"), "\"a,b\"");
+        assert_eq!(csv_quote("with\nnewline"), "\"with\nnewline\"");
     }
 
     #[test]

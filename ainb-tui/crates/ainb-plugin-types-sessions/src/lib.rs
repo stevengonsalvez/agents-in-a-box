@@ -546,6 +546,35 @@ mod tests {
     }
 
     #[test]
+    fn older_wire_version_decodes_so_consumers_can_reject_it() {
+        // An older publisher (v2 of the wire) may still be in flight
+        // when burndown upgrades to v3. The envelope's type-level
+        // decoder must succeed (otherwise the consumer never gets the
+        // chance to compare `event.version` and gracefully fall back
+        // to the schema-mismatch UI). This pins that contract so a
+        // future WIRE_VERSION bump can't silently break it.
+        assert!(
+            WIRE_VERSION >= 2,
+            "test assumes a previous wire generation exists"
+        );
+        let v2_env = UsageDataEvent {
+            version: WIRE_VERSION - 1,
+            published_ns: 0,
+            partial: false,
+            chunk_index: 0,
+            is_final: true,
+            data: UsageData::default(),
+        };
+        let bytes = rmp_serde::to_vec_named(&v2_env).unwrap();
+        let back: UsageDataEvent =
+            rmp_serde::from_slice(&bytes).expect("older wire version must decode cleanly");
+        assert_eq!(back.version, WIRE_VERSION - 1);
+        // Consumer-side gate: this is exactly what burndown's
+        // handle_usage_data_event uses to latch `schema_mismatch`.
+        assert_ne!(back.version, WIRE_VERSION);
+    }
+
+    #[test]
     fn chunked_envelope_roundtrip() {
         // Chunk 0 of a hypothetical 2-chunk publish.
         let chunk0 = UsageDataEvent {
