@@ -392,16 +392,20 @@ fn export_usage_with_data(
 /// * Path doesn't exist & otherwise → folder dump (codeburn convention:
 ///   `ainb usage export -o ./report` writes a directory).
 fn write_csv_dump(path: &Path, data: &UsageData) -> Result<()> {
-    if path.exists() {
-        if path.is_dir() {
-            return write_csv_folder(path, data);
-        }
-    } else {
+    if path.exists() && path.is_dir() {
+        return write_csv_folder(path, data);
+    }
+    if !path.exists() {
         let raw = path.to_string_lossy();
         let ends_with_sep = raw.ends_with('/') || raw.ends_with(std::path::MAIN_SEPARATOR);
+        // File-extension allow-list: anything outside this set is
+        // assumed to be a directory name (matches the codeburn
+        // convention `ainb usage export -o ./report`). Inverted vs an
+        // older block-list approach so a stray `mktemp -d` path
+        // (`tmp.pApLlhcpA5`) doesn't get treated as a file by accident.
         let looks_like_file = matches!(
             path.extension().and_then(|s| s.to_str()),
-            Some("csv") | Some("tsv") | Some("txt")
+            Some("csv") | Some("tsv") | Some("txt") | Some("tab")
         );
         if ends_with_sep || !looks_like_file {
             return write_csv_folder(path, data);
@@ -453,6 +457,13 @@ pub(crate) fn write_csv_folder(dir: &Path, data: &UsageData) -> Result<()> {
                 dir.display()
             );
         }
+        if already_export_dir {
+            // Scrub the previous run's outputs so a shrunk dataset
+            // (e.g. tools/shell_commands/mcp_servers now empty) doesn't
+            // leave stale CSVs behind to mislead the next reader. Only
+            // touch our own filenames — anything else stays put.
+            scrub_export_dir(dir);
+        }
     } else {
         fs::create_dir_all(dir)?;
     }
@@ -490,6 +501,29 @@ pub(crate) fn write_csv_folder(dir: &Path, data: &UsageData) -> Result<()> {
     }
     fs::write(dir.join("README.txt"), readme)?;
     Ok(())
+}
+
+/// Files our exporter is allowed to write inside an `.ainb-export`
+/// folder. Anything matching here gets removed before a fresh export
+/// so a shrunk dataset doesn't leave stale rows behind; anything else
+/// the user has dropped into the folder is left untouched.
+const EXPORT_OWNED_FILES: &[&str] = &[
+    "summary.csv",
+    "daily.csv",
+    "activity.csv",
+    "models.csv",
+    "projects.csv",
+    "sessions.csv",
+    "tools.csv",
+    "shell-commands.csv",
+    "mcp-servers.csv",
+    "README.txt",
+];
+
+fn scrub_export_dir(dir: &Path) {
+    for name in EXPORT_OWNED_FILES {
+        let _ = fs::remove_file(dir.join(name));
+    }
 }
 
 /// Translate the CLI's filter args into a [`UsageFilters`] struct so the
@@ -1630,5 +1664,68 @@ mod tests {
         assert_eq!(scoped.from.as_deref(), Some("2026-04-12"));
         assert_eq!(scoped.to.as_deref(), Some("2026-05-11"));
         assert!(matches!(scoped.provider, ProviderArg::Claude));
+    }
+
+    #[test]
+    fn top_zero_emits_every_row() {
+        // `--top 0` is the documented "no cap" sentinel — top_iter
+        // must return the whole slice, not an empty one.
+        let v: Vec<u32> = (0..7).collect();
+        let n = top_iter(&v, 0).count();
+        assert_eq!(n, 7, "top=0 should be no-cap, got {n}");
+
+        // And `--top 3` still caps.
+        assert_eq!(top_iter(&v, 3).count(), 3);
+    }
+
+    #[test]
+    fn write_csv_dump_picks_folder_for_extensionless_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Path doesn't exist yet, no .csv/.tsv/.txt/.tab → folder.
+        let target = tmp.path().join("report");
+        let data = UsageData::default();
+        write_csv_dump(&target, &data).unwrap();
+        assert!(target.is_dir(), "expected folder write");
+        assert!(target.join(".ainb-export").exists());
+        assert!(target.join("summary.csv").exists());
+    }
+
+    #[test]
+    fn write_csv_dump_picks_single_file_for_csv_extension() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("dump.csv");
+        let data = UsageData::default();
+        write_csv_dump(&target, &data).unwrap();
+        assert!(target.is_file(), "expected single-file write");
+        let contents = std::fs::read_to_string(&target).unwrap();
+        // combined_csv includes the summary section header.
+        assert!(contents.contains("section,metric,value"));
+    }
+
+    #[test]
+    fn rewriting_export_folder_scrubs_stale_csvs() {
+        // Simulate a previous export that included tools.csv (because
+        // data.tools was non-empty), then re-export with empty tools.
+        // tools.csv must not survive the second write.
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("report");
+
+        let mut data = UsageData::default();
+        data.tools.push(crate::data::usage::NamedUsage {
+            name: "Read".into(),
+            calls: 3,
+        });
+        write_csv_dump(&target, &data).unwrap();
+        assert!(target.join("tools.csv").exists());
+
+        // Second pass: tools is now empty. tools.csv should be gone.
+        let empty = UsageData::default();
+        write_csv_dump(&target, &empty).unwrap();
+        assert!(
+            !target.join("tools.csv").exists(),
+            "stale tools.csv should have been scrubbed"
+        );
+        // But the live core files remain rewritten.
+        assert!(target.join("summary.csv").exists());
     }
 }
