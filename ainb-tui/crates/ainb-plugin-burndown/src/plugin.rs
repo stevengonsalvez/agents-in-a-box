@@ -700,6 +700,7 @@ fn parse_format(s: &str) -> OutputFormat {
     match s {
         "json" => OutputFormat::Json,
         "csv" => OutputFormat::Csv,
+        "markdown" | "md" => OutputFormat::Markdown,
         _ => OutputFormat::Text,
     }
 }
