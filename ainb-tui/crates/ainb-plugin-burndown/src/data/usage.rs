@@ -233,7 +233,38 @@ impl UsageFilters {
     }
 
     pub(crate) fn matches(&self, call: &ProviderCall, category: ActivityCategory) -> bool {
-        if !self.project.is_empty() && !self.project.iter().any(|p| p == &call.project) {
+        self.matches_with_resolved_repo(call, category, None)
+    }
+
+    /// Variant of `matches` that lets the caller pass in the
+    /// per-call resolved repo id (e.g. `owner/repo` from a git
+    /// `origin` lookup on `call.project_path`).
+    ///
+    /// Why this exists: `aggregate_calls_with_analysis` keys the
+    /// `By Project` panel by the **resolved repo id**, so the chip
+    /// the user commits via Enter on that panel is `owner/repo`,
+    /// not the raw folder name parked on `call.project`. Comparing
+    /// the chip only against `call.project` makes the filter no-op
+    /// silently — the chip looks active in the strip but matches
+    /// zero rows. Passing the same resolved repo here means the
+    /// project chip matches calls under any worktree that resolved
+    /// to the same upstream, which is the grafana-style pivot the
+    /// user is asking for.
+    ///
+    /// Both `--project owner/repo` from the CLI and the raw folder
+    /// chip path keep working: we test the chip against both
+    /// `call.project` AND the resolved repo (`None` falls through
+    /// to the existing raw-project comparison).
+    pub(crate) fn matches_with_resolved_repo(
+        &self,
+        call: &ProviderCall,
+        category: ActivityCategory,
+        resolved_repo: Option<&str>,
+    ) -> bool {
+        let project_matches = |chip: &String| {
+            chip == &call.project || resolved_repo.is_some_and(|repo| chip == repo)
+        };
+        if !self.project.is_empty() && !self.project.iter().any(project_matches) {
             return false;
         }
         if !self.model.is_empty() && !self.model.iter().any(|m| m == &call.model) {
@@ -261,7 +292,7 @@ impl UsageFilters {
         // — calls without a branch are unaffected by branch excludes
         // (mirror of the include-side semantics where `branch == None`
         // means "no branch was recorded for this call").
-        if self.exclude_project.iter().any(|p| p == &call.project) {
+        if self.exclude_project.iter().any(project_matches) {
             return false;
         }
         if self.exclude_model.iter().any(|m| m == &call.model) {
@@ -795,6 +826,12 @@ pub fn parse_usage_for_with_roots_and_cache(
     }
 
     let filters_active = !query.filters.is_empty();
+    // Shared repo cache across the chip-match pass — resolves each
+    // distinct project_path at most once. Same purpose as the cache in
+    // `filter_usage_data_full`: lets `--project owner/repo` match calls
+    // under any worktree of the same upstream, matching the resolved-
+    // repo display key used by the aggregator.
+    let mut repo_cache: HashMap<String, Option<String>> = HashMap::new();
     let filtered: Vec<ProviderCall> = calls
         .into_iter()
         .filter(|call| {
@@ -813,7 +850,16 @@ pub fn parse_usage_for_with_roots_and_cache(
         // calling filter_usage_data over cached UsageData and is
         // unaffected.
         .filter(|call| {
-            !filters_active || query.filters.matches(call, classify_activity(call))
+            if !filters_active {
+                return true;
+            }
+            let resolved_repo =
+                repo_lookup::resolve_repo(&call.project_path, &mut repo_cache);
+            query.filters.matches_with_resolved_repo(
+                call,
+                classify_activity(call),
+                resolved_repo.as_deref(),
+            )
         })
         .collect();
 
@@ -1901,12 +1947,27 @@ pub fn filter_usage_data_full(
     // aggregate path looks up by ProviderCall.id, which is stable
     // across the filter-and-sort pipeline.
     let turn_analysis = analyze_turns(&data.calls);
+    // Resolve every call's working directory to an upstream `owner/repo`
+    // so the project chip — which is keyed on the same resolved repo by
+    // `aggregate_calls_with_analysis` — matches calls under any worktree
+    // of the same upstream. Cache is local to this filter pass so each
+    // distinct project_path resolves at most once.
+    let mut repo_cache: HashMap<String, Option<String>> = HashMap::new();
     let filtered_calls: Vec<ProviderCall> = data
         .calls
         .iter()
         .filter(|call| {
+            // Project chip can carry either a raw folder name (legacy /
+            // CLI flag input) or a resolved `owner/repo` (TUI Enter on
+            // the By Project row); test both in `matches`.
+            let resolved_repo =
+                repo_lookup::resolve_repo(&call.project_path, &mut repo_cache);
             // Chip filters (project / model / activity / session / branch).
-            if !filters.matches(call, classify_activity(call)) {
+            if !filters.matches_with_resolved_repo(
+                call,
+                classify_activity(call),
+                resolved_repo.as_deref(),
+            ) {
                 return false;
             }
             // Provider filter (Right/Left arrow on the TUI).
@@ -4367,5 +4428,90 @@ mod tests {
         );
         assert_eq!(filtered.calls.len(), 1);
         assert_eq!(filtered.calls[0].id, 7);
+    }
+
+    /// Regression for the silent project-filter no-op: the chip carries
+    /// the resolved repo (`owner/repo`) because that's how the
+    /// By Project panel keys its rows, but the call's raw `project`
+    /// field is the local folder name. The chip must still match.
+    #[test]
+    fn matches_with_resolved_repo_accepts_chip_against_owner_repo() {
+        let call = ProviderCallBuilder::new()
+            .with_id(1)
+            .with_project("worktree-folder-name")
+            .build();
+        let mut filters = UsageFilters::default();
+        filters.project.push("shotclubhouse/shotclubhouse".to_string());
+
+        // No resolved repo → chip looks for raw folder, can't match.
+        assert!(
+            !filters.matches_with_resolved_repo(&call, ActivityCategory::Conversation, None),
+            "without resolved repo, owner/repo chip must not match a raw-folder call.project"
+        );
+
+        // With resolved repo matching the chip → match.
+        assert!(
+            filters.matches_with_resolved_repo(
+                &call,
+                ActivityCategory::Conversation,
+                Some("shotclubhouse/shotclubhouse"),
+            ),
+            "chip 'owner/repo' must match calls whose project_path resolves to that repo"
+        );
+    }
+
+    /// The raw-folder chip path (CLI `--project local-folder` or
+    /// legacy chip values) must keep working alongside the new
+    /// resolved-repo path.
+    #[test]
+    fn matches_with_resolved_repo_keeps_raw_folder_chip_working() {
+        let call = ProviderCallBuilder::new()
+            .with_id(1)
+            .with_project("local-folder")
+            .build();
+        let mut filters = UsageFilters::default();
+        filters.project.push("local-folder".to_string());
+
+        assert!(filters.matches_with_resolved_repo(
+            &call,
+            ActivityCategory::Conversation,
+            None
+        ));
+        // And still works when resolved_repo is Some but differs.
+        assert!(filters.matches_with_resolved_repo(
+            &call,
+            ActivityCategory::Conversation,
+            Some("some/other-repo"),
+        ));
+    }
+
+    /// exclude_project must mirror the include path — exclude chip on
+    /// `owner/repo` should drop calls under any worktree of that repo.
+    #[test]
+    fn matches_with_resolved_repo_excludes_by_owner_repo() {
+        let call = ProviderCallBuilder::new()
+            .with_id(1)
+            .with_project("worktree-folder-name")
+            .build();
+        let mut filters = UsageFilters::default();
+        filters
+            .exclude_project
+            .push("shotclubhouse/shotclubhouse".to_string());
+
+        assert!(
+            !filters.matches_with_resolved_repo(
+                &call,
+                ActivityCategory::Conversation,
+                Some("shotclubhouse/shotclubhouse"),
+            ),
+            "exclude_project on owner/repo must drop calls that resolve to that repo"
+        );
+        // Without the resolved repo, the call survives (chip can't
+        // identify it).
+        assert!(filters.matches_with_resolved_repo(
+            &call,
+            ActivityCategory::Conversation,
+            None,
+        ));
     }
 }
