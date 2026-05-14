@@ -830,7 +830,11 @@ pub fn parse_usage_for_with_roots_and_cache(
     // distinct project_path at most once. Same purpose as the cache in
     // `filter_usage_data_full`: lets `--project owner/repo` match calls
     // under any worktree of the same upstream, matching the resolved-
-    // repo display key used by the aggregator.
+    // repo display key used by the aggregator. Only built when the
+    // caller actually needs project resolution; other chip dimensions
+    // skip the fs lookup entirely.
+    let needs_repo_lookup = filters_active
+        && (!query.filters.project.is_empty() || !query.filters.exclude_project.is_empty());
     let mut repo_cache: HashMap<String, Option<String>> = HashMap::new();
     let filtered: Vec<ProviderCall> = calls
         .into_iter()
@@ -853,8 +857,11 @@ pub fn parse_usage_for_with_roots_and_cache(
             if !filters_active {
                 return true;
             }
-            let resolved_repo =
-                repo_lookup::resolve_repo(&call.project_path, &mut repo_cache);
+            let resolved_repo = if needs_repo_lookup {
+                repo_lookup::resolve_repo(&call.project_path, &mut repo_cache)
+            } else {
+                None
+            };
             query.filters.matches_with_resolved_repo(
                 call,
                 classify_activity(call),
@@ -1951,7 +1958,11 @@ pub fn filter_usage_data_full(
     // so the project chip — which is keyed on the same resolved repo by
     // `aggregate_calls_with_analysis` — matches calls under any worktree
     // of the same upstream. Cache is local to this filter pass so each
-    // distinct project_path resolves at most once.
+    // distinct project_path resolves at most once. Only pay for the
+    // resolution when there's actually a project chip to test against —
+    // model/activity/session/branch pivots leave this empty.
+    let needs_repo_lookup =
+        !filters.project.is_empty() || !filters.exclude_project.is_empty();
     let mut repo_cache: HashMap<String, Option<String>> = HashMap::new();
     let filtered_calls: Vec<ProviderCall> = data
         .calls
@@ -1960,8 +1971,11 @@ pub fn filter_usage_data_full(
             // Project chip can carry either a raw folder name (legacy /
             // CLI flag input) or a resolved `owner/repo` (TUI Enter on
             // the By Project row); test both in `matches`.
-            let resolved_repo =
-                repo_lookup::resolve_repo(&call.project_path, &mut repo_cache);
+            let resolved_repo = if needs_repo_lookup {
+                repo_lookup::resolve_repo(&call.project_path, &mut repo_cache)
+            } else {
+                None
+            };
             // Chip filters (project / model / activity / session / branch).
             if !filters.matches_with_resolved_repo(
                 call,
