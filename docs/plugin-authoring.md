@@ -49,6 +49,8 @@ ainb-plugin-protocol    = { path = "../ainb-plugin-protocol" }
 # Wire types crate(s) for any snapshot topics you publish or subscribe to:
 ainb-plugin-types-sessions = { path = "../ainb-plugin-types-sessions" }
 
+async-trait = "0.1"                             # required for #[async_trait] on Plugin
+
 # Common workspace deps — pull what you need:
 tokio       = { workspace = true, features = ["macros", "rt-multi-thread", "io-std"] }
 serde       = { workspace = true, features = ["derive"] }
@@ -93,49 +95,62 @@ See [v2.md §1](./plugin-spec/v2.md#1-manifest) for the full schema and capabili
 
 ## Implementing the `Plugin` trait
 
+The crate is named `ainb-plugin-sdk-rust` for `Cargo.toml`, but its `[lib].name` is `ainb_plugin_sdk` — that's the path you `use` from Rust code. The trait surface uses ergonomic types (`WireBuffer`, `CliOutput`); the SDK marshals to and from the wire types documented in [`v2.md`](./plugin-spec/v2.md) on your behalf.
+
 `src/lib.rs`:
 
 ```rust
-use ainb_plugin_protocol::params::{
-    HandleEventParams, HandleKeyParams, RenderParams, RenderResult,
-    CliDispatchParams, CliDispatchResult, PluginInitResult,
-};
+use ainb_plugin_protocol::params::{HandleEventParams, HandleKeyParams, RenderParams};
 use ainb_plugin_protocol::wire_buffer::WireBuffer;
-use ainb_plugin_sdk_rust::{HostClient, Plugin, Result};
+use ainb_plugin_sdk::{CliOutput, HostClient, Plugin, Result};
+use async_trait::async_trait;
 
 pub struct MyThing {
     // Your state.
 }
 
+#[async_trait]
 impl Plugin for MyThing {
     fn manifest(&self) -> &'static str {
         include_str!("../manifest.toml")
     }
 
-    async fn on_init(&mut self, host: &HostClient) -> Result<PluginInitResult> {
-        host.log_info("mything: initialised").await;
-        Ok(PluginInitResult { abi_version: 2 })
-    }
-
-    async fn render(&mut self, _host: &HostClient, params: RenderParams) -> Result<RenderResult> {
+    async fn render(&mut self, _host: &HostClient, params: RenderParams) -> Result<WireBuffer> {
         let mut buf = WireBuffer::new(params.viewport.width, params.viewport.height);
         // paint cells…
-        Ok(RenderResult { buffer: buf, generation: params.generation })
+        Ok(buf)
     }
 
-    async fn handle_key(&mut self, _host: &HostClient, params: HandleKeyParams) -> Result<()> {
-        // mutate self.state per key…
+    async fn on_init(
+        &mut self,
+        host: &HostClient,
+        _granted_capabilities: &[String],
+    ) -> Result<()> {
+        host.log_info("mything: initialised").await?;
         Ok(())
     }
 
-    async fn handle_event(&mut self, _host: &HostClient, params: HandleEventParams) -> Result<()> {
+    async fn handle_key(&mut self, _host: &HostClient, _params: HandleKeyParams) -> Result<()> {
+        // mutate self.state per keystroke…
+        Ok(())
+    }
+
+    async fn handle_event(&mut self, _host: &HostClient, _params: HandleEventParams) -> Result<()> {
         // process subscription delivery on params.topic with params.payload…
         Ok(())
     }
 
-    async fn cli_dispatch(&mut self, _host: &HostClient, params: CliDispatchParams) -> Result<CliDispatchResult> {
-        // parse params.argv, run the subcommand…
-        Ok(CliDispatchResult { stdout: b"ok\n"[..].into(), stderr: Default::default(), exit_code: 0 })
+    async fn cli_dispatch(
+        &mut self,
+        _host: &HostClient,
+        _namespace: &str,
+        _argv: &[String],
+    ) -> Result<CliOutput> {
+        Ok(CliOutput {
+            stdout: b"ok\n".to_vec(),
+            stderr: Vec::new(),
+            exit_code: 0,
+        })
     }
 }
 ```
@@ -143,12 +158,13 @@ impl Plugin for MyThing {
 `src/main.rs`:
 
 ```rust
-use ainb_plugin_sdk_rust::Server;
+use ainb_plugin_sdk::Server;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let plugin = ainb_plugin_mything::MyThing { /* … */ };
-    Server::new(plugin).run_stdio().await
+    Server::new(plugin).run_stdio().await?;
+    Ok(())
 }
 ```
 
@@ -158,13 +174,15 @@ The SDK handles Content-Length framing, JSON-RPC envelope encode/decode, method 
 
 | Method | Required? | When fired |
 |---|---|---|
-| `manifest()` | yes | At construction; SDK reads it once for `plugin/init` |
-| `on_init` | optional (default OK) | Right after `plugin/init` — open files, kick subscriptions, publish bootstrap |
-| `render` | required if `screens` non-empty | Host requests a paint of the screen at the given viewport size |
-| `handle_key` | optional | A keystroke landed on a screen this plugin owns; preempts `handle_event` |
-| `handle_event` | optional | A subscribed snapshot was published — `params.topic` + `params.payload` |
-| `cli_dispatch` | required if `cli_namespaces` non-empty | `ainb <ns> ...` was invoked |
-| `on_shutdown` | optional (default OK) | Host is reaping the plugin; flush state and return |
+| `manifest()` | required (no default) | At construction; SDK reads it once for `plugin/init` |
+| `render` | required (no default) | Host requests a paint of the screen at the given viewport size |
+| `on_init` | optional (default no-op) | Right after `plugin/init` — open files, kick subscriptions, publish bootstrap. `granted_capabilities` lets you refuse to start with `SdkError::plugin(...)` if a required cap was withheld |
+| `handle_key` | optional (default no-op) | A keystroke landed on a screen this plugin owns; preempts `handle_event` |
+| `handle_event` | optional (default no-op) | A subscribed snapshot was published — `params.topic` + `params.payload` |
+| `cli_dispatch` | optional (default `exit 2`) | `ainb <namespace> ...` was invoked; namespace + argv are passed by reference |
+| `on_shutdown` | optional (default no-op) | Host is reaping the plugin; flush state and return |
+
+Pure-publisher plugins (no screen) can satisfy `render` with `Ok(WireBuffer::new(0, 0))` since the host never requests a paint for a plugin that doesn't declare any screens.
 
 Both `handle_key` and `handle_event` are **notifications** — the plugin dispatcher serialises them inline on the read loop to preserve chunk ordering and multi-key sequence semantics.
 
