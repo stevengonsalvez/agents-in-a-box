@@ -1,222 +1,148 @@
 # ainb plugins
 
-User-facing reference for the `ainb plugin` family of commands. If you're
-authoring a plugin, jump to [docs/plugin-authoring.md](./plugin-authoring.md).
+User-facing reference for the `ainb plugin` family of commands. If you're authoring a plugin, jump to [docs/plugin-authoring.md](./plugin-authoring.md). For the wire contract, [docs/plugin-spec/v2.md](./plugin-spec/v2.md).
 
 ## What is a plugin?
 
-A plugin is a self-contained capsule that adds a screen, command, sidebar
-entry, statusline segment, or provider to ainb without recompiling the
-host. Plugins are compiled to `wasm32-wasip1` and run inside a wasmi
-sandbox: they only see the host capabilities they declare in their
-manifest, and they cannot reach the network, filesystem, or subprocess
-launcher unless you approve those caps at install time.
+A plugin is a self-contained capsule that adds a screen, CLI subcommand, sidebar entry, or statusline segment to ainb without recompiling the host. A v2 plugin is a **native executable** the host spawns as a child process; the two talk JSON-RPC 2.0 over framed stdio. Plugins only see the host capabilities they declare in their manifest, and they cannot reach the network, filesystem, or subprocess launcher unless you grant those capabilities.
 
-The first plugin shipped in-tree is **burndown**, which owns the
-Analytics screen, the `ainb usage` CLI subcommand tree, and the budget
-statusline segment. Removing it would have left ainb without an
-Analytics screen — that's the point of Phase 5's tripwire.
+The first plugin shipped in-tree is **burndown**, which owns the Analytics screen and the `ainb usage` CLI subcommand tree. The pure-publisher **session-reader** is its data backend: it scans `~/.claude/projects/**` and `~/.codex/sessions/**` and chunked-publishes usage snapshots on the `sessions.usage_data` topic for burndown to render.
 
 ## Where things live
 
-ainb stores plugin state under `~/.agents-in-a-box/plugins/` (override
-with `$AINB_HOME`):
+The host discovers plugins from a flat staging directory:
 
-```
-~/.agents-in-a-box/plugins/
-├── .lock                       # fs2 advisory lock — one install at a time
-├── installed.toml              # lockfile of installed plugins + approved caps
-├── marketplaces/
-│   └── ainb-plugins/
-│       └── marketplace.json    # registered marketplace catalogs
-├── cache/
-│   └── ainb-plugins/
-│       └── burndown/
-│           └── 0.1.0/
-│               ├── plugin.toml
-│               └── plugin.wasm
-└── data/
-    └── burndown/               # plugin-owned writable storage
+```text
+dist/plugins/
+├── burndown/
+│   ├── burndown            (native executable, ad-hoc signed on macOS)
+│   └── manifest.toml
+└── session-reader/
+    ├── session-reader
+    └── manifest.toml
 ```
 
-The host loads any plugin under `cache/<marketplace>/<plugin>/<version>/`
-on startup. `installed.toml` records the version and the capabilities
-you approved — used by `ainb plugin update` to detect new requests.
+That layout is what `just stage-plugins` produces from in-tree crates, and what the host walks on startup. The `AINB_PLUGIN_ROOT` env var overrides it (defaults to `<workspace-root>/dist/plugins`).
 
-## Commands
+Plugin-writable state lives under `~/.agents-in-a-box/plugins/<name>/` (override with `AINB_HOME`), gated by the `write_plugin_data` capability.
 
-### Marketplaces
+## Status of the install / marketplace flow
 
-A marketplace is a JSON catalog (`marketplace.json`) that lists plugins
-available for install. Catalogs ship inside repositories; you register
-each marketplace once.
+The Phase 4 marketplace + installer surface (`ainb plugin marketplace add | install | update | remove | search`) shipped against the v1 wasm packaging and is currently **stubbed**. Running any of those commands today returns:
+
+> `error: the marketplace + installer flow is being re-cut against the subprocess ABI 2.0 (Phase 7c). Re-run after 7c lands.`
+
+Until that lands, in-tree plugins are the only path. Build + stage:
 
 ```bash
-# Register a marketplace from a public repo (shallow git clone).
-ainb plugin marketplace add https://github.com/stevengonsalvez/agents-in-a-box
-
-# Register from a local directory or file URL (useful for development).
-ainb plugin marketplace add file:///path/to/marketplace.json
-ainb plugin marketplace add ./local-mkt/marketplace.json
-
-# List registered marketplaces.
-ainb plugin marketplace list
-ainb plugin marketplace list --format=json
-
-# Remove a marketplace (does not uninstall plugins already installed
-# from it).
-ainb plugin marketplace remove ainb-plugins
+cargo build --workspace
+just stage-plugins
+./target/debug/ainb tui
 ```
 
-ainb reads the catalog from `<repo>/.ainb-plugin/marketplace.json` —
-or, for compatibility with Claude Code-style plugins,
-`<repo>/.claude-plugin/marketplace.json`. Both work.
+`AINB_DISABLE_PLUGINS=1 ainb tui` boots the host with the runtime disabled — useful when bisecting a plugin-induced regression.
 
-### Search
+## Commands that work today
+
+### `ainb plugin list`
+
+Enumerates plugins the runtime discovered at startup.
 
 ```bash
-# Substring match against plugin names across every registered marketplace.
-ainb plugin search burn
-ainb plugin search burn --format=json
+ainb plugin list
+ainb plugin list --format json
 ```
 
-### Install
+Walks `RuntimeHandle::registered_plugins()` and prints `<id> <binary-path>` per row. JSON form is `{"plugins": [{"id": "...", "binary": "..."}]}`.
+
+### `ainb plugin lint <id-or-path>`
+
+Validates a staged plugin against the v2 contract without spawning it. `arg` is either a plugin id (resolves via `AINB_PLUGIN_ROOT`) or an on-disk path to a staging directory.
 
 ```bash
-# Install latest version found in any registered marketplace.
-ainb plugin install burndown
-
-# Pin to a version.
-ainb plugin install burndown@0.1.0
-
-# Disambiguate when more than one marketplace ships the plugin.
-ainb plugin install ainb-plugins/burndown@0.1.0
-
-# Skip the capability prompt (CI / scripted installs).
-ainb plugin install burndown --yes
+ainb plugin lint burndown
+ainb plugin lint ./dist/plugins/burndown
+ainb plugin lint burndown --format json
 ```
 
-The installer:
+Checks manifest schema, binary presence, codesign status on macOS, and declared-vs-implemented method surface.
 
-1. Resolves the entry through your registered marketplaces.
-2. Fetches `plugin.wasm` (and the `plugin.toml` manifest).
-3. Validates the manifest against the host version requirement.
-4. Prints the requested capabilities and asks you to confirm.
-5. Writes the artifacts under `cache/<mkt>/<plugin>/<version>/`.
-6. Records the install in `installed.toml`.
+### `ainb plugin watch <id> [--duration <secs>]`
 
-### List
+Tracks a plugin's lifecycle transitions in real time. Polls the runtime every 100 ms and prints state changes (`Idle → Spawning → Running → Backoff → Quarantined → ShuttingDown`) with timestamps. Useful for debugging a flaky crash-loop or a manifest the runtime rejects at init.
 
 ```bash
-ainb plugin list                  # human-readable
-ainb plugin list --format=json    # machine-readable
+ainb plugin watch burndown
+ainb plugin watch burndown --duration 30
 ```
 
-### Update
+Default duration is short enough that an unattended `watch` in CI doesn't hang.
+
+### `ainb plugin tail <id> [--level <lvl>] [--since <ts>] [--duration <secs>]`
+
+Streams the plugin's JSONL log entries (its `host.log()` calls plus the captured stderr drain) from `~/.agents-in-a-box/logs/agents-in-a-box-*.jsonl`. Filters on the structured `plugin` field so you only see the target plugin's lines.
 
 ```bash
-ainb plugin update burndown
-ainb plugin update burndown --yes
+ainb plugin tail burndown
+ainb plugin tail burndown --level debug
+ainb plugin tail session-reader --since 2026-05-15T10:00:00Z --duration 60
 ```
 
-`update` re-resolves the latest version through whichever marketplace
-the plugin was originally installed from. If the new version asks for
-**any capability the lockfile doesn't already record as approved**, the
-prompt fires again — even with `--yes` the lockfile still tracks every
-approved capability. The previous version's cache directory is removed
-on a successful update.
-
-### Remove
-
-```bash
-ainb plugin remove burndown
-ainb plugin remove burndown --yes    # also delete data/<plugin>/ without prompting
-```
-
-`remove` drops the cache directory and the lockfile entry. If
-`data/<plugin>/` exists (the plugin's writable storage), ainb confirms
-before deleting — `--yes` skips that confirmation.
+`level` defaults to `debug`. The `since` filter accepts RFC 3339.
 
 ## Capability model
 
-Every plugin declares the host capabilities it needs in `plugin.toml`:
+Every plugin declares the host capabilities it needs in its `manifest.toml`:
 
 ```toml
 [capabilities]
-read_sessions       = true     # ~/.claude/agents-in-a-box/sessions/**
+read_sessions       = true     # ~/.agents-in-a-box/sessions/**
 read_claude_logs    = true     # ~/.claude/projects/**/*.jsonl
-read_codex_logs     = false    # ~/.codex/logs/**/*.jsonl
-write_plugin_data   = true     # data/<plugin>/ writable
-event_bus           = false    # publish/subscribe across plugins
+read_codex_logs     = false    # ~/.codex/sessions/**/*.jsonl
+write_plugin_data   = true     # ~/.agents-in-a-box/plugins/<name>/ writable
+event_bus           = true     # publish/subscribe across plugins
 spawn_subprocess    = false    # exec child processes
-network             = []       # explicit allowlist of host:port
-filesystem          = []       # explicit allowlist of glob patterns
+network             = []       # bool or hostname allow-list
 ```
 
-At install time ainb prints the truthy flags and the network /
-filesystem allowlists, and waits for `y` (or `--yes`). The host will
-trap any host-fn call the plugin makes against a capability you didn't
-approve.
+Default for every flag is **deny** (`false` / `[]`). The runtime rejects host-fn calls against a capability the manifest doesn't grant with JSON-RPC error code `-32001` (`CAPABILITY_DENIED`).
 
-`update` only re-prompts when the new manifest requests something *not
-already* in `capabilities_approved` for that plugin. Removed
-capabilities don't trigger a prompt — they shrink the surface,
-which is always safe.
+When the install flow returns, capability prompts will reappear at install time. Until then, capabilities are read straight from the on-disk manifest at runtime discovery — there is no separate `installed.toml` lockfile in the subprocess world.
+
+See [docs/plugin-spec/v2.md §1](./plugin-spec/v2.md#1-manifest) for full semantics.
 
 ## Configuration
 
 ### Disable plugins
 
-`AINB_DISABLE_PLUGINS=1 ainb tui` boots the host with no plugins
-loaded. Useful for bisecting plugin-induced regressions without having
-to uninstall every plugin. The Analytics screen falls back to a
-"plugin: rendering…" placeholder when its owner plugin isn't loaded.
+```bash
+AINB_DISABLE_PLUGINS=1 ainb tui
+```
 
-### Override the install root
-
-`AINB_HOME=/some/path ainb plugin …` redirects every cache /
-marketplace / lockfile path under `/some/path/plugins/` instead of
-`~/.agents-in-a-box/`. Used by tests and isolated CI environments.
+Boots the host with the plugin runtime disabled — no discovery, no spawn. The Analytics screen falls back to a "plugin: rendering…" placeholder when its owner plugin isn't loaded.
 
 ### Override the plugin search root
 
-`AINB_PLUGIN_ROOT=/path/to/dist/plugins ainb tui` makes the host load
-plugins from a flat `<plugin-id>/plugin.{toml,wasm}` layout. Used by
-`scripts/build-plugins.sh` for development.
+```bash
+AINB_PLUGIN_ROOT=/path/to/dist/plugins ainb tui
+```
 
-## Cold-install verification
+Tells the runtime to discover plugins from this directory instead of the workspace's `dist/plugins/`. Used by `just stage-plugins` for in-tree dev and by tests for isolated CI environments.
 
-Phase 5 sign-off includes a `[CHECKPOINT:human-verify]` step that the
-release manager runs on a fresh dev machine:
+### Override the home directory
 
-1. `git clone https://github.com/stevengonsalvez/agents-in-a-box`
-2. `cd agents-in-a-box/ainb-tui`
-3. `cargo build --workspace --release`
-4. `./target/release/ainb plugin marketplace add ../`
-5. `./target/release/ainb plugin install burndown`
-6. `./target/release/ainb tui`
-7. Press `A` — Analytics renders. Press `Esc` — back to home.
-8. `./target/release/ainb plugin remove burndown` — Analytics screen
-   gone next launch (graceful placeholder).
+```bash
+AINB_HOME=/some/path ainb tui
+```
 
-The automated tripwire (`cargo test --test tripwire`) runs the same
-shape headlessly on every PR.
+Redirects every host-managed path (`logs/`, `plugins/<name>/`, `sessions/`) under `/some/path/` instead of `~/.agents-in-a-box/`.
 
 ## Troubleshooting
 
-* **`marketplace.json failed to parse`** — the catalog isn't valid
-  JSON, or it's missing required fields. Check the schema in
-  [docs/plugin-authoring.md](./plugin-authoring.md#marketplace-schema).
-* **`no marketplaces registered`** — run `ainb plugin marketplace add`
-  first.
-* **`plugin 'X' is offered by multiple marketplaces`** — disambiguate
-  with `<marketplace>/<plugin>` syntax.
-* **`acquire install lock`** failures — another `ainb plugin` process
-  is mid-install. The fs2 advisory lock under
-  `<plugins-root>/.lock` serialises installs so the cache + lockfile
-  never race; re-running once the other process exits resolves the
-  block.
-* **Capability prompt times out** — pipe input or pass `--yes`.
-* **Analytics shows "plugin: rendering…" but never updates** — the
-  burndown plugin failed to load. Run `RUST_LOG=info ainb tui` and
-  look for `failed to load plugin` warnings.
+- **"the marketplace + installer flow is being re-cut against the subprocess ABI 2.0"** — install flow not yet ported. Use in-tree crates + `just stage-plugins` until Phase 7c lands.
+- **`ainb plugin list` returns "(no plugins registered)"** — the runtime found no manifests under `dist/plugins/`. Did you run `just stage-plugins`? Is `AINB_PLUGIN_ROOT` pointing at the right directory?
+- **Plugin exits 137 in <1 ms on macOS, no stderr** — AMFI silent-kill. The binary's codesign got invalidated by a copy. Re-run `just stage-plugins`.
+- **Analytics shows "plugin: rendering…" but never updates** — the burndown plugin crashed or session-reader never published. Run `ainb plugin watch burndown` AND `ainb plugin tail session-reader --level debug` in two terminals to see which one failed.
+- **`schema_mismatch` banner on Analytics** — the publisher and subscriber disagree on `WIRE_VERSION`. Rebuild both plugins from the same checkout (`cargo build --workspace` + `just stage-plugins`).
+- **Keystrokes feel sluggish during burndown refresh** — should be fixed by the priority-key channel landed 2026-05-15 (PR #125). If you see it on a build older than that, rebase onto `feat/plugin`.
+- **Capability errors (`-32001`)** — the plugin asked for a host action its manifest doesn't grant. The host JSONL log entry includes which capability and which method.

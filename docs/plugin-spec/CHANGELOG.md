@@ -1,35 +1,31 @@
 # Plugin contract changelog
 
-Tracks how the plugin contract (`docs/plugin-spec/v1.md`) evolves.
+Tracks how the plugin contract (`docs/plugin-spec/v2.md`) evolves.
 
 ## Versioning policy
 
-* **Adding** a manifest key, host-fn, ABI export, or `PluginEvent`
-  variant stays inside the current version (`v1` while we're in the
-  1.x host series). Plugins that don't use the new addition keep
-  passing `run_contract_v1`.
-* **Renaming** or **removing** any of those is a breaking change. The
-  contract bumps to `v2`; the CTS crate ships a `run_contract_v2` next
-  to `run_contract_v1`. The existing `v1` runner stays supported until
-  the host drops every plugin still pinned to it.
-* The host's `host_version` is the contract version of the host-fn
-  table. Adding a host-fn bumps minor; changing a signature bumps
-  major and refuses plugins declaring an older `ainb_min_version`
-  major.
+- **Adding** a manifest field, JSON-RPC method, capability flag, or wire-type field with `#[serde(default)]` stays inside the current contract version. Existing plugins keep passing `ainb-plugin-cts-v2`.
+- **Renaming**, **removing**, or **changing the signature** of any method or field is a breaking change. The contract bumps (`v2 → v3`); `ainb-plugin-cts-v<n+1>` ships alongside, and the previous CTS stays supported until the host drops every plugin still pinned to the older contract.
+- The runtime's `ABI_VERSION` integer in `crates/ainb-plugin-runtime/src/plugin_task.rs` is the wire-level handshake version stamped on `plugin/init`. Bump only when the contract version bumps.
+- Snapshot wire types (e.g. `ainb-plugin-types-sessions`) carry their own `WIRE_VERSION` constants — those evolve independently from the contract version.
 
-## v1 — 2026-05-08
+## v2 — 2026-05-14
 
-Initial release alongside MVP. Surface area:
+Subprocess plugin contract. Plugins are native executables exchanging JSON-RPC 2.0 over LSP-style Content-Length framed stdio. Replaces the v1 wasm contract entirely.
 
-* Manifest schema (`[plugin]`, `[capabilities]`, `[provides]`).
-* Six required exports (`_init`) + five optional
-  (`_render`, `_tick`, `_handle_event`, `_shutdown`, `_alloc`).
-* Twelve host-fn imports — see §3 of `v1.md` for the table.
-* Resource budgets: 50ms per-call wall time, 64 KiB render/event
-  payloads, 1 MiB `_alloc` request cap.
-* External-tagging only on `PluginEvent` (rmp-serde rejects internally
-  tagged primitive newtypes — locked decision).
+Surface area (full reference in [v2.md](./v2.md)):
 
-Twelve CTS axes shipped (axis 1, 6, 7, 8, 11, 12 in Phase 1.5; axes 2,
-3, 4, 5, 9, 10 in Phase 5b). Burndown plugin is the in-tree dogfood —
-its `tests/conformance.rs` runs the CTS against the live wasm bytes.
+- **Six host → plugin methods**: `plugin/init`, `plugin/shutdown`, `plugin/render`, `plugin/handle_event`, `plugin/handle_key`, `plugin/cli_dispatch`.
+- **Eight plugin → host methods**: `host/snapshot/get`, `host/snapshot/publish`, `host/snapshot/subscribe`, `host/action/invoke`, `host/log`, `host/fs/read_dir`, `host/fs/read_file`, `host/network/fetch`.
+- **Manifest schema**: `[plugin]`, `[capabilities]`, `[provides]`, `[subscribes]`, `[lifecycle]`. ABI version `2`.
+- **Seven capability flags**: `read_sessions`, `write_plugin_data`, `event_bus`, `network` (bool or allow-list), `spawn_subprocess`, `read_claude_logs`, `read_codex_logs`. Default-deny via `#[serde(default)]`.
+- **Lifecycle**: `eager` vs `lazy` spawn, idle-reap, three-strike quarantine.
+- **Resource budgets**: 16 MiB frame body, 8 KiB header block, 5 s shutdown grace.
+- **Chunked publishes**: `WIRE_VERSION` + `chunk_index` + `is_final` ordering contract; subscribers MUST drop follow-on chunks that arrived without chunk 0.
+- **Priority key channel** (2026-05-15): host runtime drains `plugin/handle_key` notifications ahead of `plugin/handle_event` to prevent FIFO starvation during chunked publishes.
+
+`ainb-plugin-cts-v2` ships with 14 conformance axes. In-tree dogfood plugins: `burndown` (analytics screen + `ainb usage` CLI) and `session-reader` (chunked usage_data publisher).
+
+## v1 — historical, removed 2026-05-15
+
+Earlier contract using `wasm32-wasip1` cdylibs + a wasmi host runtime + linker-omitted host-fn imports for capability gating. Replaced by v2 (subprocess) because the wasm sandbox added implementation cost without buying any safety property the OS process boundary doesn't already provide for ainb's threat model. The v1 spec lived at `docs/plugin-spec/v1.md`; no in-tree plugins targeted it long enough to require a deprecation path.
