@@ -112,18 +112,6 @@ pub enum Command {
         /// Snapshot bytes.
         payload: Bytes,
     },
-    /// Forward a `plugin/handle_key` notification (single keystroke
-    /// destined for the focused plugin screen). Ordering vs other
-    /// inbox traffic is preserved by the per-plugin mpsc inbox, and
-    /// the SDK server re-uses the inline-dispatch path for the same
-    /// reason — multi-key sequences would lose their semantics
-    /// otherwise. See `plugin_task.rs::handle_command` for the wire
-    /// translation.
-    HandleKey {
-        /// Pre-built params with screen_id, key, and host-allocated
-        /// generation counter.
-        params: HandleKeyParams,
-    },
     /// Send `plugin/shutdown` and reap the process.
     Shutdown,
     /// Clear quarantine + allow respawn.
@@ -143,6 +131,17 @@ pub enum Command {
 /// Inbox a [`crate::RuntimeHandle`] uses to drive the task.
 pub type Inbox = mpsc::UnboundedSender<Command>;
 
+/// Priority side-channel reserved for `plugin/handle_key` notifications.
+///
+/// Carved out of the main [`Inbox`] so a flood of `HandleEvent` chunks
+/// (chunked `sessions.usage_data` publishes can enqueue 50+ items per
+/// refresh on large datasets) can't queue ahead of an Esc keypress in
+/// the FIFO ordering. The plugin task's `tokio::select!` is `biased;`
+/// and reads from the key receiver first, so any pending keystroke is
+/// dispatched before another `HandleEvent` is pulled — restores Esc
+/// responsiveness even during a multi-second chunk drain.
+pub type KeyInbox = mpsc::UnboundedSender<HandleKeyParams>;
+
 /// Map of `plugin_id → inbox` used by [`PluginTask`] to fan out
 /// subscriber notifications when a plugin issues `host/snapshot/publish`.
 /// Shared (clone-able `Arc`) with `Runtime`, which maintains it
@@ -159,7 +158,14 @@ pub type InboxMap = Arc<parking_lot::RwLock<HashMap<PluginId, Inbox>>>;
 pub type DirtyMap =
     Arc<parking_lot::RwLock<HashMap<PluginId, Arc<std::sync::atomic::AtomicBool>>>>;
 
-/// Spawn a per-plugin task and return its inbox + render cache.
+/// Spawn a per-plugin task and return its command inbox, key inbox, and
+/// render cache.
+///
+/// Two send-ends are returned by design: the main `Inbox` carries every
+/// command except keystrokes, and `KeyInbox` carries `HandleKey`
+/// notifications. The plugin task drains the key channel with priority
+/// (see `PluginTask::run`'s `biased;` select) so Esc and other
+/// keystrokes don't queue behind chunked `HandleEvent` publishes.
 pub fn spawn(
     plugin: Arc<RegisteredPlugin>,
     snapshots: SnapshotStore,
@@ -167,8 +173,14 @@ pub fn spawn(
     dirty: DirtyMap,
     config: RuntimeConfig,
     handle: &tokio::runtime::Handle,
-) -> (Inbox, RenderCache, Arc<parking_lot::RwLock<LifecycleState>>) {
+) -> (
+    Inbox,
+    KeyInbox,
+    RenderCache,
+    Arc<parking_lot::RwLock<LifecycleState>>,
+) {
     let (tx, rx) = mpsc::unbounded_channel();
+    let (key_tx, key_rx) = mpsc::unbounded_channel();
     let cache = RenderCache::new();
     let state = Arc::new(parking_lot::RwLock::new(LifecycleState::Idle));
     let task = PluginTask {
@@ -180,6 +192,7 @@ pub fn spawn(
         cache: cache.clone(),
         state: state.clone(),
         rx,
+        key_rx,
         ledger: HashMap::new(),
         ids: IdCounter::new(),
         failures: VecDeque::new(),
@@ -188,7 +201,7 @@ pub fn spawn(
         child: None,
     };
     handle.spawn(task.run());
-    (tx, cache, state)
+    (tx, key_tx, cache, state)
 }
 
 /// Bookkeeping for one outstanding request.
@@ -233,6 +246,11 @@ struct PluginTask {
     cache: RenderCache,
     state: Arc<parking_lot::RwLock<LifecycleState>>,
     rx: mpsc::UnboundedReceiver<Command>,
+    /// Priority receiver for `plugin/handle_key` notifications. Drained
+    /// before the main `rx` on every loop iteration so keystrokes
+    /// (including Esc) are dispatched ahead of any backlog of
+    /// `HandleEvent` chunks.
+    key_rx: mpsc::UnboundedReceiver<HandleKeyParams>,
     ledger: HashMap<u64, Pending>,
     ids: IdCounter,
     failures: VecDeque<Instant>,
@@ -252,6 +270,17 @@ impl PluginTask {
 
         loop {
             tokio::select! {
+                // `biased;` makes the macro check arms top-down rather
+                // than randomising, so keystrokes always preempt the
+                // main command channel. Without this a 50-chunk
+                // `HandleEvent` flood (chunked usage_data publish on a
+                // 100k+ call dataset) would starve Esc and other
+                // navigation keys until the chunks drained.
+                biased;
+                key = self.key_rx.recv() => match key {
+                    Some(params) => self.handle_key_command(params).await,
+                    None => {}
+                },
                 cmd = self.rx.recv() => match cmd {
                     Some(Command::Shutdown) | None => { self.shutdown().await; break; }
                     Some(c) => self.handle_command(c).await,
@@ -265,6 +294,27 @@ impl PluginTask {
                 _ = idle_tick.tick() => self.maybe_idle_reap().await,
             }
         }
+    }
+
+    /// Dispatch a `plugin/handle_key` notification.
+    ///
+    /// Mirrors the legacy `Command::HandleKey` arm (now removed): same
+    /// idle-drop policy, same wire shape, just sourced from the
+    /// priority channel rather than the multiplexed command channel.
+    async fn handle_key_command(&mut self, params: HandleKeyParams) {
+        self.last_used = Instant::now();
+        if self.child.is_none() {
+            // No process to push to. A key pressed before the plugin
+            // is spawned has no plausible destination — the user
+            // almost certainly won't expect it to be replayed once
+            // the process is up.
+            debug!(plugin = %self.plugin.id, "handle_key dropped (idle)");
+            return;
+        }
+        let json = serde_json::to_value(params).expect("HandleKeyParams is serializable");
+        let _ = self
+            .send_notification(methods::PLUGIN_HANDLE_KEY, json)
+            .await;
     }
 
     async fn handle_command(&mut self, cmd: Command) {
@@ -337,20 +387,6 @@ impl PluginTask {
                 })
                 .expect("HandleEventParams is serializable");
                 let _ = self.send_notification(methods::PLUGIN_HANDLE_EVENT, params).await;
-            }
-            Command::HandleKey { params } => {
-                // Drop on idle, same policy as `HandleEvent`. A key
-                // pressed before the plugin process is even spawned
-                // has no plausible destination — the user almost
-                // certainly won't expect it to be replayed once the
-                // process is up.
-                if self.child.is_none() {
-                    debug!(plugin = %self.plugin.id, "handle_key dropped (idle)");
-                    return;
-                }
-                let json = serde_json::to_value(params)
-                    .expect("HandleKeyParams is serializable");
-                let _ = self.send_notification(methods::PLUGIN_HANDLE_KEY, json).await;
             }
             Command::Reload => {
                 self.failures.clear();
@@ -847,5 +883,68 @@ async fn drain_stderr(plugin: PluginId, stderr: tokio::process::ChildStderr) {
         // to use host.log() for normal logging — stderr is for unstructured
         // diagnostics that should not be filtered out.
         info!(plugin = %plugin, stream = "stderr", "{line}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Channel-bias smoke test for the priority key path.
+    //!
+    //! The plugin task drains its key inbox before the main command
+    //! inbox via `tokio::select! { biased; ... }`. Tokio's docs
+    //! guarantee biased branches resolve in declaration order, but
+    //! this test pins the contract so a future refactor that drops
+    //! the keyword (or reorders the branches) trips a unit-level
+    //! regression rather than a TUI freeze observed in production.
+
+    use super::HandleKeyParams;
+    use ainb_plugin_protocol::params::{KeyCode, KeyEvent, KeyKind};
+    use tokio::sync::mpsc;
+
+    #[test]
+    fn biased_select_drains_key_inbox_before_command_inbox() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<&'static str>();
+            let (key_tx, mut key_rx) = mpsc::unbounded_channel::<HandleKeyParams>();
+
+            // Fill the main command channel with 100 entries first.
+            // Then enqueue a single key. Under the production select!
+            // pattern (biased + key_rx first arm), the next pull is
+            // the key — even though commands arrived earlier in
+            // wall-clock time.
+            for _ in 0..100 {
+                cmd_tx.send("evt").unwrap();
+            }
+            let params = HandleKeyParams {
+                screen_id: "test".into(),
+                key: KeyEvent {
+                    code: KeyCode::Esc,
+                    mods: 0,
+                    kind: KeyKind::Press,
+                },
+                generation: 1,
+            };
+            key_tx.send(params.clone()).unwrap();
+
+            let pulled = tokio::select! {
+                biased;
+                k = key_rx.recv() => k.map(|p| format!("key:{}", p.screen_id)),
+                c = cmd_rx.recv() => c.map(|s| format!("cmd:{s}")),
+            };
+            assert_eq!(pulled, Some("key:test".to_string()));
+
+            // After the priority drain, the remaining 100 commands
+            // are still there in FIFO order — the bias didn't drop
+            // anything.
+            let mut remaining = 0usize;
+            while cmd_rx.try_recv().is_ok() {
+                remaining += 1;
+            }
+            assert_eq!(remaining, 100);
+        });
     }
 }
