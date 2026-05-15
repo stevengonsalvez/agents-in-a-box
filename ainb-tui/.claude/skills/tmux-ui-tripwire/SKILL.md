@@ -114,11 +114,10 @@ A refactor that breaks one shouldn't silently pass the other. If you add a new s
 | Why does my plugin exit 137 with no stderr? | `references/amfi.md` |
 | How do I seed synthetic Claude data for `$N.NN` assertions? | `references/seed-data.md` |
 | Full gotcha checklist (10 silent traps) | `references/gotchas.md` |
-| Existing tripwires to copy patterns from | `references/existing-tests.md` |
+| Existing tripwires to copy patterns from | `ls crates/ainb-core/tests/tripwire_*.rs` — each test is self-documenting via its filename + comments |
 
-## Source files (current state, May 2026)
+## Source files
 
-- `crates/ainb-core/tests/tripwire_real_data_in_tui.rs` — plugin-path tripwire (canonical example)
-- `crates/ainb-core/tests/tripwire_sessions_screen.rs` — non-plugin-path tripwire
+- `crates/ainb-core/tests/tripwire_*.rs` — every tripwire on disk; read them directly, no manifest to keep in sync
 - `scripts/build-plugins.sh` — `just stage-plugins` implementation (codesign re-sign on macOS)
 - `crates/ainb-core/src/main.rs` `setup_logging()` — default `EnvFilter` widened to include plugin crates
