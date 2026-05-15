@@ -1,10 +1,11 @@
-# vhs tape: capture the ainb home screen.
+# vhs tape: capture the ainb home screen against REAL $HOME.
 #
 # Run from the ainb-tui/ workspace root:
 #   vhs ../docs/assets/screenshots/home.tape
 #
-# Headless renderer — no real terminal needed. Drives the binary in
-# its own pty, snapshots to PNG. Re-run after UX changes to refresh.
+# Uses the contributor's real ~/.agents-in-a-box so the workspaces
+# list, recent sessions, etc. reflect actual state. Plugins disabled
+# for this shot — the burndown tape covers the plugin-enabled path.
 
 Output ../docs/assets/screenshots/home.png
 
@@ -15,23 +16,17 @@ Set Height 900
 Set Padding 20
 Set Shell bash
 
-# Disable plugins for the home shot — plugin discovery + spawn adds
-# noise to the "what does ainb look like cold" picture. The burndown
-# tape captures the plugin path separately.
 Env AINB_DISABLE_PLUGINS "1"
-Env AINB_SCREENSHOT_HOME "/tmp/ainb-screenshot-home"
 
-# seed-and-run.sh writes an onboarding-complete marker (so the wizard
-# doesn't take over the screen) + a synthetic Claude session, then
-# execs ainb tui with HOME pointed at the isolated dir.
-Type "../docs/assets/screenshots/seed-and-run.sh"
+Type "exec ./target/debug/ainb tui"
 Enter
 
-# Let the home screen settle: workspace scan, auth probe, first paint.
-Sleep 4s
+# Real $HOME — workspace scan over ~/.agents-in-a-box (repos/, sessions.json,
+# auth probe) takes ~30-60s cold against a populated contributor home.
+# Confirmed by live tmux capture: TUI didn't paint until ~t+30s. Give margin.
+Sleep 75s
 
 Screenshot ../docs/assets/screenshots/home.png
 
-# Quit cleanly so vhs releases the recording.
 Ctrl+c
 Sleep 200ms
