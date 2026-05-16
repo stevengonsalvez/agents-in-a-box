@@ -73,6 +73,28 @@ _bar() {
   printf "${col}[${bar}] ${pct}%%${RESET}"
 }
 
+# ── Reflect error indicator ───────────────────────────────────────────────────
+# Reads ~/.reflect/errors.json via `python -m reflect_kb.errors count`.
+# Output: empty when 0, "⚠N" in red when >0. Cached 10s.
+_reflect_errors() {
+  local cached_val cached_age
+  cached_val=$(_cache_get reflect_err)
+  cached_age=$(_cache_age)
+  if [[ -n "$cached_val" ]] && [[ "$cached_age" -lt "$CACHE_TTL" ]]; then
+    printf '%s' "$cached_val"
+    return
+  fi
+  local count
+  count=$(timeout 0.4 python3 -m reflect_kb.errors count 2>/dev/null || echo 0)
+  count=${count:-0}
+  local out=""
+  if [[ "$count" =~ ^[0-9]+$ ]] && [[ "$count" -gt 0 ]]; then
+    out=$(printf "${FG_RED}${BOLD}⚠%s${RESET}" "$count")
+  fi
+  _cache_set reflect_err "$out"
+  printf '%s' "$out"
+}
+
 # ── Read JSON from stdin once ─────────────────────────────────────────────────
 INPUT=$(cat)
 _jq() { printf '%s' "$INPUT" | jq -r "${1} // empty" 2>/dev/null; }
@@ -433,6 +455,19 @@ if [[ -n "$GIT_BRANCH" ]]; then
     L1+=$(_seg "$C_CYAN" "$C_BLACK" "$git_text" "$prev")
     prev="$C_CYAN"
   fi
+fi
+
+# Reflect error badge (red, only when unacked errors exist) — cached 10s
+if (( CACHE_AGE < CACHE_TTL )); then
+  REFLECT_ERR_COUNT=$(_cache_get "reflect_err_count")
+else
+  REFLECT_ERR_COUNT=$(timeout 0.4 python3 -m reflect_kb.errors count 2>/dev/null || echo 0)
+  _cache_set "reflect_err_count" "${REFLECT_ERR_COUNT:-0}"
+fi
+REFLECT_ERR_COUNT=${REFLECT_ERR_COUNT:-0}
+if [[ "$REFLECT_ERR_COUNT" =~ ^[0-9]+$ ]] && (( REFLECT_ERR_COUNT > 0 )); then
+  L1+=$(_seg "$C_RED" "$C_WHITE" "⚠${REFLECT_ERR_COUNT}" "$prev")
+  prev="$C_RED"
 fi
 
 # Beads (pink)
