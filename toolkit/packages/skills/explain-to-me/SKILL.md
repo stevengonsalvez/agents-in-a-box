@@ -151,7 +151,8 @@ sketch-like to read at a glance.
 
 1. **Copy** the chosen template to `./explainers/<slug>.html` (create
    `./explainers/` if missing). `<slug>` is hyphen-case of the topic
-   and becomes the publish slug too.
+   and identifies the *local file only*. The here.now URL is
+   server-assigned (see §5) — they do not match.
 2. **Update** the `<title>`, the `.eyebrow` text, and the `h1`.
 3. **Replace** placeholder content (acme/*, ADR-0023, PR #247, "rate
    limiting" strings, sample names) with the user's real topic.
@@ -171,15 +172,33 @@ sketch-like to read at a glance.
 ### 5. Publish to here.now (default)
 
 Unless the user passed `--local`, publish the file via the `/here-now`
-skill. The slug is the topic's hyphen-case form (the same `<slug>`
-used in the filename). If the slug is taken, append a short hash.
+skill (`~/.claude/skills/here-now/scripts/publish.sh`).
+
+**Critical: you do not get to choose the URL on a first publish.**
+The `publish.sh --slug <slug>` flag means *"update an existing publish
+at this slug"*, not *"create a new publish with this URL"*. If you
+pass `--slug` on a first publish, the server returns `Not found`
+because there's nothing at that slug to update yet. Server-assigned
+three-word slugs (e.g. `woody-mortar-9dmd`) are the only path for new
+publishes via this CLI.
 
 Procedure:
 
-1. Invoke `/here-now` with the path to `./explainers/<slug>.html` and
-   the desired slug.
-2. Capture the returned URL (typically `https://<slug>.here.now`).
-3. If `/here-now` is unavailable in the current environment, fall
+1. Invoke `publish.sh` with the file path and **no `--slug` flag**:
+   ```
+   bash ~/.claude/skills/here-now/scripts/publish.sh \
+     ./explainers/<slug>.html \
+     --title "<page title>" \
+     --description "<one-line summary>" \
+     --client claude-code
+   ```
+2. Capture the returned URL (a server-assigned three-word subdomain).
+3. If the user explicitly asks for a custom-URL publish, do the
+   sequence: publish first to get the auto-slug + claim token, then
+   re-invoke `publish.sh --slug <new-slug> --claim-token <token>` to
+   rename. Most users don't care; don't volunteer this dance unless
+   asked.
+4. If `/here-now` is unavailable in the current environment, fall
    back to local-only mode and surface the path. Tell Stevie what
    happened — don't pretend you published.
 
@@ -190,8 +209,13 @@ Report to Stevie in this exact shape:
 > **Explainer ready.**
 > - Template: `21-adr.html` — *why this one*
 > - Local: `./explainers/<slug>.html`
-> - Live: `https://<slug>.here.now`  *(or "skipped, --local")*
+> - Live: `https://<server-slug>.here.now`  *(or "skipped, --local")*
 > - Diagrams: from /fireworks-tech-graph  *(omit line if none)*
+
+If the returned URL is a three-word auto-slug (e.g.
+`woody-mortar-9dmd.here.now`) and the topic would benefit from a
+memorable URL, mention that a re-publish with `--slug` + claim token
+can rename it — but don't do it automatically.
 
 ## Customisation rules
 
@@ -222,6 +246,12 @@ Report to Stevie in this exact shape:
 - **Skipping the publish step** silently. → If `/here-now` fails, say
   so explicitly. Don't return only a local path when Stevie expected
   a URL.
+- **Passing `--slug` on a first publish.** That flag means *update an
+  existing publish at this slug*, not *choose a URL*. The server
+  returns `Not found` and the agent often misreads it as a real
+  failure. → Omit `--slug` on first publish; let the server assign a
+  three-word slug. Only use `--slug` together with `--claim-token`
+  for a deliberate rename.
 - **Hand-drawing a complex SVG architecture diagram** when
   `/fireworks-tech-graph` could produce a cleaner one. → Delegate.
 - **Putting the output inside the toolkit repo.** Always write to the
@@ -229,8 +259,10 @@ Report to Stevie in this exact shape:
 
 ## Output location
 
-- Default: `./explainers/<slug>.html` relative to the user's cwd,
-  then published to `https://<slug>.here.now`.
+- Default: `./explainers/<slug>.html` relative to the user's cwd
+  (where `<slug>` is the local file slug). Published to a
+  server-assigned URL `https://<three-word-slug>.here.now/` — not
+  derived from the local filename.
 - `--local`: skip the publish; just leave the file at the path above.
 - If `./explainers/` is awkward (e.g. the cwd is read-only), put the
   file in `$CLAUDE_JOB_DIR` (or `/tmp`) and tell the user the
