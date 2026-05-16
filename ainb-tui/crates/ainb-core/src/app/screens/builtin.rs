@@ -139,17 +139,27 @@ pub fn crossterm_to_protocol_key(
 /// - `?` / `H` → help toggle (already short-circuited above
 ///   `handle_key_event`'s plugin branch, but listed here for parity in
 ///   the `PluginScreen` trait impl path).
+/// - `Esc` → pop screen / return to home. The plugin/handle_key wire
+///   method is a one-way notification (no `consumed` reply), so once
+///   the host forwards a keystroke it has no way to know whether the
+///   plugin had any state to consume it. The user-visible failure is
+///   Esc-from-burndown silently disappearing into the plugin even when
+///   there's no filter chip or zoom to pop. Until the wire protocol is
+///   extended with a `consumed: bool` result for `plugin/handle_key`,
+///   Esc belongs to the host. Plugins re-bind internal pop semantics
+///   to `Backspace` (see burndown's `KeyCode::Backspace` handler).
 ///
-/// `Esc`, `q`, `a`, `Tab`, `Enter`, etc. are NOT reserved — the
-/// burndown plugin re-binds them to period switches, filter pops,
-/// panel focus, and zoom toggles. Letting the host swallow them would
-/// make the screen uninteractive.
+/// `q`, `a`, `Tab`, `Enter`, etc. remain plugin-owned — the burndown
+/// plugin re-binds them to period switches, panel focus, and zoom
+/// toggles. Letting the host swallow them would make the screen
+/// uninteractive.
 #[must_use]
 pub fn is_host_reserved_key(key: &crossterm::event::KeyEvent) -> bool {
     use crossterm::event::{KeyCode as CtKey, KeyModifiers as CtMods};
     match key.code {
         CtKey::Char('c') if key.modifiers.contains(CtMods::CONTROL) => true,
         CtKey::Char('?' | 'H') => true,
+        CtKey::Esc => true,
         _ => false,
     }
 }
@@ -695,11 +705,15 @@ mod tests {
         assert!(is_host_reserved_key(&mk(CtKey::Char('c'), KeyModifiers::CONTROL)));
         assert!(is_host_reserved_key(&mk(CtKey::Char('?'), KeyModifiers::NONE)));
         assert!(is_host_reserved_key(&mk(CtKey::Char('H'), KeyModifiers::NONE)));
+        // Esc is reserved: it must always bubble to the host so the
+        // screen pops back to home — see the doc on
+        // `is_host_reserved_key`. Plugins use `Backspace` for pop-state
+        // semantics instead.
+        assert!(is_host_reserved_key(&mk(CtKey::Esc, KeyModifiers::NONE)));
 
         // NOT reserved — these belong to the plugin on the analytics
         // screen (period switches, focus, filters, zoom).
         for k in [
-            CtKey::Esc,
             CtKey::Char('q'),
             CtKey::Char('a'),
             CtKey::Char('1'),

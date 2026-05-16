@@ -361,10 +361,13 @@ fn burndown_interactive_keys_change_render() {
     // state for downstream assertions.
     let _ = send_key_and_settle(&session, "z");
 
-    // Esc must be safe when no filter chip is set — a no-op rather
-    // than crashing the plugin. We don't assert a delta; we assert
-    // the burndown screen is still rendered after Esc.
-    let cap_post_esc = send_key_and_settle(&session, "Escape");
+    // Backspace must be safe when no filter chip is set — a no-op
+    // rather than crashing the plugin. We don't assert a delta; we
+    // assert the burndown screen is still rendered after Backspace.
+    // (`Esc` is host-reserved — see `is_host_reserved_key` — so the
+    // navigation-back tripwire lives in its own test file
+    // `tripwire_burndown_esc_returns_home.rs`.)
+    let cap_post_backspace = send_key_and_settle(&session, "BSpace");
 
     kill_session(&session);
 
@@ -427,10 +430,10 @@ fn burndown_interactive_keys_change_render() {
          toggle_zoom never reached the plugin"
     );
 
-    // === Esc safety ===
+    // === Backspace safety ===
     assert!(
-        cap_post_esc.contains("Usage Analytics")
-            && !cap_post_esc.contains("Waiting for session-reader plugin"),
-        "Esc with no active filter broke the burndown render:\n---\n{cap_post_esc}\n---"
+        cap_post_backspace.contains("Usage Analytics")
+            && !cap_post_backspace.contains("Waiting for session-reader plugin"),
+        "Backspace with no active filter broke the burndown render:\n---\n{cap_post_backspace}\n---"
     );
 }

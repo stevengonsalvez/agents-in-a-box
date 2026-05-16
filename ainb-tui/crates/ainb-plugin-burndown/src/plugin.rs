@@ -187,7 +187,10 @@ impl Plugin for BurndownPlugin {
     /// were renamed during implementation to match what actually
     /// exists in `ui.rs`:
     ///
-    /// - `Esc` → `pop_filter_chip` (plan: `pop_filter`).
+    /// - `Backspace` → `pop_filter_chip` / `zoom_handle_esc` (plan:
+    ///   `pop_filter`; originally bound to `Esc` but the host now
+    ///   reserves `Esc` for navigation back to home — see
+    ///   `is_host_reserved_key` in ainb-core).
     /// - `C`   → `clear_all_filter_chips` (plan: `clear_filters`).
     /// - `d` when zoomed → `toggle_zoom_detail` (plan: `zoom_toggle_detail`).
     ///
@@ -824,7 +827,12 @@ impl BurndownPlugin {
                 let _ = self.ui.commit_focused_row_exclude();
             }
             KeyCode::Char { ch: 'C' } => self.ui.clear_all_filter_chips(),
-            KeyCode::Esc => {
+            // `Backspace` (not `Esc`) handles pop-state: close zoom if
+            // open, otherwise pop the most recent filter chip. Esc is
+            // host-reserved — it always bubbles up to navigate back to
+            // home. See the doc on `is_host_reserved_key` in
+            // ainb-core/src/app/screens/builtin.rs for the rationale.
+            KeyCode::Backspace => {
                 if self.ui.is_zoomed() {
                     let _ = self.ui.zoom_handle_esc();
                 } else {
@@ -943,18 +951,30 @@ mod handle_key_dispatch_tests {
     }
 
     #[test]
-    fn esc_pops_filter_when_not_zoomed_and_unzooms_when_zoomed() {
+    fn backspace_pops_filter_when_not_zoomed_and_unzooms_when_zoomed() {
         let mut p = BurndownPlugin::default();
-        // Not zoomed: Esc claims the key (no-op against an empty
+        // Not zoomed: Backspace claims the key (no-op against an empty
         // filter stack, but still bumps generation).
-        assert!(p.dispatch_key_pure(&KeyCode::Esc));
+        assert!(p.dispatch_key_pure(&KeyCode::Backspace));
 
-        // Zoomed: Esc should also claim, and un-zoom.
+        // Zoomed: Backspace should also claim, and un-zoom.
         let _ = p.dispatch_key_pure(&KeyCode::Tab);
         assert!(p.dispatch_key_pure(&ch('z')));
         assert!(p.ui.is_zoomed());
-        assert!(p.dispatch_key_pure(&KeyCode::Esc));
-        assert!(!p.ui.is_zoomed(), "Esc must exit zoom");
+        assert!(p.dispatch_key_pure(&KeyCode::Backspace));
+        assert!(!p.ui.is_zoomed(), "Backspace must exit zoom");
+    }
+
+    #[test]
+    fn esc_is_not_claimed_by_plugin() {
+        // Esc is host-reserved (see `is_host_reserved_key` in
+        // ainb-core/src/app/screens/builtin.rs) so the runtime should
+        // never forward it. Defensively assert dispatch returns false
+        // even if it does — the plugin must NOT claim Esc, otherwise
+        // pressing it on the analytics screen would swallow the
+        // navigation-back keystroke.
+        let mut p = BurndownPlugin::default();
+        assert!(!p.dispatch_key_pure(&KeyCode::Esc));
     }
 
     #[test]
