@@ -407,5 +407,25 @@ main() {
     log "──── drain end ────"
 }
 
+# Surface missing reflect CLI at SessionStart, not just on first drain failure.
+# Drain still runs (enqueue/dequeue logging works without reflect-kb), but
+# recall stays empty until reflect-kb is installed.
+if [[ "${REFLECT_QUIET_INSTALL_WARNING:-0}" != "1" ]]; then
+    if ! command -v reflect >/dev/null 2>&1 && [[ ! -x "${HOME}/.local/bin/reflect" ]]; then
+        cat >&2 <<'EOF'
+[reflect-kb] CLI not found on PATH.
+
+  Learnings will be queued and child sessions can write .md/.entities.yaml
+  files, but `reflect reindex` and `reflect search` will not work — recall
+  will be empty.
+
+  Install:
+    uv tool install --upgrade 'git+https://github.com/stevengonsalvez/reflect-kb.git[graph]'
+
+  Set REFLECT_QUIET_INSTALL_WARNING=1 to suppress this message.
+EOF
+    fi
+fi
+
 main "$@" || true
 exit 0
