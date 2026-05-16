@@ -79,16 +79,17 @@ pub fn init_plugin_runtime() -> Result<(Runtime, RuntimeHandle, LoadOutcome), Ru
     Ok((runtime, handle, outcome))
 }
 
-/// Resolved per-plugin filter. Encodes the four states the plugin
+/// Resolved per-plugin filter. Encodes the three states the plugin
 /// admission decision can land in after merging env vars + config.toml.
 ///
 /// **Precedence** (most specific wins):
-/// 1. `AINB_DISABLE_PLUGINS=1` → [`AllOff`](PluginFilter::AllOff) — handled
-///    upstream in [`init_plugin_runtime`], never reaches this enum.
-/// 2. `AINB_ONLY_PLUGINS=a,b` → [`Allow`](PluginFilter::Allow) — env allowlist
-///    overrides config entirely.
-/// 3. `AINB_DISABLE_PLUGIN=a,b` → [`Deny`](PluginFilter::Deny) — env denylist
-///    when no env allowlist is set.
+/// 1. `AINB_DISABLE_PLUGINS=1` → discovery skipped entirely. Handled
+///    upstream in [`init_plugin_runtime`] before this enum is built,
+///    so it never appears as a `PluginFilter` variant.
+/// 2. `AINB_ONLY_PLUGINS=a,b` → [`Allow`](PluginFilter::Allow) — env
+///    allowlist overrides config entirely.
+/// 3. `AINB_DISABLE_PLUGIN=a,b` → [`Deny`](PluginFilter::Deny) — env
+///    denylist when no env allowlist is set.
 /// 4. `config.toml [plugins].enabled = [...]` → [`Allow`](PluginFilter::Allow)
 ///    when env didn't decide.
 /// 5. `config.toml [plugins].disabled = [...]` → [`Deny`](PluginFilter::Deny)
@@ -151,10 +152,22 @@ impl PluginFilter {
 fn resolve_plugin_filter_from_env_and_config() -> PluginFilter {
     let env_only = std::env::var("AINB_ONLY_PLUGINS").ok();
     let env_disable = std::env::var("AINB_DISABLE_PLUGIN").ok();
-    let cfg = crate::config::AppConfig::load()
-        .ok()
-        .map(|c| c.plugins)
-        .unwrap_or_default();
+    // Load config.toml; surface load failures so a corrupt config
+    // doesn't silently disable the user's plugin filter intent. Falling
+    // back to `Default` is still the right behaviour — booting plugin-
+    // free isn't what the user wanted — but the warn line gives them a
+    // breadcrumb in `~/.agents-in-a-box/logs/`.
+    let cfg = match crate::config::AppConfig::load() {
+        Ok(c) => c.plugins,
+        Err(e) => {
+            warn!(
+                error = %e,
+                "config.toml failed to load — falling back to default plugin filter (all plugins enabled). \
+                 [plugins].enabled / .disabled will not apply this session."
+            );
+            PluginsConfig::default()
+        }
+    };
     resolve_plugin_filter(env_only.as_deref(), env_disable.as_deref(), &cfg)
 }
 
