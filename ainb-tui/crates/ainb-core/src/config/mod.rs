@@ -242,6 +242,40 @@ pub struct AppConfig {
     /// Usage analytics configuration.
     #[serde(default)]
     pub usage: UsageConfig,
+
+    /// Plugin enable/disable lists. See [`PluginsConfig`].
+    #[serde(default)]
+    pub plugins: PluginsConfig,
+}
+
+/// Per-plugin filter persisted in `config.toml`.
+///
+/// Either list is empty by default — meaning "no filter from config".
+/// Env vars (`AINB_DISABLE_PLUGINS`, `AINB_DISABLE_PLUGIN`,
+/// `AINB_ONLY_PLUGINS`) override these at runtime; see
+/// `crates/ainb-core/src/plugins.rs::resolve_plugin_filter` for the
+/// precedence ladder.
+///
+/// Example `config.toml`:
+/// ```toml
+/// [plugins]
+/// disabled = ["burndown"]              # everything except burndown loads
+///
+/// # OR — allowlist (denylist becomes a no-op when `enabled` is non-empty):
+/// [plugins]
+/// enabled = ["session-reader"]         # only session-reader loads
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct PluginsConfig {
+    /// Allowlist — when non-empty, ONLY plugins whose `id` appears here
+    /// are loaded. Takes precedence over `disabled` when both are set.
+    #[serde(default)]
+    pub enabled: Vec<String>,
+
+    /// Denylist — plugins whose `id` appears here are skipped during
+    /// discovery. Ignored entirely when `enabled` is non-empty.
+    #[serde(default)]
+    pub disabled: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -710,6 +744,7 @@ impl Default for AppConfig {
             ui_preferences: UiPreferences::default(),
             docker: DockerConfig::default(),
             usage: UsageConfig::default(),
+            plugins: PluginsConfig::default(),
         };
 
         // Load built-in templates
