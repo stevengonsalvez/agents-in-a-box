@@ -63,6 +63,121 @@ flowchart TD
 
 ---
 
+## Mental model — who writes what, when?
+
+The single most common source of confusion is conflating the three different writers that feed the knowledge base. They run on different triggers, write to different paths, and only `/reflect:ingest` is what stitches everything together. Anchor on this picture before reading further:
+
+```
+   ┌─────────────────────────────────────────────────────────────────┐
+   │  WRITER A — Built-in auto-memory tool                           │
+   │            (runs SILENTLY whenever the agent decides to remember)│
+   │                                                                 │
+   │  Trigger: agent's internal heuristic during the conversation    │
+   │  Writes:  ~/.claude/projects/<hash>/memory/feedback_*.md        │
+   │           ~/.claude/projects/<hash>/memory/project_*.md         │
+   │           ~/.claude/projects/<hash>/memory/user_*.md            │
+   │           ~/.claude/projects/<hash>/memory/reference_*.md       │
+   │           ~/.claude/projects/<hash>/memory/MEMORY.md  (index)   │
+   │                                                                 │
+   │  Indexed? NO. Just raw files on disk. Not in any KB yet.        │
+   │  Equivalent on other tools:                                     │
+   │    Codex:   ~/.codex/memories/*.md                              │
+   │    Copilot: ~/.copilot/AGENTS.md                                │
+   │    Gemini:  ~/.gemini/GEMINI.md                                 │
+   └─────────────────────────────────────────────────────────────────┘
+                              │
+                              │ time passes — file backlog accumulates
+                              │
+   ┌──────────────────────────┴───────┬─────────────────────────────┐
+   │                                  │                             │
+   ▼                                  ▼                             ▼
+┌──────────────────────────┐  ┌─────────────────────────┐  ┌─────────────────────┐
+│ WRITER B — /reflect      │  │ WRITER B' — auto-drain  │  │ HARVESTER —         │
+│ (you invoke manually)    │  │ (PreCompact → drain →   │  │ /reflect:ingest     │
+│                          │  │  claude -p /reflect)    │  │ (you invoke         │
+│ Source: current convo    │  │                         │  │  periodically)      │
+│ transcript               │  │ Same /reflect skill,    │  │                     │
+│                          │  │ but run inside a child  │  │ Source: ALL         │
+│ Writes:                  │  │ session by the drain    │  │ Writer-A files      │
+│ • docs/solutions/<cat>/  │  │ script, on the queued   │  │ across all tools    │
+│   <name>.md              │  │ transcript.             │  │                     │
+│ • .entities.yaml sidecar │  │                         │  │ Writes:             │
+│ • ~/.reflect/episodes/   │  │ Writes the SAME outputs │  │ • ~/.learnings/     │
+│   ep-<id>.md             │  │ as Writer B.            │  │   documents/<id>.md │
+│                          │  │                         │  │ • .entities.yaml    │
+│ Indexes:                 │  │                         │  │ • archived copy in  │
+│ reflect add --entities → │  │                         │  │   memories/<proj>/  │
+│ ~/.learnings/documents/  │  │                         │  │                     │
+│ + graph + vectors        │  │                         │  │ Indexes: same       │
+└──────────────────────────┘  └─────────────────────────┘  └─────────────────────┘
+                                                                     │
+   ┌─────────────────────────────────────────────────────────────────┘
+   │
+   ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│  ~/.learnings/  (the UNIFIED KB — every writer above feeds here)    │
+│  + ~/.learnings/nano_graphrag_cache/   ← graph                      │
+│  + ~/.cache/qmd/index.sqlite           ← vectors                    │
+└────────────────────────────────┬────────────────────────────────────┘
+                                 │
+                                 ▼
+                       /recall "<anything>"
+```
+
+### What ingest processes — per tool
+
+| Tool | Where it stores memory | What ingest picks up |
+|---|---|---|
+| **Claude** | `~/.claude/projects/<project-hash>/memory/` | Every `*.md` under that dir — the `MEMORY.md` index AND the atomic per-fact files |
+| **Codex** | `~/.codex/memories/` + `~/.codex/AGENTS.md` | Every `.md` in `memories/`; the global `AGENTS.md` |
+| **Copilot** | `~/.copilot/AGENTS.md` (single file) | The global `AGENTS.md` |
+| **Gemini** | `~/.gemini/GEMINI.md` + `<repo>/GEMINI.md` | Global file + per-project files |
+| **(any)** | `<repo>/AGENTS.md` | Per-project `AGENTS.md` files (codex/copilot share this format) |
+| **(any)** | `<repo>/.agents/MEMORY.md` | Project-consolidated memory (from `/reflect:consolidate`) |
+| **Episodes** | `~/.reflect/episodes/ep-*.md` | Session episode notes (drain output) |
+| **Solutions** | `<repo>/docs/solutions/**/*.md` | Knowledge notes that don't have entity sidecars yet |
+| **Skills** | `~/.claude/skills/*/references/*.md` | Learnings embedded in skill packages |
+
+All of these flow through ONE pipeline and land in ONE place: `~/.learnings/documents/`.
+
+### The simple mental model
+
+| Action | What it does |
+|---|---|
+| You type something the agent finds important | Writer A creates a `feedback_*.md` in your project's memory dir. Silent. Always. |
+| You explicitly run `/reflect` | Writer B reads the *current conversation*, writes a knowledge note in `docs/solutions/<cat>/` + indexes it. One transcript at a time. |
+| PreCompact fires (auto) | Drain queues the transcript → child session runs `/reflect` (Writer B') on it. Same outputs. Background. |
+| You explicitly run `/reflect:ingest` | Harvester reads everything Writer A ever made + similar across other tools, batch-indexes them all. Periodic. |
+| You run `/recall` | Searches the unified KB built by all of the above. |
+
+### Worked example — one fact, full trip
+
+Take a fact: *"Fleet governance must be enforced as deterministic hooks, not standing-orders prose."*
+
+**Step 1 — Writer A captures it.** While you're correcting the agent in a conversation, Claude Code's built-in memory tool decides this is worth remembering and silently writes:
+
+```bash
+~/.claude/projects/-Users-stevengonsalvez-...-shotclubhouse/memory/feedback_governance_in_code_not_prompts.md
+```
+
+with frontmatter and body. Nothing else happens. **Not in the KB yet.**
+
+**Step 2 — `/reflect:ingest` picks it up (you, batch, periodic).** The harvester:
+
+1. Discovers the file via the Claude provider's memory-pattern glob.
+2. Computes a content hash, checks `~/.learnings/.memory-ingest-log.yaml` — if hash is new, proceeds.
+3. Archives a raw copy: `~/.learnings/documents/memories/shotclubhouse/feedback_governance_in_code_not_prompts.md`.
+4. Generates a structured learning doc at `~/.learnings/documents/lrn-governance-in-code-not-prompts-<hash6>.md` (title, key_insight, tags, provenance frontmatter; Problem/Solution/Context body).
+5. Generates an entity sidecar `.entities.yaml` alongside (9 entities, 6 relationships in this case).
+6. Calls `reflect add --entities` → graph cache + QMD vector store updated.
+7. Appends to the ingest log so future runs skip this file.
+
+**Step 3 — `/recall` retrieves it.** When you search `"governance in code not prompts"`, hybrid graph + vector ranking surfaces the learning at the top with the correct title, key_insight, tags, and source path.
+
+The fact has now travelled from a free-form correction in chat → an auto-memory file on disk → a structured learning + entities sidecar → graph + vector index → recall hit. Every step is local; nothing leaves the machine.
+
+---
+
 ## Sub-skills
 
 | Skill | What it does |
