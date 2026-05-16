@@ -9700,6 +9700,16 @@ impl App {
         }
     }
 
+    /// Move the plugin runtime out so the caller can call
+    /// [`ainb_plugin_runtime::Runtime::shutdown`] from a non-async
+    /// context. Without this, dropping `App` inside `#[tokio::main]`
+    /// trips the tokio "Cannot drop a runtime in a context where
+    /// blocking is not allowed" panic on every clean exit. See the
+    /// `Runtime::shutdown` doc for the wider picture.
+    pub fn take_plugin_runtime(&mut self) -> Option<ainb_plugin_runtime::Runtime> {
+        self.plugin_runtime_owner.take()
+    }
+
     /// Drain any freshly-painted plugin frames into
     /// `state.pending_plugin_renders` so the next `terminal.draw` paints
     /// the latest buffer per plugin-owned screen.
