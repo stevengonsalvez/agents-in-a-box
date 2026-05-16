@@ -596,8 +596,8 @@ tools via `toolkit/bootstrap.js`:
 │  (canonical source)                                              │
 │                                                                  │
 │  ├── reflect/          ├── research/       ├── prime/            │
-│  ├── instincts/        ├── global-learnings/                     │
-│  └── compound-docs/                                              │
+│  ├── instincts/        └── compound-docs/                        │
+│                                                                  │
 └─────────────────┬────────────────────────────────────────────────┘
                   │
     bootstrap.js copies to each tool:
