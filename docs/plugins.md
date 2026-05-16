@@ -119,13 +119,44 @@ See [docs/plugin-spec/v2.md §1](./plugin-spec/v2.md#1-manifest) for full semant
 
 ## Configuration
 
-### Disable plugins
+### Enable/disable plugins
+
+The host supports four knobs for selecting which plugins load, evaluated in this precedence order (most specific wins):
+
+| Knob | Where | Behavior |
+|---|---|---|
+| `AINB_DISABLE_PLUGINS=1` | env | Kill switch — skip discovery entirely. Runtime comes up plugin-free. |
+| `AINB_ONLY_PLUGINS=a,b` | env | Allowlist — load ONLY the named plugins; everything else skipped. |
+| `AINB_DISABLE_PLUGIN=a,b` | env | Denylist — load everything EXCEPT the named plugins. Ignored when `AINB_ONLY_PLUGINS` is set. |
+| `[plugins].enabled = [...]` | `config.toml` | Persistent allowlist. Same shape as `AINB_ONLY_PLUGINS` but survives across runs. Env vars override config. |
+| `[plugins].disabled = [...]` | `config.toml` | Persistent denylist. Ignored when `[plugins].enabled` is non-empty. |
+
+Examples:
 
 ```bash
+# All-or-nothing kill switch (existing behavior).
 AINB_DISABLE_PLUGINS=1 ainb tui
+
+# Skip burndown but keep session-reader running.
+AINB_DISABLE_PLUGIN=burndown ainb tui
+
+# Load only session-reader (useful for a headless data pipeline).
+AINB_ONLY_PLUGINS=session-reader ainb tui
+
+# Multiple names — comma-separated, whitespace tolerated.
+AINB_ONLY_PLUGINS="burndown, session-reader" ainb tui
 ```
 
-Boots the host with the plugin runtime disabled — no discovery, no spawn. The Analytics screen falls back to a "plugin: rendering…" placeholder when its owner plugin isn't loaded.
+Persistent config (`~/.agents-in-a-box/config/config.toml`):
+
+```toml
+[plugins]
+# Either list (or neither) — when both are set, `enabled` wins.
+enabled = ["session-reader"]
+# disabled = ["burndown"]
+```
+
+When `AINB_DISABLE_PLUGINS=1`, the Analytics screen falls back to a "plugin: rendering…" placeholder. When only specific plugins are disabled via allow/deny, screens owned by disabled plugins show the same placeholder; other screens are unaffected.
 
 ### Override the plugin search root
 
