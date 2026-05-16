@@ -134,7 +134,19 @@ async fn main() -> Result<()> {
                 let _ = crossterm::event::read();
             }
 
-            run_tui(&mut app_state, &mut layout).await
+            let tui_result = run_tui(&mut app_state, &mut layout).await;
+
+            // Explicitly tear down the plugin runtime before `app_state`
+            // drops. Without this, `AppState.plugin_runtime_owner: Option<Runtime>`
+            // drops inside `#[tokio::main]`'s active runtime context and
+            // tokio panics: "Cannot drop a runtime in a context where
+            // blocking is not allowed". See `Runtime::shutdown` for why
+            // `shutdown_background` is the right call here.
+            if let Some(rt) = app_state.take_plugin_runtime() {
+                rt.shutdown();
+            }
+
+            tui_result
         }
 
         // Every other subcommand routes through the registry.

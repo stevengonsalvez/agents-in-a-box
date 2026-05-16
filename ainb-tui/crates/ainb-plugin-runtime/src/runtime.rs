@@ -44,9 +44,13 @@ pub(crate) struct PluginHandle {
 /// Owns the tokio runtime + per-plugin tasks. Construct with
 /// [`Runtime::new`]; pass the [`RuntimeHandle`] into the TUI.
 pub struct Runtime {
-    /// Tokio multi-threaded runtime. Kept alive by the [`Runtime`]
-    /// instance — dropping it joins every plugin task.
-    tokio: TokioRuntime,
+    /// Tokio multi-threaded runtime. Wrapped in `Option` so the
+    /// explicit [`Self::shutdown`] path can take it out and call
+    /// `shutdown_background()` without tripping the "cannot drop a
+    /// runtime in a context where blocking is not allowed" panic.
+    /// `None` only after `shutdown()` has consumed it — every other
+    /// method assumes `Some(_)` via `as_ref().expect(...)`.
+    tokio: Option<TokioRuntime>,
     /// Snapshot store shared with every plugin task.
     snapshots: SnapshotStore,
     /// Channel registry (action → plugin).
@@ -97,7 +101,7 @@ impl Runtime {
         });
         Ok((
             Self {
-                tokio,
+                tokio: Some(tokio),
                 snapshots,
                 channels,
                 plugins,
@@ -107,6 +111,46 @@ impl Runtime {
             },
             handle,
         ))
+    }
+
+    /// Tear down the runtime without panicking when dropped from inside
+    /// an async context.
+    ///
+    /// `tokio::runtime::Runtime`'s `Drop` impl calls a blocking-shutdown
+    /// that traps if the drop runs inside another tokio runtime's task —
+    /// exactly the situation when ainb's `#[tokio::main]` returns and
+    /// `AppState.plugin_runtime_owner: Option<Runtime>` goes out of
+    /// scope. The user-visible failure is "Cannot drop a runtime in a
+    /// context where blocking is not allowed" on every clean exit.
+    ///
+    /// The fix is to drain the runtime explicitly via
+    /// [`TokioRuntime::shutdown_background`], which returns immediately
+    /// and joins worker threads off-task. Plugin tasks have already
+    /// received `plugin/shutdown` notifications from the TUI's normal
+    /// teardown path (or get SIGTERM when our subprocess pipes close on
+    /// exit) so a synchronous join would only cost wall-clock without
+    /// changing correctness.
+    ///
+    /// Must be called from `main` before [`App`] drops. Consumes
+    /// `self` so callers can't accidentally use it afterwards.
+    /// `Drop` is also safe as a fallback (it'll do the same
+    /// `shutdown_background` if `shutdown` wasn't called), but
+    /// explicit shutdown documents intent at the call site.
+    pub fn shutdown(mut self) {
+        // Best-effort plugin shutdown notifications first — mirrors
+        // the `Drop` impl below. Doing it here so the explicit and
+        // fallback paths produce identical lifecycle behaviour.
+        for (_, h) in self.plugins.read().iter() {
+            let _ = h.inbox.send(crate::plugin_task::Command::Shutdown);
+        }
+        // Take the runtime out so `Drop` (which runs right after this
+        // function returns) sees `None` and skips the redundant
+        // `shutdown_background` call. Without `take()` here, `Drop`
+        // would still need `Option::take()` to avoid a move-out-of-`&mut self`
+        // error inside `Drop::drop`.
+        if let Some(rt) = self.tokio.take() {
+            rt.shutdown_background();
+        }
     }
 
     /// Discover and register every plugin under `root`.
@@ -140,7 +184,10 @@ impl Runtime {
             self.inboxes.clone(),
             self.dirty.clone(),
             self.config,
-            self.tokio.handle(),
+            self.tokio
+                .as_ref()
+                .expect("plugin runtime alive — register() called after shutdown()")
+                .handle(),
         );
         if eager {
             let _ = inbox.send(plugin_task::Command::EnsureSpawned);
@@ -163,7 +210,11 @@ impl Runtime {
     /// Tokio handle for tests that need to drive the runtime directly.
     #[must_use]
     pub fn tokio_handle(&self) -> tokio::runtime::Handle {
-        self.tokio.handle().clone()
+        self.tokio
+            .as_ref()
+            .expect("plugin runtime alive — tokio_handle() called after shutdown()")
+            .handle()
+            .clone()
     }
 
     /// Snapshot store reference for tests.
@@ -175,9 +226,51 @@ impl Runtime {
 
 impl Drop for Runtime {
     fn drop(&mut self) {
-        // Send Shutdown to every task; tokio runtime drop joins them.
+        // Send Shutdown to every task. Plugin tasks observe this on
+        // their inbox and exit their event loop cleanly.
         for (_, h) in self.plugins.read().iter() {
             let _ = h.inbox.send(crate::plugin_task::Command::Shutdown);
         }
+        // Tear down the tokio runtime non-blockingly so this is safe
+        // to call from inside another runtime's task (e.g. when
+        // `AppState` drops at the end of `#[tokio::main]`).
+        // `shutdown_background()` returns immediately and joins worker
+        // threads off-task — see the `Self::shutdown` doc for the
+        // full rationale. Idempotent: if `shutdown()` already ran,
+        // `tokio` is `None` and we no-op.
+        if let Some(rt) = self.tokio.take() {
+            rt.shutdown_background();
+        }
+    }
+}
+
+#[cfg(test)]
+mod shutdown_regression_tests {
+    //! Lock the fix from PR #129. Before this change, both of these
+    //! tests would trip tokio's "Cannot drop a runtime in a context
+    //! where blocking is not allowed" panic — the inner `TokioRuntime`
+    //! ran its blocking-shutdown while still inside the outer
+    //! `#[tokio::test]` runtime's task context.
+    //!
+    //! Either path (explicit `shutdown()` OR `Drop`) must work; both
+    //! tests cover one each so a future regression in either site
+    //! fails loudly.
+    use super::*;
+
+    #[tokio::test]
+    async fn drop_inside_async_context_does_not_panic() {
+        // No explicit shutdown — relies on `Drop::drop` calling
+        // `shutdown_background()` on the inner `TokioRuntime`.
+        let (runtime, _handle) = Runtime::new().expect("runtime");
+        drop(runtime);
+    }
+
+    #[tokio::test]
+    async fn explicit_shutdown_inside_async_context_does_not_panic() {
+        // The canonical path called from `main.rs` after `run_tui`
+        // returns. Consumes `self` so `Drop` runs after on a
+        // `tokio: None` state.
+        let (runtime, _handle) = Runtime::new().expect("runtime");
+        runtime.shutdown();
     }
 }
