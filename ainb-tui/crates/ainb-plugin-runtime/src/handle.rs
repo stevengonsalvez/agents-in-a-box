@@ -318,8 +318,29 @@ impl RuntimeHandle {
     /// launched immediately — required for pure-publisher plugins
     /// (e.g. session-reader) that no caller drives directly.
     pub fn discover(&self, root: &Path) -> Result<Vec<RegisteredPlugin>, RuntimeError> {
-        let plugins = crate::registry::discover(root)?;
-        for p in &plugins {
+        self.discover_filtered(root, |_| true)
+    }
+
+    /// Discover plugins under `root` and register only those for which
+    /// `filter` returns `true`. The returned `Vec` reflects the
+    /// *registered* subset, not the on-disk superset — callers logging
+    /// "loaded plugins" want this, not the pre-filter list.
+    ///
+    /// Used by the host's `init_plugin_runtime` to apply env-var /
+    /// config.toml allowlist/denylist before any plugin task is
+    /// spawned. Filtering at discovery time (vs. spawn time) avoids
+    /// allocating per-plugin channels for skipped plugins.
+    pub fn discover_filtered<F>(
+        &self,
+        root: &Path,
+        filter: F,
+    ) -> Result<Vec<RegisteredPlugin>, RuntimeError>
+    where
+        F: Fn(&RegisteredPlugin) -> bool,
+    {
+        let discovered = crate::registry::discover(root)?;
+        let kept: Vec<RegisteredPlugin> = discovered.into_iter().filter(&filter).collect();
+        for p in &kept {
             self.inner.channels.register(p.clone());
             let arc = Arc::new(p.clone());
             let eager = matches!(
@@ -359,7 +380,7 @@ impl RuntimeHandle {
                 }),
             );
         }
-        Ok(plugins)
+        Ok(kept)
     }
 
     /// Reload (clear quarantine + failure history).
