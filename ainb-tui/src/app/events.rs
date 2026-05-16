@@ -515,6 +515,84 @@ impl EventHandler {
         }
     }
 
+    /// True when the user is currently focused on any free-form text input.
+    ///
+    /// Single-character global shortcuts (`H`, `W`, future ones) must NOT
+    /// fire while this is true — the keystroke belongs to the field, not
+    /// the app. This is the single source of truth for "is the user
+    /// typing right now"; every global character shortcut consults it so
+    /// new shortcuts can't accidentally re-introduce the bug where
+    /// pasting `SHOTClubhouse/SHOTid` becomes `SOTid` because `H`
+    /// toggled the help overlay mid-paste.
+    ///
+    /// Includes:
+    /// * Modal text-entry overlays (confirmation, OtherTmux/SSH rename,
+    ///   onboarding, setup menu) — these already early-return higher up
+    ///   in `handle_key_event`, but they're listed here so the answer to
+    ///   "am I in a text input?" is correct even before those returns.
+    /// * Quick-commit dialog (`quick_commit_message.is_some()`).
+    /// * `View::NewSession` text-entry steps (`InputRepoSource`,
+    ///   `InputBranch`, `InputPrompt`, `ConfigureSsh`). Non-text steps in
+    ///   the same view (agent picker, branch list, etc.) do not count.
+    /// * `View::SearchWorkspace`, `View::ClaudeChat`, `View::AuthSetup`,
+    ///   `View::Config`, `View::AttachedTerminal` — views whose whole
+    ///   purpose is text entry / pass-through.
+    /// * The auth-provider popup, Analytics input/zoom-search,
+    ///   Skills search overlay, and GitView commit-message mode —
+    ///   text-entry overlays toggled inside otherwise navigable screens.
+    fn is_text_input_context(state: &AppState) -> bool {
+        use crate::app::state::{NewSessionStep, View};
+
+        // Modal text-entry overlays. These early-return higher up in
+        // handle_key_event, but listing them keeps this helper a
+        // complete predicate.
+        if state.other_tmux_rename_mode
+            || state.ssh_session_rename_mode
+            || state.is_in_quick_commit_mode()
+        {
+            return true;
+        }
+
+        // NewSession is multi-step — only the text-entry steps count.
+        let new_session_text_active = state.current_view == View::NewSession
+            && state
+                .new_session_state
+                .as_ref()
+                .map(|s| {
+                    matches!(
+                        s.step,
+                        NewSessionStep::InputRepoSource
+                            | NewSessionStep::InputBranch
+                            | NewSessionStep::InputPrompt
+                            | NewSessionStep::ConfigureSsh
+                    )
+                })
+                .unwrap_or(false);
+
+        // Per-view overlays that toggle text-entry mode inside an
+        // otherwise navigable screen.
+        let analytics_text_active = state.current_view == View::Analytics
+            && (state.usage_state.input_mode.is_some() || state.usage_state.zoom_search_active);
+        let skills_text_active =
+            state.current_view == View::Skills && state.skills_state.search_active;
+        let git_view_text_active = state.current_view == View::GitView
+            && state.git_view_state.as_ref().map(|gv| gv.is_in_commit_mode()).unwrap_or(false);
+
+        new_session_text_active
+            || matches!(
+                state.current_view,
+                View::SearchWorkspace
+                    | View::ClaudeChat
+                    | View::AuthSetup
+                    | View::Config
+                    | View::AttachedTerminal
+            )
+            || state.auth_provider_popup_state.show_popup
+            || analytics_text_active
+            || skills_text_active
+            || git_view_text_active
+    }
+
     /// Pure decision logic shared between the production global-`W`
     /// shortcut and tests. Wiring is productive when live data isn't
     /// already flowing from the Tier1 cache *and* the user's
@@ -608,71 +686,65 @@ impl EventHandler {
             return Self::handle_setup_menu_keys(key_event, state);
         }
 
+        // ------------------------------------------------------------
+        // Single-character global shortcuts.
+        //
+        // Contract: a single `KeyCode::Char(_)` with no modifier MUST
+        // NOT trigger a global action while the user is in a text-input
+        // context. If you need a global that fires inside text inputs,
+        // use an explicit modifier (`Ctrl+`, `Alt+`, function keys) —
+        // never a bare `KeyCode::Char`.
+        //
+        // Previously each global shortcut maintained its own suppress
+        // list of text-input views (the `W` shortcut had one; the
+        // `H`/`?` shortcut did not). That was easy to forget and caused
+        // pasted text containing `H` to be partially swallowed because
+        // `H` toggled the help overlay mid-paste (e.g. `SHOTClubhouse/SHOTid`
+        // → `SOTid`). The single `in_text_input` predicate replaces all
+        // those lists; new shortcuts inherit the guard by being added
+        // inside the `!in_text_input` block.
+        let in_text_input = Self::is_text_input_context(state);
+
         if state.help_visible {
             tracing::debug!("Help is visible, handling key: {:?}", key_event.code);
-            match key_event.code {
-                KeyCode::Char('?' | 'H') | KeyCode::Esc => {
-                    tracing::info!("Toggling help off via {:?}", key_event.code);
-                    return Some(AppEvent::ToggleHelp);
+            if !in_text_input {
+                match key_event.code {
+                    KeyCode::Char('?' | 'H') | KeyCode::Esc => {
+                        tracing::info!("Toggling help off via {:?}", key_event.code);
+                        return Some(AppEvent::ToggleHelp);
+                    }
+                    _ => {
+                        tracing::debug!("Ignoring key {:?} while help visible", key_event.code);
+                        return None;
+                    }
                 }
-                _ => {
-                    tracing::debug!("Ignoring key {:?} while help visible", key_event.code);
-                    return None;
-                }
+            } else if matches!(key_event.code, KeyCode::Esc) {
+                // Help is visible while the user is in a text input.
+                // (Reachable via `HomeTile::Help` / `SidebarItem::Help`
+                // followed by view navigation — `H`/`?` itself can no
+                // longer toggle help inside a text input.) Treat Esc as
+                // "close help" rather than letting it fall through to
+                // the view's cancel handler, which would otherwise
+                // close the form. Any printable key falls through so
+                // the field still consumes it.
+                tracing::info!("Closing help via Esc from text-input context");
+                return Some(AppEvent::ToggleHelp);
             }
         }
 
-        // Handle global help toggle first (should work from any view)
-        // Supports both '?' and Shift+H
-        if matches!(key_event.code, KeyCode::Char('?' | 'H')) {
-            return Some(AppEvent::ToggleHelp);
-        }
+        if !in_text_input {
+            // Global help toggle: `?` or `Shift+H` from any non-text view.
+            if matches!(key_event.code, KeyCode::Char('?' | 'H')) {
+                return Some(AppEvent::ToggleHelp);
+            }
 
-        // Global `W`: wire Claude Code statusline. Active from any
-        // non-text-input context when the statusline is unwired or
-        // stale (live data isn't coming from the Tier1 cache). The CTA
-        // in the top status bar points users here, so the shortcut
-        // must work everywhere — not just from the Burndown panel
-        // where it originally lived.
-        //
-        // The suppress list below covers two kinds of context:
-        //   (a) views that fundamentally accept free-form character
-        //       input (NewSession's prompt/branch/repo entry,
-        //       SearchWorkspace, ClaudeChat, AuthSetup, the Config
-        //       editor, the AttachedTerminal pass-through, the auth
-        //       provider popup),
-        //   (b) per-view text-entry overlays toggled inside otherwise
-        //       navigable screens (GitView's commit message, the
-        //       Analytics input/zoom-search modes, the Skills search
-        //       overlay).
-        //
-        // Modal text inputs that already early-return at the top of
-        // `handle_key_event` (confirmation dialog, OtherTmux/SshSession
-        // rename, onboarding/setup menus, quick-commit) don't reach
-        // this block, so they don't need entries here.
-        let analytics_text_active = state.current_view == View::Analytics
-            && (state.usage_state.input_mode.is_some() || state.usage_state.zoom_search_active);
-        let skills_text_active =
-            state.current_view == View::Skills && state.skills_state.search_active;
-        let git_view_text_active = state.current_view == View::GitView
-            && state.git_view_state.as_ref().map(|gv| gv.is_in_commit_mode()).unwrap_or(false);
-        let suppress_global_w = matches!(
-            state.current_view,
-            View::NewSession
-                | View::SearchWorkspace
-                | View::ClaudeChat
-                | View::AuthSetup
-                | View::Config
-                | View::AttachedTerminal
-        ) || state.auth_provider_popup_state.show_popup
-            || analytics_text_active
-            || skills_text_active
-            || git_view_text_active;
-        if !suppress_global_w
-            && matches!(key_event.code, KeyCode::Char('W'))
-            && Self::should_wire_statusline(state)
-        {
-            return Some(AppEvent::UsageWireStatusline);
+            // Global `W`: wire Claude Code statusline. Active from any
+            // non-text-input context when the statusline is unwired or
+            // stale (live data isn't coming from the Tier1 cache). The
+            // CTA in the top status bar points users here.
+            if matches!(key_event.code, KeyCode::Char('W')) && Self::should_wire_statusline(state) {
+                return Some(AppEvent::UsageWireStatusline);
+            }
         }
 
         // AINB 2.0: Handle home screen view
@@ -5112,5 +5184,284 @@ mod global_w_tests {
             Source::None,
             None,
         ));
+    }
+}
+
+#[cfg(test)]
+mod text_input_guard_tests {
+    //! Regression tests for the global-shortcut guard.
+    //!
+    //! The bug these tests pin down: pasting `SHOTClubhouse/SHOTid` into
+    //! the New Session repo URL field used to come out as `SOTid`
+    //! because the unconditional global `H` shortcut toggled the help
+    //! overlay mid-paste. Same hazard for every other text-input view
+    //! and every other single-character global shortcut someone might
+    //! add in future.
+
+    use super::*;
+    use crate::app::state::{AppState, NewSessionState, NewSessionStep, View};
+
+    fn state_in_repo_input() -> AppState {
+        let mut state = AppState::default();
+        state.current_view = View::NewSession;
+        state.new_session_state = Some(NewSessionState {
+            step: NewSessionStep::InputRepoSource,
+            ..NewSessionState::default()
+        });
+        state
+    }
+
+    fn dispatch(state: &mut AppState, key: KeyEvent) {
+        if let Some(evt) = EventHandler::handle_key_event(key, state) {
+            EventHandler::process_event(evt, state);
+        }
+    }
+
+    fn char_key(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    /// Reproduces the exact bug from the screenshot: paste arrives as
+    /// individual key events (tmux stripped bracketed paste), but every
+    /// char must still land in the field.
+    #[test]
+    fn paste_as_key_events_preserves_full_repo_input() {
+        let mut state = state_in_repo_input();
+        let pasted = "SHOTClubhouse/SHOTid";
+
+        for ch in pasted.chars() {
+            dispatch(&mut state, char_key(ch));
+        }
+
+        let ns = state.new_session_state.as_ref().expect("session state");
+        assert_eq!(
+            ns.repo_input, pasted,
+            "paste delivered as key events must preserve every char"
+        );
+        assert!(
+            !state.help_visible,
+            "Shift+H inside a text input must NOT toggle help"
+        );
+    }
+
+    /// Bracketed paste path: a single `Event::Paste` is routed through
+    /// `handle_paste_event` to `RepoInputPasteText`. Must produce the
+    /// same final field value as the key-event path above.
+    #[test]
+    fn paste_as_paste_event_matches_key_event_path() {
+        let mut state = state_in_repo_input();
+        let pasted = "SHOTClubhouse/SHOTid";
+
+        let evt = EventHandler::handle_paste_event(pasted.to_string(), &state)
+            .expect("InputRepoSource must dispatch RepoInputPasteText");
+        EventHandler::process_event(evt, &mut state);
+
+        let ns = state.new_session_state.as_ref().expect("session state");
+        assert_eq!(ns.repo_input, pasted);
+    }
+
+    /// Every printable ASCII char, fed as a bare `KeyCode::Char`, must
+    /// land in the field. This is the broad invariant: no future global
+    /// shortcut may regress a single character.
+    #[test]
+    fn every_printable_ascii_char_lands_in_field() {
+        let mut state = state_in_repo_input();
+        let expected: String = (0x20u8..=0x7E).map(char::from).collect();
+
+        for ch in expected.chars() {
+            dispatch(&mut state, char_key(ch));
+        }
+
+        let ns = state.new_session_state.as_ref().expect("session state");
+        assert_eq!(
+            ns.repo_input, expected,
+            "every printable ASCII char must reach repo_input — no global shortcut may steal one"
+        );
+        assert!(
+            !state.help_visible,
+            "no char in [0x20..0x7E] may toggle the help overlay in a text input"
+        );
+    }
+
+    /// Outside any text input, `Shift+H` must still toggle the global
+    /// help overlay — we're only suppressing it inside text inputs, not
+    /// removing it.
+    #[test]
+    fn global_h_still_toggles_help_outside_text_input() {
+        let mut state = AppState::default();
+        state.current_view = View::HomeScreen;
+
+        let evt = EventHandler::handle_key_event(char_key('H'), &mut state)
+            .expect("Shift+H outside text input must dispatch ToggleHelp");
+        assert!(matches!(evt, AppEvent::ToggleHelp));
+    }
+
+    /// Esc inside a text input while help is visible must close help,
+    /// NOT fall through to the view's cancel handler (which would close
+    /// the form). Reachable when the user opens help from HomeScreen
+    /// then navigates into a text-entry view.
+    #[test]
+    fn esc_closes_help_inside_text_input_without_cancelling_form() {
+        let mut state = state_in_repo_input();
+        state.help_visible = true;
+
+        let evt = EventHandler::handle_key_event(
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &mut state,
+        )
+        .expect("Esc in help-visible text-input must dispatch ToggleHelp");
+        assert!(
+            matches!(evt, AppEvent::ToggleHelp),
+            "expected ToggleHelp, got {:?}",
+            evt
+        );
+    }
+
+    /// Every non-NewSession branch of `is_text_input_context` must be
+    /// recognised as a text-input context. This is the belt-and-braces
+    /// invariant — adding a new view that should accept free-form
+    /// input requires both extending the helper *and* extending this
+    /// test, so the two stay in sync.
+    #[test]
+    fn is_text_input_context_covers_every_other_branch() {
+        use crate::components::GitViewState;
+        use crate::components::usage::UsageInputMode;
+        use std::path::PathBuf;
+
+        // View-only branches: switching `current_view` is enough.
+        for view in &[
+            View::SearchWorkspace,
+            View::ClaudeChat,
+            View::AuthSetup,
+            View::Config,
+            View::AttachedTerminal,
+        ] {
+            let mut state = AppState::default();
+            state.current_view = view.clone();
+            assert!(
+                EventHandler::is_text_input_context(&state),
+                "View::{:?} must be treated as text input",
+                view
+            );
+        }
+
+        // Modal flags on AppState. Each must independently flip the
+        // predicate to true.
+        let cases: Vec<(&str, fn(&mut AppState))> = vec![
+            ("other_tmux_rename_mode", |s| {
+                s.other_tmux_rename_mode = true
+            }),
+            ("ssh_session_rename_mode", |s| {
+                s.ssh_session_rename_mode = true
+            }),
+            ("quick_commit_message", |s| {
+                s.quick_commit_message = Some(String::new())
+            }),
+            ("auth_provider_popup", |s| {
+                s.auth_provider_popup_state.show_popup = true
+            }),
+        ];
+        for (label, setup) in cases {
+            let mut state = AppState::default();
+            setup(&mut state);
+            assert!(
+                EventHandler::is_text_input_context(&state),
+                "{} must be treated as text input",
+                label
+            );
+        }
+
+        // Analytics input mode.
+        let mut state = AppState::default();
+        state.current_view = View::Analytics;
+        state.usage_state.input_mode = Some(UsageInputMode::DateRange);
+        assert!(
+            EventHandler::is_text_input_context(&state),
+            "Analytics input_mode = Some must be treated as text input"
+        );
+
+        // Analytics zoom-search.
+        let mut state = AppState::default();
+        state.current_view = View::Analytics;
+        state.usage_state.zoom_search_active = true;
+        assert!(
+            EventHandler::is_text_input_context(&state),
+            "Analytics zoom_search_active must be treated as text input"
+        );
+
+        // Skills search overlay.
+        let mut state = AppState::default();
+        state.current_view = View::Skills;
+        state.skills_state.search_active = true;
+        assert!(
+            EventHandler::is_text_input_context(&state),
+            "Skills search_active must be treated as text input"
+        );
+
+        // GitView commit-message mode.
+        let mut state = AppState::default();
+        state.current_view = View::GitView;
+        let mut git_state = GitViewState::new(PathBuf::from("/tmp"));
+        git_state.start_commit_message_input();
+        state.git_view_state = Some(git_state);
+        assert!(
+            EventHandler::is_text_input_context(&state),
+            "GitView commit-message mode must be treated as text input"
+        );
+
+        // Negative control: GitView without commit mode active is NOT
+        // a text input — it's a navigable view.
+        let mut state = AppState::default();
+        state.current_view = View::GitView;
+        state.git_view_state = Some(GitViewState::new(PathBuf::from("/tmp")));
+        assert!(
+            !EventHandler::is_text_input_context(&state),
+            "GitView outside commit mode must NOT be treated as text input"
+        );
+
+        // Negative control: bare default state on HomeScreen is not a
+        // text input.
+        let state = AppState::default();
+        assert!(
+            !EventHandler::is_text_input_context(&state),
+            "HomeScreen with no modal flags must NOT be treated as text input"
+        );
+    }
+
+    /// `is_text_input_context` must return true for every text-entry
+    /// step of `View::NewSession` and false for the non-text steps.
+    #[test]
+    fn is_text_input_context_covers_new_session_text_steps() {
+        let text_steps = [
+            NewSessionStep::InputRepoSource,
+            NewSessionStep::InputBranch,
+            NewSessionStep::InputPrompt,
+            NewSessionStep::ConfigureSsh,
+        ];
+        for step in &text_steps {
+            let mut state = AppState::default();
+            state.current_view = View::NewSession;
+            state.new_session_state = Some(NewSessionState {
+                step: step.clone(),
+                ..NewSessionState::default()
+            });
+            assert!(
+                EventHandler::is_text_input_context(&state),
+                "step {:?} must be treated as text input",
+                step
+            );
+        }
+
+        // Sanity: at least one non-text step is NOT a text input.
+        let mut state = AppState::default();
+        state.current_view = View::NewSession;
+        state.new_session_state = Some(NewSessionState {
+            step: NewSessionStep::SelectAgent,
+            ..NewSessionState::default()
+        });
+        assert!(
+            !EventHandler::is_text_input_context(&state),
+            "SelectAgent is a navigable step, not a text input"
+        );
     }
 }
