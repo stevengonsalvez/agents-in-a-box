@@ -105,20 +105,24 @@ class DocumentEntities:
 
     @classmethod
     def from_yaml(cls, yaml_str: str) -> "DocumentEntities":
-        data = yaml.safe_load(yaml_str)
+        data = yaml.safe_load(yaml_str) or {}
         entities = [
-            Entity(name=e["name"], type=e["type"], description=e["description"])
-            for e in data.get("entities", [])
+            Entity(
+                name=e.get("name", ""),
+                type=e.get("type", "concept"),
+                description=e.get("description", ""),
+            )
+            for e in (data.get("entities") or [])
         ]
         relationships = [
             Relationship(
-                source=r["source"],
-                target=r["target"],
-                type=r["type"],
-                description=r["description"],
+                source=r.get("source", ""),
+                target=r.get("target", ""),
+                type=r.get("type", "relates_to"),
+                description=r.get("description", ""),
                 strength=r.get("strength", 5),
             )
-            for r in data.get("relationships", [])
+            for r in (data.get("relationships") or [])
         ]
         return cls(
             document_id=data.get("document_id", ""),
