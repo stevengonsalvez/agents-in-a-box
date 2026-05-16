@@ -904,28 +904,31 @@ pub fn render(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
     let show_scan_banner = state.scan_progress.is_some()
         && state.data.is_some()
         && !state.loading;
-    let constraints: Vec<Constraint> = if show_scan_banner {
-        vec![
-            Constraint::Length(3), // Summary bar
-            Constraint::Length(3), // Provider selector
-            Constraint::Length(3), // Tab bar
-            Constraint::Length(1), // Scan banner (mid-scan only)
-            Constraint::Min(0),    // Table content
-            Constraint::Length(2), // Help bar
-        ]
+    // Stack-allocated constraints — render is the hot path; avoid the Vec.
+    let layout = if show_scan_banner {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3), // Summary bar
+                Constraint::Length(3), // Provider selector
+                Constraint::Length(3), // Tab bar
+                Constraint::Length(1), // Scan banner (mid-scan only)
+                Constraint::Min(0),    // Table content
+                Constraint::Length(2), // Help bar
+            ])
+            .split(area)
     } else {
-        vec![
-            Constraint::Length(3), // Summary bar
-            Constraint::Length(3), // Provider selector
-            Constraint::Length(3), // Tab bar
-            Constraint::Min(0),    // Table content
-            Constraint::Length(2), // Help bar
-        ]
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3), // Summary bar
+                Constraint::Length(3), // Provider selector
+                Constraint::Length(3), // Tab bar
+                Constraint::Min(0),    // Table content
+                Constraint::Length(2), // Help bar
+            ])
+            .split(area)
     };
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(constraints)
-        .split(area);
 
     render_summary_bar(buf, layout[0], state);
     render_provider_bar(buf, layout[1], state);
@@ -1605,7 +1608,7 @@ fn render_zoom_breadcrumb(buf: &mut Buffer, area: Rect, panel: UsagePanel) {
             Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
         ),
         Span::styled("   ", Style::default()),
-        Span::styled("◀ Esc back ▶", Style::default().fg(MUTED_GRAY)),
+        Span::styled("◀ BkSp unzoom · Esc home ▶", Style::default().fg(MUTED_GRAY)),
     ]);
     ratatui::widgets::Widget::render(Paragraph::new(line), area, buf);
 }
@@ -4068,8 +4071,10 @@ fn render_help_bar(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
             Span::styled(" search  ", Style::default().fg(MUTED_GRAY)),
             Span::styled("d", Style::default().fg(GOLD)),
             Span::styled(" detail  ", Style::default().fg(MUTED_GRAY)),
-            Span::styled("z/Esc", Style::default().fg(GOLD)),
-            Span::styled(" back  ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("z/BkSp", Style::default().fg(GOLD)),
+            Span::styled(" unzoom  ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("Esc", Style::default().fg(GOLD)),
+            Span::styled(" home  ", Style::default().fg(MUTED_GRAY)),
             Span::styled("j/k", Style::default().fg(GOLD)),
             Span::styled(" row  ", Style::default().fg(MUTED_GRAY)),
         ];
@@ -4089,6 +4094,8 @@ fn render_help_bar(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
     ];
     if on_burndown {
         // Burndown view: z zoom; Tab pivots panels; Enter/X commit chips; C clears.
+        // `BkSp` = Backspace (pop chip / unzoom); Esc is reserved by the host
+        // for navigation back to home, so it's listed in the trailing block.
         spans.extend_from_slice(&[
             Span::styled("z", Style::default().fg(GOLD)),
             Span::styled(" zoom  ", Style::default().fg(MUTED_GRAY)),
@@ -4098,7 +4105,7 @@ fn render_help_bar(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
             Span::styled(" add  ", Style::default().fg(MUTED_GRAY)),
             Span::styled("X", Style::default().fg(GOLD)),
             Span::styled(" exclude  ", Style::default().fg(MUTED_GRAY)),
-            Span::styled("Esc", Style::default().fg(GOLD)),
+            Span::styled("BkSp", Style::default().fg(GOLD)),
             Span::styled(" pop  ", Style::default().fg(MUTED_GRAY)),
             Span::styled("C", Style::default().fg(GOLD)),
             Span::styled(" clear  ", Style::default().fg(MUTED_GRAY)),

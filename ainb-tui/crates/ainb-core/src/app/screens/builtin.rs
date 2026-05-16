@@ -149,6 +149,12 @@ pub fn crossterm_to_protocol_key(
 ///   Esc belongs to the host. Plugins re-bind internal pop semantics
 ///   to `Backspace` (see burndown's `KeyCode::Backspace` handler).
 ///
+///   UX note: a side-effect of routing Esc straight to the host is
+///   that Esc on a *zoomed* plugin view does NOT first un-zoom — it
+///   navigates straight to home, discarding zoom state. Users who
+///   want a one-level pop press `Backspace` (closes zoom, stays on
+///   the screen). The burndown help bar advertises both keys.
+///
 /// `q`, `a`, `Tab`, `Enter`, etc. remain plugin-owned — the burndown
 /// plugin re-binds them to period switches, panel focus, and zoom
 /// toggles. Letting the host swallow them would make the screen
