@@ -894,44 +894,103 @@ impl UsageViewState {
 
 /// Render the usage analytics screen
 pub fn render(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
-    // Main layout: header + provider selector + tabs + content + help bar
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
+    // Main layout: header + provider selector + tabs + (optional scan banner) +
+    // content + help bar. The scan banner is a one-row strip that only appears
+    // while session-reader is still walking the per-provider dirs — without it,
+    // a mid-scan render shows a populated summary bar but empty panels (data
+    // streams in chunks; aggregates fill up before the panels do), which reads
+    // as a hang. The banner stays visible until the plugin clears
+    // `scan_progress` on the final `is_final` chunk.
+    let show_scan_banner = state.scan_progress.is_some()
+        && state.data.is_some()
+        && !state.loading;
+    let constraints: Vec<Constraint> = if show_scan_banner {
+        vec![
+            Constraint::Length(3), // Summary bar
+            Constraint::Length(3), // Provider selector
+            Constraint::Length(3), // Tab bar
+            Constraint::Length(1), // Scan banner (mid-scan only)
+            Constraint::Min(0),    // Table content
+            Constraint::Length(2), // Help bar
+        ]
+    } else {
+        vec![
             Constraint::Length(3), // Summary bar
             Constraint::Length(3), // Provider selector
             Constraint::Length(3), // Tab bar
             Constraint::Min(0),    // Table content
             Constraint::Length(2), // Help bar
-        ])
+        ]
+    };
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
         .split(area);
 
     render_summary_bar(buf, layout[0], state);
     render_provider_bar(buf, layout[1], state);
     render_tab_bar(buf, layout[2], state);
 
+    let (content_idx, help_idx) = if show_scan_banner {
+        render_scan_banner_inline(
+            buf,
+            layout[3],
+            state.scan_progress.as_ref().expect("guarded by show_scan_banner"),
+        );
+        (4, 5)
+    } else {
+        (3, 4)
+    };
+
     if state.loading || state.data.is_none() {
         if let Some(progress) = state.scan_progress.as_ref() {
-            render_scan_progress(buf, layout[3], progress);
+            render_scan_progress(buf, layout[content_idx], progress);
         } else {
-            render_loading(buf, layout[3]);
+            render_loading(buf, layout[content_idx]);
         }
     } else {
         let data = state.data.as_ref().unwrap();
         if data.calls.is_empty() && !state.provider.has_data() {
-            render_no_data(buf, layout[3], state);
+            render_no_data(buf, layout[content_idx], state);
         } else {
             match state.active_tab {
-                UsageTab::Daily => render_daily(buf, layout[3], data, state.scroll_offset),
-                UsageTab::Weekly => render_weekly(buf, layout[3], data, state.scroll_offset),
-                UsageTab::Projects => render_projects(buf, layout[3], data, state.scroll_offset),
-                UsageTab::Burndown => render_burndown(buf, layout[3], data, state),
-                UsageTab::Optimize => render_optimize(buf, layout[3], data),
+                UsageTab::Daily => render_daily(buf, layout[content_idx], data, state.scroll_offset),
+                UsageTab::Weekly => render_weekly(buf, layout[content_idx], data, state.scroll_offset),
+                UsageTab::Projects => render_projects(buf, layout[content_idx], data, state.scroll_offset),
+                UsageTab::Burndown => render_burndown(buf, layout[content_idx], data, state),
+                UsageTab::Optimize => render_optimize(buf, layout[content_idx], data),
             }
         }
     }
 
-    render_help_bar(buf, layout[4], state);
+    render_help_bar(buf, layout[help_idx], state);
+}
+
+/// Render a slim one-row scan-progress banner above the dashboard. Different
+/// from `render_scan_progress` (which paints the full skeleton panel when
+/// data is empty) — this is the data-present mid-scan affordance:
+///
+///   ⏳ Scanning sessions: 12/47 · my-project
+///
+/// No border, no surrounding panel — just inline text so the row above the
+/// dashboard doesn't visually compete with the panel chrome.
+fn render_scan_banner_inline(buf: &mut Buffer, area: Rect, progress: &ScanProgressEvent) {
+    let mut spans = vec![
+        Span::styled(" ⏳ ", Style::default().fg(GOLD)),
+        Span::styled(
+            scan_progress_headline(progress),
+            Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
+        ),
+    ];
+    if !progress.current_project.is_empty() {
+        spans.push(Span::styled(" · ", Style::default().fg(MUTED_GRAY)));
+        spans.push(Span::styled(
+            progress.current_project.clone(),
+            Style::default().fg(MUTED_GRAY),
+        ));
+    }
+    let paragraph = Paragraph::new(Line::from(spans));
+    ratatui::widgets::Widget::render(paragraph, area, buf);
 }
 
 fn render_summary_bar(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
