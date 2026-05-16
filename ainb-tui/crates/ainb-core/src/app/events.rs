@@ -681,11 +681,6 @@ impl EventHandler {
 
         if state.help_visible {
             tracing::debug!("Help is visible, handling key: {:?}", key_event.code);
-            // While focused in a text input, defer to the view handler
-            // so the field can consume the keystroke. The help overlay
-            // can still be dismissed with Esc through the per-view
-            // cancel path; a global `H`/`?` would re-introduce the
-            // partial-paste bug.
             if !in_text_input {
                 match key_event.code {
                     KeyCode::Char('?' | 'H') | KeyCode::Esc => {
@@ -697,6 +692,17 @@ impl EventHandler {
                         return None;
                     }
                 }
+            } else if matches!(key_event.code, KeyCode::Esc) {
+                // Help is visible while the user is in a text input.
+                // (Reachable via `HomeTile::Help` / `SidebarItem::Help`
+                // followed by view navigation — `H`/`?` itself can no
+                // longer toggle help inside a text input.) Treat Esc as
+                // "close help" rather than letting it fall through to
+                // the view's cancel handler, which would otherwise
+                // close the form. Any printable key falls through so
+                // the field still consumes it.
+                tracing::info!("Closing help via Esc from text-input context");
+                return Some(AppEvent::ToggleHelp);
             }
         }
 
@@ -5093,6 +5099,132 @@ mod text_input_guard_tests {
         let evt = EventHandler::handle_key_event(char_key('H'), &mut state)
             .expect("Shift+H outside text input must dispatch ToggleHelp");
         assert!(matches!(evt, AppEvent::ToggleHelp));
+    }
+
+    /// Esc inside a text input while help is visible must close help,
+    /// NOT fall through to the view's cancel handler (which would close
+    /// the form). Reachable when the user opens help from HomeScreen
+    /// then navigates into a text-entry view.
+    #[test]
+    fn esc_closes_help_inside_text_input_without_cancelling_form() {
+        let mut state = state_in_repo_input();
+        state.help_visible = true;
+
+        let evt =
+            EventHandler::handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut state)
+                .expect("Esc in help-visible text-input must dispatch ToggleHelp");
+        assert!(
+            matches!(evt, AppEvent::ToggleHelp),
+            "expected ToggleHelp, got {:?}",
+            evt
+        );
+    }
+
+    /// Every non-NewSession branch of `is_text_input_context` must be
+    /// recognised as a text-input context. This is the belt-and-braces
+    /// invariant — adding a new view that should accept free-form
+    /// input requires both extending the helper *and* extending this
+    /// test, so the two stay in sync.
+    #[test]
+    fn is_text_input_context_covers_every_other_branch() {
+        use crate::components::GitViewState;
+        use crate::components::usage::UsageInputMode;
+        use std::path::PathBuf;
+
+        // View-only branches: switching `current_view` is enough.
+        for view in &[
+            View::SearchWorkspace,
+            View::ClaudeChat,
+            View::AuthSetup,
+            View::Config,
+            View::AttachedTerminal,
+        ] {
+            let mut state = AppState::default();
+            state.current_view = view.clone();
+            assert!(
+                EventHandler::is_text_input_context(&state),
+                "View::{:?} must be treated as text input",
+                view
+            );
+        }
+
+        // Modal flags on AppState. Each must independently flip the
+        // predicate to true.
+        let cases: Vec<(&str, fn(&mut AppState))> = vec![
+            ("other_tmux_rename_mode", |s| s.other_tmux_rename_mode = true),
+            ("ssh_session_rename_mode", |s| s.ssh_session_rename_mode = true),
+            ("quick_commit_message", |s| {
+                s.quick_commit_message = Some(String::new())
+            }),
+            ("auth_provider_popup", |s| {
+                s.auth_provider_popup_state.show_popup = true
+            }),
+        ];
+        for (label, setup) in cases {
+            let mut state = AppState::default();
+            setup(&mut state);
+            assert!(
+                EventHandler::is_text_input_context(&state),
+                "{} must be treated as text input",
+                label
+            );
+        }
+
+        // Analytics input mode.
+        let mut state = AppState::default();
+        state.current_view = View::Analytics;
+        state.usage_state.input_mode = Some(UsageInputMode::DateRange);
+        assert!(
+            EventHandler::is_text_input_context(&state),
+            "Analytics input_mode = Some must be treated as text input"
+        );
+
+        // Analytics zoom-search.
+        let mut state = AppState::default();
+        state.current_view = View::Analytics;
+        state.usage_state.zoom_search_active = true;
+        assert!(
+            EventHandler::is_text_input_context(&state),
+            "Analytics zoom_search_active must be treated as text input"
+        );
+
+        // Skills search overlay.
+        let mut state = AppState::default();
+        state.current_view = View::Skills;
+        state.skills_state.search_active = true;
+        assert!(
+            EventHandler::is_text_input_context(&state),
+            "Skills search_active must be treated as text input"
+        );
+
+        // GitView commit-message mode.
+        let mut state = AppState::default();
+        state.current_view = View::GitView;
+        let mut git_state = GitViewState::new(PathBuf::from("/tmp"));
+        git_state.start_commit_message_input();
+        state.git_view_state = Some(git_state);
+        assert!(
+            EventHandler::is_text_input_context(&state),
+            "GitView commit-message mode must be treated as text input"
+        );
+
+        // Negative control: GitView without commit mode active is NOT
+        // a text input — it's a navigable view.
+        let mut state = AppState::default();
+        state.current_view = View::GitView;
+        state.git_view_state = Some(GitViewState::new(PathBuf::from("/tmp")));
+        assert!(
+            !EventHandler::is_text_input_context(&state),
+            "GitView outside commit mode must NOT be treated as text input"
+        );
+
+        // Negative control: bare default state on HomeScreen is not a
+        // text input.
+        let state = AppState::default();
+        assert!(
+            !EventHandler::is_text_input_context(&state),
+            "HomeScreen with no modal flags must NOT be treated as text input"
+        );
     }
 
     /// `is_text_input_context` must return true for every text-entry
