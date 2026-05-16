@@ -30,10 +30,19 @@ use uuid::Uuid;
 /// row's current visible position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttachableRef {
-    WorkspaceSession { workspace_idx: usize, session_idx: usize },
-    WorkspaceShell { workspace_idx: usize },
-    SshSession { ssh_idx: usize },
-    OtherTmux { other_idx: usize },
+    WorkspaceSession {
+        workspace_idx: usize,
+        session_idx: usize,
+    },
+    WorkspaceShell {
+        workspace_idx: usize,
+    },
+    SshSession {
+        ssh_idx: usize,
+    },
+    OtherTmux {
+        other_idx: usize,
+    },
 }
 
 /// Text editor with cursor support for boss mode prompts
@@ -2727,8 +2736,7 @@ impl Default for AppState {
 
             statusline_status_cache: None,
 
-            live_window_watcher:
-                crate::models::live_window_watcher::LiveWindowWatcher::default(),
+            live_window_watcher: crate::models::live_window_watcher::LiveWindowWatcher::default(),
 
             // Skills browser state
             skills_state: crate::components::skills::SkillsViewState::default(),
