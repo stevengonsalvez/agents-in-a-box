@@ -243,3 +243,34 @@ impl Drop for Runtime {
         }
     }
 }
+
+#[cfg(test)]
+mod shutdown_regression_tests {
+    //! Lock the fix from PR #129. Before this change, both of these
+    //! tests would trip tokio's "Cannot drop a runtime in a context
+    //! where blocking is not allowed" panic — the inner `TokioRuntime`
+    //! ran its blocking-shutdown while still inside the outer
+    //! `#[tokio::test]` runtime's task context.
+    //!
+    //! Either path (explicit `shutdown()` OR `Drop`) must work; both
+    //! tests cover one each so a future regression in either site
+    //! fails loudly.
+    use super::*;
+
+    #[tokio::test]
+    async fn drop_inside_async_context_does_not_panic() {
+        // No explicit shutdown — relies on `Drop::drop` calling
+        // `shutdown_background()` on the inner `TokioRuntime`.
+        let (runtime, _handle) = Runtime::new().expect("runtime");
+        drop(runtime);
+    }
+
+    #[tokio::test]
+    async fn explicit_shutdown_inside_async_context_does_not_panic() {
+        // The canonical path called from `main.rs` after `run_tui`
+        // returns. Consumes `self` so `Drop` runs after on a
+        // `tokio: None` state.
+        let (runtime, _handle) = Runtime::new().expect("runtime");
+        runtime.shutdown();
+    }
+}
