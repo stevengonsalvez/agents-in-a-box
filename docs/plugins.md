@@ -8,6 +8,12 @@ A plugin is a self-contained capsule that adds a screen, CLI subcommand, sidebar
 
 The first plugin shipped in-tree is **burndown**, which owns the Analytics screen and the `ainb usage` CLI subcommand tree. The pure-publisher **session-reader** is its data backend: it scans `~/.claude/projects/**` and `~/.codex/sessions/**` and chunked-publishes usage snapshots on the `sessions.usage_data` topic for burndown to render.
 
+<p align="center">
+  <img src="./assets/screenshots/burndown.png" alt="Burndown plugin — full analytics dashboard" width="900">
+  <br>
+  <em>The burndown plugin rendering the full analytics dashboard against real <code>~/.claude/projects</code> data — daily activity, top sessions, per-project + per-model breakdown, budget, optimisation hints.</em>
+</p>
+
 ## Where things live
 
 The host discovers plugins from a flat staging directory:
