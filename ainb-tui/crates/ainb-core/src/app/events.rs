@@ -5110,9 +5110,11 @@ mod text_input_guard_tests {
         let mut state = state_in_repo_input();
         state.help_visible = true;
 
-        let evt =
-            EventHandler::handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut state)
-                .expect("Esc in help-visible text-input must dispatch ToggleHelp");
+        let evt = EventHandler::handle_key_event(
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &mut state,
+        )
+        .expect("Esc in help-visible text-input must dispatch ToggleHelp");
         assert!(
             matches!(evt, AppEvent::ToggleHelp),
             "expected ToggleHelp, got {:?}",
@@ -5151,8 +5153,12 @@ mod text_input_guard_tests {
         // Modal flags on AppState. Each must independently flip the
         // predicate to true.
         let cases: Vec<(&str, fn(&mut AppState))> = vec![
-            ("other_tmux_rename_mode", |s| s.other_tmux_rename_mode = true),
-            ("ssh_session_rename_mode", |s| s.ssh_session_rename_mode = true),
+            ("other_tmux_rename_mode", |s| {
+                s.other_tmux_rename_mode = true
+            }),
+            ("ssh_session_rename_mode", |s| {
+                s.ssh_session_rename_mode = true
+            }),
             ("quick_commit_message", |s| {
                 s.quick_commit_message = Some(String::new())
             }),
