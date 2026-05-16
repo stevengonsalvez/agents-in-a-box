@@ -23,6 +23,7 @@ from rich.table import Table
 from rich.panel import Panel
 
 from reflect_kb.metrics import write_metric
+from reflect_kb import errors as _err
 
 console = Console(stderr=True)
 
@@ -354,7 +355,14 @@ def reindex(force: bool):
                     generated_count += 1
             except Exception as e:
                 title = doc.get("title", doc.get("name", doc_path.name))
-                console.print(f"  [yellow]Warning: Auto-extract failed for {title}: {e}[/yellow]")
+                msg = f"Auto-extract failed for {title}: {e}"
+                console.print(f"  [yellow]Warning: {msg}[/yellow]")
+                _err.append(
+                    severity="warn", source="parse",
+                    kind="autoextract_" + type(e).__name__.lower(),
+                    message=msg,
+                    context={"path": str(doc_path), "title": title},
+                )
 
     if generated_count:
         console.print(f"[green]Auto-generated {generated_count} missing sidecars[/green]")
@@ -381,7 +389,14 @@ def reindex(force: bool):
                 rel_total += doc_entities.relationship_count
                 console.print(f"  [dim]{title} - {doc_entities.entity_count} entities[/dim]")
             except Exception as e:
-                console.print(f"  [yellow]Warning: Bad sidecar for {title}: {e}[/yellow]")
+                msg = f"Bad sidecar for {title}: {e}"
+                console.print(f"  [yellow]Warning: {msg}[/yellow]")
+                _err.append(
+                    severity="warn", source="parse",
+                    kind="sidecar_" + type(e).__name__.lower(),
+                    message=msg,
+                    context={"path": str(sidecar_path), "title": title},
+                )
         else:
             console.print(f"  [dim]{title} - no sidecar (placeholder entities)[/dim]")
 
