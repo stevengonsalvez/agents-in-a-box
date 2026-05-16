@@ -79,6 +79,7 @@ Full copy-paste helper functions in `references/helpers.md`.
 3. **NEVER append `Enter` to a single-character keystroke.** `tmux send-keys -t S "i"` for nav keys. `Enter` as a SEPARATE arg is only for committing a shell command line.
 4. **NEVER use bare `sleep` before capture.** TUI render rate is 4–30 Hz. Use `poll_capture(deadline, predicate)` with 500 ms internal sleep.
 5. **NEVER grep `Cargo.toml` for the version in a shell wrapper.** Workspace crates have `version.workspace = true` literally — grepping returns that string, breaks the wizard-skip seed. Use `env!("CARGO_PKG_VERSION")` in Rust or read `[workspace.package].version` from the root `Cargo.toml`.
+6. **ALWAYS pair forward + return navigation.** When a tripwire asserts "press X → screen Y rendered", add a sibling test (or trailing assertion) that "press Esc → previous screen returned". Forward-only tests pass while return paths silently break — exactly how the Esc-from-burndown swallow shipped past 4 existing tripwires in PR #128. The `plugin/handle_key` wire is a one-way notification: it cannot signal "ignored, fall through", so plugins can swallow keys with no visible failure unless you test the round-trip end-to-end. See `tripwire_burndown_esc_returns_home.rs` for the canonical return-path shape.
 
 ## Two-tmux pattern — KEEP BOTH PATHS
 
