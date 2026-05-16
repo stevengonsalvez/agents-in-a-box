@@ -96,9 +96,10 @@ Missing sidecars:
 ### 4. GraphRAG Health
 
 ```bash
-LEARNINGS_CLI="$HOME/.claude/global-learnings/cli/learnings"
-if [[ -x "$LEARNINGS_CLI" ]]; then
-    "$LEARNINGS_CLI" stats
+if command -v reflect >/dev/null 2>&1; then
+    reflect stats
+elif [[ -x "$HOME/.local/bin/reflect" ]]; then
+    "$HOME/.local/bin/reflect" stats
 fi
 ```
 
@@ -252,8 +253,8 @@ Review pending items? (approve N / reject N / skip)
 - Check state directory: `ls ~/.reflect/`
 
 **GraphRAG stats unavailable:**
-- Check if learnings CLI is installed: `ls ~/.claude/global-learnings/cli/learnings`
-- Install if missing per global-learnings setup guide
+- Check if reflect-kb CLI is installed: `command -v reflect`
+- Install if missing: `uv tool install --upgrade 'git+https://github.com/stevengonsalvez/reflect-kb.git[graph]'`
 
 **Sidecar count is 0:**
 - Knowledge notes may exist without sidecars (pre-v3 behavior)
