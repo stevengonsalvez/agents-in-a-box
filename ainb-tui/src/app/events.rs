@@ -578,15 +578,19 @@ impl EventHandler {
         let git_view_text_active = state.current_view == View::GitView
             && state.git_view_state.as_ref().map(|gv| gv.is_in_commit_mode()).unwrap_or(false);
 
+        // Config is multi-mode — `editing` and `api_key_input_mode`
+        // are the only states that accept free-form character input.
+        // Plain navigation of settings categories should NOT suppress
+        // global shortcuts like `H`; that would be a UX regression.
+        let config_text_active = state.current_view == View::Config
+            && (state.config_screen_state.editing || state.config_screen_state.api_key_input_mode);
+
         new_session_text_active
             || matches!(
                 state.current_view,
-                View::SearchWorkspace
-                    | View::ClaudeChat
-                    | View::AuthSetup
-                    | View::Config
-                    | View::AttachedTerminal
+                View::SearchWorkspace | View::ClaudeChat | View::AuthSetup | View::AttachedTerminal
             )
+            || config_text_active
             || state.auth_provider_popup_state.show_popup
             || analytics_text_active
             || skills_text_active
@@ -690,10 +694,10 @@ impl EventHandler {
         // Single-character global shortcuts.
         //
         // Contract: a single `KeyCode::Char(_)` with no modifier MUST
-        // NOT trigger a global action while the user is in a text-input
-        // context. If you need a global that fires inside text inputs,
-        // use an explicit modifier (`Ctrl+`, `Alt+`, function keys) —
-        // never a bare `KeyCode::Char`.
+        // NOT trigger any app-level action while the user is in a
+        // text-input context. If you need a binding that fires inside
+        // text inputs, use an explicit modifier (`Ctrl+`, `Alt+`,
+        // function keys) — never a bare `KeyCode::Char`.
         //
         // Previously each global shortcut maintained its own suppress
         // list of text-input views (the `W` shortcut had one; the
@@ -701,8 +705,13 @@ impl EventHandler {
         // pasted text containing `H` to be partially swallowed because
         // `H` toggled the help overlay mid-paste (e.g. `SHOTClubhouse/SHOTid`
         // → `SOTid`). The single `in_text_input` predicate replaces all
-        // those lists; new shortcuts inherit the guard by being added
-        // inside the `!in_text_input` block.
+        // those lists. It now gates *three* places: (a) the explicit
+        // `?`/`H` and `W` globals immediately below, (b) the help-visible
+        // swallow guard (so the field still consumes keys if help is
+        // somehow open inside a text input), and (c) the SessionList
+        // fallthrough match later in this function (defense-in-depth
+        // for future text-input views that forget an early-return
+        // handler).
         let in_text_input = Self::is_text_input_context(state);
 
         if state.help_visible {
@@ -846,7 +855,19 @@ impl EventHandler {
             return Self::handle_session_recovery_keys(key_event, state);
         }
 
-        // Handle key events based on focused pane
+        // Handle key events based on focused pane (the SessionList view
+        // reaches this block via fallthrough — it has no explicit early
+        // return above). Defense-in-depth guard: every text-input view
+        // listed in `is_text_input_context` already has its own
+        // early-return handler higher up, so reaching here while
+        // `in_text_input` is true would only happen if someone adds a
+        // new text-input view to the predicate but forgets to wire a
+        // handler. Short-circuit so the bare-char shortcuts below
+        // (`c`, `n`, `a`, `q`, …) can't steal a keystroke from the field.
+        if in_text_input {
+            return None;
+        }
+
         use crate::app::state::FocusedPane;
 
         match key_event.code {
@@ -5296,6 +5317,22 @@ mod text_input_guard_tests {
         assert!(matches!(evt, AppEvent::ToggleHelp));
     }
 
+    /// Config screen — `Shift+H` must still toggle help when the user
+    /// is navigating settings (not actively editing a value).
+    /// Regression test for the gemini-code-assist#MEDIUM finding on
+    /// PR #130: blanket-including `View::Config` in the text-input
+    /// predicate broke the help shortcut for plain navigation.
+    #[test]
+    fn global_h_still_toggles_help_during_config_navigation() {
+        let mut state = AppState::default();
+        state.current_view = View::Config;
+        // editing = false, api_key_input_mode = false by default
+
+        let evt = EventHandler::handle_key_event(char_key('H'), &mut state)
+            .expect("Shift+H in Config navigation must dispatch ToggleHelp");
+        assert!(matches!(evt, AppEvent::ToggleHelp));
+    }
+
     /// Esc inside a text input while help is visible must close help,
     /// NOT fall through to the view's cancel handler (which would close
     /// the form). Reachable when the user opens help from HomeScreen
@@ -5329,11 +5366,12 @@ mod text_input_guard_tests {
         use std::path::PathBuf;
 
         // View-only branches: switching `current_view` is enough.
+        // (Config is intentionally excluded — it's gated on edit state,
+        // covered separately below.)
         for view in &[
             View::SearchWorkspace,
             View::ClaudeChat,
             View::AuthSetup,
-            View::Config,
             View::AttachedTerminal,
         ] {
             let mut state = AppState::default();
@@ -5344,6 +5382,33 @@ mod text_input_guard_tests {
                 view
             );
         }
+
+        // Config view: only counts as text input when actively editing
+        // a setting or entering an API key, NOT when navigating the
+        // categories list. Suppressing globals during plain navigation
+        // would regress the help shortcut UX.
+        let mut state = AppState::default();
+        state.current_view = View::Config;
+        assert!(
+            !EventHandler::is_text_input_context(&state),
+            "Config without edit mode must NOT be treated as text input"
+        );
+
+        let mut state = AppState::default();
+        state.current_view = View::Config;
+        state.config_screen_state.editing = true;
+        assert!(
+            EventHandler::is_text_input_context(&state),
+            "Config + editing = true must be treated as text input"
+        );
+
+        let mut state = AppState::default();
+        state.current_view = View::Config;
+        state.config_screen_state.api_key_input_mode = true;
+        assert!(
+            EventHandler::is_text_input_context(&state),
+            "Config + api_key_input_mode = true must be treated as text input"
+        );
 
         // Modal flags on AppState. Each must independently flip the
         // predicate to true.
