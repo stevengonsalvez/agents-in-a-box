@@ -2200,96 +2200,130 @@ pub enum WorkspaceLoadResult {
 /// Load workspaces asynchronously (standalone function for use in spawned tasks)
 /// This is called from background task to avoid blocking the main thread
 async fn load_workspaces_async() -> anyhow::Result<Vec<Workspace>> {
-    use crate::interactive::InteractiveSessionManager;
-
     info!("load_workspaces_async: Starting");
-    let mut workspaces = Vec::new();
 
-    // Load Boss mode sessions (Docker-based) if Docker is available
-    if AppState::is_docker_available_sync() {
-        info!("load_workspaces_async: Docker available, loading Boss mode sessions");
-        match SessionLoader::new().await {
-            Ok(loader) => match loader.load_active_sessions().await {
-                Ok(mut docker_workspaces) => {
-                    info!(
-                        "load_workspaces_async: Loaded {} Boss mode workspaces",
-                        docker_workspaces.len()
-                    );
-                    workspaces.append(&mut docker_workspaces);
-                }
-                Err(e) => {
-                    warn!(
-                        "load_workspaces_async: Failed to load Boss mode sessions: {}",
-                        e
-                    );
-                }
-            },
-            Err(e) => {
-                warn!(
-                    "load_workspaces_async: Failed to create session loader: {}",
-                    e
-                );
-            }
-        }
-    } else {
-        info!("load_workspaces_async: Docker not available, skipping Boss mode");
-    }
+    // Boss-mode (Docker) and Interactive-mode (tmux) sessions are fetched
+    // CONCURRENTLY with independent budgets. A slow or stuck Docker daemon
+    // must not starve Interactive loading — interactive sessions are
+    // tmux-only and have no Docker dependency. Before this split, a 9s
+    // `list_agents_containers` call would burn the outer 10s timeout
+    // before Interactive even ran, leaving the workspace tree empty even
+    // though Interactive would have returned instantly.
+    //
+    // The merge step (combining Boss and Interactive sessions into the
+    // same Workspace by canonical path) runs after both fetches return,
+    // since the workspace_map mutation is non-commutative.
+    let (boss_workspaces, interactive_sessions) =
+        tokio::join!(fetch_boss_mode_workspaces(), fetch_interactive_sessions());
 
-    // Load Interactive mode sessions (always attempt, no Docker needed)
-    info!("load_workspaces_async: Loading Interactive mode sessions");
-    match InteractiveSessionManager::new() {
-        Ok(mut manager) => {
-            match manager.list_sessions().await {
-                Ok(interactive_sessions) => {
-                    info!(
-                        "load_workspaces_async: Found {} Interactive sessions",
-                        interactive_sessions.len()
-                    );
-                    // Group sessions by workspace
-                    for interactive_session in interactive_sessions {
-                        let session = interactive_session.to_session_model();
-                        let workspace_path = interactive_session.source_repository.clone();
-                        let workspace_name = interactive_session.workspace_name.clone();
+    let mut workspaces = boss_workspaces;
+    for interactive_session in interactive_sessions {
+        let session = interactive_session.to_session_model();
+        let workspace_path = interactive_session.source_repository.clone();
+        let workspace_name = interactive_session.workspace_name.clone();
 
-                        // Find or create workspace using canonicalized path comparison
-                        // This prevents duplicates when paths differ only by normalization
-                        // (e.g., symlinks, ".." components, trailing slashes)
-                        let canonical_workspace_path = workspace_path.canonicalize().ok();
-                        if let Some(workspace) = workspaces
-                            .iter_mut()
-                            .find(|w| w.path.canonicalize().ok() == canonical_workspace_path)
-                        {
-                            workspace.add_session(session);
-                        } else {
-                            let mut workspace = Workspace::new(workspace_name, workspace_path);
-                            workspace.add_session(session);
-                            workspaces.push(workspace);
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!(
-                        "load_workspaces_async: Failed to list Interactive sessions: {}",
-                        e
-                    );
-                }
-            }
-        }
-        Err(e) => {
-            warn!(
-                "load_workspaces_async: Failed to create Interactive session manager: {}",
-                e
-            );
+        // Find or create workspace using canonicalized path comparison.
+        // This prevents duplicates when paths differ only by normalization
+        // (e.g., symlinks, ".." components, trailing slashes).
+        let canonical_workspace_path = workspace_path.canonicalize().ok();
+        if let Some(workspace) = workspaces
+            .iter_mut()
+            .find(|w| w.path.canonicalize().ok() == canonical_workspace_path)
+        {
+            workspace.add_session(session);
+        } else {
+            let mut workspace = Workspace::new(workspace_name, workspace_path);
+            workspace.add_session(session);
+            workspaces.push(workspace);
         }
     }
 
-    // Load other tmux sessions (not managed by agents-in-a-box)
-    // This is quick and doesn't involve Docker, so we include it
     info!(
         "load_workspaces_async: Complete with {} workspaces",
         workspaces.len()
     );
     Ok(workspaces)
+}
+
+/// Fetch Boss-mode (Docker container) workspaces with a strict per-mode
+/// timeout. Returns an empty `Vec` on any failure path — caller proceeds
+/// with Interactive results. The `docker info` probe runs on a blocking
+/// thread so a wedged Docker socket can't pin a tokio runtime thread.
+async fn fetch_boss_mode_workspaces() -> Vec<Workspace> {
+    const BOSS_MODE_TIMEOUT: Duration = Duration::from_secs(5);
+
+    let docker_available =
+        tokio::task::spawn_blocking(AppState::is_docker_available_sync).await.unwrap_or(false);
+
+    if !docker_available {
+        info!("load_workspaces_async: Docker not available, skipping Boss mode");
+        return Vec::new();
+    }
+
+    info!("load_workspaces_async: Docker available, loading Boss mode sessions");
+    let load = async {
+        let loader = SessionLoader::new().await?;
+        loader.load_active_sessions().await
+    };
+
+    match tokio::time::timeout(BOSS_MODE_TIMEOUT, load).await {
+        Ok(Ok(workspaces)) => {
+            info!(
+                "load_workspaces_async: Loaded {} Boss mode workspaces",
+                workspaces.len()
+            );
+            workspaces
+        }
+        Ok(Err(e)) => {
+            warn!(
+                "load_workspaces_async: Failed to load Boss mode sessions: {}",
+                e
+            );
+            Vec::new()
+        }
+        Err(_) => {
+            warn!(
+                "load_workspaces_async: Boss mode load exceeded {}s budget — proceeding with Interactive only",
+                BOSS_MODE_TIMEOUT.as_secs()
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// Fetch Interactive-mode (tmux) sessions. No Docker dependency — must
+/// not be gated on Boss-mode completing.
+async fn fetch_interactive_sessions() -> Vec<crate::interactive::InteractiveSession> {
+    use crate::interactive::InteractiveSessionManager;
+
+    info!("load_workspaces_async: Loading Interactive mode sessions");
+    let mut manager = match InteractiveSessionManager::new() {
+        Ok(m) => m,
+        Err(e) => {
+            warn!(
+                "load_workspaces_async: Failed to create Interactive session manager: {}",
+                e
+            );
+            return Vec::new();
+        }
+    };
+
+    match manager.list_sessions().await {
+        Ok(sessions) => {
+            info!(
+                "load_workspaces_async: Found {} Interactive sessions",
+                sessions.len()
+            );
+            sessions
+        }
+        Err(e) => {
+            warn!(
+                "load_workspaces_async: Failed to list Interactive sessions: {}",
+                e
+            );
+            Vec::new()
+        }
+    }
 }
 
 /// Focus state for the combined Agent + Model selection panel
