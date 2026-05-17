@@ -694,7 +694,7 @@ ROW3="${SPARK_T}${GAP}${SPARK_E}"
 ROW4="${SPARK_C}${GAP}${SPARK_A}"
 
 # ── Write cache and emit ─────────────────────────────────────────────────────
-HINT=" $(_fg 110 110 130)↑ click a label or run: $0 --explain TOK${RESET}"
+HINT=" $(_fg 110 110 130)↑ click a label or run: reflect timeline --explain TOK${RESET}"
 OUT=$(printf '\n%b\n %b\n %b\n %b\n%b' "$ROW1" "$ROW2" "$ROW3" "$ROW4" "$HINT")
 
 # Refresh the drill-down file in background — clicks land on fresh data.
