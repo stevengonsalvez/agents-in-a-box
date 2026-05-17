@@ -53,9 +53,9 @@ A terminal-native ecosystem for managing AI coding agents. Built around a Rust T
 </p>
 
 <p align="center">
-  <img src="docs/assets/screenshots/stats-daily.png" alt="ainb usage analytics — daily token usage chart" width="900">
+  <img src="docs/assets/screenshots/burndown.png" alt="ainb burndown dashboard — multi-panel analytics with budget, daily activity, project/model breakdowns, optimisation hints" width="900">
   <br>
-  <em>Built-in usage analytics: 11.9B tokens tracked across 45 projects and 487 sessions, by provider and by day</em>
+  <em>Burndown dashboard: daily activity, per-project & per-model breakdowns, top sessions, live budget tracking, and optimisation hints — all in one view</em>
 </p>
 
 ---
@@ -116,9 +116,9 @@ A Rust-based terminal application for managing AI coding sessions with git workt
 <table>
   <tr>
     <td width="50%" valign="top">
-      <img src="docs/assets/screenshots/welcome.png" alt="Main dashboard with sidebar navigation" width="100%"><br>
+      <img src="docs/assets/screenshots/home.png" alt="ainb home screen with sidebar and welcome panel" width="100%"><br>
       <strong>📊 Unified dashboard</strong><br>
-      <em>Sidebar navigation across Agents, Catalog, Sessions, Recovery, Logs, Stats, Changelog, and Setup. Keyboard-driven throughout.</em>
+      <em>Sidebar navigation across Agents, Catalog, Sessions, Recovery, Logs, Stats, Skills, Changelog, and Setup. Keyboard-driven throughout.</em>
     </td>
     <td width="50%" valign="top">
       <img src="docs/assets/screenshots/agent-picker.png" alt="AI agent picker with model selection" width="100%"><br>
@@ -140,9 +140,9 @@ A Rust-based terminal application for managing AI coding sessions with git workt
   </tr>
   <tr>
     <td width="50%" valign="top">
-      <img src="docs/assets/screenshots/stats-daily.png" alt="Daily usage analytics with bar chart" width="100%"><br>
-      <strong>📈 Usage analytics, built in</strong><br>
-      <em>Daily / weekly / by-project views across all providers. Understand your token burn at a glance.</em>
+      <img src="docs/assets/screenshots/burndown.png" alt="Burndown analytics dashboard — daily activity, per-project, per-model, budget, optimisation" width="100%"><br>
+      <strong>📈 Burndown analytics, built in</strong><br>
+      <em>Multi-panel dashboard: daily activity, top sessions, per-project + per-model token attribution, live budget tracking, and inline optimisation hints.</em>
     </td>
     <td width="50%" valign="top">
       <img src="docs/assets/screenshots/stats-projects.png" alt="Per-project token usage breakdown" width="100%"><br>

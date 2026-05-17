@@ -1,0 +1,52 @@
+# ainb plugin manifest — burndown (subprocess plugin, ABI v2).
+#
+# Loaded by ainb-plugin-runtime at host startup (discovery) and again
+# at plugin/init for validation. Schema lives in
+# `ainb-plugin-protocol::manifest::Manifest` — keep field names in
+# sync with that type.
+
+[plugin]
+name = "burndown"
+version = "2.0.0"
+abi_version = 2
+description = "Daily/weekly/project usage burndown panels"
+
+[capabilities]
+# Burndown no longer scans session files itself — the session-reader
+# plugin owns the data plane and publishes UsageDataEvent on
+# sessions.usage_data, which we consume via [subscribes].snapshots.
+read_sessions      = true
+# Persist any plugin-local config (model aliases, currency) under the
+# plugin data dir.
+write_plugin_data  = true
+# Required so the runtime exposes host/snapshot/get + host/snapshot/publish
+# + host/log on the reverse channel.
+event_bus          = true
+
+[provides]
+screens        = ["analytics"]
+commands       = ["/usage", "/burndown"]
+cli_namespaces = ["usage"]
+snapshots      = []
+
+[subscribes]
+# The runtime auto-pushes plugin/handle_event for every publish on
+# these topics. No imperative `host/snapshot/subscribe` call needed at
+# startup.
+snapshots = ["sessions.usage_data"]
+
+[lifecycle]
+# Eager — burndown must subscribe to `sessions.usage_data` BEFORE
+# session-reader publishes. With `lazy`, the first `dispatch_cli`
+# (TUI screen open OR `ainb usage …`) is what spawns burndown, but
+# by then the publish window has closed: chunked publishes from
+# session-reader landed in the snapshot store (last-chunk-wins) and
+# burndown's just-installed subscription only catches future
+# publishes. `snapshot_get` then reads a single follow-on chunk
+# with no chunk-0 seed → `DroppedFollowOn` → `self.data = None` →
+# "install session-reader" hint. Eager-spawn closes the race:
+# burndown's `on_init` subscribes synchronously, then publishes
+# `sessions.refresh_request` to kick session-reader's first scan
+# with us already on the wire.
+spawn          = "eager"
+idle_reap_secs = 600

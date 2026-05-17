@@ -1,0 +1,2 @@
+{"type":"user","timestamp":"2026-05-07T12:10:00Z","sessionId":"360f46db-109f-cddb-75de-5999bf90e5f2","cwd":"/Users/test/proj-gamma","gitBranch":"main","message":{"content":[{"type":"text","text":"tripwire seed B1_week 2"}]}}
+{"type":"assistant","timestamp":"2026-05-07T12:10:30Z","sessionId":"360f46db-109f-cddb-75de-5999bf90e5f2","cwd":"/Users/test/proj-gamma","gitBranch":"main","message":{"model":"claude-sonnet-4-5","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":300,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0}}}

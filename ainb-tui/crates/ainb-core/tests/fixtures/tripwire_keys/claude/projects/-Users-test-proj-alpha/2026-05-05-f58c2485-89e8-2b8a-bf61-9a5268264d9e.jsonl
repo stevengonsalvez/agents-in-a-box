@@ -1,0 +1,2 @@
+{"type":"user","timestamp":"2026-05-05T13:15:00Z","sessionId":"f58c2485-89e8-2b8a-bf61-9a5268264d9e","cwd":"/Users/test/proj-alpha","gitBranch":"feature","message":{"content":[{"type":"text","text":"tripwire seed B1_week 3"}]}}
+{"type":"assistant","timestamp":"2026-05-05T13:15:30Z","sessionId":"f58c2485-89e8-2b8a-bf61-9a5268264d9e","cwd":"/Users/test/proj-alpha","gitBranch":"feature","message":{"model":"claude-sonnet-4-5","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":100,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0}}}

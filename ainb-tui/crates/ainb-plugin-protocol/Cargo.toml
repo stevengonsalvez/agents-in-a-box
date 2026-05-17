@@ -1,0 +1,47 @@
+[package]
+name = "ainb-plugin-protocol"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Wire protocol types for ainb plugins (JSON-RPC 2.0 over stdio): manifest v2, methods, params, errors, framing, WireBuffer"
+categories = ["development-tools", "encoding"]
+keywords = ["ainb", "plugin", "json-rpc", "protocol"]
+readme = "README.md"
+
+[lib]
+name = "ainb_plugin_protocol"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+bytes = { version = "1.6", features = ["serde"] }
+base64 = "0.22"
+
+# Local lint config rather than `workspace = true` because the
+# workspace-level lints declare lint groups (clippy::all, ::pedantic,
+# ::nursery, ::cargo) at the same priority as specific lints, which
+# rustc rejects with `lint group has the same priority as a lint`.
+# Workspace fix is out of scope for this crate; we mirror the intent
+# locally with explicit priorities so this crate cleanly passes
+# `cargo clippy -p ainb-plugin-protocol -- -D warnings`.
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unused_imports = "warn"
+unused_variables = "warn"
+dead_code = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+similar_names = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"

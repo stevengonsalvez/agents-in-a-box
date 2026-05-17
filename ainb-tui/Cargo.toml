@@ -1,23 +1,30 @@
-[package]
-name = "ainb"
+[workspace]
+resolver = "2"
+members = [
+    "crates/ainb-core",
+    "crates/ainb-plugin-burndown",
+    "crates/ainb-plugin-protocol",
+    "crates/ainb-plugin-runtime",
+    "crates/ainb-plugin-sdk-rust",
+    "crates/ainb-plugin-session-reader",
+    "crates/ainb-plugin-testkit",
+    "crates/ainb-plugin-types-sessions",
+    "crates/ainb-plugin-cts-v2",
+    "xtask",
+]
+default-members = ["crates/ainb-core"]
+# Phase 7c: burndown returns as a subprocess plugin (native binary,
+# stdio JSON-RPC over the SDK). session-reader is being re-shipped in
+# parallel under agents-in-a-box-4is.
+
+[workspace.package]
 version = "1.1.0"
 edition = "2021"
 authors = ["Agents-in-a-Box Team"]
-description = "Terminal-based development environment manager for Claude Code containers"
 license = "MIT"
 repository = "https://github.com/stevengonsalvez/agents-in-a-box"
-keywords = ["claude", "docker", "tui", "development", "containers"]
-categories = ["command-line-utilities", "development-tools"]
 
-[[bin]]
-name = "ainb"
-path = "src/main.rs"
-
-[lib]
-name = "ainb"
-path = "src/lib.rs"
-
-[dependencies]
+[workspace.dependencies]
 # Core
 tokio = { version = "1.36", features = ["full"] }
 ratatui = "0.26"
@@ -42,31 +49,33 @@ toml = "0.8"
 
 # Claude API integration
 reqwest = { version = "0.11", default-features = false, features = ["json", "stream", "rustls-tls"] }
+async-stream = "0.3"
 tokio-stream = "0.1"
 
 # Utils
-shell-escape = "0.1"  # Safe shell escaping for paths
+shell-escape = "0.1"
 anyhow = "1.0"
 thiserror = "1.0"
+directories = "5.0"
 dirs = "5.0"
 uuid = { version = "1.5", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 clap = { version = "4.4", features = ["derive"] }
-clap_complete = "4.4"  # Shell completion generation
+clap_complete = "4.4"
 tempfile = "3.8"
 nix = { version = "0.27", features = ["user"] }
-arboard = "3.3"  # Cross-platform clipboard support
-keyring = { version = "3", features = ["apple-native", "linux-native"] }  # Secure credential storage
+arboard = "3.3"
+keyring = { version = "3", features = ["apple-native", "linux-native"] }
 regex = "1.10"
 lazy_static = "1.4"
-which = "6.0"  # Cross-platform command detection
-url = "2.5"  # URL parsing for git credential handling
+which = "6.0"
+url = "2.5"
 
 # Markdown and syntax highlighting
-pulldown-cmark = "0.9"  # Markdown parsing
-syntect = "5.0"  # Syntax highlighting for code blocks
+pulldown-cmark = "0.9"
+syntect = "5.0"
 ansi-to-tui = "4"
 
 # Persistent usage analytics cache
@@ -77,47 +86,35 @@ bincode = "1.3"
 # Fuzzy search for the burndown zoom panels
 nucleo-matcher = "0.3"
 
-[features]
-default = []
-visual-debug = []  # Enable live terminal during tests
-vt100-tests = []   # Enable vt100 screen verification
-# Exposes shared test fixtures (test_support module) so integration
-# tests in tests/ can use them. Always enabled under #[cfg(test)] for
-# unit tests; integration tests must opt in via this feature.
-test-support = []
+# File-locking for concurrent plugin install protection
+fs2 = "0.4"
 
-[dev-dependencies]
+# Dev / test
 mockall = "0.12"
 pretty_assertions = "1.4"
-
-# PTY-based end-to-end testing (like expect for Rust)
 rexpect = "0.5"
-
-# VT100 terminal emulation for visual verification
 vt100 = "0.15"
 
-[profile.release]
-lto = true
-codegen-units = 1
-strip = true
-opt-level = "z"
-
-# Linting configuration
-[lints.rust]
+[workspace.lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"
 unused_imports = "warn"
 unused_variables = "warn"
 dead_code = "warn"
 
-[lints.clippy]
-all = "warn"
-pedantic = "warn"
-nursery = "warn"
-cargo = "warn"
-# Allow some pedantic lints that can be overly strict
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
 module_name_repetitions = "allow"
 similar_names = "allow"
 must_use_candidate = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+opt-level = "z"

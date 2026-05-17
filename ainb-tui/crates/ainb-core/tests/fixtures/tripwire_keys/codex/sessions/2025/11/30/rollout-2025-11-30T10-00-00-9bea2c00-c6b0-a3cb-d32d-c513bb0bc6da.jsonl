@@ -1,0 +1,2 @@
+{"type":"session_meta","timestamp":"2025-11-30T10:00:00Z","payload":{"session_id":"9bea2c00-c6b0-a3cb-d32d-c513bb0bc6da","originator":"codex","model":"gpt-5","cwd":"/Users/test/proj-alpha"}}
+{"type":"event_msg","timestamp":"2025-11-30T10:00:30Z","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":200,"cached_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0},"total_token_usage":{"input_tokens":200,"cached_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":200}}}}

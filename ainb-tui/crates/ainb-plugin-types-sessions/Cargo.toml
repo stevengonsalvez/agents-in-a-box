@@ -1,0 +1,23 @@
+[package]
+name = "ainb-plugin-types-sessions"
+version = "0.1.0"
+edition = "2021"
+authors = ["Agents-in-a-Box Team"]
+license = "MIT"
+description = "Wire schema for the sessions.usage_data event published by the session-reader plugin and consumed by burndown."
+
+# This crate is the wire-format contract between two plugins. It must
+# build for both the host target AND wasm32-wasip1, so it carries no
+# host-only dependencies — only `serde` and `chrono` (no_default
+# features, with `clock` + `serde` opted in explicitly). See
+# reference_plugin_sdk_no_host_deps.
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+serde = { version = "1.0", features = ["derive"] }
+
+[dev-dependencies]
+rmp-serde = "1.3"
+
+[lints.rust]
+unsafe_code = "forbid"

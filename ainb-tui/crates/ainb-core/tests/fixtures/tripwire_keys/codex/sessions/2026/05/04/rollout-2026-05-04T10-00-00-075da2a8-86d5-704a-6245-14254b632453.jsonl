@@ -1,0 +1,2 @@
+{"type":"session_meta","timestamp":"2026-05-04T10:00:00Z","payload":{"session_id":"075da2a8-86d5-704a-6245-14254b632453","originator":"codex","model":"gpt-5","cwd":"/Users/test/proj-gamma"}}
+{"type":"event_msg","timestamp":"2026-05-04T10:00:30Z","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":600,"cached_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0},"total_token_usage":{"input_tokens":600,"cached_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":600}}}}

@@ -1,0 +1,147 @@
+[package]
+name = "ainb-plugin-cts-v2"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Conformance test suite for ainb plugin JSON-RPC subprocess ABI v2 (14 axes)"
+categories = ["development-tools::testing"]
+keywords = ["ainb", "plugin", "cts", "conformance"]
+
+[lib]
+name = "ainb_plugin_cts_v2"
+path = "src/lib.rs"
+
+[dependencies]
+ainb-plugin-protocol = { path = "../ainb-plugin-protocol" }
+ainb-plugin-runtime = { path = "../ainb-plugin-runtime" }
+ainb-plugin-sdk-rust = { path = "../ainb-plugin-sdk-rust" }
+
+tokio = { workspace = true }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+serde = { workspace = true }
+tempfile = { workspace = true }
+toml = { workspace = true }
+bytes = { version = "1.6", features = ["serde"] }
+async-trait = "0.1"
+
+[dev-dependencies]
+ainb-plugin-protocol = { path = "../ainb-plugin-protocol" }
+ainb-plugin-runtime = { path = "../ainb-plugin-runtime" }
+tokio = { workspace = true }
+
+# --- Canary binaries ---
+# Each canary is a tiny plugin that speaks JSON-RPC over stdio.
+# They depend on the SDK so they get the Plugin trait + Server.
+
+[[bin]]
+name = "cts-a01-manifest"
+path = "tests/canaries/a01_manifest_round_trip/main.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "cts-a02-framing"
+path = "tests/canaries/a02_framing_decode/main.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "cts-a03-method-dispatch"
+path = "tests/canaries/a03_method_dispatch/main.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "cts-a04-cap-denied"
+path = "tests/canaries/a04_capability_denied/main.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "cts-a05-render-determinism"
+path = "tests/canaries/a05_render_determinism/main.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "cts-a06-snapshot-get"
+path = "tests/canaries/a06_snapshot_get_after_publish/main.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "cts-a07-snapshot-subscribe"
+path = "tests/canaries/a07_snapshot_subscribe_event/main.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "cts-a08-action-timeout"
+path = "tests/canaries/a08_action_invoke_timeout/main.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "cts-a09-log-filter"
+path = "tests/canaries/a09_log_level_filtering/main.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "cts-a10-fs-guard"
+path = "tests/canaries/a10_fs_path_guard/main.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "cts-a11-shutdown"
+path = "tests/canaries/a11_graceful_shutdown/main.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "cts-a12-crash-recovery"
+path = "tests/canaries/a12_crash_recovery/main.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "cts-a13-quarantine"
+path = "tests/canaries/a13_quarantine/main.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "cts-a14-cli-dispatch"
+path = "tests/canaries/a14_cli_dispatch_capture/main.rs"
+test = false
+doc = false
+
+# --- Host-side test harness (all 14 axes) ---
+
+[[test]]
+name = "axes"
+path = "tests/axes.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "allow"
+unused_imports = "warn"
+unused_variables = "warn"
+dead_code = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+similar_names = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+significant_drop_tightening = "allow"
+significant_drop_in_scrutinee = "allow"
+duration_suboptimal_units = "allow"

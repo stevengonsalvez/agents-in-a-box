@@ -1,0 +1,2 @@
+{"type":"user","timestamp":"2025-10-31T11:05:00Z","sessionId":"096a29c5-9c5f-3fdf-b9eb-aa6a1b0dd861","cwd":"/Users/test/proj-beta","gitBranch":"feature","message":{"content":[{"type":"text","text":"tripwire seed B5_last_year 1"}]}}
+{"type":"assistant","timestamp":"2025-10-31T11:05:30Z","sessionId":"096a29c5-9c5f-3fdf-b9eb-aa6a1b0dd861","cwd":"/Users/test/proj-beta","gitBranch":"feature","message":{"model":"claude-sonnet-4-5","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":200,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0}}}

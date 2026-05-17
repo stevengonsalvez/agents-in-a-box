@@ -58,6 +58,17 @@ clean:
 # Install development dependencies
 setup:
     rustup component add rustfmt clippy
+
+# Build + stage all bundled plugins (subprocess binaries) into dist/plugins/
+# Required before running tripwire_real_data_in_tui or anything that
+# discovers plugins from dist/. On macOS this also re-signs each staged
+# binary so AMFI doesn't SIGKILL it at exec.
+stage-plugins:
+    ./scripts/build-plugins.sh
+
+# Same but release profile.
+stage-plugins-release:
+    ./scripts/build-plugins.sh --release
     cargo install just
 
 # Watch and rebuild on changes
