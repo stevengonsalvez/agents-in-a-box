@@ -1,147 +1,133 @@
 # reflect-kb
 
-Universal cross-harness retrieval + learning knowledge base for AI coding agents.
+> Universal cross-harness retrieval + learning knowledge base for AI coding agents.
 
-This repository is the standalone, installable form of the `reflect` system
-originally developed inside [ai-coder-rules](https://github.com/stevengonsalvez/ai-coder-rules).
-It provides a hybrid GraphRAG + QMD retrieval pipeline plus a two-tier
-(personal + team) knowledge model that works across Claude Code, Codex CLI,
-and GitHub Copilot.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![Python](https://img.shields.io/badge/python-%3E%3D3.11-blue.svg)](https://www.python.org/)
+[![Version](https://img.shields.io/badge/version-0.1.1-green.svg)](./pyproject.toml)
 
-**Status:** Scaffold. Implementation tracks the v4 specification.
+## What it does
 
-## Specification
-
-The design and scope of this repo are driven by the v4 universal install spec:
-
-- [`plans/reflect-v4-universal-install-spec.md`](https://github.com/stevengonsalvez/ai-coder-rules/blob/main/plans/reflect-v4-universal-install-spec.md)
-
-Read that document first — it defines the architecture (reflect-kb = the tool,
-team-kb = the content), the install UX (Nix primary, pipx fallback), the
-two-KB model (`~/.learnings/` personal + configurable team path), the
-confidence-gated write flow, and the cross-harness adapter story.
+reflect-kb implements the **capture → index → recall** loop for agent knowledge. After every session,
+the agents-in-a-box reflect plugin drains the ingest queue (`~/.learnings/ingest/`), calls `reflect add`
+for each pending document, and rebuilds the graph index. At the start of the next session, `reflect search`
+recalls the most relevant prior learnings and surfaces them before the agent touches the first file.
+The result is a compounding knowledge base that gets smarter the more it is used — without per-session
+context-window blowup. Works across Claude Code, Codex CLI, and GitHub Copilot via cross-harness adapters
+baked into the plugin.
 
 ## Install
 
-### Nix (primary)
-
-The flake handles the nano-graphrag transitive-dep mess for you:
+Recommended: `uv tool install` with the `[graph]` extra (pulls the full GraphRAG + vector stack):
 
 ```bash
-# One-shot run (no install).
-nix run github:stevengonsalvez/reflect-kb -- --help
-
-# Install into your profile.
-nix profile install github:stevengonsalvez/reflect-kb
+uv tool install --upgrade 'git+https://github.com/stevengonsalvez/reflect-kb.git[graph]'
 ```
 
-### Develop with Nix
+Verify: `reflect --version` should print `0.1.x`.
+
+**Post-consolidation install (after Phase 7 of the monorepo plan):**
 
 ```bash
-nix develop
-# Drops you into a shell with python311 + all reflect-kb runtime deps
-# (nano-graphrag with the graspologic/hyppo/numba/llvmlite chain stripped).
-# Editable overlay:
-#   pip install -e . --no-deps --prefix $PWD/.venv-editable
+uv tool install --upgrade 'git+https://github.com/stevengonsalvez/agents-in-a-box.git#subdirectory=reflect-kb[graph]'
 ```
 
-### pipx (fallback)
+Both URLs will resolve during the transition window.
 
-See the Troubleshooting section below for the `--no-deps` workaround for the
-nano-graphrag dep chain on Python ≥3.11.
-
-### Per-harness adapter
+## Quick start
 
 ```bash
-reflect adapter install claude-code
-reflect adapter install codex
-reflect adapter install copilot
-```
-(Not yet wired — planned per the v4 spec.)
+# 1. Initialise the KB (one time per machine — creates ~/.claude/global-learnings/)
+reflect init
 
-## Repo layout (target)
+# 2. Add a learning document (with optional entity sidecar)
+reflect add ./my-solution.md --entities ./my-solution.entities.yaml
 
-```
-reflect-kb/
-├── flake.nix                 # Nix package + dev shell
-├── pyproject.toml            # pipx fallback
-├── src/reflect_kb/           # CLI + retrieval engine
-├── skills/                   # Tool-agnostic SKILL.md files
-├── hooks/                    # Session-start recall hook (Claude)
-├── schema/                   # YAML frontmatter JSON Schema
-└── harness-adapters/         # Per-tool install scripts
-    ├── claude-code/
-    ├── codex/
-    └── copilot/
+# 3. Search the knowledge base
+reflect search "how did we fix the tokio runtime panic"
+
+# 4. Show KB statistics
+reflect stats
+
+# 5. Drill into the statusline dashboard
+reflect timeline --explain TOK
 ```
 
-The current tree only contains the top-level scaffolding. Subdirectories will
-land in follow-up tasks per the v4 plan.
+## Subcommands
 
-## Pre-commit (team-kb schema validation)
+| Command | What it does |
+|---|---|
+| [`reflect init`](docs/usage.md#reflect-init) | Initialise the KB at `~/.claude/global-learnings/` |
+| [`reflect add`](docs/usage.md#reflect-add) | Add a learning doc; `--force` for non-interactive overwrite |
+| [`reflect search`](docs/usage.md#reflect-search) | Hybrid GraphRAG + vector search over the KB |
+| [`reflect reindex`](docs/usage.md#reflect-reindex) | Rebuild the full graph index from all documents |
+| [`reflect stats`](docs/usage.md#reflect-stats) | Show KB metrics (doc count, entities, relationships, confidence) |
+| [`reflect critical-patterns`](docs/usage.md#reflect-critical-patterns) | Surface high-confidence, widely-applicable patterns |
+| [`reflect generate-sidecars`](docs/usage.md#reflect-generate-sidecars) | Backfill missing `.entities.yaml` sidecars (heuristic, no LLM) |
+| [`reflect metrics stats`](docs/usage.md#reflect-metrics-stats) | Aggregate the recall-metrics JSONL log (hit rate, latency) |
+| [`reflect timeline`](docs/usage.md#reflect-timeline) | Drill down on statusline dashboard rows (REC/MEM/ING/DRN/TOK/ERR/COM/AGT) |
 
-Team-kb repos gate writes on the v4 frontmatter schema. Add reflect-kb as a
-hook source in your team-kb's `.pre-commit-config.yaml`:
+See [docs/usage.md](docs/usage.md) for per-subcommand synopsis, all flags, examples, and common errors.
 
-```yaml
-repos:
-  - repo: https://github.com/stevengonsalvez/reflect-kb
-    rev: v0.1.0          # pin to a tag once published
-    hooks:
-      - id: reflect-kb-frontmatter
-        # Default `files:` matches ^documents/.*\.md$ — override if you keep
-        # learnings under a different path.
+## Architecture
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│  agents-in-a-box reflect plugin  (orchestrator)                │
+│  ┌─────────────────┐  ┌──────────────────┐                     │
+│  │ PreCompact hook │  │ SessionStart hook │                     │
+│  │  drains ingest  │  │  calls `reflect   │                     │
+│  │  queue; calls   │  │   search` + injects│                    │
+│  │ `reflect add`   │  │   context         │                     │
+│  └────────┬────────┘  └────────┬──────────┘                    │
+│           │                    │                                │
+└───────────┼────────────────────┼────────────────────────────────┘
+            │                    │
+            ▼                    ▼
+┌───────────────────────────────────────────────────────────────┐
+│  reflect-kb  (this library — Python CLI + retrieval engine)   │
+│  • GraphRAG index (nano-graphrag)                             │
+│  • Vector search (nano-vectordb + sentence-transformers)      │
+│  • Entity sidecar store (.entities.yaml)                      │
+│  • Metrics JSONL writer                                       │
+└───────────────────────────────┬───────────────────────────────┘
+                                │  reads/writes
+                                ▼
+┌───────────────────────────────────────────────────────────────┐
+│  learnings-kb  (~/.claude/global-learnings/ or               │
+│                 $GLOBAL_LEARNINGS_PATH)                       │
+│  • documents/*.md          knowledge documents                │
+│  • documents/*.entities.yaml   entity sidecars                │
+│  • nano_graphrag_cache/    graph index (gitignored)           │
+│  • metrics.jsonl           recall telemetry (rotated 10 MB)   │
+└───────────────────────────────────────────────────────────────┘
 ```
 
-Then run `pre-commit install` in the team-kb checkout. Every commit that
-touches `documents/*.md` will parse the YAML frontmatter and validate it
-against `schemas/frontmatter.schema.json`. Invalid documents fail the commit
-with a pointer to the offending field.
+**Key split:** reflect-kb is the data layer — it knows nothing about Claude Code. The plugin is the
+orchestrator — it knows when to drain, recall, and surface. The learnings-kb content directory is a
+separate git repo (private; content not code).
 
-You can also run the validator directly (same binary pre-commit invokes):
+## Companion tooling
 
-```bash
-python scripts/validate_frontmatter.py documents/ # recurse
-python scripts/validate_frontmatter.py path/to/one-learning.md
-```
+- **Claude Code plugin:** `claude plugin install reflect@agents-in-a-box`
+  — ships the PreCompact + SessionStart hooks, drain script, recall skill, and statusline timeline.
+- **Content directory:** `~/.claude/global-learnings/` (override with `$GLOBAL_LEARNINGS_PATH`).
 
-Exit codes: `0` clean, `1` validation failure, `2` usage error.
+## What's new in 0.1.1
 
-## Troubleshooting
-
-### `pipx install reflect-kb` fails when resolving nano-graphrag
-
-`nano-graphrag` pulls an unusable transitive dependency chain on Python
-≥3.11: `graspologic → hyppo → numba → llvmlite` — the last hop only builds
-for Python <3.10. The bare `pipx install .` flow works because `nano-graphrag`
-is **not** in the base `dependencies`; it lives under the `graph` extra.
-Installing the `graph` extra via pip/pipx therefore fails.
-
-The supported workaround is:
-
-```bash
-# 1. Install the CLI with its safe runtime deps.
-pipx install .
-
-# 2. Inject nano-graphrag without its broken transitive chain.
-pipx inject reflect-kb nano-graphrag --pip-args="--no-deps"
-
-# 3. Verify.
-reflect --help
-```
-
-The base install covers every import path `reflect` actually uses
-(sentence-transformers, nano-vectordb, networkx, tiktoken, openai, tenacity,
-hnswlib, xxhash, numpy, click, rich, pyyaml). The Nix flake handles this
-same `--no-deps` split out-of-band, so nix users do not hit this.
-
-### `reflect --help` prints but subcommands crash on import
-
-Early scaffold only — the full GraphRAG stack is gated behind the `graph`
-extra. If you installed base-only (no nano-graphrag), `reflect search` and
-`reflect reindex` will fail at import time. Complete the `pipx inject`
-step above.
+- **`--force` flag on `reflect add`** — non-interactive overwrite for ingest pipelines and subprocess
+  contexts where `click.confirm` cannot read a TTY. Without `--force`, non-TTY stdin now fails loudly
+  rather than silently dropping the file.
+- **Content-hash `doc_id`** — `doc_id` is now `slug(title) + sha256(title + body)[:6]`. Previously
+  hashing title-only caused silent collisions when two documents shared a slug-able title. Same title +
+  same body = same id (idempotent re-ingest). Same title + different body = distinct ids.
+- **`reflect timeline --explain ROW`** — drill-down on a single statusline dashboard row (REC, MEM,
+  ING, DRN, TOK, ERR, COM, AGT, or `all`). Delegates to the reflect plugin's `reflect_timeline.sh`
+  helper, auto-discovered from `$CLAUDE_PLUGIN_ROOT` or the plugin cache.
+- **`reflect metrics stats`** — aggregate the recall-metrics JSONL log: total events, hit rate,
+  p50/p95 latency, top tags. Supports `--format json` for machine consumption and `--window-days` for
+  custom time windows.
 
 ## License
 
-MIT. See [`LICENSE`](./LICENSE).
+MIT. See [LICENSE](./LICENSE).
