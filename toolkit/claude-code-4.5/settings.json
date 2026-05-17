@@ -20,7 +20,8 @@
       "Bash(touch:*)",
       "WebFetch(domain:docs.anthropic.com)"
     ],
-    "deny": []
+    "deny": [],
+    "defaultMode": "bypassPermissions"
   },
   "model": "claude-opus-4-6",
   "includeCoAuthoredBy": false,
