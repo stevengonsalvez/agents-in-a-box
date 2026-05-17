@@ -58,7 +58,8 @@ explicit, higher-limit path.
    ```
 3. **Inspect results** — each result has `[lrn-id]`, key insight, and how-to-apply.
 4. **Fetch full docs if needed** — for any interesting learning ID, the user can
-   run `learnings search <id>` or check `~/.learnings/documents/learnings/`.
+   run `reflect search <id>` or check the reflect repo's `documents/` dir
+   (`~/.claude/global-learnings/documents/` by default).
 
 ## Query construction tips
 
@@ -68,7 +69,10 @@ explicit, higher-limit path.
 
 ## Backend details
 
-- **Retrieval**: wraps `~/.learnings/cli/learnings search` as subprocess.
+- **Retrieval**: wraps the `reflect search` CLI (from `reflect-kb`,
+  install via `uv tool install reflect-kb`) as a subprocess. Resolved via
+  `shutil.which("reflect")`; falls back to the legacy
+  `~/.learnings/cli/learnings` only if the canonical CLI is missing.
 - **Ranking**: `confidence × recency × (1 + tag_overlap_bonus)`.
   - Confidence: HIGH=1.0, MEDIUM=0.7, LOW=0.4
   - Recency: exp(-days_ago / 90), half-life ~60 days

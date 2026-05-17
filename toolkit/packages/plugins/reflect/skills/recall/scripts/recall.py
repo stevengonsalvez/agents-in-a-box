@@ -8,8 +8,9 @@
 """
 Reflect Recall — hybrid retrieval from the global learnings KB.
 
-Wraps ~/.learnings/cli/learnings as a subprocess so we inherit GraphRAG +
-embeddings without pulling the nano-graphrag dep chain into this plugin.
+Wraps the `reflect` CLI (reflect-kb, installed via `uv tool install reflect-kb`)
+as a subprocess so we inherit GraphRAG + embeddings without pulling the
+nano-graphrag dep chain into this plugin.
 
 Usage:
     recall.py <query> [--limit N] [--mode naive|local|global]
@@ -51,10 +52,13 @@ DEFAULT_LIMIT = 10
 DEFAULT_MODE = "naive"
 DEFAULT_CACHE_TTL = 3600  # 1 hour
 DEFAULT_MAX_CHARS = 2000
-LEARNINGS_CLI_CANDIDATES = [
-    Path.home() / ".learnings" / "cli" / "learnings",
-    Path("/opt/homebrew/bin/learnings"),
-]
+# Canonical CLI name (reflect-kb). Resolved via `shutil.which("reflect")` so
+# we honour whatever install path `uv tool install reflect-kb` produced
+# (typically ~/.local/bin/reflect). Legacy `~/.learnings/cli/learnings` is
+# retained as a last-ditch fallback ONLY so recall doesn't silently break
+# on machines mid-migration; new installs should never hit it.
+REFLECT_CLI_NAME = "reflect"
+LEGACY_LEARNINGS_CLI = Path.home() / ".learnings" / "cli" / "learnings"
 
 CONFIDENCE_WEIGHTS = {"HIGH": 1.0, "MEDIUM": 0.7, "LOW": 0.4}
 CHUNK_SEPARATOR = "--New Chunk--"
@@ -63,7 +67,7 @@ ARCHIVE_HEADER_RE = re.compile(r"<!--\s*archived:\s*([0-9T:.+\-Z]+)\s*-->")
 # --- QMD fusion config ---------------------------------------------------
 # QMD provides BM25 lexical search (fast, ~0.5s) as a complement to
 # GraphRAG's vector path. Fusing the two via RRF gives hybrid lex+vec
-# retrieval without changing the learnings CLI.
+# retrieval without changing the reflect CLI.
 QMD_COLLECTION = "learnings"
 QMD_DOCS_ROOT = Path.home() / ".learnings" / "documents"
 QMD_PATH_RE = re.compile(r"qmd://" + re.escape(QMD_COLLECTION) + r"/(\S+?\.md)")
@@ -150,21 +154,28 @@ class RecallResult:
 # --- Helpers -------------------------------------------------------------
 
 def find_learnings_cli() -> Path | None:
-    """Locate the learnings CLI. D1: subprocess wrapper.
+    """Locate the reflect-kb CLI. D1: subprocess wrapper.
 
-    Trust boundary: absolute candidates under `~/.learnings/cli/` are
-    tried first (installed by bootstrap.js from the toolkit template),
-    so the canonical install always wins. Only if those are absent do
-    we fall back to `shutil.which("learnings")` — which resolves via
-    `$PATH` and is therefore only as trustworthy as the caller's
-    environment. In practice this only runs as the user in their own
-    session; a hostile `$PATH` would already compromise their shell.
+    Resolution order:
+      1. `shutil.which("reflect")` — canonical install via `uv tool install reflect-kb`.
+         Resolves through $PATH so it picks up whatever the user's environment
+         points at (usually ~/.local/bin/reflect).
+      2. Legacy `~/.learnings/cli/learnings` — pre-migration install. Kept only
+         so machines that haven't installed reflect-kb yet don't silently lose
+         recall; new code paths should never hit this.
+
+    Trust boundary: `$PATH` is only as trustworthy as the caller's environment,
+    but this script only runs in the user's own session — a hostile `$PATH`
+    would already compromise their shell.
+
+    Returns None if neither is found. Caller surfaces a graceful empty result.
     """
-    for candidate in LEARNINGS_CLI_CANDIDATES:
-        if candidate.exists() and os.access(candidate, os.X_OK):
-            return candidate
-    cli_on_path = shutil.which("learnings")
-    return Path(cli_on_path) if cli_on_path else None
+    cli_on_path = shutil.which(REFLECT_CLI_NAME)
+    if cli_on_path:
+        return Path(cli_on_path)
+    if LEGACY_LEARNINGS_CLI.exists() and os.access(LEGACY_LEARNINGS_CLI, os.X_OK):
+        return LEGACY_LEARNINGS_CLI
+    return None
 
 
 CACHE_VERSION = "v2-hybrid"  # bump when fusion semantics change
@@ -328,7 +339,7 @@ def rrf_fuse(result_lists: list[list[Learning]], k: int = RRF_K) -> list[Learnin
 
 
 def parse_learnings_output(json_blob: str) -> list[Learning]:
-    """Split a `learnings search --format json` response into Learning objects."""
+    """Split a `reflect search --format json` response into Learning objects."""
     try:
         envelope = json.loads(json_blob)
     except json.JSONDecodeError:
@@ -479,7 +490,10 @@ def recall(
     """High-level API: query → ranked Learnings. Never raises on KB issues."""
     cli = find_learnings_cli()
     if not cli:
-        return RecallResult([], query, mode, error="learnings CLI not found")
+        return RecallResult(
+            [], query, mode,
+            error="reflect CLI not found on $PATH (install with `uv tool install reflect-kb`)",
+        )
 
     fetched_limit = max(limit * 2, 10)
     cache_file = cache_path(query, mode, fetched_limit)
@@ -499,7 +513,7 @@ def recall(
             log_recall(query, mode, len(learnings), cached=True)
             return RecallResult(learnings, query, mode, cache_hit=True)
 
-    # Fan out GraphRAG (via learnings CLI) and QMD (BM25) in parallel.
+    # Fan out GraphRAG (via reflect CLI) and QMD (BM25) in parallel.
     # QMD contributes lexical recall that pure vector search misses; it's a
     # booster, not a blocker — returns [] on any failure and fusion still works.
     def _fetch_learnings() -> tuple[list[Learning], str | None]:
@@ -512,7 +526,7 @@ def recall(
         except (subprocess.TimeoutExpired, OSError) as e:
             return [], f"subprocess failed: {e}"
         if proc.returncode != 0:
-            return [], f"learnings exit {proc.returncode}"
+            return [], f"reflect search exit {proc.returncode}"
         return parse_learnings_output(proc.stdout), None
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:

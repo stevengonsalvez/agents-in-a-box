@@ -99,14 +99,15 @@ def test_recall_preamble_positioned_before_main_flow():
 
 @pytest.fixture
 def sandbox_kb(tmp_path):
-    """Minimal fake KB that the `learnings` CLI can search."""
-    # Return a callable that installs a stub `learnings` binary + seed docs.
-    # We don't exercise nano-graphrag here — we stub the subprocess output.
+    """Minimal fake KB that the `reflect` CLI can search."""
+    # Install a stub `reflect` binary on PATH that returns canned JSON. We
+    # don't exercise nano-graphrag here — recall.py just needs the subprocess
+    # to return something parseable.
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
 
-    # Stub `learnings` CLI that returns a fixed JSON result containing the seed.
-    # Shape matches what real CLI emits: {"context": "<chunks separated by --New Chunk-->"}
+    # Stub `reflect` CLI that returns a fixed JSON result containing the seed.
+    # Shape matches what the real CLI emits: {"context": "<chunks separated by --New Chunk-->"}
     seed_id = "lrn-test-fixture-abc123"
     chunk = (
         "---\n"
@@ -120,26 +121,22 @@ def sandbox_kb(tmp_path):
     )
     fake_output = json.dumps({"context": chunk})
 
-    stub = bin_dir / "learnings"
+    stub = bin_dir / "reflect"
     stub.write_text(
         "#!/usr/bin/env bash\n"
-        "# stub learnings CLI for sandbox tests\n"
+        "# stub reflect CLI for sandbox tests\n"
         f"cat <<'EOF'\n{fake_output}\nEOF\n"
     )
     stub.chmod(0o755)
 
-    # Fake ~/.learnings/cli/ layout so recall.py finds it via candidate path.
-    home_learnings = tmp_path / "home" / ".learnings" / "cli"
-    home_learnings.mkdir(parents=True)
-    real_stub = home_learnings / "learnings"
-    shutil.copy(stub, real_stub)
-    real_stub.chmod(0o755)
-
     # Also create the nano_graphrag_cache dir so kb_last_modified() works.
-    (tmp_path / "home" / ".learnings" / "nano_graphrag_cache").mkdir()
+    # (Path is unchanged from pre-migration — it's still under ~/.learnings/
+    # for legacy QMD/cache-invalidation purposes; see recall.py.)
+    (tmp_path / "home" / ".learnings" / "nano_graphrag_cache").mkdir(parents=True)
 
     yield {
         "home": tmp_path / "home",
+        "bin": bin_dir,
         "seed_id": seed_id,
         "reflect_state": tmp_path / "reflect_state",
     }
@@ -153,6 +150,9 @@ def test_recall_returns_seeded_learning(sandbox_kb):
     env = os.environ.copy()
     env["HOME"] = str(sandbox_kb["home"])
     env["REFLECT_STATE_DIR"] = str(sandbox_kb["reflect_state"])
+    # Put the stub `reflect` binary first on PATH so shutil.which("reflect")
+    # picks it up instead of any real install.
+    env["PATH"] = f"{sandbox_kb['bin']}:{env.get('PATH', '/bin:/usr/bin')}"
 
     result = subprocess.run(
         [
@@ -177,8 +177,9 @@ def test_recall_returns_seeded_learning(sandbox_kb):
 
 def test_recall_graceful_on_missing_kb(tmp_path):
     """D9: when KB is absent, recall exits 0 with no output."""
-    # HOME-empty hides ~/.learnings; PATH=/bin:/usr/bin hides `qmd`. uv is
-    # invoked by full path so PATH stripping is safe.
+    # Strip PATH so `reflect` and `qmd` are both unreachable; HOME-empty hides
+    # ~/.learnings/ so the legacy fallback also can't fire. uv is invoked by
+    # full path so PATH stripping is safe.
     env = os.environ.copy()
     env["HOME"] = str(tmp_path)  # empty — no ~/.learnings
     env["PATH"] = "/bin:/usr/bin"
@@ -199,13 +200,12 @@ def test_recall_graceful_on_missing_kb(tmp_path):
 
 @pytest.fixture
 def dual_stub_kb(tmp_path):
-    """Install stubs for BOTH `learnings` and `qmd` + seed docs for both.
+    """Install stubs for BOTH `reflect` and `qmd` + seed docs for both.
 
-    learnings stub returns lrn-graph-X (distinct from lrn-qmd-X in QMD).
+    reflect stub returns lrn-graph-X (distinct from lrn-qmd-X in QMD).
     This lets us verify fusion: the output should contain IDs from BOTH.
     """
     home = tmp_path / "home"
-    (home / ".learnings" / "cli").mkdir(parents=True)
     (home / ".learnings" / "nano_graphrag_cache").mkdir(parents=True)
     docs_root = home / ".learnings" / "documents"
     (docs_root / "learnings").mkdir(parents=True)
@@ -217,7 +217,7 @@ def dual_stub_kb(tmp_path):
             f"tags: [sandbox]\n---\n\n**How to apply:** qmd hit\n"
         )
 
-    # learnings stub — emits envelope JSON with 2 distinct chunks.
+    # reflect CLI stub — emits envelope JSON with 2 distinct chunks.
     graph_chunks = []
     for lid in ["lrn-graph-a", "lrn-graph-b"]:
         graph_chunks.append(
@@ -227,16 +227,17 @@ def dual_stub_kb(tmp_path):
     graph_context = "\n--New Chunk--\n".join(graph_chunks)
     graph_envelope = json.dumps({"context": graph_context})
 
-    learnings_stub = home / ".learnings" / "cli" / "learnings"
-    learnings_stub.write_text(
-        f"#!/usr/bin/env bash\ncat <<'EOF'\n{graph_envelope}\nEOF\n"
-    )
-    learnings_stub.chmod(0o755)
-
-    # qmd stub — emits text output with paths pointing at our seeded docs.
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     (bin_dir / "uv").symlink_to(UV)
+
+    reflect_stub = bin_dir / "reflect"
+    reflect_stub.write_text(
+        f"#!/usr/bin/env bash\ncat <<'EOF'\n{graph_envelope}\nEOF\n"
+    )
+    reflect_stub.chmod(0o755)
+
+    # qmd stub — emits text output with paths pointing at our seeded docs.
     qmd_stub = bin_dir / "qmd"
     qmd_stub.write_text(
         "#!/usr/bin/env bash\n"
@@ -273,7 +274,7 @@ def test_fusion_includes_both_backends(dual_stub_kb):
     assert result.returncode == 0, f"recall failed: {result.stderr}"
     # Must see at least one ID from each backend → fusion is happening
     assert "lrn-graph-" in result.stdout, (
-        f"graph backend results missing — recall isn't calling learnings CLI.\n"
+        f"graph backend results missing — recall isn't calling reflect CLI.\n"
         f"stdout: {result.stdout}"
     )
     assert "lrn-qmd-" in result.stdout, (
@@ -284,26 +285,26 @@ def test_fusion_includes_both_backends(dual_stub_kb):
 
 # ─── Layer 6: REAL CLI smoke tests (skipped if KB absent) ──────────────
 
-def _real_learnings_available() -> bool:
-    return (Path.home() / ".learnings" / "cli" / "learnings").exists()
+def _real_reflect_available() -> bool:
+    return shutil.which("reflect") is not None
 
 
 def _real_qmd_available() -> bool:
     return shutil.which("qmd") is not None
 
 
-@pytest.mark.skipif(not _real_learnings_available(),
-                    reason="no real ~/.learnings KB on this host")
-def test_real_learnings_cli_returns_results():
-    """Smoke test: the real learnings CLI actually returns something for a
+@pytest.mark.skipif(not _real_reflect_available(),
+                    reason="reflect CLI not on $PATH (install with `uv tool install reflect-kb`)")
+def test_real_reflect_cli_returns_results():
+    """Smoke test: the real reflect CLI actually returns something for a
     generic query. Catches if the local KB is empty or broken."""
     result = subprocess.run(
-        [str(Path.home() / ".learnings" / "cli" / "learnings"),
+        ["reflect",
          "search", "the", "--mode", "naive", "--format", "json", "--limit", "3"],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True, text=True, timeout=120,
     )
     assert result.returncode == 0, (
-        f"learnings CLI failed: {result.stderr[:500]}"
+        f"reflect CLI failed: {result.stderr[:500]}"
     )
     payload = json.loads(result.stdout)
     assert isinstance(payload, dict), f"expected envelope dict, got {type(payload)}"
