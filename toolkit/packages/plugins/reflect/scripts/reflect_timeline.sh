@@ -244,7 +244,7 @@ _render_tokens() {
   # Heat gradient: green ≤5k, yellow 5k–15k, red >15k. Label uses neutral
   # gold so it's visually distinct from the heat ramp.
   local counts=("$@")
-  local out="$(_fg 240 200 80)T:${RESET} "
+  local out="$(_fg 240 200 80)TOK:${RESET} "
   local i c idx h alpha r g b
   for (( i=0; i<NCELLS; i++ )); do
     c=${counts[i]:-0}
@@ -300,14 +300,14 @@ done
 # Row 4: I (ingest, green)       | D (drain runs, orange)
 # Row 5: T (tokens, heat)        | E (errors, red)
 # Row 6: C (commits+pushes, gray)| A (agent spawns, cyan)
-SPARK_R=$(_render_sparkline "R"  80 180 255 "${RECALL_B[@]}")
-SPARK_M=$(_render_sparkline "M" 100 200 220 "${MEMORY_B[@]}")
-SPARK_I=$(_render_sparkline "I" 120 200 120 "${INGEST_B[@]}")
-SPARK_D=$(_render_sparkline "D" 230 150  90 "${DRAIN_B[@]}")
+SPARK_R=$(_render_sparkline "REC"  80 180 255 "${RECALL_B[@]}")
+SPARK_M=$(_render_sparkline "MEM" 100 200 220 "${MEMORY_B[@]}")
+SPARK_I=$(_render_sparkline "ING" 120 200 120 "${INGEST_B[@]}")
+SPARK_D=$(_render_sparkline "DRN" 230 150  90 "${DRAIN_B[@]}")
 SPARK_T=$(_render_tokens "${TOKENS_B[@]}")
-SPARK_E=$(_render_sparkline "E" 240  80  80 "${ERRORS_B[@]}")
-SPARK_C=$(_render_sparkline "C" 180 180 180 "${COMMITS_B[@]}")
-SPARK_A=$(_render_sparkline "A"  80 200 220 "${AGENTS_B[@]}")
+SPARK_E=$(_render_sparkline "ERR" 240  80  80 "${ERRORS_B[@]}")
+SPARK_C=$(_render_sparkline "COM" 180 180 180 "${COMMITS_B[@]}")
+SPARK_A=$(_render_sparkline "AGT"  80 200 220 "${AGENTS_B[@]}")
 
 # Pair side-by-side with 3-space separator. Each line gets a single leading
 # space so it visually aligns under line 2 (which is printed with a leading
