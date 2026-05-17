@@ -41,19 +41,56 @@ _fingerprint() {
   printf '%s' "$out"
 }
 
-# ── Resolve current session JSONL ────────────────────────────────────────────
+# ── Resolve the live session's project dir + JSONL ───────────────────────────
+# Claude Code hashes the PROJECT ROOT (the dir containing .git), not the literal
+# pwd — so worktrees end up sharing the parent repo's project dir. Three-tier
+# resolution, env-driven first because that's what statusline.sh hands us.
+#
+# 1. $REFLECT_TIMELINE_PROJECT_DIR (passed by statusline.sh from stdin JSON)
+# 2. Walk up cwd to find .git dir, hash THAT path
+# 3. Fall back to literal pwd hash (legacy behaviour)
+_resolve_project_dir() {
+  local source_path hash
+  source_path="${REFLECT_TIMELINE_PROJECT_DIR:-}"
+  if [[ -z "$source_path" ]] && command -v git >/dev/null 2>&1; then
+    # `git rev-parse --git-common-dir`'s parent → the main repo root for both
+    # regular checkouts AND worktrees. Worktrees have .git as a file pointing
+    # to <main>/.git/worktrees/<name>; --git-common-dir resolves through that
+    # to <main>/.git. Claude Code hashes this same path, so we match its
+    # project-dir convention exactly.
+    local gcd
+    gcd=$(git rev-parse --git-common-dir 2>/dev/null)
+    if [[ -n "$gcd" ]]; then
+      # Make absolute if relative (it's usually relative to cwd)
+      [[ "$gcd" != /* ]] && gcd="$(pwd)/$gcd"
+      source_path=$(dirname "$gcd")
+    fi
+  fi
+  # Last-ditch fallback: literal pwd
+  [[ -z "$source_path" ]] && source_path=$(pwd 2>/dev/null || echo "")
+  [[ -z "$source_path" ]] && return
+  hash=$(printf '%s' "$source_path" | tr '/.' '-')
+  local dir="${PROJECTS_DIR}/${hash}"
+  [[ -d "$dir" ]] && printf '%s' "$dir"
+}
+
 _resolve_session_jsonl() {
-  local cwd hash dir latest
-  cwd=$(pwd 2>/dev/null || echo "")
-  [[ -z "$cwd" ]] && return
-  hash=$(printf '%s' "$cwd" | tr '/.' '-')
-  dir="${PROJECTS_DIR}/${hash}"
-  [[ -d "$dir" ]] || return
+  # If session_id is explicit, find <session_id>.jsonl anywhere — most reliable.
+  if [[ -n "${REFLECT_TIMELINE_SESSION_ID:-}" ]]; then
+    local match
+    match=$(find "$PROJECTS_DIR" -maxdepth 2 -name "${REFLECT_TIMELINE_SESSION_ID}.jsonl" 2>/dev/null | head -1)
+    [[ -n "$match" ]] && { printf '%s' "$match"; return; }
+  fi
+  # Else: pick the most-recently-modified JSONL inside the resolved project dir.
+  local dir latest
+  dir=$(_resolve_project_dir)
+  [[ -z "$dir" ]] && return
   latest=$(ls -t "$dir"/*.jsonl 2>/dev/null | head -1)
   [[ -n "$latest" ]] && printf '%s' "$latest"
 }
 
 SESSION_JSONL=$(_resolve_session_jsonl)
+PROJECT_DIR=$(_resolve_project_dir)
 
 # ── Cache check ──────────────────────────────────────────────────────────────
 _now=$(date +%s)
@@ -103,16 +140,11 @@ _gather_raw() {
       | tail -n 500 \
       | sed -E 's/^\[([^]]+)\].*/D\t\1\t1/'
   fi
-  # M: memory mtimes (already epoch)
-  local cwd hash mdir
-  cwd=$(pwd 2>/dev/null || echo "")
-  if [[ -n "$cwd" ]]; then
-    hash=$(printf '%s' "$cwd" | tr '/.' '-')
-    mdir="${PROJECTS_DIR}/${hash}/memory"
-    if [[ -d "$mdir" ]]; then
-      find "$mdir" -maxdepth 2 -name '*.md' -newermt '2 hours ago' 2>/dev/null \
-        | while IFS= read -r f; do printf 'M\tE%s\t1\n' "$(_mtime "$f")"; done
-    fi
+  # M: memory mtimes (already epoch). Uses the same resolved project dir as
+  # the session JSONL — see _resolve_project_dir above.
+  if [[ -n "$PROJECT_DIR" && -d "$PROJECT_DIR/memory" ]]; then
+    find "$PROJECT_DIR/memory" -maxdepth 2 -name '*.md' -newermt '2 hours ago' 2>/dev/null \
+      | while IFS= read -r f; do printf 'M\tE%s\t1\n' "$(_mtime "$f")"; done
   fi
   # T: tokens
   if [[ -n "$SESSION_JSONL" && -f "$SESSION_JSONL" ]]; then
