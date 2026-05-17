@@ -55,24 +55,19 @@ def get_state_dir() -> Path:
     return Path.home() / '.reflect'
 
 
-def load_state() -> dict:
-    """Load reflect state."""
-    state_file = get_state_dir() / 'reflect-state.yaml'
-    if not state_file.exists():
-        return {'auto_reflect': False}
-
-    if yaml:
-        with open(state_file) as f:
-            return yaml.safe_load(f) or {}
-    else:
-        # Fallback: basic parsing
-        return {'auto_reflect': False}
-
-
 def is_auto_reflect_enabled() -> bool:
-    """Check if auto-reflection is enabled."""
-    state = load_state()
-    return state.get('auto_reflect', False)
+    """
+    Auto-reflect is ON by default when the plugin is installed.
+    Override with REFLECT_AUTO_REFLECT=0 to disable.
+
+    Legacy reflect-state.yaml is no longer consulted (deprecated in v3
+    migration on 2026-05-09; values would always return False because the
+    migration stub does not carry the auto_reflect key).
+    """
+    val = os.environ.get('REFLECT_AUTO_REFLECT', '').strip().lower()
+    if val in ('0', 'false', 'no', 'off'):
+        return False
+    return True
 
 
 def log_precompact_event(input_data: dict, mode: str):

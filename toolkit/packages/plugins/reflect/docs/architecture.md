@@ -667,7 +667,6 @@ Team KB repos provisioned via `reflect team init/clone` include a `.pre-commit-c
 | `REFLECT_RETENTION_DAYS` | `90` | Knowledge note retention policy |
 | `REFLECT_AUTO_APPROVE` | `0.8` | Confidence threshold for auto-approval |
 | `REFLECT_CONFIG_PATH` | `~/.learnings/config.toml` | Override dashboard config path |
-| `GLOBAL_LEARNINGS_PATH` | `~/.claude/global-learnings` | Override learnings repo root |
 | `REFLECT_RECALL_DEBUG` | (unset) | Print recall errors to stderr for debugging |
 
 ---

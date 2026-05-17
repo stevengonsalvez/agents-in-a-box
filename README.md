@@ -308,7 +308,7 @@ Skills are reusable capabilities that any supported AI tool can invoke.
 <details>
 <summary><b>Knowledge & Learning</b></summary>
 
-`reflect` · `global-learnings` · `research` · `research-cache` · `instincts` · `compound-docs` · `prime`
+`reflect` · `research` · `research-cache` · `instincts` · `compound-docs` · `prime`
 </details>
 
 <details>
@@ -372,7 +372,7 @@ A two-tier learning system that captures insights during development and retriev
 | **Fast local** | QMD (Quick Markdown Documents) | Semantic search over structured learning notes |
 | **Deep graph** | GraphRAG (nano-graphrag) | Entity-relationship graph with community detection for cross-project knowledge retrieval |
 
-The `/reflect` skill captures learnings. The `/research` and `/prime` skills retrieve them. The `/global-learnings` skill manages the knowledge base directly.
+The `/reflect` skill captures learnings. The `/research` and `/prime` skills retrieve them. The standalone [reflect-kb](https://github.com/stevengonsalvez/reflect-kb) CLI (installed as `reflect`) manages the knowledge base directly.
 
 **[How the knowledge system works →](docs/how-reflection-works.md)**
 

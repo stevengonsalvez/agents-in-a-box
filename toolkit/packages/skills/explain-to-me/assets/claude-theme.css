@@ -1,0 +1,89 @@
+/* Claude brand polish layer for explain-to-me templates.
+ * Inject as a second <style> block AFTER the template's own <style>.
+ * Templates already use Claude's palette (ivory/slate/clay/oat/olive);
+ * this layer adds:
+ *   - Söhne-like sans stack (matches claude.ai)
+ *   - Tiempos Headline–like serif fallback for headings
+ *   - Subtle paper texture on body
+ *   - Brand badge (bottom-right)
+ *   - Clay focus ring
+ * Layout-safe: only touches typography, surface, and decoration.
+ */
+
+:root {
+  /* Re-affirm tokens in case template scoped them. */
+  --ivory:    #FAF9F5;
+  --slate:    #141413;
+  --clay:     #D97757;
+  --oat:      #E3DACC;
+  --olive:    #788C5D;
+  --gray-150: #F0EEE6;
+  --gray-300: #D1CFC5;
+  --gray-500: #87867F;
+  --gray-700: #3D3D3A;
+
+  /* claude.ai font stacks. Web fonts (Söhne, Tiempos) are licensed; the
+   * stack falls back to high-quality system fonts that read as similar. */
+  --sans:  "Söhne", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --serif: "Tiempos Headline", "Tiempos Text", "Source Serif Pro", "Iowan Old Style", "Charter", Georgia, serif;
+  --mono:  "Söhne Mono", "Berkeley Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+body {
+  background-image:
+    radial-gradient(rgba(20, 20, 19, 0.018) 1px, transparent 1px);
+  background-size: 4px 4px;
+}
+
+h1, h2, h3 {
+  letter-spacing: -0.012em;
+}
+
+.eyebrow::after {
+  content: " · explained by claude";
+  color: var(--clay);
+  letter-spacing: 0.08em;
+}
+
+:focus-visible {
+  outline: 2px solid var(--clay);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+pre, code {
+  font-feature-settings: "ss01", "cv11", "calt";
+}
+pre {
+  background: var(--gray-150) !important;
+  border: 1px solid var(--gray-300);
+}
+
+body::after {
+  content: "claude · explainer";
+  position: fixed;
+  bottom: 18px;
+  right: 18px;
+  z-index: 999;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--gray-500);
+  background: rgba(250, 249, 245, 0.92);
+  border: 1px solid var(--gray-300);
+  border-left: 3px solid var(--clay);
+  padding: 6px 10px 6px 12px;
+  border-radius: 4px;
+  backdrop-filter: blur(6px);
+  pointer-events: none;
+}
+
+@media print {
+  body::after { display: none; }
+  body { background-image: none; }
+}
+
+@media (max-width: 640px) {
+  body::after { display: none; }
+}

@@ -333,9 +333,17 @@ main() {
         fi
     fi
 
-    # Also search global learnings if CLI is available
-    local GLOBAL_CLI="${HOME}/.claude/global-learnings/cli/learnings"
-    if [[ -x "$GLOBAL_CLI" ]]; then
+    # Also search global learnings via reflect-kb CLI if available
+    local REFLECT_CLI
+    if command -v reflect >/dev/null 2>&1; then
+        REFLECT_CLI="$(command -v reflect)"
+    elif [[ -x "${HOME}/.local/bin/reflect" ]]; then
+        REFLECT_CLI="${HOME}/.local/bin/reflect"
+    else
+        REFLECT_CLI=""
+    fi
+
+    if [[ -n "$REFLECT_CLI" ]]; then
         if [[ "$FORMAT" != "json" ]]; then
             echo ""
             echo -e "${BOLD}Searching global learnings (GraphRAG)...${RESET}"
@@ -345,13 +353,13 @@ main() {
         local global_format="simple"
         [[ "$FORMAT" == "json" ]] && global_format="json"
 
-        if "$GLOBAL_CLI" search "$QUERY" --mode local --format "$global_format" 2>/dev/null; then
+        if "$REFLECT_CLI" search "$QUERY" --mode local --format "$global_format" 2>/dev/null; then
             : # Success with graph search
-        elif "$GLOBAL_CLI" search "$QUERY" --mode naive --format "$global_format" 2>/dev/null; then
+        elif "$REFLECT_CLI" search "$QUERY" --mode naive --format "$global_format" 2>/dev/null; then
             : # Fallback to vector-only search
         else
             if [[ "$FORMAT" != "json" ]]; then
-                echo -e "${YELLOW}(Global search unavailable - run 'learnings reindex' to initialize)${RESET}"
+                echo -e "${YELLOW}(Global search unavailable - run 'reflect reindex' to initialize)${RESET}"
             fi
         fi
     fi

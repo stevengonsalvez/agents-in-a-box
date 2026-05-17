@@ -16,6 +16,7 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Datelike, Timelike, Utc};
+use tracing::{debug, trace};
 
 use crate::cli::statusline::{LiveCache, cache_path, read_cache};
 use crate::models::usage::ProviderCall;
@@ -72,12 +73,21 @@ impl Default for Source {
 /// runs when Tier 1 is missing/stale and only walks the *most recent*
 /// JSONL files (filtered by mtime).
 pub fn current() -> LiveWindow {
+    // Tier1 hit is the steady-state happy path — called on every
+    // watcher tick (5s) when the statusline is wired. Log it at
+    // trace so it doesn't dominate JSONL output. Tier transitions
+    // (tier1 miss, tier2 outcomes) are rare and informative, so they
+    // stay at debug.
     if let Some(window) = current_tier1() {
+        trace!(source = ?window.source, "live_window: tier1 (statusline cache) hit");
         return window;
     }
+    debug!("live_window: tier1 miss/stale, falling through to tier2");
     if let Some(window) = current_tier2() {
+        debug!(source = ?window.source, "live_window: tier2 (local JSONL) hit");
         return window;
     }
+    debug!("live_window: tier2 miss, returning empty (CTA)");
     LiveWindow::empty()
 }
 

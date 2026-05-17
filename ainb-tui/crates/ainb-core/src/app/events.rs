@@ -557,12 +557,17 @@ impl EventHandler {
         let git_view_text_active = state.current_screen == screen_ids::GIT_VIEW
             && state.git_view_state.as_ref().map(|gv| gv.is_in_commit_mode()).unwrap_or(false);
 
-        // Config is multi-mode — `editing` and `api_key_input_mode`
-        // are the only states that accept free-form character input.
-        // Plain navigation of settings categories should NOT suppress
-        // global shortcuts like `H`; that would be a UX regression.
+        // Config is multi-mode — only the states that accept free-form
+        // character input count as text-entry. Plain navigation of
+        // settings categories should NOT suppress global shortcuts
+        // like `H`; that would be a UX regression. AINB 2.0 also opens
+        // a modal popup via `ConfigEditSetting` whose `TextInput` /
+        // `NumberInput` variants capture characters — `show_popup` is
+        // included so `H` doesn't toggle help mid-edit there either.
         let config_text_active = state.current_screen == screen_ids::CONFIG
-            && (state.config_screen_state.editing || state.config_screen_state.api_key_input_mode);
+            && (state.config_screen_state.editing
+                || state.config_screen_state.api_key_input_mode
+                || state.config_popup_state.show_popup);
 
         new_session_text_active
             || matches!(
@@ -743,8 +748,7 @@ impl EventHandler {
             //       provider popup),
             //   (b) per-view text-entry overlays toggled inside otherwise
             //       navigable screens (GitView's commit message, the
-            //       Analytics input/zoom-search modes, the Skills search
-            //       overlay).
+            //       Skills search overlay).
             //
             // Modal text inputs that already early-return at the top of
             // `handle_key_event` (confirmation dialog, OtherTmux/SshSession
@@ -5220,6 +5224,17 @@ mod text_input_guard_tests {
         assert!(
             EventHandler::is_text_input_context(&state),
             "Config + api_key_input_mode = true must be treated as text input"
+        );
+
+        // Config edit popup (opened via ConfigEditSetting). Captures
+        // character input for Text/Number settings — `H` must NOT
+        // toggle help while it's open.
+        let mut state = AppState::default();
+        state.current_screen = screen_ids::CONFIG.to_string();
+        state.config_popup_state.show_popup = true;
+        assert!(
+            EventHandler::is_text_input_context(&state),
+            "Config + config_popup_state.show_popup = true must be treated as text input"
         );
 
         // Modal flags on AppState. Each must independently flip the

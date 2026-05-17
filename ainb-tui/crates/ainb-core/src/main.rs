@@ -1242,12 +1242,67 @@ fn setup_logging() {
     use std::path::PathBuf;
     use tracing_subscriber::prelude::*;
 
+    // Short-lived CLI subcommands (one-shot utilities, the statusline
+    // hook that fires on every Claude Code prompt render, completion
+    // generation, `--help`, etc.) must NOT open a JSONL file — it'd
+    // litter `~/.agents-in-a-box/logs/` with one empty file per
+    // invocation. For these commands, install a stderr-only subscriber
+    // so explicit warns/errors still surface when invoked synchronously
+    // from a shell. Long-running commands (TUI, `run`, `attach`,
+    // `auth`, `recover`) fall through to the JSONL file path.
+    let first_arg = std::env::args().nth(1);
+    let is_short_lived_cli = matches!(
+        first_arg.as_deref(),
+        Some(
+            "list"
+                | "logs"
+                | "status"
+                | "kill"
+                | "config"
+                | "git"
+                | "favorites"
+                | "init"
+                | "presets"
+                | "usage"
+                | "claudecode"
+                | "statusline"
+                | "completion"
+                | "--help"
+                | "-h"
+                | "--version"
+                | "-V"
+                | "help"
+        )
+    );
+    if is_short_lived_cli {
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(std::io::stderr)
+                    .with_ansi(false)
+                    .compact(),
+            )
+            .with(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "ainb=warn".into()),
+            )
+            .init();
+        return;
+    }
+
     // Create log directory if it doesn't exist
     let log_dir = std::env::var("HOME")
         .map(|home| PathBuf::from(home).join(".agents-in-a-box").join("logs"))
         .unwrap_or_else(|_| PathBuf::from(".agents-in-a-box/logs"));
 
     let _ = std::fs::create_dir_all(&log_dir);
+
+    // Best-effort janitor: every TUI startup, prune zero-byte JSONL
+    // files older than 24h. The bug that produced 2,999 empty files
+    // (filter mismatch + per-invocation file open) is fixed, but old
+    // installs accumulate cruft and even now a crash before the first
+    // log event leaves an empty file behind.
+    purge_empty_log_files(&log_dir);
 
     // Create JSONL log file with timestamp
     let log_file = log_dir.join(format!(
@@ -1271,6 +1326,12 @@ fn setup_logging() {
                 .with_ansi(false),
         )
         .with(
+            // Comprehensive default: `ainb`/`ainb_core` (this crate and
+            // its lib) at info so every traced event from our own code
+            // lands in the JSONL, plugin runtime + first-party plugins
+            // at debug for visibility, and global `warn` so noisy
+            // dependencies (bollard, hyper, tokio, etc.) only surface
+            // real problems. Override at any time with `RUST_LOG`.
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
                 "info,ainb=info,ainb_core=info,ainb_plugin_runtime=debug,\
                  ainb_plugin_session_reader=debug,ainb_plugin_burndown=debug"
@@ -1278,6 +1339,35 @@ fn setup_logging() {
             }),
         )
         .init();
+}
+
+/// Remove zero-byte `agents-in-a-box-*.jsonl` files older than 24h.
+/// Best-effort — any IO error is silently swallowed so log
+/// initialisation always proceeds.
+fn purge_empty_log_files(log_dir: &std::path::Path) {
+    use std::time::{Duration, SystemTime};
+
+    const STALE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
+
+    let Ok(entries) = std::fs::read_dir(log_dir) else {
+        return;
+    };
+    let now = SystemTime::now();
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() || meta.len() != 0 {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("agents-in-a-box-") || !name.ends_with(".jsonl") {
+            continue;
+        }
+        let age = meta.modified().ok().and_then(|m| now.duration_since(m).ok());
+        if age.is_some_and(|a| a >= STALE_AFTER) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 fn setup_panic_handler() {

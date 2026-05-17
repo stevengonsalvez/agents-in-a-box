@@ -17,6 +17,8 @@
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use tracing::{trace, warn};
+
 use crate::models::live_window::{self, LiveWindow};
 
 /// How often the watcher recomputes the live window. Cheap on the Tier 1
@@ -34,7 +36,10 @@ impl LiveWindowWatcher {
     /// Cheap snapshot for the render path. Never blocks beyond a brief
     /// `RwLock::read` against a single writer.
     pub fn snapshot(&self) -> LiveWindow {
-        self.inner.read().map(|w| w.clone()).unwrap_or_else(|_| LiveWindow::empty())
+        self.inner.read().map(|w| w.clone()).unwrap_or_else(|err| {
+            warn!(error = %err, "live_window_watcher: snapshot RwLock poisoned");
+            LiveWindow::empty()
+        })
     }
 
     /// Start a background poll loop. Safe to call only from inside a
@@ -59,10 +64,24 @@ impl LiveWindowWatcher {
                 let Some(strong) = weak.upgrade() else {
                     break;
                 };
-                if let Ok(value) = fresh {
-                    if let Ok(mut guard) = strong.write() {
-                        *guard = value;
+                match fresh {
+                    Ok(value) => {
+                        // Heartbeat — fires every REFRESH_INTERVAL (5s).
+                        // At debug it'd be 17K events/day; trace keeps
+                        // it gated behind explicit `RUST_LOG=ainb=trace`.
+                        trace!(source = ?value.source, "live_window_watcher: refresh ok");
+                        match strong.write() {
+                            Ok(mut guard) => *guard = value,
+                            Err(err) => warn!(
+                                error = %err,
+                                "live_window_watcher: write RwLock poisoned"
+                            ),
+                        }
                     }
+                    Err(err) => warn!(
+                        error = %err,
+                        "live_window_watcher: spawn_blocking failed"
+                    ),
                 }
                 drop(strong);
                 tokio::time::sleep(interval).await;

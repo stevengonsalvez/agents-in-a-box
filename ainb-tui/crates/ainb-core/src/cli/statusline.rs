@@ -246,9 +246,13 @@ pub fn execute(cache_only: bool) -> Result<()> {
             eprintln!("ainb statusline --cache-only: {e}");
             std::process::exit(1);
         }
-        Err(_) => {
+        Err(e) => {
             // Default render mode: degrade to an empty line so we never
-            // break the user's shell prompt.
+            // break the user's shell prompt. But surface the cause via
+            // tracing so the failure isn't completely silent — users
+            // running with `RUST_LOG=ainb=debug` (or anyone tailing
+            // stderr from a wrapper script) get a real error message.
+            tracing::warn!(error = %e, "ainb statusline: cache write/parse failed in render mode");
             println!();
             Ok(())
         }

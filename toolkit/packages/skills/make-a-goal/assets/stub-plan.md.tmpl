@@ -1,0 +1,39 @@
+# Goal: {{OUTCOME}}
+
+This is a stub plan for an autonomous coding agent run. The final outcome —
+what "done" looks like in one line — is stated above. Conduct an interview
+to gather the remaining context the autonomous agent will need to execute
+this end-to-end without supervision.
+
+## Context fields the interview must produce
+
+The autonomous run consumes these as its operating context. Each must be
+explicit and specific.
+
+- **Project** — what is being built (one paragraph product/feature summary)
+- **Stack** — languages, frameworks, infrastructure (be specific; versions matter)
+- **Current state** — what exists today; the starting point the agent inherits
+- **Working dir** — absolute path or repo URL where work happens
+- **Constraints** — budget, time, off-limits items, must-not-touch areas
+- **Audience** — who this is for (end users · internal · both)
+
+## Success criteria the interview must produce
+
+The agent will check itself against three specific, measurable outcomes
+before stopping. Surface all three.
+
+- Success criterion 1 — a single specific measurable outcome
+- Success criterion 2 — a single specific measurable outcome
+- Success criterion 3 — a single specific measurable outcome
+
+## Interview guidance
+
+- Focus on the six context fields and the three success criteria above.
+  Skip the broader `/interview` spec template categories that don't map to
+  the mega-prompt — depth elsewhere is wasted.
+- Be specific. "Make it fast" is not a success criterion; "p95 latency
+  under 200ms for /search across 10k rows" is.
+- The agent will run autonomously for hours. Every ambiguity costs hours
+  of wasted work. Push back on vague answers.
+- If the user offers a constraint, dig into the *why* — it usually
+  changes the success criteria.

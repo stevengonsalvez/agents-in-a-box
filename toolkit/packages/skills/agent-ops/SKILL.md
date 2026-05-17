@@ -184,7 +184,7 @@ echo ""
 
 # Disk usage
 echo "## Knowledge Base Size"
-du -sh "/.claude/global-learnings/" 2>/dev/null || echo "  No knowledge base"
+du -sh "$HOME/.learnings/" 2>/dev/null || echo "  No knowledge base"
 du -sh "$HOME/{{TOOL_DIR}}/metrics/" 2>/dev/null || echo "  No metrics"
 ```
 

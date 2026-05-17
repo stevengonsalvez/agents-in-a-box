@@ -90,7 +90,7 @@ installed via `uv tool install` by `bootstrap.js`. See the bootstrap's
 <details>
 <summary><b>Session & Learning</b> (9)</summary>
 
-`session-info` · `session-metrics` · `session-summary` · `health-check` · `instincts` · `reflect` · `compound-docs` · `global-learnings` · `research-cache`
+`session-info` · `session-metrics` · `session-summary` · `health-check` · `instincts` · `reflect` · `compound-docs` · `research-cache`
 </details>
 
 <details>

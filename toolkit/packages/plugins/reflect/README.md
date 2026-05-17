@@ -63,6 +63,178 @@ flowchart TD
 
 ---
 
+## Mental model — who writes what, when?
+
+The single most common source of confusion is conflating the three different writers that feed the knowledge base. They run on different triggers, write to different paths, and only `/reflect:ingest` is what stitches everything together. Anchor on this picture before reading further:
+
+```
+   ┌─────────────────────────────────────────────────────────────────┐
+   │  WRITER A — Built-in auto-memory tool                           │
+   │            (runs SILENTLY whenever the agent decides to remember)│
+   │                                                                 │
+   │  Trigger: agent's internal heuristic during the conversation    │
+   │  Writes:  ~/.claude/projects/<hash>/memory/feedback_*.md        │
+   │           ~/.claude/projects/<hash>/memory/project_*.md         │
+   │           ~/.claude/projects/<hash>/memory/user_*.md            │
+   │           ~/.claude/projects/<hash>/memory/reference_*.md       │
+   │           ~/.claude/projects/<hash>/memory/MEMORY.md  (index)   │
+   │                                                                 │
+   │  Indexed? NO. Just raw files on disk. Not in any KB yet.        │
+   │  Equivalent on other tools:                                     │
+   │    Codex:   ~/.codex/memories/*.md                              │
+   │    Copilot: ~/.copilot/AGENTS.md                                │
+   │    Gemini:  ~/.gemini/GEMINI.md                                 │
+   └─────────────────────────────────────────────────────────────────┘
+                              │
+                              │ time passes — file backlog accumulates
+                              │
+   ┌──────────────────────────┴───────┬─────────────────────────────┐
+   │                                  │                             │
+   ▼                                  ▼                             ▼
+┌──────────────────────────┐  ┌─────────────────────────┐  ┌─────────────────────┐
+│ WRITER B — /reflect      │  │ WRITER B' — auto-drain  │  │ HARVESTER —         │
+│ (you invoke manually)    │  │ (PreCompact → drain →   │  │ /reflect:ingest     │
+│                          │  │  claude -p /reflect)    │  │ (you invoke         │
+│ Source: current convo    │  │                         │  │  periodically)      │
+│ transcript               │  │ Same /reflect skill,    │  │                     │
+│                          │  │ but run inside a child  │  │ Source: ALL         │
+│ Writes:                  │  │ session by the drain    │  │ Writer-A files      │
+│ • docs/solutions/<cat>/  │  │ script, on the queued   │  │ across all tools    │
+│   <name>.md              │  │ transcript.             │  │                     │
+│ • .entities.yaml sidecar │  │                         │  │ Writes:             │
+│ • ~/.reflect/episodes/   │  │ Writes the SAME outputs │  │ • ~/.learnings/     │
+│   ep-<id>.md             │  │ as Writer B.            │  │   documents/<id>.md │
+│                          │  │                         │  │ • .entities.yaml    │
+│ Indexes:                 │  │                         │  │ • archived copy in  │
+│ reflect add --entities → │  │                         │  │   memories/<proj>/  │
+│ ~/.learnings/documents/  │  │                         │  │                     │
+│ + graph + vectors        │  │                         │  │ Indexes: same       │
+└──────────────────────────┘  └─────────────────────────┘  └─────────────────────┘
+                                                                     │
+   ┌─────────────────────────────────────────────────────────────────┘
+   │
+   ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│  ~/.learnings/  (the UNIFIED KB — every writer above feeds here)    │
+│  + ~/.learnings/nano_graphrag_cache/   ← graph                      │
+│  + ~/.cache/qmd/index.sqlite           ← vectors                    │
+└────────────────────────────────┬────────────────────────────────────┘
+                                 │
+                                 ▼
+                       /recall "<anything>"
+```
+
+### What ingest processes — per tool
+
+| Tool | Where it stores memory | What ingest picks up |
+|---|---|---|
+| **Claude** | `~/.claude/projects/<project-hash>/memory/` | Every `*.md` under that dir — the `MEMORY.md` index AND the atomic per-fact files |
+| **Codex** | `~/.codex/memories/` + `~/.codex/AGENTS.md` | Every `.md` in `memories/`; the global `AGENTS.md` |
+| **Copilot** | `~/.copilot/AGENTS.md` (single file) | The global `AGENTS.md` |
+| **Gemini** | `~/.gemini/GEMINI.md` + `<repo>/GEMINI.md` | Global file + per-project files |
+| **(any)** | `<repo>/AGENTS.md` | Per-project `AGENTS.md` files (codex/copilot share this format) |
+| **(any)** | `<repo>/.agents/MEMORY.md` | Project-consolidated memory (from `/reflect:consolidate`) |
+| **Episodes** | `~/.reflect/episodes/ep-*.md` | Session episode notes (drain output) |
+| **Solutions** | `<repo>/docs/solutions/**/*.md` | Knowledge notes that don't have entity sidecars yet |
+| **Skills** | `~/.claude/skills/*/references/*.md` | Learnings embedded in skill packages |
+
+All of these flow through ONE pipeline and land in ONE place: `~/.learnings/documents/`.
+
+### The simple mental model
+
+| Action | What it does |
+|---|---|
+| You type something the agent finds important | Writer A creates a `feedback_*.md` in your project's memory dir. Silent. Always. |
+| You explicitly run `/reflect` | Writer B reads the *current conversation*, writes a knowledge note in `docs/solutions/<cat>/` + indexes it. One transcript at a time. |
+| PreCompact fires (auto) | Drain queues the transcript → child session runs `/reflect` (Writer B') on it. Same outputs. Background. |
+| You explicitly run `/reflect:ingest` | Harvester reads everything Writer A ever made + similar across other tools, batch-indexes them all. Periodic. |
+| You run `/recall` | Searches the unified KB built by all of the above. |
+
+### Worked example — one fact, full trip
+
+Take a fact: *"Fleet governance must be enforced as deterministic hooks, not standing-orders prose."*
+
+**Step 1 — Writer A captures it.** While you're correcting the agent in a conversation, Claude Code's built-in memory tool decides this is worth remembering and silently writes:
+
+```bash
+~/.claude/projects/-Users-stevengonsalvez-...-shotclubhouse/memory/feedback_governance_in_code_not_prompts.md
+```
+
+with frontmatter and body. Nothing else happens. **Not in the KB yet.**
+
+**Step 2 — `/reflect:ingest` picks it up (you, batch, periodic).** The harvester:
+
+1. Discovers the file via the Claude provider's memory-pattern glob.
+2. Computes a content hash, checks `~/.learnings/.memory-ingest-log.yaml` — if hash is new, proceeds.
+3. Archives a raw copy: `~/.learnings/documents/memories/shotclubhouse/feedback_governance_in_code_not_prompts.md`.
+4. Generates a structured learning doc at `~/.learnings/documents/lrn-governance-in-code-not-prompts-<hash6>.md` (title, key_insight, tags, provenance frontmatter; Problem/Solution/Context body).
+5. Generates an entity sidecar `.entities.yaml` alongside (9 entities, 6 relationships in this case).
+6. Calls `reflect add --entities` → graph cache + QMD vector store updated.
+7. Appends to the ingest log so future runs skip this file.
+
+**Step 3 — `/recall` retrieves it.** When you search `"governance in code not prompts"`, hybrid graph + vector ranking surfaces the learning at the top with the correct title, key_insight, tags, and source path.
+
+The fact has now travelled from a free-form correction in chat → an auto-memory file on disk → a structured learning + entities sidecar → graph + vector index → recall hit. Every step is local; nothing leaves the machine.
+
+---
+
+## Live timeline dashboard (optional)
+
+The plugin ships a 4-row activity dashboard renderer at `scripts/reflect_timeline.sh`. After install it lands at `~/.claude/plugins/cache/agents-in-a-box/reflect/<version>/scripts/reflect_timeline.sh`. Wire it into your statusline to see a rolling 2-hour view of all 8 reflect-pipeline signals side-by-side.
+
+```
+R: ▁·▁▂▅█▆▃▁·····▁··▂··░·   M: ········▁▂▃·····▁▂··    ◀ recall (blue)        | auto-memory (cyan)
+I: ·······▒▓···············   D: ··········▁▂▃·······    ◀ ingest (green)       | drain (orange)
+T: ▂·▁▂▃▅▇█▇▆▃▁▁▂▃▅▇█▇▆▃▁·   E: ···············█······    ◀ tokens (heat, 20k)  | errors (red)
+C: ················▁▂······   A: ··········▁▂········█    ◀ commits (gray)      | agents (cyan)
+```
+
+Each sub-sparkline: 24 cells × 5 minutes = 2 hours, right edge = now. Heights encode per-row event count; the two sub-sparklines on a row are separated by 3 spaces. Each label letter is rendered in its own base colour.
+
+| Row | Left | Right |
+|---|---|---|
+| 3 | `R` recall events from `~/.reflect/recall_log.jsonl` | `M` auto-memory file writes under `~/.claude/projects/<hash>/memory/` |
+| 4 | `I` ingest entries in `~/.learnings/.memory-ingest-log.yaml` | `D` drain-start markers in `~/.reflect/drain.log` |
+| 5 | `T` token totals from the current session JSONL (heat gradient) | `E` unacked errors in `~/.reflect/errors.json` |
+| 6 | `C` git commits + reflog pushes in cwd over 2h | `A` agent spawns (Task tool / `dev-,agent-,swarm-` tmux / `~/.cloud-coding/runs.jsonl`) |
+
+Wire it into your statusline by adding this block at the end (after `printf '%b\n %b' "$L1" "$L2"`):
+
+```bash
+TIMELINE_HELPER="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/cache/agents-in-a-box/reflect/3.3.1}/scripts/reflect_timeline.sh"
+if [[ "${REFLECT_TIMELINE_DISABLE:-0}" != "1" ]] && [[ -x "$TIMELINE_HELPER" ]]; then
+  "$TIMELINE_HELPER" 2>/dev/null
+fi
+printf '\n'
+```
+
+Tunables (env vars):
+
+| Var | Default | Effect |
+|-----|---------|--------|
+| `REFLECT_TIMELINE_DISABLE` | unset | Set to `1` to suppress all 4 rows (zero-overhead opt-out for headless / CI sessions) |
+| `REFLECT_TIMELINE_TOKEN_FULLBAR` | `20000` | Tokens per 5-min bucket that maps to a full-height bar on row T |
+
+The helper is session-scoped (reads the current cwd's session JSONL), reads only local files (no network), caches output for 10 seconds, and degrades gracefully when any data source is missing.
+
+### Drill-down
+
+Cmd-click any row label (`REC:`, `TOK:`, etc.) in a terminal that supports
+OSC 8 hyperlinks (Warp, iTerm2, kitty, WezTerm, tmux with
+`allow-passthrough on`) to open a plain-text drill-down report at
+`/tmp/reflect-timeline-explain-$USER.txt`. The report shows the actual
+events that fed each row's buckets over the last 2 hours.
+
+If your terminal doesn't support OSC 8, run the equivalent CLI:
+
+    /path/to/reflect_timeline.sh --explain TOK   # one row
+    /path/to/reflect_timeline.sh --explain all   # everything
+
+The report is regenerated on every dashboard render (cached 10s), so
+clicks always show fresh data.
+
+---
+
 ## Sub-skills
 
 | Skill | What it does |

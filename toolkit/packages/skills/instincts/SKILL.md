@@ -3,8 +3,8 @@ name: instincts
 description: |
   Atomic behavioral instincts system. Captures micro-learnings as lightweight
   YAML entries with confidence scoring (0.3-0.9). Project-scoped instincts
-  are stored locally; universal instincts feed into the global-learnings
-  GraphRAG knowledge base for cross-project retrieval.
+  are stored locally; universal instincts feed into the reflect-kb GraphRAG
+  knowledge base for cross-project retrieval.
 
   Use when: (1) A behavioral pattern should be remembered but is too small
   for a full learning note, (2) Building up project-specific conventions,
@@ -77,14 +77,15 @@ instincts:
 ### Universal Instincts (Global Knowledge Base)
 
 When an instinct reaches high confidence (>=0.8) and universal scope,
-promote it to the global-learnings system:
+promote it to the reflect-kb knowledge base via the `reflect` CLI:
 
 ```bash
-LEARNINGS_CLI="$LEARNINGS_HOME/cli/learnings"
-
 # Promote instinct to a full learning note
-if [[ -x "$LEARNINGS_CLI" ]]; then
-    "$LEARNINGS_CLI" add docs/solutions/instincts/{instinct-id}.md \
+if command -v reflect >/dev/null 2>&1; then
+    reflect add docs/solutions/instincts/{instinct-id}.md \
+        --entities docs/solutions/instincts/{instinct-id}.entities.yaml
+elif [[ -x "$HOME/.local/bin/reflect" ]]; then
+    "$HOME/.local/bin/reflect" add docs/solutions/instincts/{instinct-id}.md \
         --entities docs/solutions/instincts/{instinct-id}.entities.yaml
 fi
 ```

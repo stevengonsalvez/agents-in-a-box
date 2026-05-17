@@ -8,7 +8,12 @@ staleness_days = 30
 
 [providers.claude]
 projects_dir = "~/.claude/projects"
-memory_pattern = "*/memory/MEMORY.md"
+# Scan every .md file under memory/ — the consolidated MEMORY.md index
+# AND the atomic per-fact files (feedback_*.md, project_*.md, user_*.md,
+# reference_*.md) that carry the rich content. Older versions narrowly
+# matched MEMORY.md only and silently dropped every atomic file from the
+# knowledge base (incident 2026-05-16).
+memory_pattern = "*/memory/*.md"
 
 [providers.codex]
 home_dir = "~/.codex"

@@ -6,8 +6,14 @@
 """
 Claude Code memory provider.
 
-Discovers ``~/.claude/projects/*/memory/MEMORY.md`` files and normalises
-them into ``DiscoveredMemory`` records.
+Discovers all memory files under ``~/.claude/projects/*/memory/`` — both the
+consolidated ``MEMORY.md`` index and the atomic per-fact files alongside it
+(``feedback_*.md``, ``project_*.md``, ``user_*.md``, ``reference_*.md``).
+
+The atomic files carry the rich content; ``MEMORY.md`` is only an index of
+links and one-line summaries. Older versions of this provider scanned only
+``MEMORY.md`` and so silently dropped every atomic auto-memory file from the
+knowledge base — incident 2026-05-16.
 """
 
 import os
@@ -55,7 +61,7 @@ class ClaudeProvider(BaseProvider):
         self._projects_dir = resolve_path(
             cfg.get("projects_dir", "~/.claude/projects")
         )
-        self._pattern = cfg.get("memory_pattern", "*/memory/MEMORY.md")
+        self._pattern = cfg.get("memory_pattern", "*/memory/*.md")
 
     # ------------------------------------------------------------------
     # BaseProvider interface

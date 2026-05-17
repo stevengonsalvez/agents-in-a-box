@@ -116,7 +116,9 @@ _BUILTIN_DEFAULTS: dict[str, Any] = {
     "providers": {
         "claude": {
             "projects_dir": "~/.claude/projects",
-            "memory_pattern": "*/memory/MEMORY.md",
+            # Match every .md under memory/ — both the consolidated MEMORY.md
+            # index AND atomic per-fact files. See reflect.toml comment.
+            "memory_pattern": "*/memory/*.md",
         },
         "codex": {
             "home_dir": "~/.codex",

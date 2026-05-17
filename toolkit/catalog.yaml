@@ -42,7 +42,6 @@ components:
     - frontend-slides
     - gh-issue
     - git-history-surgery
-    - global-learnings
     - handover
     - health-check
     - implement
@@ -82,6 +81,7 @@ components:
     - shadcn-ui
     - skill-creator
     - spawn-agent
+    - standup
     - start-android
     - start-ios
     - start-local

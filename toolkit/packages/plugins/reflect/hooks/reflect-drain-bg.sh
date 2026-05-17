@@ -68,6 +68,16 @@ log() {
     printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$LOG_FILE"
 }
 
+emit_error() {
+    # emit_error <severity> <kind> <message> [transcript_path]
+    local severity="$1" kind="$2" message="$3" transcript="${4:-}"
+    python3 -m reflect_kb.errors append \
+        --severity "$severity" --source drain --kind "$kind" \
+        --message "$message" \
+        --context "$(printf '{"transcript_path":"%s"}' "$transcript")" \
+        >/dev/null 2>&1 || true
+}
+
 # ── Locking ───────────────────────────────────────────────────────────────────
 acquire_lock() {
     if [[ -f "$LOCK_FILE" ]]; then
@@ -211,6 +221,7 @@ process_entry() {
 
     if [[ ! -f "$transcript" ]]; then
         log "  skip-stale: transcript missing on disk: $transcript"
+        emit_error warn drain_stale "transcript missing: $transcript" "$transcript"
         record_cost_event 0 "$transcript" "stale"
         return 2  # treat as permanent skip — drop from queue
     fi
@@ -219,6 +230,7 @@ process_entry() {
     retry=$(get_retry_count "$transcript")
     if [[ "$retry" -ge "$MAX_RETRIES" ]]; then
         log "  poison: $transcript (retries=$retry >= $MAX_RETRIES); archiving"
+        emit_error error drain_poison "poison after $retry retries: $transcript" "$transcript"
         printf '%s\n' "$entry_json" >> "$POISON_FILE"
         record_cost_event 0 "$transcript" "poison"
         return 2
@@ -261,6 +273,7 @@ Extract any HIGH-confidence corrections, MEDIUM-confidence approved approaches, 
     # Fatal subprocess errors (signal, timeout, process couldn't start) — no JSON.
     if [[ -z "$out_json" ]]; then
         log "    claude -p produced no output (exit=$exit_code); likely timeout or auth issue"
+        emit_error error drain_no_output "claude -p produced no output (exit=$exit_code)" "$transcript"
         bump_retry_count "$transcript" >/dev/null
         record_cost_event 1 "$transcript" "fail_no_output_exit_${exit_code}"
         return 1
@@ -277,6 +290,7 @@ Extract any HIGH-confidence corrections, MEDIUM-confidence approved approaches, 
         record_cost_event 1 "$transcript" "partial_max_turns"
         # If we've hit max_turns repeatedly, give up and drop from queue.
         if [[ "$retries_after" -ge "$MAX_RETRIES" ]]; then
+            emit_error warn drain_max_turns_exhausted "max_turns hit $MAX_RETRIES times" "$transcript"
             return 2
         fi
         return 1  # leave in queue for another shot with fresh budget
@@ -385,12 +399,33 @@ main() {
                 log "reindex OK"
             else
                 log "reindex returned non-zero (continuing; not fatal)"
+                emit_error error reindex_fail "reflect reindex non-zero exit" ""
             fi
         fi
     fi
 
     log "──── drain end ────"
 }
+
+# Surface missing reflect CLI at SessionStart, not just on first drain failure.
+# Drain still runs (enqueue/dequeue logging works without reflect-kb), but
+# recall stays empty until reflect-kb is installed.
+if [[ "${REFLECT_QUIET_INSTALL_WARNING:-0}" != "1" ]]; then
+    if ! command -v reflect >/dev/null 2>&1 && [[ ! -x "${HOME}/.local/bin/reflect" ]]; then
+        cat >&2 <<'EOF'
+[reflect-kb] CLI not found on PATH.
+
+  Learnings will be queued and child sessions can write .md/.entities.yaml
+  files, but `reflect reindex` and `reflect search` will not work — recall
+  will be empty.
+
+  Install:
+    uv tool install --upgrade 'git+https://github.com/stevengonsalvez/reflect-kb.git[graph]'
+
+  Set REFLECT_QUIET_INSTALL_WARNING=1 to suppress this message.
+EOF
+    fi
+fi
 
 main "$@" || true
 exit 0
