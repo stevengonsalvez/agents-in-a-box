@@ -72,6 +72,19 @@ impl ConfigPopupState {
         Self::default()
     }
 
+    /// True when the popup is visible AND its variant captures
+    /// character input (Text/Number). Choice and Boolean popups are
+    /// navigation-only (arrow keys / Enter), so callers checking
+    /// "should bare `Char(_)` keys go to the popup" should consult
+    /// this — not `show_popup` alone.
+    pub fn is_text_entry(&self) -> bool {
+        self.show_popup
+            && matches!(
+                self.popup_type,
+                ConfigPopupType::TextInput { .. } | ConfigPopupType::NumberInput { .. }
+            )
+    }
+
     /// Open popup for a choice setting
     pub fn open_choice(
         &mut self,
