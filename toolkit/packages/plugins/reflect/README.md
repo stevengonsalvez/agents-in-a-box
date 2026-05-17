@@ -217,6 +217,22 @@ Tunables (env vars):
 
 The helper is session-scoped (reads the current cwd's session JSONL), reads only local files (no network), caches output for 10 seconds, and degrades gracefully when any data source is missing.
 
+### Drill-down
+
+Cmd-click any row label (`REC:`, `TOK:`, etc.) in a terminal that supports
+OSC 8 hyperlinks (Warp, iTerm2, kitty, WezTerm, tmux with
+`allow-passthrough on`) to open a plain-text drill-down report at
+`/tmp/reflect-timeline-explain-$USER.txt`. The report shows the actual
+events that fed each row's buckets over the last 2 hours.
+
+If your terminal doesn't support OSC 8, run the equivalent CLI:
+
+    /path/to/reflect_timeline.sh --explain TOK   # one row
+    /path/to/reflect_timeline.sh --explain all   # everything
+
+The report is regenerated on every dashboard render (cached 10s), so
+clicks always show fresh data.
+
 ---
 
 ## Sub-skills
