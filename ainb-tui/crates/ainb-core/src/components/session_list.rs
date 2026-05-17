@@ -696,13 +696,39 @@ impl SessionListComponent {
         }
 
         if items.is_empty() {
-            let empty_line = Line::from(vec![
-                Span::styled("✨ ", Style::default().fg(MUTED_GRAY)),
-                Span::styled(
-                    "No workspaces found",
-                    Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
-                ),
-            ]);
+            // Distinguish "still loading" from "loaded but empty" — the
+            // background workspace scan can take a few seconds on cold
+            // launch and a bare "No workspaces found" line during that
+            // window reads as "you have nothing here" when the truth is
+            // "we haven't looked yet". Spinner matches the one used in
+            // the home screen's recent-activity strip so the two
+            // surfaces share a vocabulary.
+            let empty_line = if state.is_loading_workspaces {
+                let spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+                let frame_idx = (std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() / 100)
+                    .unwrap_or(0)
+                    % spinner_frames.len() as u128) as usize;
+                Line::from(vec![
+                    Span::styled(
+                        format!("{} ", spinner_frames[frame_idx]),
+                        Style::default().fg(GOLD),
+                    ),
+                    Span::styled(
+                        "Loading workspaces…",
+                        Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
+                    ),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::styled("✨ ", Style::default().fg(MUTED_GRAY)),
+                    Span::styled(
+                        "No workspaces found",
+                        Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+                    ),
+                ])
+            };
             items.push(ListItem::new(empty_line));
         }
 
