@@ -221,19 +221,19 @@ _render_sparkline() {
   local counts=("$@")
   local max=8 c
   local out="$(_fg "$r" "$g" "$b")${label}:${RESET} "
-  local i idx alpha rr gg bb
+  local i idx
   for (( i=0; i<NCELLS; i++ )); do
     c=${counts[i]:-0}
     idx=$(_glyph_idx "$c" "$max")
     if (( idx == 0 )); then
       out+="$(_fg 90 90 110)${GLYPHS[0]}${RESET}"
     else
-      # Intensity scaling: dim baseline → full color at idx=8
-      alpha=$(( 30 + idx * 25 ))   # 55..230
-      rr=$(( r * alpha / 255 ))
-      gg=$(( g * alpha / 255 ))
-      bb=$(( b * alpha / 255 ))
-      out+="$(_fg $rr $gg $bb)${GLYPHS[idx]}${RESET}"
+      # Full base color for every non-zero cell — glyph height alone conveys
+      # intensity. Previous version dimmed by 30+idx*25 alpha, which on a
+      # dark terminal rendered low-count cells (idx=1 → 21% brightness)
+      # near-invisible. Sparkline convention: height = intensity, color =
+      # signal identity. Don't dim both.
+      out+="$(_fg "$r" "$g" "$b")${GLYPHS[idx]}${RESET}"
     fi
   done
   printf '%b' "$out"
