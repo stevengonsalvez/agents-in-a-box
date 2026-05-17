@@ -346,7 +346,10 @@ def gather_agt():
                     for c in content:
                         if not isinstance(c, dict): continue
                         if c.get("type") != "tool_use": continue
-                        if c.get("name") not in ("Task", "TaskCreate"): continue
+                        # Subagent-spawn tools: Task (interactive Claude Code) and
+                        # Agent (background-job harness). TaskCreate is the todo-list
+                        # tool, NOT a spawn — excluding it removes false positives.
+                        if c.get("name") not in ("Task", "Agent"): continue
                         descr = ""
                         ipt = c.get("input") or {}
                         if isinstance(ipt, dict):
@@ -491,11 +494,13 @@ _gather_raw() {
       | "T\t" + .timestamp + "\t" + (((.message.usage.input_tokens // 0)
         + (.message.usage.output_tokens // 0)) | tostring)' \
       "$SESSION_JSONL" 2>/dev/null
-    # A from same JSONL: Task tool_use entries
+    # A from same JSONL: subagent-spawn tool_use entries (Task = interactive
+    # Claude Code; Agent = background-job harness). TaskCreate is the todo
+    # tool, not a spawn — excluded.
     jq -r 'select(.message.content and .timestamp)
       | .timestamp as $t
       | (.message.content | if type=="array" then .[] else . end)
-      | select(.type=="tool_use" and (.name=="Task" or .name=="TaskCreate"))
+      | select(.type=="tool_use" and (.name=="Task" or .name=="Agent"))
       | "A\t" + $t + "\t1"' "$SESSION_JSONL" 2>/dev/null
   fi
   # C: git commits + pushes
