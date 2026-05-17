@@ -560,14 +560,15 @@ impl EventHandler {
         // Config is multi-mode — only the states that accept free-form
         // character input count as text-entry. Plain navigation of
         // settings categories should NOT suppress global shortcuts
-        // like `H`; that would be a UX regression. AINB 2.0 also opens
-        // a modal popup via `ConfigEditSetting` whose `TextInput` /
-        // `NumberInput` variants capture characters — `show_popup` is
-        // included so `H` doesn't toggle help mid-edit there either.
+        // like `H`; that would be a UX regression. The modal popup
+        // opened via `ConfigEditSetting` is included only for its
+        // `TextInput` / `NumberInput` variants (via
+        // `ConfigPopupState::is_text_entry`); `Choice` and `Boolean`
+        // popups are navigation-only, so `H` is still allowed there.
         let config_text_active = state.current_screen == screen_ids::CONFIG
             && (state.config_screen_state.editing
                 || state.config_screen_state.api_key_input_mode
-                || state.config_popup_state.show_popup);
+                || state.config_popup_state.is_text_entry());
 
         new_session_text_active
             || matches!(
@@ -5226,15 +5227,34 @@ mod text_input_guard_tests {
             "Config + api_key_input_mode = true must be treated as text input"
         );
 
-        // Config edit popup (opened via ConfigEditSetting). Captures
-        // character input for Text/Number settings — `H` must NOT
-        // toggle help while it's open.
+        // Config edit popup (opened via ConfigEditSetting). The
+        // predicate only flips for popup variants that actually
+        // capture characters — `TextInput` and `NumberInput`. Use
+        // the public `open_text` API so the test exercises a real
+        // popup-open code path and stays valid if the popup_type
+        // representation changes.
         let mut state = AppState::default();
         state.current_screen = screen_ids::CONFIG.to_string();
-        state.config_popup_state.show_popup = true;
+        state.config_popup_state.open_text("Title", "Desc", "key", "value");
         assert!(
             EventHandler::is_text_input_context(&state),
-            "Config + config_popup_state.show_popup = true must be treated as text input"
+            "Config + config_popup TextInput must be treated as text input"
+        );
+
+        // Negative control: a Choice popup is navigation-only (arrow
+        // keys / Enter), so `H` should still toggle help.
+        let mut state = AppState::default();
+        state.current_screen = screen_ids::CONFIG.to_string();
+        state.config_popup_state.open_choice(
+            "Title",
+            "Desc",
+            "key",
+            vec!["A".into(), "B".into()],
+            0,
+        );
+        assert!(
+            !EventHandler::is_text_input_context(&state),
+            "Config + Choice popup must NOT be treated as text input"
         );
 
         // Modal flags on AppState. Each must independently flip the
