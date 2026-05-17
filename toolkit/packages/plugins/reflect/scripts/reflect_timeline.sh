@@ -466,10 +466,13 @@ _gather_raw() {
     tail -n 5000 "$RECALL_LOG" 2>/dev/null \
       | jq -r '"R\t" + (.ts // "") + "\t1"' 2>/dev/null
   fi
-  # I: ingest
+  # I: ingest — accept entries with double-quoted, single-quoted, or unquoted
+  # ISO timestamps. Earlier regex only handled double quotes, so single-quoted
+  # entries (e.g. written by yaml.dump in some Python contexts) extracted the
+  # value WITH the quotes attached, breaking the downstream timestamp parser.
   if [[ -f "$INGEST_LOG" ]]; then
     grep -E '^  ingested_at:' "$INGEST_LOG" 2>/dev/null \
-      | sed -E 's/^  ingested_at:[[:space:]]*"?([^"]*)"?.*/I\t\1\t1/'
+      | sed -E "s/^  ingested_at:[[:space:]]*['\"]?([^'\"]*)['\"]?.*/I\t\1\t1/"
   fi
   # E: errors (unacked only)
   if [[ -f "$ERRORS_JSON" ]]; then
