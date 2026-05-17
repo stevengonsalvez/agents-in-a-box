@@ -1,4 +1,4 @@
-"""Tests for the Claude Code adapter (toolkit/packages/plugins/reflect/adapters/claude).
+"""Tests for the Claude Code adapter (plugins/reflect/adapters/claude).
 
 The test runs the adapter against a temp HOME so it exercises the real
 install path without touching the invoking user's ~/.claude.

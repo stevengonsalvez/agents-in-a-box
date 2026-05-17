@@ -30,7 +30,7 @@ If you already have a PreCompact hook (like running `/handover`), chain the refl
         "hooks": [
           {
             "type": "command",
-            "command": "uv run /path/to/toolkit/packages/plugins/reflect/hooks/precompact_reflect.py --remind"
+            "command": "uv run /path/to/plugins/reflect/hooks/precompact_reflect.py --remind"
           }
         ]
       }

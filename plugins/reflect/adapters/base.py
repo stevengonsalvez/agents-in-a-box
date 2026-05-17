@@ -39,7 +39,7 @@ from typing import Any, Optional, Sequence
 import yaml
 
 # Skills exposed by the reflect plugin that adapters install. Each entry
-# is a directory name under ``toolkit/packages/plugins/reflect/skills/``.
+# is a directory name under ``plugins/reflect/skills/``.
 PLUGIN_SKILLS: tuple[str, ...] = (
     "reflect",
     "recall",
@@ -82,7 +82,7 @@ def find_plugin_root(script_path: Path | None = None) -> Path:
 
     Layout::
 
-        toolkit/packages/plugins/reflect/        ← return this
+        plugins/reflect/                         ← return this
         └── adapters/<harness>/<adapter>.py      ← script_path
 
     The adapter cannot rely on a fixed relative depth because we want

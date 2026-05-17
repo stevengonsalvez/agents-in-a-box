@@ -270,8 +270,8 @@ git clone https://github.com/stevengonsalvez/agents-in-a-box.git
 cd agents-in-a-box
 
 # pick your harness
-python3 toolkit/packages/plugins/reflect/adapters/codex/codex_adapter.py install
-python3 toolkit/packages/plugins/reflect/adapters/copilot/copilot_adapter.py install
+python3 plugins/reflect/adapters/codex/codex_adapter.py install
+python3 plugins/reflect/adapters/copilot/copilot_adapter.py install
 
 # same CLI prerequisite
 uv tool install --force --upgrade 'git+https://github.com/stevengonsalvez/reflect-kb.git[graph]'

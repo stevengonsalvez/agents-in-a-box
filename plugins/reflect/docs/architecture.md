@@ -598,7 +598,7 @@ Switch `--remind` to `--auto` after running `/reflect on` to enable automatic ep
 
 ### `reflect.toml` — plugin defaults (toolkit-bundled, layer 1)
 
-Located at `toolkit/packages/plugins/reflect/reflect.toml`. This is the base layer of the four-layer config cascade. Users never need to edit this directly.
+Located at `plugins/reflect/reflect.toml`. This is the base layer of the four-layer config cascade. Users never need to edit this directly.
 
 ```toml
 [storage]
@@ -676,7 +676,7 @@ Team KB repos provisioned via `reflect team init/clone` include a `.pre-commit-c
 All three harnesses — Claude Code, Codex CLI, GitHub Copilot — read from the **same** `~/.learnings/` content directory. The harness-specific adapters only manage _pointer_ `SKILL.md` files that redirect each harness's skill discovery to the canonical plugin source. No knowledge is duplicated; only the discovery layer is per-harness.
 
 ```
-toolkit/packages/plugins/reflect/
+plugins/reflect/
 └── skills/
     ├── recall/SKILL.md          ← canonical source
     ├── reflect/SKILL.md

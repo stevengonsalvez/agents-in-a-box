@@ -1,4 +1,4 @@
-"""Tests for the Copilot adapter (toolkit/packages/plugins/reflect/adapters/copilot)."""
+"""Tests for the Copilot adapter (plugins/reflect/adapters/copilot)."""
 
 from __future__ import annotations
 

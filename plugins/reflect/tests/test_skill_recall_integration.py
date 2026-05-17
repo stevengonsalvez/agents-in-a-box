@@ -21,7 +21,7 @@ Two layers:
    a skill would call it.
 
 Run:
-    uv run toolkit/packages/plugins/reflect/tests/test_skill_recall_integration.py
+    uv run plugins/reflect/tests/test_skill_recall_integration.py
 """
 from __future__ import annotations
 

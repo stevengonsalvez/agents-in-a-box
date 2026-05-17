@@ -14,7 +14,7 @@
       "author": {
         "name": "Steven Gonsalvez"
       },
-      "source": "./packages/plugins/reflect",
+      "source": "../plugins/reflect",
       "category": "development",
       "homepage": "https://github.com/stevengonsalvez/agents-in-a-box"
     }

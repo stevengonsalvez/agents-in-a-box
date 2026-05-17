@@ -1,4 +1,4 @@
-"""Tests for the Codex adapter (toolkit/packages/plugins/reflect/adapters/codex)."""
+"""Tests for the Codex adapter (plugins/reflect/adapters/codex)."""
 
 from __future__ import annotations
 

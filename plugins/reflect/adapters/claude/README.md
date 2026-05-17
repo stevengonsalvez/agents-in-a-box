@@ -20,11 +20,11 @@ the forthcoming Codex and Copilot adapters (see spec §Phase 2).
 
 ```bash
 # Dry-run (no filesystem changes, prints the plan)
-python toolkit/packages/plugins/reflect/adapters/claude/claude_adapter.py \
+python plugins/reflect/adapters/claude/claude_adapter.py \
     install --dry-run
 
 # Real install
-python toolkit/packages/plugins/reflect/adapters/claude/claude_adapter.py install
+python plugins/reflect/adapters/claude/claude_adapter.py install
 
 # Install only pointers, skip hook merge
 python .../claude_adapter.py install --no-hooks
