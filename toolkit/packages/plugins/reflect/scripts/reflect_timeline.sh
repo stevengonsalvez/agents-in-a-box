@@ -614,7 +614,11 @@ _render_sparkline() {
       out+="$(_fg "$r" "$g" "$b")${GLYPHS[idx]}${RESET}"
     fi
   done
-  printf '%b' "$out"
+  # %s, NOT %b — $out contains raw ANSI bytes from _link / _fg, possibly
+  # including literal `\E` (the OSC 8 terminator `\\` followed by labels
+  # starting with `E` like ERR). Bash printf %b interprets `\E` as ESC
+  # (bash extension), corrupting the bytes. %s preserves them verbatim.
+  printf '%s' "$out"
 }
 
 _render_tokens() {
@@ -643,7 +647,8 @@ _render_tokens() {
     fi
     out+="$(_fg $r $g $b)${GLYPHS[h]}${RESET}"
   done
-  printf '%b' "$out"
+  # %s, not %b — see _render_sparkline comment about \E corruption.
+  printf '%s' "$out"
 }
 
 # ── Build buckets — single-pass ──────────────────────────────────────────────
@@ -700,7 +705,10 @@ ROW4="${SPARK_C}${GAP}${SPARK_A}"
 
 # ── Write cache and emit ─────────────────────────────────────────────────────
 HINT=" $(_fg 110 110 130)↑ click a label or run: reflect timeline --explain TOK${RESET}"
-OUT=$(printf '\n%b\n %b\n %b\n %b\n%b' "$ROW1" "$ROW2" "$ROW3" "$ROW4" "$HINT")
+# %s for args (preserves raw ANSI/OSC8 bytes); \n stays in the format string.
+# Avoids bash printf %b's interpretation of `\E` → ESC which corrupts the ERR
+# label (see _render_sparkline comment).
+OUT=$(printf '\n%s\n %s\n %s\n %s\n%s' "$ROW1" "$ROW2" "$ROW3" "$ROW4" "$HINT")
 
 # Refresh the drill-down file in background — clicks land on fresh data.
 # Fire-and-forget; must not block the render.
