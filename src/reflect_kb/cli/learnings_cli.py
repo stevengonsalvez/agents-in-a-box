@@ -6,10 +6,12 @@ Provides semantic search over the global learnings repository
 using nano-graphrag for vector + graph-based retrieval.
 """
 
+import glob
 import json
 import os
 import hashlib
 import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -99,7 +101,7 @@ def _get_graph_engine():
 
 
 @click.group()
-@click.version_option(version="2.0.0")
+@click.version_option(version="0.1.1")
 def cli():
     """Global Learnings CLI - Knowledge base with GraphRAG search."""
     ensure_repo_exists()
@@ -637,6 +639,51 @@ def stats():
         conf_table.add_row(conf, str(count))
 
     console.print(conf_table)
+
+
+@cli.command('timeline')
+@click.option('--explain', 'explain_row', default=None,
+              help='Print drill-down for a single row (REC, MEM, ING, DRN, TOK, ERR, COM, AGT) or "all".')
+def timeline(explain_row):
+    """Show or drill into the reflect timeline dashboard.
+
+    Without --explain, prints a usage hint. With --explain, shells out to
+    the agents-in-a-box reflect plugin's reflect_timeline.sh helper to
+    render the drill-down. The helper is auto-discovered via
+    $CLAUDE_PLUGIN_ROOT, then via the highest-versioned plugin cache dir
+    under ~/.claude/plugins/cache/agents-in-a-box/reflect/.
+    """
+    if not explain_row:
+        click.echo("Live dashboard renders on your Claude Code statusline.")
+        click.echo(
+            "Run `reflect timeline --explain <ROW>` for drill-down. "
+            "ROW = REC|MEM|ING|DRN|TOK|ERR|COM|AGT|all"
+        )
+        return
+
+    helper = None
+    plugin_root = os.environ.get('CLAUDE_PLUGIN_ROOT')
+    if plugin_root:
+        candidate = Path(plugin_root) / 'scripts' / 'reflect_timeline.sh'
+        if candidate.is_file():
+            helper = str(candidate)
+
+    if not helper:
+        pattern = str(
+            Path.home() / '.claude' / 'plugins' / 'cache' / 'agents-in-a-box'
+            / 'reflect' / '*' / 'scripts' / 'reflect_timeline.sh'
+        )
+        matches = sorted(glob.glob(pattern))
+        if matches:
+            helper = matches[-1]
+
+    if not helper:
+        click.echo(click.style("error: reflect plugin not found.", fg='red'), err=True)
+        click.echo("Install with: `claude plugin install reflect@agents-in-a-box`", err=True)
+        raise click.Abort()
+
+    rc = subprocess.call([helper, '--explain', explain_row])
+    raise click.exceptions.Exit(rc)
 
 
 # Register subcommand groups. Import here (after `cli` exists) to keep
