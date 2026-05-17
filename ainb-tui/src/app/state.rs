@@ -2208,24 +2208,32 @@ async fn load_workspaces_async() -> anyhow::Result<Vec<Workspace>> {
     let (boss_workspaces, interactive_sessions) =
         tokio::join!(fetch_boss_mode_workspaces(), fetch_interactive_sessions());
 
+    // Index from canonicalized (or raw-fallback) workspace path to its
+    // position in `workspaces`. Computed once per workspace and once per
+    // interactive session — O(N+M) canonicalize syscalls instead of the
+    // O(N×M) "canonicalize-in-find-loop" pattern. The raw-fallback also
+    // fixes a correctness bug: two paths that both fail to canonicalize
+    // (e.g., deleted worktrees) previously matched each other via shared
+    // `None`, collapsing distinct sessions into one Workspace.
+    let canonical_key = |p: &std::path::Path| -> PathBuf {
+        p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
+    };
     let mut workspaces = boss_workspaces;
+    let mut path_index: HashMap<PathBuf, usize> =
+        workspaces.iter().enumerate().map(|(i, w)| (canonical_key(&w.path), i)).collect();
+
     for interactive_session in interactive_sessions {
         let session = interactive_session.to_session_model();
         let workspace_path = interactive_session.source_repository.clone();
         let workspace_name = interactive_session.workspace_name.clone();
+        let key = canonical_key(&workspace_path);
 
-        // Find or create workspace using canonicalized path comparison.
-        // This prevents duplicates when paths differ only by normalization
-        // (e.g., symlinks, ".." components, trailing slashes).
-        let canonical_workspace_path = workspace_path.canonicalize().ok();
-        if let Some(workspace) = workspaces
-            .iter_mut()
-            .find(|w| w.path.canonicalize().ok() == canonical_workspace_path)
-        {
-            workspace.add_session(session);
+        if let Some(&idx) = path_index.get(&key) {
+            workspaces[idx].add_session(session);
         } else {
             let mut workspace = Workspace::new(workspace_name, workspace_path);
             workspace.add_session(session);
+            path_index.insert(key, workspaces.len());
             workspaces.push(workspace);
         }
     }
