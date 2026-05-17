@@ -63,11 +63,22 @@ def parse_frontmatter(content: str) -> tuple[Dict[str, Any], str]:
         return {}, content
 
 
-def generate_document_id(title: str) -> str:
+def generate_document_id(title: str, body: str = "") -> str:
+    """Stable doc_id = slug(title) + sha256(title + body)[:6].
+
+    Previously hashed title-only, which produced identical ids for any two
+    docs sharing a slug-able title (capitalisation / punctuation collapses
+    them). Under non-interactive subprocess that triggered click.confirm,
+    which silently aborted — entire ingests dropped files. Including body
+    in the hash makes collisions content-aware: same title + same body =>
+    same id (idempotent re-ingest); same title + different body => distinct
+    ids.
+    """
     slug = title.lower()
     slug = "".join(c if c.isalnum() or c == " " else "" for c in slug)
     slug = "-".join(slug.split())[:50]
-    hash_suffix = hashlib.md5(title.encode()).hexdigest()[:6]
+    hash_input = (title + "\n" + body).encode("utf-8", errors="replace")
+    hash_suffix = hashlib.sha256(hash_input).hexdigest()[:6]
     return f"{slug}-{hash_suffix}"
 
 
@@ -208,15 +219,20 @@ def search(query: str, mode: str, tags: Optional[str], category: Optional[str],
     "--entities", "-e", type=click.Path(exists=True),
     help="Path to .entities.yaml sidecar with pre-extracted entities",
 )
-def add(file_path: str, entities: Optional[str]):
+@click.option(
+    "--force", "-f", is_flag=True, default=False,
+    help="Overwrite an existing document with the same generated ID without prompting.",
+)
+def add(file_path: str, entities: Optional[str], force: bool):
     """Add a learning document to the knowledge base.
 
     The document should have YAML frontmatter with at least:
     title, category, key_insight
 
     Examples:
-        learnings add ./my-solution.md
-        learnings add ./my-solution.md --entities ./my-solution.entities.yaml
+        reflect add ./my-solution.md
+        reflect add ./my-solution.md --entities ./my-solution.entities.yaml
+        reflect add --force ./my-solution.md   # non-interactive overwrite
     """
     source = Path(file_path)
     content = source.read_text()
@@ -233,14 +249,28 @@ def add(file_path: str, entities: Optional[str]):
         console.print(f"[red]Error: Missing required fields: {', '.join(missing)}[/red]")
         return
 
-    # Generate document ID and copy to repo
-    doc_id = generate_document_id(frontmatter["title"])
+    # Generate document ID (slug + sha256(title+body)[:6]) and copy to repo.
+    doc_id = generate_document_id(frontmatter["title"], body)
     repo = get_repo_path()
     dest = repo / DOCUMENTS_DIR / f"{doc_id}.md"
 
     if dest.exists():
-        if not click.confirm(f"Document {dest.name} exists. Overwrite?"):
-            return
+        # If --force is set, overwrite silently. Else require a TTY for the
+        # confirm prompt — click.confirm under a non-TTY pipe silently aborts,
+        # which used to make ingest pipelines drop files invisibly. Now we
+        # fail loudly with an instruction to retry with --force.
+        if force:
+            pass  # overwrite below
+        elif not sys.stdin.isatty():
+            console.print(
+                f"[red]Error: document {dest.name} already exists and stdin is not a TTY.[/red]\n"
+                f"[red]Re-run with --force to overwrite, or update the source title/body so the "
+                f"generated id differs.[/red]"
+            )
+            sys.exit(2)
+        else:
+            if not click.confirm(f"Document {dest.name} exists. Overwrite?"):
+                return
 
     shutil.copy(source, dest)
 
