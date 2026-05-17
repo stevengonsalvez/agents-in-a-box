@@ -29,7 +29,11 @@ home_dir = "~/.gemini"
 global_md = "~/.gemini/GEMINI.md"
 
 [indexers.graphrag]
-cli_path = "~/.learnings/cli/learnings"
+# Canonical CLI is `reflect` (from reflect-kb, installed via
+# `uv tool install reflect-kb`). Resolved through $PATH so any install
+# location works; the bare name is intentional. Override here only if you
+# need to pin a specific binary.
+cli_path = "reflect"
 auto_sidecar = true
 
 [policies]

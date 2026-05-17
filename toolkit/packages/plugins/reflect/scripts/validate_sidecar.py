@@ -4,11 +4,12 @@
 # dependencies = ["pyyaml"]
 # ///
 """
-Validate an .entities.yaml sidecar against the learnings CLI schema.
+Validate an .entities.yaml sidecar against the reflect-kb sidecar schema.
 
-Mirrors ``~/.learnings/cli/entity_store.py::DocumentEntities.from_yaml``
-so that sidecars emitted by reflect:ingest will not fail downstream when
-fed to ``learnings add --entities``.
+Mirrors ``reflect_kb.entity_store::DocumentEntities.from_yaml`` (originally
+``~/.learnings/cli/entity_store.py`` pre-migration) so that sidecars emitted
+by reflect:ingest will not fail downstream when fed to
+``reflect add --entities``.
 
 Exit 0 = valid, 1 = invalid (with specific errors on stderr).
 

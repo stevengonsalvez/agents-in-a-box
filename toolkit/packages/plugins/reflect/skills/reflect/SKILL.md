@@ -270,19 +270,20 @@ relationships:
 3. Write entity sidecar alongside each knowledge note
 4. Index globally (validates sidecar first to catch schema errors early):
    ```bash
-   LEARNINGS_CLI="$HOME/.learnings/cli/learnings"
    SIDECAR="docs/solutions/{category}/{filename}.entities.yaml"
    DOC="docs/solutions/{category}/{filename}.md"
    VALIDATE="{{HOME_TOOL_DIR}}/skills/reflect/scripts/validate_sidecar.py"
 
-   if [[ -x "$LEARNINGS_CLI" ]]; then
+   if command -v reflect >/dev/null 2>&1; then
        # Validate before ingest — malformed sidecars fail loudly here, not
        # silently at GraphRAG time
        uv run "$VALIDATE" --strict "$SIDECAR" || {
            echo "ERROR: sidecar validation failed for $SIDECAR" >&2
            exit 1
        }
-       "$LEARNINGS_CLI" add "$DOC" --entities "$SIDECAR"
+       # --force skips the interactive y/N prompt; content-hash doc_id makes
+       # the call idempotent so re-runs no-op cleanly.
+       reflect add "$DOC" --entities "$SIDECAR" --force
    fi
    ```
    Capture → index is now closed: every accepted learning flows into GraphRAG

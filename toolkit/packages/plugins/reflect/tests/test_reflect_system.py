@@ -352,27 +352,33 @@ class ReflectSystemTest(unittest.TestCase):
             self.assertEqual(len(r["content_hash"]), 16)
 
     # ---------------------------------------------------------------
-    # 11. End-to-end: real `learnings add` into a sandbox LEARNINGS_HOME
+    # 11. End-to-end: real `reflect add` into a sandbox HOME
     #     Verifies the capture-side contract with the actual indexer CLI,
     #     without reindexing (skip GraphRAG embedding to avoid LLM cost).
+    #
+    #     reflect-kb hardcodes its repo path to {HOME}/.claude/global-learnings,
+    #     so we sandbox by overriding HOME — there's no LEARNINGS_HOME env var
+    #     in the new CLI.
     # ---------------------------------------------------------------
-    def test_11_learnings_cli_add_roundtrip(self) -> None:
-        learnings_cli = Path.home() / ".learnings" / "cli" / "learnings"
-        if not learnings_cli.exists():
-            self.skipTest("learnings CLI not installed — skipping integration")
+    def test_11_reflect_cli_add_roundtrip(self) -> None:
+        reflect_cli = shutil.which("reflect")
+        if not reflect_cli:
+            self.skipTest("reflect CLI not on $PATH — `uv tool install reflect-kb`")
 
-        sb = self.sandbox / "learnings_home"
+        sb = self.sandbox / "fake_home"
         sb.mkdir(parents=True, exist_ok=True)
-        env = {**os.environ, "LEARNINGS_HOME": str(sb)}
+        env = {**os.environ, "HOME": str(sb)}
+        # Resolved repo path under the sandboxed HOME:
+        repo_root = sb / ".claude" / "global-learnings"
 
         init = subprocess.run(
-            [str(learnings_cli), "init"],
+            [reflect_cli, "init"],
             capture_output=True, text=True, env=env, cwd=self.sandbox,
         )
         self.assertEqual(init.returncode, 0,
-                         f"learnings init failed: {init.stderr}")
+                         f"reflect init failed: {init.stderr}")
         self.assertTrue(
-            (sb / "documents").exists(),
+            (repo_root / "documents").exists(),
             "init must create documents/ root",
         )
 
@@ -397,7 +403,7 @@ class ReflectSystemTest(unittest.TestCase):
             "## Solution\nUse `uv pip install`.\n"
         )
         sidecar = self.sandbox / "lrn-test-abc123.entities.yaml"
-        # The learnings CLI (entity_store.py) requires a strict schema that
+        # reflect-kb's entity_store.py requires a strict schema that
         # reflect's references/knowledge_format.md documents INCORRECTLY:
         #   - entities need `description` (docs omit it)
         #   - relationships use `source`/`target`, NOT `from`/`to` (docs say `from`/`to`)
@@ -422,22 +428,24 @@ class ReflectSystemTest(unittest.TestCase):
         )
 
         add = subprocess.run(
-            [str(learnings_cli), "add", str(note),
-             "--entities", str(sidecar)],
+            [reflect_cli, "add", str(note),
+             "--entities", str(sidecar), "--force"],
             capture_output=True, text=True, env=env, cwd=self.sandbox,
         )
         self.assertEqual(add.returncode, 0,
-                         f"learnings add failed: stdout={add.stdout!r} "
+                         f"reflect add failed: stdout={add.stdout!r} "
                          f"stderr={add.stderr!r}")
 
-        # Verify the note landed in the sandbox's learnings documents dir
-        landed = list((sb / "documents" / "learnings").glob("*.md"))
-        self.assertTrue(landed, "learnings add must copy note into sandbox")
+        # Verify the note landed in the sandboxed repo's documents dir.
+        # reflect-kb flattens learnings into documents/ (no /learnings/ subdir),
+        # matching the layout `reflect stats` reports.
+        landed = list((repo_root / "documents").glob("*.md"))
+        self.assertTrue(landed, "reflect add must copy note into sandbox")
 
         # Verify the sidecar also copied next to the note (GraphRAG will consume it
         # on the next reindex; we skip reindex to avoid requiring OpenAI creds).
         landed_sidecars = list(
-            (sb / "documents" / "learnings").glob("*.entities.yaml")
+            (repo_root / "documents").glob("*.entities.yaml")
         )
         self.assertTrue(
             landed_sidecars,

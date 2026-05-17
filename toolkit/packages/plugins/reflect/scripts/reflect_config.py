@@ -132,7 +132,10 @@ _BUILTIN_DEFAULTS: dict[str, Any] = {
     },
     "indexers": {
         "graphrag": {
-            "cli_path": "~/.learnings/cli/learnings",
+            # Canonical CLI is `reflect` (reflect-kb). Bare name is resolved
+            # through $PATH so any install location (`uv tool install reflect-kb`,
+            # homebrew, etc.) works without per-machine overrides.
+            "cli_path": "reflect",
             "auto_sidecar": True,
         },
     },

@@ -150,7 +150,7 @@ You run `/reflect` after a session where something interesting happened. The ski
 2. Classifies them by confidence: HIGH / MEDIUM / LOW.
 3. Proposes agent file diffs and knowledge notes with entity sidecars.
 4. Shows you a diff and asks for approval (`Y / N / modify / 1,3 / k1,k2`).
-5. On approval: writes `docs/solutions/<category>/<slug>.md` and `.entities.yaml`, validates the sidecar, runs `learnings add --entities`, and commits.
+5. On approval: writes `docs/solutions/<category>/<slug>.md` and `.entities.yaml`, validates the sidecar, runs `reflect add --entities --force`, and commits.
 
 ### Running `/reflect:ingest`
 
@@ -312,7 +312,7 @@ sequenceDiagram
     A->>V: validate_sidecar.py --strict <sidecar>
     V-->>A: ok / schema error
     alt validation passes
-        A->>LC: learnings add <doc> --entities <sidecar>
+        A->>LC: reflect add <doc> --entities <sidecar> --force
         LC->>KB: copy to documents/learnings/<id>.md + sidecar
         LC->>KB: nano-graphrag insert (batch)
         LC->>KB: qmd update + embed
@@ -333,7 +333,7 @@ sequenceDiagram
     participant A as Agent
     participant R as recall.py
     participant C as Cache (~/.reflect/recall_cache/)
-    participant GR as learnings CLI (GraphRAG)
+    participant GR as reflect CLI (GraphRAG)
     participant QM as qmd (BM25)
     participant RRF as RRF fuse
     participant RR as rerank
@@ -347,7 +347,7 @@ sequenceDiagram
         RR-->>R: ranked results
     else cache miss
         par parallel fetch
-            R->>GR: learnings search query --format json --limit 20
+            R->>GR: reflect search query --format json --limit 20
             GR-->>R: graph_results[]
         and
             R->>QM: qmd search query -c learnings --limit 20
@@ -610,7 +610,7 @@ enabled_providers = ["claude", "codex", "copilot", "gemini"]
 staleness_days    = 30
 
 [indexers.graphrag]
-cli_path    = "~/.learnings/cli/learnings"
+cli_path    = "reflect"   # reflect-kb; resolved via $PATH
 auto_sidecar = true
 
 [policies]
@@ -831,11 +831,11 @@ The system is designed to degrade silently rather than block the user's session.
 
 | Failure | Detection | Graceful degrade |
 |---------|-----------|-----------------|
-| `~/.learnings/` does not exist | `find_learnings_cli()` returns `None` | `recall()` returns `RecallResult([], error="learnings CLI not found")`. Session starts with empty context. If `REFLECT_RECALL_DEBUG` is set, the error prints to stderr. |
+| `reflect` CLI not installed | `find_learnings_cli()` returns `None` (neither `shutil.which("reflect")` nor the legacy `~/.learnings/cli/learnings` resolves) | `recall()` returns `RecallResult([], error="reflect CLI not found on $PATH (install with \`uv tool install reflect-kb\`)")`. Session starts with empty context. If `REFLECT_RECALL_DEBUG` is set, the error prints to stderr. |
 | `qmd` not installed | `shutil.which("qmd")` returns `None` | `fetch_qmd()` returns `[]`. RRF proceeds with only the GraphRAG leg. Hybrid recall degrades to vector-only recall. |
 | `qmd` times out (> 10s) | `subprocess.TimeoutExpired` | Caught; returns `[]`. Same as not installed. |
-| GraphRAG cache stale / corrupted | `graph_engine.search()` raises `GraphEngineError` | `recall.py` returns `RecallResult([], error=...)`. User can run `learnings reindex --force` to rebuild. |
-| nano-graphrag sequential-insert bug | Community reports dropped on N+1 `insert()` calls | `insert_documents_batch()` in `graph_engine.py` is the canonical API. `learnings add` uses single-insert (safe for one doc); `reindex` uses batch. This is documented in `MEMORY.md`. Do not call `graph.insert()` sequentially in a loop. |
+| GraphRAG cache stale / corrupted | `graph_engine.search()` raises `GraphEngineError` | `recall.py` returns `RecallResult([], error=...)`. User can run `reflect reindex --force` to rebuild. |
+| nano-graphrag sequential-insert bug | Community reports dropped on N+1 `insert()` calls | `insert_documents_batch()` in `graph_engine.py` is the canonical API. `reflect add` uses single-insert (safe for one doc); `reindex` uses batch. This is documented in `MEMORY.md`. Do not call `graph.insert()` sequentially in a loop. |
 | `git` not on PATH | `OSError` in `session_start_recall.py:git_capture()` | Returns `""`. Query falls back to cwd basename only. Session starts with degraded query quality but no crash. |
 | SessionStart hook takes > 10s | `subprocess.TimeoutExpired` in `session_start_recall.py` | `emit("")` is called — session starts with empty context. The 10s cap is intentional ("SessionStart must feel instant"). The recall cache makes repeat sessions fast; the first cold miss is absorbed silently. |
 | `uv` not on PATH | `shutil.which("uv")` returns `None` in hook | `UV_BIN = None` → hook calls `emit("")`. Session starts empty. |
@@ -845,7 +845,7 @@ The system is designed to degrade silently rather than block the user's session.
 | Dashboard returns 4xx | `response.status_code >= 400` | No retry (4xx = client/config bug). `sync()` returns exit code 1 with HTTP status in the message. |
 | Team KB `gh` not installed | `shutil.which("gh")` returns `None` | `route_medium()` skips PR creation, appends "gh not available — branch pushed; open the PR manually" to `RouteResult.notes`. Branch is still committed and pushed. |
 | Team KB push fails (no remote, auth issue) | `subprocess.CalledProcessError` | `_safe_push()` appends the stderr to `RouteResult.notes` and returns `pushed=False`. The document remains in the local team-kb clone; user can push manually. |
-| Sidecar schema validation fails | `validate_sidecar.py --strict` exits non-zero | `/reflect` skill prints "ERROR: sidecar validation failed" and halts ingest for that document. The `.md` is still written; only the index step is skipped. User fixes the sidecar and re-runs `learnings add`. |
+| Sidecar schema validation fails | `validate_sidecar.py --strict` exits non-zero | `/reflect` skill prints "ERROR: sidecar validation failed" and halts ingest for that document. The `.md` is still written; only the index step is skipped. User fixes the sidecar and re-runs `reflect add`. |
 
 ---
 
@@ -928,7 +928,7 @@ Strength scale: 9–10 = direct/causal, 5–7 = moderate, 1–4 = weak.
 
 ## Appendix C — Pre-commit Schema Check (Team KB)
 
-Team KB repos provisioned by `reflect team init` contain a `.pre-commit-config.yaml` that runs `validate_sidecar.py --strict` on staged `.entities.yaml` files. The same validator is run by `/reflect` before calling `learnings add`, so the pre-commit check is a belt-and-suspenders guard for directly-committed files.
+Team KB repos provisioned by `reflect team init` contain a `.pre-commit-config.yaml` that runs `validate_sidecar.py --strict` on staged `.entities.yaml` files. The same validator is run by `/reflect` before calling `reflect add`, so the pre-commit check is a belt-and-suspenders guard for directly-committed files.
 
 ```yaml
 # .pre-commit-config.yaml (auto-generated by reflect team init)
