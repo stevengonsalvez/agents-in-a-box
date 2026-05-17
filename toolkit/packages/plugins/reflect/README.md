@@ -178,6 +178,40 @@ The fact has now travelled from a free-form correction in chat → an auto-memor
 
 ---
 
+## Live timeline dashboard (optional)
+
+The plugin ships a 4-row activity dashboard renderer at `scripts/reflect_timeline.sh`. After install it lands at `~/.claude/plugins/cache/agents-in-a-box/reflect/<version>/scripts/reflect_timeline.sh`. Wire it into your statusline to see a rolling 2-hour view of recall hits, ingest writes, token burn, and operational events.
+
+```
+M: ▁·▁▂▅█▆▃▁·····▁··▂··░·   ◀── memory  (recall + auto-memory writes,   blue)
+I: ·······▒▓···············   ◀── pipeline (ingest writes + drain attempts, green)
+T: ▂·▁▂▃▅▇█▇▆▃▁▁▂▃▅▇█▇▆▃▁·   ◀── tokens  (heat gradient, full bar = 20k)
+X: ··········x·····C······a   ◀── ops     (x errors, C commits, a agents)
+```
+
+Each row: 24 cells × 5 minutes = 2 hours, right edge = now. Heights encode count, base colour encodes signal family.
+
+Wire it into your statusline by adding this block at the end (after `printf '%b\n %b' "$L1" "$L2"`):
+
+```bash
+TIMELINE_HELPER="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/cache/agents-in-a-box/reflect/3.3.0}/scripts/reflect_timeline.sh"
+if [[ "${REFLECT_TIMELINE_DISABLE:-0}" != "1" ]] && [[ -x "$TIMELINE_HELPER" ]]; then
+  "$TIMELINE_HELPER" 2>/dev/null
+fi
+printf '\n'
+```
+
+Tunables (env vars):
+
+| Var | Default | Effect |
+|-----|---------|--------|
+| `REFLECT_TIMELINE_DISABLE` | unset | Set to `1` to suppress all 4 rows (zero-overhead opt-out for headless / CI sessions) |
+| `REFLECT_TIMELINE_TOKEN_FULLBAR` | `20000` | Tokens per 5-min bucket that maps to a full-height bar on row T |
+
+The helper is session-scoped (reads the current cwd's session JSONL), reads only local files (no network), caches output for 10 seconds, and degrades gracefully when any data source is missing.
+
+---
+
 ## Sub-skills
 
 | Skill | What it does |
