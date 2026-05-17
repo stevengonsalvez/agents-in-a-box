@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ABOUTME: Renders the 4-row reflect timeline dashboard (memory/pipeline/tokens/ops) as
+# ABOUTME: Renders the 4-row reflect timeline dashboard (8 signals, paired 2-per-row) as
 # ABOUTME: ANSI lines appended to the statusline. Reads local files only; 10s cache; opt-out via REFLECT_TIMELINE_DISABLE=1.
 
 if [[ "${REFLECT_TIMELINE_DISABLE:-0}" == "1" ]]; then exit 0; fi
@@ -207,12 +207,14 @@ _glyph_idx() {
 
 _render_sparkline() {
   # args: label r g b counts...
+  # Renders "<label>: <24 cells>" — label in its base color at full saturation,
+  # cells intensity-scaled by per-row max.
   local label=$1 r=$2 g=$3 b=$4
   shift 4
   local counts=("$@")
   local max=1 c
   for c in "${counts[@]}"; do (( c > max )) && max=$c; done
-  local out="${label}: "
+  local out="$(_fg "$r" "$g" "$b")${label}:${RESET} "
   local i idx alpha rr gg bb
   for (( i=0; i<NCELLS; i++ )); do
     c=${counts[i]:-0}
@@ -233,8 +235,10 @@ _render_sparkline() {
 
 _render_tokens() {
   # args: counts (already token totals per bucket)
+  # Heat gradient: green ≤5k, yellow 5k–15k, red >15k. Label uses neutral
+  # gold so it's visually distinct from the heat ramp.
   local counts=("$@")
-  local out="T: "
+  local out="$(_fg 240 200 80)T:${RESET} "
   local i c idx h alpha r g b
   for (( i=0; i<NCELLS; i++ )); do
     c=${counts[i]:-0}
@@ -242,7 +246,7 @@ _render_tokens() {
       out+="$(_fg 90 90 110)${GLYPHS[0]}${RESET}"
       continue
     fi
-    # Height: count / 2500 capped at 8
+    # Height: count / TOKEN_FULLBAR scaled to 1..8
     h=$(( c * 8 / TOKEN_FULLBAR ))
     (( h < 1 )) && h=1
     (( h > 8 )) && h=8
@@ -252,26 +256,6 @@ _render_tokens() {
     else                        r=240; g=80;  b=80
     fi
     out+="$(_fg $r $g $b)${GLYPHS[h]}${RESET}"
-  done
-  printf '%b' "$out"
-}
-
-_render_eventtape() {
-  # args: R_counts (24) C_counts (24) A_counts (24) — passed as three space-joined strings
-  local R_raw=$1 C_raw=$2 A_raw=$3
-  local R=($R_raw) C=($C_raw) A=($A_raw)
-  local out="X: "
-  local i
-  for (( i=0; i<NCELLS; i++ )); do
-    if (( ${R[i]:-0} > 0 )); then
-      out+="$(_fg 240 80 80)x${RESET}"
-    elif (( ${C[i]:-0} > 0 )); then
-      out+="$(_fg 180 180 180)C${RESET}"
-    elif (( ${A[i]:-0} > 0 )); then
-      out+="$(_fg 80 200 220)a${RESET}"
-    else
-      out+="$(_fg 90 90 110)·${RESET}"
-    fi
   done
   printf '%b' "$out"
 }
@@ -305,21 +289,31 @@ for arr in RECALL_B INGEST_B ERRORS_B DRAIN_B MEMORY_B TOKENS_B COMMITS_B AGENTS
   fi
 done
 
-# Merge: M = recall+memory; I = ingest+drain
-MERGE_M=(); MERGE_I=()
-for (( i=0; i<NCELLS; i++ )); do
-  MERGE_M+=( $(( ${RECALL_B[i]:-0} + ${MEMORY_B[i]:-0} )) )
-  MERGE_I+=( $(( ${INGEST_B[i]:-0} + ${DRAIN_B[i]:-0} )) )
-done
+# ── Render 8 individual sparklines, paired 2-per-row ─────────────────────────
+# Row 3: R (recall, blue)        | M (auto-memory writes, cyan)
+# Row 4: I (ingest, green)       | D (drain runs, orange)
+# Row 5: T (tokens, heat)        | E (errors, red)
+# Row 6: C (commits+pushes, gray)| A (agent spawns, cyan)
+SPARK_R=$(_render_sparkline "R"  80 180 255 "${RECALL_B[@]}")
+SPARK_M=$(_render_sparkline "M" 100 200 220 "${MEMORY_B[@]}")
+SPARK_I=$(_render_sparkline "I" 120 200 120 "${INGEST_B[@]}")
+SPARK_D=$(_render_sparkline "D" 230 150  90 "${DRAIN_B[@]}")
+SPARK_T=$(_render_tokens "${TOKENS_B[@]}")
+SPARK_E=$(_render_sparkline "E" 240  80  80 "${ERRORS_B[@]}")
+SPARK_C=$(_render_sparkline "C" 180 180 180 "${COMMITS_B[@]}")
+SPARK_A=$(_render_sparkline "A"  80 200 220 "${AGENTS_B[@]}")
 
-# ── Render rows ──────────────────────────────────────────────────────────────
-ROW_M=$(_render_sparkline "M" 80 180 255 "${MERGE_M[@]}")
-ROW_I=$(_render_sparkline "I" 120 200 120 "${MERGE_I[@]}")
-ROW_T=$(_render_tokens "${TOKENS_B[@]}")
-ROW_X=$(_render_eventtape "${ERRORS_B[*]}" "${COMMITS_B[*]}" "${AGENTS_B[*]}")
+# Pair side-by-side with 3-space separator. Each line gets a single leading
+# space so it visually aligns under line 2 (which is printed with a leading
+# space by statusline.sh — see "printf '%b\n %b' ..." block).
+GAP="   "
+ROW1="${SPARK_R}${GAP}${SPARK_M}"
+ROW2="${SPARK_I}${GAP}${SPARK_D}"
+ROW3="${SPARK_T}${GAP}${SPARK_E}"
+ROW4="${SPARK_C}${GAP}${SPARK_A}"
 
 # ── Write cache and emit ─────────────────────────────────────────────────────
-OUT=$(printf '\n%b\n %b\n %b\n %b' "$ROW_M" "$ROW_I" "$ROW_T" "$ROW_X")
+OUT=$(printf '\n%b\n %b\n %b\n %b' "$ROW1" "$ROW2" "$ROW3" "$ROW4")
 FP=$(_fingerprint)
 {
   printf '# sources: %s\n' "$FP"
