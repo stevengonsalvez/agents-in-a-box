@@ -208,12 +208,18 @@ _glyph_idx() {
 _render_sparkline() {
   # args: label r g b counts...
   # Renders "<label>: <24 cells>" — label in its base color at full saturation,
-  # cells intensity-scaled by per-row max.
+  # cells intensity-scaled by ABSOLUTE count (1 event = ▁, 8+ events = █).
+  #
+  # Why absolute, not per-row max: with per-row-max scaling, a row that has
+  # ONE event in one bucket normalizes that single event to height 8 (because
+  # it IS the row's max), producing a "pipe" — a full-height block surrounded
+  # by zeros. Looks nothing like a bar chart. Absolute mapping means rare
+  # events are visibly small (▁), busy buckets stack up tall, and the
+  # bar-chart shape forms naturally across the 24 cells.
   local label=$1 r=$2 g=$3 b=$4
   shift 4
   local counts=("$@")
-  local max=1 c
-  for c in "${counts[@]}"; do (( c > max )) && max=$c; done
+  local max=8 c
   local out="$(_fg "$r" "$g" "$b")${label}:${RESET} "
   local i idx alpha rr gg bb
   for (( i=0; i<NCELLS; i++ )); do
