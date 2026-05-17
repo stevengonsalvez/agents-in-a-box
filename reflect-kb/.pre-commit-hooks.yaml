@@ -1,0 +1,19 @@
+# Pre-commit hook manifest published by the reflect-kb repo.
+# Consumers add reflect-kb as a `repo:` entry in their own
+# .pre-commit-config.yaml to pull the frontmatter validator.
+- id: reflect-kb-frontmatter
+  name: reflect-kb frontmatter schema
+  description: >-
+    Validate YAML frontmatter on team-kb learning documents against the v4
+    JSON Schema (schemas/frontmatter.schema.json). Rejects commits with
+    missing required fields, invalid confidence values, or malformed dates.
+  entry: python scripts/validate_frontmatter.py
+  language: python
+  # Matches team-kb documents: `documents/**.md`. Teams that keep learnings
+  # elsewhere should override `files:` in their .pre-commit-config.yaml.
+  files: '^documents/.*\.md$'
+  types: [markdown]
+  additional_dependencies:
+    - 'jsonschema>=4.20'
+    - 'pyyaml>=6.0'
+  pass_filenames: true

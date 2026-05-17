@@ -1,0 +1,95 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "reflect-kb"
+version = "0.1.1"
+description = "Universal cross-harness retrieval + learning KB for AI coding agents"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+authors = [
+    { name = "Steven Gonsalvez" },
+]
+keywords = [
+    "ai",
+    "agents",
+    "claude-code",
+    "codex",
+    "copilot",
+    "graphrag",
+    "retrieval",
+    "knowledge-base",
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development",
+]
+# Slim base deps — just what `reflect --help`, `reflect team`, `reflect
+# share`, `reflect metrics ...`, and `reflect metrics dashboard sync` need.
+# Heavy ML deps (sentence-transformers, torch via SBERT, nano-graphrag
+# import-time chain) live in `[graph]` so a plain `pipx install .` doesn't
+# pull ~2GB on every CI run. The graph_engine module already lazy-imports
+# them inside `_get_graph_engine()`, so `reflect search --help` resolves
+# even without `[graph]` installed.
+dependencies = [
+    "click>=8.0",
+    "rich>=13.0",
+    "pyyaml>=6.0",
+    # Dashboard sync client (P5.3); see src/reflect_kb/dashboard.py.
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "ruff>=0.5",
+    "mypy>=1.10",
+    "respx>=0.21",
+    "jsonschema>=4.20",
+]
+# Full GraphRAG stack. `pip install .[graph]` will NOT resolve cleanly on
+# Python >=3.11 because nano-graphrag pulls graspologic -> hyppo -> numba ->
+# llvmlite (py<3.10 only). The supported flow is:
+#   pipx install .[graph] --pip-args="--no-deps" --include-deps
+# or
+#   pipx install .
+#   pipx inject reflect-kb nano-graphrag --pip-args="--no-deps"
+# (see README troubleshooting). Nix picks the full set up via `[graph]` and
+# patches nano-graphrag's deps in flake.nix.
+graph = [
+    "sentence-transformers>=2.2.0",
+    "numpy>=1.24.0",
+    "networkx>=3.0",
+    "tiktoken>=0.5.0",
+    "nano-vectordb",
+    # nano-graphrag import-time deps we satisfy manually (since we install it
+    # with --no-deps).
+    "openai>=1.0",
+    "tenacity>=8.0",
+    "hnswlib>=0.7.0",
+    "xxhash>=3.0",
+    "nano-graphrag",
+]
+
+[project.scripts]
+reflect = "reflect_kb.cli.main:main"
+
+[project.urls]
+Homepage = "https://github.com/stevengonsalvez/reflect-kb"
+Repository = "https://github.com/stevengonsalvez/reflect-kb"
+Issues = "https://github.com/stevengonsalvez/reflect-kb/issues"
+Specification = "https://github.com/stevengonsalvez/ai-coder-rules/blob/main/plans/reflect-v4-universal-install-spec.md"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/reflect_kb"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

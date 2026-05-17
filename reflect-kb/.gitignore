@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Nix
+.direnv/
+result
+result-*
+
+# Reflect KB runtime caches
+nano_graphrag_cache/
+.reflect-cache/
+
+# uv / tooling artifacts (lockfile excluded until real deps land)
+uv.lock
+logs/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo

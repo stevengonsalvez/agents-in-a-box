@@ -1,0 +1,96 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel in-progress runs on the same ref so a series of pushes doesn't pile up.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    name: pytest (${{ matrix.os }} / py${{ matrix.python-version }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ['3.11', '3.12']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: install package + dev deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev]
+      - name: run pytest
+        run: pytest -q
+
+  pipx-smoke:
+    name: pipx smoke (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: install pipx
+        run: python -m pip install --upgrade pip pipx
+      - name: pipx install reflect-kb (slim)
+        # `--force` so re-runs on cached venvs reinstall cleanly. We
+        # explicitly install WITHOUT the [graph] extra so this job
+        # validates that the slim CLI surface (search/help, share, team,
+        # metrics, dashboard sync) resolves without sentence-transformers/
+        # torch — the slim install is what most pipx users get.
+        run: pipx install --force .
+      - name: ensure pipx bin on PATH
+        run: |
+          pipx ensurepath
+          echo "${HOME}/.local/bin" >> "$GITHUB_PATH"
+      - name: assert torch is NOT installed (slim install guarantee)
+        # If this ever starts failing, a heavy ML dep leaked back into the
+        # base `dependencies` list in pyproject.toml — move it to `[graph]`.
+        run: |
+          if pipx runpip reflect-kb show torch 2>/dev/null | grep -q '^Name:'; then
+            echo "::error::torch is installed in the slim pipx env — it should live under the [graph] extra"
+            exit 1
+          fi
+          echo "ok: torch absent from slim install"
+      - name: smoke — reflect --help
+        # The reflect CLI exposes search/share/stats/etc. without optional
+        # graph deps; --help guarantees the entry point resolves and the
+        # click tree builds. This is the minimum viable signal that pipx
+        # produced a working binary.
+        run: reflect --help
+      - name: smoke — reflect search --help (lazy graph imports)
+        # `reflect search` only imports the heavy graph stack inside its
+        # function body, so `--help` MUST resolve from a slim install.
+        # If this regresses, an eager import has snuck back in.
+        run: reflect search --help
+
+  nix:
+    name: nix (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v14
+      - uses: DeterminateSystems/magic-nix-cache-action@v8
+      - name: nix flake check
+        # Run the full check (no `--no-build`) so derivations actually get
+        # validated. The `nix build .#reflect-kb` step below is then just
+        # a focused signal that the main package built — the cache from
+        # `flake check` makes it near-instant.
+        run: nix flake check
+      - name: nix build .#reflect-kb
+        run: nix build .#reflect-kb --print-build-logs
+      - name: smoke — reflect --help via nix run
+        run: nix run .#reflect-kb -- --help

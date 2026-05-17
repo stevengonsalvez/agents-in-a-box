@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/stevengonsalvez/reflect-kb/schemas/frontmatter.schema.json",
+  "title": "reflect-kb learning frontmatter (v4)",
+  "description": "YAML frontmatter for a reflect-kb learning document (documents/*.md). The v4 spec pins the ten fields enumerated here; additional fields are tolerated so real-world provenance/ingest metadata survives validation.",
+  "type": "object",
+  "required": ["title", "created", "confidence"],
+  "additionalProperties": true,
+  "properties": {
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Human-readable title for the learning."
+    },
+    "category": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Free-form classifier (e.g. build-errors, architecture, memories, feedback). CODEOWNERS routing keys off this value."
+    },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true,
+      "description": "Retrieval tags (lowercase kebab or short words). No semantic meaning beyond boosting recall."
+    },
+    "symptoms": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "description": "Error messages, stack traces, or observable signals that match this learning. Used for symptom-based retrieval."
+    },
+    "root_cause": {
+      "type": "string",
+      "minLength": 1,
+      "description": "One-sentence diagnosis of *why* the problem happens."
+    },
+    "key_insight": {
+      "type": "string",
+      "minLength": 1,
+      "description": "One-sentence actionable takeaway — what the next engineer should do differently."
+    },
+    "created": {
+      "type": "string",
+      "format": "date",
+      "description": "ISO-8601 date the learning was first captured (YYYY-MM-DD)."
+    },
+    "confidence": {
+      "type": "string",
+      "enum": ["high", "medium", "low"],
+      "description": "Confidence tier. HIGH auto-commits to team KB; MED/LOW goes through PR review."
+    },
+    "language": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Primary programming language (e.g. python, rust, typescript). Lowercase preferred."
+    },
+    "framework": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Primary framework / runtime (e.g. tokio, react, django). Lowercase preferred."
+    }
+  }
+}

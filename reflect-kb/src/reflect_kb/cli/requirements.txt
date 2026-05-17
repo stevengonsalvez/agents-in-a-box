@@ -1,0 +1,37 @@
+# Global Learnings CLI Dependencies
+#
+# NOTE: nano-graphrag must be installed with --no-deps due to broken
+# transitive dependency chain (graspologic -> hyppo -> numba -> llvmlite
+# incompatible with Python 3.11+). We install only the deps we actually use.
+
+# GraphRAG (installed separately with --no-deps)
+# nano-graphrag>=0.0.8
+
+# Embeddings (local model - all-mpnet-base-v2, 768 dims)
+sentence-transformers>=2.2.0
+
+# CLI framework
+click>=8.0
+rich>=13.0
+
+# YAML parsing
+pyyaml>=6.0
+
+# Numerical (used by embeddings + graph)
+numpy>=1.24.0
+
+# Graph operations (used by nano-graphrag internals + stats)
+networkx>=3.0
+
+# Tokenization (used by nano-graphrag)
+tiktoken>=0.5.0
+
+# Vector storage (used by nano-graphrag)
+nano-vectordb
+
+# nano-graphrag import-time dependencies (not in our --no-deps install)
+openai>=1.0
+tenacity>=8.0
+hnswlib>=0.7.0
+xxhash>=3.0
+neo4j>=5.0

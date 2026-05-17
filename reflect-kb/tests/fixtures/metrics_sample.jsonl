@@ -1,0 +1,13 @@
+{"ts":"2026-04-20T10:00:00+00:00","op":"recall","query":"tokio panic","tags":["rust","tokio"],"hits":3,"latency_ms":12.0,"harness":"claude"}
+{"ts":"2026-04-20T10:01:00+00:00","op":"recall","query":"react suspense","tags":["react","frontend"],"hits":1,"latency_ms":18.0,"harness":"claude"}
+{"ts":"2026-04-20T10:02:00+00:00","op":"recall","query":"python imports","tags":["python"],"hits":0,"latency_ms":7.0,"harness":"codex"}
+{"ts":"2026-04-22T11:00:00+00:00","op":"recall","query":"tokio runtime","tags":["rust","tokio","async"],"hits":5,"latency_ms":22.0,"harness":"claude"}
+{"ts":"2026-04-23T11:00:00+00:00","op":"add","category":"architecture","confidence":"high","shared":true,"harness":"claude"}
+{"ts":"2026-04-23T11:30:00+00:00","op":"recall","query":"jsonschema enums","tags":["python","jsonschema"],"hits":2,"latency_ms":31.0,"harness":"claude"}
+{"ts":"2026-04-24T09:15:00+00:00","op":"recall","query":"tokio block_on","tags":["rust","tokio"],"hits":4,"latency_ms":15.0,"harness":"claude"}
+{"ts":"2026-04-24T09:20:00+00:00","op":"share","route":"high","confidence":"high","pushed":true,"pr_opened":false,"harness":"claude"}
+{"ts":"2026-04-24T10:00:00+00:00","op":"recall","query":"react hooks","tags":["react"],"hits":0,"latency_ms":9.0,"harness":"copilot"}
+{"ts":"2026-04-24T10:05:00+00:00","op":"recall","query":"tokio cancel","tags":["rust","tokio","cancellation"],"hits":2,"latency_ms":40.0,"harness":"claude"}
+{"ts":"2026-04-15T08:00:00+00:00","op":"recall","query":"old query","tags":["rust"],"hits":1,"latency_ms":10.0,"harness":"claude"}
+not-json-just-garbage
+{"ts":"2026-04-15T08:05:00+00:00","op":"recall","query":"older recall","tags":["python"],"hits":0,"latency_ms":50.0,"harness":"claude"}

@@ -1,0 +1,15 @@
+# Local pre-commit config for the reflect-kb repo itself (lint its own samples +
+# schema). Team-kb repos consume the published hook from .pre-commit-hooks.yaml
+# — see README §Pre-commit.
+repos:
+  - repo: local
+    hooks:
+      - id: reflect-kb-frontmatter
+        name: reflect-kb frontmatter schema (local)
+        entry: python scripts/validate_frontmatter.py
+        language: python
+        files: '^(tests/samples|documents)/.*\.md$'
+        additional_dependencies:
+          - 'jsonschema>=4.20'
+          - 'pyyaml>=6.0'
+        pass_filenames: true

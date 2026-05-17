@@ -1,0 +1,3 @@
+# Default owner for everything in this repo.
+# Until sub-maintainers are appointed per area, all PRs are routed to @stevengonsalvez.
+*       @stevengonsalvez
