@@ -200,6 +200,125 @@ pub fn forward_key_to_focused_plugin(
     EventOutcome::Handled
 }
 
+/// Build the placeholder paragraph shown when a plugin screen renders
+/// but no frame has arrived yet. Two cases:
+///
+/// 1. **Plugin not registered** — runtime came up but this plugin is
+///    absent. Either disabled (`AINB_DISABLE_PLUGINS=1`,
+///    `AINB_DISABLE_PLUGIN=<id>`, `AINB_ONLY_PLUGINS` omits it,
+///    `config.toml [plugins]` excludes it) or never installed at all.
+///    Show actionable text so the user knows it's a deliberate state,
+///    not a hang.
+/// 2. **Plugin registered, no frame yet** — runtime spawned the
+///    subprocess but the first `plugin/render` hasn't completed. This
+///    is the genuine "rendering…" case; lasts milliseconds in normal
+///    operation.
+fn build_placeholder_for_unloaded_plugin(
+    screen_id: &str,
+    state: &AppState,
+) -> ratatui::widgets::Paragraph<'static> {
+    use ratatui::{
+        style::{Color, Modifier, Style},
+        text::{Line, Span},
+        widgets::{Block, BorderType, Borders, Paragraph},
+    };
+
+    let plugin_name = plugin_id_for_screen(screen_id);
+    let plugin_registered = match (plugin_name, state.plugin_runtime.as_ref()) {
+        (Some(name), Some(rt)) => {
+            let pid = ainb_plugin_runtime::PluginId::from(name);
+            rt.lifecycle_state(&pid).is_some()
+        }
+        _ => false,
+    };
+
+    if plugin_registered {
+        // Genuine transient render lag.
+        let line = Line::from(vec![
+            Span::styled("  ⏳ ", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!("Loading {}…", screen_id),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+        ]);
+        return Paragraph::new(line);
+    }
+
+    // Plugin not registered — explain why and how to fix.
+    let title = plugin_name
+        .map(|n| format!(" [ {} unavailable ] ", n))
+        .unwrap_or_else(|| " [ plugin unavailable ] ".to_string());
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            format!("  This screen is owned by the `{}` plugin, which isn't loaded.",
+                plugin_name.unwrap_or(screen_id)
+            ),
+            Style::default().add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(""),
+        Line::from("  Check whether plugins are disabled in this session:"),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("    • "),
+            Span::styled("AINB_DISABLE_PLUGINS=1", Style::default().fg(Color::Cyan)),
+            Span::raw("     — all plugins off (kill switch)"),
+        ]),
+        Line::from(vec![
+            Span::raw("    • "),
+            Span::styled(
+                format!("AINB_DISABLE_PLUGIN={}", plugin_name.unwrap_or("<id>")),
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::raw("   — this plugin denylisted by env"),
+        ]),
+        Line::from(vec![
+            Span::raw("    • "),
+            Span::styled("AINB_ONLY_PLUGINS=…", Style::default().fg(Color::Cyan)),
+            Span::raw("        — env allowlist excludes it"),
+        ]),
+        Line::from(vec![
+            Span::raw("    • "),
+            Span::styled("config.toml [plugins]", Style::default().fg(Color::Cyan)),
+            Span::raw("     — persistent allow/disable list"),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("  To restore it: unset the env var(s) and/or edit "),
+            Span::styled(
+                "~/.agents-in-a-box/config/config.toml",
+                Style::default().fg(Color::Cyan),
+            ),
+        ]),
+        Line::from(vec![
+            Span::raw("  Logs: "),
+            Span::styled(
+                "~/.agents-in-a-box/logs/agents-in-a-box-*.jsonl",
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::raw(" — search `applying plugin filter`."),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("  See "),
+            Span::styled("docs/plugins.md", Style::default().fg(Color::Cyan)),
+            Span::raw(" → Configuration → Enable/disable plugins."),
+        ]),
+    ];
+
+    let block = Block::default()
+        .title(Span::styled(
+            title,
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Yellow));
+
+    Paragraph::new(lines).block(block)
+}
+
 impl Screen for PluginScreen {
     fn id(&self) -> &str {
         self.screen_id
@@ -214,10 +333,7 @@ impl Screen for PluginScreen {
             .insert(self.screen_id.to_string(), (area.width, area.height));
 
         let Some(wire) = state.pending_plugin_renders.get(self.screen_id) else {
-            let placeholder = ratatui::widgets::Paragraph::new(format!(
-                "[plugin {}: rendering...]",
-                self.screen_id
-            ));
+            let placeholder = build_placeholder_for_unloaded_plugin(self.screen_id, state);
             frame.render_widget(placeholder, area);
             return;
         };
