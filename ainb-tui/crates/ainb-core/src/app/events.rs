@@ -515,7 +515,8 @@ impl EventHandler {
     ///   Skills search overlay, and GitView commit-message mode —
     ///   text-entry overlays toggled inside otherwise navigable screens.
     fn is_text_input_context(state: &AppState) -> bool {
-        use crate::app::state::{NewSessionStep, View};
+        use crate::app::screens::ids as screen_ids;
+        use crate::app::state::NewSessionStep;
 
         // Modal text-entry overlays. These early-return higher up in
         // handle_key_event, but listing them keeps this helper a
@@ -528,7 +529,7 @@ impl EventHandler {
         }
 
         // NewSession is multi-step — only the text-entry steps count.
-        let new_session_text_active = state.current_view == View::NewSession
+        let new_session_text_active = state.current_screen == screen_ids::NEW_SESSION
             && state
                 .new_session_state
                 .as_ref()
@@ -543,30 +544,36 @@ impl EventHandler {
                 })
                 .unwrap_or(false);
 
-        // Per-view overlays that toggle text-entry mode inside an
-        // otherwise navigable screen.
-        let analytics_text_active = state.current_view == View::Analytics
-            && (state.usage_state.input_mode.is_some() || state.usage_state.zoom_search_active);
+        // Analytics is plugin-owned post-Phase 7; the host can't
+        // introspect the burndown plugin's input modes (zoom search,
+        // custom-period input). The plugin's own handle_key path
+        // consumes character keystrokes before they reach this
+        // helper, so we treat the analytics screen as always-non-text
+        // here. If a plugin ever needs the host to suppress global
+        // shortcuts while it's in text-entry mode, add a wire signal
+        // (e.g. publish on `host.input_mode`) and read it here.
         let skills_text_active =
-            state.current_view == View::Skills && state.skills_state.search_active;
-        let git_view_text_active = state.current_view == View::GitView
+            state.current_screen == screen_ids::SKILLS && state.skills_state.search_active;
+        let git_view_text_active = state.current_screen == screen_ids::GIT_VIEW
             && state.git_view_state.as_ref().map(|gv| gv.is_in_commit_mode()).unwrap_or(false);
 
         // Config is multi-mode — `editing` and `api_key_input_mode`
         // are the only states that accept free-form character input.
         // Plain navigation of settings categories should NOT suppress
         // global shortcuts like `H`; that would be a UX regression.
-        let config_text_active = state.current_view == View::Config
+        let config_text_active = state.current_screen == screen_ids::CONFIG
             && (state.config_screen_state.editing || state.config_screen_state.api_key_input_mode);
 
         new_session_text_active
             || matches!(
-                state.current_view,
-                View::SearchWorkspace | View::ClaudeChat | View::AuthSetup | View::AttachedTerminal
+                state.current_screen.as_str(),
+                screen_ids::SEARCH_WORKSPACE
+                    | screen_ids::CLAUDE_CHAT
+                    | screen_ids::AUTH_SETUP
+                    | screen_ids::ATTACHED_TERMINAL
             )
             || config_text_active
             || state.auth_provider_popup_state.show_popup
-            || analytics_text_active
             || skills_text_active
             || git_view_text_active
     }
@@ -5025,11 +5032,12 @@ mod text_input_guard_tests {
     //! add in future.
 
     use super::*;
-    use crate::app::state::{AppState, NewSessionState, NewSessionStep, View};
+    use crate::app::screens::ids as screen_ids;
+    use crate::app::state::{AppState, NewSessionState, NewSessionStep};
 
     fn state_in_repo_input() -> AppState {
         let mut state = AppState::default();
-        state.current_view = View::NewSession;
+        state.current_screen = screen_ids::NEW_SESSION.to_string();
         state.new_session_state = Some(NewSessionState {
             step: NewSessionStep::InputRepoSource,
             ..NewSessionState::default()
@@ -5115,7 +5123,7 @@ mod text_input_guard_tests {
     #[test]
     fn global_h_still_toggles_help_outside_text_input() {
         let mut state = AppState::default();
-        state.current_view = View::HomeScreen;
+        state.current_screen = screen_ids::HOME.to_string();
 
         let evt = EventHandler::handle_key_event(char_key('H'), &mut state)
             .expect("Shift+H outside text input must dispatch ToggleHelp");
@@ -5125,12 +5133,12 @@ mod text_input_guard_tests {
     /// Config screen — `Shift+H` must still toggle help when the user
     /// is navigating settings (not actively editing a value).
     /// Regression test for the gemini-code-assist#MEDIUM finding on
-    /// PR #130: blanket-including `View::Config` in the text-input
+    /// PR #130: blanket-including `screen_ids::CONFIG` in the text-input
     /// predicate broke the help shortcut for plain navigation.
     #[test]
     fn global_h_still_toggles_help_during_config_navigation() {
         let mut state = AppState::default();
-        state.current_view = View::Config;
+        state.current_screen = screen_ids::CONFIG.to_string();
         // editing = false, api_key_input_mode = false by default
 
         let evt = EventHandler::handle_key_event(char_key('H'), &mut state)
@@ -5167,40 +5175,39 @@ mod text_input_guard_tests {
     #[test]
     fn is_text_input_context_covers_every_other_branch() {
         use crate::components::GitViewState;
-        use crate::components::usage::UsageInputMode;
         use std::path::PathBuf;
 
-        // View-only branches: switching `current_view` is enough.
+        // Screen-only branches: switching `current_screen` is enough.
         // (Config is intentionally excluded — it's gated on edit state,
         // covered separately below.)
-        for view in &[
-            View::SearchWorkspace,
-            View::ClaudeChat,
-            View::AuthSetup,
-            View::AttachedTerminal,
+        for screen in &[
+            screen_ids::SEARCH_WORKSPACE,
+            screen_ids::CLAUDE_CHAT,
+            screen_ids::AUTH_SETUP,
+            screen_ids::ATTACHED_TERMINAL,
         ] {
             let mut state = AppState::default();
-            state.current_view = view.clone();
+            state.current_screen = (*screen).to_string();
             assert!(
                 EventHandler::is_text_input_context(&state),
-                "View::{:?} must be treated as text input",
-                view
+                "screen `{}` must be treated as text input",
+                screen
             );
         }
 
-        // Config view: only counts as text input when actively editing
+        // Config screen: only counts as text input when actively editing
         // a setting or entering an API key, NOT when navigating the
         // categories list. Suppressing globals during plain navigation
         // would regress the help shortcut UX.
         let mut state = AppState::default();
-        state.current_view = View::Config;
+        state.current_screen = screen_ids::CONFIG.to_string();
         assert!(
             !EventHandler::is_text_input_context(&state),
             "Config without edit mode must NOT be treated as text input"
         );
 
         let mut state = AppState::default();
-        state.current_view = View::Config;
+        state.current_screen = screen_ids::CONFIG.to_string();
         state.config_screen_state.editing = true;
         assert!(
             EventHandler::is_text_input_context(&state),
@@ -5208,7 +5215,7 @@ mod text_input_guard_tests {
         );
 
         let mut state = AppState::default();
-        state.current_view = View::Config;
+        state.current_screen = screen_ids::CONFIG.to_string();
         state.config_screen_state.api_key_input_mode = true;
         assert!(
             EventHandler::is_text_input_context(&state),
@@ -5241,27 +5248,17 @@ mod text_input_guard_tests {
             );
         }
 
-        // Analytics input mode.
-        let mut state = AppState::default();
-        state.current_view = View::Analytics;
-        state.usage_state.input_mode = Some(UsageInputMode::DateRange);
-        assert!(
-            EventHandler::is_text_input_context(&state),
-            "Analytics input_mode = Some must be treated as text input"
-        );
-
-        // Analytics zoom-search.
-        let mut state = AppState::default();
-        state.current_view = View::Analytics;
-        state.usage_state.zoom_search_active = true;
-        assert!(
-            EventHandler::is_text_input_context(&state),
-            "Analytics zoom_search_active must be treated as text input"
-        );
+        // Analytics input mode + zoom-search assertions DROPPED in the
+        // plugin migration — analytics is now owned by the burndown
+        // subprocess plugin. The host can't read its text-entry modes;
+        // see the comment in `is_text_input_context` for the host/
+        // plugin boundary rationale and the wire-signal path forward
+        // when a plugin needs the host to suppress globals during
+        // text entry.
 
         // Skills search overlay.
         let mut state = AppState::default();
-        state.current_view = View::Skills;
+        state.current_screen = screen_ids::SKILLS.to_string();
         state.skills_state.search_active = true;
         assert!(
             EventHandler::is_text_input_context(&state),
@@ -5270,7 +5267,7 @@ mod text_input_guard_tests {
 
         // GitView commit-message mode.
         let mut state = AppState::default();
-        state.current_view = View::GitView;
+        state.current_screen = screen_ids::GIT_VIEW.to_string();
         let mut git_state = GitViewState::new(PathBuf::from("/tmp"));
         git_state.start_commit_message_input();
         state.git_view_state = Some(git_state);
@@ -5280,9 +5277,9 @@ mod text_input_guard_tests {
         );
 
         // Negative control: GitView without commit mode active is NOT
-        // a text input — it's a navigable view.
+        // a text input — it's a navigable screen.
         let mut state = AppState::default();
-        state.current_view = View::GitView;
+        state.current_screen = screen_ids::GIT_VIEW.to_string();
         state.git_view_state = Some(GitViewState::new(PathBuf::from("/tmp")));
         assert!(
             !EventHandler::is_text_input_context(&state),
@@ -5299,7 +5296,7 @@ mod text_input_guard_tests {
     }
 
     /// `is_text_input_context` must return true for every text-entry
-    /// step of `View::NewSession` and false for the non-text steps.
+    /// step of the NewSession screen and false for the non-text steps.
     #[test]
     fn is_text_input_context_covers_new_session_text_steps() {
         let text_steps = [
@@ -5310,7 +5307,7 @@ mod text_input_guard_tests {
         ];
         for step in &text_steps {
             let mut state = AppState::default();
-            state.current_view = View::NewSession;
+            state.current_screen = screen_ids::NEW_SESSION.to_string();
             state.new_session_state = Some(NewSessionState {
                 step: step.clone(),
                 ..NewSessionState::default()
@@ -5324,7 +5321,7 @@ mod text_input_guard_tests {
 
         // Sanity: at least one non-text step is NOT a text input.
         let mut state = AppState::default();
-        state.current_view = View::NewSession;
+        state.current_screen = screen_ids::NEW_SESSION.to_string();
         state.new_session_state = Some(NewSessionState {
             step: NewSessionStep::SelectAgent,
             ..NewSessionState::default()
