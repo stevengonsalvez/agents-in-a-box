@@ -63,18 +63,22 @@ one place. If it exists in a memory file somewhere, it should be in the global i
 Everything flows to:
 
 ```
-~/.learnings/
+~/.learnings/                (KB content + index; managed by the `reflect` CLI)
 ├── documents/
-│   ├── learnings/          Knowledge notes (.md + .entities.yaml)
-│   │                       Indexed into GraphRAG + QMD
-│   ├── memories/           Archived originals (by project)
+│   ├── *.md / *.entities.yaml  Learning notes + entity sidecars (indexed
+│   │                            into GraphRAG + QMD)
+│   ├── memories/               Archived originals (by project)
 │   │   ├── shotclubhouse/
 │   │   ├── ai-coder-rules/
 │   │   └── ...
-│   └── episodes/           Session episode notes
-├── nano_graphrag_cache/    GraphRAG index (nodes, edges, communities)
-├── cli/learnings           CLI for add/search/reindex
-└── .memory-ingest-log.yaml Tracks what's been ingested (prevents reprocessing)
+│   └── episodes/               Session episode notes
+├── nano_graphrag_cache/        GraphRAG index (nodes, edges, communities)
+└── .memory-ingest-log.yaml     Tracks what's been ingested (prevents reprocessing)
+
+# The `reflect` CLI itself is installed separately via:
+#   uv tool install --upgrade 'git+https://github.com/stevengonsalvez/reflect-kb.git[graph]'
+# and lands on $PATH at ~/.local/bin/reflect. The legacy ~/.learnings/cli/
+# install path is deprecated; the `reflect` binary fully supersedes it.
 
 ~/.cache/qmd/
 ├── index.sqlite            QMD search index
@@ -130,13 +134,14 @@ For each discovered file:
 Check each entry against what's already indexed:
 
 ```bash
-LEARNINGS_CLI="$HOME/.learnings/cli/learnings"
-
 # Check QMD first (fastest)
 qmd query --collection learnings --json "{key_insight}" 2>/dev/null
 
-# Check GraphRAG
-"$LEARNINGS_CLI" search "{key terms}" 2>/dev/null
+# Check GraphRAG via the reflect CLI (from reflect-kb — installed via
+# `uv tool install reflect-kb`). Older versions of this skill referenced
+# a legacy $HOME/.learnings/cli/learnings wrapper — that path is gone
+# after the global-learnings skill purge; use `reflect` instead.
+reflect search "{key terms}" 2>/dev/null
 
 # Check ingest log (prevents reprocessing)
 grep -q "{content_hash}" "$HOME/.learnings/.memory-ingest-log.yaml" 2>/dev/null
@@ -285,8 +290,11 @@ mkdir -p "$ARCHIVE_DIR"
 **C. Index into GraphRAG + QMD:**
 
 ```bash
-LEARNINGS_CLI="$HOME/.learnings/cli/learnings"
-"$LEARNINGS_CLI" add "$NOTE_PATH" --entities "$SIDECAR_PATH"
+# Use the canonical reflect CLI (from reflect-kb, installed via
+# `uv tool install reflect-kb`). --force is REQUIRED here because this
+# step runs under a non-interactive subprocess; without it, an existing
+# doc with a colliding id would silently abort the add.
+reflect add "$NOTE_PATH" --entities "$SIDECAR_PATH" --force
 ```
 
 **D. Update QMD:**
