@@ -3409,10 +3409,20 @@ impl AppState {
             }
         }
 
-        // Load Boss mode sessions (Docker-based) if Docker is available
+        // Load Boss mode sessions (Docker-based) if Docker is available.
+        // Capped at 5s — a slow or wedged Docker daemon must not block
+        // the workspaces panel from rendering. Interactive mode is
+        // tmux-only and runs unconditionally after this returns.
+        const BOSS_MODE_TIMEOUT: Duration = Duration::from_secs(5);
         if self.is_docker_available().await {
             info!("Docker available - loading Boss mode sessions");
-            self.load_boss_mode_sessions().await;
+            match tokio::time::timeout(BOSS_MODE_TIMEOUT, self.load_boss_mode_sessions()).await {
+                Ok(()) => {}
+                Err(_) => warn!(
+                    "load_real_workspaces: Boss mode load exceeded {}s budget — proceeding with Interactive only",
+                    BOSS_MODE_TIMEOUT.as_secs()
+                ),
+            }
         } else {
             info!("Docker not available - skipping Boss mode session loading");
         }
