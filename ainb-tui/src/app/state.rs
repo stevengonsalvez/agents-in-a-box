@@ -2215,12 +2215,14 @@ async fn load_workspaces_async() -> anyhow::Result<Vec<Workspace>> {
     // fixes a correctness bug: two paths that both fail to canonicalize
     // (e.g., deleted worktrees) previously matched each other via shared
     // `None`, collapsing distinct sessions into one Workspace.
-    let canonical_key = |p: &std::path::Path| -> PathBuf {
-        p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
-    };
+    let canonical_key =
+        |p: &std::path::Path| -> PathBuf { p.canonicalize().unwrap_or_else(|_| p.to_path_buf()) };
     let mut workspaces = boss_workspaces;
-    let mut path_index: HashMap<PathBuf, usize> =
-        workspaces.iter().enumerate().map(|(i, w)| (canonical_key(&w.path), i)).collect();
+    let mut path_index: HashMap<PathBuf, usize> = workspaces
+        .iter()
+        .enumerate()
+        .map(|(i, w)| (canonical_key(&w.path), i))
+        .collect();
 
     for interactive_session in interactive_sessions {
         let session = interactive_session.to_session_model();
@@ -2252,8 +2254,9 @@ async fn load_workspaces_async() -> anyhow::Result<Vec<Workspace>> {
 async fn fetch_boss_mode_workspaces() -> Vec<Workspace> {
     const BOSS_MODE_TIMEOUT: Duration = Duration::from_secs(5);
 
-    let docker_available =
-        tokio::task::spawn_blocking(AppState::is_docker_available_sync).await.unwrap_or(false);
+    let docker_available = tokio::task::spawn_blocking(AppState::is_docker_available_sync)
+        .await
+        .unwrap_or(false);
 
     if !docker_available {
         info!("load_workspaces_async: Docker not available, skipping Boss mode");
