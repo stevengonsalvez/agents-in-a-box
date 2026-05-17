@@ -180,21 +180,28 @@ The fact has now travelled from a free-form correction in chat → an auto-memor
 
 ## Live timeline dashboard (optional)
 
-The plugin ships a 4-row activity dashboard renderer at `scripts/reflect_timeline.sh`. After install it lands at `~/.claude/plugins/cache/agents-in-a-box/reflect/<version>/scripts/reflect_timeline.sh`. Wire it into your statusline to see a rolling 2-hour view of recall hits, ingest writes, token burn, and operational events.
+The plugin ships a 4-row activity dashboard renderer at `scripts/reflect_timeline.sh`. After install it lands at `~/.claude/plugins/cache/agents-in-a-box/reflect/<version>/scripts/reflect_timeline.sh`. Wire it into your statusline to see a rolling 2-hour view of all 8 reflect-pipeline signals side-by-side.
 
 ```
-M: ▁·▁▂▅█▆▃▁·····▁··▂··░·   ◀── memory  (recall + auto-memory writes,   blue)
-I: ·······▒▓···············   ◀── pipeline (ingest writes + drain attempts, green)
-T: ▂·▁▂▃▅▇█▇▆▃▁▁▂▃▅▇█▇▆▃▁·   ◀── tokens  (heat gradient, full bar = 20k)
-X: ··········x·····C······a   ◀── ops     (x errors, C commits, a agents)
+R: ▁·▁▂▅█▆▃▁·····▁··▂··░·   M: ········▁▂▃·····▁▂··    ◀ recall (blue)        | auto-memory (cyan)
+I: ·······▒▓···············   D: ··········▁▂▃·······    ◀ ingest (green)       | drain (orange)
+T: ▂·▁▂▃▅▇█▇▆▃▁▁▂▃▅▇█▇▆▃▁·   E: ···············█······    ◀ tokens (heat, 20k)  | errors (red)
+C: ················▁▂······   A: ··········▁▂········█    ◀ commits (gray)      | agents (cyan)
 ```
 
-Each row: 24 cells × 5 minutes = 2 hours, right edge = now. Heights encode count, base colour encodes signal family.
+Each sub-sparkline: 24 cells × 5 minutes = 2 hours, right edge = now. Heights encode per-row event count; the two sub-sparklines on a row are separated by 3 spaces. Each label letter is rendered in its own base colour.
+
+| Row | Left | Right |
+|---|---|---|
+| 3 | `R` recall events from `~/.reflect/recall_log.jsonl` | `M` auto-memory file writes under `~/.claude/projects/<hash>/memory/` |
+| 4 | `I` ingest entries in `~/.learnings/.memory-ingest-log.yaml` | `D` drain-start markers in `~/.reflect/drain.log` |
+| 5 | `T` token totals from the current session JSONL (heat gradient) | `E` unacked errors in `~/.reflect/errors.json` |
+| 6 | `C` git commits + reflog pushes in cwd over 2h | `A` agent spawns (Task tool / `dev-,agent-,swarm-` tmux / `~/.cloud-coding/runs.jsonl`) |
 
 Wire it into your statusline by adding this block at the end (after `printf '%b\n %b' "$L1" "$L2"`):
 
 ```bash
-TIMELINE_HELPER="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/cache/agents-in-a-box/reflect/3.3.0}/scripts/reflect_timeline.sh"
+TIMELINE_HELPER="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/cache/agents-in-a-box/reflect/3.3.1}/scripts/reflect_timeline.sh"
 if [[ "${REFLECT_TIMELINE_DISABLE:-0}" != "1" ]] && [[ -x "$TIMELINE_HELPER" ]]; then
   "$TIMELINE_HELPER" 2>/dev/null
 fi
