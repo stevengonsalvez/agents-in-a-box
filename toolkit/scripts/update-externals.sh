@@ -113,22 +113,22 @@ update_nanoclaw() {
 
 # ----- reflect plugin (Claude marketplace install) -----
 # This repo is itself a marketplace (.claude-plugin/marketplace.json at root)
-# that publishes reflect from toolkit/packages/plugins/reflect/. The marketplace
-# path is the canonical Claude-native install; the python adapter remains the
-# fallback for Codex/Copilot which lack plugin runtime parity.
+# that publishes reflect from plugins/reflect/. The marketplace path is the
+# canonical Claude-native install; the python adapter remains the fallback for
+# Codex/Copilot which lack plugin runtime parity.
 update_reflect() {
   section "reflect plugin (claude plugin install via in-repo marketplace)"
   run "claude plugin marketplace add stevengonsalvez/agents-in-a-box"
   run "claude plugin install reflect@agents-in-a-box"
   echo "  Sub-skills deployed: reflect, reflect:consolidate, reflect:ingest, recall, reflect-status"
   echo "  (Codex/Copilot still use the python adapter — see"
-  echo "   toolkit/packages/plugins/reflect/adapters/{codex,copilot}/)"
+  echo "   plugins/reflect/adapters/{codex,copilot}/)"
 }
 
 # ----- external-packages (uv tool) -----
 update_packages() {
   section "external-packages (uv tool)"
-  run "uv tool install --force --upgrade 'git+https://github.com/stevengonsalvez/reflect-kb.git[graph]'"
+  run "uv tool install --force --upgrade 'git+https://github.com/stevengonsalvez/agents-in-a-box.git#subdirectory=reflect-kb[graph]'"
   # graphify (PyPI: graphifyy, double-y) — knowledge-graph builder used by /graphify skill
   run "uv tool install --force --upgrade graphifyy"
 }

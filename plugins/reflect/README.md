@@ -256,7 +256,7 @@ claude plugin marketplace add stevengonsalvez/agents-in-a-box
 claude plugin install reflect@agents-in-a-box
 
 # install the underlying CLI (provides nano-graphrag + qmd)
-uv tool install --force --upgrade 'git+https://github.com/stevengonsalvez/reflect-kb.git[graph]'
+uv tool install --force --upgrade 'git+https://github.com/stevengonsalvez/agents-in-a-box.git#subdirectory=reflect-kb[graph]'
 ```
 
 That's it. The next session you open, the SessionStart hook fires `recall` automatically.
@@ -274,7 +274,7 @@ python3 plugins/reflect/adapters/codex/codex_adapter.py install
 python3 plugins/reflect/adapters/copilot/copilot_adapter.py install
 
 # same CLI prerequisite
-uv tool install --force --upgrade 'git+https://github.com/stevengonsalvez/reflect-kb.git[graph]'
+uv tool install --force --upgrade 'git+https://github.com/stevengonsalvez/agents-in-a-box.git#subdirectory=reflect-kb[graph]'
 ```
 
 ---
@@ -319,8 +319,9 @@ For design decisions and the v4 universal-install spec, see **[docs/design-recor
 
 ## Companion CLI
 
-The Python CLI that powers this plugin lives in a separate repo:
-**[stevengonsalvez/reflect-kb](https://github.com/stevengonsalvez/reflect-kb)** — install via `uv tool install`.
+The Python CLI that powers this plugin lives in the same monorepo at
+[`reflect-kb/`](../../reflect-kb/) — install via `uv tool install` (see Install
+section above for the subdirectory URL).
 
 The plugin in this repo is the harness-side glue (skills, hooks, settings.json merge); the CLI is the actual KB engine.
 

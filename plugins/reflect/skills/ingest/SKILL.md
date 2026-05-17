@@ -76,7 +76,7 @@ Everything flows to:
 └── .memory-ingest-log.yaml     Tracks what's been ingested (prevents reprocessing)
 
 # The `reflect` CLI itself is installed separately via:
-#   uv tool install --upgrade 'git+https://github.com/stevengonsalvez/reflect-kb.git[graph]'
+#   uv tool install --upgrade 'git+https://github.com/stevengonsalvez/agents-in-a-box.git#subdirectory=reflect-kb[graph]'
 # and lands on $PATH at ~/.local/bin/reflect. The legacy ~/.learnings/cli/
 # install path is deprecated; the `reflect` binary fully supersedes it.
 

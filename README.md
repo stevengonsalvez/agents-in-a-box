@@ -372,7 +372,7 @@ A two-tier learning system that captures insights during development and retriev
 | **Fast local** | QMD (Quick Markdown Documents) | Semantic search over structured learning notes |
 | **Deep graph** | GraphRAG (nano-graphrag) | Entity-relationship graph with community detection for cross-project knowledge retrieval |
 
-The `/reflect` skill captures learnings. The `/research` and `/prime` skills retrieve them. The standalone [reflect-kb](https://github.com/stevengonsalvez/reflect-kb) CLI (installed as `reflect`) manages the knowledge base directly.
+The `/reflect` skill captures learnings. The `/research` and `/prime` skills retrieve them. The [`reflect-kb/`](reflect-kb/) Python library (installed as the `reflect` CLI) manages the knowledge base directly — it lives in this monorepo and installs via `uv tool install --upgrade 'git+https://github.com/stevengonsalvez/agents-in-a-box.git#subdirectory=reflect-kb[graph]'`.
 
 **[How the knowledge system works →](docs/how-reflection-works.md)**
 
@@ -397,7 +397,15 @@ agents-in-a-box/
 │   ├── Formula/                #   Homebrew formula
 │   └── install.sh              #   One-liner installer
 │
-├── toolkit/                    # Portable AI agent toolkit
+├── reflect-kb/                 # Python library — `reflect` CLI + GraphRAG/QMD engine
+│   ├── src/                    #   Package source (installed via `uv tool install`)
+│   ├── tests/                  #   Unit + integration tests
+│   └── pyproject.toml          #   Workspace member
+│
+├── plugins/                    # Claude Code plugins (root-level, sibling to reflect-kb/)
+│   └── reflect/                #   `reflect@agents-in-a-box` plugin — skills, hooks, adapters
+│
+├── toolkit/                    # Portable AI agent toolkit (internal agent infrastructure)
 │   ├── packages/
 │   │   ├── skills/             #   71 reusable skills
 │   │   ├── agents/             #   37 agent definitions

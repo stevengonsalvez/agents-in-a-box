@@ -785,16 +785,17 @@ function copyDirectoryRecursive(source, destination, excludeFiles = [], template
 // reflect-kb installer — replaces the legacy installLearningsCli flow.
 // =============================================================================
 //
-// Strategy: install the reflect-kb Python package (separate repo) globally via
-// `uv tool install`, then run the per-harness adapter under
-// toolkit/packages/plugins/reflect/adapters/<tool>/ to wire pointer SKILL.md
+// Strategy: install the reflect-kb Python package (lives at reflect-kb/ in
+// this monorepo) globally via `uv tool install`, then run the per-harness
+// adapter under plugins/reflect/adapters/<tool>/ to wire pointer SKILL.md
 // files (and, for Claude only, a SessionStart hook) into the user's harness
 // home dir.
 //
 // Source resolution (in priority order):
 //   1. REFLECT_KB_SOURCE env var — local path or git URL (for dev iteration)
-//   2. Clone github.com/stevengonsalvez/reflect-kb to a managed cache dir
-//      under ~/.cache/ai-coder-rules/reflect-kb (created on first run, fast-
+//   2. Clone github.com/stevengonsalvez/agents-in-a-box (subdirectory
+//      reflect-kb) to a managed cache dir under
+//      ~/.cache/ai-coder-rules/reflect-kb (created on first run, fast-
 //      forwarded with `git pull` on subsequent runs)
 //
 // Idempotency: if `reflect --version` already reports the same version the
@@ -814,11 +815,15 @@ function copyDirectoryRecursive(source, destination, excludeFiles = [], template
 // Returns {installed, skippedReason, adapter, version, errors, warnings} so
 // the caller can render a single completeProgress line.
 
-const REFLECT_KB_REPO = 'https://github.com/stevengonsalvez/reflect-kb.git';
-const REFLECT_KB_CACHE_DIR = path.join(os.homedir(), '.cache', 'ai-coder-rules', 'reflect-kb');
+// reflect-kb now lives inside the agents-in-a-box monorepo at reflect-kb/.
+// We clone the whole monorepo to the cache dir and install from the
+// subdirectory. REFLECT_KB_SUBDIR pins which subdirectory holds the package.
+const REFLECT_KB_REPO = 'https://github.com/stevengonsalvez/agents-in-a-box.git';
+const REFLECT_KB_CACHE_DIR = path.join(os.homedir(), '.cache', 'ai-coder-rules', 'agents-in-a-box');
+const REFLECT_KB_SUBDIR = 'reflect-kb';
 
 // Map bootstrap tool slugs to the adapter directory under
-// toolkit/packages/plugins/reflect/adapters/. Tools not in this map skip the
+// plugins/reflect/adapters/. Tools not in this map skip the
 // adapter step (the package install still proceeds — the CLI works regardless).
 const REFLECT_ADAPTER_BY_TOOL = {
     'claude-code-4.5': 'claude',
@@ -881,7 +886,8 @@ function resolveReflectKbSource() {
         return { source: cacheDir, dir: cacheDir, kind: 'env-git' };
     }
     cloneOrUpdateGit(REFLECT_KB_REPO, REFLECT_KB_CACHE_DIR);
-    return { source: REFLECT_KB_CACHE_DIR, dir: REFLECT_KB_CACHE_DIR, kind: 'cache' };
+    const pkgDir = path.join(REFLECT_KB_CACHE_DIR, REFLECT_KB_SUBDIR);
+    return { source: pkgDir, dir: pkgDir, kind: 'cache' };
 }
 
 function cloneOrUpdateGit(repoUrl, cloneDir) {
@@ -973,9 +979,11 @@ async function installReflectKb(tool, options = {}) {
         result.warnings.push(`no reflect adapter for tool '${tool}'; skipping adapter step`);
         return result;
     }
+    // Plugin moved to root-level plugins/ in the monorepo. __dirname is
+    // toolkit/, so go one level up to find the plugin tree.
     const adapterScript = path.join(
-        __dirname,
-        'packages', 'plugins', 'reflect', 'adapters', adapterSlug, `${adapterSlug}_adapter.py`
+        path.dirname(__dirname),
+        'plugins', 'reflect', 'adapters', adapterSlug, `${adapterSlug}_adapter.py`
     );
     if (!fs.existsSync(adapterScript)) {
         result.warnings.push(`adapter script missing: ${adapterScript}`);

@@ -19,7 +19,8 @@ cd toolkit && npm install
 | `toolkit/bootstrap.js` | The orchestrator: deploys rules and skills into per-tool config dirs (`~/.claude`, `~/.codex`, etc.) |
 | `toolkit/general-rules/` | Cross-tool source-of-truth rules (Go, deps, env, MCP, Postman, etc.) |
 | `toolkit/packages/skills/` | Bundled skills (deployed by bootstrap) |
-| `toolkit/packages/plugins/reflect/` | The `reflect` plugin — installable via `claude plugin install reflect@agents-in-a-box` |
+| `plugins/reflect/` | The `reflect` plugin — installable via `claude plugin install reflect@agents-in-a-box` |
+| `reflect-kb/` | Python library (root-level) — `reflect` CLI engine; installs via `uv tool install --upgrade 'git+https://github.com/stevengonsalvez/agents-in-a-box.git#subdirectory=reflect-kb[graph]'` |
 | `toolkit/{cursor,cline,roo,copilot,amazonq}/` | Per-tool rule layouts targeted by bootstrap |
 | `toolkit/external-dependencies.yaml` | Manifest of every external skill, plugin, npx package, and CLI dependency |
 | `toolkit/scripts/update-externals.sh` | Refreshes everything tracked in the manifest |

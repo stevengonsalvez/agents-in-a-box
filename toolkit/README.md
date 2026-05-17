@@ -56,16 +56,18 @@ packages/
 │   └── utils/           Shell utility libraries
 ├── workflows/
 │   └── single-agent/    Guided plan → implement → validate flows
-├── plugins/
-│   └── reflect/         Learning-capture plugin (reflect:capture, reflect:ingest)
 └── knowledge/
     └── docs-solutions-template/
 ```
 
-The reflect/recall knowledge base CLI now lives in a separate repo
-([reflect-kb](https://github.com/stevengonsalvez/reflect-kb)) and is
-installed via `uv tool install` by `bootstrap.js`. See the bootstrap's
-`installReflectKb()` function for details.
+The reflect Claude Code plugin lives at root-level
+[`plugins/reflect/`](../plugins/reflect/) (moved out of
+`toolkit/packages/plugins/` to sit beside its companion library).
+The reflect/recall knowledge base CLI lives at root-level
+[`reflect-kb/`](../reflect-kb/) in this same monorepo and is installed
+via `uv tool install` by `bootstrap.js` (from the
+`git+https://github.com/stevengonsalvez/agents-in-a-box.git#subdirectory=reflect-kb`
+URL). See the bootstrap's `installReflectKb()` function for details.
 
 ### Skills at a glance (86 total, grouped by purpose)
 
