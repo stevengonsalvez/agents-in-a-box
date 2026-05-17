@@ -9358,21 +9358,28 @@ impl AppState {
                 }
                 crate::models::SessionStatus::Idle => {
                     info!(
-                        "Session {} is idle (tmux running but Claude stopped), restarting Claude in tmux",
+                        "Session {} is idle (tmux running but CLI stopped), restarting CLI in tmux",
                         session_id
                     );
 
-                    // For Idle sessions, we restart Claude within the existing tmux session
-                    if let Err(e) = self.restart_claude_in_tmux(session_id).await {
-                        error!(
-                            "Failed to restart Claude in tmux for session {}: {}",
-                            session_id, e
-                        );
-                        self.add_error_notification(format!("❌ Failed to restart Claude: {}", e));
-                    } else {
-                        self.add_success_notification(
-                            "✓ Claude restarted successfully".to_string(),
-                        );
+                    // For Idle sessions, we restart the original CLI within the existing tmux session
+                    match self.restart_cli_in_tmux(session_id).await {
+                        Ok(name) => {
+                            self.add_success_notification(format!(
+                                "✓ {} restarted successfully",
+                                name
+                            ));
+                        }
+                        Err(e) => {
+                            error!(
+                                "Failed to restart CLI in tmux for session {}: {}",
+                                session_id, e
+                            );
+                            self.add_error_notification(format!(
+                                "❌ Failed to restart CLI: {}",
+                                e
+                            ));
+                        }
                     }
                 }
                 status => {
@@ -9754,11 +9761,12 @@ impl AppState {
     }
 
     /// Restart Claude in an existing tmux session (for Idle sessions)
-    async fn restart_claude_in_tmux(&mut self, session_id: Uuid) -> anyhow::Result<()> {
+    async fn restart_cli_in_tmux(&mut self, session_id: Uuid) -> anyhow::Result<String> {
+        use crate::config::CliProvider;
+        use crate::models::session::SessionAgentType;
         use anyhow::Context;
         use std::process::Command;
 
-        // Get session details
         let session = self
             .find_session(session_id)
             .ok_or_else(|| anyhow::anyhow!("Session not found"))?;
@@ -9771,47 +9779,52 @@ impl AppState {
 
         let workspace_path = session.workspace_path.clone();
         let skip_permissions = session.skip_permissions;
+        let agent_type = session.agent_type;
 
-        info!(
-            "Restarting Claude in tmux session '{}' for workspace '{}'",
-            tmux_session_name, workspace_path
-        );
-
-        // Send 'claude' command to the tmux session
-        // This assumes the user stopped Claude with Ctrl+C or it crashed
-        let claude_cmd = if skip_permissions {
-            "claude --dangerously-skip-permissions".to_string()
-        } else {
-            "claude".to_string()
+        let provider = match agent_type {
+            SessionAgentType::Claude => CliProvider::Claude,
+            SessionAgentType::Codex => CliProvider::Codex,
+            SessionAgentType::Gemini => CliProvider::Gemini,
+            SessionAgentType::Copilot => CliProvider::Copilot,
+            SessionAgentType::Shell | SessionAgentType::Ssh | SessionAgentType::Kiro => {
+                anyhow::bail!("Restart unsupported for agent type {:?}", agent_type);
+            }
         };
 
-        // Send the command to tmux using 'send-keys'
+        let mut cmd_parts = vec![provider.command().to_string()];
+        if skip_permissions {
+            cmd_parts.push(provider.skip_permissions_flag().to_string());
+        }
+        let cli_cmd = cmd_parts.join(" ");
+
+        info!(
+            "Restarting {} in tmux session '{}' for workspace '{}' (cmd: {})",
+            provider.display_name(),
+            tmux_session_name,
+            workspace_path,
+            cli_cmd
+        );
+
         let output = Command::new("tmux")
-            .args(&[
-                "send-keys",
-                "-t",
-                &tmux_session_name,
-                &claude_cmd,
-                "C-m", // Press Enter
-            ])
+            .args(&["send-keys", "-t", &tmux_session_name, &cli_cmd, "C-m"])
             .output()
-            .context("Failed to send claude command to tmux")?;
+            .context("Failed to send CLI restart command to tmux")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             anyhow::bail!("Failed to send command to tmux: {}", stderr);
         }
 
-        // Update session status to Running (will be confirmed by next preview update)
         if let Some(session) = self.find_session_mut(session_id) {
             session.set_status(crate::models::SessionStatus::Running);
         }
 
         info!(
-            "Successfully sent Claude restart command to tmux session '{}'",
+            "Successfully sent {} restart command to tmux session '{}'",
+            provider.display_name(),
             tmux_session_name
         );
-        Ok(())
+        Ok(provider.display_name().to_string())
     }
 
     /// Helper to find a session by ID across all workspaces
