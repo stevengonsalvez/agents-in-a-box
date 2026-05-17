@@ -466,7 +466,7 @@ else
 fi
 REFLECT_ERR_COUNT=${REFLECT_ERR_COUNT:-0}
 if [[ "$REFLECT_ERR_COUNT" =~ ^[0-9]+$ ]] && (( REFLECT_ERR_COUNT > 0 )); then
-  L1+=$(_seg "$C_RED" "$C_WHITE" "⚠${REFLECT_ERR_COUNT}" "$prev")
+  L1+=$(_seg "$C_RED" "$C_WHITE" "⚠${REFLECT_ERR_COUNT} /reflect:errors-ack" "$prev")
   prev="$C_RED"
 fi
 
@@ -495,6 +495,15 @@ L2+=" ${SEP} ctx ${CTX_BAR}"
 [[ -n "$COST_DISPLAY" ]] && L2+=" ${SEP} ${FG_GREEN}${COST_DISPLAY}${RESET}"
 
 # ── Output ────────────────────────────────────────────────────────────────────
-printf '%b\n %b\n' "$L1" "$L2"
+printf '%b\n %b' "$L1" "$L2"
+
+# Reflect timeline dashboard (plugin-shipped, opt-out via REFLECT_TIMELINE_DISABLE=1)
+# Helper emits its own leading newline + 4 rows. Falls through silently if absent.
+TIMELINE_HELPER="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/cache/agents-in-a-box/reflect/3.3.0}/scripts/reflect_timeline.sh"
+if [[ "${REFLECT_TIMELINE_DISABLE:-0}" != "1" ]] && [[ -x "$TIMELINE_HELPER" ]]; then
+  "$TIMELINE_HELPER" 2>/dev/null
+fi
+
+printf '\n'
 
 exit 0
