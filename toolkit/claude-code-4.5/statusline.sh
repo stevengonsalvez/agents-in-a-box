@@ -499,9 +499,14 @@ printf '%b\n %b' "$L1" "$L2"
 
 # Reflect timeline dashboard (plugin-shipped, opt-out via REFLECT_TIMELINE_DISABLE=1)
 # Helper emits its own leading newline + 4 rows. Falls through silently if absent.
+# Pass session_id + project_dir from the stdin JSON so the helper can find
+# THIS session's JSONL (Claude Code hashes project root, not cwd — worktrees
+# end up under the parent repo's project hash, so cwd-based resolution misses).
 TIMELINE_HELPER="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/cache/agents-in-a-box/reflect/3.3.1}/scripts/reflect_timeline.sh"
 if [[ "${REFLECT_TIMELINE_DISABLE:-0}" != "1" ]] && [[ -x "$TIMELINE_HELPER" ]]; then
-  "$TIMELINE_HELPER" 2>/dev/null
+  REFLECT_TIMELINE_SESSION_ID="$(_jq '.session_id')" \
+  REFLECT_TIMELINE_PROJECT_DIR="$(_jq '.workspace.project_dir // .workspace.current_dir')" \
+    "$TIMELINE_HELPER" 2>/dev/null
 fi
 
 printf '\n'
