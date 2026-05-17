@@ -95,11 +95,13 @@ relationship types, extraction guidelines, and sidecar format.
 mkdir -p docs/solutions/[category]
 # Save: docs/solutions/[category]/[filename].md
 
-# Global promotion (via CLI)
-LEARNINGS_CLI="$LEARNINGS_HOME/cli/learnings"
-if [[ -x "$LEARNINGS_CLI" ]]; then
-    "$LEARNINGS_CLI" add docs/solutions/[category]/[filename].md \
-        --entities docs/solutions/[category]/[filename].entities.yaml
+# Global promotion (via the reflect CLI from reflect-kb).
+# `--force` skips the interactive y/N prompt; content-hash doc_id makes the
+# call idempotent so re-runs no-op cleanly.
+if command -v reflect >/dev/null 2>&1; then
+    reflect add docs/solutions/[category]/[filename].md \
+        --entities docs/solutions/[category]/[filename].entities.yaml \
+        --force
 fi
 ```
 
