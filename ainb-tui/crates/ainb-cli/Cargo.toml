@@ -1,0 +1,17 @@
+[package]
+name = "ainb-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ainb-adapters-source = { path = "../ainb-adapters-source" }
+ainb-adapters-tool = { path = "../ainb-adapters-tool" }
+ainb-skill-core = { path = "../ainb-skill-core" }
+ainb-diff = { path = "../ainb-diff" }
+ainb-fetch = { path = "../ainb-fetch" }
+anyhow = { workspace = true }
+clap = { workspace = true }
+serde_yaml_ng = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,15 @@
+[package]
+name = "ainb-fetch"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ainb-skill-core = { path = "../ainb-skill-core" }
+anyhow = { workspace = true }
+git2 = { workspace = true }
+reqwest = { version = "0.11", default-features = false, features = ["blocking", "rustls-tls"] }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

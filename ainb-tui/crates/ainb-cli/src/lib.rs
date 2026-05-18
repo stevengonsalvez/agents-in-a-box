@@ -1,0 +1,263 @@
+//! ainb-cli — clap surface for the `ainb` binary's non-TUI commands.
+//!
+//! P2 ships the `source` subcommand tree (with real fetch on `add`)
+//! and the top-level `search` query. P3+ will wire up `skill`,
+//! `plugin`, `agent`, `hook`, `mcp`, `migrate`, `cache`, and `doctor`
+//! via the same dispatch entrypoint.
+
+use std::io;
+
+use anyhow::Result;
+use clap::{Args, Parser, Subcommand};
+
+pub mod doctor;
+pub mod migrate;
+pub mod search;
+pub mod skill;
+pub mod source;
+
+/// Top-level CLI grammar.
+#[derive(Parser, Debug)]
+#[command(name = "ainb", about = "agents-in-a-box CLI", version)]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Command,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum Command {
+    /// Manage source repositories declared in the manifest.
+    Source {
+        #[command(subcommand)]
+        action: SourceCommand,
+    },
+    /// Search across all enabled sources for units matching a query.
+    Search(SearchArgs),
+    /// Install / remove units across one or more target tools.
+    Skill {
+        #[command(subcommand)]
+        action: SkillCommand,
+    },
+    /// Day-1 migration helpers: scan existing tool homes, optionally
+    /// wipe them with a backup, or seed the manifest from
+    /// `toolkit/external-dependencies.yaml`.
+    Migrate(MigrateArgs),
+    /// Health-check the manifest, lockfile, deployed files, and
+    /// configured sources. Exits non-zero when any problem is found.
+    Doctor(DoctorArgs),
+}
+
+#[derive(Args, Debug, Default)]
+pub struct DoctorArgs {
+    /// Skip the source-reachability check (avoid hitting the
+    /// network / re-running fetchers).
+    #[arg(long)]
+    pub offline: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct MigrateArgs {
+    /// Scan adapter install roots and report what would be wiped.
+    /// Read-only; mutually exclusive with the other migrate modes.
+    #[arg(long, conflicts_with_all = ["clean", "from_bootstrap"])]
+    pub check: bool,
+
+    /// Wipe every adapter's install root (after optional backup) and
+    /// then run `skill sync` to reconcile from the manifest.
+    #[arg(long, conflicts_with = "from_bootstrap")]
+    pub clean: bool,
+
+    /// Snapshot every adapter's install root to
+    /// `$AINB_HOME/backups/<ts>/<tool>/` before clean wipes it.
+    /// Only valid with --clean.
+    #[arg(long, requires = "clean")]
+    pub backup: bool,
+
+    /// Parse `toolkit/external-dependencies.yaml` from the supplied
+    /// path (or the working directory if omitted) and populate the
+    /// manifest with one source + matching unit entries.
+    #[arg(long = "from-bootstrap")]
+    pub from_bootstrap: bool,
+
+    /// Override the toolkit root used by --from-bootstrap. Defaults
+    /// to the current working directory.
+    #[arg(long, value_name = "PATH")]
+    pub toolkit_root: Option<std::path::PathBuf>,
+
+    /// Skip the interactive confirmation prompt.
+    #[arg(long)]
+    pub yes: bool,
+
+    /// Show the planned actions but don't apply.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SkillCommand {
+    /// Install a unit by full URI to the accepting target tools.
+    Install(InstallArgs),
+    /// Remove a previously-installed unit from its target tools.
+    Remove(RemoveSkillArgs),
+    /// Refresh a unit (or all stale ones) — re-fetches the source and
+    /// applies the diff. `--check` reports drift without changing
+    /// anything; `--all` batches every locked unit.
+    Update(UpdateArgs),
+    /// Reconcile on-disk state with the manifest: install units that
+    /// are declared but missing, uninstall units that the lockfile
+    /// holds but the manifest no longer mentions.
+    Sync(SyncArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct InstallArgs {
+    /// Full unit URI (e.g. `gh:org/repo@main/skills/foo`).
+    pub uri: String,
+
+    /// Comma-separated list of target tools (defaults to every
+    /// tool whose `accepts()` returns Yes for the unit's kind).
+    #[arg(long)]
+    pub targets: Option<String>,
+
+    /// Show the planned diff but don't apply.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Skip the interactive confirmation prompt.
+    #[arg(long)]
+    pub yes: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct RemoveSkillArgs {
+    /// Full unit URI to remove.
+    pub uri: String,
+
+    /// Comma-separated list of target tools (defaults to every tool
+    /// this unit was deployed to per the lockfile).
+    #[arg(long)]
+    pub targets: Option<String>,
+
+    /// Skip the interactive confirmation prompt.
+    #[arg(long)]
+    pub yes: bool,
+
+    /// Show the planned deletions but don't apply.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct UpdateArgs {
+    /// Optional unit URI to target. Without it, see `--all`.
+    pub uri: Option<String>,
+
+    /// Refresh every locked unit. Mutually exclusive with a positional URI.
+    #[arg(long, conflicts_with = "uri")]
+    pub all: bool,
+
+    /// Re-fetch sources and report drift without changing anything.
+    #[arg(long)]
+    pub check: bool,
+
+    /// Skip the interactive confirmation prompt.
+    #[arg(long)]
+    pub yes: bool,
+
+    /// Show the planned diff but don't apply.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct SyncArgs {
+    /// Skip the interactive confirmation prompt.
+    #[arg(long)]
+    pub yes: bool,
+
+    /// Show the planned mutations but don't apply.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct SearchArgs {
+    /// Substring matched (case-insensitive) against unit names,
+    /// descriptions, and tags. Pass an empty string to list every
+    /// unit.
+    pub query: String,
+
+    /// Restrict results to one unit kind (e.g. `skill`, `plugin`,
+    /// `agent`, `command`, `hook`, `mcp-server`, `statusline`).
+    #[arg(long)]
+    pub kind: Option<String>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SourceCommand {
+    /// Add a new source by URI.
+    Add(AddArgs),
+    /// List configured sources.
+    List,
+    /// Remove a source by name.
+    Remove(RemoveArgs),
+    /// Enable a source.
+    Enable(NameArg),
+    /// Disable a source.
+    Disable(NameArg),
+}
+
+#[derive(Args, Debug)]
+pub struct AddArgs {
+    /// Source URI without unit path (e.g. `gh:org/repo` or `gh:org/repo@v1.2`).
+    pub uri: String,
+
+    /// Override the derived source name slug.
+    #[arg(long)]
+    pub name: Option<String>,
+
+    /// Source kind hint (`marketplace`, `manifest`, `raw`, `single`).
+    /// Optional; adapter auto-detection in P2 will fill it when omitted.
+    #[arg(long = "type", value_parser = source::parse_kind_hint)]
+    pub kind: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct RemoveArgs {
+    /// Source name to remove.
+    pub name: String,
+
+    /// Skip the confirmation prompt.
+    #[arg(long)]
+    pub yes: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct NameArg {
+    /// Source name.
+    pub name: String,
+}
+
+/// Run the CLI using process argv and the default `$AINB_HOME`.
+pub fn run() -> Result<()> {
+    let cli = Cli::parse();
+    let home = ainb_skill_core::paths::default_ainb_home();
+    dispatch(&home, cli.command, &mut io::stdout())
+}
+
+/// Dispatch a parsed command against an explicit ainb home. Used by
+/// integration tests so they can isolate state in a tempdir without
+/// touching the process env.
+pub fn dispatch(
+    home: &std::path::Path,
+    command: Command,
+    out: &mut dyn io::Write,
+) -> Result<()> {
+    match command {
+        Command::Source { action } => source::dispatch(home, action, out),
+        Command::Search(args) => search::dispatch(home, args, out),
+        Command::Skill { action } => skill::dispatch(home, action, out),
+        Command::Migrate(args) => migrate::dispatch(home, args, out),
+        Command::Doctor(args) => doctor::dispatch(home, args, out),
+    }
+}

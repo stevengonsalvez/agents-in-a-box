@@ -1,0 +1,16 @@
+[package]
+name = "ainb-adapters-tool"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ainb-adapters-source = { path = "../ainb-adapters-source" }
+ainb-skill-core = { path = "../ainb-skill-core" }
+anyhow = { workspace = true }
+serde = { workspace = true }
+sha2 = "0.10"
+thiserror = { workspace = true }
+walkdir = "2"
+
+[dev-dependencies]
+tempfile = "3"
