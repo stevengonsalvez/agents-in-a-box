@@ -61,7 +61,7 @@ Then reload: `tmux source-file ~/.tmux.conf`
 
 ### How do I copy/paste in tmux?
 
-See the [Clipboard Setup section in CLAUDE.md](../CLAUDE.md#clipboard-setup) for full details.
+See the [Clipboard Setup section in ainb-tui/CLAUDE.md](../../ainb-tui/CLAUDE.md#clipboard-setup) for full details.
 
 **Quick reference:**
 
