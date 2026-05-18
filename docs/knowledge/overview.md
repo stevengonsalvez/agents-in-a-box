@@ -592,7 +592,7 @@ findings into a single report.
 ## Cross-Tool Deployment
 
 The knowledge system is **tool-agnostic**. Skills deploy to multiple AI coding
-tools via `toolkit/bootstrap.js`:
+tools via the `ainb` skill manager (`ainb-tui/`):
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
@@ -604,7 +604,8 @@ tools via `toolkit/bootstrap.js`:
 │                                                                  │
 └─────────────────┬────────────────────────────────────────────────┘
                   │
-    bootstrap.js copies to each tool:
+    ainb skill install <unit-uri> --targets <tools>
+    (or `ainb skill sync` to reconcile the whole manifest)
                   │
        ┌──────────┼──────────────┐
        │          │              │
