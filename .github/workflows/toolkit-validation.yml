@@ -90,10 +90,14 @@ jobs:
           # CLI tripwires run without tmux; TUI tripwires self-skip when
           # tmux is missing (sudo-installed step above ensures it's
           # present on this runner). Both groups must be green.
+          #
+          # Naming convention: `tripwire_<area>_<feature>_*` where area is
+          # one of {cli, core, plugin}. `tripwire_helpers.rs` is the shared
+          # module (not a test) and is excluded by the prefix scheme.
           cargo test -p ainb --release \
               --test 'tripwire_cli_*' \
-              --test 'tripwire_skill_manager_*' \
-              --test 'tripwire_home_tile_lists_skill_manager'
+              --test 'tripwire_core_skill_manager_*' \
+              --test 'tripwire_core_home_tile_lists_skill_manager'
 
       - name: Smoke test: AINB_USE_REAL_HOMES wiring with a tempdir HOME
         run: |

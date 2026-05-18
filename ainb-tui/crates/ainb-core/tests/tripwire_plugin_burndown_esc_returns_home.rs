@@ -13,11 +13,11 @@
 //! `crates/ainb-core/src/app/screens/builtin.rs::is_host_reserved_key`)
 //! so it bypasses the plugin forwarder and routes through the central
 //! key dispatch to `GoToHomeScreen`. The plugin's internal pop-state
-//! semantics moved to `Backspace` (see `tripwire_burndown_keys.rs`).
+//! semantics moved to `Backspace` (see `tripwire_plugin_burndown_keys.rs`).
 //!
 //! Skips gracefully if `tmux` isn't on `$PATH` or `dist/plugins/` isn't
 //! staged — mirrors the gate pattern in
-//! `tripwire_burndown_keys.rs`/`tripwire_real_data_in_tui.rs`.
+//! `tripwire_plugin_burndown_keys.rs`/`tripwire_plugin_burndown_real_data_in_tui.rs`.
 
 use std::fs;
 use std::path::{Path, PathBuf};

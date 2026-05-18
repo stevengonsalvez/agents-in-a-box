@@ -23,7 +23,7 @@
 //! Skips gracefully if `tmux` isn't on `$PATH` or if dist/plugins isn't
 //! staged with re-signed binaries (`scripts/build-plugins.sh` /
 //! `just stage-plugins`). Both gates already exist on
-//! `tripwire_real_data_in_tui.rs` and we mirror them here for
+//! `tripwire_plugin_burndown_real_data_in_tui.rs` and we mirror them here for
 //! consistency.
 
 use std::fs;
@@ -262,7 +262,7 @@ fn burndown_interactive_keys_change_render() {
     // calls races: a second send-keys can land before the first has
     // fully flushed its character sequence, which on some tmux builds
     // truncates the launch command. The working tripwire
-    // (`tripwire_real_data_in_tui.rs`) uses the combined form, so we
+    // (`tripwire_plugin_burndown_real_data_in_tui.rs`) uses the combined form, so we
     // mirror it.
     Command::new("tmux")
         .args(["send-keys", "-t", &session, &cmd, "Enter"])
@@ -352,7 +352,7 @@ fn burndown_interactive_keys_change_render() {
     // assert the burndown screen is still rendered after Backspace.
     // (`Esc` is host-reserved — see `is_host_reserved_key` — so the
     // navigation-back tripwire lives in its own test file
-    // `tripwire_burndown_esc_returns_home.rs`.)
+    // `tripwire_plugin_burndown_esc_returns_home.rs`.)
     let cap_post_backspace = send_key_and_settle(&session, "BSpace");
 
     kill_session(&session);

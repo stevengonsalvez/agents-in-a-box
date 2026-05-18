@@ -1,5 +1,5 @@
 //! Tripwire: from the SkillManager view, pressing `q` returns to
-//! the HomeScreen. Sibling of `tripwire_skill_manager_esc_returns_home.rs`
+//! the HomeScreen. Sibling of `tripwire_core_skill_manager_esc_returns_home.rs`
 //! — Esc and `q` are wired to the same `SkillManagerBack` event, so
 //! both round-trip paths must work. Either path silently breaking
 //! is exactly the regression hard rule #6 (always pair forward +

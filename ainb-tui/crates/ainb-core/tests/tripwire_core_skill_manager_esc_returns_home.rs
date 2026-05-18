@@ -1,6 +1,6 @@
 //! Tripwire: from the SkillManager view, pressing `Esc` returns to
 //! the HomeScreen. The forward-only sibling
-//! `tripwire_skill_manager_screen_opens.rs` would pass while the
+//! `tripwire_core_skill_manager_screen_opens.rs` would pass while the
 //! return path silently broke — exactly the failure mode the
 //! tmux-ui-tripwire skill's hard rule #6 codifies.
 //!

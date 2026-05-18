@@ -10,7 +10,7 @@
 //! test proves the whole render path from `cached_filtered`'s seq bump
 //! through the chip-strip span builder reaches the tmux pane.
 //!
-//! Drives the same fixture as `tripwire_burndown_keys` so totals are
+//! Drives the same fixture as `tripwire_plugin_burndown_keys` so totals are
 //! reproducible. Skips gracefully if `tmux` isn't installed or if
 //! `dist/plugins/{burndown,session-reader}` isn't staged.
 

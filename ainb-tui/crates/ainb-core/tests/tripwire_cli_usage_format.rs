@@ -42,7 +42,7 @@ fn ainb_bin() -> PathBuf {
 }
 
 /// Walk up from the ainb binary looking for the `dist/plugins/` staging
-/// dir. Mirrors `tripwire_real_data_in_tui::plugins_staged` so the test
+/// dir. Mirrors `tripwire_plugin_burndown_real_data_in_tui::plugins_staged` so the test
 /// skips cleanly on fresh checkouts.
 fn plugins_staged() -> Option<PathBuf> {
     let bin = ainb_bin();
