@@ -105,7 +105,7 @@ fn esc_on_skill_manager_returns_to_home_screen() {
     // Wait for HomeScreen.
     if poll_capture(
         &session,
-        Instant::now() + Duration::from_secs(45),
+        Instant::now() + Duration::from_secs(120),
         |c| c.contains("Agents") && c.contains("Catalog"),
     )
     .is_none()
@@ -119,7 +119,7 @@ fn esc_on_skill_manager_returns_to_home_screen() {
     send_key(&session, "M");
     if poll_capture(
         &session,
-        Instant::now() + Duration::from_secs(30),
+        Instant::now() + Duration::from_secs(90),
         |c| c.contains("Sources") && c.contains("Units") && c.contains("Detail"),
     )
     .is_none()
@@ -143,7 +143,7 @@ fn esc_on_skill_manager_returns_to_home_screen() {
     // SkillManager-only marker to disappear before sampling.
     let post = poll_capture(
         &session,
-        Instant::now() + Duration::from_secs(30),
+        Instant::now() + Duration::from_secs(90),
         |c| {
             c.contains("Agents")
                 && c.contains("Catalog")

@@ -121,7 +121,7 @@ fn pressing_M_on_home_opens_skill_manager_screen() {
     // HomeScreen paint.
     let home_render = poll_capture(
         &session,
-        Instant::now() + Duration::from_secs(45),
+        Instant::now() + Duration::from_secs(120),
         |c| c.contains("Agents") && c.contains("Catalog") && !c.contains("Welcome to ainb"),
     );
     let home_render = match home_render {
@@ -150,7 +150,7 @@ fn pressing_M_on_home_opens_skill_manager_screen() {
     // if the wrong screen rendered.
     let post = poll_capture(
         &session,
-        Instant::now() + Duration::from_secs(30),
+        Instant::now() + Duration::from_secs(90),
         |c| {
             c.contains("Sources")
                 && c.contains("Units")

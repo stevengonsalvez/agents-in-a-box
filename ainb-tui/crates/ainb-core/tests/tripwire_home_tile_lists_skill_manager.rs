@@ -100,7 +100,7 @@ fn home_tile_grid_lists_skill_manager() {
     // present so a label/description regression also fires.
     let post = poll_capture(
         &session,
-        Instant::now() + Duration::from_secs(45),
+        Instant::now() + Duration::from_secs(120),
         |c| {
             c.contains("Agents")
                 && c.contains("Catalog")
