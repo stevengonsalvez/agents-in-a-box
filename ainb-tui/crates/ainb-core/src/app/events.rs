@@ -3480,6 +3480,10 @@ impl EventHandler {
                         state.current_screen = screen_ids::SKILLS.to_string();
                         state.start_background_skills_load(false);
                     }
+                    SidebarItem::SkillManager => {
+                        tracing::info!("Navigating to SkillManager from sidebar (spec §10.1)");
+                        state.current_screen = screen_ids::SKILL_MANAGER.to_string();
+                    }
                     SidebarItem::Changelog => {
                         state.current_screen = screen_ids::CHANGELOG.to_string();
                     }

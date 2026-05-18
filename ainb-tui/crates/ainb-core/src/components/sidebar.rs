@@ -31,17 +31,18 @@ pub const SIDEBAR_CONTENT_RESERVE: u16 = 50;
 /// Sidebar navigation items - matches HomeTile options
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidebarItem {
-    Agents,    // Agent selection
-    Catalog,   // Browse catalog/marketplace
-    Config,    // Settings & presets
-    Sessions,  // Session manager
-    Recovery,  // Recover orphaned sessions
-    Logs,      // Log history viewer
-    Stats,     // Analytics & usage
-    Skills,    // Browse per-agent skills
-    Changelog, // Version history
-    Setup,     // Setup wizard & factory reset
-    Help,      // Docs & guides
+    Agents,       // Agent selection
+    Catalog,      // Browse catalog/marketplace
+    Config,       // Settings & presets
+    Sessions,     // Session manager
+    Recovery,     // Recover orphaned sessions
+    Logs,         // Log history viewer
+    Stats,        // Analytics & usage
+    Skills,       // Browse per-agent skills
+    SkillManager, // Skill / unit manager (spec §10.1)
+    Changelog,    // Version history
+    Setup,        // Setup wizard & factory reset
+    Help,         // Docs & guides
 }
 
 impl SidebarItem {
@@ -56,6 +57,7 @@ impl SidebarItem {
             Self::Logs => "📋",
             Self::Stats => "📊",
             Self::Skills => "🧠",
+            Self::SkillManager => "🧰",
             Self::Changelog => "📝",
             Self::Setup => "🛠️",
             Self::Help => "❓",
@@ -73,6 +75,7 @@ impl SidebarItem {
             Self::Logs => "Logs",
             Self::Stats => "Stats",
             Self::Skills => "Skills",
+            Self::SkillManager => "Skills (manager)",
             Self::Changelog => "Changelog",
             Self::Setup => "Setup",
             Self::Help => "Help",
@@ -90,6 +93,7 @@ impl SidebarItem {
             Self::Logs => "View Log History",
             Self::Stats => "Usage & Analytics",
             Self::Skills => "Per-Agent Skills",
+            Self::SkillManager => "Install / sync / doctor",
             Self::Changelog => "Version History",
             Self::Setup => "Setup & Reset",
             Self::Help => "Docs & Guides",
@@ -107,6 +111,7 @@ impl SidebarItem {
             Self::Logs => "l",
             Self::Stats => "i",
             Self::Skills => "k",
+            Self::SkillManager => "M",
             Self::Changelog => "v",
             Self::Setup => "S",
             Self::Help => "?",
@@ -124,6 +129,7 @@ impl SidebarItem {
             Self::Logs,
             Self::Stats,
             Self::Skills,
+            Self::SkillManager,
             Self::Changelog,
             Self::Setup,
             Self::Help,
