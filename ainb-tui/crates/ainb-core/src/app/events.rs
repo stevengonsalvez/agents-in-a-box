@@ -272,6 +272,8 @@ pub enum AppEvent {
     GoToSessionList,         // Navigate to session list view
     GoToStats,               // Navigate to stats view
     GoToSkills,              // Navigate to skills view
+    GoToSkillManager,        // Navigate to skill-manager view (spec §10.1)
+    SkillManagerBack,        // Return to home screen from SkillManager (Esc/q)
     GoToRecovery,            // Navigate to session recovery view
     // AINB 2.0: Agent selection events
     AgentSelectionBack,         // Return to home screen (Esc)
@@ -987,6 +989,15 @@ impl EventHandler {
         if state.current_screen == screen_ids::SKILLS {
             tracing::debug!("In skills view, handling skills keys");
             return Self::handle_skills_keys(key_event, state);
+        }
+
+        // Handle skill-manager view (spec §10.1)
+        if state.current_screen == screen_ids::SKILL_MANAGER {
+            tracing::debug!("In skill-manager view, handling Esc/q return");
+            return match key_event.code {
+                KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::SkillManagerBack),
+                _ => None,
+            };
         }
 
         // Handle session recovery view
@@ -2107,6 +2118,7 @@ impl EventHandler {
             KeyCode::Char('s') => return Some(AppEvent::GoToSessionList),
             KeyCode::Char('i') => return Some(AppEvent::GoToStats),
             KeyCode::Char('k') => return Some(AppEvent::GoToSkills),
+            KeyCode::Char('M') => return Some(AppEvent::GoToSkillManager),
             KeyCode::Char('R') => return Some(AppEvent::GoToRecovery),
             KeyCode::Char('v') => return Some(AppEvent::ShowChangelog),
             KeyCode::Char('?') => return Some(AppEvent::ToggleHelp),
@@ -3692,6 +3704,14 @@ impl EventHandler {
                 tracing::info!("Navigating to Skills");
                 state.current_screen = screen_ids::SKILLS.to_string();
                 state.start_background_skills_load(false);
+            }
+            AppEvent::GoToSkillManager => {
+                tracing::info!("Navigating to SkillManager (spec §10.1)");
+                state.current_screen = screen_ids::SKILL_MANAGER.to_string();
+            }
+            AppEvent::SkillManagerBack => {
+                tracing::info!("Returning to home from SkillManager (Esc/q)");
+                state.current_screen = screen_ids::HOME.to_string();
             }
             AppEvent::GoToRecovery => {
                 tracing::info!("Navigating to Session Recovery");
