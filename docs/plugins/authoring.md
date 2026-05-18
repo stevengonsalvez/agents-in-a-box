@@ -1,6 +1,6 @@
 # ainb plugin authoring
 
-Developer-facing reference for shipping a v2 plugin. For end-user install/CLI docs see [docs/plugins.md](./plugins.md). For the wire contract see [docs/plugin-spec/v2.md](./plugin-spec/v2.md).
+Developer-facing reference for shipping a v2 plugin. For end-user install/CLI docs see [./user-guide.md](./user-guide.md). For the wire contract see [./spec-v2.md](./spec-v2.md).
 
 ## What you're building
 
@@ -91,11 +91,11 @@ spawn          = "lazy"
 idle_reap_secs = 600
 ```
 
-See [v2.md §1](./plugin-spec/v2.md#1-manifest) for the full schema and capability semantics.
+See [v2.md §1](./spec-v2.md#1-manifest) for the full schema and capability semantics.
 
 ## Implementing the `Plugin` trait
 
-The crate is named `ainb-plugin-sdk-rust` for `Cargo.toml`, but its `[lib].name` is `ainb_plugin_sdk` — that's the path you `use` from Rust code. The trait surface uses ergonomic types (`WireBuffer`, `CliOutput`); the SDK marshals to and from the wire types documented in [`v2.md`](./plugin-spec/v2.md) on your behalf.
+The crate is named `ainb-plugin-sdk-rust` for `Cargo.toml`, but its `[lib].name` is `ainb_plugin_sdk` — that's the path you `use` from Rust code. The trait surface uses ergonomic types (`WireBuffer`, `CliOutput`); the SDK marshals to and from the wire types documented in [`v2.md`](./spec-v2.md) on your behalf.
 
 `src/lib.rs`:
 

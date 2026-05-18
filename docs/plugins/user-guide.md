@@ -1,36 +1,6 @@
-# ainb plugins
+# Plugin user guide
 
-User-facing reference for the `ainb plugin` family of commands. If you're authoring a plugin, jump to [docs/plugin-authoring.md](./plugin-authoring.md). For the wire contract, [docs/plugin-spec/v2.md](./plugin-spec/v2.md).
-
-## What is a plugin?
-
-A plugin is a self-contained capsule that adds a screen, CLI subcommand, sidebar entry, or statusline segment to ainb without recompiling the host. A v2 plugin is a **native executable** the host spawns as a child process; the two talk JSON-RPC 2.0 over framed stdio. Plugins only see the host capabilities they declare in their manifest, and they cannot reach the network, filesystem, or subprocess launcher unless you grant those capabilities.
-
-The first plugin shipped in-tree is **burndown**, which owns the Analytics screen and the `ainb usage` CLI subcommand tree. The pure-publisher **session-reader** is its data backend: it scans `~/.claude/projects/**` and `~/.codex/sessions/**` and chunked-publishes usage snapshots on the `sessions.usage_data` topic for burndown to render.
-
-<p align="center">
-  <img src="./assets/screenshots/burndown.png" alt="Burndown plugin — full analytics dashboard" width="900">
-  <br>
-  <em>The burndown plugin rendering the full analytics dashboard against real <code>~/.claude/projects</code> data — daily activity, top sessions, per-project + per-model breakdown, budget, optimisation hints.</em>
-</p>
-
-## Where things live
-
-The host discovers plugins from a flat staging directory:
-
-```text
-dist/plugins/
-├── burndown/
-│   ├── burndown            (native executable, ad-hoc signed on macOS)
-│   └── manifest.toml
-└── session-reader/
-    ├── session-reader
-    └── manifest.toml
-```
-
-That layout is what `just stage-plugins` produces from in-tree crates, and what the host walks on startup. The `AINB_PLUGIN_ROOT` env var overrides it (defaults to `<workspace-root>/dist/plugins`).
-
-Plugin-writable state lives under `~/.agents-in-a-box/plugins/<name>/` (override with `AINB_HOME`), gated by the `write_plugin_data` capability.
+User-facing reference for the `ainb plugin` family of commands. New to plugins? Read [overview.md](./overview.md) first. Writing one? [authoring.md](./authoring.md). Wire contract: [spec-v2.md](./spec-v2.md).
 
 ## Status of the install / marketplace flow
 
@@ -115,7 +85,7 @@ Default for every flag is **deny** (`false` / `[]`). The runtime rejects host-fn
 
 When the install flow returns, capability prompts will reappear at install time. Until then, capabilities are read straight from the on-disk manifest at runtime discovery — there is no separate `installed.toml` lockfile in the subprocess world.
 
-See [docs/plugin-spec/v2.md §1](./plugin-spec/v2.md#1-manifest) for full semantics.
+See [./spec-v2.md §1](./spec-v2.md#1-manifest) for full semantics.
 
 ## Configuration
 
