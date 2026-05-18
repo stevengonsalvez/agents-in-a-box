@@ -115,6 +115,11 @@ fn q_on_skill_manager_returns_to_home_screen() {
         panic!("HomeScreen never rendered:\n{dump}");
     }
 
+    // Settle window: predicate can match mid-frame. Give ratatui one
+    // idle paint cycle before sending M so the keystroke isn't lost
+    // to a binary still finishing its boot paint.
+    thread::sleep(Duration::from_millis(200));
+
     send_key(&session, "M");
     if poll_capture(
         &session,
@@ -127,6 +132,9 @@ fn q_on_skill_manager_returns_to_home_screen() {
         kill_session(&session);
         panic!("SkillManager never rendered after M:\n{dump}");
     }
+
+    // Settle before the return-trip q — same race in reverse.
+    thread::sleep(Duration::from_millis(200));
 
     // Press `q` — NOT a quit on this view; in events.rs the handler
     // for View::SkillManager routes `q` to SkillManagerBack.
