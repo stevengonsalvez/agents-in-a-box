@@ -214,7 +214,7 @@ fn walk_into(node: &LayoutNode, area: Rect, out: &mut Vec<(LeafId, Rect)>) {
                     height: area.height,
                 };
                 let right_rect = Rect {
-                    x: area.x + left_w,
+                    x: area.x.saturating_add(left_w),
                     y: area.y,
                     width: area.width.saturating_sub(left_w),
                     height: area.height,
@@ -232,7 +232,7 @@ fn walk_into(node: &LayoutNode, area: Rect, out: &mut Vec<(LeafId, Rect)>) {
                 };
                 let bottom_rect = Rect {
                     x: area.x,
-                    y: area.y + top_h,
+                    y: area.y.saturating_add(top_h),
                     width: area.width,
                     height: area.height.saturating_sub(top_h),
                 };

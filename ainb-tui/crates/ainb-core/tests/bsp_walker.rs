@@ -67,3 +67,13 @@ fn walk_uses_area_offsets_not_zero_origin() {
     assert_eq!(leaves[0].1, Rect { x: 10, y: 5, width: 50, height: 40 });
     assert_eq!(leaves[1].1, Rect { x: 60, y: 5, width: 50, height: 40 });
 }
+
+#[test]
+fn walk_saturates_on_u16_overflow_instead_of_panicking() {
+    // area.x near u16::MAX + non-trivial left_w would panic without saturation
+    let tree = LayoutNode::split_h(0.5, LayoutNode::pane("a"), LayoutNode::pane("b"));
+    let area = Rect { x: u16::MAX - 10, y: 0, width: 100, height: 40 };
+    let leaves = tree.walk(area);
+    // both leaves yield a Rect; right.x saturates at u16::MAX
+    assert_eq!(leaves[1].1.x, u16::MAX);
+}
