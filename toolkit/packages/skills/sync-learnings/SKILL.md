@@ -274,6 +274,13 @@ blocks or always-on summary tables.
    Per-section confirmation is forbidden.
 5. **Silent execution.** Do NOT echo each `cp` operation. Run the sync, then
    print a 3-line receipt: counts per direction + final commit SHA.
+6. **Orphans + plugin audit are INFORMATIONAL, not actionable.** The Y/n gate
+   covers ONLY the file-sync rows in the plan table. Orphans (live-only
+   skills) and untracked-plugin rows go in a `## Informational` section
+   *below* the plan table and are NOT gated by the Y/n. If the user wants
+   to act on them, they ask explicitly ("classify the orphans", "add
+   untracked plugins to the manifest"). Treating them as part of the plan
+   is a regression — Stevie corrected this on 2026-05-19.
 
 ### Output template
 
@@ -286,10 +293,13 @@ blocks or always-on summary tables.
 | →repo | agents/engineering/bar.md           | packages/agents/engineering/     | updated |
 | →home | packages/skills/baz/SKILL.md        | ~/.claude/skills/baz/            | newer   |
 
-[Orphans / Plugin audit / Don't-sync ONLY if non-empty — emit as small tables
- under H2 headers. Each row one line. If all empty, no sections at all.]
-
 Proceed? [Y/n]
+
+## Informational (NOT part of the gate above)
+
+[Orphans / Plugin audit / Drift — ONLY if non-empty. Each as a small table.
+ These are review-later items, not "do this now". The Y/n above does not
+ cover them. Surface them so they're visible; don't bundle into the plan.]
 ```
 
 ### Receipt template (after execution)
