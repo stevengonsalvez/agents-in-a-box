@@ -65,7 +65,9 @@ Before creating any commits, ALWAYS perform cleanup:
    - Essential README updates
    - API documentation if requested
 
-4. **Verify cleanup**:
+4. **Anything the agent produces for its own reference is LOCAL-ONLY** — scratch notes, goals, plans, research, handover docs, status scripts. Usually under `.agents/{goals,plans,research,scratch,handover}/`, but apply by intent not path. `git rm --cached` anything already tracked, ensure the dir is in `.gitignore`. Exceptions: `.agents/pr-signals/`, `.agents/MEMORY.md` and similar deliberately-tracked agent infrastructure.
+
+5. **Verify cleanup**:
    ```bash
    git status
    ```
@@ -246,6 +248,16 @@ of root level. Clients need to update response parsing."
    - Delete work tracking documents
    - Remove temporary markdown notes
    - Only keep docs the user specifically asked for
+
+4. **Anything the agent produces for its own reference must NOT be committed**
+   - Scratch notes, goals, plans, research, handover docs, status scripts —
+     local-only. Usually under `.agents/{goals,plans,research,scratch,handover}/`
+     but apply by *intent*: if the file exists for the agent's benefit, not the
+     repo's, it doesn't ship. Add to `.gitignore`, `git rm --cached` slips.
+   - Exception: `.agents/pr-signals/`, `.agents/MEMORY.md` and similar
+     deliberately-tracked agent infrastructure.
+   - **Never use `git add -A` or `git add .`** — those are the fastest path
+     to dragging agent scratch into a commit. Always stage by named paths.
 
 ### Commit Rules
 1. **NEVER add co-author information or Claude attribution**:

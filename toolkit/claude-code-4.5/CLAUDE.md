@@ -38,6 +38,24 @@ CRITICAL: You MUST ALWAYS maintain a todo list for any tasks requested by the us
 Caveman mode is mandatory default for all responses. Use caveman-full: drop articles, filler, pleasantries, and hedging; keep technical terms exact. Resume caveman after any necessary safety/clarity exception. Stop only if Stevie explicitly says "normal mode" or "stop caveman".
 </caveman_default>
 
+<option_presentation>
+MANDATORY: whenever you would present Stevie with options — choices between paths, A/B/C decisions, "which approach?", "should I do X or Y?", trade-off picks — you MUST invoke the `/interview` skill (via the Skill tool) to ask via structured `AskUserQuestion`, not plaintext markdown tables in chat.
+
+This applies to:
+- Any "Options: A / B / C" presentation
+- Decision-time forks during implementation ("merge vs rebase?", "fix in PR or follow-up issue?")
+- Tool/library selection ("which library should we use?")
+- Architecture choices presented for confirmation
+- Any time the next step depends on Stevie's pick from a finite enumerated set
+
+It does NOT apply to:
+- Open-ended questions ("what should I do here?")
+- Yes/no confirmations on a single proposed action
+- Status reports without a fork
+
+Why: plaintext options dumped in chat are easy to skim past, hard to answer cleanly, and produce ambiguous follow-ups. `AskUserQuestion` (via `/interview`) produces typed answers the agent can branch on. Stevie has explicitly mandated this — slipping back to plaintext option tables is a correction-worthy regression.
+</option_presentation>
+
 
 <project_setup>
 When creating a new project with its own claude.md (or other tool base system prompt md file):
@@ -518,7 +536,7 @@ RATIONALE: Long scrolled webpage screenshots contain too much information for ef
 
 <health_check_protocol>
 When starting ANY conversation, immediately perform a health check to establish session state:
-1. Check for existing session state in `.claude/session/current-session.yaml`
+1. Check for existing session state in `{{TOOL_DIR}}/session/current-session.yaml`
 2. Initialize or update session health tracking
 3. Set appropriate mode based on task type
 4. Track scope of work (MICRO/SMALL/MEDIUM/LARGE/EPIC)
@@ -548,7 +566,7 @@ When starting ANY conversation, immediately perform a health check to establish 
 </automatic_behaviours>
 
 <session_state_management>
-Session state is stored in `.claude/session/current-session.yaml` and includes:
+Session state is stored in `{{TOOL_DIR}}/session/current-session.yaml` and includes:
 - Health status and message count
 - Current mode and scope
 - Active task (reference ID, phase, progress)
@@ -566,8 +584,8 @@ When health reaches 🟡, proactively:
 
 # Templates
 
-@~/.claude/skills/commit/assets/codereview-checklist.md
-@~/.claude/skills/handover/assets/template.md
+@{{HOME_TOOL_DIR}}/skills/commit/assets/codereview-checklist.md
+@{{HOME_TOOL_DIR}}/skills/handover/assets/template.md
 
 
 
@@ -579,7 +597,7 @@ When health reaches 🟡, proactively:
 
 0.⁠ ⁠*Always run multiple Task invocations in a SINGLE message when sensible* - Maximize parallelism for better performance.
 
-1.⁠ ⁠*Aggressively use specialized agents* - Custom agent definitions in ⁠ ~/.claude/agents/ ⁠ (available in this repo under `toolkit/packages/agents/`):
+1.⁠ ⁠*Aggressively use specialized agents* - Custom agent definitions in ⁠ {{HOME_TOOL_DIR}}/agents/ ⁠ (available in this repo under `toolkit/packages/agents/`):
    - ⁠ distinguished-engineer ⁠ - Drive system design and high‑leverage tradeoffs
    - ⁠ web-search-researcher ⁠ - Research modern information from the web
    - ⁠ universal/ ⁠
@@ -602,7 +620,7 @@ When health reaches 🟡, proactively:
    - ⁠ meta/ ⁠
      - agentmaker – Create and refine new agents
 
-2.⁠ ⁠*Use skills for structured workflows* - Skills in ⁠ ~/.claude/skills/ ⁠ (available in this repo under `toolkit/packages/skills/`):
+2.⁠ ⁠*Use skills for structured workflows* - Skills in ⁠ {{HOME_TOOL_DIR}}/skills/ ⁠ (available in this repo under `toolkit/packages/skills/`):
    - ⁠ /prime ⁠ - Prime session with working context
    - ⁠ /health-check ⁠ - Run session health check
    - ⁠ /session-metrics ⁠ - Show session metrics
@@ -636,6 +654,7 @@ When health reaches 🟡, proactively:
    - Encode invariants at compile time for correctness with minimal tests
 
 5.⁠ ⁠*Commit Hygiene*:
+   - **ALWAYS commit via the `/commit` skill, NEVER raw `git commit` ad-hoc.** The skill runs the pre-commit cleanup (env files, debug scripts, stray docs, skill-output scratch under `.agents/{goals,plans,research,scratch,handover}/`), enforces atomic single-concern staging by named paths (never `git add -A` / `git add .`), and applies the rules below in a checklist. Running `git commit` directly skips all of that and is how skill scratch ends up in PRs.
    - Never mention Claude, AI, or assistance in commit messages
    - Write commits as if authored by a human developer
    - Follow conventional commit format without attribution
@@ -713,5 +732,5 @@ ast-grep --lang python -p 'class $NAME($$$):'
 </tool_selection_hierarchy>
 @~/Developer/browser-harness/SKILL.md
 # graphify
-- **graphify** (`~/.claude/skills/graphify/SKILL.md`) - any input to knowledge graph. Trigger: `/graphify`
+- **graphify** (`{{HOME_TOOL_DIR}}/skills/graphify/SKILL.md`) - any input to knowledge graph. Trigger: `/graphify`
 When the user types `/graphify`, invoke the Skill tool with `skill: "graphify"` before doing anything else.

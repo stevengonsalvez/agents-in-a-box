@@ -179,8 +179,24 @@ swarm_spawn_leader() {
 Poll your inbox every 5 seconds. Message types:
 - 'status': Progress update from agent
 - 'handoff': Agent passing work to another
-- 'help': Agent requesting assistance
-- 'complete': Agent finished task
+- 'help': Agent requesting assistance (NEW: watchdog also writes 'help' when an
+         agent has been stuck for >2 cycles — agent name + stuck_snippet in payload)
+- 'complete': Agent finished task (verify locally before bd-close + dispatch next!)
+- 'finalize_done': Watchdog reports epic-done finalize completed (read
+         report_md path; this is INFORMATIONAL — do not auto-merge)
+
+## v2 — Watchdog / Auto-Tick Awareness:
+A watchdog daemon runs in tmux session '${team_id}-watchdog' and ticks every
+few minutes. It:
+- Captures all member panes (yours + workers) and detects stuck/active/capped
+- On worker stuck >2 cycles: writes a 'help' message to YOUR inbox
+- On epic-done: runs finalize.sh which writes a report and writes
+  'finalize_done' to your inbox — DOES NOT MERGE OR KILL TMUX
+You should:
+1. Treat watchdog 'help' messages with priority — investigate the stuck worker
+   (capture-pane, send guidance via inbox, or reassign bd to a free worker)
+2. On 'finalize_done': summarize report to user, suggest next steps (merge cmd,
+   PR cmd, /swarm-shutdown) — never auto-execute those
 
 Start by reading your team.json and checking for ready work."
 
@@ -294,6 +310,19 @@ Poll your inbox every 5 seconds. Send 'status' updates to leader:
 - When starting a task
 - At 25%, 50%, 75% progress
 - When complete or blocked
+
+## v2 — Watchdog / Auto-Tick Awareness:
+This swarm runs a watchdog daemon in tmux session '${team_id}-watchdog' that
+ticks every few minutes. On each tick, the watchdog inspects your tmux pane
+and may send you 'continue' or Enter if it detects you've stalled with text in
+the prompt. When you receive such a nudge:
+1. Re-check your inbox at ${inbox_file} for new task messages
+2. Run \`bd ready --assignee ${agent_name} --json\` to find work currently
+   assigned to you
+3. If you have an in-progress bd, RESUME WORK on it (don't wait for re-prompt)
+4. If nothing is assigned, write a 'idle' status to leader inbox and stay
+   responsive — don't write large multi-line prompt text and sit on it (that's
+   what triggers nudges)
 
 Start by checking your inbox for task assignments."
 
@@ -865,6 +894,181 @@ swarm_archive() {
 }
 
 # ============================================================================
+# v2 — Watchdog / Provider / Verify-cmd / Attach helpers
+# ============================================================================
+
+# swarm_detect_verify_cmd <worktree-path>
+# Returns a verify command string based on what's present in the worktree.
+swarm_detect_verify_cmd() {
+    local worktree="${1:-.}"
+    if [[ -f "${worktree}/Cargo.toml" ]]; then
+        echo "cargo test --workspace --no-fail-fast"
+    elif [[ -f "${worktree}/package.json" ]]; then
+        if jq -e '.scripts.test' "${worktree}/package.json" >/dev/null 2>&1; then
+            echo "npm test"
+        else
+            echo ":"
+        fi
+    elif [[ -f "${worktree}/pyproject.toml" || -f "${worktree}/pytest.ini" || -f "${worktree}/setup.cfg" ]]; then
+        echo "pytest"
+    elif [[ -f "${worktree}/go.mod" ]]; then
+        echo "go test ./..."
+    elif [[ -f "${worktree}/mix.exs" ]]; then
+        echo "mix test"
+    elif [[ -f "${worktree}/Makefile" ]] && grep -qE '^test:' "${worktree}/Makefile" 2>/dev/null; then
+        echo "make test"
+    elif [[ -f "${worktree}/Gemfile" ]] && grep -q rspec "${worktree}/Gemfile" 2>/dev/null; then
+        echo "bundle exec rspec"
+    else
+        echo ":"  # no-op
+    fi
+}
+
+# swarm_set_team_field <team-id> <jq-path> <value>
+# Atomically merge a JSON field into team.json (string value).
+swarm_set_team_field() {
+    local team_id="$1"
+    local jq_path="$2"
+    local value="$3"
+    local team_dir="${SWARM_BASE_DIR}/${team_id}"
+    local team_json="${team_dir}/team.json"
+    local tmp; tmp="$(mktemp)"
+    jq --arg v "$value" "${jq_path} = \$v" "$team_json" > "$tmp" && mv "$tmp" "$team_json" || rm -f "$tmp"
+}
+
+# swarm_set_team_field_raw <team-id> <jq-path> <raw-json-value>
+# Same as above but value is treated as raw JSON (numbers, booleans, objects).
+swarm_set_team_field_raw() {
+    local team_id="$1"
+    local jq_path="$2"
+    local raw="$3"
+    local team_dir="${SWARM_BASE_DIR}/${team_id}"
+    local team_json="${team_dir}/team.json"
+    local tmp; tmp="$(mktemp)"
+    jq --argjson v "$raw" "${jq_path} = \$v" "$team_json" > "$tmp" && mv "$tmp" "$team_json" || rm -f "$tmp"
+}
+
+# swarm_init_v2_team_json <team-id> <provider> <verify-cmd> <tick-min> <auto-pr> <use-loop> <worktree-path>
+# Adds the v2 schema fields to an existing team.json (idempotent — safe to re-run).
+swarm_init_v2_team_json() {
+    local team_id="$1"
+    local provider="${2:-claude}"
+    local verify_cmd="${3:-}"
+    local tick_min="${4:-5}"
+    local auto_pr="${5:-false}"
+    local use_loop="${6:-false}"
+    local worktree="${7:-$(pwd)}"
+
+    local team_dir="${SWARM_BASE_DIR}/${team_id}"
+    local team_json="${team_dir}/team.json"
+    local watchdog_session="${team_id}-watchdog"
+
+    [[ -z "$verify_cmd" ]] && verify_cmd="$(swarm_detect_verify_cmd "$worktree")"
+
+    local tmp; tmp="$(mktemp)"
+    jq \
+        --arg provider "$provider" \
+        --arg verify "$verify_cmd" \
+        --argjson tick "$tick_min" \
+        --argjson autopr "$auto_pr" \
+        --argjson useloop "$use_loop" \
+        --arg session "$watchdog_session" \
+        --arg pid_file "${team_dir}/watchdog.pid" \
+        --arg log_file "${team_dir}/watchdog.log" \
+        --arg report_path "${team_dir}/shared/finalize-report.md" \
+        --arg worktree "$worktree" \
+        '
+        .provider = $provider
+        | .commands = (.commands // {}) | .commands.verify = $verify
+        | .ci = (.ci // {})
+        | .ci.auto_pr = $autopr
+        | .ci.pr_template_path = (.ci.pr_template_path // null)
+        | .watchdog = (.watchdog // {})
+        | .watchdog.enabled = true
+        | .watchdog.tick_min = $tick
+        | .watchdog.session = $session
+        | .watchdog.pid_file = $pid_file
+        | .watchdog.log_file = $log_file
+        | .watchdog.use_loop = $useloop
+        | .finalize = (.finalize // {})
+        | .finalize.policy = "notify-only"
+        | .finalize.report_path = $report_path
+        | .worktree_path = $worktree
+        ' "$team_json" > "$tmp" && mv "$tmp" "$team_json" || { rm -f "$tmp"; return 1; }
+}
+
+# swarm_spawn_watchdog <team-id>
+# Spawn the watchdog daemon as a dedicated tmux session.
+# Idempotent — refuses if session already exists.
+swarm_spawn_watchdog() {
+    local team_id="$1"
+    local team_dir="${SWARM_BASE_DIR}/${team_id}"
+    local session_name="${team_id}-watchdog"
+    local watchdog_sh="${HOME}/.claude/skills/swarm-create/watchdog.sh"
+
+    if [[ ! -f "$watchdog_sh" ]]; then
+        echo "Error: watchdog.sh not found at $watchdog_sh" >&2
+        return 1
+    fi
+    if [[ ! -x "$watchdog_sh" ]]; then
+        chmod +x "$watchdog_sh"
+    fi
+    if tmux has-session -t "$session_name" 2>/dev/null; then
+        echo "Watchdog session already exists: $session_name" >&2
+        return 1
+    fi
+
+    # Spawn dedicated tmux session running watchdog.sh
+    tmux new-session -d -s "$session_name" -c "$PWD" \
+        "bash '${watchdog_sh}' '${team_id}'; echo '[watchdog exited]'; exec bash"
+
+    # Wait briefly for pid file
+    local i=0
+    while [[ ! -f "${team_dir}/watchdog.pid" && $i -lt 10 ]]; do
+        sleep 1; i=$((i+1))
+    done
+
+    echo "$session_name"
+}
+
+# swarm_kill_watchdog <team-id>
+# Stop the watchdog (kill tmux session named <team-id>-watchdog only).
+# Does NOT touch leader/agent sessions.
+swarm_kill_watchdog() {
+    local team_id="$1"
+    local session_name="${team_id}-watchdog"
+    if tmux has-session -t "$session_name" 2>/dev/null; then
+        tmux kill-session -t "$session_name"
+        echo "Watchdog session killed: $session_name"
+    else
+        echo "No watchdog session for $team_id"
+    fi
+    rm -f "${SWARM_BASE_DIR}/${team_id}/watchdog.pid"
+}
+
+# swarm_attach_watchdog <team-id> <provider> [verify-cmd] [tick-min]
+# Retrofit: take an existing v1 swarm, upgrade team.json to v2, spawn watchdog.
+swarm_attach_watchdog() {
+    local team_id="$1"
+    local provider="${2:-claude}"
+    local verify_cmd="${3:-}"
+    local tick_min="${4:-5}"
+
+    local team_dir="${SWARM_BASE_DIR}/${team_id}"
+    if [[ ! -d "$team_dir" || ! -f "${team_dir}/team.json" ]]; then
+        echo "Error: team $team_id not found" >&2
+        return 1
+    fi
+
+    # Upgrade team.json in place
+    swarm_init_v2_team_json "$team_id" "$provider" "$verify_cmd" "$tick_min" "false" "false" "$(pwd)"
+    echo "team.json upgraded to v2 schema for $team_id"
+
+    # Spawn watchdog
+    swarm_spawn_watchdog "$team_id"
+}
+
+# ============================================================================
 # CLI Interface
 # ============================================================================
 
@@ -921,6 +1125,26 @@ case "${1:-}" in
     agent-commit)
         swarm_agent_commit "$2" "$3" "$4"
         ;;
+    detect-verify-cmd)
+        # Usage: detect-verify-cmd [worktree-path]
+        swarm_detect_verify_cmd "${2:-$(pwd)}"
+        ;;
+    init-v2-team-json)
+        # Usage: init-v2-team-json <team-id> <provider> [verify-cmd] [tick-min] [auto-pr] [use-loop] [worktree-path]
+        swarm_init_v2_team_json "$2" "$3" "${4:-}" "${5:-5}" "${6:-false}" "${7:-false}" "${8:-$(pwd)}"
+        ;;
+    spawn-watchdog)
+        # Usage: spawn-watchdog <team-id>
+        swarm_spawn_watchdog "$2"
+        ;;
+    kill-watchdog)
+        # Usage: kill-watchdog <team-id>
+        swarm_kill_watchdog "$2"
+        ;;
+    attach-watchdog)
+        # Usage: attach-watchdog <team-id> <provider> [verify-cmd] [tick-min]
+        swarm_attach_watchdog "$2" "$3" "${4:-}" "${5:-5}"
+        ;;
     *)
         cat <<EOF
 Swarm Orchestration Library
@@ -956,6 +1180,15 @@ Status & Control:
   shutdown <team_id> [--force]           Gracefully shutdown team (kills child processes)
   cleanup-orphans                        Kill orphaned dev processes (tsc, vite, etc.)
   archive <team_id>                      Archive team to .archive/
+
+v2 Watchdog (self-sufficient swarm):
+  detect-verify-cmd [path]               Auto-detect verify command from worktree files
+  init-v2-team-json <team_id> <provider> [verify-cmd] [tick-min] [auto-pr] [use-loop] [worktree-path]
+                                         Initialize v2 schema fields on team.json
+  spawn-watchdog <team_id>               Spawn the watchdog daemon as a dedicated tmux session
+  kill-watchdog <team_id>                Stop watchdog (only kills <team>-watchdog session)
+  attach-watchdog <team_id> <provider> [verify-cmd] [tick-min]
+                                         Retrofit existing v1 swarm: upgrade team.json + spawn watchdog
 
 Isolation Modes:
   shared    - All agents work in same directory (default)
