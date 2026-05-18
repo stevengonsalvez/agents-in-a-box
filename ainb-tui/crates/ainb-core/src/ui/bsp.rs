@@ -8,6 +8,14 @@
 //! enforcement) to produce the per-leaf `Rect` list ready for compositing.
 //! `cycle_focus_next/prev`, `close_focused`, and `split_focused` mutate the
 //! tree in response to user keystrokes / mouse actions.
+//!
+//! ## Focus invariant
+//!
+//! Code in this module is written assuming **at most one leaf is focused at
+//! a time**. The constructors don't enforce that — callers must ensure they
+//! don't `.focused(true)` two siblings. The cycle / close / split mutators
+//! preserve the single-focused-leaf shape; `cycle_focus_*` collapses any
+//! accidental multi-focus to whichever leaf comes first in pre-order.
 
 use ratatui::layout::Rect;
 use serde::{Deserialize, Serialize};
@@ -88,7 +96,8 @@ impl LayoutNode {
         }
     }
 
-    /// Builder: set focus state on a `Pane`. On a `Split` this is a no-op.
+    /// Builder: set focus state on a `Pane`. Silently returns `self`
+    /// unchanged when called on a `Split` — focus only exists on leaves.
     pub fn focused(self, f: bool) -> Self {
         match self {
             LayoutNode::Pane { id, .. } => LayoutNode::Pane { id, focused: f },
@@ -186,8 +195,10 @@ impl LayoutNode {
         set_focused_only(self, &prev_id);
     }
 
-    /// Remove the focused leaf, promoting its sibling to the parent slot.
-    /// No-op (returns false) when the focused leaf is the root.
+    /// Remove the focused leaf, promoting its sibling subtree into the
+    /// parent's slot. Focus migrates to the **first leaf of the promoted
+    /// subtree** (pre-order). No-op (returns false) when the focused leaf
+    /// is the root or no leaf is focused.
     pub fn close_focused(&mut self) -> bool {
         if let LayoutNode::Pane { focused: true, .. } = self {
             return false;
