@@ -5,9 +5,7 @@
 use std::path::PathBuf;
 
 use ainb_adapters_source::{RawAdapter, ResolvedUnit, SourceAdapter};
-use ainb_adapters_tool::{
-    plan::PlanOp, AcceptDecision, ClaudeAdapter, ToolAdapter,
-};
+use ainb_adapters_tool::{AcceptDecision, ClaudeAdapter, ToolAdapter, plan::PlanOp};
 use ainb_skill_core::{DeployedRef, UnitKind};
 
 /// Build a tempdir source layout that RawAdapter can list, and
@@ -26,9 +24,7 @@ fn fixture_skill() -> (tempfile::TempDir, ResolvedUnit) {
     )
     .unwrap();
 
-    let resolved = RawAdapter::new()
-        .resolve_unit(dir.path(), "skills/commit")
-        .unwrap();
+    let resolved = RawAdapter::new().resolve_unit(dir.path(), "skills/commit").unwrap();
     (dir, resolved)
 }
 
@@ -83,10 +79,7 @@ fn apply_writes_files_and_returns_hashes() {
         let report = ClaudeAdapter::new().apply(&plan).unwrap();
         assert_eq!(report.tool, "claude");
         assert!(dst_home.path().join("skills/commit/SKILL.md").exists());
-        assert!(dst_home
-            .path()
-            .join("skills/commit/assets/checklist.md")
-            .exists());
+        assert!(dst_home.path().join("skills/commit/assets/checklist.md").exists());
         assert_eq!(report.file_hashes.len(), 2);
     });
 }
@@ -112,16 +105,9 @@ fn modified_file_yields_update_op() {
         let plan = ClaudeAdapter::new().plan_install(&unit).unwrap();
         ClaudeAdapter::new().apply(&plan).unwrap();
         // Tamper with the deployed file → next plan should reinstall.
-        std::fs::write(
-            dst_home.path().join("skills/commit/SKILL.md"),
-            "TAMPERED",
-        )
-        .unwrap();
+        std::fs::write(dst_home.path().join("skills/commit/SKILL.md"), "TAMPERED").unwrap();
         let plan2 = ClaudeAdapter::new().plan_install(&unit).unwrap();
-        let any_update = plan2
-            .ops
-            .iter()
-            .any(|op| matches!(op, PlanOp::Update { .. }));
+        let any_update = plan2.ops.iter().any(|op| matches!(op, PlanOp::Update { .. }));
         assert!(any_update, "expected Update, got: {:?}", plan2.ops);
     });
 }
@@ -141,10 +127,7 @@ fn uninstall_removes_deployed_files() {
         assert!(dst_home.path().join("skills/commit/SKILL.md").exists());
         ClaudeAdapter::new().uninstall(&deployed).unwrap();
         assert!(!dst_home.path().join("skills/commit/SKILL.md").exists());
-        assert!(!dst_home
-            .path()
-            .join("skills/commit/assets/checklist.md")
-            .exists());
+        assert!(!dst_home.path().join("skills/commit/assets/checklist.md").exists());
         // Empty parent dirs are pruned best-effort.
         assert!(
             !dst_home.path().join("skills/commit").exists(),

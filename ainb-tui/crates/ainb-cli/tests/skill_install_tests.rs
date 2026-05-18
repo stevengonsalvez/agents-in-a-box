@@ -4,19 +4,14 @@
 
 use std::path::{Path, PathBuf};
 
-use ainb_cli::{
-    dispatch, AddArgs, Command, InstallArgs, SkillCommand, SourceCommand,
-};
+use ainb_cli::{AddArgs, Command, InstallArgs, SkillCommand, SourceCommand, dispatch};
 use ainb_skill_core::lockfile::Lockfile;
 use ainb_skill_core::paths::lockfile_path_in;
 
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn tmp_home() -> tempfile::TempDir {
-    tempfile::Builder::new()
-        .prefix("ainb-skill-test-")
-        .tempdir()
-        .expect("tempdir")
+    tempfile::Builder::new().prefix("ainb-skill-test-").tempdir().expect("tempdir")
 }
 
 fn run(home: &Path, action: SkillCommand) -> (String, anyhow::Result<()>) {
@@ -199,24 +194,29 @@ fn install_targets_flag_filters_tools() {
     let claude_dst = tempfile::tempdir().unwrap();
     let codex_dst = tempfile::tempdir().unwrap();
 
-    with_tool_homes(Some(claude_dst.path()), Some(codex_dst.path()), None, || {
-        let (out, res) = run(
-            home.path(),
-            SkillCommand::Install(InstallArgs {
-                uri: unit_uri.clone(),
-                targets: Some("claude".into()),
-                dry_run: false,
-                yes: true,
-            }),
-        );
-        res.expect("install ok");
-        assert!(out.contains("1 tool(s)"), "got: {out}");
-        assert!(claude_dst.path().join("skills/commit/SKILL.md").exists());
-        assert!(
-            !codex_dst.path().join("skills/commit/SKILL.md").exists(),
-            "codex shouldn't have been touched"
-        );
-    });
+    with_tool_homes(
+        Some(claude_dst.path()),
+        Some(codex_dst.path()),
+        None,
+        || {
+            let (out, res) = run(
+                home.path(),
+                SkillCommand::Install(InstallArgs {
+                    uri: unit_uri.clone(),
+                    targets: Some("claude".into()),
+                    dry_run: false,
+                    yes: true,
+                }),
+            );
+            res.expect("install ok");
+            assert!(out.contains("1 tool(s)"), "got: {out}");
+            assert!(claude_dst.path().join("skills/commit/SKILL.md").exists());
+            assert!(
+                !codex_dst.path().join("skills/commit/SKILL.md").exists(),
+                "codex shouldn't have been touched"
+            );
+        },
+    );
 }
 
 #[test]
@@ -336,32 +336,37 @@ fn install_skips_unsupported_kinds_per_matrix() {
     let claude_dst = tempfile::tempdir().unwrap();
     let copilot_dst = tempfile::tempdir().unwrap();
 
-    with_tool_homes(Some(claude_dst.path()), None, Some(copilot_dst.path()), || {
-        let (out, res) = run(
-            home.path(),
-            SkillCommand::Install(InstallArgs {
-                uri: unit_uri.clone(),
-                targets: Some("claude,copilot".into()),
-                dry_run: false,
-                yes: true,
-            }),
-        );
-        res.expect("install ok");
-        assert!(out.contains("skipped copilot"), "got: {out}");
-        assert!(claude_dst.path().join("plugins/reflect/plugin.json").exists());
-        assert!(
-            !copilot_dst.path().join("plugins/reflect/plugin.json").exists(),
-            "copilot must not receive plugin"
-        );
-        let lock = Lockfile::load_from(&lockfile_path_in(home.path())).unwrap();
-        let entry = &lock.units[0];
-        assert!(matches!(
-            entry.deployed.get("copilot").unwrap(),
-            ainb_skill_core::DeployedRef::Skipped { .. }
-        ));
-        assert!(matches!(
-            entry.deployed.get("claude").unwrap(),
-            ainb_skill_core::DeployedRef::Deployed { .. }
-        ));
-    });
+    with_tool_homes(
+        Some(claude_dst.path()),
+        None,
+        Some(copilot_dst.path()),
+        || {
+            let (out, res) = run(
+                home.path(),
+                SkillCommand::Install(InstallArgs {
+                    uri: unit_uri.clone(),
+                    targets: Some("claude,copilot".into()),
+                    dry_run: false,
+                    yes: true,
+                }),
+            );
+            res.expect("install ok");
+            assert!(out.contains("skipped copilot"), "got: {out}");
+            assert!(claude_dst.path().join("plugins/reflect/plugin.json").exists());
+            assert!(
+                !copilot_dst.path().join("plugins/reflect/plugin.json").exists(),
+                "copilot must not receive plugin"
+            );
+            let lock = Lockfile::load_from(&lockfile_path_in(home.path())).unwrap();
+            let entry = &lock.units[0];
+            assert!(matches!(
+                entry.deployed.get("copilot").unwrap(),
+                ainb_skill_core::DeployedRef::Skipped { .. }
+            ));
+            assert!(matches!(
+                entry.deployed.get("claude").unwrap(),
+                ainb_skill_core::DeployedRef::Deployed { .. }
+            ));
+        },
+    );
 }

@@ -1,9 +1,7 @@
 //! AmazonqAdapter tests — accept matrix + plan/apply/uninstall + list scope.
 
 use ainb_adapters_source::{RawAdapter, ResolvedUnit, SourceAdapter};
-use ainb_adapters_tool::{
-    plan::PlanOp, AcceptDecision, AmazonqAdapter, ToolAdapter,
-};
+use ainb_adapters_tool::{AcceptDecision, AmazonqAdapter, ToolAdapter, plan::PlanOp};
 use ainb_skill_core::{DeployedRef, UnitKind};
 
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -24,9 +22,7 @@ fn skill_fixture() -> (tempfile::TempDir, ResolvedUnit) {
         "---\nname: commit\n---\n",
     )
     .unwrap();
-    let r = RawAdapter::new()
-        .resolve_unit(dir.path(), "skills/commit")
-        .unwrap();
+    let r = RawAdapter::new().resolve_unit(dir.path(), "skills/commit").unwrap();
     (dir, r)
 }
 
@@ -90,7 +86,10 @@ fn list_installed_scope_is_skills_only() {
         std::fs::create_dir_all(dst.path().join("mcp-servers/foo")).unwrap();
         std::fs::write(dst.path().join("mcp-servers/foo/cfg.json"), "{}").unwrap();
         let installed = AmazonqAdapter::new().list_installed().unwrap();
-        assert!(installed.is_empty(), "amazonq shouldn't list mcp: {installed:?}");
+        assert!(
+            installed.is_empty(),
+            "amazonq shouldn't list mcp: {installed:?}"
+        );
     });
 }
 

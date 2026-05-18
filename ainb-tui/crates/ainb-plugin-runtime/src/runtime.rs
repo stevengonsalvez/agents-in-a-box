@@ -3,8 +3,8 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use parking_lot::RwLock;
 use tokio::runtime::Runtime as TokioRuntime;

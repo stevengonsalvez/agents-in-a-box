@@ -146,10 +146,7 @@ impl Lockfile {
     /// Flag every unit whose `declared_uri` starts with
     /// `<source_uri_prefix>@` as pending uninstall on every tool it was
     /// deployed to. Returns the count of affected units.
-    pub fn mark_units_pending_uninstall_by_source_uri(
-        &mut self,
-        source_uri_prefix: &str,
-    ) -> usize {
+    pub fn mark_units_pending_uninstall_by_source_uri(&mut self, source_uri_prefix: &str) -> usize {
         let needle = format!("{source_uri_prefix}@");
         let mut affected = 0;
         for unit in &mut self.units {

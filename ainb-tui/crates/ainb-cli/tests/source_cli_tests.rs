@@ -5,18 +5,13 @@
 
 use std::path::{Path, PathBuf};
 
-use ainb_cli::{
-    dispatch, AddArgs, Command, NameArg, RemoveArgs, SourceCommand,
-};
+use ainb_cli::{AddArgs, Command, NameArg, RemoveArgs, SourceCommand, dispatch};
 use ainb_skill_core::lockfile::{DeployedRef, LockedUnit, Lockfile};
 use ainb_skill_core::manifest::Manifest;
 use ainb_skill_core::paths::{lockfile_path_in, manifest_path_in};
 
 fn tmp_home() -> tempfile::TempDir {
-    tempfile::Builder::new()
-        .prefix("ainb-cli-test-")
-        .tempdir()
-        .expect("tempdir")
+    tempfile::Builder::new().prefix("ainb-cli-test-").tempdir().expect("tempdir")
 }
 
 fn run(home: &Path, action: SourceCommand) -> (String, anyhow::Result<()>) {
@@ -55,10 +50,7 @@ fn add_fetches_local_and_records_unit_count() {
         }),
     );
     res.expect("add ok");
-    assert!(
-        out.contains("added source local-src"),
-        "got: {out}"
-    );
+    assert!(out.contains("added source local-src"), "got: {out}");
     assert!(out.contains("(raw)"), "auto-detected kind missing: {out}");
     assert!(out.contains("2 unit(s)"), "unit count missing: {out}");
 
@@ -268,8 +260,7 @@ fn remove_flags_lockfile_units_pending_uninstall() {
             file_hashes: std::collections::BTreeMap::new(),
         },
     );
-    let mut lockfile =
-        Lockfile::load_from(&lockfile_path_in(home.path())).unwrap();
+    let mut lockfile = Lockfile::load_from(&lockfile_path_in(home.path())).unwrap();
     lockfile.units.push(LockedUnit {
         uri: format!("{source_uri_for_lock}@sha/x"),
         declared_uri: format!("{source_uri_for_lock}@main/x"),
@@ -314,7 +305,9 @@ fn enable_disable_toggles_flag() {
 
     let (_, res) = run(
         home.path(),
-        SourceCommand::Disable(NameArg { name: "alpha".into() }),
+        SourceCommand::Disable(NameArg {
+            name: "alpha".into(),
+        }),
     );
     res.unwrap();
     let m = Manifest::load_from(&manifest_path_in(home.path())).unwrap();
@@ -322,7 +315,9 @@ fn enable_disable_toggles_flag() {
 
     let (_, res) = run(
         home.path(),
-        SourceCommand::Enable(NameArg { name: "alpha".into() }),
+        SourceCommand::Enable(NameArg {
+            name: "alpha".into(),
+        }),
     );
     res.unwrap();
     let m = Manifest::load_from(&manifest_path_in(home.path())).unwrap();
@@ -334,7 +329,9 @@ fn enable_missing_source_errors() {
     let home = tmp_home();
     let (_, res) = run(
         home.path(),
-        SourceCommand::Enable(NameArg { name: "ghost".into() }),
+        SourceCommand::Enable(NameArg {
+            name: "ghost".into(),
+        }),
     );
     assert!(res.unwrap_err().to_string().contains("ghost"));
 }

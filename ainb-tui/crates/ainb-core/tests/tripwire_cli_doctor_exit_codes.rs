@@ -52,21 +52,40 @@ git_directories = []
         .env("AINB_HOME", ainb_home.path())
         .output()
         .expect("source add");
-    assert!(add.status.success(), "source add failed: {}", String::from_utf8_lossy(&add.stderr));
+    assert!(
+        add.status.success(),
+        "source add failed: {}",
+        String::from_utf8_lossy(&add.stderr)
+    );
 
     let unit_uri = format!("{local_uri}@main/skills/commit");
     let install = Command::new(&bin)
-        .args(["skill", "install", &unit_uri, "--targets", "claude", "--yes"])
+        .args([
+            "skill",
+            "install",
+            &unit_uri,
+            "--targets",
+            "claude",
+            "--yes",
+        ])
         .env("HOME", home.path())
         .env("AINB_HOME", ainb_home.path())
         .output()
         .expect("skill install");
-    assert!(install.status.success(), "install failed: {}", String::from_utf8_lossy(&install.stderr));
+    assert!(
+        install.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&install.stderr)
+    );
 
     // Find the deployed file (under the sandbox) and DELETE it to
     // break the lockfile's claim.
     let sandbox = ainb_home.path().join("tools/claude/skills/commit/SKILL.md");
-    assert!(sandbox.exists(), "install didn't land where expected: {}", sandbox.display());
+    assert!(
+        sandbox.exists(),
+        "install didn't land where expected: {}",
+        sandbox.display()
+    );
     fs::remove_file(&sandbox).expect("nuke deployed file");
 
     // Doctor MUST detect the missing file.

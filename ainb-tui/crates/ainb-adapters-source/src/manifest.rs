@@ -23,8 +23,8 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use serde_yaml_ng::Value as YamlValue;
 
-use crate::types::{ResolvedUnit, UnitDescriptor};
 use crate::SourceAdapter;
+use crate::types::{ResolvedUnit, UnitDescriptor};
 
 const MANIFEST_REL: &str = "manifest.yaml";
 
@@ -94,11 +94,7 @@ impl SourceAdapter for ManifestAdapter {
             .collect())
     }
 
-    fn resolve_unit(
-        &self,
-        fetched_root: &Path,
-        path: &str,
-    ) -> anyhow::Result<ResolvedUnit> {
+    fn resolve_unit(&self, fetched_root: &Path, path: &str) -> anyhow::Result<ResolvedUnit> {
         let units = self.list_units(fetched_root)?;
         let descriptor = units
             .into_iter()

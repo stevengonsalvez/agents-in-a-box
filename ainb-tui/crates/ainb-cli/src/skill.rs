@@ -21,11 +21,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 
 use ainb_adapters_source::pick_adapter;
 use ainb_adapters_tool::{
-    adapter_by_name, all_adapters, plan::InstallPlan, AcceptDecision, ToolAdapter,
+    AcceptDecision, ToolAdapter, adapter_by_name, all_adapters, plan::InstallPlan,
 };
 use ainb_skill_core::lockfile::{LockedUnit, Lockfile};
 use ainb_skill_core::manifest::Manifest;
@@ -57,16 +57,17 @@ fn install(home: &Path, args: InstallArgs, out: &mut dyn io::Write) -> Result<()
     // Look up the source matching this URI in the user manifest.
     let manifest = Manifest::load_from(&manifest_path_in(home))?;
     let source_uri = format!("{}:{}", uri.source_type, uri.locator);
-    let source = manifest
-        .sources
-        .iter()
-        .find(|s| s.uri == source_uri && s.enabled)
-        .ok_or_else(|| {
-            anyhow!(
-                "no enabled source matches `{source_uri}` — run \
+    let source =
+        manifest
+            .sources
+            .iter()
+            .find(|s| s.uri == source_uri && s.enabled)
+            .ok_or_else(|| {
+                anyhow!(
+                    "no enabled source matches `{source_uri}` — run \
                  `ainb source add {source_uri}` first"
-            )
-        })?;
+                )
+            })?;
 
     // Find the fetched checkout via lockfile.
     let mut lockfile = Lockfile::load_from(&lockfile_path_in(home))?;
@@ -90,10 +91,7 @@ fn install(home: &Path, args: InstallArgs, out: &mut dyn io::Write) -> Result<()
     // Resolve the unit and pick a source adapter for it.
     let adapter = pick_adapter(&fetched_path)
         .ok_or_else(|| anyhow!("no source adapter matched `{}`", fetched_path.display()))?;
-    let unit_rel = uri
-        .path
-        .as_deref()
-        .ok_or_else(|| anyhow!("unit URI has no path"))?;
+    let unit_rel = uri.path.as_deref().ok_or_else(|| anyhow!("unit URI has no path"))?;
     let resolved = adapter
         .resolve_unit(&fetched_path, unit_rel)
         .with_context(|| format!("resolving unit `{unit_rel}`"))?;
@@ -137,19 +135,15 @@ fn install(home: &Path, args: InstallArgs, out: &mut dyn io::Write) -> Result<()
         return Ok(());
     }
     if !args.yes {
-        bail!(
-            "interactive confirmation not yet wired in P3 — pass --yes (or --dry-run)"
-        );
+        bail!("interactive confirmation not yet wired in P3 — pass --yes (or --dry-run)");
     }
 
     // Apply each plan.
     let mut deployed_map: BTreeMap<String, DeployedRef> = BTreeMap::new();
     for (tool_name, plan) in &plans {
-        let tool = adapter_by_name(tool_name)
-            .ok_or_else(|| anyhow!("unknown tool `{tool_name}`"))?;
-        let report = tool
-            .apply(plan)
-            .with_context(|| format!("applying {tool_name} plan"))?;
+        let tool =
+            adapter_by_name(tool_name).ok_or_else(|| anyhow!("unknown tool `{tool_name}`"))?;
+        let report = tool.apply(plan).with_context(|| format!("applying {tool_name} plan"))?;
         deployed_map.insert(
             tool_name.clone(),
             DeployedRef::Deployed {
@@ -212,11 +206,7 @@ fn remove(home: &Path, args: RemoveSkillArgs, out: &mut dyn io::Write) -> Result
             }
             match dref {
                 DeployedRef::Deployed { path, file_hashes } => {
-                    writeln!(
-                        out,
-                        "- {tool} @ {path} ({} file(s))",
-                        file_hashes.len()
-                    )?;
+                    writeln!(out, "- {tool} @ {path} ({} file(s))", file_hashes.len())?;
                 }
                 DeployedRef::Skipped { reason } => {
                     writeln!(out, "- {tool}: skipped previously ({reason})")?;
@@ -241,10 +231,7 @@ fn remove(home: &Path, args: RemoveSkillArgs, out: &mut dyn io::Write) -> Result
     let mut removed_tools: Vec<String> = Vec::new();
     let mut retained: BTreeMap<String, DeployedRef> = BTreeMap::new();
     for (tool_name, dref) in unit_clone.deployed {
-        let in_filter = target_filter
-            .as_ref()
-            .map(|f| f.contains(&tool_name))
-            .unwrap_or(true);
+        let in_filter = target_filter.as_ref().map(|f| f.contains(&tool_name)).unwrap_or(true);
         if !in_filter {
             retained.insert(tool_name, dref);
             continue;
@@ -283,8 +270,8 @@ fn parse_targets(spec: Option<&str>) -> Result<Vec<Box<dyn ToolAdapter>>> {
     };
     let mut out: Vec<Box<dyn ToolAdapter>> = Vec::new();
     for name in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-        let tool = adapter_by_name(name)
-            .ok_or_else(|| anyhow!("unknown tool `{name}` in --targets"))?;
+        let tool =
+            adapter_by_name(name).ok_or_else(|| anyhow!("unknown tool `{name}` in --targets"))?;
         out.push(tool);
     }
     if out.is_empty() {
@@ -404,11 +391,7 @@ fn update_apply(home: &Path, args: UpdateArgs, out: &mut dyn io::Write) -> Resul
         let uri = Uri::parse(&unit.declared_uri)
             .with_context(|| format!("parsing `{}`", unit.declared_uri))?;
         let source_uri = format!("{}:{}", uri.source_type, uri.locator);
-        let source = match manifest
-            .sources
-            .iter()
-            .find(|s| s.uri == source_uri && s.enabled)
-        {
+        let source = match manifest.sources.iter().find(|s| s.uri == source_uri && s.enabled) {
             Some(s) => s,
             None => {
                 writeln!(
@@ -441,10 +424,7 @@ fn update_apply(home: &Path, args: UpdateArgs, out: &mut dyn io::Write) -> Resul
         // Resolve the unit at the new SHA.
         let adapter = pick_adapter(&fetched.path)
             .ok_or_else(|| anyhow!("no source adapter for `{}`", fetched.path.display()))?;
-        let unit_rel = uri
-            .path
-            .as_deref()
-            .ok_or_else(|| anyhow!("unit URI has no path"))?;
+        let unit_rel = uri.path.as_deref().ok_or_else(|| anyhow!("unit URI has no path"))?;
         let resolved = adapter
             .resolve_unit(&fetched.path, unit_rel)
             .with_context(|| format!("resolving `{unit_rel}`"))?;
@@ -457,19 +437,16 @@ fn update_apply(home: &Path, args: UpdateArgs, out: &mut dyn io::Write) -> Resul
             }
             let tool = adapter_by_name(tool_name)
                 .ok_or_else(|| anyhow!("unknown tool `{tool_name}` in lockfile"))?;
-            let plan = tool
-                .plan_install(&resolved)
-                .with_context(|| format!("planning {tool_name} update for {}", unit.declared_uri))?;
+            let plan = tool.plan_install(&resolved).with_context(|| {
+                format!("planning {tool_name} update for {}", unit.declared_uri)
+            })?;
             all_plans.push((*idx, tool_name.clone(), plan));
         }
         deferred_sha_updates.insert(
             unit.declared_uri.clone(),
             (
                 fetched.resolved_sha.clone(),
-                fetched
-                    .path
-                    .to_string_lossy()
-                    .to_string(),
+                fetched.path.to_string_lossy().to_string(),
             ),
         );
     }
@@ -503,11 +480,9 @@ fn update_apply(home: &Path, args: UpdateArgs, out: &mut dyn io::Write) -> Resul
     // Apply every plan + record new deployed hashes.
     let mut new_hashes: BTreeMap<(usize, String), DeployedRef> = BTreeMap::new();
     for (idx, tool_name, plan) in &all_plans {
-        let tool = adapter_by_name(tool_name)
-            .ok_or_else(|| anyhow!("unknown tool `{tool_name}`"))?;
-        let report = tool
-            .apply(plan)
-            .with_context(|| format!("applying {tool_name} update"))?;
+        let tool =
+            adapter_by_name(tool_name).ok_or_else(|| anyhow!("unknown tool `{tool_name}`"))?;
+        let report = tool.apply(plan).with_context(|| format!("applying {tool_name} update"))?;
         new_hashes.insert(
             (*idx, tool_name.clone()),
             DeployedRef::Deployed {
@@ -522,11 +497,7 @@ fn update_apply(home: &Path, args: UpdateArgs, out: &mut dyn io::Write) -> Resul
         lockfile.units[idx].deployed.insert(tool_name, dref);
     }
     for (declared_uri, (new_sha, _fetched_path)) in deferred_sha_updates {
-        if let Some(unit) = lockfile
-            .units
-            .iter_mut()
-            .find(|u| u.declared_uri == declared_uri)
-        {
+        if let Some(unit) = lockfile.units.iter_mut().find(|u| u.declared_uri == declared_uri) {
             unit.sha = Some(new_sha.clone());
         }
         // Also bump LockedSource.resolved_sha for the source this unit
@@ -534,10 +505,7 @@ fn update_apply(home: &Path, args: UpdateArgs, out: &mut dyn io::Write) -> Resul
         let uri = Uri::parse(&declared_uri)?;
         let source_uri = format!("{}:{}", uri.source_type, uri.locator);
         if let Some(source_entry) = manifest.sources.iter().find(|s| s.uri == source_uri) {
-            if let Some(lsource) = lockfile
-                .sources
-                .iter_mut()
-                .find(|s| s.name == source_entry.name)
+            if let Some(lsource) = lockfile.sources.iter_mut().find(|s| s.name == source_entry.name)
             {
                 lsource.resolved_sha = Some(new_sha);
             }
@@ -567,22 +535,14 @@ fn sync(home: &Path, args: SyncArgs, out: &mut dyn io::Write) -> Result<()> {
     let lockfile = Lockfile::load_from(&lockfile_path_in(home))?;
 
     let declared: BTreeSet<String> = manifest.units.iter().map(|u| u.uri.clone()).collect();
-    let locked: BTreeSet<String> = lockfile
-        .units
-        .iter()
-        .map(|u| u.declared_uri.clone())
-        .collect();
+    let locked: BTreeSet<String> = lockfile.units.iter().map(|u| u.declared_uri.clone()).collect();
 
     let missing: Vec<String> = declared.difference(&locked).cloned().collect();
     let orphans: Vec<String> = locked.difference(&declared).cloned().collect();
     let pending_uninstall: Vec<String> = lockfile
         .units
         .iter()
-        .filter(|u| {
-            u.deployed
-                .values()
-                .any(|d| matches!(d, DeployedRef::PendingUninstall))
-        })
+        .filter(|u| u.deployed.values().any(|d| matches!(d, DeployedRef::PendingUninstall)))
         .map(|u| u.declared_uri.clone())
         .collect();
 
@@ -616,19 +576,14 @@ fn sync(home: &Path, args: SyncArgs, out: &mut dyn io::Write) -> Result<()> {
     // honoring the manifest's per-unit `targets` override.
     let mut install_count = 0;
     for uri in &missing {
-        let targets = manifest
-            .units
-            .iter()
-            .find(|u| u.uri == *uri)
-            .and_then(|u| u.targets.clone());
+        let targets = manifest.units.iter().find(|u| u.uri == *uri).and_then(|u| u.targets.clone());
         let install_args = InstallArgs {
             uri: uri.clone(),
             targets: targets.map(|v| v.join(",")),
             dry_run: false,
             yes: true,
         };
-        install(home, install_args, out)
-            .with_context(|| format!("installing {uri}"))?;
+        install(home, install_args, out).with_context(|| format!("installing {uri}"))?;
         install_count += 1;
     }
 
@@ -652,7 +607,10 @@ fn sync(home: &Path, args: SyncArgs, out: &mut dyn io::Write) -> Result<()> {
         remove_count += 1;
     }
 
-    writeln!(out, "# sync done: {install_count} installed, {remove_count} removed")?;
+    writeln!(
+        out,
+        "# sync done: {install_count} installed, {remove_count} removed"
+    )?;
     Ok(())
 }
 
@@ -671,11 +629,8 @@ fn scope_to_source_names(
     if let Ok(uri) = Uri::parse(input) {
         if uri.is_unit() {
             let source_uri = format!("{}:{}", uri.source_type, uri.locator);
-            let name = manifest
-                .sources
-                .iter()
-                .find(|s| s.uri == source_uri)
-                .map(|s| s.name.clone());
+            let name =
+                manifest.sources.iter().find(|s| s.uri == source_uri).map(|s| s.name.clone());
             if let Some(name) = name {
                 return Ok(Some([name].into_iter().collect()));
             }
@@ -703,4 +658,3 @@ fn short_sha(s: &str) -> &str {
         &s[..12]
     }
 }
-

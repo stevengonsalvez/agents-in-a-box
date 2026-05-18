@@ -561,9 +561,7 @@ async fn run_usage_via_plugin(argv: Vec<String>) -> anyhow::Result<i32> {
     let result = dispatch_inner(&handle, argv).await;
 
     // Drop the owning runtime off the async context.
-    tokio::task::spawn_blocking(move || drop(runtime))
-        .await
-        .ok();
+    tokio::task::spawn_blocking(move || drop(runtime)).await.ok();
 
     result
 }
@@ -651,12 +649,9 @@ async fn dispatch_inner(
             }
             last_trace = std::time::Instant::now();
         }
-        outcome = handle
-            .dispatch_cli(&burndown, "usage", argv.clone())
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!("burndown plugin task disconnected before replying: {e}")
-            })?;
+        outcome = handle.dispatch_cli(&burndown, "usage", argv.clone()).await.map_err(|e| {
+            anyhow::anyhow!("burndown plugin task disconnected before replying: {e}")
+        })?;
         let should_retry = matches!(
             &outcome,
             CliOutcome::Ok(r)
@@ -791,10 +786,7 @@ impl CliCommand for ClaudecodeCommand {
     }
     fn run(&self, matches: &ArgMatches, _ctx: CliContext) -> BoxFuture<'static, Result<()>> {
         let (sub_name, cache_only) = match matches.subcommand() {
-            Some(("statusline", m)) => (
-                Some("statusline".to_string()),
-                m.get_flag("cache-only"),
-            ),
+            Some(("statusline", m)) => (Some("statusline".to_string()), m.get_flag("cache-only")),
             _ => (None, false),
         };
         Box::pin(async move {
@@ -1120,7 +1112,10 @@ mod tests {
         assert_eq!(top, "plugin");
         let (sub_name, args) = sub.subcommand().expect("plugin install");
         assert_eq!(sub_name, "install");
-        assert_eq!(args.get_one::<String>("plugin").map(String::as_str), Some("burndown"));
+        assert_eq!(
+            args.get_one::<String>("plugin").map(String::as_str),
+            Some("burndown")
+        );
         assert!(args.get_flag("yes"));
     }
 

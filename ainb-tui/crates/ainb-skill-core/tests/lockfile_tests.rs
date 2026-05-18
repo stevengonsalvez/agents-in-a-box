@@ -6,10 +6,7 @@ use ainb_skill_core::lockfile::{DeployedRef, LockedSource, LockedUnit, Lockfile}
 use ainb_skill_core::paths::lockfile_path_in;
 
 fn tmp_home() -> tempfile::TempDir {
-    tempfile::Builder::new()
-        .prefix("ainb-lock-test-")
-        .tempdir()
-        .expect("tempdir")
+    tempfile::Builder::new().prefix("ainb-lock-test-").tempdir().expect("tempdir")
 }
 
 #[test]
@@ -53,16 +50,12 @@ fn round_trip_with_deployed_and_skipped() {
             declared_ref: "main".into(),
             resolved_sha: Some("0e9bc28a1b".into()),
             fetched_at: Some("2026-05-14T20:00:00Z".into()),
-            fetched_path: Some(
-                "/Users/me/.agents-in-a-box/cache/toolkit/0e9bc28a".into(),
-            ),
+            fetched_path: Some("/Users/me/.agents-in-a-box/cache/toolkit/0e9bc28a".into()),
         }],
         units: vec![LockedUnit {
-            uri: "gh:stevengonsalvez/ai-coder-rules@0e9bc28/toolkit/packages/skills/commit"
+            uri: "gh:stevengonsalvez/ai-coder-rules@0e9bc28/toolkit/packages/skills/commit".into(),
+            declared_uri: "gh:stevengonsalvez/ai-coder-rules@main/toolkit/packages/skills/commit"
                 .into(),
-            declared_uri:
-                "gh:stevengonsalvez/ai-coder-rules@main/toolkit/packages/skills/commit"
-                    .into(),
             kind: "skill".into(),
             sha: Some("0e9bc28a1b".into()),
             deployed,
@@ -153,10 +146,7 @@ fn mark_units_pending_uninstall_by_source_uri() {
 
     // The "drop" unit is flagged on every tool.
     let drop = l.units.iter().find(|u| u.declared_uri.contains("drop")).unwrap();
-    assert!(drop
-        .deployed
-        .values()
-        .all(|d| matches!(d, DeployedRef::PendingUninstall)));
+    assert!(drop.deployed.values().all(|d| matches!(d, DeployedRef::PendingUninstall)));
 }
 
 #[test]

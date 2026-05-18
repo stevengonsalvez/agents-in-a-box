@@ -24,17 +24,13 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
 use serde_json::Value;
-use tokio::io::{
-    AsyncReadExt, AsyncWriteExt, BufReader, DuplexStream, ReadHalf, WriteHalf,
-};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, DuplexStream, ReadHalf, WriteHalf};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use ainb_plugin_protocol::{
-    framing,
-    methods,
+    ProtocolError, RpcError, WireBuffer, framing, methods,
     params::{HandleEventParams, PluginInitParams, RenderParams, RenderResult, Viewport},
-    ProtocolError, RpcError, WireBuffer,
 };
 use ainb_plugin_sdk::{Plugin, Server};
 
@@ -86,9 +82,8 @@ impl ObservedFrame {
 pub fn run_plugin<P: Plugin>(plugin: P) -> Harness {
     let (host_side, plugin_side) = tokio::io::duplex(DUPLEX_BUF_BYTES);
     let (plugin_read, plugin_write) = tokio::io::split(plugin_side);
-    let server_task = tokio::spawn(async move {
-        Server::new(plugin).run(plugin_read, plugin_write).await
-    });
+    let server_task =
+        tokio::spawn(async move { Server::new(plugin).run(plugin_read, plugin_write).await });
     let (host_read, host_write) = tokio::io::split(host_side);
     Harness {
         server_task: Some(server_task),
@@ -172,11 +167,7 @@ impl Harness {
     /// Use this when a plugin you are testing issues
     /// `host.snapshot_get(...)` mid-handler — pull the request out of
     /// [`Self::recv_request`], fabricate the reply, and call this.
-    pub async fn respond<R: serde::Serialize>(
-        &mut self,
-        id: i64,
-        result: R,
-    ) -> HarnessResult<()> {
+    pub async fn respond<R: serde::Serialize>(&mut self, id: i64, result: R) -> HarnessResult<()> {
         let body = serde_json::json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -186,11 +177,7 @@ impl Harness {
     }
 
     /// Reply to a plugin-issued request with an `error` envelope.
-    pub async fn respond_error(
-        &mut self,
-        id: i64,
-        error: RpcError,
-    ) -> HarnessResult<()> {
+    pub async fn respond_error(&mut self, id: i64, error: RpcError) -> HarnessResult<()> {
         let body = serde_json::json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -202,10 +189,7 @@ impl Harness {
     /// Wait up to `timeout` for the next plugin-initiated frame
     /// (request or notification). Returns immediately if there is
     /// already one buffered.
-    pub async fn recv_observed(
-        &mut self,
-        timeout: Duration,
-    ) -> HarnessResult<ObservedFrame> {
+    pub async fn recv_observed(&mut self, timeout: Duration) -> HarnessResult<ObservedFrame> {
         if let Some(frame) = self.observed.pop_front() {
             return Ok(frame);
         }
@@ -213,9 +197,7 @@ impl Harness {
         loop {
             let remaining = deadline
                 .checked_duration_since(Instant::now())
-                .ok_or_else(|| {
-                    HarnessError::Timeout(timeout, "plugin-initiated frame".into())
-                })?;
+                .ok_or_else(|| HarnessError::Timeout(timeout, "plugin-initiated frame".into()))?;
             tokio::select! {
                 () = tokio::time::sleep(remaining) => {
                     return Err(HarnessError::Timeout(
@@ -256,17 +238,12 @@ impl Harness {
     /// (notifications are buffered and skipped). Use this when a
     /// plugin under test issues `host.snapshot_get(...)` and you need
     /// to feed it a fake reply.
-    pub async fn recv_request(
-        &mut self,
-        timeout: Duration,
-    ) -> HarnessResult<ObservedFrame> {
+    pub async fn recv_request(&mut self, timeout: Duration) -> HarnessResult<ObservedFrame> {
         let deadline = Instant::now() + timeout;
         loop {
             let remaining = deadline
                 .checked_duration_since(Instant::now())
-                .ok_or_else(|| {
-                    HarnessError::Timeout(timeout, "plugin-initiated request".into())
-                })?;
+                .ok_or_else(|| HarnessError::Timeout(timeout, "plugin-initiated request".into()))?;
             let frame = self.recv_observed(remaining).await?;
             if frame.is_request() {
                 return Ok(frame);
@@ -375,9 +352,7 @@ impl Harness {
     /// task.
     pub async fn close(mut self) -> HarnessResult<()> {
         // Notification, not request — matches what the runtime does.
-        let _ = self
-            .send_notification(methods::PLUGIN_SHUTDOWN, serde_json::json!({}))
-            .await;
+        let _ = self.send_notification(methods::PLUGIN_SHUTDOWN, serde_json::json!({})).await;
         if let Some(mut writer) = self.plugin_in.take() {
             let _ = writer.shutdown().await;
         }
@@ -407,11 +382,7 @@ impl Harness {
         Ok(())
     }
 
-    async fn recv_response_for(
-        &mut self,
-        id: i64,
-        timeout: Duration,
-    ) -> HarnessResult<Value> {
+    async fn recv_response_for(&mut self, id: i64, timeout: Duration) -> HarnessResult<Value> {
         let deadline = Instant::now() + timeout;
         loop {
             let remaining = deadline
@@ -423,14 +394,14 @@ impl Harness {
                 Ok(Ok(None)) => return Err(HarnessError::UnexpectedEof(id)),
                 Ok(Err(e)) => return Err(e),
                 Err(_) => {
-                    return Err(HarnessError::Timeout(timeout, format!("response for id={id}")));
+                    return Err(HarnessError::Timeout(
+                        timeout,
+                        format!("response for id={id}"),
+                    ));
                 }
             };
             match classify(&value) {
-                FrameKind::Response {
-                    id: rid,
-                    outcome,
-                } if rid == id => match outcome {
+                FrameKind::Response { id: rid, outcome } if rid == id => match outcome {
                     Ok(v) => return Ok(v),
                     Err(rpc) => return Err(HarnessError::Rpc(Box::new(rpc))),
                 },
@@ -447,10 +418,7 @@ impl Harness {
 
     /// Recv with caller-supplied timeout — escape hatch for tests
     /// that need to override [`DEFAULT_RECV_TIMEOUT`].
-    pub async fn recv_with_timeout(
-        &mut self,
-        timeout: Duration,
-    ) -> HarnessResult<ObservedFrame> {
+    pub async fn recv_with_timeout(&mut self, timeout: Duration) -> HarnessResult<ObservedFrame> {
         self.recv_observed(timeout).await
     }
 }
@@ -605,11 +573,7 @@ mod tests {
         fn manifest(&self) -> &'static str {
             "[plugin]\nname = \"fixture\"\nversion = \"0.1.0\"\nabi_version = 2\n"
         }
-        async fn on_init(
-            &mut self,
-            host: &HostClient,
-            _granted: &[String],
-        ) -> SdkResult<()> {
+        async fn on_init(&mut self, host: &HostClient, _granted: &[String]) -> SdkResult<()> {
             host.snapshot_publish("fixture.greeting", bytes::Bytes::from_static(b"hello"))
                 .await
         }
@@ -700,11 +664,7 @@ mod tests {
             fn manifest(&self) -> &'static str {
                 "[plugin]\nname = \"wobbly\"\nversion = \"0.0.0\"\nabi_version = 2\n"
             }
-            async fn render(
-                &mut self,
-                _h: &HostClient,
-                _p: RenderParams,
-            ) -> SdkResult<WireBuffer> {
+            async fn render(&mut self, _h: &HostClient, _p: RenderParams) -> SdkResult<WireBuffer> {
                 self.counter += 1;
                 let mut b = WireBuffer::new(1, 1);
                 b.push(
@@ -736,11 +696,7 @@ mod tests {
             fn manifest(&self) -> &'static str {
                 "[plugin]\nname = \"quiet\"\nversion = \"0.0.0\"\nabi_version = 2\n"
             }
-            async fn render(
-                &mut self,
-                _h: &HostClient,
-                _p: RenderParams,
-            ) -> SdkResult<WireBuffer> {
+            async fn render(&mut self, _h: &HostClient, _p: RenderParams) -> SdkResult<WireBuffer> {
                 Ok(WireBuffer::new(1, 1))
             }
         }
@@ -805,25 +761,16 @@ mod tests {
         h.write_frame(&body).await.unwrap();
 
         // Pick up the plugin->host snapshot/get request.
-        let req = h
-            .recv_request(Duration::from_secs(2))
-            .await
-            .expect("plugin issued a request");
+        let req = h.recv_request(Duration::from_secs(2)).await.expect("plugin issued a request");
         assert_eq!(req.method, methods::HOST_SNAPSHOT_GET);
         assert_eq!(req.params["topic"], "topic.x");
         let req_id = req.id.expect("plugin request has id");
-        h.respond(
-            req_id,
-            serde_json::json!({"payload": null, "version": 9}),
-        )
-        .await
-        .unwrap();
+        h.respond(req_id, serde_json::json!({"payload": null, "version": 9}))
+            .await
+            .unwrap();
 
         // Now the render response arrives.
-        let resp = h
-            .recv_response_for(id, Duration::from_secs(2))
-            .await
-            .expect("render response");
+        let resp = h.recv_response_for(id, Duration::from_secs(2)).await.expect("render response");
         let result: RenderResult = serde_json::from_value(resp).unwrap();
         assert_eq!(result.buffer.width, 1);
 

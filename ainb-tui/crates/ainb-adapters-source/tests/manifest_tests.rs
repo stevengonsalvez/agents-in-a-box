@@ -38,7 +38,10 @@ units:
 
     let commit = units.iter().find(|u| u.name == "commit").unwrap();
     assert_eq!(commit.kind, "skill");
-    assert_eq!(commit.description.as_deref(), Some("well-formatted commits"));
+    assert_eq!(
+        commit.description.as_deref(),
+        Some("well-formatted commits")
+    );
     assert_eq!(commit.tags, vec!["git", "workflow"]);
     assert_eq!(commit.requires, vec!["git"]);
 }
@@ -58,10 +61,7 @@ fn name_defaults_to_basename_of_path() {
 fn empty_units_list_round_trips() {
     let dir = tempfile::tempdir().unwrap();
     write_manifest(dir.path(), "schema_version: 1\nunits: []\n");
-    assert!(ManifestAdapter::new()
-        .list_units(dir.path())
-        .unwrap()
-        .is_empty());
+    assert!(ManifestAdapter::new().list_units(dir.path()).unwrap().is_empty());
 }
 
 #[test]
@@ -79,9 +79,7 @@ fn resolve_unit_returns_descriptor() {
         dir.path(),
         "units:\n  - path: skills/x\n    kind: skill\n    name: x\n",
     );
-    let resolved = ManifestAdapter::new()
-        .resolve_unit(dir.path(), "skills/x")
-        .unwrap();
+    let resolved = ManifestAdapter::new().resolve_unit(dir.path(), "skills/x").unwrap();
     assert_eq!(resolved.descriptor.name, "x");
     assert_eq!(resolved.descriptor.kind, "skill");
 }

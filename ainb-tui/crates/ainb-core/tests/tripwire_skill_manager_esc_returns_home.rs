@@ -69,9 +69,7 @@ fn send_key(session: &str, key: &str) {
 }
 
 fn kill_session(session: &str) {
-    let _ = Command::new("tmux")
-        .args(["kill-session", "-t", session])
-        .status();
+    let _ = Command::new("tmux").args(["kill-session", "-t", session]).status();
 }
 
 #[test]
@@ -103,11 +101,9 @@ fn esc_on_skill_manager_returns_to_home_screen() {
         .expect("tmux send-keys launch");
 
     // Wait for HomeScreen.
-    if poll_capture(
-        &session,
-        Instant::now() + Duration::from_secs(120),
-        |c| c.contains("Agents") && c.contains("Catalog") && c.contains("Welcome to AINB"),
-    )
+    if poll_capture(&session, Instant::now() + Duration::from_secs(120), |c| {
+        c.contains("Agents") && c.contains("Catalog") && c.contains("Welcome to AINB")
+    })
     .is_none()
     {
         let dump = capture_pane(&session);
@@ -122,11 +118,9 @@ fn esc_on_skill_manager_returns_to_home_screen() {
 
     // Navigate into SkillManager.
     send_key(&session, "M");
-    if poll_capture(
-        &session,
-        Instant::now() + Duration::from_secs(90),
-        |c| c.contains("Sources") && c.contains("Units") && c.contains("Detail"),
-    )
+    if poll_capture(&session, Instant::now() + Duration::from_secs(90), |c| {
+        c.contains("Sources") && c.contains("Units") && c.contains("Detail")
+    })
     .is_none()
     {
         let dump = capture_pane(&session);
@@ -149,16 +143,12 @@ fn esc_on_skill_manager_returns_to_home_screen() {
     // both views are partially painted; we wait for the new screen
     // to FULLY claim the bottom rows by also requiring the
     // SkillManager-only marker to disappear before sampling.
-    let post = poll_capture(
-        &session,
-        Instant::now() + Duration::from_secs(90),
-        |c| {
-            c.contains("Agents")
-                && c.contains("Catalog")
-                && c.contains("Welcome to")
-                && !c.contains("(select a unit to see details)")
-        },
-    );
+    let post = poll_capture(&session, Instant::now() + Duration::from_secs(90), |c| {
+        c.contains("Agents")
+            && c.contains("Catalog")
+            && c.contains("Welcome to")
+            && !c.contains("(select a unit to see details)")
+    });
     let post = match post {
         Some(p) => p,
         None => {
@@ -172,8 +162,14 @@ fn esc_on_skill_manager_returns_to_home_screen() {
     };
     kill_session(&session);
 
-    assert!(post.contains("Agents"), "missing HomeScreen sidebar: {post}");
-    assert!(post.contains("Catalog"), "missing HomeScreen sidebar: {post}");
+    assert!(
+        post.contains("Agents"),
+        "missing HomeScreen sidebar: {post}"
+    );
+    assert!(
+        post.contains("Catalog"),
+        "missing HomeScreen sidebar: {post}"
+    );
     assert!(
         post.contains("Welcome to"),
         "missing HomeScreen welcome panel: {post}"

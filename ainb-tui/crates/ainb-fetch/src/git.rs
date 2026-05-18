@@ -12,7 +12,7 @@ use std::path::Path;
 use ainb_skill_core::{SourceType, Uri};
 
 use crate::cache::cache_path_for;
-use crate::fetcher::{now_utc_iso8601, FetchError, FetchedRef, Fetcher};
+use crate::fetcher::{FetchError, FetchedRef, Fetcher, now_utc_iso8601};
 
 const STAGING_DIR: &str = ".staging";
 
@@ -53,8 +53,7 @@ impl Fetcher for GitFetcher {
 
         let sha = resolve_ref_to_sha(&repo, ref_name)
             .map_err(|e| FetchError::Git(format!("resolve `{ref_name}`: {e}")))?;
-        checkout_sha(&repo, &sha)
-            .map_err(|e| FetchError::Git(format!("checkout `{sha}`: {e}")))?;
+        checkout_sha(&repo, &sha).map_err(|e| FetchError::Git(format!("checkout `{sha}`: {e}")))?;
 
         // Drop the Repository before renaming so handles are closed.
         drop(repo);

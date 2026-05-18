@@ -25,20 +25,17 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::json;
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 use ainb_plugin_protocol::{
-    framing,
-    methods,
+    RpcError, framing, methods,
     params::{
         ActionInvokeParams, ActionInvokeResult, LogLevel, LogParams, SnapshotGetParams,
-        SnapshotGetResult, SnapshotPublishParams, SnapshotSubscribeParams,
-        SnapshotSubscribeResult,
+        SnapshotGetResult, SnapshotPublishParams, SnapshotSubscribeParams, SnapshotSubscribeResult,
     },
-    RpcError,
 };
 
 use crate::{Result, SdkError};
@@ -172,8 +169,7 @@ impl HostClient {
             topic: topic.into(),
             payload: payload.into(),
         };
-        self.send_notification(methods::HOST_SNAPSHOT_PUBLISH, &params)
-            .await
+        self.send_notification(methods::HOST_SNAPSHOT_PUBLISH, &params).await
     }
 
     /// Subscribe to snapshot updates for a topic. The host will start
@@ -187,8 +183,7 @@ impl HostClient {
         let params = SnapshotSubscribeParams {
             topic: topic.into(),
         };
-        self.send_request(methods::HOST_SNAPSHOT_SUBSCRIBE, &params)
-            .await
+        self.send_request(methods::HOST_SNAPSHOT_SUBSCRIBE, &params).await
     }
 
     /// Invoke a remote action with a timeout. `timeout` of [`Duration::ZERO`]

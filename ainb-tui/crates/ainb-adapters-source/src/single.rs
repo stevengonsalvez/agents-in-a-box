@@ -17,9 +17,9 @@ use std::path::{Path, PathBuf};
 
 use serde_yaml_ng::Value as YamlValue;
 
+use crate::SourceAdapter;
 use crate::frontmatter;
 use crate::types::{ResolvedUnit, UnitDescriptor};
-use crate::SourceAdapter;
 
 pub struct SingleAdapter;
 
@@ -51,11 +51,7 @@ impl SourceAdapter for SingleAdapter {
         Ok(vec![descriptor_for_file(fetched_root, &file)?])
     }
 
-    fn resolve_unit(
-        &self,
-        fetched_root: &Path,
-        path: &str,
-    ) -> anyhow::Result<ResolvedUnit> {
+    fn resolve_unit(&self, fetched_root: &Path, path: &str) -> anyhow::Result<ResolvedUnit> {
         let units = self.list_units(fetched_root)?;
         let descriptor = units
             .into_iter()
@@ -111,15 +107,8 @@ fn descriptor_for_file(root: &Path, file: &Path) -> anyhow::Result<UnitDescripto
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|_| file.to_path_buf());
     let rel_str = rel.to_string_lossy().to_string();
-    let stem = file
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("unit")
-        .to_string();
-    let ext = file
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
+    let stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or("unit").to_string();
+    let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
 
     match ext {
         "md" | "markdown" => {
@@ -147,15 +136,8 @@ fn descriptor_for_file(root: &Path, file: &Path) -> anyhow::Result<UnitDescripto
             let body = fs::read_to_string(file).unwrap_or_default();
             let v: serde_json::Value =
                 serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
-            let name = v
-                .get("name")
-                .and_then(|x| x.as_str())
-                .map(str::to_string)
-                .unwrap_or(stem);
-            let description = v
-                .get("description")
-                .and_then(|x| x.as_str())
-                .map(str::to_string);
+            let name = v.get("name").and_then(|x| x.as_str()).map(str::to_string).unwrap_or(stem);
+            let description = v.get("description").and_then(|x| x.as_str()).map(str::to_string);
             Ok(UnitDescriptor {
                 name,
                 kind: "plugin".into(),

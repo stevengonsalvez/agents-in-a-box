@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use ainb_adapters_source::{pick_adapter, UnitDescriptor};
+use ainb_adapters_source::{UnitDescriptor, pick_adapter};
 use ainb_skill_core::lockfile::Lockfile;
 use ainb_skill_core::manifest::{Manifest, SourceEntry};
 use ainb_skill_core::paths::{lockfile_path_in, manifest_path_in};
@@ -26,10 +26,7 @@ struct Hit {
 
 impl Hit {
     fn full_uri(&self) -> String {
-        format!(
-            "{}@{}/{}",
-            self.source_uri, self.source_ref, self.unit.path
-        )
+        format!("{}@{}/{}", self.source_uri, self.source_ref, self.unit.path)
     }
 }
 
@@ -46,11 +43,7 @@ pub fn dispatch(home: &Path, args: SearchArgs, out: &mut dyn io::Write) -> Resul
     render_table(&hits, out)
 }
 
-fn collect_hits(
-    manifest: &Manifest,
-    lockfile: &Lockfile,
-    args: &SearchArgs,
-) -> Result<Vec<Hit>> {
+fn collect_hits(manifest: &Manifest, lockfile: &Lockfile, args: &SearchArgs) -> Result<Vec<Hit>> {
     let query_lc = args.query.to_lowercase();
     let mut hits = Vec::new();
 
@@ -90,11 +83,7 @@ fn collect_hits(
 fn checkout_path_for(source: &SourceEntry, lockfile: &Lockfile) -> Option<PathBuf> {
     let locked = lockfile.sources.iter().find(|s| s.name == source.name)?;
     let path = PathBuf::from(locked.fetched_path.as_deref()?);
-    if path.exists() {
-        Some(path)
-    } else {
-        None
-    }
+    if path.exists() { Some(path) } else { None }
 }
 
 fn matches_query(unit: &UnitDescriptor, query_lc: &str) -> bool {
@@ -104,25 +93,23 @@ fn matches_query(unit: &UnitDescriptor, query_lc: &str) -> bool {
     if unit.name.to_lowercase().contains(query_lc) {
         return true;
     }
-    if unit
-        .description
-        .as_deref()
-        .unwrap_or("")
-        .to_lowercase()
-        .contains(query_lc)
-    {
+    if unit.description.as_deref().unwrap_or("").to_lowercase().contains(query_lc) {
         return true;
     }
-    unit.tags
-        .iter()
-        .any(|t| t.to_lowercase().contains(query_lc))
+    unit.tags.iter().any(|t| t.to_lowercase().contains(query_lc))
 }
 
 fn render_table(hits: &[Hit], out: &mut dyn io::Write) -> Result<()> {
     let uri_strs: Vec<String> = hits.iter().map(Hit::full_uri).collect();
     let uri_w = header_width("URI", &uri_strs);
-    let kind_w = header_width("KIND", &hits.iter().map(|h| h.unit.kind.clone()).collect::<Vec<_>>());
-    let src_w = header_width("SOURCE", &hits.iter().map(|h| h.source_name.clone()).collect::<Vec<_>>());
+    let kind_w = header_width(
+        "KIND",
+        &hits.iter().map(|h| h.unit.kind.clone()).collect::<Vec<_>>(),
+    );
+    let src_w = header_width(
+        "SOURCE",
+        &hits.iter().map(|h| h.source_name.clone()).collect::<Vec<_>>(),
+    );
 
     writeln!(
         out,
@@ -130,14 +117,7 @@ fn render_table(hits: &[Hit], out: &mut dyn io::Write) -> Result<()> {
         "URI", "KIND", "SOURCE",
     )?;
     for (h, uri) in hits.iter().zip(uri_strs.iter()) {
-        let desc = h
-            .unit
-            .description
-            .as_deref()
-            .unwrap_or("")
-            .chars()
-            .take(60)
-            .collect::<String>();
+        let desc = h.unit.description.as_deref().unwrap_or("").chars().take(60).collect::<String>();
         writeln!(
             out,
             "{:<uri_w$}  {:<kind_w$}  {:<src_w$}  {desc}",

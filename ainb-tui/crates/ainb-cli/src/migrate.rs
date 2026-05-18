@@ -28,7 +28,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use serde_yaml_ng::Value as YamlValue;
 
 use ainb_adapters_tool::all_adapters;
@@ -43,9 +43,7 @@ pub fn dispatch(home: &Path, args: MigrateArgs, out: &mut dyn io::Write) -> Resu
         (true, _, _) => migrate_check(home, out),
         (_, true, _) => migrate_clean(home, args, out),
         (_, _, true) => migrate_from_bootstrap(home, args, out),
-        _ => bail!(
-            "specify one of --check, --clean [--backup], or --from-bootstrap"
-        ),
+        _ => bail!("specify one of --check, --clean [--backup], or --from-bootstrap"),
     }
 }
 
@@ -153,8 +151,7 @@ fn migrate_clean(home: &Path, args: MigrateArgs, out: &mut dyn io::Write) -> Res
             copy_dir_recursive(root, &target)
                 .with_context(|| format!("backing up {tool} to {}", target.display()))?;
         }
-        fs::remove_dir_all(root)
-            .with_context(|| format!("wiping {}", root.display()))?;
+        fs::remove_dir_all(root).with_context(|| format!("wiping {}", root.display()))?;
     }
     writeln!(out, "# wiped {} tool root(s)", to_wipe.len())?;
 
@@ -179,11 +176,7 @@ fn migrate_clean(home: &Path, args: MigrateArgs, out: &mut dyn io::Write) -> Res
 /// `external-dependencies.yaml` and seed the manifest with a
 /// `toolkit` source + one UnitEntry per bundled-skill / agent-skill
 /// path.
-fn migrate_from_bootstrap(
-    home: &Path,
-    args: MigrateArgs,
-    out: &mut dyn io::Write,
-) -> Result<()> {
+fn migrate_from_bootstrap(home: &Path, args: MigrateArgs, out: &mut dyn io::Write) -> Result<()> {
     let toolkit_root = args
         .toolkit_root
         .clone()
@@ -204,8 +197,8 @@ fn migrate_from_bootstrap(
         );
     }
 
-    let body = fs::read_to_string(&ext_yaml)
-        .with_context(|| format!("reading {}", ext_yaml.display()))?;
+    let body =
+        fs::read_to_string(&ext_yaml).with_context(|| format!("reading {}", ext_yaml.display()))?;
     let parsed: YamlValue =
         serde_yaml_ng::from_str(&body).with_context(|| "parsing external-dependencies.yaml")?;
 
@@ -276,8 +269,7 @@ fn migrate_from_bootstrap(
 fn make_backup_dir(home: &Path) -> Result<PathBuf> {
     let ts = ainb_fetch::fetcher::now_utc_iso8601().replace(':', "-");
     let dir = home.join("backups").join(ts);
-    fs::create_dir_all(&dir)
-        .with_context(|| format!("creating backup dir {}", dir.display()))?;
+    fs::create_dir_all(&dir).with_context(|| format!("creating backup dir {}", dir.display()))?;
     Ok(dir)
 }
 

@@ -9,17 +9,17 @@
 use std::io;
 use std::path::Path;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 
 use ainb_adapters_source::{
-    pick_adapter, ManifestAdapter, MarketplaceAdapter, RawAdapter, SingleAdapter, SourceAdapter,
+    ManifestAdapter, MarketplaceAdapter, RawAdapter, SingleAdapter, SourceAdapter, pick_adapter,
 };
+use ainb_fetch::{FetchedRef, Fetcher, GitFetcher, HttpFetcher, LocalFetcher};
+use ainb_skill_core::SourceType;
 use ainb_skill_core::lockfile::{LockedSource, Lockfile};
 use ainb_skill_core::manifest::{Manifest, SourceEntry};
 use ainb_skill_core::paths::{cache_dir_in, lockfile_path_in, manifest_path_in};
 use ainb_skill_core::uri::Uri;
-use ainb_skill_core::SourceType;
-use ainb_fetch::{FetchedRef, Fetcher, GitFetcher, HttpFetcher, LocalFetcher};
 
 use crate::{AddArgs, NameArg, RemoveArgs, SourceCommand};
 
@@ -31,10 +31,7 @@ pub fn parse_kind_hint(s: &str) -> std::result::Result<String, String> {
     if ALLOWED_KINDS.contains(&s) {
         Ok(s.to_string())
     } else {
-        Err(format!(
-            "must be one of {}",
-            ALLOWED_KINDS.join(", ")
-        ))
+        Err(format!("must be one of {}", ALLOWED_KINDS.join(", ")))
     }
 }
 
@@ -57,8 +54,8 @@ fn add(
     lockfile_path: &Path,
     out: &mut dyn io::Write,
 ) -> Result<()> {
-    let uri = Uri::parse(&args.uri)
-        .with_context(|| format!("parsing source URI `{}`", args.uri))?;
+    let uri =
+        Uri::parse(&args.uri).with_context(|| format!("parsing source URI `{}`", args.uri))?;
 
     if uri.path.is_some() {
         bail!(
@@ -293,7 +290,10 @@ mod tests {
 
     #[test]
     fn slug_strips_slashes() {
-        assert_eq!(derive_name_slug(&SourceType::Gh, "stevengonsalvez/my-skills"), "stevengonsalvez-my-skills");
+        assert_eq!(
+            derive_name_slug(&SourceType::Gh, "stevengonsalvez/my-skills"),
+            "stevengonsalvez-my-skills"
+        );
     }
 
     #[test]

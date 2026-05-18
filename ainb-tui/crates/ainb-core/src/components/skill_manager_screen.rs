@@ -119,11 +119,12 @@ fn render_sources_panel(frame: &mut Frame, area: Rect, data: &SkillsScreenData) 
                 format!(" {:<12} ", source.name),
                 Style::default().fg(SOFT_WHITE),
             );
-            let uri = Span::styled(
-                format!("({})", source.uri),
-                Style::default().fg(MUTED_GRAY),
-            );
-            lines.push(Line::from(vec![Span::styled(glyph, glyph_style), name, uri]));
+            let uri = Span::styled(format!("({})", source.uri), Style::default().fg(MUTED_GRAY));
+            lines.push(Line::from(vec![
+                Span::styled(glyph, glyph_style),
+                name,
+                uri,
+            ]));
         }
     }
     let para = Paragraph::new(lines).block(block);
@@ -181,9 +182,7 @@ fn render_units_table(frame: &mut Frame, area: Rect, data: &SkillsScreenData) {
 fn render_detail_pane(frame: &mut Frame, area: Rect, data: &SkillsScreenData) {
     let title = match data.detail.as_ref() {
         Some(_) if !data.units.is_empty() => {
-            let sel = data
-                .units
-                .get(data.selected.min(data.units.len().saturating_sub(1)));
+            let sel = data.units.get(data.selected.min(data.units.len().saturating_sub(1)));
             match sel {
                 Some(u) => format!(" Detail (#{} {}) ", u.idx, u.name),
                 None => " Detail ".to_string(),

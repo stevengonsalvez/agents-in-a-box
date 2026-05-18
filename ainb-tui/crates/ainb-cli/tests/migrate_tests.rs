@@ -5,9 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use ainb_cli::{
-    dispatch, AddArgs, Command, InstallArgs, MigrateArgs, SkillCommand, SourceCommand,
-};
+use ainb_cli::{AddArgs, Command, InstallArgs, MigrateArgs, SkillCommand, SourceCommand, dispatch};
 use ainb_skill_core::manifest::{Manifest, UnitEntry};
 use ainb_skill_core::paths::manifest_path_in;
 
@@ -26,10 +24,7 @@ const ALL_TOOL_ENV_VARS: &[&str] = &[
 ];
 
 fn tmp_home() -> tempfile::TempDir {
-    tempfile::Builder::new()
-        .prefix("ainb-migrate-")
-        .tempdir()
-        .expect("tempdir")
+    tempfile::Builder::new().prefix("ainb-migrate-").tempdir().expect("tempdir")
 }
 
 fn run_migrate(home: &Path, args: MigrateArgs) -> (String, anyhow::Result<()>) {
@@ -257,15 +252,12 @@ fn migrate_clean_wipes_and_syncs_from_manifest() {
 
         // Make the manifest declare the same unit so clean → sync
         // reinstalls it after the wipe.
-        let mut manifest =
-            Manifest::load_from(&manifest_path_in(home.path())).unwrap();
+        let mut manifest = Manifest::load_from(&manifest_path_in(home.path())).unwrap();
         manifest.units.push(UnitEntry {
             uri: unit_uri.clone(),
             targets: Some(vec!["claude".into()]),
         });
-        manifest
-            .save_to(&manifest_path_in(home.path()))
-            .unwrap();
+        manifest.save_to(&manifest_path_in(home.path())).unwrap();
 
         let (out, res) = run_migrate(
             home.path(),
@@ -281,7 +273,10 @@ fn migrate_clean_wipes_and_syncs_from_manifest() {
         );
         res.expect("clean ok");
         assert!(out.contains("wiped"), "got: {out}");
-        assert!(out.contains("installed") || out.contains("install"), "got: {out}");
+        assert!(
+            out.contains("installed") || out.contains("install"),
+            "got: {out}"
+        );
 
         // Stray gone, real unit re-installed.
         assert!(
@@ -337,15 +332,12 @@ fn migrate_clean_backup_snapshots_existing_state() {
         )
         .unwrap();
 
-        let mut manifest =
-            Manifest::load_from(&manifest_path_in(home.path())).unwrap();
+        let mut manifest = Manifest::load_from(&manifest_path_in(home.path())).unwrap();
         manifest.units.push(UnitEntry {
             uri: unit_uri.clone(),
             targets: Some(vec!["claude".into()]),
         });
-        manifest
-            .save_to(&manifest_path_in(home.path()))
-            .unwrap();
+        manifest.save_to(&manifest_path_in(home.path())).unwrap();
 
         let (out, res) = run_migrate(
             home.path(),
@@ -363,10 +355,7 @@ fn migrate_clean_backup_snapshots_existing_state() {
         assert!(out.contains("backup"), "got: {out}");
 
         let backups_root = home.path().join("backups");
-        let entries: Vec<_> = std::fs::read_dir(&backups_root)
-            .unwrap()
-            .flatten()
-            .collect();
+        let entries: Vec<_> = std::fs::read_dir(&backups_root).unwrap().flatten().collect();
         assert_eq!(entries.len(), 1, "expected one backup dir");
         let snapshot = entries[0].path();
         assert!(
@@ -419,15 +408,12 @@ fn migrate_clean_dry_run_does_not_wipe() {
 
         // Declare the same unit in the manifest so --clean doesn't bail
         // on "manifest has no units".
-        let mut manifest =
-            Manifest::load_from(&manifest_path_in(home.path())).unwrap();
+        let mut manifest = Manifest::load_from(&manifest_path_in(home.path())).unwrap();
         manifest.units.push(UnitEntry {
             uri: format!("{local_uri}@main/skills/commit"),
             targets: Some(vec!["claude".into()]),
         });
-        manifest
-            .save_to(&manifest_path_in(home.path()))
-            .unwrap();
+        manifest.save_to(&manifest_path_in(home.path())).unwrap();
 
         let (out, res) = run_migrate(
             home.path(),

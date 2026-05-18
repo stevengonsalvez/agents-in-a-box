@@ -1,9 +1,7 @@
 //! RooAdapter tests — accept matrix + plan/apply/uninstall + list scope.
 
 use ainb_adapters_source::{RawAdapter, ResolvedUnit, SourceAdapter};
-use ainb_adapters_tool::{
-    plan::PlanOp, AcceptDecision, RooAdapter, ToolAdapter,
-};
+use ainb_adapters_tool::{AcceptDecision, RooAdapter, ToolAdapter, plan::PlanOp};
 use ainb_skill_core::{DeployedRef, UnitKind};
 
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -24,9 +22,7 @@ fn skill_fixture() -> (tempfile::TempDir, ResolvedUnit) {
         "---\nname: commit\n---\n",
     )
     .unwrap();
-    let r = RawAdapter::new()
-        .resolve_unit(dir.path(), "skills/commit")
-        .unwrap();
+    let r = RawAdapter::new().resolve_unit(dir.path(), "skills/commit").unwrap();
     (dir, r)
 }
 
@@ -90,7 +86,10 @@ fn list_installed_scope_skills_and_mcp() {
         std::fs::create_dir_all(dst.path().join("hooks/foo")).unwrap();
         std::fs::write(dst.path().join("hooks/foo/hook.yaml"), "x").unwrap();
         let installed = RooAdapter::new().list_installed().unwrap();
-        assert!(installed.is_empty(), "roo shouldn't list hooks: {installed:?}");
+        assert!(
+            installed.is_empty(),
+            "roo shouldn't list hooks: {installed:?}"
+        );
     });
 }
 

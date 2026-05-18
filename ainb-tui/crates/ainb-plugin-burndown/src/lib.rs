@@ -6,7 +6,8 @@
 //! generation + CLI) and the [`plugin`] module wires them onto the
 //! SDK's `Plugin` trait.
 
-#![allow(dead_code)] // Lifted analytics surface — many entry points used only by CLI subcommands.
+#![allow(dead_code)]
+// Lifted analytics surface — many entry points used only by CLI subcommands.
 // The cli/ui/data modules are a 1:1 port of the Phase 6c-cli host-side
 // burndown that ran inside ainb-tui. Style nits live with the original
 // code; the migration's value is the new subprocess shell, not a

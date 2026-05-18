@@ -4,11 +4,7 @@ use ainb_skill_core::{SourceType, Uri};
 
 fn assert_roundtrip(input: &str) -> Uri {
     let parsed = Uri::parse(input).unwrap_or_else(|e| panic!("`{input}` failed to parse: {e}"));
-    assert_eq!(
-        parsed.display(),
-        input,
-        "round-trip mismatch for `{input}`"
-    );
+    assert_eq!(parsed.display(), input, "round-trip mismatch for `{input}`");
     parsed
 }
 
@@ -63,7 +59,8 @@ fn parses_local_absolute_path() {
 
 #[test]
 fn parses_marketplace() {
-    let u = assert_roundtrip("marketplace:anthropic/claude-marketplace@latest/plugin/code-reviewer");
+    let u =
+        assert_roundtrip("marketplace:anthropic/claude-marketplace@latest/plugin/code-reviewer");
     assert_eq!(u.source_type, SourceType::Marketplace);
     assert_eq!(u.locator, "anthropic/claude-marketplace");
     assert_eq!(u.ref_.as_deref(), Some("latest"));

@@ -19,10 +19,7 @@ use sha2::{Digest, Sha256};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PlanOp {
     /// File does not exist on disk; will be written.
-    Create {
-        dst: PathBuf,
-        contents: Vec<u8>,
-    },
+    Create { dst: PathBuf, contents: Vec<u8> },
     /// File exists on disk; will be overwritten.
     Update {
         dst: PathBuf,
@@ -36,9 +33,7 @@ pub enum PlanOp {
 impl PlanOp {
     pub fn destination(&self) -> &Path {
         match self {
-            PlanOp::Create { dst, .. }
-            | PlanOp::Update { dst, .. }
-            | PlanOp::Delete { dst } => dst,
+            PlanOp::Create { dst, .. } | PlanOp::Update { dst, .. } | PlanOp::Delete { dst } => dst,
         }
     }
 

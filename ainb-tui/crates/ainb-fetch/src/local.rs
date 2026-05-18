@@ -12,7 +12,7 @@ use std::time::SystemTime;
 
 use ainb_skill_core::{SourceType, Uri};
 
-use crate::fetcher::{now_utc_iso8601, FetchError, FetchedRef, Fetcher};
+use crate::fetcher::{FetchError, FetchedRef, Fetcher, now_utc_iso8601};
 
 pub struct LocalFetcher;
 
@@ -97,18 +97,14 @@ mod tests {
     #[test]
     fn missing_path_errors() {
         let uri = Uri::parse("local:/definitely-not-a-real-path-9f7c1e3").unwrap();
-        let err = LocalFetcher::new()
-            .fetch(&uri, "x", Path::new("/tmp/ainb-cache"))
-            .unwrap_err();
+        let err = LocalFetcher::new().fetch(&uri, "x", Path::new("/tmp/ainb-cache")).unwrap_err();
         assert!(matches!(err, FetchError::Io(_)));
     }
 
     #[test]
     fn rejects_non_local_source_type() {
         let uri = Uri::parse("gh:foo/bar@main").unwrap();
-        let err = LocalFetcher::new()
-            .fetch(&uri, "x", Path::new("/tmp/ainb-cache"))
-            .unwrap_err();
+        let err = LocalFetcher::new().fetch(&uri, "x", Path::new("/tmp/ainb-cache")).unwrap_err();
         assert!(matches!(err, FetchError::UnsupportedSourceType(_)));
     }
 

@@ -32,10 +32,7 @@ fn plugins_staged() -> Option<PathBuf> {
     for _ in 0..6 {
         let candidate = dir.join("dist").join("plugins");
         if candidate.join("burndown").join("burndown").exists()
-            && candidate
-                .join("session-reader")
-                .join("session-reader")
-                .exists()
+            && candidate.join("session-reader").join("session-reader").exists()
         {
             return Some(candidate);
         }
@@ -57,36 +54,19 @@ git_directories = []
         env!("CARGO_PKG_VERSION")
     );
     fs::write(cfg.join("onboarding.toml"), onboarding).unwrap();
-    let proj_dir = home
-        .join(".claude")
-        .join("projects")
-        .join("-tripwire-fixture-project");
+    let proj_dir = home.join(".claude").join("projects").join("-tripwire-fixture-project");
     fs::create_dir_all(&proj_dir).unwrap();
     let session_jsonl = r#"{"type":"assistant","timestamp":"2026-05-10T12:00:00.000Z","sessionId":"fixture-session-1","cwd":"/tmp/x","message":{"model":"claude-sonnet-4-5","usage":{"input_tokens":1000,"output_tokens":500,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}
 "#;
-    fs::write(
-        proj_dir.join("fixture-session-1.jsonl"),
-        session_jsonl,
-    )
-    .unwrap();
+    fs::write(proj_dir.join("fixture-session-1.jsonl"), session_jsonl).unwrap();
 }
 
-fn run_export_csv(
-    plugin_root: &Path,
-    home: &Path,
-    output: &Path,
-) -> std::process::Output {
+fn run_export_csv(plugin_root: &Path, home: &Path, output: &Path) -> std::process::Output {
     Command::new(ainb_bin())
         .env("HOME", home)
         .env("AINB_PLUGIN_ROOT", plugin_root)
         .args([
-            "usage",
-            "export",
-            "--format",
-            "csv",
-            "--period",
-            "all",
-            "-o",
+            "usage", "export", "--format", "csv", "--period", "all", "-o",
         ])
         .arg(output)
         .output()
@@ -210,7 +190,11 @@ fn usage_export_csv_inline_stream_unchanged_without_output() {
         .args(["usage", "export", "--format", "csv", "--period", "all"])
         .output()
         .unwrap();
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         stdout.starts_with("section,metric,value"),
@@ -235,31 +219,21 @@ fn usage_report_top_caps_by_x_sections() {
         .env("HOME", home.path())
         .env("AINB_PLUGIN_ROOT", &plugin_root)
         .args([
-            "usage",
-            "report",
-            "--format",
-            "text",
-            "--period",
-            "all",
-            "--top",
-            "3",
+            "usage", "report", "--format", "text", "--period", "all", "--top", "3",
         ])
         .output()
         .unwrap();
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
 
     // Walk each section and confirm no more than 3 dash-bullet rows after it.
     for section in ["By Project", "By Activity", "By Model"] {
-        let after = stdout
-            .split_once(section)
-            .map(|(_, rest)| rest)
-            .unwrap_or("");
-        let rows = after
-            .lines()
-            .skip(1)
-            .take_while(|l| l.starts_with("- "))
-            .count();
+        let after = stdout.split_once(section).map(|(_, rest)| rest).unwrap_or("");
+        let rows = after.lines().skip(1).take_while(|l| l.starts_with("- ")).count();
         assert!(
             rows <= 3,
             "{section} emitted {rows} rows under --top 3 (max allowed: 3)\nFull output:\n{stdout}"

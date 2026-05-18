@@ -88,8 +88,7 @@ pub fn refresh_cache(root: &Path, cache_path: &Path) -> Result<UsageStats> {
     };
     if let Some(parent) = cache_path.parent() {
         if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
+            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
         }
     }
     let serialized = serde_json::to_vec_pretty(&cache)?;
@@ -103,8 +102,7 @@ pub fn load_cache(cache_path: &Path) -> Result<UsageCache> {
     if !cache_path.exists() {
         return Ok(UsageCache::default());
     }
-    let body = fs::read(cache_path)
-        .with_context(|| format!("reading {}", cache_path.display()))?;
+    let body = fs::read(cache_path).with_context(|| format!("reading {}", cache_path.display()))?;
     if body.iter().all(u8::is_ascii_whitespace) {
         return Ok(UsageCache::default());
     }
@@ -137,10 +135,7 @@ fn ingest_line(line: &str, stats: &mut UsageStats) {
         Ok(v) => v,
         Err(_) => return,
     };
-    let ts = value
-        .get("timestamp")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
+    let ts = value.get("timestamp").and_then(|v| v.as_str()).map(str::to_string);
 
     for name in extract_command_names(trimmed) {
         bump(stats, &name, ts.as_deref());
@@ -178,10 +173,8 @@ fn walk_for_skill(value: &serde_json::Value) -> Option<String> {
         if obj.get("type").and_then(|v| v.as_str()) == Some("tool_use")
             && obj.get("name").and_then(|v| v.as_str()) == Some("Skill")
         {
-            if let Some(skill) = obj
-                .get("input")
-                .and_then(|v| v.get("skill"))
-                .and_then(|v| v.as_str())
+            if let Some(skill) =
+                obj.get("input").and_then(|v| v.get("skill")).and_then(|v| v.as_str())
             {
                 return Some(skill.to_string());
             }
@@ -215,10 +208,7 @@ fn bump(stats: &mut UsageStats, name: &str, ts: Option<&str>) {
 
 fn now_iso() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let days = secs / 86_400;
     let rem = secs % 86_400;
     let (h, m, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
@@ -274,8 +264,10 @@ mod tests {
     #[test]
     fn ingest_keeps_latest_timestamp() {
         let mut stats: UsageStats = BTreeMap::new();
-        let older = r#"{"timestamp":"2026-01-01T00:00:00Z","content":"<command-name>x</command-name>"}"#;
-        let newer = r#"{"timestamp":"2026-06-01T00:00:00Z","content":"<command-name>x</command-name>"}"#;
+        let older =
+            r#"{"timestamp":"2026-01-01T00:00:00Z","content":"<command-name>x</command-name>"}"#;
+        let newer =
+            r#"{"timestamp":"2026-06-01T00:00:00Z","content":"<command-name>x</command-name>"}"#;
         ingest_line(older, &mut stats);
         ingest_line(newer, &mut stats);
         assert_eq!(stats["x"].invocations, 2);

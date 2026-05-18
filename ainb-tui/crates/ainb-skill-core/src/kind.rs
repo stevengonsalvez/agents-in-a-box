@@ -107,6 +107,9 @@ mod tests {
 
     #[test]
     fn accepts_legacy_underscore_for_mcp() {
-        assert_eq!("mcp_server".parse::<UnitKind>().unwrap(), UnitKind::McpServer);
+        assert_eq!(
+            "mcp_server".parse::<UnitKind>().unwrap(),
+            UnitKind::McpServer
+        );
     }
 }

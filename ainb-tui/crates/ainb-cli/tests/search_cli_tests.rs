@@ -2,15 +2,10 @@
 
 use std::path::{Path, PathBuf};
 
-use ainb_cli::{
-    dispatch, AddArgs, Command, NameArg, SearchArgs, SourceCommand,
-};
+use ainb_cli::{AddArgs, Command, NameArg, SearchArgs, SourceCommand, dispatch};
 
 fn tmp_home() -> tempfile::TempDir {
-    tempfile::Builder::new()
-        .prefix("ainb-search-test-")
-        .tempdir()
-        .expect("tempdir")
+    tempfile::Builder::new().prefix("ainb-search-test-").tempdir().expect("tempdir")
 }
 
 fn raw_fixture(skills: &[(&str, &str, &[&str])]) -> (String, tempfile::TempDir) {
@@ -106,10 +101,7 @@ fn filters_by_substring_in_description() {
 #[test]
 fn filters_by_tag() {
     let home = tmp_home();
-    let (uri, _fix) = raw_fixture(&[
-        ("a", "x", &["git"]),
-        ("b", "x", &["docker"]),
-    ]);
+    let (uri, _fix) = raw_fixture(&[("a", "x", &["git"]), ("b", "x", &["docker"])]);
     add_source(home.path(), uri, "src");
 
     let (out, res) = run_search(home.path(), "docker", None);
@@ -156,9 +148,7 @@ fn disabled_sources_are_excluded() {
     dispatch(
         home.path(),
         Command::Source {
-            action: SourceCommand::Disable(NameArg {
-                name: "off".into(),
-            }),
+            action: SourceCommand::Disable(NameArg { name: "off".into() }),
         },
         &mut buf,
     )

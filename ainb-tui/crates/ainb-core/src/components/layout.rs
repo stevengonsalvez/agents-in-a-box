@@ -134,7 +134,9 @@ impl LayoutComponent {
         }
 
         // Render new session overlay if visible
-        if state.current_screen == screen_ids::NEW_SESSION || state.current_screen == screen_ids::SEARCH_WORKSPACE {
+        if state.current_screen == screen_ids::NEW_SESSION
+            || state.current_screen == screen_ids::SEARCH_WORKSPACE
+        {
             self.new_session.render(frame, frame.size(), state);
         }
 

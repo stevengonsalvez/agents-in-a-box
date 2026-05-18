@@ -23,15 +23,14 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use ainb_plugin_protocol::{
-    framing,
-    methods,
+    framing, methods,
     params::{
         HandleEventParams, PluginInitResult, PluginShutdownResult, SnapshotPublishParams,
         SnapshotSubscribeResult,
     },
 };
 use ainb_plugin_types_sessions::{UsageDataEvent, WIRE_VERSION};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 fn binary_path() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_BIN_EXE_ainb-plugin-session-reader"))
@@ -129,9 +128,10 @@ fn subprocess_init_publishes_snapshot_then_responds_ok() {
         if let Some(method) = frame.get("method").and_then(Value::as_str) {
             match method {
                 m if m == methods::HOST_SNAPSHOT_SUBSCRIBE => {
-                    let id = frame.get("id").and_then(Value::as_i64).expect(
-                        "snapshot/subscribe should be a request with id",
-                    );
+                    let id = frame
+                        .get("id")
+                        .and_then(Value::as_i64)
+                        .expect("snapshot/subscribe should be a request with id");
                     let topic = frame
                         .get("params")
                         .and_then(|p| p.get("topic"))
@@ -142,10 +142,9 @@ fn subprocess_init_publishes_snapshot_then_responds_ok() {
                     break;
                 }
                 m if m == methods::HOST_SNAPSHOT_PUBLISH => {
-                    let params: SnapshotPublishParams = serde_json::from_value(
-                        frame.get("params").cloned().unwrap_or(Value::Null),
-                    )
-                    .expect("decode snapshot/publish params");
+                    let params: SnapshotPublishParams =
+                        serde_json::from_value(frame.get("params").cloned().unwrap_or(Value::Null))
+                            .expect("decode snapshot/publish params");
                     publish_seen = Some(params);
                 }
                 m if m == methods::HOST_LOG => { /* ignore log notifications */ }
@@ -180,8 +179,7 @@ fn subprocess_init_publishes_snapshot_then_responds_ok() {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut init_response: Option<Value> = None;
     while Instant::now() < deadline {
-        let frame = read_frame(&mut stdout)
-            .expect("plugin closed stdout before init response");
+        let frame = read_frame(&mut stdout).expect("plugin closed stdout before init response");
         if let Some(method) = frame.get("method").and_then(Value::as_str) {
             if method == methods::HOST_SNAPSHOT_PUBLISH {
                 panic!("plugin published during init — expected refresh-gated publish only");
@@ -194,7 +192,10 @@ fn subprocess_init_publishes_snapshot_then_responds_ok() {
     }
 
     let init_response = init_response.expect("no plugin/init response within deadline");
-    assert!(init_response.get("error").is_none(), "init failed: {init_response}");
+    assert!(
+        init_response.get("error").is_none(),
+        "init failed: {init_response}"
+    );
     let result_value = init_response.get("result").cloned().expect("init result");
     let init_result: PluginInitResult =
         serde_json::from_value(result_value).expect("decode PluginInitResult");
@@ -223,10 +224,9 @@ fn subprocess_init_publishes_snapshot_then_responds_ok() {
             None => break,
         };
         if frame.get("method").and_then(Value::as_str) == Some(methods::HOST_SNAPSHOT_PUBLISH) {
-            let params: SnapshotPublishParams = serde_json::from_value(
-                frame.get("params").cloned().unwrap_or(Value::Null),
-            )
-            .expect("decode publish params");
+            let params: SnapshotPublishParams =
+                serde_json::from_value(frame.get("params").cloned().unwrap_or(Value::Null))
+                    .expect("decode publish params");
             assert_eq!(params.topic, "sessions.usage_data");
             let event: UsageDataEvent = rmp_serde::from_slice(&params.payload)
                 .expect("snapshot payload is rmp-serde UsageDataEvent");
@@ -264,10 +264,9 @@ fn subprocess_init_publishes_snapshot_then_responds_ok() {
         };
         if frame.get("id").and_then(Value::as_i64) == Some(99) {
             assert!(frame.get("error").is_none(), "shutdown failed: {frame}");
-            let _: PluginShutdownResult = serde_json::from_value(
-                frame.get("result").cloned().unwrap_or(Value::Null),
-            )
-            .expect("decode PluginShutdownResult");
+            let _: PluginShutdownResult =
+                serde_json::from_value(frame.get("result").cloned().unwrap_or(Value::Null))
+                    .expect("decode PluginShutdownResult");
             shutdown_ok = true;
             break;
         }

@@ -12,8 +12,8 @@ use ainb_adapters_source::ResolvedUnit;
 use ainb_skill_core::{DeployedRef, UnitKind};
 
 use crate::install_root::install_root_for;
-use crate::plan::{apply_plan, InstallPlan, InstallReport};
-use crate::{convention, AcceptDecision, ToolAdapter};
+use crate::plan::{InstallPlan, InstallReport, apply_plan};
+use crate::{AcceptDecision, ToolAdapter, convention};
 
 pub struct CodexAdapter;
 
@@ -40,10 +40,9 @@ impl ToolAdapter for CodexAdapter {
 
     fn accepts(&self, kind: UnitKind) -> AcceptDecision {
         match kind {
-            UnitKind::Skill
-            | UnitKind::Agent
-            | UnitKind::Command
-            | UnitKind::McpServer => AcceptDecision::Yes,
+            UnitKind::Skill | UnitKind::Agent | UnitKind::Command | UnitKind::McpServer => {
+                AcceptDecision::Yes
+            }
             UnitKind::Plugin => AcceptDecision::No {
                 reason: "codex does not support plugins (claude-native)".into(),
             },
@@ -57,7 +56,12 @@ impl ToolAdapter for CodexAdapter {
     }
 
     fn plan_install(&self, unit: &ResolvedUnit) -> anyhow::Result<InstallPlan> {
-        convention::plan_install_prefix_swap(self.name(), unit, &self.install_root(), &self.template_substitutions())
+        convention::plan_install_prefix_swap(
+            self.name(),
+            unit,
+            &self.install_root(),
+            &self.template_substitutions(),
+        )
     }
 
     fn apply(&self, plan: &InstallPlan) -> anyhow::Result<InstallReport> {

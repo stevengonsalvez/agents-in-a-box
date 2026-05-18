@@ -17,7 +17,7 @@ use std::path::Path;
 use ainb_skill_core::{SourceType, Uri};
 
 use crate::cache::cache_path_for;
-use crate::fetcher::{now_utc_iso8601, FetchError, FetchedRef, Fetcher};
+use crate::fetcher::{FetchError, FetchedRef, Fetcher, now_utc_iso8601};
 
 pub struct HttpFetcher {
     client: reqwest::blocking::Client,
@@ -143,9 +143,7 @@ mod tests {
     fn rejects_non_https_source_type() {
         let uri = Uri::parse("gh:foo/bar@main").unwrap();
         let cache = tempfile::tempdir().unwrap();
-        let err = HttpFetcher::new()
-            .fetch(&uri, "x", cache.path())
-            .unwrap_err();
+        let err = HttpFetcher::new().fetch(&uri, "x", cache.path()).unwrap_err();
         assert!(matches!(err, FetchError::UnsupportedSourceType(_)));
     }
 
@@ -158,9 +156,7 @@ mod tests {
         let cache = tempfile::tempdir().unwrap();
         // Stable, tiny endpoint that just echoes bytes.
         let uri = Uri::parse("https://httpbin.org/bytes/64").unwrap();
-        let fetched = HttpFetcher::new()
-            .fetch(&uri, "httpbin", cache.path())
-            .unwrap();
+        let fetched = HttpFetcher::new().fetch(&uri, "httpbin", cache.path()).unwrap();
         assert!(fetched.path.exists());
         assert_eq!(std::fs::metadata(&fetched.path).unwrap().len(), 64);
     }

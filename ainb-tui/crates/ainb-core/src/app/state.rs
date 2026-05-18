@@ -3025,8 +3025,8 @@ impl Default for AppState {
             skills_load_receiver: None,
 
             // Skill-manager screen state (spec §10.1)
-            skill_manager_state:
-                crate::components::skill_manager_screen::SkillsScreenData::default(),
+            skill_manager_state: crate::components::skill_manager_screen::SkillsScreenData::default(
+            ),
 
             // Periodic session snapshot tracking
             last_snapshot_time: None,

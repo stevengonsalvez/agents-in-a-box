@@ -55,7 +55,14 @@ git_directories = []
 
     let unit_uri = format!("{local_uri}@main/skills/commit");
     let install = Command::new(&bin)
-        .args(["skill", "install", &unit_uri, "--targets", "claude", "--yes"])
+        .args([
+            "skill",
+            "install",
+            &unit_uri,
+            "--targets",
+            "claude",
+            "--yes",
+        ])
         .env("HOME", home.path())
         .env("AINB_HOME", ainb_home.path())
         .output()
@@ -63,7 +70,11 @@ git_directories = []
     assert!(install.status.success(), "skill install failed");
 
     let deployed_file = ainb_home.path().join("tools/claude/skills/commit/SKILL.md");
-    assert!(deployed_file.exists(), "install didn't land where expected: {}", deployed_file.display());
+    assert!(
+        deployed_file.exists(),
+        "install didn't land where expected: {}",
+        deployed_file.display()
+    );
 
     // Snapshot lockfile bytes + the deployed file contents before
     // migrate --check.

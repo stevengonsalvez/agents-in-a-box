@@ -21,7 +21,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 use ainb_adapters_tool::{all_adapters, plan::hex_sha256};
 use ainb_skill_core::lockfile::{DeployedRef, Lockfile};
@@ -29,8 +29,8 @@ use ainb_skill_core::manifest::Manifest;
 use ainb_skill_core::paths::{cache_dir_in, lockfile_path_in, manifest_path_in};
 use ainb_skill_core::uri::Uri;
 
-use crate::source::run_fetcher;
 use crate::DoctorArgs;
+use crate::source::run_fetcher;
 
 pub fn dispatch(home: &Path, args: DoctorArgs, out: &mut dyn io::Write) -> Result<()> {
     let mut issues: Vec<String> = Vec::new();
@@ -94,10 +94,7 @@ pub fn dispatch(home: &Path, args: DoctorArgs, out: &mut dyn io::Write) -> Resul
                     writeline(
                         "file",
                         true,
-                        &format!(
-                            "{} (tool {tool}) missing on disk",
-                            candidate.display()
-                        ),
+                        &format!("{} (tool {tool}) missing on disk", candidate.display()),
                     )?;
                     file_problems += 1;
                     continue;
@@ -176,17 +173,11 @@ pub fn dispatch(home: &Path, args: DoctorArgs, out: &mut dyn io::Write) -> Resul
             let uri_str = format!("{}@{}", entry.uri, entry.r#ref);
             match Uri::parse(&uri_str) {
                 Ok(uri) => match run_fetcher(&uri, &entry.name, &cache_dir_in(home)) {
-                    Ok(_) => writeline(
-                        "reachability",
-                        false,
-                        &format!("{}: fetch OK", entry.name),
-                    )?,
+                    Ok(_) => {
+                        writeline("reachability", false, &format!("{}: fetch OK", entry.name))?
+                    }
                     Err(e) => {
-                        writeline(
-                            "reachability",
-                            true,
-                            &format!("{}: {e}", entry.name),
-                        )?;
+                        writeline("reachability", true, &format!("{}: {e}", entry.name))?;
                         source_problems += 1;
                     }
                 },
@@ -277,9 +268,5 @@ fn finalize(out: &mut dyn io::Write, issues: Vec<String>) -> Result<()> {
 }
 
 fn short(hex: &str) -> &str {
-    if hex.len() > 12 {
-        &hex[..12]
-    } else {
-        hex
-    }
+    if hex.len() > 12 { &hex[..12] } else { hex }
 }

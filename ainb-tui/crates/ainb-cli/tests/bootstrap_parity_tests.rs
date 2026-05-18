@@ -24,9 +24,7 @@
 
 use std::path::{Path, PathBuf};
 
-use ainb_cli::{
-    dispatch, AddArgs, Command, InstallArgs, SkillCommand, SourceCommand,
-};
+use ainb_cli::{AddArgs, Command, InstallArgs, SkillCommand, SourceCommand, dispatch};
 use ainb_skill_core::lockfile::{DeployedRef, Lockfile};
 use ainb_skill_core::paths::lockfile_path_in;
 
@@ -45,10 +43,7 @@ const ALL_TOOL_ENV_VARS: &[&str] = &[
 ];
 
 fn tmp_home() -> tempfile::TempDir {
-    tempfile::Builder::new()
-        .prefix("ainb-parity-")
-        .tempdir()
-        .expect("tempdir")
+    tempfile::Builder::new().prefix("ainb-parity-").tempdir().expect("tempdir")
 }
 
 fn with_tool_homes<R>(base: &Path, body: impl FnOnce() -> R) -> R {
@@ -207,12 +202,7 @@ fn shared_content_lands_in_every_named_target() {
     let home = tmp_home();
     let base = tempfile::tempdir().unwrap();
     with_tool_homes(base.path(), || {
-        let (_src, uri) = add_local_source_with_unit(
-            home.path(),
-            "fix",
-            "skills/review",
-            "shared",
-        );
+        let (_src, uri) = add_local_source_with_unit(home.path(), "fix", "skills/review", "shared");
         let (out, res) = install(home.path(), &uri, "claude,codex,copilot,gemini");
         res.expect("install ok");
         assert!(out.contains("4 tool(s)"), "got: {out}");
@@ -248,35 +238,52 @@ fn template_substitution_applies_per_tool_at_install_time() {
         let (_o, res) = install(home.path(), &uri, "claude,codex,gemini");
         res.expect("install ok");
 
-        let claude_body = std::fs::read_to_string(
-            base.path().join("claude/skills/templated/SKILL.md"),
-        )
-        .unwrap();
-        assert!(claude_body.contains("TOOL_DIR==.claude"), "got: {claude_body}");
-        assert!(claude_body.contains("TOOL_NAME==claude"), "got: {claude_body}");
-        assert!(claude_body.contains("HOME_TOOL_DIR==~/.claude"), "got: {claude_body}");
-        assert!(!claude_body.contains("{{"), "raw template leaked: {claude_body}");
+        let claude_body =
+            std::fs::read_to_string(base.path().join("claude/skills/templated/SKILL.md")).unwrap();
+        assert!(
+            claude_body.contains("TOOL_DIR==.claude"),
+            "got: {claude_body}"
+        );
+        assert!(
+            claude_body.contains("TOOL_NAME==claude"),
+            "got: {claude_body}"
+        );
+        assert!(
+            claude_body.contains("HOME_TOOL_DIR==~/.claude"),
+            "got: {claude_body}"
+        );
+        assert!(
+            !claude_body.contains("{{"),
+            "raw template leaked: {claude_body}"
+        );
 
-        let codex_body = std::fs::read_to_string(
-            base.path().join("codex/skills/templated/SKILL.md"),
-        )
-        .unwrap();
+        let codex_body =
+            std::fs::read_to_string(base.path().join("codex/skills/templated/SKILL.md")).unwrap();
         assert!(codex_body.contains("TOOL_DIR==.codex"), "got: {codex_body}");
-        assert!(codex_body.contains("HOME_TOOL_DIR==~/.codex"), "got: {codex_body}");
+        assert!(
+            codex_body.contains("HOME_TOOL_DIR==~/.codex"),
+            "got: {codex_body}"
+        );
 
-        let gemini_body = std::fs::read_to_string(
-            base.path().join("gemini/skills/templated/SKILL.md"),
-        )
-        .unwrap();
-        assert!(gemini_body.contains("TOOL_DIR==.gemini"), "got: {gemini_body}");
-        assert!(gemini_body.contains("HOME_TOOL_DIR==~/.gemini"), "got: {gemini_body}");
+        let gemini_body =
+            std::fs::read_to_string(base.path().join("gemini/skills/templated/SKILL.md")).unwrap();
+        assert!(
+            gemini_body.contains("TOOL_DIR==.gemini"),
+            "got: {gemini_body}"
+        );
+        assert!(
+            gemini_body.contains("HOME_TOOL_DIR==~/.gemini"),
+            "got: {gemini_body}"
+        );
     });
 }
 
 #[test]
 fn template_substitution_leaves_non_utf8_payloads_untouched() {
     use ainb_adapters_tool::{ClaudeAdapter, ToolAdapter};
-    let bytes = [0xFF, 0xFE, b'{', b'{', b'T', b'O', b'O', b'L', b'_', b'D', b'I', b'R', b'}', b'}', 0x00];
+    let bytes = [
+        0xFF, 0xFE, b'{', b'{', b'T', b'O', b'O', b'L', b'_', b'D', b'I', b'R', b'}', b'}', 0x00,
+    ];
     let subs = ClaudeAdapter::new().template_substitutions();
     let out = ainb_adapters_tool::convention::apply_substitutions(&bytes, &subs);
     assert_eq!(out, bytes, "binary content must pass through unchanged");
@@ -301,7 +308,12 @@ fn accepts_matrix_matches_spec_section_7_4() {
             let want_yes = expected.contains(&k);
             let got = adapter.accepts(k);
             if want_yes {
-                assert_eq!(got, AcceptDecision::Yes, "{} should accept {k}", adapter.name());
+                assert_eq!(
+                    got,
+                    AcceptDecision::Yes,
+                    "{} should accept {k}",
+                    adapter.name()
+                );
             } else {
                 assert!(
                     !got.is_yes(),
@@ -326,7 +338,12 @@ fn accepts_matrix_matches_spec_section_7_4() {
     );
     assert_accepts(
         CodexAdapter::new(),
-        &[UnitKind::Skill, UnitKind::Agent, UnitKind::Command, UnitKind::McpServer],
+        &[
+            UnitKind::Skill,
+            UnitKind::Agent,
+            UnitKind::Command,
+            UnitKind::McpServer,
+        ],
     );
     assert_accepts(CopilotAdapter::new(), &[UnitKind::Skill, UnitKind::Agent]);
     assert_accepts(GeminiAdapter::new(), &[UnitKind::Skill, UnitKind::Agent]);
@@ -351,12 +368,7 @@ fn default_install_fans_out_to_all_accepting_adapters() {
     let home = tmp_home();
     let base = tempfile::tempdir().unwrap();
     with_tool_homes(base.path(), || {
-        let (_src, uri) = add_local_source_with_unit(
-            home.path(),
-            "fix",
-            "skills/everyone",
-            "v1",
-        );
+        let (_src, uri) = add_local_source_with_unit(home.path(), "fix", "skills/everyone", "v1");
         let mut buf = Vec::new();
         let res = dispatch(
             home.path(),
@@ -406,12 +418,8 @@ fn real_homes_opt_in_writes_under_fake_home() {
     std::env::set_var("AINB_USE_REAL_HOMES", "1");
 
     let home = tmp_home();
-    let (_src, uri) = add_local_source_with_unit(
-        home.path(),
-        "fix",
-        "skills/commit",
-        "real-home-target",
-    );
+    let (_src, uri) =
+        add_local_source_with_unit(home.path(), "fix", "skills/commit", "real-home-target");
     let _ = ainb_home; // unused; just keeps the dir alive.
 
     let mut buf = Vec::new();

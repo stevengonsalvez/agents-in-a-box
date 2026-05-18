@@ -13,8 +13,8 @@ use ainb_adapters_source::ResolvedUnit;
 use ainb_skill_core::{DeployedRef, UnitKind};
 
 use crate::install_root::install_root_for;
-use crate::plan::{apply_plan, InstallPlan, InstallReport};
-use crate::{convention, AcceptDecision, ToolAdapter};
+use crate::plan::{InstallPlan, InstallReport, apply_plan};
+use crate::{AcceptDecision, ToolAdapter, convention};
 
 pub struct ClaudeDesktopAdapter;
 
@@ -64,7 +64,12 @@ impl ToolAdapter for ClaudeDesktopAdapter {
     }
 
     fn plan_install(&self, unit: &ResolvedUnit) -> anyhow::Result<InstallPlan> {
-        convention::plan_install_prefix_swap(self.name(), unit, &self.install_root(), &self.template_substitutions())
+        convention::plan_install_prefix_swap(
+            self.name(),
+            unit,
+            &self.install_root(),
+            &self.template_substitutions(),
+        )
     }
 
     fn apply(&self, plan: &InstallPlan) -> anyhow::Result<InstallReport> {
@@ -89,7 +94,10 @@ impl ToolAdapter for ClaudeDesktopAdapter {
         let mut m = HashMap::new();
         m.insert("TOOL_DIR", "Library/Application Support/Claude".to_string());
         m.insert("TOOL_NAME", "claude-desktop".to_string());
-        m.insert("HOME_TOOL_DIR", "~/Library/Application Support/Claude".to_string());
+        m.insert(
+            "HOME_TOOL_DIR",
+            "~/Library/Application Support/Claude".to_string(),
+        );
         m
     }
 }

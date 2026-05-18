@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use ainb_adapters_source::ResolvedUnit;
 use ainb_skill_core::DeployedRef;
 
-use crate::plan::{hex_sha256, InstallPlan, PlanOp};
+use crate::plan::{InstallPlan, PlanOp, hex_sha256};
 
 /// Compute an InstallPlan by reading each file in `unit.file_list`
 /// from `unit.source_root` and mapping it to the same relative path
@@ -40,8 +40,7 @@ pub fn plan_install_prefix_swap(
     for rel in &unit.file_list {
         let src = unit.source_root.join(rel);
         let dst = install_root.join(rel);
-        let raw = fs::read(&src)
-            .map_err(|e| anyhow::anyhow!("read `{}`: {e}", src.display()))?;
+        let raw = fs::read(&src).map_err(|e| anyhow::anyhow!("read `{}`: {e}", src.display()))?;
         let contents = apply_substitutions(&raw, substitutions);
         if dst.exists() {
             let previous = fs::read(&dst).unwrap_or_default();
@@ -101,10 +100,7 @@ pub fn uninstall(deployed: &DeployedRef, install_root: &Path) -> anyhow::Result<
     let DeployedRef::Deployed { file_hashes, .. } = deployed else {
         return Ok(());
     };
-    let mut paths: Vec<PathBuf> = file_hashes
-        .keys()
-        .map(|rel| install_root.join(rel))
-        .collect();
+    let mut paths: Vec<PathBuf> = file_hashes.keys().map(|rel| install_root.join(rel)).collect();
     paths.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
 
     for abs in &paths {

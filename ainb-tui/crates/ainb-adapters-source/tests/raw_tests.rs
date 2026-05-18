@@ -66,10 +66,7 @@ fn detect_requires_a_convention_dir() {
         "empty dir should not match"
     );
     std::fs::create_dir(dir.path().join("skills")).unwrap();
-    assert!(
-        RawAdapter::new().detect(dir.path()),
-        "skills/ should match"
-    );
+    assert!(RawAdapter::new().detect(dir.path()), "skills/ should match");
 }
 
 #[test]
@@ -103,25 +100,34 @@ fn lists_all_seven_kinds() {
     assert!(by_kind.get("skill").unwrap().contains(&"commit".to_string()));
     assert!(by_kind.get("skill").unwrap().contains(&"review-pr".to_string()));
     assert_eq!(by_kind.get("plugin").unwrap(), &vec!["reflect".to_string()]);
-    assert_eq!(by_kind.get("agent").unwrap(), &vec!["researcher".to_string()]);
+    assert_eq!(
+        by_kind.get("agent").unwrap(),
+        &vec!["researcher".to_string()]
+    );
     assert_eq!(by_kind.get("command").unwrap(), &vec!["run".to_string()]);
-    assert_eq!(by_kind.get("hook").unwrap(), &vec!["pre-commit".to_string()]);
+    assert_eq!(
+        by_kind.get("hook").unwrap(),
+        &vec!["pre-commit".to_string()]
+    );
     assert_eq!(
         by_kind.get("mcp-server").unwrap(),
         &vec!["filesystem".to_string(), "github".to_string()]
     );
-    assert_eq!(by_kind.get("statusline").unwrap(), &vec!["cost".to_string()]);
+    assert_eq!(
+        by_kind.get("statusline").unwrap(),
+        &vec!["cost".to_string()]
+    );
 }
 
 #[test]
 fn skill_frontmatter_fields_populate_descriptor() {
     let fixture = make_fixture();
     let units = RawAdapter::new().list_units(fixture.path()).unwrap();
-    let commit = units
-        .iter()
-        .find(|u| u.kind == "skill" && u.name == "commit")
-        .unwrap();
-    assert_eq!(commit.description.as_deref(), Some("well-formatted commits"));
+    let commit = units.iter().find(|u| u.kind == "skill" && u.name == "commit").unwrap();
+    assert_eq!(
+        commit.description.as_deref(),
+        Some("well-formatted commits")
+    );
     assert_eq!(commit.tags, vec!["git", "workflow"]);
     assert_eq!(commit.requires, vec!["git"]);
     assert_eq!(commit.path, "skills/commit");
@@ -130,9 +136,7 @@ fn skill_frontmatter_fields_populate_descriptor() {
 #[test]
 fn resolve_unit_returns_matching_descriptor() {
     let fixture = make_fixture();
-    let resolved = RawAdapter::new()
-        .resolve_unit(fixture.path(), "skills/commit")
-        .unwrap();
+    let resolved = RawAdapter::new().resolve_unit(fixture.path(), "skills/commit").unwrap();
     assert_eq!(resolved.descriptor.name, "commit");
     assert_eq!(resolved.descriptor.kind, "skill");
 }
@@ -140,9 +144,7 @@ fn resolve_unit_returns_matching_descriptor() {
 #[test]
 fn resolve_unit_errors_on_missing_path() {
     let fixture = make_fixture();
-    let err = RawAdapter::new()
-        .resolve_unit(fixture.path(), "skills/nope")
-        .unwrap_err();
+    let err = RawAdapter::new().resolve_unit(fixture.path(), "skills/nope").unwrap_err();
     assert!(err.to_string().contains("no unit at path"), "got: {err}");
 }
 

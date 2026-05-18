@@ -22,9 +22,9 @@ use std::path::Path;
 
 use serde_yaml_ng::Value as YamlValue;
 
+use crate::SourceAdapter;
 use crate::frontmatter;
 use crate::types::UnitDescriptor;
-use crate::SourceAdapter;
 
 pub struct RawAdapter;
 
@@ -148,16 +148,14 @@ fn scan_plugins(root: &Path, out: &mut Vec<UnitDescriptor>) -> anyhow::Result<()
         }
         let dir_name = entry.file_name().to_string_lossy().to_string();
         let body = fs::read_to_string(&plugin_json).unwrap_or_default();
-        let json: serde_json::Value = serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
+        let json: serde_json::Value =
+            serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
         let name = json
             .get("name")
             .and_then(|v| v.as_str())
             .map(str::to_string)
             .unwrap_or_else(|| dir_name.clone());
-        let description = json
-            .get("description")
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
+        let description = json.get("description").and_then(|v| v.as_str()).map(str::to_string);
 
         out.push(UnitDescriptor {
             name,
@@ -187,11 +185,7 @@ fn scan_flat_md(
         if p.extension().and_then(|e| e.to_str()) != Some("md") {
             continue;
         }
-        let stem = p
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_string();
+        let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
         let body = fs::read_to_string(&p).unwrap_or_default();
         let (meta, _) = frontmatter::parse(&body);
         let name = frontmatter::str_field(&meta, "name")

@@ -366,7 +366,10 @@ mod tests {
 
         let mut cache = HashMap::new();
         let cwd = dir.path().to_string_lossy().into_owned();
-        assert_eq!(resolve_repo(&cwd, &mut cache), Some("acme/widget".to_string()));
+        assert_eq!(
+            resolve_repo(&cwd, &mut cache),
+            Some("acme/widget".to_string())
+        );
     }
 
     #[test]
@@ -384,7 +387,10 @@ mod tests {
 
         let mut cache = HashMap::new();
         let cwd = nested.to_string_lossy().into_owned();
-        assert_eq!(resolve_repo(&cwd, &mut cache), Some("acme/widget".to_string()));
+        assert_eq!(
+            resolve_repo(&cwd, &mut cache),
+            Some("acme/widget".to_string())
+        );
     }
 
     #[test]
@@ -424,7 +430,10 @@ mod tests {
     #[test]
     fn cache_hit_short_circuits_resolution() {
         let mut cache = HashMap::new();
-        cache.insert("/no/such/path".to_string(), Some("cached/value".to_string()));
+        cache.insert(
+            "/no/such/path".to_string(),
+            Some("cached/value".to_string()),
+        );
         // No filesystem access — value comes straight from cache.
         assert_eq!(
             resolve_repo("/no/such/path", &mut cache),
@@ -437,5 +446,4 @@ mod tests {
         // Ensure Windows paths don't get mistaken for scp URLs.
         assert_eq!(extract_owner_repo("C:\\users\\dev\\repo"), None);
     }
-
 }

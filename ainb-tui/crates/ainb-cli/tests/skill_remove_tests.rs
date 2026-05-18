@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use ainb_cli::{
-    dispatch, AddArgs, Command, InstallArgs, RemoveSkillArgs, SkillCommand, SourceCommand,
+    AddArgs, Command, InstallArgs, RemoveSkillArgs, SkillCommand, SourceCommand, dispatch,
 };
 use ainb_skill_core::lockfile::Lockfile;
 use ainb_skill_core::paths::lockfile_path_in;
@@ -66,11 +66,7 @@ fn with_tool_homes<R>(
     r
 }
 
-fn install_then(
-    home: &Path,
-    unit_uri: &str,
-    targets: Option<&str>,
-) {
+fn install_then(home: &Path, unit_uri: &str, targets: Option<&str>) {
     let mut buf = Vec::new();
     dispatch(
         home,
@@ -220,6 +216,9 @@ fn remove_without_yes_or_dry_run_errors() {
             }),
         );
         let err = res.unwrap_err().to_string();
-        assert!(err.contains("--yes") || err.contains("dry-run"), "got: {err}");
+        assert!(
+            err.contains("--yes") || err.contains("dry-run"),
+            "got: {err}"
+        );
     });
 }

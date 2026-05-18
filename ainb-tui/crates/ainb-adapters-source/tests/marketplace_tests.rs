@@ -66,9 +66,7 @@ fn skips_entries_without_name() {
 fn rejects_invalid_json() {
     let dir = tempfile::tempdir().unwrap();
     write_marketplace(dir.path(), "{not valid");
-    let err = MarketplaceAdapter::new()
-        .list_units(dir.path())
-        .unwrap_err();
+    let err = MarketplaceAdapter::new().list_units(dir.path()).unwrap_err();
     assert!(err.to_string().contains("parsing"), "got: {err}");
 }
 
@@ -76,8 +74,6 @@ fn rejects_invalid_json() {
 fn resolve_unit_returns_descriptor() {
     let dir = tempfile::tempdir().unwrap();
     write_marketplace(dir.path(), r#"[{"name": "x"}]"#);
-    let resolved = MarketplaceAdapter::new()
-        .resolve_unit(dir.path(), "plugins/x")
-        .unwrap();
+    let resolved = MarketplaceAdapter::new().resolve_unit(dir.path(), "plugins/x").unwrap();
     assert_eq!(resolved.descriptor.name, "x");
 }

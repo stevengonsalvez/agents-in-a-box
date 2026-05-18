@@ -63,7 +63,9 @@ fn render_op(op: &PlanOp) -> String {
             ));
             s.push_str(&render_unified(b"", contents));
         }
-        PlanOp::Update { previous, contents, .. } => {
+        PlanOp::Update {
+            previous, contents, ..
+        } => {
             s.push_str(&format!("--- {dst_display} (before)\n"));
             s.push_str(&format!("+++ {dst_display} (after)\n"));
             s.push_str(&render_unified(previous, contents));
@@ -132,13 +134,9 @@ pub fn page(text: &str) -> Result<()> {
         }
     };
     {
-        let stdin = child
-            .stdin
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("pager stdin unavailable"))?;
-        stdin
-            .write_all(text.as_bytes())
-            .context("write to pager")?;
+        let stdin =
+            child.stdin.as_mut().ok_or_else(|| anyhow::anyhow!("pager stdin unavailable"))?;
+        stdin.write_all(text.as_bytes()).context("write to pager")?;
     }
     child.wait().context("wait for pager")?;
     Ok(())
@@ -220,7 +218,10 @@ mod tests {
             dst: PathBuf::from("/y/b.md"),
         }]);
         let s = render_plans(&[a, b]);
-        assert!(s.contains("summary: 2 file op(s) across 2 plan(s)"), "got: {s}");
+        assert!(
+            s.contains("summary: 2 file op(s) across 2 plan(s)"),
+            "got: {s}"
+        );
     }
 
     #[test]

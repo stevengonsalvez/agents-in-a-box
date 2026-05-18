@@ -58,10 +58,7 @@ pub trait Fetcher: Send + Sync {
 /// [`FetchedRef::fetched_at`].
 pub fn now_utc_iso8601() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     // Avoid pulling in chrono just for one timestamp — format manually.
     let days = secs / 86_400;
     let rem = secs % 86_400;

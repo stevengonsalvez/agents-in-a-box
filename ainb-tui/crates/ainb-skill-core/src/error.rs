@@ -8,7 +8,9 @@ pub enum CoreError {
     #[error("invalid unit URI: {0}")]
     InvalidUri(String),
 
-    #[error("unknown source type `{0}` — expected one of: gh, git, gist, https, local, npm, marketplace")]
+    #[error(
+        "unknown source type `{0}` — expected one of: gh, git, gist, https, local, npm, marketplace"
+    )]
     UnknownSourceType(String),
 
     #[error("manifest at {path:?} is invalid: {message}")]

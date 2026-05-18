@@ -75,9 +75,7 @@ fn send_key(session: &str, key: &str) {
 }
 
 fn kill_session(session: &str) {
-    let _ = Command::new("tmux")
-        .args(["kill-session", "-t", session])
-        .status();
+    let _ = Command::new("tmux").args(["kill-session", "-t", session]).status();
 }
 
 #[test]
@@ -97,10 +95,7 @@ fn pressing_M_on_home_opens_skill_manager_screen() {
 
     // Spawn a sized tmux session, then launch ainb inside it.
     let status = Command::new("tmux")
-        .args([
-            "new-session", "-d", "-s", &session,
-            "-x", "200", "-y", "50",
-        ])
+        .args(["new-session", "-d", "-s", &session, "-x", "200", "-y", "50"])
         .status()
         .expect("tmux new-session");
     assert!(status.success(), "tmux new-session failed");
@@ -122,15 +117,9 @@ fn pressing_M_on_home_opens_skill_manager_screen() {
     // Require the welcome-panel literal too so the predicate only
     // fires when both the sidebar AND the right-hand panel are
     // alive — the binary is then ready to consume keystrokes.
-    let home_render = poll_capture(
-        &session,
-        Instant::now() + Duration::from_secs(120),
-        |c| {
-            c.contains("Agents")
-                && c.contains("Catalog")
-                && c.contains("Welcome to AINB")
-        },
-    );
+    let home_render = poll_capture(&session, Instant::now() + Duration::from_secs(120), |c| {
+        c.contains("Agents") && c.contains("Catalog") && c.contains("Welcome to AINB")
+    });
     let home_render = match home_render {
         Some(r) => r,
         None => {
@@ -160,24 +149,15 @@ fn pressing_M_on_home_opens_skill_manager_screen() {
     // Positive AND negative markers per hard rule #2 — substring-OR
     // on lone chrome strings ("Sources", "ainb") would silently pass
     // if the wrong screen rendered.
-    let post = poll_capture(
-        &session,
-        Instant::now() + Duration::from_secs(90),
-        |c| {
-            c.contains("Sources")
-                && c.contains("Units")
-                && c.contains("Detail")
-                && c.contains("[i]")
-        },
-    );
+    let post = poll_capture(&session, Instant::now() + Duration::from_secs(90), |c| {
+        c.contains("Sources") && c.contains("Units") && c.contains("Detail") && c.contains("[i]")
+    });
     let post = match post {
         Some(p) => p,
         None => {
             let dump = capture_pane(&session);
             kill_session(&session);
-            panic!(
-                "SkillManager screen never rendered after pressing M. last capture:\n{dump}"
-            );
+            panic!("SkillManager screen never rendered after pressing M. last capture:\n{dump}");
         }
     };
     kill_session(&session);
@@ -186,10 +166,7 @@ fn pressing_M_on_home_opens_skill_manager_screen() {
     // ships with SkillsScreenData::default() until the live-data
     // binding follow-up lands. "(no sources configured)" is the
     // placeholder we shipped in component code.
-    assert!(
-        post.contains("Sources"),
-        "missing Sources panel: {post}"
-    );
+    assert!(post.contains("Sources"), "missing Sources panel: {post}");
     assert!(post.contains("Units"), "missing Units panel: {post}");
     assert!(post.contains("Detail"), "missing Detail pane: {post}");
     assert!(

@@ -111,6 +111,9 @@ fn save_is_atomic_via_tmp_rename() {
         s = PathBuf::from(os);
         s
     };
-    assert!(!tmp.exists(), "sibling .tmp should be cleaned up after rename");
+    assert!(
+        !tmp.exists(),
+        "sibling .tmp should be cleaned up after rename"
+    );
     assert!(path.exists());
 }

@@ -50,9 +50,5 @@ pub trait SourceAdapter: Send + Sync {
 
     /// Fully resolve one unit by its relative `path`. P3+ uses this to
     /// drive the install diff pipeline; P2 only needs a minimal stub.
-    fn resolve_unit(
-        &self,
-        fetched_root: &Path,
-        path: &str,
-    ) -> anyhow::Result<ResolvedUnit>;
+    fn resolve_unit(&self, fetched_root: &Path, path: &str) -> anyhow::Result<ResolvedUnit>;
 }

@@ -2,7 +2,7 @@
 
 use ainb_adapters_source::{RawAdapter, ResolvedUnit, SourceAdapter};
 use ainb_adapters_tool::{
-    adapter_by_name, all_adapters, AcceptDecision, CopilotAdapter, ToolAdapter,
+    AcceptDecision, CopilotAdapter, ToolAdapter, adapter_by_name, all_adapters,
 };
 use ainb_skill_core::UnitKind;
 
@@ -24,9 +24,7 @@ fn skill_fixture() -> (tempfile::TempDir, ResolvedUnit) {
         "---\nname: commit\n---\n",
     )
     .unwrap();
-    let r = RawAdapter::new()
-        .resolve_unit(dir.path(), "skills/commit")
-        .unwrap();
+    let r = RawAdapter::new().resolve_unit(dir.path(), "skills/commit").unwrap();
     (dir, r)
 }
 
@@ -63,7 +61,10 @@ fn plan_apply_skill_creates_files() {
 #[test]
 fn template_substitutions_use_github_path() {
     let m = CopilotAdapter::new().template_substitutions();
-    assert_eq!(m.get("TOOL_DIR").map(String::as_str), Some(".github/copilot"));
+    assert_eq!(
+        m.get("TOOL_DIR").map(String::as_str),
+        Some(".github/copilot")
+    );
 }
 
 #[test]

@@ -66,7 +66,14 @@ git_directories = []
     // `<HOME>/.claude/skills/commit/SKILL.md`.
     let unit_uri = format!("{local_uri}@main/skills/commit");
     let install = Command::new(&bin)
-        .args(["skill", "install", &unit_uri, "--targets", "claude", "--yes"])
+        .args([
+            "skill",
+            "install",
+            &unit_uri,
+            "--targets",
+            "claude",
+            "--yes",
+        ])
         .env("HOME", home.path())
         .env("AINB_HOME", ainb_home.path())
         .env("AINB_USE_REAL_HOMES", "1")

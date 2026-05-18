@@ -1,7 +1,7 @@
 //! SingleAdapter tests + adapter-priority pick tests.
 
 use ainb_adapters_source::{
-    pick_adapter, ManifestAdapter, MarketplaceAdapter, RawAdapter, SingleAdapter, SourceAdapter,
+    ManifestAdapter, MarketplaceAdapter, RawAdapter, SingleAdapter, SourceAdapter, pick_adapter,
 };
 
 #[test]
@@ -83,11 +83,7 @@ fn pick_adapter_prefers_marketplace_over_raw() {
     // Has both signatures — marketplace wins.
     std::fs::create_dir(dir.path().join("skills")).unwrap();
     std::fs::create_dir_all(dir.path().join(".claude-plugin")).unwrap();
-    std::fs::write(
-        dir.path().join(".claude-plugin/marketplace.json"),
-        "[]",
-    )
-    .unwrap();
+    std::fs::write(dir.path().join(".claude-plugin/marketplace.json"), "[]").unwrap();
     let picked = pick_adapter(dir.path()).unwrap();
     assert_eq!(picked.name(), "marketplace");
 }

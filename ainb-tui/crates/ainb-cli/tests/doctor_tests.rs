@@ -3,9 +3,7 @@
 
 use std::path::Path;
 
-use ainb_cli::{
-    dispatch, AddArgs, Command, DoctorArgs, InstallArgs, SkillCommand, SourceCommand,
-};
+use ainb_cli::{AddArgs, Command, DoctorArgs, InstallArgs, SkillCommand, SourceCommand, dispatch};
 
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -22,10 +20,7 @@ const ALL_TOOL_ENV_VARS: &[&str] = &[
 ];
 
 fn tmp_home() -> tempfile::TempDir {
-    tempfile::Builder::new()
-        .prefix("ainb-doctor-")
-        .tempdir()
-        .expect("tempdir")
+    tempfile::Builder::new().prefix("ainb-doctor-").tempdir().expect("tempdir")
 }
 
 fn with_tool_homes<R>(base: &Path, body: impl FnOnce() -> R) -> R {

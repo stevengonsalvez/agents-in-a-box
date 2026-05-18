@@ -1,9 +1,7 @@
 //! ClaudeDesktopAdapter tests — accept matrix + plan/apply/uninstall + list scope.
 
 use ainb_adapters_source::{RawAdapter, ResolvedUnit, SourceAdapter};
-use ainb_adapters_tool::{
-    plan::PlanOp, AcceptDecision, ClaudeDesktopAdapter, ToolAdapter,
-};
+use ainb_adapters_tool::{AcceptDecision, ClaudeDesktopAdapter, ToolAdapter, plan::PlanOp};
 use ainb_skill_core::{DeployedRef, UnitKind};
 
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -32,9 +30,7 @@ fn skill_fixture() -> (tempfile::TempDir, ResolvedUnit) {
         "---\nname: commit\n---\n",
     )
     .unwrap();
-    let r = RawAdapter::new()
-        .resolve_unit(dir.path(), "skills/commit")
-        .unwrap();
+    let r = RawAdapter::new().resolve_unit(dir.path(), "skills/commit").unwrap();
     (dir, r)
 }
 
@@ -98,7 +94,10 @@ fn list_installed_scope_is_mcp_only() {
         std::fs::create_dir_all(dst.path().join("skills/foo")).unwrap();
         std::fs::write(dst.path().join("skills/foo/SKILL.md"), "x").unwrap();
         let installed = ClaudeDesktopAdapter::new().list_installed().unwrap();
-        assert!(installed.is_empty(), "claude-desktop shouldn't list skills: {installed:?}");
+        assert!(
+            installed.is_empty(),
+            "claude-desktop shouldn't list skills: {installed:?}"
+        );
     });
 }
 

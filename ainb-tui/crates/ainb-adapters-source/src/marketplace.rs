@@ -14,8 +14,8 @@ use std::path::Path;
 
 use serde_yaml_ng::Value as YamlValue;
 
-use crate::types::{ResolvedUnit, UnitDescriptor};
 use crate::SourceAdapter;
+use crate::types::{ResolvedUnit, UnitDescriptor};
 
 const MANIFEST_REL: &str = ".claude-plugin/marketplace.json";
 
@@ -59,15 +59,9 @@ impl SourceAdapter for MarketplaceAdapter {
 
         let mut out = Vec::with_capacity(entries.len());
         for entry in entries {
-            let name = entry
-                .get("name")
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
+            let name = entry.get("name").and_then(|v| v.as_str()).map(str::to_string);
             let Some(name) = name else { continue };
-            let description = entry
-                .get("description")
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
+            let description = entry.get("description").and_then(|v| v.as_str()).map(str::to_string);
             // Relative path inside the source — if the entry encodes
             // its own location use that, otherwise default to the
             // plugin name.
@@ -89,11 +83,7 @@ impl SourceAdapter for MarketplaceAdapter {
         Ok(out)
     }
 
-    fn resolve_unit(
-        &self,
-        fetched_root: &Path,
-        path: &str,
-    ) -> anyhow::Result<ResolvedUnit> {
+    fn resolve_unit(&self, fetched_root: &Path, path: &str) -> anyhow::Result<ResolvedUnit> {
         let units = self.list_units(fetched_root)?;
         let descriptor = units
             .into_iter()

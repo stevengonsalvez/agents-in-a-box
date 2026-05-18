@@ -1,9 +1,7 @@
 //! CursorAdapter tests — accept matrix + plan/apply/uninstall + list scope.
 
 use ainb_adapters_source::{RawAdapter, ResolvedUnit, SourceAdapter};
-use ainb_adapters_tool::{
-    plan::PlanOp, AcceptDecision, CursorAdapter, ToolAdapter,
-};
+use ainb_adapters_tool::{AcceptDecision, CursorAdapter, ToolAdapter, plan::PlanOp};
 use ainb_skill_core::{DeployedRef, UnitKind};
 
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -24,9 +22,7 @@ fn skill_fixture() -> (tempfile::TempDir, ResolvedUnit) {
         "---\nname: commit\n---\n",
     )
     .unwrap();
-    let r = RawAdapter::new()
-        .resolve_unit(dir.path(), "skills/commit")
-        .unwrap();
+    let r = RawAdapter::new().resolve_unit(dir.path(), "skills/commit").unwrap();
     (dir, r)
 }
 
@@ -92,7 +88,10 @@ fn list_installed_scope_skips_unsupported_kinds() {
         std::fs::create_dir_all(dst.path().join("agents")).unwrap();
         std::fs::write(dst.path().join("agents/foo.md"), "x").unwrap();
         let installed = CursorAdapter::new().list_installed().unwrap();
-        assert!(installed.is_empty(), "cursor shouldn't list agents: {installed:?}");
+        assert!(
+            installed.is_empty(),
+            "cursor shouldn't list agents: {installed:?}"
+        );
     });
 }
 

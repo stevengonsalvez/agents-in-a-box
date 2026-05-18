@@ -114,9 +114,7 @@ impl Uri {
         };
 
         if locator.is_empty() {
-            return Err(CoreError::InvalidUri(format!(
-                "empty locator in `{input}`"
-            )));
+            return Err(CoreError::InvalidUri(format!("empty locator in `{input}`")));
         }
 
         let (ref_, path) = match ref_path {

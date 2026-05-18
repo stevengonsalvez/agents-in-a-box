@@ -4,12 +4,10 @@
 
 use std::path::{Path, PathBuf};
 
-use ainb_cli::{
-    dispatch, AddArgs, Command, InstallArgs, SkillCommand, SourceCommand, UpdateArgs,
-};
+use ainb_cli::{AddArgs, Command, InstallArgs, SkillCommand, SourceCommand, UpdateArgs, dispatch};
+use ainb_skill_core::DeployedRef;
 use ainb_skill_core::lockfile::Lockfile;
 use ainb_skill_core::paths::lockfile_path_in;
-use ainb_skill_core::DeployedRef;
 
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -212,10 +210,8 @@ fn update_applies_new_content_and_bumps_lockfile_sha() {
         assert!(out.contains("updated 1 unit"), "got: {out}");
 
         // File on disk now carries the new body.
-        let installed = std::fs::read_to_string(
-            claude_dst.path().join("skills/commit/SKILL.md"),
-        )
-        .unwrap();
+        let installed =
+            std::fs::read_to_string(claude_dst.path().join("skills/commit/SKILL.md")).unwrap();
         assert!(
             installed.contains("body-v2-after-edit"),
             "deployed file didn't refresh: {installed}"

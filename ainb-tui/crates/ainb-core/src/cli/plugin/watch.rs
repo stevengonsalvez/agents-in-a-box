@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use ainb_plugin_runtime::{LifecycleState, PluginId, RuntimeHandle};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use chrono::Utc;
 use serde::Serialize;
 
@@ -46,9 +46,7 @@ pub async fn run(plugin_id: &str, duration_secs: Option<u64>) -> Result<()> {
     // Drop the owning runtime off the async context — dropping it while
     // we're still inside the outer tokio runtime hits the "Cannot drop a
     // runtime in a context where blocking is not allowed" panic.
-    tokio::task::spawn_blocking(move || drop(runtime))
-        .await
-        .ok();
+    tokio::task::spawn_blocking(move || drop(runtime)).await.ok();
     outcome
 }
 
@@ -62,15 +60,9 @@ pub(crate) async fn run_with_handle(
 ) -> Result<()> {
     let pid = PluginId::from(plugin_id);
     let registered = handle.registered_plugins();
-    let target = registered
-        .iter()
-        .find(|p| p.id == pid)
-        .cloned()
-        .ok_or_else(|| {
-            anyhow!(
-                "plugin '{plugin_id}' is not registered — try 'ainb plugin list'"
-            )
-        })?;
+    let target = registered.iter().find(|p| p.id == pid).cloned().ok_or_else(|| {
+        anyhow!("plugin '{plugin_id}' is not registered — try 'ainb plugin list'")
+    })?;
 
     print_header(&target);
 
@@ -130,12 +122,7 @@ impl Event {
     }
 }
 
-async fn poll_loop(
-    handle: &RuntimeHandle,
-    pid: &PluginId,
-    topics: &[String],
-    duration: Duration,
-) {
+async fn poll_loop(handle: &RuntimeHandle, pid: &PluginId, topics: &[String], duration: Duration) {
     let deadline = Instant::now() + duration;
     let mut last_state: Option<LifecycleState> = handle.lifecycle_state(pid);
     if let Some(s) = last_state {
@@ -223,10 +210,7 @@ mod tests {
         // we don't tangle with the runtime owned by the
         // [`ainb_plugin_runtime::Runtime`] under test.
         let (runtime, handle) = Runtime::new().expect("runtime");
-        let test_rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
+        let test_rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let result = test_rt.block_on(run_with_handle(&handle, "nonexistent", Some(1)));
         // Drop the plugin runtime off the test thread before the test
         // tokio runtime tears down, mirroring the dance run() does.

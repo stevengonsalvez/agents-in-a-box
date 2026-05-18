@@ -248,11 +248,7 @@ pub fn run() -> Result<()> {
 /// Dispatch a parsed command against an explicit ainb home. Used by
 /// integration tests so they can isolate state in a tempdir without
 /// touching the process env.
-pub fn dispatch(
-    home: &std::path::Path,
-    command: Command,
-    out: &mut dyn io::Write,
-) -> Result<()> {
+pub fn dispatch(home: &std::path::Path, command: Command, out: &mut dyn io::Write) -> Result<()> {
     match command {
         Command::Source { action } => source::dispatch(home, action, out),
         Command::Search(args) => search::dispatch(home, args, out),

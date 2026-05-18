@@ -38,9 +38,7 @@ pub fn install_root_for(tool: &str) -> PathBuf {
         }
     }
 
-    ainb_skill_core::default_ainb_home()
-        .join("tools")
-        .join(tool)
+    ainb_skill_core::default_ainb_home().join("tools").join(tool)
 }
 
 /// Translate a tool name into its env-var override (e.g.
@@ -76,9 +74,7 @@ fn real_home_for(tool: &str) -> Option<PathBuf> {
         "claude-desktop" => {
             #[cfg(target_os = "macos")]
             {
-                PathBuf::from("Library")
-                    .join("Application Support")
-                    .join("Claude")
+                PathBuf::from("Library").join("Application Support").join("Claude")
             }
             #[cfg(not(target_os = "macos"))]
             {
@@ -152,9 +148,7 @@ mod tests {
         std::env::remove_var("AINB_USE_REAL_HOMES");
         assert_eq!(
             p,
-            PathBuf::from("/tmp/fake-home-for-test")
-                .join(".aws")
-                .join("amazonq")
+            PathBuf::from("/tmp/fake-home-for-test").join(".aws").join("amazonq")
         );
     }
 

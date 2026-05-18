@@ -4,9 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use ainb_cli::{
-    dispatch, AddArgs, Command, InstallArgs, SkillCommand, SourceCommand, SyncArgs,
-};
+use ainb_cli::{AddArgs, Command, InstallArgs, SkillCommand, SourceCommand, SyncArgs, dispatch};
 use ainb_skill_core::lockfile::Lockfile;
 use ainb_skill_core::manifest::{Manifest, UnitEntry};
 use ainb_skill_core::paths::{lockfile_path_in, manifest_path_in};
@@ -14,10 +12,7 @@ use ainb_skill_core::paths::{lockfile_path_in, manifest_path_in};
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn tmp_home() -> tempfile::TempDir {
-    tempfile::Builder::new()
-        .prefix("ainb-skill-sync-")
-        .tempdir()
-        .expect("tempdir")
+    tempfile::Builder::new().prefix("ainb-skill-sync-").tempdir().expect("tempdir")
 }
 
 fn run(home: &Path, action: SkillCommand) -> (String, anyhow::Result<()>) {
@@ -101,15 +96,12 @@ fn sync_with_aligned_state_is_noop() {
 
         // Declare the same unit in the manifest so it's aligned with
         // what install placed in the lockfile.
-        let mut manifest =
-            Manifest::load_from(&manifest_path_in(home.path())).unwrap();
+        let mut manifest = Manifest::load_from(&manifest_path_in(home.path())).unwrap();
         manifest.units.push(UnitEntry {
             uri: unit_uri.clone(),
             targets: None,
         });
-        manifest
-            .save_to(&manifest_path_in(home.path()))
-            .unwrap();
+        manifest.save_to(&manifest_path_in(home.path())).unwrap();
 
         let (out, res) = run(
             home.path(),
@@ -131,17 +123,13 @@ fn sync_installs_manifest_declared_missing_unit() {
 
     with_all_tool_homes_under(base.path(), || {
         // Manifest declares the unit; lockfile is empty.
-        let mut manifest =
-            Manifest::load_from(&manifest_path_in(home.path())).unwrap();
+        let mut manifest = Manifest::load_from(&manifest_path_in(home.path())).unwrap();
         manifest.units.push(UnitEntry {
             uri: unit_uri.clone(),
             targets: Some(vec!["claude".into()]),
         });
-        manifest
-            .save_to(&manifest_path_in(home.path()))
-            .unwrap();
-        let lock_before =
-            Lockfile::load_from(&lockfile_path_in(home.path())).unwrap();
+        manifest.save_to(&manifest_path_in(home.path())).unwrap();
+        let lock_before = Lockfile::load_from(&lockfile_path_in(home.path())).unwrap();
         assert!(lock_before.units.is_empty());
 
         let (out, res) = run(
@@ -154,8 +142,7 @@ fn sync_installs_manifest_declared_missing_unit() {
         res.expect("sync ok");
         assert!(out.contains("1 installed"), "got: {out}");
 
-        let lock_after =
-            Lockfile::load_from(&lockfile_path_in(home.path())).unwrap();
+        let lock_after = Lockfile::load_from(&lockfile_path_in(home.path())).unwrap();
         assert_eq!(lock_after.units.len(), 1);
         assert_eq!(lock_after.units[0].declared_uri, unit_uri);
     });
@@ -180,9 +167,11 @@ fn sync_removes_orphan_lockfile_unit() {
         res.expect("install");
 
         // Manifest does NOT declare the unit → orphan.
-        let manifest =
-            Manifest::load_from(&manifest_path_in(home.path())).unwrap();
-        assert!(manifest.units.is_empty(), "manifest must not list units yet");
+        let manifest = Manifest::load_from(&manifest_path_in(home.path())).unwrap();
+        assert!(
+            manifest.units.is_empty(),
+            "manifest must not list units yet"
+        );
 
         let (out, res) = run(
             home.path(),
@@ -194,18 +183,14 @@ fn sync_removes_orphan_lockfile_unit() {
         res.expect("sync ok");
         assert!(out.contains("1 removed"), "got: {out}");
 
-        let lock_after =
-            Lockfile::load_from(&lockfile_path_in(home.path())).unwrap();
+        let lock_after = Lockfile::load_from(&lockfile_path_in(home.path())).unwrap();
         assert!(
             lock_after.units.is_empty(),
             "orphan must be cleared from lockfile: {:?}",
             lock_after.units
         );
         assert!(
-            !base
-                .path()
-                .join("claude/skills/commit/SKILL.md")
-                .exists(),
+            !base.path().join("claude/skills/commit/SKILL.md").exists(),
             "orphan file must be removed from disk"
         );
     });
@@ -220,15 +205,12 @@ fn sync_dry_run_reports_plan_without_mutating() {
     with_all_tool_homes_under(base.path(), || {
         // Declare in manifest, do not install — sync should plan an
         // install but dry-run must not execute it.
-        let mut manifest =
-            Manifest::load_from(&manifest_path_in(home.path())).unwrap();
+        let mut manifest = Manifest::load_from(&manifest_path_in(home.path())).unwrap();
         manifest.units.push(UnitEntry {
             uri: unit_uri.clone(),
             targets: Some(vec!["claude".into()]),
         });
-        manifest
-            .save_to(&manifest_path_in(home.path()))
-            .unwrap();
+        manifest.save_to(&manifest_path_in(home.path())).unwrap();
 
         let (out, res) = run(
             home.path(),
@@ -241,8 +223,7 @@ fn sync_dry_run_reports_plan_without_mutating() {
         assert!(out.contains("install:  1"), "got: {out}");
         assert!(out.contains("dry-run"), "got: {out}");
 
-        let lock_after =
-            Lockfile::load_from(&lockfile_path_in(home.path())).unwrap();
+        let lock_after = Lockfile::load_from(&lockfile_path_in(home.path())).unwrap();
         assert!(
             lock_after.units.is_empty(),
             "dry-run must not mutate lockfile: {:?}",
@@ -258,15 +239,12 @@ fn sync_without_yes_or_dry_run_errors_when_work_pending() {
     let base = tempfile::tempdir().unwrap();
 
     with_all_tool_homes_under(base.path(), || {
-        let mut manifest =
-            Manifest::load_from(&manifest_path_in(home.path())).unwrap();
+        let mut manifest = Manifest::load_from(&manifest_path_in(home.path())).unwrap();
         manifest.units.push(UnitEntry {
             uri: unit_uri.clone(),
             targets: Some(vec!["claude".into()]),
         });
-        manifest
-            .save_to(&manifest_path_in(home.path()))
-            .unwrap();
+        manifest.save_to(&manifest_path_in(home.path())).unwrap();
 
         let (_out, res) = run(
             home.path(),

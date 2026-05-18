@@ -61,9 +61,7 @@ where
 }
 
 fn kill_session(session: &str) {
-    let _ = Command::new("tmux")
-        .args(["kill-session", "-t", session])
-        .status();
+    let _ = Command::new("tmux").args(["kill-session", "-t", session]).status();
 }
 
 #[test]
@@ -98,15 +96,9 @@ fn home_tile_grid_lists_skill_manager() {
     // app/state.rs:487 is literally "Skills (manager)" and the
     // description "Install / sync / doctor (M)" — assert both are
     // present so a label/description regression also fires.
-    let post = poll_capture(
-        &session,
-        Instant::now() + Duration::from_secs(120),
-        |c| {
-            c.contains("Agents")
-                && c.contains("Catalog")
-                && c.contains("Skills (manager)")
-        },
-    );
+    let post = poll_capture(&session, Instant::now() + Duration::from_secs(120), |c| {
+        c.contains("Agents") && c.contains("Catalog") && c.contains("Skills (manager)")
+    });
     let post = match post {
         Some(p) => p,
         None => {

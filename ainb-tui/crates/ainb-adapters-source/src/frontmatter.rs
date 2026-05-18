@@ -69,11 +69,7 @@ pub fn str_list_field(meta: &Value, key: &str) -> Vec<String> {
     meta.as_mapping()
         .and_then(|m| m.get(Value::String(key.to_string())))
         .and_then(|v| v.as_sequence())
-        .map(|seq| {
-            seq.iter()
-                .filter_map(|item| item.as_str().map(str::to_string))
-                .collect()
-        })
+        .map(|seq| seq.iter().filter_map(|item| item.as_str().map(str::to_string)).collect())
         .unwrap_or_default()
 }
 
