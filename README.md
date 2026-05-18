@@ -88,10 +88,11 @@ Most AI coding setups are a loose collection of dotfiles. This project treats th
 # Install the TUI (macOS / Linux)
 brew tap stevengonsalvez/agents-in-a-box && brew install ainb
 
-# Install the toolkit for your AI tool
-cd toolkit && npm install && node create-rule.js --tool=claude-code-4.5
+# Seed the manifest from the toolkit and deploy units into your tool home
+ainb migrate --from-bootstrap --toolkit-root ./toolkit
+AINB_USE_REAL_HOMES=1 ainb migrate --clean --backup --yes
 
-# Launch
+# Launch the TUI
 ainb
 ```
 
@@ -417,8 +418,20 @@ agents-in-a-box/
 │   │   │   └── meta/           #     Agent creation & reflection
 │   │   ├── workflows/          #   Structured delivery workflows
 │   │   └── utilities/          #   Shared utilities
-│   ├── bootstrap.js            #   Multi-tool deployment engine
-│   └── create-rule.js          #   CLI installer
+│   └── catalog.yaml            #   Auto-generated discovery surface
+│                               #   (regenerate with toolkit/bin/generate-catalog.sh)
+│
+├── ainb-tui/                   # `ainb` binary (Rust) — TUI + skill-manager CLI
+│   ├── crates/
+│   │   ├── ainb-cli/           #   ainb source/skill/migrate/doctor subcommands
+│   │   ├── ainb-core/          #   ratatui app + manifest/lockfile/URI types
+│   │   ├── ainb-fetch/         #   git2 / http / local fetchers
+│   │   ├── ainb-adapters-source/  # marketplace / manifest / raw / single
+│   │   ├── ainb-adapters-tool/    # 9 tool adapters (claude/codex/copilot/…)
+│   │   ├── ainb-diff/          #   Diff render + pager driver
+│   │   ├── ainb-skill-core/    #   Manifest/lockfile/URI/paths/error
+│   │   └── ainb-usage/         #   JSONL invocation parser + cache
+│   └── plans/skill-manager/spec.md   # v1 design + acceptance criteria
 │
 ├── docs/                       # Documentation hub (Markdown source of truth)
 │   ├── README.md               #   Docs TOC
@@ -489,12 +502,21 @@ cargo deny check                        # Security + licenses
 ### Installing the toolkit
 
 ```bash
-cd toolkit
-npm install
-node create-rule.js --tool=claude-code-4.5    # Deploy to ~/.claude/
-node create-rule.js --tool=gemini             # Deploy to .gemini/
-node create-rule.js --tool=codex              # Deploy to ~/.codex/
+# Seed your manifest from the bundled toolkit on first run.
+ainb migrate --from-bootstrap --toolkit-root ./toolkit
+
+# Deploy into the real tool home dirs (opt-in via env).
+AINB_USE_REAL_HOMES=1 ainb skill sync --yes
+
+# Or scope the install to specific tools (passed to every mutating verb):
+ainb skill install local:./toolkit@main/packages/skills/commit --targets claude,codex
+ainb skill update --check                     # report drift across sources
+ainb skill update --all --yes                 # re-fetch + apply
+ainb doctor                                   # health-check the deployment
 ```
+
+See `ainb-tui/plans/skill-manager/spec.md` for the full §8 CLI
+surface (`source`, `skill`, `migrate`, `doctor`, `usage`).
 
 ### Contributing
 
