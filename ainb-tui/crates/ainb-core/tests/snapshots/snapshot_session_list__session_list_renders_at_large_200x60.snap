@@ -1,0 +1,64 @@
+---
+source: crates/ainb-core/tests/snapshot_session_list.rs
+expression: rendered
+---
+╭ 📁  Workspaces (1)────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│    ▼ 📁  project (20)                                                                                                                                                                                 │
+│▶ 1 [ ]├─ ⏸ 🖥️  ✻ ○ ainb/session-00                                                                                                                                                                    │
+│  2 [ ]├─ ⏸ 🖥️  ✻ ○ ainb/session-01                                                                                                                                                                    │
+│  3 [ ]├─ ⏸ 🖥️  ✻ ○ ainb/session-02                                                                                                                                                                    │
+│  4 [ ]├─ ⏸ 🖥️  ✻ ○ ainb/session-03                                                                                                                                                                    │
+│  5 [ ]├─ ⏸ 🖥️  ✻ ○ ainb/session-04                                                                                                                                                                    │
+│  6 [ ]├─ ⏸ 🖥️  ✻ ○ ainb/session-05                                                                                                                                                                    │
+│  7 [ ]├─ ⏸ 🖥️  ✻ ○ ainb/session-06                                                                                                                                                                    │
+│  8 [ ]├─ ⏸ 🖥️  ✻ ○ ainb/session-07                                                                                                                                                                    │
+│  9 [ ]├─ ⏸ 🖥️  ✻ ○ ainb/session-08                                                                                                                                                                    │
+│    [ ]├─ ⏸ 🖥️  ✻ ○ ainb/session-09                                                                                                                                                                    │
+│    [ ]├─ ⏸ 🖥️  ✻ ○ ainb/session-10                                                                                                                                                                    │
+│    [ ]├─ ⏸ 🖥️  ✻ ○ ainb/session-11                                                                                                                                                                    │
+│    [ ]├─ ⏸ 🖥️  ✻ ○ ainb/session-12                                                                                                                                                                    │
+│    [ ]├─ ⏸ 🖥️  ✻ ○ ainb/session-13                                                                                                                                                                    │
+│    [ ]├─ ⏸ 🖥️  ✻ ○ ainb/session-14                                                                                                                                                                    │
+│    [ ]├─ ⏸ 🖥️  ✻ ○ ainb/session-15                                                                                                                                                                    │
+│    [ ]├─ ⏸ 🖥️  ✻ ○ ainb/session-16                                                                                                                                                                    │
+│    [ ]├─ ⏸ 🖥️  ✻ ○ ainb/session-17                                                                                                                                                                    │
+│    [ ]├─ ⏸ 🖥️  ✻ ○ ainb/session-18                                                                                                                                                                    │
+│    [ ]└─ ⏸ 🖥️  ✻ ○ ainb/session-19                                                                                                                                                                    │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+│                                                                                                                                                                                                      │
+╰ Enter select │ s ⭐  │ $ shell │ Space mark │ D del marked │ F filter │ 1-9 attach ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

@@ -1,0 +1,14 @@
+---
+source: crates/ainb-core/tests/snapshot_session_list.rs
+expression: rendered
+---
+╭ 📁  Workspaces (1)──────────╮
+│    ▼ 📁  project (3)        │
+│▶ 1 [ ]├─ ⏸ 🖥️  ✻ ○ ainb/sess│
+│  2 [ ]├─ ⏸ 🖥️  ✻ ○ ainb/sess│
+│  3 [ ]└─ ⏸ 🖥️  ✻ ○ ainb/sess│
+│                            │
+│                            │
+│                            │
+│                            │
+╰ Enter select │ s ⭐  │ $ she╯
