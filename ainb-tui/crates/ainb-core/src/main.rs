@@ -45,6 +45,7 @@ mod models;
 mod plugins;
 mod providers;
 mod tmux;
+mod ui;
 mod usage_cache;
 mod widgets;
 

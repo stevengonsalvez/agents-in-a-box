@@ -89,6 +89,20 @@ pub enum BspError {
 }
 
 impl LayoutNode {
+    /// Default BSP root for the home screen: a 40/60 horizontal split of
+    /// `session_list` over `live_logs_stream`. Matches the legacy
+    /// `LayoutComponent::render` hardcoded `Constraint::Percentage(40) /
+    /// Percentage(60)` split (see `components/layout.rs:92`), so swapping
+    /// the legacy path for `bsp.walk(...)` produces visually identical
+    /// output at the same area.
+    pub fn default_root() -> Self {
+        LayoutNode::split_h(
+            0.4,
+            LayoutNode::pane("session_list").focused(true),
+            LayoutNode::pane("live_logs_stream"),
+        )
+    }
+
     pub fn pane(id: impl Into<LeafId>) -> Self {
         LayoutNode::Pane {
             id: id.into(),
