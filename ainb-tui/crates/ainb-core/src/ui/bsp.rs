@@ -45,12 +45,28 @@ pub enum LayoutNode {
 }
 
 /// Persistable snapshot wrapper.
+///
+/// Fields use `#[serde(default)]` so a future schema bump that adds new
+/// optional fields can land without breaking already-on-disk snapshots.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LayoutSnapshot {
+    #[serde(default = "default_snapshot_version")]
     pub version: u32,
     pub root: LayoutNode,
+    #[serde(default = "default_min_cols")]
     pub min_cols: u16,
+    #[serde(default = "default_min_rows")]
     pub min_rows: u16,
+}
+
+fn default_snapshot_version() -> u32 {
+    1
+}
+fn default_min_cols() -> u16 {
+    30
+}
+fn default_min_rows() -> u16 {
+    10
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]

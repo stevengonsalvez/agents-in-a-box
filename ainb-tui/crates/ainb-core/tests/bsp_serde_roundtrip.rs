@@ -51,3 +51,21 @@ fn snapshot_exposes_version_min_cols_min_rows() {
     assert_eq!(snap.min_cols, 30);
     assert_eq!(snap.min_rows, 10);
 }
+
+#[test]
+fn snapshot_decodes_with_only_root_field() {
+    // a legacy / hand-rolled JSON with just `root` should decode using
+    // built-in defaults (version=1, min_cols=30, min_rows=10).
+    let json = r#"{"root":{"kind":"pane","id":"only"}}"#;
+    let snap: LayoutSnapshot = serde_json::from_str(json).expect("decode partial");
+    assert_eq!(snap.version, 1);
+    assert_eq!(snap.min_cols, 30);
+    assert_eq!(snap.min_rows, 10);
+    match snap.root {
+        LayoutNode::Pane { id, focused } => {
+            assert_eq!(id, "only");
+            assert!(!focused);
+        }
+        _ => panic!("expected Pane"),
+    }
+}
