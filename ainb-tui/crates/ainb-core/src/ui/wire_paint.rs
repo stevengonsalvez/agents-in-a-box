@@ -41,12 +41,7 @@ pub fn paint_wire_buffer(target: &mut Buffer, wire: &WireBuffer, area: Rect) {
         let ty = area.y.saturating_add(coord.y);
         let dst = target.get_mut(tx, ty);
         dst.set_symbol(&cell.symbol);
-        dst.set_fg(rgb_to_color(cell.fg));
-        dst.set_bg(rgb_to_color(cell.bg));
-        dst.set_style(
-            ratatui::style::Style::default()
-                .add_modifier(modifier_bits_to_modifiers(cell.modifier)),
-        );
+        dst.set_style(cell_to_style(cell));
     }
 }
 
@@ -79,7 +74,10 @@ pub fn modifier_bits_to_modifiers(b: u16) -> Modifier {
     m
 }
 
-#[allow(dead_code)]
+/// Translate a wire `Cell`'s style attributes (fg, bg, modifier) into a
+/// single ratatui [`Style`]. The cell's `symbol` is NOT carried in the
+/// returned style — paint the symbol separately via [`Buffer::get_mut`]
+/// `.set_symbol`.
 fn cell_to_style(cell: &Cell) -> ratatui::style::Style {
     ratatui::style::Style::default()
         .fg(rgb_to_color(cell.fg))
