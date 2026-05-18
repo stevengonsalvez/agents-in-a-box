@@ -6,7 +6,30 @@ One canonical source. Many AI tools. Write a skill once, install it into Claude 
 
 ---
 
-## Quick start
+> **Migration notice — `ainb` is the new deploy surface (May 2026).**
+>
+> `bootstrap.js`, `update-externals.sh`, and `external-dependencies.yaml`
+> have been retired in favour of [`ainb`](../ainb-tui/), the Rust-based
+> unit manager. The new install / update / sync / migrate flow lives in
+> the spec at [`ainb-tui/plans/skill-manager/spec.md`](../ainb-tui/plans/skill-manager/spec.md).
+>
+> Day-1 path for existing users:
+>
+> ```bash
+> cargo install --path ainb-tui                       # one-time
+> ainb migrate --from-bootstrap --toolkit-root .      # seed manifest
+> ainb migrate --check                                # preview wipe
+> ainb migrate --clean --backup --yes                 # apply
+> ainb skill list                                     # verify
+> ```
+>
+> Sections below describe the legacy `bootstrap.js` workflow and remain
+> for historical reference; the engine itself no longer ships in this
+> repo. New users should skip directly to `ainb`.
+
+---
+
+## Quick start (legacy — retired, see migration notice above)
 
 ```bash
 cd toolkit
