@@ -1,0 +1,14 @@
+---
+source: crates/ainb-core/tests/snapshot_live_logs_stream.rs
+expression: rendered
+---
+┌🔴  Live Logs All Sessions  (┐
+│      No logs available     │
+│                            │
+│Logs will appear here when c│
+│                            │
+│                            │
+│                            │
+│                            │
+│                            │
+└────────────────────────────┘
