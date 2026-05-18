@@ -19,6 +19,7 @@ pub mod models;
 pub mod plugins;
 pub mod providers;
 pub mod tmux;
+pub mod ui;
 pub mod usage_cache;
 pub mod widgets;
 
