@@ -115,14 +115,21 @@ fn pressing_M_on_home_opens_skill_manager_screen() {
         .status()
         .expect("tmux send-keys launch");
 
-    // Wait for HomeScreen to render. Markers from
-    // crates/ainb-tui/src/components/home_screen_v2.rs and the tile
-    // grid: "Agents" + "Catalog" should both appear in a healthy
-    // HomeScreen paint.
+    // Wait for HomeScreen to render FULLY. The previous bare
+    // (Agents && Catalog) pair could match mid-paint, before the
+    // welcome panel had painted, leading to a race where M was
+    // sent while the binary was still booting and got lost.
+    // Require the welcome-panel literal too so the predicate only
+    // fires when both the sidebar AND the right-hand panel are
+    // alive — the binary is then ready to consume keystrokes.
     let home_render = poll_capture(
         &session,
         Instant::now() + Duration::from_secs(120),
-        |c| c.contains("Agents") && c.contains("Catalog") && !c.contains("Welcome to ainb"),
+        |c| {
+            c.contains("Agents")
+                && c.contains("Catalog")
+                && c.contains("Welcome to AINB")
+        },
     );
     let home_render = match home_render {
         Some(r) => r,
@@ -132,6 +139,11 @@ fn pressing_M_on_home_opens_skill_manager_screen() {
             panic!("HomeScreen never rendered. last capture:\n{dump}");
         }
     };
+
+    // Small settle window before keystroke. ratatui paints at
+    // 4-30 Hz; 200ms guarantees at least 1 idle frame between
+    // initial-paint completion and the keystroke arriving.
+    thread::sleep(Duration::from_millis(200));
 
     // Negative pre-press: we should NOT already be on the
     // SkillManager screen. If "Sources" already appears here the

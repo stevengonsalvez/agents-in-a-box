@@ -106,7 +106,7 @@ fn esc_on_skill_manager_returns_to_home_screen() {
     if poll_capture(
         &session,
         Instant::now() + Duration::from_secs(120),
-        |c| c.contains("Agents") && c.contains("Catalog"),
+        |c| c.contains("Agents") && c.contains("Catalog") && c.contains("Welcome to AINB"),
     )
     .is_none()
     {
