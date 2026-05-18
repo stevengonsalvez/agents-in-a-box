@@ -1,0 +1,14 @@
+---
+source: crates/ainb-core/tests/snapshot_skills.rs
+expression: rendered
+---
+╭────────────────────────────╮
+│🧠  Skills  │  Loading...    │
+╰────────────────────────────╯
+╭────────────────────────────╮
+│  Provider: ✻ Claude Code  ││
+╰────────────────────────────╯
+╭────────────────────────────╮
+│ Skills  │  Agents  │  Assoc│
+╰────────────────────────────╯
+ ◀/▶ provider  Tab view  j/k s

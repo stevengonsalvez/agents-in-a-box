@@ -1,0 +1,14 @@
+---
+source: crates/ainb-core/tests/snapshot_git_view.rs
+expression: rendered
+---
+    ╭───────╮                 
+[G] │ Files │ · Diff  · Commit
+────┘       └─────────────────
+╭ 📁  Changed Files───────────╮
+│✨  No changes detected      │
+│                            │
+╰────────────────────────────╯
+╭────────────────────────────╮
+│✓ Working directory clean  ││
+╰────────────────────────────╯

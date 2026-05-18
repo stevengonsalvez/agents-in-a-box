@@ -1,0 +1,14 @@
+---
+source: crates/ainb-core/tests/snapshot_log_history_viewer.rs
+expression: rendered
+---
+╭📋  Log History──────────────╮
+│╭Logs [0] [ALL]────────────╮│
+││Select a log file to view ││
+││                          ││
+││                          ││
+││                          ││
+││                          ││
+││                          ││
+│╰──────────────────────────╯│
+╰────────────────────────────╯

@@ -1,0 +1,14 @@
+---
+source: crates/ainb-core/tests/snapshot_claude_chat.rs
+expression: rendered
+---
+┌ Claude Chat - Press [ESC] t┐
+│ Messages                   │
+│Welcome to Claude Chat!     │
+│                            │
+│────────────────────────────│
+│ Type your message (Enter to│
+│█Type your message here...  │
+│                            │
+│                            │
+└────────────────────────────┘

@@ -1,0 +1,14 @@
+---
+source: crates/ainb-core/tests/snapshot_tmux_preview.rs
+expression: rendered
+---
+┌Session Preview─────────────┐
+│Select a session to view its│
+│        live preview        │
+│                            │
+│                            │
+│                            │
+│                            │
+│                            │
+│                            │
+└────────────────────────────┘

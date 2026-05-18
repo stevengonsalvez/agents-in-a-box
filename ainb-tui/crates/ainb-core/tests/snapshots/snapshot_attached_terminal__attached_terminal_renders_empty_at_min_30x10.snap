@@ -1,0 +1,14 @@
+---
+source: crates/ainb-core/tests/snapshot_attached_terminal.rs
+expression: rendered
+---
+┌Terminal Error──────────────┐
+│Error: No attached session f│
+│                            │
+│                            │
+│                            │
+│                            │
+│                            │
+│                            │
+│                            │
+└────────────────────────────┘
