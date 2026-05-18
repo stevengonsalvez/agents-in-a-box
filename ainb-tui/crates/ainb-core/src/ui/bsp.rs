@@ -81,22 +81,23 @@ impl LayoutNode {
     }
 
     /// Side-by-side split. `ratio` is clamped to `0.0..=1.0` and applies to
-    /// the left tile.
+    /// the left tile. Non-finite ratios (`NaN`, `±inf`) become `0.5` because
+    /// JSON has no NaN encoding and a NaN ratio would break serde round-trip.
     pub fn split_h(ratio: f32, left: LayoutNode, right: LayoutNode) -> Self {
         LayoutNode::Split {
             dir: SplitDir::Horizontal,
-            ratio: ratio.clamp(0.0, 1.0),
+            ratio: sanitize_ratio(ratio),
             left: Box::new(left),
             right: Box::new(right),
         }
     }
 
     /// Stacked split. `ratio` is clamped to `0.0..=1.0` and applies to the
-    /// top tile.
+    /// top tile. Non-finite ratios become `0.5` (see `split_h` for why).
     pub fn split_v(ratio: f32, top: LayoutNode, bottom: LayoutNode) -> Self {
         LayoutNode::Split {
             dir: SplitDir::Vertical,
-            ratio: ratio.clamp(0.0, 1.0),
+            ratio: sanitize_ratio(ratio),
             left: Box::new(top),
             right: Box::new(bottom),
         }
@@ -181,11 +182,19 @@ impl LayoutNode {
     /// Replace the focused leaf with a `Split` whose left child is the
     /// original focused leaf and whose right child is `Pane(new_leaf)`.
     pub fn split_focused(&mut self, dir: SplitDir, ratio: f32, new_leaf: LeafId) {
-        split_focused_inner(self, dir, ratio.clamp(0.0, 1.0), new_leaf);
+        split_focused_inner(self, dir, sanitize_ratio(ratio), new_leaf);
     }
 }
 
 // ─── private helpers ─────────────────────────────────────────────────────────
+
+fn sanitize_ratio(r: f32) -> f32 {
+    if r.is_finite() {
+        r.clamp(0.0, 1.0)
+    } else {
+        0.5
+    }
+}
 
 fn walk_into(node: &LayoutNode, area: Rect, out: &mut Vec<(LeafId, Rect)>) {
     match node {
