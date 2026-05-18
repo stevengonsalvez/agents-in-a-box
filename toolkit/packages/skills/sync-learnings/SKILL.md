@@ -252,77 +252,63 @@ The audit report should include:
 | mystery-skill | In {{HOME_TOOL_DIR}} only, not in packages | SYNC or EXCLUDE |
 ```
 
-## Assessment Phase
+## Assessment Phase — Tidied Output Contract
 
-Before syncing, generate an assessment table:
+The assessment output MUST follow this dense, scannable format. Stevie has
+explicitly requested terse output — do NOT regress to multi-bullet per-file
+blocks or always-on summary tables.
+
+### Rules
+
+1. **One combined plan table.** A single table with `dir | file | target | note`
+   covers both directions (`→repo`, `→home`). No separate `SYNC TO REPO` /
+   `SYNC TO HOME` sub-sections.
+2. **One line per file.** No multi-bullet per-item blocks
+   (no `**Purpose:**`/`**Action:**` lists). The `note` column carries the
+   one-word rationale: `new`, `updated`, `newer`, `older`, etc.
+3. **Hide empty sections.** If orphans, plugin audit, or don't-sync have zero
+   items, OMIT those sections entirely — no "✓ none" lines, no empty tables.
+   The plan table itself is always shown (even if empty → emit one line:
+   "Nothing to sync.").
+4. **Single Y/n gate.** Show the plan, then ask `Proceed? [Y/n]` once.
+   Per-section confirmation is forbidden.
+5. **Silent execution.** Do NOT echo each `cp` operation. Run the sync, then
+   print a 3-line receipt: counts per direction + final commit SHA.
+
+### Output template
 
 ```markdown
-# Sync Assessment: {{HOME_TOOL_DIR}} <-> packages/
+# Sync Assessment
 
-## Summary
+| dir   | file                                | target                           | note    |
+|-------|-------------------------------------|----------------------------------|---------|
+| →repo | skills/foo/SKILL.md                 | packages/skills/foo/             | new     |
+| →repo | agents/engineering/bar.md           | packages/agents/engineering/     | updated |
+| →home | packages/skills/baz/SKILL.md        | ~/.claude/skills/baz/            | newer   |
 
-| Action | Files | Reason |
-|--------|-------|--------|
-| **SYNC TO REPO** | N files | Useful generic additions |
-| **SYNC TO {{HOME_TOOL_DIR}}** | N files | Repo has newer versions |
-| **ORPHANS** | N items | In {{HOME_TOOL_DIR}} only, need classification |
-| **PLUGIN AUDIT** | N plugins | Cross-check with manifest |
-| **DON'T SYNC** | Multiple | Project-specific or session data |
+[Orphans / Plugin audit / Don't-sync ONLY if non-empty — emit as small tables
+ under H2 headers. Each row one line. If all empty, no sections at all.]
 
----
-
-## ORPHANS (in {{HOME_TOOL_DIR}} only)
-
-### 1. `skills/mystery-skill/` (ORPHAN)
-- **Source**: {{HOME_TOOL_DIR}}/skills/mystery-skill/
-- **Classification**: [SYNC TO REPO | EXTERNAL | PERSONAL | DEPRECATED]
-- **Action**: [Copy to packages/ | Verify in manifest | Add to exclusions | Remove]
-
----
-
-## PLUGIN & EXTERNAL DEPENDENCY AUDIT
-
-| Plugin/Dep | Installed | In Manifest | Status |
-|------------|-----------|-------------|--------|
-| beads | v0.49.0 | Yes | OK |
-| debug-bridge | v0.2.0 | Yes | OK |
-| untracked-plugin | v1.0.0 | No | ADD TO MANIFEST |
-
-### Skills with External Dependencies
-
-| Skill | Requires | Dependency Tracked | Status |
-|-------|----------|-------------------|--------|
-| swarm-create | bd (Beads) | Yes | OK |
-| [skill] | [cli] | No | NEEDS TRACKING |
-
----
-
-## SYNC TO REPO (from {{HOME_TOOL_DIR}})
-
-### 1. `path/to/file.md` (NEW|UPDATED)
-- **Purpose**: [what this file does]
-- **Target**: `packages/[routed-path]/`
-- **Assessment**: Valuable addition
-
----
-
-## SYNC TO {{HOME_TOOL_DIR}} (from packages/)
-
-**⚠️ Always interpolate templates after copying** — see Template Interpolation section above.
-
-### 1. `packages/path/to/file.md`
-- **Status**: Packages version is NEWER
-- **What's new**: [description of changes]
-- **Assessment**: Copy to {{HOME_TOOL_DIR}}
-- **Action**: Copy then interpolate `{{HOME_TOOL_DIR}}` → `{{HOME_TOOL_DIR}}/`
-
----
-
-## DON'T SYNC
-
-### [Category Name]
-- `file1.md` - [reason]
+Proceed? [Y/n]
 ```
+
+### Receipt template (after execution)
+
+```
+Receipt:
+  N files → repo
+  M files → home
+  commit <sha> on <branch>
+```
+
+### Anti-patterns (do NOT emit)
+
+- ❌ Top-level summary table that just counts what's below it (duplicate signal).
+- ❌ `### 1. file.md (NEW)` with `**Purpose:**` / `**Target:**` / `**Action:**`
+  multi-bullet blocks.
+- ❌ "✓ none" placeholder lines for empty sections.
+- ❌ Per-section Y/n prompts.
+- ❌ Echoing every `\cp` line during execution.
 
 ## Execution
 
@@ -506,73 +492,52 @@ grep -rl '\bbd\b' packages/skills/*/SKILL.md 2>/dev/null
 - **Route commands** to correct package directory
 - **Exclude** files matching exclusion categories
 
-## Example Session
+## Example Session (tidied format)
 
 ```
 User: /sync-learnings
 
-Claude: # Sync Assessment: {{HOME_TOOL_DIR}} <-> packages/
+Claude:
+# Sync Assessment
 
-## Summary
+| dir   | file                                       | target                              | note    |
+|-------|--------------------------------------------|-------------------------------------|---------|
+| →repo | agents/engineering/new-validator.md        | packages/agents/engineering/        | new     |
+| →repo | commands/custom-workflow.md                | packages/utilities/commands/        | new     |
+| →home | packages/utilities/commands/sync-learnings.md | {{HOME_TOOL_DIR}}/commands/      | newer   |
 
-| Action | Files | Reason |
-|--------|-------|--------|
-| **SYNC TO REPO** | 3 files | Useful generic additions |
-| **SYNC TO {{HOME_TOOL_DIR}}** | 1 file | Packages has newer version |
-| **ORPHANS** | 0 items | All skills/agents accounted for |
-| **PLUGIN AUDIT** | 6 plugins | All tracked in manifest |
-| **DON'T SYNC** | Multiple | Project-specific or session data |
-
-## ORPHANS
-
-No orphaned skills or agents detected. All items in {{HOME_TOOL_DIR}}/ have
-counterparts in packages/ or are tracked in external-dependencies.yaml.
-
-## PLUGIN & EXTERNAL DEPENDENCY AUDIT
-
-| Plugin | Installed | In Manifest | Status |
-|--------|-----------|-------------|--------|
-| beads | v0.49.0 | Yes | OK |
-| debug-bridge | v0.2.0 | Yes | OK |
-| ralph-loop | v55b58ec | Yes | OK |
-| code-review | v55b58ec | Yes | OK |
-| playground | latest | Yes | OK |
-| dev-browser | v66682fb | Yes | OK |
-
-| Skill | Requires | Tracked | Status |
-|-------|----------|---------|--------|
-| swarm-create | bd (Beads) | Yes | OK |
-
-## SYNC TO REPO
-
-### 1. `agents/engineering/new-validator.md` (NEW)
-- **Purpose**: Custom validation agent
-- **Target**: `packages/agents/engineering/`
-- **Assessment**: Generic utility
-
-### 2. `commands/custom-workflow.md` (NEW)
-- **Purpose**: New workflow command
-- **Target**: `packages/utilities/commands/` (routed)
-- **Assessment**: Generic utility
-
-## SYNC TO {{HOME_TOOL_DIR}}
-
-### 1. `packages/utilities/commands/sync-learnings.md`
-- **Status**: Packages version is NEWER
-- **What's new**: Added command routing logic
-- **Assessment**: Copy to {{HOME_TOOL_DIR}}
-
-Proceed with sync? [Y/n]
+Proceed? [Y/n]
 
 User: Y
 
-Claude: Executing sync...
+Claude:
+Receipt:
+  2 files → repo
+  1 file  → home
+  commit a1b2c3d on main
+```
 
-new-validator.md -> packages/agents/engineering/
-custom-workflow.md -> packages/utilities/commands/
-sync-learnings.md -> {{HOME_TOOL_DIR}}/commands/
+Notice what is NOT in the output: no top-level summary table, no ORPHANS /
+PLUGIN AUDIT / DON'T SYNC sections (all empty this run), no per-file
+multi-bullet blocks, no per-`\cp` echo during execution.
 
-Committed: chore: sync learnings to packages
+If orphans or untracked plugins DO exist, append them as small tables UNDER
+the plan table — still one row per item, no nested bullets.
+
+```
+# Sync Assessment
+
+| dir   | file                       | target                          | note    |
+|-------|----------------------------|---------------------------------|---------|
+| →repo | skills/new-helper/SKILL.md | packages/skills/new-helper/     | new     |
+
+## Orphans (need classification)
+
+| item                      | suggestion              |
+|---------------------------|-------------------------|
+| skills/mystery-skill/     | PERSONAL or DEPRECATED? |
+
+Proceed? [Y/n]
 ```
 
 ## Automation Tip
