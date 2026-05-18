@@ -36,12 +36,14 @@ components:
     - do-issues
     - enhance-prompt
     - expect-test
+    - explain-to-me
     - expose
     - find-missing-tests
     - frontend-design
     - frontend-slides
     - gh-issue
     - git-history-surgery
+    - global-learnings
     - handover
     - health-check
     - implement
@@ -50,6 +52,7 @@ components:
     - langfuse-setup
     - liquid-glass
     - list-agent-worktrees
+    - make-a-goal
     - make-github-issues
     - media-processing
     - merge-agent-work
@@ -105,15 +108,6 @@ components:
     - validate
     - webapp-testing
     - workflow
-
-  plugins:
-    - name: reflect
-      skills:
-        - consolidate
-        - ingest
-        - recall
-        - reflect
-        - reflect-status
 
   workflows:
     - name: single-agent
