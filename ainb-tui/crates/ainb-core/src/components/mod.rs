@@ -32,6 +32,7 @@ pub mod session_recovery;
 pub mod slash;
 pub mod setup_menu;
 pub mod sidebar;
+pub mod skill_manager_screen;
 pub mod skills;
 pub mod tmux_preview;
 // `usage` removed in Phase 3 cutover — the burndown plugin owns the

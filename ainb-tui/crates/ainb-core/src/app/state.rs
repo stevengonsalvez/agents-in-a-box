@@ -675,13 +675,14 @@ pub enum ConfirmAction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HomeTile {
-    Agents,   // Agent selection
-    Catalog,  // Browse catalog/marketplace
-    Config,   // Settings & presets
-    Sessions, // Session manager
-    Recovery, // Recover orphaned sessions
-    Stats,    // Analytics & usage
-    Help,     // Docs & guides
+    Agents,       // Agent selection
+    Catalog,      // Browse catalog/marketplace
+    SkillManager, // Install / sync / doctor (spec §10.1)
+    Config,       // Settings & presets
+    Sessions,     // Session manager
+    Recovery,     // Recover orphaned sessions
+    Stats,        // Analytics & usage
+    Help,         // Docs & guides
 }
 
 impl HomeTile {
@@ -689,6 +690,7 @@ impl HomeTile {
         vec![
             HomeTile::Agents,
             HomeTile::Catalog,
+            HomeTile::SkillManager,
             HomeTile::Config,
             HomeTile::Sessions,
             HomeTile::Recovery,
@@ -701,6 +703,7 @@ impl HomeTile {
         match self {
             HomeTile::Agents => "Agents",
             HomeTile::Catalog => "Catalog",
+            HomeTile::SkillManager => "Skills (manager)",
             HomeTile::Config => "Config",
             HomeTile::Sessions => "Sessions",
             HomeTile::Recovery => "Recovery",
@@ -713,6 +716,7 @@ impl HomeTile {
         match self {
             HomeTile::Agents => "Select & Configure",
             HomeTile::Catalog => "Browse & Bootstrap",
+            HomeTile::SkillManager => "Install / sync / doctor (M)",
             HomeTile::Config => "Settings & Presets",
             HomeTile::Sessions => "Manage Active",
             HomeTile::Recovery => "Resume Orphaned",
@@ -725,6 +729,7 @@ impl HomeTile {
         match self {
             HomeTile::Agents => "🤖",
             HomeTile::Catalog => "📦",
+            HomeTile::SkillManager => "🧰",
             HomeTile::Config => "⚙️",
             HomeTile::Sessions => "🚀",
             HomeTile::Recovery => "🔄",
@@ -2393,6 +2398,9 @@ pub struct AppState {
     /// Present only while a scan is in flight; `tick()` drains it.
     pub skills_load_receiver: Option<mpsc::UnboundedReceiver<crate::models::SkillsData>>,
 
+    // Skill-manager screen state (spec §10.1)
+    pub skill_manager_state: crate::components::skill_manager_screen::SkillsScreenData,
+
     // Periodic session snapshot tracking
     pub last_snapshot_time: Option<Instant>,
 
@@ -3015,6 +3023,10 @@ impl Default for AppState {
             // Skills browser state
             skills_state: crate::components::skills::SkillsViewState::default(),
             skills_load_receiver: None,
+
+            // Skill-manager screen state (spec §10.1)
+            skill_manager_state:
+                crate::components::skill_manager_screen::SkillsScreenData::default(),
 
             // Periodic session snapshot tracking
             last_snapshot_time: None,

@@ -3396,6 +3396,10 @@ impl EventHandler {
                             tracing::info!("Navigating to SessionRecovery view");
                             state.current_screen = screen_ids::SESSION_RECOVERY.to_string();
                         }
+                        HomeTile::SkillManager => {
+                            tracing::info!("Navigating to SkillManager view (spec §10.1)");
+                            state.current_screen = screen_ids::SKILL_MANAGER.to_string();
+                        }
                         HomeTile::Catalog | HomeTile::Stats => {
                             tracing::info!("Tile {:?} - Coming Soon", tile);
                             // Coming soon - show notification
