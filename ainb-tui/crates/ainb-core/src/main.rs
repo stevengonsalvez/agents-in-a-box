@@ -82,8 +82,31 @@ fn cleanup_terminal_with_instance<B: Backend + std::io::Write>(
     Ok(())
 }
 
+/// argv[1] values that route to the `ainb-cli` crate before tokio
+/// spins up. These commands are pure CLI (no Docker, no tmux, no
+/// alt-screen) so they short-circuit the TUI bootstrap entirely.
+/// Keep in sync with the safety-tag's CLI_COMMANDS list — adding a
+/// new top-level command means adding it here AND wiring an arm in
+/// ainb-cli's Command enum.
+const SKILL_MANAGER_CLI_COMMANDS: &[&str] = &[
+    "source", "search", "skill", "migrate", "doctor",
+];
+
+fn is_skill_manager_cli_invocation() -> bool {
+    std::env::args()
+        .nth(1)
+        .is_some_and(|arg| SKILL_MANAGER_CLI_COMMANDS.contains(&arg.as_str()))
+}
+
+fn main() -> Result<()> {
+    if is_skill_manager_cli_invocation() {
+        return ainb_cli::run();
+    }
+    tokio_main()
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn tokio_main() -> Result<()> {
     setup_logging();
     setup_panic_handler();
 
