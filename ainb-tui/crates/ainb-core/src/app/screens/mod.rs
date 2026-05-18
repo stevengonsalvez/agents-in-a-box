@@ -38,6 +38,7 @@ pub mod ids {
     pub const CHANGELOG: &str = "changelog";
     pub const SESSION_RECOVERY: &str = "session_recovery";
     pub const SKILLS: &str = "skills";
+    pub const SKILL_MANAGER: &str = "skill_manager";
 }
 
 /// Outcome of a screen-handled event.
@@ -110,6 +111,7 @@ mod tests {
             ids::CHANGELOG,
             ids::SESSION_RECOVERY,
             ids::SKILLS,
+            ids::SKILL_MANAGER,
         ];
         let mut sorted = all.to_vec();
         sorted.sort();
