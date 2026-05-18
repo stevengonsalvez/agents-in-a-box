@@ -145,6 +145,12 @@ pub struct Provides {
     /// Snapshot topics the plugin publishes.
     #[serde(default)]
     pub snapshots: Vec<String>,
+    /// Optional minimum tile size hint for the BSP layout: `[cols, rows]`.
+    /// The host clamps splits to keep the plugin's tile at or above this
+    /// size; falls back to the global 30×10 floor when `None`. Additive
+    /// to the v2 manifest schema.
+    #[serde(default)]
+    pub preferred_min_size: Option<[u16; 2]>,
 }
 
 /// `[subscribes]` — host pushes these to the plugin via `plugin/handle_event`.
