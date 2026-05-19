@@ -1,6 +1,6 @@
 {
   "name": "reflect",
-  "version": "3.4.1",
+  "version": "3.4.2",
   "description": "Agent self-improvement + retrieval. Captures learnings via colon-namespaced sub-skills (reflect, reflect:consolidate, reflect:ingest, reflect:recall, reflect-status) and auto-injects relevant prior learnings at SessionStart via hook. Philosophy: Correct once, never again; recall everything next time.",
   "author": {
     "name": "stevengonsalvez"
