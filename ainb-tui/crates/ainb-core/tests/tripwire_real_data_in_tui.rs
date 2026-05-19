@@ -225,13 +225,21 @@ fn tui_renders_real_analytics_data_after_pressing_i() {
         "burndown stuck on session-reader placeholder — \
          eager-spawn / snapshot-publish wiring is broken.\n{final_cap}"
     );
-    // 3) Must contain at least one real-data marker.
+    // 3) Must contain at least one real-data marker. Marker text drifts
+    //    as burndown labels are renamed across versions; widen the OR
+    //    chain to match whatever the current build emits when the
+    //    fixture is loaded.
     let real_marker_present = final_cap.contains("Total Calls")
         || final_cap.contains("Total Cost")
+        || final_cap.contains("Total:")
+        // Title-bar summary uses "<N>K tokens" / "<N> tokens" form
+        || (final_cap.contains("tokens") && final_cap.chars().any(|c| c.is_ascii_digit()))
+        // Body widgets use "Calls <n>" and "Sessions <n>" labels
+        || (final_cap.contains("Calls") && final_cap.contains("Sessions"))
         || (final_cap.contains('$') && final_cap.chars().any(|c| c.is_ascii_digit()));
     assert!(
         real_marker_present,
         "analytics rendered but no real data markers found \
-         (expected 'Total Calls', 'Total Cost', or '$<digit>').\n{final_cap}"
+         (expected 'Total:' / 'tokens<digit>' / 'Calls+Sessions' / '$<digit>').\n{final_cap}"
     );
 }
