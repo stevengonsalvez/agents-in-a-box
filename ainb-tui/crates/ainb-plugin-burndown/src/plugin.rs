@@ -205,9 +205,9 @@ impl Plugin for BurndownPlugin {
     /// Generation is bumped only when the dispatch matched a binding,
     /// so unmapped keys won't trigger an avoidable re-render.
     async fn handle_key(&mut self, host: &HostClient, params: HandleKeyParams) -> Result<()> {
-        // Refresh is the one binding that needs the host. Everything
-        // else mutates `self.ui` only, so it lives in the pure helper
-        // below for testability.
+        // Refresh + flush-cache are the two bindings that need the
+        // host. Everything else mutates `self.ui` only, so it lives in
+        // the pure helper below for testability.
         let handled = match params.key.code {
             KeyCode::Char { ch: 'r' | 'R' } => {
                 // Ask session-reader to re-publish from scratch. Best
@@ -215,6 +215,19 @@ impl Plugin for BurndownPlugin {
                 // snapshot stays on screen.
                 let _ = host
                     .snapshot_publish("sessions.refresh_request", bytes::Bytes::new())
+                    .await;
+                true
+            }
+            KeyCode::Char { ch: 'F' } => {
+                // Wipe the persistent parse cache, then rescan. Use
+                // `F` (uppercase) to make the destructive nature
+                // obvious — `f` would be too easy to fat-finger. The
+                // scan immediately afterwards is cold-cache and may
+                // take 10s+ for large $HOME datasets; the
+                // `Scanning sessions:` skeleton (now with the new
+                // `N/M` progress bar) covers the latency.
+                let _ = host
+                    .snapshot_publish("sessions.flush_cache_request", bytes::Bytes::new())
                     .await;
                 true
             }

@@ -45,6 +45,14 @@ pub const TOPIC_USAGE_DATA: &str = "sessions.usage_data";
 /// Topic any consumer can publish to to force a re-scan + re-publish.
 pub const TOPIC_REFRESH_REQUEST: &str = "sessions.refresh_request";
 
+/// Topic any consumer can publish to to wipe the per-file parse cache
+/// and re-publish from scratch. Distinct from `sessions.refresh_request`
+/// because the latter is cache-aware (most files short-circuit on
+/// `(mtime, size)` match) — flush-cache is the escape hatch for
+/// suspected cache corruption or behavioural drift where the user
+/// wants to know the snapshot was built from scratch.
+pub const TOPIC_FLUSH_CACHE_REQUEST: &str = "sessions.flush_cache_request";
+
 /// Topic the plugin publishes per-file scan progress on. Burndown
 /// subscribes here to render the skeleton/`Scanning sessions…` line
 /// while the cold scan is in flight.
@@ -100,6 +108,39 @@ impl SessionReader {
             cache: None,
             #[cfg(not(target_arch = "wasm32"))]
             cache_init: false,
+        }
+    }
+
+    /// Wipe every cached parse row and force the next scan to re-parse
+    /// every file from disk. Best-effort: if the cache hasn't been
+    /// opened yet, opens it and clears; if open fails, logs and falls
+    /// through (the subsequent rescan still works, it's just cold).
+    /// Doesn't delete the sqlite file — `UsageCache::clear()` runs
+    /// `DELETE FROM file_cache` + `VACUUM`, preserving the schema row
+    /// so the next open doesn't migrate.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn flush_cache(&mut self, host: &HostClient) {
+        self.ensure_cache();
+        if let Some(cache) = self.cache.as_mut() {
+            match cache.clear() {
+                Ok(()) => {
+                    let _ = host
+                        .log_info("flush_cache: persistent cache wiped")
+                        .await;
+                }
+                Err(err) => {
+                    let _ = host
+                        .log_info(format!(
+                            "flush_cache: cache clear failed: {err}; \
+                            next rescan will degrade to cold-cache speed regardless"
+                        ))
+                        .await;
+                }
+            }
+        } else {
+            let _ = host
+                .log_info("flush_cache: no cache open; nothing to wipe")
+                .await;
         }
     }
 
@@ -501,6 +542,9 @@ impl Plugin for SessionReader {
             .log_info("on_init: subscribing to sessions.refresh_request")
             .await;
         host.snapshot_subscribe(TOPIC_REFRESH_REQUEST).await?;
+        // Also subscribe to flush-cache so burndown's `F` key can wipe
+        // the persistent cache and republish from scratch.
+        host.snapshot_subscribe(TOPIC_FLUSH_CACHE_REQUEST).await?;
         let _ = host
             .log_info("on_init: subscribed, idle until refresh_request")
             .await;
@@ -524,6 +568,11 @@ impl Plugin for SessionReader {
     ) -> Result<()> {
         if params.topic == TOPIC_REFRESH_REQUEST {
             tracing::info!("session-reader: refresh requested — rescanning");
+            return self.publish(host).await;
+        }
+        if params.topic == TOPIC_FLUSH_CACHE_REQUEST {
+            tracing::info!("session-reader: flush_cache requested — wiping cache + rescanning");
+            self.flush_cache(host).await;
             return self.publish(host).await;
         }
         tracing::debug!(topic = %params.topic, "session-reader: ignoring unrelated event");

@@ -4168,6 +4168,8 @@ fn render_help_bar(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
         Span::styled(" scroll  ", Style::default().fg(MUTED_GRAY)),
         Span::styled("r/R", Style::default().fg(GOLD)),
         Span::styled(" refresh  ", Style::default().fg(MUTED_GRAY)),
+        Span::styled("F", Style::default().fg(GOLD)),
+        Span::styled(" flush cache  ", Style::default().fg(MUTED_GRAY)),
         Span::styled("Esc", Style::default().fg(GOLD)),
         Span::styled(" back", Style::default().fg(MUTED_GRAY)),
     ]);
