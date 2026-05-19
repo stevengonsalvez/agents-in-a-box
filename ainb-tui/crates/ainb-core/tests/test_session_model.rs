@@ -9,7 +9,7 @@ fn test_session_creation() {
 
     assert_eq!(session.name, "test-session");
     assert_eq!(session.workspace_path, "/path/to/workspace");
-    assert_eq!(session.branch_name, "claude/test-session");
+    assert_eq!(session.branch_name, "ainb/test-session");
     assert!(matches!(session.status, SessionStatus::Stopped));
     assert_eq!(session.container_id, None);
     assert_eq!(session.git_changes.total(), 0);
@@ -18,10 +18,10 @@ fn test_session_creation() {
 #[test]
 fn test_session_branch_name_formatting() {
     let session1 = Session::new("Fix Auth Bug".to_string(), "/workspace".to_string());
-    assert_eq!(session1.branch_name, "claude/fix-auth-bug");
+    assert_eq!(session1.branch_name, "ainb/fix-auth-bug");
 
     let session2 = Session::new("add new feature".to_string(), "/workspace".to_string());
-    assert_eq!(session2.branch_name, "claude/add-new-feature");
+    assert_eq!(session2.branch_name, "ainb/add-new-feature");
 }
 
 #[test]
