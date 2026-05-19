@@ -8,6 +8,10 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 #[tokio::test]
 async fn test_manual_refresh_key() {
     let mut app = App::new();
+    // 'f' refresh key is handled by the session-list fallthrough — pin
+    // the screen so HomeScreen V2's global shortcut table doesn't
+    // shadow it (HomeScreen V2 doesn't bind 'f').
+    app.state.current_screen = screen_ids::SESSION_LIST.to_string();
 
     // Load initial mock data
     app.state.load_mock_data();
@@ -58,8 +62,11 @@ async fn test_manual_refresh_key() {
 #[tokio::test]
 async fn test_refresh_from_session_list_view() {
     let mut app = App::new();
+    // Default screen is HOME (HomeScreen V2) post-restructure; this test
+    // pre-dates that change and assumed SESSION_LIST was the default.
+    app.state.current_screen = screen_ids::SESSION_LIST.to_string();
     app.state.load_mock_data();
-    let initial_workspace_count = app.state.workspaces.len();
+    let _initial_workspace_count = app.state.workspaces.len();
 
     // Ensure we're in SessionList view
     assert_eq!(app.state.current_screen, screen_ids::SESSION_LIST);
@@ -111,6 +118,7 @@ async fn test_refresh_event_handling() {
 #[tokio::test]
 async fn test_multiple_refreshes() {
     let mut app = App::new();
+    app.state.current_screen = screen_ids::SESSION_LIST.to_string();
     app.state.load_mock_data();
 
     // Perform multiple refreshes to ensure it's stable
@@ -150,6 +158,7 @@ async fn test_multiple_refreshes() {
 #[tokio::test]
 async fn test_refresh_doesnt_interfere_with_help() {
     let mut app = App::new();
+    app.state.current_screen = screen_ids::SESSION_LIST.to_string();
     app.state.load_mock_data();
 
     // Show help first
