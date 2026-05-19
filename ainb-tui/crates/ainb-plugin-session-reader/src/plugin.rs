@@ -467,20 +467,15 @@ pub(crate) fn chunk_usage_data(
 
         loop {
             // Pop priority: calls (largest) → sessions → shell_commands.
-            // Track which queue we popped from so a spill-back lands in
-            // the right place.
-            let popped_from = if let Some(c) = calls_q.pop_front() {
+            if let Some(c) = calls_q.pop_front() {
                 chunk_data.calls.push(c);
-                TailQueue::Calls
             } else if let Some(s) = sessions_q.pop_front() {
                 chunk_data.sessions.push(s);
-                TailQueue::Sessions
             } else if let Some(s) = shell_q.pop_front() {
                 chunk_data.shell_commands.push(s);
-                TailQueue::ShellCommands
             } else {
                 break; // every queue drained
-            };
+            }
             since_probe += 1;
 
             let all_empty =
@@ -509,27 +504,20 @@ pub(crate) fn chunk_usage_data(
             // (e.g. one 5 MiB user_message) can't stall the loop.
             //
             // Spill in a loop, not just once: STEP=64 means the chunk
-            // can land 8 MiB over budget when one of those 64 items is
-            // a 100+ KiB outlier. Single-spill would still ship a chunk
-            // 50× over target. We pop the most-recently-pushed item from
-            // the queue that received it, then re-probe; keep spilling
-            // until we're back under target or only 1 item remains.
-            // popped_from tracks the *last* push, but a multi-spill
-            // needs to walk back through previous pushes — we use the
-            // queue with the largest tail first as a heuristic.
+            // can land many MiB over budget when one of those 64 items
+            // is a 100+ KiB outlier. Single-spill would still ship a
+            // chunk 50× over target. Each iteration picks the largest
+            // tail vec as the spill source (best chance of cheaply
+            // shrinking the chunk) and re-probes; keep spilling until
+            // we're back under target or only 1 item remains.
             let chunk_item_count = chunk_data.calls.len()
                 + chunk_data.sessions.len()
                 + chunk_data.shell_commands.len();
             if probe_size >= target_bytes && chunk_item_count > 1 {
-                // First spill: the just-popped item, to the queue it
-                // came from. Subsequent spills come from whichever
-                // tail vec currently has the most items (best chance
-                // of cheaply shrinking the chunk).
-                let _ = popped_from; // first spill uses the queue below
-                let mut current_size = probe_size;
                 loop {
-                    // Choose the spill source: the largest tail vec.
-                    // Re-evaluate every iteration because vecs shrink.
+                    // Choose the spill source: whichever tail vec
+                    // currently has the most items. Re-evaluate every
+                    // iteration because vecs shrink.
                     let from = if chunk_data.calls.len()
                         >= chunk_data.sessions.len()
                         && chunk_data.calls.len()
@@ -590,10 +578,10 @@ pub(crate) fn chunk_usage_data(
                             && shell_q.is_empty(),
                         data: chunk_data.clone(),
                     };
-                    current_size = rmp_serde::to_vec_named(&probe)
+                    let probe_after_spill = rmp_serde::to_vec_named(&probe)
                         .map(|b| b.len())
                         .unwrap_or(target_bytes);
-                    if current_size < target_bytes {
+                    if probe_after_spill < target_bytes {
                         break;
                     }
                 }
