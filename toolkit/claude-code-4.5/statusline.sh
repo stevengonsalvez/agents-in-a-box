@@ -502,7 +502,14 @@ printf '%b\n %b' "$L1" "$L2"
 # Pass session_id + project_dir from the stdin JSON so the helper can find
 # THIS session's JSONL (Claude Code hashes project root, not cwd — worktrees
 # end up under the parent repo's project hash, so cwd-based resolution misses).
-TIMELINE_HELPER="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/cache/agents-in-a-box/reflect/3.3.1}/scripts/reflect_timeline.sh"
+# Fallback resolves the latest installed reflect plugin dynamically so the
+# statusline keeps working across plugin version upgrades without manual edits.
+if [[ -n "${CLAUDE_PLUGIN_ROOT:-}" ]]; then
+  TIMELINE_HELPER="$CLAUDE_PLUGIN_ROOT/scripts/reflect_timeline.sh"
+else
+  _REFLECT_CACHE="$HOME/.claude/plugins/cache/agents-in-a-box/reflect"
+  TIMELINE_HELPER="$(ls -1d "$_REFLECT_CACHE"/*/ 2>/dev/null | sort -V | tail -1)scripts/reflect_timeline.sh"
+fi
 if [[ "${REFLECT_TIMELINE_DISABLE:-0}" != "1" ]] && [[ -x "$TIMELINE_HELPER" ]]; then
   REFLECT_TIMELINE_SESSION_ID="$(_jq '.session_id')" \
   REFLECT_TIMELINE_PROJECT_DIR="$(_jq '.workspace.project_dir // .workspace.current_dir')" \

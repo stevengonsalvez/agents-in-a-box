@@ -162,7 +162,7 @@ For each pending item, show:
 When approving:
 1. Apply the behavioral change or create the knowledge note
 2. Generate entity sidecar if knowledge type
-3. Index via `learnings add` CLI
+3. Index via `reflect add` CLI (reflect-kb)
 4. Remove from pending queue:
    ```bash
    # Done internally via state_manager

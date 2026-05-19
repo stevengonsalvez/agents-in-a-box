@@ -1,0 +1,708 @@
+---
+// Landing page — hacker-honest, terminal-native. Bypass Starlight chrome for
+// a full-bleed marketing experience. Docs hub picks up its own theming via
+// the Starlight integration.
+import '../styles/tokens.css';
+import '../styles/crt.css';
+
+const REPO = 'https://github.com/stevengonsalvez/agents-in-a-box';
+const BASE = import.meta.env.BASE_URL.replace(/\/$/, '');
+const docs = (path: string) => `${BASE}/${path.replace(/^\//, '')}`;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0F0F18" />
+    <meta name="description" content="Run agents. Worktree per session. No bullshit. Terminal-native ecosystem for managing AI coding agents — Claude · Codex · Gemini · Copilot." />
+    <meta property="og:title" content="agents-in-a-box" />
+    <meta property="og:description" content="Run agents. Worktree per session. No bullshit." />
+    <meta property="og:type" content="website" />
+    <title>agents-in-a-box — run agents, worktree per session, no bullshit</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap"
+    />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+
+    <header class="nav">
+      <a class="nav__brand" href={`${BASE}/`}>ainb<span class="ainb-cursor" aria-hidden="true"></span></a>
+      <nav class="nav__links">
+        <a href={docs('product/what-is-ainb')}>Docs</a>
+        <a href={docs('plugins/overview')}>Plugins</a>
+        <a href={docs('toolkit/overview')}>Toolkit</a>
+        <a href={REPO}>GitHub →</a>
+      </nav>
+    </header>
+
+    <main id="main">
+      <!-- HERO -->
+      <section class="hero">
+        <pre class="hero__logo" aria-label="agents-in-a-box">
+   █████╗  ██████╗ ███████╗███╗   ██╗████████╗███████╗
+  ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝██╔════╝
+  ███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║   ███████╗
+  ██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║   ╚════██║
+  ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║   ███████║
+  ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝   ╚══════╝
+            IN  A  BOX</pre>
+
+        <p class="hero__tag">
+          Run agents. Worktree per session. No&nbsp;bullshit.
+        </p>
+
+        <div class="install">
+          <code id="install-cmd">brew install ainb</code>
+          <button type="button" data-copy="brew install ainb" aria-label="Copy install command">copy</button>
+        </div>
+
+        <div class="hero__ctas">
+          <a class="btn btn--primary" href={docs('product/what-is-ainb')}>Read the docs →</a>
+          <a class="btn" href={REPO}>★ GitHub</a>
+        </div>
+      </section>
+
+      <!-- THREE-COL VALUE PROP -->
+      <section class="row3">
+        <a class="card" href={docs('tui/overview')}>
+          <h3>TUI</h3>
+          <div class="card__body">
+            <span>115 modules</span>
+            <span>4 providers</span>
+            <span>tmux-bound</span>
+          </div>
+          <span class="card__cta">docs →</span>
+        </a>
+        <a class="card" href={docs('toolkit/overview')}>
+          <h3>TOOLKIT</h3>
+          <div class="card__body">
+            <span>86 skills</span>
+            <span>9 tools</span>
+            <span>37 agents</span>
+          </div>
+          <span class="card__cta">docs →</span>
+        </a>
+        <a class="card" href={docs('plugins/overview')}>
+          <h3>PLUGINS</h3>
+          <div class="card__body">
+            <span>v2 ABI</span>
+            <span>JSON-RPC</span>
+            <span>cap-gated</span>
+          </div>
+          <span class="card__cta">docs →</span>
+        </a>
+      </section>
+
+      <!-- PLUGIN TEASER -->
+      <section class="section">
+        <div class="rule">═══════════════════════════════════════════════════════════</div>
+        <h2 class="section__title">Plugins, the right way.</h2>
+
+        <p class="section__lead">
+          Native binaries. JSON-RPC over stdio. Deny-by-default capabilities.
+          Your plugin can't reach the network unless you say it can.
+        </p>
+
+        <p class="section__lead">Two reference plugins ship in-tree:</p>
+        <ul class="bullets">
+          <li>▸ <strong>burndown</strong> — full analytics screen + <code>ainb usage</code> CLI</li>
+          <li>▸ <strong>session-reader</strong> — pure-publisher data backend</li>
+        </ul>
+
+        <pre class="codeblock"><code>[plugin]
+name        = "burndown"
+version     = "2.0.0"
+abi_version = 2
+
+[capabilities]
+read_claude_logs  = true
+event_bus         = true
+write_plugin_data = true
+network           = []          # deny
+
+[provides]
+screens        = ["analytics"]
+cli_namespaces = ["usage"]</code></pre>
+
+        <div class="ctas">
+          <a class="btn" href={docs('plugins/user-guide')}>User guide →</a>
+          <a class="btn" href={docs('plugins/authoring')}>Authoring →</a>
+          <a class="btn" href={docs('plugins/spec-v2')}>v2 spec →</a>
+        </div>
+      </section>
+
+      <!-- TOOLKIT GRID -->
+      <section class="section">
+        <div class="rule">═══════════════════════════════════════════════════════════</div>
+        <h2 class="section__title">One toolkit. Nine tools.</h2>
+        <p class="section__lead">
+          Write a skill once. Deploy it everywhere.
+        </p>
+
+        <div class="grid9">
+          <div class="cell"><span class="cell__name">Claude Code</span><code>--tool=claude-code-4.5</code></div>
+          <div class="cell"><span class="cell__name">Codex</span><code>--tool=codex</code></div>
+          <div class="cell"><span class="cell__name">Copilot</span><code>--tool=copilot</code></div>
+          <div class="cell"><span class="cell__name">Gemini CLI</span><code>--tool=gemini</code></div>
+          <div class="cell"><span class="cell__name">Amazon Q</span><code>--tool=amazonq</code></div>
+          <div class="cell"><span class="cell__name">Cursor</span><code>--tool=cursor</code></div>
+          <div class="cell"><span class="cell__name">Cline</span><code>--tool=cline</code></div>
+          <div class="cell"><span class="cell__name">Roo</span><code>--tool=roo</code></div>
+          <div class="cell"><span class="cell__name">Clawdhub</span><code>--tool=clawdhub</code></div>
+        </div>
+      </section>
+
+      <!-- ARCHITECTURE -->
+      <section class="section">
+        <div class="rule">═══════════════════════════════════════════════════════════</div>
+        <h2 class="section__title">Architecture.</h2>
+
+        <pre class="architecture" aria-label="ainb architecture diagram"><code>┌─────────────────────────────────────────────────────────┐
+│                     ainb TUI host                        │
+│   ┌──────────┐  ┌──────────┐  ┌────────────────────┐    │
+│   │ tmux/PTY │  │ git/wkt  │  │ plugin runtime     │    │
+│   └────┬─────┘  └────┬─────┘  └──────┬─────────────┘    │
+│        │             │               │                  │
+└────────┼─────────────┼───────────────┼──────────────────┘
+         │             │               │  JSON-RPC/stdio
+         ▼             ▼               ▼
+   ┌──────────┐  ┌─────────────┐  ┌──────────────────────┐
+   │  Claude  │  │ worktrees   │  │ burndown · session-  │
+   │  Codex   │  │ per session │  │ reader · yours       │
+   │  Gemini  │  └─────────────┘  └──────────────────────┘
+   │  Copilot │
+   └──────────┘
+
+   ┌────────────────────────────────────┐
+   │  Toolkit (86 skills · 37 agents)   │
+   │  Deploys to 9 AI coding tools      │
+   └────────────────────────────────────┘
+
+   ┌────────────────────────────────────┐
+   │  Knowledge: reflect-kb (GraphRAG)  │
+   │  /reflect  /recall  /ingest        │
+   └────────────────────────────────────┘</code></pre>
+
+        <p class="section__lead">
+          <a href={docs('reference/architecture')}>Read the deep-dive →</a>
+        </p>
+      </section>
+
+      <!-- KNOWLEDGE TEASER -->
+      <section class="section">
+        <div class="rule">─── » » » ───</div>
+        <h2 class="section__title">Capture what you learn.</h2>
+        <p class="section__lead">
+          Retrieve it across sessions.<br />
+          GraphRAG underneath. <code>/reflect</code> on top.<br />
+          170+ learnings indexed and growing.
+        </p>
+        <a class="btn" href={docs('knowledge/overview')}>How it works →</a>
+      </section>
+
+      <!-- STATS -->
+      <section class="stats">
+        <div class="stats__item">
+          <span class="stats__num ainb-stat">115</span>
+          <span class="stats__lbl">modules</span>
+        </div>
+        <div class="stats__item">
+          <span class="stats__num ainb-stat">86</span>
+          <span class="stats__lbl">skills</span>
+        </div>
+        <div class="stats__item">
+          <span class="stats__num ainb-stat">37</span>
+          <span class="stats__lbl">agents</span>
+        </div>
+        <div class="stats__item">
+          <span class="stats__num ainb-stat">2</span>
+          <span class="stats__lbl">plugins</span>
+        </div>
+      </section>
+
+      <!-- FINAL CTA -->
+      <section class="section final-cta">
+        <div class="rule">═══════════════════════════════════════════════════════════</div>
+        <p class="final-cta__lead">
+          Open source. MIT.<br />
+          Installs in a single command.
+        </p>
+        <div class="install install--big">
+          <code>brew install ainb</code>
+          <button type="button" data-copy="brew install ainb" aria-label="Copy install command">copy</button>
+        </div>
+        <div class="ctas">
+          <a class="btn btn--primary" href={docs('product/what-is-ainb')}>Read the docs →</a>
+          <a class="btn" href={REPO}>★ GitHub</a>
+          <a class="btn" href={`${REPO}/releases`}>Releases</a>
+        </div>
+        <div class="rule">═══════════════════════════════════════════════════════════</div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <div class="footer__cols">
+        <div>
+          <h4>Docs</h4>
+          <a href={docs('product/what-is-ainb')}>What is ainb</a>
+          <a href={docs('tui/cli')}>CLI reference</a>
+          <a href={docs('plugins/overview')}>Plugins</a>
+          <a href={docs('toolkit/overview')}>Toolkit</a>
+          <a href={docs('knowledge/overview')}>Knowledge</a>
+        </div>
+        <div>
+          <h4>Project</h4>
+          <a href={REPO}>GitHub</a>
+          <a href={`${REPO}/releases`}>Releases</a>
+          <a href={`${REPO}/issues`}>Issues</a>
+          <a href={`${REPO}/blob/main/LICENSE`}>License — MIT</a>
+        </div>
+        <div>
+          <h4>Maintainer</h4>
+          <a href="https://github.com/stevengonsalvez">stevengonsalvez</a>
+        </div>
+      </div>
+      <div class="footer__sub">
+        MIT · 2024–2026 · stevengonsalvez<span class="ainb-cursor" aria-hidden="true"></span>
+      </div>
+    </footer>
+
+    <script is:inline>
+      // Click-to-copy install command — minimal, no framework.
+      document.querySelectorAll('[data-copy]').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const text = btn.getAttribute('data-copy') || '';
+          try {
+            await navigator.clipboard.writeText(text);
+            const original = btn.textContent;
+            btn.textContent = 'copied';
+            btn.classList.add('btn--copied');
+            setTimeout(() => {
+              btn.textContent = original || 'copy';
+              btn.classList.remove('btn--copied');
+            }, 1500);
+          } catch {
+            btn.textContent = 'press ⌘C';
+            setTimeout(() => (btn.textContent = 'copy'), 1500);
+          }
+        });
+      });
+    </script>
+
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+
+      .skip-link {
+        position: absolute;
+        left: -9999px;
+      }
+      .skip-link:focus {
+        position: fixed;
+        left: 1rem;
+        top: 1rem;
+        background: var(--ainb-accent-gold);
+        color: var(--ainb-bg-deep);
+        padding: 0.5rem 1rem;
+        z-index: 9999;
+      }
+
+      .nav {
+        position: sticky;
+        top: 0;
+        z-index: 100;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 1rem 2rem;
+        background: color-mix(in srgb, var(--ainb-bg-deep) 92%, transparent);
+        backdrop-filter: blur(8px);
+        border-bottom: 1px solid color-mix(in srgb, var(--ainb-border) 25%, transparent);
+      }
+
+      .nav__brand {
+        font-family: var(--ainb-font-display);
+        font-weight: 700;
+        font-size: 1.1rem;
+        color: var(--ainb-accent-gold);
+        text-decoration: none;
+        letter-spacing: 0.05em;
+      }
+
+      .nav__links {
+        display: flex;
+        gap: 1.5rem;
+      }
+      .nav__links a {
+        color: var(--ainb-text-primary);
+        text-decoration: none;
+        font-size: 0.9rem;
+      }
+      .nav__links a:hover {
+        color: var(--ainb-accent-gold);
+      }
+
+      main {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 0 1.5rem;
+      }
+
+      /* HERO */
+      .hero {
+        padding: 6rem 0 4rem;
+        text-align: center;
+      }
+      .hero__logo {
+        font-family: var(--ainb-font-display);
+        font-weight: 700;
+        color: var(--ainb-accent-gold);
+        font-size: clamp(0.55rem, 1.2vw, 0.95rem);
+        line-height: 1.05;
+        text-align: center;
+        white-space: pre;
+        display: inline-block;
+        margin: 0 auto;
+        text-shadow: 0 0 24px color-mix(in srgb, var(--ainb-accent-gold) 25%, transparent);
+      }
+      .hero__tag {
+        font-family: var(--ainb-font-display);
+        font-size: clamp(1.2rem, 2.5vw, 1.6rem);
+        margin: 2.5rem 0 2rem;
+        color: var(--ainb-text-primary);
+      }
+
+      .install {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+        background: var(--ainb-bg-panel);
+        border: 1px solid color-mix(in srgb, var(--ainb-border) 40%, transparent);
+        border-radius: 6px;
+        padding: 0.75rem 1rem;
+        margin-bottom: 2rem;
+      }
+      .install code {
+        color: var(--ainb-accent-gold);
+        font-size: 1rem;
+        font-family: var(--ainb-font-mono);
+        background: transparent;
+      }
+      .install code::before {
+        content: '$ ';
+        color: var(--ainb-text-muted);
+      }
+      .install button {
+        background: transparent;
+        border: 1px solid color-mix(in srgb, var(--ainb-border) 40%, transparent);
+        color: var(--ainb-text-muted);
+        padding: 0.25rem 0.6rem;
+        font-family: var(--ainb-font-mono);
+        font-size: 0.75rem;
+        border-radius: 3px;
+        cursor: pointer;
+        transition: all 120ms;
+      }
+      .install button:hover,
+      .install button.btn--copied {
+        color: var(--ainb-bg-deep);
+        background: var(--ainb-accent-gold);
+        border-color: var(--ainb-accent-gold);
+      }
+      .install--big {
+        padding: 1rem 1.5rem;
+      }
+      .install--big code {
+        font-size: 1.15rem;
+      }
+
+      .hero__ctas {
+        display: flex;
+        justify-content: center;
+        gap: 1rem;
+        flex-wrap: wrap;
+      }
+
+      .btn {
+        display: inline-block;
+        padding: 0.65rem 1.25rem;
+        border: 1px solid color-mix(in srgb, var(--ainb-border) 60%, transparent);
+        border-radius: 4px;
+        color: var(--ainb-text-primary);
+        text-decoration: none;
+        font-family: var(--ainb-font-mono);
+        font-size: 0.9rem;
+        transition: all 120ms;
+        background: transparent;
+      }
+      .btn:hover {
+        background: var(--ainb-bg-raised);
+        border-color: var(--ainb-border);
+        color: var(--ainb-accent-gold);
+      }
+      .btn--primary {
+        background: var(--ainb-accent-gold);
+        color: var(--ainb-bg-deep);
+        border-color: var(--ainb-accent-gold);
+        font-weight: 700;
+      }
+      .btn--primary:hover {
+        background: var(--ainb-text-primary);
+        color: var(--ainb-bg-deep);
+        border-color: var(--ainb-text-primary);
+      }
+
+      /* THREE COL */
+      .row3 {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        gap: 1.5rem;
+        margin: 3rem 0;
+      }
+      .card {
+        display: block;
+        padding: 1.5rem;
+        border: 1px solid color-mix(in srgb, var(--ainb-border) 35%, transparent);
+        border-radius: 6px;
+        background: var(--ainb-bg-panel);
+        text-decoration: none;
+        color: var(--ainb-text-primary);
+        transition: all 150ms;
+      }
+      .card:hover {
+        background: var(--ainb-bg-raised);
+        border-color: var(--ainb-border);
+        transform: translateY(-2px);
+      }
+      .card h3 {
+        color: var(--ainb-accent-gold);
+        font-family: var(--ainb-font-display);
+        margin: 0 0 1rem;
+        letter-spacing: 0.1em;
+      }
+      .card__body {
+        display: flex;
+        flex-direction: column;
+        gap: 0.25rem;
+        color: var(--ainb-text-muted);
+        margin-bottom: 1rem;
+      }
+      .card__cta {
+        color: var(--ainb-border);
+        font-size: 0.85rem;
+      }
+      .card:hover .card__cta {
+        color: var(--ainb-accent-gold);
+      }
+
+      /* SECTIONS */
+      .section {
+        margin: 5rem 0;
+        text-align: center;
+      }
+      .section__title {
+        font-family: var(--ainb-font-display);
+        color: var(--ainb-accent-gold);
+        font-size: clamp(1.5rem, 3vw, 2.25rem);
+        margin: 1.5rem 0 1.5rem;
+      }
+      .section__lead {
+        color: var(--ainb-text-primary);
+        max-width: 50ch;
+        margin: 1rem auto;
+        line-height: 1.6;
+      }
+      .section__lead code {
+        color: var(--ainb-accent-gold);
+        background: var(--ainb-bg-highlight);
+        padding: 0 0.35rem;
+        border-radius: 3px;
+        font-size: 0.95em;
+      }
+      .rule {
+        color: color-mix(in srgb, var(--ainb-border) 45%, transparent);
+        white-space: nowrap;
+        overflow: hidden;
+        font-size: 0.7rem;
+        margin: 0 auto;
+      }
+
+      .bullets {
+        list-style: none;
+        padding: 0;
+        max-width: 50ch;
+        margin: 1rem auto;
+        text-align: left;
+      }
+      .bullets li {
+        margin: 0.35rem 0;
+        color: var(--ainb-text-primary);
+      }
+      .bullets strong {
+        color: var(--ainb-accent-gold);
+      }
+
+      .ctas {
+        display: flex;
+        justify-content: center;
+        gap: 0.75rem;
+        margin-top: 1.5rem;
+        flex-wrap: wrap;
+      }
+
+      .codeblock {
+        text-align: left;
+        background: #0A0A12;
+        border: 1px solid color-mix(in srgb, var(--ainb-border) 35%, transparent);
+        border-radius: 6px;
+        padding: 1rem 1.25rem;
+        margin: 1.5rem auto;
+        max-width: 55ch;
+        font-size: 0.85rem;
+        overflow-x: auto;
+      }
+      .codeblock code {
+        color: var(--ainb-text-primary);
+        font-family: var(--ainb-font-mono);
+      }
+
+      /* TOOLKIT GRID */
+      .grid9 {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 0;
+        border: 1px solid color-mix(in srgb, var(--ainb-border) 40%, transparent);
+        max-width: 800px;
+        margin: 2rem auto;
+      }
+      .cell {
+        padding: 1rem;
+        border-right: 1px solid color-mix(in srgb, var(--ainb-border) 25%, transparent);
+        border-bottom: 1px solid color-mix(in srgb, var(--ainb-border) 25%, transparent);
+        text-align: left;
+      }
+      .cell:nth-child(3n) { border-right: 0; }
+      .cell:nth-child(n+7) { border-bottom: 0; }
+      .cell__name {
+        display: block;
+        color: var(--ainb-accent-gold);
+        font-weight: 700;
+        margin-bottom: 0.3rem;
+      }
+      .cell code {
+        color: var(--ainb-text-muted);
+        font-size: 0.8rem;
+        background: transparent;
+        padding: 0;
+      }
+      @media (max-width: 700px) {
+        .grid9 { grid-template-columns: 1fr; }
+        .cell { border-right: 0 !important; border-bottom: 1px solid color-mix(in srgb, var(--ainb-border) 25%, transparent) !important; }
+        .cell:last-child { border-bottom: 0 !important; }
+      }
+
+      .architecture {
+        text-align: left;
+        background: #0A0A12;
+        border: 1px solid color-mix(in srgb, var(--ainb-border) 35%, transparent);
+        border-radius: 6px;
+        padding: 1.5rem;
+        margin: 2rem auto;
+        max-width: 700px;
+        font-size: clamp(0.62rem, 1vw, 0.78rem);
+        line-height: 1.35;
+        overflow-x: auto;
+      }
+      .architecture code {
+        color: var(--ainb-text-primary);
+        background: transparent;
+        padding: 0;
+      }
+
+      /* STATS */
+      .stats {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+        gap: 2rem;
+        text-align: center;
+        margin: 4rem 0;
+        padding: 2rem 0;
+        border-top: 1px solid color-mix(in srgb, var(--ainb-border) 30%, transparent);
+        border-bottom: 1px solid color-mix(in srgb, var(--ainb-border) 30%, transparent);
+      }
+      .stats__item {
+        display: flex;
+        flex-direction: column;
+        gap: 0.25rem;
+      }
+      .stats__num {
+        font-family: var(--ainb-font-display);
+        font-weight: 700;
+        font-size: clamp(2.5rem, 5vw, 3.5rem);
+        color: var(--ainb-accent-gold);
+        text-shadow: 0 0 18px color-mix(in srgb, var(--ainb-accent-gold) 20%, transparent);
+      }
+      .stats__lbl {
+        color: var(--ainb-text-muted);
+        font-size: 0.85rem;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+
+      .final-cta__lead {
+        font-family: var(--ainb-font-display);
+        font-size: clamp(1.1rem, 2vw, 1.35rem);
+        color: var(--ainb-text-primary);
+        line-height: 1.6;
+        margin: 1.5rem 0;
+      }
+      .final-cta .install {
+        margin: 1rem 0 1.5rem;
+      }
+
+      /* FOOTER */
+      .footer {
+        max-width: 1100px;
+        margin: 4rem auto 2rem;
+        padding: 2rem 1.5rem;
+        border-top: 1px solid color-mix(in srgb, var(--ainb-border) 25%, transparent);
+      }
+      .footer__cols {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+        gap: 2rem;
+      }
+      .footer__cols h4 {
+        color: var(--ainb-accent-gold);
+        font-family: var(--ainb-font-display);
+        margin: 0 0 0.75rem;
+        letter-spacing: 0.05em;
+      }
+      .footer__cols a {
+        display: block;
+        color: var(--ainb-text-muted);
+        text-decoration: none;
+        padding: 0.2rem 0;
+        font-size: 0.9rem;
+      }
+      .footer__cols a:hover {
+        color: var(--ainb-accent-gold);
+      }
+      .footer__sub {
+        margin-top: 2rem;
+        padding-top: 1.5rem;
+        border-top: 1px solid color-mix(in srgb, var(--ainb-border) 15%, transparent);
+        color: var(--ainb-text-faint);
+        font-size: 0.8rem;
+        text-align: center;
+      }
+    </style>
+  </body>
+</html>

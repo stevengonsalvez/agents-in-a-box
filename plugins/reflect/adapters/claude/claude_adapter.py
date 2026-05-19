@@ -4,16 +4,23 @@
 This is a thin wrapper that plugs reflect-kb into the Claude Code `.claude`
 layout on a user's machine. It:
 
-  1. Writes pointer skill files into ``~/.claude/skills/<skill_name>/`` so
-     Claude's skill discovery picks them up. The pointer references the
-     canonical SKILL.md under the reflect-kb plugin, rather than copying the
-     whole tree — updates to the upstream skill propagate automatically.
+  1. Writes the full plugin SKILL.md content into
+     ``~/.claude/skills/<skill_name>/SKILL.md`` so Claude's skill discovery
+     picks them up with real workflow guidance. (Earlier versions wrote a
+     pointer stub that referenced the source path — Claude Code's skill
+     loader does NOT dereference that ``source:`` field, so the pointer
+     pattern silently loaded 12 lines of "see source" and agents improvised
+     everything else. The adapter now copies content directly; a
+     ``managed_by:`` sentinel in frontmatter still lets uninstall recognise
+     adapter-written files.) Re-run ``install --force`` after each
+     ``/plugin update`` to mirror the refreshed plugin content.
   2. Merges a SessionStart hook snippet into ``~/.claude/settings.json`` so
      the recall skill fires on session start.
 
 Both steps support ``--dry-run`` (report intent, no filesystem changes) and
 are idempotent. The Claude harness is the only one with hook parity; Codex
-and Copilot get pointer-only installs (see their respective adapters).
+and Copilot still use the inherited pointer-stub pattern (their own loaders
+may or may not dereference ``source:`` — see their respective adapters).
 
 Usage::
 
@@ -24,14 +31,15 @@ Usage::
     python claude_adapter.py uninstall
 
 Most of the install/uninstall mechanics live on :class:`AdapterBase`. The
-Claude-specific pieces are the SessionStart hook injection and the bespoke
-pointer body that doesn't mention "no hooks" (since Claude *does* have them).
+Claude-specific pieces are the SessionStart hook injection and the
+``_pointer_body`` override that writes full content instead of a stub.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any, Optional
@@ -77,13 +85,63 @@ _LEGACY_SESSION_START_HOOK_COMMAND = SESSION_START_HOOK_COMMAND_TEMPLATE.replace
 )
 
 
+def _inject_managed_by(text: str, sentinel: str) -> str:
+    """Ensure ``text``'s YAML frontmatter contains ``managed_by: <sentinel>``.
+
+    Used by :class:`ClaudeAdapter` to mark adapter-installed skill files for
+    later uninstall while preserving the rest of the plugin SKILL.md byte
+    for byte. Three cases:
+
+      * No frontmatter at all → wrap with minimal ``---\\nmanaged_by:...\\n---``.
+      * Frontmatter present, no ``managed_by`` key → append the line before
+        the closing ``---``.
+      * Frontmatter present with ``managed_by`` already → replace that line.
+
+    Body content (including stray ``---`` rules used as horizontal dividers)
+    is left untouched.
+    """
+    if not text.startswith("---"):
+        return f"---\nmanaged_by: {sentinel}\n---\n\n{text}"
+
+    # Locate the closing ``---`` of the first frontmatter block. Search
+    # starts after the opening ``---`` (position 3) and matches a ``---``
+    # that's the entire content of its own line.
+    body = text[3:]
+    m = re.search(r"(^|\n)---(\n|$)", body)
+    if not m:
+        # Malformed frontmatter (no closing) — treat as no frontmatter.
+        return f"---\nmanaged_by: {sentinel}\n---\n\n{text}"
+
+    fm_block = body[: m.start()]
+    rest = body[m.end():]
+    trailing = m.group(2)  # "\n" or "" (end-of-file)
+
+    managed_re = re.compile(r"^managed_by:.*$", re.MULTILINE)
+    if managed_re.search(fm_block):
+        new_fm = managed_re.sub(f"managed_by: {sentinel}", fm_block)
+    else:
+        new_fm = fm_block.rstrip("\n") + f"\nmanaged_by: {sentinel}\n"
+
+    return f"---{new_fm}---{trailing}{rest}"
+
+
 class ClaudeAdapter(AdapterBase):
-    """Claude harness: pointer install + SessionStart hook merge."""
+    """Claude harness: full-content skill install + SessionStart hook merge.
+
+    Unlike the base adapter (which writes a pointer-stub SKILL.md and relies
+    on the harness to dereference ``source:``), this adapter copies the
+    plugin's SKILL.md content verbatim into ``~/.claude/skills/<name>/`` —
+    Claude Code's skill loader reads the file content directly and does not
+    follow the ``source:`` field. Frontmatter is mutated to set
+    ``managed_by:`` so uninstall still recognises adapter-written files.
+    """
 
     POINTER_MANAGED_BY = POINTER_MANAGED_BY
     HARNESS_DIR = ".claude"
     HARNESS_LABEL = "Claude"
 
+    # Retained as a fallback for the rare case where the source SKILL.md is
+    # unreadable; normal operation overrides this via ``_pointer_body``.
     POINTER_BODY_TEMPLATE = (
         "---\n"
         "name: {name}\n"
@@ -91,11 +149,21 @@ class ClaudeAdapter(AdapterBase):
         "managed_by: {managed_by}\n"
         "source: {source}\n"
         "---\n\n"
-        "Pointer skill installed by the reflect-kb {harness_label} adapter.\n\n"
-        "Canonical skill definition lives at `{source}`. The adapter\n"
-        "writes this pointer so Claude Code's skill discovery finds the\n"
-        "reflect skill set via its standard `~/.claude/skills/` scan.\n"
+        "Adapter could not read the upstream SKILL.md at `{source}` —\n"
+        "re-run the install once the source path is accessible.\n"
     )
+
+    def _pointer_body(self, source_skill: Path) -> str:
+        """Return the full plugin SKILL.md content with ``managed_by:`` injected.
+
+        Overrides :meth:`AdapterBase._pointer_body` which produces a
+        pointer-stub. See the module docstring for the rationale.
+        """
+        try:
+            text = source_skill.read_text(encoding="utf-8")
+        except OSError:
+            return super()._pointer_body(source_skill)
+        return _inject_managed_by(text, self.POINTER_MANAGED_BY)
 
     # --- CLI flags -------------------------------------------------------
 

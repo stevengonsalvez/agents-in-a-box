@@ -1,3 +1,7 @@
+---
+title: "Screenshots"
+---
+
 # Screenshots
 
 Reproducible TUI screenshots for the project docs. Generated headlessly by [vhs](https://github.com/charmbracelet/vhs) — no real terminal needed, no on-screen pop-ups, output is byte-deterministic per binary build + theme + `$HOME` state.

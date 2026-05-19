@@ -44,16 +44,18 @@ _fingerprint() {
 
 # ── Resolve the live session's project dir + JSONL ───────────────────────────
 # Claude Code hashes the PROJECT ROOT (the dir containing .git), not the literal
-# pwd — so worktrees end up sharing the parent repo's project dir. Three-tier
-# resolution, env-driven first because that's what statusline.sh hands us.
+# pwd — so worktrees end up sharing the parent repo's project dir. Resolution
+# order prefers the git-common-dir walk because $REFLECT_TIMELINE_PROJECT_DIR
+# from statusline.sh carries the worktree cwd (which hashes to a project dir
+# that exists but has no memory/ subdir — Claude Code's auto-memory writes
+# always land under the git-root hash).
 #
-# 1. $REFLECT_TIMELINE_PROJECT_DIR (passed by statusline.sh from stdin JSON)
-# 2. Walk up cwd to find .git dir, hash THAT path
-# 3. Fall back to literal pwd hash (legacy behaviour)
+# 1. Walk up cwd to find .git dir, hash THAT path (matches Claude Code)
+# 2. $REFLECT_TIMELINE_PROJECT_DIR fallback (non-git contexts)
+# 3. Literal pwd hash (legacy)
 _resolve_project_dir() {
   local source_path hash
-  source_path="${REFLECT_TIMELINE_PROJECT_DIR:-}"
-  if [[ -z "$source_path" ]] && command -v git >/dev/null 2>&1; then
+  if command -v git >/dev/null 2>&1; then
     # `git rev-parse --git-common-dir`'s parent → the main repo root for both
     # regular checkouts AND worktrees. Worktrees have .git as a file pointing
     # to <main>/.git/worktrees/<name>; --git-common-dir resolves through that
@@ -67,7 +69,7 @@ _resolve_project_dir() {
       source_path=$(dirname "$gcd")
     fi
   fi
-  # Last-ditch fallback: literal pwd
+  [[ -z "$source_path" ]] && source_path="${REFLECT_TIMELINE_PROJECT_DIR:-}"
   [[ -z "$source_path" ]] && source_path=$(pwd 2>/dev/null || echo "")
   [[ -z "$source_path" ]] && return
   hash=$(printf '%s' "$source_path" | tr '/.' '-')

@@ -42,7 +42,17 @@ use serde::{Deserialize, Serialize};
 /// deserialise on v2 consumers (the externally-tagged enum rejects
 /// unknown variants), so receivers MUST check
 /// `event.version == WIRE_VERSION` before trusting the payload.
-pub const WIRE_VERSION: u32 = 3;
+///
+/// v4: per-chunk `sessions` and `shell_commands` slices. Previously
+/// chunk 0 carried the entire aggregate tree (including the full
+/// `sessions` vec and the full `shell_commands` vec), which for large
+/// `$HOME` datasets pushed chunk 0 past the framer's 16 MiB
+/// `MAX_BODY_BYTES` cap (observed: 17 MiB for ~128k calls / ~4k
+/// sessions / many distinct bash commands). Under v4, `sessions` and
+/// `shell_commands` are tail-chunkable: chunk 0 leaves them empty;
+/// follow-on chunks carry slices that the consumer accumulator
+/// `extend`s into the in-flight `UsageData` just like `calls`.
+pub const WIRE_VERSION: u32 = 4;
 
 /// Per-file scan progress payload published on the
 /// `sessions.scan_progress` topic.
@@ -76,15 +86,22 @@ pub struct ScanProgressEvent {
 /// "partial" badge and re-asks on the next refresh.
 ///
 /// **Chunked publishes**: a single logical snapshot may be split into
-/// N envelopes. Chunk 0 carries the full aggregates plus the first
-/// slice of [`UsageData::calls`]; chunks 1..N carry the remaining
-/// `calls` only (every other field is empty/default). The last chunk
-/// sets `is_final = true`; consumers concat the call slices and treat
-/// the snapshot as live once they see `is_final`.
+/// N envelopes. Chunk 0 carries the bounded aggregates (`daily`,
+/// `weekly`, `projects`, `grand_total`, `models`, `activities`,
+/// `tools`, `mcp_servers`, `branches`, `model_project_counts`); chunks
+/// 1..N carry slices of the unbounded vecs (`calls`, `sessions`,
+/// `shell_commands`). The consumer accumulator concats each slice into
+/// the in-flight `UsageData`. The last chunk sets `is_final = true`;
+/// consumers treat the snapshot as live once they see `is_final`.
 ///
 /// Single-chunk publishes use `chunk_index = 0, is_final = true` — the
 /// defaults — so old publishers and small snapshots keep working
 /// unchanged.
+///
+/// Wire-format note: chunks 1..N also leave every bounded aggregate
+/// at default (empty vec / zero counters); only `calls`, `sessions`,
+/// and `shell_commands` are populated. The consumer reads these three
+/// fields with `extend`, ignoring the others on follow-on chunks.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UsageDataEvent {
     /// Schema version. Equals [`WIRE_VERSION`] when the publisher and
