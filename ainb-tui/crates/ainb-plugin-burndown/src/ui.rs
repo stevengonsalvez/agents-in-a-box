@@ -7,7 +7,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Paragraph, Row, Table, Tabs},
+    widgets::{Block, BorderType, Borders, Gauge, Paragraph, Row, Table, Tabs},
 };
 
 use ainb_plugin_types_sessions::ScanProgressEvent;
@@ -1205,11 +1205,16 @@ fn render_loading(buf: &mut Buffer, area: Rect) {
 /// events from session-reader. Two formats depending on whether the
 /// scanner has pre-computed a file total:
 ///
-/// * `total > 0` → `Scanning sessions: N/M · {current_project}`
-/// * `total = 0` → `Scanning sessions… N files · {current_project}`
+/// * `total > 0` → headline `Scanning sessions: N/M · {current_project}`
+///   on row 0 of the inner area, plus a ratatui `Gauge` bar on row 1
+///   showing the `N/M` ratio with the inline `XX% (N/M)` label.
+/// * `total = 0` → headline `Scanning sessions… N files · {current_project}`
+///   only (no bar — without a total there's no ratio to render).
 ///
 /// The text is rendered in the same rounded panel as `render_loading`
-/// so the layout doesn't jitter between the two skeleton variants.
+/// so the layout doesn't jitter between the two skeleton variants. The
+/// gauge area is only allocated when total > 0; otherwise the panel is
+/// unchanged from the legacy single-line skeleton.
 pub(crate) fn render_scan_progress(
     buf: &mut Buffer,
     area: Rect,
@@ -1220,6 +1225,11 @@ pub(crate) fn render_scan_progress(
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(CORNFLOWER_BLUE))
         .style(Style::default().bg(DARK_BG));
+    let inner = block.inner(area);
+    ratatui::widgets::Widget::render(block, area, buf);
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
 
     let mut spans = vec![
         Span::styled("  ⏳ ", Style::default().fg(GOLD)),
@@ -1235,8 +1245,45 @@ pub(crate) fn render_scan_progress(
             Style::default().fg(MUTED_GRAY),
         ));
     }
-    let paragraph = Paragraph::new(Line::from(spans)).block(block);
-    ratatui::widgets::Widget::render(paragraph, area, buf);
+
+    // When `total` is known and the panel has room for a second row,
+    // split the inner area into a 1-row headline + 1-row gauge. When
+    // `total` is 0 (or the panel is too short for 2 rows), fall back to
+    // the legacy single-line skeleton so we never render a bar with
+    // bogus 0% data.
+    let show_gauge = progress.total > 0 && inner.height >= 2;
+    if !show_gauge {
+        let paragraph = Paragraph::new(Line::from(spans));
+        ratatui::widgets::Widget::render(paragraph, inner, buf);
+        return;
+    }
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Length(1)])
+        .split(inner);
+
+    let paragraph = Paragraph::new(Line::from(spans));
+    ratatui::widgets::Widget::render(paragraph, layout[0], buf);
+
+    // Cap the ratio at 1.0 in case `scanned` overshoots `total` (can
+    // happen briefly if files are added mid-scan — ProgressReporter's
+    // counter is monotonic but `total` is the pre-walk snapshot).
+    let ratio = (f64::from(progress.scanned) / f64::from(progress.total)).clamp(0.0, 1.0);
+    let pct = (ratio * 100.0).round() as u16;
+    let gauge = Gauge::default()
+        .gauge_style(
+            Style::default()
+                .fg(SELECTION_GREEN)
+                .bg(PANEL_BG)
+                .add_modifier(Modifier::BOLD),
+        )
+        .label(format!(
+            "{pct:>3}% ({}/{})",
+            progress.scanned, progress.total
+        ))
+        .ratio(ratio);
+    ratatui::widgets::Widget::render(gauge, layout[1], buf);
 }
 
 /// Format the scanned/total counters into the headline portion of the
@@ -5284,5 +5331,85 @@ mod scan_progress_tests {
             .collect();
         assert!(painted.contains("1 files"));
         assert!(!painted.contains(" · "), "no separator when project empty: {painted:?}");
+    }
+
+    #[test]
+    fn render_skeleton_paints_gauge_below_headline_when_total_known() {
+        // height=4 leaves an inner area of 2 rows after the rounded
+        // block — one for the headline, one for the gauge.
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 4,
+        };
+        let mut buf = Buffer::empty(area);
+        render_scan_progress(&mut buf, area, &progress(50, 100, "alpha"));
+
+        // Row 1 = headline. Row 2 = gauge.
+        let headline_row: String = (0..area.width)
+            .map(|x| buf.get(x, 1).symbol().to_string())
+            .collect();
+        let gauge_row: String = (0..area.width)
+            .map(|x| buf.get(x, 2).symbol().to_string())
+            .collect();
+        assert!(
+            headline_row.contains("Scanning sessions: 50/100"),
+            "headline rendered on row 1: {headline_row:?}"
+        );
+        assert!(
+            gauge_row.contains("50%") || gauge_row.contains("(50/100)"),
+            "gauge row contains the percent/ratio label: {gauge_row:?}"
+        );
+    }
+
+    #[test]
+    fn render_skeleton_falls_back_to_single_line_when_total_unknown() {
+        // total=0 → never render the gauge, even with a tall area.
+        // Without a denominator there's no ratio to draw.
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 6,
+        };
+        let mut buf = Buffer::empty(area);
+        render_scan_progress(&mut buf, area, &progress(17, 0, "alpha"));
+
+        // Row 1 should have the headline. Row 2 should be empty (no
+        // gauge), filled with spaces / default cells.
+        let row2: String = (0..area.width)
+            .map(|x| buf.get(x, 2).symbol().to_string())
+            .collect();
+        assert!(
+            !row2.contains('%'),
+            "no gauge row when total=0: row2 = {row2:?}"
+        );
+    }
+
+    #[test]
+    fn render_skeleton_clamps_overshoot_ratio() {
+        // If `scanned` somehow exceeds `total` (e.g. files added
+        // mid-scan after the pre-walk), the gauge must clamp at 100%
+        // rather than over-fill the bar or print "120%".
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 4,
+        };
+        let mut buf = Buffer::empty(area);
+        render_scan_progress(&mut buf, area, &progress(120, 100, "alpha"));
+        let gauge_row: String = (0..area.width)
+            .map(|x| buf.get(x, 2).symbol().to_string())
+            .collect();
+        assert!(
+            gauge_row.contains("100%"),
+            "overshoot clamps to 100%: {gauge_row:?}"
+        );
+        assert!(
+            !gauge_row.contains("120%"),
+            "no over-100% label: {gauge_row:?}"
+        );
     }
 }
