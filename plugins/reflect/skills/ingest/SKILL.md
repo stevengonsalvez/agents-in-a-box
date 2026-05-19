@@ -158,7 +158,8 @@ grep -q "{content_hash}" "$HOME/.learnings/.memory-ingest-log.yaml" 2>/dev/null
 
 For each non-duplicate memory, generate:
 
-**A. Learning note** (`~/.learnings/documents/learnings/{id}.md`):
+**A. Learning note** (`~/.learnings/documents/{id}.md` — flat top-level; the
+CLI chooses this destination):
 
 Use the template at `assets/learning_template.md` for the note structure.
 Fields preserved: `id`, `scope`, `confidence`, `learning_type`, `source_episodes`,
@@ -192,7 +193,8 @@ provenance:
 {project name, source path, related files}
 ```
 
-**B. Entity sidecar** (`~/.learnings/documents/learnings/{id}.entities.yaml`):
+**B. Entity sidecar** (`~/.learnings/documents/{id}.entities.yaml` — sibling
+of the learning note):
 
 Required schema — every field below is mandatory except `strength` (defaults to 5).
 The `reflect add --entities` CLI enforces this via `entity_store.Entity` and will

@@ -373,11 +373,14 @@ Reflect signals land in one of four v3 homes depending on scope.
 - `~/.claude/projects/<HASH>/memory/MEMORY.md` — index pointing at the above.
 
 **Cross-project / generic knowledge (queryable via `/recall` from any session):**
-- `reflect add <file>` → `~/.learnings/documents/learnings/{id}.md` plus a
-  `{id}.entities.yaml` sidecar; auto-indexed into GraphRAG + QMD. Use this for
-  system-level findings, library quirks, or behavioural patterns that aren't
-  tied to any one repo. If the signal doesn't belong to any specific project,
-  go straight here — no project-scoped intermediate step required.
+- `reflect add <file>` → `~/.learnings/documents/{id}.md` plus a
+  `{id}.entities.yaml` sidecar (flat top-level under `documents/` — the CLI
+  picks the destination; older subdirs like `documents/learnings/` are from
+  prior layouts, do not target them); auto-indexed into GraphRAG + QMD. Use
+  this for system-level findings, library quirks, or behavioural patterns
+  that aren't tied to any one repo. If the signal doesn't belong to any
+  specific project, go straight here — no project-scoped intermediate step
+  required.
 
 **In-repo solution notes (versioned with code, harvested by `/reflect:ingest`):**
 - `docs/solutions/{category}/{name}.md` + `{name}.entities.yaml`
