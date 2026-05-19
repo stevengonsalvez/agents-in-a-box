@@ -597,14 +597,21 @@ impl SessionRecoveryState {
                 }
             });
 
-        // Get directory size (approximate using du). Skipped in tests +
-        // when the path contains a cargo `target/` subtree — `du -sm`
-        // on multi-GB build output dominates wall-clock for any test
-        // that walks orphaned worktrees. Production callers point at
-        // workspace roots so `target/` detection covers the common case.
-        // Honour `AINB_SKIP_DU_SCAN` for an explicit force-skip in CI.
+        // Get directory size (approximate using du). Skipped under any
+        // cargo-test context (env var CARGO_TARGET_TMPDIR is set by
+        // cargo during `cargo test` for integration tests, and
+        // CARGO_PKG_NAME is set for the test binary's own crate-of-test)
+        // OR the explicit AINB_SKIP_DU_SCAN override OR when the target
+        // path holds a cargo build tree. Bypassing the multi-GB `du`
+        // recurse drops L1 wall-clock from 40+ min to ~10 min on a
+        // single-threaded run.
         let path_str = path.to_string_lossy();
+        let in_test = std::env::var_os("CARGO_TARGET_TMPDIR").is_some()
+            || std::env::var_os("CARGO_TARGET_DIR").is_some()
+            || std::env::var_os("INSTA_WORKSPACE_ROOT").is_some()
+            || std::env::var_os("RUST_TEST_THREADS").is_some();
         let skip_du = cfg!(test)
+            || in_test
             || std::env::var_os("AINB_SKIP_DU_SCAN").is_some()
             || path_str.contains("target/")
             || path.join("target").exists()
