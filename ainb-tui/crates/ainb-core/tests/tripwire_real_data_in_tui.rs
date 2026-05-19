@@ -31,6 +31,9 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[path = "tripwire_tmux_lock.rs"]
+mod tripwire_tmux_lock;
+
 fn ainb_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_ainb"))
 }
@@ -116,6 +119,43 @@ fn kill_session(session: &str) {
     let _ = Command::new("tmux").args(["kill-session", "-t", session]).status();
 }
 
+fn send_key(session: &str, key: &str) {
+    Command::new("tmux")
+        .args(["send-keys", "-t", session, key])
+        .status()
+        .expect("tmux send-keys");
+}
+
+/// Press `key` repeatedly until `ok` matches a capture, or `total`
+/// elapses. Re-presses every ~5s — a single send-key can be dropped
+/// under heavy CPU contention (30+ test binaries fighting for the
+/// scheduler) before the host's event loop drains the input queue.
+fn press_until<F>(
+    session: &str,
+    key: &str,
+    total: Duration,
+    mut ok: F,
+) -> Option<String>
+where
+    F: FnMut(&str) -> bool,
+{
+    let deadline = Instant::now() + total;
+    let mut last_press = Instant::now();
+    send_key(session, key);
+    while Instant::now() < deadline {
+        let cap = capture_pane(session);
+        if ok(&cap) {
+            return Some(cap);
+        }
+        if last_press.elapsed() > Duration::from_secs(5) {
+            send_key(session, key);
+            last_press = Instant::now();
+        }
+        thread::sleep(Duration::from_millis(400));
+    }
+    None
+}
+
 // The "Waiting for session-reader plugin..." stall was two layered bugs:
 //   1. The runtime ignored `manifest.lifecycle.spawn = "eager"`, so
 //      session-reader was never started (fixed in plugin_task.rs via
@@ -143,6 +183,8 @@ fn tui_renders_real_analytics_data_after_pressing_i() {
         );
         return;
     };
+
+    let _lock = tripwire_tmux_lock::TmuxSerialLock::acquire();
 
     let home_tmp = tempfile::tempdir().expect("home tempdir");
     seed_isolated_home(home_tmp.path());
@@ -185,16 +227,10 @@ fn tui_renders_real_analytics_data_after_pressing_i() {
     );
 
     // Drive the real keybinding: lowercase `i` opens stats.
-    Command::new("tmux")
-        .args(["send-keys", "-t", &session, "i"])
-        .status()
-        .expect("send i");
-
-    // Wait until burndown actually renders real numbers. We allow up
-    // to 30s for session-reader's first scan + publish. The success
-    // markers are real data cues — Total Calls/Cost/$N — not chrome.
-    let data_deadline = Instant::now() + Duration::from_secs(30);
-    let post_cap = poll_capture(&session, data_deadline, |c| {
+    // Use press_until so a single dropped send-key (heavy L1 ci
+    // contention drops the host's first read of the input queue) is
+    // recovered by a re-press every ~5s.
+    let post_cap = press_until(&session, "i", Duration::from_secs(90), |c| {
         let has_real_marker = c.contains("Total Calls")
             || c.contains("Total Cost")
             || c.contains("$0.")

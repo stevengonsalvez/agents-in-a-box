@@ -26,6 +26,9 @@
 //! `tripwire_real_data_in_tui.rs` and we mirror them here for
 //! consistency.
 
+#[path = "tripwire_tmux_lock.rs"]
+mod tripwire_tmux_lock;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -146,6 +149,36 @@ where
     None
 }
 
+/// Press `key` repeatedly until `ok` matches a capture, or `total`
+/// elapses. Re-presses every ~5s — a single send-key can be dropped
+/// under heavy CPU contention (30+ test binaries fighting for the
+/// scheduler) before the host's event loop drains the input queue.
+fn press_until<F>(
+    session: &str,
+    key: &str,
+    total: Duration,
+    mut ok: F,
+) -> Option<String>
+where
+    F: FnMut(&str) -> bool,
+{
+    let deadline = Instant::now() + total;
+    let mut last_press = Instant::now();
+    send_key(session, key);
+    while Instant::now() < deadline {
+        let cap = capture_pane(session);
+        if ok(&cap) {
+            return Some(cap);
+        }
+        if last_press.elapsed() > Duration::from_secs(5) {
+            send_key(session, key);
+            last_press = Instant::now();
+        }
+        thread::sleep(Duration::from_millis(400));
+    }
+    None
+}
+
 fn send_key(session: &str, key: &str) {
     Command::new("tmux")
         .args(["send-keys", "-t", session, key])
@@ -239,6 +272,8 @@ fn burndown_interactive_keys_change_render() {
         return;
     };
 
+    let _lock = tripwire_tmux_lock::TmuxSerialLock::acquire();
+
     let home_tmp = tempfile::tempdir().expect("home tempdir");
     seed_fixture_home(home_tmp.path());
 
@@ -282,10 +317,10 @@ fn burndown_interactive_keys_change_render() {
 
     // Enter burndown. Wait for real data — fixture totals are non-zero
     // so a `$<digit>` token must appear inside 30s once session-reader
-    // publishes the first usage_data chunk.
-    send_key(&session, "i");
-    let data_deadline = Instant::now() + Duration::from_secs(45);
-    let initial = poll_capture(&session, data_deadline, |c| {
+    // publishes the first usage_data chunk. press_until re-sends `i`
+    // every ~5s in case the first keypress was dropped during CPU
+    // contention.
+    let initial = press_until(&session, "i", Duration::from_secs(90), |c| {
         c.contains("Usage Analytics")
             && !c.contains("Waiting for session-reader plugin")
             && c.contains('$')

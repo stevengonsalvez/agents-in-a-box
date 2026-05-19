@@ -20,6 +20,9 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[path = "tripwire_tmux_lock.rs"]
+mod tripwire_tmux_lock;
+
 fn ainb_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_ainb"))
 }
@@ -132,6 +135,37 @@ fn send_key(session: &str, key: &str) {
         .expect("tmux send-keys");
 }
 
+/// Press `key` repeatedly until `ok` matches a capture, or `total`
+/// elapses. Re-presses every ~5s — a single send-key can be dropped
+/// under heavy CPU contention (30+ test binaries fighting for the
+/// scheduler) before the host's event loop drains the input queue.
+/// Solo runs never see this; full L1 ci sees it routinely.
+fn press_until<F>(
+    session: &str,
+    key: &str,
+    total: Duration,
+    mut ok: F,
+) -> Option<String>
+where
+    F: FnMut(&str) -> bool,
+{
+    let deadline = Instant::now() + total;
+    let mut last_press = Instant::now();
+    send_key(session, key);
+    while Instant::now() < deadline {
+        let cap = capture_pane(session);
+        if ok(&cap) {
+            return Some(cap);
+        }
+        if last_press.elapsed() > Duration::from_secs(5) {
+            send_key(session, key);
+            last_press = Instant::now();
+        }
+        thread::sleep(Duration::from_millis(400));
+    }
+    None
+}
+
 /// Send a key and wait for the capture to settle (no further byte
 /// changes for two consecutive polls, or hard timeout).
 fn send_key_and_settle(session: &str, key: &str) -> String {
@@ -204,6 +238,8 @@ fn fresh_pivot_badge_appears_on_recompute_and_clears_on_next_render() {
         return;
     };
 
+    let _lock = tripwire_tmux_lock::TmuxSerialLock::acquire();
+
     let home_tmp = tempfile::tempdir().expect("home tempdir");
     seed_fixture_home(home_tmp.path());
 
@@ -239,13 +275,20 @@ fn fresh_pivot_badge_appears_on_recompute_and_clears_on_next_render() {
         panic!("HomeScreen never rendered; last capture:\n---\n{last}\n---");
     }
 
-    // Enter burndown. Wait for real data — the badge ride along with
+    // Enter burndown. Wait for real data — the badge rides along with
     // the first render after the fixture's usage_data lands, so we
     // need the screen to be data-bearing before asserting on chip
     // strip state.
-    send_key(&session, "i");
-    let data_deadline = Instant::now() + Duration::from_secs(45);
-    let initial = poll_capture(&session, data_deadline, |c| {
+    //
+    // Re-presses `i` every ~5s of polling: under heavy L1 ci contention
+    // (30+ test binaries running concurrently) a single send-key can be
+    // dropped before the host's event loop drains the input queue,
+    // leaving the test parked on HomeScreen until timeout. Solo runs
+    // never see this because there is no CPU competition. The retry
+    // does not corrupt state: from HomeScreen `i` navigates to stats;
+    // from the stats screen the burndown plugin owns `i` and either
+    // ignores it or treats it as a chip filter (idempotent on data).
+    let initial = press_until(&session, "i", Duration::from_secs(90), |c| {
         c.contains("Usage Analytics")
             && !c.contains("Waiting for session-reader plugin")
             && c.contains('$')

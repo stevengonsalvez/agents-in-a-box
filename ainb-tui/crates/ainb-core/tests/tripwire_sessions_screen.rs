@@ -15,6 +15,9 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[path = "tripwire_tmux_lock.rs"]
+mod tripwire_tmux_lock;
+
 fn ainb_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_ainb"))
 }
@@ -81,6 +84,8 @@ fn tui_sessions_screen_renders_after_pressing_s() {
         return;
     }
 
+    let _lock = tripwire_tmux_lock::TmuxSerialLock::acquire();
+
     let home_tmp = tempfile::tempdir().expect("home tempdir");
     seed_isolated_home(home_tmp.path());
 
@@ -120,17 +125,30 @@ fn tui_sessions_screen_renders_after_pressing_s() {
         "pre-key capture already on sessions screen — state leaked\n{pre_cap}"
     );
 
-    Command::new("tmux")
+    // Re-send `s` every ~5s up to 60s — under full L1 ci contention a
+    // single send-key can be dropped before the host's event loop
+    // drains it. Solo runs don't see this.
+    let nav_deadline = Instant::now() + Duration::from_secs(60);
+    let mut last_press = Instant::now();
+    let _ = Command::new("tmux")
         .args(["send-keys", "-t", &session, "s"])
         .status()
         .expect("send s");
-
-    // Wait for sessions screen markers. Per the layout in
-    // `components/session_list.rs`, the screen renders a panel with
-    // either a session list or an empty-state hint — accept either
-    // because a fresh tempdir HOME has no sessions yet.
-    let nav_deadline = Instant::now() + Duration::from_secs(20);
-    let post = poll(&session, nav_deadline, |c| is_on_sessions_screen(c));
+    let mut post: Option<String> = None;
+    while Instant::now() < nav_deadline {
+        let c = capture(&session);
+        if is_on_sessions_screen(&c) {
+            post = Some(c);
+            break;
+        }
+        if last_press.elapsed() > Duration::from_secs(5) {
+            let _ = Command::new("tmux")
+                .args(["send-keys", "-t", &session, "s"])
+                .status();
+            last_press = Instant::now();
+        }
+        thread::sleep(Duration::from_millis(400));
+    }
 
     let final_cap = post.unwrap_or_else(|| capture(&session));
     let _ = Command::new("tmux").args(["kill-session", "-t", &session]).status();

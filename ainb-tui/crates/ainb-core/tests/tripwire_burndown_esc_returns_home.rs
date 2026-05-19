@@ -25,6 +25,9 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[path = "tripwire_tmux_lock.rs"]
+mod tripwire_tmux_lock;
+
 fn ainb_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_ainb"))
 }
@@ -137,6 +140,36 @@ fn send_key(session: &str, key: &str) {
         .expect("tmux send-keys");
 }
 
+/// Press `key` repeatedly until `ok` matches a capture, or `total`
+/// elapses. Re-presses every ~5s — a single send-key can be dropped
+/// under heavy CPU contention (30+ test binaries fighting for the
+/// scheduler) before the host's event loop drains the input queue.
+fn press_until<F>(
+    session: &str,
+    key: &str,
+    total: Duration,
+    mut ok: F,
+) -> Option<String>
+where
+    F: FnMut(&str) -> bool,
+{
+    let deadline = Instant::now() + total;
+    let mut last_press = Instant::now();
+    send_key(session, key);
+    while Instant::now() < deadline {
+        let cap = capture_pane(session);
+        if ok(&cap) {
+            return Some(cap);
+        }
+        if last_press.elapsed() > Duration::from_secs(5) {
+            send_key(session, key);
+            last_press = Instant::now();
+        }
+        thread::sleep(Duration::from_millis(400));
+    }
+    None
+}
+
 fn kill_session(session: &str) {
     let _ = Command::new("tmux").args(["kill-session", "-t", session]).status();
 }
@@ -154,6 +187,8 @@ fn esc_on_burndown_returns_to_home() {
         );
         return;
     };
+
+    let _lock = tripwire_tmux_lock::TmuxSerialLock::acquire();
 
     let home_tmp = tempfile::tempdir().expect("home tempdir");
     seed_fixture_home(home_tmp.path());
@@ -197,10 +232,10 @@ fn esc_on_burndown_returns_to_home() {
         "before pressing `i`, burndown chrome must not be visible"
     );
 
-    // Open burndown.
-    send_key(&session, "i");
-    let burndown_deadline = Instant::now() + Duration::from_secs(45);
-    let on_burndown = poll_capture(&session, burndown_deadline, |c| {
+    // Open burndown. Use press_until — under full L1 ci contention a
+    // single `i` send-key gets dropped before the host's event loop
+    // drains it. Re-press every ~5s up to 90s.
+    let on_burndown = press_until(&session, "i", Duration::from_secs(90), |c| {
         c.contains("Usage Analytics")
             && !c.contains("Waiting for session-reader plugin")
             && c.contains('$')
