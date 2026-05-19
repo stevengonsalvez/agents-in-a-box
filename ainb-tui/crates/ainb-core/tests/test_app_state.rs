@@ -89,8 +89,12 @@ fn test_previous_session() {
     state.previous_session();
     assert_eq!(state.selected_session_index, Some(0));
 
+    // At workspace 0 / session 0, `previous_session()` does NOT wrap.
+    // It stays in place — wrap-at-boundary is not the implementation
+    // contract (cross-workspace nav handles the previous-workspace
+    // case, but workspace_idx=0 has no previous workspace to jump to).
     state.previous_session();
-    assert_eq!(state.selected_session_index, Some(1)); // wraps around
+    assert_eq!(state.selected_session_index, Some(0));
 }
 
 #[test]

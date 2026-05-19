@@ -597,21 +597,36 @@ impl SessionRecoveryState {
                 }
             });
 
-        // Get directory size (approximate using du)
-        let size_mb = Command::new("du")
-            .args(["-sm", &path.to_string_lossy()])
-            .output()
-            .ok()
-            .and_then(|o| {
-                if o.status.success() {
-                    String::from_utf8_lossy(&o.stdout)
-                        .split_whitespace()
-                        .next()
-                        .and_then(|s| s.parse().ok())
-                } else {
-                    None
-                }
-            });
+        // Get directory size (approximate using du). Skipped in tests +
+        // when the path contains a cargo `target/` subtree — `du -sm`
+        // on multi-GB build output dominates wall-clock for any test
+        // that walks orphaned worktrees. Production callers point at
+        // workspace roots so `target/` detection covers the common case.
+        // Honour `AINB_SKIP_DU_SCAN` for an explicit force-skip in CI.
+        let path_str = path.to_string_lossy();
+        let skip_du = cfg!(test)
+            || std::env::var_os("AINB_SKIP_DU_SCAN").is_some()
+            || path_str.contains("target/")
+            || path.join("target").exists()
+            || path.join("ainb-tui").join("target").exists();
+        let size_mb = if skip_du {
+            None
+        } else {
+            Command::new("du")
+                .args(["-sm", &path_str])
+                .output()
+                .ok()
+                .and_then(|o| {
+                    if o.status.success() {
+                        String::from_utf8_lossy(&o.stdout)
+                            .split_whitespace()
+                            .next()
+                            .and_then(|s| s.parse().ok())
+                    } else {
+                        None
+                    }
+                })
+        };
 
         // Calculate time ago from mtime
         let time_ago = std::fs::metadata(path)
