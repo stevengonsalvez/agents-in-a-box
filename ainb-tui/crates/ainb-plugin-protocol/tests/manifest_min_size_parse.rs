@@ -1,6 +1,6 @@
-// P8: optional preferred_min_size hint in [provides] parses cleanly,
-// defaults to None when absent, and surfaces malformed shapes as a
-// parse error rather than silently dropping data.
+//! P8: optional `preferred_min_size` hint in `[provides]` parses cleanly,
+//! defaults to `None` when absent, and surfaces malformed shapes as a
+//! parse error rather than silently dropping data.
 
 use ainb_plugin_protocol::manifest::Manifest;
 

@@ -33,11 +33,11 @@ use tracing::{debug, error, info, warn};
 
 use crate::error::RuntimeError;
 use crate::framing::{read_frame, write_frame};
-use crate::process::{signal_pgrp, spawn_plugin, SIGTERM};
+use crate::process::{SIGTERM, signal_pgrp, spawn_plugin};
 use crate::registry::RegisteredPlugin;
 use crate::rpc::{
-    build_error_response, build_notification, build_request, build_response, parse_inbound,
-    IdCounter, Inbound,
+    IdCounter, Inbound, build_error_response, build_notification, build_request, build_response,
+    parse_inbound,
 };
 use crate::snapshot::SnapshotStore;
 use crate::types::{
@@ -144,19 +144,20 @@ pub type KeyInbox = mpsc::UnboundedSender<HandleKeyParams>;
 
 /// Map of `plugin_id → inbox` used by [`PluginTask`] to fan out
 /// subscriber notifications when a plugin issues `host/snapshot/publish`.
+///
 /// Shared (clone-able `Arc`) with `Runtime`, which maintains it
 /// alongside the public plugin handle map.
 pub type InboxMap = Arc<parking_lot::RwLock<HashMap<PluginId, Inbox>>>;
 
-/// Map of `plugin_id → render-dirty flag`. Mirrors [`InboxMap`] —
-/// when a plugin's `host/snapshot/publish` fans out to subscribers,
+/// Map of `plugin_id → render-dirty flag`. Mirrors [`InboxMap`].
+///
+/// When a plugin's `host/snapshot/publish` fans out to subscribers,
 /// each subscriber's flag is set so the host's render-tick loop knows
 /// to kick a `plugin/render` for it. Without this the dirty bit set
 /// on the host-side `publish_snapshot` path would miss every
 /// plugin→plugin publish (session-reader → burndown is the load-bearing
 /// case).
-pub type DirtyMap =
-    Arc<parking_lot::RwLock<HashMap<PluginId, Arc<std::sync::atomic::AtomicBool>>>>;
+pub type DirtyMap = Arc<parking_lot::RwLock<HashMap<PluginId, Arc<std::sync::atomic::AtomicBool>>>>;
 
 /// Spawn a per-plugin task and return its command inbox, key inbox, and
 /// render cache.
@@ -277,9 +278,8 @@ impl PluginTask {
                 // 100k+ call dataset) would starve Esc and other
                 // navigation keys until the chunks drained.
                 biased;
-                key = self.key_rx.recv() => match key {
-                    Some(params) => self.handle_key_command(params).await,
-                    None => {}
+                key = self.key_rx.recv() => if let Some(params) = key {
+                    self.handle_key_command(params).await;
                 },
                 cmd = self.rx.recv() => match cmd {
                     Some(Command::Shutdown) | None => { self.shutdown().await; break; }
@@ -312,21 +312,26 @@ impl PluginTask {
             return;
         }
         let json = serde_json::to_value(params).expect("HandleKeyParams is serializable");
-        let _ = self
-            .send_notification(methods::PLUGIN_HANDLE_KEY, json)
-            .await;
+        let _ = self.send_notification(methods::PLUGIN_HANDLE_KEY, json).await;
     }
 
     async fn handle_command(&mut self, cmd: Command) {
         self.last_used = Instant::now();
         match cmd {
-            Command::Render { viewport, generation, reply } => {
+            Command::Render {
+                viewport,
+                generation,
+                reply,
+            } => {
                 if let Err(e) = self.ensure_running().await {
                     let _ = reply.send(RenderOutcome::RuntimeError(e.to_string()));
                     return;
                 }
-                let params = serde_json::to_value(RenderParams { viewport, generation })
-                    .expect("RenderParams is serializable");
+                let params = serde_json::to_value(RenderParams {
+                    viewport,
+                    generation,
+                })
+                .expect("RenderParams is serializable");
                 let id = self.ids.allocate();
                 self.ledger.insert(id, Pending::Render(reply));
                 if let Err(e) = self.send_request(id, methods::PLUGIN_RENDER, params).await {
@@ -335,7 +340,11 @@ impl PluginTask {
                     }
                 }
             }
-            Command::Cli { namespace, argv, reply } => {
+            Command::Cli {
+                namespace,
+                argv,
+                reply,
+            } => {
                 if let Err(e) = self.ensure_running().await {
                     let _ = reply.send(CliOutcome::RuntimeError(e.to_string()));
                     return;
@@ -350,7 +359,12 @@ impl PluginTask {
                     }
                 }
             }
-            Command::Action { action, payload, timeout_ms, reply } => {
+            Command::Action {
+                action,
+                payload,
+                timeout_ms,
+                reply,
+            } => {
                 // For Phase 7a, the runtime delivers actions to the plugin
                 // owning the namespace by sending it a synthesized
                 // `plugin/handle_event` carrying the action — the v2
@@ -441,9 +455,8 @@ impl PluginTask {
             .stderr
             .take()
             .ok_or_else(|| RuntimeError::Wire("stderr pipe missing".into()))?;
-        let pid_u32 = child
-            .id()
-            .ok_or_else(|| RuntimeError::Wire("child pid unavailable".into()))?;
+        let pid_u32 =
+            child.id().ok_or_else(|| RuntimeError::Wire("child pid unavailable".into()))?;
         let pid = i32::try_from(pid_u32)
             .map_err(|_| RuntimeError::Wire(format!("pid {pid_u32} doesn't fit in i32")))?;
         let plugin_name = self.plugin.id.clone();
@@ -478,7 +491,12 @@ impl PluginTask {
         Ok(())
     }
 
-    async fn send_request(&mut self, id: u64, method: &str, params: Value) -> Result<(), RuntimeError> {
+    async fn send_request(
+        &mut self,
+        id: u64,
+        method: &str,
+        params: Value,
+    ) -> Result<(), RuntimeError> {
         let body = build_request(id, method, params)?;
         let cs = self
             .child
@@ -612,7 +630,9 @@ impl PluginTask {
         if let Some(cs) = &mut self.child {
             debug!(plugin = %self.plugin.id, id, bytes = body.len(), "host->plugin response: writing");
             match write_frame(&mut cs.stdin, &body).await {
-                Ok(()) => debug!(plugin = %self.plugin.id, id, "host->plugin response: write_frame OK"),
+                Ok(()) => {
+                    debug!(plugin = %self.plugin.id, id, "host->plugin response: write_frame OK");
+                }
                 Err(e) => warn!(plugin = %self.plugin.id, id, "write response: {e}"),
             }
         } else {
@@ -635,8 +655,7 @@ impl PluginTask {
     fn host_snapshot_subscribe(&self, params: Value) -> Result<Value, RpcError> {
         let p: SnapshotSubscribeParams =
             serde_json::from_value(params).map_err(|e| RpcError::invalid_params(e.to_string()))?;
-        self.snapshots
-            .subscribe(Topic::from(p.topic), self.plugin.id.clone());
+        self.snapshots.subscribe(Topic::from(p.topic), self.plugin.id.clone());
         Ok(serde_json::to_value(SnapshotSubscribeResult::default())
             .expect("SnapshotSubscribeResult serializable"))
     }
@@ -752,15 +771,10 @@ impl PluginTask {
 
     async fn maybe_idle_reap(&mut self) {
         let elapsed = self.last_used.elapsed();
-        let reap_threshold = Duration::from_secs(u64::from(self.plugin.manifest.lifecycle.idle_reap_secs))
-            .max(self.config.idle_reap);
-        let has_subs = self
-            .plugin
-            .manifest
-            .subscribes
-            .snapshots
-            .iter()
-            .any(|_| true);
+        let reap_threshold =
+            Duration::from_secs(u64::from(self.plugin.manifest.lifecycle.idle_reap_secs))
+                .max(self.config.idle_reap);
+        let has_subs = self.plugin.manifest.subscribes.snapshots.iter().any(|_| true);
         if matches!(*self.state.read(), LifecycleState::Running)
             && elapsed >= reap_threshold
             && !has_subs
@@ -778,9 +792,7 @@ impl PluginTask {
         self.set_state(LifecycleState::ShuttingDown);
         let params = serde_json::to_value(PluginShutdownParams::default())
             .expect("PluginShutdownParams serializable");
-        let _ = self
-            .send_notification(methods::PLUGIN_SHUTDOWN, params)
-            .await;
+        let _ = self.send_notification(methods::PLUGIN_SHUTDOWN, params).await;
         // Wait up to 5s for graceful exit; then SIGTERM the process group.
         let cs = self.child.as_mut().unwrap();
         let pid = cs.pid;
@@ -807,13 +819,27 @@ impl PluginTask {
 fn collect_granted_capabilities(m: &ainb_plugin_protocol::manifest::Manifest) -> Vec<String> {
     let c = &m.capabilities;
     let mut out = Vec::new();
-    if c.read_sessions.is_granted() { out.push("read_sessions".into()); }
-    if c.write_plugin_data.is_granted() { out.push("write_plugin_data".into()); }
-    if c.event_bus.is_granted() { out.push("event_bus".into()); }
-    if c.network.is_granted() { out.push("network".into()); }
-    if c.spawn_subprocess.is_granted() { out.push("spawn_subprocess".into()); }
-    if c.read_claude_logs.is_granted() { out.push("read_claude_logs".into()); }
-    if c.read_codex_logs.is_granted() { out.push("read_codex_logs".into()); }
+    if c.read_sessions.is_granted() {
+        out.push("read_sessions".into());
+    }
+    if c.write_plugin_data.is_granted() {
+        out.push("write_plugin_data".into());
+    }
+    if c.event_bus.is_granted() {
+        out.push("event_bus".into());
+    }
+    if c.network.is_granted() {
+        out.push("network".into());
+    }
+    if c.spawn_subprocess.is_granted() {
+        out.push("spawn_subprocess".into());
+    }
+    if c.read_claude_logs.is_granted() {
+        out.push("read_claude_logs".into());
+    }
+    if c.read_codex_logs.is_granted() {
+        out.push("read_codex_logs".into());
+    }
     out
 }
 
@@ -862,11 +888,7 @@ fn spawn_stdout_reader(
 
 async fn next_inbound(child: &mut Option<ChildState>) -> InboundEvent {
     match child {
-        Some(cs) => cs
-            .inbound_rx
-            .recv()
-            .await
-            .unwrap_or(InboundEvent::Eof),
+        Some(cs) => cs.inbound_rx.recv().await.unwrap_or(InboundEvent::Eof),
         None => {
             // No child — park forever (until select! wakes us via cmd
             // or timer). pending() never resolves.
@@ -903,10 +925,7 @@ mod tests {
 
     #[test]
     fn biased_select_drains_key_inbox_before_command_inbox() {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         rt.block_on(async move {
             let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<&'static str>();
             let (key_tx, mut key_rx) = mpsc::unbounded_channel::<HandleKeyParams>();

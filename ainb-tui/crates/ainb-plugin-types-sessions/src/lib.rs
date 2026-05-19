@@ -450,10 +450,7 @@ mod tests {
                 branch: "main".into(),
                 bucket,
             }],
-            model_project_counts: vec![(
-                "claude-3-5-sonnet".into(),
-                vec![("ainb".into(), 1)],
-            )],
+            model_project_counts: vec![("claude-3-5-sonnet".into(), vec![("ainb".into(), 1)])],
         }
     }
 
@@ -553,7 +550,10 @@ mod tests {
         // chance to compare `event.version` and gracefully fall back
         // to the schema-mismatch UI). This pins that contract so a
         // future WIRE_VERSION bump can't silently break it.
-        assert!(
+        // Compile-time gate: a future WIRE_VERSION bump can't silently break
+        // the v2 decode-then-mismatch contract. Use a const assertion so the
+        // "constant value" clippy lint doesn't fire on a runtime assert!.
+        const _: () = assert!(
             WIRE_VERSION >= 2,
             "test assumes a previous wire generation exists"
         );
@@ -592,8 +592,10 @@ mod tests {
         assert!(!back.is_final);
 
         // Chunk 1 (final) carries only the remaining calls.
-        let mut calls_only = UsageData::default();
-        calls_only.calls = vec![fixture_call()];
+        let calls_only = UsageData {
+            calls: vec![fixture_call()],
+            ..UsageData::default()
+        };
         let chunk1 = UsageDataEvent {
             version: WIRE_VERSION,
             published_ns: 1_700_000_000_000_000_000,

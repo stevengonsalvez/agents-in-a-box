@@ -19,7 +19,7 @@
 //! - `src/components/**/*.rs` — every screen/component renderer
 //! - `src/widgets/**/*.rs`    — reusable render widgets
 //! - `src/app/state.rs`       — `App::tick_plugin_renders`, the
-//!                              top-of-frame plugin drain
+//!   top-of-frame plugin drain
 //!
 //! ## Allow-list
 //! Currently empty. If you genuinely need to await something in the
@@ -149,7 +149,7 @@ fn scan_file_fn_scoped(
             .find(|c: char| !c.is_alphanumeric() && c != '_')
             .unwrap_or(after_fn.len());
         let name = &after_fn[..name_end];
-        if !fn_names.iter().any(|n| *n == name) {
+        if !fn_names.contains(&name) {
             continue;
         }
         // Found the function — walk forward until brace depth returns
@@ -185,8 +185,8 @@ fn is_offending(line: &str) -> bool {
 fn find_body_start(lines: &[&str], sig_line: usize) -> (usize, i32) {
     let mut depth = 0_i32;
     let max = lines.len().min(sig_line + 16);
-    for j in sig_line..max {
-        depth += brace_delta(lines[j]);
+    for (j, line) in lines.iter().enumerate().take(max).skip(sig_line) {
+        depth += brace_delta(line);
         if depth > 0 {
             return (j + 1, depth);
         }

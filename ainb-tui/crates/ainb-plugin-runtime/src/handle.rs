@@ -38,7 +38,7 @@ pub(crate) struct HandleInner {
     pub(crate) snapshots: SnapshotStore,
     pub(crate) channels: ChannelRegistry,
     pub(crate) plugins: Arc<RwLock<HashMap<PluginId, Arc<PluginHandle>>>>,
-    /// Lightweight fan-out map (plugin_id → Inbox). Mirrors `plugins`
+    /// Lightweight fan-out map (`plugin_id` → Inbox). Mirrors `plugins`
     /// for the publish path; see [`crate::plugin_task::InboxMap`].
     pub(crate) inboxes: InboxMap,
     /// Parallel `plugin_id → render-dirty` map. See `runtime::PluginHandle`.
@@ -158,7 +158,9 @@ impl RuntimeHandle {
     ) -> oneshot::Receiver<ActionOutcome> {
         let (tx, rx) = oneshot::channel();
         let Some(plugin_id) = self.inner.channels.route_action(action) else {
-            let _ = tx.send(ActionOutcome::RuntimeError(format!("unknown action: {action}")));
+            let _ = tx.send(ActionOutcome::RuntimeError(format!(
+                "unknown action: {action}"
+            )));
             return rx;
         };
         let Some(handle) = self.lookup(&plugin_id) else {
@@ -304,12 +306,7 @@ impl RuntimeHandle {
     /// Registered plugins, in registration order.
     #[must_use]
     pub fn registered_plugins(&self) -> Vec<Arc<RegisteredPlugin>> {
-        self.inner
-            .plugins
-            .read()
-            .values()
-            .map(|p| p.plugin.clone())
-            .collect()
+        self.inner.plugins.read().values().map(|p| p.plugin.clone()).collect()
     }
 
     /// Discover plugins under `root` and register each. When a
@@ -358,16 +355,10 @@ impl RuntimeHandle {
             if eager {
                 let _ = inbox.send(crate::plugin_task::Command::EnsureSpawned);
             }
-            self.inner
-                .inboxes
-                .write()
-                .insert(arc.id.clone(), inbox.clone());
+            self.inner.inboxes.write().insert(arc.id.clone(), inbox.clone());
             // Start dirty so the first paint after registration kicks a render.
             let render_dirty = Arc::new(std::sync::atomic::AtomicBool::new(true));
-            self.inner
-                .dirty
-                .write()
-                .insert(arc.id.clone(), render_dirty.clone());
+            self.inner.dirty.write().insert(arc.id.clone(), render_dirty.clone());
             self.inner.plugins.write().insert(
                 arc.id.clone(),
                 Arc::new(PluginHandle {
@@ -388,9 +379,7 @@ impl RuntimeHandle {
         let h = self
             .lookup(plugin_id)
             .ok_or_else(|| RuntimeError::UnknownPlugin(plugin_id.clone()))?;
-        h.inbox
-            .send(Command::Reload)
-            .map_err(|_| RuntimeError::ShuttingDown)?;
+        h.inbox.send(Command::Reload).map_err(|_| RuntimeError::ShuttingDown)?;
         Ok(())
     }
 
@@ -402,9 +391,7 @@ impl RuntimeHandle {
         let h = self
             .lookup(plugin_id)
             .ok_or_else(|| RuntimeError::UnknownPlugin(plugin_id.clone()))?;
-        h.inbox
-            .send(Command::InjectKill)
-            .map_err(|_| RuntimeError::ShuttingDown)?;
+        h.inbox.send(Command::InjectKill).map_err(|_| RuntimeError::ShuttingDown)?;
         Ok(())
     }
 }

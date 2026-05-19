@@ -24,8 +24,10 @@ pub const PLUGIN_RENDER: &str = "plugin/render";
 pub const PLUGIN_HANDLE_EVENT: &str = "plugin/handle_event";
 
 /// Host forwards a single key event to the plugin owning the focused screen.
-/// Notification — no response expected. Ordering is preserved across the same
-/// transport as `plugin/handle_event` so key sequences arrive in send order.
+///
+/// Notification — no response expected. Ordering is preserved across the
+/// same transport as `plugin/handle_event` so key sequences arrive in
+/// send order.
 pub const PLUGIN_HANDLE_KEY: &str = "plugin/handle_key";
 
 /// Host dispatches a CLI namespace + argv to the plugin; plugin replies with stdout/stderr/exit.
