@@ -34,6 +34,9 @@ Thumbs.db
 # Logs
 *.log
 
+# vhs tape outputs (generated; tapes themselves are checked in)
+tests/vhs/bsp/out/
+
 # Environment
 .env
 .env.local
@@ -65,3 +68,4 @@ AmazonQ.md
 test-logs/
 tests/recordings/
 ainb-tui/crates/ainb-plugin-burndown/target/
+
