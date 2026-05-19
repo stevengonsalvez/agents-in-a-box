@@ -1,0 +1,197 @@
+/*
+ * agents-in-a-box — design tokens
+ *
+ * Locked to the TUI palette (see ../../../BRIEF.md §5.2). No light mode in v1.
+ * Override Starlight's CSS variables to project the TUI identity through the
+ * docs hub.
+ */
+
+:root,
+:root[data-theme='dark'],
+:root[data-theme='light'] {
+  /* ---- Palette ---- */
+  --ainb-bg-deep:        #0F0F18;
+  --ainb-bg-panel:       #191923;
+  --ainb-bg-raised:      #1F1F2D;
+  --ainb-bg-highlight:   #28283C;
+
+  --ainb-border:         #6495ED;
+  --ainb-accent-gold:    #FFD700;
+  --ainb-accent-green:   #64C864;
+
+  --ainb-text-primary:   #DCDCE6;
+  --ainb-text-muted:     #78788C;
+  --ainb-text-faint:     #4A4A5C;
+
+  --ainb-syntax-keyword: #FFD700;
+  --ainb-syntax-string:  #64C864;
+  --ainb-syntax-comment: #78788C;
+  --ainb-syntax-number:  #6495ED;
+
+  /* ---- Typography ---- */
+  --ainb-font-mono:      'JetBrains Mono', 'SF Mono', 'Menlo', monospace;
+  --ainb-font-display:   'IBM Plex Mono', 'JetBrains Mono', monospace;
+
+  /* Starlight variable overrides — mono everywhere, no sans-serif body. */
+  --sl-font:             var(--ainb-font-mono);
+  --sl-font-system:      var(--ainb-font-mono);
+  --sl-font-system-mono: var(--ainb-font-mono);
+
+  --sl-color-bg:                 var(--ainb-bg-deep);
+  --sl-color-bg-nav:             var(--ainb-bg-deep);
+  --sl-color-bg-sidebar:         var(--ainb-bg-deep);
+  --sl-color-bg-inline-code:     var(--ainb-bg-highlight);
+  --sl-color-bg-accent:          var(--ainb-bg-raised);
+  --sl-color-bg-overlay:         color-mix(in srgb, var(--ainb-bg-deep) 92%, transparent);
+
+  --sl-color-hairline:           color-mix(in srgb, var(--ainb-border) 25%, transparent);
+  --sl-color-hairline-light:     color-mix(in srgb, var(--ainb-border) 15%, transparent);
+  --sl-color-hairline-shade:     color-mix(in srgb, var(--ainb-border) 35%, transparent);
+
+  --sl-color-white:              var(--ainb-text-primary);
+  --sl-color-gray-1:             var(--ainb-text-primary);
+  --sl-color-gray-2:             var(--ainb-text-primary);
+  --sl-color-gray-3:             var(--ainb-text-muted);
+  --sl-color-gray-4:             var(--ainb-text-muted);
+  --sl-color-gray-5:             var(--ainb-text-faint);
+  --sl-color-gray-6:             var(--ainb-bg-raised);
+  --sl-color-gray-7:             var(--ainb-bg-panel);
+
+  --sl-color-text:               var(--ainb-text-primary);
+  --sl-color-text-accent:        var(--ainb-accent-gold);
+  --sl-color-text-invert:        var(--ainb-bg-deep);
+
+  --sl-color-accent:             var(--ainb-border);
+  --sl-color-accent-high:        var(--ainb-accent-gold);
+  --sl-color-accent-low:         color-mix(in srgb, var(--ainb-border) 30%, transparent);
+
+  /* Headings use gold for h1, cornflower for h2/h3 to mirror the brief. */
+  --sl-color-text-h1:            var(--ainb-accent-gold);
+  --sl-color-text-h2:            var(--ainb-border);
+  --sl-color-text-h3:            var(--ainb-border);
+
+  /* Code blocks — Expressive Code uses these. */
+  --sl-color-bg-code:            #0A0A12;
+  --ec-codeFontFmly:             var(--ainb-font-mono);
+  --ec-frm-tabBarBg:             var(--ainb-bg-panel);
+  --ec-frm-tabActBg:             var(--ainb-bg-raised);
+  --ec-brdCol:                   color-mix(in srgb, var(--ainb-border) 40%, transparent);
+
+  /* Spacing rhythm */
+  --sl-content-width:            48rem;
+}
+
+/* Headings: use display font and a touch more presence. */
+h1, .sl-heading-1 {
+  font-family: var(--ainb-font-display);
+  letter-spacing: -0.01em;
+}
+h2, .sl-heading-2,
+h3, .sl-heading-3 {
+  font-family: var(--ainb-font-display);
+}
+
+/* Section dividers — ASCII rule between h2 sections. */
+.sl-markdown-content h2 {
+  position: relative;
+  margin-top: 2.5rem;
+  padding-top: 1.5rem;
+}
+.sl-markdown-content h2::before {
+  content: '═══════════════════════════════════════════════════════════════';
+  display: block;
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  color: color-mix(in srgb, var(--ainb-border) 35%, transparent);
+  font-size: 0.6rem;
+  line-height: 1;
+}
+
+/* Links — cornflower base, gold on hover. */
+.sl-markdown-content a:not(.not-content a),
+a:not(.sl-link-card):not([class*='sl-flex']) {
+  color: var(--ainb-border);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--ainb-border) 40%, transparent);
+  text-underline-offset: 3px;
+  transition: color 120ms ease, text-decoration-color 120ms ease;
+}
+.sl-markdown-content a:hover,
+a:not(.sl-link-card):not([class*='sl-flex']):hover {
+  color: var(--ainb-accent-gold);
+  text-decoration-color: var(--ainb-accent-gold);
+}
+
+/* Inline code — gold on highlighted background. */
+.sl-markdown-content :not(pre) > code {
+  color: var(--ainb-accent-gold);
+  background: var(--ainb-bg-highlight);
+  border: 1px solid color-mix(in srgb, var(--ainb-border) 25%, transparent);
+  border-radius: 4px;
+  padding: 0.05rem 0.35rem;
+  font-size: 0.875em;
+}
+
+/* Tables — cornflower borders, zebra body. */
+.sl-markdown-content table {
+  border: 1px solid color-mix(in srgb, var(--ainb-border) 40%, transparent);
+  border-collapse: collapse;
+  overflow: hidden;
+}
+.sl-markdown-content th {
+  background: var(--ainb-bg-panel);
+  color: var(--ainb-accent-gold);
+  font-weight: 700;
+  border-bottom: 2px solid color-mix(in srgb, var(--ainb-border) 60%, transparent);
+}
+.sl-markdown-content tr:nth-child(even) td {
+  background: var(--ainb-bg-panel);
+}
+
+/* Blockquotes — cornflower bar, muted text. */
+.sl-markdown-content blockquote {
+  border-left: 3px solid var(--ainb-border);
+  background: var(--ainb-bg-panel);
+  color: var(--ainb-text-primary);
+  padding: 0.75rem 1rem;
+}
+
+/* Pre/code blocks — dark, cornflower border. */
+.sl-markdown-content pre,
+.expressive-code .frame {
+  border: 1px solid color-mix(in srgb, var(--ainb-border) 35%, transparent) !important;
+  border-radius: 6px;
+  background: var(--sl-color-bg-code);
+}
+
+/* Selected nav item gets gold accent. */
+.sidebar .top-level a[aria-current='page'],
+.sidebar a[aria-current='page'] {
+  color: var(--ainb-accent-gold) !important;
+  background: var(--ainb-bg-highlight);
+  border-left: 2px solid var(--ainb-accent-gold);
+}
+
+/* Focus rings — cornflower with offset. */
+*:focus-visible {
+  outline: 2px solid var(--ainb-border);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* Body — keep mono, soften paragraph rhythm. */
+body {
+  font-family: var(--ainb-font-mono);
+  font-feature-settings: 'liga' 0; /* no ligatures in prose */
+  background: var(--ainb-bg-deep);
+  color: var(--ainb-text-primary);
+}
+.sl-markdown-content code,
+.sl-markdown-content pre,
+.expressive-code {
+  font-feature-settings: 'liga' 1; /* ligatures ON for code blocks */
+}

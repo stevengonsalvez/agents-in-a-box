@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" fill="#0F0F18" rx="6"/>
+  <rect x="10" y="18" width="44" height="28" fill="none" stroke="#6495ED" stroke-width="2" rx="2"/>
+  <text x="32" y="38" font-family="JetBrains Mono, Menlo, monospace" font-size="14" font-weight="700"
+        text-anchor="middle" fill="#FFD700">ainb</text>
+  <rect x="44" y="32" width="6" height="2" fill="#FFD700">
+    <animate attributeName="opacity" values="1;1;0;0" dur="1s" repeatCount="indefinite"/>
+  </rect>
+</svg>
