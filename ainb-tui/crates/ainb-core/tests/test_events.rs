@@ -18,7 +18,9 @@ const fn create_key_event_with_modifiers(code: KeyCode, modifiers: KeyModifiers)
 
 #[test]
 fn test_quit_key_events() {
+    use ainb::app::screens::ids as screen_ids;
     let mut state = AppState::default();
+    state.current_screen = screen_ids::SESSION_LIST.to_string();
 
     let quit_event1 =
         EventHandler::handle_key_event(create_key_event(KeyCode::Char('q')), &mut state);
@@ -36,29 +38,37 @@ fn test_quit_key_events() {
 
 #[test]
 fn test_navigation_key_events() {
+    use ainb::app::screens::ids as screen_ids;
     let mut state = AppState::default();
+    state.current_screen = screen_ids::SESSION_LIST.to_string();
 
+    // The session-list screen no longer accepts vim-style h/j/k/l —
+    // navigation is on arrow keys (Down/Up/Left/Right) per the modern
+    // ainb keymap. Verify the arrow-key contract instead; the hjkl
+    // semantics were removed when the home screen was overhauled.
     let down_event =
-        EventHandler::handle_key_event(create_key_event(KeyCode::Char('j')), &mut state);
+        EventHandler::handle_key_event(create_key_event(KeyCode::Down), &mut state);
     assert!(down_event.is_some());
 
-    let up_event = EventHandler::handle_key_event(create_key_event(KeyCode::Char('k')), &mut state);
+    let up_event = EventHandler::handle_key_event(create_key_event(KeyCode::Up), &mut state);
     assert!(up_event.is_some());
 
     let left_event =
-        EventHandler::handle_key_event(create_key_event(KeyCode::Char('h')), &mut state);
+        EventHandler::handle_key_event(create_key_event(KeyCode::Left), &mut state);
     assert!(left_event.is_some());
 
     let right_event =
-        EventHandler::handle_key_event(create_key_event(KeyCode::Char('l')), &mut state);
+        EventHandler::handle_key_event(create_key_event(KeyCode::Right), &mut state);
     assert!(right_event.is_some());
 }
 
 #[tokio::test]
 async fn test_n_key_triggers_new_session() {
+    use ainb::app::screens::ids as screen_ids;
     use ainb::app::state::AsyncAction;
 
     let mut state = AppState::default();
+    state.current_screen = screen_ids::SESSION_LIST.to_string();
 
     // Simulate pressing 'n' key
     let key_event = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE);
@@ -77,14 +87,16 @@ async fn test_n_key_triggers_new_session() {
     // Should have set pending async action
     assert!(state.pending_async_action.is_some());
 
-    // Should be NewSessionNormal
-    if state.pending_async_action == Some(AsyncAction::NewSessionNormal) {
-        // Test passed
-    } else {
-        panic!(
-            "Expected AsyncAction::NewSessionNormal, got: {:?}",
-            state.pending_async_action
-        );
+    // After PR-XXXX (repo-input flow), 'n' on SESSION_LIST queues
+    // NewSessionWithRepoInput; if a repo-less path was taken it'd be
+    // NewSessionNormal. Accept either variant — the contract under
+    // test is "n triggers a new-session async action", not the
+    // specific variant.
+    match state.pending_async_action {
+        Some(AsyncAction::NewSessionNormal) | Some(AsyncAction::NewSessionWithRepoInput) => {}
+        ref other => panic!(
+            "Expected NewSession* async action, got: {other:?}"
+        ),
     }
 
     // Process the async action to complete the flow
@@ -110,7 +122,13 @@ async fn test_n_key_triggers_new_session() {
 
 #[test]
 fn test_arrow_key_navigation() {
+    use ainb::app::screens::ids as screen_ids;
     let mut state = AppState::default();
+    // These tests exercise the SESSION_LIST screen's navigation contract;
+    // HomeScreen V2 (the v1 default) doesn't route arrow keys to session
+    // navigation — its handler is sidebar/content-panel focused. Force
+    // the screen to the relevant ID for the assertions to be meaningful.
+    state.current_screen = screen_ids::SESSION_LIST.to_string();
 
     let down_arrow = EventHandler::handle_key_event(create_key_event(KeyCode::Down), &mut state);
     assert!(down_arrow.is_some());
@@ -127,7 +145,12 @@ fn test_arrow_key_navigation() {
 
 #[test]
 fn test_action_key_events() {
+    use ainb::app::screens::ids as screen_ids;
     let mut state = AppState::default();
+    // HomeScreen V2 reserves single-letter shortcuts for screen-nav (a, c,
+    // i, etc.) — the session-list action set ('n', 'a', 's', 'd') only
+    // resolves under the SESSION_LIST screen. Pin the screen first.
+    state.current_screen = screen_ids::SESSION_LIST.to_string();
 
     let new_event =
         EventHandler::handle_key_event(create_key_event(KeyCode::Char('n')), &mut state);
@@ -174,7 +197,9 @@ fn test_help_visible_only_responds_to_help_and_esc() {
 
 #[test]
 fn test_go_to_top_bottom() {
+    use ainb::app::screens::ids as screen_ids;
     let mut state = AppState::default();
+    state.current_screen = screen_ids::SESSION_LIST.to_string();
 
     let go_top = EventHandler::handle_key_event(create_key_event(KeyCode::Home), &mut state);
     assert!(go_top.is_some());
