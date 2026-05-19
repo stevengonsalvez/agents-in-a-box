@@ -1108,10 +1108,9 @@ impl EventHandler {
                 FocusedPane::Sessions => Some(AppEvent::GoToBottom),
                 FocusedPane::LiveLogs => Some(AppEvent::ScrollLogsToBottom),
             },
-            KeyCode::Char(' ') => match state.focused_pane {
-                FocusedPane::Sessions => None, // Space does nothing in sessions pane
-                FocusedPane::LiveLogs => Some(AppEvent::ToggleAutoScroll),
-            },
+            // `KeyCode::Char(' ')` is consumed by an earlier arm in this
+            // match (`ToggleSelectSession` at the top of the function), so
+            // there is no further space-specific dispatch here.
             _ => None,
         }
     }

@@ -444,7 +444,7 @@ mod tests {
 
     #[test]
     fn test_install_commands_grouping() {
-        let mut status = DependencyStatus {
+        let status = DependencyStatus {
             checks: vec![
                 DependencyCheckResult {
                     dependency: Dependency {

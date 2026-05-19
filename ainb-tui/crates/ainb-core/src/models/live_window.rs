@@ -15,7 +15,7 @@
 
 use std::time::Duration;
 
-use chrono::{DateTime, Datelike, Timelike, Utc};
+use chrono::{DateTime, Timelike, Utc};
 use tracing::{debug, trace};
 
 use crate::cli::statusline::{LiveCache, cache_path, read_cache};

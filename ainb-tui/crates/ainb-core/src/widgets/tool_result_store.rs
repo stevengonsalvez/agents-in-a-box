@@ -424,7 +424,7 @@ mod tests {
         }
 
         // Spawn threads that read
-        for i in 0..5 {
+        for _i in 0..5 {
             let store_clone = Arc::clone(&store);
             let handle = thread::spawn(move || {
                 for _ in 0..20 {

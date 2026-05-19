@@ -1,6 +1,7 @@
 // ABOUTME: Tests for AppState new session functionality, focusing on mode selection flow
 
 #[cfg(test)]
+#[allow(unused_imports)]
 mod tests {
     use super::*;
     use crate::app::state::{AppState, NewSessionState, NewSessionStep, SessionAgentOption};

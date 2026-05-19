@@ -15,10 +15,10 @@ const GOLD: Color = Color::Rgb(255, 215, 0);
 const SOFT_WHITE: Color = Color::Rgb(220, 220, 230);
 const SHADOW_GRAY: Color = Color::Rgb(60, 60, 80);
 
-/// ASCII art frames for the Boxy mascot
-/// Each frame is a vector of string slices representing lines
-
-/// Neutral expression - default state
+/// ASCII art frames for the Boxy mascot.
+/// Each frame is a vector of string slices representing lines.
+///
+/// Neutral expression — default state.
 const MASCOT_FRAME_NEUTRAL: &[&str] = &[
     "    ╭──────────╮    ",
     "   ╱│          │╲   ",

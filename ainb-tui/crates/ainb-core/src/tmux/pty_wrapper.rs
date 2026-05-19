@@ -85,7 +85,7 @@ mod tests {
 
     #[test]
     fn test_pty_wrapper_resize() {
-        let mut cmd = CommandBuilder::new("cat");
+        let cmd = CommandBuilder::new("cat");
         let pty = PtyWrapper::start(cmd).unwrap();
 
         let result = pty.resize(100, 50);

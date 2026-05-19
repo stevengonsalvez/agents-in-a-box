@@ -424,7 +424,10 @@ mod tests {
 
     #[test]
     fn test_parse_scalar_float() {
-        assert_eq!(parse_toml_scalar("3.14"), toml::Value::Float(3.14));
+        // Test value happens to be close to PI — silence approx_constant lint.
+        #[allow(clippy::approx_constant)]
+        let pi_ish = 3.14;
+        assert_eq!(parse_toml_scalar("3.14"), toml::Value::Float(pi_ish));
     }
 
     #[test]

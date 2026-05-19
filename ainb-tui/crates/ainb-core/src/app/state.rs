@@ -9968,7 +9968,7 @@ impl App {
             let viewport = ainb_plugin_runtime::Viewport { width, height };
             // Returned oneshot is intentionally dropped — the cache
             // pickup happens via `try_recv_render` next tick.
-            let _ = handle.render(&pid, viewport, 0);
+            drop(handle.render(&pid, viewport, 0));
         }
     }
 

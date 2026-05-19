@@ -235,6 +235,10 @@ fn build_associations(skills: &[Skill], agents: &[ScannedAgent]) -> HashMap<Stri
 /// Good enough for the subset of frontmatter our skills/agents use.
 fn split_frontmatter(content: &str) -> (HashMap<String, String>, String) {
     let mut map: HashMap<String, String> = HashMap::new();
+    // body_start defaults to 0 when the loop below never assigns (no closing
+    // `---` found) — `#[allow]` because rustc's lint can't trace the
+    // assign-then-read flow across the iterator-based scan.
+    #[allow(unused_assignments)]
     let mut body_start = 0usize;
 
     let mut lines = content.lines().enumerate();

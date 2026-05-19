@@ -1357,6 +1357,7 @@ mod tests {
         );
 
         // Create agents-dev session
+        #[allow(deprecated)]
         let session_state = manager.create_agents_dev_session(request).await.unwrap();
         assert_eq!(session_state.session.id, session_id);
         assert!(session_state.worktree_info.is_some());
@@ -1418,6 +1419,7 @@ mod tests {
 
         // Create agents-dev session with progress tracking
         let session_task = tokio::spawn(async move {
+            #[allow(deprecated)]
             manager.create_agents_dev_session_with_logs(request, Some(tx)).await
         });
 

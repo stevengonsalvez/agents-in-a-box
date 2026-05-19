@@ -228,7 +228,7 @@ impl SetupMenuComponent {
 
         // Calculate item height (2 lines per item: label + description)
         let item_height = 2u16;
-        let total_height = items.len() as u16 * item_height;
+        let _total_height = items.len() as u16 * item_height;
 
         // Create constraints for each item plus separator before Factory Reset
         let mut constraints: Vec<Constraint> = Vec::new();
