@@ -242,22 +242,60 @@ def gather_drn():
 
 def gather_tok():
     rows = []
-    total = 0
+    win = {"in":0, "cr5m":0, "cr1h":0, "rd":0, "out":0}
+    thrash_n = 0
+    causes = {}
+    seen_msg_ids = set()
     if session_jsonl and os.path.isfile(session_jsonl):
         try:
             with open(session_jsonl, 'r', errors='replace') as fh:
+                prev_ts = None
+                prev_model = None
+                prev_tool_names = []  # tool_use names from last assistant turn
+                last_user_blob = ""   # stringified content of last user message
                 for line in fh:
                     try: obj = json.loads(line)
                     except: continue
                     msg = obj.get("message") or {}
+                    role = msg.get("role")
+                    if role == "user":
+                        c = msg.get("content")
+                        if isinstance(c, str):
+                            last_user_blob = c
+                        else:
+                            try: last_user_blob = json.dumps(c)
+                            except: last_user_blob = str(c)
+                        continue
+                    if role != "assistant":
+                        continue
                     usage = msg.get("usage")
                     if not usage: continue
+                    # Claude Code logs N JSONL rows per assistant response (one per
+                    # streamed content block) — all share the same .message.id and
+                    # carry the SAME response-level usage. Dedup by msg id so we
+                    # don't N-count the same tokens.
+                    mid = msg.get("id")
+                    if mid:
+                        if mid in seen_msg_ids: continue
+                        seen_msg_ids.add(mid)
                     ts = parse_ts(obj.get("timestamp"))
                     if ts is None or ts < cutoff: continue
-                    inp = int(usage.get("input_tokens") or 0)
-                    outp= int(usage.get("output_tokens") or 0)
-                    tot = inp + outp
-                    total += tot
+                    inp  = int(usage.get("input_tokens") or 0)
+                    crT  = int(usage.get("cache_creation_input_tokens") or 0)
+                    rd   = int(usage.get("cache_read_input_tokens") or 0)
+                    outp = int(usage.get("output_tokens") or 0)
+                    cr_info = usage.get("cache_creation") or {}
+                    cr5m = int(cr_info.get("ephemeral_5m_input_tokens") or 0)
+                    cr1h = int(cr_info.get("ephemeral_1h_input_tokens") or 0)
+                    cur_model = msg.get("model")
+                    win["in"]   += inp
+                    win["cr5m"] += cr5m
+                    win["cr1h"] += cr1h
+                    win["rd"]   += rd
+                    win["out"]  += outp
+                    denom = inp + crT + rd
+                    hit = (rd * 100 // denom) if denom > 0 else 0
+                    # Tools the assistant called on this turn (for next-turn cause inference)
                     tools = []
                     content = msg.get("content")
                     if isinstance(content, list):
@@ -265,13 +303,67 @@ def gather_tok():
                             if isinstance(c, dict) and c.get("type") == "tool_use":
                                 n = c.get("name")
                                 if n: tools.append(n)
-                    tool_str = f"  tool=[{', '.join(tools)}]" if tools else ""
-                    rows.append((ts, f"{hhmmss(ts)}  in={inp} out={outp}  total={tot}{tool_str}"))
+                    # Cache thrash heuristic: substantial cache write AND hit ratio
+                    # below the "red" band (matches the TOK sparkline color rule).
+                    # Implies the prefix changed (autocompact, model switch, tool
+                    # defs, system-reminder injection, TTL expiry).
+                    thrash_label = ""
+                    if crT > 5000 and hit < 30:
+                        cause = "unknown"
+                        gap = (ts - prev_ts) if prev_ts is not None else 0
+                        if prev_model and cur_model and prev_model != cur_model:
+                            cause = f"model_switch[{prev_model}→{cur_model}]"
+                        elif prev_ts is None or rd == 0:
+                            cause = "session_start_or_cold_cache"
+                        elif gap > 3600:
+                            cause = f"1h_TTL_expired[gap={gap//60}m]"
+                        elif gap > 300:
+                            cause = f"5m_TTL_expired[gap={gap//60}m]"
+                        elif "ToolSearch" in prev_tool_names:
+                            cause = "tool_defs_changed[ToolSearch_load]"
+                        elif last_user_blob and ("<system-reminder>" in last_user_blob
+                                                  or "<command-message>" in last_user_blob):
+                            cause = "system_reminder_injected"
+                        elif last_user_blob and len(last_user_blob) > 8000:
+                            cause = "large_user_input"
+                        thrash_label = f"  thrash[{cause}]"
+                        thrash_n += 1
+                        causes[cause] = causes.get(cause, 0) + 1
+                    tool_str = f"  tool=[{', '.join(tools[:3])}]" if tools else ""
+                    rows.append((
+                        ts,
+                        f"{hhmmss(ts)}  in={inp}  cr={crT}(5m:{cr5m}/1h:{cr1h})  "
+                        f"rd={rd}  out={outp}  hit={hit}%{thrash_label}{tool_str}"
+                    ))
+                    prev_ts = ts
+                    prev_model = cur_model
+                    prev_tool_names = tools
+                    # Reset user blob — only the message immediately preceding the
+                    # current assistant turn is causally relevant.
+                    last_user_blob = ""
         except Exception:
             pass
     rows.sort()
-    out = [r[1] for r in rows]
-    return out, f"{len(out)} total; sum={total}"
+    out_lines = [r[1] for r in rows]
+    total_seen = win["in"] + win["cr5m"] + win["cr1h"] + win["rd"] + win["out"]
+    rd_share = (win["rd"] * 100 // total_seen) if total_seen > 0 else 0
+    # Cost-weighted units (Anthropic ephemeral cache pricing weights):
+    #   uncached input = 1.00, cache_write_5m = 1.25, cache_write_1h = 2.00,
+    #   cache_read = 0.10, output = 5.00.
+    # Multiply by your model's $/MTok input rate to estimate spend.
+    cost_units = (win["in"]*1.00 + win["cr5m"]*1.25 + win["cr1h"]*2.00
+                  + win["rd"]*0.10 + win["out"]*5.00)
+    cause_str = ""
+    if causes:
+        items = sorted(causes.items(), key=lambda kv: -kv[1])
+        cause_str = "  thrash_causes={" + ", ".join(f"{k}:{v}" for k, v in items) + "}"
+    summary = (
+        f"turns={len(out_lines)}  in:{win['in']}  cr_5m:{win['cr5m']}  "
+        f"cr_1h:{win['cr1h']}  rd:{win['rd']}  out:{win['out']}  "
+        f"cache_read_share={rd_share}%  thrash_turns={thrash_n}{cause_str}  "
+        f"cost_units={int(cost_units)} (×$/MTok input)"
+    )
+    return out_lines, summary
 
 def gather_err():
     rows = []
@@ -400,7 +492,7 @@ SECTIONS = [
     ("MEM", "MEM — Auto-memory writes (project's memory/*.md mtimes)", gather_mem),
     ("ING", "ING — Ingest entries (~/.learnings/.memory-ingest-log.yaml)", gather_ing),
     ("DRN", "DRN — Drain runs (~/.reflect/drain.log)", gather_drn),
-    ("TOK", "TOK — Token consumption (current session JSONL, per assistant turn)", gather_tok),
+    ("TOK", "TOK — Token consumption (in / cache_write[5m+1h] / cache_read / out per turn; thrash flag when prefix invalidated)", gather_tok),
     ("ERR", "ERR — Errors written to ~/.reflect/errors.json (unacked only)", gather_err),
     ("COM", "COM — Git commits + pushes", gather_com),
     ("AGT", "AGT — Agent spawns (Task tool + tmux dev/agent/swarm + cloud-coding)", gather_agt),
@@ -493,11 +585,37 @@ _gather_raw() {
     find "$PROJECT_DIR/memory" -maxdepth 2 -name '*.md' -newermt '2 hours ago' 2>/dev/null \
       | while IFS= read -r f; do printf 'M\tE%s\t1\n' "$(_mtime "$f")"; done
   fi
-  # T: tokens
+  # T: total tokens per turn (input + cache_creation + cache_read + output)
+  # U: uncached tokens (input + cache_creation) — what we "paid full price" for
+  # X: cache_read tokens — cheap reuse (~0.1× input cost)
+  # Cache-hit ratio per bucket is derived in _bucket_all and emitted as H.
+  #
+  # Claude Code streams content blocks as separate JSONL rows that ALL carry the
+  # SAME (response-level) usage block — same .message.id and .requestId across
+  # rows. Counting per row inflates token totals N×. We emit .message.id as a
+  # 4th tab-separated dedup key; the Python bucketer skips repeats per signal.
   if [[ -n "$SESSION_JSONL" && -f "$SESSION_JSONL" ]]; then
-    jq -r 'select(.message.usage and .timestamp)
-      | "T\t" + .timestamp + "\t" + (((.message.usage.input_tokens // 0)
-        + (.message.usage.output_tokens // 0)) | tostring)' \
+    jq -r 'select(.message.usage and .timestamp and .message.id)
+      | .message.usage as $u
+      | .timestamp as $t
+      | .message.id as $mid
+      | (($u.input_tokens // 0)
+         + ($u.cache_creation_input_tokens // 0)
+         + ($u.cache_read_input_tokens // 0)
+         + ($u.output_tokens // 0)) as $tot
+      | (($u.input_tokens // 0)
+         + ($u.cache_creation_input_tokens // 0)) as $unc
+      | (($u.cache_read_input_tokens // 0)) as $rd
+      | (($u.output_tokens // 0)) as $out
+      | (($u.input_tokens // 0)) as $inp
+      | (($u.cache_creation_input_tokens // 0)) as $crw
+      | (if $crw > 5000 and ($rd * 100) < (($inp + $crw + $rd) * 30)
+         then 1 else 0 end) as $thrash
+      | "T\t" + $t + "\t" + ($tot|tostring) + "\t" + $mid,
+        "U\t" + $t + "\t" + ($unc|tostring) + "\t" + $mid,
+        "X\t" + $t + "\t" + ($rd |tostring) + "\t" + $mid,
+        "O\t" + $t + "\t" + ($out|tostring) + "\t" + $mid,
+        (if $thrash == 1 then "H\t" + $t + "\t1\t" + $mid else empty end)' \
       "$SESSION_JSONL" 2>/dev/null
     # A from same JSONL: subagent-spawn tool_use entries (Task = interactive
     # Claude Code; Agent = background-job harness). TaskCreate is the todo
@@ -538,7 +656,10 @@ now=$_now
 ncells=$NCELLS
 bsec=$BUCKET_SEC
 cutoff = now - ncells*bsec
-sigs = ['R','I','E','D','M','T','C','A']
+# T = total tokens, U = uncached (in + cache_creation), X = cache_read,
+# O = output tokens, H = tHrash event count (1 per turn meeting cache-miss
+# heuristic: cache_creation > 5k AND hit% < 30%). Each renders as its own row.
+sigs = ['R','I','E','D','M','T','U','X','O','H','C','A']
 b = {s: [0]*ncells for s in sigs}
 def parse_ts(s):
     if not s: return None
@@ -556,11 +677,19 @@ def parse_ts(s):
     if d.tzinfo is None:
         d = d.astimezone()
     return int(d.timestamp())
+# Dedup keys per signal: skip rows whose 4th-col key has already been counted
+# for this signal. Used by T/U/X to collapse streamed JSONL dupes (multiple
+# rows per Anthropic API response, same .message.id).
+seen = set()
 for line in sys.stdin:
     parts = line.rstrip('\n').split('\t')
     if len(parts) < 3: continue
     sig, tsraw, cnt = parts[0], parts[1], parts[2]
     if sig not in b: continue
+    if len(parts) >= 4 and parts[3]:
+        sk = (sig, parts[3])
+        if sk in seen: continue
+        seen.add(sk)
     ts = parse_ts(tsraw)
     if ts is None or ts < cutoff: continue
     try: c = int(float(cnt))
@@ -568,6 +697,15 @@ for line in sys.stdin:
     idx = ncells - 1 - (now - ts) // bsec
     if 0 <= idx < ncells:
         b[sig][idx] += c
+# Derive P (cache hit ratio %) per bucket: X / (U + X). -1 sentinel = no data.
+# Used by TOK row renderer to color each cell by cache health (good/bad cue),
+# while UNC/CHR/OUT stay identity-colored heatmap rows.
+P = [-1]*ncells
+for i in range(ncells):
+    denom = b['U'][i] + b['X'][i]
+    if denom > 0:
+        P[i] = (b['X'][i] * 100) // denom
+print('P', *P)
 for s in sigs:
     print(s, *b[s])
 "
@@ -626,31 +764,76 @@ _render_sparkline() {
   printf '%s' "$out"
 }
 
-_render_tokens() {
-  # args: counts (already token totals per bucket)
-  # Heat gradient: green ≤5k, yellow 5k–15k, red >15k. Label uses neutral
-  # gold so it's visually distinct from the heat ramp.
-  local counts=("$@")
+_render_tok_with_hit_color() {
+  # Special renderer for the TOK row only. Encodes BOTH magnitude AND
+  # cache-health in one row by colouring each bucket cell by hit ratio:
+  #   ≥70%   → green   (healthy cache reuse — the cheap path)
+  #   30-69% → amber   (mixed — partial reuse)
+  #   <30%   → red     (BAD — uncached spike / cache miss)
+  #   no data → dim grey
+  # Glyph height = total tokens scaled by full-bar threshold.
+  # Other token rows (UNC/CHR/OUT) keep constant identity colour because
+  # their meaning is already unambiguous (UNC = always bad, CHR = always cheap,
+  # OUT = informational). Mixing schemes is fine as long as the legend
+  # spells it out.
+  local -n _t=$1
+  local -n _h=$2
+  local scale=${3:-20000}
+  (( scale <= 0 )) && scale=20000
   local linked_label
   linked_label=$(_link "$EXPLAIN_URL" "TOK:")
   local out="$(_fg 240 200 80)${linked_label}${RESET} "
-  local i c idx h alpha r g b
+  local i c h hp r g b
   for (( i=0; i<NCELLS; i++ )); do
-    c=${counts[i]:-0}
+    c=${_t[i]:-0}
     if (( c <= 0 )); then
       out+="$(_fg 90 90 110)${GLYPHS[0]}${RESET}"
       continue
     fi
-    # Height: count / TOKEN_FULLBAR scaled to 1..8
-    h=$(( c * 8 / TOKEN_FULLBAR ))
+    h=$(( c * 8 / scale ))
     (( h < 1 )) && h=1
     (( h > 8 )) && h=8
-    # Heat: green ≤5k, yellow 5k–15k, red >15k
-    if   (( c <= 5000 ));  then r=120; g=200; b=120
-    elif (( c <= 15000 )); then r=240; g=200; b=80
-    else                        r=240; g=80;  b=80
+    hp=${_h[i]:--1}
+    if   (( hp < 0 ));   then r=160; g=160; b=160
+    elif (( hp >= 70 )); then r=120; g=200; b=120
+    elif (( hp >= 30 )); then r=240; g=200; b=80
+    else                      r=255; g=80;  b=80
     fi
     out+="$(_fg $r $g $b)${GLYPHS[h]}${RESET}"
+  done
+  printf '%s' "$out"
+}
+
+_render_token_heatmap() {
+  # Generic heatmap-row renderer for token streams.
+  # Args: <label> <r> <g> <b> <array_name> <full_scale>
+  #   label       — 3-char stream name (TOK, UNC, CHR, OUT)
+  #   r,g,b       — stream identity colour (constant across cells)
+  #   array_name  — bash nameref to bucket array (count per 5-min slot)
+  #   full_scale  — token count that maps to a full █ glyph
+  #
+  # Heatmap semantics: COLOUR = which stream (identity), GLYPH HEIGHT = magnitude.
+  # No "good/bad" overloading — bright + tall just means "lots of THIS stream".
+  # Per-stream scale lets us compare disparate magnitudes (output ~1-5k/turn,
+  # cache_read ~100k+/turn) without one row crushing the others.
+  local label=$1 r=$2 g=$3 b=$4
+  local -n _arr=$5
+  local scale=${6:-20000}
+  (( scale <= 0 )) && scale=20000
+  local linked_label
+  linked_label=$(_link "$EXPLAIN_URL" "${label}:")
+  local out="$(_fg "$r" "$g" "$b")${linked_label}${RESET} "
+  local i c h
+  for (( i=0; i<NCELLS; i++ )); do
+    c=${_arr[i]:-0}
+    if (( c <= 0 )); then
+      out+="$(_fg 90 90 110)${GLYPHS[0]}${RESET}"
+      continue
+    fi
+    h=$(( c * 8 / scale ))
+    (( h < 1 )) && h=1
+    (( h > 8 )) && h=8
+    out+="$(_fg "$r" "$g" "$b")${GLYPHS[h]}${RESET}"
   done
   # %s, not %b — see _render_sparkline comment about \E corruption.
   printf '%s' "$out"
@@ -665,55 +848,94 @@ while IFS= read -r line; do
   SIG[$s]="$rest"
 done <<< "$BUCKETS_RAW"
 
-RECALL_B=( ${SIG[R]:-} )
-INGEST_B=( ${SIG[I]:-} )
-ERRORS_B=( ${SIG[E]:-} )
-DRAIN_B=(  ${SIG[D]:-} )
-MEMORY_B=( ${SIG[M]:-} )
-TOKENS_B=( ${SIG[T]:-} )
-COMMITS_B=( ${SIG[C]:-} )
-AGENTS_B=(  ${SIG[A]:-} )
+RECALL_B=(   ${SIG[R]:-} )
+INGEST_B=(   ${SIG[I]:-} )
+ERRORS_B=(   ${SIG[E]:-} )
+DRAIN_B=(    ${SIG[D]:-} )
+MEMORY_B=(   ${SIG[M]:-} )
+TOKENS_B=(   ${SIG[T]:-} )
+UNCACHED_B=( ${SIG[U]:-} )
+CACHERD_B=(  ${SIG[X]:-} )
+OUTPUT_B=(   ${SIG[O]:-} )
+THRASH_B=(   ${SIG[H]:-} )
+HITRATIO_B=( ${SIG[P]:-} )
+COMMITS_B=(  ${SIG[C]:-} )
+AGENTS_B=(   ${SIG[A]:-} )
 
-# Pad to NCELLS in case a signal had no data
-for arr in RECALL_B INGEST_B ERRORS_B DRAIN_B MEMORY_B TOKENS_B COMMITS_B AGENTS_B; do
+# Pad to NCELLS in case a signal had no data.
+# HITRATIO_B pads with -1 sentinel ("no data" → grey); all others pad with 0.
+for arr in RECALL_B INGEST_B ERRORS_B DRAIN_B MEMORY_B TOKENS_B UNCACHED_B CACHERD_B OUTPUT_B THRASH_B HITRATIO_B COMMITS_B AGENTS_B; do
   eval "len=\${#${arr}[@]}"
   if (( len < NCELLS )); then
     while (( len < NCELLS )); do
-      eval "${arr}+=( 0 )"
+      if [[ "$arr" == "HITRATIO_B" ]]; then
+        eval "${arr}+=( -1 )"
+      else
+        eval "${arr}+=( 0 )"
+      fi
       len=$(( len + 1 ))
     done
   fi
 done
 
-# ── Render 8 individual sparklines, paired 2-per-row ─────────────────────────
-# Row 3: R (recall, blue)        | M (auto-memory writes, cyan)
-# Row 4: I (ingest, green)       | D (drain runs, orange)
-# Row 5: T (tokens, heat)        | E (errors, red)
-# Row 6: C (commits+pushes, gray)| A (agent spawns, cyan)
+# ── Render sparklines — 3-column × 4-row layout ──────────────────────────────
+# Column 1 (token heatmap)   |  Column 2 (ops + thrash)  |  Column 3 (other)
+# ─────────────────────────  |  ────────────────────────  |  ──────────────────
+# ROW1: TOK (green)  — total |  MEM (cyan)               |  REC (blue)
+# ROW2: UNC (red)    — burn  |  DRN (orange)             |  ING (green)
+# ROW3: CHR (blue)   — reads |  AGT (cyan)               |  COM (grey)
+# ROW4: OUT (purple) — out   |  THR (bright red) — NEW   |  ERR (red)
+#
+# Column 1 is the 4-stream token heatmap: colour = stream identity (constant
+# per row), glyph height = magnitude. Read vertically: tall+bright UNC + dim
+# CHR at the same time bucket means uncached burn without cache benefit. Tall
+# CHR + thin UNC means cache is winning.
+#
+# Column 2 bottom row (THR) lights up when a turn meets the cache-thrash
+# heuristic: cache_creation > 5k AND hit% < 30%. Spikes = autocompact / model
+# switch / tool defs changed / system-reminder injection / TTL expiry.
+#
+# Per-stream full-bar scales (token count at which the row hits █):
+#   TOK total ≈ 20k    UNC uncached ≈ 15k
+#   CHR reads ≈ 100k   OUT output  ≈ 5k
+TOK_SCALE_TOTAL=${REFLECT_TIMELINE_SCALE_TOK:-20000}
+TOK_SCALE_UNC=${REFLECT_TIMELINE_SCALE_UNC:-15000}
+TOK_SCALE_CHR=${REFLECT_TIMELINE_SCALE_CHR:-100000}
+TOK_SCALE_OUT=${REFLECT_TIMELINE_SCALE_OUT:-5000}
+
 SPARK_R=$(_render_sparkline "REC"  80 180 255 "${RECALL_B[@]}")
 SPARK_M=$(_render_sparkline "MEM" 100 200 220 "${MEMORY_B[@]}")
 SPARK_I=$(_render_sparkline "ING" 120 200 120 "${INGEST_B[@]}")
 SPARK_D=$(_render_sparkline "DRN" 230 150  90 "${DRAIN_B[@]}")
-SPARK_T=$(_render_tokens "${TOKENS_B[@]}")
-SPARK_E=$(_render_sparkline "ERR" 240  80  80 "${ERRORS_B[@]}")
 SPARK_C=$(_render_sparkline "COM" 180 180 180 "${COMMITS_B[@]}")
 SPARK_A=$(_render_sparkline "AGT"  80 200 220 "${AGENTS_B[@]}")
+SPARK_E=$(_render_sparkline "ERR" 240  80  80 "${ERRORS_B[@]}")
+# THR (cache thrash events). Bright red-orange — visually distinct from UNC's
+# softer red and ERR's plain red. Default sparkline scale (8) is right for
+# event counts (most buckets 0, occasional 1-3 spikes).
+SPARK_H=$(_render_sparkline "THR" 255  90  30 "${THRASH_B[@]}")
+# TOK uses hit-ratio coloring (good/bad cue) — other rows stay identity-colored.
+SPARK_T=$(_render_tok_with_hit_color TOKENS_B HITRATIO_B "$TOK_SCALE_TOTAL")
+SPARK_U=$(_render_token_heatmap "UNC" 240 100 100 UNCACHED_B "$TOK_SCALE_UNC")
+SPARK_X=$(_render_token_heatmap "CHR"  90 170 230 CACHERD_B  "$TOK_SCALE_CHR")
+SPARK_O=$(_render_token_heatmap "OUT" 190 150 230 OUTPUT_B   "$TOK_SCALE_OUT")
 
-# Pair side-by-side with 3-space separator. Each line gets a single leading
-# space so it visually aligns under line 2 (which is printed with a leading
-# space by statusline.sh — see "printf '%b\n %b' ..." block).
 GAP="   "
-ROW1="${SPARK_R}${GAP}${SPARK_M}"
-ROW2="${SPARK_I}${GAP}${SPARK_D}"
-ROW3="${SPARK_T}${GAP}${SPARK_E}"
-ROW4="${SPARK_C}${GAP}${SPARK_A}"
+
+ROW1="${SPARK_T}${GAP}${SPARK_M}${GAP}${SPARK_R}"
+ROW2="${SPARK_U}${GAP}${SPARK_D}${GAP}${SPARK_I}"
+ROW3="${SPARK_X}${GAP}${SPARK_A}${GAP}${SPARK_C}"
+ROW4="${SPARK_O}${GAP}${SPARK_H}${GAP}${SPARK_E}"
 
 # ── Write cache and emit ─────────────────────────────────────────────────────
-HINT=" $(_fg 110 110 130)↑ click a label or run: reflect timeline --explain TOK${RESET}"
+# Legend explaining the color schemes. TOK is the ONLY row with good/bad
+# semantic coloring; everything else uses identity color.
+LEGEND=" $(_fg 160 160 160)legend:${RESET} $(_fg 120 200 120)█${RESET}$(_fg 160 160 160) TOK cache≥70%${RESET}  $(_fg 240 200 80)█${RESET}$(_fg 160 160 160) 30-70%${RESET}  $(_fg 255 80 80)█${RESET}$(_fg 160 160 160) <30% (uncached spike)${RESET}  $(_fg 255 90 30)▌${RESET}$(_fg 160 160 160) THR = cache invalidation${RESET}"
+HINT=" $(_fg 110 110 130)↑ col 1 tokens (TOK/UNC/CHR/OUT) · col 2 ops + THR · col 3 REC/ING/COM/ERR · click label / --explain TOK${RESET}"
 # %s for args (preserves raw ANSI/OSC8 bytes); \n stays in the format string.
 # Avoids bash printf %b's interpretation of `\E` → ESC which corrupts the ERR
 # label (see _render_sparkline comment).
-OUT=$(printf '\n%s\n %s\n %s\n %s\n%s' "$ROW1" "$ROW2" "$ROW3" "$ROW4" "$HINT")
+OUT=$(printf '\n%s\n %s\n %s\n %s\n%s\n%s' "$ROW1" "$ROW2" "$ROW3" "$ROW4" "$LEGEND" "$HINT")
 
 # Refresh the drill-down file in background — clicks land on fresh data.
 # Fire-and-forget; must not block the render.
