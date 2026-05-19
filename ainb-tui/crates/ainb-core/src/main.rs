@@ -56,6 +56,15 @@ use app::{App, EventHandler};
 use components::LayoutComponent;
 use components::slash::{SlashAction, SlashCommandRegistry, SlashPalette};
 
+/// Where the BSP layout snapshot lives on disk. Defaults to
+/// `~/.agents-in-a-box/layout.json`; falls back to the current dir if
+/// the home directory can't be resolved (rare).
+fn bsp_layout_path() -> std::path::PathBuf {
+    dirs::home_dir()
+        .map(|h| h.join(".agents-in-a-box").join("layout.json"))
+        .unwrap_or_else(|| std::path::PathBuf::from(".agents-in-a-box/layout.json"))
+}
+
 /// Terminal cleanup utility to ensure proper restoration
 fn cleanup_terminal() {
     let _ = disable_raw_mode();
@@ -120,6 +129,36 @@ async fn main() -> Result<()> {
             app_state.init().await;
             let mut layout = LayoutComponent::new();
 
+            // P7-wiring: try to restore the BSP layout from disk. On
+            // schema-mismatch or I/O error, log + fall back to the
+            // AppState::default() value (which is Some(default_root)).
+            let layout_path = bsp_layout_path();
+            match ui::bsp_persist::LayoutPersist::load(&layout_path) {
+                Ok(Some(snap)) => {
+                    tracing::info!(
+                        "Restored BSP layout from {} (v{} {}×{})",
+                        layout_path.display(),
+                        snap.version,
+                        snap.min_cols,
+                        snap.min_rows
+                    );
+                    app_state.state.bsp = Some(snap);
+                }
+                Ok(None) => {
+                    tracing::debug!(
+                        "No BSP layout on disk at {} — using default_root",
+                        layout_path.display()
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to load BSP layout from {} ({}). Falling back to default_root.",
+                        layout_path.display(),
+                        e
+                    );
+                }
+            }
+
             // Check if first-time setup is needed
             if app::state::AppState::needs_onboarding() {
                 tracing::info!("First-time setup detected - starting onboarding wizard");
@@ -136,6 +175,24 @@ async fn main() -> Result<()> {
             }
 
             let tui_result = run_tui(&mut app_state, &mut layout).await;
+
+            // P7-wiring: save the BSP layout on graceful shutdown so the
+            // next launch restores the user's tile arrangement. Atomic
+            // write via tmp+rename — see ui::bsp_persist for details.
+            if let Some(ref snap) = app_state.state.bsp {
+                match ui::bsp_persist::LayoutPersist::save(snap, &layout_path) {
+                    Ok(bytes) => tracing::info!(
+                        "Persisted BSP layout to {} ({} bytes)",
+                        layout_path.display(),
+                        bytes
+                    ),
+                    Err(e) => tracing::warn!(
+                        "Failed to persist BSP layout to {}: {}",
+                        layout_path.display(),
+                        e
+                    ),
+                }
+            }
 
             // Explicitly tear down the plugin runtime before `app_state`
             // drops. Without this, `AppState.plugin_runtime_owner: Option<Runtime>`
