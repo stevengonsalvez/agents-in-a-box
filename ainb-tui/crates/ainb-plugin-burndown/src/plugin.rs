@@ -1289,7 +1289,11 @@ mod chunk_accumulator_tests {
         assert_eq!(d.calls[2].id, 3);
         // Sessions and shell_commands also accumulated.
         assert_eq!(d.sessions.len(), 3, "sessions extended across chunks");
-        assert_eq!(d.shell_commands.len(), 3, "shell_commands extended across chunks");
+        assert_eq!(
+            d.shell_commands.len(),
+            3,
+            "shell_commands extended across chunks"
+        );
         // Aggregates from chunk 0 survived.
         assert_eq!(d.projects.len(), 1);
     }
