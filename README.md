@@ -66,7 +66,7 @@ A terminal-native ecosystem for managing AI coding agents. Built around a Rust T
 |-----------|-------------|-------|
 | **[ainb TUI](#ainb--terminal-ui)** | Rust terminal app for managing Claude Code sessions | 115 modules |
 | **[Toolkit](#toolkit)** | Portable skills, agents, and workflows for AI coding tools | 71 skills, 37 agents |
-| **[Knowledge System](#knowledge-system)** | GraphRAG + QMD learning capture and retrieval | [Architecture docs](docs/how-reflection-works.md) |
+| **[Knowledge System](#knowledge-system)** | GraphRAG + QMD learning capture and retrieval | [Architecture docs](docs/knowledge/overview.md) |
 
 ---
 
@@ -109,7 +109,7 @@ A Rust-based terminal application for managing AI coding sessions with git workt
 - **Usage analytics** — Built-in token + session tracking by day, week, provider, and project. Know where your budget went
 - **Easy onboarding** — First-run setup wizard checks dependencies, configures auth, and gets you creating sessions in minutes
 - **Live log streaming** — Real-time viewer with level filtering and search across all running sessions
-- **Scriptable CLI** — 15 commands with `--format json` output for every piece of state. **[📘 Full CLI reference →](ainb-tui/docs/CLI.md)**
+- **Scriptable CLI** — 15 commands with `--format json` output for every piece of state. **[📘 Full CLI reference →](docs/tui/cli.md)**
 
 ### Feature Showcase
 
@@ -168,7 +168,7 @@ ainb completion zsh > ~/.zsh/completions/_ainb
 
 **15 top-level commands** — `run`, `list`, `logs`, `attach`, `status`, `kill`, `auth`, `recover`, `config`, `git`, `favorites`, `init`, `presets`, `completion`, `tui` — with nested subcommands for recover / config / git / favorites / presets.
 
-**[📘 Full CLI reference → ainb-tui/docs/CLI.md](ainb-tui/docs/CLI.md)**
+**[📘 Full CLI reference → docs/tui/cli.md](docs/tui/cli.md)**
 
 ### Installation
 
@@ -374,7 +374,7 @@ A two-tier learning system that captures insights during development and retriev
 
 The `/reflect` skill captures learnings. The `/research` and `/prime` skills retrieve them. The [`reflect-kb/`](reflect-kb/) Python library (installed as the `reflect` CLI) manages the knowledge base directly — it lives in this monorepo and installs via `uv tool install --upgrade 'git+https://github.com/stevengonsalvez/agents-in-a-box.git#subdirectory=reflect-kb[graph]'`.
 
-**[How the knowledge system works →](docs/how-reflection-works.md)**
+**[How the knowledge system works →](docs/knowledge/overview.md)**
 
 ---
 
@@ -420,8 +420,18 @@ agents-in-a-box/
 │   ├── bootstrap.js            #   Multi-tool deployment engine
 │   └── create-rule.js          #   CLI installer
 │
-├── docs/                       # Documentation
-│   └── how-reflection-works.md #   Knowledge system architecture
+├── docs/                       # Documentation hub (Markdown source of truth)
+│   ├── README.md               #   Docs TOC
+│   ├── product/                #   What ainb is, value, architecture
+│   ├── tui/                    #   ainb CLI reference, FAQ, keyboard shortcuts
+│   ├── toolkit/                #   Skills + agents + bootstrap reference
+│   ├── plugins/                #   v2 plugin overview, user guide, authoring, spec
+│   ├── knowledge/              #   reflect/recall (GraphRAG + QMD)
+│   ├── contributing/           #   Build, CI/CD, release
+│   └── reference/              #   Architecture deep-dive, glossary
+│
+├── website/                    # Website source (Astro + Starlight)
+│   └── BRIEF.md                #   Design instruction for stevengonsalvez.github.io
 │
 └── .github/workflows/
     ├── ci.yml                  #   Rust CI (fmt, clippy, test, deny, machete)
@@ -501,7 +511,7 @@ node create-rule.js --tool=codex              # Deploy to ~/.codex/
 - [Releases](https://github.com/stevengonsalvez/agents-in-a-box/releases)
 - [Homebrew Tap](https://github.com/stevengonsalvez/homebrew-ainb)
 - [Issues](https://github.com/stevengonsalvez/agents-in-a-box/issues)
-- [Knowledge System Architecture](docs/how-reflection-works.md)
+- [Knowledge System Architecture](docs/knowledge/overview.md)
 - [Toolkit Documentation](toolkit/README.md)
 
 ---

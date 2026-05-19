@@ -1,6 +1,6 @@
 # Plugin contract changelog
 
-Tracks how the plugin contract (`docs/plugin-spec/v2.md`) evolves.
+Tracks how the plugin contract (`./spec-v2.md`) evolves.
 
 ## Versioning policy
 
@@ -28,4 +28,4 @@ Surface area (full reference in [v2.md](./v2.md)):
 
 ## v1 — historical, removed 2026-05-15
 
-Earlier contract using `wasm32-wasip1` cdylibs + a wasmi host runtime + linker-omitted host-fn imports for capability gating. Replaced by v2 (subprocess) because the wasm sandbox added implementation cost without buying any safety property the OS process boundary doesn't already provide for ainb's threat model. The v1 spec lived at `docs/plugin-spec/v1.md`; no in-tree plugins targeted it long enough to require a deprecation path.
+Earlier contract using `wasm32-wasip1` cdylibs + a wasmi host runtime + linker-omitted host-fn imports for capability gating. Replaced by v2 (subprocess) because the wasm sandbox added implementation cost without buying any safety property the OS process boundary doesn't already provide for ainb's threat model. The v1 spec lived at `./spec-v1.md`; no in-tree plugins targeted it long enough to require a deprecation path.
