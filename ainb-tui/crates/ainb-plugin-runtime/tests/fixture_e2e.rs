@@ -38,6 +38,7 @@ fn fixture_manifest() -> Manifest {
             commands: vec![],
             cli_namespaces: vec!["echo".into()],
             snapshots: vec!["fixture.greeting".into()],
+            ..Provides::default()
         },
         subscribes: Subscribes::default(),
         lifecycle: Lifecycle {

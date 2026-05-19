@@ -58,6 +58,7 @@ pub fn register_plugin(rt: &Runtime, name: &str, bin_path: PathBuf) -> PluginId 
             commands: vec![],
             cli_namespaces: vec!["echo".into()],
             snapshots: vec!["fixture.greeting".into()],
+            ..Provides::default()
         },
         subscribes: Subscribes::default(),
         lifecycle: Lifecycle {
