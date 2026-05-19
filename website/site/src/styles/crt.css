@@ -1,0 +1,66 @@
+/*
+ * CRT flourishes — scanlines + blinking cursor + ASCII dividers.
+ * All motion gated on prefers-reduced-motion.
+ */
+
+/* Scanlines overlay — 1% opacity, 2px line every 4px. */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1000;
+  background-image: repeating-linear-gradient(
+    to bottom,
+    rgba(220, 220, 230, 0.015) 0,
+    rgba(220, 220, 230, 0.015) 1px,
+    transparent 1px,
+    transparent 4px
+  );
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body::after {
+    display: none;
+  }
+}
+
+/* Blinking block cursor — square-wave step (CRT-honest, not sine). */
+@keyframes ainb-blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
+.ainb-cursor {
+  display: inline-block;
+  width: 0.6ch;
+  height: 1.1em;
+  background: var(--ainb-accent-gold);
+  vertical-align: text-bottom;
+  margin-left: 0.1ch;
+  animation: ainb-blink 1s steps(2) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ainb-cursor {
+    animation: none;
+    opacity: 1;
+  }
+}
+
+/* Stats counter — subtle CRT flicker. */
+@keyframes ainb-flicker {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.97; }
+  80%      { opacity: 0.99; }
+}
+
+.ainb-stat {
+  animation: ainb-flicker 4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ainb-stat {
+    animation: none;
+  }
+}

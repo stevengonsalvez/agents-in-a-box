@@ -1,3 +1,7 @@
+---
+title: "CI / CD"
+---
+
 # CI / CD
 
 > **Status:** stub. Authoritative content currently lives at `.github/workflows/*.yml + main README §CI/CD`.

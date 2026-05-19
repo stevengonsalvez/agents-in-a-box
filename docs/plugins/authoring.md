@@ -1,3 +1,7 @@
+---
+title: "ainb plugin authoring"
+---
+
 # ainb plugin authoring
 
 Developer-facing reference for shipping a v2 plugin. For end-user install/CLI docs see [./user-guide.md](./user-guide.md). For the wire contract see [./spec-v2.md](./spec-v2.md).

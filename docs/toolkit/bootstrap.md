@@ -1,3 +1,7 @@
+---
+title: "Bootstrap engine"
+---
+
 # Bootstrap engine
 
 > **Status:** stub. Authoritative content currently lives at `toolkit/bootstrap.js`.

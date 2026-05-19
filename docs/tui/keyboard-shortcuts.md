@@ -1,3 +1,7 @@
+---
+title: "Keyboard shortcuts"
+---
+
 # Keyboard shortcuts
 
 > **Status:** stub. Authoritative content currently lives at `ainb-tui/src/components/*.rs + README §Keyboard Shortcuts`.

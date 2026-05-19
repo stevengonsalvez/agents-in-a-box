@@ -1,3 +1,7 @@
+---
+title: "`reflect` CLI reference"
+---
+
 # `reflect` CLI reference
 
 > **Status:** stub. Authoritative content currently lives at `reflect-kb/README.md + reflect-kb/cli source`.

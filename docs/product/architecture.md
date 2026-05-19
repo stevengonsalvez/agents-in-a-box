@@ -1,3 +1,7 @@
+---
+title: "Whole-system architecture"
+---
+
 # Whole-system architecture
 
 How the four components of agents-in-a-box fit together.

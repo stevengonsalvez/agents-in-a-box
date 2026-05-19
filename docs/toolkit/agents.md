@@ -1,3 +1,7 @@
+---
+title: "Agents (37)"
+---
+
 # Agents (37)
 
 > **Status:** stub. Authoritative content currently lives at `toolkit/packages/agents/`.

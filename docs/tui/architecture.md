@@ -1,3 +1,7 @@
+---
+title: "TUI architecture"
+---
+
 # TUI architecture
 
 > **Status:** stub. Authoritative content currently lives at `ainb-tui/CLAUDE.md + ainb-tui/src/ source tree`.

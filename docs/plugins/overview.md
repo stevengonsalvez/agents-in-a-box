@@ -1,3 +1,7 @@
+---
+title: "ainb v2 plugins — overview"
+---
+
 # ainb v2 plugins — overview
 
 What a v2 subprocess plugin is, conceptually. New here? Read [README.md](./README.md) first — it disambiguates from Claude Code plugins.
