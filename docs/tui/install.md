@@ -1,3 +1,7 @@
+---
+title: "Install the TUI"
+---
+
 # Install the TUI
 
 > **Status:** stub. Authoritative content currently lives at `ainb-tui/install.sh + Homebrew tap README + main README §Installation`.

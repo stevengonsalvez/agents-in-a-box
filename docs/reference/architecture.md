@@ -1,3 +1,7 @@
+---
+title: "Architecture deep-dive"
+---
+
 # Architecture deep-dive
 
 > **Status:** stub. Authoritative content currently lives at `docs/product/architecture.md + ainb-tui/CLAUDE.md`.

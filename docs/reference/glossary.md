@@ -1,3 +1,7 @@
+---
+title: "Glossary"
+---
+
 # Glossary
 
 > **Status:** stub. Authoritative content currently lives at `new — synthesises across the codebase`.

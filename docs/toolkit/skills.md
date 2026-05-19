@@ -1,3 +1,7 @@
+---
+title: "Skills (86)"
+---
+
 # Skills (86)
 
 > **Status:** stub. Authoritative content currently lives at `toolkit/packages/skills/*/SKILL.md + toolkit/README.md §Skills at a glance`.

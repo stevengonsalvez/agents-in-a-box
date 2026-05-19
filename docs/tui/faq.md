@@ -1,3 +1,7 @@
+---
+title: "FAQ & Tips"
+---
+
 # FAQ & Tips
 
 Common questions and tips for using agents-in-a-box effectively.

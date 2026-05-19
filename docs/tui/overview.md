@@ -1,3 +1,7 @@
+---
+title: "ainb TUI — overview"
+---
+
 # ainb TUI — overview
 
 > **Status:** stub. Authoritative content currently lives at `ainb-tui/README.md + ainb-tui/CLAUDE.md`.

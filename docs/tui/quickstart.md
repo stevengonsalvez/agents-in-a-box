@@ -1,3 +1,7 @@
+---
+title: "Quickstart — first session in 60 seconds"
+---
+
 # Quickstart — first session in 60 seconds
 
 > **Status:** stub. Authoritative content currently lives at `new — synthesises README quickstart + first-session UX`.

@@ -1,3 +1,7 @@
+---
+title: "Release process"
+---
+
 # Release process
 
 > **Status:** stub. Authoritative content currently lives at `ainb-tui/CHANGELOG.md + .github/workflows/release.yml`.

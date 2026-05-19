@@ -1,3 +1,7 @@
+---
+title: "Toolkit overview"
+---
+
 # Toolkit overview
 
 > **Status:** stub. Authoritative content currently lives at `toolkit/README.md`.

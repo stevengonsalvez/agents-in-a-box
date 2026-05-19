@@ -1,3 +1,7 @@
+---
+title: "ainb plugin contract — v2 (subprocess)"
+---
+
 # ainb plugin contract — v2 (subprocess)
 
 **Status:** stable.

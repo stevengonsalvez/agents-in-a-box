@@ -1,3 +1,7 @@
+---
+title: "Building from source"
+---
+
 # Building from source
 
 > **Status:** stub. Authoritative content currently lives at `ainb-tui/CLAUDE.md + main README §Development`.
