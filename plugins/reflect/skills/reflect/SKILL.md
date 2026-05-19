@@ -336,32 +336,10 @@ reflect off  -> python {{HOME_TOOL_DIR}}/skills/reflect/scripts/state_manager.py
 
 ## State Management
 
-State is stored in `~/.reflect/` (configurable via `REFLECT_STATE_DIR`):
-
-```yaml
-# reflect-state.yaml
-auto_reflect: false
-last_reflection: "2026-01-26T10:30:00Z"
-pending_low_confidence: []
-```
-
-### Metrics Tracking
-
-```yaml
-# reflect-metrics.yaml
-total_sessions_analyzed: 42
-total_signals_detected: 156
-total_changes_accepted: 89
-acceptance_rate: 78%
-confidence_breakdown:
-  high: 45
-  medium: 32
-  low: 12
-most_updated_agents:
-  code-reviewer: 23
-  backend-developer: 18
-skills_created: 5
-```
+Reflect persists state in `~/.reflect/` SQLite via `reflect_db.py` (toggle, pending
+low-confidence queue, drained reflections, errors). Inspect or operate via the
+`reflect:reflect-status` skill or the `reflect metrics` / `reflect stats` CLI
+subcommands (from `reflect-kb`).
 
 ## Safety Guardrails
 
@@ -382,15 +360,30 @@ skills_created: 5
 
 ## Output Locations
 
-**Project-level (versioned with repo):**
-- `docs/solutions/{category}/{name}.md` - Knowledge notes
-- `docs/solutions/{category}/{name}.entities.yaml` - Entity sidecars
-- `.claude/skills/{name}/SKILL.md` - New skills
+Reflect signals land in one of four v3 homes depending on scope.
 
-**Global (user-level):**
-- `~/.reflect/learnings.yaml` - Learning log
-- `~/.reflect/reflect-metrics.yaml` - Aggregate metrics
-- Via `learnings add` CLI - GraphRAG indexed knowledge
+**Behavioral corrections (encode in the responsible agent definition):**
+- `~/.claude/agents/{agent-name}.md` — direct edit to agent rules
+- `.claude/skills/{name}/SKILL.md` — when a new skill is the right home
+
+**Project-scoped knowledge (auto-loaded next session in this project):**
+- `~/.claude/projects/<HASH>/memory/{type}_{slug}.md` — auto-memory entries.
+  `<HASH>` is the git-root path encoded by Claude Code; the statusline MEM row
+  surfaces writes here.
+- `~/.claude/projects/<HASH>/memory/MEMORY.md` — index pointing at the above.
+
+**Cross-project / generic knowledge (queryable via `/recall` from any session):**
+- `reflect add <file>` → `~/.learnings/documents/learnings/{id}.md` plus a
+  `{id}.entities.yaml` sidecar; auto-indexed into GraphRAG + QMD. Use this for
+  system-level findings, library quirks, or behavioural patterns that aren't
+  tied to any one repo. If the signal doesn't belong to any specific project,
+  go straight here — no project-scoped intermediate step required.
+
+**In-repo solution notes (versioned with code, harvested by `/reflect:ingest`):**
+- `docs/solutions/{category}/{name}.md` + `{name}.entities.yaml`
+
+Legacy paths (`~/.reflect/learnings.yaml`, `~/.claude/session/learnings.yaml`,
+`~/.reflect/reflect-metrics.yaml`) are no longer canonical. Do not write there.
 
 ## Examples
 

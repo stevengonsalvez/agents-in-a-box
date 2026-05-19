@@ -195,7 +195,7 @@ provenance:
 **B. Entity sidecar** (`~/.learnings/documents/learnings/{id}.entities.yaml`):
 
 Required schema — every field below is mandatory except `strength` (defaults to 5).
-The `learnings add --entities` CLI enforces this via `entity_store.Entity` and will
+The `reflect add --entities` CLI enforces this via `entity_store.Entity` and will
 raise `KeyError` if any required key is missing.
 
 ```yaml
