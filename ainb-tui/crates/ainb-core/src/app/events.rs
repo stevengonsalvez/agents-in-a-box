@@ -2118,7 +2118,7 @@ impl EventHandler {
             KeyCode::Char('s') => return Some(AppEvent::GoToSessionList),
             KeyCode::Char('i') => return Some(AppEvent::GoToStats),
             KeyCode::Char('k') => return Some(AppEvent::GoToSkills),
-            KeyCode::Char('M') => return Some(AppEvent::GoToSkillManager),
+            KeyCode::Char('m') => return Some(AppEvent::GoToSkillManager),
             KeyCode::Char('R') => return Some(AppEvent::GoToRecovery),
             KeyCode::Char('v') => return Some(AppEvent::ShowChangelog),
             KeyCode::Char('?') => return Some(AppEvent::ToggleHelp),

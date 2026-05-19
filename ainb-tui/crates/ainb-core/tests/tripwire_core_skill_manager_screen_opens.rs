@@ -79,7 +79,7 @@ fn kill_session(session: &str) {
 }
 
 #[test]
-fn pressing_M_on_home_opens_skill_manager_screen() {
+fn pressing_m_on_home_opens_skill_manager_screen() {
     if !tmux_available() {
         eprintln!("SKIP: tmux not on PATH");
         return;
@@ -112,7 +112,7 @@ fn pressing_M_on_home_opens_skill_manager_screen() {
 
     // Wait for HomeScreen to render FULLY. The previous bare
     // (Agents && Catalog) pair could match mid-paint, before the
-    // welcome panel had painted, leading to a race where M was
+    // welcome panel had painted, leading to a race where m was
     // sent while the binary was still booting and got lost.
     // Require the welcome-panel literal too so the predicate only
     // fires when both the sidebar AND the right-hand panel are
@@ -142,9 +142,10 @@ fn pressing_M_on_home_opens_skill_manager_screen() {
         "test invariant broken: SkillManager markers visible on HomeScreen capture:\n{home_render}"
     );
 
-    // Press M (uppercase — see app/events.rs:2012). NEVER append Enter
-    // to a single-char nav key, per tripwire-skill hard rule #3.
-    send_key(&session, "M");
+    // Press m (lowercase — see app/events.rs HomeScreen V2 match arm).
+    // NEVER append Enter to a single-char nav key, per tripwire-skill
+    // hard rule #3.
+    send_key(&session, "m");
 
     // Positive AND negative markers per hard rule #2 — substring-OR
     // on lone chrome strings ("Sources", "ainb") would silently pass

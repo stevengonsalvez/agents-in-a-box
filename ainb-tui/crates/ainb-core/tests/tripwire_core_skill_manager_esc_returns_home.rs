@@ -112,12 +112,12 @@ fn esc_on_skill_manager_returns_to_home_screen() {
     }
 
     // Settle window: predicate can match mid-frame. Give ratatui one
-    // idle paint cycle before sending M so the keystroke isn't lost
+    // idle paint cycle before sending m so the keystroke isn't lost
     // to a binary still finishing its boot paint.
     thread::sleep(Duration::from_millis(200));
 
     // Navigate into SkillManager.
-    send_key(&session, "M");
+    send_key(&session, "m");
     if poll_capture(&session, Instant::now() + Duration::from_secs(90), |c| {
         c.contains("Sources") && c.contains("Units") && c.contains("Detail")
     })
@@ -125,7 +125,7 @@ fn esc_on_skill_manager_returns_to_home_screen() {
     {
         let dump = capture_pane(&session);
         kill_session(&session);
-        panic!("SkillManager never rendered after M:\n{dump}");
+        panic!("SkillManager never rendered after m:\n{dump}");
     }
 
     // Settle before the return trip too — analogous race in reverse.

@@ -111,7 +111,7 @@ impl SidebarItem {
             Self::Logs => "l",
             Self::Stats => "i",
             Self::Skills => "k",
-            Self::SkillManager => "M",
+            Self::SkillManager => "m",
             Self::Changelog => "v",
             Self::Setup => "S",
             Self::Help => "?",
