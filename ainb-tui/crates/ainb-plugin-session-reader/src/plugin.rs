@@ -112,12 +112,17 @@ impl SessionReader {
     }
 
     /// Wipe every cached parse row and force the next scan to re-parse
-    /// every file from disk. Best-effort: if the cache hasn't been
-    /// opened yet, opens it and clears; if open fails, logs and falls
-    /// through (the subsequent rescan still works, it's just cold).
-    /// Doesn't delete the sqlite file — `UsageCache::clear()` runs
-    /// `DELETE FROM file_cache` + `VACUUM`, preserving the schema row
-    /// so the next open doesn't migrate.
+    /// every file from disk.
+    ///
+    /// Two-tier recovery: first try the fast in-place wipe
+    /// (`UsageCache::clear()` runs `DELETE FROM file_cache` + `VACUUM`,
+    /// preserving the schema row so the next open doesn't migrate). If
+    /// that fails — the user is likely pressing `F` precisely because
+    /// they suspect corruption, so SQL clear may fail too — drop the
+    /// cache handle, `rm -f` the file, and let the next
+    /// [`Self::ensure_cache`] re-create it from scratch. This way the
+    /// rescan that runs immediately afterwards starts cold-cache
+    /// regardless of how broken the previous cache was.
     #[cfg(not(target_arch = "wasm32"))]
     async fn flush_cache(&mut self, host: &HostClient) {
         self.ensure_cache();
@@ -125,22 +130,48 @@ impl SessionReader {
             match cache.clear() {
                 Ok(()) => {
                     let _ = host
-                        .log_info("flush_cache: persistent cache wiped")
+                        .log_info("flush_cache: persistent cache wiped via clear()")
+                        .await;
+                    return;
+                }
+                Err(err) => {
+                    let _ = host
+                        .log_info(format!(
+                            "flush_cache: clear() failed: {err}; falling back to file delete"
+                        ))
+                        .await;
+                }
+            }
+        }
+        // Either no cache was open, or clear() failed. Drop the handle
+        // (closes the sqlite connection if any) and remove the file —
+        // the next ensure_cache rebuilds.
+        self.cache = None;
+        self.cache_init = false;
+        if let Some(path) = crate::cache::default_db_path() {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {
+                    let _ = host
+                        .log_info(format!(
+                            "flush_cache: removed cache file at {}",
+                            path.display()
+                        ))
+                        .await;
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    let _ = host
+                        .log_info("flush_cache: cache file already absent")
                         .await;
                 }
                 Err(err) => {
                     let _ = host
                         .log_info(format!(
-                            "flush_cache: cache clear failed: {err}; \
-                            next rescan will degrade to cold-cache speed regardless"
+                            "flush_cache: remove cache file failed: {err}; \
+                            next rescan still runs (but cache may stay stale)"
                         ))
                         .await;
                 }
             }
-        } else {
-            let _ = host
-                .log_info("flush_cache: no cache open; nothing to wipe")
-                .await;
         }
     }
 
@@ -475,27 +506,95 @@ pub(crate) fn chunk_usage_data(
 
             // Cut on probe overshoot, but only if the chunk has >1 item
             // total — single-item chunks always ship so a giant outlier
-            // (e.g. one 5 MiB user_message) can't stall the loop. Spill
-            // the just-popped item back to its source queue and break.
+            // (e.g. one 5 MiB user_message) can't stall the loop.
+            //
+            // Spill in a loop, not just once: STEP=64 means the chunk
+            // can land 8 MiB over budget when one of those 64 items is
+            // a 100+ KiB outlier. Single-spill would still ship a chunk
+            // 50× over target. We pop the most-recently-pushed item from
+            // the queue that received it, then re-probe; keep spilling
+            // until we're back under target or only 1 item remains.
+            // popped_from tracks the *last* push, but a multi-spill
+            // needs to walk back through previous pushes — we use the
+            // queue with the largest tail first as a heuristic.
             let chunk_item_count = chunk_data.calls.len()
                 + chunk_data.sessions.len()
                 + chunk_data.shell_commands.len();
             if probe_size >= target_bytes && chunk_item_count > 1 {
-                match popped_from {
-                    TailQueue::Calls => {
-                        if let Some(spill) = chunk_data.calls.pop() {
-                            calls_q.push_front(spill);
+                // First spill: the just-popped item, to the queue it
+                // came from. Subsequent spills come from whichever
+                // tail vec currently has the most items (best chance
+                // of cheaply shrinking the chunk).
+                let _ = popped_from; // first spill uses the queue below
+                let mut current_size = probe_size;
+                loop {
+                    // Choose the spill source: the largest tail vec.
+                    // Re-evaluate every iteration because vecs shrink.
+                    let from = if chunk_data.calls.len()
+                        >= chunk_data.sessions.len()
+                        && chunk_data.calls.len()
+                            >= chunk_data.shell_commands.len()
+                        && !chunk_data.calls.is_empty()
+                    {
+                        TailQueue::Calls
+                    } else if chunk_data.sessions.len()
+                        >= chunk_data.shell_commands.len()
+                        && !chunk_data.sessions.is_empty()
+                    {
+                        TailQueue::Sessions
+                    } else if !chunk_data.shell_commands.is_empty() {
+                        TailQueue::ShellCommands
+                    } else {
+                        break; // nothing left to spill
+                    };
+
+                    match from {
+                        TailQueue::Calls => {
+                            if let Some(spill) = chunk_data.calls.pop() {
+                                calls_q.push_front(spill);
+                            }
+                        }
+                        TailQueue::Sessions => {
+                            if let Some(spill) = chunk_data.sessions.pop() {
+                                sessions_q.push_front(spill);
+                            }
+                        }
+                        TailQueue::ShellCommands => {
+                            if let Some(spill) = chunk_data.shell_commands.pop() {
+                                shell_q.push_front(spill);
+                            }
                         }
                     }
-                    TailQueue::Sessions => {
-                        if let Some(spill) = chunk_data.sessions.pop() {
-                            sessions_q.push_front(spill);
-                        }
+
+                    let remaining_items = chunk_data.calls.len()
+                        + chunk_data.sessions.len()
+                        + chunk_data.shell_commands.len();
+                    if remaining_items <= 1 {
+                        // Single-item chunks always ship (giant-outlier
+                        // protection). Even if still oversize, exit
+                        // here rather than spill the lone survivor.
+                        break;
                     }
-                    TailQueue::ShellCommands => {
-                        if let Some(spill) = chunk_data.shell_commands.pop() {
-                            shell_q.push_front(spill);
-                        }
+
+                    // Re-probe. Cost is O(chunk_data_encoded_size) per
+                    // probe — at ~1 MiB target and 100 KiB outliers,
+                    // worst case ~10 probes per cut, totally affordable
+                    // relative to the I/O cost of the actual publish.
+                    let probe = UsageDataEvent {
+                        version: WIRE_VERSION,
+                        published_ns,
+                        partial,
+                        chunk_index,
+                        is_final: calls_q.is_empty()
+                            && sessions_q.is_empty()
+                            && shell_q.is_empty(),
+                        data: chunk_data.clone(),
+                    };
+                    current_size = rmp_serde::to_vec_named(&probe)
+                        .map(|b| b.len())
+                        .unwrap_or(target_bytes);
+                    if current_size < target_bytes {
+                        break;
                     }
                 }
                 break;
@@ -918,6 +1017,56 @@ mod tests {
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[1].data.calls.len(), 3);
         assert_eq!(chunks[1].data.sessions.len(), 3);
+    }
+
+    #[test]
+    fn chunk_multispill_keeps_each_chunk_under_target_with_outlier_calls() {
+        // Regression for the multi-spill fix: when the probe step
+        // (STEP=64) accumulates a chunk that's many MiB over budget
+        // because one or more items are outliers, a single-spill cut
+        // would still ship the chunk way over. Multi-spill must drain
+        // back until under target (or 1 item remains).
+        //
+        // Build 128 fat calls (~50 KiB each). With STEP=64 and a
+        // 1 MiB target, the first probe lands at ~3.2 MiB. Without
+        // multi-spill, the chunk would ship at ~3.15 MiB. With
+        // multi-spill, each chunk must encode under 1 MiB.
+        let mut data = fake_data(0);
+        data.calls = (0..128)
+            .map(|i| {
+                let mut c = fake_call(i);
+                c.user_message = "x".repeat(50 * 1024);
+                c
+            })
+            .collect();
+
+        let target = 1024 * 1024; // 1 MiB
+        let chunks = chunk_usage_data(data, 0, false, target);
+
+        // Verify each chunk (except possibly chunk 0 which carries
+        // only bounded aggregates, well under target, and chunks
+        // containing a single mandatory item) encodes under target.
+        for (i, chunk) in chunks.iter().enumerate() {
+            let size = rmp_serde::to_vec_named(chunk).unwrap().len();
+            let item_count = chunk.data.calls.len()
+                + chunk.data.sessions.len()
+                + chunk.data.shell_commands.len();
+            // Single-item chunks always ship even if oversize (giant-
+            // outlier protection). Otherwise must fit.
+            if item_count > 1 {
+                assert!(
+                    size < target,
+                    "chunk {i} has {item_count} items at {size} bytes \
+                    (target {target}) — multi-spill should have kept \
+                    this under target"
+                );
+            }
+        }
+
+        // No call loss.
+        let (calls, _, _) = tail_totals(&chunks);
+        assert_eq!(calls, 128);
+        assert!(chunks.last().unwrap().is_final);
     }
 
     #[test]

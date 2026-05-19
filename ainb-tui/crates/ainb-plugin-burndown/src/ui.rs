@@ -1270,7 +1270,10 @@ pub(crate) fn render_scan_progress(
     // happen briefly if files are added mid-scan — ProgressReporter's
     // counter is monotonic but `total` is the pre-walk snapshot).
     let ratio = (f64::from(progress.scanned) / f64::from(progress.total)).clamp(0.0, 1.0);
-    let pct = (ratio * 100.0).round() as u16;
+    // Ratio is in [0, 1] so `ratio * 100` is in [0, 100] — fits u16
+    // without truncation. try_from + unwrap_or makes the bound
+    // explicit instead of relying on the clamp + clippy lint allow.
+    let pct: u16 = u16::try_from((ratio * 100.0).round() as i32).unwrap_or(100);
     let gauge = Gauge::default()
         .gauge_style(
             Style::default()
