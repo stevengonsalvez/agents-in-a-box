@@ -5,6 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+readme.workspace = true
 description = "Host-side plugin runtime: subprocess spawn, JSON-RPC over stdio, snapshot/action bus, lifecycle FSM"
 categories = ["development-tools"]
 keywords = ["ainb", "plugin", "json-rpc", "runtime"]

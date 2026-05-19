@@ -5,6 +5,9 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+readme.workspace = true
+keywords = ["burndown", "claude", "usage", "tui"]
+categories = ["development-tools"]
 description = "Daily/weekly/project usage burndown analytics — subprocess plugin (ABI v2)"
 
 [lib]

@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Agents-in-a-Box Team"]
 license = "MIT"
+repository = "https://github.com/stevengonsalvez/agents-in-a-box"
+readme = "../../README.md"
+keywords = ["claude", "session", "types", "wire"]
+categories = ["development-tools"]
 description = "Wire schema for the sessions.usage_data event published by the session-reader plugin and consumed by burndown."
 
 # This crate is the wire-format contract between two plugins. It must

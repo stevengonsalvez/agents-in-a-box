@@ -5,6 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+readme.workspace = true
 description = "In-process harness for testing ainb plugins. Drives a Plugin trait impl over tokio::io::DuplexStream — no subprocess, no fixtures on disk."
 categories = ["development-tools", "development-tools::testing"]
 keywords = ["ainb", "plugin", "testing", "harness", "json-rpc"]

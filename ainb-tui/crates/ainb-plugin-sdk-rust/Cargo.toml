@@ -5,6 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+readme.workspace = true
 description = "Rust SDK for ainb plugins. Implements the Plugin trait + stdio JSON-RPC server + reverse-call host_client."
 categories = ["development-tools"]
 keywords = ["ainb", "plugin", "sdk", "json-rpc"]

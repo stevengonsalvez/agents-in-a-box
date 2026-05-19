@@ -5,6 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+readme.workspace = true
 description = "Conformance test suite for ainb plugin JSON-RPC subprocess ABI v2 (14 axes)"
 categories = ["development-tools::testing"]
 keywords = ["ainb", "plugin", "cts", "conformance"]

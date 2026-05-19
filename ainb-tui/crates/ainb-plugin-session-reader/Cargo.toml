@@ -5,6 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+readme.workspace = true
 description = "Session-reader plugin for ainb — walks per-provider log dirs and publishes sessions.usage_data over JSON-RPC stdio."
 categories = ["development-tools"]
 keywords = ["ainb", "plugin", "session", "usage"]
