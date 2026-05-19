@@ -1996,11 +1996,14 @@ impl SessionFilter {
 pub struct AppState {
     pub workspaces: Vec<Workspace>,
     /// BSP layout tree for the home-screen main-content region. `None`
-    /// means "use the legacy hardcoded 40/60 horizontal split" — that's
-    /// the v1 default to preserve visual parity. Wiring of the actual
-    /// `bsp.walk(...)` render path in `components/layout.rs` is tracked
-    /// as a follow-up bead (see siu epic notes).
+    /// means "use the legacy hardcoded 40/60 horizontal split"; default
+    /// is `Some(default_root)` so the BSP code path drives render. See
+    /// `components/layout.rs::render` for the dispatch branch.
     pub bsp: Option<crate::ui::bsp::LayoutSnapshot>,
+    /// True between `Ctrl+W` chord and the second keystroke that
+    /// commits the BSP action (split / close / cycle / resize). Reset
+    /// to false on action commit, Esc, or any unrecognised key.
+    pub bsp_prefix_active: bool,
     pub selected_workspace_index: Option<usize>,
     pub selected_session_index: Option<usize>,
     pub shell_selected: bool, // Whether the workspace shell is currently selected
@@ -2707,6 +2710,7 @@ impl Default for AppState {
                 min_cols: 30,
                 min_rows: 10,
             }),
+            bsp_prefix_active: false,
             selected_workspace_index: None,
             selected_session_index: None,
             shell_selected: false,

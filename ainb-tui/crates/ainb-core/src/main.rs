@@ -336,6 +336,67 @@ async fn run_tui_loop(
 
                     use crossterm::event::KeyCode;
 
+                    // P5-wiring: BSP prefix-mode dispatch. Catches `Ctrl+W`
+                    // when inactive (enters prefix mode) and the second
+                    // keystroke when active (commits the BSP action). Runs
+                    // before the slash palette so the chord isn't shadowed
+                    // by `:` typed mid-chord.
+                    {
+                        use crate::ui::bsp::SplitDir;
+                        use crate::ui::bsp_keys::{dispatch_key, BspAction};
+                        if let Some(action) = dispatch_key(app.state.bsp_prefix_active, key_event) {
+                            tracing::debug!(
+                                "BSP action: {:?} (prefix_was={})",
+                                action,
+                                app.state.bsp_prefix_active
+                            );
+                            match action {
+                                BspAction::EnterPrefix => {
+                                    app.state.bsp_prefix_active = true;
+                                }
+                                BspAction::ExitPrefix => {
+                                    app.state.bsp_prefix_active = false;
+                                }
+                                BspAction::SplitVertical | BspAction::SplitHorizontal => {
+                                    app.state.bsp_prefix_active = false;
+                                    if let Some(snap) = app.state.bsp.as_mut() {
+                                        let dir = if matches!(action, BspAction::SplitVertical) {
+                                            SplitDir::Vertical
+                                        } else {
+                                            SplitDir::Horizontal
+                                        };
+                                        // Demo: new tile defaults to live_logs_stream.
+                                        // P5 follow-up: pop a component picker.
+                                        snap.root.split_focused(
+                                            dir,
+                                            0.5,
+                                            "live_logs_stream".to_string(),
+                                        );
+                                    }
+                                }
+                                BspAction::CloseFocused => {
+                                    app.state.bsp_prefix_active = false;
+                                    if let Some(snap) = app.state.bsp.as_mut() {
+                                        snap.root.close_focused();
+                                    }
+                                }
+                                BspAction::CycleFocusNext | BspAction::CycleFocusNextAlt => {
+                                    app.state.bsp_prefix_active = false;
+                                    if let Some(snap) = app.state.bsp.as_mut() {
+                                        snap.root.cycle_focus_next();
+                                    }
+                                }
+                                BspAction::EnterResize => {
+                                    // Resize-mode h/j/k/l dispatch is a
+                                    // separate follow-up; for now just bail
+                                    // out of prefix mode.
+                                    app.state.bsp_prefix_active = false;
+                                }
+                            }
+                            continue;
+                        }
+                    }
+
                     // Slash-command palette: `:` opens it; while open, all
                     // keypresses go to the palette. Plugin-contributed slash
                     // commands hook in here in Phase 4.
