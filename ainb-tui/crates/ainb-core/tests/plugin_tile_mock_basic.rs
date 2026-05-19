@@ -90,7 +90,11 @@ fn composite_skips_leaves_with_no_buffer() {
 
     assert_eq!(painted, 1, "only the ready leaf was painted");
     assert_eq!(target.get(0, 0).symbol(), "R");
-    assert_eq!(target.get(10, 0).symbol(), "·", "pending tile placeholder preserved");
+    assert_eq!(
+        target.get(10, 0).symbol(),
+        "·",
+        "pending tile placeholder preserved"
+    );
 }
 
 #[test]

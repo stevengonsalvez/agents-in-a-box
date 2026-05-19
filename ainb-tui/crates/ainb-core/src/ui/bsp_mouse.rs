@@ -40,10 +40,7 @@ pub enum HitTarget {
     /// Click inside a leaf, not on its border.
     Interior { leaf_id: LeafId },
     /// Click on a tile border — start of a drag-to-resize gesture.
-    Border {
-        leaf_id: LeafId,
-        edge: BorderEdge,
-    },
+    Border { leaf_id: LeafId, edge: BorderEdge },
 }
 
 /// Map a `(col, row)` pixel coordinate to the leaf it falls on (and

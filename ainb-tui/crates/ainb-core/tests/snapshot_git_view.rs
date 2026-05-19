@@ -3,9 +3,9 @@
 
 use ainb::components::git_view::{GitViewComponent, GitViewState};
 use insta::assert_snapshot;
+use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
-use ratatui::Terminal;
 use std::path::PathBuf;
 
 fn render_to_string(w: u16, h: u16) -> String {

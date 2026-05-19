@@ -1,7 +1,7 @@
 // P5 dispatch truth table: (prefix_active, key) -> Option<BspAction>.
 
 use ainb::ui::bsp::SplitDir;
-use ainb::ui::bsp_keys::{dispatch_key, BspAction};
+use ainb::ui::bsp_keys::{BspAction, dispatch_key};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 fn key(c: char) -> KeyEvent {
@@ -33,13 +33,22 @@ fn plain_keys_pass_through_when_prefix_inactive() {
 #[test]
 fn split_keys_emit_correct_action_in_prefix_mode() {
     assert_eq!(dispatch_key(true, key('v')), Some(BspAction::SplitVertical));
-    assert_eq!(dispatch_key(true, key('s')), Some(BspAction::SplitHorizontal));
+    assert_eq!(
+        dispatch_key(true, key('s')),
+        Some(BspAction::SplitHorizontal)
+    );
 }
 
 #[test]
 fn split_actions_map_to_split_dir() {
-    assert_eq!(BspAction::SplitVertical.as_split_dir(), Some(SplitDir::Vertical));
-    assert_eq!(BspAction::SplitHorizontal.as_split_dir(), Some(SplitDir::Horizontal));
+    assert_eq!(
+        BspAction::SplitVertical.as_split_dir(),
+        Some(SplitDir::Vertical)
+    );
+    assert_eq!(
+        BspAction::SplitHorizontal.as_split_dir(),
+        Some(SplitDir::Horizontal)
+    );
     assert_eq!(BspAction::CloseFocused.as_split_dir(), None);
 }
 
@@ -50,13 +59,22 @@ fn close_focused_emits_in_prefix_mode() {
 
 #[test]
 fn cycle_focus_keys_in_prefix_mode() {
-    assert_eq!(dispatch_key(true, key('o')), Some(BspAction::CycleFocusNext));
-    assert_eq!(dispatch_key(true, special(KeyCode::Tab)), Some(BspAction::CycleFocusNextAlt));
+    assert_eq!(
+        dispatch_key(true, key('o')),
+        Some(BspAction::CycleFocusNext)
+    );
+    assert_eq!(
+        dispatch_key(true, special(KeyCode::Tab)),
+        Some(BspAction::CycleFocusNextAlt)
+    );
 }
 
 #[test]
 fn esc_exits_prefix_mode() {
-    assert_eq!(dispatch_key(true, special(KeyCode::Esc)), Some(BspAction::ExitPrefix));
+    assert_eq!(
+        dispatch_key(true, special(KeyCode::Esc)),
+        Some(BspAction::ExitPrefix)
+    );
 }
 
 #[test]

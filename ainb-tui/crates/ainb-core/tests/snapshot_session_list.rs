@@ -6,9 +6,9 @@ use ainb::app::AppState;
 use ainb::components::session_list::SessionListComponent;
 use ainb::models::{Session, Workspace};
 use insta::assert_snapshot;
+use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
-use ratatui::Terminal;
 use std::path::PathBuf;
 
 fn build_state(n_sessions: usize) -> AppState {

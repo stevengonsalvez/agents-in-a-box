@@ -1,7 +1,7 @@
 // P7: LayoutPersist::save then load round-trips a snapshot.
 
 use ainb::ui::bsp::{LayoutNode, LayoutSnapshot};
-use ainb::ui::bsp_persist::{LayoutPersist, PersistError, CURRENT_SCHEMA_VERSION};
+use ainb::ui::bsp_persist::{CURRENT_SCHEMA_VERSION, LayoutPersist, PersistError};
 
 fn snap() -> LayoutSnapshot {
     LayoutSnapshot {
@@ -59,5 +59,8 @@ fn save_is_atomic_no_tmp_left_on_disk_after_success() {
     LayoutPersist::save(&snap(), &path).expect("save");
     // *.tmp sibling must not exist after a successful rename
     let tmp = dir.path().join("layout.json.tmp");
-    assert!(!tmp.exists(), "tmp file should not survive a successful save");
+    assert!(
+        !tmp.exists(),
+        "tmp file should not survive a successful save"
+    );
 }

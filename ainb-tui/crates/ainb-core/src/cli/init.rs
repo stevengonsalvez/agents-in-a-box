@@ -228,7 +228,9 @@ fn cmd_check(format: OutputFormat) -> Result<()> {
                 .context("Failed to serialize prerequisite report")?;
             println!("{json}");
         }
-        OutputFormat::Text | OutputFormat::Csv | OutputFormat::Markdown => print_report_text(&report),
+        OutputFormat::Text | OutputFormat::Csv | OutputFormat::Markdown => {
+            print_report_text(&report)
+        }
     }
 
     if !report.all_required_present {

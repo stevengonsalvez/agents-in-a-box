@@ -1,7 +1,6 @@
 use ainb_plugin_sdk::{
-    CliOutput, HostClient, Plugin, Result, SdkError, Server,
-    RenderParams, RpcError, WireBuffer, Cell, Coord,
-    METHOD_NOT_FOUND,
+    Cell, CliOutput, Coord, HostClient, METHOD_NOT_FOUND, Plugin, RenderParams, Result, RpcError,
+    SdkError, Server, WireBuffer,
 };
 use async_trait::async_trait;
 

@@ -7,9 +7,9 @@
 use ainb::app::AppState;
 use ainb::components::live_logs_stream::LiveLogsStreamComponent;
 use insta::assert_snapshot;
+use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
-use ratatui::Terminal;
 
 fn render_to_string(w: u16, h: u16, state: &AppState) -> String {
     let backend = TestBackend::new(w, h);

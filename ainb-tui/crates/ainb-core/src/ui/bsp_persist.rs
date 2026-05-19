@@ -31,9 +31,7 @@ pub enum PersistError {
     Io(#[from] std::io::Error),
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
-    #[error(
-        "schema version mismatch: file has {got}, host expects {CURRENT_SCHEMA_VERSION}"
-    )]
+    #[error("schema version mismatch: file has {got}, host expects {CURRENT_SCHEMA_VERSION}")]
     SchemaMismatch { got: u32 },
 }
 
@@ -44,10 +42,7 @@ impl LayoutPersist {
     /// bytes written for caller diagnostics.
     pub fn save(snapshot: &LayoutSnapshot, path: &Path) -> Result<usize, PersistError> {
         let mut tmp = path.to_path_buf();
-        let original_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("layout.json");
+        let original_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("layout.json");
         tmp.set_file_name(format!("{original_name}.tmp"));
 
         if let Some(parent) = path.parent() {

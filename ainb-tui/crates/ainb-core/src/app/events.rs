@@ -23,7 +23,10 @@ pub enum AppEvent {
     /// identified by `plugin_id`. Phase 2c added this variant; the
     /// `usage_event_bridge` module decodes legacy `Usage*` variants through
     /// it pre-Phase-3 (when burndown is extracted into a real plugin).
-    Plugin { plugin_id: String, payload: Vec<u8> },
+    Plugin {
+        plugin_id: String,
+        payload: Vec<u8>,
+    },
     /// Navigate to a registered screen by id. Phase 2c added this variant to
     /// collapse the per-screen `GoTo*` variants behind one dispatch path —
     /// existing `GoTo*` variants are kept for now and translate through this
@@ -3188,8 +3191,10 @@ impl EventHandler {
             }
             AppEvent::GitViewBack => {
                 // Return to the previous view (where user was before opening Git view)
-                state.current_screen =
-                    state.previous_screen.take().unwrap_or(crate::app::screens::ids::SESSION_LIST.to_string());
+                state.current_screen = state
+                    .previous_screen
+                    .take()
+                    .unwrap_or(crate::app::screens::ids::SESSION_LIST.to_string());
                 state.git_view_state = None;
             }
             // Commit message input events
@@ -4901,10 +4906,7 @@ mod navigate_to_tests {
     fn navigate_to_known_screen_updates_current() {
         let mut state = fresh_state();
         let starting = state.current_screen.clone();
-        EventHandler::process_event(
-            AppEvent::NavigateTo(ids::ANALYTICS.to_string()),
-            &mut state,
-        );
+        EventHandler::process_event(AppEvent::NavigateTo(ids::ANALYTICS.to_string()), &mut state);
         assert_eq!(state.current_screen, ids::ANALYTICS);
         assert_eq!(state.previous_screen.as_deref(), Some(starting.as_str()));
     }

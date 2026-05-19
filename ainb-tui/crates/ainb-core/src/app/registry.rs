@@ -93,9 +93,18 @@ mod tests {
     fn registry_preserves_insertion_order() {
         let mut r = ScreenRegistry::new();
         let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        r.register(Box::new(Stub { id: ids::HOME, rendered: counter.clone() }));
-        r.register(Box::new(Stub { id: ids::ANALYTICS, rendered: counter.clone() }));
-        r.register(Box::new(Stub { id: ids::CONFIG, rendered: counter }));
+        r.register(Box::new(Stub {
+            id: ids::HOME,
+            rendered: counter.clone(),
+        }));
+        r.register(Box::new(Stub {
+            id: ids::ANALYTICS,
+            rendered: counter.clone(),
+        }));
+        r.register(Box::new(Stub {
+            id: ids::CONFIG,
+            rendered: counter,
+        }));
         assert_eq!(r.order(), &[ids::HOME, ids::ANALYTICS, ids::CONFIG]);
         assert_eq!(r.len(), 3);
         assert!(r.contains(ids::ANALYTICS));
@@ -106,10 +115,19 @@ mod tests {
     fn re_registering_same_id_keeps_one_entry_and_order() {
         let mut r = ScreenRegistry::new();
         let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        r.register(Box::new(Stub { id: ids::HOME, rendered: counter.clone() }));
-        r.register(Box::new(Stub { id: ids::ANALYTICS, rendered: counter.clone() }));
+        r.register(Box::new(Stub {
+            id: ids::HOME,
+            rendered: counter.clone(),
+        }));
+        r.register(Box::new(Stub {
+            id: ids::ANALYTICS,
+            rendered: counter.clone(),
+        }));
         // Re-register HOME — must replace in place, not duplicate the order entry.
-        r.register(Box::new(Stub { id: ids::HOME, rendered: counter }));
+        r.register(Box::new(Stub {
+            id: ids::HOME,
+            rendered: counter,
+        }));
         assert_eq!(r.len(), 2);
         assert_eq!(r.order(), &[ids::HOME, ids::ANALYTICS]);
     }

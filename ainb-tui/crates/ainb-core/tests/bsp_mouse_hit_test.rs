@@ -2,7 +2,7 @@
 // stamped Vec<TileRegion>. Covers interior clicks, border-edge clicks,
 // and out-of-bounds.
 
-use ainb::ui::bsp_mouse::{hit_test, BorderEdge, HitTarget, TileRegion};
+use ainb::ui::bsp_mouse::{BorderEdge, HitTarget, TileRegion, hit_test};
 use ratatui::layout::Rect;
 
 fn make_regions() -> Vec<TileRegion> {
@@ -21,13 +21,23 @@ fn make_regions() -> Vec<TileRegion> {
 #[test]
 fn click_inside_left_leaf_returns_interior_left() {
     let h = hit_test(&make_regions(), 10, 10);
-    assert_eq!(h, Some(HitTarget::Interior { leaf_id: "left".into() }));
+    assert_eq!(
+        h,
+        Some(HitTarget::Interior {
+            leaf_id: "left".into()
+        })
+    );
 }
 
 #[test]
 fn click_inside_right_leaf_returns_interior_right() {
     let h = hit_test(&make_regions(), 70, 10);
-    assert_eq!(h, Some(HitTarget::Interior { leaf_id: "right".into() }));
+    assert_eq!(
+        h,
+        Some(HitTarget::Interior {
+            leaf_id: "right".into()
+        })
+    );
 }
 
 #[test]

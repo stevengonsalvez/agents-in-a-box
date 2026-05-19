@@ -107,13 +107,12 @@ async fn main() -> Result<()> {
     // `tui` is handled inline in this function (it owns the alternate-screen
     // setup + cleanup), so it sits outside the registry. Declare it on the
     // base command so help/completion still list it.
-    app = app.subcommand(clap::Command::new("tui").about("Launch the TUI (default if no command given)"));
+    app = app.subcommand(
+        clap::Command::new("tui").about("Launch the TUI (default if no command given)"),
+    );
     app = registry.build_clap(app);
     let matches = app.get_matches();
-    let format = matches
-        .get_one::<cli::OutputFormat>("format")
-        .copied()
-        .unwrap_or_default();
+    let format = matches.get_one::<cli::OutputFormat>("format").copied().unwrap_or_default();
     let ctx = cli::registry::CliContext { format };
 
     // Track whether we entered TUI mode so we only clean up terminal in that case.
@@ -343,7 +342,7 @@ async fn run_tui_loop(
                     // by `:` typed mid-chord.
                     {
                         use crate::ui::bsp::SplitDir;
-                        use crate::ui::bsp_keys::{dispatch_key, BspAction};
+                        use crate::ui::bsp_keys::{BspAction, dispatch_key};
                         if let Some(action) = dispatch_key(app.state.bsp_prefix_active, key_event) {
                             tracing::debug!(
                                 "BSP action: {:?} (prefix_was={})",
@@ -408,9 +407,7 @@ async fn run_tui_loop(
                                     cmd
                                 );
                             }
-                            SlashAction::Opened
-                            | SlashAction::Closed
-                            | SlashAction::None => {}
+                            SlashAction::Opened | SlashAction::Closed | SlashAction::None => {}
                         }
                         continue;
                     }
@@ -1090,7 +1087,8 @@ async fn run_tui_loop(
 
                         // Clear new session state
                         app.state.new_session_state = None;
-                        app.state.current_screen = crate::app::screens::ids::SESSION_LIST.to_string();
+                        app.state.current_screen =
+                            crate::app::screens::ids::SESSION_LIST.to_string();
 
                         if let Some(target) = ssh_target {
                             let ssh_cmd = target.to_ssh_command();

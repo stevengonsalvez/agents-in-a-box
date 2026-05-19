@@ -83,9 +83,7 @@ pub fn read_frame<R: BufRead>(r: &mut R) -> Result<Option<Vec<u8>>, ProtocolErro
 
     loop {
         let mut line = String::new();
-        let n = r
-            .read_line(&mut line)
-            .map_err(ProtocolError::Transport)?;
+        let n = r.read_line(&mut line).map_err(ProtocolError::Transport)?;
 
         if n == 0 {
             // Clean EOF.
@@ -136,14 +134,12 @@ pub fn read_frame<R: BufRead>(r: &mut R) -> Result<Option<Vec<u8>>, ProtocolErro
         let value = value.trim();
 
         if name.eq_ignore_ascii_case("Content-Length") {
-            let parsed: usize = value
-                .parse()
-                .map_err(|_| ProtocolError::Decode(format!("non-numeric Content-Length: {value:?}")))?;
+            let parsed: usize = value.parse().map_err(|_| {
+                ProtocolError::Decode(format!("non-numeric Content-Length: {value:?}"))
+            })?;
             content_length = Some(parsed);
         } else {
-            return Err(ProtocolError::Decode(format!(
-                "unsupported header: {name}"
-            )));
+            return Err(ProtocolError::Decode(format!("unsupported header: {name}")));
         }
     }
 }
@@ -216,7 +212,8 @@ mod tests {
 
     #[test]
     fn unsupported_header_rejected() {
-        let mut cursor = Cursor::new(b"Content-Type: application/json\r\nContent-Length: 0\r\n\r\n".to_vec());
+        let mut cursor =
+            Cursor::new(b"Content-Type: application/json\r\nContent-Length: 0\r\n\r\n".to_vec());
         let err = read_frame(&mut cursor).unwrap_err();
         assert!(matches!(err, ProtocolError::Decode(_)));
     }

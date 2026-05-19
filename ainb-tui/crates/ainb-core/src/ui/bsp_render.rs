@@ -56,8 +56,6 @@ where
     F: FnMut(&LeafId, Rect) -> Option<WireBuffer>,
 {
     // First validate via walk_checked; if it errors, return immediately.
-    snapshot
-        .root
-        .walk_checked(area, snapshot.min_cols, snapshot.min_rows)?;
+    snapshot.root.walk_checked(area, snapshot.min_cols, snapshot.min_rows)?;
     Ok(composite_snapshot(target, snapshot, area, lookup))
 }

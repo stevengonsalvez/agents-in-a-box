@@ -91,9 +91,7 @@ impl SessionAgentRegistry {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = Arc<dyn SessionAgent>> + '_ {
-        self.ids
-            .iter()
-            .filter_map(|id| self.by_id.get(*id).cloned())
+        self.ids.iter().filter_map(|id| self.by_id.get(*id).cloned())
     }
 
     #[must_use]
@@ -113,59 +111,117 @@ impl SessionAgentRegistry {
 
 pub struct ClaudeAgent;
 impl SessionAgent for ClaudeAgent {
-    fn id(&self) -> &'static str { "claude" }
-    fn icon(&self) -> &'static str { "✻" }
-    fn name(&self) -> &'static str { "Claude Code" }
-    fn description(&self) -> &'static str { "AI coding assistant powered by Anthropic" }
+    fn id(&self) -> &'static str {
+        "claude"
+    }
+    fn icon(&self) -> &'static str {
+        "✻"
+    }
+    fn name(&self) -> &'static str {
+        "Claude Code"
+    }
+    fn description(&self) -> &'static str {
+        "AI coding assistant powered by Anthropic"
+    }
 }
 
 pub struct ShellAgent;
 impl SessionAgent for ShellAgent {
-    fn id(&self) -> &'static str { "shell" }
-    fn icon(&self) -> &'static str { "🐚" }
-    fn name(&self) -> &'static str { "Shell Only" }
-    fn description(&self) -> &'static str { "Plain terminal shell without AI agent" }
+    fn id(&self) -> &'static str {
+        "shell"
+    }
+    fn icon(&self) -> &'static str {
+        "🐚"
+    }
+    fn name(&self) -> &'static str {
+        "Shell Only"
+    }
+    fn description(&self) -> &'static str {
+        "Plain terminal shell without AI agent"
+    }
 }
 
 pub struct SshAgent;
 impl SessionAgent for SshAgent {
-    fn id(&self) -> &'static str { "ssh" }
-    fn icon(&self) -> &'static str { "🔐" }
-    fn name(&self) -> &'static str { "SSH" }
-    fn description(&self) -> &'static str { "SSH connection to remote server" }
+    fn id(&self) -> &'static str {
+        "ssh"
+    }
+    fn icon(&self) -> &'static str {
+        "🔐"
+    }
+    fn name(&self) -> &'static str {
+        "SSH"
+    }
+    fn description(&self) -> &'static str {
+        "SSH connection to remote server"
+    }
 }
 
 pub struct CodexAgent;
 impl SessionAgent for CodexAgent {
-    fn id(&self) -> &'static str { "codex" }
-    fn icon(&self) -> &'static str { "✦" }
-    fn name(&self) -> &'static str { "Codex CLI" }
-    fn description(&self) -> &'static str { "OpenAI's coding assistant" }
+    fn id(&self) -> &'static str {
+        "codex"
+    }
+    fn icon(&self) -> &'static str {
+        "✦"
+    }
+    fn name(&self) -> &'static str {
+        "Codex CLI"
+    }
+    fn description(&self) -> &'static str {
+        "OpenAI's coding assistant"
+    }
 }
 
 pub struct GeminiAgent;
 impl SessionAgent for GeminiAgent {
-    fn id(&self) -> &'static str { "gemini" }
-    fn icon(&self) -> &'static str { "✨" }
-    fn name(&self) -> &'static str { "Gemini CLI" }
-    fn description(&self) -> &'static str { "Google's AI assistant" }
+    fn id(&self) -> &'static str {
+        "gemini"
+    }
+    fn icon(&self) -> &'static str {
+        "✨"
+    }
+    fn name(&self) -> &'static str {
+        "Gemini CLI"
+    }
+    fn description(&self) -> &'static str {
+        "Google's AI assistant"
+    }
 }
 
 pub struct CopilotAgent;
 impl SessionAgent for CopilotAgent {
-    fn id(&self) -> &'static str { "copilot" }
-    fn icon(&self) -> &'static str { "🐙" }
-    fn name(&self) -> &'static str { "GitHub Copilot" }
-    fn description(&self) -> &'static str { "GitHub Copilot CLI — AI coding agent by GitHub" }
+    fn id(&self) -> &'static str {
+        "copilot"
+    }
+    fn icon(&self) -> &'static str {
+        "🐙"
+    }
+    fn name(&self) -> &'static str {
+        "GitHub Copilot"
+    }
+    fn description(&self) -> &'static str {
+        "GitHub Copilot CLI — AI coding agent by GitHub"
+    }
 }
 
 pub struct KiroAgent;
 impl SessionAgent for KiroAgent {
-    fn id(&self) -> &'static str { "kiro" }
-    fn icon(&self) -> &'static str { "🔮" }
-    fn name(&self) -> &'static str { "Kiro" }
-    fn description(&self) -> &'static str { "AWS AI coding assistant" }
-    fn is_available(&self) -> bool { false }
+    fn id(&self) -> &'static str {
+        "kiro"
+    }
+    fn icon(&self) -> &'static str {
+        "🔮"
+    }
+    fn name(&self) -> &'static str {
+        "Kiro"
+    }
+    fn description(&self) -> &'static str {
+        "AWS AI coding assistant"
+    }
+    fn is_available(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]
@@ -176,7 +232,9 @@ mod tests {
     fn registry_resolves_all_seven_built_ins() {
         let r = SessionAgentRegistry::built_ins();
         assert_eq!(r.len(), 7);
-        for id in ["claude", "shell", "ssh", "codex", "gemini", "copilot", "kiro"] {
+        for id in [
+            "claude", "shell", "ssh", "codex", "gemini", "copilot", "kiro",
+        ] {
             assert!(r.get(id).is_some(), "missing {id}");
         }
     }
@@ -187,7 +245,9 @@ mod tests {
         let ids: Vec<_> = r.iter().map(|a| a.id()).collect();
         assert_eq!(
             ids,
-            vec!["claude", "shell", "ssh", "codex", "gemini", "copilot", "kiro"]
+            vec![
+                "claude", "shell", "ssh", "codex", "gemini", "copilot", "kiro"
+            ]
         );
     }
 
@@ -195,9 +255,15 @@ mod tests {
     fn kiro_is_unavailable_others_are_available() {
         let r = SessionAgentRegistry::built_ins();
         for id in ["claude", "shell", "ssh", "codex", "gemini", "copilot"] {
-            assert!(r.get(id).unwrap().is_available(), "{id} should be available");
+            assert!(
+                r.get(id).unwrap().is_available(),
+                "{id} should be available"
+            );
         }
-        assert!(!r.get("kiro").unwrap().is_available(), "kiro should be unavailable");
+        assert!(
+            !r.get("kiro").unwrap().is_available(),
+            "kiro should be unavailable"
+        );
     }
 
     #[test]

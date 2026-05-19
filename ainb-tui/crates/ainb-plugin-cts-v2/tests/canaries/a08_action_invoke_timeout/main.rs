@@ -1,6 +1,5 @@
 use ainb_plugin_sdk::{
-    CliOutput, HostClient, Plugin, Result, Server,
-    RenderParams, WireBuffer, Cell, Coord,
+    Cell, CliOutput, Coord, HostClient, Plugin, RenderParams, Result, Server, WireBuffer,
 };
 use async_trait::async_trait;
 

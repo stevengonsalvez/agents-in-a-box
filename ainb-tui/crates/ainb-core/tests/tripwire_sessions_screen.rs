@@ -49,9 +49,7 @@ git_directories = []
 fn is_on_sessions_screen(c: &str) -> bool {
     c.contains("Session Details")
         || c.contains("Select a session to view details")
-        || c.contains("attach")
-            && c.contains("restart")
-            && c.contains("cleanup")
+        || c.contains("attach") && c.contains("restart") && c.contains("cleanup")
 }
 
 fn capture(session: &str) -> String {
@@ -90,16 +88,7 @@ fn tui_sessions_screen_renders_after_pressing_s() {
     let ainb = ainb_bin();
 
     let status = Command::new("tmux")
-        .args([
-            "new-session",
-            "-d",
-            "-s",
-            &session,
-            "-x",
-            "180",
-            "-y",
-            "50",
-        ])
+        .args(["new-session", "-d", "-s", &session, "-x", "180", "-y", "50"])
         .status()
         .expect("new-session");
     assert!(status.success());
@@ -123,9 +112,7 @@ fn tui_sessions_screen_renders_after_pressing_s() {
     });
     let Some(pre_cap) = pre else {
         let last = capture(&session);
-        let _ = Command::new("tmux")
-            .args(["kill-session", "-t", &session])
-            .status();
+        let _ = Command::new("tmux").args(["kill-session", "-t", &session]).status();
         panic!("HomeScreen never rendered; last:\n{last}");
     };
     assert!(
@@ -146,9 +133,7 @@ fn tui_sessions_screen_renders_after_pressing_s() {
     let post = poll(&session, nav_deadline, |c| is_on_sessions_screen(c));
 
     let final_cap = post.unwrap_or_else(|| capture(&session));
-    let _ = Command::new("tmux")
-        .args(["kill-session", "-t", &session])
-        .status();
+    let _ = Command::new("tmux").args(["kill-session", "-t", &session]).status();
 
     let on_sessions = is_on_sessions_screen(&final_cap);
     assert!(

@@ -56,11 +56,7 @@ fn category(c: W::ActivityCategory) -> L::ActivityCategory {
 pub fn wire_to_local(w: W::UsageData) -> UsageData {
     let mut local = L::UsageData {
         daily: w.daily.into_iter().map(|(d, b)| (d, bucket(b))).collect(),
-        weekly: w
-            .weekly
-            .into_iter()
-            .map(|(d, b)| (d, bucket(b)))
-            .collect(),
+        weekly: w.weekly.into_iter().map(|(d, b)| (d, bucket(b))).collect(),
         projects: w
             .projects
             .into_iter()

@@ -282,46 +282,37 @@ pub fn aggregate(mut calls: Vec<ProviderCall>) -> UsageData {
 
         merge(&mut grand_total, &bucket);
 
-        daily
-            .entry(day)
-            .or_default()
-            .ingest(&bucket, &call.project, &session_key);
-        weekly
-            .entry(week)
-            .or_default()
-            .ingest(&bucket, &call.project, &session_key);
+        daily.entry(day).or_default().ingest(&bucket, &call.project, &session_key);
+        weekly.entry(week).or_default().ingest(&bucket, &call.project, &session_key);
         models
             .entry(call.model.clone())
             .or_default()
             .ingest(&bucket, &call.project, &session_key);
         if let Some(branch) = call.branch.as_deref().filter(|b| !b.is_empty()) {
-            branches
-                .entry(branch.to_string())
-                .or_default()
-                .ingest(&bucket, &call.project, &session_key);
+            branches.entry(branch.to_string()).or_default().ingest(
+                &bucket,
+                &call.project,
+                &session_key,
+            );
         }
 
-        let project = projects
-            .entry(call.project.clone())
-            .or_insert_with(|| ProjectAccumulator {
-                path: call.project_path.clone(),
-                bucket: TokenBucket::default(),
-                sessions: HashSet::new(),
-            });
+        let project = projects.entry(call.project.clone()).or_insert_with(|| ProjectAccumulator {
+            path: call.project_path.clone(),
+            bucket: TokenBucket::default(),
+            sessions: HashSet::new(),
+        });
         project.path = call.project_path.clone();
         project.sessions.insert(session_key.clone());
         merge(&mut project.bucket, &bucket);
 
-        let session = sessions
-            .entry(session_key.clone())
-            .or_insert_with(|| SessionAccumulator {
-                provider: call.provider,
-                project: call.project.clone(),
-                session_id: call.session_id.clone(),
-                first_timestamp: call.timestamp,
-                last_timestamp: call.timestamp,
-                bucket: TokenBucket::default(),
-            });
+        let session = sessions.entry(session_key.clone()).or_insert_with(|| SessionAccumulator {
+            provider: call.provider,
+            project: call.project.clone(),
+            session_id: call.session_id.clone(),
+            first_timestamp: call.timestamp,
+            last_timestamp: call.timestamp,
+            bucket: TokenBucket::default(),
+        });
         if call.timestamp < session.first_timestamp {
             session.first_timestamp = call.timestamp;
         }
@@ -521,10 +512,8 @@ fn sort_sessions_by_recency(mut rows: Vec<SessionUsage>) -> Vec<SessionUsage> {
 }
 
 fn map_to_named_usage_sorted(map: BTreeMap<String, usize>) -> Vec<NamedUsage> {
-    let mut rows: Vec<NamedUsage> = map
-        .into_iter()
-        .map(|(name, calls)| NamedUsage { name, calls })
-        .collect();
+    let mut rows: Vec<NamedUsage> =
+        map.into_iter().map(|(name, calls)| NamedUsage { name, calls }).collect();
     rows.sort_by(|a, b| b.calls.cmp(&a.calls).then(a.name.cmp(&b.name)));
     rows
 }
@@ -652,8 +641,24 @@ mod tests {
     #[test]
     fn aggregates_grand_total_correctly() {
         let calls = vec![
-            call(Provider::Claude, "p", "s1", 1_700_000_000, 10, 20, Some(0.001)),
-            call(Provider::Claude, "p", "s1", 1_700_000_001, 30, 40, Some(0.002)),
+            call(
+                Provider::Claude,
+                "p",
+                "s1",
+                1_700_000_000,
+                10,
+                20,
+                Some(0.001),
+            ),
+            call(
+                Provider::Claude,
+                "p",
+                "s1",
+                1_700_000_001,
+                30,
+                40,
+                Some(0.002),
+            ),
         ];
         let data = aggregate(calls);
         assert_eq!(data.grand_total.input_tokens, 40);

@@ -71,11 +71,7 @@ fn paint_is_inverse_of_capture_for_paragraph() {
         .borders(Borders::ALL)
         .style(Style::default().fg(Color::Rgb(100, 149, 237)));
     let paragraph = Paragraph::new("hello world")
-        .style(
-            Style::default()
-                .fg(Color::Rgb(255, 215, 0))
-                .add_modifier(Modifier::BOLD),
-        )
+        .style(Style::default().fg(Color::Rgb(255, 215, 0)).add_modifier(Modifier::BOLD))
         .block(block);
     paragraph.render(area, &mut buf_a);
 

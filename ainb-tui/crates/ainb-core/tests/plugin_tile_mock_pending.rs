@@ -24,7 +24,10 @@ fn pending_tile_keeps_pre_painted_placeholder() {
 
     let painted = composite_snapshot(&mut target, &snapshot, area, |_id, _tile| None);
 
-    assert_eq!(painted, 0, "no leaves should report painted when lookup returns None");
+    assert_eq!(
+        painted, 0,
+        "no leaves should report painted when lookup returns None"
+    );
     // placeholder still there
     for x in 0..10u16 {
         assert_eq!(target.get(x, 0).symbol(), "…");

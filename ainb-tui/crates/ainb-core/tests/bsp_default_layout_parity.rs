@@ -41,7 +41,10 @@ fn default_root_parity_holds_across_common_terminal_sizes() {
         let bsp = LayoutNode::default_root().walk(area);
         let legacy = legacy_40_60(area);
         assert_eq!(bsp[0].1, legacy[0], "session_list rect mismatch at {w}x{h}");
-        assert_eq!(bsp[1].1, legacy[1], "live_logs_stream rect mismatch at {w}x{h}");
+        assert_eq!(
+            bsp[1].1, legacy[1],
+            "live_logs_stream rect mismatch at {w}x{h}"
+        );
     }
 }
 

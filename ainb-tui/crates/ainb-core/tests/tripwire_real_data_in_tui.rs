@@ -53,10 +53,7 @@ fn plugins_staged() -> Option<PathBuf> {
     for _ in 0..6 {
         let candidate = dir.join("dist").join("plugins");
         if candidate.join("burndown").join("burndown").exists()
-            && candidate
-                .join("session-reader")
-                .join("session-reader")
-                .exists()
+            && candidate.join("session-reader").join("session-reader").exists()
         {
             return Some(candidate);
         }
@@ -85,18 +82,12 @@ git_directories = []
     // the placeholder is gone — that proves the plugin pipeline — but
     // we want the strict-mode assertion to bite: real `$N.NN` cost
     // strings can only show up when there are non-zero tokens to price.
-    let proj_dir = home
-        .join(".claude")
-        .join("projects")
-        .join("-tripwire-fixture-project");
+    let proj_dir = home.join(".claude").join("projects").join("-tripwire-fixture-project");
     fs::create_dir_all(&proj_dir).expect("create claude project dir");
     let session_jsonl = r#"{"type":"assistant","timestamp":"2026-05-10T12:00:00.000Z","sessionId":"fixture-session-1","cwd":"/tmp/x","message":{"model":"claude-sonnet-4-5","usage":{"input_tokens":1000,"output_tokens":500,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}
 "#;
-    fs::write(
-        proj_dir.join("fixture-session-1.jsonl"),
-        session_jsonl,
-    )
-    .expect("seed synthetic claude jsonl");
+    fs::write(proj_dir.join("fixture-session-1.jsonl"), session_jsonl)
+        .expect("seed synthetic claude jsonl");
 }
 
 fn capture_pane(session: &str) -> String {
@@ -122,9 +113,7 @@ where
 }
 
 fn kill_session(session: &str) {
-    let _ = Command::new("tmux")
-        .args(["kill-session", "-t", session])
-        .status();
+    let _ = Command::new("tmux").args(["kill-session", "-t", session]).status();
 }
 
 // The "Waiting for session-reader plugin..." stall was two layered bugs:
@@ -162,16 +151,7 @@ fn tui_renders_real_analytics_data_after_pressing_i() {
     let ainb = ainb_bin();
 
     let status = Command::new("tmux")
-        .args([
-            "new-session",
-            "-d",
-            "-s",
-            &session,
-            "-x",
-            "180",
-            "-y",
-            "50",
-        ])
+        .args(["new-session", "-d", "-s", &session, "-x", "180", "-y", "50"])
         .status()
         .expect("tmux new-session");
     assert!(status.success(), "tmux new-session failed");
@@ -190,14 +170,13 @@ fn tui_renders_real_analytics_data_after_pressing_i() {
     // Wait until HomeScreen sidebar appears — the unique marker is the
     // gold-coloured "Stats" sidebar tile with its `[i]` hotkey hint.
     let home_deadline = Instant::now() + Duration::from_secs(45);
-    let pre_cap = poll_capture(&session, home_deadline, |c| c.contains("Stats")
-        && c.contains("[i]"));
+    let pre_cap = poll_capture(&session, home_deadline, |c| {
+        c.contains("Stats") && c.contains("[i]")
+    });
     let Some(pre) = pre_cap else {
         let last = capture_pane(&session);
         kill_session(&session);
-        panic!(
-            "HomeScreen never rendered; last capture:\n---\n{last}\n---"
-        );
+        panic!("HomeScreen never rendered; last capture:\n---\n{last}\n---");
     };
     // Sanity: pre-press capture must NOT be on the analytics screen.
     assert!(
@@ -249,8 +228,7 @@ fn tui_renders_real_analytics_data_after_pressing_i() {
     // 3) Must contain at least one real-data marker.
     let real_marker_present = final_cap.contains("Total Calls")
         || final_cap.contains("Total Cost")
-        || (final_cap.contains('$')
-            && final_cap.chars().any(|c| c.is_ascii_digit()));
+        || (final_cap.contains('$') && final_cap.chars().any(|c| c.is_ascii_digit()));
     assert!(
         real_marker_present,
         "analytics rendered but no real data markers found \

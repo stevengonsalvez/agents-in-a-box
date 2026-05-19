@@ -186,8 +186,7 @@ impl SessionReader {
         let roots = self.roots.clone();
         let cache = self.cache.take();
 
-        let (tx, mut rx) =
-            tokio::sync::mpsc::unbounded_channel::<ScanProgressEvent>();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ScanProgressEvent>();
 
         let scan_handle = tokio::task::spawn_blocking(move || {
             let mut cache_opt = cache;
@@ -197,11 +196,7 @@ impl SessionReader {
                 // we hold `rx` until `scan_handle` resolves).
                 let _ = tx.send(evt);
             });
-            let data = scanner::scan_with_cache_and_progress(
-                &roots,
-                &mut cache_opt,
-                &mut reporter,
-            );
+            let data = scanner::scan_with_cache_and_progress(&roots, &mut cache_opt, &mut reporter);
             (data, cache_opt)
         });
 
@@ -211,9 +206,7 @@ impl SessionReader {
         while let Some(evt) = rx.recv().await {
             match rmp_serde::to_vec_named(&evt) {
                 Ok(bytes) => {
-                    if let Err(err) =
-                        host.snapshot_publish(TOPIC_SCAN_PROGRESS, bytes).await
-                    {
+                    if let Err(err) = host.snapshot_publish(TOPIC_SCAN_PROGRESS, bytes).await {
                         let _ = host
                             .log_info(format!(
                                 "session-reader: scan_progress publish failed: {err}"
@@ -251,13 +244,9 @@ impl SessionReader {
     /// Encode + publish a single chunk. Returns the encoded byte size
     /// so callers can log/audit. Encoding failures bubble up; the
     /// caller stops the publish sequence on first error.
-    async fn publish_chunk(
-        host: &HostClient,
-        event: &UsageDataEvent,
-    ) -> Result<usize> {
-        let bytes = rmp_serde::to_vec_named(event).map_err(|e| {
-            SdkError::plugin(format!("encode UsageDataEvent: {e}"))
-        })?;
+    async fn publish_chunk(host: &HostClient, event: &UsageDataEvent) -> Result<usize> {
+        let bytes = rmp_serde::to_vec_named(event)
+            .map_err(|e| SdkError::plugin(format!("encode UsageDataEvent: {e}")))?;
         let len = bytes.len();
         host.snapshot_publish(TOPIC_USAGE_DATA, bytes).await?;
         Ok(len)
@@ -276,8 +265,7 @@ impl SessionReader {
         #[cfg(target_arch = "wasm32")]
         let data = self.scan_now();
         let published_ns = now_ns();
-        let chunks =
-            chunk_usage_data(data, published_ns, false, CHUNK_TARGET_BYTES);
+        let chunks = chunk_usage_data(data, published_ns, false, CHUNK_TARGET_BYTES);
         let total_chunks = chunks.len();
         let total_calls: usize = chunks.iter().map(|c| c.data.calls.len()).sum();
 
@@ -388,9 +376,8 @@ pub(crate) fn chunk_usage_data(
                 is_final: remaining.is_empty(),
                 data: chunk_data.clone(),
             };
-            let probe_size = rmp_serde::to_vec_named(&probe_event)
-                .map(|b| b.len())
-                .unwrap_or(target_bytes);
+            let probe_size =
+                rmp_serde::to_vec_named(&probe_event).map(|b| b.len()).unwrap_or(target_bytes);
             if probe_size >= target_bytes && chunk_data.calls.len() > 1 {
                 // Shed the trailing call back to `remaining`.
                 if let Some(spill) = chunk_data.calls.pop() {
@@ -437,31 +424,19 @@ impl Plugin for SessionReader {
         // A startup publish races the consumer's own `on_init` and
         // can arrive while burndown is still subscribing, losing
         // chunks of the sequence (Bug A in fix/runtime-eager-spawn).
-        let _ = host
-            .log_info("on_init: subscribing to sessions.refresh_request")
-            .await;
+        let _ = host.log_info("on_init: subscribing to sessions.refresh_request").await;
         host.snapshot_subscribe(TOPIC_REFRESH_REQUEST).await?;
-        let _ = host
-            .log_info("on_init: subscribed, idle until refresh_request")
-            .await;
+        let _ = host.log_info("on_init: subscribed, idle until refresh_request").await;
         Ok(())
     }
 
-    async fn render(
-        &mut self,
-        _host: &HostClient,
-        _params: RenderParams,
-    ) -> Result<WireBuffer> {
+    async fn render(&mut self, _host: &HostClient, _params: RenderParams) -> Result<WireBuffer> {
         // No UI surface — return an empty 0×0 buffer. The host's render
         // path tolerates empty buffers from headless plugins.
         Ok(WireBuffer::new(0, 0))
     }
 
-    async fn handle_event(
-        &mut self,
-        host: &HostClient,
-        params: HandleEventParams,
-    ) -> Result<()> {
+    async fn handle_event(&mut self, host: &HostClient, params: HandleEventParams) -> Result<()> {
         if params.topic == TOPIC_REFRESH_REQUEST {
             tracing::info!("session-reader: refresh requested — rescanning");
             return self.publish(host).await;
@@ -489,17 +464,11 @@ mod tests {
         assert_eq!(m.plugin.name, "session-reader");
         assert_eq!(m.plugin.abi_version, 2);
         assert!(
-            m.provides
-                .snapshots
-                .iter()
-                .any(|t| t == TOPIC_USAGE_DATA),
+            m.provides.snapshots.iter().any(|t| t == TOPIC_USAGE_DATA),
             "expected manifest to declare publishing topic"
         );
         assert!(
-            m.subscribes
-                .snapshots
-                .iter()
-                .any(|t| t == TOPIC_REFRESH_REQUEST),
+            m.subscribes.snapshots.iter().any(|t| t == TOPIC_REFRESH_REQUEST),
             "expected manifest to subscribe to refresh topic"
         );
     }

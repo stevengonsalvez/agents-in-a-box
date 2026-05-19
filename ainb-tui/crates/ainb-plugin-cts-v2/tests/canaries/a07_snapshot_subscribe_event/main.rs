@@ -1,6 +1,6 @@
 use ainb_plugin_sdk::{
-    CliOutput, HandleEventParams, HostClient, Plugin, Result, Server,
-    RenderParams, WireBuffer, Cell, Coord,
+    Cell, CliOutput, Coord, HandleEventParams, HostClient, Plugin, RenderParams, Result, Server,
+    WireBuffer,
 };
 use async_trait::async_trait;
 use std::sync::Arc;

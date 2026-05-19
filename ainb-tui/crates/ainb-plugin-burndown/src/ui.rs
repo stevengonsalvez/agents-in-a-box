@@ -901,9 +901,7 @@ pub fn render(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
     // streams in chunks; aggregates fill up before the panels do), which reads
     // as a hang. The banner stays visible until the plugin clears
     // `scan_progress` on the final `is_final` chunk.
-    let show_scan_banner = state.scan_progress.is_some()
-        && state.data.is_some()
-        && !state.loading;
+    let show_scan_banner = state.scan_progress.is_some() && state.data.is_some() && !state.loading;
     // Stack-allocated constraints — render is the hot path; avoid the Vec.
     let layout = if show_scan_banner {
         Layout::default()
@@ -957,9 +955,15 @@ pub fn render(buf: &mut Buffer, area: Rect, state: &UsageViewState) {
             render_no_data(buf, layout[content_idx], state);
         } else {
             match state.active_tab {
-                UsageTab::Daily => render_daily(buf, layout[content_idx], data, state.scroll_offset),
-                UsageTab::Weekly => render_weekly(buf, layout[content_idx], data, state.scroll_offset),
-                UsageTab::Projects => render_projects(buf, layout[content_idx], data, state.scroll_offset),
+                UsageTab::Daily => {
+                    render_daily(buf, layout[content_idx], data, state.scroll_offset)
+                }
+                UsageTab::Weekly => {
+                    render_weekly(buf, layout[content_idx], data, state.scroll_offset)
+                }
+                UsageTab::Projects => {
+                    render_projects(buf, layout[content_idx], data, state.scroll_offset)
+                }
                 UsageTab::Burndown => render_burndown(buf, layout[content_idx], data, state),
                 UsageTab::Optimize => render_optimize(buf, layout[content_idx], data),
             }
@@ -1210,11 +1214,7 @@ fn render_loading(buf: &mut Buffer, area: Rect) {
 ///
 /// The text is rendered in the same rounded panel as `render_loading`
 /// so the layout doesn't jitter between the two skeleton variants.
-pub(crate) fn render_scan_progress(
-    buf: &mut Buffer,
-    area: Rect,
-    progress: &ScanProgressEvent,
-) {
+pub(crate) fn render_scan_progress(buf: &mut Buffer, area: Rect, progress: &ScanProgressEvent) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -1489,8 +1489,7 @@ fn render_burndown(buf: &mut Buffer, area: Rect, data: &UsageData, state: &Usage
     let any_filter_active = state.filters.any()
         || !matches!(state.period, UsagePeriod::All)
         || !matches!(state.provider_filter, UsageProviderFilter::All);
-    let filtered_owned: Option<UsageData> = if any_filter_active
-        && state.cached_filtered.is_none()
+    let filtered_owned: Option<UsageData> = if any_filter_active && state.cached_filtered.is_none()
     {
         Some(filter_usage_data_full(
             data,
@@ -1608,7 +1607,10 @@ fn render_zoom_breadcrumb(buf: &mut Buffer, area: Rect, panel: UsagePanel) {
             Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
         ),
         Span::styled("   ", Style::default()),
-        Span::styled("◀ BkSp unzoom · Esc home ▶", Style::default().fg(MUTED_GRAY)),
+        Span::styled(
+            "◀ BkSp unzoom · Esc home ▶",
+            Style::default().fg(MUTED_GRAY),
+        ),
     ]);
     ratatui::widgets::Widget::render(Paragraph::new(line), area, buf);
 }
@@ -1720,17 +1722,10 @@ fn render_zoom_panel_body(
         UsagePanel::ByActivity => render_zoom_by_activity(buf, area, data, state, q),
         UsagePanel::DailyActivity => render_zoom_daily_activity(buf, area, data, state, q),
         UsagePanel::Leaderboard => render_zoom_by_project(buf, area, data, state, q),
-        UsagePanel::CoreTools => {
-            render_zoom_named(buf, area, "Core Tools", &data.tools, state, q)
+        UsagePanel::CoreTools => render_zoom_named(buf, area, "Core Tools", &data.tools, state, q),
+        UsagePanel::ShellCommands => {
+            render_zoom_named(buf, area, "Shell Commands", &data.shell_commands, state, q)
         }
-        UsagePanel::ShellCommands => render_zoom_named(
-            buf,
-            area,
-            "Shell Commands",
-            &data.shell_commands,
-            state,
-            q,
-        ),
         UsagePanel::McpServers => {
             render_zoom_named(buf, area, "MCP Servers", &data.mcp_servers, state, q)
         }
@@ -2928,9 +2923,7 @@ fn push_fresh_pivot_badge(spans: &mut Vec<Span<'static>>) {
     spans.push(Span::raw("  "));
     spans.push(Span::styled(
         "↻ updated",
-        Style::default()
-            .fg(SELECTION_GREEN)
-            .add_modifier(Modifier::BOLD),
+        Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
     ));
 }
 
@@ -3583,7 +3576,10 @@ fn budget_live_header_lines(
             )));
             out.push(Line::from(vec![
                 Span::styled("    Press ", Style::default().fg(MUTED_GRAY)),
-                Span::styled("[W]", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "[W]",
+                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(
                     " to wire up Claude Code statusline.",
                     Style::default().fg(MUTED_GRAY),
@@ -4556,7 +4552,10 @@ mod cross_filter_tests {
         state.focus_row = 0;
         // Bypass period filtering — this test is about Enter→chip dispatch.
         state.period = UsagePeriod::All;
-        assert!(state.commit_focused_row(), "Enter on a branch row must commit a chip");
+        assert!(
+            state.commit_focused_row(),
+            "Enter on a branch row must commit a chip"
+        );
         assert_eq!(state.filters.branch, vec!["main".to_string()]);
     }
 
@@ -4574,7 +4573,10 @@ mod cross_filter_tests {
         state.focused_panel = Some(UsagePanel::ByBranch);
         state.focus_row = 0;
         state.period = UsagePeriod::All;
-        assert!(state.commit_focused_row_exclude(), "X on a branch row must commit an exclude chip");
+        assert!(
+            state.commit_focused_row_exclude(),
+            "X on a branch row must commit an exclude chip"
+        );
         assert_eq!(state.filters.exclude_branch, vec!["main".to_string()]);
     }
 
@@ -4701,12 +4703,18 @@ mod cross_filter_tests {
         state.fresh_pivot = false;
         let line = build_filter_chip_line(&state);
         let flat: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(!flat.contains("↻ updated"), "badge must hide when flag is off: {flat}");
+        assert!(
+            !flat.contains("↻ updated"),
+            "badge must hide when flag is off: {flat}"
+        );
 
         state.fresh_pivot = true;
         let line = build_filter_chip_line(&state);
         let flat: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(flat.contains("↻ updated"), "badge must show when flag is on: {flat}");
+        assert!(
+            flat.contains("↻ updated"),
+            "badge must show when flag is on: {flat}"
+        );
     }
 
     /// Same indicator visibility applies on the no-chip path so the
@@ -5256,9 +5264,7 @@ mod scan_progress_tests {
         };
         let mut buf = Buffer::empty(area);
         render_scan_progress(&mut buf, area, &progress(2, 3, "alpha"));
-        let painted: String = (0..area.width)
-            .map(|x| buf.get(x, 1).symbol().to_string())
-            .collect();
+        let painted: String = (0..area.width).map(|x| buf.get(x, 1).symbol().to_string()).collect();
         assert!(
             painted.contains("Scanning sessions: 2/3"),
             "skeleton headline rendered: {painted:?}"
@@ -5279,10 +5285,11 @@ mod scan_progress_tests {
         };
         let mut buf = Buffer::empty(area);
         render_scan_progress(&mut buf, area, &progress(1, 0, ""));
-        let painted: String = (0..area.width)
-            .map(|x| buf.get(x, 1).symbol().to_string())
-            .collect();
+        let painted: String = (0..area.width).map(|x| buf.get(x, 1).symbol().to_string()).collect();
         assert!(painted.contains("1 files"));
-        assert!(!painted.contains(" · "), "no separator when project empty: {painted:?}");
+        assert!(
+            !painted.contains(" · "),
+            "no separator when project empty: {painted:?}"
+        );
     }
 }

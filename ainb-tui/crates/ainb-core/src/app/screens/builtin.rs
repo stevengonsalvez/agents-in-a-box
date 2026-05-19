@@ -67,9 +67,7 @@ pub const PLUGIN_SCREENS: &[(&str, &str)] = &[(ids::ANALYTICS, "burndown")];
 /// Resolve the plugin id that owns `screen_id`, if any.
 #[must_use]
 pub fn plugin_id_for_screen(screen_id: &str) -> Option<&'static str> {
-    PLUGIN_SCREENS
-        .iter()
-        .find_map(|(s, p)| (*s == screen_id).then_some(*p))
+    PLUGIN_SCREENS.iter().find_map(|(s, p)| (*s == screen_id).then_some(*p))
 }
 
 /// Convert a `crossterm::event::KeyEvent` into the portable wire
@@ -252,7 +250,8 @@ fn build_placeholder_for_unloaded_plugin(
     let lines = vec![
         Line::from(""),
         Line::from(vec![Span::styled(
-            format!("  This screen is owned by the `{}` plugin, which isn't loaded.",
+            format!(
+                "  This screen is owned by the `{}` plugin, which isn't loaded.",
                 plugin_name.unwrap_or(screen_id)
             ),
             Style::default().add_modifier(Modifier::BOLD),
@@ -377,11 +376,21 @@ fn rgb_to_color(c: Option<ainb_plugin_protocol::wire_buffer::Color>) -> ratatui:
 fn modifier_bits_to_modifiers(b: u16) -> ratatui::style::Modifier {
     use ratatui::style::Modifier;
     let mut m = Modifier::empty();
-    if b & 1 != 0 { m |= Modifier::BOLD; }
-    if b & 2 != 0 { m |= Modifier::DIM; }
-    if b & 4 != 0 { m |= Modifier::ITALIC; }
-    if b & 8 != 0 { m |= Modifier::UNDERLINED; }
-    if b & 16 != 0 { m |= Modifier::REVERSED; }
+    if b & 1 != 0 {
+        m |= Modifier::BOLD;
+    }
+    if b & 2 != 0 {
+        m |= Modifier::DIM;
+    }
+    if b & 4 != 0 {
+        m |= Modifier::ITALIC;
+    }
+    if b & 8 != 0 {
+        m |= Modifier::UNDERLINED;
+    }
+    if b & 16 != 0 {
+        m |= Modifier::REVERSED;
+    }
     m
 }
 
@@ -442,7 +451,9 @@ pub struct HomeScreen {
 impl HomeScreen {
     #[must_use]
     pub fn new() -> Self {
-        Self { component: HomeScreenV2Component::new() }
+        Self {
+            component: HomeScreenV2Component::new(),
+        }
     }
 }
 
@@ -474,7 +485,9 @@ pub struct AgentSelectionScreen {
 impl AgentSelectionScreen {
     #[must_use]
     pub fn new() -> Self {
-        Self { component: AgentSelectionComponent::new() }
+        Self {
+            component: AgentSelectionComponent::new(),
+        }
     }
 }
 
@@ -538,7 +551,9 @@ pub struct LogHistoryScreen {
 impl LogHistoryScreen {
     #[must_use]
     pub fn new() -> Self {
-        Self { component: LogHistoryViewerComponent::new() }
+        Self {
+            component: LogHistoryViewerComponent::new(),
+        }
     }
 }
 
@@ -564,7 +579,9 @@ pub struct OnboardingScreen {
 impl OnboardingScreen {
     #[must_use]
     pub fn new() -> Self {
-        Self { component: OnboardingComponent }
+        Self {
+            component: OnboardingComponent,
+        }
     }
 }
 
@@ -632,7 +649,9 @@ pub struct AuthSetupScreen {
 impl AuthSetupScreen {
     #[must_use]
     pub fn new() -> Self {
-        Self { component: AuthSetupComponent::new() }
+        Self {
+            component: AuthSetupComponent::new(),
+        }
     }
 }
 
@@ -661,7 +680,9 @@ pub struct AttachedTerminalScreen {
 impl AttachedTerminalScreen {
     #[must_use]
     pub fn new() -> Self {
-        Self { component: AttachedTerminalComponent::new() }
+        Self {
+            component: AttachedTerminalComponent::new(),
+        }
     }
 }
 
@@ -824,9 +845,18 @@ mod tests {
         };
 
         // Reserved.
-        assert!(is_host_reserved_key(&mk(CtKey::Char('c'), KeyModifiers::CONTROL)));
-        assert!(is_host_reserved_key(&mk(CtKey::Char('?'), KeyModifiers::NONE)));
-        assert!(is_host_reserved_key(&mk(CtKey::Char('H'), KeyModifiers::NONE)));
+        assert!(is_host_reserved_key(&mk(
+            CtKey::Char('c'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(is_host_reserved_key(&mk(
+            CtKey::Char('?'),
+            KeyModifiers::NONE
+        )));
+        assert!(is_host_reserved_key(&mk(
+            CtKey::Char('H'),
+            KeyModifiers::NONE
+        )));
         // Esc is reserved: it must always bubble to the host so the
         // screen pops back to home — see the doc on
         // `is_host_reserved_key`. Plugins use `Backspace` for pop-state
