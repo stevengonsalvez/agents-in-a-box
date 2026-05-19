@@ -10,6 +10,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 #[tokio::test]
 async fn test_session_creation_shows_immediately() {
     let mut app = App::new();
+    app.state.current_screen = screen_ids::SESSION_LIST.to_string();
 
     // Load mock data to ensure we have some workspaces
     app.state.load_mock_data();
@@ -36,17 +37,26 @@ async fn test_session_creation_shows_immediately() {
     // Check that we have session state set up
     // Note: The behavior depends on whether the test directory is a git repository
     if let Some(ref session_state) = app.state.new_session_state {
-        // The step should be either InputBranch (current dir mode) or SelectRepo (workspace search mode)
+        // The step is one of: InputBranch (current dir mode), SelectRepo
+        // (workspace search mode), or SelectSource (post-repo-input flow added
+        // after this test was written).
         assert!(
             session_state.step == NewSessionStep::InputBranch
-                || session_state.step == NewSessionStep::SelectRepo,
-            "Step should be either InputBranch or SelectRepo, got: {:?}",
+                || session_state.step == NewSessionStep::SelectRepo
+                || session_state.step == NewSessionStep::SelectSource,
+            "Step should be InputBranch / SelectRepo / SelectSource, got: {:?}",
             session_state.step
         );
-        assert!(
-            !session_state.branch_name.is_empty(),
-            "Branch name should be pre-filled"
-        );
+        // branch_name is only pre-filled past the SelectSource step
+        // (the pre-fill happens once we know which repo/source the user
+        // picked). For the SelectSource step it can legitimately be empty.
+        if session_state.step != NewSessionStep::SelectSource {
+            assert!(
+                !session_state.branch_name.is_empty(),
+                "Branch name should be pre-filled at step {:?}",
+                session_state.step
+            );
+        }
     }
 
     // Simulate pressing Enter to create the session
@@ -127,6 +137,7 @@ async fn test_session_creation_shows_immediately() {
 #[tokio::test]
 async fn test_workspace_refresh_order() {
     let mut app = App::new();
+    app.state.current_screen = screen_ids::SESSION_LIST.to_string();
     app.state.load_mock_data();
 
     // Record initial state
@@ -186,6 +197,7 @@ async fn test_workspace_refresh_order() {
 #[tokio::test]
 async fn test_no_empty_homescreen_after_creation() {
     let mut app = App::new();
+    app.state.current_screen = screen_ids::SESSION_LIST.to_string();
 
     // Start with some data
     app.state.load_mock_data();
@@ -241,6 +253,7 @@ async fn test_no_empty_homescreen_after_creation() {
 #[tokio::test]
 async fn test_error_handling_with_correct_refresh() {
     let mut app = App::new();
+    app.state.current_screen = screen_ids::SESSION_LIST.to_string();
     app.state.load_mock_data();
 
     // Simulate session creation error path
@@ -288,6 +301,7 @@ async fn test_error_handling_with_correct_refresh() {
 #[tokio::test]
 async fn test_ui_refresh_mechanism() {
     let mut app = App::new();
+    app.state.current_screen = screen_ids::SESSION_LIST.to_string();
     app.state.load_mock_data();
 
     // Initially no refresh needed
