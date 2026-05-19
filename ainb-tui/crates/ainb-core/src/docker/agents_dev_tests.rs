@@ -35,8 +35,7 @@ mod tests {
         // File existence alone is not enough (Docker Desktop may leave a
         // socket file behind even when the engine isn't running).
         let any_reachable = candidates.iter().any(|p| {
-            std::path::Path::new(p).exists()
-                && std::os::unix::net::UnixStream::connect(p).is_ok()
+            std::path::Path::new(p).exists() && std::os::unix::net::UnixStream::connect(p).is_ok()
         });
         !any_reachable
     }
@@ -44,10 +43,7 @@ mod tests {
     macro_rules! skip_if_no_docker {
         () => {
             if docker_unavailable() {
-                eprintln!(
-                    "[skip] {}: no Docker daemon reachable",
-                    module_path!()
-                );
+                eprintln!("[skip] {}: no Docker daemon reachable", module_path!());
                 return Ok(());
             }
         };

@@ -33,9 +33,7 @@ fn burndown_binary_path() -> Option<PathBuf> {
         return Some(candidate);
     }
     // also try sibling target/release
-    let release = target_dir
-        .parent()
-        .map(|p| p.join("release").join("ainb-plugin-burndown"));
+    let release = target_dir.parent().map(|p| p.join("release").join("ainb-plugin-burndown"));
     if let Some(p) = release {
         if p.exists() {
             return Some(p);
