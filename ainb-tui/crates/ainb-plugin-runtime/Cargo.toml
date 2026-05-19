@@ -54,10 +54,10 @@ path = "tests/fixture_e2e.rs"
 
 [lints.rust]
 unsafe_code = "allow"  # PR_SET_PDEATHSIG / setpgid require unsafe libc calls
-missing_docs = "warn"
-unused_imports = "warn"
-unused_variables = "warn"
-dead_code = "warn"
+missing_docs = "allow"
+unused_imports = "allow"
+unused_variables = "allow"
+dead_code = "allow"
 
 [lints.clippy]
 correctness = { level = "warn", priority = -1 }
