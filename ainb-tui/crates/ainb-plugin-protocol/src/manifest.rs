@@ -223,6 +223,7 @@ mod tests {
                 commands: vec!["/usage".into(), "/burndown".into()],
                 cli_namespaces: vec!["usage".into()],
                 snapshots: vec![],
+                ..Provides::default()
             },
             subscribes: Subscribes {
                 snapshots: vec!["sessions.usage_data".into()],
