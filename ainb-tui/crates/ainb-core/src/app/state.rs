@@ -2698,7 +2698,15 @@ impl Default for AppState {
 
         Self {
             workspaces: Vec::new(),
-            bsp: None,
+            // P3-wiring: BSP path is the v1 default. default_root() produces
+            // the same 40/60 split shape as the legacy hardcoded path
+            // (rect-math parity proven by bsp_default_layout_parity tests).
+            bsp: Some(crate::ui::bsp::LayoutSnapshot {
+                version: 1,
+                root: crate::ui::bsp::LayoutNode::default_root(),
+                min_cols: 30,
+                min_rows: 10,
+            }),
             selected_workspace_index: None,
             selected_session_index: None,
             shell_selected: false,

@@ -88,32 +88,61 @@ impl LayoutComponent {
         // Render top status bar
         self.render_status_bar(frame, main_layout[0], state);
 
-        // Simple 2-panel layout: session list | logs (Claude chat is now a popup)
-        let content_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(40), // Session list
-                Constraint::Percentage(60), // Live logs stream
-            ])
-            .split(main_layout[1]);
-
-        // Pass focus information to components
-        self.session_list.render(frame, content_chunks[0], state);
-
-        // Render tmux preview if selected session has tmux, otherwise show live logs
-        // This includes both regular Claude sessions AND shell sessions
+        // P3-wiring: drive the main content region via the BSP tree when
+        // AppState.bsp is set. Falls back to the legacy 40/60 split when
+        // None (preserves the v1 path; legacy code stays as parity insurance).
+        let content_rect = main_layout[1];
         let selected_has_tmux = state
             .get_selected_session()
             .and_then(|s| s.tmux_session_name.as_ref())
             .is_some()
             || state.selected_shell_session().is_some();
 
-        if selected_has_tmux {
-            // Render tmux preview pane
-            self.tmux_preview.render(frame, content_chunks[1], state);
+        if let Some(snapshot) = state.bsp.clone() {
+            // BSP path: walk the tree and dispatch each leaf to its
+            // component renderer.
+            for (leaf_id, tile) in snapshot.root.walk(content_rect) {
+                match leaf_id.as_str() {
+                    "session_list" => self.session_list.render(frame, tile, state),
+                    "live_logs_stream" => {
+                        if selected_has_tmux {
+                            self.tmux_preview.render(frame, tile, state);
+                        } else {
+                            self.live_logs_stream.render(frame, tile, state);
+                        }
+                    }
+                    other => {
+                        // Unknown leaf id: render a placeholder so a stale
+                        // layout.json doesn't blow up the frame.
+                        let placeholder = Paragraph::new(format!(
+                            "⚠ unknown component: {other}\n\nClose this tile with Ctrl+W x"
+                        ))
+                        .block(
+                            Block::default()
+                                .borders(Borders::ALL)
+                                .border_style(Style::default().fg(WARNING_ORANGE)),
+                        )
+                        .style(Style::default().fg(MUTED_GRAY))
+                        .alignment(Alignment::Center);
+                        frame.render_widget(placeholder, tile);
+                    }
+                }
+            }
         } else {
-            // Render traditional live logs stream
-            self.live_logs_stream.render(frame, content_chunks[1], state);
+            // Legacy fallback: hardcoded 40/60 horizontal split.
+            let content_chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(40), // Session list
+                    Constraint::Percentage(60), // Live logs stream
+                ])
+                .split(content_rect);
+            self.session_list.render(frame, content_chunks[0], state);
+            if selected_has_tmux {
+                self.tmux_preview.render(frame, content_chunks[1], state);
+            } else {
+                self.live_logs_stream.render(frame, content_chunks[1], state);
+            }
         }
 
         // Render bottom logs area (traditional logs viewer)

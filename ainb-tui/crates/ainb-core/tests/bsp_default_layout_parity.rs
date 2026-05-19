@@ -46,9 +46,35 @@ fn default_root_parity_holds_across_common_terminal_sizes() {
 }
 
 #[test]
-fn app_state_bsp_field_defaults_to_none() {
+fn app_state_bsp_field_defaults_to_default_root_snapshot() {
+    // P3-wiring made BSP the v1 default — default_root() produces the same
+    // rect shape as the legacy 40/60 split so the swap is visually a no-op,
+    // but the BSP code path is now the one that drives render.
     let state = AppState::default();
-    assert!(state.bsp.is_none(), "BSP must default to None to preserve legacy path");
+    let snap = state.bsp.as_ref().expect("AppState.bsp defaults to Some");
+    assert_eq!(snap.version, 1);
+    assert_eq!(snap.min_cols, 30);
+    assert_eq!(snap.min_rows, 10);
+    // root is a horizontal split between session_list and live_logs_stream
+    match &snap.root {
+        LayoutNode::Split { left, right, .. } => {
+            match left.as_ref() {
+                LayoutNode::Pane { id, focused } => {
+                    assert_eq!(id, "session_list");
+                    assert!(*focused);
+                }
+                _ => panic!("expected left Pane(session_list)"),
+            }
+            match right.as_ref() {
+                LayoutNode::Pane { id, focused } => {
+                    assert_eq!(id, "live_logs_stream");
+                    assert!(!*focused);
+                }
+                _ => panic!("expected right Pane(live_logs_stream)"),
+            }
+        }
+        _ => panic!("expected root to be a Split"),
+    }
 }
 
 #[test]
