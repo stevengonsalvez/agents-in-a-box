@@ -731,6 +731,39 @@ impl PluginTask {
         debug!(plugin = %self.plugin.id, "backoff {backoff:?}");
         tokio::time::sleep(backoff).await;
         self.set_state(LifecycleState::Idle);
+
+        // Honour `manifest.lifecycle.spawn = "eager"` on the *exit
+        // path*, not only at registration. An eager plugin that exits
+        // (process crash, broken pipe, etc.) needs to come back without
+        // a host event triggering it — otherwise a one-shot failure
+        // wedges the plugin dead for the rest of the TUI session. The
+        // original bug: session-reader shipped a single oversize chunk,
+        // host framer rejected it, plugin's stdout pipe closed, plugin
+        // exited; with no respawn here the burndown UI stayed at
+        // "Scanning sessions…" forever. Lazy plugins are left alone —
+        // they only spawn when first used.
+        if matches!(
+            self.plugin.manifest.lifecycle.spawn,
+            ainb_plugin_protocol::manifest::SpawnMode::Eager
+        ) && !matches!(*self.state.read(), LifecycleState::Quarantined)
+        {
+            debug!(
+                plugin = %self.plugin.id,
+                "eager: respawning after exit (attempt {})",
+                self.respawn_attempts
+            );
+            if let Err(e) = self.spawn_and_init().await {
+                warn!(
+                    plugin = %self.plugin.id,
+                    "eager respawn after exit failed: {e}"
+                );
+                // spawn_and_init transitions to Spawning then either
+                // Running on success or leaves us in Spawning on
+                // failure; explicitly fall back to Idle so the next
+                // failure scheduling math doesn't confuse states.
+                self.set_state(LifecycleState::Idle);
+            }
+        }
     }
 
     fn record_failure(&mut self) {

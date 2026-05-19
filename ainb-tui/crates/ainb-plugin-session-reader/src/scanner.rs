@@ -220,12 +220,41 @@ pub fn scan_with_cache(
 /// Cache + progress-aware scan. Drives [`ProgressReporter::note_file`]
 /// from each per-file parse so the plugin's async publish loop can
 /// fan progress out to the host without blocking the scan thread.
+///
+/// Pre-walks the Claude and Codex provider dirs to count `.jsonl`
+/// files before the actual parse loop, then calls
+/// [`ProgressReporter::set_total`] so the burndown UI can render a
+/// real `N/M` progress bar (instead of the open-ended `N files`
+/// fallback). The pre-walk is cheap — directory enumeration only, no
+/// file reads — typically under 50 ms even for 5000+ Claude session
+/// JSONLs. Gemini, Copilot, and Cursor parsers aren't progress-aware
+/// (they don't emit `note_file`) so they're excluded from the total
+/// to keep the bar honest; their file counts are usually small enough
+/// that the under-count is invisible.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn scan_with_cache_and_progress(
     roots: &ProviderRoots,
     cache: &mut Option<crate::cache::UsageCache>,
     reporter: &mut ProgressReporter,
 ) -> UsageData {
+    // Pre-walk: count the files the progress-aware parsers will visit
+    // so the UI can render an `N/M` ratio. Each branch returns 0 if the
+    // root is None or unreadable — same semantics as the parse path.
+    let claude_files = roots
+        .claude_projects
+        .as_deref()
+        .map_or(0, count_jsonl_in_two_level_tree);
+    let codex_files = roots
+        .codex_sessions
+        .as_deref()
+        .map_or(0, count_jsonl_recursive);
+    let total = claude_files.saturating_add(codex_files);
+    if total > 0 {
+        // Saturate at u32::MAX — unlikely in practice (would require
+        // ~4 billion .jsonl files) but keeps the cast explicit.
+        reporter.set_total(u32::try_from(total).unwrap_or(u32::MAX));
+    }
+
     let mut all_calls = Vec::new();
     if let Some(root) = &roots.claude_projects {
         all_calls.extend(crate::parsers::claude::parse_dir_cached_with_progress(
@@ -247,6 +276,64 @@ pub fn scan_with_cache_and_progress(
         all_calls.extend(crate::parsers::cursor::parse_dir(root));
     }
     aggregate(all_calls)
+}
+
+/// Count `.jsonl` files in the Claude layout: `<root>/<project>/<session>.jsonl`.
+/// Two-level walk (project dir → session files). Matches the iteration
+/// shape of `parsers::claude::parse_dir_cached_with_progress` so the
+/// running counter and the pre-walk total stay in sync.
+#[cfg(not(target_arch = "wasm32"))]
+fn count_jsonl_in_two_level_tree(root: &Path) -> usize {
+    let mut count = 0usize;
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return 0;
+    };
+    for project_entry in entries.flatten() {
+        let p = project_entry.path();
+        if !p.is_dir() {
+            continue;
+        }
+        let Ok(session_entries) = std::fs::read_dir(&p) else {
+            continue;
+        };
+        for session_entry in session_entries.flatten() {
+            if session_entry
+                .path()
+                .extension()
+                .and_then(|s| s.to_str())
+                == Some("jsonl")
+            {
+                count = count.saturating_add(1);
+            }
+        }
+    }
+    count
+}
+
+/// Count `.jsonl` files recursively under `root`. Used for the Codex
+/// layout (`<root>/<YYYY>/<MM>/<DD>/rollout-*.jsonl`) where depth
+/// varies. Plain depth-first walk; symlinks aren't followed.
+#[cfg(not(target_arch = "wasm32"))]
+fn count_jsonl_recursive(root: &Path) -> usize {
+    let mut count = 0usize;
+    let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_dir() {
+                stack.push(p);
+            } else if ft.is_file()
+                && p.extension().and_then(|s| s.to_str()) == Some("jsonl")
+            {
+                count = count.saturating_add(1);
+            }
+        }
+    }
+    count
 }
 
 /// Pure aggregation: `Vec<ProviderCall>` → `UsageData`.
@@ -730,5 +817,83 @@ mod tests {
             assert!(r.claude_projects.is_some());
             assert!(r.codex_sessions.is_some());
         }
+    }
+
+    #[test]
+    fn count_jsonl_two_level_matches_real_layout() {
+        // Build a fake Claude-layout: <root>/<project>/<session>.jsonl
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("proj-a")).unwrap();
+        std::fs::create_dir_all(root.join("proj-b")).unwrap();
+        std::fs::write(root.join("proj-a/s1.jsonl"), b"{}").unwrap();
+        std::fs::write(root.join("proj-a/s2.jsonl"), b"{}").unwrap();
+        std::fs::write(root.join("proj-b/s3.jsonl"), b"{}").unwrap();
+        // Ignored: non-jsonl file, plus a stray file at the root level.
+        std::fs::write(root.join("proj-a/notes.txt"), b"hi").unwrap();
+        std::fs::write(root.join("toplevel-stray.jsonl"), b"{}").unwrap();
+
+        assert_eq!(count_jsonl_in_two_level_tree(root), 3);
+    }
+
+    #[test]
+    fn count_jsonl_recursive_walks_arbitrary_depth() {
+        // Codex layout: <root>/<YYYY>/<MM>/<DD>/rollout-*.jsonl
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let dir = root.join("2026/05/19");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("rollout-1.jsonl"), b"{}").unwrap();
+        std::fs::write(dir.join("rollout-2.jsonl"), b"{}").unwrap();
+        std::fs::write(dir.join("rollout-3.txt"), b"hi").unwrap(); // not jsonl
+        // Another day with one rollout.
+        let dir2 = root.join("2026/05/18");
+        std::fs::create_dir_all(&dir2).unwrap();
+        std::fs::write(dir2.join("rollout-1.jsonl"), b"{}").unwrap();
+
+        assert_eq!(count_jsonl_recursive(root), 3);
+    }
+
+    #[test]
+    fn count_jsonl_returns_zero_for_missing_root() {
+        let missing = std::path::PathBuf::from("/nonexistent/path/to/nowhere");
+        assert_eq!(count_jsonl_in_two_level_tree(&missing), 0);
+        assert_eq!(count_jsonl_recursive(&missing), 0);
+    }
+
+    #[test]
+    fn scan_pre_walk_sets_total_on_reporter() {
+        // End-to-end: build fake Claude + Codex trees, run a scan with
+        // a real ProgressReporter, and verify `total` equals the actual
+        // file count when the first note_file fires.
+        let tmp = tempfile::tempdir().unwrap();
+        let claude_root = tmp.path().join("claude/projects");
+        let codex_root = tmp.path().join("codex/sessions");
+        std::fs::create_dir_all(claude_root.join("proj-a")).unwrap();
+        std::fs::write(claude_root.join("proj-a/s1.jsonl"), b"").unwrap();
+        std::fs::write(claude_root.join("proj-a/s2.jsonl"), b"").unwrap();
+        std::fs::create_dir_all(codex_root.join("2026/05/19")).unwrap();
+        std::fs::write(codex_root.join("2026/05/19/rollout.jsonl"), b"").unwrap();
+
+        let roots = ProviderRoots {
+            claude_projects: Some(claude_root),
+            codex_sessions: Some(codex_root),
+            ..ProviderRoots::default()
+        };
+
+        let captured: Arc<Mutex<Vec<ScanProgressEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&captured);
+        let mut reporter = ProgressReporter::new(move |evt| sink.lock().unwrap().push(evt));
+        let mut cache: Option<crate::cache::UsageCache> = None;
+        let _data = scan_with_cache_and_progress(&roots, &mut cache, &mut reporter);
+
+        let evts = captured.lock().unwrap().clone();
+        // 3 files total (2 Claude + 1 Codex). First emit should carry
+        // total=3; later emits inherit the same total via set_total.
+        assert!(!evts.is_empty(), "reporter saw at least one event");
+        assert_eq!(
+            evts[0].total, 3,
+            "pre-walk set total to count of progress-aware files"
+        );
     }
 }

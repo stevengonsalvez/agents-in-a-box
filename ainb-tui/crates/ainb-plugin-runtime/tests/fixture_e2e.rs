@@ -387,6 +387,67 @@ fn handle_is_send_and_clone() {
     let _: Arc<dyn Send + Sync> = Arc::new(()) as Arc<dyn Send + Sync>;
 }
 
+// Eager-respawn regression: an eager plugin that exits (crash, broken
+// pipe, etc.) must come back automatically after the backoff window —
+// not only at registration time. Without this guarantee, a single
+// transient failure wedges the plugin dead for the rest of the TUI
+// session. The original bug: session-reader shipped one oversize
+// chunk, host framer rejected it, plugin's stdout pipe closed, plugin
+// exited; burndown UI stayed stuck at "Scanning sessions…" forever
+// because session-reader never respawned.
+#[test]
+fn eager_plugin_respawns_automatically_after_exit() {
+    let (rt, handle) = build_runtime();
+    let mut manifest = fixture_manifest();
+    manifest.lifecycle.spawn = SpawnMode::Eager;
+    manifest.plugin.name = "fixture-eager-respawn".into();
+    let plugin = RegisteredPlugin::new(
+        manifest,
+        fixture_path(),
+        PathBuf::from("/dev/null/manifest.toml"),
+    );
+    let id = plugin.id.clone();
+    rt.register(plugin);
+
+    // Wait for the initial eager spawn.
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while std::time::Instant::now() < deadline {
+        if matches!(handle.lifecycle_state(&id), Some(LifecycleState::Running)) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        handle.lifecycle_state(&id),
+        Some(LifecycleState::Running),
+        "eager plugin never reached initial Running"
+    );
+
+    // Kill the plugin process. The runtime should observe pipe close,
+    // log "plugin exited / pipe closed", run through backoff, then
+    // respawn because spawn=eager. No host request (render/cli) needed
+    // to trigger the respawn — that's the whole point of this test.
+    handle.inject_kill(&id).expect("inject_kill");
+
+    // Backoff is 50ms in the test config, plus exec latency. Give it
+    // generous headroom — the respawn path includes child spawn,
+    // PluginInit RPC, and reading the init response.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut respawned = false;
+    while std::time::Instant::now() < deadline {
+        if matches!(handle.lifecycle_state(&id), Some(LifecycleState::Running)) {
+            respawned = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    assert!(
+        respawned,
+        "eager plugin did not auto-respawn after exit; state = {:?}",
+        handle.lifecycle_state(&id)
+    );
+}
+
 // Eager-spawn regression: manifest declaring `spawn = "eager"` must
 // cause the runtime to launch the plugin process immediately at
 // registration time, without waiting for a first request. Without

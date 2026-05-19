@@ -205,9 +205,9 @@ impl Plugin for BurndownPlugin {
     /// Generation is bumped only when the dispatch matched a binding,
     /// so unmapped keys won't trigger an avoidable re-render.
     async fn handle_key(&mut self, host: &HostClient, params: HandleKeyParams) -> Result<()> {
-        // Refresh is the one binding that needs the host. Everything
-        // else mutates `self.ui` only, so it lives in the pure helper
-        // below for testability.
+        // Refresh + flush-cache are the two bindings that need the
+        // host. Everything else mutates `self.ui` only, so it lives in
+        // the pure helper below for testability.
         let handled = match params.key.code {
             KeyCode::Char { ch: 'r' | 'R' } => {
                 // Ask session-reader to re-publish from scratch. Best
@@ -215,6 +215,19 @@ impl Plugin for BurndownPlugin {
                 // snapshot stays on screen.
                 let _ = host
                     .snapshot_publish("sessions.refresh_request", bytes::Bytes::new())
+                    .await;
+                true
+            }
+            KeyCode::Char { ch: 'F' } => {
+                // Wipe the persistent parse cache, then rescan. Use
+                // `F` (uppercase) to make the destructive nature
+                // obvious — `f` would be too easy to fat-finger. The
+                // scan immediately afterwards is cold-cache and may
+                // take 10s+ for large $HOME datasets; the
+                // `Scanning sessions:` skeleton (now with the new
+                // `N/M` progress bar) covers the latency.
+                let _ = host
+                    .snapshot_publish("sessions.flush_cache_request", bytes::Bytes::new())
                     .await;
                 true
             }
@@ -415,16 +428,24 @@ impl BurndownPlugin {
     fn apply_chunk_pure(&mut self, event: UsageDataEvent) -> ChunkOutcome {
         if event.chunk_index == 0 {
             // Fresh publish sequence — seed the accumulator with the
-            // full aggregates + first call slice. Any prior in-flight
-            // accumulator is discarded (the publisher abandoned it).
+            // bounded aggregates from chunk 0. v4 wire model: chunk 0
+            // also carries empty `calls`/`sessions`/`shell_commands`
+            // (those are tail-chunked and arrive in chunks 1..N), so
+            // the seed already has the right empty tail vecs. Any
+            // prior in-flight accumulator is discarded — the publisher
+            // abandoned it.
             self.pending = Some(event.data);
         } else {
-            // Append `calls` onto the in-flight accumulator. If we
-            // missed chunk 0 (subscriber joined late or sequence got
-            // reordered), drop the chunk — partial data without
-            // aggregates is worse than no data.
+            // Extend each of the three tail-chunked vecs onto the
+            // in-flight accumulator. If we missed chunk 0 (subscriber
+            // joined late or sequence got reordered), drop the chunk —
+            // partial data without aggregates is worse than no data.
             match self.pending.as_mut() {
-                Some(acc) => acc.calls.extend(event.data.calls),
+                Some(acc) => {
+                    acc.calls.extend(event.data.calls);
+                    acc.sessions.extend(event.data.sessions);
+                    acc.shell_commands.extend(event.data.shell_commands);
+                }
                 None => return ChunkOutcome::DroppedFollowOn,
             }
         }
@@ -1187,6 +1208,102 @@ mod chunk_accumulator_tests {
         p.schema_mismatch = true;
         let _ = p.apply_chunk_pure(chunk(0, true, vec![fake_call(1)]));
         assert!(!p.schema_mismatch);
+    }
+
+    #[test]
+    fn v4_chunk_zero_no_calls_follow_on_chunks_extend_tail_vecs() {
+        // v4 wire model: chunk 0 carries only bounded aggregates;
+        // follow-on chunks carry slices of `calls`, `sessions`, and
+        // `shell_commands` that the accumulator extend()s onto the
+        // in-flight UsageData. This is what session-reader publishes
+        // after the chunker rewrite (see plugin.rs `chunk_usage_data`).
+        use ainb_plugin_types_sessions::{NamedUsage, SessionUsage};
+        use chrono::DateTime;
+
+        fn session(id: &str) -> SessionUsage {
+            SessionUsage {
+                provider: Provider::Claude,
+                project: "p".into(),
+                session_id: id.into(),
+                first_timestamp: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+                last_timestamp: DateTime::from_timestamp(1_700_000_001, 0).unwrap(),
+                bucket: TokenBucket::default(),
+            }
+        }
+
+        fn shell(name: &str) -> NamedUsage {
+            NamedUsage {
+                name: name.into(),
+                calls: 1,
+            }
+        }
+
+        let mut p = BurndownPlugin::default();
+
+        // Chunk 0: aggregates only. No calls, no sessions, no shell_cmds.
+        let mut chunk_0_data = WireUsageData::default();
+        chunk_0_data.projects = vec![ProjectUsage {
+            name: "p".into(),
+            path: "/tmp".into(),
+            bucket: TokenBucket::default(),
+            repo: None,
+        }];
+        assert_eq!(
+            p.apply_chunk_pure(UsageDataEvent {
+                version: WIRE_VERSION,
+                published_ns: 0,
+                partial: false,
+                chunk_index: 0,
+                is_final: false,
+                data: chunk_0_data,
+            }),
+            ChunkOutcome::Buffered
+        );
+
+        // Chunk 1: tail slice — 2 calls + 2 sessions + 1 shell_cmd.
+        let mut chunk_1_data = WireUsageData::default();
+        chunk_1_data.calls = vec![fake_call(1), fake_call(2)];
+        chunk_1_data.sessions = vec![session("s1"), session("s2")];
+        chunk_1_data.shell_commands = vec![shell("ls")];
+        assert_eq!(
+            p.apply_chunk_pure(UsageDataEvent {
+                version: WIRE_VERSION,
+                published_ns: 0,
+                partial: false,
+                chunk_index: 1,
+                is_final: false,
+                data: chunk_1_data,
+            }),
+            ChunkOutcome::Buffered
+        );
+
+        // Chunk 2: more tail — 1 call + 1 session + 2 shell_cmds, is_final.
+        let mut chunk_2_data = WireUsageData::default();
+        chunk_2_data.calls = vec![fake_call(3)];
+        chunk_2_data.sessions = vec![session("s3")];
+        chunk_2_data.shell_commands = vec![shell("grep"), shell("cat")];
+        assert_eq!(
+            p.apply_chunk_pure(UsageDataEvent {
+                version: WIRE_VERSION,
+                published_ns: 0,
+                partial: false,
+                chunk_index: 2,
+                is_final: true,
+                data: chunk_2_data,
+            }),
+            ChunkOutcome::Finalised
+        );
+
+        let d = p.data.as_ref().expect("snapshot finalised");
+        // Calls accumulated in order across chunks 1 and 2.
+        assert_eq!(d.calls.len(), 3);
+        assert_eq!(d.calls[0].id, 1);
+        assert_eq!(d.calls[2].id, 3);
+        // Sessions and shell_commands also accumulated.
+        assert_eq!(d.sessions.len(), 3, "sessions extended across chunks");
+        assert_eq!(d.shell_commands.len(), 3, "shell_commands extended across chunks");
+        // Aggregates from chunk 0 survived.
+        assert_eq!(d.projects.len(), 1);
     }
 
     #[test]

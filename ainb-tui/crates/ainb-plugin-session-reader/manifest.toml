@@ -29,7 +29,10 @@ snapshots = ["sessions.usage_data"]
 
 [subscribes]
 # Refresh trigger: any publisher on this topic prompts a re-scan.
-snapshots = ["sessions.refresh_request"]
+# Flush trigger: any publisher on `sessions.flush_cache_request`
+# prompts a cache wipe followed by a full re-scan. Used by burndown's
+# `F` key for cache-corruption recovery.
+snapshots = ["sessions.refresh_request", "sessions.flush_cache_request"]
 
 [lifecycle]
 # Eager: the host needs the first snapshot ready before burndown asks.
