@@ -166,7 +166,9 @@ fn usage_models_by_task_matrix_renders_in_each_format() {
     assert!(csv.status.success());
     let csv_out = String::from_utf8_lossy(&csv.stdout);
     assert!(
-        csv_out.starts_with("model,Coding_calls,Coding_tokens,Coding_cost_usd"),
+        // Activity category names normalised to snake_case ("coding_*",
+        // not "Coding_*") in the current build.
+        csv_out.starts_with("model,coding_calls,coding_tokens,coding_cost_usd"),
         "csv matrix header wrong:\n{csv_out}"
     );
     assert!(
