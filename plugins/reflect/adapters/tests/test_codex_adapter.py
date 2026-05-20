@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -59,10 +60,242 @@ def test_install_writes_pointer_files_under_dot_codex(tmp_path):
     body = recall.read_text(encoding="utf-8")
     assert codex_adapter.POINTER_MANAGED_BY in body
     assert "name: reflect:recall" in body
-    # Codex adapter never touches settings.json (no hook system parity)
+    # Codex uses hooks.json, not settings.json
     assert not (tmp_path / ".codex" / "settings.json").exists()
     # And it must not have leaked into a Claude dir.
     assert not (tmp_path / ".claude").exists()
+
+
+def test_install_syncs_recall_hooks_and_scripts(tmp_path):
+    """Codex needs the hook script files physically present so the hook
+    command in hooks.json resolves at runtime. Validate the recall hook
+    and the plugin-level reflect hook both land under ~/.codex/skills/."""
+    subprocess.run(
+        [sys.executable, str(ADAPTER), "install", "--home", str(tmp_path)],
+        check=True, capture_output=True,
+    )
+    recall_hook = (
+        tmp_path / ".codex" / "skills" / "recall" / "hooks"
+        / "session_start_recall.py"
+    )
+    assert recall_hook.exists()
+    assert recall_hook.read_text().startswith("#!/usr/bin/env -S uv run")
+
+    precompact = (
+        tmp_path / ".codex" / "skills" / "reflect" / "hooks"
+        / "precompact_reflect.py"
+    )
+    assert precompact.exists()
+
+    drain = (
+        tmp_path / ".codex" / "skills" / "reflect" / "hooks"
+        / "reflect-drain-bg.sh"
+    )
+    assert drain.exists()
+
+
+def test_install_writes_hooks_json_with_all_three_entries(tmp_path):
+    """Default install wires SessionStart-recall, SessionStart-drain, and
+    PreCompact-reflect into ~/.codex/hooks.json."""
+    subprocess.run(
+        [sys.executable, str(ADAPTER), "install", "--home", str(tmp_path)],
+        check=True, capture_output=True,
+    )
+
+    hooks_path = tmp_path / ".codex" / "hooks.json"
+    assert hooks_path.exists()
+    cfg = json.loads(hooks_path.read_text())
+    ss_cmds = [
+        h["command"]
+        for entry in cfg["hooks"]["SessionStart"]
+        for h in entry["hooks"]
+    ]
+    pc_cmds = [
+        h["command"]
+        for entry in cfg["hooks"]["PreCompact"]
+        for h in entry["hooks"]
+    ]
+    codex_dir = tmp_path / ".codex"
+    assert codex_adapter._render_recall_hook_command(codex_dir) in ss_cmds
+    assert codex_adapter._render_drain_hook_command(codex_dir) in ss_cmds
+    assert codex_adapter._render_precompact_hook_command(codex_dir) in pc_cmds
+
+    # No surviving template placeholders in the persisted file.
+    text = hooks_path.read_text()
+    assert "{{" not in text
+    assert "{home_tool_dir}" not in text
+
+
+def test_install_no_hooks_flag_skips_hooks_json(tmp_path):
+    subprocess.run(
+        [sys.executable, str(ADAPTER), "install",
+         "--home", str(tmp_path), "--no-hooks"],
+        check=True, capture_output=True,
+    )
+    assert (tmp_path / ".codex" / "skills" / "recall" / "SKILL.md").exists()
+    assert not (tmp_path / ".codex" / "hooks.json").exists()
+
+
+def test_install_no_bg_drain_omits_drain_hook(tmp_path):
+    """--no-bg-drain wires only SessionStart-recall + PreCompact, not the
+    drain shell script (useful on codex-only machines without claude)."""
+    subprocess.run(
+        [sys.executable, str(ADAPTER), "install",
+         "--home", str(tmp_path), "--no-bg-drain"],
+        check=True, capture_output=True,
+    )
+    cfg = json.loads((tmp_path / ".codex" / "hooks.json").read_text())
+    ss_cmds = [
+        h["command"]
+        for entry in cfg["hooks"]["SessionStart"]
+        for h in entry["hooks"]
+    ]
+    codex_dir = tmp_path / ".codex"
+    assert codex_adapter._render_recall_hook_command(codex_dir) in ss_cmds
+    assert codex_adapter._render_drain_hook_command(codex_dir) not in ss_cmds
+    # PreCompact still wired
+    pc_cmds = [
+        h["command"]
+        for entry in cfg["hooks"]["PreCompact"]
+        for h in entry["hooks"]
+    ]
+    assert codex_adapter._render_precompact_hook_command(codex_dir) in pc_cmds
+
+
+def test_install_preserves_existing_unrelated_hooks_json(tmp_path):
+    """Adapter must merge into an existing hooks.json without nuking
+    unrelated entries already wired by other tools (eg. superset)."""
+    codex_dir = tmp_path / ".codex"
+    codex_dir.mkdir()
+    existing = {
+        "hooks": {
+            "SessionStart": [
+                {"hooks": [{"type": "command", "command": "echo superset-ss"}]}
+            ],
+            "Stop": [
+                {"hooks": [{"type": "command", "command": "echo superset-stop"}]}
+            ],
+        }
+    }
+    (codex_dir / "hooks.json").write_text(json.dumps(existing))
+
+    subprocess.run(
+        [sys.executable, str(ADAPTER), "install", "--home", str(tmp_path)],
+        check=True, capture_output=True,
+    )
+
+    cfg = json.loads((codex_dir / "hooks.json").read_text())
+    all_ss_cmds = [
+        h["command"]
+        for entry in cfg["hooks"]["SessionStart"]
+        for h in entry["hooks"]
+    ]
+    all_stop_cmds = [
+        h["command"]
+        for entry in cfg["hooks"]["Stop"]
+        for h in entry["hooks"]
+    ]
+    # Pre-existing unrelated entries survived
+    assert "echo superset-ss" in all_ss_cmds
+    assert "echo superset-stop" in all_stop_cmds
+    # And our reflect entries landed
+    assert codex_adapter._render_recall_hook_command(codex_dir) in all_ss_cmds
+
+
+def test_install_idempotent_hooks_json(tmp_path):
+    """Two installs in a row: hook entries should appear exactly once."""
+    for _ in range(2):
+        subprocess.run(
+            [sys.executable, str(ADAPTER), "install", "--home", str(tmp_path)],
+            check=True, capture_output=True,
+        )
+    cfg = json.loads((tmp_path / ".codex" / "hooks.json").read_text())
+    codex_dir = tmp_path / ".codex"
+    ss_cmds = [
+        h["command"]
+        for entry in cfg["hooks"]["SessionStart"]
+        for h in entry["hooks"]
+    ]
+    assert ss_cmds.count(codex_adapter._render_recall_hook_command(codex_dir)) == 1
+    assert ss_cmds.count(codex_adapter._render_drain_hook_command(codex_dir)) == 1
+
+
+def test_install_cleans_up_legacy_unsubstituted_hook(tmp_path):
+    """Legacy {{HOME_TOOL_DIR}} hooks from earlier installs should be
+    swept out and replaced with the correctly-rendered command."""
+    codex_dir = tmp_path / ".codex"
+    codex_dir.mkdir()
+    legacy = (
+        "uv run {{HOME_TOOL_DIR}}/skills/recall/hooks/session_start_recall.py"
+    )
+    (codex_dir / "hooks.json").write_text(json.dumps({
+        "hooks": {
+            "SessionStart": [
+                {"matcher": "", "hooks": [{"type": "command", "command": legacy}]}
+            ]
+        }
+    }))
+
+    subprocess.run(
+        [sys.executable, str(ADAPTER), "install", "--home", str(tmp_path)],
+        check=True, capture_output=True,
+    )
+
+    cfg_text = (codex_dir / "hooks.json").read_text()
+    assert "{{HOME_TOOL_DIR}}" not in cfg_text
+    cfg = json.loads(cfg_text)
+    ss_cmds = [
+        h["command"]
+        for entry in cfg["hooks"]["SessionStart"]
+        for h in entry["hooks"]
+    ]
+    assert legacy not in ss_cmds
+    assert ss_cmds.count(codex_adapter._render_recall_hook_command(codex_dir)) == 1
+
+
+def test_install_errors_on_corrupt_hooks_json(tmp_path):
+    codex_dir = tmp_path / ".codex"
+    codex_dir.mkdir()
+    (codex_dir / "hooks.json").write_text("{ not valid json")
+
+    result = subprocess.run(
+        [sys.executable, str(ADAPTER), "install", "--home", str(tmp_path)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "hooks.json" in result.stderr.lower()
+
+
+def test_uninstall_removes_hook_entries(tmp_path):
+    """Uninstall strips reflect hook entries but leaves unrelated ones."""
+    codex_dir = tmp_path / ".codex"
+    codex_dir.mkdir()
+    (codex_dir / "hooks.json").write_text(json.dumps({
+        "hooks": {
+            "SessionStart": [
+                {"hooks": [{"type": "command", "command": "echo unrelated"}]}
+            ]
+        }
+    }))
+    subprocess.run(
+        [sys.executable, str(ADAPTER), "install", "--home", str(tmp_path)],
+        check=True, capture_output=True,
+    )
+    subprocess.run(
+        [sys.executable, str(ADAPTER), "uninstall", "--home", str(tmp_path)],
+        check=True, capture_output=True,
+    )
+
+    cfg = json.loads((codex_dir / "hooks.json").read_text())
+    ss_cmds = [
+        h["command"]
+        for entry in cfg.get("hooks", {}).get("SessionStart", [])
+        for h in entry["hooks"]
+    ]
+    assert "echo unrelated" in ss_cmds
+    assert codex_adapter._render_recall_hook_command(codex_dir) not in ss_cmds
+    # PreCompact had only our entries → block dropped entirely
+    assert "PreCompact" not in cfg.get("hooks", {})
 
 
 def test_install_is_idempotent(tmp_path):
