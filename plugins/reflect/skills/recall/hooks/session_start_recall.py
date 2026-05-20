@@ -35,8 +35,45 @@ import re
 import shutil
 import subprocess
 import sys
+import time
+import traceback
 from pathlib import Path
 from typing import NoReturn
+
+
+# --- Silent-fail event sink ----------------------------------------------
+#
+# Hooks MUST NOT raise into the user's session — a recall failure (graphrag
+# down, broken cwd, missing dep) is not the user's problem. On any uncaught
+# exception we still exit 0 with an empty additionalContext, but we leave a
+# breadcrumb at ~/.reflect/last-event.json so the harness's status line can
+# render a "⚠ recall failed" fragment without flooding stderr.
+#
+# Atomic write (tmp + rename) so a concurrent status-line reader never sees
+# a half-written file.
+
+LAST_EVENT_PATH = Path(
+    os.environ.get("REFLECT_STATE_DIR", str(Path.home() / ".reflect"))
+) / "last-event.json"
+
+
+def _write_last_event(event: str, kind: str, detail: str) -> None:
+    """Best-effort error breadcrumb for the status line. Never raises."""
+    try:
+        LAST_EVENT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "event": event,            # "ok" | "error"
+            "hook": "session_start_recall",
+            "kind": kind,              # short error class, e.g. "OSError"
+            "detail": detail[:500],    # truncated message
+            "ts": time.time(),
+        }
+        tmp = LAST_EVENT_PATH.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        tmp.replace(LAST_EVENT_PATH)
+    except Exception:
+        # If even the breadcrumb fails, we still must not surface anything.
+        pass
 
 
 # D2: conservative caps for auto-inject
@@ -171,7 +208,9 @@ def emit(additional_context: str) -> NoReturn:
 UV_BIN = shutil.which("uv")
 
 
-def main() -> NoReturn:
+def _main_body() -> NoReturn:
+    """The real work. Wrapped by ``main()`` in a top-level catch so any
+    uncaught exception silent-fails to an empty inject + last-event log."""
     # Hooks receive JSON on stdin but we don't need it for cwd derivation
     try:
         _ = sys.stdin.read()
@@ -219,6 +258,35 @@ def main() -> NoReturn:
         emit("")
 
     emit((r.stdout or "").strip())
+
+
+def main() -> NoReturn:
+    """Top-level entry. Any uncaught exception falls through to an empty
+    inject + a breadcrumb on ~/.reflect/last-event.json so the status line
+    can show ⚠ without anything reaching the user's session."""
+    try:
+        _main_body()
+    except SystemExit:
+        # ``emit()`` and the inner code use sys.exit(0) for clean exits —
+        # let those through unchanged.
+        raise
+    except BaseException as exc:  # noqa: BLE001 — deliberately broadest catch
+        _write_last_event(
+            event="error",
+            kind=type(exc).__name__,
+            detail=str(exc) or traceback.format_exc(limit=2),
+        )
+        # MUST exit 0 with valid JSON. Don't even let json.dumps raise —
+        # use a literal so this last branch can never throw.
+        try:
+            sys.stdout.write(
+                '{"hookSpecificOutput":{"hookEventName":"SessionStart",'
+                '"additionalContext":""}}\n'
+            )
+            sys.stdout.flush()
+        except Exception:
+            pass
+        sys.exit(0)
 
 
 if __name__ == "__main__":
