@@ -20,23 +20,42 @@ Output goes to additionalContext so the new agent sees it as part of its
 initial context. The agent is responsible for archiving the queue once
 processed (instructions included in the surfaced text).
 
-Wire up in ~/.claude/settings.json:
+Wire up in the harness's hooks config:
+- Claude: ~/.claude/settings.json (hooks.SessionStart)
+- Codex:  ~/.codex/hooks.json    (hooks.SessionStart)
+
+Same JSON shape in both:
 {
   "hooks": {
     "SessionStart": [
       { "hooks": [
         { "type": "command",
-          "command": "uv run ~/.claude/skills/reflect/hooks/sessionstart_drain_reflections.py" }
+          "command": "uv run <HOME_TOOL_DIR>/skills/reflect/hooks/sessionstart_drain_reflections.py" }
       ] }
     ]
   }
 }
+where <HOME_TOOL_DIR> is ~/.claude or ~/.codex.
 """
 
 import json
 import os
 import sys
+import traceback
 from pathlib import Path
+
+
+# Shared silent-fail mechanics.
+_HOOK_NAME = "sessionstart_drain_reflections"
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]  # hooks/<this> → plugins/reflect/
+sys.path.insert(0, str(_PLUGIN_ROOT / "scripts"))
+try:
+    from silent_fail import write_last_event, forensics_log  # noqa: E402
+except ImportError:
+    def write_last_event(**kwargs):  # type: ignore[no-redef]
+        pass
+    def forensics_log(*args, **kwargs):  # type: ignore[no-redef]
+        pass
 
 
 def get_state_dir() -> Path:
@@ -44,7 +63,7 @@ def get_state_dir() -> Path:
     return Path(custom).expanduser() if custom else Path.home() / '.reflect'
 
 
-def main():
+def _main_body():
     queue_file = get_state_dir() / 'pending_reflections.jsonl'
 
     # No queue, no work — exit silently so SessionStart isn't noisy.
@@ -69,9 +88,10 @@ def main():
     lines = [
         f"## Pending auto-reflections ({len(entries)})",
         "",
-        "Previous Claude session(s) ended with a context compaction. Their transcripts "
-        "were queued for reflection but the actual learning capture didn't run yet "
-        "(hook scripts can't invoke an LLM).",
+        "Previous session(s) (Claude and/or Codex) ended with a context "
+        "compaction. Their transcripts were queued for reflection but the "
+        "actual learning capture didn't run yet (hook scripts can't "
+        "invoke an LLM).",
         "",
         "**Action:** For each transcript below, invoke the `/reflect` skill with the "
         "transcript path. Process them in order, then archive the queue.",
@@ -102,6 +122,36 @@ def main():
     }
     print(json.dumps(output))
     sys.exit(0)
+
+
+def main():
+    """Top-level entry. Any uncaught exception writes a breadcrumb to
+    ~/.reflect/last-event.json and exits 0 silently so SessionStart never
+    surfaces a traceback into the user's session.
+    """
+    try:
+        _main_body()
+    except SystemExit:
+        raise
+    except BaseException as exc:  # noqa: BLE001 — deliberately broadest catch
+        detail = str(exc) or traceback.format_exc(limit=2)
+        write_last_event(
+            hook_name=_HOOK_NAME,
+            event="error",
+            kind=type(exc).__name__,
+            detail=detail,
+        )
+        forensics_log(_HOOK_NAME, f"{type(exc).__name__}: {detail}")
+        # SessionStart must produce valid JSON or nothing; emit empty.
+        try:
+            sys.stdout.write(
+                '{"hookSpecificOutput":{"hookEventName":"SessionStart",'
+                '"additionalContext":""}}\n'
+            )
+            sys.stdout.flush()
+        except Exception:
+            pass
+        sys.exit(0)
 
 
 if __name__ == '__main__':

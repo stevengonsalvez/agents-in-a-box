@@ -35,7 +35,6 @@ import re
 import shutil
 import subprocess
 import sys
-import time
 import traceback
 from pathlib import Path
 from typing import NoReturn
@@ -44,35 +43,24 @@ from typing import NoReturn
 # --- Silent-fail event sink ----------------------------------------------
 #
 # Hooks MUST NOT raise into the user's session — a recall failure (graphrag
-# down, broken cwd, missing dep) is not the user's problem. On any uncaught
-# exception we still exit 0 with an empty additionalContext, but we leave a
-# breadcrumb at ~/.reflect/last-event.json so the harness's status line can
-# render a "⚠ recall failed" fragment without flooding stderr.
-#
-# Atomic write (tmp + rename) so a concurrent status-line reader never sees
-# a half-written file.
+# down, broken cwd, missing dep) is not the user's problem. The shared
+# helper in ``plugins/reflect/scripts/silent_fail.py`` handles the
+# breadcrumb writer + credential scrubber + forensics log; we just import
+# it. sys.path manipulation needed because uv-script mode doesn't see
+# sibling packages by default.
 
-LAST_EVENT_PATH = Path(
-    os.environ.get("REFLECT_STATE_DIR", str(Path.home() / ".reflect"))
-) / "last-event.json"
-
-
-def _write_last_event(event: str, kind: str, detail: str) -> None:
-    """Best-effort error breadcrumb for the status line. Never raises."""
-    try:
-        LAST_EVENT_PATH.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "event": event,            # "ok" | "error"
-            "hook": "session_start_recall",
-            "kind": kind,              # short error class, e.g. "OSError"
-            "detail": detail[:500],    # truncated message
-            "ts": time.time(),
-        }
-        tmp = LAST_EVENT_PATH.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(payload), encoding="utf-8")
-        tmp.replace(LAST_EVENT_PATH)
-    except Exception:
-        # If even the breadcrumb fails, we still must not surface anything.
+_HOOK_NAME = "session_start_recall"
+_PLUGIN_ROOT = Path(__file__).resolve().parents[3]  # skills/recall/hooks/<this> → plugins/reflect/
+sys.path.insert(0, str(_PLUGIN_ROOT / "scripts"))
+try:
+    from silent_fail import write_last_event, forensics_log  # noqa: E402
+except ImportError:
+    # Defensive fallback: if the shared helper is missing (broken install)
+    # we still must silent-fail. Define no-ops so the wrapper at the bottom
+    # of this file can't itself blow up.
+    def write_last_event(**kwargs):  # type: ignore[no-redef]
+        pass
+    def forensics_log(*args, **kwargs):  # type: ignore[no-redef]
         pass
 
 
@@ -271,11 +259,14 @@ def main() -> NoReturn:
         # let those through unchanged.
         raise
     except BaseException as exc:  # noqa: BLE001 — deliberately broadest catch
-        _write_last_event(
+        detail = str(exc) or traceback.format_exc(limit=2)
+        write_last_event(
+            hook_name=_HOOK_NAME,
             event="error",
             kind=type(exc).__name__,
-            detail=str(exc) or traceback.format_exc(limit=2),
+            detail=detail,
         )
+        forensics_log(_HOOK_NAME, f"{type(exc).__name__}: {detail}")
         # MUST exit 0 with valid JSON. Don't even let json.dumps raise —
         # use a literal so this last branch can never throw.
         try:
