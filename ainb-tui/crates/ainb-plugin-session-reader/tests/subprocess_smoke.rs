@@ -175,7 +175,11 @@ fn subprocess_init_publishes_snapshot_then_responds_ok() {
     );
 
     // 4) Drain outbound frames until we see the plugin/init response.
-    //    No snapshot/publish should arrive in this window.
+    //    No snapshot/publish should arrive in this window. Post-merge
+    //    session-reader subscribes to a SECOND topic
+    //    (`sessions.flush_cache_request`) after `refresh_request` —
+    //    reply to any additional subscribe requests so on_init can
+    //    proceed to the init response.
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut init_response: Option<Value> = None;
     while Instant::now() < deadline {
@@ -183,6 +187,22 @@ fn subprocess_init_publishes_snapshot_then_responds_ok() {
         if let Some(method) = frame.get("method").and_then(Value::as_str) {
             if method == methods::HOST_SNAPSHOT_PUBLISH {
                 panic!("plugin published during init — expected refresh-gated publish only");
+            }
+            if method == methods::HOST_SNAPSHOT_SUBSCRIBE {
+                // Reply to additional subscribe requests so on_init
+                // can finish even when the plugin subscribes to >1 topic.
+                let id = frame
+                    .get("id")
+                    .and_then(Value::as_i64)
+                    .expect("snapshot/subscribe should be a request with id");
+                write_frame(
+                    &mut stdin,
+                    &json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": SnapshotSubscribeResult {},
+                    }),
+                );
             }
             // ignore other notifications (logs, etc.)
         } else if frame.get("id").and_then(Value::as_i64) == Some(1) {
