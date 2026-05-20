@@ -11,6 +11,7 @@ use crate::cli::statusline_install::{InstallOutcome, StatuslineStatus, install_s
 use crate::credentials;
 use crate::models::live_window::Source as LiveSource;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::time::Instant;
 use tracing::info;
 
 // Layout configuration - sessions pane width as percentage of terminal width
@@ -23,7 +24,10 @@ pub enum AppEvent {
     /// identified by `plugin_id`. Phase 2c added this variant; the
     /// `usage_event_bridge` module decodes legacy `Usage*` variants through
     /// it pre-Phase-3 (when burndown is extracted into a real plugin).
-    Plugin { plugin_id: String, payload: Vec<u8> },
+    Plugin {
+        plugin_id: String,
+        payload: Vec<u8>,
+    },
     /// Navigate to a registered screen by id. Phase 2c added this variant to
     /// collapse the per-screen `GoTo*` variants behind one dispatch path —
     /// existing `GoTo*` variants are kept for now and translate through this
@@ -76,6 +80,10 @@ pub enum AppEvent {
         y: u16,
     },
     MouseDragging {
+        x: u16,
+        y: u16,
+    },
+    MouseMove {
         x: u16,
         y: u16,
     },
@@ -408,7 +416,23 @@ impl EventHandler {
     /// Handle mouse events and convert to appropriate app events
     pub fn handle_mouse_event(event: AppEvent, state: &mut AppState) -> Option<AppEvent> {
         match event {
-            AppEvent::MouseClick { x, y: _ } => {
+            AppEvent::MouseClick { x, y } => {
+                if state.current_screen == screen_ids::HOME && !state.help_visible {
+                    if state.home_screen_v2_state.begin_sidebar_resize(x, y) {
+                        return None;
+                    }
+
+                    if let Some(outcome) =
+                        state.home_screen_v2_state.click_sidebar_item_at(x, y, Instant::now())
+                    {
+                        if outcome.double_click {
+                            return Some(AppEvent::HomeScreenSidebarSelect);
+                        }
+                    }
+
+                    return None;
+                }
+
                 // Determine which pane was clicked based on terminal dimensions
                 // The layout splits at 40% for sessions, 60% for logs
                 let term_width = crossterm::terminal::size().unwrap_or((80, 24)).0;
@@ -444,7 +468,13 @@ impl EventHandler {
                     None
                 }
             }
-            AppEvent::MouseDragging { x: _, y: _ } => {
+            AppEvent::MouseDragging { x, y: _ } => {
+                if state.current_screen == screen_ids::HOME && !state.help_visible {
+                    let term_width = crossterm::terminal::size().unwrap_or((80, 24)).0;
+                    state.home_screen_v2_state.drag_sidebar_resize(x, term_width);
+                    return None;
+                }
+
                 // Update selection during drag
                 if state.focused_pane == crate::app::state::FocusedPane::LiveLogs {
                     // This will be handled in Phase 2
@@ -453,7 +483,19 @@ impl EventHandler {
                     None
                 }
             }
-            AppEvent::MouseDragEnd { x: _, y: _ } => {
+            AppEvent::MouseDragEnd { x, y } => {
+                if state.current_screen == screen_ids::HOME && !state.help_visible {
+                    state.home_screen_v2_state.update_sidebar_edge_hover(x, y);
+                    if state.home_screen_v2_state.finish_sidebar_resize() {
+                        let width = state.home_screen_v2_state.sidebar.preferred_width;
+                        state.app_config.ui_preferences.home_sidebar_width = Some(width);
+                        if let Err(e) = state.app_config.save() {
+                            tracing::warn!("Failed to persist HomeScreen sidebar width: {}", e);
+                        }
+                    }
+                    return None;
+                }
+
                 // Finalize text selection
                 if state.focused_pane == crate::app::state::FocusedPane::LiveLogs {
                     // This will be handled in Phase 2
@@ -461,6 +503,12 @@ impl EventHandler {
                 } else {
                     None
                 }
+            }
+            AppEvent::MouseMove { x, y } => {
+                if state.current_screen == screen_ids::HOME && !state.help_visible {
+                    state.home_screen_v2_state.update_sidebar_edge_hover(x, y);
+                }
+                None
             }
             _ => None,
         }
@@ -3188,8 +3236,10 @@ impl EventHandler {
             }
             AppEvent::GitViewBack => {
                 // Return to the previous view (where user was before opening Git view)
-                state.current_screen =
-                    state.previous_screen.take().unwrap_or(crate::app::screens::ids::SESSION_LIST.to_string());
+                state.current_screen = state
+                    .previous_screen
+                    .take()
+                    .unwrap_or(crate::app::screens::ids::SESSION_LIST.to_string());
                 state.git_view_state = None;
             }
             // Commit message input events
@@ -4816,7 +4866,8 @@ impl EventHandler {
             AppEvent::MouseClick { .. }
             | AppEvent::MouseDragStart { .. }
             | AppEvent::MouseDragEnd { .. }
-            | AppEvent::MouseDragging { .. } => {
+            | AppEvent::MouseDragging { .. }
+            | AppEvent::MouseMove { .. } => {
                 // These are processed by handle_mouse_event
             }
             // Phase 2c plugin-shaped variants. Today the in-core burndown
@@ -4901,10 +4952,7 @@ mod navigate_to_tests {
     fn navigate_to_known_screen_updates_current() {
         let mut state = fresh_state();
         let starting = state.current_screen.clone();
-        EventHandler::process_event(
-            AppEvent::NavigateTo(ids::ANALYTICS.to_string()),
-            &mut state,
-        );
+        EventHandler::process_event(AppEvent::NavigateTo(ids::ANALYTICS.to_string()), &mut state);
         assert_eq!(state.current_screen, ids::ANALYTICS);
         assert_eq!(state.previous_screen.as_deref(), Some(starting.as_str()));
     }

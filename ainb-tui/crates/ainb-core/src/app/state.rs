@@ -2689,6 +2689,8 @@ impl Default for AppState {
             warn!("Failed to load config, using defaults: {}", e);
             AppConfig::default()
         });
+        let mut home_screen_v2_state = HomeScreenV2State::default();
+        home_screen_v2_state.restore_sidebar_width(app_config.ui_preferences.home_sidebar_width);
 
         Self {
             workspaces: Vec::new(),
@@ -2751,7 +2753,7 @@ impl Default for AppState {
 
             // AINB 2.0: Home screen and agent selection
             home_screen_state: HomeScreenState::default(),
-            home_screen_v2_state: HomeScreenV2State::default(),
+            home_screen_v2_state,
             agent_selection_state: AgentSelectionState::default(),
             config_screen_state: ConfigScreenState::from_app_config(&app_config),
             auth_provider_popup_state: AuthProviderPopupState::from_app_config(&app_config),

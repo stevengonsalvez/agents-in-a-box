@@ -11,9 +11,10 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph},
 };
+use std::time::{Duration, Instant};
 
 use super::mascot::{MascotAnimation, render_mascot};
-use super::sidebar::{SidebarComponent, SidebarState};
+use super::sidebar::{SidebarComponent, SidebarItem, SidebarState};
 use super::welcome_panel::{WelcomePanelComponent, WelcomePanelState};
 use crate::models::Workspace;
 
@@ -26,6 +27,8 @@ const PANEL_BG: Color = Color::Rgb(30, 30, 40);
 const SOFT_WHITE: Color = Color::Rgb(220, 220, 230);
 const MUTED_GRAY: Color = Color::Rgb(120, 120, 140);
 const SUBDUED_BORDER: Color = Color::Rgb(60, 60, 80);
+const SIDEBAR_EDGE_HIT_SLOP: u16 = 1;
+pub const SIDEBAR_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(300);
 
 /// Focus area on the home screen
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +48,19 @@ pub struct HomeScreenV2State {
     pub welcome: WelcomePanelState,
     /// Mascot animation
     pub mascot: MascotAnimation,
+    /// Last sidebar area rendered by HomeScreen V2.
+    pub last_sidebar_rect: Option<Rect>,
+    /// Whether the mouse is currently over the sidebar resize edge.
+    pub sidebar_edge_hovered: bool,
+    /// Whether a sidebar resize drag is active.
+    pub sidebar_resize_active: bool,
+    last_sidebar_click: Option<(usize, Instant)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SidebarClickOutcome {
+    pub item: SidebarItem,
+    pub double_click: bool,
 }
 
 impl HomeScreenV2State {
@@ -54,6 +70,10 @@ impl HomeScreenV2State {
             sidebar: SidebarState::new(),
             welcome: WelcomePanelState::new(),
             mascot: MascotAnimation::new(),
+            last_sidebar_rect: None,
+            sidebar_edge_hovered: false,
+            sidebar_resize_active: false,
+            last_sidebar_click: None,
         };
         // Sidebar starts focused
         state.sidebar.is_focused = true;
@@ -86,12 +106,111 @@ impl HomeScreenV2State {
     pub fn set_active_sessions(&mut self, count: usize) {
         self.sidebar.active_sessions_count = count;
     }
+
+    pub fn restore_sidebar_width(&mut self, width: Option<u16>) {
+        if let Some(width) = width {
+            self.sidebar.preferred_width = width.max(super::sidebar::MIN_SIDEBAR_WIDTH);
+        }
+    }
+
+    pub fn rendered_sidebar_width(&self) -> Option<u16> {
+        self.last_sidebar_rect.map(|rect| rect.width)
+    }
+
+    fn remember_sidebar_rect(&mut self, rect: Rect) {
+        self.last_sidebar_rect = Some(rect);
+    }
+
+    pub fn sidebar_edge_highlighted(&self) -> bool {
+        self.sidebar_edge_hovered || self.sidebar_resize_active
+    }
+
+    pub fn update_sidebar_edge_hover(&mut self, x: u16, y: u16) {
+        self.sidebar_edge_hovered = self.is_on_sidebar_edge(x, y);
+    }
+
+    pub fn is_on_sidebar_edge(&self, x: u16, y: u16) -> bool {
+        let Some(rect) = self.last_sidebar_rect else {
+            return false;
+        };
+        if y < rect.y || y >= rect.y.saturating_add(rect.height) || rect.width == 0 {
+            return false;
+        }
+
+        let edge_x = rect.x.saturating_add(rect.width.saturating_sub(1));
+        x.abs_diff(edge_x) <= SIDEBAR_EDGE_HIT_SLOP
+    }
+
+    pub fn begin_sidebar_resize(&mut self, x: u16, y: u16) -> bool {
+        let on_edge = self.is_on_sidebar_edge(x, y);
+        self.sidebar_resize_active = on_edge;
+        self.sidebar_edge_hovered = on_edge;
+        on_edge
+    }
+
+    pub fn drag_sidebar_resize(&mut self, x: u16, terminal_width: u16) -> bool {
+        if !self.sidebar_resize_active {
+            return false;
+        }
+        let Some(rect) = self.last_sidebar_rect else {
+            return false;
+        };
+
+        let requested_width = x.saturating_sub(rect.x).saturating_add(1);
+        self.sidebar.set_preferred_width(requested_width, terminal_width);
+        true
+    }
+
+    pub fn finish_sidebar_resize(&mut self) -> bool {
+        let was_active = self.sidebar_resize_active;
+        self.sidebar_resize_active = false;
+        was_active
+    }
+
+    pub fn click_sidebar_item_at(
+        &mut self,
+        x: u16,
+        y: u16,
+        now: Instant,
+    ) -> Option<SidebarClickOutcome> {
+        let rect = self.last_sidebar_rect?;
+        if !rect_contains(rect, x, y) || self.is_on_sidebar_edge(x, y) {
+            return None;
+        }
+
+        let item_index = SidebarComponent::item_index_at(rect, y)?;
+        self.sidebar.select_index(item_index);
+        self.focus = HomeScreenFocus::Sidebar;
+        self.sidebar.is_focused = true;
+        self.welcome.is_focused = false;
+
+        let double_click = self
+            .last_sidebar_click
+            .map(|(last_index, last_at)| {
+                last_index == item_index
+                    && now.saturating_duration_since(last_at) <= SIDEBAR_DOUBLE_CLICK_WINDOW
+            })
+            .unwrap_or(false);
+        self.last_sidebar_click = Some((item_index, now));
+
+        Some(SidebarClickOutcome {
+            item: self.sidebar.selected_item(),
+            double_click,
+        })
+    }
 }
 
 impl Default for HomeScreenV2State {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn rect_contains(rect: Rect, x: u16, y: u16) -> bool {
+    x >= rect.x
+        && x < rect.x.saturating_add(rect.width)
+        && y >= rect.y
+        && y < rect.y.saturating_add(rect.height)
 }
 
 /// Layout mode based on terminal size
@@ -202,16 +321,23 @@ impl HomeScreenV2Component {
         self.render_header(frame, main_layout[0], state);
 
         // Horizontal split: sidebar | welcome panel
+        let sidebar_width = state.sidebar.effective_width(main_layout[1].width);
         let content_layout = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Length(26), // Sidebar (wider for shortcuts)
-                Constraint::Min(50),    // Welcome panel
+                Constraint::Length(sidebar_width), // Sidebar (mouse-resizable)
+                Constraint::Min(1),                // Welcome panel
             ])
             .split(main_layout[1]);
+        state.remember_sidebar_rect(content_layout[0]);
 
         // Render sidebar
-        self.sidebar.render(frame, content_layout[0], &state.sidebar);
+        self.sidebar.render_with_edge_highlight(
+            frame,
+            content_layout[0],
+            &state.sidebar,
+            state.sidebar_edge_highlighted(),
+        );
 
         // Render welcome panel (needs mutable state for scroll tracking)
         self.welcome_panel.render(frame, content_layout[1], &mut state.welcome);
@@ -273,15 +399,22 @@ impl HomeScreenV2Component {
         self.render_compact_header(frame, layout[0], state);
 
         // Horizontal split: sidebar | welcome
+        let sidebar_width = state.sidebar.effective_width(layout[1].width);
         let content_layout = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Length(24), // Sidebar
-                Constraint::Min(40),    // Welcome panel
+                Constraint::Length(sidebar_width), // Sidebar
+                Constraint::Min(1),                // Welcome panel
             ])
             .split(layout[1]);
+        state.remember_sidebar_rect(content_layout[0]);
 
-        self.sidebar.render(frame, content_layout[0], &state.sidebar);
+        self.sidebar.render_with_edge_highlight(
+            frame,
+            content_layout[0],
+            &state.sidebar,
+            state.sidebar_edge_highlighted(),
+        );
         self.welcome_panel.render(frame, content_layout[1], &mut state.welcome);
 
         self.render_recent_activity(frame, layout[2], workspaces);
@@ -312,8 +445,29 @@ impl HomeScreenV2Component {
 
         frame.render_widget(title, layout[0]);
 
-        // Render sidebar directly
-        self.sidebar.render(frame, layout[1], &state.sidebar);
+        let sidebar_width = state.sidebar.effective_width(layout[1].width);
+        let content_layout = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(sidebar_width), Constraint::Min(1)])
+            .split(layout[1]);
+        state.remember_sidebar_rect(content_layout[0]);
+
+        self.sidebar.render_with_edge_highlight(
+            frame,
+            content_layout[0],
+            &state.sidebar,
+            state.sidebar_edge_highlighted(),
+        );
+
+        if content_layout[1].width > 0 {
+            let selected = state.sidebar.selected_item();
+            let summary = Paragraph::new(Line::from(vec![
+                Span::styled(" ", Style::default()),
+                Span::styled(selected.label(), Style::default().fg(GOLD)),
+            ]))
+            .style(Style::default().bg(DARK_BG));
+            frame.render_widget(summary, content_layout[1]);
+        }
 
         self.render_help_bar(frame, layout[2], state);
     }
@@ -556,5 +710,91 @@ mod tests {
     fn test_default_focus() {
         let state = HomeScreenV2State::new();
         assert_eq!(state.focus, HomeScreenFocus::Sidebar);
+    }
+
+    #[test]
+    fn detects_sidebar_drag_start_band() {
+        let mut state = HomeScreenV2State::new();
+        state.remember_sidebar_rect(Rect::new(0, 4, 26, 20));
+
+        assert!(state.begin_sidebar_resize(24, 8));
+        assert!(state.sidebar_resize_active);
+        state.finish_sidebar_resize();
+
+        assert!(state.begin_sidebar_resize(25, 8));
+        state.finish_sidebar_resize();
+
+        assert!(state.begin_sidebar_resize(26, 8));
+        state.finish_sidebar_resize();
+
+        assert!(!state.begin_sidebar_resize(23, 8));
+        assert!(!state.sidebar_resize_active);
+    }
+
+    #[test]
+    fn drag_resize_updates_width_with_bounds() {
+        let mut state = HomeScreenV2State::new();
+        state.remember_sidebar_rect(Rect::new(0, 4, 26, 20));
+        assert!(state.begin_sidebar_resize(25, 8));
+        assert!(state.drag_sidebar_resize(44, 120));
+        assert_eq!(state.sidebar.preferred_width, 45);
+
+        assert!(state.drag_sidebar_resize(2, 120));
+        assert_eq!(
+            state.sidebar.preferred_width,
+            crate::components::sidebar::MIN_SIDEBAR_WIDTH
+        );
+    }
+
+    #[test]
+    fn sidebar_click_selects_then_double_click_navigates() {
+        let mut state = HomeScreenV2State::new();
+        state.remember_sidebar_rect(Rect::new(0, 4, 26, 30));
+        let now = Instant::now();
+
+        let first = state.click_sidebar_item_at(3, 10, now).unwrap();
+        assert_eq!(first.item, SidebarItem::Catalog);
+        assert!(!first.double_click);
+        assert_eq!(state.sidebar.selected_item(), SidebarItem::Catalog);
+
+        let second = state.click_sidebar_item_at(3, 10, now + SIDEBAR_DOUBLE_CLICK_WINDOW).unwrap();
+        assert_eq!(second.item, SidebarItem::Catalog);
+        assert!(second.double_click);
+    }
+
+    #[test]
+    fn slow_second_sidebar_click_is_not_double_click() {
+        let mut state = HomeScreenV2State::new();
+        state.remember_sidebar_rect(Rect::new(0, 4, 26, 30));
+        let now = Instant::now();
+
+        assert!(!state.click_sidebar_item_at(3, 10, now).unwrap().double_click);
+        assert!(
+            !state
+                .click_sidebar_item_at(
+                    3,
+                    10,
+                    now + SIDEBAR_DOUBLE_CLICK_WINDOW + Duration::from_millis(1)
+                )
+                .unwrap()
+                .double_click
+        );
+    }
+
+    #[test]
+    fn rendered_width_uses_sidebar_state() {
+        let component = HomeScreenV2Component::new();
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut state = HomeScreenV2State::new();
+        state.sidebar.set_preferred_width(40, 120);
+
+        terminal
+            .draw(|frame| {
+                component.render(frame, Rect::new(0, 0, 120, 40), &mut state, &[]);
+            })
+            .unwrap();
+
+        assert_eq!(state.rendered_sidebar_width(), Some(40));
     }
 }
