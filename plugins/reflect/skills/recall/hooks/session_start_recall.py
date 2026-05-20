@@ -35,8 +35,33 @@ import re
 import shutil
 import subprocess
 import sys
+import traceback
 from pathlib import Path
 from typing import NoReturn
+
+
+# --- Silent-fail event sink ----------------------------------------------
+#
+# Hooks MUST NOT raise into the user's session — a recall failure (graphrag
+# down, broken cwd, missing dep) is not the user's problem. The shared
+# helper in ``plugins/reflect/scripts/silent_fail.py`` handles the
+# breadcrumb writer + credential scrubber + forensics log; we just import
+# it. sys.path manipulation needed because uv-script mode doesn't see
+# sibling packages by default.
+
+_HOOK_NAME = "session_start_recall"
+_PLUGIN_ROOT = Path(__file__).resolve().parents[3]  # skills/recall/hooks/<this> → plugins/reflect/
+sys.path.insert(0, str(_PLUGIN_ROOT / "scripts"))
+try:
+    from silent_fail import write_last_event, forensics_log  # noqa: E402
+except ImportError:
+    # Defensive fallback: if the shared helper is missing (broken install)
+    # we still must silent-fail. Define no-ops so the wrapper at the bottom
+    # of this file can't itself blow up.
+    def write_last_event(**kwargs):  # type: ignore[no-redef]
+        pass
+    def forensics_log(*args, **kwargs):  # type: ignore[no-redef]
+        pass
 
 
 # D2: conservative caps for auto-inject
@@ -171,7 +196,9 @@ def emit(additional_context: str) -> NoReturn:
 UV_BIN = shutil.which("uv")
 
 
-def main() -> NoReturn:
+def _main_body() -> NoReturn:
+    """The real work. Wrapped by ``main()`` in a top-level catch so any
+    uncaught exception silent-fails to an empty inject + last-event log."""
     # Hooks receive JSON on stdin but we don't need it for cwd derivation
     try:
         _ = sys.stdin.read()
@@ -219,6 +246,38 @@ def main() -> NoReturn:
         emit("")
 
     emit((r.stdout or "").strip())
+
+
+def main() -> NoReturn:
+    """Top-level entry. Any uncaught exception falls through to an empty
+    inject + a breadcrumb on ~/.reflect/last-event.json so the status line
+    can show ⚠ without anything reaching the user's session."""
+    try:
+        _main_body()
+    except SystemExit:
+        # ``emit()`` and the inner code use sys.exit(0) for clean exits —
+        # let those through unchanged.
+        raise
+    except BaseException as exc:  # noqa: BLE001 — deliberately broadest catch
+        detail = str(exc) or traceback.format_exc(limit=2)
+        write_last_event(
+            hook_name=_HOOK_NAME,
+            event="error",
+            kind=type(exc).__name__,
+            detail=detail,
+        )
+        forensics_log(_HOOK_NAME, f"{type(exc).__name__}: {detail}")
+        # MUST exit 0 with valid JSON. Don't even let json.dumps raise —
+        # use a literal so this last branch can never throw.
+        try:
+            sys.stdout.write(
+                '{"hookSpecificOutput":{"hookEventName":"SessionStart",'
+                '"additionalContext":""}}\n'
+            )
+            sys.stdout.flush()
+        except Exception:
+            pass
+        sys.exit(0)
 
 
 if __name__ == "__main__":

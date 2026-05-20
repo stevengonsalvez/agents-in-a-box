@@ -37,6 +37,7 @@ import argparse
 import json
 import os
 import sys
+import traceback
 from datetime import datetime
 from pathlib import Path
 
@@ -44,6 +45,20 @@ try:
     import yaml
 except ImportError:
     yaml = None
+
+
+# Shared silent-fail mechanics — breadcrumb writer, secret scrubber,
+# forensics log. See plugins/reflect/scripts/silent_fail.py.
+_HOOK_NAME = "precompact_reflect"
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]  # hooks/<this> → plugins/reflect/
+sys.path.insert(0, str(_PLUGIN_ROOT / "scripts"))
+try:
+    from silent_fail import write_last_event, forensics_log  # noqa: E402
+except ImportError:
+    def write_last_event(**kwargs):  # type: ignore[no-redef]
+        pass
+    def forensics_log(*args, **kwargs):  # type: ignore[no-redef]
+        pass
 
 
 def get_state_dir() -> Path:
@@ -71,20 +86,17 @@ def is_auto_reflect_enabled() -> bool:
 
 
 def log_precompact_event(input_data: dict, mode: str):
-    """Log the PreCompact event for debugging."""
-    log_dir = Path.home() / '.claude' / 'logs'
-    log_dir.mkdir(parents=True, exist_ok=True)
+    """Log the PreCompact event for debugging.
 
-    log_file = log_dir / 'reflect_precompact.log'
-
-    timestamp = datetime.now().isoformat()
-    session_id = input_data.get('session_id', 'unknown')[:8]
+    Lands at ``$REFLECT_STATE_DIR/logs/reflect_precompact.log`` (defaults
+    to ``~/.reflect/logs/``) — harness-agnostic, so codex-fired
+    invocations log to the same place as claude-fired ones. Previously
+    this hardcoded ``~/.claude/logs/`` which dropped codex logs into a
+    Claude-flavoured directory the user wouldn't think to look in.
+    """
+    session_id = str(input_data.get('session_id', 'unknown'))[:8]
     trigger = input_data.get('trigger', 'unknown')
-
-    log_entry = f"[{timestamp}] session={session_id} trigger={trigger} mode={mode}\n"
-
-    with open(log_file, 'a') as f:
-        f.write(log_entry)
+    forensics_log(_HOOK_NAME, f"session={session_id} trigger={trigger} mode={mode}")
 
 
 def generate_reminder_context(trigger: str) -> dict:
@@ -162,7 +174,7 @@ def run_reflection_analysis(input_data: dict) -> dict:
     }
 
 
-def main():
+def _main_body():
     parser = argparse.ArgumentParser(description='PreCompact Reflect Hook')
     parser.add_argument('--remind', action='store_true',
                        help='Add reminder to run /reflect')
@@ -218,6 +230,31 @@ def main():
             print("Auto-reflect not enabled, adding reminder")
         output = generate_reminder_context(trigger)
         print(json.dumps(output))
+        sys.exit(0)
+
+
+def main():
+    """Top-level entry. Any uncaught exception writes a breadcrumb to
+    ~/.reflect/last-event.json and exits 0 silently so PreCompact never
+    surfaces a traceback into the user's session.
+
+    SystemExit is re-raised so intentional clean exits (sys.exit(0) from
+    the body) propagate unchanged. We don't catch argparse's SystemExit(2)
+    on bad args either — that's a config bug worth surfacing.
+    """
+    try:
+        _main_body()
+    except SystemExit:
+        raise
+    except BaseException as exc:  # noqa: BLE001 — deliberately broadest catch
+        detail = str(exc) or traceback.format_exc(limit=2)
+        write_last_event(
+            hook_name=_HOOK_NAME,
+            event="error",
+            kind=type(exc).__name__,
+            detail=detail,
+        )
+        forensics_log(_HOOK_NAME, f"{type(exc).__name__}: {detail}")
         sys.exit(0)
 
 
