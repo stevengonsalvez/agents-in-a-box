@@ -129,9 +129,7 @@ impl SessionReader {
         if let Some(cache) = self.cache.as_mut() {
             match cache.clear() {
                 Ok(()) => {
-                    let _ = host
-                        .log_info("flush_cache: persistent cache wiped via clear()")
-                        .await;
+                    let _ = host.log_info("flush_cache: persistent cache wiped via clear()").await;
                     return;
                 }
                 Err(err) => {
@@ -159,9 +157,7 @@ impl SessionReader {
                         .await;
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                    let _ = host
-                        .log_info("flush_cache: cache file already absent")
-                        .await;
+                    let _ = host.log_info("flush_cache: cache file already absent").await;
                 }
                 Err(err) => {
                     let _ = host
@@ -466,8 +462,7 @@ pub(crate) fn chunk_usage_data(
             }
             since_probe += 1;
 
-            let all_empty =
-                calls_q.is_empty() && sessions_q.is_empty() && shell_q.is_empty();
+            let all_empty = calls_q.is_empty() && sessions_q.is_empty() && shell_q.is_empty();
             // Probe when we've accumulated STEP items, or when every
             // queue just drained (so we don't miss tiny final overshoots).
             if since_probe < CHUNKER_PROBE_STEP && !all_empty {
@@ -483,9 +478,8 @@ pub(crate) fn chunk_usage_data(
                 is_final: all_empty,
                 data: chunk_data.clone(),
             };
-            let probe_size = rmp_serde::to_vec_named(&probe_event)
-                .map(|b| b.len())
-                .unwrap_or(target_bytes);
+            let probe_size =
+                rmp_serde::to_vec_named(&probe_event).map(|b| b.len()).unwrap_or(target_bytes);
 
             // Cut on probe overshoot, but only if the chunk has >1 item
             // total — single-item chunks always ship so a giant outlier
@@ -506,15 +500,12 @@ pub(crate) fn chunk_usage_data(
                     // Choose the spill source: whichever tail vec
                     // currently has the most items. Re-evaluate every
                     // iteration because vecs shrink.
-                    let from = if chunk_data.calls.len()
-                        >= chunk_data.sessions.len()
-                        && chunk_data.calls.len()
-                            >= chunk_data.shell_commands.len()
+                    let from = if chunk_data.calls.len() >= chunk_data.sessions.len()
+                        && chunk_data.calls.len() >= chunk_data.shell_commands.len()
                         && !chunk_data.calls.is_empty()
                     {
                         TailQueue::Calls
-                    } else if chunk_data.sessions.len()
-                        >= chunk_data.shell_commands.len()
+                    } else if chunk_data.sessions.len() >= chunk_data.shell_commands.len()
                         && !chunk_data.sessions.is_empty()
                     {
                         TailQueue::Sessions
@@ -561,14 +552,11 @@ pub(crate) fn chunk_usage_data(
                         published_ns,
                         partial,
                         chunk_index,
-                        is_final: calls_q.is_empty()
-                            && sessions_q.is_empty()
-                            && shell_q.is_empty(),
+                        is_final: calls_q.is_empty() && sessions_q.is_empty() && shell_q.is_empty(),
                         data: chunk_data.clone(),
                     };
-                    let probe_after_spill = rmp_serde::to_vec_named(&probe)
-                        .map(|b| b.len())
-                        .unwrap_or(target_bytes);
+                    let probe_after_spill =
+                        rmp_serde::to_vec_named(&probe).map(|b| b.len()).unwrap_or(target_bytes);
                     if probe_after_spill < target_bytes {
                         break;
                     }
@@ -577,8 +565,7 @@ pub(crate) fn chunk_usage_data(
             }
         }
 
-        let is_final =
-            calls_q.is_empty() && sessions_q.is_empty() && shell_q.is_empty();
+        let is_final = calls_q.is_empty() && sessions_q.is_empty() && shell_q.is_empty();
         out.push(UsageDataEvent {
             version: WIRE_VERSION,
             published_ns,
@@ -618,9 +605,7 @@ impl Plugin for SessionReader {
         // Also subscribe to flush-cache so burndown's `F` key can wipe
         // the persistent cache and republish from scratch.
         host.snapshot_subscribe(TOPIC_FLUSH_CACHE_REQUEST).await?;
-        let _ = host
-            .log_info("on_init: subscribed, idle until refresh_request")
-            .await;
+        let _ = host.log_info("on_init: subscribed, idle until refresh_request").await;
         Ok(())
     }
 
@@ -759,7 +744,10 @@ mod tests {
         // Chunk 0: aggregates, no tail items.
         assert_eq!(chunks[0].chunk_index, 0);
         assert!(!chunks[0].is_final);
-        assert!(chunks[0].data.calls.is_empty(), "chunk 0 has no calls in v4");
+        assert!(
+            chunks[0].data.calls.is_empty(),
+            "chunk 0 has no calls in v4"
+        );
         assert!(chunks[0].data.sessions.is_empty());
         assert!(chunks[0].data.shell_commands.is_empty());
         assert_eq!(chunks[0].data.projects.len(), 1, "aggregates ride chunk 0");
@@ -770,7 +758,10 @@ mod tests {
         assert_eq!(chunks[1].chunk_index, 1);
         assert!(chunks[1].is_final);
         assert_eq!(chunks[1].data.calls.len(), 10);
-        assert!(chunks[1].data.projects.is_empty(), "no aggregates in tail chunks");
+        assert!(
+            chunks[1].data.projects.is_empty(),
+            "no aggregates in tail chunks"
+        );
     }
 
     #[test]
@@ -822,7 +813,10 @@ mod tests {
         assert!(!chunks[0].is_final);
         assert_eq!(chunks[0].data.projects.len(), 1);
         assert_eq!(chunks[0].data.activities.len(), 1);
-        assert!(chunks[0].data.calls.is_empty(), "v4: tails live in follow-on chunks");
+        assert!(
+            chunks[0].data.calls.is_empty(),
+            "v4: tails live in follow-on chunks"
+        );
 
         // Chunks 1+ carry only tail vecs (no aggregates).
         assert!(chunks[1].data.projects.is_empty());
@@ -941,7 +935,9 @@ mod tests {
         let mut data = fake_data(0);
         data.shell_commands = (0..500)
             .map(|i| NamedUsage {
-                name: format!("git log --oneline --all --decorate --since=\"30 days ago\" --grep=fix_{i:05}"),
+                name: format!(
+                    "git log --oneline --all --decorate --since=\"30 days ago\" --grep=fix_{i:05}"
+                ),
                 calls: 1,
             })
             .collect();

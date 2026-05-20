@@ -1219,11 +1219,7 @@ fn render_loading(buf: &mut Buffer, area: Rect) {
 /// so the layout doesn't jitter between the two skeleton variants. The
 /// gauge area is only allocated when total > 0; otherwise the panel is
 /// unchanged from the legacy single-line skeleton.
-pub(crate) fn render_scan_progress(
-    buf: &mut Buffer,
-    area: Rect,
-    progress: &ScanProgressEvent,
-) {
+pub(crate) fn render_scan_progress(buf: &mut Buffer, area: Rect, progress: &ScanProgressEvent) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -1279,12 +1275,7 @@ pub(crate) fn render_scan_progress(
     // explicit instead of relying on the clamp + clippy lint allow.
     let pct: u16 = u16::try_from((ratio * 100.0).round() as i32).unwrap_or(100);
     let gauge = Gauge::default()
-        .gauge_style(
-            Style::default()
-                .fg(SELECTION_GREEN)
-                .bg(PANEL_BG)
-                .add_modifier(Modifier::BOLD),
-        )
+        .gauge_style(Style::default().fg(SELECTION_GREEN).bg(PANEL_BG).add_modifier(Modifier::BOLD))
         .label(format!(
             "{pct:>3}% ({}/{})",
             progress.scanned, progress.total
@@ -5363,12 +5354,10 @@ mod scan_progress_tests {
         render_scan_progress(&mut buf, area, &progress(50, 100, "alpha"));
 
         // Row 1 = headline. Row 2 = gauge.
-        let headline_row: String = (0..area.width)
-            .map(|x| buf.get(x, 1).symbol().to_string())
-            .collect();
-        let gauge_row: String = (0..area.width)
-            .map(|x| buf.get(x, 2).symbol().to_string())
-            .collect();
+        let headline_row: String =
+            (0..area.width).map(|x| buf.get(x, 1).symbol().to_string()).collect();
+        let gauge_row: String =
+            (0..area.width).map(|x| buf.get(x, 2).symbol().to_string()).collect();
         assert!(
             headline_row.contains("Scanning sessions: 50/100"),
             "headline rendered on row 1: {headline_row:?}"
@@ -5394,9 +5383,7 @@ mod scan_progress_tests {
 
         // Row 1 should have the headline. Row 2 should be empty (no
         // gauge), filled with spaces / default cells.
-        let row2: String = (0..area.width)
-            .map(|x| buf.get(x, 2).symbol().to_string())
-            .collect();
+        let row2: String = (0..area.width).map(|x| buf.get(x, 2).symbol().to_string()).collect();
         assert!(
             !row2.contains('%'),
             "no gauge row when total=0: row2 = {row2:?}"
@@ -5416,9 +5403,8 @@ mod scan_progress_tests {
         };
         let mut buf = Buffer::empty(area);
         render_scan_progress(&mut buf, area, &progress(120, 100, "alpha"));
-        let gauge_row: String = (0..area.width)
-            .map(|x| buf.get(x, 2).symbol().to_string())
-            .collect();
+        let gauge_row: String =
+            (0..area.width).map(|x| buf.get(x, 2).symbol().to_string()).collect();
         assert!(
             gauge_row.contains("100%"),
             "overshoot clamps to 100%: {gauge_row:?}"

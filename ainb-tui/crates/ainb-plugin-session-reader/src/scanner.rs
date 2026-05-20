@@ -240,14 +240,8 @@ pub fn scan_with_cache_and_progress(
     // Pre-walk: count the files the progress-aware parsers will visit
     // so the UI can render an `N/M` ratio. Each branch returns 0 if the
     // root is None or unreadable — same semantics as the parse path.
-    let claude_files = roots
-        .claude_projects
-        .as_deref()
-        .map_or(0, count_jsonl_in_two_level_tree);
-    let codex_files = roots
-        .codex_sessions
-        .as_deref()
-        .map_or(0, count_jsonl_recursive);
+    let claude_files = roots.claude_projects.as_deref().map_or(0, count_jsonl_in_two_level_tree);
+    let codex_files = roots.codex_sessions.as_deref().map_or(0, count_jsonl_recursive);
     let total = claude_files.saturating_add(codex_files);
     if total > 0 {
         // Saturate at u32::MAX — unlikely in practice (would require
@@ -297,12 +291,7 @@ fn count_jsonl_in_two_level_tree(root: &Path) -> usize {
             continue;
         };
         for session_entry in session_entries.flatten() {
-            if session_entry
-                .path()
-                .extension()
-                .and_then(|s| s.to_str())
-                == Some("jsonl")
-            {
+            if session_entry.path().extension().and_then(|s| s.to_str()) == Some("jsonl") {
                 count = count.saturating_add(1);
             }
         }
@@ -326,9 +315,7 @@ fn count_jsonl_recursive(root: &Path) -> usize {
             let Ok(ft) = entry.file_type() else { continue };
             if ft.is_dir() {
                 stack.push(p);
-            } else if ft.is_file()
-                && p.extension().and_then(|s| s.to_str()) == Some("jsonl")
-            {
+            } else if ft.is_file() && p.extension().and_then(|s| s.to_str()) == Some("jsonl") {
                 count = count.saturating_add(1);
             }
         }

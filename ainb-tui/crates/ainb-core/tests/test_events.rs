@@ -46,19 +46,16 @@ fn test_navigation_key_events() {
     // navigation is on arrow keys (Down/Up/Left/Right) per the modern
     // ainb keymap. Verify the arrow-key contract instead; the hjkl
     // semantics were removed when the home screen was overhauled.
-    let down_event =
-        EventHandler::handle_key_event(create_key_event(KeyCode::Down), &mut state);
+    let down_event = EventHandler::handle_key_event(create_key_event(KeyCode::Down), &mut state);
     assert!(down_event.is_some());
 
     let up_event = EventHandler::handle_key_event(create_key_event(KeyCode::Up), &mut state);
     assert!(up_event.is_some());
 
-    let left_event =
-        EventHandler::handle_key_event(create_key_event(KeyCode::Left), &mut state);
+    let left_event = EventHandler::handle_key_event(create_key_event(KeyCode::Left), &mut state);
     assert!(left_event.is_some());
 
-    let right_event =
-        EventHandler::handle_key_event(create_key_event(KeyCode::Right), &mut state);
+    let right_event = EventHandler::handle_key_event(create_key_event(KeyCode::Right), &mut state);
     assert!(right_event.is_some());
 }
 
@@ -94,9 +91,7 @@ async fn test_n_key_triggers_new_session() {
     // specific variant.
     match state.pending_async_action {
         Some(AsyncAction::NewSessionNormal) | Some(AsyncAction::NewSessionWithRepoInput) => {}
-        ref other => panic!(
-            "Expected NewSession* async action, got: {other:?}"
-        ),
+        ref other => panic!("Expected NewSession* async action, got: {other:?}"),
     }
 
     // Process the async action to complete the flow

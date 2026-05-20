@@ -619,20 +619,16 @@ impl SessionRecoveryState {
         let size_mb = if skip_du {
             None
         } else {
-            Command::new("du")
-                .args(["-sm", &path_str])
-                .output()
-                .ok()
-                .and_then(|o| {
-                    if o.status.success() {
-                        String::from_utf8_lossy(&o.stdout)
-                            .split_whitespace()
-                            .next()
-                            .and_then(|s| s.parse().ok())
-                    } else {
-                        None
-                    }
-                })
+            Command::new("du").args(["-sm", &path_str]).output().ok().and_then(|o| {
+                if o.status.success() {
+                    String::from_utf8_lossy(&o.stdout)
+                        .split_whitespace()
+                        .next()
+                        .and_then(|s| s.parse().ok())
+                } else {
+                    None
+                }
+            })
         };
 
         // Calculate time ago from mtime
