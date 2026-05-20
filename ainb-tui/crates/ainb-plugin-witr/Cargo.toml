@@ -1,0 +1,30 @@
+[package]
+name = "ainb-plugin-witr"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Process causality tracing — wraps github.com/pranshuparmar/witr as a native ainb plugin (ABI v2)"
+
+[lib]
+name = "ainb_plugin_witr"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ainb-plugin-witr"
+path = "src/main.rs"
+
+[dependencies]
+ainb-plugin-sdk-rust = { path = "../ainb-plugin-sdk-rust" }
+
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+async-trait = "0.1"
+
+[dev-dependencies]
+toml = { workspace = true }
+ainb-plugin-protocol = { path = "../ainb-plugin-protocol" }
