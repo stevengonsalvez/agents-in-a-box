@@ -206,31 +206,35 @@ def _main_body():
     # Log the event
     log_precompact_event(input_data, mode)
 
-    # Handle based on mode
+    # ── stdout protocol ───────────────────────────────────────────────────
+    # PreCompact is a pure side-effect hook in both harnesses:
+    #   * The transcript is about to be compacted — anything we inject as
+    #     additionalContext gets compacted immediately, so it's pointless.
+    #   * Codex 0.131 does NOT define ``PreCompactHookSpecificOutputWire``
+    #     in its schema. Emitting ``{"hookSpecificOutput":{...}}`` for
+    #     PreCompact triggers an "invalid PreCompact hook JSON output"
+    #     error in codex (Claude tolerates it, but it's noise).
+    #
+    # So: regardless of mode, we just enqueue (run_reflection_analysis does
+    # the file I/O for its side-effect) and exit 0 with NO stdout output.
+    # Verbose chatter goes to stderr only — never pollute the protocol
+    # channel.
+    if args.verbose:
+        print(f"[precompact_reflect] mode={mode} trigger={trigger}", file=sys.stderr)
+
     if mode == 'log-only':
-        if args.verbose:
-            print(f"Logged PreCompact event (trigger={trigger})")
         sys.exit(0)
 
-    elif mode == 'auto' and is_auto_reflect_enabled():
-        # Run automatic reflection
-        output = run_reflection_analysis(input_data)
-        print(json.dumps(output))
-        sys.exit(0)
+    # 'auto' or 'remind' — both enqueue for the next-session drainer.
+    # We deliberately ignore the dict return value: the queue is the
+    # canonical side-effect; the dict was only useful when we were
+    # injecting additionalContext (which we no longer do).
+    if mode == 'auto' and is_auto_reflect_enabled():
+        run_reflection_analysis(input_data)
+    # 'remind' mode and the "auto but disabled" fallback are no-ops on
+    # disk now — the drainer surfaces queued entries on its own.
 
-    elif mode == 'remind':
-        # Just add a reminder
-        output = generate_reminder_context(trigger)
-        print(json.dumps(output))
-        sys.exit(0)
-
-    else:
-        # Auto mode but not enabled, just remind
-        if args.verbose:
-            print("Auto-reflect not enabled, adding reminder")
-        output = generate_reminder_context(trigger)
-        print(json.dumps(output))
-        sys.exit(0)
+    sys.exit(0)
 
 
 def main():
