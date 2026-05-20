@@ -331,6 +331,44 @@ def test_forensics_log_scrubs_secrets(tmp_path, monkeypatch):
     assert "***REDACTED***" in contents
 
 
+def test_precompact_emits_no_stdout_protocol_pollution(tmp_path):
+    """Regression for codex 'invalid PreCompact hook JSON output' error.
+
+    Codex 0.131 doesn't define PreCompactHookSpecificOutputWire in its
+    schema — any ``hookSpecificOutput`` envelope emitted from PreCompact
+    triggers an "invalid JSON output" rejection. PreCompact is now a pure
+    side-effect hook (enqueue only); stdout MUST be empty regardless of
+    mode/verbose/env flags.
+
+    Also covers the earlier bug where ``--verbose`` printed plaintext
+    chatter to stdout BEFORE the JSON, producing two-line output that
+    codex couldn't parse as a single JSON object.
+    """
+    test_cases = [
+        # (env, args, stdin, label)
+        ({}, ["--auto", "--verbose"], '{"trigger":"auto","transcript_path":"/tmp/x"}', "auto+verbose+enabled"),
+        ({"REFLECT_AUTO_REFLECT": "0"}, ["--auto", "--verbose"], '{"trigger":"auto","transcript_path":"/tmp/x"}', "auto+verbose+disabled"),
+        ({}, ["--auto"], '{"trigger":"auto","transcript_path":"/tmp/x"}', "auto only"),
+        ({}, ["--remind", "--verbose"], '{"trigger":"manual"}', "remind+verbose"),
+        ({}, ["--log-only", "--verbose"], '{"trigger":"auto"}', "log-only+verbose"),
+    ]
+    for env_extra, args, stdin, label in test_cases:
+        result = subprocess.run(
+            [sys.executable, str(PRECOMPACT_HOOK), *args],
+            input=stdin,
+            capture_output=True,
+            text=True,
+            env={**os.environ, "REFLECT_STATE_DIR": str(tmp_path), **env_extra},
+            timeout=20,
+        )
+        assert result.returncode == 0, f"[{label}] exit={result.returncode}"
+        assert result.stdout == "", (
+            f"[{label}] PreCompact must emit NO stdout (would break codex "
+            f"schema validation). Got: {result.stdout!r}"
+        )
+        # Verbose chatter, if any, lives on stderr — that's allowed.
+
+
 def test_precompact_log_path_is_harness_neutral(tmp_path):
     """End-to-end: run precompact_reflect.py with --log-only and confirm
     the log lands under $REFLECT_STATE_DIR/logs/, NOT ~/.claude/logs/.
