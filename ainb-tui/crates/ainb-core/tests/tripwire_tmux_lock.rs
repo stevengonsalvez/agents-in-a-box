@@ -67,9 +67,7 @@ impl TmuxSerialLock {
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                     if let Some(holder) = read_holder_pid(&path) {
                         if !pid_alive(holder) {
-                            eprintln!(
-                                "TmuxSerialLock: stealing stale lock from dead PID {holder}"
-                            );
+                            eprintln!("TmuxSerialLock: stealing stale lock from dead PID {holder}");
                             let _ = std::fs::remove_file(&path);
                             continue;
                         }

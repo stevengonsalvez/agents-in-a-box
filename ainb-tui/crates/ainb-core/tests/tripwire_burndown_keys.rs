@@ -153,12 +153,7 @@ where
 /// elapses. Re-presses every ~5s — a single send-key can be dropped
 /// under heavy CPU contention (30+ test binaries fighting for the
 /// scheduler) before the host's event loop drains the input queue.
-fn press_until<F>(
-    session: &str,
-    key: &str,
-    total: Duration,
-    mut ok: F,
-) -> Option<String>
+fn press_until<F>(session: &str, key: &str, total: Duration, mut ok: F) -> Option<String>
 where
     F: FnMut(&str) -> bool,
 {
@@ -320,7 +315,7 @@ fn burndown_interactive_keys_change_render() {
     // publishes the first usage_data chunk. press_until re-sends `i`
     // every ~5s in case the first keypress was dropped during CPU
     // contention.
-    let initial = press_until(&session, "i", Duration::from_secs(90), |c| {
+    let initial = press_until(&session, "i", Duration::from_secs(120), |c| {
         c.contains("Usage Analytics")
             && !c.contains("Waiting for session-reader plugin")
             && c.contains('$')

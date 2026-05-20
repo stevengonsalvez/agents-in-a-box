@@ -130,12 +130,7 @@ fn send_key(session: &str, key: &str) {
 /// elapses. Re-presses every ~5s — a single send-key can be dropped
 /// under heavy CPU contention (30+ test binaries fighting for the
 /// scheduler) before the host's event loop drains the input queue.
-fn press_until<F>(
-    session: &str,
-    key: &str,
-    total: Duration,
-    mut ok: F,
-) -> Option<String>
+fn press_until<F>(session: &str, key: &str, total: Duration, mut ok: F) -> Option<String>
 where
     F: FnMut(&str) -> bool,
 {
@@ -230,7 +225,7 @@ fn tui_renders_real_analytics_data_after_pressing_i() {
     // Use press_until so a single dropped send-key (heavy L1 ci
     // contention drops the host's first read of the input queue) is
     // recovered by a re-press every ~5s.
-    let post_cap = press_until(&session, "i", Duration::from_secs(90), |c| {
+    let post_cap = press_until(&session, "i", Duration::from_secs(120), |c| {
         let has_real_marker = c.contains("Total Calls")
             || c.contains("Total Cost")
             || c.contains("$0.")

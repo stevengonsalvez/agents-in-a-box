@@ -140,12 +140,7 @@ fn send_key(session: &str, key: &str) {
 /// under heavy CPU contention (30+ test binaries fighting for the
 /// scheduler) before the host's event loop drains the input queue.
 /// Solo runs never see this; full L1 ci sees it routinely.
-fn press_until<F>(
-    session: &str,
-    key: &str,
-    total: Duration,
-    mut ok: F,
-) -> Option<String>
+fn press_until<F>(session: &str, key: &str, total: Duration, mut ok: F) -> Option<String>
 where
     F: FnMut(&str) -> bool,
 {
@@ -288,7 +283,7 @@ fn fresh_pivot_badge_appears_on_recompute_and_clears_on_next_render() {
     // does not corrupt state: from HomeScreen `i` navigates to stats;
     // from the stats screen the burndown plugin owns `i` and either
     // ignores it or treats it as a chip filter (idempotent on data).
-    let initial = press_until(&session, "i", Duration::from_secs(90), |c| {
+    let initial = press_until(&session, "i", Duration::from_secs(120), |c| {
         c.contains("Usage Analytics")
             && !c.contains("Waiting for session-reader plugin")
             && c.contains('$')

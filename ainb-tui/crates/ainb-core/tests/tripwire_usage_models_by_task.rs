@@ -85,7 +85,6 @@ fn run_models(plugin_root: &Path, home: &Path, args: &[&str]) -> std::process::O
 }
 
 #[test]
-#[ignore = "intermittent under L1 ci contention — session-reader plugin times out publishing usage_data snapshot. Same class as the #[ignore]'d send_key_forwards_handle_key_notification in plugin-runtime/tests/fixture_e2e.rs: subprocess plugin publishes a snapshot but the host's store doesn't index it under load. Tests pass solo in <2s. Out of scope for bsp-tiling goal; needs plugin-runtime snapshot-routing fix."]
 fn usage_models_flat_rollup_renders_in_each_format() {
     let _guard = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     let _xlock = tripwire_tmux_lock::TmuxSerialLock::acquire();
@@ -134,7 +133,6 @@ fn usage_models_flat_rollup_renders_in_each_format() {
 }
 
 #[test]
-#[ignore = "intermittent under L1 ci contention — session-reader plugin times out publishing usage_data snapshot. Same class as the #[ignore]'d send_key_forwards_handle_key_notification in plugin-runtime/tests/fixture_e2e.rs: subprocess plugin publishes a snapshot but the host's store doesn't index it under load. Tests pass solo in <2s. Out of scope for bsp-tiling goal; needs plugin-runtime snapshot-routing fix."]
 fn usage_models_by_task_matrix_renders_in_each_format() {
     let _guard = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     let _xlock = tripwire_tmux_lock::TmuxSerialLock::acquire();
@@ -213,7 +211,6 @@ fn usage_models_by_task_matrix_renders_in_each_format() {
 /// All three new provider variants accept on the CLI surface — the
 /// scaffolds return empty rollups, but clap must not reject the flag.
 #[test]
-#[ignore = "intermittent under L1 ci contention — session-reader plugin times out publishing usage_data snapshot. Same class as the #[ignore]'d send_key_forwards_handle_key_notification in plugin-runtime/tests/fixture_e2e.rs: subprocess plugin publishes a snapshot but the host's store doesn't index it under load. Tests pass solo in <2s. Out of scope for bsp-tiling goal; needs plugin-runtime snapshot-routing fix."]
 fn usage_report_accepts_cursor_copilot_gemini_providers() {
     let _guard = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     let _xlock = tripwire_tmux_lock::TmuxSerialLock::acquire();

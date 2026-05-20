@@ -144,12 +144,7 @@ fn send_key(session: &str, key: &str) {
 /// elapses. Re-presses every ~5s — a single send-key can be dropped
 /// under heavy CPU contention (30+ test binaries fighting for the
 /// scheduler) before the host's event loop drains the input queue.
-fn press_until<F>(
-    session: &str,
-    key: &str,
-    total: Duration,
-    mut ok: F,
-) -> Option<String>
+fn press_until<F>(session: &str, key: &str, total: Duration, mut ok: F) -> Option<String>
 where
     F: FnMut(&str) -> bool,
 {
@@ -235,7 +230,7 @@ fn esc_on_burndown_returns_to_home() {
     // Open burndown. Use press_until — under full L1 ci contention a
     // single `i` send-key gets dropped before the host's event loop
     // drains it. Re-press every ~5s up to 90s.
-    let on_burndown = press_until(&session, "i", Duration::from_secs(90), |c| {
+    let on_burndown = press_until(&session, "i", Duration::from_secs(120), |c| {
         c.contains("Usage Analytics")
             && !c.contains("Waiting for session-reader plugin")
             && c.contains('$')

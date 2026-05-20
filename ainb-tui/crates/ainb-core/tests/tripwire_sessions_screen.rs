@@ -142,9 +142,7 @@ fn tui_sessions_screen_renders_after_pressing_s() {
             break;
         }
         if last_press.elapsed() > Duration::from_secs(5) {
-            let _ = Command::new("tmux")
-                .args(["send-keys", "-t", &session, "s"])
-                .status();
+            let _ = Command::new("tmux").args(["send-keys", "-t", &session, "s"]).status();
             last_press = Instant::now();
         }
         thread::sleep(Duration::from_millis(400));

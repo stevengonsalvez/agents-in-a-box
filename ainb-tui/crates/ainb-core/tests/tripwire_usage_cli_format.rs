@@ -119,7 +119,6 @@ fn run_usage_report(plugin_root: &Path, home: &Path, format: &str, pre_position:
 }
 
 #[test]
-#[ignore = "intermittent under L1 ci contention — session-reader plugin times out publishing usage_data snapshot. Same class as the #[ignore]'d send_key_forwards_handle_key_notification in plugin-runtime/tests/fixture_e2e.rs: subprocess plugin publishes a snapshot but the host's store doesn't index it under load. Tests pass solo in <2s. Out of scope for bsp-tiling goal; needs plugin-runtime snapshot-routing fix."]
 fn usage_report_format_text_both_positions() {
     let _guard = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     let _xlock = tripwire_tmux_lock::TmuxSerialLock::acquire();
@@ -156,7 +155,6 @@ fn usage_report_format_text_both_positions() {
 }
 
 #[test]
-#[ignore = "intermittent under L1 ci contention — session-reader plugin times out publishing usage_data snapshot. Same class as the #[ignore]'d send_key_forwards_handle_key_notification in plugin-runtime/tests/fixture_e2e.rs: subprocess plugin publishes a snapshot but the host's store doesn't index it under load. Tests pass solo in <2s. Out of scope for bsp-tiling goal; needs plugin-runtime snapshot-routing fix."]
 fn usage_report_format_json_both_positions() {
     let _guard = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     let _xlock = tripwire_tmux_lock::TmuxSerialLock::acquire();
@@ -186,7 +184,6 @@ fn usage_report_format_json_both_positions() {
 }
 
 #[test]
-#[ignore = "intermittent under L1 ci contention — session-reader plugin times out publishing usage_data snapshot. Same class as the #[ignore]'d send_key_forwards_handle_key_notification in plugin-runtime/tests/fixture_e2e.rs: subprocess plugin publishes a snapshot but the host's store doesn't index it under load. Tests pass solo in <2s. Out of scope for bsp-tiling goal; needs plugin-runtime snapshot-routing fix."]
 fn usage_report_format_csv_both_positions() {
     let _guard = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     let _xlock = tripwire_tmux_lock::TmuxSerialLock::acquire();
@@ -208,7 +205,6 @@ fn usage_report_format_csv_both_positions() {
 }
 
 #[test]
-#[ignore = "intermittent under L1 ci contention — session-reader plugin times out publishing usage_data snapshot. Same class as the #[ignore]'d send_key_forwards_handle_key_notification in plugin-runtime/tests/fixture_e2e.rs: subprocess plugin publishes a snapshot but the host's store doesn't index it under load. Tests pass solo in <2s. Out of scope for bsp-tiling goal; needs plugin-runtime snapshot-routing fix."]
 fn usage_report_format_markdown_both_positions() {
     let _guard = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     let _xlock = tripwire_tmux_lock::TmuxSerialLock::acquire();
