@@ -30,7 +30,9 @@ CLI capable of driving any subclass without per-harness boilerplate.
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -101,6 +103,138 @@ def find_plugin_root(script_path: Path | None = None) -> Path:
         f"could not find reflect plugin root walking up from {here!r}; "
         "expected a parent containing both skills/ and adapters/"
     )
+
+
+def inject_managed_by(text: str, sentinel: str) -> str:
+    """Ensure ``text``'s YAML frontmatter contains ``managed_by: <sentinel>``.
+
+    Used by adapters that copy full SKILL.md content (Claude, Codex) to
+    mark adapter-installed files for later uninstall while preserving the
+    rest of the file byte-for-byte. Three cases:
+
+      * No frontmatter at all → wrap with minimal ``---\\nmanaged_by:...\\n---``.
+      * Frontmatter present, no ``managed_by`` key → append the line before
+        the closing ``---``.
+      * Frontmatter present with ``managed_by`` already → replace that line.
+
+    Body content (including stray ``---`` rules used as horizontal dividers)
+    is left untouched.
+    """
+    if not text.startswith("---"):
+        return f"---\nmanaged_by: {sentinel}\n---\n\n{text}"
+
+    body = text[3:]
+    m = re.search(r"(^|\n)---(\n|$)", body)
+    if not m:
+        return f"---\nmanaged_by: {sentinel}\n---\n\n{text}"
+
+    fm_block = body[: m.start()]
+    rest = body[m.end():]
+    trailing = m.group(2)
+
+    managed_re = re.compile(r"^managed_by:.*$", re.MULTILINE)
+    if managed_re.search(fm_block):
+        new_fm = managed_re.sub(f"managed_by: {sentinel}", fm_block)
+    else:
+        new_fm = fm_block.rstrip("\n") + f"\nmanaged_by: {sentinel}\n"
+
+    return f"---{new_fm}---{trailing}{rest}"
+
+
+def merge_hook_commands(
+    config: dict,
+    *,
+    event: str,
+    commands: Sequence[dict],
+    legacy_commands: Sequence[str] = (),
+) -> bool:
+    """Add hook command entries under ``config['hooks'][event]``.
+
+    Each item in ``commands`` is a dict shaped like
+    ``{"type": "command", "command": "...", ...}`` (optionally with
+    ``timeout`` / ``statusMessage`` etc — the shape both Claude and Codex
+    accept verbatim).
+
+    ``legacy_commands`` contains literal command strings produced by
+    earlier buggy adapter versions; any matching entry is stripped so
+    re-installs heal the file. Returns ``True`` iff the config was
+    mutated.
+
+    The function does **not** persist the change — callers serialise the
+    mutated ``config`` themselves so this helper stays harness-agnostic
+    (settings.json vs hooks.json).
+    """
+    changed = False
+    hooks = config.setdefault("hooks", {})
+    entries = hooks.setdefault(event, [])
+
+    legacy_set = set(legacy_commands)
+    if legacy_set:
+        for entry in entries:
+            original_hooks = entry.get("hooks", [])
+            kept = [
+                hook for hook in original_hooks
+                if hook.get("command") not in legacy_set
+            ]
+            if kept != original_hooks:
+                entry["hooks"] = kept
+                changed = True
+        entries[:] = [e for e in entries if e.get("hooks")]
+
+    already_present_cmds = {
+        hook.get("command")
+        for entry in entries
+        for hook in entry.get("hooks", [])
+    }
+    to_add = [entry for entry in commands if entry["command"] not in already_present_cmds]
+
+    if to_add:
+        entries.append({"matcher": "", "hooks": list(to_add)})
+        changed = True
+
+    return changed
+
+
+def remove_hook_commands(
+    config: dict,
+    *,
+    event: str,
+    commands: Sequence[str],
+) -> bool:
+    """Remove any hook entry under ``config['hooks'][event]`` whose
+    ``command`` matches one of ``commands``. Returns ``True`` iff the
+    config was mutated. Empty hook groups are dropped; empty events are
+    pruned; empty ``hooks`` block is removed entirely.
+    """
+    hooks = config.get("hooks")
+    if not isinstance(hooks, dict):
+        return False
+    entries = hooks.get(event)
+    if not isinstance(entries, list):
+        return False
+    removable = set(commands)
+    changed = False
+    filtered: list = []
+    for entry in entries:
+        kept = [
+            hook for hook in entry.get("hooks", [])
+            if hook.get("command") not in removable
+        ]
+        if kept != entry.get("hooks", []):
+            changed = True
+        if kept:
+            new_entry = dict(entry)
+            new_entry["hooks"] = kept
+            filtered.append(new_entry)
+    if not changed:
+        return False
+    if filtered:
+        hooks[event] = filtered
+    else:
+        hooks.pop(event, None)
+    if not hooks:
+        config.pop("hooks", None)
+    return True
 
 
 def parse_skill_frontmatter(text: str) -> dict[str, Any]:

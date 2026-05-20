@@ -39,7 +39,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 from pathlib import Path
 from typing import Any, Optional
@@ -55,6 +54,7 @@ from base import (  # noqa: E402
     PLUGIN_SKILLS,  # re-exported for backwards-compat with tests
     _resolve_home,
     find_plugin_root as _shared_find_plugin_root,
+    inject_managed_by as _inject_managed_by,
     parse_skill_frontmatter,
     run_cli,
 )
@@ -83,46 +83,6 @@ def _render_session_start_hook_command(claude_dir: Path) -> str:
 _LEGACY_SESSION_START_HOOK_COMMAND = SESSION_START_HOOK_COMMAND_TEMPLATE.replace(
     "{home_tool_dir}", "{{HOME_TOOL_DIR}}"
 )
-
-
-def _inject_managed_by(text: str, sentinel: str) -> str:
-    """Ensure ``text``'s YAML frontmatter contains ``managed_by: <sentinel>``.
-
-    Used by :class:`ClaudeAdapter` to mark adapter-installed skill files for
-    later uninstall while preserving the rest of the plugin SKILL.md byte
-    for byte. Three cases:
-
-      * No frontmatter at all → wrap with minimal ``---\\nmanaged_by:...\\n---``.
-      * Frontmatter present, no ``managed_by`` key → append the line before
-        the closing ``---``.
-      * Frontmatter present with ``managed_by`` already → replace that line.
-
-    Body content (including stray ``---`` rules used as horizontal dividers)
-    is left untouched.
-    """
-    if not text.startswith("---"):
-        return f"---\nmanaged_by: {sentinel}\n---\n\n{text}"
-
-    # Locate the closing ``---`` of the first frontmatter block. Search
-    # starts after the opening ``---`` (position 3) and matches a ``---``
-    # that's the entire content of its own line.
-    body = text[3:]
-    m = re.search(r"(^|\n)---(\n|$)", body)
-    if not m:
-        # Malformed frontmatter (no closing) — treat as no frontmatter.
-        return f"---\nmanaged_by: {sentinel}\n---\n\n{text}"
-
-    fm_block = body[: m.start()]
-    rest = body[m.end():]
-    trailing = m.group(2)  # "\n" or "" (end-of-file)
-
-    managed_re = re.compile(r"^managed_by:.*$", re.MULTILINE)
-    if managed_re.search(fm_block):
-        new_fm = managed_re.sub(f"managed_by: {sentinel}", fm_block)
-    else:
-        new_fm = fm_block.rstrip("\n") + f"\nmanaged_by: {sentinel}\n"
-
-    return f"---{new_fm}---{trailing}{rest}"
 
 
 class ClaudeAdapter(AdapterBase):

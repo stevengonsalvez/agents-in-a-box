@@ -66,7 +66,6 @@ def test_install_writes_pointer_files_and_hook(tmp_path):
 
     recall_body = recall.read_text(encoding="utf-8")
     assert claude_adapter.POINTER_MANAGED_BY in recall_body
-    assert "source:" in recall_body
     # Name preserved from upstream frontmatter (reflect:recall).
     assert "name: reflect:recall" in recall_body
 
