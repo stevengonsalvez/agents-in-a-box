@@ -127,6 +127,146 @@ def test_install_is_idempotent_and_preserves_existing_hooks(tmp_path):
     assert commands.count(expected) == 1
 
 
+def _seed_plugin_runtime_install(tmp_path):
+    """Create a minimal installed_plugins.json that looks like the plugin
+    runtime installed reflect via `/plugin install reflect@agents-in-a-box`."""
+    plugins_dir = tmp_path / ".claude" / "plugins"
+    plugins_dir.mkdir(parents=True, exist_ok=True)
+    (plugins_dir / "installed_plugins.json").write_text(json.dumps({
+        "version": 2,
+        "plugins": {
+            "reflect@agents-in-a-box": [
+                {
+                    "scope": "user",
+                    "installPath": str(plugins_dir / "cache" / "agents-in-a-box" / "reflect" / "3.5.1"),
+                    "version": "3.5.1",
+                    "installedAt": "2026-05-20T00:00:00Z",
+                    "lastUpdated": "2026-05-20T00:00:00Z",
+                    "gitCommitSha": "deadbeef",
+                }
+            ]
+        }
+    }))
+
+
+def test_install_skips_settings_when_plugin_runtime_owns_it(tmp_path):
+    """When ``/plugin install reflect`` has already wired the SessionStart
+    hook via plugin.json autowire, the adapter must NOT add its own
+    duplicate entry — that creates a stale-code dupe-firing surface."""
+    _seed_plugin_runtime_install(tmp_path)
+
+    result = subprocess.run(
+        [sys.executable, str(ADAPTER), "install", "--home", str(tmp_path)],
+        check=True, capture_output=True, text=True,
+    )
+    assert "plugin runtime owns reflect hooks" in result.stdout
+    # Skills still installed
+    assert (tmp_path / ".claude" / "skills" / "recall" / "SKILL.md").exists()
+    # settings.json should NOT contain our SessionStart entry
+    settings_path = tmp_path / ".claude" / "settings.json"
+    if settings_path.exists():
+        cfg = json.loads(settings_path.read_text())
+        expected = claude_adapter._render_session_start_hook_command(tmp_path / ".claude")
+        commands = [
+            h["command"]
+            for entry in cfg.get("hooks", {}).get("SessionStart", [])
+            for h in entry["hooks"]
+        ]
+        assert expected not in commands
+
+
+def test_install_cleans_up_legacy_entry_when_plugin_runtime_takes_over(tmp_path):
+    """Migration scenario: user previously ran the adapter (pre-plugin),
+    then installed via the plugin runtime. Next adapter run must SWEEP
+    OUT the legacy duplicate it wrote, leaving only the plugin runtime
+    wire-up active."""
+    claude_dir = tmp_path / ".claude"
+    claude_dir.mkdir()
+    # Pre-seed settings.json with the legacy adapter-written hook.
+    legacy_cmd = claude_adapter._render_session_start_hook_command(claude_dir)
+    (claude_dir / "settings.json").write_text(json.dumps({
+        "hooks": {
+            "SessionStart": [
+                {
+                    "matcher": "",
+                    "hooks": [
+                        {"type": "command", "command": "echo unrelated"},
+                        {"type": "command", "command": legacy_cmd},
+                    ],
+                }
+            ]
+        }
+    }))
+    _seed_plugin_runtime_install(tmp_path)
+
+    result = subprocess.run(
+        [sys.executable, str(ADAPTER), "install", "--home", str(tmp_path)],
+        check=True, capture_output=True, text=True,
+    )
+    assert "cleaned up legacy duplicate" in result.stdout
+
+    cfg = json.loads((claude_dir / "settings.json").read_text())
+    commands = [
+        h["command"]
+        for entry in cfg.get("hooks", {}).get("SessionStart", [])
+        for h in entry["hooks"]
+    ]
+    assert legacy_cmd not in commands
+    assert "echo unrelated" in commands  # untouched
+
+
+def test_install_still_wires_settings_when_plugin_runtime_absent(tmp_path):
+    """If the plugin runtime is NOT used (toolkit-only / dev install),
+    the adapter still needs to write its settings.json hook so recall
+    fires on SessionStart."""
+    # No installed_plugins.json at all
+    result = subprocess.run(
+        [sys.executable, str(ADAPTER), "install", "--home", str(tmp_path)],
+        check=True, capture_output=True, text=True,
+    )
+    assert "plugin runtime owns" not in result.stdout
+
+    cfg = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+    commands = [
+        h["command"]
+        for entry in cfg.get("hooks", {}).get("SessionStart", [])
+        for h in entry["hooks"]
+    ]
+    expected = claude_adapter._render_session_start_hook_command(tmp_path / ".claude")
+    assert expected in commands
+
+
+def test_install_skips_settings_when_unrelated_plugin_runtime_installs_exist(tmp_path):
+    """The detection must specifically check for ``reflect`` — having
+    OTHER plugins installed shouldn't make us think reflect is also
+    plugin-runtime-managed."""
+    plugins_dir = tmp_path / ".claude" / "plugins"
+    plugins_dir.mkdir(parents=True, exist_ok=True)
+    (plugins_dir / "installed_plugins.json").write_text(json.dumps({
+        "version": 2,
+        "plugins": {
+            "some-other-plugin@some-marketplace": [
+                {"scope": "user", "version": "1.0.0"}
+            ]
+        }
+    }))
+
+    result = subprocess.run(
+        [sys.executable, str(ADAPTER), "install", "--home", str(tmp_path)],
+        check=True, capture_output=True, text=True,
+    )
+    # Should NOT detect plugin runtime — adapter writes its entry normally
+    assert "plugin runtime owns" not in result.stdout
+    cfg = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+    commands = [
+        h["command"]
+        for entry in cfg.get("hooks", {}).get("SessionStart", [])
+        for h in entry["hooks"]
+    ]
+    expected = claude_adapter._render_session_start_hook_command(tmp_path / ".claude")
+    assert expected in commands
+
+
 def test_install_no_hooks_flag_leaves_settings_alone(tmp_path):
     subprocess.run(
         [sys.executable, str(ADAPTER), "install",
