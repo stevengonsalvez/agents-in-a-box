@@ -104,6 +104,7 @@ impl CommandRegistry {
         r.register(TmuxCommand);
         r.register(CompletionCommand);
         r.register(PluginCommand); // Phase 4 stub — surface reserved now
+        r.register(FleetCommand);
         r
     }
 
@@ -1026,6 +1027,87 @@ impl CliCommand for PluginCommand {
     }
 }
 
+pub struct FleetCommand;
+impl CliCommand for FleetCommand {
+    fn name(&self) -> &'static str {
+        "fleet"
+    }
+    fn build(&self, app: Command) -> Command {
+        let standup = Command::new("standup")
+            .about("Live fleet status: every claude session across ainb + peers + bg jobs")
+            .arg(
+                clap::Arg::new("text")
+                    .long("text")
+                    .action(clap::ArgAction::SetTrue)
+                    .help("Force text output even with --format json"),
+            );
+        let broadcast = Command::new("broadcast")
+            .about("Send one prompt to selected sessions (peers-first, tmux fallback)")
+            .arg(clap::Arg::new("prompt").required(true))
+            .arg(
+                clap::Arg::new("all")
+                    .long("all")
+                    .action(clap::ArgAction::SetTrue)
+                    .help("Fan out to every running session"),
+            )
+            .arg(
+                clap::Arg::new("filter")
+                    .long("filter")
+                    .help("Regex against tmux/workspace name"),
+            )
+            .arg(
+                clap::Arg::new("cwd")
+                    .long("cwd")
+                    .help("Substring against cwd"),
+            );
+        let sequence = Command::new("sequence")
+            .about("Ordered prompts with ack between steps")
+            .arg(
+                clap::Arg::new("steps")
+                    .required(true)
+                    .num_args(1..)
+                    .action(clap::ArgAction::Append),
+            )
+            .arg(
+                clap::Arg::new("all")
+                    .long("all")
+                    .action(clap::ArgAction::SetTrue),
+            )
+            .arg(
+                clap::Arg::new("timeout")
+                    .long("timeout")
+                    .value_parser(clap::value_parser!(u64))
+                    .default_value("300")
+                    .help("Per-step timeout (seconds)"),
+            );
+        let needs = Command::new("needs")
+            .about("List sessions blocked on input / errors / waiting");
+        let daemon = Command::new("daemon")
+            .about("Watcher: registers as ainb-fleet-cp peer, auto-continues API errors")
+            .arg(
+                clap::Arg::new("verbose")
+                    .long("verbose")
+                    .short('v')
+                    .action(clap::ArgAction::SetTrue),
+            );
+        app.subcommand(
+            Command::new(self.name())
+                .about("Fleet orchestration: standup / broadcast / sequence / needs / daemon")
+                .subcommand_required(true)
+                .arg_required_else_help(true)
+                .subcommand(standup)
+                .subcommand(broadcast)
+                .subcommand(sequence)
+                .subcommand(needs)
+                .subcommand(daemon),
+        )
+    }
+    fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
+        let matches = matches.clone();
+        Box::pin(async move { crate::cli::fleet::execute(&matches, ctx.format).await })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1035,13 +1117,13 @@ mod tests {
     }
 
     #[test]
-    fn built_ins_registers_nineteen_commands() {
+    fn built_ins_registers_twenty_commands() {
         let r = CommandRegistry::built_ins();
         let names = r.names();
         // 16 user-facing built-ins + claudecode namespace + tmux namespace
-        // + plugin stub = 19. The TUI is NOT in the registry — main.rs
-        // handles `tui` / no-subcommand inline.
-        assert_eq!(names.len(), 19, "expected 19 entries, got {names:?}");
+        // + plugin stub + fleet = 20. The TUI is NOT in the registry —
+        // main.rs handles `tui` / no-subcommand inline.
+        assert_eq!(names.len(), 20, "expected 20 entries, got {names:?}");
         for required in [
             "run",
             "list",
@@ -1062,6 +1144,7 @@ mod tests {
             "tmux",
             "completion",
             "plugin",
+            "fleet",
         ] {
             assert!(
                 names.contains(&required),

@@ -10,6 +10,7 @@ pub mod attach;
 pub mod auth;
 pub mod config_cmd;
 pub mod favorites;
+pub mod fleet;
 pub mod git_cmd;
 pub mod init;
 pub mod list;
