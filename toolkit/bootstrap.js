@@ -841,6 +841,56 @@ function findUv() {
     }
 }
 
+// Make sure ~/.local/bin (where `uv tool install` drops shims) is on PATH for
+// both the current process AND future shells. Returns one of:
+//   { changed: false, reason: 'already-on-path' | 'rc-already-patched' | ... }
+//   { changed: true, rc, exportLine }            (rc file appended)
+//   { changed: false, reason: 'unsupported-shell', shell }   (warn-and-continue)
+//
+// Current-process PATH is patched in-memory so the smoke test in installReflectKb
+// can call the freshly-installed shim without requiring the user to source the
+// rc file first.
+function ensureLocalBinOnPath() {
+    const localBin = path.join(os.homedir(), '.local', 'bin');
+    if (!fs.existsSync(localBin)) {
+        return { changed: false, reason: 'no-local-bin' };
+    }
+
+    const pathParts = (process.env.PATH || '').split(path.delimiter).map(p => p.replace(/\/$/, ''));
+    const alreadyOnPath = pathParts.includes(localBin);
+
+    // Always patch in-memory PATH so the smoke test below sees the shim.
+    if (!alreadyOnPath) {
+        process.env.PATH = `${localBin}${path.delimiter}${process.env.PATH || ''}`;
+    }
+
+    if (alreadyOnPath) {
+        return { changed: false, reason: 'already-on-path' };
+    }
+
+    // Detect login shell + rc file. zsh and bash only — fish/nu/etc. need
+    // syntax we don't want to guess; warn and keep going.
+    const shell = process.env.SHELL || '';
+    let rc;
+    if (shell.endsWith('/zsh') || shell === 'zsh') {
+        rc = path.join(os.homedir(), '.zshrc');
+    } else if (shell.endsWith('/bash') || shell === 'bash') {
+        rc = path.join(os.homedir(), '.bashrc');
+    } else {
+        return { changed: false, reason: 'unsupported-shell', shell };
+    }
+
+    const sentinel = '# ai-coder-rules bootstrap: ensure uv tool shims on PATH';
+    const exportLine = 'export PATH="$HOME/.local/bin:$PATH"';
+    const existing = fs.existsSync(rc) ? fs.readFileSync(rc, 'utf8') : '';
+    if (existing.includes(sentinel) || existing.includes(exportLine)) {
+        return { changed: false, reason: 'rc-already-patched', rc };
+    }
+
+    fs.appendFileSync(rc, `\n${sentinel}\n${exportLine}\n`);
+    return { changed: true, rc, exportLine };
+}
+
 function getReflectInstalledVersion() {
     try {
         const out = execSync('reflect --version', { stdio: ['ignore', 'pipe', 'ignore'] });
@@ -936,16 +986,40 @@ async function installReflectKb(tool, options = {}) {
     }
     const sourceVersion = readPyprojectVersion(sourceInfo.dir);
 
-    // 3. Idempotency: if reflect is already on PATH and reports a version,
-    // skip the install unless --force is set. We deliberately don't compare
-    // to sourceVersion strictly because the CLI's version_option is hardcoded
-    // separately from pyproject (a known reflect-kb quirk); presence is enough.
+    // 3. Make sure ~/.local/bin is on PATH before we probe `reflect --version`.
+    // Patches the running process and appends to ~/.zshrc / ~/.bashrc when
+    // missing (so future shells inherit the fix). We do this BEFORE the
+    // idempotency check too — otherwise a previously-installed shim is
+    // invisible and we'd reinstall on every run with no PATH on the box.
+    const pathFix = ensureLocalBinOnPath();
+    if (pathFix.changed) {
+        result.warnings.push(
+            `appended PATH export to ${pathFix.rc}. Open a new shell or run ` +
+            `'source ${pathFix.rc}' to pick it up.`
+        );
+    } else if (pathFix.reason === 'unsupported-shell') {
+        result.warnings.push(
+            `~/.local/bin not on PATH and shell '${pathFix.shell}' is not zsh/bash; ` +
+            `add ~/.local/bin to PATH manually for your shell.`
+        );
+    }
+
+    // 4. Idempotency: skip install only when installed version matches source.
+    // If the source pyproject version is known and differs from the installed
+    // CLI, we upgrade — this catches the 'bootstrap ran once, repo bumped
+    // reflect-kb later, second bootstrap silently skipped' failure mode.
     const installedVersion = getReflectInstalledVersion();
-    if (installedVersion && !force) {
-        result.skippedReason = `reflect ${installedVersion} already installed`;
+    const versionsMatch = installedVersion && sourceVersion && installedVersion === sourceVersion;
+    if (installedVersion && !force && versionsMatch) {
+        result.skippedReason = `reflect ${installedVersion} already installed (matches source)`;
         result.version = installedVersion;
     } else {
-        // 4. Install the package. The [graph] extra pulls heavy ML deps and is
+        if (installedVersion && sourceVersion && !versionsMatch) {
+            result.warnings.push(
+                `upgrading reflect ${installedVersion} → ${sourceVersion} (source drift detected)`
+            );
+        }
+        // 5. Install the package. The [graph] extra pulls heavy ML deps and is
         // mandatory — the recall/search workflow needs it.
         const installSpec = `${sourceInfo.source}[graph]`;
         try {
@@ -959,7 +1033,7 @@ async function installReflectKb(tool, options = {}) {
             return result;
         }
 
-        // 5. Smoke test — fail loudly if the CLI didn't land on PATH.
+        // 6. Smoke test — fail loudly if the CLI didn't land on PATH.
         const postInstallVersion = getReflectInstalledVersion();
         if (!postInstallVersion) {
             result.errors.push(
