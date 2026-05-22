@@ -85,7 +85,10 @@ pub fn discover_from_peers() -> Result<Vec<Session>> {
             bg_job_id: None,
             transcript_path: None,
             sources: vec![SessionSource::Peers],
-            summary: Some(p.summary),
+            // Broker summary is unreliable — most peers never call set_summary.
+            // Standup synthesises the field from JSONL instead. Leave None here
+            // so the JSONL value isn't shadowed by a stale broker write.
+            summary: None,
             last_seen_ms: parse_iso8601_ms(&p.last_seen),
         })
         .collect())
