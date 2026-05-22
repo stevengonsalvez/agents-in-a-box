@@ -413,6 +413,16 @@ pub enum AppEvent {
 pub struct EventHandler;
 
 impl EventHandler {
+    fn persist_sessions_pane_preferences(state: &mut AppState) {
+        state.app_config.ui_preferences.sessions_sidebar_width =
+            Some(state.sessions_pane_state.preferred_width);
+        state.app_config.ui_preferences.sessions_sidebar_collapsed =
+            Some(state.sessions_pane_state.collapsed);
+        if let Err(e) = state.app_config.save() {
+            tracing::warn!("Failed to persist Sessions pane preferences: {}", e);
+        }
+    }
+
     /// Handle mouse events and convert to appropriate app events
     pub fn handle_mouse_event(event: AppEvent, state: &mut AppState) -> Option<AppEvent> {
         match event {
@@ -440,21 +450,37 @@ impl EventHandler {
 
                 // Check if we're in the main view (not in overlays)
                 if state.current_screen == screen_ids::SESSION_LIST && !state.help_visible {
-                    if x < split_point {
-                        // Clicked in sessions pane
-                        if state.focused_pane != crate::app::state::FocusedPane::Sessions {
-                            Some(AppEvent::SwitchPaneFocus)
-                        } else {
-                            None
-                        }
-                    } else {
-                        // Clicked in logs pane
-                        if state.focused_pane != crate::app::state::FocusedPane::LiveLogs {
-                            Some(AppEvent::SwitchPaneFocus)
-                        } else {
-                            None
-                        }
+                    if state.sessions_pane_state.is_on_toggle(x, y) {
+                        state.sessions_pane_state.toggle_collapsed();
+                        Self::persist_sessions_pane_preferences(state);
+                        return None;
                     }
+
+                    if state.sessions_pane_state.begin_resize(x, y) {
+                        return None;
+                    }
+
+                    if let Some(target) = state.session_list_row_at_mouse(x, y) {
+                        state.select_session_list_row(target);
+                        return None;
+                    }
+
+                    if state.sessions_pane_state.contains_sessions_point(x, y) {
+                        state.focused_pane = crate::app::state::FocusedPane::Sessions;
+                        return None;
+                    }
+
+                    if state.sessions_pane_state.contains_preview_point(x, y) {
+                        state.focused_pane = crate::app::state::FocusedPane::LiveLogs;
+                        return None;
+                    }
+
+                    if x < split_point {
+                        state.focused_pane = crate::app::state::FocusedPane::Sessions;
+                    } else {
+                        state.focused_pane = crate::app::state::FocusedPane::LiveLogs;
+                    }
+                    None
                 } else {
                     None
                 }
@@ -472,6 +498,15 @@ impl EventHandler {
                 if state.current_screen == screen_ids::HOME && !state.help_visible {
                     let term_width = crossterm::terminal::size().unwrap_or((80, 24)).0;
                     state.home_screen_v2_state.drag_sidebar_resize(x, term_width);
+                    return None;
+                }
+
+                if state.current_screen == screen_ids::SESSION_LIST && !state.help_visible {
+                    let width = state
+                        .sessions_pane_state
+                        .last_content_width()
+                        .unwrap_or_else(|| crossterm::terminal::size().unwrap_or((80, 24)).0);
+                    state.sessions_pane_state.drag_resize(x, width);
                     return None;
                 }
 
@@ -496,6 +531,14 @@ impl EventHandler {
                     return None;
                 }
 
+                if state.current_screen == screen_ids::SESSION_LIST && !state.help_visible {
+                    state.sessions_pane_state.update_hover(x, y);
+                    if state.sessions_pane_state.finish_resize() {
+                        Self::persist_sessions_pane_preferences(state);
+                    }
+                    return None;
+                }
+
                 // Finalize text selection
                 if state.focused_pane == crate::app::state::FocusedPane::LiveLogs {
                     // This will be handled in Phase 2
@@ -507,6 +550,9 @@ impl EventHandler {
             AppEvent::MouseMove { x, y } => {
                 if state.current_screen == screen_ids::HOME && !state.help_visible {
                     state.home_screen_v2_state.update_sidebar_edge_hover(x, y);
+                }
+                if state.current_screen == screen_ids::SESSION_LIST && !state.help_visible {
+                    state.sessions_pane_state.update_hover(x, y);
                 }
                 None
             }

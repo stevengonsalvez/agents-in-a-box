@@ -68,9 +68,10 @@ impl SessionListComponent {
         Self::default()
     }
 
-    pub fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState) {
+    pub fn render(&mut self, frame: &mut Frame, area: Rect, state: &mut AppState) {
         // Update list state selection based on app state first
         self.update_selection(state);
+        state.sessions_pane_state.set_list_scroll_offset(self.list_state.offset());
 
         let items = SessionListComponent::build_list_items_static(state);
 
@@ -79,6 +80,11 @@ impl SessionListComponent {
         let (border_color, is_focused) = match state.focused_pane {
             FocusedPane::Sessions => (SELECTION_GREEN, true),
             FocusedPane::LiveLogs => (SUBDUED_BORDER, false),
+        };
+        let border_color = if state.sessions_pane_state.edge_highlighted() {
+            GOLD
+        } else {
+            border_color
         };
 
         // Visible workspace count reflects the filter — workspaces that lose
@@ -117,6 +123,11 @@ impl SessionListComponent {
                 Style::default().fg(GOLD),
             ));
         }
+        title_spans.push(Span::raw(" "));
+        title_spans.push(Span::styled(
+            "[-]",
+            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::BOLD),
+        ));
 
         let list = List::new(items)
             .block(
