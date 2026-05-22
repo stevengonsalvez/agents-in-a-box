@@ -214,19 +214,19 @@ def query_recall(query: str) -> tuple[str, list[str]]:
     return output, ids
 
 
-def filter_to_new(markdown: str, ids: list[str], already_injected: set[str]) -> tuple[str, list[str]]:
+def filter_to_new(markdown: str, already_injected: set[str]) -> tuple[str, list[str]]:
     """Strip out blocks corresponding to already-injected learning IDs.
 
-    The markdown is a list of bullets (one per learning). We split on
-    line boundaries and keep blocks whose ID is NOT in ``already_injected``.
-    Returns ``(filtered_markdown, new_ids)``.
+    The recall script emits markdown as a flat list of bullets (one per
+    learning). We split on top-level ``"- "`` lines and keep blocks whose
+    ``[lrn-...]`` ID is NOT in ``already_injected``. Returns
+    ``(filtered_markdown, new_ids)``.
     """
     if not markdown:
         return "", []
-    lines = markdown.split("\n")
     blocks: list[list[str]] = []
     current: list[str] = []
-    for line in lines:
+    for line in markdown.split("\n"):
         # New bullet starts a new block (top-level "- " line).
         if line.startswith("- ") and current:
             blocks.append(current)
@@ -236,17 +236,15 @@ def filter_to_new(markdown: str, ids: list[str], already_injected: set[str]) -> 
     if current:
         blocks.append(current)
 
-    kept_blocks = []
-    kept_ids = []
+    kept_blocks: list[str] = []
+    kept_ids: list[str] = []
     for block in blocks:
         block_text = "\n".join(block)
         ids_in_block = re.findall(r"\[(lrn-[a-z0-9\-]+)\]", block_text)
-        if any(f"[{i}]" in block_text or i in [b.strip("[]") for b in ids] for i in ids_in_block):
-            pass  # carry on
-        is_new = not any(i in already_injected for i in ids_in_block)
-        if is_new:
-            kept_blocks.append(block_text)
-            kept_ids.extend(ids_in_block)
+        if any(i in already_injected for i in ids_in_block):
+            continue  # already injected this session — skip
+        kept_blocks.append(block_text)
+        kept_ids.extend(ids_in_block)
         if len(kept_blocks) >= USER_PROMPT_LIMIT:
             break
     return "\n".join(kept_blocks), kept_ids[:USER_PROMPT_LIMIT]
@@ -370,12 +368,12 @@ def _main_body() -> NoReturn:
         emit("")
 
     # Query recall with the prompt itself.
-    markdown, _ids = query_recall(prompt)
+    markdown, _ = query_recall(prompt)
     if not markdown:
         emit("")
 
     already = load_session_injected(session_id)
-    filtered, new_ids = filter_to_new(markdown, _ids, already)
+    filtered, new_ids = filter_to_new(markdown, already)
     if not filtered:
         emit("")
 

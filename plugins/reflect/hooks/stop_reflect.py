@@ -76,6 +76,11 @@ def session_already_queued(qfile: Path, session_id: str) -> bool:
 
     Returns ``True`` if found, ``False`` otherwise (or on any read error
     — better to enqueue twice than to skip silently).
+
+    The scan is linear but bounded: ``reflect-drain-bg.sh`` caps the
+    queue at ``REFLECT_DRAIN_DAILY_MAX`` (default 20) entries before
+    flushing, so worst-case this reads 20 short JSONL lines — fine for
+    a hook that runs once per agent finish.
     """
     if not session_id or not qfile.exists():
         return False
