@@ -1021,11 +1021,21 @@ async function installReflectKb(tool, options = {}) {
         }
         // 5. Install the package. The [graph] extra pulls heavy ML deps and is
         // mandatory — the recall/search workflow needs it.
+        //
+        // Pin Python: the [graph] extras drag in nano-graphrag → graspologic →
+        // hyppo → numba → llvmlite, and llvmlite ships wheels lagging the
+        // newest CPython by 1–2 minor versions. Without a pin, `uv tool
+        // install` picks the user's system python (often 3.14+ on bleeding-
+        // edge boxes) and the build dies on llvmlite. 3.13 is the known-good
+        // version (matches the maintainer's working install) and has wheels
+        // for every transitive dep. Override with REFLECT_KB_PYTHON if needed.
+        const pythonPin = process.env.REFLECT_KB_PYTHON || '3.13';
         const installSpec = `${sourceInfo.source}[graph]`;
         try {
-            execSync(`uv tool install --force ${JSON.stringify(installSpec)}`, {
-                stdio: 'pipe',
-            });
+            execSync(
+                `uv tool install --force --python ${JSON.stringify(pythonPin)} ${JSON.stringify(installSpec)}`,
+                { stdio: 'pipe' }
+            );
             result.installed = true;
         } catch (err) {
             const stderr = err.stderr ? err.stderr.toString() : err.message;
