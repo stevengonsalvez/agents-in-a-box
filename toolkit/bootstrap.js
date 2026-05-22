@@ -1030,7 +1030,30 @@ async function installReflectKb(tool, options = {}) {
         // version (matches the maintainer's working install) and has wheels
         // for every transitive dep. Override with REFLECT_KB_PYTHON if needed.
         const pythonPin = process.env.REFLECT_KB_PYTHON || '3.13';
-        const installSpec = `${sourceInfo.source}[graph]`;
+
+        // Intel-macOS carve-out: torch 2.3+ dropped macosx_x86_64 wheels (ARM
+        // only). The [graph] extra pulls sentence-transformers → torch, so it
+        // can't resolve on Intel macs. Strict conditional fork — every other
+        // platform (Apple Silicon, linux x86_64, linux arm64, Windows) takes
+        // the unchanged [graph] path below. Intel macs get the slim base
+        // install: `reflect add/search` still works via non-graph paths;
+        // GraphRAG features are unavailable. Override with
+        // REFLECT_KB_FORCE_GRAPH=1 to force-attempt the [graph] install
+        // anyway (e.g. on Intel linux which is fine).
+        const isIntelMac =
+            process.platform === 'darwin' &&
+            process.arch === 'x64' &&
+            !process.env.REFLECT_KB_FORCE_GRAPH;
+        const installSpec = isIntelMac
+            ? `${sourceInfo.source}`
+            : `${sourceInfo.source}[graph]`;
+        if (isIntelMac) {
+            result.warnings.push(
+                'Intel macOS detected: installing reflect-kb WITHOUT [graph] extra ' +
+                '(torch 2.3+ dropped Intel mac wheels). GraphRAG features unavailable; ' +
+                'core capture/search still works. Override: REFLECT_KB_FORCE_GRAPH=1.'
+            );
+        }
         try {
             execSync(
                 `uv tool install --force --python ${JSON.stringify(pythonPin)} ${JSON.stringify(installSpec)}`,
