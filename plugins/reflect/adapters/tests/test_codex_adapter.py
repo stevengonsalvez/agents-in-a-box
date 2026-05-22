@@ -126,6 +126,101 @@ def test_install_writes_hooks_json_with_all_three_entries(tmp_path):
     assert "{home_tool_dir}" not in text
 
 
+def test_install_writes_new_hooks_for_3_6_0(tmp_path):
+    """3.6.0 adds UserPromptSubmit, PostToolUse, and Stop hooks.
+    Verify they all land in ~/.codex/hooks.json under the right events."""
+    subprocess.run(
+        [sys.executable, str(ADAPTER), "install", "--home", str(tmp_path)],
+        check=True, capture_output=True,
+    )
+
+    cfg = json.loads((tmp_path / ".codex" / "hooks.json").read_text())
+    codex_dir = tmp_path / ".codex"
+
+    ups_cmds = [
+        h["command"]
+        for entry in cfg["hooks"]["UserPromptSubmit"]
+        for h in entry["hooks"]
+    ]
+    ptu_cmds = [
+        h["command"]
+        for entry in cfg["hooks"]["PostToolUse"]
+        for h in entry["hooks"]
+    ]
+    stop_cmds = [
+        h["command"]
+        for entry in cfg["hooks"]["Stop"]
+        for h in entry["hooks"]
+    ]
+    assert codex_adapter._render_user_prompt_recall_command(codex_dir) in ups_cmds
+    assert codex_adapter._render_posttooluse_minilearning_command(codex_dir) in ptu_cmds
+    assert codex_adapter._render_stop_reflect_command(codex_dir) in stop_cmds
+
+
+def test_install_deploys_new_hook_scripts_on_disk(tmp_path):
+    """The three new hook script files must physically exist under
+    ~/.codex/skills/ — otherwise the hook commands in hooks.json
+    reference non-existent paths and the harness silently skips them."""
+    subprocess.run(
+        [sys.executable, str(ADAPTER), "install", "--home", str(tmp_path)],
+        check=True, capture_output=True,
+    )
+    codex_dir = tmp_path / ".codex"
+    expected = [
+        codex_dir / "skills" / "recall" / "hooks" / "user_prompt_submit_recall.py",
+        codex_dir / "skills" / "reflect" / "hooks" / "posttooluse_minilearning.py",
+        codex_dir / "skills" / "reflect" / "hooks" / "stop_reflect.py",
+    ]
+    for path in expected:
+        assert path.exists(), f"missing on disk: {path}"
+
+
+def test_uninstall_removes_new_hooks_too(tmp_path):
+    """Uninstall must strip all five reflect-managed events
+    (SessionStart, PreCompact, UserPromptSubmit, PostToolUse, Stop)."""
+    # Pre-seed with an unrelated entry under each event to verify it survives.
+    codex_dir = tmp_path / ".codex"
+    codex_dir.mkdir()
+    (codex_dir / "hooks.json").write_text(json.dumps({
+        "hooks": {
+            "UserPromptSubmit": [
+                {"hooks": [{"type": "command", "command": "echo other-ups"}]}
+            ],
+            "PostToolUse": [
+                {"hooks": [{"type": "command", "command": "echo other-ptu"}]}
+            ],
+            "Stop": [
+                {"hooks": [{"type": "command", "command": "echo other-stop"}]}
+            ],
+        }
+    }))
+    subprocess.run(
+        [sys.executable, str(ADAPTER), "install", "--home", str(tmp_path)],
+        check=True, capture_output=True,
+    )
+    subprocess.run(
+        [sys.executable, str(ADAPTER), "uninstall", "--home", str(tmp_path)],
+        check=True, capture_output=True,
+    )
+
+    cfg = json.loads((codex_dir / "hooks.json").read_text())
+    # Map each event to (seeded-unrelated-cmd, reflect-render-fn)
+    spec = {
+        "UserPromptSubmit": ("echo other-ups", codex_adapter._render_user_prompt_recall_command),
+        "PostToolUse":      ("echo other-ptu", codex_adapter._render_posttooluse_minilearning_command),
+        "Stop":             ("echo other-stop", codex_adapter._render_stop_reflect_command),
+    }
+    for event, (other_cmd, render_fn) in spec.items():
+        cmds = [
+            h["command"]
+            for entry in cfg.get("hooks", {}).get(event, [])
+            for h in entry["hooks"]
+        ]
+        assert other_cmd in cmds, f"unrelated {event} hook lost! cmds={cmds}"
+        # Reflect entry should be gone
+        assert render_fn(codex_dir) not in cmds
+
+
 def test_install_no_hooks_flag_skips_hooks_json(tmp_path):
     subprocess.run(
         [sys.executable, str(ADAPTER), "install",
