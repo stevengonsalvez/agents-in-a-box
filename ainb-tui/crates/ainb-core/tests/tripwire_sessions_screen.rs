@@ -179,6 +179,20 @@ fn tui_sessions_screen_renders_after_pressing_s() {
         capture(&session)
     );
 
+    send_sgr_mouse(&session, 0, 2, 4, true);
+    send_sgr_mouse(&session, 0, 2, 4, false);
+    let expanded = poll(&session, Instant::now() + Duration::from_secs(10), |c| {
+        !c.contains("[+]")
+            && is_on_sessions_screen(c)
+            && config_text(home_tmp.path()).contains("sessions_sidebar_collapsed = false")
+    });
+    assert!(
+        expanded.is_some(),
+        "sessions sidebar did not expand from visible [+] click; config:\n{}\npane:\n{}",
+        config_text(home_tmp.path()),
+        capture(&session)
+    );
+
     // Regression cross-check: must not be analytics by accident.
     assert!(
         !final_cap.contains("Usage Analytics"),

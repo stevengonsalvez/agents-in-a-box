@@ -69,7 +69,7 @@ fn sessions_mouse_drag_resizes_and_persists_on_release_only() {
 #[test]
 fn sessions_mouse_toggle_collapses_and_expands_sidebar() {
     let _guard = HOME_LOCK.lock().expect("home env lock");
-    let (_home, mut state) = state_with_two_sessions();
+    let (home, mut state) = state_with_two_sessions();
 
     EventHandler::handle_mouse_event(AppEvent::MouseClick { x: 2, y: 3 }, &mut state);
     assert!(state.sessions_pane_state.collapsed);
@@ -78,8 +78,12 @@ fn sessions_mouse_toggle_collapses_and_expands_sidebar() {
     state
         .sessions_pane_state
         .set_layout(Rect::new(0, 3, 5, 20), Rect::new(5, 3, 115, 20));
-    EventHandler::handle_mouse_event(AppEvent::MouseClick { x: 1, y: 3 }, &mut state);
+    EventHandler::handle_mouse_event(AppEvent::MouseClick { x: 2, y: 4 }, &mut state);
 
     assert!(!state.sessions_pane_state.collapsed);
     assert_eq!(state.sessions_pane_state.effective_width(120), 40);
+
+    let config = std::fs::read_to_string(home.path().join(".agents-in-a-box/config/config.toml"))
+        .expect("persisted config");
+    assert!(config.contains("sessions_sidebar_collapsed = false"));
 }

@@ -521,11 +521,22 @@ impl SessionsPaneState {
         let Some(rect) = self.last_sessions_rect else {
             return false;
         };
-        if y != rect.y || rect.width == 0 {
+        if rect.width == 0 {
             return false;
         }
 
-        x >= rect.x && x < rect.x.saturating_add(rect.width)
+        let on_x = x >= rect.x && x < rect.x.saturating_add(rect.width);
+        if !on_x {
+            return false;
+        }
+
+        if self.collapsed {
+            // Expanded pane puts `[-]` in the block title on the top border.
+            // Collapsed rail renders `[+]` as first content row inside the block.
+            return y == rect.y || y == rect.y.saturating_add(1);
+        }
+
+        y == rect.y
     }
 
     pub fn contains_sessions_point(&self, x: u16, y: u16) -> bool {
