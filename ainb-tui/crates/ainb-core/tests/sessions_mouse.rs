@@ -46,6 +46,34 @@ fn sessions_mouse_click_selects_session_row_without_async_work() {
 }
 
 #[test]
+fn sessions_mouse_double_click_attaches_selected_session_row() {
+    let _guard = HOME_LOCK.lock().expect("home env lock");
+    let (_home, mut state) = state_with_two_sessions();
+
+    let first = EventHandler::handle_mouse_event(AppEvent::MouseClick { x: 8, y: 6 }, &mut state);
+    let second = EventHandler::handle_mouse_event(AppEvent::MouseClick { x: 8, y: 6 }, &mut state);
+
+    assert!(first.is_none());
+    assert!(matches!(second, Some(AppEvent::AttachTmuxSession)));
+    assert_eq!(state.selected_workspace_index, Some(0));
+    assert_eq!(state.selected_session_index, Some(1));
+}
+
+#[test]
+fn sessions_mouse_double_click_requires_same_attachable_row() {
+    let _guard = HOME_LOCK.lock().expect("home env lock");
+    let (_home, mut state) = state_with_two_sessions();
+
+    let first = EventHandler::handle_mouse_event(AppEvent::MouseClick { x: 8, y: 5 }, &mut state);
+    let second = EventHandler::handle_mouse_event(AppEvent::MouseClick { x: 8, y: 6 }, &mut state);
+
+    assert!(first.is_none());
+    assert!(second.is_none());
+    assert_eq!(state.selected_workspace_index, Some(0));
+    assert_eq!(state.selected_session_index, Some(1));
+}
+
+#[test]
 fn sessions_mouse_drag_resizes_and_persists_on_release_only() {
     let _guard = HOME_LOCK.lock().expect("home env lock");
     let (home, mut state) = state_with_two_sessions();

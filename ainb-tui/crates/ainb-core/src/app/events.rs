@@ -461,7 +461,12 @@ impl EventHandler {
                     }
 
                     if let Some(target) = state.session_list_row_at_mouse(x, y) {
+                        let double_click =
+                            state.sessions_pane_state.record_row_click(target, Instant::now());
                         state.select_session_list_row(target);
+                        if double_click {
+                            return Some(AppEvent::AttachTmuxSession);
+                        }
                         return None;
                     }
 

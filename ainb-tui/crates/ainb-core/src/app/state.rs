@@ -417,6 +417,7 @@ pub const DEFAULT_SESSIONS_SIDEBAR_WIDTH: u16 = 40;
 pub const MIN_SESSIONS_SIDEBAR_WIDTH: u16 = 24;
 pub const SESSIONS_PREVIEW_RESERVE: u16 = 50;
 pub const COLLAPSED_SESSIONS_SIDEBAR_WIDTH: u16 = 5;
+pub const SESSIONS_ROW_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(300);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionListRowTarget {
@@ -435,6 +436,7 @@ pub struct SessionsPaneState {
     last_sessions_rect: Option<Rect>,
     last_preview_rect: Option<Rect>,
     last_list_scroll_offset: usize,
+    last_attachable_click: Option<(AttachableRef, Instant)>,
 }
 
 impl Default for SessionsPaneState {
@@ -447,6 +449,7 @@ impl Default for SessionsPaneState {
             last_sessions_rect: None,
             last_preview_rect: None,
             last_list_scroll_offset: 0,
+            last_attachable_click: None,
         }
     }
 }
@@ -573,6 +576,23 @@ impl SessionsPaneState {
         }
 
         Some(self.last_list_scroll_offset + usize::from(y - rect.y - 1))
+    }
+
+    pub fn record_row_click(&mut self, target: SessionListRowTarget, now: Instant) -> bool {
+        let SessionListRowTarget::Attachable(target) = target else {
+            self.last_attachable_click = None;
+            return false;
+        };
+
+        let double_click = self
+            .last_attachable_click
+            .map(|(last_target, last_at)| {
+                last_target == target
+                    && now.saturating_duration_since(last_at) <= SESSIONS_ROW_DOUBLE_CLICK_WINDOW
+            })
+            .unwrap_or(false);
+        self.last_attachable_click = Some((target, now));
+        double_click
     }
 
     pub fn begin_resize(&mut self, x: u16, y: u16) -> bool {
