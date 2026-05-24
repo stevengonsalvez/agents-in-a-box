@@ -8,6 +8,7 @@
 
 use anyhow::{Context, Result};
 use crossterm::{
+    event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -58,14 +59,22 @@ impl<'a> AttachHandler<'a> {
 
     /// Suspend the TUI
     ///
-    /// Leaves alternate screen and disables raw mode, returning control to the normal terminal
+    /// Leaves alternate screen and disables raw mode, returning control to the normal terminal.
+    /// Disables mouse capture and bracketed paste so the inner program (tmux) sees a clean
+    /// terminal — the symmetric counterparts are re-enabled in `resume_tui`.
     async fn suspend_tui(&mut self) -> Result<()> {
         // Disable raw mode first
         disable_raw_mode().context("Failed to disable raw mode")?;
 
-        // Leave alternate screen
-        execute!(self.terminal.backend_mut(), LeaveAlternateScreen)
-            .context("Failed to leave alternate screen")?;
+        // Leave alternate screen and tear down input modes that match TUI startup
+        // (see main.rs: EnterAlternateScreen + EnableMouseCapture + EnableBracketedPaste).
+        execute!(
+            self.terminal.backend_mut(),
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            DisableBracketedPaste,
+        )
+        .context("Failed to leave alternate screen")?;
 
         // Show cursor
         self.terminal.show_cursor().context("Failed to show cursor")?;
@@ -76,11 +85,19 @@ impl<'a> AttachHandler<'a> {
 
     /// Resume the TUI
     ///
-    /// Enters alternate screen and enables raw mode, restoring the TUI
+    /// Enters alternate screen and enables raw mode, restoring the TUI. Must restore the
+    /// full input mode set established at startup (mouse capture + bracketed paste), otherwise
+    /// mouse events stop arriving after the first detach.
     async fn resume_tui(&mut self) -> Result<()> {
-        // Enter alternate screen
-        execute!(self.terminal.backend_mut(), EnterAlternateScreen)
-            .context("Failed to enter alternate screen")?;
+        // Enter alternate screen and re-enable the input modes that match TUI startup
+        // (see main.rs: EnterAlternateScreen + EnableMouseCapture + EnableBracketedPaste).
+        execute!(
+            self.terminal.backend_mut(),
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            EnableBracketedPaste,
+        )
+        .context("Failed to enter alternate screen")?;
 
         // Enable raw mode
         enable_raw_mode().context("Failed to enable raw mode")?;

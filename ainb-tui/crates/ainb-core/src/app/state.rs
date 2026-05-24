@@ -2340,10 +2340,8 @@ pub struct AppState {
     /// `App::tick_plugin_renders` populates this before each frame so
     /// `PluginScreen::render` can paint without needing access to the
     /// plugin runtime (which lives on `App`, not `AppState`).
-    pub pending_plugin_renders: std::collections::HashMap<
-        crate::app::screens::ScreenId,
-        ainb_plugin_runtime::WireBuffer,
-    >,
+    pub pending_plugin_renders:
+        std::collections::HashMap<crate::app::screens::ScreenId, ainb_plugin_runtime::WireBuffer>,
 
     /// Last `(width, height)` `PluginScreen::render` was handed for each
     /// screen id. `tick_plugin_renders` reads this and forwards it to
@@ -2351,8 +2349,7 @@ pub struct AppState {
     /// size instead of falling back to its hard-coded default. One-frame
     /// stale is fine — the first frame still uses the plugin's fallback,
     /// every subsequent frame matches the host's layout.
-    pub plugin_render_areas:
-        std::collections::HashMap<crate::app::screens::ScreenId, (u16, u16)>,
+    pub plugin_render_areas: std::collections::HashMap<crate::app::screens::ScreenId, (u16, u16)>,
 
     /// Cheap Send + Clone façade onto the plugin runtime, populated by
     /// `App::init`. `None` when running plugin-free (e.g. tests, or
@@ -9324,6 +9321,10 @@ impl AppState {
     /// Run OAuth authentication setup
     async fn run_oauth_setup(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         use crossterm::{
+            event::{
+                DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
+                EnableMouseCapture,
+            },
             execute,
             terminal::{LeaveAlternateScreen, disable_raw_mode},
         };
@@ -9383,9 +9384,15 @@ impl AppState {
         // Temporarily exit TUI to run interactive container
         info!("Exiting TUI to run interactive authentication");
 
-        // Disable raw mode and restore terminal
+        // Disable raw mode and tear down input modes that match TUI startup
+        // (see main.rs: EnterAlternateScreen + EnableMouseCapture + EnableBracketedPaste).
         let _ = disable_raw_mode();
-        let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
+        let _ = execute!(
+            std::io::stdout(),
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            DisableBracketedPaste,
+        );
 
         println!("\n🔐 Claude Authentication Setup\n");
         println!("This will guide you through the OAuth authentication process.");
@@ -9451,10 +9458,17 @@ impl AppState {
             }
         }
 
-        // Re-enable raw mode and return to TUI
+        // Re-enable raw mode and the full input mode set established at startup —
+        // without re-enabling mouse capture + bracketed paste, mouse events stop
+        // arriving after the auth flow returns to the TUI.
         use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
         let _ = enable_raw_mode();
-        let _ = execute!(std::io::stdout(), EnterAlternateScreen);
+        let _ = execute!(
+            std::io::stdout(),
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            EnableBracketedPaste,
+        );
 
         // Force UI refresh
         self.ui_needs_refresh = true;
@@ -9749,10 +9763,7 @@ impl AppState {
                                 "Failed to restart CLI in tmux for session {}: {}",
                                 session_id, e
                             );
-                            self.add_error_notification(format!(
-                                "❌ Failed to restart CLI: {}",
-                                e
-                            ));
+                            self.add_error_notification(format!("❌ Failed to restart CLI: {}", e));
                         }
                     }
                 }
@@ -10282,9 +10293,8 @@ impl App {
         // Static plugin-screen routing table. Pairs a stable screen id
         // (consumed by `PluginScreen` and matched against
         // `state.current_screen`) with the plugin id that owns it.
-        const PLUGIN_SCREENS: &[(&str, &str)] = &[
-            (crate::app::screens::ids::ANALYTICS, "burndown"),
-        ];
+        const PLUGIN_SCREENS: &[(&str, &str)] =
+            &[(crate::app::screens::ids::ANALYTICS, "burndown")];
 
         for (screen_id, plugin_id) in PLUGIN_SCREENS {
             let pid = ainb_plugin_runtime::PluginId::from(*plugin_id);
@@ -10300,9 +10310,7 @@ impl App {
             // `plugin/render`; `try_recv_render` is the non-blocking
             // hand-off the render thread relies on.
             if let Some(buf) = handle.try_recv_render(&pid) {
-                self.state
-                    .pending_plugin_renders
-                    .insert((*screen_id).to_string(), buf);
+                self.state.pending_plugin_renders.insert((*screen_id).to_string(), buf);
             }
 
             // Kick the next render ONLY when something has actually
@@ -10327,12 +10335,8 @@ impl App {
             // before the first paint — the plugin treats that as "use
             // your own fallback size", which keeps the first frame
             // sensible until the area cache fills in.
-            let (width, height) = self
-                .state
-                .plugin_render_areas
-                .get(*screen_id)
-                .copied()
-                .unwrap_or((0, 0));
+            let (width, height) =
+                self.state.plugin_render_areas.get(*screen_id).copied().unwrap_or((0, 0));
             let viewport = ainb_plugin_runtime::Viewport { width, height };
             // Returned oneshot is intentionally dropped — the cache
             // pickup happens via `try_recv_render` next tick.
