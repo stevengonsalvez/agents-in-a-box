@@ -89,16 +89,22 @@ impl LayoutComponent {
         self.render_status_bar(frame, main_layout[0], state);
 
         // Simple 2-panel layout: session list | logs (Claude chat is now a popup)
+        let sessions_width = state.sessions_pane_state.effective_width(main_layout[1].width);
         let content_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Percentage(40), // Session list
-                Constraint::Percentage(60), // Live logs stream
+                Constraint::Length(sessions_width), // Session list
+                Constraint::Min(0),                 // Live logs stream
             ])
             .split(main_layout[1]);
+        state.sessions_pane_state.set_layout(content_chunks[0], content_chunks[1]);
 
         // Pass focus information to components
-        self.session_list.render(frame, content_chunks[0], state);
+        if state.sessions_pane_state.collapsed {
+            self.render_collapsed_sessions_rail(frame, content_chunks[0], state);
+        } else {
+            self.session_list.render(frame, content_chunks[0], state);
+        }
 
         // Render tmux preview if selected session has tmux, otherwise show live logs
         // This includes both regular Claude sessions AND shell sessions
@@ -160,6 +166,36 @@ impl LayoutComponent {
     /// Get mutable reference to tmux preview component for scroll handling
     pub fn tmux_preview_mut(&mut self) -> &mut TmuxPreviewPane {
         &mut self.tmux_preview
+    }
+
+    fn render_collapsed_sessions_rail(&self, frame: &mut Frame, area: Rect, state: &AppState) {
+        let border_color = if state.sessions_pane_state.edge_highlighted() {
+            GOLD
+        } else if state.focused_pane == crate::app::state::FocusedPane::Sessions {
+            SELECTION_GREEN
+        } else {
+            SUBDUED_BORDER
+        };
+        let rail = Paragraph::new(vec![
+            Line::from(Span::styled(
+                "[+]",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled("S", Style::default().fg(CORNFLOWER_BLUE))),
+            Line::from(Span::styled("E", Style::default().fg(CORNFLOWER_BLUE))),
+            Line::from(Span::styled("S", Style::default().fg(CORNFLOWER_BLUE))),
+        ])
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(border_color))
+                .style(Style::default().bg(DARK_BG)),
+        )
+        .alignment(Alignment::Center);
+
+        frame.render_widget(rail, area);
     }
 
     fn render_menu_bar(&self, frame: &mut Frame, area: Rect, state: &AppState) {

@@ -97,13 +97,12 @@ async fn main() -> Result<()> {
     // `tui` is handled inline in this function (it owns the alternate-screen
     // setup + cleanup), so it sits outside the registry. Declare it on the
     // base command so help/completion still list it.
-    app = app.subcommand(clap::Command::new("tui").about("Launch the TUI (default if no command given)"));
+    app = app.subcommand(
+        clap::Command::new("tui").about("Launch the TUI (default if no command given)"),
+    );
     app = registry.build_clap(app);
     let matches = app.get_matches();
-    let format = matches
-        .get_one::<cli::OutputFormat>("format")
-        .copied()
-        .unwrap_or_default();
+    let format = matches.get_one::<cli::OutputFormat>("format").copied().unwrap_or_default();
     let ctx = cli::registry::CliContext { format };
 
     // Track whether we entered TUI mode so we only clean up terminal in that case.
@@ -289,9 +288,7 @@ async fn run_tui_loop(
                                     cmd
                                 );
                             }
-                            SlashAction::Opened
-                            | SlashAction::Closed
-                            | SlashAction::None => {}
+                            SlashAction::Opened | SlashAction::Closed | SlashAction::None => {}
                         }
                         continue;
                     }
@@ -430,9 +427,16 @@ async fn run_tui_loop(
 
                             if app.state.current_screen == screen_ids::HOME {
                                 // Scroll welcome panel on home screen (right side only)
-                                // Sidebar is ~26 chars wide, so anything beyond that is the welcome panel
-                                let sidebar_width = 26u16;
-                                if mouse_event.column > sidebar_width {
+                                let sidebar_width = app
+                                    .state
+                                    .home_screen_v2_state
+                                    .rendered_sidebar_width()
+                                    .unwrap_or_else(|| {
+                                        app.state.home_screen_v2_state.sidebar.effective_width(
+                                            crossterm::terminal::size().unwrap_or((80, 24)).0,
+                                        )
+                                    });
+                                if mouse_event.column >= sidebar_width {
                                     for _ in 0..SCROLL_LINES {
                                         if is_down {
                                             app.state.home_screen_v2_state.welcome.scroll_down();
@@ -519,6 +523,15 @@ async fn run_tui_loop(
                                 app.state.log_history_state.end_selection();
                             } else if let Some(app_event) = EventHandler::handle_mouse_event(
                                 AppEvent::MouseDragEnd { x: col, y: row },
+                                &mut app.state,
+                            ) {
+                                EventHandler::process_event(app_event, &mut app.state);
+                            }
+                        }
+                        MouseEventKind::Moved => {
+                            let (col, row) = (mouse_event.column, mouse_event.row);
+                            if let Some(app_event) = EventHandler::handle_mouse_event(
+                                AppEvent::MouseMove { x: col, y: row },
                                 &mut app.state,
                             ) {
                                 EventHandler::process_event(app_event, &mut app.state);
@@ -971,7 +984,8 @@ async fn run_tui_loop(
 
                         // Clear new session state
                         app.state.new_session_state = None;
-                        app.state.current_screen = crate::app::screens::ids::SESSION_LIST.to_string();
+                        app.state.current_screen =
+                            crate::app::screens::ids::SESSION_LIST.to_string();
 
                         if let Some(target) = ssh_target {
                             let ssh_cmd = target.to_ssh_command();

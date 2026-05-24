@@ -445,6 +445,18 @@ pub struct UiPreferences {
     #[serde(default)]
     pub preferred_editor: Option<String>,
 
+    /// Preferred HomeScreen sidebar width in terminal columns.
+    #[serde(default)]
+    pub home_sidebar_width: Option<u16>,
+
+    /// Preferred Sessions screen sidebar width in terminal columns.
+    #[serde(default)]
+    pub sessions_sidebar_width: Option<u16>,
+
+    /// Whether the Sessions screen sidebar starts minimized.
+    #[serde(default)]
+    pub sessions_sidebar_collapsed: Option<bool>,
+
     /// User's response to the "wire up Claude Code statusline" prompt.
     /// `Unset` means we'll prompt again (init wizard) and surface the
     /// CTA in the Budget panel. `Declined` suppresses the top-bar CTA
@@ -474,6 +486,9 @@ impl Default for UiPreferences {
             show_container_status: true,
             show_git_status: true,
             preferred_editor: None,
+            home_sidebar_width: None,
+            sessions_sidebar_width: None,
+            sessions_sidebar_collapsed: None,
             statusline_decision: StatuslineDecision::default(),
         }
     }
@@ -689,6 +704,17 @@ impl AppConfig {
         if other.ui_preferences.preferred_editor.is_some() {
             self.ui_preferences.preferred_editor = other.ui_preferences.preferred_editor;
         }
+        if other.ui_preferences.home_sidebar_width.is_some() {
+            self.ui_preferences.home_sidebar_width = other.ui_preferences.home_sidebar_width;
+        }
+        if other.ui_preferences.sessions_sidebar_width.is_some() {
+            self.ui_preferences.sessions_sidebar_width =
+                other.ui_preferences.sessions_sidebar_width;
+        }
+        if other.ui_preferences.sessions_sidebar_collapsed.is_some() {
+            self.ui_preferences.sessions_sidebar_collapsed =
+                other.ui_preferences.sessions_sidebar_collapsed;
+        }
 
         // Override Docker settings
         if other.docker.host.is_some() {
@@ -882,6 +908,9 @@ mod tests {
         config.ui_preferences.show_container_status = false;
         config.ui_preferences.show_git_status = false;
         config.ui_preferences.preferred_editor = Some("nvim".to_string());
+        config.ui_preferences.home_sidebar_width = Some(42);
+        config.ui_preferences.sessions_sidebar_width = Some(44);
+        config.ui_preferences.sessions_sidebar_collapsed = Some(true);
         config.usage.plan = Some(UsagePlan {
             id: UsagePlanId::ClaudePro,
             monthly_usd: 20.0,
@@ -938,6 +967,18 @@ mod tests {
             "preferred_editor not in TOML"
         );
         assert!(
+            toml_str.contains("home_sidebar_width = 42"),
+            "home_sidebar_width not in TOML"
+        );
+        assert!(
+            toml_str.contains("sessions_sidebar_width = 44"),
+            "sessions_sidebar_width not in TOML"
+        );
+        assert!(
+            toml_str.contains("sessions_sidebar_collapsed = true"),
+            "sessions_sidebar_collapsed not in TOML"
+        );
+        assert!(
             toml_str.contains("[usage.plan]") && toml_str.contains("[usage.currency]"),
             "usage config not in TOML"
         );
@@ -969,6 +1010,9 @@ mod tests {
             loaded.ui_preferences.preferred_editor,
             Some("nvim".to_string())
         );
+        assert_eq!(loaded.ui_preferences.home_sidebar_width, Some(42));
+        assert_eq!(loaded.ui_preferences.sessions_sidebar_width, Some(44));
+        assert_eq!(loaded.ui_preferences.sessions_sidebar_collapsed, Some(true));
         assert_eq!(loaded.usage.plan.unwrap().reset_day, 12);
         assert_eq!(loaded.usage.currency.code, "GBP");
         assert_eq!(
@@ -1061,6 +1105,9 @@ mod old_config_tests {
                 show_container_status: false,
                 show_git_status: false,
                 preferred_editor: None,
+                home_sidebar_width: None,
+                sessions_sidebar_width: None,
+                sessions_sidebar_collapsed: None,
                 statusline_decision: StatuslineDecision::default(),
             },
             docker: DockerConfig {
@@ -1101,6 +1148,9 @@ mod old_config_tests {
                 show_container_status: false,
                 show_git_status: false,
                 preferred_editor: None,
+                home_sidebar_width: Some(38),
+                sessions_sidebar_width: Some(46),
+                sessions_sidebar_collapsed: Some(true),
                 statusline_decision: StatuslineDecision::default(),
             },
             docker: DockerConfig {
@@ -1124,6 +1174,12 @@ mod old_config_tests {
 
         // Theme should be updated
         assert_eq!(defaults.ui_preferences.theme, "light");
+        assert_eq!(defaults.ui_preferences.home_sidebar_width, Some(38));
+        assert_eq!(defaults.ui_preferences.sessions_sidebar_width, Some(46));
+        assert_eq!(
+            defaults.ui_preferences.sessions_sidebar_collapsed,
+            Some(true)
+        );
 
         // Timeout should be updated
         assert_eq!(defaults.docker.timeout, 30);
