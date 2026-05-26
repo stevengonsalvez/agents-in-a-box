@@ -13,6 +13,7 @@ use clap::{Args, Parser, Subcommand};
 pub mod discovery;
 pub mod doctor;
 pub mod migrate;
+pub mod promote;
 pub mod search;
 pub mod skill;
 pub mod source;
@@ -129,6 +130,9 @@ pub enum SkillCommand {
     /// are declared but missing, uninstall units that the lockfile
     /// holds but the manifest no longer mentions.
     Sync(SyncArgs),
+    /// Promote a `local:` orphan unit into a git-backed source repo,
+    /// rewriting the manifest URI from `local:` to `gh:` / `git:`.
+    Promote(PromoteArgs),
 }
 
 #[derive(Args, Debug)]
@@ -189,6 +193,33 @@ pub struct UpdateArgs {
     /// Show the planned diff but don't apply.
     #[arg(long)]
     pub dry_run: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct PromoteArgs {
+    /// Unit name to promote (matches the trailing `/path` of the
+    /// unit URI, e.g. `my-skill` in `local:~/.claude/skills@head/my-skill`).
+    pub unit_name: String,
+
+    /// Destination git URI. Supports `gh:user/repo[@branch]` for real
+    /// GitHub remotes and `file://<path>[@<branch>]` for tests
+    /// (and local bare repos). Required.
+    #[arg(long)]
+    pub to: String,
+
+    /// Override the default commit message. Otherwise:
+    /// `feat(<unit-name>): promote from local`.
+    #[arg(long)]
+    pub message: Option<String>,
+
+    /// Print the plan; do not clone, commit, push, or write any
+    /// manifest/lockfile mutations.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Skip the interactive confirmation prompt.
+    #[arg(long)]
+    pub yes: bool,
 }
 
 #[derive(Args, Debug)]

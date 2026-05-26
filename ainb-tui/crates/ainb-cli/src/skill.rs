@@ -42,6 +42,7 @@ pub fn dispatch(home: &Path, action: SkillCommand, out: &mut dyn io::Write) -> R
         SkillCommand::Remove(args) => remove(home, args, out),
         SkillCommand::Update(args) => update(home, args, out),
         SkillCommand::Sync(args) => sync(home, args, out),
+        SkillCommand::Promote(args) => crate::promote::dispatch(home, args, out),
     }
 }
 

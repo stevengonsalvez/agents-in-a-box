@@ -11,6 +11,7 @@ ainb-diff = { path = "../ainb-diff" }
 ainb-fetch = { path = "../ainb-fetch" }
 anyhow = { workspace = true }
 clap = { workspace = true }
+serde_json = { workspace = true }
 serde_yaml_ng = { workspace = true }
 
 [dev-dependencies]
