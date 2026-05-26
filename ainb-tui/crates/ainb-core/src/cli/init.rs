@@ -74,6 +74,9 @@ struct StatusReport {
     config_path: String,
     config_exists: bool,
     skipped_dependencies: Vec<String>,
+    /// State of `~/.tmux.conf` relative to ainb's rich bundled conf.
+    /// See [`crate::cli::tmux_install::OnboardingTmuxState`].
+    tmux_conf_state: String,
 }
 
 /// Validate that at most one mode flag is set
@@ -288,6 +291,15 @@ fn cmd_setup(format: OutputFormat) -> Result<()> {
         let _ = run_statusline_step(&mut std::io::stdin().lock(), &mut std::io::stdout().lock());
     }
 
+    // Tmux conf step — mirrors statusline shape. Only prompts on Missing or
+    // a recognisable-old ainb default; never touches custom user confs.
+    if matches!(format, OutputFormat::Text) {
+        let _ = crate::cli::tmux_install::run_tmux_setup_step(
+            &mut std::io::stdin().lock(),
+            &mut std::io::stdout().lock(),
+        );
+    }
+
     match format {
         OutputFormat::Json => {
             let output = serde_json::json!({
@@ -325,6 +337,10 @@ fn cmd_status(format: OutputFormat) -> Result<()> {
     let user_dir = AppConfig::get_user_config_dir()?;
     let config_path = user_dir.join("config.toml");
 
+    let tmux_state = crate::cli::tmux_install::detect_onboarding_state_default()
+        .map(|s| s.label().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+
     let report = StatusReport {
         completed: onboarding.completed,
         completed_at: onboarding.completed_at.clone(),
@@ -334,6 +350,7 @@ fn cmd_status(format: OutputFormat) -> Result<()> {
         config_path: config_path.display().to_string(),
         config_exists: config_path.exists(),
         skipped_dependencies: onboarding.skipped_dependencies.clone(),
+        tmux_conf_state: tmux_state,
     };
 
     match format {
@@ -372,6 +389,16 @@ fn cmd_status(format: OutputFormat) -> Result<()> {
                     "    Skipped deps: {}",
                     report.skipped_dependencies.join(", ")
                 );
+            }
+            // Tmux conf state — informational, never errors out.
+            let tmux_marker = match report.tmux_conf_state.as_str() {
+                "up to date" => "\u{2713}",
+                "custom (not managed by ainb)" => "\u{2139}", // info ⓘ
+                _ => "\u{26A0}",                              // ⚠ for missing / old
+            };
+            println!("  {tmux_marker} Tmux conf:    {}", report.tmux_conf_state);
+            if matches!(report.tmux_conf_state.as_str(), "missing" | "old ainb default (upgradable)") {
+                println!("    \u{21B3} run `ainb tmux install` to install the rich conf");
             }
         }
     }
