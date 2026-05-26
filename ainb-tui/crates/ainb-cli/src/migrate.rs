@@ -526,7 +526,7 @@ fn apply_legacy_yaml_match(patch: &mut ManifestPatch, path: &Path) -> Result<usi
         }
         let new_uri = format!("gh:{repo}@{ref}/{path_in_repo}");
         let key = (repo.clone(), r#ref.clone());
-        if !gh_sources_seen.contains_key(&key) {
+        gh_sources_seen.entry(key).or_insert_with(|| {
             let source_name = format!("gh-{}", repo.replace('/', "-"));
             new_gh_sources.push(SourceEntry {
                 name: source_name.clone(),
@@ -536,8 +536,8 @@ fn apply_legacy_yaml_match(patch: &mut ManifestPatch, path: &Path) -> Result<usi
                 enabled: true,
                 read_only: false,
             });
-            gh_sources_seen.insert(key, source_name);
-        }
+            source_name
+        });
         rewritten_units.push(UnitEntry {
             uri: new_uri,
             targets: unit.targets,
