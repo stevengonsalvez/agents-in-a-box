@@ -190,6 +190,14 @@ fn walk_dir_units(
         let Some(dir_name) = path.file_name().and_then(|s| s.to_str()) else {
             continue;
         };
+        // `~/.claude/plugins/cache/` is Claude Code's marketplace
+        // plugin cache, owned by class-A discovery. A bare class-C
+        // walk would otherwise surface `cache` as a synthetic orphan
+        // plugin named "cache". Skip it for the claude tool only —
+        // other tools have no such reserved subdir.
+        if tool == "claude" && fallback_kind == UnitKind::Plugin && dir_name == "cache" {
+            continue;
+        }
         let skill_md = path.join("SKILL.md");
         let (name, kind, valid) = if skill_md.is_file() {
             parse_frontmatter(&skill_md, dir_name, fallback_kind)
