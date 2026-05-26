@@ -101,6 +101,7 @@ impl CommandRegistry {
         r.register(UsageCommand);
         r.register(StatuslineCommand);
         r.register(ClaudecodeCommand);
+        r.register(TmuxCommand);
         r.register(CompletionCommand);
         r.register(PluginCommand); // Phase 4 stub — surface reserved now
         r
@@ -807,6 +808,64 @@ impl CliCommand for ClaudecodeCommand {
     }
 }
 
+/// `ainb tmux {install,status}` — manage the bundled rich tmux.conf at
+/// `~/.tmux.conf`. See `crate::cli::tmux_install` for the implementation.
+pub struct TmuxCommand;
+impl CliCommand for TmuxCommand {
+    fn name(&self) -> &'static str {
+        "tmux"
+    }
+    fn build(&self, app: Command) -> Command {
+        let install = <crate::cli::tmux_install::InstallArgs as clap::Args>::augment_args(
+            Command::new("install").about(
+                "Install or upgrade the bundled rich tmux.conf to ~/.tmux.conf \
+                 (backs up any existing file, shows a diff preview, then reloads \
+                 live sessions).",
+            ),
+        );
+        let status = <crate::cli::tmux_install::StatusArgs as clap::Args>::augment_args(
+            Command::new("status").about(
+                "Report whether ~/.tmux.conf is missing, up to date, or stale \
+                 relative to the bundled rich conf.",
+            ),
+        );
+        app.subcommand(
+            Command::new(self.name())
+                .about(
+                    "Manage the rich tmux.conf shipped with ainb-tui \
+                     (Catppuccin Mocha + TPM + resurrect/continuum/yank + \
+                     discoverable detach hints).",
+                )
+                .subcommand_required(true)
+                .arg_required_else_help(true)
+                .subcommand(install)
+                .subcommand(status),
+        )
+    }
+    fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
+        match matches.subcommand() {
+            Some(("install", m)) => match crate::cli::tmux_install::InstallArgs::from_arg_matches(m)
+            {
+                Ok(args) => Box::pin(async move {
+                    crate::cli::tmux_install::install(args, ctx.format).await
+                }),
+                Err(e) => boxed_err(e),
+            },
+            Some(("status", m)) => match crate::cli::tmux_install::StatusArgs::from_arg_matches(m) {
+                Ok(args) => {
+                    Box::pin(async move { crate::cli::tmux_install::status(args, ctx.format).await })
+                }
+                Err(e) => boxed_err(e),
+            },
+            _ => Box::pin(async move {
+                Err(anyhow::anyhow!(
+                    "tmux requires a subcommand: install | status"
+                ))
+            }),
+        }
+    }
+}
+
 pub struct CompletionCommand;
 impl CliCommand for CompletionCommand {
     fn name(&self) -> &'static str {
@@ -976,13 +1035,13 @@ mod tests {
     }
 
     #[test]
-    fn built_ins_registers_eighteen_commands() {
+    fn built_ins_registers_nineteen_commands() {
         let r = CommandRegistry::built_ins();
         let names = r.names();
-        // 16 user-facing built-ins + claudecode namespace + plugin stub = 18.
-        // The TUI is NOT in the registry — main.rs handles `tui` /
-        // no-subcommand inline.
-        assert_eq!(names.len(), 18, "expected 18 entries, got {names:?}");
+        // 16 user-facing built-ins + claudecode namespace + tmux namespace
+        // + plugin stub = 19. The TUI is NOT in the registry — main.rs
+        // handles `tui` / no-subcommand inline.
+        assert_eq!(names.len(), 19, "expected 19 entries, got {names:?}");
         for required in [
             "run",
             "list",
@@ -1000,6 +1059,7 @@ mod tests {
             "usage",
             "statusline",
             "claudecode",
+            "tmux",
             "completion",
             "plugin",
         ] {

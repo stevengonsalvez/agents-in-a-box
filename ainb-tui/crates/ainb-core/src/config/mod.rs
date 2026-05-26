@@ -463,6 +463,13 @@ pub struct UiPreferences {
     /// (the Budget-panel CTA remains visible for power users).
     #[serde(default)]
     pub statusline_decision: StatuslineDecision,
+
+    /// User's response to the "install ainb's rich tmux conf" prompt.
+    /// Same shape as `statusline_decision`. `Unset` re-prompts on next
+    /// `ainb init` if the on-disk conf is Missing or a known-old ainb
+    /// default; `Declined` suppresses the prompt entirely.
+    #[serde(default)]
+    pub tmux_decision: TmuxDecision,
 }
 
 /// The user's recorded decision on the Claude Code statusline wiring.
@@ -479,6 +486,20 @@ pub enum StatuslineDecision {
     Installed,
 }
 
+/// The user's recorded decision on the ainb rich tmux conf installation.
+/// Mirrors [`StatuslineDecision`] semantics.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TmuxDecision {
+    /// Never asked, or dismissed without accepting/declining.
+    #[default]
+    Unset,
+    /// Explicitly opted out — suppress future prompts.
+    Declined,
+    /// Accepted; ainb has written ~/.tmux.conf (and deployed helpers).
+    Installed,
+}
+
 impl Default for UiPreferences {
     fn default() -> Self {
         Self {
@@ -490,6 +511,7 @@ impl Default for UiPreferences {
             sessions_sidebar_width: None,
             sessions_sidebar_collapsed: None,
             statusline_decision: StatuslineDecision::default(),
+            tmux_decision: TmuxDecision::default(),
         }
     }
 }
@@ -715,6 +737,12 @@ impl AppConfig {
             self.ui_preferences.sessions_sidebar_collapsed =
                 other.ui_preferences.sessions_sidebar_collapsed;
         }
+        // Decision fields: always trust on-disk, even when the value equals
+        // the default. "Unset" is itself a meaningful decision (means: prompt
+        // again next time), and "Declined" must round-trip across loads or
+        // the wizard would re-pester the user every run.
+        self.ui_preferences.statusline_decision = other.ui_preferences.statusline_decision;
+        self.ui_preferences.tmux_decision = other.ui_preferences.tmux_decision;
 
         // Override Docker settings
         if other.docker.host.is_some() {
@@ -1109,6 +1137,7 @@ mod old_config_tests {
                 sessions_sidebar_width: None,
                 sessions_sidebar_collapsed: None,
                 statusline_decision: StatuslineDecision::default(),
+                tmux_decision: TmuxDecision::default(),
             },
             docker: DockerConfig {
                 host: None,
@@ -1152,6 +1181,7 @@ mod old_config_tests {
                 sessions_sidebar_width: Some(46),
                 sessions_sidebar_collapsed: Some(true),
                 statusline_decision: StatuslineDecision::default(),
+                tmux_decision: TmuxDecision::default(),
             },
             docker: DockerConfig {
                 host: None,
