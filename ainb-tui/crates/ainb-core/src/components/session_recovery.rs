@@ -94,8 +94,6 @@ pub struct OrphanedWorktree {
     pub source_repo: Option<String>,
     /// Type of orphan
     pub orphan_type: OrphanType,
-    /// Directory size in MB
-    pub size_mb: Option<u64>,
     /// Time since last modification
     pub time_ago: String,
     /// Agent type from sessions.json (if known)
@@ -118,7 +116,6 @@ impl Default for OrphanedWorktree {
             last_commit: None,
             source_repo: None,
             orphan_type: OrphanType::NoMetadata,
-            size_mb: None,
             time_ago: String::new(),
             agent_type: None,
         }
@@ -597,22 +594,6 @@ impl SessionRecoveryState {
                 }
             });
 
-        // Get directory size (approximate using du)
-        let size_mb = Command::new("du")
-            .args(["-sm", &path.to_string_lossy()])
-            .output()
-            .ok()
-            .and_then(|o| {
-                if o.status.success() {
-                    String::from_utf8_lossy(&o.stdout)
-                        .split_whitespace()
-                        .next()
-                        .and_then(|s| s.parse().ok())
-                } else {
-                    None
-                }
-            });
-
         // Calculate time ago from mtime
         let time_ago = std::fs::metadata(path)
             .and_then(|m| m.modified())
@@ -641,7 +622,6 @@ impl SessionRecoveryState {
             last_commit,
             source_repo,
             orphan_type,
-            size_mb,
             time_ago,
             agent_type: None, // Enriched later from sessions.json
         })
@@ -2091,15 +2071,6 @@ impl SessionRecovery {
                     commit.chars().take(60).collect::<String>(),
                     Style::default().fg(SOFT_WHITE),
                 ),
-            ]));
-            lines.push(Line::from(""));
-        }
-
-        // Size
-        if let Some(size) = worktree.size_mb {
-            lines.push(Line::from(vec![
-                Span::styled("Size:     ", Style::default().fg(MUTED_GRAY)),
-                Span::styled(format!("{} MB", size), Style::default().fg(SOFT_WHITE)),
             ]));
             lines.push(Line::from(""));
         }
