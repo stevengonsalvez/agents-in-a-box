@@ -23,6 +23,8 @@ use ainb_cli::discovery::{
     class_c,
     reconcile::{self, WalkerOutput},
 };
+use ainb_skill_core::lockfile::{DeployedRef, Lockfile};
+use ainb_skill_core::paths::{lockfile_path_in, manifest_path_in};
 use ainb_skill_core::{Manifest, UnitEntry};
 
 // Style guide constants — match the rest of ainb-tui's components
@@ -726,6 +728,106 @@ fn count_conflicts(walker: &WalkerOutput) -> usize {
         .flat_map(|plugin| plugin.units.iter())
         .filter(|u| claude_names.contains(u.name.as_str()))
         .count()
+}
+
+impl SkillsScreenData {
+    /// Load the screen's view-model from the on-disk manifest +
+    /// lockfile under `home`. Best-effort: missing manifest / lockfile
+    /// yields empty rows (the screen renders placeholders), and
+    /// malformed YAML is treated as "not present" rather than a hard
+    /// error so a corrupt lockfile never blocks the user from opening
+    /// the screen.
+    ///
+    /// Banner state (`banner` / `walker_cache`) is left untouched so a
+    /// caller can sequence `load_from_disk` -> `maybe_show_discovery_banner`
+    /// without clobbering banner counts the user just saw.
+    ///
+    /// Spec §Implementation Phases P8 + §Components row
+    /// `tui::discovery_banner` / `skills_screen_data`.
+    pub fn load_from_disk(home: &Path) -> Self {
+        let manifest = Manifest::load_from(&manifest_path_in(home)).unwrap_or_default();
+        let lockfile = Lockfile::load_from(&lockfile_path_in(home)).unwrap_or_default();
+        let mut data = SkillsScreenData::default();
+        refresh_view_model_from_manifest(&mut data, &manifest);
+        data.detail = compute_detail_for_selected(&data, &lockfile);
+        data
+    }
+
+    /// Reload manifest + lockfile and refresh the rendered rows in
+    /// place. Banner state is left untouched. Used by callers that
+    /// already own a `SkillsScreenData` and want to pick up
+    /// out-of-band manifest mutations (e.g. after `ainb migrate
+    /// --discover` has rewritten disk).
+    pub fn reload_from_disk(&mut self, home: &Path) {
+        let manifest = Manifest::load_from(&manifest_path_in(home)).unwrap_or_default();
+        let lockfile = Lockfile::load_from(&lockfile_path_in(home)).unwrap_or_default();
+        refresh_view_model_from_manifest(self, &manifest);
+        self.detail = compute_detail_for_selected(self, &lockfile);
+    }
+}
+
+/// Build the detail-pane content for the currently-selected unit by
+/// joining the manifest's URI with the lockfile's deployment record.
+/// Returns `None` when the units list is empty (the render path
+/// shows its "(select a unit to see details)" placeholder).
+fn compute_detail_for_selected(
+    data: &SkillsScreenData,
+    lockfile: &Lockfile,
+) -> Option<UnitDetail> {
+    if data.units.is_empty() {
+        return None;
+    }
+    let idx = data.selected.min(data.units.len().saturating_sub(1));
+    let row = data.units.get(idx)?;
+    let manifest_uri = manifest_uri_for_row(row);
+    let deployed_paths = collect_deployed_paths(lockfile, &manifest_uri);
+    Some(UnitDetail {
+        uri: manifest_uri,
+        deployed: deployed_paths,
+        // Last-used / invocations / requires / upstream wiring is
+        // P8+1 work (usage-cache + adapters); MVP shows URI +
+        // deployed only.
+        last_used: None,
+        invocations: None,
+        requires: Vec::new(),
+        upstream_status: String::new(),
+    })
+}
+
+/// Reconstruct the manifest URI for a `UnitRow`. `UnitRow` is the
+/// render-side projection (split into name/source/kind/ref); the
+/// lockfile keys on the full declared URI, so we re-assemble.
+fn manifest_uri_for_row(row: &UnitRow) -> String {
+    if row.source.is_empty() {
+        // Defensive: row came from a URI the parser couldn't split.
+        // `name` holds the original URI in that branch.
+        return row.name.clone();
+    }
+    if row.git_ref.is_empty() {
+        format!("{}/{}", row.source, row.name)
+    } else {
+        format!("{}@{}/{}", row.source, row.git_ref, row.name)
+    }
+}
+
+/// Pull every `DeployedRef::Deployed.path` for `declared_uri` from
+/// the lockfile, joined into the order the lockfile records them.
+fn collect_deployed_paths(lockfile: &Lockfile, declared_uri: &str) -> Vec<String> {
+    let Some(locked) = lockfile
+        .units
+        .iter()
+        .find(|u| u.declared_uri == declared_uri)
+    else {
+        return Vec::new();
+    };
+    locked
+        .deployed
+        .values()
+        .filter_map(|d| match d {
+            DeployedRef::Deployed { path, .. } => Some(path.clone()),
+            DeployedRef::Skipped { .. } | DeployedRef::PendingUninstall => None,
+        })
+        .collect()
 }
 
 /// Rebuild the screen's view-model rows from a manifest. Called
