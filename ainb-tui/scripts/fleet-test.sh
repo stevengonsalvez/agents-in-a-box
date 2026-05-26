@@ -284,6 +284,55 @@ dod4() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────
+# DoD #5 — `ainb fleet needs` surfaces a session whose claude fired AskUserQuestion
+# ─────────────────────────────────────────────────────────────────────────
+
+dod5_needs() {
+  log "=== DoD #5: needs detects ASK signal from fired AskUserQuestion ==="
+
+  spawn_session needs   # interactive claude — no -p flag
+  local name="$CURRENT_NAME"
+  wait_for_claude_active "$name"
+
+  if [ "$DRY_RUN" -eq 0 ]; then
+    # Send the prompt via the same send-route the broadcast verb uses.
+    log "broadcasting AskUserQuestion-triggering prompt to $name"
+    "$AINB" fleet broadcast \
+      "Use the AskUserQuestion tool to ask me to pick a favorite colour from: red, green, blue. Just fire the tool; do not narrate." \
+      --filter "$name" 2>&1 | tee -a "$LOG"
+
+    # Wait for AskUserQuestion tool_use to land in JSONL → surfaced by needs.
+    log "waiting up to 90s for AskUserQuestion to land + needs to surface ASK…"
+    local elapsed=0
+    local found=0
+    while [ "$elapsed" -lt 90 ]; do
+      sleep 5
+      elapsed=$((elapsed + 5))
+      local out
+      out=$("$AINB" --format json fleet needs 2>/dev/null)
+      if echo "$out" | jq -e --arg n "$name" '
+        any(.[]; (.session.tmux_session // "" | contains($n)) and .kind == "ASK")
+      ' >/dev/null 2>&1; then
+        log "PASS — needs surfaced $name with kind=ASK at ${elapsed}s"
+        echo "$out" | jq --arg n "$name" '
+          .[] | select((.session.tmux_session // "") | contains($n))
+            | { kind, question: .context.question, options: [.context.options[].label] }
+        ' | tee -a "$LOG"
+        found=1
+        break
+      fi
+    done
+    if [ "$found" -eq 0 ]; then
+      log "FAIL — needs did not surface $name as ASK within 90s"
+      log "current needs first row:"
+      "$AINB" --format json fleet needs 2>/dev/null \
+        | jq '.[0] | { kind, name: .session.tmux_session }' | tee -a "$LOG"
+      return 1
+    fi
+  fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────
 # Entry
 # ─────────────────────────────────────────────────────────────────────────
 
@@ -291,12 +340,12 @@ cmd=""
 for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=1 ;;
-    dod2|dod3|dod4|all) cmd="$arg" ;;
-    *) echo "usage: $0 [--dry-run] {dod2|dod3|dod4|all}"; exit 2 ;;
+    dod2|dod3|dod4|dod5_needs|all) cmd="$arg" ;;
+    *) echo "usage: $0 [--dry-run] {dod2|dod3|dod4|dod5_needs|all}"; exit 2 ;;
   esac
 done
 
-[ -z "$cmd" ] && { echo "usage: $0 [--dry-run] {dod2|dod3|dod4|all}"; exit 2; }
+[ -z "$cmd" ] && { echo "usage: $0 [--dry-run] {dod2|dod3|dod4|dod5_needs|all}"; exit 2; }
 
 log "fleet-test starting — prefix=$PREFIX dry_run=$DRY_RUN cmd=$cmd"
 log "evidence log: $LOG"
@@ -305,5 +354,6 @@ case "$cmd" in
   dod2) dod2 ;;
   dod3) dod3 ;;
   dod4) dod4 ;;
-  all)  dod2 && dod3 && dod4 ;;
+  dod5_needs) dod5_needs ;;
+  all)  dod2 && dod3 && dod4 && dod5_needs ;;
 esac
