@@ -45,6 +45,59 @@ git_directories = []
     fs::write(cfg.join("onboarding.toml"), onboarding).expect("seed onboarding.toml");
 }
 
+/// Seed `$HOME/.agents-in-a-box/manifest.yaml` + `lock.yaml` so the
+/// SkillManager screen's live-data binding (hdt.9) has real rows to
+/// render. The default `default_ainb_home()` resolution lands at
+/// `$HOME/.agents-in-a-box` when neither `$AINB_HOME` nor
+/// `$XDG_CONFIG_HOME` is set, which matches the `HOME=<tmp>` env
+/// we hand the spawned `ainb` binary.
+///
+/// The seeded fixture is intentionally non-empty so the discovery
+/// banner trigger (`manifest.units.is_empty()` guard) does NOT
+/// fire — the banner overlay would otherwise sit on top of the
+/// Sources/Units panels and break the substring assertions below.
+fn seed_manifest_and_lockfile(home: &Path) {
+    let ainb_home = home.join(".agents-in-a-box");
+    fs::create_dir_all(&ainb_home).expect("create ainb_home");
+
+    // Manifest: one source + one unit. Unit URI uses gh: so the URI
+    // parser's source-type/locator split lines up cleanly in the
+    // Detail pane (the live binding reassembles the URI from the
+    // row projection).
+    let manifest_yaml = r#"schema_version: 1
+sources:
+  - name: stevie-skills
+    type: gh
+    uri: gh:stevie/skills
+    ref: main
+    enabled: true
+units:
+  - uri: gh:stevie/skills@main/skills/commit
+    targets: [claude]
+"#;
+    fs::write(ainb_home.join("manifest.yaml"), manifest_yaml).expect("seed manifest.yaml");
+
+    // Lockfile: matching LockedUnit pointing at a synthetic deploy
+    // path so the Detail pane has a concrete "Deployed:" line to
+    // assert against.
+    let lock_yaml = r#"schema_version: 1
+generated_at: "2026-05-26T00:00:00+00:00"
+sources: []
+units:
+  - uri: gh:stevie/skills@abc123/skills/commit
+    declared_uri: gh:stevie/skills@main/skills/commit
+    kind: skill
+    sha: abc123
+    deployed:
+      claude:
+        status: deployed
+        path: /tmp/tripwire-deployed/claude/skills/commit
+        file_hashes:
+          SKILL.md: deadbeef
+"#;
+    fs::write(ainb_home.join("lock.yaml"), lock_yaml).expect("seed lock.yaml");
+}
+
 fn capture_pane(session: &str) -> String {
     let out = Command::new("tmux")
         .args(["capture-pane", "-t", session, "-p"])
@@ -87,6 +140,7 @@ fn pressing_m_on_home_opens_skill_manager_screen() {
 
     let home_tmp = tempfile::tempdir().expect("home tempdir");
     seed_isolated_home(home_tmp.path());
+    seed_manifest_and_lockfile(home_tmp.path());
 
     // Use process-id-suffixed exact session name so concurrent test
     // runs don't collide. NEVER wildcard-kill — only exact name.
@@ -149,29 +203,75 @@ fn pressing_m_on_home_opens_skill_manager_screen() {
 
     // Positive AND negative markers per hard rule #2 — substring-OR
     // on lone chrome strings ("Sources", "ainb") would silently pass
-    // if the wrong screen rendered.
+    // if the wrong screen rendered. Wait until the LIVE DATA has
+    // painted — the seeded source name "stevie-skills" only appears
+    // when SkillsScreenData::reload_from_disk wired into the screen-
+    // open handler ran and the manifest+lockfile are reflected in
+    // the Sources/Units panels.
     let post = poll_capture(&session, Instant::now() + Duration::from_secs(90), |c| {
-        c.contains("Sources") && c.contains("Units") && c.contains("Detail") && c.contains("[i]")
+        c.contains("Sources")
+            && c.contains("Units")
+            && c.contains("Detail")
+            && c.contains("[i]")
+            && c.contains("stevie-skills")
     });
     let post = match post {
         Some(p) => p,
         None => {
             let dump = capture_pane(&session);
             kill_session(&session);
-            panic!("SkillManager screen never rendered after pressing M. last capture:\n{dump}");
+            panic!("SkillManager screen never rendered live data after pressing M. last capture:\n{dump}");
         }
     };
     kill_session(&session);
 
-    // Confirm placeholder data (empty state) — the wired-up screen
-    // ships with SkillsScreenData::default() until the live-data
-    // binding follow-up lands. "(no sources configured)" is the
-    // placeholder we shipped in component code.
+    // Chrome — the screen layout is alive.
     assert!(post.contains("Sources"), "missing Sources panel: {post}");
     assert!(post.contains("Units"), "missing Units panel: {post}");
     assert!(post.contains("Detail"), "missing Detail pane: {post}");
     assert!(
         post.contains("[i]") && post.contains("[s]"),
         "missing help-bar hotkeys: {post}"
+    );
+
+    // Live data — hdt.9 live-data binding (P8). Each substring is
+    // anchored to a distinct part of the manifest/lockfile fixture
+    // so a partial wire-up (e.g. sources rendered but not units, or
+    // detail still showing the "(select a unit to see details)"
+    // placeholder) fails loudly.
+    //
+    // Sources panel: the seeded source name AND its URI both have
+    // to render — the placeholder "(no sources configured)" must
+    // NOT appear.
+    assert!(
+        post.contains("stevie-skills"),
+        "Sources panel missing seeded source name: {post}"
+    );
+    assert!(
+        !post.contains("(no sources configured)"),
+        "Sources placeholder still present after live-data binding: {post}"
+    );
+
+    // Units table: the unit name parsed out of
+    // `gh:stevie/skills@main/skills/commit` is `skills/commit`. The
+    // rendered row uses the URI's path component, which the parser
+    // emits as `skills/commit`. We assert the trailing segment
+    // ("commit") since the column may be width-clipped.
+    assert!(
+        post.contains("commit"),
+        "Units table missing seeded unit name 'commit': {post}"
+    );
+
+    // Detail pane: the URI lookup is keyed by `declared_uri` in the
+    // lockfile, so the deployed path from the seeded lockfile must
+    // appear. The placeholder "(select a unit to see details)" must
+    // NOT survive past live binding.
+    assert!(
+        post.contains("/tmp/tripwire-deployed/claude/skills/commit"),
+        "Detail pane missing seeded deployed path: {post}"
+    );
+    assert!(
+        !post.contains("(select a unit to see details)"),
+        "Detail placeholder still present after live-data binding: {post}"
     );
 }
