@@ -25,6 +25,13 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 async-trait = "0.1"
 
+# Binary discovery + version-string parsing (cfx.2).
+which = { workspace = true }
+regex = { workspace = true }
+semver = "1.0"
+
 [dev-dependencies]
 toml = { workspace = true }
 ainb-plugin-protocol = { path = "../ainb-plugin-protocol" }
+# Stub-witr binary on PATH for detect_subprocess tests.
+tempfile = { workspace = true }

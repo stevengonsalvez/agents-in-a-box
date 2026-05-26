@@ -11,4 +11,5 @@
 //! publish). `ainb-core` has zero refs to witr — that's the gate that
 //! makes this a real plugin rather than a host-baked feature.
 
+pub mod detect;
 pub mod plugin;
