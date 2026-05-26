@@ -572,6 +572,94 @@ pub fn apply_discovery_skip(
     Ok(())
 }
 
+/// Apply `[s]` on the Units panel — flip the `shadowed_by`
+/// relationship for the currently-selected unit when it is part of a
+/// conflict pair (spec §User Flow 3 + hdt.8 / P7).
+///
+/// Behaviour:
+/// - If the selected unit currently has `shadowed_by = Some(X)`, find
+///   the unit with `uri == X` and swap: selected becomes active, the
+///   peer becomes shadowed-by-selected.
+/// - If the selected unit has `shadowed_by = None` but some other unit
+///   has `shadowed_by = Some(selected.uri)`, swap the other way.
+/// - Otherwise the unit is not part of a conflict pair → no-op
+///   (silent; the keystroke just does nothing).
+///
+/// Persists immediately to `<ainb_home>/manifest.yaml` and refreshes
+/// the view-model so subsequent renders show the flipped state. Pure
+/// w.r.t. disk except for that one manifest write.
+pub fn apply_conflict_flip(
+    data: &mut SkillsScreenData,
+    ainb_home: &Path,
+) -> std::io::Result<()> {
+    let manifest_path = ainb_home.join("manifest.yaml");
+    let mut manifest = match Manifest::load_from(&manifest_path) {
+        Ok(m) => m,
+        // No manifest on disk → nothing to flip. Silent no-op so the
+        // keystroke can't crash the screen.
+        Err(_) => return Ok(()),
+    };
+    if manifest.units.is_empty() {
+        return Ok(());
+    }
+    let sel = data.selected;
+    if sel >= manifest.units.len() {
+        return Ok(());
+    }
+
+    let sel_uri_str = manifest.units[sel].uri.clone();
+    let other_idx: Option<usize> = if manifest.units[sel].shadowed_by.is_some() {
+        // Case A: selected is shadowed → peer is the unit pointed at
+        // by selected.shadowed_by.
+        let target = manifest.units[sel]
+            .shadowed_by
+            .as_ref()
+            .map(|u| u.to_string());
+        target.and_then(|t| manifest.units.iter().position(|u| u.uri == t))
+    } else {
+        // Case B: selected is active → peer is whichever unit has
+        // shadowed_by pointing back at selected.uri.
+        manifest.units.iter().enumerate().find_map(|(i, u)| {
+            u.shadowed_by
+                .as_ref()
+                .filter(|x| x.to_string() == sel_uri_str)
+                .map(|_| i)
+        })
+    };
+
+    let Some(other) = other_idx else {
+        // No conflict pair — silent no-op (negative case).
+        return Ok(());
+    };
+    if other == sel {
+        // Defensive: should never happen (a unit cannot shadow
+        // itself) but guard against a malformed manifest.
+        return Ok(());
+    }
+
+    // Swap which side carries `shadowed_by`. Exactly one side is
+    // expected to have it set before the flip; afterwards the other
+    // side does.
+    let sel_was_shadowed = manifest.units[sel].shadowed_by.is_some();
+    let other_uri_str = manifest.units[other].uri.clone();
+    if sel_was_shadowed {
+        // sel was shadowed → sel becomes active, other becomes shadowed.
+        manifest.units[sel].shadowed_by = None;
+        manifest.units[other].shadowed_by = ainb_skill_core::Uri::parse(&sel_uri_str).ok();
+    } else {
+        // sel was active → sel becomes shadowed, other becomes active.
+        manifest.units[sel].shadowed_by = ainb_skill_core::Uri::parse(&other_uri_str).ok();
+        manifest.units[other].shadowed_by = None;
+    }
+
+    manifest
+        .save_to(&manifest_path)
+        .map_err(|e| std::io::Error::other(format!("manifest save failed: {e}")))?;
+
+    refresh_view_model_from_manifest(data, &manifest);
+    Ok(())
+}
+
 /// Apply `[d] details` — toggles between the compact `Visible`
 /// and expanded `Details` rendering. No-op when banner is `Hidden`.
 pub fn toggle_discovery_details(data: &mut SkillsScreenData) {

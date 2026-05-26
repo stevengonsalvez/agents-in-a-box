@@ -282,6 +282,10 @@ pub enum AppEvent {
     /// Discovery banner: skip + persist marker so the banner does
     /// not re-show on subsequent opens.
     SkillManagerDiscoverySkip,
+    /// Units panel: flip `shadowed_by` between the currently-selected
+    /// unit and its conflict peer (spec §User Flow 3, hdt.8). No-op
+    /// when the selected unit is not part of a conflict pair.
+    SkillManagerConflictFlip,
     GoToRecovery,            // Navigate to session recovery view
     // AINB 2.0: Agent selection events
     AgentSelectionBack,         // Return to home screen (Esc)
@@ -1014,9 +1018,15 @@ impl EventHandler {
                     _ => None,
                 };
             }
-            tracing::debug!("In skill-manager view, handling Esc/q return");
+            tracing::debug!("In skill-manager view, handling Esc/q/s");
             return match key_event.code {
                 KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::SkillManagerBack),
+                // Units panel `[s]` — flip the shadowed_by edge between
+                // the currently-selected unit and its conflict peer.
+                // Silent no-op when not part of a conflict pair. Note
+                // that the banner branch above intercepts `s` first
+                // when the discovery overlay is visible (skip-banner).
+                KeyCode::Char('s') => Some(AppEvent::SkillManagerConflictFlip),
                 _ => None,
             };
         }
@@ -3782,6 +3792,18 @@ impl EventHandler {
                     )
                 {
                     tracing::warn!(error = %e, "discovery skip failed");
+                }
+            }
+            AppEvent::SkillManagerConflictFlip => {
+                tracing::info!("Units panel: flip shadowed_by on selected unit");
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                if let Err(e) =
+                    crate::components::skill_manager_screen::apply_conflict_flip(
+                        &mut state.skill_manager_state,
+                        &ainb_home,
+                    )
+                {
+                    tracing::warn!(error = %e, "conflict flip failed");
                 }
             }
             AppEvent::GoToRecovery => {
