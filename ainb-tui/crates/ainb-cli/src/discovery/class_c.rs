@@ -721,4 +721,66 @@ mod tests {
         }
         out
     }
+
+    // ---- spec §Walker performance budget ------------------------
+
+    /// 100 dir-layout units spread across the 9 tool homes must
+    /// walk in under 500ms on a debug build (spec §Walker
+    /// performance budget). Sister bead .1 (ClassA) is expected
+    /// to add its own slice of the same budget; together the two
+    /// walkers must stay under the 500ms ceiling.
+    ///
+    /// The fixture uses real frontmatter so the YAML parser path
+    /// is exercised, not just `read_dir`. Each unit is placed in
+    /// the first dir-layout subdir the tool actually deploys to
+    /// (most are `skills/`; `claude-desktop` only takes
+    /// `mcp-servers/`), so the walker enumerates every placed unit.
+    #[test]
+    fn perf_budget_under_500ms_for_100_units() {
+        let tmp = TempDir::new().unwrap();
+        let tool_setup: Vec<(&'static str, PathBuf, &'static str)> = ALL_TOOLS
+            .iter()
+            .map(|tool| {
+                let subdir = tool_subdirs(tool)
+                    .iter()
+                    .find(|(_, layout, _)| *layout == Layout::Dir)
+                    .map(|(_, _, sub)| *sub)
+                    .expect("every adapter has at least one dir-layout subdir");
+                (*tool, tmp.path().join(tool), subdir)
+            })
+            .collect();
+        let total_units: usize = 100;
+        let mut placed = 0usize;
+        for (i, (_, root, subdir)) in tool_setup.iter().enumerate() {
+            let mut per_tool = total_units / ALL_TOOLS.len();
+            if i < total_units % ALL_TOOLS.len() {
+                per_tool += 1;
+            }
+            for n in 0..per_tool {
+                let unit = root.join(subdir).join(format!("unit-{i}-{n}"));
+                fs::create_dir_all(&unit).unwrap();
+                fs::write(
+                    unit.join("SKILL.md"),
+                    format!("---\nname: unit-{i}-{n}\nkind: skill\n---\nbody\n"),
+                )
+                .unwrap();
+                placed += 1;
+            }
+        }
+        assert_eq!(placed, total_units);
+
+        let start = std::time::Instant::now();
+        let mut out = Vec::new();
+        for (tool, root, _) in &tool_setup {
+            walk_one_tool(tool, root, &mut out);
+        }
+        let elapsed = start.elapsed();
+
+        assert_eq!(out.len(), total_units, "walker dropped units");
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "walker took {elapsed:?} for {total_units} units; \
+             spec §Walker performance budget is <500ms"
+        );
+    }
 }
