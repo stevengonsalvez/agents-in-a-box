@@ -8,9 +8,10 @@
 //!
 //! - `class_a` — marketplace plugins installed via Claude Code's
 //!   `/plugin install`, cached at `~/.claude/plugins/cache/<mp>/<plugin>/<ver>/`.
-//! - `class_c` (P1, separate bead) — orphan SKILL.md units under
-//!   `~/.<tool>/skills/` etc. across the 9 adapter tools.
+//! - `class_c` — orphan SKILL.md units under `~/.<tool>/skills/`,
+//!   `~/.<tool>/agents/`, etc. across the 9 adapter tools.
 //! - `class_b` (P4, opt-in) — name-match against a legacy
 //!   `external-dependencies.yaml` to recognise bootstrap.js sources.
 
 pub mod class_a;
+pub mod class_c;
