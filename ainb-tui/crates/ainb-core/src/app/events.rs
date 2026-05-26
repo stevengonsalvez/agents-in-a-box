@@ -3739,6 +3739,19 @@ impl EventHandler {
             AppEvent::GoToSkillManager => {
                 tracing::info!("Navigating to SkillManager (spec §10.1)");
                 state.current_screen = screen_ids::SKILL_MANAGER.to_string();
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                // P8 live-data binding (hdt.9): rehydrate Sources /
+                // Units / Detail panels from $AINB_HOME/manifest.yaml
+                // + lock.yaml on every screen-open so out-of-band
+                // edits (e.g. `ainb migrate --discover`,
+                // `ainb skill install`) are reflected without
+                // requiring a TUI restart. Banner state is preserved
+                // by `reload_from_disk` — the subsequent
+                // `maybe_show_discovery_banner` call only flips
+                // banner to Visible when the manifest is empty AND
+                // walkers find candidates, so the two steps compose
+                // cleanly.
+                state.skill_manager_state.reload_from_disk(&ainb_home);
                 // Spec §User Flow 1: on screen-enter, when the
                 // manifest is empty AND we have not been told to
                 // skip, run the discovery walkers and pop the
@@ -3747,7 +3760,6 @@ impl EventHandler {
                 // sees the same counts they did first time, per
                 // spec edge case "Banner re-appears next open
                 // until dismissed via [s]").
-                let ainb_home = ainb_skill_core::default_ainb_home();
                 let claude_home = std::env::var_os("HOME")
                     .map(std::path::PathBuf::from)
                     .map(|h| h.join(".claude"))
