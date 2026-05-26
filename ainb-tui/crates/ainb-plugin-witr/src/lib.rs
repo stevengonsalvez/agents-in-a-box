@@ -12,4 +12,6 @@
 //! makes this a real plugin rather than a host-baked feature.
 
 pub mod detect;
+pub mod exec;
+pub mod model;
 pub mod plugin;
