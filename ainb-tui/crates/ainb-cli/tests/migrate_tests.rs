@@ -97,6 +97,9 @@ fn migrate_check_empty_roots_reports_no_units() {
                 toolkit_root: None,
                 yes: false,
                 dry_run: false,
+                discover: false,
+                legacy_yaml: None,
+                force: false,
             },
         );
         res.expect("check ok");
@@ -171,6 +174,9 @@ fn migrate_check_reports_installed_units() {
                 toolkit_root: None,
                 yes: false,
                 dry_run: false,
+                discover: false,
+                legacy_yaml: None,
+                force: false,
             },
         );
         res.expect("check ok");
@@ -194,6 +200,9 @@ fn migrate_clean_errors_when_manifest_has_no_units() {
                 toolkit_root: None,
                 yes: true,
                 dry_run: false,
+                discover: false,
+                legacy_yaml: None,
+                force: false,
             },
         );
         let err = res.unwrap_err().to_string();
@@ -270,6 +279,9 @@ fn migrate_clean_wipes_and_syncs_from_manifest() {
                 toolkit_root: None,
                 yes: true,
                 dry_run: false,
+                discover: false,
+                legacy_yaml: None,
+                force: false,
             },
         );
         res.expect("clean ok");
@@ -351,6 +363,9 @@ fn migrate_clean_backup_snapshots_existing_state() {
                 toolkit_root: None,
                 yes: true,
                 dry_run: false,
+                discover: false,
+                legacy_yaml: None,
+                force: false,
             },
         );
         res.expect("clean ok");
@@ -428,6 +443,9 @@ fn migrate_clean_dry_run_does_not_wipe() {
                 toolkit_root: None,
                 yes: false,
                 dry_run: true,
+                discover: false,
+                legacy_yaml: None,
+                force: false,
             },
         );
         res.expect("dry-run ok");
@@ -455,6 +473,9 @@ fn migrate_from_bootstrap_seeds_manifest_with_toolkit_source_and_units() {
             toolkit_root: Some(toolkit.path().to_path_buf()),
             yes: true,
             dry_run: false,
+            discover: false,
+            legacy_yaml: None,
+            force: false,
         },
     );
     res.expect("from-bootstrap ok");
@@ -485,6 +506,9 @@ fn migrate_from_bootstrap_is_idempotent() {
                 toolkit_root: Some(toolkit.path().to_path_buf()),
                 yes: true,
                 dry_run: false,
+                discover: false,
+                legacy_yaml: None,
+                force: false,
             },
         );
         res.expect("from-bootstrap ok");
@@ -513,6 +537,9 @@ fn migrate_from_bootstrap_errors_on_missing_yaml() {
             toolkit_root: Some(empty.path().to_path_buf()),
             yes: true,
             dry_run: false,
+            discover: false,
+            legacy_yaml: None,
+            force: false,
         },
     );
     let err = res.unwrap_err().to_string();
@@ -532,6 +559,9 @@ fn migrate_without_any_mode_errors() {
             toolkit_root: None,
             yes: false,
             dry_run: false,
+            discover: false,
+            legacy_yaml: None,
+            force: false,
         },
     );
     let err = res.unwrap_err().to_string();
