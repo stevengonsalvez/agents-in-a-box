@@ -518,6 +518,30 @@ ainb doctor                                   # health-check the deployment
 See `ainb-tui/plans/skill-manager/spec.md` for the full §8 CLI
 surface (`source`, `skill`, `migrate`, `doctor`, `usage`).
 
+#### v1.1 — Discovery + adoption + promote
+
+If you already have skills under `~/.<tool>/skills/` (Claude,
+Codex, Gemini, …) or plugins installed via Claude Code's
+`/plugin install`, you don't have to migrate by hand any more.
+v1.1 layers a read-only discovery walker + a one-keystroke
+adoption banner on top of v1. Open SkillManager (`m` on Home)
+with an empty manifest and `ainb` offers to import what's already
+on disk — marketplace plugins, orphan skills, the lot —
+including a conflict matrix when the same name shows up in two
+places.
+
+A new `ainb skill promote <unit> --to gh:user/repo` command turns
+a hand-edited orphan into a git-backed source in one shot:
+clones the target repo, copies the unit, commits + pushes, and
+rewrites the manifest URI from `local:` to `gh:`.
+
+- [Discovery flow reference →](docs/skill-manager/discovery.md) —
+  walker classes, reconciler conflict matrix, banner UX
+- [`ainb skill promote` reference →](docs/skill-manager/promote.md) —
+  command surface, locked design, failure modes
+
+Full spec at `.agents/goals/ainb-skill-manager-v1.1-discovery-spec.md`.
+
 ### Contributing
 
 1. Fork the repository
