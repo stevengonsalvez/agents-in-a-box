@@ -10,6 +10,7 @@ use std::io;
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 
+pub mod discovery;
 pub mod doctor;
 pub mod migrate;
 pub mod search;
