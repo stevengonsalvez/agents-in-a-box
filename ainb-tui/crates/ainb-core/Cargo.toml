@@ -84,6 +84,9 @@ ainb-plugin-protocol = { path = "../ainb-plugin-protocol", version = "0.1.0" }
 
 # Skill manager CLI surface (source/search/skill/migrate/doctor — spec §10.1).
 ainb-cli = { path = "../ainb-cli", version = "0.1.0" }
+# Manifest + URI types — needed by the SkillManager screen's discovery
+# banner (spec §User Flow 1 / P5) to load + write `manifest.yaml`.
+ainb-skill-core = { path = "../ainb-skill-core", version = "0.1.0" }
 # Zero-copy byte buffers — required for `RuntimeHandle::publish_snapshot`'s
 # `payload: bytes::Bytes` parameter, used by the Phase 7c CLI dispatcher.
 bytes = "1.6"

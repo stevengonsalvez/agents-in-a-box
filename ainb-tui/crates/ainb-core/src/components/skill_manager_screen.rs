@@ -8,13 +8,22 @@
 // deterministic and to surface the spec markers (Sources / Units /
 // Detail / help bar) so the cutover gate (P8) is satisfied.
 
+use std::path::{Path, PathBuf};
+
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table},
+    widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table},
 };
+
+use ainb_cli::discovery::{
+    class_a,
+    class_c,
+    reconcile::{self, WalkerOutput},
+};
+use ainb_skill_core::{Manifest, UnitEntry};
 
 // Style guide constants — match the rest of ainb-tui's components
 // (cornflower borders, gold titles, soft white text, muted gray for
@@ -65,6 +74,58 @@ pub struct SkillsScreenData {
     pub units: Vec<UnitRow>,
     pub selected: usize,
     pub detail: Option<UnitDetail>,
+    /// First-open discovery banner (spec §User Flow 1 + §P5).
+    /// `Hidden` is the normal steady state; transitions to
+    /// `Visible` (or `Details`) on screen-enter when the manifest
+    /// is empty AND walkers find candidates.
+    pub banner: DiscoveryBannerState,
+    /// Cached walker output captured at the moment the banner was
+    /// shown. Reused by the `[Enter]` import path so the user
+    /// doesn't see a different count than the banner advertised
+    /// (e.g. if a file lands between paint and keypress).
+    pub walker_cache: Option<WalkerOutput>,
+}
+
+/// Discovery banner state machine.
+///
+/// Transitions:
+/// - `Hidden` → `Visible` on screen-enter when
+///   `manifest.units.is_empty()` AND walker output has candidates.
+/// - `Visible` ↔ `Details` via `[d]` keybind (just toggles which
+///   variant is rendered; same underlying counts).
+/// - `Visible | Details` → `Hidden` on `[Enter]` (after import) or
+///   on `[s]` (skip, persisted via marker file).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum DiscoveryBannerState {
+    #[default]
+    Hidden,
+    Visible(DiscoveryBannerCounts),
+    Details(DiscoveryBannerCounts),
+}
+
+impl DiscoveryBannerState {
+    pub fn is_active(&self) -> bool {
+        !matches!(self, DiscoveryBannerState::Hidden)
+    }
+
+    pub fn counts(&self) -> Option<&DiscoveryBannerCounts> {
+        match self {
+            DiscoveryBannerState::Visible(c) | DiscoveryBannerState::Details(c) => Some(c),
+            DiscoveryBannerState::Hidden => None,
+        }
+    }
+}
+
+/// Per-category counts shown in the discovery banner. Mirrors the
+/// ASCII mockup in spec §User Flow 1.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiscoveryBannerCounts {
+    pub marketplace_plugins: usize,
+    pub orphan_units_total: usize,
+    /// `(tool, count)` pairs in deterministic input order. Tools
+    /// with zero orphans are omitted so the banner stays compact.
+    pub orphan_units_per_tool: Vec<(String, usize)>,
+    pub conflicts: usize,
 }
 
 /// Render the spec §10.1 skills screen into `area`.
@@ -89,6 +150,14 @@ pub fn render(frame: &mut Frame, area: Rect, data: &SkillsScreenData) {
     render_units_table(frame, top[1], data);
     render_detail_pane(frame, outer[1], data);
     render_help_bar(frame, outer[2]);
+
+    // Discovery banner overlay (spec §User Flow 1) — drawn LAST
+    // so it sits on top of the underlying panels. Hidden state
+    // is a no-op.
+    if let Some(counts) = data.banner.counts() {
+        let detailed = matches!(data.banner, DiscoveryBannerState::Details(_));
+        render_discovery_banner(frame, area, counts, detailed);
+    }
 }
 
 fn render_sources_panel(frame: &mut Frame, area: Rect, data: &SkillsScreenData) {
@@ -263,4 +332,669 @@ fn key_span(key: &str) -> Span<'static> {
         format!("[{key}]"),
         Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
     )
+}
+
+// ---------------------------------------------------------------------
+// Discovery banner (spec §User Flow 1 + §P5)
+// ---------------------------------------------------------------------
+
+/// Width of the banner overlay (matches the ASCII mockup in spec
+/// §User Flow 1). Banner is centered horizontally inside `area`.
+const BANNER_WIDTH: u16 = 44;
+/// Marker file under `$AINB_HOME` whose presence means the user
+/// pressed `[s] skip` on the discovery banner. Cleared by a forced
+/// re-scan (e.g. `ainb migrate --discover --force`, future P5+).
+const SKIP_MARKER_FILE: &str = ".discovery-skipped";
+
+/// Title rendered in the banner border. Stable string so tripwires
+/// can assert against it.
+pub const BANNER_TITLE: &str = "Detected existing units — import them?";
+
+/// Render the discovery banner overlay on top of the main screen.
+/// The caller decides whether to invoke this by checking
+/// [`SkillsScreenData::banner`].
+fn render_discovery_banner(
+    frame: &mut Frame,
+    area: Rect,
+    counts: &DiscoveryBannerCounts,
+    detailed: bool,
+) {
+    // Calculate body height: 1 line per displayed row + blank
+    // separators + help bar. Cap at the available area height.
+    let mut body_lines: Vec<Line<'static>> = Vec::new();
+    body_lines.push(banner_row(
+        "Marketplace plugins:",
+        counts.marketplace_plugins,
+    ));
+    body_lines.push(banner_row("Orphan units:", counts.orphan_units_total));
+    if detailed {
+        for (tool, n) in &counts.orphan_units_per_tool {
+            body_lines.push(banner_row_indent(
+                &format!("~/.{tool}/skills/"),
+                *n,
+            ));
+        }
+    }
+    body_lines.push(Line::from(""));
+    body_lines.push(banner_row(
+        "Conflicts (orphan wins by default):",
+        counts.conflicts,
+    ));
+    body_lines.push(Line::from(""));
+    body_lines.push(help_line());
+
+    // Body height = number of lines, plus 2 for the rounded border.
+    let height = (body_lines.len() as u16).saturating_add(2);
+    let banner_area = centered_rect(area, BANNER_WIDTH, height);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(GOLD))
+        .title(Span::styled(
+            format!(" {BANNER_TITLE} "),
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ));
+
+    // Clear under the banner so the underlying panels don't bleed
+    // through (Ratatui overlay convention).
+    frame.render_widget(Clear, banner_area);
+    let para = Paragraph::new(body_lines).block(block);
+    frame.render_widget(para, banner_area);
+}
+
+fn banner_row(label: &str, n: usize) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!(" {label:<36}"),
+            Style::default().fg(SOFT_WHITE),
+        ),
+        Span::styled(
+            format!("{n:>3} "),
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ),
+    ])
+}
+
+fn banner_row_indent(label: &str, n: usize) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("   {label:<34}"),
+            Style::default().fg(MUTED_GRAY),
+        ),
+        Span::styled(
+            format!("{n:>3} "),
+            Style::default().fg(SOFT_WHITE),
+        ),
+    ])
+}
+
+fn help_line() -> Line<'static> {
+    Line::from(vec![
+        Span::raw(" "),
+        key_span("Enter"),
+        Span::styled(" import all  ", Style::default().fg(MUTED_GRAY)),
+        key_span("d"),
+        Span::styled(" details  ", Style::default().fg(MUTED_GRAY)),
+        key_span("s"),
+        Span::styled(" skip", Style::default().fg(MUTED_GRAY)),
+    ])
+}
+
+fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
+    let w = width.min(area.width);
+    let h = height.min(area.height);
+    let x = area.x + area.width.saturating_sub(w) / 2;
+    let y = area.y + area.height.saturating_sub(h) / 2;
+    Rect { x, y, width: w, height: h }
+}
+
+// ---------------------------------------------------------------------
+// Trigger + import (spec §User Flow 1 step 3-5)
+// ---------------------------------------------------------------------
+
+/// Run the class-A + class-C walkers against the configured tool
+/// homes. Thin wrapper around the walker modules so production
+/// callers can capture a [`WalkerOutput`] in one place; tests
+/// build synthetic outputs by hand.
+///
+/// `claude_home` is normally `$HOME/.claude`. Class-C uses
+/// `ainb_adapters_tool::install_root_for` internally, which honours
+/// `AINB_TOOL_HOME_<TOOL>` and `AINB_USE_REAL_HOMES` env vars.
+pub fn run_discovery_walkers(claude_home: &Path) -> WalkerOutput {
+    WalkerOutput {
+        class_a: class_a::walk(claude_home),
+        class_c: class_c::walk_orphans(),
+    }
+}
+
+/// Flip `data.banner` to `Visible` when:
+/// - the manifest under `ainb_home` is empty AND
+/// - the user has not already pressed `[s]` in a prior open
+///   (skip-marker absent under `ainb_home`) AND
+/// - the combined walker output is non-empty.
+///
+/// Idempotent: re-entering an already-`Visible` banner is a no-op
+/// (per spec edge case "Banner re-appears next open until dismissed
+/// via [s]" — but with the *same* counts the user saw the first
+/// time, not a freshly-walked snapshot).
+///
+/// Pure with respect to discovery: the only fs interaction is
+/// reading `<ainb_home>/manifest.yaml` and checking for the skip
+/// marker. Walkers run upstream of this fn so tests can inject
+/// synthetic walker output without env-var surgery.
+pub fn maybe_show_discovery_banner(
+    data: &mut SkillsScreenData,
+    ainb_home: &Path,
+    walker: WalkerOutput,
+) {
+    if data.banner.is_active() {
+        return;
+    }
+    let manifest = Manifest::load_from(&ainb_home.join("manifest.yaml")).unwrap_or_default();
+    if !manifest.units.is_empty() {
+        return;
+    }
+    if ainb_home.join(SKIP_MARKER_FILE).exists() {
+        return;
+    }
+    let counts = compute_counts(&walker);
+    let total = counts.marketplace_plugins + counts.orphan_units_total;
+    if total == 0 {
+        return;
+    }
+    data.banner = DiscoveryBannerState::Visible(counts);
+    data.walker_cache = Some(walker);
+}
+
+/// Apply `[Enter] import all` — calls the reconciler on the cached
+/// walker output, merges the patch into the on-disk manifest, and
+/// refreshes the screen view-model so the Units / Sources panels
+/// show the just-imported entries.
+///
+/// Best-effort: returns `Err` only on filesystem failures during
+/// the manifest write. On success the banner is dismissed (no
+/// skip-marker — the import itself is the "yes" answer).
+pub fn apply_discovery_import(
+    data: &mut SkillsScreenData,
+    ainb_home: &Path,
+) -> std::io::Result<()> {
+    let Some(walker) = data.walker_cache.take() else {
+        // No cached walker → nothing to import. Caller already
+        // checked banner state; this is a defensive no-op.
+        data.banner = DiscoveryBannerState::Hidden;
+        return Ok(());
+    };
+    let patch = reconcile::reconcile(&walker);
+
+    let manifest_path = ainb_home.join("manifest.yaml");
+    let mut manifest = Manifest::load_from(&manifest_path).unwrap_or_default();
+    for src in patch.new_sources {
+        // De-dup by name; new entry wins to keep the patch
+        // idempotent across repeat imports.
+        if let Some(existing) = manifest.source_mut(&src.name) {
+            *existing = src;
+        } else {
+            // Source name uniqueness was just checked, so
+            // `add_source` cannot fail here.
+            let _ = manifest.add_source(src);
+        }
+    }
+    for unit in &patch.new_units {
+        if !manifest.units.iter().any(|u| u.uri == unit.uri) {
+            manifest.units.push(unit.clone());
+        }
+    }
+    if let Err(e) = manifest.save_to(&manifest_path) {
+        // Re-stash the walker output so the user can retry.
+        data.walker_cache = Some(walker);
+        return Err(std::io::Error::other(format!(
+            "manifest save failed: {e}"
+        )));
+    }
+
+    refresh_view_model_from_manifest(data, &manifest);
+    data.banner = DiscoveryBannerState::Hidden;
+    Ok(())
+}
+
+/// Apply `[s] skip` — writes a marker file under `ainb_home` so
+/// subsequent SkillManager opens do not re-show the banner, and
+/// flips the in-memory state to `Hidden`.
+pub fn apply_discovery_skip(
+    data: &mut SkillsScreenData,
+    ainb_home: &Path,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(ainb_home)?;
+    std::fs::write(ainb_home.join(SKIP_MARKER_FILE), b"")?;
+    data.banner = DiscoveryBannerState::Hidden;
+    data.walker_cache = None;
+    Ok(())
+}
+
+/// Apply `[d] details` — toggles between the compact `Visible`
+/// and expanded `Details` rendering. No-op when banner is `Hidden`.
+pub fn toggle_discovery_details(data: &mut SkillsScreenData) {
+    data.banner = match std::mem::take(&mut data.banner) {
+        DiscoveryBannerState::Visible(c) => DiscoveryBannerState::Details(c),
+        DiscoveryBannerState::Details(c) => DiscoveryBannerState::Visible(c),
+        DiscoveryBannerState::Hidden => DiscoveryBannerState::Hidden,
+    };
+}
+
+/// Reset the discovery banner state. Used by tests + by a future
+/// `--force` flag that clears the skip marker AND re-runs the
+/// banner trigger.
+pub fn clear_discovery_skip_marker(ainb_home: &Path) -> std::io::Result<()> {
+    let p = ainb_home.join(SKIP_MARKER_FILE);
+    match std::fs::remove_file(&p) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+fn compute_counts(walker: &WalkerOutput) -> DiscoveryBannerCounts {
+    let marketplace_plugins = walker.class_a.len();
+    let orphan_units_total = walker.class_c.len();
+    let conflicts = count_conflicts(walker);
+
+    // Deterministic per-tool breakdown in first-seen order. Tools
+    // with zero orphans aren't included so the banner stays terse.
+    let mut per_tool: Vec<(String, usize)> = Vec::new();
+    for orphan in &walker.class_c {
+        if let Some(entry) = per_tool.iter_mut().find(|(t, _)| t == &orphan.tool) {
+            entry.1 += 1;
+        } else {
+            per_tool.push((orphan.tool.clone(), 1));
+        }
+    }
+    DiscoveryBannerCounts {
+        marketplace_plugins,
+        orphan_units_total,
+        orphan_units_per_tool: per_tool,
+        conflicts,
+    }
+}
+
+/// Conflict count = number of marketplace-shipped units that share
+/// a name with a class-C orphan in the `claude` tool home. Mirrors
+/// the reconciler's A-vs-C-in-claude rule so the banner number
+/// matches the import outcome 1:1.
+fn count_conflicts(walker: &WalkerOutput) -> usize {
+    use std::collections::HashSet;
+    let claude_names: HashSet<&str> = walker
+        .class_c
+        .iter()
+        .filter(|o| o.tool == "claude")
+        .map(|o| o.name.as_str())
+        .collect();
+    if claude_names.is_empty() {
+        return 0;
+    }
+    walker
+        .class_a
+        .iter()
+        .flat_map(|plugin| plugin.units.iter())
+        .filter(|u| claude_names.contains(u.name.as_str()))
+        .count()
+}
+
+/// Rebuild the screen's view-model rows from a manifest. Called
+/// after `[Enter]` so the user immediately sees imported entries
+/// without waiting for a separate refresh trigger. Best-effort;
+/// keeps existing `selected` / `detail` state unchanged.
+fn refresh_view_model_from_manifest(data: &mut SkillsScreenData, manifest: &Manifest) {
+    data.sources = manifest
+        .sources
+        .iter()
+        .map(|s| SourceRow {
+            name: s.name.clone(),
+            uri: s.uri.clone(),
+            enabled: s.enabled,
+        })
+        .collect();
+    data.units = manifest
+        .units
+        .iter()
+        .enumerate()
+        .map(|(i, u)| unit_row_from_entry(i + 1, u))
+        .collect();
+}
+
+fn unit_row_from_entry(idx: usize, u: &UnitEntry) -> UnitRow {
+    let parsed = ainb_skill_core::Uri::parse(&u.uri).ok();
+    let (name, source, kind, git_ref) = match parsed.as_ref() {
+        Some(uri) => (
+            uri.path.clone().unwrap_or_else(|| uri.locator.clone()),
+            format!("{}:{}", uri.source_type, uri.locator),
+            uri.source_type.to_string(),
+            uri.ref_.clone().unwrap_or_default(),
+        ),
+        None => (u.uri.clone(), String::new(), String::new(), String::new()),
+    };
+    UnitRow {
+        idx,
+        name,
+        kind,
+        source,
+        git_ref,
+        targets: u.targets.clone().unwrap_or_default(),
+    }
+}
+
+// ---------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ainb_cli::discovery::class_a::{
+        DiscoveredMarketplaceUnit, DiscoveredUnit, DiscoveredUnitKind,
+    };
+    use ainb_cli::discovery::class_c::DiscoveredOrphanUnit;
+    use ainb_skill_core::UnitKind;
+
+    use std::path::PathBuf;
+
+    fn mk_orphan(tool: &str, name: &str) -> DiscoveredOrphanUnit {
+        DiscoveredOrphanUnit {
+            tool: tool.to_string(),
+            kind: UnitKind::Skill,
+            name: name.to_string(),
+            path: PathBuf::from(format!("/fixture/{tool}/skills/{name}")),
+            frontmatter_valid: false,
+        }
+    }
+
+    fn mk_plugin(plugin: &str, marketplace: &str, unit_names: &[&str]) -> DiscoveredMarketplaceUnit {
+        DiscoveredMarketplaceUnit {
+            plugin: plugin.to_string(),
+            marketplace: marketplace.to_string(),
+            version: "v1".to_string(),
+            units: unit_names
+                .iter()
+                .map(|n| DiscoveredUnit {
+                    kind: DiscoveredUnitKind::Skill,
+                    name: (*n).to_string(),
+                    path: PathBuf::from(format!(
+                        "/fixture/cache/{marketplace}/{plugin}/v1/skills/{n}"
+                    )),
+                })
+                .collect(),
+        }
+    }
+
+    // ---- compute_counts ------------------------------------------
+
+    #[test]
+    fn counts_empty() {
+        let c = compute_counts(&WalkerOutput::default());
+        assert_eq!(c.marketplace_plugins, 0);
+        assert_eq!(c.orphan_units_total, 0);
+        assert!(c.orphan_units_per_tool.is_empty());
+        assert_eq!(c.conflicts, 0);
+    }
+
+    #[test]
+    fn counts_per_tool_aggregates() {
+        let w = WalkerOutput {
+            class_c: vec![
+                mk_orphan("claude", "a"),
+                mk_orphan("claude", "b"),
+                mk_orphan("codex", "c"),
+            ],
+            ..Default::default()
+        };
+        let c = compute_counts(&w);
+        assert_eq!(c.orphan_units_total, 3);
+        assert_eq!(
+            c.orphan_units_per_tool,
+            vec![("claude".to_string(), 2), ("codex".to_string(), 1)]
+        );
+    }
+
+    #[test]
+    fn counts_conflicts_only_in_claude_tool_home() {
+        let w = WalkerOutput {
+            class_a: vec![mk_plugin("reflect", "official", &["commit"])],
+            class_c: vec![
+                mk_orphan("claude", "commit"),  // collides → conflict
+                mk_orphan("codex", "commit"),   // different tool → not a conflict
+            ],
+        };
+        let c = compute_counts(&w);
+        assert_eq!(c.conflicts, 1);
+    }
+
+    #[test]
+    fn counts_no_conflicts_when_names_differ() {
+        let w = WalkerOutput {
+            class_a: vec![mk_plugin("reflect", "official", &["commit"])],
+            class_c: vec![mk_orphan("claude", "summarize")],
+        };
+        let c = compute_counts(&w);
+        assert_eq!(c.conflicts, 0);
+    }
+
+    // ---- maybe_show_discovery_banner -----------------------------
+
+    fn isolated_ainb_home() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let ainb_home = tmp.path().join("ainb-home");
+        std::fs::create_dir_all(&ainb_home).unwrap();
+        (tmp, ainb_home)
+    }
+
+    fn synth_walker_with_one_candidate() -> WalkerOutput {
+        WalkerOutput {
+            class_c: vec![mk_orphan("claude", "x")],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn trigger_visible_when_all_conditions_met() {
+        let (_tmp, ainb_home) = isolated_ainb_home();
+        let mut data = SkillsScreenData::default();
+        maybe_show_discovery_banner(&mut data, &ainb_home, synth_walker_with_one_candidate());
+        assert!(matches!(data.banner, DiscoveryBannerState::Visible(_)));
+        assert!(data.walker_cache.is_some());
+    }
+
+    #[test]
+    fn trigger_hidden_when_manifest_has_units() {
+        let (_tmp, ainb_home) = isolated_ainb_home();
+        let manifest = Manifest {
+            sources: vec![],
+            units: vec![UnitEntry {
+                uri: "local:~/x@head/y".to_string(),
+                targets: None,
+                shadowed_by: None,
+            }],
+            ..Default::default()
+        };
+        manifest.save_to(&ainb_home.join("manifest.yaml")).unwrap();
+
+        let mut data = SkillsScreenData::default();
+        maybe_show_discovery_banner(&mut data, &ainb_home, synth_walker_with_one_candidate());
+        assert!(matches!(data.banner, DiscoveryBannerState::Hidden));
+    }
+
+    #[test]
+    fn trigger_hidden_when_skip_marker_present() {
+        let (_tmp, ainb_home) = isolated_ainb_home();
+        std::fs::write(ainb_home.join(SKIP_MARKER_FILE), b"").unwrap();
+        let mut data = SkillsScreenData::default();
+        maybe_show_discovery_banner(&mut data, &ainb_home, synth_walker_with_one_candidate());
+        assert!(matches!(data.banner, DiscoveryBannerState::Hidden));
+    }
+
+    #[test]
+    fn trigger_hidden_when_walker_has_no_candidates() {
+        let (_tmp, ainb_home) = isolated_ainb_home();
+        let mut data = SkillsScreenData::default();
+        maybe_show_discovery_banner(&mut data, &ainb_home, WalkerOutput::default());
+        assert!(matches!(data.banner, DiscoveryBannerState::Hidden));
+    }
+
+    #[test]
+    fn trigger_idempotent_when_already_visible() {
+        let (_tmp, ainb_home) = isolated_ainb_home();
+        let mut data = SkillsScreenData::default();
+        let prior = DiscoveryBannerCounts {
+            marketplace_plugins: 42,
+            orphan_units_total: 0,
+            orphan_units_per_tool: vec![],
+            conflicts: 0,
+        };
+        data.banner = DiscoveryBannerState::Visible(prior.clone());
+        maybe_show_discovery_banner(&mut data, &ainb_home, synth_walker_with_one_candidate());
+        // Untouched because banner was already active.
+        assert_eq!(data.banner, DiscoveryBannerState::Visible(prior));
+    }
+
+    // ---- toggle_discovery_details -------------------------------
+
+    #[test]
+    fn toggle_details_flips_visible_to_details_and_back() {
+        let counts = DiscoveryBannerCounts::default();
+        let mut data = SkillsScreenData::default();
+        data.banner = DiscoveryBannerState::Visible(counts.clone());
+        toggle_discovery_details(&mut data);
+        assert!(matches!(data.banner, DiscoveryBannerState::Details(_)));
+        toggle_discovery_details(&mut data);
+        assert!(matches!(data.banner, DiscoveryBannerState::Visible(_)));
+    }
+
+    #[test]
+    fn toggle_details_noop_when_hidden() {
+        let mut data = SkillsScreenData::default();
+        toggle_discovery_details(&mut data);
+        assert!(matches!(data.banner, DiscoveryBannerState::Hidden));
+    }
+
+    // ---- apply_discovery_skip -----------------------------------
+
+    #[test]
+    fn skip_writes_marker_and_hides() {
+        let (_tmp, ainb_home) = isolated_ainb_home();
+        let mut data = SkillsScreenData::default();
+        data.banner = DiscoveryBannerState::Visible(DiscoveryBannerCounts::default());
+        apply_discovery_skip(&mut data, &ainb_home).unwrap();
+        assert!(matches!(data.banner, DiscoveryBannerState::Hidden));
+        assert!(ainb_home.join(SKIP_MARKER_FILE).exists());
+    }
+
+    #[test]
+    fn skip_then_clear_marker_allows_retrigger() {
+        let (_tmp, ainb_home) = isolated_ainb_home();
+        let mut data = SkillsScreenData::default();
+        apply_discovery_skip(&mut data, &ainb_home).unwrap();
+        assert!(ainb_home.join(SKIP_MARKER_FILE).exists());
+        clear_discovery_skip_marker(&ainb_home).unwrap();
+        assert!(!ainb_home.join(SKIP_MARKER_FILE).exists());
+    }
+
+    // ---- apply_discovery_import ---------------------------------
+
+    #[test]
+    fn import_writes_manifest_and_populates_view_model() {
+        let (_tmp, ainb_home) = isolated_ainb_home();
+        let walker = WalkerOutput {
+            class_c: vec![mk_orphan("claude", "commit")],
+            ..Default::default()
+        };
+        let mut data = SkillsScreenData::default();
+        data.banner = DiscoveryBannerState::Visible(compute_counts(&walker));
+        data.walker_cache = Some(walker);
+
+        apply_discovery_import(&mut data, &ainb_home).unwrap();
+
+        // Banner dismissed.
+        assert!(matches!(data.banner, DiscoveryBannerState::Hidden));
+        assert!(data.walker_cache.is_none());
+
+        // Manifest written.
+        let manifest = Manifest::load_from(&ainb_home.join("manifest.yaml")).unwrap();
+        assert_eq!(manifest.units.len(), 1);
+        assert_eq!(manifest.units[0].uri, "local:~/.claude/skills@head/commit");
+        assert_eq!(manifest.sources.len(), 1);
+
+        // View-model refreshed.
+        assert_eq!(data.units.len(), 1);
+        assert_eq!(data.sources.len(), 1);
+    }
+
+    #[test]
+    fn import_no_op_when_no_walker_cache() {
+        let (_tmp, ainb_home) = isolated_ainb_home();
+        let mut data = SkillsScreenData::default();
+        data.banner = DiscoveryBannerState::Visible(DiscoveryBannerCounts::default());
+        apply_discovery_import(&mut data, &ainb_home).unwrap();
+        assert!(matches!(data.banner, DiscoveryBannerState::Hidden));
+        // No manifest was written.
+        assert!(!ainb_home.join("manifest.yaml").exists());
+    }
+
+    // ---- render smoke (banner draws without panicking) ----------
+
+    #[test]
+    fn render_with_visible_banner_does_not_panic() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut data = SkillsScreenData::default();
+        data.banner = DiscoveryBannerState::Visible(DiscoveryBannerCounts {
+            marketplace_plugins: 3,
+            orphan_units_total: 9,
+            orphan_units_per_tool: vec![("claude".to_string(), 6), ("codex".to_string(), 3)],
+            conflicts: 0,
+        });
+        terminal
+            .draw(|f| render(f, f.size(), &data))
+            .expect("render did not panic");
+    }
+
+    #[test]
+    fn render_banner_contains_title_and_help_markers() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut data = SkillsScreenData::default();
+        data.banner = DiscoveryBannerState::Visible(DiscoveryBannerCounts {
+            marketplace_plugins: 3,
+            orphan_units_total: 9,
+            orphan_units_per_tool: vec![],
+            conflicts: 1,
+        });
+        terminal.draw(|f| render(f, f.size(), &data)).unwrap();
+
+        let buf = terminal.backend().buffer().clone();
+        let mut joined = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                joined.push_str(buf.get(x, y).symbol());
+            }
+            joined.push('\n');
+        }
+        // Substring-AND, not OR — per project_ainb_tui_width_aware_panels
+        // / tmux-ui-tripwire hard rules. Each marker proves a distinct
+        // banner element painted.
+        assert!(joined.contains(BANNER_TITLE), "title missing: {joined}");
+        assert!(
+            joined.contains("Marketplace plugins:"),
+            "mp row missing: {joined}"
+        );
+        assert!(joined.contains("Orphan units:"), "orphan row missing: {joined}");
+        assert!(joined.contains("Conflicts"), "conflicts row missing: {joined}");
+        assert!(joined.contains("[Enter]"), "help: Enter missing: {joined}");
+        assert!(joined.contains("[d]"), "help: d missing: {joined}");
+        assert!(joined.contains("[s]"), "help: s missing: {joined}");
+    }
 }

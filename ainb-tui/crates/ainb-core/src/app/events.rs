@@ -274,6 +274,14 @@ pub enum AppEvent {
     GoToSkills,              // Navigate to skills view
     GoToSkillManager,        // Navigate to skill-manager view (spec §10.1)
     SkillManagerBack,        // Return to home screen from SkillManager (Esc/q)
+    /// Discovery banner: import all detected units into the manifest
+    /// (Enter on the §User Flow 1 banner).
+    SkillManagerDiscoveryImport,
+    /// Discovery banner: toggle the compact / expanded view.
+    SkillManagerDiscoveryToggleDetails,
+    /// Discovery banner: skip + persist marker so the banner does
+    /// not re-show on subsequent opens.
+    SkillManagerDiscoverySkip,
     GoToRecovery,            // Navigate to session recovery view
     // AINB 2.0: Agent selection events
     AgentSelectionBack,         // Return to home screen (Esc)
@@ -993,6 +1001,19 @@ impl EventHandler {
 
         // Handle skill-manager view (spec §10.1)
         if state.current_screen == screen_ids::SKILL_MANAGER {
+            // Discovery banner (spec §User Flow 1 / P5): when the
+            // overlay is visible, Enter/d/s drive its state machine
+            // instead of the normal Skills shortcuts. Esc/q still
+            // returns to Home so the user can always escape.
+            if state.skill_manager_state.banner.is_active() {
+                return match key_event.code {
+                    KeyCode::Enter => Some(AppEvent::SkillManagerDiscoveryImport),
+                    KeyCode::Char('d') => Some(AppEvent::SkillManagerDiscoveryToggleDetails),
+                    KeyCode::Char('s') => Some(AppEvent::SkillManagerDiscoverySkip),
+                    KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::SkillManagerBack),
+                    _ => None,
+                };
+            }
             tracing::debug!("In skill-manager view, handling Esc/q return");
             return match key_event.code {
                 KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::SkillManagerBack),
@@ -3708,10 +3729,60 @@ impl EventHandler {
             AppEvent::GoToSkillManager => {
                 tracing::info!("Navigating to SkillManager (spec §10.1)");
                 state.current_screen = screen_ids::SKILL_MANAGER.to_string();
+                // Spec §User Flow 1: on screen-enter, when the
+                // manifest is empty AND we have not been told to
+                // skip, run the discovery walkers and pop the
+                // banner overlay. Idempotent — re-entering an
+                // already-Visible banner is a no-op (the user
+                // sees the same counts they did first time, per
+                // spec edge case "Banner re-appears next open
+                // until dismissed via [s]").
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                let claude_home = std::env::var_os("HOME")
+                    .map(std::path::PathBuf::from)
+                    .map(|h| h.join(".claude"))
+                    .unwrap_or_else(|| std::path::PathBuf::from(".claude"));
+                let walker = crate::components::skill_manager_screen::run_discovery_walkers(
+                    &claude_home,
+                );
+                crate::components::skill_manager_screen::maybe_show_discovery_banner(
+                    &mut state.skill_manager_state,
+                    &ainb_home,
+                    walker,
+                );
             }
             AppEvent::SkillManagerBack => {
                 tracing::info!("Returning to home from SkillManager (Esc/q)");
                 state.current_screen = screen_ids::HOME.to_string();
+            }
+            AppEvent::SkillManagerDiscoveryImport => {
+                tracing::info!("Discovery banner: import all");
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                if let Err(e) =
+                    crate::components::skill_manager_screen::apply_discovery_import(
+                        &mut state.skill_manager_state,
+                        &ainb_home,
+                    )
+                {
+                    tracing::warn!(error = %e, "discovery import failed");
+                }
+            }
+            AppEvent::SkillManagerDiscoveryToggleDetails => {
+                crate::components::skill_manager_screen::toggle_discovery_details(
+                    &mut state.skill_manager_state,
+                );
+            }
+            AppEvent::SkillManagerDiscoverySkip => {
+                tracing::info!("Discovery banner: skip + persist marker");
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                if let Err(e) =
+                    crate::components::skill_manager_screen::apply_discovery_skip(
+                        &mut state.skill_manager_state,
+                        &ainb_home,
+                    )
+                {
+                    tracing::warn!(error = %e, "discovery skip failed");
+                }
             }
             AppEvent::GoToRecovery => {
                 tracing::info!("Navigating to Session Recovery");
