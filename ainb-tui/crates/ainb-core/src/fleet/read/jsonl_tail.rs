@@ -159,6 +159,186 @@ fn scan_for_turn_end(path: &Path, last_offset: &mut u64) -> Result<Option<bool>>
     Ok(if found_end { Some(true) } else { None })
 }
 
+/// Structured AskUserQuestion data extracted from a transcript tool_use block.
+/// Matches the shape of the AskUserQuestion tool's `input` parameter.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AskUserQuestionData {
+    pub question: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    pub options: Vec<AskOption>,
+    #[serde(default)]
+    pub multi_select: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AskOption {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// Last assistant turn's timing + text + stop reason — for IDLE detection
+/// and for the IDLE card's "last said" snippet.
+#[derive(Debug, Clone)]
+pub struct LastAssistantInfo {
+    /// Unix ms of the timestamp on the assistant row.
+    pub ts_ms: i64,
+    /// stop_reason field (e.g. "end_turn", "tool_use", "max_tokens").
+    pub stop_reason: Option<String>,
+    /// First text-block content, truncated and whitespace-collapsed.
+    pub text_snippet: Option<String>,
+    /// Whether there's a subsequent user-role row in the file.
+    pub has_user_follow_up: bool,
+}
+
+/// Scan the transcript for the most recent AskUserQuestion tool_use call.
+/// Returns None if the session has no such call within the lookback window.
+///
+/// Walks the same exponential lookback as `last_narrative_snapshot` (20 → 320).
+pub fn last_ask_user_question(path: &Path) -> Option<AskUserQuestionData> {
+    let lines = read_lines(path)?;
+    if lines.is_empty() {
+        return None;
+    }
+    for window in [20usize, 40, 80, 160, 320] {
+        let start = lines.len().saturating_sub(window);
+        if let Some(aq) = find_ask_user_question(&lines[start..]) {
+            return Some(aq);
+        }
+        if start == 0 {
+            break;
+        }
+    }
+    None
+}
+
+fn find_ask_user_question(rows: &[String]) -> Option<AskUserQuestionData> {
+    for row in rows.iter().rev() {
+        let Ok(v) = serde_json::from_str::<Value>(row) else {
+            continue;
+        };
+        if v.get("type").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let content = v.pointer("/message/content").and_then(Value::as_array)?;
+        // Walk content backward — last tool_use wins.
+        for block in content.iter().rev() {
+            let is_tool = block.get("type").and_then(Value::as_str) == Some("tool_use");
+            let name = block.get("name").and_then(Value::as_str);
+            if !is_tool || name != Some("AskUserQuestion") {
+                continue;
+            }
+            let input = block.get("input")?;
+            let questions = input.get("questions").and_then(Value::as_array)?;
+            let first = questions.first()?;
+            return Some(AskUserQuestionData {
+                question: first
+                    .get("question")
+                    .and_then(Value::as_str)
+                    .unwrap_or("(no question text)")
+                    .to_string(),
+                header: first
+                    .get("header")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                options: first
+                    .get("options")
+                    .and_then(Value::as_array)
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|o| {
+                                Some(AskOption {
+                                    label: o.get("label").and_then(Value::as_str)?.to_string(),
+                                    description: o
+                                        .get("description")
+                                        .and_then(Value::as_str)
+                                        .map(str::to_string),
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                multi_select: first
+                    .get("multiSelect")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            });
+        }
+        // No tool_use in this assistant row — keep searching older rows.
+    }
+    None
+}
+
+/// Probe the transcript for the last assistant turn's timing + stop reason.
+/// Used by the IDLE classifier.
+pub fn last_assistant_info(path: &Path) -> Option<LastAssistantInfo> {
+    let lines = read_lines(path)?;
+    if lines.is_empty() {
+        return None;
+    }
+    // Walk backward; first assistant row wins. Track whether we see a user
+    // row AFTER it (i.e. earlier in our reverse walk).
+    let mut saw_user_after = false;
+    for row in lines.iter().rev() {
+        let Ok(v) = serde_json::from_str::<Value>(row) else {
+            continue;
+        };
+        let row_type = v.get("type").and_then(Value::as_str).unwrap_or("");
+        if row_type == "user" {
+            saw_user_after = true;
+            continue;
+        }
+        if row_type != "assistant" {
+            continue;
+        }
+        let ts_ms = parse_ts_ms(v.get("timestamp").and_then(Value::as_str).unwrap_or(""));
+        let stop_reason = v
+            .pointer("/message/stop_reason")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let text_snippet = v
+            .pointer("/message/content")
+            .and_then(Value::as_array)
+            .and_then(|arr| {
+                let mut buf = String::new();
+                for b in arr {
+                    if b.get("type").and_then(Value::as_str) == Some("text") {
+                        if let Some(t) = b.get("text").and_then(Value::as_str) {
+                            buf.push_str(t);
+                            buf.push(' ');
+                        }
+                    }
+                }
+                let collapsed = collapse_whitespace(buf.trim());
+                if collapsed.is_empty() {
+                    None
+                } else {
+                    Some(truncate(&collapsed, 120))
+                }
+            });
+        return Some(LastAssistantInfo {
+            ts_ms: ts_ms.unwrap_or(0),
+            stop_reason,
+            text_snippet,
+            has_user_follow_up: saw_user_after,
+        });
+    }
+    None
+}
+
+fn read_lines(path: &Path) -> Option<Vec<String>> {
+    let file = std::fs::File::open(path).ok()?;
+    let reader = std::io::BufReader::new(file);
+    Some(reader.lines().map_while(Result::ok).collect())
+}
+
+fn parse_ts_ms(s: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|dt| dt.timestamp_millis())
+}
+
 /// Synthesise a one-line "what is this session doing right now" string from
 /// the transcript. Walks recent rows backward looking for the freshest
 /// assistant turn with substance.

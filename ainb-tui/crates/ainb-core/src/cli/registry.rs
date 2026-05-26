@@ -1081,7 +1081,13 @@ impl CliCommand for FleetCommand {
                     .help("Per-step timeout (seconds)"),
             );
         let needs = Command::new("needs")
-            .about("List sessions blocked on input / errors / waiting");
+            .about("Center control panel — sessions blocked on input / errors / idle / waiting")
+            .arg(
+                clap::Arg::new("idle-min")
+                    .long("idle-min")
+                    .value_parser(clap::value_parser!(i64))
+                    .help("Minutes of assistant silence before flagging IDLE (default 5, env AINB_FLEET_IDLE_MIN)"),
+            );
         let daemon = Command::new("daemon")
             .about("Watcher: registers as ainb-fleet-cp peer, auto-continues API errors")
             .arg(
