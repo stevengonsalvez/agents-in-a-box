@@ -100,6 +100,7 @@ fn sync_with_aligned_state_is_noop() {
         manifest.units.push(UnitEntry {
             uri: unit_uri.clone(),
             targets: None,
+            shadowed_by: None,
         });
         manifest.save_to(&manifest_path_in(home.path())).unwrap();
 
@@ -127,6 +128,7 @@ fn sync_installs_manifest_declared_missing_unit() {
         manifest.units.push(UnitEntry {
             uri: unit_uri.clone(),
             targets: Some(vec!["claude".into()]),
+            shadowed_by: None,
         });
         manifest.save_to(&manifest_path_in(home.path())).unwrap();
         let lock_before = Lockfile::load_from(&lockfile_path_in(home.path())).unwrap();
@@ -209,6 +211,7 @@ fn sync_dry_run_reports_plan_without_mutating() {
         manifest.units.push(UnitEntry {
             uri: unit_uri.clone(),
             targets: Some(vec!["claude".into()]),
+            shadowed_by: None,
         });
         manifest.save_to(&manifest_path_in(home.path())).unwrap();
 
@@ -243,6 +246,7 @@ fn sync_without_yes_or_dry_run_errors_when_work_pending() {
         manifest.units.push(UnitEntry {
             uri: unit_uri.clone(),
             targets: Some(vec!["claude".into()]),
+            shadowed_by: None,
         });
         manifest.save_to(&manifest_path_in(home.path())).unwrap();
 

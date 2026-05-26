@@ -175,6 +175,90 @@ impl Uri {
     pub fn is_source(&self) -> bool {
         self.path.is_none()
     }
+
+    /// Construct a `marketplace:<plugin>@<marketplace>[@<version>]` URI.
+    ///
+    /// The unversioned form maps to `locator=plugin, ref_=marketplace`.
+    /// The versioned form folds the marketplace into the locator
+    /// (`locator=plugin@marketplace, ref_=version`) so [`Uri::display`]
+    /// round-trips and [`Uri::parse`] (which splits on the last `@`)
+    /// recovers the same components.
+    pub fn marketplace(plugin: &str, marketplace: &str, version: Option<&str>) -> Self {
+        match version {
+            None => Uri {
+                source_type: SourceType::Marketplace,
+                locator: plugin.to_string(),
+                ref_: Some(marketplace.to_string()),
+                path: None,
+            },
+            Some(v) => Uri {
+                source_type: SourceType::Marketplace,
+                locator: format!("{plugin}@{marketplace}"),
+                ref_: Some(v.to_string()),
+                path: None,
+            },
+        }
+    }
+
+    /// Decode a marketplace unit URI into its semantic
+    /// `(plugin, marketplace, version)` triple.
+    ///
+    /// Returns `CoreError::InvalidUri` when called on a non-marketplace
+    /// URI, when the marketplace segment is missing, or when a `/path`
+    /// component is present (marketplace unit URIs have no path).
+    pub fn as_marketplace(&self) -> Result<MarketplaceUri> {
+        if self.source_type != SourceType::Marketplace {
+            return Err(CoreError::InvalidUri(format!(
+                "not a marketplace URI: source type is `{}`",
+                self.source_type
+            )));
+        }
+        if self.path.is_some() {
+            return Err(CoreError::InvalidUri(format!(
+                "marketplace unit URI must not have a `/path` component: `{}`",
+                self.display()
+            )));
+        }
+        let ref_ = self.ref_.as_deref().ok_or_else(|| {
+            CoreError::InvalidUri(format!(
+                "marketplace URI missing marketplace segment: `{}`",
+                self.display()
+            ))
+        })?;
+        // Versioned form has another `@` inside the locator
+        // (`plugin@marketplace`); unversioned form has no `@`.
+        match self.locator.split_once('@') {
+            Some((plugin, marketplace)) => Ok(MarketplaceUri {
+                plugin: plugin.to_string(),
+                marketplace: marketplace.to_string(),
+                version: Some(ref_.to_string()),
+            }),
+            None => Ok(MarketplaceUri {
+                plugin: self.locator.clone(),
+                marketplace: ref_.to_string(),
+                version: None,
+            }),
+        }
+    }
+}
+
+/// Semantic decomposition of a `marketplace:` unit URI (see
+/// [`Uri::as_marketplace`] and [`Uri::marketplace`]).
+///
+/// Mirrors the `/plugin install <plugin>@<marketplace>` argument shape
+/// from Claude Code so v1.1 discovery can flag marketplace-installed
+/// plugins without re-parsing strings ad-hoc downstream.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MarketplaceUri {
+    pub plugin: String,
+    pub marketplace: String,
+    pub version: Option<String>,
+}
+
+impl From<MarketplaceUri> for Uri {
+    fn from(m: MarketplaceUri) -> Self {
+        Uri::marketplace(&m.plugin, &m.marketplace, m.version.as_deref())
+    }
 }
 
 impl fmt::Display for Uri {

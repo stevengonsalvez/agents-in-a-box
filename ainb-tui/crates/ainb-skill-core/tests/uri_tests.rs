@@ -1,5 +1,6 @@
 //! URI parser tests — positive + negative cases from spec §6.1.
 
+use ainb_skill_core::uri::MarketplaceUri;
 use ainb_skill_core::{SourceType, Uri};
 
 fn assert_roundtrip(input: &str) -> Uri {
@@ -137,4 +138,75 @@ fn serde_yaml_round_trip() {
     assert!(yaml.contains("gh:stevengonsalvez/my-skills@main/skills/review-pr"));
     let decoded: Uri = serde_yaml_ng::from_str(&yaml).unwrap();
     assert_eq!(decoded, original);
+}
+
+// === marketplace: unit-URI scheme (hdt.3 / spec §URI scheme additions) ===
+
+#[test]
+fn marketplace_unit_uri_unversioned_roundtrips() {
+    // `marketplace:<plugin>@<marketplace>` — Claude Code plugin source.
+    let u = assert_roundtrip("marketplace:reflect@claude-plugins-official");
+    assert_eq!(u.source_type, SourceType::Marketplace);
+    let m = u.as_marketplace().expect("is marketplace unit URI");
+    assert_eq!(m.plugin, "reflect");
+    assert_eq!(m.marketplace, "claude-plugins-official");
+    assert!(m.version.is_none());
+}
+
+#[test]
+fn marketplace_unit_uri_versioned_roundtrips() {
+    // `marketplace:<plugin>@<marketplace>@<version>` — version-pinned form.
+    let u = assert_roundtrip("marketplace:reflect@claude-plugins-official@v1.2.3");
+    assert_eq!(u.source_type, SourceType::Marketplace);
+    let m = u.as_marketplace().expect("is versioned marketplace URI");
+    assert_eq!(m.plugin, "reflect");
+    assert_eq!(m.marketplace, "claude-plugins-official");
+    assert_eq!(m.version.as_deref(), Some("v1.2.3"));
+}
+
+#[test]
+fn marketplace_uri_builder_roundtrips_unversioned() {
+    let built = Uri::marketplace("reflect", "claude-plugins-official", None);
+    assert_eq!(built.display(), "marketplace:reflect@claude-plugins-official");
+    let parsed = Uri::parse(&built.display()).unwrap();
+    assert_eq!(parsed, built);
+}
+
+#[test]
+fn marketplace_uri_builder_roundtrips_versioned() {
+    let built = Uri::marketplace("reflect", "claude-plugins-official", Some("v1"));
+    assert_eq!(
+        built.display(),
+        "marketplace:reflect@claude-plugins-official@v1"
+    );
+    let parsed = Uri::parse(&built.display()).unwrap();
+    assert_eq!(parsed, built);
+    let m = parsed.as_marketplace().unwrap();
+    assert_eq!(m.version.as_deref(), Some("v1"));
+}
+
+#[test]
+fn marketplace_uri_as_marketplace_rejects_non_marketplace() {
+    let u = Uri::parse("gh:stevengonsalvez/my-skills@main").unwrap();
+    assert!(u.as_marketplace().is_err());
+}
+
+#[test]
+fn marketplace_uri_as_marketplace_rejects_missing_marketplace_field() {
+    // No `@<marketplace>` segment — not a valid marketplace unit URI.
+    let u = Uri::parse("marketplace:reflect").unwrap();
+    assert!(u.as_marketplace().is_err());
+}
+
+#[test]
+fn marketplace_uri_struct_roundtrip_via_uri() {
+    let m = MarketplaceUri {
+        plugin: "code-reviewer".into(),
+        marketplace: "anthropic".into(),
+        version: Some("2026.01".into()),
+    };
+    let uri: Uri = m.clone().into();
+    assert_eq!(uri.display(), "marketplace:code-reviewer@anthropic@2026.01");
+    let parsed_back = uri.as_marketplace().unwrap();
+    assert_eq!(parsed_back, m);
 }

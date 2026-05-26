@@ -214,6 +214,7 @@ fn migrate_from_bootstrap(home: &Path, args: MigrateArgs, out: &mut dyn io::Writ
                 units.push(UnitEntry {
                     uri: unit_uri,
                     targets: None,
+                    shadowed_by: None,
                 });
             }
         }
@@ -232,6 +233,7 @@ fn migrate_from_bootstrap(home: &Path, args: MigrateArgs, out: &mut dyn io::Writ
             uri: source_uri.clone(),
             r#ref: "main".into(),
             enabled: true,
+            read_only: false,
         });
         added_source = true;
     }

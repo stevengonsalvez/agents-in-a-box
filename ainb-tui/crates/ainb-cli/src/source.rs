@@ -105,6 +105,7 @@ fn add(
             uri: stored_uri,
             r#ref: ref_.clone(),
             enabled: true,
+            read_only: false,
         })
         .map_err(anyhow::Error::from)?;
     manifest.save_to(manifest_path)?;

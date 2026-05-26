@@ -5,13 +5,17 @@
 //! never replace the live file.
 
 use std::collections::BTreeMap;
+use std::convert::Infallible;
+use std::fmt;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::{CoreError, Result};
+use crate::uri::Uri;
 
 const CURRENT_SCHEMA_VERSION: u32 = 1;
 
@@ -27,6 +31,58 @@ fn default_ref() -> String {
     "main".to_string()
 }
 
+fn is_false(b: &bool) -> bool {
+    !b
+}
+
+/// Typed view over the free-form `SourceEntry.kind` string. Use
+/// [`SourceEntry::kind_typed`] to access; the underlying field stays
+/// `Option<String>` so unknown / forward-compat values round-trip
+/// losslessly through [`SourceKind::Other`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceKind {
+    Manifest,
+    Raw,
+    Gh,
+    Single,
+    Marketplace,
+    /// Claude Code marketplace plugin source (read-only — ainb does not
+    /// `install` / `update` / `uninstall`).
+    ClaudeMarketplace,
+    /// Catch-all for unrecognised kinds — preserves the raw string
+    /// verbatim so v1 manifests round-trip without data loss.
+    Other(String),
+}
+
+impl FromStr for SourceKind {
+    type Err = Infallible;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        Ok(match s {
+            "manifest" => Self::Manifest,
+            "raw" => Self::Raw,
+            "gh" => Self::Gh,
+            "single" => Self::Single,
+            "marketplace" => Self::Marketplace,
+            "claude-marketplace" => Self::ClaudeMarketplace,
+            other => Self::Other(other.to_string()),
+        })
+    }
+}
+
+impl fmt::Display for SourceKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Manifest => "manifest",
+            Self::Raw => "raw",
+            Self::Gh => "gh",
+            Self::Single => "single",
+            Self::Marketplace => "marketplace",
+            Self::ClaudeMarketplace => "claude-marketplace",
+            Self::Other(s) => s,
+        })
+    }
+}
+
 /// One configured source. The `uri` is the source-level identifier
 /// (e.g. `gh:org/repo`) — the `@ref/path` suffix is held separately so
 /// users can re-pin without rewriting the URI.
@@ -34,8 +90,10 @@ fn default_ref() -> String {
 pub struct SourceEntry {
     pub name: String,
 
-    /// Source kind hint (marketplace | manifest | raw | single). Optional;
-    /// adapter auto-detection in P2 will fill it in when omitted.
+    /// Source kind hint (manifest | raw | gh | single | marketplace |
+    /// claude-marketplace). Optional; adapter auto-detection fills it
+    /// in when omitted. Stored as a free-form string so unknown values
+    /// round-trip — use [`SourceEntry::kind_typed`] for typed access.
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "type")]
     pub kind: Option<String>,
 
@@ -48,6 +106,24 @@ pub struct SourceEntry {
 
     #[serde(default = "default_true")]
     pub enabled: bool,
+
+    /// When `true`, `ainb` treats this source as externally managed and
+    /// will not run install / update / uninstall against it (e.g. a
+    /// Claude Code marketplace owned by `/plugin`). Defaults to `false`;
+    /// v1 manifests written without this field load with the default.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub read_only: bool,
+}
+
+impl SourceEntry {
+    /// Typed view of [`SourceEntry::kind`]. Returns `None` when no kind
+    /// is set; unknown strings parse to [`SourceKind::Other`] so this
+    /// never fails.
+    pub fn kind_typed(&self) -> Option<SourceKind> {
+        self.kind
+            .as_deref()
+            .map(|s| s.parse().expect("SourceKind::from_str is infallible"))
+    }
 }
 
 /// One declared unit, by full URI.
@@ -56,6 +132,14 @@ pub struct UnitEntry {
     pub uri: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub targets: Option<Vec<String>>,
+
+    /// When set, the unit is being shadowed by another unit (typically
+    /// a marketplace plugin overriding an orphan with the same name).
+    /// `ainb skill list` renders the shadowed row as inactive; `[s]`
+    /// in the SkillManager TUI flips which side wins. Defaults to
+    /// `None`; v1 manifests load with the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shadowed_by: Option<Uri>,
 }
 
 /// Manifest-level defaults applied when a unit omits a field.

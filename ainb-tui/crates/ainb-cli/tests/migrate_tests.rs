@@ -256,6 +256,7 @@ fn migrate_clean_wipes_and_syncs_from_manifest() {
         manifest.units.push(UnitEntry {
             uri: unit_uri.clone(),
             targets: Some(vec!["claude".into()]),
+            shadowed_by: None,
         });
         manifest.save_to(&manifest_path_in(home.path())).unwrap();
 
@@ -336,6 +337,7 @@ fn migrate_clean_backup_snapshots_existing_state() {
         manifest.units.push(UnitEntry {
             uri: unit_uri.clone(),
             targets: Some(vec!["claude".into()]),
+            shadowed_by: None,
         });
         manifest.save_to(&manifest_path_in(home.path())).unwrap();
 
@@ -412,6 +414,7 @@ fn migrate_clean_dry_run_does_not_wipe() {
         manifest.units.push(UnitEntry {
             uri: format!("{local_uri}@main/skills/commit"),
             targets: Some(vec!["claude".into()]),
+            shadowed_by: None,
         });
         manifest.save_to(&manifest_path_in(home.path())).unwrap();
 
