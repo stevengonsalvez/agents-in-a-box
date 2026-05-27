@@ -3508,6 +3508,11 @@ impl EventHandler {
                     SidebarItem::Sessions => {
                         state.current_screen = screen_ids::SESSION_LIST.to_string();
                     }
+                    SidebarItem::Inbox => {
+                        state.previous_screen = Some(state.current_screen.clone());
+                        state.current_screen = screen_ids::INBOX.to_string();
+                        state.inbox_state.refresh();
+                    }
                     SidebarItem::Recovery => {
                         state.session_recovery_state.refresh();
                         state.current_screen = screen_ids::SESSION_RECOVERY.to_string();
