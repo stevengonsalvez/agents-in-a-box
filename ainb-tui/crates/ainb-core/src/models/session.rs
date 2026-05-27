@@ -6,10 +6,17 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionMode {
+    // PascalCase variants are the canonical wire format for
+    // `~/.agents-in-a-box/sessions.json` (existing on-disk corpus). The
+    // lowercase aliases keep the same enum compatible with the preset TOML
+    // files (`mode = "boss"` / `mode = "interactive"`), so `RepositoryPreset`
+    // can target this single enum instead of a parallel copy.
+    #[serde(alias = "interactive")]
     Interactive, // Traditional interactive mode with shell access
-    Boss,        // Non-interactive mode with direct prompt execution
+    #[serde(alias = "boss")]
+    Boss, // Non-interactive mode with direct prompt execution
 }
 
 impl Default for SessionMode {
@@ -111,54 +118,198 @@ impl SessionAgentType {
     }
 }
 
-/// Available Claude models for session
+/// Available Claude models for session.
+///
+/// The `SystemDefault` variant is special: when selected, `--model` is omitted
+/// from the launched CLI command entirely so the user's `claude` defaults
+/// apply. Real model variants serialize their full canonical IDs (e.g.
+/// `claude-opus-4-7`, not the `opus` alias) — but `parse()` still accepts the
+/// short aliases so existing user-saved presets (`agent_model = "opus"`)
+/// continue to deserialize correctly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ClaudeModel {
+    /// Omit `--model` from the spawned `claude` command; user's CLI default wins.
     #[default]
-    Sonnet,
+    SystemDefault,
+    /// `claude-opus-4-7` — 1M ctx, flagship.
     Opus,
+    /// `claude-opus-4-6` — 1M ctx, previous Opus (still live).
+    Opus46,
+    /// `claude-sonnet-4-6` — 1M ctx, balanced.
+    Sonnet,
+    /// `claude-haiku-4-5` — 200K ctx, fastest.
     Haiku,
+    /// `opusplan` — hybrid (Opus plan-mode + Sonnet exec).
+    OpusPlan,
 }
 
 impl ClaudeModel {
-    /// Get the CLI value to pass to `claude --model`
-    pub fn cli_value(&self) -> &'static str {
+    /// CLI value to pass to `claude --model`. `None` means "omit the flag entirely".
+    pub fn cli_value(&self) -> Option<&'static str> {
         match self {
-            ClaudeModel::Sonnet => "sonnet",
-            ClaudeModel::Opus => "opus",
-            ClaudeModel::Haiku => "haiku",
+            ClaudeModel::SystemDefault => None,
+            ClaudeModel::Opus => Some("claude-opus-4-7"),
+            ClaudeModel::Opus46 => Some("claude-opus-4-6"),
+            ClaudeModel::Sonnet => Some("claude-sonnet-4-6"),
+            ClaudeModel::Haiku => Some("claude-haiku-4-5"),
+            ClaudeModel::OpusPlan => Some("opusplan"),
         }
     }
 
-    /// Get human-readable display name
-    pub fn display_name(&self) -> &'static str {
+    /// Human-readable label for the Configure row. Full ID + ctx hint for real
+    /// variants; lowercase "system default" for the no-flag variant (rendered
+    /// muted-gray italic in the screen).
+    pub fn display_label(&self) -> &'static str {
         match self {
-            ClaudeModel::Sonnet => "Sonnet",
-            ClaudeModel::Opus => "Opus",
-            ClaudeModel::Haiku => "Haiku",
+            ClaudeModel::SystemDefault => "system default",
+            ClaudeModel::Opus => "claude-opus-4-7 [1M]",
+            ClaudeModel::Opus46 => "claude-opus-4-6 [1M]",
+            ClaudeModel::Sonnet => "claude-sonnet-4-6 [1M]",
+            ClaudeModel::Haiku => "claude-haiku-4-5 [200K]",
+            ClaudeModel::OpusPlan => "opusplan (hybrid)",
         }
+    }
+
+    /// Back-compat alias for older call sites that still ask for `display_name`.
+    /// Forwards to `display_label`.
+    pub fn display_name(&self) -> &'static str {
+        self.display_label()
     }
 
     /// Get model description for UI
     pub fn description(&self) -> &'static str {
         match self {
-            ClaudeModel::Sonnet => "Balanced speed and intelligence (default)",
-            ClaudeModel::Opus => "Most capable, best for complex tasks",
+            ClaudeModel::SystemDefault => "Use the CLI's built-in default model",
+            ClaudeModel::Opus => "Most capable, best for complex reasoning",
+            ClaudeModel::Opus46 => "Previous flagship Opus, still live",
+            ClaudeModel::Sonnet => "Balanced speed and intelligence",
             ClaudeModel::Haiku => "Fastest, best for simple tasks",
+            ClaudeModel::OpusPlan => "Opus for planning, Sonnet for execution",
         }
     }
 
-    /// Get all available models
+    /// All variants in the order the Configure ring should cycle them.
     pub fn all() -> Vec<ClaudeModel> {
-        vec![ClaudeModel::Sonnet, ClaudeModel::Opus, ClaudeModel::Haiku]
+        vec![
+            ClaudeModel::SystemDefault,
+            ClaudeModel::Opus,
+            ClaudeModel::Opus46,
+            ClaudeModel::Sonnet,
+            ClaudeModel::Haiku,
+            ClaudeModel::OpusPlan,
+        ]
     }
 
     /// Get icon for the model
     pub fn icon(&self) -> &'static str {
         match self {
-            ClaudeModel::Sonnet => "⚖️",
+            ClaudeModel::SystemDefault => "·",
             ClaudeModel::Opus => "🎭",
+            ClaudeModel::Opus46 => "🎭",
+            ClaudeModel::Sonnet => "⚖️",
             ClaudeModel::Haiku => "⚡",
+            ClaudeModel::OpusPlan => "📐",
+        }
+    }
+
+    /// Parse a TOML / preset string into a `ClaudeModel`. Accepts:
+    ///   * `""` or `"default"` → `SystemDefault`
+    ///   * Canonical IDs (`claude-opus-4-7`, `claude-sonnet-4-6`, `claude-haiku-4-5`, `opusplan`)
+    ///   * Legacy short aliases (`opus`, `sonnet`, `haiku`) so user-saved
+    ///     presets written before the 2026-05 refresh still resolve.
+    /// Unknown values fall back to `SystemDefault` and emit a tracing::warn.
+    pub fn parse(value: &str) -> ClaudeModel {
+        match value.trim().to_lowercase().as_str() {
+            "" | "default" => ClaudeModel::SystemDefault,
+            "opus" | "claude-opus" | "claude-3-opus" | "claude-opus-4-7" => ClaudeModel::Opus,
+            "opus-4-6" | "claude-opus-4-6" | "opus46" => ClaudeModel::Opus46,
+            "sonnet" | "claude-sonnet" | "claude-3-sonnet" | "claude-sonnet-4-6" => {
+                ClaudeModel::Sonnet
+            }
+            "haiku" | "claude-haiku" | "claude-3-haiku" | "claude-haiku-4-5" => ClaudeModel::Haiku,
+            "opusplan" | "opus-plan" => ClaudeModel::OpusPlan,
+            other => {
+                tracing::warn!(
+                    value = %other,
+                    "ClaudeModel::parse: unknown model id, defaulting to SystemDefault"
+                );
+                ClaudeModel::SystemDefault
+            }
+        }
+    }
+}
+
+/// Available Codex models for session.
+///
+/// As with `ClaudeModel`, `SystemDefault` means "omit `--model` from the
+/// spawned `codex` command". The Codex CLI's own internal default applies in
+/// that case (currently `gpt-5.5`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum CodexModel {
+    /// Omit `--model` from the spawned `codex` command.
+    #[default]
+    SystemDefault,
+    /// `gpt-5.5` — 1M ctx, recommended default.
+    Gpt55,
+    /// `gpt-5.4` — 1M ctx, flagship alt.
+    Gpt54,
+    /// `gpt-5.4-mini` — 200K ctx, fast/cheap.
+    Gpt54Mini,
+    /// `gpt-5.3-codex` — 200K ctx, deep SWE.
+    Gpt53Codex,
+}
+
+impl CodexModel {
+    /// CLI value to pass to `codex --model`. `None` means "omit the flag entirely".
+    pub fn cli_value(&self) -> Option<&'static str> {
+        match self {
+            CodexModel::SystemDefault => None,
+            CodexModel::Gpt55 => Some("gpt-5.5"),
+            CodexModel::Gpt54 => Some("gpt-5.4"),
+            CodexModel::Gpt54Mini => Some("gpt-5.4-mini"),
+            CodexModel::Gpt53Codex => Some("gpt-5.3-codex"),
+        }
+    }
+
+    /// Human-readable label for the Configure row.
+    pub fn display_label(&self) -> &'static str {
+        match self {
+            CodexModel::SystemDefault => "system default",
+            CodexModel::Gpt55 => "gpt-5.5 [1M]",
+            CodexModel::Gpt54 => "gpt-5.4 [1M]",
+            CodexModel::Gpt54Mini => "gpt-5.4-mini [200K]",
+            CodexModel::Gpt53Codex => "gpt-5.3-codex [200K]",
+        }
+    }
+
+    /// All variants in the order the Configure ring should cycle them.
+    pub fn all() -> Vec<CodexModel> {
+        vec![
+            CodexModel::SystemDefault,
+            CodexModel::Gpt55,
+            CodexModel::Gpt54,
+            CodexModel::Gpt54Mini,
+            CodexModel::Gpt53Codex,
+        ]
+    }
+
+    /// Parse a TOML / preset string into a `CodexModel`. Accepts canonical IDs
+    /// only (Codex CLI never had short aliases) plus `""` / `"default"` for
+    /// the SystemDefault variant. Unknown values fall back to `SystemDefault`.
+    pub fn parse(value: &str) -> CodexModel {
+        match value.trim().to_lowercase().as_str() {
+            "" | "default" => CodexModel::SystemDefault,
+            "gpt-5.5" => CodexModel::Gpt55,
+            "gpt-5.4" => CodexModel::Gpt54,
+            "gpt-5.4-mini" => CodexModel::Gpt54Mini,
+            "gpt-5.3-codex" => CodexModel::Gpt53Codex,
+            other => {
+                tracing::warn!(
+                    value = %other,
+                    "CodexModel::parse: unknown model id, defaulting to SystemDefault"
+                );
+                CodexModel::SystemDefault
+            }
         }
     }
 }
@@ -312,6 +463,12 @@ pub struct Session {
     pub agent_type: SessionAgentType, // The AI agent or shell for this session
     #[serde(default)]
     pub model: Option<ClaudeModel>, // Claude model for this session (only for Claude agent)
+    /// Codex model (only meaningful when `agent_type == Codex`). Mirrors
+    /// `model` for the Claude agent: `Some(SystemDefault)` and `None` both
+    /// cause `--model` to be omitted from the spawned `codex` command;
+    /// anything else emits `--model <id>`.
+    #[serde(default)]
+    pub codex_model: Option<CodexModel>,
     #[serde(default)]
     pub ssh_target: Option<SshTarget>, // SSH connection target for SSH agent type
     #[serde(default)]
@@ -540,6 +697,7 @@ impl Session {
             boss_prompt,
             agent_type,
             model,
+            codex_model: None,
             ssh_target: None,
             display_name: None,
             tmux_session_name: None,
@@ -567,6 +725,7 @@ impl Session {
             boss_prompt: None,
             agent_type: SessionAgentType::Ssh,
             model: None,
+            codex_model: None,
             ssh_target: Some(ssh_target),
             display_name: None,
             tmux_session_name: None,

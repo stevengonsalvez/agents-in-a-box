@@ -7,15 +7,17 @@ use crate::audit::{self, AuditResult, AuditTrigger};
 use crate::claude::client::ClaudeChatManager;
 use crate::claude::types::ClaudeStreamingEvent;
 use crate::claude::{ClaudeApiClient, ClaudeMessage};
-use crate::components::fuzzy_file_finder::FuzzyFileFinderState;
+// Phase 6 (new-session redesign): FuzzyFileFinderState was used by the legacy
+// boss-mode @-trigger; removed along with the prompt textarea.
 use crate::components::home_screen_v2::HomeScreenV2State;
 use crate::components::live_logs_stream::LogEntry;
-use crate::config::{AppConfig, SshDisplayNameStore, WorktreeCollisionBehavior};
+use crate::config::{AppConfig, SshDisplayNameStore};
 use crate::credentials;
 use crate::docker::LogStreamingCoordinator;
 use crate::editors;
-use crate::git::{ParsedRepo, RemoteBranch, RepoSource};
-use crate::models::{ClaudeModel, Session, SessionAgentType, Workspace};
+// Phase 6 (new-session redesign): ParsedRepo / RemoteBranch / legacy
+// `RepoSource` import retired with the legacy remote-clone flow.
+use crate::models::{Session, SessionAgentType, Workspace};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -82,6 +84,21 @@ impl TextEditor {
 
     pub fn is_empty(&self) -> bool {
         self.lines.len() == 1 && self.lines[0].is_empty()
+    }
+
+    /// Return the editor contents as `Some(String)` iff non-empty, else `None`.
+    ///
+    /// Collapses the "empty prompt → no prompt" idiom that was inlined at
+    /// multiple sites in `configure.rs` (finding #17). Callers that need
+    /// `Option<&str>` can chain `.as_deref()`.
+    #[must_use]
+    pub fn to_non_empty_string(&self) -> Option<String> {
+        let s = self.to_string();
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
     }
 
     pub fn insert_char(&mut self, ch: char) {
@@ -2355,301 +2372,81 @@ pub enum BranchCheckoutMode {
 
 #[derive(Debug)]
 pub struct NewSessionState {
-    pub source_choice: RepoSourceChoice, // Local or Remote repo source
-    pub available_repos: Vec<std::path::PathBuf>,
-    pub filtered_repos: Vec<(usize, std::path::PathBuf)>, // (original_index, path)
-    pub selected_repo_index: Option<usize>,
-    pub current_repo_branch: Option<String>, // Current branch of selected local repo
-    pub branch_name: String,
+    /// The current step in the redesigned 2-screen flow (PickRepo →
+    /// Configure → Creating).
     pub step: NewSessionStep,
-    pub filter_text: String,
-    pub is_current_dir_mode: bool, // true if creating session in current dir
-    pub skip_permissions: bool,    // true to use --dangerously-skip-permissions flag
-    pub mode: crate::models::SessionMode, // Interactive or Boss mode
-    pub boss_prompt: TextEditor,   // The prompt text editor for boss mode execution
-    pub file_finder: FuzzyFileFinderState, // Fuzzy file finder for @ symbol
-    pub restart_session_id: Option<Uuid>, // If set, this is a restart operation
-    // Agent selection
-    pub selected_agent: SessionAgentType, // The selected agent for this session
-    pub agent_options: Vec<SessionAgentOption>, // List of available agents
-    pub selected_agent_index: usize,      // Index in agent_options list
-    // Model selection (for Claude agent)
-    pub selected_model: ClaudeModel, // The selected model for this session
-    pub model_options: Vec<ClaudeModel>, // List of available models
-    pub selected_model_index: usize, // Index in model_options list
-    pub agent_model_focus: AgentModelFocus, // Which panel has focus (Agent or Model)
 
-    // Remote repository support
-    pub repo_input: String,                 // URL or path input from user
-    pub repo_source: Option<RepoSource>,    // Parsed repo source
-    pub remote_branches: Vec<RemoteBranch>, // Available branches from remote
-    pub filtered_branches: Vec<(usize, RemoteBranch)>, // (original_index, branch) after filter
-    pub branch_filter_text: String,         // Filter text for fuzzy branch search
-    pub selected_branch_index: usize,       // Selected index in filtered branch list
-    pub selected_base_branch: Option<String>, // The base branch to create worktree from
-    pub cached_repo_path: Option<PathBuf>,  // Path to cached bare clone
-    pub repo_validation_error: Option<String>, // Error message for UI display
-    pub is_validating: bool,                // Show loading indicator
-    pub recent_repos: Vec<ParsedRepo>,      // Recently used repos for suggestions
-    pub branch_checkout_mode: BranchCheckoutMode, // Toggle: create new vs checkout existing
+    /// Screen-1 (unified repo picker) state. `Some` while the user is on
+    /// `PickRepo`; populated by the `AppEvent::NewSession` handler from disk
+    /// (favorites + session-defaults).
+    pub pick_repo_state: Option<crate::components::new_session::pick_repo::PickRepoState>,
 
-    // SSH configuration (only used when agent_type == Ssh)
-    pub ssh_host: String,               // SSH host (e.g., "server.example.com")
-    pub ssh_port: String,               // SSH port (string for input, parsed to u16)
-    pub ssh_user: String,               // SSH username (optional)
-    pub ssh_identity_file: String,      // Path to SSH identity file (optional)
-    pub ssh_input_focus: SshInputFocus, // Which SSH field has focus
-
-    // Favorites (shown inline in InputRepoSource for quick selection)
-    pub favorites_store: crate::config::FavoritesStore, // Cached favorites
-    pub selected_favorite_index: Option<usize>,         // Selected favorite (None = typing URL)
+    /// Screen-2 (Configure) state. `Some` after PickRepo's
+    /// `AdvanceTo` / `StartClone` resolves to a clonable or local source;
+    /// holds the launch payload that `create_session_from_configure` reads.
+    pub configure_state: Option<crate::components::new_session::configure::ConfigureState>,
 }
 
 impl Default for NewSessionState {
     fn default() -> Self {
         Self {
-            source_choice: RepoSourceChoice::default(),
-            available_repos: vec![],
-            filtered_repos: vec![],
-            selected_repo_index: None,
-            current_repo_branch: None,
-            branch_name: String::new(),
-            step: NewSessionStep::SelectSource, // Start with source selection
-            filter_text: String::new(),
-            is_current_dir_mode: false,
-            skip_permissions: false,
-            mode: crate::models::SessionMode::Interactive,
-            boss_prompt: TextEditor::new(),
-            file_finder: FuzzyFileFinderState::new(),
-            restart_session_id: None,
-            // Agent selection defaults
-            selected_agent: SessionAgentType::default(),
-            agent_options: SessionAgentOption::all(),
-            selected_agent_index: 0,
-            // Model selection defaults (Sonnet as default)
-            selected_model: ClaudeModel::default(),
-            model_options: ClaudeModel::all(),
-            selected_model_index: 0,
-            agent_model_focus: AgentModelFocus::default(),
-            // Remote repository support defaults
-            repo_input: String::new(),
-            repo_source: None,
-            remote_branches: Vec::new(),
-            filtered_branches: Vec::new(),
-            branch_filter_text: String::new(),
-            selected_branch_index: 0,
-            selected_base_branch: None,
-            cached_repo_path: None,
-            repo_validation_error: None,
-            is_validating: false,
-            recent_repos: Vec::new(),
-            branch_checkout_mode: BranchCheckoutMode::default(),
-            // SSH configuration defaults
-            ssh_host: String::new(),
-            ssh_port: "22".to_string(),
-            ssh_user: String::new(),
-            ssh_identity_file: String::new(),
-            ssh_input_focus: SshInputFocus::default(),
-            // Favorites defaults (shown inline in InputRepoSource)
-            favorites_store: crate::config::FavoritesStore::default(),
-            selected_favorite_index: None,
+            // Phase 6 (new-session redesign): default is the unified picker;
+            // callers that need a different step must override explicitly.
+            step: NewSessionStep::PickRepo,
+            pick_repo_state: None,
+            configure_state: None,
         }
     }
 }
 
-impl NewSessionState {
-    pub fn apply_filter(&mut self) {
-        self.filtered_repos.clear();
-        let filter_lower = self.filter_text.to_lowercase();
-
-        for (idx, repo) in self.available_repos.iter().enumerate() {
-            if let Some(folder_name) = repo.file_name() {
-                if let Some(name_str) = folder_name.to_str() {
-                    if name_str.to_lowercase().contains(&filter_lower) {
-                        self.filtered_repos.push((idx, repo.clone()));
-                    }
-                }
-            }
-        }
-
-        // Reset selection if current selection is out of bounds
-        if let Some(idx) = self.selected_repo_index {
-            if idx >= self.filtered_repos.len() {
-                self.selected_repo_index = if self.filtered_repos.is_empty() {
-                    None
-                } else {
-                    Some(0)
-                };
-            }
-        } else if !self.filtered_repos.is_empty() {
-            self.selected_repo_index = Some(0);
-        }
-    }
-
-    // Agent selection helpers
-    pub fn next_agent(&mut self) {
-        if !self.agent_options.is_empty() {
-            self.selected_agent_index = (self.selected_agent_index + 1) % self.agent_options.len();
-            // Also update selected_agent to keep in sync
-            self.selected_agent = self.current_agent_type();
-            self.enforce_mode_constraints();
-        }
-    }
-
-    pub fn prev_agent(&mut self) {
-        if !self.agent_options.is_empty() {
-            self.selected_agent_index = if self.selected_agent_index == 0 {
-                self.agent_options.len() - 1
-            } else {
-                self.selected_agent_index - 1
-            };
-            // Also update selected_agent to keep in sync
-            self.selected_agent = self.current_agent_type();
-            self.enforce_mode_constraints();
-        }
-    }
-
-    pub fn current_agent_option(&self) -> Option<&SessionAgentOption> {
-        self.agent_options.get(self.selected_agent_index)
-    }
-
-    pub fn current_agent_type(&self) -> SessionAgentType {
-        self.current_agent_option().map(|o| o.agent_type).unwrap_or_default()
-    }
-
-    pub fn is_current_agent_available(&self) -> bool {
-        self.current_agent_type().is_available()
-    }
-
-    pub fn is_boss_mode_available(&self) -> bool {
-        self.selected_agent == SessionAgentType::Claude
-    }
-
-    pub fn enforce_mode_constraints(&mut self) {
-        if !self.is_boss_mode_available() && self.mode == crate::models::SessionMode::Boss {
-            self.mode = crate::models::SessionMode::Interactive;
-        }
-    }
-
-    /// Select the current agent and update selected_agent field
-    pub fn confirm_agent_selection(&mut self) {
-        self.selected_agent = self.current_agent_type();
-        self.enforce_mode_constraints();
-    }
-
-    /// Get the selected repo path
-    pub fn get_selected_repo_path(&self) -> Option<std::path::PathBuf> {
-        self.selected_repo_index
-            .and_then(|idx| self.filtered_repos.get(idx))
-            .map(|(_, path)| path.clone())
-    }
-
-    // Model selection helpers
-
-    /// Move to next model in the list
-    pub fn next_model(&mut self) {
-        if !self.model_options.is_empty() {
-            self.selected_model_index = (self.selected_model_index + 1) % self.model_options.len();
-            self.selected_model = self.model_options[self.selected_model_index];
-        }
-    }
-
-    /// Move to previous model in the list
-    pub fn prev_model(&mut self) {
-        if !self.model_options.is_empty() {
-            self.selected_model_index = if self.selected_model_index == 0 {
-                self.model_options.len() - 1
-            } else {
-                self.selected_model_index - 1
-            };
-            self.selected_model = self.model_options[self.selected_model_index];
-        }
-    }
-
-    /// Get the currently selected model
-    pub fn current_model(&self) -> ClaudeModel {
-        self.model_options.get(self.selected_model_index).copied().unwrap_or_default()
-    }
-
-    /// Toggle focus between Agent and Model panels
-    pub fn toggle_agent_model_focus(&mut self) {
-        self.agent_model_focus = match self.agent_model_focus {
-            AgentModelFocus::Agent => AgentModelFocus::Model,
-            AgentModelFocus::Model => AgentModelFocus::Agent,
-        };
-    }
-
-    /// Toggle between CreateNew and CheckoutExisting branch modes
-    pub fn toggle_branch_checkout_mode(&mut self) {
-        self.branch_checkout_mode = match self.branch_checkout_mode {
-            BranchCheckoutMode::CreateNew => BranchCheckoutMode::CheckoutExisting,
-            BranchCheckoutMode::CheckoutExisting => BranchCheckoutMode::CreateNew,
-        };
-    }
-
-    /// Check if model selection should be shown (only for Claude agent)
-    pub fn should_show_model_selection(&self) -> bool {
-        self.current_agent_type() == SessionAgentType::Claude
-    }
-
-    /// Get the model to use for session creation (None for non-Claude agents)
-    pub fn get_session_model(&self) -> Option<ClaudeModel> {
-        if self.current_agent_type() == SessionAgentType::Claude {
-            Some(self.selected_model)
-        } else {
-            None
-        }
-    }
+/// Phase 6 (new-session redesign): launch payload built from `ConfigureState`
+/// inside `create_session_from_configure`. Kept private to `state.rs` since the
+/// only producer/consumer is the configure-launch async path.
+#[derive(Debug, Clone)]
+struct ConfigureLaunchSnapshot {
+    repo_source: crate::git::repo_source::RepoSource,
+    branch_name: String,
+    skip_permissions: bool,
+    mode: crate::models::SessionMode,
+    boss_prompt: Option<String>,
+    agent_type: crate::models::SessionAgentType,
+    /// Claude model for Claude-agent sessions. `Some(SystemDefault)` / `None`
+    /// both omit `--model` from the spawned `claude` command (the CLI's own
+    /// default applies). Set only when `agent_type == Claude`.
+    session_model: Option<crate::models::ClaudeModel>,
+    /// Codex model for Codex-agent sessions. Same omit-on-default semantics
+    /// as `session_model`. Set only when `agent_type == Codex`.
+    codex_model: Option<crate::models::CodexModel>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NewSessionStep {
-    SelectSource,    // Choose between Local repos, Remote URL, SSH, or Favorites
-    InputRepoSource, // Enter URL for remote repos (shows favorites as suggestions)
-    ValidatingRepo,  // Validating URL / cloning
-    SelectBranch,    // Pick from remote branches
-    SelectRepo,      // Browse/search local repos
-    SelectFavorite,  // Pick from saved favorites
-    SelectAgent,     // Choose agent (Claude, Shell, SSH, etc.)
-    ConfigureSsh,    // Configure SSH connection (host, port, user, key)
-    InputBranch,     // Name the session branch (ainb/...)
-    SelectMode,      // Choose between Interactive and Boss mode
-    InputPrompt,     // Enter prompt for Boss mode
-    ConfigurePermissions,
+    /// Phase 6 (new-session redesign): the unified repo picker (screen 1).
+    /// Owns its own state via `NewSessionState.pick_repo_state`.
+    PickRepo,
+    /// Phase 6 (new-session redesign): the consolidated Configure screen
+    /// (screen 2). Owns its own state via `NewSessionState.configure_state`.
+    Configure,
+    /// In-flight session creation — the legacy render dispatcher draws an
+    /// "Creating session…" panel while `create_session_from_configure`
+    /// resolves.
     Creating,
-}
-
-/// Which SSH input field has focus
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SshInputFocus {
-    #[default]
-    Host,
-    Port,
-    User,
-    IdentityFile,
-}
-
-/// Choice for repository source in new session flow
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum RepoSourceChoice {
-    #[default]
-    Local, // Browse local repos
-    Remote,    // Clone from URL
-    Ssh,       // SSH connection to remote server
-    Favorites, // Quick access to saved favorites
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AsyncAction {
-    StartNewSession,         // Old - will be removed
-    StartWorkspaceSearch,    // New - search all workspaces
-    NewSessionInCurrentDir,  // New - create session in current directory
-    NewSessionNormal,        // New - create normal new session with mode selection
-    NewSessionWithRepoInput, // NEW: Start with URL/path input
-    ValidateRepoSource,      // NEW: Parse and validate repo input
-    CloneRemoteRepo,         // NEW: Clone remote repo to cache
-    FetchRemoteBranches,     // NEW: Get branch list from remote
-    CreateNewSession,
+    // Phase 6 (new-session redesign): legacy `StartNewSession`,
+    // `StartWorkspaceSearch`, `NewSessionInCurrentDir`, `NewSessionNormal`,
+    // `NewSessionWithRepoInput`, `ValidateRepoSource`, `CloneRemoteRepo`,
+    // `FetchRemoteBranches`, and `CreateNewSession` variants have been
+    // removed. The redesigned new-session flow uses
+    // `CreateSessionFromConfigure` exclusively.
+    /// Launch a session from the Configure screen — the sole session-creation
+    /// entry point post-Phase-6. The payload is the already-built
+    /// `LaunchSpec` returned by `ConfigureOutcome::Launch`, threaded through
+    /// the dispatcher so the async path doesn't re-derive it from
+    /// `configure_state` (finding #7).
+    CreateSessionFromConfigure(crate::components::new_session::configure::LaunchSpec),
     DeleteSession(Uuid),           // New - delete session with container cleanup
     StopSession(Uuid),             // Soft-stop interactive session (kill tmux only)
     ResumeSession(Uuid, String), // Recreate tmux for a Stopped interactive session; String is the trigger key for audit
@@ -2674,8 +2471,6 @@ pub enum AsyncAction {
     },
     OpenShellAtPath(std::path::PathBuf), // Open shell directly at a path (no workspace required)
     KillWorkspaceShell(usize),           // Kill workspace shell by workspace index
-    // SSH session actions
-    CreateSshSession, // Create a new SSH session with configured target
     // Editor action
     OpenInEditor(std::path::PathBuf), // Open workspace in preferred editor
     // Onboarding actions
@@ -5325,1832 +5120,85 @@ impl AppState {
         }
     }
 
-    pub async fn new_session_normal(&mut self) {
-        use crate::git::WorkspaceScanner;
-        use std::env;
-
-        info!("=== new_session_normal called ===");
-
-        // REMOVED: Auth check moved to Boss mode selection only
-        // Interactive mode works without Docker authentication (uses host ~/.claude)
-        // Boss mode will check auth when selected during session creation
-        info!("Proceeding with session creation (auth deferred to Boss mode selection)");
-
-        // Check if current directory is a git repository
-        let current_dir = match env::current_dir() {
-            Ok(dir) => {
-                info!("Current directory: {:?}", dir);
-                dir
-            }
-            Err(e) => {
-                warn!("Failed to get current directory: {}", e);
-                return;
-            }
-        };
-
-        match WorkspaceScanner::validate_workspace(&current_dir) {
-            Ok(true) => {
-                info!(
-                    "Current directory is a valid git repository: {:?}",
-                    current_dir
-                );
-            }
-            Ok(false) => {
-                warn!(
-                    "Current directory is not a git repository: {:?}",
-                    current_dir
-                );
-                info!("Falling back to workspace search");
-                // Fall back to workspace search since current directory is not a git repository
-                self.start_workspace_search().await;
-                return;
-            }
-            Err(e) => {
-                error!("Failed to validate workspace: {}", e);
-                info!("Falling back to workspace search due to validation error");
-                // Fall back to workspace search on validation error
-                self.start_workspace_search().await;
-                return;
-            }
-        }
-
-        // Generate branch name with UUID
-        let branch_base = format!(
-            "ainb/{}",
-            uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("session")
-        );
-
-        // Create new session state for normal new session (NOT current directory mode)
-        self.new_session_state = Some(NewSessionState {
-            available_repos: vec![current_dir.clone()],
-            filtered_repos: vec![(0, current_dir.clone())],
-            selected_repo_index: Some(0),
-            branch_name: branch_base.clone(),
-            step: NewSessionStep::InputBranch,
-            ..Default::default()
-        });
-
-        self.current_screen = screen_ids::NEW_SESSION.to_string();
-
-        info!(
-            "Successfully created normal new session state with branch: {}",
-            branch_base
-        );
-    }
-
-    /// Start new session - shows source selection (Local or Remote)
-    pub async fn new_session_with_repo_input(&mut self) {
-        info!("Starting new session - showing source selection");
-
-        // Create new session state with SelectSource step (default)
-        self.new_session_state = Some(NewSessionState::default());
-        self.current_screen = screen_ids::NEW_SESSION.to_string();
-        info!("New session state created with SelectSource step");
-    }
-
-    /// Validate the repo input (URL or path) and proceed accordingly
-    pub async fn validate_repo_source(&mut self) {
-        use crate::git::RepoSource;
-
-        let input = if let Some(ref state) = self.new_session_state {
-            state.repo_input.trim().to_string()
-        } else {
-            error!("validate_repo_source called but no new_session_state");
-            return;
-        };
-
-        if input.is_empty() {
-            if let Some(ref mut state) = self.new_session_state {
-                state.repo_validation_error =
-                    Some("Please enter a repository URL or path".to_string());
-            }
-            return;
-        }
-
-        // Set validating state
-        if let Some(ref mut state) = self.new_session_state {
-            state.is_validating = true;
-            state.repo_validation_error = None;
-        }
-
-        // Parse the input
-        let source = match RepoSource::from_input(&input) {
-            Ok(s) => s,
-            Err(e) => {
-                if let Some(ref mut state) = self.new_session_state {
-                    state.is_validating = false;
-                    state.repo_validation_error = Some(e.to_string());
-                }
-                return;
-            }
-        };
-
-        info!(
-            "Parsed repo source: {:?}, is_remote: {}",
-            source,
-            source.is_remote()
-        );
-
-        if source.is_remote() {
-            // Remote URL - try to fetch branches
-            self.handle_remote_repo_source(source).await;
-        } else {
-            // Local path - validate and proceed
-            self.handle_local_repo_source(source).await;
-        }
-    }
-
-    /// Handle a remote repository source (URL)
-    async fn handle_remote_repo_source(&mut self, source: RepoSource) {
-        use crate::git::RemoteRepoManager;
-
-        let manager = match RemoteRepoManager::new() {
-            Ok(m) => m,
-            Err(e) => {
-                if let Some(ref mut state) = self.new_session_state {
-                    state.is_validating = false;
-                    state.repo_validation_error =
-                        Some(format!("Failed to init repo manager: {}", e));
-                }
-                return;
-            }
-        };
-
-        info!("Fetching branches for remote repo...");
-
-        // Try to list branches
-        match manager.list_remote_branches(&source) {
-            Ok(branches) => {
-                info!("Found {} branches", branches.len());
-                if let Some(ref mut state) = self.new_session_state {
-                    state.repo_source = Some(source);
-                    // Initialize filtered_branches with all branches (no filter yet)
-                    state.filtered_branches = branches.iter().cloned().enumerate().collect();
-                    state.remote_branches = branches;
-                    state.branch_filter_text.clear();
-                    state.selected_branch_index = 0;
-                    state.is_validating = false;
-                    state.step = NewSessionStep::SelectBranch;
-                }
-            }
-            Err(crate::git::RemoteRepoError::AuthFailed) => {
-                // Auth failed - let user enter branch manually
-                warn!("Auth failed for remote repo, allowing manual branch entry");
-                if let Some(ref mut state) = self.new_session_state {
-                    state.repo_source = Some(source);
-                    state.is_validating = false;
-                    // Generate a branch name
-                    state.branch_name = format!(
-                        "ainb/{}",
-                        uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("session")
-                    );
-                    // Default to main as base branch
-                    state.selected_base_branch = Some("main".to_string());
-                    state.repo_validation_error = Some(
-                        "Auth required. Defaulting to 'main' branch. Change base branch in next step if needed.".to_string()
-                    );
-                    state.step = NewSessionStep::InputBranch;
-                }
-            }
-            Err(e) => {
-                error!("Failed to list branches: {}", e);
-                if let Some(ref mut state) = self.new_session_state {
-                    state.is_validating = false;
-                    state.repo_validation_error = Some(e.to_string());
-                }
-            }
-        }
-    }
-
-    /// Handle a local repository source (path)
-    async fn handle_local_repo_source(&mut self, source: RepoSource) {
-        use crate::git::WorkspaceScanner;
-
-        if let RepoSource::LocalPath(ref path) = source {
-            // Validate path exists
-            if !path.exists() {
-                if let Some(ref mut state) = self.new_session_state {
-                    state.is_validating = false;
-                    state.repo_validation_error =
-                        Some(format!("Path not found: {}", path.display()));
-                }
-                return;
-            }
-
-            // Validate it's a git repo
-            if !WorkspaceScanner::validate_workspace(path).unwrap_or(false) {
-                if let Some(ref mut state) = self.new_session_state {
-                    state.is_validating = false;
-                    state.repo_validation_error =
-                        Some(format!("Not a git repository: {}", path.display()));
-                }
-                return;
-            }
-
-            // Clone path before moving source
-            let path_clone = path.clone();
-
-            // Valid local repo - proceed to agent selection
-            info!("Valid local repo: {}", path_clone.display());
-            if let Some(ref mut state) = self.new_session_state {
-                state.repo_source = Some(source);
-                state.available_repos = vec![path_clone];
-                state.selected_repo_index = Some(0);
-                state.branch_name = format!(
-                    "ainb/{}",
-                    uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("session")
-                );
-                state.is_validating = false;
-                state.step = NewSessionStep::SelectAgent;
-            }
-        }
-    }
-
-    /// Clone the selected remote repo and proceed
-    pub async fn clone_remote_repo(&mut self) {
-        use crate::git::RemoteRepoManager;
-
-        let (source, base_branch, checkout_mode) = if let Some(ref state) = self.new_session_state {
-            // Get branch from filtered list (which stores (original_idx, branch) tuples)
-            let branch = state
-                .filtered_branches
-                .get(state.selected_branch_index)
-                .map(|(_, b)| b.name.clone())
-                .or_else(|| state.selected_base_branch.clone())
-                .unwrap_or_else(|| "main".to_string());
-            (
-                state.repo_source.clone(),
-                branch,
-                state.branch_checkout_mode,
-            )
-        } else {
-            error!("clone_remote_repo called but no state");
-            return;
-        };
-
-        let Some(source) = source else {
-            error!("No repo source set");
-            return;
-        };
-
-        // Set validating state
-        if let Some(ref mut state) = self.new_session_state {
-            state.is_validating = true;
-            state.step = NewSessionStep::ValidatingRepo;
-        }
-
-        let manager = match RemoteRepoManager::new() {
-            Ok(m) => m,
-            Err(e) => {
-                if let Some(ref mut state) = self.new_session_state {
-                    state.is_validating = false;
-                    state.repo_validation_error =
-                        Some(format!("Failed to init repo manager: {}", e));
-                    state.step = NewSessionStep::SelectBranch;
-                }
-                return;
-            }
-        };
-
-        let parsed = match source.parse_components() {
-            Ok(p) => p,
-            Err(e) => {
-                if let Some(ref mut state) = self.new_session_state {
-                    state.is_validating = false;
-                    state.repo_validation_error = Some(format!("Failed to parse repo: {}", e));
-                    state.step = NewSessionStep::SelectBranch;
-                }
-                return;
-            }
-        };
-
-        info!("Cloning repo: {}/{}", parsed.owner, parsed.repo_name);
-
-        match manager.clone_repo(&source, &parsed) {
-            Ok(cache_path) => {
-                info!("Cloned to: {}", cache_path.display());
-                if let Some(ref mut state) = self.new_session_state {
-                    state.cached_repo_path = Some(cache_path);
-                    state.selected_base_branch = Some(base_branch.clone());
-                    // Set branch name based on checkout mode
-                    state.branch_name = match checkout_mode {
-                        BranchCheckoutMode::CreateNew => format!(
-                            "ainb/{}",
-                            uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("session")
-                        ),
-                        BranchCheckoutMode::CheckoutExisting => base_branch,
-                    };
-                    state.is_validating = false;
-                    state.step = NewSessionStep::SelectAgent;
-                }
-            }
-            Err(e) => {
-                error!("Clone failed: {}", e);
-                if let Some(ref mut state) = self.new_session_state {
-                    state.is_validating = false;
-                    state.repo_validation_error = Some(e.to_string());
-                    state.step = NewSessionStep::SelectBranch;
-                }
-            }
-        }
-    }
-
-    /// Fetch branches from remote (called when user wants to refresh branch list)
-    pub async fn fetch_remote_branches(&mut self) {
-        use crate::git::RemoteRepoManager;
-
-        let source = if let Some(ref state) = self.new_session_state {
-            state.repo_source.clone()
-        } else {
-            return;
-        };
-
-        let Some(source) = source else { return };
-
-        let manager = match RemoteRepoManager::new() {
-            Ok(m) => m,
-            Err(_) => return,
-        };
-
-        if let Ok(branches) = manager.list_remote_branches(&source) {
-            if let Some(ref mut state) = self.new_session_state {
-                state.filtered_branches = branches.iter().cloned().enumerate().collect();
-                state.remote_branches = branches;
-                state.branch_filter_text.clear();
-                state.selected_branch_index = 0;
-            }
-        }
-    }
-
-    /// Navigate to next branch in branch picker (uses filtered list)
-    pub fn branch_select_next(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::SelectBranch && !state.filtered_branches.is_empty() {
-                state.selected_branch_index =
-                    (state.selected_branch_index + 1) % state.filtered_branches.len();
-            }
-        }
-    }
-
-    /// Navigate to previous branch in branch picker (uses filtered list)
-    pub fn branch_select_prev(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::SelectBranch && !state.filtered_branches.is_empty() {
-                state.selected_branch_index = state
-                    .selected_branch_index
-                    .checked_sub(1)
-                    .unwrap_or(state.filtered_branches.len() - 1);
-            }
-        }
-    }
-
-    /// Update branch filter text and re-filter the list
-    pub fn branch_filter_update(&mut self, ch: char) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::SelectBranch {
-                state.branch_filter_text.push(ch);
-                Self::apply_branch_filter(state);
-            }
-        }
-    }
-
-    /// Handle branch filter backspace
-    pub fn branch_filter_backspace(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::SelectBranch {
-                state.branch_filter_text.pop();
-                Self::apply_branch_filter(state);
-            }
-        }
-    }
-
-    /// Apply fuzzy filter to branch list
-    fn apply_branch_filter(state: &mut NewSessionState) {
-        let filter = state.branch_filter_text.to_lowercase();
-        if filter.is_empty() {
-            // No filter - show all branches
-            state.filtered_branches = state.remote_branches.iter().cloned().enumerate().collect();
-        } else {
-            // Fuzzy filter - match if filter chars appear in order
-            state.filtered_branches = state
-                .remote_branches
-                .iter()
-                .enumerate()
-                .filter(|(_, branch)| {
-                    let name = branch.name.to_lowercase();
-                    // Simple substring match (can enhance to fuzzy later)
-                    name.contains(&filter)
-                })
-                .map(|(idx, branch)| (idx, branch.clone()))
-                .collect();
-        }
-        // Reset selection to 0 (or keep valid if possible)
-        if state.selected_branch_index >= state.filtered_branches.len() {
-            state.selected_branch_index = 0;
-        }
-    }
-
-    /// Update repo input text
-    pub fn repo_input_update(&mut self, ch: char) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::InputRepoSource {
-                state.repo_input.push(ch);
-                state.repo_validation_error = None;
-            }
-        }
-    }
-
-    /// Handle repo input backspace
-    pub fn repo_input_backspace(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::InputRepoSource {
-                state.repo_input.pop();
-                state.repo_validation_error = None;
-            }
-        }
-    }
-
-    /// Handle repo input backspace word
-    pub fn repo_input_backspace_word(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::InputRepoSource && !state.repo_input.is_empty() {
-                // Remove trailing whitespace first
-                while state.repo_input.ends_with(' ') {
-                    state.repo_input.pop();
-                }
-                // Remove word characters until whitespace or start
-                while !state.repo_input.is_empty() && !state.repo_input.ends_with(' ') {
-                    state.repo_input.pop();
-                }
-                state.repo_validation_error = None;
-            }
-        }
-    }
-
-    /// Go back from branch selection to repo input
-    pub fn branch_select_back(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::SelectBranch {
-                state.step = NewSessionStep::InputRepoSource;
-                state.repo_source = None;
-                state.remote_branches.clear();
-                state.selected_branch_index = 0;
-            }
-        }
-    }
-
-    pub async fn new_session_in_current_dir(&mut self) {
-        use crate::git::WorkspaceScanner;
-        use std::env;
-
-        info!("Starting new session in current directory");
-
-        // Check if authentication is set up first
-        if Self::is_first_time_setup() {
-            info!("Authentication not set up, switching to auth setup view");
-            self.current_screen = screen_ids::AUTH_SETUP.to_string();
-            self.auth_setup_state = Some(AuthSetupState {
-                selected_method: AuthMethod::OAuth,
-                api_key_input: String::new(),
-                is_processing: false,
-                error_message: Some("Authentication required before creating sessions.\n\nPlease set up Claude authentication to continue.".to_string()),
-                show_cursor: false,
-            });
-            return;
-        }
-
-        // Check if current directory is a git repository
-        let current_dir = match env::current_dir() {
-            Ok(dir) => {
-                info!("Current directory: {:?}", dir);
-                dir
-            }
-            Err(e) => {
-                warn!("Failed to get current directory: {}", e);
-                return;
-            }
-        };
-
-        match WorkspaceScanner::validate_workspace(&current_dir) {
-            Ok(true) => {
-                info!(
-                    "Current directory is a valid git repository: {:?}",
-                    current_dir
-                );
-            }
-            Ok(false) => {
-                warn!(
-                    "Current directory is not a git repository: {:?}",
-                    current_dir
-                );
-                info!("Falling back to workspace search");
-                // Fall back to workspace search since current directory is not a git repository
-                self.start_workspace_search().await;
-                return;
-            }
-            Err(e) => {
-                error!("Failed to validate workspace: {}", e);
-                info!("Falling back to workspace search due to validation error");
-                // Fall back to workspace search on validation error
-                self.start_workspace_search().await;
-                return;
-            }
-        }
-
-        // Generate branch name with UUID
-        let branch_base = format!(
-            "ainb/{}",
-            uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("session")
-        );
-
-        // Create new session state for current directory
-        self.new_session_state = Some(NewSessionState {
-            available_repos: vec![current_dir.clone()],
-            filtered_repos: vec![(0, current_dir.clone())],
-            selected_repo_index: Some(0),
-            branch_name: branch_base.clone(),
-            step: NewSessionStep::InputBranch,
-            is_current_dir_mode: true,
-            ..Default::default()
-        });
-
-        self.current_screen = screen_ids::NEW_SESSION.to_string();
-
-        info!(
-            "Successfully created new session state with branch: {}",
-            branch_base
-        );
-    }
-
-    pub async fn start_workspace_search(&mut self) {
-        info!("Starting workspace search");
-
-        // Only transition to SessionList if coming from NonGitNotification
-        // (preserve current view for new session flow which handles its own transitions)
-        if self.current_screen == screen_ids::NON_GIT_NOTIFICATION {
-            self.current_screen = screen_ids::SESSION_LIST.to_string();
-        }
-
-        // Scan for repositories directly without Docker dependency.
-        // SessionLoader::new() requires Docker (ContainerManager), but repository
-        // discovery only needs filesystem scanning via WorkspaceScanner + AppConfig.
-        use crate::git::WorkspaceScanner;
-
-        let repos = match AppConfig::load() {
-            Ok(config) => {
-                let scanner = WorkspaceScanner::with_additional_paths(
-                    config.workspace_defaults.workspace_scan_paths.clone(),
-                )
-                .with_exclude_paths(config.workspace_defaults.exclude_paths.clone());
-
-                match scanner.scan() {
-                    Ok(scan_result) => {
-                        let max_repos = config.workspace_defaults.max_repositories;
-                        let total_found = scan_result.workspaces.len();
-                        let repos: Vec<std::path::PathBuf> = scan_result
-                            .workspaces
-                            .into_iter()
-                            .map(|w| w.path)
-                            .take(max_repos)
-                            .collect();
-                        info!(
-                            "Found {} repositories (showing {} of {}, limit: {})",
-                            total_found,
-                            repos.len(),
-                            total_found,
-                            max_repos
-                        );
-                        repos
-                    }
-                    Err(e) => {
-                        warn!("Failed to scan for repositories: {}", e);
-                        vec![]
-                    }
-                }
-            }
-            Err(e) => {
-                warn!("Failed to load config for workspace search: {}", e);
-                vec![]
-            }
-        };
-
-        if repos.is_empty() {
-            warn!("No repositories found in default search paths");
-            info!("Showing empty search interface - user can type to add paths");
-        }
-
-        // Generate branch name with UUID
-        let branch_base = format!(
-            "ainb/{}",
-            uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("session")
-        );
-
-        // Initialize filtered repos with all repos (even if empty)
-        let filtered_repos: Vec<(usize, std::path::PathBuf)> =
-            repos.iter().enumerate().map(|(idx, path)| (idx, path.clone())).collect();
-
-        // Check if user has already cancelled (e.g., pressed escape while loading)
-        if self.async_operation_cancelled {
-            info!("Operation was cancelled by user");
-            return;
-        }
-
-        let has_repos = !filtered_repos.is_empty();
-        self.new_session_state = Some(NewSessionState {
-            available_repos: repos,
-            filtered_repos,
-            selected_repo_index: if has_repos { Some(0) } else { None },
-            branch_name: branch_base,
-            step: NewSessionStep::SelectRepo,
-            source_choice: RepoSourceChoice::Local,
-            ..Default::default()
-        });
-
-        self.current_screen = screen_ids::SEARCH_WORKSPACE.to_string();
-        info!("Successfully transitioned to SearchWorkspace view");
-    }
-
-    pub async fn start_new_session(&mut self) {
-        info!("Starting new session creation");
-
-        // Scan for repositories directly without Docker dependency.
-        use crate::git::WorkspaceScanner;
-
-        let repos = match AppConfig::load() {
-            Ok(config) => {
-                let scanner = WorkspaceScanner::with_additional_paths(
-                    config.workspace_defaults.workspace_scan_paths.clone(),
-                )
-                .with_exclude_paths(config.workspace_defaults.exclude_paths.clone());
-
-                match scanner.scan() {
-                    Ok(scan_result) => {
-                        let max_repos = config.workspace_defaults.max_repositories;
-                        scan_result.workspaces.into_iter().map(|w| w.path).take(max_repos).collect()
-                    }
-                    Err(e) => {
-                        warn!("Failed to scan for repositories: {}", e);
-                        vec![]
-                    }
-                }
-            }
-            Err(e) => {
-                warn!("Failed to load config: {}", e);
-                vec![]
-            }
-        };
-
-        let has_repos = !repos.is_empty();
-        let filtered_repos: Vec<(usize, std::path::PathBuf)> =
-            repos.iter().enumerate().map(|(idx, path)| (idx, path.clone())).collect();
-
-        self.new_session_state = Some(NewSessionState {
-            available_repos: repos,
-            filtered_repos,
-            selected_repo_index: if has_repos { Some(0) } else { None },
-            ..Default::default()
-        });
-        self.current_screen = screen_ids::NEW_SESSION.to_string();
-    }
-
     pub fn cancel_new_session(&mut self) {
         self.new_session_state = None;
-        self.current_screen = screen_ids::SESSION_LIST.to_string();
+        // Return to whichever screen the user opened new-session from
+        // (Home / Sessions / …). Falls back to SESSION_LIST if no
+        // previous screen was recorded — matches the pre-redesign
+        // contract for the legacy 13-step wizard's Cancel path.
+        let prev = self
+            .previous_screen
+            .take()
+            .unwrap_or_else(|| screen_ids::SESSION_LIST.to_string());
+        self.current_screen = prev;
         // Also clear any pending async actions to prevent race conditions
         self.pending_async_action = None;
         // Set cancellation flag to prevent race conditions
         self.async_operation_cancelled = true;
     }
 
-    pub fn new_session_next_repo(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if !state.filtered_repos.is_empty() {
-                let current = state.selected_repo_index.unwrap_or(0);
-                state.selected_repo_index = Some((current + 1) % state.filtered_repos.len());
-            }
-        }
-    }
+    pub async fn create_session_from_configure(
+        &mut self,
+        spec: crate::components::new_session::configure::LaunchSpec,
+    ) {
+        use crate::models::{ClaudeModel, CodexModel, SessionAgentType, SessionMode};
 
-    pub fn new_session_prev_repo(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if !state.filtered_repos.is_empty() {
-                let current = state.selected_repo_index.unwrap_or(0);
-                state.selected_repo_index = Some(if current == 0 {
-                    state.filtered_repos.len() - 1
-                } else {
-                    current - 1
-                });
-            }
-        }
-    }
-
-    pub fn new_session_confirm_repo(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.selected_repo_index.is_some() {
-                tracing::info!(
-                    "Confirming repository selection - selected_repo_index: {:?}",
-                    state.selected_repo_index
-                );
-                tracing::info!(
-                    "Available repos count: {}, Filtered repos count: {}",
-                    state.available_repos.len(),
-                    state.filtered_repos.len()
-                );
-
-                if let Some(repo_index) = state.selected_repo_index {
-                    if let Some((_, repo_path)) = state.filtered_repos.get(repo_index) {
-                        tracing::info!("Selected repository path: {:?}", repo_path);
-
-                        // Fetch current branch from the repository
-                        state.current_repo_branch = Self::get_repo_current_branch(repo_path);
-                        tracing::info!("Current branch: {:?}", state.current_repo_branch);
-                    } else {
-                        tracing::error!(
-                            "Failed to get repository at index {} from filtered_repos",
-                            repo_index
-                        );
-                        return;
-                    }
-                }
-
-                // Skip agent selection step (agent/model selected on search screen)
-                // Go directly to branch input
-                state.step = NewSessionStep::InputBranch;
-
-                // Change view from SearchWorkspace to NewSession
-                self.current_screen = screen_ids::NEW_SESSION.to_string();
-                tracing::info!(
-                    "Repository confirmed (agent: {:?}, model: {:?}), transitioning to branch input",
-                    state.selected_agent,
-                    state.selected_model
-                );
-            }
-        }
-    }
-
-    /// Get the current branch of a local repository
-    fn get_repo_current_branch(repo_path: &std::path::Path) -> Option<String> {
-        match git2::Repository::open(repo_path) {
-            Ok(repo) => {
-                match repo.head() {
-                    Ok(head) => {
-                        if head.is_branch() {
-                            head.shorthand().map(|s| s.to_string())
-                        } else {
-                            // Detached HEAD - show short commit hash
-                            head.target().map(|oid| format!("detached:{}", &oid.to_string()[..7]))
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to get HEAD for {:?}: {}", repo_path, e);
-                        None
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::warn!("Failed to open repository {:?}: {}", repo_path, e);
-                None
-            }
-        }
-    }
-
-    /// Navigate to next agent in new session flow
-    pub fn new_session_next_agent(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            // Allow agent selection on both SelectAgent and InputBranch steps
-            if state.step == NewSessionStep::SelectAgent
-                || state.step == NewSessionStep::InputBranch
-            {
-                state.next_agent();
-            }
-        }
-    }
-
-    /// Navigate to previous agent in new session flow
-    pub fn new_session_prev_agent(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            // Allow agent selection on both SelectAgent and InputBranch steps
-            if state.step == NewSessionStep::SelectAgent
-                || state.step == NewSessionStep::InputBranch
-            {
-                state.prev_agent();
-            }
-        }
-    }
-
-    /// Navigate to next model in new session flow
-    pub fn new_session_next_model(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            // Allow model selection on both SelectAgent and InputBranch steps
-            if state.step == NewSessionStep::SelectAgent
-                || state.step == NewSessionStep::InputBranch
-            {
-                state.next_model();
-            }
-        }
-    }
-
-    /// Navigate to previous model in new session flow
-    pub fn new_session_prev_model(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            // Allow model selection on both SelectAgent and InputBranch steps
-            if state.step == NewSessionStep::SelectAgent
-                || state.step == NewSessionStep::InputBranch
-            {
-                state.prev_model();
-            }
-        }
-    }
-
-    /// Toggle focus between agent and model panels
-    pub fn new_session_toggle_agent_model_focus(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::SelectAgent
-                || state.step == NewSessionStep::InputBranch
-            {
-                state.toggle_agent_model_focus();
-            }
-        }
-    }
-
-    /// Select agent and proceed to next step (or create shell/SSH session)
-    /// Returns true if Shell was selected (needs async handling)
-    pub fn new_session_select_agent(&mut self) -> bool {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step != NewSessionStep::SelectAgent {
-                return false;
-            }
-
-            let agent_type = state.current_agent_type();
-
-            // Check if agent is available
-            if !agent_type.is_available() {
-                self.add_info_notification(format!(
-                    "{} {} - Coming Soon!",
-                    agent_type.icon(),
-                    agent_type.name()
-                ));
-                return false;
-            }
-
-            // Store the selected agent
-            state.confirm_agent_selection();
-            tracing::info!("Selected agent: {:?}", state.selected_agent);
-
-            // If Shell is selected, we need async handling to create shell session
-            if agent_type == SessionAgentType::Shell {
-                tracing::info!("Shell agent selected - will create shell session");
-                return true; // Signal that async shell creation is needed
-            }
-
-            // If SSH is selected, go to SSH configuration step
-            if agent_type == SessionAgentType::Ssh {
-                tracing::info!("SSH agent selected - transitioning to SSH configuration");
-                state.step = NewSessionStep::ConfigureSsh;
-                // Reset SSH fields to defaults
-                state.ssh_host.clear();
-                state.ssh_port = "22".to_string();
-                state.ssh_user.clear();
-                state.ssh_identity_file.clear();
-                state.ssh_input_focus = SshInputFocus::Host;
-                return false;
-            }
-
-            // For AI agents, check if we should skip branch input
-            // In CheckoutExisting mode for remote repos, the branch name is already set
-            let skip_branch_input = state.branch_checkout_mode
-                == BranchCheckoutMode::CheckoutExisting
-                && state.cached_repo_path.is_some()
-                && !state.branch_name.is_empty();
-
-            if skip_branch_input {
-                // Skip InputBranch step - go directly to mode selection
-                state.step = NewSessionStep::SelectMode;
-                tracing::info!(
-                    "Agent selected: {:?}, skipping branch input (CheckoutExisting mode), branch: {}",
-                    state.selected_agent,
-                    state.branch_name
-                );
-            } else {
-                // Normal flow: proceed to branch input
-                state.step = NewSessionStep::InputBranch;
-                let uuid_str = uuid::Uuid::new_v4().to_string();
-                // Use branch prefix from config (default: "agents/")
-                let prefix = &self.app_config.workspace_defaults.branch_prefix;
-                state.branch_name = format!("{}session-{}", prefix, &uuid_str[..8]);
-
-                tracing::info!(
-                    "Agent selected: {:?}, transitioning to branch input with branch: {}",
-                    state.selected_agent,
-                    state.branch_name
-                );
-            }
-        }
-        false
-    }
-
-    pub fn new_session_update_branch(&mut self, ch: char) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::InputBranch {
-                state.branch_name.push(ch);
-            }
-        }
-    }
-
-    pub fn new_session_backspace(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::InputBranch {
-                state.branch_name.pop();
-            }
-        }
-    }
-
-    /// Delete word backward in branch name (Shift+Backspace)
-    pub fn new_session_backspace_word(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::InputBranch && !state.branch_name.is_empty() {
-                // Find the last word boundary (space, slash, dash, underscore)
-                let s = &state.branch_name;
-                // First, skip any trailing delimiters
-                let trimmed_end =
-                    s.trim_end_matches(|c: char| c == ' ' || c == '/' || c == '-' || c == '_');
-                if trimmed_end.is_empty() {
-                    state.branch_name.clear();
-                    return;
-                }
-                // Find the last word boundary
-                let last_boundary =
-                    trimmed_end.rfind(|c: char| c == ' ' || c == '/' || c == '-' || c == '_');
-                match last_boundary {
-                    Some(idx) => {
-                        // Keep up to and including the delimiter
-                        state.branch_name = trimmed_end[..=idx].to_string();
-                    }
-                    None => {
-                        // No boundary found, clear all
-                        state.branch_name.clear();
-                    }
-                }
-            }
-        }
-    }
-
-    pub fn new_session_proceed_to_mode_selection(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::InputBranch {
-                tracing::info!(
-                    "Proceeding from InputBranch to SelectMode with branch: {}",
-                    state.branch_name
-                );
-                state.step = NewSessionStep::SelectMode;
-            }
-        }
-    }
-
-    // ============================================================================
-    // SSH Configuration Methods
-    // ============================================================================
-
-    /// Navigate to next SSH input field (Tab)
-    pub fn new_session_ssh_next_field(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::ConfigureSsh {
-                state.ssh_input_focus = match state.ssh_input_focus {
-                    SshInputFocus::Host => SshInputFocus::Port,
-                    SshInputFocus::Port => SshInputFocus::User,
-                    SshInputFocus::User => SshInputFocus::IdentityFile,
-                    SshInputFocus::IdentityFile => SshInputFocus::Host,
-                };
-            }
-        }
-    }
-
-    /// Navigate to previous SSH input field (Shift+Tab)
-    pub fn new_session_ssh_prev_field(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::ConfigureSsh {
-                state.ssh_input_focus = match state.ssh_input_focus {
-                    SshInputFocus::Host => SshInputFocus::IdentityFile,
-                    SshInputFocus::Port => SshInputFocus::Host,
-                    SshInputFocus::User => SshInputFocus::Port,
-                    SshInputFocus::IdentityFile => SshInputFocus::User,
-                };
-            }
-        }
-    }
-
-    /// Handle character input for SSH configuration
-    pub fn new_session_ssh_input_char(&mut self, ch: char) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::ConfigureSsh {
-                match state.ssh_input_focus {
-                    SshInputFocus::Host => state.ssh_host.push(ch),
-                    SshInputFocus::Port => {
-                        // Only allow digits for port
-                        if ch.is_ascii_digit() {
-                            state.ssh_port.push(ch);
-                        }
-                    }
-                    SshInputFocus::User => state.ssh_user.push(ch),
-                    SshInputFocus::IdentityFile => state.ssh_identity_file.push(ch),
-                }
-            }
-        }
-    }
-
-    /// Handle backspace for SSH configuration
-    pub fn new_session_ssh_backspace(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::ConfigureSsh {
-                match state.ssh_input_focus {
-                    SshInputFocus::Host => {
-                        state.ssh_host.pop();
-                    }
-                    SshInputFocus::Port => {
-                        state.ssh_port.pop();
-                    }
-                    SshInputFocus::User => {
-                        state.ssh_user.pop();
-                    }
-                    SshInputFocus::IdentityFile => {
-                        state.ssh_identity_file.pop();
-                    }
-                }
-            }
-        }
-    }
-
-    /// Validate and confirm SSH configuration, returns true if ready to create session
-    pub fn new_session_ssh_confirm(&mut self) -> bool {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step != NewSessionStep::ConfigureSsh {
-                return false;
-            }
-
-            // Validate host is not empty
-            if state.ssh_host.trim().is_empty() {
-                self.add_error_notification("SSH host is required".to_string());
-                return false;
-            }
-
-            // Validate port is a valid number
-            let port: u16 = state.ssh_port.parse().unwrap_or(22);
-            if port == 0 {
-                self.add_error_notification("Invalid port number".to_string());
-                return false;
-            }
-
-            tracing::info!(
-                "SSH configuration confirmed: {}@{}:{}",
-                if state.ssh_user.is_empty() {
-                    "(no user)"
-                } else {
-                    &state.ssh_user
-                },
-                state.ssh_host,
-                port
-            );
-
-            // SSH sessions go directly to Creating step (no branch/mode needed)
-            state.step = NewSessionStep::Creating;
-            return true;
-        }
-        false
-    }
-
-    /// Go back from SSH configuration to agent selection
-    pub fn new_session_ssh_go_back(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::ConfigureSsh {
-                state.step = NewSessionStep::SelectAgent;
-                tracing::info!("Going back from SSH config to agent selection");
-            }
-        }
-    }
-
-    /// Build SSH command preview string
-    pub fn get_ssh_command_preview(&self) -> String {
-        if let Some(ref state) = self.new_session_state {
-            let mut cmd = String::from("ssh");
-
-            let port: u16 = state.ssh_port.parse().unwrap_or(22);
-            if port != 22 {
-                cmd.push_str(&format!(" -p {}", port));
-            }
-
-            if !state.ssh_identity_file.is_empty() {
-                cmd.push_str(&format!(" -i {}", state.ssh_identity_file));
-            }
-
-            if !state.ssh_user.is_empty() {
-                cmd.push_str(&format!(" {}@{}", state.ssh_user, state.ssh_host));
-            } else if !state.ssh_host.is_empty() {
-                cmd.push_str(&format!(" {}", state.ssh_host));
-            }
-
-            cmd
-        } else {
-            String::from("ssh")
-        }
-    }
-
-    /// Build SshTarget from current state
-    pub fn build_ssh_target(&self) -> Option<crate::models::SshTarget> {
-        if let Some(ref state) = self.new_session_state {
-            if state.ssh_host.trim().is_empty() {
-                return None;
-            }
-
-            let port: u16 = state.ssh_port.parse().unwrap_or(22);
-            let user = if state.ssh_user.is_empty() {
-                None
-            } else {
-                Some(state.ssh_user.clone())
-            };
-            let identity_file = if state.ssh_identity_file.is_empty() {
-                None
-            } else {
-                Some(std::path::PathBuf::from(&state.ssh_identity_file))
-            };
-
-            Some(crate::models::SshTarget::with_config(
-                state.ssh_host.clone(),
-                port,
-                user,
-                identity_file,
-            ))
+        // Finding #7: `LaunchSpec` is the single source of truth — no more
+        // reaching back into `configure_state` to re-derive what the
+        // component already built. The dispatcher passed it via
+        // `AsyncAction::CreateSessionFromConfigure(spec)`.
+        let preset = &spec.preset;
+        let agent_type = match preset.agent_provider.as_str() {
+            "claude" => SessionAgentType::Claude,
+            "shell" => SessionAgentType::Shell,
+            "ssh" => SessionAgentType::Ssh,
+            "codex" => SessionAgentType::Codex,
+            "gemini" => SessionAgentType::Gemini,
+            "copilot" => SessionAgentType::Copilot,
+            _ => SessionAgentType::Claude,
+        };
+        // Per-agent model parsing. `preset.agent_model` is a free-form String
+        // (TOML schema stability) — each enum's `parse()` accepts aliases,
+        // canonical IDs, and `""` / `"default"` (→ SystemDefault). For
+        // non-Claude / non-Codex agents the model concept doesn't apply at
+        // CLI launch time, so we leave both as `None`.
+        let session_model = if agent_type == SessionAgentType::Claude {
+            Some(ClaudeModel::parse(&preset.agent_model))
         } else {
             None
-        }
-    }
-
-    pub fn new_session_proceed_from_mode(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::SelectMode {
-                state.enforce_mode_constraints();
-                tracing::info!(
-                    "Proceeding from SelectMode to next step with mode: {:?}",
-                    state.mode
-                );
-                match state.mode {
-                    crate::models::SessionMode::Interactive => {
-                        // Interactive mode: go directly to permissions
-                        state.step = NewSessionStep::ConfigurePermissions;
-                        tracing::info!("Interactive mode selected, going to ConfigurePermissions");
-                    }
-                    crate::models::SessionMode::Boss => {
-                        // Boss mode: go to prompt input first
-                        state.step = NewSessionStep::InputPrompt;
-                        tracing::info!("Boss mode selected, going to InputPrompt");
-                    }
-                }
-            }
-        }
-    }
-
-    pub fn new_session_proceed_to_permissions(&mut self) {
-        tracing::info!("new_session_proceed_to_permissions called");
-        if let Some(ref mut state) = self.new_session_state {
-            tracing::debug!("Current session state step: {:?}", state.step);
-            if state.step == NewSessionStep::InputPrompt {
-                tracing::info!("Advancing from InputPrompt to ConfigurePermissions");
-                state.step = NewSessionStep::ConfigurePermissions;
-                self.ui_needs_refresh = true;
-            } else {
-                tracing::warn!(
-                    "Cannot proceed to permissions - not in InputPrompt step (current: {:?})",
-                    state.step
-                );
-            }
+        };
+        let codex_model = if agent_type == SessionAgentType::Codex {
+            Some(CodexModel::parse(&preset.agent_model))
         } else {
-            tracing::error!("Cannot proceed to permissions - no session state found");
-        }
-    }
-
-    /// Toggle between Local and Remote source choice
-    /// Toggle source choice forward (↓ key): Local → Remote → Ssh → Favorites → Local
-    pub fn new_session_toggle_source(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::SelectSource {
-                state.source_choice = match state.source_choice {
-                    RepoSourceChoice::Local => RepoSourceChoice::Remote,
-                    RepoSourceChoice::Remote => RepoSourceChoice::Ssh,
-                    RepoSourceChoice::Ssh => RepoSourceChoice::Favorites,
-                    RepoSourceChoice::Favorites => RepoSourceChoice::Local,
-                };
-                tracing::info!("Source choice toggled to: {:?}", state.source_choice);
-            }
-        }
-    }
-
-    /// Toggle source choice backward (↑ key): Local → Favorites → Ssh → Remote → Local
-    pub fn new_session_toggle_source_reverse(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::SelectSource {
-                state.source_choice = match state.source_choice {
-                    RepoSourceChoice::Local => RepoSourceChoice::Favorites,
-                    RepoSourceChoice::Remote => RepoSourceChoice::Local,
-                    RepoSourceChoice::Ssh => RepoSourceChoice::Remote,
-                    RepoSourceChoice::Favorites => RepoSourceChoice::Ssh,
-                };
-                tracing::info!(
-                    "Source choice toggled (reverse) to: {:?}",
-                    state.source_choice
-                );
-            }
-        }
-    }
-
-    /// Proceed from source selection to appropriate next step
-    pub fn new_session_proceed_from_source(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::SelectSource {
-                match state.source_choice {
-                    RepoSourceChoice::Local => {
-                        tracing::info!("Proceeding with Local source - loading repos");
-                        // Reset cancellation flag for fresh search (prevents stale flag from previous session)
-                        self.async_operation_cancelled = false;
-                        // Set step to SelectRepo and trigger async repo loading
-                        state.step = NewSessionStep::SelectRepo;
-                        self.pending_async_action = Some(AsyncAction::StartWorkspaceSearch);
-                    }
-                    RepoSourceChoice::Remote => {
-                        tracing::info!(
-                            "Proceeding with Remote source - showing URL input with favorites"
-                        );
-                        // Load favorites for quick selection in InputRepoSource
-                        state.favorites_store = crate::config::FavoritesStore::load();
-                        state.selected_favorite_index = None; // Start with URL input focused
-                        state.step = NewSessionStep::InputRepoSource;
-                    }
-                    RepoSourceChoice::Ssh => {
-                        tracing::info!("Proceeding with SSH source - showing SSH config");
-                        // Skip repo selection - go directly to SSH config
-                        state.step = NewSessionStep::ConfigureSsh;
-                        state.selected_agent = SessionAgentType::Ssh;
-                        // Reset SSH fields to defaults
-                        state.ssh_host.clear();
-                        state.ssh_port = "22".to_string();
-                        state.ssh_user.clear();
-                        state.ssh_identity_file.clear();
-                        state.ssh_input_focus = SshInputFocus::Host;
-                    }
-                    RepoSourceChoice::Favorites => {
-                        tracing::info!(
-                            "Proceeding with Favorites source - showing favorites picker"
-                        );
-                        // Load favorites and go to favorites picker
-                        state.favorites_store = crate::config::FavoritesStore::load();
-                        state.selected_favorite_index = if state.favorites_store.is_empty() {
-                            None
-                        } else {
-                            Some(0)
-                        };
-                        state.step = NewSessionStep::SelectFavorite;
-                    }
-                }
-            }
-        }
-    }
-
-    /// Quick select Local source and proceed
-    pub fn new_session_quick_select_local(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::SelectSource {
-                state.source_choice = RepoSourceChoice::Local;
-                tracing::info!("Quick select: Local source");
-            }
-        }
-        self.new_session_proceed_from_source();
-    }
-
-    /// Quick select Remote source and proceed
-    pub fn new_session_quick_select_remote(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::SelectSource {
-                state.source_choice = RepoSourceChoice::Remote;
-                tracing::info!("Quick select: Remote source");
-            }
-        }
-        self.new_session_proceed_from_source();
-    }
-
-    /// Quick select SSH source and proceed directly to SSH config
-    pub fn new_session_quick_select_ssh(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::SelectSource {
-                state.source_choice = RepoSourceChoice::Ssh;
-                tracing::info!("Quick select: SSH source");
-            }
-        }
-        self.new_session_proceed_from_source();
-    }
-
-    /// Quick select Favorites source and proceed to favorites picker
-    pub fn new_session_quick_select_favorites(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::SelectSource {
-                state.source_choice = RepoSourceChoice::Favorites;
-                tracing::info!("Quick select: Favorites source");
-            }
-        }
-        self.new_session_proceed_from_source();
-    }
-
-    // === Favorites picker methods (used in SelectFavorite step) ===
-
-    /// Move to next favorite in picker
-    pub fn favorite_select_next(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::SelectFavorite && !state.favorites_store.is_empty() {
-                let count = state.favorites_store.len();
-                state.selected_favorite_index = match state.selected_favorite_index {
-                    None => Some(0),
-                    Some(idx) if idx + 1 < count => Some(idx + 1),
-                    Some(idx) => Some(idx), // Stay at last
-                };
-            }
-        }
-    }
-
-    /// Move to previous favorite in picker
-    pub fn favorite_select_prev(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::SelectFavorite && !state.favorites_store.is_empty() {
-                state.selected_favorite_index = match state.selected_favorite_index {
-                    None => Some(0),
-                    Some(0) => Some(0), // Stay at first
-                    Some(idx) => Some(idx - 1),
-                };
-            }
-        }
-    }
-
-    /// Confirm selected favorite and proceed
-    pub fn favorite_select_confirm(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::SelectFavorite {
-                if let Some(idx) = state.selected_favorite_index {
-                    let sorted = state.favorites_store.sorted_by_usage();
-                    if let Some(favorite) = sorted.get(idx) {
-                        // Copy favorite data before mutating
-                        let alias = favorite.alias.clone();
-                        let source = favorite.source.clone();
-
-                        // Record usage
-                        state.favorites_store.record_use(&alias);
-                        let _ = state.favorites_store.save();
-
-                        // Set the repo input and trigger validation
-                        // ValidateRepoSource handles both local paths and remote URLs
-                        state.repo_input = source.clone();
-                        state.step = NewSessionStep::ValidatingRepo;
-                        self.pending_async_action = Some(AsyncAction::ValidateRepoSource);
-
-                        tracing::info!("Selected favorite: {} -> {}", alias, source);
-                    }
-                }
-            }
-        }
-    }
-
-    /// Go back from favorites picker to source selection
-    pub fn favorite_go_back(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::SelectFavorite {
-                state.step = NewSessionStep::SelectSource;
-                state.selected_favorite_index = None;
-            }
-        }
-    }
-
-    /// Delete selected favorite
-    pub fn favorite_delete(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::SelectFavorite {
-                if let Some(idx) = state.selected_favorite_index {
-                    let sorted = state.favorites_store.sorted_by_usage();
-                    if let Some(favorite) = sorted.get(idx) {
-                        let alias = favorite.alias.clone();
-                        state.favorites_store.remove(&alias);
-                        let _ = state.favorites_store.save();
-                        tracing::info!("Deleted favorite: {}", alias);
-
-                        // Adjust selection index
-                        let new_count = state.favorites_store.len();
-                        if new_count == 0 {
-                            state.selected_favorite_index = None;
-                        } else if idx >= new_count {
-                            state.selected_favorite_index = Some(new_count - 1);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // === Inline favorites methods (used in InputRepoSource) ===
-
-    /// Move focus to next favorite in inline list
-    pub fn repo_input_favorite_next(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::InputRepoSource && !state.favorites_store.is_empty() {
-                let count = state.favorites_store.len();
-                state.selected_favorite_index = match state.selected_favorite_index {
-                    None => Some(0), // Move from input to first favorite
-                    Some(idx) if idx + 1 < count => Some(idx + 1),
-                    Some(_) => None, // Wrap back to input
-                };
-            }
-        }
-    }
-
-    /// Move focus to previous favorite in inline list
-    pub fn repo_input_favorite_prev(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::InputRepoSource && !state.favorites_store.is_empty() {
-                let count = state.favorites_store.len();
-                state.selected_favorite_index = match state.selected_favorite_index {
-                    None => Some(count - 1), // Move from input to last favorite
-                    Some(0) => None,         // Move back to input
-                    Some(idx) => Some(idx - 1),
-                };
-            }
-        }
-    }
-
-    /// Select a favorite and fill in the repo input
-    pub fn repo_input_select_favorite(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::InputRepoSource {
-                if let Some(idx) = state.selected_favorite_index {
-                    let sorted = state.favorites_store.sorted_by_usage();
-                    if let Some(favorite) = sorted.get(idx) {
-                        // Fill repo input with favorite's source
-                        state.repo_input = favorite.source.clone();
-                        // Record usage
-                        let alias = favorite.alias.clone();
-                        state.favorites_store.record_use(&alias);
-                        let _ = state.favorites_store.save();
-                        // Move focus back to input
-                        state.selected_favorite_index = None;
-                        tracing::info!("Selected favorite: {} -> {}", alias, state.repo_input);
-                    }
-                }
-            }
-        }
-    }
-
-    /// Toggle favorite status for current repo_input
-    pub fn repo_input_toggle_favorite(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if !state.repo_input.is_empty() {
-                let source = state.repo_input.clone();
-                // Check if already a favorite
-                if let Some(existing) =
-                    state.favorites_store.favorites.iter().find(|f| f.source == source)
-                {
-                    let alias = existing.alias.clone();
-                    state.favorites_store.remove(&alias);
-                    tracing::info!("Removed from favorites: {}", source);
-                } else {
-                    // Add as new favorite with auto-generated alias
-                    let alias = Self::generate_favorite_alias(&source);
-                    let source_type = Self::detect_source_type(&source);
-                    let favorite =
-                        crate::config::Favorite::new(alias.clone(), source.clone(), source_type);
-                    let _ = state.favorites_store.add(favorite);
-                    tracing::info!("Added to favorites: {} as {}", source, alias);
-                }
-                let _ = state.favorites_store.save();
-            }
-        }
-    }
-
-    /// Generate an alias from a repo URL/path
-    fn generate_favorite_alias(source: &str) -> String {
-        // Extract repo name from URL or path
-        let name = source
-            .trim_end_matches('/')
-            .split('/')
-            .last()
-            .unwrap_or("repo")
-            .trim_end_matches(".git");
-        name.to_string()
-    }
-
-    /// Detect source type from URL/path
-    fn detect_source_type(source: &str) -> crate::config::FavoriteSourceType {
-        if source.starts_with("https://") || source.starts_with("http://") {
-            crate::config::FavoriteSourceType::HttpsUrl
-        } else if source.starts_with("git@") || source.contains("@") && source.contains(":") {
-            crate::config::FavoriteSourceType::SshUrl
-        } else if source.starts_with('/') || source.starts_with('~') || source.starts_with('.') {
-            crate::config::FavoriteSourceType::LocalPath
-        } else if source.contains('/') && !source.contains(':') {
-            // owner/repo format
-            crate::config::FavoriteSourceType::GithubShorthand
+            None
+        };
+        let mode = preset.mode;
+        let boss_prompt = if mode == SessionMode::Boss {
+            spec.prompt.clone()
         } else {
-            crate::config::FavoriteSourceType::HttpsUrl
-        }
-    }
-
-    /// Check if current repo_input is a favorite
-    pub fn is_repo_input_favorite(&self) -> bool {
-        if let Some(ref state) = self.new_session_state {
-            if !state.repo_input.is_empty() {
-                return state
-                    .favorites_store
-                    .favorites
-                    .iter()
-                    .any(|f| f.source == state.repo_input);
-            }
-        }
-        false
-    }
-
-    /// Toggle favorite status for currently selected local repo
-    pub fn local_repo_toggle_favorite(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            // Get the selected repo from filtered_repos
-            if let Some(idx) = state.selected_repo_index {
-                if let Some((_, repo_path)) = state.filtered_repos.get(idx) {
-                    let source = repo_path.display().to_string();
-
-                    // Check if already a favorite
-                    if let Some(existing) =
-                        state.favorites_store.favorites.iter().find(|f| f.source == source)
-                    {
-                        let alias = existing.alias.clone();
-                        state.favorites_store.remove(&alias);
-                        tracing::info!("Removed local repo from favorites: {}", source);
-                    } else {
-                        // Add as new favorite with auto-generated alias
-                        let alias = Self::generate_favorite_alias(&source);
-                        let source_type = crate::config::FavoriteSourceType::LocalPath;
-                        let favorite = crate::config::Favorite::new(
-                            alias.clone(),
-                            source.clone(),
-                            source_type,
-                        );
-                        let _ = state.favorites_store.add(favorite);
-                        tracing::info!("Added local repo to favorites: {} as {}", source, alias);
-                    }
-                    let _ = state.favorites_store.save();
-                }
-            }
-        }
-    }
-
-    /// Check if a local repo path is a favorite
-    pub fn is_local_repo_favorite(&self, path: &std::path::Path) -> bool {
-        if let Some(ref state) = self.new_session_state {
-            let path_str = path.display().to_string();
-            return state.favorites_store.favorites.iter().any(|f| f.source == path_str);
-        }
-        false
-    }
-
-    pub fn new_session_toggle_mode(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::SelectMode {
-                if !state.is_boss_mode_available() {
-                    state.mode = crate::models::SessionMode::Interactive;
-                    return;
-                }
-                state.mode = match state.mode {
-                    crate::models::SessionMode::Interactive => crate::models::SessionMode::Boss,
-                    crate::models::SessionMode::Boss => crate::models::SessionMode::Interactive,
-                };
-            }
-        }
-    }
-
-    pub fn new_session_add_char_to_prompt(&mut self, ch: char) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::InputPrompt {
-                if ch == '@' {
-                    // Activate fuzzy file finder (supports multiple @ references)
-                    let workspace_root = if let Some(selected_idx) = state.selected_repo_index {
-                        state.filtered_repos.get(selected_idx).map(|(_, path)| path.clone())
-                    } else {
-                        None
-                    };
-                    // If already active, deactivate current search and start new one
-                    if state.file_finder.is_active {
-                        state.file_finder.deactivate();
-                    }
-                    state.file_finder.activate(state.boss_prompt.to_string().len(), workspace_root);
-                    state.boss_prompt.insert_char(ch);
-                } else if state.file_finder.is_active {
-                    // File finder is active, handle character input for filtering
-                    if ch == ' ' || ch == '\t' || ch == '\n' {
-                        // Whitespace deactivates file finder
-                        state.file_finder.deactivate();
-                        state.boss_prompt.insert_char(ch);
-                    } else {
-                        state.file_finder.add_char_to_query(ch);
-                    }
-                } else {
-                    // Normal character input
-                    state.boss_prompt.insert_char(ch);
-                }
-            }
-        }
-    }
-
-    pub fn new_session_backspace_prompt(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::InputPrompt {
-                if state.file_finder.is_active {
-                    if !state.file_finder.query.is_empty() {
-                        // Remove character from file finder query
-                        state.file_finder.backspace_query();
-                    } else {
-                        // Query is empty, deactivate file finder and remove @ symbol
-                        state.file_finder.deactivate();
-                        state.boss_prompt.backspace();
-                    }
-                } else {
-                    // Normal backspace
-                    state.boss_prompt.backspace();
-                }
-            }
-        }
-    }
-
-    pub fn new_session_move_cursor_left(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::InputPrompt && !state.file_finder.is_active {
-                state.boss_prompt.move_cursor_left();
-            }
-        }
-    }
-
-    pub fn new_session_move_cursor_right(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::InputPrompt && !state.file_finder.is_active {
-                state.boss_prompt.move_cursor_right();
-            }
-        }
-    }
-
-    pub fn new_session_move_cursor_up(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::InputPrompt && !state.file_finder.is_active {
-                state.boss_prompt.move_cursor_up();
-            }
-        }
-    }
-
-    pub fn new_session_move_cursor_down(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::InputPrompt && !state.file_finder.is_active {
-                state.boss_prompt.move_cursor_down();
-            }
-        }
-    }
-
-    pub fn new_session_move_to_line_start(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::InputPrompt && !state.file_finder.is_active {
-                state.boss_prompt.move_to_line_start();
-            }
-        }
-    }
-
-    pub fn new_session_move_to_line_end(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::InputPrompt && !state.file_finder.is_active {
-                state.boss_prompt.move_to_line_end();
-            }
-        }
-    }
-
-    pub fn new_session_move_cursor_word_left(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::InputPrompt && !state.file_finder.is_active {
-                state.boss_prompt.move_cursor_word_backward();
-            }
-        }
-    }
-
-    pub fn new_session_move_cursor_word_right(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::InputPrompt && !state.file_finder.is_active {
-                state.boss_prompt.move_cursor_word_forward();
-            }
-        }
-    }
-
-    pub fn new_session_delete_word_forward(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::InputPrompt && !state.file_finder.is_active {
-                state.boss_prompt.delete_word_forward();
-            }
-        }
-    }
-
-    pub fn new_session_delete_word_backward(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::InputPrompt && !state.file_finder.is_active {
-                state.boss_prompt.delete_word_backward();
-            }
-        }
-    }
-
-    pub fn new_session_insert_newline(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::InputPrompt && !state.file_finder.is_active {
-                state.boss_prompt.insert_newline();
-            }
-        }
-    }
-
-    pub fn new_session_paste_text(&mut self, text: String) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::InputPrompt && !state.file_finder.is_active {
-                // Insert the pasted text at the current cursor position
-                state.boss_prompt.insert_text(&text);
-            }
-        }
-    }
-
-    /// Paste text into the remote-repo URL input. URLs are single-line, so
-    /// CR/LF are stripped rather than splitting the field.
-    pub fn repo_input_paste_text(&mut self, text: &str) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::InputRepoSource {
-                for ch in text.chars().filter(|c| *c != '\r' && *c != '\n') {
-                    state.repo_input.push(ch);
-                }
-                state.repo_validation_error = None;
-            }
-        }
-    }
-
-    /// Paste text into the currently-focused SSH field. CR/LF are stripped
-    /// because each SSH field is a single-line value; for the port field we
-    /// additionally drop non-digit characters.
-    pub fn new_session_ssh_paste_text(&mut self, text: &str) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::ConfigureSsh {
-                let filtered = text.chars().filter(|c| *c != '\r' && *c != '\n');
-                match state.ssh_input_focus {
-                    SshInputFocus::Host => state.ssh_host.extend(filtered),
-                    SshInputFocus::Port => {
-                        state.ssh_port.extend(filtered.filter(char::is_ascii_digit));
-                    }
-                    SshInputFocus::User => state.ssh_user.extend(filtered),
-                    SshInputFocus::IdentityFile => state.ssh_identity_file.extend(filtered),
-                }
-            }
-        }
-    }
-
-    /// Paste text into the branch-name input. Branch names are single-line,
-    /// so CR/LF are stripped.
-    pub fn new_session_input_paste_text(&mut self, text: &str) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::InputBranch {
-                for ch in text.chars().filter(|c| *c != '\r' && *c != '\n') {
-                    state.branch_name.push(ch);
-                }
-            }
-        }
-    }
-
-    pub fn new_session_toggle_permissions(&mut self) {
-        if let Some(ref mut state) = self.new_session_state {
-            if state.step == NewSessionStep::ConfigurePermissions {
-                state.skip_permissions = !state.skip_permissions;
-            }
-        }
-    }
-
-    pub async fn new_session_create(&mut self) {
-        // Check session mode FIRST to determine if auth is needed
-        let session_mode = if let Some(ref state) = self.new_session_state {
-            state.mode.clone()
-        } else {
-            tracing::error!("new_session_create called but new_session_state is None");
-            return;
+            None
+        };
+        let snapshot = ConfigureLaunchSnapshot {
+            repo_source: spec.repo_source.clone(),
+            branch_name: spec.branch_worktree.clone(),
+            skip_permissions: preset.permissions.skip_all,
+            mode,
+            boss_prompt,
+            agent_type,
+            session_model,
+            codex_model,
         };
 
         // ONLY check authentication for Boss mode (Docker-based sessions)
-        // Interactive mode uses host ~/.claude and doesn't need Docker auth
-        if session_mode == crate::models::SessionMode::Boss {
-            // First check if Docker is available (Boss mode requires Docker)
+        if snapshot.mode == SessionMode::Boss {
             if !self.is_docker_available().await {
                 error!("Boss mode requires Docker but Docker is not running");
                 self.add_error_notification(
                     "Boss mode requires Docker.\n\nPlease start Docker and try again, or use Interactive mode instead.".to_string()
                 );
-                // Stay in current view so user can go back and select Interactive mode
                 return;
             }
 
-            // Check if tokens need refresh (Docker is available at this point)
             if let Some(home) = dirs::home_dir() {
                 let credentials_path = home.join(".agents-in-a-box/auth/.credentials.json");
                 if credentials_path.exists() && Self::oauth_token_needs_refresh(&credentials_path) {
@@ -7159,16 +5207,16 @@ impl AppState {
                         Ok(()) => info!("OAuth tokens refreshed successfully for Boss mode"),
                         Err(e) => {
                             error!("Failed to refresh OAuth tokens for Boss mode: {}", e);
-                            self.add_error_notification(
-                                format!("Failed to refresh OAuth tokens: {}\n\nPlease check Docker and try again.", e)
-                            );
+                            self.add_error_notification(format!(
+                                "Failed to refresh OAuth tokens: {}\n\nPlease check Docker and try again.",
+                                e
+                            ));
                             return;
                         }
                     }
                 }
             }
 
-            // Then check if authentication is set up
             if Self::is_first_time_setup() {
                 info!(
                     "Boss mode selected but authentication not set up, switching to auth setup view"
@@ -7178,10 +5226,11 @@ impl AppState {
                     selected_method: AuthMethod::OAuth,
                     api_key_input: String::new(),
                     is_processing: false,
-                    error_message: Some("Boss mode requires Docker authentication.\n\nPlease set up Claude authentication to continue.".to_string()),
+                    error_message: Some(
+                        "Boss mode requires Docker authentication.\n\nPlease set up Claude authentication to continue.".to_string()
+                    ),
                     show_cursor: false,
                 });
-                // Clear new session state
                 self.new_session_state = None;
                 return;
             }
@@ -7191,313 +5240,246 @@ impl AppState {
             );
         }
 
-        let (
-            repo_path,
-            branch_name,
-            session_id,
-            skip_permissions,
-            mode,
-            boss_prompt,
-            restart_session_id,
-            agent_type,
-            session_model,
-            existing_worktree,
-            deferred_notice,
-        ) = {
-            if let Some(ref mut state) = self.new_session_state {
-                tracing::info!("new_session_create called with step: {:?}", state.step);
-
-                // Handle both ConfigurePermissions step (normal flow) and InputBranch step (current dir mode)
-                let can_create = match state.step {
-                    NewSessionStep::ConfigurePermissions => true,
-                    NewSessionStep::InputBranch if state.is_current_dir_mode => {
-                        // For current directory mode, skip to permissions step with defaults
-                        state.step = NewSessionStep::ConfigurePermissions;
-                        state.skip_permissions = false; // Default to safe permissions
-                        state.mode = crate::models::SessionMode::Interactive; // Default mode
-                        true
-                    }
-                    _ => false,
-                };
-
-                if can_create {
-                    // Check if this is a remote repo flow (cached_repo_path is set)
-                    // For remote repos, we create worktree here and pass it to session creation
-                    // For local repos, session creation will create the worktree
-                    let (repo_path, existing_worktree, worktree_notice) = if let Some(
-                        ref cached_path,
-                    ) =
-                        state.cached_repo_path
-                    {
-                        // Remote repo flow - create worktree from bare cache
-                        use crate::git::RemoteRepoManager;
-
-                        let base_branch = state.selected_base_branch.as_deref().unwrap_or("main");
-                        let branch_name = &state.branch_name;
-
-                        // Determine worktree location in ~/.agents-in-a-box/worktrees/
-                        let worktree_base = match dirs::home_dir() {
-                            Some(dir) => dir.join(".agents-in-a-box").join("worktrees"),
-                            None => {
-                                tracing::error!("Home directory not found, cannot create worktree");
-                                state.repo_validation_error =
-                                    Some("Home directory not found".to_string());
-                                state.step = NewSessionStep::InputRepoSource;
-                                return;
-                            }
-                        };
-
-                        // Create unique worktree path using repo name and branch
-                        let repo_name = state
-                            .repo_source
-                            .as_ref()
-                            .map(|s| s.display_name().replace('/', "_"))
-                            .unwrap_or_else(|| "unknown".to_string());
-                        let base_worktree_name =
-                            format!("{}_{}", repo_name, branch_name.replace('/', "_"));
-                        let mut worktree_path = worktree_base.join(&base_worktree_name);
-                        let mut worktree_notice: Option<String> = None;
-
-                        if worktree_path.exists() {
-                            match self.app_config.workspace_defaults.worktree_collision_behavior {
-                                WorktreeCollisionBehavior::AutoRename => {
-                                    let mut suffix = Uuid::new_v4().to_string();
-                                    suffix.truncate(8);
-                                    let mut candidate = worktree_base
-                                        .join(format!("{}-{}", base_worktree_name, suffix));
-                                    while candidate.exists() {
-                                        let mut next_suffix = Uuid::new_v4().to_string();
-                                        next_suffix.truncate(8);
-                                        candidate = worktree_base.join(format!(
-                                            "{}-{}",
-                                            base_worktree_name, next_suffix
-                                        ));
-                                    }
-                                    worktree_notice = Some(format!(
-                                        "⚠️ Worktree already exists. Creating new worktree at {}",
-                                        candidate.display()
-                                    ));
-                                    tracing::info!(
-                                        "Worktree path exists, auto-renaming: {} -> {}",
-                                        worktree_path.display(),
-                                        candidate.display()
-                                    );
-                                    worktree_path = candidate;
-                                }
-                                WorktreeCollisionBehavior::Error => {
-                                    let message = format!(
-                                        "Worktree path already exists: {}",
-                                        worktree_path.display()
-                                    );
-                                    tracing::error!("{}", message);
-                                    state.repo_validation_error = Some(message);
-                                    state.step = NewSessionStep::InputRepoSource;
-                                    return;
-                                }
-                            }
-                        }
-
-                        let manager = match RemoteRepoManager::new() {
-                            Ok(m) => m,
-                            Err(e) => {
-                                tracing::error!("Failed to create RemoteRepoManager: {}", e);
-                                return;
-                            }
-                        };
-
-                        // Route worktree creation based on checkout mode
-                        let checkout_mode = state.branch_checkout_mode;
-                        tracing::info!(
-                            "Creating worktree from cache: {} -> {} (branch: {}, base: {}, mode: {:?})",
-                            cached_path.display(),
-                            worktree_path.display(),
-                            branch_name,
-                            base_branch,
-                            checkout_mode
-                        );
-
-                        // Handle worktree creation based on checkout mode
-                        let final_worktree_path = match checkout_mode {
-                            BranchCheckoutMode::CreateNew => {
-                                match manager.create_worktree_from_cache(
-                                    cached_path,
-                                    &worktree_path,
-                                    branch_name,
-                                    base_branch,
-                                ) {
-                                    Ok(()) => worktree_path.clone(),
-                                    Err(e) => {
-                                        tracing::error!("Failed to create worktree: {}", e);
-                                        state.repo_validation_error =
-                                            Some(format!("Failed to create worktree: {}", e));
-                                        state.step = NewSessionStep::InputRepoSource;
-                                        return;
-                                    }
-                                }
-                            }
-                            BranchCheckoutMode::CheckoutExisting => {
-                                match manager.checkout_existing_branch_worktree(
-                                    cached_path,
-                                    &worktree_path,
-                                    base_branch,
-                                ) {
-                                    Ok(None) => worktree_path.clone(),
-                                    Ok(Some((suffixed_path, suffixed_branch))) => {
-                                        // Created worktree with suffixed branch due to collision
-                                        tracing::info!(
-                                            "Created suffixed worktree '{}' at: {}",
-                                            suffixed_branch,
-                                            suffixed_path.display()
-                                        );
-                                        worktree_notice = Some(format!(
-                                            "⚠️ Branch already has worktree. Created '{}' at {}",
-                                            suffixed_branch,
-                                            suffixed_path.display()
-                                        ));
-                                        suffixed_path
-                                    }
-                                    Err(e) => {
-                                        tracing::error!("Failed to create worktree: {}", e);
-                                        state.repo_validation_error =
-                                            Some(format!("Failed to create worktree: {}", e));
-                                        state.step = NewSessionStep::InputRepoSource;
-                                        return;
-                                    }
-                                }
-                            }
-                        };
-
-                        tracing::info!("Using worktree at: {}", final_worktree_path.display());
-                        // Return worktree path and the existing worktree info (worktree_path, source_repo)
-                        (
-                            final_worktree_path.clone(),
-                            Some((final_worktree_path, cached_path.clone())),
-                            worktree_notice,
-                        )
-                    } else if let Some(repo_index) = state.selected_repo_index {
-                        // Local repo flow - no existing worktree, session creation will create it
-                        if let Some((_, repo_path)) = state.filtered_repos.get(repo_index) {
-                            (repo_path.clone(), None, None)
-                        } else {
-                            tracing::error!(
-                                "Failed to get repository path from filtered_repos at index: {}",
-                                repo_index
-                            );
-                            return;
-                        }
-                    } else {
-                        tracing::error!("No repository selected and no cached repo path");
-                        return;
-                    };
-
-                    tracing::info!(
-                        "Creating session for repository: {:?}, branch: {}, existing_worktree: {}",
-                        repo_path,
-                        state.branch_name,
-                        existing_worktree.is_some()
-                    );
-                    state.step = NewSessionStep::Creating;
-
-                    // Use existing session ID for restart, or generate new one
-                    let session_id =
-                        state.restart_session_id.unwrap_or_else(|| uuid::Uuid::new_v4());
-
-                    (
-                        repo_path,
-                        state.branch_name.clone(),
-                        session_id,
-                        state.skip_permissions,
-                        state.mode.clone(),
-                        if state.mode == crate::models::SessionMode::Boss {
-                            Some(state.boss_prompt.to_string())
-                        } else {
-                            None
-                        },
-                        state.restart_session_id,  // Pass restart session ID
-                        state.selected_agent,      // Agent type for session
-                        state.get_session_model(), // Model (only for Claude agent)
-                        existing_worktree,         // Existing worktree for remote repos
-                        worktree_notice,
-                    )
-                } else {
-                    tracing::warn!(
-                        "new_session_create called but step is not valid for creation, current step: {:?}, is_current_dir_mode: {}",
-                        state.step,
-                        state.is_current_dir_mode
-                    );
-                    return;
+        // Resolve the repo path. LocalPath uses the path directly. HttpsUrl,
+        // SshUrl, and GithubShorthand clone via `RemoteRepoManager` into the
+        // `~/.agents-in-a-box/repos/<host>/<owner>/<repo>` cache (Phase 6.5).
+        // SshSession is a launch-only path that bypasses worktree creation
+        // entirely — it's handled in a dedicated branch below.
+        let repo_path = match snapshot.repo_source.clone() {
+            crate::git::repo_source::RepoSource::LocalPath(p) => p,
+            crate::git::repo_source::RepoSource::SshSession(url) => {
+                self.launch_ssh_session_from_configure(&url).await;
+                return;
+            }
+            ref remote @ (crate::git::repo_source::RepoSource::HttpsUrl(_)
+            | crate::git::repo_source::RepoSource::SshUrl(_)
+            | crate::git::repo_source::RepoSource::GithubShorthand { .. }) => {
+                match self.clone_remote_for_configure(remote).await {
+                    Ok(path) => path,
+                    Err(()) => return,
                 }
-            } else {
-                tracing::error!("new_session_create called but new_session_state is None");
+            }
+            crate::git::repo_source::RepoSource::Filter(s) => {
+                tracing::warn!(filter = %s, "create_session_from_configure: Filter source not launchable");
+                self.add_error_notification(format!(
+                    "Could not resolve repository from '{}'. Try a path, owner/repo, or full URL.",
+                    s
+                ));
                 return;
             }
         };
 
-        if let Some(notice) = deferred_notice {
-            self.add_info_notification(notice);
+        let session_id = uuid::Uuid::new_v4();
+
+        // Mark step = Creating so the existing render machinery (legacy.rs)
+        // picks up the in-flight UI.
+        if let Some(ns) = self.new_session_state.as_mut() {
+            ns.step = NewSessionStep::Creating;
         }
 
-        // Create the session with log streaming
         tracing::info!(
-            "Calling create_session_with_logs for session {} (mode: {:?}, restart: {})",
+            "create_session_from_configure: launching session {} for {:?}, branch {} (mode: {:?})",
             session_id,
-            mode,
-            restart_session_id.is_some()
+            repo_path,
+            snapshot.branch_name,
+            snapshot.mode
         );
 
-        let result = if let Some(restart_id) = restart_session_id {
-            // This is a restart - try to reuse existing worktree
-            info!(
-                "Restarting session {} with potentially updated configuration",
-                restart_id
-            );
-            self.create_restart_session_with_logs(
+        let result = self
+            .create_session_with_logs(
                 &repo_path,
-                &branch_name,
+                &snapshot.branch_name,
                 session_id,
-                skip_permissions,
-                mode,
-                boss_prompt,
-                agent_type,
-                session_model,
+                snapshot.skip_permissions,
+                snapshot.mode,
+                snapshot.boss_prompt,
+                snapshot.agent_type,
+                snapshot.session_model,
+                snapshot.codex_model,
+                None, // existing_worktree — local-only path for now
             )
-            .await
-        } else {
-            // Normal new session creation
-            self.create_session_with_logs(
-                &repo_path,
-                &branch_name,
-                session_id,
-                skip_permissions,
-                mode,
-                boss_prompt,
-                agent_type,
-                session_model,
-                existing_worktree,
-            )
-            .await
-        };
+            .await;
 
         match result {
             Ok(()) => {
-                info!("Session created successfully");
-                // Reload workspaces BEFORE switching view to ensure UI shows new session immediately
+                info!("Session created successfully via configure flow");
                 self.load_real_workspaces().await;
-
-                // Start log streaming for the newly created session
                 if let Err(e) = self.start_log_streaming_for_session(session_id).await {
                     warn!(
                         "Failed to start log streaming for session {}: {}",
                         session_id, e
                     );
                 }
-
-                // Force UI refresh to show new session immediately
                 self.ui_needs_refresh = true;
                 self.cancel_new_session();
             }
             Err(e) => {
-                error!("Failed to create session: {}", e);
+                error!("Failed to create session via configure flow: {}", e);
+                self.cancel_new_session();
+            }
+        }
+    }
+
+    /// Clone a remote repository (HttpsUrl / SshUrl / GithubShorthand) into the
+    /// `~/.agents-in-a-box/repos/<host>/<owner>/<repo>` cache and return the
+    /// cache path. Posts user-visible notifications for in-flight progress and
+    /// terminal errors. On failure: notifies the user, calls
+    /// `cancel_new_session()` so the picker reopens, returns `Err(())`.
+    ///
+    /// The clone itself runs on `spawn_blocking` because `git2` / `git` CLI
+    /// are synchronous and would otherwise block the async runtime.
+    async fn clone_remote_for_configure(
+        &mut self,
+        source: &crate::git::repo_source::RepoSource,
+    ) -> Result<std::path::PathBuf, ()> {
+        use crate::git::remote_repo_manager::RemoteRepoManager;
+
+        let parsed = match source.parse_components() {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!(?source, error = %e, "clone_remote_for_configure: parse_components failed");
+                self.add_error_notification(format!(
+                    "Could not parse repository: {}",
+                    e
+                ));
+                self.cancel_new_session();
+                return Err(());
+            }
+        };
+
+        self.add_info_notification(format!(
+            "Cloning {}/{}/{}…",
+            parsed.host, parsed.owner, parsed.repo_name
+        ));
+        self.ui_needs_refresh = true;
+
+        let manager = match RemoteRepoManager::new() {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::error!(error = %e, "clone_remote_for_configure: RemoteRepoManager::new failed");
+                self.add_error_notification(format!(
+                    "Could not initialise repo cache: {}",
+                    e
+                ));
+                self.cancel_new_session();
+                return Err(());
+            }
+        };
+
+        let source_owned = source.clone();
+        let parsed_owned = parsed.clone();
+        // git2 / git CLI are synchronous — push the clone onto a blocking
+        // thread so the async runtime stays responsive.
+        let clone_result = tokio::task::spawn_blocking(move || {
+            manager.clone_repo(&source_owned, &parsed_owned)
+        })
+        .await;
+
+        let cache_path = match clone_result {
+            Ok(Ok(path)) => path,
+            Ok(Err(e)) => {
+                tracing::error!(error = %e, "clone_remote_for_configure: clone_repo failed");
+                self.add_error_notification(format!(
+                    "Clone failed for {}/{}: {}",
+                    parsed.owner, parsed.repo_name, e
+                ));
+                self.cancel_new_session();
+                return Err(());
+            }
+            Err(join_err) => {
+                tracing::error!(error = %join_err, "clone_remote_for_configure: blocking task panicked");
+                self.add_error_notification(format!(
+                    "Clone task panicked: {}",
+                    join_err
+                ));
+                self.cancel_new_session();
+                return Err(());
+            }
+        };
+
+        self.add_info_notification(format!(
+            "Cloned {}/{} → {}",
+            parsed.owner,
+            parsed.repo_name,
+            cache_path.display()
+        ));
+        self.ui_needs_refresh = true;
+        Ok(cache_path)
+    }
+
+    /// Launch an interactive SSH session inside tmux from a `ssh://user@host[:port]`
+    /// URL. Parses the URL into an `SshTarget`, spawns
+    /// `tmux new-session -d -s <name> "<ssh ...>"`, adds the session to the
+    /// SSH bucket on `AppState`, and resets the new-session flow. Failure paths
+    /// surface a notification and cancel the new-session flow.
+    async fn launch_ssh_session_from_configure(&mut self, url: &str) {
+        use crate::models::Session;
+        use tokio::process::Command;
+
+        let Some(target) = crate::git::repo_source::parse_ssh_session_url(url) else {
+            tracing::error!(url = %url, "launch_ssh_session_from_configure: parse failed");
+            self.add_error_notification(format!(
+                "Could not parse SSH URL: {} (expected ssh://[user@]host[:port])",
+                url
+            ));
+            self.cancel_new_session();
+            return;
+        };
+
+        // Mark step = Creating so the in-flight UI is shown until tmux returns.
+        if let Some(ns) = self.new_session_state.as_mut() {
+            ns.step = NewSessionStep::Creating;
+        }
+        self.ui_needs_refresh = true;
+
+        // tmux session name: `ssh-<host>-<port>` matches the convention parsed
+        // by `auto-detect` in load_real_workspaces (search "name.starts_with(\"ssh-\")").
+        let safe_host = target.host.replace(['.', '/', ' '], "-");
+        let tmux_name = format!("ssh-{}-{}", safe_host, target.port);
+        let ssh_cmd = target.to_ssh_command();
+
+        tracing::info!(
+            "launch_ssh_session_from_configure: spawning tmux session '{}' running `{}`",
+            tmux_name,
+            ssh_cmd
+        );
+
+        let spawn_result = Command::new("tmux")
+            .args(["new-session", "-d", "-s", &tmux_name, &ssh_cmd])
+            .status()
+            .await;
+
+        match spawn_result {
+            Ok(status) if status.success() => {
+                let display = target.display_name();
+                let mut session = Session::new_ssh_session(display.clone(), target);
+                session.tmux_session_name = Some(tmux_name.clone());
+                session.status = crate::models::SessionStatus::Idle;
+                self.ssh_sessions.push(session);
+                self.add_info_notification(format!("SSH session ready: {}", display));
+                self.ui_needs_refresh = true;
+                // Refresh workspaces / sessions list so the new bucket entry is
+                // discoverable through the normal flow too.
+                self.load_real_workspaces().await;
+                self.cancel_new_session();
+            }
+            Ok(status) => {
+                tracing::error!(
+                    "launch_ssh_session_from_configure: tmux exited with {:?}",
+                    status.code()
+                );
+                self.add_error_notification(format!(
+                    "Failed to launch SSH session (tmux exit {:?})",
+                    status.code()
+                ));
+                self.cancel_new_session();
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "launch_ssh_session_from_configure: tmux spawn failed");
+                self.add_error_notification(format!(
+                    "Failed to spawn tmux for SSH session: {}",
+                    e
+                ));
                 self.cancel_new_session();
             }
         }
@@ -7716,6 +5698,7 @@ impl AppState {
         boss_prompt: Option<String>,
         agent_type: crate::models::SessionAgentType,
         model: Option<crate::models::ClaudeModel>,
+        codex_model: Option<crate::models::CodexModel>,
         existing_worktree: Option<(std::path::PathBuf, std::path::PathBuf)>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Branch based on session mode
@@ -7728,6 +5711,7 @@ impl AppState {
                     skip_permissions,
                     agent_type,
                     model,
+                    codex_model,
                     existing_worktree,
                 )
                 .await
@@ -7763,6 +5747,7 @@ impl AppState {
         skip_permissions: bool,
         agent_type: crate::models::SessionAgentType,
         model: Option<crate::models::ClaudeModel>,
+        codex_model: Option<crate::models::CodexModel>,
         existing_worktree: Option<(std::path::PathBuf, std::path::PathBuf)>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         use crate::interactive::InteractiveSessionManager;
@@ -7822,6 +5807,7 @@ impl AppState {
                     skip_permissions,
                     agent_type,
                     model,
+                    codex_model,
                 )
                 .await
         } else {
@@ -7837,6 +5823,7 @@ impl AppState {
                     skip_permissions,
                     agent_type,
                     model,
+                    codex_model,
                 )
                 .await
         };
@@ -8468,11 +6455,14 @@ impl AppState {
         let store = SessionStore::load();
         let metadata = store.sessions().values().find(|m| m.session_id == session_id).cloned();
 
-        // Pull skip_permissions and model from the in-memory Session if available.
-        let (skip_permissions, model) = self
+        // Pull skip_permissions, model, codex_model from the in-memory Session
+        // if available. Both per-agent model fields default to `None` (which
+        // is treated identically to `Some(SystemDefault)` at the CLI emission
+        // site — `--model` is omitted, CLI default applies).
+        let (skip_permissions, model, codex_model) = self
             .find_session(session_id)
-            .map(|s| (s.skip_permissions, s.model))
-            .unwrap_or((false, None));
+            .map(|s| (s.skip_permissions, s.model, s.codex_model))
+            .unwrap_or((false, None, None));
 
         // Capture audit context before any fallible step so we can record both
         // success and failure with the same fields.
@@ -8533,6 +6523,7 @@ impl AppState {
                     &metadata.tmux_session_name,
                     skip_permissions,
                     model,
+                    codex_model,
                     metadata.agent_type,
                     transcript.clone(),
                 )
@@ -8716,43 +6707,8 @@ impl AppState {
                 action
             );
             match action {
-                AsyncAction::StartNewSession => {
-                    self.start_new_session().await;
-                }
-                AsyncAction::StartWorkspaceSearch => {
-                    // Add timeout to prevent hanging
-                    use tokio::time::{Duration, timeout};
-                    match timeout(Duration::from_secs(10), self.start_workspace_search()).await {
-                        Ok(_) => {}
-                        Err(_) => {
-                            warn!("Workspace search timed out after 10 seconds");
-                            // Return to safe state
-                            self.new_session_state = None;
-                            self.current_screen = screen_ids::SESSION_LIST.to_string();
-                            return Err(anyhow::anyhow!("Workspace search timed out"));
-                        }
-                    }
-                }
-                AsyncAction::NewSessionInCurrentDir => {
-                    self.new_session_in_current_dir().await;
-                }
-                AsyncAction::NewSessionNormal => {
-                    self.new_session_normal().await;
-                }
-                AsyncAction::NewSessionWithRepoInput => {
-                    self.new_session_with_repo_input().await;
-                }
-                AsyncAction::ValidateRepoSource => {
-                    self.validate_repo_source().await;
-                }
-                AsyncAction::CloneRemoteRepo => {
-                    self.clone_remote_repo().await;
-                }
-                AsyncAction::FetchRemoteBranches => {
-                    self.fetch_remote_branches().await;
-                }
-                AsyncAction::CreateNewSession => {
-                    self.new_session_create().await;
+                AsyncAction::CreateSessionFromConfigure(spec) => {
+                    self.create_session_from_configure(spec).await;
                 }
                 AsyncAction::DeleteSession(session_id) => {
                     if let Err(e) = self.delete_session(session_id).await {
@@ -8908,10 +6864,6 @@ impl AppState {
                 }
                 action @ AsyncAction::OpenShellAtPath(_) => {
                     debug!("OpenShellAtPath action deferred to main loop");
-                    self.pending_async_action = Some(action);
-                }
-                action @ AsyncAction::CreateSshSession => {
-                    debug!("CreateSshSession action deferred to main loop");
                     self.pending_async_action = Some(action);
                 }
                 action @ AsyncAction::KillWorkspaceShell(_) => {
@@ -9320,35 +7272,43 @@ impl AppState {
                         session_id
                     );
 
-                    // Start the new session UI flow with pre-populated data from the existing session
+                    // Phase 6 (new-session redesign): restart routes the user
+                    // straight to the Configure screen with the source repo
+                    // pre-selected. The user can review the preset / branch /
+                    // prompt and press Enter to relaunch.
+                    use crate::components::new_session::configure::ConfigureState;
+                    use crate::config::session_defaults::SessionDefaults;
+                    use crate::git::repo_source::RepoSource;
+
+                    let defaults = SessionDefaults::load_from(&SessionDefaults::default_path());
+                    let repo_source = RepoSource::LocalPath(workspace.path.clone());
+                    let repo_label = workspace
+                        .path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| workspace.path.display().to_string());
+                    let branch_source = crate::git::repo_source::head_branch(&workspace.path);
+                    let branch_prefix = self.app_config.workspace_defaults.branch_prefix.clone();
+                    let existing_branches: Vec<String> =
+                        crate::git::worktree_manager::WorktreeManager::new()
+                            .ok()
+                            .and_then(|m| m.list_worktrees().ok())
+                            .map(|infos| infos.into_iter().map(|i| i.branch_name).collect())
+                            .unwrap_or_default();
+                    let configure_state = ConfigureState::from_pick_repo(
+                        repo_source,
+                        repo_label,
+                        &defaults,
+                        branch_source,
+                        &branch_prefix,
+                        existing_branches,
+                    );
+
                     self.current_screen = screen_ids::NEW_SESSION.to_string();
                     self.new_session_state = Some(NewSessionState {
-                        available_repos: vec![workspace.path.clone()],
-                        filtered_repos: vec![(0, workspace.path.clone())],
-                        selected_repo_index: Some(0),
-                        branch_name: session.branch_name.clone(),
-                        step: NewSessionStep::InputBranch, // Start at branch input since repo is pre-selected (skip agent selection for restart)
-                        filter_text: String::new(),
-                        is_current_dir_mode: false,
-                        skip_permissions: session.skip_permissions,
-                        mode: session.mode.clone(),
-                        boss_prompt: if let Some(ref prompt) = session.boss_prompt {
-                            TextEditor::from_string(prompt)
-                        } else {
-                            TextEditor::new()
-                        },
-                        file_finder: FuzzyFileFinderState::new(),
-                        restart_session_id: Some(session_id), // Mark this as a restart operation
-                        // Agent selection - default to Claude for restart
-                        selected_agent: SessionAgentType::Claude,
-                        agent_options: SessionAgentOption::all(),
-                        selected_agent_index: 0,
-                        // Model selection - use session's model or default to Sonnet
-                        selected_model: session.model.unwrap_or_default(),
-                        model_options: crate::models::ClaudeModel::all(),
-                        selected_model_index: 0,
-                        agent_model_focus: AgentModelFocus::default(),
-                        // Remote repo fields - not used for restart
+                        step: NewSessionStep::Configure,
+                        configure_state: Some(configure_state),
                         ..Default::default()
                     });
 

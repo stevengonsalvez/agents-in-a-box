@@ -279,9 +279,13 @@ impl SessionListComponent {
                 if by_path {
                     true
                 } else {
-                    // Also check by remote URL (owner/repo format)
+                    // Also check by remote URL (owner/repo format).
+                    // `from_input` is deprecated for free-form input
+                    // (finding #14); the URL here came from
+                    // `get_remote_url()` so the legacy contract is fine.
                     if let Ok(git_repo) = crate::git::RepositoryManager::open(&workspace.path) {
                         if let Ok(Some(remote_url)) = git_repo.get_remote_url() {
+                            #[allow(deprecated)]
                             if let Ok(repo_source) = crate::git::RepoSource::from_input(&remote_url)
                             {
                                 if let Ok(parsed) = repo_source.parse_components() {

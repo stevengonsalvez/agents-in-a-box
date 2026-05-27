@@ -79,88 +79,10 @@ pub enum AppEvent {
         x: u16,
         y: u16,
     },
-    // New session creation events
+    // New session creation events. Phase 6 (new-session redesign) retired
+    // the legacy 13-step variants; only `NewSessionCancel` survives as the
+    // host-level Esc handler for the `Creating` step.
     NewSessionCancel,
-    NewSessionNextRepo,
-    NewSessionPrevRepo,
-    NewSessionConfirmRepo,
-    NewSessionInputChar(char),
-    NewSessionInputPasteText(String),
-    NewSessionBackspace,
-    NewSessionBackspaceWord, // Delete word backward (Shift+Backspace)
-    // Source selection events (Local, Remote, SSH, Favorites)
-    SourceSelectionToggle, // Toggle forward: Local → Remote → SSH → Favorites → Local
-    SourceSelectionToggleReverse, // Toggle backward: Local → Favorites → SSH → Remote → Local
-    SourceSelectionConfirm, // Proceed with selected source
-    SourceQuickSelectLocal, // Quick select Local and proceed
-    SourceQuickSelectRemote, // Quick select Remote and proceed
-    SourceQuickSelectSsh,  // Quick select SSH and proceed
-    SourceQuickSelectFavorites, // Quick select Favorites and proceed
-    // Favorites picker events (SelectFavorite step)
-    FavoriteSelectNext,    // Navigate to next favorite
-    FavoriteSelectPrev,    // Navigate to previous favorite
-    FavoriteSelectConfirm, // Confirm selection
-    FavoriteGoBack,        // Go back to source selection
-    FavoriteDelete,        // Delete selected favorite
-    // Repo input events (URL or path)
-    RepoInputChar(char),
-    RepoInputBackspace,
-    RepoInputBackspaceWord,
-    RepoInputPasteText(String),
-    RepoInputSubmit,
-    RepoInputFavoriteNext,   // Navigate to next favorite in inline list
-    RepoInputFavoritePrev,   // Navigate to previous favorite in inline list
-    RepoInputSelectFavorite, // Use selected favorite
-    RepoInputToggleFavorite, // Star/unstar current input as favorite
-    // Local repo selection events
-    LocalRepoToggleFavorite, // Star/unstar currently selected local repo
-    // Branch selection events
-    BranchSelectNext,
-    BranchSelectPrev,
-    BranchSelectConfirm,
-    BranchSelectBack,
-    BranchFilterInput(char),
-    BranchFilterBackspace,
-    BranchToggleCheckoutMode, // Tab to toggle between create new vs checkout existing
-    NewSessionProceedToModeSelection,
-    NewSessionToggleMode,
-    NewSessionProceedFromMode,
-    NewSessionInputPromptChar(char),
-    NewSessionBackspacePrompt,
-    NewSessionInsertNewline,
-    NewSessionPasteText(String), // Paste text into boss mode prompt
-    // Cursor movement events for boss mode prompt
-    NewSessionCursorLeft,
-    NewSessionCursorRight,
-    NewSessionCursorUp,
-    NewSessionCursorDown,
-    NewSessionCursorLineStart,
-    NewSessionCursorLineEnd,
-    // Word-wise movement and deletion events
-    NewSessionCursorWordLeft,
-    NewSessionCursorWordRight,
-    NewSessionDeleteWordForward,
-    NewSessionDeleteWordBackward,
-    NewSessionProceedToPermissions,
-    NewSessionTogglePermissions,
-    NewSessionCreate,
-    // Agent selection events (new session flow)
-    NewSessionAgentNext,
-    NewSessionAgentPrev,
-    NewSessionAgentSelect,
-    NewSessionOpenShell, // Open shell directly when Shell agent is selected
-    // SSH configuration events (new session flow - for SSH agent)
-    NewSessionSshNextField,         // Tab to next SSH input field
-    NewSessionSshPrevField,         // Shift+Tab to previous SSH input field
-    NewSessionSshInputChar(char),   // Character input for SSH fields
-    NewSessionSshPasteText(String), // Paste text into focused SSH field
-    NewSessionSshBackspace,         // Backspace in SSH fields
-    NewSessionSshConfirm,           // Confirm SSH configuration
-    NewSessionSshGoBack,            // Go back to agent selection
-    // Model selection events (new session flow - for Claude agent)
-    NewSessionModelNext,
-    NewSessionModelPrev,
-    NewSessionToggleAgentModelFocus, // Tab to switch between agent and model panels
     // Notification events
     ShowNotification(String), // Display a notification message to the user
     // File finder events for @ symbol trigger
@@ -169,8 +91,9 @@ pub enum AppEvent {
     FileFinderSelectFile,
     FileFinderCancel,
     // Search workspace events
-    SearchWorkspaceInputChar(char),
-    SearchWorkspaceBackspace,
+    // Phase 6 (new-session redesign): SearchWorkspaceInputChar /
+    // SearchWorkspaceBackspace retired — the SearchWorkspace screen no
+    // longer hosts a text-filter input; PickRepo absorbed that role.
     // Confirmation dialog events
     ConfirmationToggle, // Switch between Yes/No (binary) or cycle forward (tri-option)
     ConfirmationPrev,   // Cycle backwards through tri-option dialog
@@ -400,6 +323,68 @@ pub enum AppEvent {
     SessionRecoveryDeleteSelected, // Delete all multi-selected items (Shift+D)
     ToggleSelectSession,           // Toggle multi-select on current session (Space)
     DeleteSelectedSessions,        // Bulk delete all multi-selected sessions (Shift+D)
+    // Phase 5 (new-session redesign) Configure-screen events. Emitted by the
+    // `configure::handle_key` outcome plumbing in `handle_new_session_keys`.
+    /// Enter on Configure → record launch + start session. Carries the
+    /// `LaunchSpec` already built by the Configure component so the
+    /// dispatcher / async path doesn't have to re-derive the same fields
+    /// (finding #7).
+    ConfigureLaunch(crate::components::new_session::configure::LaunchSpec),
+    ConfigureBack,      // Esc on Configure → return to PickRepo
+    ConfigureOpenPresetManager, // ^P stub until Phase 7 polish
+}
+
+/// Translate a `RepoSource` variant into the `(SourceType, source_string)`
+/// pair that `session-defaults.per_repo[].source_type/source` accepts
+/// (finding #1). `None` for unparseable / non-clonable variants — the
+/// picker's `recent_source` will fall back to favorites or `parse_with`.
+fn source_provenance(
+    source: &crate::git::repo_source::RepoSource,
+) -> (Option<crate::config::favorites_store::SourceType>, Option<String>) {
+    use crate::config::favorites_store::SourceType;
+    use crate::git::repo_source::RepoSource;
+    match source {
+        RepoSource::LocalPath(p) => (
+            Some(SourceType::LocalPath),
+            Some(p.display().to_string()),
+        ),
+        RepoSource::HttpsUrl(u) => (Some(SourceType::HttpsUrl), Some(u.clone())),
+        RepoSource::SshUrl(u) => (Some(SourceType::SshUrl), Some(u.clone())),
+        RepoSource::GithubShorthand { owner, repo } => (
+            Some(SourceType::GithubShorthand),
+            Some(format!("{owner}/{repo}")),
+        ),
+        // SshSession and Filter have no clean SourceType mapping — leave
+        // both columns blank so a future open falls back to favorites /
+        // parse_with.
+        RepoSource::SshSession(_) | RepoSource::Filter(_) => (None, None),
+    }
+}
+
+/// Compute a stable display label for a `RepoSource` — drives the Configure
+/// screen's title bar and the persistence key in `session-defaults.yaml`.
+/// Phase 5 (new-session redesign).
+fn derive_repo_label(source: &crate::git::repo_source::RepoSource) -> String {
+    use crate::git::repo_source::RepoSource;
+    match source {
+        RepoSource::LocalPath(p) => p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| p.display().to_string()),
+        RepoSource::GithubShorthand { repo, .. } => repo.clone(),
+        RepoSource::HttpsUrl(u) | RepoSource::SshUrl(u) => {
+            // Pull the last path segment.
+            u.rsplit('/').next().unwrap_or(u).trim_end_matches(".git").to_string()
+        }
+        RepoSource::SshSession(s) => {
+            // `ssh://user@host` -> `host` for the title bar.
+            let rest = s.strip_prefix("ssh://").unwrap_or(s);
+            let host_part = rest.split('@').next_back().unwrap_or(rest);
+            host_part.split('/').next().unwrap_or(host_part).to_string()
+        }
+        RepoSource::Filter(s) => s.clone(),
+    }
 }
 
 pub struct EventHandler;
@@ -476,17 +461,14 @@ impl EventHandler {
     /// Dispatch a bracketed-paste event to the right New Session text-entry step.
     /// Returns `None` when the user isn't currently in a text-entry step that
     /// accepts paste, so the text is dropped silently rather than typed literally.
-    pub fn handle_paste_event(text: String, state: &AppState) -> Option<AppEvent> {
-        use crate::app::state::NewSessionStep;
-
-        let session_state = state.new_session_state.as_ref()?;
-        match session_state.step {
-            NewSessionStep::InputRepoSource => Some(AppEvent::RepoInputPasteText(text)),
-            NewSessionStep::ConfigureSsh => Some(AppEvent::NewSessionSshPasteText(text)),
-            NewSessionStep::InputBranch => Some(AppEvent::NewSessionInputPasteText(text)),
-            NewSessionStep::InputPrompt => Some(AppEvent::NewSessionPasteText(text)),
-            _ => None,
-        }
+    ///
+    /// Phase 6 (new-session redesign): the legacy 13-step flow is gone — the
+    /// only text-entry surfaces are the smart-parse picker (PickRepo) and the
+    /// Configure prompt textarea. Both own their own paste handling via the
+    /// component-local `handle_key` arms, so paste events never need to be
+    /// dispatched at the host event-router level.
+    pub fn handle_paste_event(_text: String, _state: &AppState) -> Option<AppEvent> {
+        None
     }
 
     /// True when the user is currently focused on any free-form text input.
@@ -514,6 +496,12 @@ impl EventHandler {
     /// * The auth-provider popup, Analytics input/zoom-search,
     ///   Skills search overlay, and GitView commit-message mode —
     ///   text-entry overlays toggled inside otherwise navigable screens.
+    /// Public wrapper so the main event loop can suppress globals like the
+    /// slash-palette while the user is typing into a free-form input.
+    pub fn is_in_text_input_context(state: &AppState) -> bool {
+        Self::is_text_input_context(state)
+    }
+
     fn is_text_input_context(state: &AppState) -> bool {
         use crate::app::screens::ids as screen_ids;
         use crate::app::state::NewSessionStep;
@@ -528,19 +516,17 @@ impl EventHandler {
             return true;
         }
 
-        // NewSession is multi-step — only the text-entry steps count.
+        // NewSession (post-Phase-6) has only two text-entry steps —
+        // PickRepo's smart-parse filter and Configure's Boss-mode prompt
+        // textarea. Both accept colon-bearing input (URLs, prompts), so
+        // global single-character shortcuts must be suppressed while they
+        // own focus.
         let new_session_text_active = state.current_screen == screen_ids::NEW_SESSION
             && state
                 .new_session_state
                 .as_ref()
                 .map(|s| {
-                    matches!(
-                        s.step,
-                        NewSessionStep::InputRepoSource
-                            | NewSessionStep::InputBranch
-                            | NewSessionStep::InputPrompt
-                            | NewSessionStep::ConfigureSsh
-                    )
+                    matches!(s.step, NewSessionStep::PickRepo | NewSessionStep::Configure)
                 })
                 .unwrap_or(false);
 
@@ -1117,454 +1103,177 @@ impl EventHandler {
         key_event: KeyEvent,
         _state: &mut AppState,
     ) -> Option<AppEvent> {
+        // Phase 6 (new-session redesign): the search-workspace screen used to
+        // host the legacy `SelectRepo` repo picker. The redesigned flow
+        // routes that responsibility into PickRepo, so this handler now only
+        // honors Esc to back out.
         match key_event.code {
             KeyCode::Esc => Some(AppEvent::NewSessionCancel),
-            KeyCode::Down => Some(AppEvent::NewSessionNextRepo),
-            KeyCode::Up => Some(AppEvent::NewSessionPrevRepo),
-            KeyCode::Enter => Some(AppEvent::NewSessionConfirmRepo),
-            KeyCode::Backspace => Some(AppEvent::SearchWorkspaceBackspace),
-            KeyCode::Char(ch) => Some(AppEvent::SearchWorkspaceInputChar(ch)),
             _ => None,
         }
     }
 
     fn handle_new_session_keys(key_event: KeyEvent, state: &mut AppState) -> Option<AppEvent> {
         use crate::app::state::NewSessionStep;
+        use crate::components::new_session::configure::{self, ConfigureOutcome};
+        use crate::components::new_session::pick_repo::{self, PickRepoOutcome};
 
+        // Phase 5 (new-session redesign): Configure screen — own key handler.
+        // Process BEFORE PickRepo so the step check stays linear.
+        let on_configure = state
+            .new_session_state
+            .as_ref()
+            .map(|s| s.step == NewSessionStep::Configure)
+            .unwrap_or(false);
+        if on_configure {
+            let outcome = state
+                .new_session_state
+                .as_mut()
+                .and_then(|s| s.configure_state.as_mut())
+                .map(|cfg| configure::handle_key(cfg, key_event))
+                .unwrap_or(ConfigureOutcome::Stay);
+
+            return match outcome {
+                ConfigureOutcome::Stay => None,
+                ConfigureOutcome::BackToPickRepo => Some(AppEvent::ConfigureBack),
+                ConfigureOutcome::Launch(spec) => Some(AppEvent::ConfigureLaunch(spec)),
+                ConfigureOutcome::OpenPresetManager => {
+                    Some(AppEvent::ConfigureOpenPresetManager)
+                }
+            };
+        }
+
+        // Phase 4 (new-session redesign): screen-1 has its own self-contained
+        // key handler. Process it BEFORE the match below so we can take a
+        // `&mut` borrow on `pick_repo_state` without fighting the immutable
+        // borrow used by the legacy match arms.
+        let on_pick_repo = state
+            .new_session_state
+            .as_ref()
+            .map(|s| s.step == NewSessionStep::PickRepo)
+            .unwrap_or(false);
+        if on_pick_repo {
+            let outcome = state
+                .new_session_state
+                .as_mut()
+                .and_then(|s| s.pick_repo_state.as_mut())
+                .map(|pick| pick_repo::handle_key(pick, key_event))
+                .unwrap_or(PickRepoOutcome::Stay);
+
+            return match outcome {
+                PickRepoOutcome::Stay => None,
+                PickRepoOutcome::BackToHome => {
+                    // Persist session-defaults at the screen boundary
+                    // (finding #3) so arrow/Esc no longer write on every
+                    // keypress. Best-effort — non-fatal IO error.
+                    use crate::config::session_defaults::SessionDefaults;
+                    if let Some(pick) = state
+                        .new_session_state
+                        .as_ref()
+                        .and_then(|ns| ns.pick_repo_state.as_ref())
+                    {
+                        let path = SessionDefaults::default_path();
+                        if let Err(err) = pick.defaults.save_to(&path) {
+                            tracing::warn!(error = %err, "PickRepo BackToHome: persist session-defaults failed");
+                        }
+                    }
+                    // Return to whichever screen the user invoked `n` from
+                    // (Sessions, Home, …). Stevie hit Esc-on-PickRepo
+                    // dropping him on Home even when he opened it from
+                    // Sessions (2026-05-22). Fall back to Home if no
+                    // previous screen recorded.
+                    state.new_session_state = None;
+                    let prev = state
+                        .previous_screen
+                        .take()
+                        .unwrap_or_else(|| crate::app::screens::ids::HOME.to_string());
+                    state.current_screen = prev;
+                    None
+                }
+                PickRepoOutcome::AdvanceTo(source)
+                | PickRepoOutcome::StartClone(source) => {
+                    // Phase 5: transition into Configure. StartClone for now
+                    // skips the real async clone (Phase 6+ wires it) and
+                    // advances straight in — the tripwires don't depend on
+                    // network I/O. Build `configure_state` from `source` +
+                    // session-defaults, set step = Configure.
+                    //
+                    // The dispatcher (not the UI layer) computes:
+                    //   - the HEAD branch via `git::repo_source::head_branch`
+                    //     (finding #9 — keeps git2 out of components/);
+                    //   - the configured `branch_prefix` (finding #5);
+                    //   - the existing-branch list for collision-disamb
+                    //     (finding #16).
+                    // PickRepo persistence (finding #3): write
+                    // session-defaults ONCE here, not on every arrow keypress.
+                    use crate::components::new_session::configure::ConfigureState;
+                    use crate::config::session_defaults::SessionDefaults;
+                    use crate::git::repo_source::head_branch;
+                    use crate::git::worktree_manager::WorktreeManager;
+                    if let Some(pick) = state
+                        .new_session_state
+                        .as_ref()
+                        .and_then(|ns| ns.pick_repo_state.as_ref())
+                    {
+                        let path = SessionDefaults::default_path();
+                        if let Err(err) = pick.defaults.save_to(&path) {
+                            tracing::warn!(error = %err, "PickRepo advance: persist session-defaults failed");
+                        }
+                    }
+                    let defaults =
+                        SessionDefaults::load_from(&SessionDefaults::default_path());
+                    let label = derive_repo_label(&source);
+                    let branch_source = match &source {
+                        crate::git::repo_source::RepoSource::LocalPath(p) => head_branch(p),
+                        _ => None,
+                    };
+                    let branch_prefix = state
+                        .app_config
+                        .workspace_defaults
+                        .branch_prefix
+                        .clone();
+                    // Use `list_all_worktrees` (scans by-session symlinks →
+                    // real git branch via head.shorthand()), NOT
+                    // `list_worktrees` which only finds legacy UUID-named
+                    // top-level dirs and misses every modern by-name worktree.
+                    // The latter returned empty → collision never detected
+                    // (Stevie 2026-05-27: feat/blog re-launch slipped through).
+                    let existing_branches: Vec<String> = WorktreeManager::new()
+                        .ok()
+                        .and_then(|m| m.list_all_worktrees().ok())
+                        .map(|infos| {
+                            infos.into_iter().map(|(_, i)| i.branch_name).collect()
+                        })
+                        .unwrap_or_default();
+                    let cfg = ConfigureState::from_pick_repo(
+                        source.clone(),
+                        label,
+                        &defaults,
+                        branch_source,
+                        &branch_prefix,
+                        existing_branches,
+                    );
+                    if let Some(ns) = state.new_session_state.as_mut() {
+                        ns.configure_state = Some(cfg);
+                        ns.step = NewSessionStep::Configure;
+                    }
+                    tracing::debug!(?source, "PickRepo advance → Configure");
+                    None
+                }
+            };
+        }
+
+        // Phase 6 (new-session redesign): the only steps remaining are
+        // PickRepo (handled above), Configure (handled above), and Creating —
+        // the in-flight state which only accepts Esc to cancel.
         if let Some(ref session_state) = state.new_session_state {
             match session_state.step {
-                NewSessionStep::SelectSource => {
-                    // Source selection: Local, Remote, SSH, or Favorites
-                    match key_event.code {
-                        KeyCode::Esc => Some(AppEvent::NewSessionCancel),
-                        KeyCode::Enter => Some(AppEvent::SourceSelectionConfirm),
-                        // Down/j cycles forward: Local → Remote → SSH → Favorites → Local
-                        KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::SourceSelectionToggle),
-                        // Up/k cycles backward: Local → Favorites → SSH → Remote → Local
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            Some(AppEvent::SourceSelectionToggleReverse)
-                        }
-                        KeyCode::Char('l' | 'L') => {
-                            // Quick select Local - set to Local and proceed
-                            Some(AppEvent::SourceQuickSelectLocal)
-                        }
-                        KeyCode::Char('r' | 'R') => {
-                            // Quick select Remote - set to Remote and proceed
-                            Some(AppEvent::SourceQuickSelectRemote)
-                        }
-                        KeyCode::Char('s' | 'S') => {
-                            // Quick select SSH - set to SSH and proceed
-                            Some(AppEvent::SourceQuickSelectSsh)
-                        }
-                        KeyCode::Char('f' | 'F') => {
-                            // Quick select Favorites - set to Favorites and proceed
-                            Some(AppEvent::SourceQuickSelectFavorites)
-                        }
-                        _ => None,
-                    }
-                }
-                NewSessionStep::SelectFavorite => {
-                    // Favorites picker
-                    match key_event.code {
-                        KeyCode::Esc => Some(AppEvent::FavoriteGoBack),
-                        KeyCode::Enter => Some(AppEvent::FavoriteSelectConfirm),
-                        KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::FavoriteSelectNext),
-                        KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::FavoriteSelectPrev),
-                        KeyCode::Char('d') | KeyCode::Delete => Some(AppEvent::FavoriteDelete),
-                        _ => None,
-                    }
-                }
-                NewSessionStep::InputRepoSource => {
-                    match key_event.code {
-                        KeyCode::Esc => Some(AppEvent::NewSessionCancel),
-                        KeyCode::Enter => {
-                            // If a favorite is selected, use it; otherwise submit input
-                            if state
-                                .new_session_state
-                                .as_ref()
-                                .map(|s| s.selected_favorite_index.is_some())
-                                .unwrap_or(false)
-                            {
-                                Some(AppEvent::RepoInputSelectFavorite)
-                            } else {
-                                Some(AppEvent::RepoInputSubmit)
-                            }
-                        }
-                        KeyCode::Down => Some(AppEvent::RepoInputFavoriteNext),
-                        KeyCode::Up => Some(AppEvent::RepoInputFavoritePrev),
-                        KeyCode::Char('s')
-                            if key_event.modifiers.contains(KeyModifiers::CONTROL) =>
-                        {
-                            Some(AppEvent::RepoInputToggleFavorite)
-                        }
-                        KeyCode::Char('v')
-                            if key_event.modifiers.contains(KeyModifiers::CONTROL) =>
-                        {
-                            Self::get_clipboard_text().ok().map(AppEvent::RepoInputPasteText)
-                        }
-                        KeyCode::Insert if key_event.modifiers.contains(KeyModifiers::SHIFT) => {
-                            Self::get_clipboard_text().ok().map(AppEvent::RepoInputPasteText)
-                        }
-                        KeyCode::Backspace if key_event.modifiers.contains(KeyModifiers::SHIFT) => {
-                            Some(AppEvent::RepoInputBackspaceWord)
-                        }
-                        KeyCode::Backspace => Some(AppEvent::RepoInputBackspace),
-                        KeyCode::Char(ch) => Some(AppEvent::RepoInputChar(ch)),
-                        _ => None,
-                    }
-                }
-                NewSessionStep::ValidatingRepo => {
-                    // Only allow cancel during validation
-                    match key_event.code {
-                        KeyCode::Esc => Some(AppEvent::NewSessionCancel),
-                        _ => None,
-                    }
-                }
-                NewSessionStep::SelectBranch => match key_event.code {
-                    KeyCode::Esc => Some(AppEvent::BranchSelectBack),
-                    KeyCode::Enter => Some(AppEvent::BranchSelectConfirm),
-                    KeyCode::Down => Some(AppEvent::BranchSelectNext),
-                    KeyCode::Up => Some(AppEvent::BranchSelectPrev),
-                    KeyCode::Tab => Some(AppEvent::BranchToggleCheckoutMode),
-                    KeyCode::Backspace => Some(AppEvent::BranchFilterBackspace),
-                    KeyCode::Char(c) => Some(AppEvent::BranchFilterInput(c)),
-                    _ => None,
-                },
-                NewSessionStep::SelectRepo => {
-                    match key_event.code {
-                        KeyCode::Esc => Some(AppEvent::NewSessionCancel),
-                        KeyCode::Down => Some(AppEvent::NewSessionNextRepo),
-                        KeyCode::Up => Some(AppEvent::NewSessionPrevRepo),
-                        KeyCode::Enter => Some(AppEvent::NewSessionConfirmRepo),
-                        // 's' key to star/unstar selected repo
-                        KeyCode::Char('s') => Some(AppEvent::LocalRepoToggleFavorite),
-                        // '$' key to open shell directly at repo (no branch/worktree prompt)
-                        KeyCode::Char('$') => Some(AppEvent::NewSessionOpenShell),
-                        _ => None,
-                    }
-                }
-                NewSessionStep::SelectAgent => {
-                    // Simplified UX: Up/Down for agent, Left/Right for model
-                    let show_model = session_state.should_show_model_selection();
-
-                    match key_event.code {
-                        KeyCode::Esc => Some(AppEvent::NewSessionCancel),
-                        // Agent navigation (vertical)
-                        KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::NewSessionAgentNext),
-                        KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::NewSessionAgentPrev),
-                        // Model navigation (horizontal) - only when Claude is selected
-                        KeyCode::Right | KeyCode::Char('l') if show_model => {
-                            Some(AppEvent::NewSessionModelNext)
-                        }
-                        KeyCode::Left | KeyCode::Char('h') if show_model => {
-                            Some(AppEvent::NewSessionModelPrev)
-                        }
-                        KeyCode::Enter => Some(AppEvent::NewSessionAgentSelect),
-                        _ => None,
-                    }
-                }
-                NewSessionStep::ConfigureSsh => match key_event.code {
-                    KeyCode::Esc => Some(AppEvent::NewSessionSshGoBack),
-                    KeyCode::Tab => {
-                        if key_event.modifiers.contains(KeyModifiers::SHIFT) {
-                            Some(AppEvent::NewSessionSshPrevField)
-                        } else {
-                            Some(AppEvent::NewSessionSshNextField)
-                        }
-                    }
-                    KeyCode::BackTab => Some(AppEvent::NewSessionSshPrevField),
-                    KeyCode::Enter => Some(AppEvent::NewSessionSshConfirm),
-                    KeyCode::Char('v') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
-                        Self::get_clipboard_text().ok().map(AppEvent::NewSessionSshPasteText)
-                    }
-                    KeyCode::Insert if key_event.modifiers.contains(KeyModifiers::SHIFT) => {
-                        Self::get_clipboard_text().ok().map(AppEvent::NewSessionSshPasteText)
-                    }
-                    KeyCode::Backspace => Some(AppEvent::NewSessionSshBackspace),
-                    KeyCode::Char(ch) => Some(AppEvent::NewSessionSshInputChar(ch)),
-                    _ => None,
-                },
-                NewSessionStep::InputBranch => {
-                    // Check if model selection is available (Claude selected)
-                    let show_model = session_state.should_show_model_selection();
-
-                    // Get selected agent info
-                    let selected_agent = session_state.selected_agent;
-                    let agent_available = selected_agent.is_available();
-
-                    match key_event.code {
-                        KeyCode::Esc => Some(AppEvent::NewSessionCancel),
-                        KeyCode::Enter => {
-                            // Check if selected agent is available
-                            if !agent_available {
-                                // Agent not available yet (Coming Soon)
-                                Some(AppEvent::ShowNotification(
-                                    "This agent is coming soon!".to_string(),
-                                ))
-                            } else if selected_agent == crate::models::SessionAgentType::Shell {
-                                // Shell selected - open shell directly
-                                Some(AppEvent::NewSessionOpenShell)
-                            } else {
-                                // Claude or other available agent
-                                if let Some(ref session_state) = state.new_session_state {
-                                    if session_state.is_current_dir_mode {
-                                        // Skip mode selection and permissions for current directory mode
-                                        Some(AppEvent::NewSessionCreate)
-                                    } else {
-                                        Some(AppEvent::NewSessionProceedToModeSelection)
-                                    }
-                                } else {
-                                    Some(AppEvent::NewSessionProceedToModeSelection)
-                                }
-                            }
-                        }
-                        // Tab cycles through agents
-                        KeyCode::Tab => Some(AppEvent::NewSessionAgentNext),
-                        // Left/Right for model selection (only when Claude is selected)
-                        KeyCode::Left if show_model => Some(AppEvent::NewSessionModelPrev),
-                        KeyCode::Right if show_model => Some(AppEvent::NewSessionModelNext),
-                        KeyCode::Char('v')
-                            if key_event.modifiers.contains(KeyModifiers::CONTROL) =>
-                        {
-                            Self::get_clipboard_text().ok().map(AppEvent::NewSessionInputPasteText)
-                        }
-                        KeyCode::Insert if key_event.modifiers.contains(KeyModifiers::SHIFT) => {
-                            Self::get_clipboard_text().ok().map(AppEvent::NewSessionInputPasteText)
-                        }
-                        KeyCode::Backspace if key_event.modifiers.contains(KeyModifiers::SHIFT) => {
-                            Some(AppEvent::NewSessionBackspaceWord)
-                        }
-                        KeyCode::Backspace => Some(AppEvent::NewSessionBackspace),
-                        KeyCode::Char(ch) => Some(AppEvent::NewSessionInputChar(ch)),
-                        _ => None,
-                    }
-                }
-                NewSessionStep::SelectMode => match key_event.code {
+                NewSessionStep::Configure => None, // handled above
+                NewSessionStep::PickRepo => None,  // handled above
+                NewSessionStep::Creating => match key_event.code {
                     KeyCode::Esc => Some(AppEvent::NewSessionCancel),
-                    KeyCode::Enter => Some(AppEvent::NewSessionProceedFromMode),
-                    KeyCode::Down | KeyCode::Up => Some(AppEvent::NewSessionToggleMode),
                     _ => None,
                 },
-                NewSessionStep::InputPrompt => {
-                    // Debug logging to understand what key events we're receiving
-                    tracing::debug!(
-                        "InputPrompt: Received key event: {:?} with modifiers: {:?}",
-                        key_event.code,
-                        key_event.modifiers
-                    );
-
-                    // Check if file finder is active first
-                    let file_finder_active =
-                        if let Some(ref session_state) = state.new_session_state {
-                            session_state.file_finder.is_active
-                        } else {
-                            false
-                        };
-
-                    if file_finder_active {
-                        // File finder navigation takes precedence
-                        match key_event.code {
-                            KeyCode::Esc => {
-                                tracing::debug!(
-                                    "InputPrompt: Escape pressed while file finder active, cancelling file finder"
-                                );
-                                Some(AppEvent::FileFinderCancel)
-                            }
-                            KeyCode::Up => {
-                                tracing::debug!("InputPrompt: Up navigation in file finder");
-                                Some(AppEvent::FileFinderNavigateUp)
-                            }
-                            KeyCode::Down => {
-                                tracing::debug!("InputPrompt: Down navigation in file finder");
-                                Some(AppEvent::FileFinderNavigateDown)
-                            }
-                            KeyCode::Enter => {
-                                tracing::debug!(
-                                    "InputPrompt: Enter pressed in file finder, selecting file"
-                                );
-                                Some(AppEvent::FileFinderSelectFile)
-                            }
-                            KeyCode::Backspace => {
-                                tracing::debug!("InputPrompt: Backspace pressed in file finder");
-                                Some(AppEvent::NewSessionBackspacePrompt)
-                            }
-                            KeyCode::Char(ch) => {
-                                tracing::debug!(
-                                    "InputPrompt: Character '{}' typed in file finder",
-                                    ch
-                                );
-                                Some(AppEvent::NewSessionInputPromptChar(ch))
-                            }
-                            _ => {
-                                tracing::debug!(
-                                    "InputPrompt: Unhandled key in file finder: {:?}",
-                                    key_event.code
-                                );
-                                None
-                            }
-                        }
-                    } else {
-                        // Normal prompt input handling
-                        match key_event.code {
-                            KeyCode::Esc => {
-                                tracing::debug!("InputPrompt: Escape pressed, cancelling session");
-                                Some(AppEvent::NewSessionCancel)
-                            }
-                            KeyCode::Enter => {
-                                tracing::debug!(
-                                    "InputPrompt: Enter detected, checking prompt validity"
-                                );
-                                // Check if prompt is not empty before proceeding
-                                if let Some(ref session_state) = state.new_session_state {
-                                    let prompt_string = session_state.boss_prompt.to_string();
-                                    let prompt_content = prompt_string.trim();
-                                    tracing::debug!(
-                                        "InputPrompt: Current prompt content: '{}' (length: {})",
-                                        prompt_content,
-                                        prompt_content.len()
-                                    );
-                                    if prompt_content.is_empty() {
-                                        tracing::warn!(
-                                            "InputPrompt: Prompt is empty, not proceeding"
-                                        );
-                                        None // Don't proceed if prompt is empty
-                                    } else {
-                                        tracing::info!(
-                                            "InputPrompt: Prompt is valid ({}), proceeding to permissions",
-                                            prompt_content.len()
-                                        );
-                                        Some(AppEvent::NewSessionProceedToPermissions)
-                                    }
-                                } else {
-                                    tracing::error!(
-                                        "InputPrompt: No session state found, cannot proceed"
-                                    );
-                                    None
-                                }
-                            }
-                            KeyCode::Char('j')
-                                if key_event.modifiers.contains(KeyModifiers::CONTROL) =>
-                            {
-                                tracing::debug!("InputPrompt: Ctrl+J pressed, inserting newline");
-                                Some(AppEvent::NewSessionInsertNewline)
-                            }
-                            KeyCode::Char('v')
-                                if key_event.modifiers.contains(KeyModifiers::CONTROL) =>
-                            {
-                                tracing::debug!(
-                                    "InputPrompt: Ctrl+V pressed, attempting to paste from clipboard"
-                                );
-                                // Try to get clipboard content
-                                match Self::get_clipboard_text() {
-                                    Ok(text) => {
-                                        tracing::debug!(
-                                            "InputPrompt: Successfully got clipboard text: {} chars",
-                                            text.len()
-                                        );
-                                        Some(AppEvent::NewSessionPasteText(text))
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            "InputPrompt: Failed to get clipboard content: {}",
-                                            e
-                                        );
-                                        None
-                                    }
-                                }
-                            }
-                            // Option key combinations for word movement and deletion (must come first)
-                            KeyCode::Left if key_event.modifiers.contains(KeyModifiers::ALT) => {
-                                tracing::debug!("InputPrompt: Option+Left - word left");
-                                Some(AppEvent::NewSessionCursorWordLeft)
-                            }
-                            KeyCode::Right if key_event.modifiers.contains(KeyModifiers::ALT) => {
-                                tracing::debug!("InputPrompt: Option+Right - word right");
-                                Some(AppEvent::NewSessionCursorWordRight)
-                            }
-                            KeyCode::Delete if key_event.modifiers.contains(KeyModifiers::ALT) => {
-                                tracing::debug!("InputPrompt: Option+Delete - delete word forward");
-                                Some(AppEvent::NewSessionDeleteWordForward)
-                            }
-                            KeyCode::Backspace
-                                if key_event.modifiers.contains(KeyModifiers::ALT) =>
-                            {
-                                tracing::debug!(
-                                    "InputPrompt: Option+Backspace - delete word backward"
-                                );
-                                Some(AppEvent::NewSessionDeleteWordBackward)
-                            }
-                            KeyCode::Backspace => {
-                                tracing::debug!("InputPrompt: Backspace pressed");
-                                Some(AppEvent::NewSessionBackspacePrompt)
-                            }
-                            // Arrow keys only for cursor movement (removed hjkl to allow typing those letters)
-                            KeyCode::Left => {
-                                tracing::debug!("InputPrompt: Cursor left");
-                                Some(AppEvent::NewSessionCursorLeft)
-                            }
-                            KeyCode::Right => {
-                                tracing::debug!("InputPrompt: Cursor right");
-                                Some(AppEvent::NewSessionCursorRight)
-                            }
-                            KeyCode::Up => {
-                                tracing::debug!("InputPrompt: Cursor up");
-                                Some(AppEvent::NewSessionCursorUp)
-                            }
-                            KeyCode::Down => {
-                                tracing::debug!("InputPrompt: Cursor down");
-                                Some(AppEvent::NewSessionCursorDown)
-                            }
-                            KeyCode::Char(ch) => {
-                                tracing::debug!("InputPrompt: Character '{}' typed", ch);
-                                Some(AppEvent::NewSessionInputPromptChar(ch))
-                            }
-                            _ => {
-                                tracing::debug!("InputPrompt: Unhandled key: {:?}", key_event.code);
-                                None
-                            }
-                        }
-                    }
-                }
-                NewSessionStep::ConfigurePermissions => {
-                    tracing::debug!(
-                        "ConfigurePermissions: Received key event: {:?}",
-                        key_event.code
-                    );
-                    match key_event.code {
-                        KeyCode::Esc => {
-                            tracing::debug!(
-                                "ConfigurePermissions: Escape pressed, cancelling session"
-                            );
-                            Some(AppEvent::NewSessionCancel)
-                        }
-                        KeyCode::Enter => {
-                            tracing::info!(
-                                "ConfigurePermissions: Enter pressed, creating new session"
-                            );
-                            Some(AppEvent::NewSessionCreate)
-                        }
-                        KeyCode::Char(' ') => {
-                            tracing::debug!(
-                                "ConfigurePermissions: Space pressed, toggling permissions"
-                            );
-                            Some(AppEvent::NewSessionTogglePermissions)
-                        }
-                        _ => {
-                            tracing::debug!(
-                                "ConfigurePermissions: Unhandled key: {:?}",
-                                key_event.code
-                            );
-                            None
-                        }
-                    }
-                }
-                NewSessionStep::Creating => {
-                    // During creation, only allow cancellation
-                    match key_event.code {
-                        KeyCode::Esc => Some(AppEvent::NewSessionCancel),
-                        _ => None,
-                    }
-                }
             }
         } else {
             None
@@ -2012,6 +1721,11 @@ impl EventHandler {
             KeyCode::Char('v') => return Some(AppEvent::ShowChangelog),
             KeyCode::Char('?') => return Some(AppEvent::ToggleHelp),
             KeyCode::Char('q') => return Some(AppEvent::Quit),
+            // Phase 4 (new-session redesign): `n` opens the unified picker
+            // directly from home. The spec's 90% flow is `n -> Enter` (2
+            // keystrokes) — previously users had to land on session-list
+            // first. See plans/new-session-redesign-spec.md flow 1.
+            KeyCode::Char('n') => return Some(AppEvent::NewSession),
             _ => {}
         }
 
@@ -2255,291 +1969,140 @@ impl EventHandler {
                 }
             }
             AppEvent::NewSession => {
-                // Mark for async processing - start new session with repo URL/path input
-                state.pending_async_action = Some(AsyncAction::NewSessionWithRepoInput);
+                // Phase 4 (new-session redesign): open the screen-1 unified
+                // picker synchronously. Initialise `pick_repo_state` from disk
+                // (favorites + session-defaults), set `step = PickRepo`, and
+                // route the user to the NEW_SESSION screen.
+                //
+                // Local-repo paths come from the already-loaded `state.workspaces`
+                // (populated async by `load_real_workspaces` on startup).
+                // Calling `WorkspaceScanner::scan()` here would block the event
+                // loop on slow filesystems — Stevie hit a freeze on first `n`
+                // when this was synchronous (2026-05-22).
+                //
+                // Track `previous_screen` so Esc on PickRepo returns to wherever
+                // the user invoked `n` from (Home, Sessions, etc.) rather than
+                // hardcoding HOME.
+                use crate::components::new_session::pick_repo::PickRepoState;
+                let local_paths: Vec<std::path::PathBuf> = state
+                    .workspaces
+                    .iter()
+                    .map(|w| std::path::PathBuf::from(&w.path))
+                    .collect();
+                let ns = crate::app::state::NewSessionState {
+                    step: crate::app::state::NewSessionStep::PickRepo,
+                    pick_repo_state: Some(PickRepoState::from_disk(&local_paths)),
+                    ..Default::default()
+                };
+                state.new_session_state = Some(ns);
+                state.previous_screen = Some(state.current_screen.clone());
+                state.current_screen =
+                    crate::app::screens::ids::NEW_SESSION.to_string();
+                tracing::debug!(
+                    previous = %state.previous_screen.as_deref().unwrap_or(""),
+                    "AppEvent::NewSession -> PickRepo opened"
+                );
             }
             AppEvent::SearchWorkspace => {
-                // Don't overwrite pending DeleteSession actions
-                if let Some(AsyncAction::DeleteSession(_)) = state.pending_async_action {
-                    return;
-                }
-
-                // Mark for async processing - search all workspaces
-                state.pending_async_action = Some(AsyncAction::StartWorkspaceSearch);
-                // Clear any previous cancellation flag
-                state.async_operation_cancelled = false;
+                // Phase 6 (new-session redesign): SearchWorkspace is a no-op —
+                // the legacy workspace-search flow was wired to the deleted
+                // `SelectRepo` step. The redesigned PickRepo screen absorbed
+                // that role; nothing in the host should fire this anymore.
+                tracing::debug!("AppEvent::SearchWorkspace: legacy no-op (Phase 6)");
             }
             AppEvent::NewSessionCancel => {
                 state.cancel_new_session();
             }
-            // Source selection events (Local vs Remote)
-            AppEvent::SourceSelectionToggle => {
-                state.new_session_toggle_source();
-            }
-            AppEvent::SourceSelectionConfirm => {
-                state.new_session_proceed_from_source();
-            }
-            AppEvent::SourceQuickSelectLocal => {
-                state.new_session_quick_select_local();
-            }
-            AppEvent::SourceQuickSelectRemote => {
-                state.new_session_quick_select_remote();
-            }
-            AppEvent::SourceQuickSelectSsh => {
-                state.new_session_quick_select_ssh();
-            }
-            AppEvent::SourceQuickSelectFavorites => {
-                state.new_session_quick_select_favorites();
-            }
-            // Favorites picker events (SelectFavorite step)
-            AppEvent::FavoriteSelectNext => {
-                state.favorite_select_next();
-            }
-            AppEvent::FavoriteSelectPrev => {
-                state.favorite_select_prev();
-            }
-            AppEvent::FavoriteSelectConfirm => {
-                state.favorite_select_confirm();
-            }
-            AppEvent::FavoriteGoBack => {
-                state.favorite_go_back();
-            }
-            AppEvent::FavoriteDelete => {
-                state.favorite_delete();
-            }
-            // Inline favorites events (in InputRepoSource)
-            AppEvent::RepoInputFavoriteNext => {
-                state.repo_input_favorite_next();
-            }
-            AppEvent::RepoInputFavoritePrev => {
-                state.repo_input_favorite_prev();
-            }
-            AppEvent::RepoInputSelectFavorite => {
-                state.repo_input_select_favorite();
-            }
-            AppEvent::RepoInputToggleFavorite => {
-                state.repo_input_toggle_favorite();
-            }
-            AppEvent::LocalRepoToggleFavorite => {
-                state.local_repo_toggle_favorite();
-            }
-            AppEvent::SourceSelectionToggleReverse => {
-                state.new_session_toggle_source_reverse();
-            }
-            // Repo input events
-            AppEvent::RepoInputChar(ch) => {
-                state.repo_input_update(ch);
-            }
-            AppEvent::RepoInputBackspace => {
-                state.repo_input_backspace();
-            }
-            AppEvent::RepoInputBackspaceWord => {
-                state.repo_input_backspace_word();
-            }
-            AppEvent::RepoInputPasteText(text) => {
-                state.repo_input_paste_text(&text);
-            }
-            AppEvent::RepoInputSubmit => {
-                tracing::info!("Event: RepoInputSubmit - validating repo source");
-                state.pending_async_action = Some(AsyncAction::ValidateRepoSource);
-            }
-            // Branch selection events
-            AppEvent::BranchSelectNext => {
-                state.branch_select_next();
-            }
-            AppEvent::BranchSelectPrev => {
-                state.branch_select_prev();
-            }
-            AppEvent::BranchSelectConfirm => {
-                tracing::info!("Event: BranchSelectConfirm - cloning repo");
-                state.pending_async_action = Some(AsyncAction::CloneRemoteRepo);
-            }
-            AppEvent::BranchSelectBack => {
-                state.branch_select_back();
-            }
-            AppEvent::BranchFilterInput(ch) => {
-                state.branch_filter_update(ch);
-            }
-            AppEvent::BranchFilterBackspace => {
-                state.branch_filter_backspace();
-            }
-            AppEvent::BranchToggleCheckoutMode => {
-                if let Some(ref mut session_state) = state.new_session_state {
-                    session_state.toggle_branch_checkout_mode();
-                }
-            }
-            AppEvent::NewSessionNextRepo => state.new_session_next_repo(),
-            AppEvent::NewSessionPrevRepo => state.new_session_prev_repo(),
-            AppEvent::NewSessionConfirmRepo => {
-                tracing::info!("Event: NewSessionConfirmRepo");
-                state.new_session_confirm_repo();
-            }
-            AppEvent::NewSessionInputChar(ch) => {
-                tracing::debug!("Event: NewSessionInputChar({})", ch);
-                state.new_session_update_branch(ch);
-            }
-            AppEvent::NewSessionInputPasteText(text) => {
-                tracing::debug!("Event: NewSessionInputPasteText({} chars)", text.len());
-                state.new_session_input_paste_text(&text);
-            }
-            AppEvent::NewSessionBackspace => {
-                tracing::debug!("Event: NewSessionBackspace");
-                state.new_session_backspace();
-            }
-            AppEvent::NewSessionBackspaceWord => {
-                tracing::debug!("Event: NewSessionBackspaceWord");
-                state.new_session_backspace_word();
-            }
-            AppEvent::NewSessionProceedToModeSelection => {
-                tracing::info!("Event: NewSessionProceedToModeSelection");
-                state.new_session_proceed_to_mode_selection();
-            }
-            AppEvent::NewSessionToggleMode => {
-                tracing::info!("Event: NewSessionToggleMode");
-                state.new_session_toggle_mode();
-            }
-            AppEvent::NewSessionProceedFromMode => {
-                tracing::info!("Event: NewSessionProceedFromMode");
-                state.new_session_proceed_from_mode();
-            }
-            AppEvent::NewSessionInputPromptChar(ch) => state.new_session_add_char_to_prompt(ch),
-            AppEvent::NewSessionBackspacePrompt => state.new_session_backspace_prompt(),
-            AppEvent::NewSessionInsertNewline => state.new_session_insert_newline(),
-            AppEvent::NewSessionPasteText(text) => state.new_session_paste_text(text),
-            AppEvent::NewSessionCursorLeft => state.new_session_move_cursor_left(),
-            AppEvent::NewSessionCursorRight => state.new_session_move_cursor_right(),
-            AppEvent::NewSessionCursorUp => state.new_session_move_cursor_up(),
-            AppEvent::NewSessionCursorDown => state.new_session_move_cursor_down(),
-            AppEvent::NewSessionCursorLineStart => state.new_session_move_to_line_start(),
-            AppEvent::NewSessionCursorLineEnd => state.new_session_move_to_line_end(),
-            // Word movement and deletion events
-            AppEvent::NewSessionCursorWordLeft => state.new_session_move_cursor_word_left(),
-            AppEvent::NewSessionCursorWordRight => state.new_session_move_cursor_word_right(),
-            AppEvent::NewSessionDeleteWordForward => state.new_session_delete_word_forward(),
-            AppEvent::NewSessionDeleteWordBackward => state.new_session_delete_word_backward(),
-            AppEvent::NewSessionProceedToPermissions => {
-                tracing::info!("Processing NewSessionProceedToPermissions event");
-                state.new_session_proceed_to_permissions();
-            }
-            AppEvent::NewSessionTogglePermissions => state.new_session_toggle_permissions(),
-            AppEvent::NewSessionCreate => {
-                tracing::info!("Processing NewSessionCreate event - queueing async action");
-                // Mark for async processing
-                state.pending_async_action = Some(AsyncAction::CreateNewSession);
-            }
-            // Agent selection events (new session flow)
-            AppEvent::NewSessionAgentNext => {
-                tracing::debug!("Event: NewSessionAgentNext");
-                state.new_session_next_agent();
-            }
-            AppEvent::NewSessionAgentPrev => {
-                tracing::debug!("Event: NewSessionAgentPrev");
-                state.new_session_prev_agent();
-            }
-            AppEvent::NewSessionAgentSelect => {
-                tracing::info!("Event: NewSessionAgentSelect");
-                let shell_selected = state.new_session_select_agent();
-                if shell_selected {
-                    // Shell was selected - find or create workspace and open shell
-                    if let Some(ref session_state) = state.new_session_state {
-                        if let Some(repo_path) = session_state.get_selected_repo_path() {
-                            tracing::info!("Opening shell in workspace: {:?}", repo_path);
-
-                            // Find the workspace index for this repo
-                            let workspace_idx =
-                                state.workspaces.iter().position(|w| w.path == repo_path);
-
-                            if let Some(idx) = workspace_idx {
-                                state.pending_async_action =
-                                    Some(AsyncAction::OpenWorkspaceShell {
-                                        workspace_index: idx,
-                                        target_dir: None, // Open in workspace root
-                                    });
-                            } else {
-                                state.add_warning_notification("Workspace not found".to_string());
-                            }
-                        }
-                    }
-                    state.new_session_state = None;
-                    state.current_screen = crate::app::screens::ids::SESSION_LIST.to_string();
-                }
-            }
-            AppEvent::NewSessionOpenShell => {
-                tracing::info!("Event: NewSessionOpenShell - opening shell at repo path");
-                // Open shell directly at the repo path (no worktree, no workspace required)
-                if let Some(ref session_state) = state.new_session_state {
-                    if let Some(repo_path) = session_state.get_selected_repo_path() {
-                        tracing::info!("Opening shell directly at: {:?}", repo_path);
-                        state.pending_async_action = Some(AsyncAction::OpenShellAtPath(repo_path));
+            AppEvent::ConfigureBack => {
+                // Phase 5: Esc on Configure persists the half-typed prompt to
+                // session-defaults so it's restored on re-entry, then routes
+                // the user back to PickRepo without losing the highlighted
+                // row. Persistence error is non-fatal (best-effort).
+                use crate::app::state::NewSessionStep;
+                use crate::config::session_defaults::SessionDefaults;
+                let (repo_label, prompt_text) = state
+                    .new_session_state
+                    .as_ref()
+                    .and_then(|ns| ns.configure_state.as_ref())
+                    .map(|cfg| (cfg.repo_label.clone(), cfg.prompt.to_string()))
+                    .unwrap_or_default();
+                if !repo_label.is_empty() {
+                    let path = SessionDefaults::default_path();
+                    let mut defaults = SessionDefaults::load_from(&path);
+                    let entry = defaults
+                        .per_repo
+                        .entry(repo_label.clone())
+                        .or_default();
+                    entry.last_prompt = if prompt_text.is_empty() {
+                        None
                     } else {
-                        state.add_warning_notification("No repository selected".to_string());
+                        Some(prompt_text)
+                    };
+                    if let Err(err) = defaults.save_to(&path) {
+                        tracing::warn!(error = %err, "ConfigureBack: persist failed");
+                    }
+                    // Refresh PickRepo's in-memory snapshot so a later Enter
+                    // on PickRepo doesn't clobber the prompt we just wrote.
+                    // The picker carries its own `defaults` copy from open
+                    // time; mutations elsewhere are invisible to it.
+                    if let Some(pick) = state
+                        .new_session_state
+                        .as_mut()
+                        .and_then(|ns| ns.pick_repo_state.as_mut())
+                    {
+                        pick.defaults = defaults;
                     }
                 }
-                state.new_session_state = None;
-                state.current_screen = crate::app::screens::ids::SESSION_LIST.to_string();
-            }
-            // SSH configuration events
-            AppEvent::NewSessionSshNextField => {
-                tracing::debug!("Event: NewSessionSshNextField");
-                state.new_session_ssh_next_field();
-            }
-            AppEvent::NewSessionSshPrevField => {
-                tracing::debug!("Event: NewSessionSshPrevField");
-                state.new_session_ssh_prev_field();
-            }
-            AppEvent::NewSessionSshInputChar(ch) => {
-                tracing::debug!("Event: NewSessionSshInputChar({})", ch);
-                state.new_session_ssh_input_char(ch);
-            }
-            AppEvent::NewSessionSshPasteText(text) => {
-                tracing::debug!("Event: NewSessionSshPasteText({} chars)", text.len());
-                state.new_session_ssh_paste_text(&text);
-            }
-            AppEvent::NewSessionSshBackspace => {
-                tracing::debug!("Event: NewSessionSshBackspace");
-                state.new_session_ssh_backspace();
-            }
-            AppEvent::NewSessionSshConfirm => {
-                tracing::info!("Event: NewSessionSshConfirm");
-                let ready = state.new_session_ssh_confirm();
-                if ready {
-                    // SSH session ready to create - queue async action
-                    tracing::info!("SSH configuration confirmed, creating SSH session");
-                    state.pending_async_action = Some(AsyncAction::CreateSshSession);
+                if let Some(ns) = state.new_session_state.as_mut() {
+                    ns.configure_state = None;
+                    ns.step = NewSessionStep::PickRepo;
                 }
             }
-            AppEvent::NewSessionSshGoBack => {
-                tracing::debug!("Event: NewSessionSshGoBack");
-                state.new_session_ssh_go_back();
+            AppEvent::ConfigureLaunch(spec) => {
+                // Phase 6 (new-session redesign): persist launch into
+                // session-defaults BEFORE the async dispatch so tripwires
+                // observe the YAML mutation synchronously, transition to the
+                // Creating step so the legacy render dispatcher draws the
+                // in-flight banner, then fire
+                // `AsyncAction::CreateSessionFromConfigure` — the new
+                // configure-state-aware sibling of `CreateNewSession`.
+                //
+                // The `LaunchSpec` payload is the same one the Configure
+                // component built (finding #7); we use it as the single
+                // source of truth instead of reaching back into
+                // `configure_state` a second time.
+                use crate::config::session_defaults::SessionDefaults;
+                let path = SessionDefaults::default_path();
+                let mut defaults = SessionDefaults::load_from(&path);
+                let (st, src) = source_provenance(&spec.repo_source);
+                let branch_override = spec.branch_override();
+                defaults.record_launch(
+                    &spec.repo_label,
+                    &spec.preset_name,
+                    branch_override.as_deref(),
+                    spec.prompt.as_deref(),
+                    st,
+                    src.as_deref(),
+                );
+                if let Err(err) = defaults.save_to(&path) {
+                    tracing::warn!(error = %err, "ConfigureLaunch: persist failed");
+                }
+                // Move into the Creating step so the in-flight UI is shown
+                // until the async create resolves. Keep `configure_state`
+                // intact — `create_session_from_configure` reads it.
+                if let Some(ns) = state.new_session_state.as_mut() {
+                    ns.step = crate::app::state::NewSessionStep::Creating;
+                }
+                state.pending_async_action =
+                    Some(AsyncAction::CreateSessionFromConfigure(spec));
+            }
+            AppEvent::ConfigureOpenPresetManager => {
+                // Phase 7 polish — stub for now.
+                tracing::warn!("ConfigureOpenPresetManager — stub until Phase 7");
             }
             AppEvent::ShowNotification(message) => {
                 tracing::info!("Event: ShowNotification - {}", message);
                 state.add_warning_notification(message);
-            }
-            // Model selection events (new session flow - for Claude agent)
-            AppEvent::NewSessionModelNext => {
-                tracing::debug!("Event: NewSessionModelNext");
-                state.new_session_next_model();
-            }
-            AppEvent::NewSessionModelPrev => {
-                tracing::debug!("Event: NewSessionModelPrev");
-                state.new_session_prev_model();
-            }
-            AppEvent::NewSessionToggleAgentModelFocus => {
-                tracing::debug!("Event: NewSessionToggleAgentModelFocus");
-                state.new_session_toggle_agent_model_focus();
-            }
-            AppEvent::SearchWorkspaceInputChar(ch) => {
-                if let Some(ref mut session_state) = state.new_session_state {
-                    session_state.filter_text.push(ch);
-                    session_state.apply_filter();
-                }
-            }
-            AppEvent::SearchWorkspaceBackspace => {
-                if let Some(ref mut session_state) = state.new_session_state {
-                    session_state.filter_text.pop();
-                    session_state.apply_filter();
-                }
             }
             AppEvent::AttachSession => {
                 if let Some(session_id) = state.get_selected_session_id() {
@@ -3040,45 +2603,15 @@ impl EventHandler {
                     );
                 }
             }
-            // File finder events
-            AppEvent::FileFinderNavigateUp => {
-                if let Some(ref mut session_state) = state.new_session_state {
-                    session_state.file_finder.move_selection_up();
-                }
-            }
-            AppEvent::FileFinderNavigateDown => {
-                if let Some(ref mut session_state) = state.new_session_state {
-                    session_state.file_finder.move_selection_down();
-                }
-            }
-            AppEvent::FileFinderSelectFile => {
-                if let Some(ref mut session_state) = state.new_session_state {
-                    if let Some(selected_file) = session_state.file_finder.get_selected_file() {
-                        // Replace @query with the selected file path
-                        let file_path = &selected_file.relative_path;
-                        let at_pos = session_state.file_finder.at_symbol_position;
-                        let query_end_pos = at_pos + 1 + session_state.file_finder.query.len();
-
-                        // Construct new prompt by replacing @query with file path
-                        let current_text = session_state.boss_prompt.to_string();
-                        let mut new_prompt =
-                            String::with_capacity(current_text.len() + file_path.len());
-                        new_prompt.push_str(&current_text[..at_pos]);
-                        new_prompt.push_str(file_path);
-                        if query_end_pos < current_text.len() {
-                            new_prompt.push_str(&current_text[query_end_pos..]);
-                        }
-
-                        session_state.boss_prompt =
-                            crate::app::state::TextEditor::from_string(&new_prompt);
-                        session_state.file_finder.deactivate();
-                    }
-                }
-            }
-            AppEvent::FileFinderCancel => {
-                if let Some(ref mut session_state) = state.new_session_state {
-                    session_state.file_finder.deactivate();
-                }
+            // Phase 6 (new-session redesign): the FileFinder events (@-trigger
+            // for the legacy Boss-prompt textarea) have been removed. The new
+            // Configure screen owns its own prompt textarea and doesn't host
+            // the @-finder yet — Phase 7 polish will reintroduce it if needed.
+            AppEvent::FileFinderNavigateUp
+            | AppEvent::FileFinderNavigateDown
+            | AppEvent::FileFinderSelectFile
+            | AppEvent::FileFinderCancel => {
+                tracing::debug!("FileFinder event in NewSession: legacy no-op (Phase 6)");
             }
             // Git view events
             AppEvent::ShowGitView => {
@@ -3405,7 +2938,13 @@ impl EventHandler {
                             crate::git::RepositoryManager::open(&workspace.path)
                         {
                             if let Ok(Some(remote_url)) = git_repo.get_remote_url() {
-                                // Parse the remote URL to get owner/repo
+                                // Parse the remote URL to get owner/repo.
+                                // `from_input` is deprecated for new
+                                // free-form input (finding #14), but the
+                                // URL here is already validated by
+                                // `get_remote_url()` so the legacy
+                                // fallible contract is fine.
+                                #[allow(deprecated)]
                                 if let Ok(repo_source) =
                                     crate::git::RepoSource::from_input(&remote_url)
                                 {
@@ -5040,86 +4579,14 @@ mod text_input_guard_tests {
     use crate::app::screens::ids as screen_ids;
     use crate::app::state::{AppState, NewSessionState, NewSessionStep};
 
-    fn state_in_repo_input() -> AppState {
-        let mut state = AppState::default();
-        state.current_screen = screen_ids::NEW_SESSION.to_string();
-        state.new_session_state = Some(NewSessionState {
-            step: NewSessionStep::InputRepoSource,
-            ..NewSessionState::default()
-        });
-        state
-    }
-
-    fn dispatch(state: &mut AppState, key: KeyEvent) {
-        if let Some(evt) = EventHandler::handle_key_event(key, state) {
-            EventHandler::process_event(evt, state);
-        }
-    }
-
+    // Phase 6 (new-session redesign): the three legacy `InputRepoSource`
+    // paste/keystroke regression tests were removed along with the step
+    // itself. PickRepo and Configure own their own paste handling
+    // component-locally; the cross-component "no global shortcut steals a
+    // char" invariant is still covered by `is_text_input_context_covers_*`
+    // tests below.
     fn char_key(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
-    }
-
-    /// Reproduces the exact bug from the screenshot: paste arrives as
-    /// individual key events (tmux stripped bracketed paste), but every
-    /// char must still land in the field.
-    #[test]
-    fn paste_as_key_events_preserves_full_repo_input() {
-        let mut state = state_in_repo_input();
-        let pasted = "SHOTClubhouse/SHOTid";
-
-        for ch in pasted.chars() {
-            dispatch(&mut state, char_key(ch));
-        }
-
-        let ns = state.new_session_state.as_ref().expect("session state");
-        assert_eq!(
-            ns.repo_input, pasted,
-            "paste delivered as key events must preserve every char"
-        );
-        assert!(
-            !state.help_visible,
-            "Shift+H inside a text input must NOT toggle help"
-        );
-    }
-
-    /// Bracketed paste path: a single `Event::Paste` is routed through
-    /// `handle_paste_event` to `RepoInputPasteText`. Must produce the
-    /// same final field value as the key-event path above.
-    #[test]
-    fn paste_as_paste_event_matches_key_event_path() {
-        let mut state = state_in_repo_input();
-        let pasted = "SHOTClubhouse/SHOTid";
-
-        let evt = EventHandler::handle_paste_event(pasted.to_string(), &state)
-            .expect("InputRepoSource must dispatch RepoInputPasteText");
-        EventHandler::process_event(evt, &mut state);
-
-        let ns = state.new_session_state.as_ref().expect("session state");
-        assert_eq!(ns.repo_input, pasted);
-    }
-
-    /// Every printable ASCII char, fed as a bare `KeyCode::Char`, must
-    /// land in the field. This is the broad invariant: no future global
-    /// shortcut may regress a single character.
-    #[test]
-    fn every_printable_ascii_char_lands_in_field() {
-        let mut state = state_in_repo_input();
-        let expected: String = (0x20u8..=0x7E).map(char::from).collect();
-
-        for ch in expected.chars() {
-            dispatch(&mut state, char_key(ch));
-        }
-
-        let ns = state.new_session_state.as_ref().expect("session state");
-        assert_eq!(
-            ns.repo_input, expected,
-            "every printable ASCII char must reach repo_input — no global shortcut may steal one"
-        );
-        assert!(
-            !state.help_visible,
-            "no char in [0x20..0x7E] may toggle the help overlay in a text input"
-        );
     }
 
     /// Outside any text input, `Shift+H` must still toggle the global
@@ -5154,10 +4621,16 @@ mod text_input_guard_tests {
     /// Esc inside a text input while help is visible must close help,
     /// NOT fall through to the view's cancel handler (which would close
     /// the form). Reachable when the user opens help from HomeScreen
-    /// then navigates into a text-entry view.
+    /// then navigates into a text-entry view. Phase 6 (new-session
+    /// redesign) updates this to use the PickRepo step.
     #[test]
     fn esc_closes_help_inside_text_input_without_cancelling_form() {
-        let mut state = state_in_repo_input();
+        let mut state = AppState::default();
+        state.current_screen = screen_ids::NEW_SESSION.to_string();
+        state.new_session_state = Some(NewSessionState {
+            step: NewSessionStep::PickRepo,
+            ..NewSessionState::default()
+        });
         state.help_visible = true;
 
         let evt = EventHandler::handle_key_event(
@@ -5331,15 +4804,14 @@ mod text_input_guard_tests {
     }
 
     /// `is_text_input_context` must return true for every text-entry
-    /// step of the NewSession screen and false for the non-text steps.
+    /// step of the NewSession screen. Phase 6 (new-session redesign):
+    /// the legacy 13-step flow was retired — only PickRepo (smart-parse
+    /// filter) and Configure (Boss-mode prompt) accept free-form chars
+    /// and must therefore be treated as text-input contexts. The
+    /// `Creating` step is a render-only spinner with no text entry.
     #[test]
     fn is_text_input_context_covers_new_session_text_steps() {
-        let text_steps = [
-            NewSessionStep::InputRepoSource,
-            NewSessionStep::InputBranch,
-            NewSessionStep::InputPrompt,
-            NewSessionStep::ConfigureSsh,
-        ];
+        let text_steps = [NewSessionStep::PickRepo, NewSessionStep::Configure];
         for step in &text_steps {
             let mut state = AppState::default();
             state.current_screen = screen_ids::NEW_SESSION.to_string();
@@ -5354,16 +4826,17 @@ mod text_input_guard_tests {
             );
         }
 
-        // Sanity: at least one non-text step is NOT a text input.
+        // Sanity: the Creating step is a render-only spinner and must
+        // NOT be treated as a text-input context.
         let mut state = AppState::default();
         state.current_screen = screen_ids::NEW_SESSION.to_string();
         state.new_session_state = Some(NewSessionState {
-            step: NewSessionStep::SelectAgent,
+            step: NewSessionStep::Creating,
             ..NewSessionState::default()
         });
         assert!(
             !EventHandler::is_text_input_context(&state),
-            "SelectAgent is a navigable step, not a text input"
+            "Creating is render-only, not a text input"
         );
     }
 }

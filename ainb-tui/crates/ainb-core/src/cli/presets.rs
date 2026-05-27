@@ -284,6 +284,7 @@ fn build_new_preset(
         description: description.unwrap_or_default(),
         agent_provider: provider.unwrap_or(defaults.agent_provider),
         agent_model: model.unwrap_or(defaults.agent_model),
+        mode: defaults.mode,
         skills: Vec::new(),
         plugins: Vec::new(),
         permissions: PermissionSet::default(),
@@ -347,27 +348,28 @@ mod tests {
     // --- is_builtin_name ---
 
     #[test]
-    fn test_is_builtin_name_matches_defaults() {
-        assert!(is_builtin_name("rust-backend"));
-        assert!(is_builtin_name("typescript-frontend"));
-        assert!(is_builtin_name("fast-iteration"));
+    fn test_is_builtin_name_matches_shipped_defaults() {
+        assert!(is_builtin_name("claude-interactive-yolo"));
+        assert!(is_builtin_name("codex-interactive-yolo"));
     }
 
     #[test]
     fn test_is_builtin_name_rejects_custom() {
         assert!(!is_builtin_name("my-custom-preset"));
         assert!(!is_builtin_name(""));
-        assert!(!is_builtin_name("Rust-Backend"));
+        // Old (no-longer-shipped) names are NOT built-in anymore.
+        assert!(!is_builtin_name("rust-backend"));
+        assert!(!is_builtin_name("typescript-frontend"));
+        assert!(!is_builtin_name("fast-iteration"));
     }
 
     // --- create_default_presets surface ---
 
     #[test]
-    fn test_default_presets_contain_expected_names() {
+    fn test_default_presets_contain_shipped_names() {
         let names: Vec<String> = create_default_presets().into_iter().map(|p| p.name).collect();
-        assert!(names.contains(&"rust-backend".to_string()));
-        assert!(names.contains(&"typescript-frontend".to_string()));
-        assert!(names.contains(&"fast-iteration".to_string()));
+        assert!(names.contains(&"claude-interactive-yolo".to_string()));
+        assert!(names.contains(&"codex-interactive-yolo".to_string()));
     }
 
     // --- build_new_preset ---
@@ -415,15 +417,17 @@ mod tests {
     #[test]
     fn test_apply_preset_round_trip_via_load_repo_preset() {
         let dir = tempdir().unwrap();
-        let original =
-            create_default_presets().into_iter().find(|p| p.name == "rust-backend").unwrap();
+        let original = create_default_presets()
+            .into_iter()
+            .find(|p| p.name == "claude-interactive-yolo")
+            .expect("claude-interactive-yolo ships as a built-in default");
 
         apply_preset_to_dir(&original, dir.path()).unwrap();
 
         let loaded = PresetManager::load_repo_preset(dir.path())
             .unwrap()
             .expect("preset.toml should be loadable");
-        assert_eq!(loaded.name, "rust-backend");
+        assert_eq!(loaded.name, "claude-interactive-yolo");
         assert_eq!(loaded.agent_provider, original.agent_provider);
         assert_eq!(loaded.agent_model, original.agent_model);
         assert_eq!(loaded.skills, original.skills);
@@ -464,10 +468,12 @@ mod tests {
 
     #[test]
     fn test_format_preset_text_mentions_builtin_tag() {
-        let preset =
-            create_default_presets().into_iter().find(|p| p.name == "rust-backend").unwrap();
+        let preset = create_default_presets()
+            .into_iter()
+            .find(|p| p.name == "claude-interactive-yolo")
+            .expect("claude-interactive-yolo ships as a built-in default");
         let text = format_preset_text(&preset, true);
-        assert!(text.contains("rust-backend"));
+        assert!(text.contains("claude-interactive-yolo"));
         assert!(text.contains("built-in"));
         assert!(text.contains("Provider:"));
         assert!(text.contains("Model:"));
@@ -514,14 +520,14 @@ mod tests {
     #[test]
     fn test_list_entry_json_schema() {
         let entry = PresetListEntry {
-            name: "rust-backend".to_string(),
+            name: "claude-interactive-yolo".to_string(),
             description: "desc".to_string(),
             provider: "claude".to_string(),
-            model: "sonnet".to_string(),
+            model: "opus".to_string(),
             builtin: true,
         };
         let json = serde_json::to_string(&entry).unwrap();
-        assert!(json.contains("\"name\":\"rust-backend\""));
+        assert!(json.contains("\"name\":\"claude-interactive-yolo\""));
         assert!(json.contains("\"builtin\":true"));
         assert!(json.contains("\"provider\":\"claude\""));
     }
@@ -535,6 +541,7 @@ mod tests {
             description: "d".to_string(),
             agent_provider: "codex".to_string(),
             agent_model: "opus".to_string(),
+            mode: Default::default(),
             skills: Vec::new(),
             plugins: Vec::new(),
             permissions: PermissionSet::default(),
@@ -556,9 +563,9 @@ mod tests {
         // PresetManager::new() loads real ~/.agents-in-a-box/presets,
         // but resolve_preset checks built-ins first so this is stable.
         if let Ok(manager) = PresetManager::new() {
-            let (preset, builtin) = resolve_preset(&manager, "rust-backend").unwrap();
+            let (preset, builtin) = resolve_preset(&manager, "claude-interactive-yolo").unwrap();
             assert!(builtin);
-            assert_eq!(preset.name, "rust-backend");
+            assert_eq!(preset.name, "claude-interactive-yolo");
         }
     }
 
