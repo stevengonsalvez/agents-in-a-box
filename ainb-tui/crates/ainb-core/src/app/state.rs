@@ -4663,6 +4663,48 @@ impl AppState {
         }
     }
 
+    /// Handle mouse-wheel or trackpad scrolling over the sessions screen.
+    ///
+    /// Returns true when the scroll was consumed by session-list navigation.
+    /// Returns false when the caller should preserve the existing live-log
+    /// scroll behavior.
+    pub fn scroll_session_list_by_mouse(
+        &mut self,
+        x: u16,
+        y: u16,
+        is_down: bool,
+        steps: usize,
+    ) -> bool {
+        if self.current_screen != screen_ids::SESSION_LIST || self.help_visible {
+            return false;
+        }
+
+        if self.sessions_pane_state.contains_preview_point(x, y) {
+            self.focused_pane = FocusedPane::LiveLogs;
+            return false;
+        }
+
+        let over_sessions = self.sessions_pane_state.contains_sessions_point(x, y)
+            && !self.sessions_pane_state.collapsed;
+        let should_scroll_sessions =
+            over_sessions || matches!(self.focused_pane, FocusedPane::Sessions);
+
+        if !should_scroll_sessions {
+            return false;
+        }
+
+        self.focused_pane = FocusedPane::Sessions;
+        for _ in 0..steps.max(1) {
+            if is_down {
+                self.next_session();
+            } else {
+                self.previous_session();
+            }
+        }
+        self.last_preview_update = None;
+        true
+    }
+
     pub fn session_list_row_target(&self, row_index: usize) -> Option<SessionListRowTarget> {
         let mut current_row = 0usize;
 

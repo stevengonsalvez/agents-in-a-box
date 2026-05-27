@@ -487,6 +487,15 @@ async fn run_tui_loop(
                                         app.state.log_history_state.scroll_up_by(SCROLL_LINES);
                                     }
                                 }
+                            } else if app.state.current_screen == screen_ids::SESSION_LIST
+                                && app.state.scroll_session_list_by_mouse(
+                                    mouse_event.column,
+                                    mouse_event.row,
+                                    is_down,
+                                    SCROLL_LINES,
+                                )
+                            {
+                                // Session-list scrolling was handled in-memory.
                             } else {
                                 // Default: scroll live logs
                                 if is_down {

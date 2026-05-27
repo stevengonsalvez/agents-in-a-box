@@ -2,6 +2,7 @@
 
 use ainb::app::events::AppEvent;
 use ainb::app::screens::ids as screen_ids;
+use ainb::app::state::FocusedPane;
 use ainb::app::{AppState, EventHandler};
 use ainb::models::{Session, Workspace};
 use ratatui::layout::Rect;
@@ -9,7 +10,7 @@ use std::sync::Mutex;
 
 static HOME_LOCK: Mutex<()> = Mutex::new(());
 
-fn state_with_two_sessions() -> (tempfile::TempDir, AppState) {
+fn state_with_sessions(count: usize) -> (tempfile::TempDir, AppState) {
     let temp_home = tempfile::tempdir().expect("temp home");
     std::env::set_var("HOME", temp_home.path());
 
@@ -19,8 +20,12 @@ fn state_with_two_sessions() -> (tempfile::TempDir, AppState) {
     state.selected_session_index = Some(0);
 
     let mut workspace = Workspace::new("repo".to_string(), "/tmp/repo".into());
-    workspace.add_session(Session::new("one".to_string(), "/tmp/repo".to_string()));
-    workspace.add_session(Session::new("two".to_string(), "/tmp/repo".to_string()));
+    for index in 0..count {
+        workspace.add_session(Session::new(
+            format!("session-{}", index + 1),
+            "/tmp/repo".to_string(),
+        ));
+    }
     state.workspaces = vec![workspace];
 
     state
@@ -29,6 +34,10 @@ fn state_with_two_sessions() -> (tempfile::TempDir, AppState) {
     state.sessions_pane_state.set_list_scroll_offset(0);
 
     (temp_home, state)
+}
+
+fn state_with_two_sessions() -> (tempfile::TempDir, AppState) {
+    state_with_sessions(2)
 }
 
 #[test]
@@ -114,4 +123,44 @@ fn sessions_mouse_toggle_collapses_and_expands_sidebar() {
     let config = std::fs::read_to_string(home.path().join(".agents-in-a-box/config/config.toml"))
         .expect("persisted config");
     assert!(config.contains("sessions_sidebar_collapsed = false"));
+}
+
+#[test]
+fn sessions_mouse_wheel_down_over_sessions_moves_selection() {
+    let _guard = HOME_LOCK.lock().expect("home env lock");
+    let (_home, mut state) = state_with_sessions(5);
+
+    let handled = state.scroll_session_list_by_mouse(8, 6, true, 3);
+
+    assert!(handled);
+    assert_eq!(state.focused_pane, FocusedPane::Sessions);
+    assert_eq!(state.selected_session_index, Some(3));
+    assert!(state.pending_async_action.is_some());
+}
+
+#[test]
+fn sessions_mouse_wheel_up_over_sessions_moves_selection() {
+    let _guard = HOME_LOCK.lock().expect("home env lock");
+    let (_home, mut state) = state_with_sessions(5);
+    state.selected_session_index = Some(3);
+
+    let handled = state.scroll_session_list_by_mouse(8, 6, false, 2);
+
+    assert!(handled);
+    assert_eq!(state.focused_pane, FocusedPane::Sessions);
+    assert_eq!(state.selected_session_index, Some(1));
+}
+
+#[test]
+fn sessions_mouse_wheel_over_preview_preserves_log_scroll_path() {
+    let _guard = HOME_LOCK.lock().expect("home env lock");
+    let (_home, mut state) = state_with_sessions(5);
+    state.focused_pane = FocusedPane::Sessions;
+
+    let handled = state.scroll_session_list_by_mouse(50, 6, true, 3);
+
+    assert!(!handled);
+    assert_eq!(state.focused_pane, FocusedPane::LiveLogs);
+    assert_eq!(state.selected_session_index, Some(0));
+    assert!(state.pending_async_action.is_none());
 }
