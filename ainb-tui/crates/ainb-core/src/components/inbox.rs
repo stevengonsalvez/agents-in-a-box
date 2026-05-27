@@ -112,12 +112,29 @@ impl Default for InboxState {
             .as_ref()
             .map(|p| p.db.clone())
             .unwrap_or_default();
+        // Eagerly open the store when the DB already exists so the
+        // global unread badge (rendered by the bottom menu bar before
+        // the Inbox screen is opened) sees a live count from the
+        // first frame.
+        let store = if db_path.exists() {
+            Store::open(&db_path)
+                .map_err(|e| {
+                    tracing::warn!(
+                        error = ?e,
+                        path = %db_path.display(),
+                        "inbox: eager store open failed"
+                    );
+                })
+                .ok()
+        } else {
+            None
+        };
         Self {
             selected: 0,
             rows: Vec::new(),
             show_archived: false,
             agent_filter: AgentFilter::default(),
-            store: None,
+            store,
             db_path,
             tick: 0,
         }

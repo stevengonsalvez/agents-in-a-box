@@ -298,6 +298,34 @@ impl LayoutComponent {
             Span::styled(" home", Style::default().fg(MUTED_GRAY)),
         ];
 
+        // ainb-hooks unread inbox badge — surfaced globally on the
+        // menu bar so the user always sees pending agent events
+        // (idle prompts, permission requests, stops). Hidden when
+        // zero. Polled live from the ainb-plugin-notifyd store via
+        // AppState; cheap (SELECT COUNT(*) over indexed columns).
+        let inbox_unread = state
+            .inbox_state
+            .store
+            .as_ref()
+            .and_then(|s| s.unread_count().ok())
+            .unwrap_or(0);
+        let mut line2_spans = line2_spans;
+        if inbox_unread > 0 {
+            line2_spans.push(Span::styled(
+                " │ ",
+                Style::default().fg(SUBDUED_BORDER),
+            ));
+            line2_spans.push(Span::styled(
+                format!("● {inbox_unread} "),
+                Style::default().fg(WARNING_ORANGE).add_modifier(Modifier::BOLD),
+            ));
+            line2_spans.push(Span::styled(
+                "I",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ));
+            line2_spans.push(Span::styled(" inbox", Style::default().fg(MUTED_GRAY)));
+        }
+
         let menu_lines = vec![Line::from(line1_spans), Line::from(line2_spans)];
 
         let menu = Paragraph::new(menu_lines)
