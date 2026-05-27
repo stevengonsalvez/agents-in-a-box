@@ -69,6 +69,42 @@ ainb fleet --format json standup \
   | jq -r 'group_by(.sources | sort | join(",")) | .[] | "\(.[0].sources | sort | join(",")): \(length)"'
 ```
 
+## Auto-chain to `/ainb-fleet:needs`
+
+After rendering standup, **scan the result for sessions whose `summary`
+contains `AskUserQuestion`** (literal string — the JSONL-synthesised
+summary surfaces this when the last assistant turn fired the tool).
+
+If ANY such session exists, the standup MUST NOT stop at the standup
+table. Immediately:
+
+1. Tell Stevie explicitly:
+   ```
+   N session(s) blocked on AskUserQuestion — firing `/ainb-fleet:needs`
+   to surface the questions + answer them in one batch.
+   ```
+
+2. Invoke the `ainb-fleet:needs` skill (via the Skill tool) OR run
+   `ainb --format json fleet needs` directly and render the Jarvis HUD
+   per the `ainb-fleet:needs` SKILL.md. No second Stevie-typed slash
+   command required — the handover is automatic.
+
+Detection one-liner:
+
+```bash
+ainb --format json fleet standup \
+  | jq -r '[.[] | select(.summary // "" | contains("AskUserQuestion"))] | length'
+```
+
+If 0 → skip the chain, standup is the final word.
+If >0 → chain immediately.
+
+**Rationale:** standup is a snapshot; the moment it reveals an
+answerable question, the fleet's center control panel (`needs`)
+already knows how to extract the structured options + route the
+answer back. Don't make Stevie type another slash command for a
+mechanically inevitable next step.
+
 ## Performance
 
 Sub-100ms cold start. Reads broker SQLite directly + shells out to `ainb list`
