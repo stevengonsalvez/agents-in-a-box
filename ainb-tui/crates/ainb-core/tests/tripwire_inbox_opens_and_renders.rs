@@ -159,16 +159,26 @@ fn inbox_opens_and_renders_seeded_notifications() {
         panic!("HomeScreen never rendered; last capture:\n---\n{last}\n---");
     };
 
-    // Pre-assertion: must not already be on the Inbox screen.
+    // Pre-assertion 1: must not already be on the Inbox screen.
     assert!(
         !pre.contains("📥 Inbox"),
         "pre-key capture already on inbox — state leaked.\n{pre}"
     );
 
-    // The global unread badge currently renders only on layout.rs's
-    // menu bar (split-pane screens). HomeScreen V2 owns its own
-    // bottom hint line and so doesn't show the badge yet — that's a
-    // follow-up. Skip the badge check on the home screen.
+    // Pre-assertion 2 (discoverability gate): the HomeScreen V2
+    // sidebar MUST list the Inbox tile. Without this, a fresh user
+    // has no visual cue that an inbox exists — the `I` shortcut
+    // works but is undiscoverable. Tile shape:
+    //
+    //     📥  Inbox          [I]
+    //
+    // We tolerate trailing whitespace by checking for the icon +
+    // label + shortcut tag separately.
+    assert!(
+        pre.contains("📥") && pre.contains("Inbox") && pre.contains("[I]"),
+        "HomeScreen V2 sidebar missing Inbox tile — \
+         discoverability regression. Pre-capture:\n{pre}"
+    );
 
     // Drive the inbox open shortcut.
     Command::new("tmux")
