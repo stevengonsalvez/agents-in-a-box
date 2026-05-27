@@ -3752,7 +3752,58 @@ impl EventHandler {
             AppEvent::InboxPageUp => state.inbox_state.move_up(10),
             AppEvent::InboxPageDown => state.inbox_state.move_down(10),
             AppEvent::InboxOpenSelected => {
+                // Capture the cwd before mark_selected_read invalidates
+                // selection ordering on refresh.
+                let row_cwd = state
+                    .inbox_state
+                    .selected_row()
+                    .map(|r| r.cwd.clone())
+                    .unwrap_or_default();
                 state.inbox_state.mark_selected_read();
+                // cwd-based jump-to-tmux: find the ainb session whose
+                // workspace_path matches the notification's cwd (exact
+                // or prefix). If found, surface its tmux session name
+                // for the existing AttachToOtherTmux async action so
+                // ainb's tmux subsystem owns the attach itself.
+                if !row_cwd.is_empty() {
+                    let target = state
+                        .workspaces
+                        .iter()
+                        .find(|ws| {
+                            let p = ws.path.to_string_lossy().to_string();
+                            row_cwd == p
+                                || row_cwd.starts_with(&format!("{p}/"))
+                        })
+                        .and_then(|ws| {
+                            // Prefer a non-shell session (an agent-running
+                            // one) since hook events come from agents,
+                            // not shells. Fall back to the workspace
+                            // shell if no agent session has tmux.
+                            ws.sessions
+                                .iter()
+                                .find_map(|s| s.tmux_session_name.clone())
+                                .or_else(|| {
+                                    ws.shell_session
+                                        .as_ref()
+                                        .map(|s| s.tmux_session_name.clone())
+                                })
+                        });
+                    if let Some(tmux_name) = target {
+                        tracing::info!(
+                            cwd = %row_cwd,
+                            tmux = %tmux_name,
+                            "inbox: jumping to tmux session"
+                        );
+                        state.pending_async_action =
+                            Some(crate::app::state::AsyncAction::AttachToOtherTmux(
+                                tmux_name,
+                            ));
+                    } else {
+                        state.add_info_notification(format!(
+                            "no ainb session matches cwd {row_cwd}"
+                        ));
+                    }
+                }
             }
             AppEvent::InboxDismissSelected => {
                 state.inbox_state.dismiss_selected();

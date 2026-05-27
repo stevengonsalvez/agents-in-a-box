@@ -261,6 +261,64 @@ impl Store {
         Ok(out)
     }
 
+    /// Unread count grouped by `cwd` (working directory at hook-fire
+    /// time). The ainb-tui session list uses this to render a
+    /// per-session `●N` badge: ainb's `Session.working_dir` matches
+    /// the notification's `cwd` for any session whose host agent has
+    /// been firing hooks. This is the cwd-based correlation layer
+    /// between ainb's internal `Uuid` ids and the agents' hook-side
+    /// session_id strings.
+    pub fn unread_by_cwd(&self) -> Result<Vec<(String, u64)>, StoreError> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT cwd, COUNT(*)
+             FROM notifications
+             WHERE read = 0 AND dismissed = 0 AND cwd != ''
+             GROUP BY cwd",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, u64>(1)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Look up the most-recent notification whose `cwd` matches
+    /// `target_cwd`. Used by the Inbox screen when the user presses
+    /// Enter on a row: from the row's `cwd` we resolve back to ainb's
+    /// `Session` (via `Session.working_dir`) and attach its tmux pane.
+    pub fn latest_by_cwd(
+        &self,
+        target_cwd: &str,
+    ) -> Result<Option<NotificationRecord>, StoreError> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, ts, agent, session_id, cwd, project, raw_event, payload, read, dismissed
+             FROM notifications
+             WHERE cwd = ?1
+             ORDER BY ts DESC
+             LIMIT 1",
+        )?;
+        let row = stmt
+            .query_row(params![target_cwd], |r| {
+                Ok(NotificationRecord {
+                    id: r.get(0)?,
+                    ts: r.get(1)?,
+                    agent: r.get(2)?,
+                    session_id: r.get(3)?,
+                    cwd: r.get(4)?,
+                    project: r.get(5)?,
+                    raw_event: r.get(6)?,
+                    payload_json: r.get(7)?,
+                    read: r.get::<_, i64>(8)? != 0,
+                    dismissed: r.get::<_, i64>(9)? != 0,
+                })
+            })
+            .optional()?;
+        Ok(row)
+    }
+
     /// Most recent record overall. Used by `ainb hooks status`.
     pub fn latest(&self) -> Result<Option<NotificationRecord>, StoreError> {
         let conn = self.conn();
@@ -507,5 +565,67 @@ mod tests {
         let mut counts = store.unread_by_session().unwrap();
         counts.sort();
         assert_eq!(counts, vec![("s-1".into(), 2), ("s-2".into(), 1)]);
+    }
+
+    #[test]
+    fn unread_by_cwd_groups_by_working_dir_and_skips_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("a.db")).unwrap();
+        // Three events under /tmp/proj-a, two under /tmp/proj-b, one
+        // with empty cwd (must NOT appear in the result), and one
+        // dismissed under /tmp/proj-a (must NOT count toward unread).
+        let mut e = env("claude", "Stop", 1);
+        e.cwd = "/tmp/proj-a".into();
+        let _ = store.insert(&e).unwrap();
+        e.ts = 2;
+        let _ = store.insert(&e).unwrap();
+        e.ts = 3;
+        let dismissed_id = store.insert(&e).unwrap();
+        store.dismiss(&dismissed_id).unwrap();
+        e.ts = 4;
+        let _ = store.insert(&e).unwrap();
+        e.cwd = "/tmp/proj-b".into();
+        e.ts = 5;
+        let _ = store.insert(&e).unwrap();
+        e.ts = 6;
+        let _ = store.insert(&e).unwrap();
+        e.cwd = "".into();
+        e.ts = 7;
+        let _ = store.insert(&e).unwrap();
+
+        let mut counts = store.unread_by_cwd().unwrap();
+        counts.sort();
+        assert_eq!(
+            counts,
+            vec![
+                ("/tmp/proj-a".into(), 3),
+                ("/tmp/proj-b".into(), 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn latest_by_cwd_returns_most_recent_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("a.db")).unwrap();
+        let mut e = env("claude", "Stop", 100);
+        e.cwd = "/tmp/proj-a".into();
+        store.insert(&e).unwrap();
+        e.ts = 200;
+        e.raw_event = "Notification:idle_prompt".into();
+        store.insert(&e).unwrap();
+        e.cwd = "/tmp/proj-b".into();
+        e.ts = 300;
+        e.raw_event = "Stop".into();
+        store.insert(&e).unwrap();
+
+        let latest = store.latest_by_cwd("/tmp/proj-a").unwrap().unwrap();
+        // Most recent among proj-a is the idle_prompt at ts=200.
+        assert_eq!(latest.cwd, "/tmp/proj-a");
+        assert_eq!(latest.raw_event, "Notification:idle_prompt");
+        assert_eq!(latest.ts, 200);
+
+        let nope = store.latest_by_cwd("/tmp/does-not-exist").unwrap();
+        assert!(nope.is_none());
     }
 }

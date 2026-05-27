@@ -237,6 +237,13 @@ impl SessionListComponent {
         // Load favorites to check which workspaces are starred
         let favorites = crate::config::FavoritesStore::load();
 
+        // ainb-hooks unread counts, grouped by notification cwd. We
+        // query once per render (cheap with SQLite WAL + the indexed
+        // `unread` partial index) and look up per session/workspace
+        // path below to render a `●N` badge. Empty map when the
+        // store isn't open or no rows are unread.
+        let unread_by_cwd = state.inbox_state.unread_by_cwd_map();
+
         // Must stay in lockstep with AppState::attachable_items_in_order;
         // divergence would attach the wrong session for a given digit.
         let mut attach_no: usize = 0;
@@ -417,7 +424,18 @@ impl SessionListComponent {
                         Span::styled("[ ]", Style::default().fg(MUTED_GRAY))
                     };
 
-                    let session_line = Line::from(vec![
+                    // ainb-hooks unread badge for this session row.
+                    // Match by session.workspace_path against the
+                    // notification cwd map (exact or prefix-with-/);
+                    // a session whose host agent fired a hook from
+                    // anywhere inside its workspace root gets a `●N`.
+                    let session_unread =
+                        crate::components::inbox::InboxState::unread_for_workspace_path(
+                            &unread_by_cwd,
+                            &session.workspace_path,
+                        );
+
+                    let mut session_spans = vec![
                         next_badge(&mut attach_no),
                         checkbox,
                         Span::styled(tree_prefix, Style::default().fg(SUBDUED_BORDER)),
@@ -439,7 +457,17 @@ impl SessionListComponent {
                             ),
                         ),
                         Span::styled(changes_text, Style::default().fg(WARNING_ORANGE)),
-                    ]);
+                    ];
+                    if session_unread > 0 {
+                        session_spans.push(Span::raw("  "));
+                        session_spans.push(Span::styled(
+                            format!("● {session_unread}"),
+                            Style::default()
+                                .fg(WARNING_ORANGE)
+                                .add_modifier(Modifier::BOLD),
+                        ));
+                    }
+                    let session_line = Line::from(session_spans);
 
                     items.push(ListItem::new(session_line));
                 }
