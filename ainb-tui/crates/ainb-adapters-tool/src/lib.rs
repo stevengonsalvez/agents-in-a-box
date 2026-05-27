@@ -35,7 +35,7 @@ pub use codex::CodexAdapter;
 pub use copilot::CopilotAdapter;
 pub use cursor::CursorAdapter;
 pub use gemini::GeminiAdapter;
-pub use install_root::install_root_for;
+pub use install_root::{install_root_for, read_root_for};
 pub use plan::{InstallPlan, InstallReport, PlanOp};
 pub use roo::RooAdapter;
 

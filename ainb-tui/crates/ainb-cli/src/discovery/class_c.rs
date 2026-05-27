@@ -32,7 +32,7 @@
 
 use std::path::{Path, PathBuf};
 
-use ainb_adapters_tool::install_root_for;
+use ainb_adapters_tool::read_root_for;
 use ainb_skill_core::UnitKind;
 
 /// One unit found on disk that may or may not already be in the
@@ -137,10 +137,14 @@ fn tool_subdirs(tool: &str) -> &'static [(UnitKind, Layout, &'static str)] {
 }
 
 /// Walk every adapter tool's install root for orphan units. The
-/// install root is resolved per the three-tier precedence in
-/// `install_root_for` (env override → real home opt-in → managed
-/// sandbox), so `AINB_TOOL_HOME_<TOOL>` env vars steer the walker
-/// at test or run time without touching this function.
+/// read root is resolved per the two-tier precedence in
+/// `read_root_for` (env override → real home), so the SkillManager
+/// discovery banner sees the user's actual `~/.claude/skills/...`
+/// without `AINB_USE_REAL_HOMES=1`. Writes still go through
+/// `install_root_for` (sandbox-by-default).
+///
+/// `AINB_TOOL_HOME_<TOOL>` env vars steer the walker at test or run
+/// time without touching this function.
 ///
 /// Output ordering is deterministic per tool (the `ALL_TOOLS`
 /// order) but file-system enumeration inside each subdir mirrors
@@ -150,7 +154,7 @@ fn tool_subdirs(tool: &str) -> &'static [(UnitKind, Layout, &'static str)] {
 pub fn walk_orphans() -> Vec<DiscoveredOrphanUnit> {
     let mut out = Vec::new();
     for tool in ALL_TOOLS {
-        let root = install_root_for(tool);
+        let root = read_root_for(tool);
         walk_one_tool(tool, &root, &mut out);
     }
     out

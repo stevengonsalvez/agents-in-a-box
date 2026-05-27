@@ -59,6 +59,40 @@ fn real_homes_enabled() -> bool {
     )
 }
 
+/// Resolve a per-tool path for **read-only** consumers such as the
+/// class-C discovery walker. Unlike [`install_root_for`] (used by
+/// write paths), this defaults to the real home — so the SkillManager
+/// discovery banner sees the user's actual `~/.claude/skills/...`
+/// without requiring `AINB_USE_REAL_HOMES=1`.
+///
+/// Precedence:
+///
+/// 1. `$AINB_TOOL_HOME_<TOOL>` (preserved so test fixtures isolate
+///    the walker against tempdirs without env-var surgery).
+/// 2. The tool's real config dir (`~/.claude`, `~/.codex`, …).
+/// 3. `$AINB_HOME/tools/<tool>` only when `$HOME` is unresolvable —
+///    pure safety fallback, expected to be unreachable in practice.
+///
+/// Safety: walkers built on top of this function never write. They
+/// list directories and read frontmatter. If a future caller starts
+/// writing through a `read_root_for` path, that caller must be moved
+/// onto [`install_root_for`] so the `AINB_USE_REAL_HOMES` gate keeps
+/// protecting against accidental clobber.
+pub fn read_root_for(tool: &str) -> PathBuf {
+    let env_var = env_var_name(tool);
+    if let Ok(p) = std::env::var(&env_var) {
+        if !p.is_empty() {
+            return PathBuf::from(p);
+        }
+    }
+
+    if let Some(real) = real_home_for(tool) {
+        return real;
+    }
+
+    ainb_skill_core::default_ainb_home().join("tools").join(tool)
+}
+
 /// Best-effort per-tool real-home mapping. Returns `None` when the
 /// home directory can't be determined (e.g. no `$HOME` set), in
 /// which case the caller falls back to the managed sandbox.
@@ -160,5 +194,33 @@ mod tests {
         let p = install_root_for("unknown-tool-x");
         std::env::remove_var("AINB_USE_REAL_HOMES");
         assert!(p.ends_with("tools/unknown-tool-x"), "got: {p:?}");
+    }
+
+    #[test]
+    fn read_root_defaults_to_real_home_without_env_gate() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("HOME", "/tmp/fake-home-for-read-root");
+        std::env::remove_var("AINB_USE_REAL_HOMES");
+        std::env::remove_var("AINB_TOOL_HOME_CLAUDE");
+        let p = read_root_for("claude");
+        assert_eq!(
+            p,
+            PathBuf::from("/tmp/fake-home-for-read-root").join(".claude"),
+            "read_root_for must default to real home — that's the whole point"
+        );
+    }
+
+    #[test]
+    fn read_root_env_override_still_wins() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("AINB_TOOL_HOME_CLAUDE", "/tmp/test-isolated-claude");
+        std::env::set_var("HOME", "/tmp/fake-home-ignored");
+        let p = read_root_for("claude");
+        std::env::remove_var("AINB_TOOL_HOME_CLAUDE");
+        assert_eq!(
+            p,
+            PathBuf::from("/tmp/test-isolated-claude"),
+            "AINB_TOOL_HOME_<TOOL> must still override read_root_for so test fixtures isolate"
+        );
     }
 }
