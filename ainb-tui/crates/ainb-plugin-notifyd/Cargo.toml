@@ -1,0 +1,33 @@
+[package]
+name = "ainb-plugin-notifyd"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "ainb_plugin_notifyd"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ainb-notifyd"
+path = "src/bin/ainb-notifyd.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+dirs = { workspace = true }
+nix = { workspace = true, features = ["signal", "process"] }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
