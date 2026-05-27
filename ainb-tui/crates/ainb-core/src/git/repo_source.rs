@@ -1,19 +1,30 @@
 // ABOUTME: Repository source detection and URL parsing for remote and local repos
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+use lazy_static::lazy_static;
+use regex::Regex;
 use thiserror::Error;
 
 /// Represents the source of a git repository - either remote (URL) or local (path)
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RepoSource {
     /// HTTPS URL (https://github.com/user/repo)
     HttpsUrl(String),
-    /// SSH URL (git@github.com:user/repo.git)
+    /// SSH URL for clone (git@github.com:user/repo.git)
     SshUrl(String),
+    /// `ssh://user@host[:port]` with no repo segment — opens an interactive SSH
+    /// session, NOT a clone. New-session screen 1 (smart-parse v2) introduces
+    /// this variant to distinguish from `SshUrl`.
+    SshSession(String),
     /// Local filesystem path
     LocalPath(PathBuf),
     /// GitHub shorthand (user/repo) - expands to HTTPS
     GithubShorthand { owner: String, repo: String },
+    /// Unparseable input — pass through to the fuzzy filter on the picker list.
+    /// New-session screen 1 (smart-parse v2) sink variant; never produced by
+    /// the legacy `from_input` parser.
+    Filter(String),
 }
 
 /// Parsed repository components for cache path generation
@@ -38,7 +49,26 @@ pub enum RepoSourceError {
 }
 
 impl RepoSource {
-    /// Classify user input into appropriate RepoSource variant
+    /// Classify user input into appropriate `RepoSource` variant.
+    ///
+    /// **Status:** legacy (finding #14). New code should use [`parse_with`]
+    /// (smart-parse v2) which returns an infallible typed variant —
+    /// including the `Filter` sink for unparseable strings — instead of a
+    /// `Result`. `from_input` survives only for callers that operate on
+    /// already-validated git remote URLs (e.g., the output of
+    /// `get_remote_url()`) where the fallible contract is meaningful and
+    /// the `SshSession`/`Filter` variants are unreachable.
+    ///
+    /// Behavioural differences vs `parse_with`:
+    /// - `from_input` accepts uppercase `owner/repo`; `parse_with` does not
+    ///   (it rejects `Cargo/Cargo.toml`-style false positives).
+    /// - `from_input` does NOT consult the filesystem; `parse_with` does.
+    /// - `from_input` returns `Err(ParseError)` on empty input;
+    ///   `parse_with` returns `Filter("")`.
+    #[deprecated(
+        since = "1.2.0",
+        note = "Use `parse_with(input, &RealFs)` for new code; this remains for already-validated git remote URLs."
+    )]
     pub fn from_input(input: &str) -> Result<Self, RepoSourceError> {
         let input = input.trim();
 
@@ -87,7 +117,10 @@ impl RepoSource {
         Ok(RepoSource::LocalPath(PathBuf::from(input)))
     }
 
-    /// Convert to canonical git URL for cloning
+    /// Convert to canonical git URL for cloning.
+    ///
+    /// `SshSession` and `Filter` are non-clonable; their string form is
+    /// returned as-is so callers that mis-route still get a sane debug value.
     pub fn to_clone_url(&self) -> String {
         match self {
             RepoSource::HttpsUrl(url) => ensure_git_suffix(url),
@@ -96,10 +129,15 @@ impl RepoSource {
             RepoSource::GithubShorthand { owner, repo } => {
                 format!("https://github.com/{}/{}.git", owner, repo)
             }
+            // Non-clonable variants — string passthrough for safe debug.
+            RepoSource::SshSession(s) | RepoSource::Filter(s) => s.clone(),
         }
     }
 
-    /// Check if this is a remote source (requires cloning)
+    /// Check if this is a remote source (requires cloning).
+    ///
+    /// `SshSession` is interactive, NOT a clone target — excluded here.
+    /// `Filter` is unparseable input — also excluded.
     pub fn is_remote(&self) -> bool {
         matches!(
             self,
@@ -131,6 +169,8 @@ impl RepoSource {
             RepoSource::GithubShorthand { owner, repo } => {
                 format!("{}/{}", owner, repo)
             }
+            // Non-clonable variants: passthrough so the picker can render them.
+            RepoSource::SshSession(s) | RepoSource::Filter(s) => s.clone(),
         }
     }
 
@@ -155,8 +195,170 @@ impl RepoSource {
                     repo_name,
                 })
             }
+            // SshSession is an interactive session, not a clone — no components
+            // to extract. Filter is unparseable text and likewise has no
+            // owner/repo to expose.
+            RepoSource::SshSession(s) | RepoSource::Filter(s) => Err(
+                RepoSourceError::ParseError(format!("not a clonable repo: {s}")),
+            ),
         }
     }
+}
+
+/// Trait abstracting filesystem existence checks so `parse_with` stays pure
+/// and unit-testable.
+pub trait FileExists {
+    /// Return true iff `p` refers to an existing filesystem entry.
+    fn exists(&self, p: &Path) -> bool;
+}
+
+/// Real-filesystem implementation backing production callers.
+pub struct RealFs;
+
+impl FileExists for RealFs {
+    fn exists(&self, p: &Path) -> bool {
+        p.exists()
+    }
+}
+
+lazy_static! {
+    /// `owner/repo` shorthand — lowercase only to avoid catching `Cargo/Cargo.toml`.
+    static ref SHORTHAND_RE: Regex =
+        Regex::new(r"^([a-z0-9-]+)/([a-z0-9._-]+)$").expect("shorthand regex compiles");
+    /// `^https?://...`
+    static ref HTTP_RE: Regex = Regex::new(r"^https?://").expect("http regex compiles");
+    /// `git@host:owner/repo` (optional `.git`)
+    static ref GIT_SSH_RE: Regex =
+        Regex::new(r"^git@[^:]+:.+/.+(\.git)?$").expect("git ssh regex compiles");
+    /// `ssh://host[/]` — host-only, NO repo segment. The trailing `/?$` rejects
+    /// `ssh://host/path/to/repo.git` (which is a clone URL, not a session).
+    static ref SSH_SESSION_RE: Regex =
+        Regex::new(r"^ssh://[^/]+/?$").expect("ssh session regex compiles");
+}
+
+/// Smart-parse v2: classify raw user input into a typed `RepoSource`.
+///
+/// Pure function; the only side effect is the existence check delegated to
+/// `fs`. Order matches the new-session screen 1 spec table:
+/// 1. Absolute or `~`-prefixed path that exists → `LocalPath`
+/// 2. `owner/repo` shorthand: local subdir under cwd wins if it exists,
+///    otherwise `GithubShorthand`
+/// 3. `^https?://...` → `HttpsUrl`
+/// 4. `^git@host:owner/repo(.git)?$` → `SshUrl` (clone-able)
+/// 5. `^ssh://host[/]$` (no repo segment) → `SshSession` (interactive, no clone)
+/// 6. Everything else → `Filter` (sink for fuzzy-filter pass-through)
+///
+/// Unlike the legacy [`RepoSource::from_input`], this NEVER returns `Result`
+/// — `Filter` is the catch-all. Callers cannot mis-handle the parsed value
+/// because every input maps to a typed variant.
+#[must_use]
+pub fn parse_with(input: &str, fs: &dyn FileExists) -> RepoSource {
+    // 1. Local path: absolute OR tilde-expanded, existing on disk.
+    if input.starts_with('/') || input.starts_with('~') {
+        let expanded = expand_tilde(input);
+        if fs.exists(&expanded) {
+            // Best-effort canonicalize for real filesystems; fall back to the
+            // expanded path when canonicalize fails (e.g. test stubs whose
+            // paths don't exist on the real disk).
+            let canonical = expanded.canonicalize().unwrap_or(expanded);
+            return RepoSource::LocalPath(canonical);
+        }
+    }
+
+    // 2. `owner/repo` shorthand. Local-path-under-cwd takes precedence per
+    //    spec rule (Cargo subdir wins over a plausible GitHub repo of the
+    //    same name).
+    if let Some(caps) = SHORTHAND_RE.captures(input) {
+        let owner = caps.get(1).map_or("", |m| m.as_str()).to_string();
+        let repo = caps.get(2).map_or("", |m| m.as_str()).to_string();
+        if let Ok(cwd) = std::env::current_dir() {
+            let candidate = cwd.join(input);
+            if fs.exists(&candidate) {
+                let canonical = candidate.canonicalize().unwrap_or(candidate);
+                return RepoSource::LocalPath(canonical);
+            }
+        }
+        return RepoSource::GithubShorthand { owner, repo };
+    }
+
+    // 3. `http(s)://...`
+    if HTTP_RE.is_match(input) {
+        return RepoSource::HttpsUrl(input.to_string());
+    }
+
+    // 4. `git@host:owner/repo(.git)?` — must come BEFORE the ssh:// check
+    //    because `git@host:` paths don't start with `ssh://`.
+    if GIT_SSH_RE.is_match(input) {
+        return RepoSource::SshUrl(input.to_string());
+    }
+
+    // 5. `ssh://host[/]` — host-only, interactive session (NOT a clone).
+    if SSH_SESSION_RE.is_match(input) {
+        return RepoSource::SshSession(input.to_string());
+    }
+
+    // 6. Fall-through: filter text for the fuzzy picker.
+    RepoSource::Filter(input.to_string())
+}
+
+/// Parse a `ssh://[user@]host[:port][/...]` URL into an `SshTarget`.
+///
+/// Canonical parser for the smart-parse v2 `SshSession` shape. Accepts a
+/// trailing path/slash which is ignored — only the connection coords matter
+/// for interactive sessions. Returns `None` if the URL doesn't carry a host
+/// segment.
+///
+/// Examples:
+/// - `ssh://prod-1.internal`        → host=prod-1.internal, port=22, user=None
+/// - `ssh://deploy@prod-1`          → host=prod-1, port=22, user=Some("deploy")
+/// - `ssh://deploy@prod-1:2222`     → host=prod-1, port=2222, user=Some("deploy")
+/// - `ssh://prod-1/some/path`       → host=prod-1, port=22, user=None (path dropped)
+#[must_use]
+pub fn parse_ssh_session_url(url: &str) -> Option<crate::models::SshTarget> {
+    let rest = url.strip_prefix("ssh://")?;
+    // Trim trailing path — only the authority part contributes to the target.
+    let authority = match rest.find('/') {
+        Some(i) => &rest[..i],
+        None => rest,
+    };
+    if authority.is_empty() {
+        return None;
+    }
+    // user@host[:port]
+    let (user, host_port) = match authority.find('@') {
+        Some(i) => (Some(authority[..i].to_string()), &authority[i + 1..]),
+        None => (None, authority),
+    };
+    if host_port.is_empty() {
+        return None;
+    }
+    let (host, port) = match host_port.rfind(':') {
+        Some(i) => {
+            let port_str = &host_port[i + 1..];
+            match port_str.parse::<u16>() {
+                Ok(p) => (host_port[..i].to_string(), p),
+                Err(_) => (host_port.to_string(), 22),
+            }
+        }
+        None => (host_port.to_string(), 22),
+    };
+    if host.is_empty() {
+        return None;
+    }
+    let mut target = crate::models::SshTarget::new(host).with_port(port);
+    if let Some(u) = user {
+        target = target.with_user(u);
+    }
+    Some(target)
+}
+
+/// Resolve the HEAD branch name of a local git repo. Best-effort — returns
+/// `None` for non-local sources or when git2 cannot open the path.
+#[must_use]
+pub fn head_branch(path: &Path) -> Option<String> {
+    let repo = git2::Repository::open(path).ok()?;
+    let head = repo.head().ok()?;
+    head.shorthand().map(str::to_string)
 }
 
 /// Expand ~ to home directory
@@ -267,6 +469,7 @@ fn parse_ssh_url(url: &str, source: RepoSource) -> Result<ParsedRepo, RepoSource
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // existing legacy `from_input` tests pre-date finding #14
 mod tests {
     use super::*;
 
@@ -388,5 +591,191 @@ mod tests {
         let url = source.to_clone_url();
         assert!(url.ends_with(".git"));
         assert!(!url.ends_with(".git.git"));
+    }
+
+    // ------------------------------------------------------------------------
+    // `parse_with` (smart-parse v2) — new-session screen 1 redesign Phase 3.
+    // These tests pin the spec table in `plans/new-session-redesign-spec.md`.
+    // The legacy `from_input` tests above remain authoritative for the legacy
+    // parser; `parse_with` is a different contract (no Result, Filter sink,
+    // injected FileExists for purity).
+    // ------------------------------------------------------------------------
+
+    use std::collections::HashSet;
+
+    /// In-memory `FileExists` stub for unit tests.
+    struct StubExists(HashSet<PathBuf>);
+
+    impl FileExists for StubExists {
+        fn exists(&self, p: &Path) -> bool {
+            self.0.contains(p)
+        }
+    }
+
+    fn stub<I: IntoIterator<Item = PathBuf>>(paths: I) -> StubExists {
+        StubExists(paths.into_iter().collect())
+    }
+
+    #[test]
+    fn parses_absolute_local_path_if_exists_via_parse_with() {
+        let s = stub([PathBuf::from("/home/foo/repo")]);
+        // The stub path doesn't exist on the real disk, so canonicalize falls
+        // back to the expanded form — we get the input path back unchanged.
+        assert_eq!(
+            parse_with("/home/foo/repo", &s),
+            RepoSource::LocalPath("/home/foo/repo".into())
+        );
+    }
+
+    #[test]
+    fn parses_tilde_local_path_if_expands_to_existing() {
+        let home = dirs::home_dir().expect("home_dir resolves in test env");
+        let s = stub([home.join("repo")]);
+        let parsed = parse_with("~/repo", &s);
+        assert!(matches!(parsed, RepoSource::LocalPath(_)), "got {parsed:?}");
+        if let RepoSource::LocalPath(p) = parsed {
+            assert_eq!(p, home.join("repo"));
+        }
+    }
+
+    #[test]
+    fn parses_owner_repo_as_github_shorthand_via_parse_with() {
+        let s = stub([]);
+        assert_eq!(
+            parse_with("foo/bar", &s),
+            RepoSource::GithubShorthand {
+                owner: "foo".into(),
+                repo: "bar".into()
+            }
+        );
+    }
+
+    #[test]
+    fn local_path_takes_precedence_over_github_shorthand() {
+        // Spec rule: if a local subdir matches `foo/bar`, use it instead of
+        // treating the input as a GitHub clone candidate.
+        let cwd = std::env::current_dir().expect("cwd resolves in test env");
+        let candidate = cwd.join("foo/bar");
+        let s = stub([candidate.clone()]);
+        let parsed = parse_with("foo/bar", &s);
+        // Real cwd exists, so canonicalize succeeds — compare against the
+        // canonicalized form when possible, else fall back.
+        let expected = candidate.canonicalize().unwrap_or(candidate);
+        assert!(
+            matches!(parsed, RepoSource::LocalPath(ref p) if p == &expected),
+            "got {parsed:?}, expected LocalPath({expected:?})"
+        );
+    }
+
+    #[test]
+    fn parses_https_url_as_clone_via_parse_with() {
+        let s = stub([]);
+        assert!(matches!(
+            parse_with("https://github.com/foo/bar.git", &s),
+            RepoSource::HttpsUrl(_)
+        ));
+    }
+
+    #[test]
+    fn parses_git_ssh_url_as_clone_via_parse_with() {
+        let s = stub([]);
+        assert!(matches!(
+            parse_with("git@github.com:foo/bar.git", &s),
+            RepoSource::SshUrl(_)
+        ));
+    }
+
+    #[test]
+    fn parses_ssh_protocol_no_repo_as_session_not_clone() {
+        // Spec: `ssh://user@host` (no repo path) opens an interactive session,
+        // it does NOT clone. This is the key behavioural difference between
+        // `SshUrl` (clone) and `SshSession` (interactive).
+        let s = stub([]);
+        let parsed = parse_with("ssh://deploy@prod-1.internal", &s);
+        assert!(
+            matches!(parsed, RepoSource::SshSession(_)),
+            "got {parsed:?} — expected SshSession (host-only, no repo segment)"
+        );
+        // Negative assertion: must NOT be classified as a clone-able SshUrl.
+        assert!(!matches!(parsed, RepoSource::SshUrl(_)));
+    }
+
+    #[test]
+    fn unparseable_input_falls_through_to_filter() {
+        let s = stub([]);
+        assert_eq!(
+            parse_with("just some text", &s),
+            RepoSource::Filter("just some text".into())
+        );
+    }
+
+    // ------------------------------------------------------------------------
+    // `parse_ssh_session_url` — canonical SSH-session parser (finding #8).
+    // ------------------------------------------------------------------------
+
+    #[test]
+    fn ssh_session_parses_host_only() {
+        let t = parse_ssh_session_url("ssh://prod-1.internal").expect("host only");
+        assert_eq!(t.host, "prod-1.internal");
+        assert_eq!(t.port, 22);
+        assert!(t.user.is_none());
+    }
+
+    #[test]
+    fn ssh_session_parses_user_and_host() {
+        let t = parse_ssh_session_url("ssh://deploy@prod-1").expect("user+host");
+        assert_eq!(t.host, "prod-1");
+        assert_eq!(t.port, 22);
+        assert_eq!(t.user.as_deref(), Some("deploy"));
+    }
+
+    #[test]
+    fn ssh_session_parses_user_host_port() {
+        let t = parse_ssh_session_url("ssh://deploy@prod-1:2222").expect("user+host+port");
+        assert_eq!(t.host, "prod-1");
+        assert_eq!(t.port, 2222);
+        assert_eq!(t.user.as_deref(), Some("deploy"));
+    }
+
+    #[test]
+    fn ssh_session_default_port_when_omitted() {
+        let t = parse_ssh_session_url("ssh://user@host").expect("default port");
+        assert_eq!(t.port, 22);
+    }
+
+    #[test]
+    fn ssh_session_drops_trailing_path() {
+        let t = parse_ssh_session_url("ssh://prod-1/some/path").expect("trailing path");
+        assert_eq!(t.host, "prod-1");
+        assert_eq!(t.port, 22);
+        assert!(t.user.is_none());
+    }
+
+    #[test]
+    fn ssh_session_with_path_and_user() {
+        let t = parse_ssh_session_url("ssh://alice@host:5022/srv/x").expect("path+user");
+        assert_eq!(t.host, "host");
+        assert_eq!(t.port, 5022);
+        assert_eq!(t.user.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn ssh_session_rejects_malformed_input() {
+        assert!(parse_ssh_session_url("prod-1").is_none());
+        assert!(parse_ssh_session_url("ssh://").is_none());
+        assert!(parse_ssh_session_url("ssh://user@").is_none());
+    }
+
+    #[test]
+    fn shorthand_rejects_uppercase_to_avoid_false_positive() {
+        // `Cargo/Cargo.toml` is far more likely to be a relative file path
+        // the user typed than a GitHub repo — lowercase-only shorthand keeps
+        // it out of `GithubShorthand`. (The legacy `from_input` does NOT
+        // enforce this; `parse_with` is the stricter v2 contract.)
+        let s = stub([]);
+        assert_eq!(
+            parse_with("Cargo/Cargo.toml", &s),
+            RepoSource::Filter("Cargo/Cargo.toml".into())
+        );
     }
 }

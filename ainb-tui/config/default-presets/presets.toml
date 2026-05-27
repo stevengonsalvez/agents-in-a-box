@@ -1,0 +1,38 @@
+# Shipped default presets. Bundled into the binary via include_str! and
+# installed to ~/.agents-in-a-box/presets.toml on first run. User edits are
+# preserved across upgrades (file is never overwritten if it exists).
+
+[[preset]]
+name = "claude-interactive-yolo"
+description = "Claude Code, interactive REPL with bypass permissions"
+agent_provider = "claude"
+agent_model = "default"
+mode = "interactive"
+[preset.permissions]
+skip_all = true
+
+[[preset]]
+name = "codex-interactive-yolo"
+description = "Codex CLI, interactive REPL with bypass permissions"
+agent_provider = "codex"
+agent_model = "default"
+mode = "interactive"
+[preset.permissions]
+skip_all = true
+
+[[preset]]
+name = "opusplan"
+description = "Claude Code with opusplan hybrid (Opus plans, Sonnet executes), Boss mode, bypass permissions"
+agent_provider = "claude"
+agent_model = "opusplan"
+mode = "boss"
+[preset.permissions]
+skip_all = true
+
+[[preset]]
+name = "shell"
+description = "Plain shell in the worktree; no agent"
+agent_provider = "shell"
+agent_model = "default"
+mode = "interactive"
+[preset.permissions]

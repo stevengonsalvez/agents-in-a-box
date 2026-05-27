@@ -254,13 +254,13 @@ fn get_current_branch(repo_path: &std::path::Path) -> Option<String> {
     }
 }
 
-/// Parse model string to `ClaudeModel` enum
+/// Parse model string to `ClaudeModel` enum.
+///
+/// Delegates to `ClaudeModel::parse` so the alias / canonical-id mapping lives
+/// in exactly one place. Unknown / empty values resolve to `SystemDefault`,
+/// which means the spawned `claude` command will omit `--model` entirely.
 fn parse_model(model_str: &str) -> ClaudeModel {
-    match model_str.to_lowercase().as_str() {
-        "opus" | "claude-opus" | "claude-3-opus" => ClaudeModel::Opus,
-        "haiku" | "claude-haiku" | "claude-3-haiku" => ClaudeModel::Haiku,
-        _ => ClaudeModel::Sonnet, // Default to Sonnet
-    }
+    ClaudeModel::parse(model_str)
 }
 
 /// Validate that the selected provider's CLI binary is installed and on PATH
@@ -283,16 +283,45 @@ fn validate_provider_installed(provider: &CliProvider) -> Result<()> {
     Ok(())
 }
 
-/// Build the agent CLI command with appropriate flags for the selected provider
+/// Build the agent CLI command with appropriate flags for the selected provider.
+///
+/// **Model emission semantics (2026-05 refresh):**
+///   * Claude — `--model <canonical-id>` (e.g. `claude-opus-4-7`) emitted ONLY
+///     when `model` resolves to a non-`SystemDefault` variant. The
+///     `ClaudeModel::SystemDefault` variant (or `None`) causes the flag to be
+///     omitted entirely so the installed `claude` CLI's default applies.
+///   * Codex — when the caller's raw `args.model` string parses into a
+///     non-`SystemDefault` `CodexModel`, `--model <id>` is emitted (e.g.
+///     `--model gpt-5.4`). Default / empty / unknown strings → no flag.
+///   * Gemini / Copilot — never emit `--model` (those CLIs don't accept it
+///     in this codebase).
 fn build_agent_command(args: &RunArgs, model: Option<ClaudeModel>) -> String {
+    use crate::models::CodexModel;
+
     let provider = args.tool.to_cli_provider();
     let mut cmd_parts = vec![provider.command().to_string()];
 
-    // Add model flag (Claude-only)
-    if provider == CliProvider::Claude {
-        if let Some(m) = model {
-            cmd_parts.push("--model".to_string());
-            cmd_parts.push(m.cli_value().to_string());
+    match provider {
+        CliProvider::Claude => {
+            if let Some(m) = model {
+                if let Some(id) = m.cli_value() {
+                    cmd_parts.push("--model".to_string());
+                    cmd_parts.push(id.to_string());
+                }
+            }
+        }
+        CliProvider::Codex => {
+            // Codex no longer hard-blocks `--model`. Parse the raw `--model`
+            // string into a CodexModel; emit only when it's not the
+            // SystemDefault sentinel (covers `""` and `"default"`).
+            let cm = CodexModel::parse(&args.model);
+            if let Some(id) = cm.cli_value() {
+                cmd_parts.push("--model".to_string());
+                cmd_parts.push(id.to_string());
+            }
+        }
+        CliProvider::Gemini | CliProvider::Copilot => {
+            // No model flag for these providers (today).
         }
     }
 
@@ -347,12 +376,21 @@ mod tests {
 
     #[test]
     fn test_parse_model() {
+        // Aliases (back-compat with on-disk user presets) still resolve.
         assert_eq!(parse_model("sonnet"), ClaudeModel::Sonnet);
         assert_eq!(parse_model("SONNET"), ClaudeModel::Sonnet);
         assert_eq!(parse_model("opus"), ClaudeModel::Opus);
         assert_eq!(parse_model("haiku"), ClaudeModel::Haiku);
         assert_eq!(parse_model("claude-sonnet"), ClaudeModel::Sonnet);
-        assert_eq!(parse_model("unknown"), ClaudeModel::Sonnet); // Default
+        // Canonical IDs (2026-05 refresh) also resolve.
+        assert_eq!(parse_model("claude-opus-4-7"), ClaudeModel::Opus);
+        assert_eq!(parse_model("claude-sonnet-4-6"), ClaudeModel::Sonnet);
+        assert_eq!(parse_model("claude-haiku-4-5"), ClaudeModel::Haiku);
+        assert_eq!(parse_model("opusplan"), ClaudeModel::OpusPlan);
+        // Empty / default / unknown all map to SystemDefault (omit --model).
+        assert_eq!(parse_model(""), ClaudeModel::SystemDefault);
+        assert_eq!(parse_model("default"), ClaudeModel::SystemDefault);
+        assert_eq!(parse_model("unknown"), ClaudeModel::SystemDefault);
     }
 
     #[test]
@@ -373,7 +411,11 @@ mod tests {
 
         let cmd = build_agent_command(&args, Some(ClaudeModel::Sonnet));
         assert!(cmd.contains("claude"));
-        assert!(cmd.contains("--model sonnet"));
+        // Full canonical ID, not the `sonnet` alias.
+        assert!(
+            cmd.contains("--model claude-sonnet-4-6"),
+            "expected full canonical id, got: {cmd}"
+        );
         assert!(cmd.contains("--dangerously-skip-permissions"));
     }
 
@@ -395,19 +437,68 @@ mod tests {
 
         let cmd = build_agent_command(&args, Some(ClaudeModel::Opus));
         assert!(cmd.contains("claude"));
-        assert!(cmd.contains("--model opus"));
+        assert!(cmd.contains("--model claude-opus-4-7"));
         assert!(!cmd.contains("--dangerously-skip-permissions"));
     }
 
     #[test]
-    fn test_build_codex_command() {
+    fn test_build_agent_command_system_default_omits_model_flag() {
+        let args = RunArgs {
+            remote_repo: None,
+            repo: None,
+            create_branch: None,
+            worktree: false,
+            tool: Tool::Claude,
+            model: String::new(),
+            prompt: None,
+            attach: false,
+            dangerously_skip_permissions: false,
+            name: None,
+            interactive: false,
+        };
+
+        let cmd = build_agent_command(&args, Some(ClaudeModel::SystemDefault));
+        assert!(cmd.starts_with("claude"));
+        assert!(
+            !cmd.contains("--model"),
+            "SystemDefault must NOT emit --model, got: {cmd}"
+        );
+    }
+
+    #[test]
+    fn test_build_agent_command_no_model_at_all_omits_flag() {
+        // `None` should behave identically to SystemDefault — no --model.
+        let args = RunArgs {
+            remote_repo: None,
+            repo: None,
+            create_branch: None,
+            worktree: false,
+            tool: Tool::Claude,
+            model: "default".to_string(),
+            prompt: None,
+            attach: false,
+            dangerously_skip_permissions: false,
+            name: None,
+            interactive: false,
+        };
+
+        let cmd = build_agent_command(&args, None);
+        assert!(!cmd.contains("--model"));
+    }
+
+    #[test]
+    fn test_build_codex_command_default_model_omits_flag() {
+        // 2026-05 refresh: Codex CAN emit `--model`, but only when the
+        // resolved CodexModel is non-default. `"sonnet"` is a Claude alias
+        // that doesn't parse into any CodexModel variant → SystemDefault →
+        // no `--model` flag.
         let args = RunArgs {
             remote_repo: None,
             repo: None,
             create_branch: None,
             worktree: false,
             tool: Tool::Codex,
-            model: "sonnet".to_string(),
+            model: "default".to_string(),
             prompt: None,
             attach: false,
             dangerously_skip_permissions: false,
@@ -423,7 +514,34 @@ mod tests {
         );
         assert!(
             !cmd.contains("--model"),
-            "Codex should not have --model flag"
+            "Codex with default model should not have --model flag, got: {cmd}"
+        );
+    }
+
+    #[test]
+    fn test_build_codex_command_with_explicit_model() {
+        // 2026-05 refresh: when a real CodexModel id is passed, Codex emits
+        // `--model <id>` like Claude. This used to be asserted as "Codex
+        // never has --model" — that assertion is gone.
+        let args = RunArgs {
+            remote_repo: None,
+            repo: None,
+            create_branch: None,
+            worktree: false,
+            tool: Tool::Codex,
+            model: "gpt-5.4".to_string(),
+            prompt: None,
+            attach: false,
+            dangerously_skip_permissions: false,
+            name: None,
+            interactive: false,
+        };
+
+        let cmd = build_agent_command(&args, None);
+        assert!(cmd.starts_with("codex"));
+        assert!(
+            cmd.contains("--model gpt-5.4"),
+            "Codex with explicit gpt-5.4 must emit --model, got: {cmd}"
         );
     }
 
@@ -435,7 +553,7 @@ mod tests {
             create_branch: None,
             worktree: false,
             tool: Tool::Codex,
-            model: "sonnet".to_string(),
+            model: "default".to_string(),
             prompt: None,
             attach: false,
             dangerously_skip_permissions: true,
