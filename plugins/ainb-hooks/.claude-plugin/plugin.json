@@ -1,0 +1,82 @@
+{
+  "name": "ainb-hooks",
+  "version": "0.1.0",
+  "description": "Emit Claude Code lifecycle events to the ainb notification inbox (ainb-notifyd via Unix socket).",
+  "author": {
+    "name": "Agents-in-a-Box"
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
