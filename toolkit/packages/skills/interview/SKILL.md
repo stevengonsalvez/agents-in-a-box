@@ -59,6 +59,17 @@ interview path/to/plan.md
 
 ## Interview Process
 
+```
+┌────────┐   ┌──────────────┐   ┌──────────────┐   ┌────────────┐
+│ Read   │──▶│ Detect       │──▶│ AskUser-     │──▶│ Write      │
+│ input  │   │ embedded     │   │ Question     │   │ spec.md    │
+│ file   │   │ sections     │   │ rounds 1..N  │   │ (template) │
+└────────┘   └──────────────┘   └──────┬───────┘   └────────────┘
+                                       │
+                              previews from input
+                              ASCII library section
+```
+
 ### Step 1: Read and Analyze the Plan
 
 Read the plan file provided as `$ARGUMENTS` (or `$1`):
@@ -74,6 +85,15 @@ Analyze the plan for:
 - **Dependencies** - What does this rely on?
 - **Gaps** - What's missing or underspecified?
 
+**Also scan for these embedded sections (used by `/brainstorm` topic stubs):**
+
+- `## For /interview` — explicit instructions from the upstream skill. Follow these verbatim; they typically dictate first-round question shape, ASCII preview usage, and topic coverage.
+- `## Initial hypotheses` — pre-populated A/B/C approach options. If present, your **first** AskUserQuestion round MUST present these as the options, with each option's ASCII code-block embedded in the `preview` field.
+- `## ASCII preview library` — reusable preview snippets keyed to subject type. Use these in subsequent AskUserQuestion `preview` fields whenever you compare concrete shapes (mockups, schemas, diagrams).
+- `## Output Spec Template` — a literal markdown template for the spec file output. If present, **use this template verbatim** for the spec instead of the default in Step 5.
+
+These sections are how `/brainstorm` hands off the design context. Honor them.
+
 ### Step 2: Conduct the Interview
 
 **MANDATORY: use a structured user-prompt tool. Do NOT dump questions in plaintext chat.**
@@ -86,6 +106,24 @@ Pick the tool in this order — first match wins:
 4. **Generic LLMs / no native tool**: only as last resort, fall back to a clearly-formatted plaintext block (`### Question 1: ...` / `### Question 2: ...`) and ask the user to answer inline.
 
 Why this is forced: free-form plaintext questioning is unreliable across runs — agents skip the structured tool when given an "or equivalent" out, which produces lower-quality interviews and bad follow-up. The tool produces typed answers the agent can branch on; plaintext does not.
+
+#### Format preferences for chat outputs and spec content
+
+When invoked from `/brainstorm`, the input stub contains a "Format preferences" section that dictates output shape. Honor it. The default convention (matching Stevie's CLAUDE.md `<flow_diagrams>` rule):
+
+| Content shape                                | Use                                              |
+|----------------------------------------------|--------------------------------------------------|
+| Flow / sequence / relationships / state      | ASCII box+arrow diagram (`┌─┐ │ └─┘ ─▶ ▼`)        |
+| Tabular DATA (rows × columns of facts)       | markdown pipe table                              |
+| Discrete items, no ordering                  | bullet list                                      |
+| Picks / open questions                       | `- [ ]` checklist                                |
+| Prose / narrative paragraphs                 | AVOID — break into one of the above              |
+
+Rules:
+- **Diagram FIRST, table SECOND** when both apply.
+- Diagram width ≤ 80 chars. Caveman inside boxes.
+- No prose-only sections in the produced spec. Every section = diagram + table + bullets.
+- AskUserQuestion `preview` fields should follow the same convention.
 
 Interview categories:
 
@@ -159,7 +197,16 @@ Once the interview is complete, write a comprehensive specification to the same 
 
 Example: `project-plan.md` → `project-plan-spec.md`
 
-#### Specification Template
+#### Template selection
+
+**If the input file contained an `## Output Spec Template` section** (typically present when invoked by `/brainstorm`):
+- Use that template verbatim for the output spec
+- Fill its placeholders from the interview answers
+- Do NOT mix in sections from the default template below
+
+**Otherwise**, use the default Specification Template below.
+
+#### Default Specification Template
 
 ```markdown
 # Specification: {Project/Feature Name}

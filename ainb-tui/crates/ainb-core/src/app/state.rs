@@ -23,6 +23,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use chrono;
+use ratatui::layout::Rect;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, trace, warn};
@@ -427,6 +428,227 @@ impl Notification {
 pub enum FocusedPane {
     Sessions, // Left pane - workspace/session list
     LiveLogs, // Right pane - live logs
+}
+
+pub const DEFAULT_SESSIONS_SIDEBAR_WIDTH: u16 = 40;
+pub const MIN_SESSIONS_SIDEBAR_WIDTH: u16 = 24;
+pub const SESSIONS_PREVIEW_RESERVE: u16 = 50;
+pub const COLLAPSED_SESSIONS_SIDEBAR_WIDTH: u16 = 5;
+pub const SESSIONS_ROW_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(300);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionListRowTarget {
+    WorkspaceHeader { workspace_idx: usize },
+    SshHeader,
+    OtherTmuxHeader,
+    Attachable(AttachableRef),
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionsPaneState {
+    pub preferred_width: u16,
+    pub collapsed: bool,
+    resize_active: bool,
+    edge_hovered: bool,
+    last_sessions_rect: Option<Rect>,
+    last_preview_rect: Option<Rect>,
+    last_list_scroll_offset: usize,
+    last_attachable_click: Option<(AttachableRef, Instant)>,
+}
+
+impl Default for SessionsPaneState {
+    fn default() -> Self {
+        Self {
+            preferred_width: DEFAULT_SESSIONS_SIDEBAR_WIDTH,
+            collapsed: false,
+            resize_active: false,
+            edge_hovered: false,
+            last_sessions_rect: None,
+            last_preview_rect: None,
+            last_list_scroll_offset: 0,
+            last_attachable_click: None,
+        }
+    }
+}
+
+impl SessionsPaneState {
+    pub fn restore(&mut self, width: Option<u16>, collapsed: bool) {
+        if let Some(width) = width {
+            self.preferred_width = width.max(MIN_SESSIONS_SIDEBAR_WIDTH);
+        }
+        self.collapsed = collapsed;
+    }
+
+    pub fn set_layout(&mut self, sessions_rect: Rect, preview_rect: Rect) {
+        self.last_sessions_rect = Some(sessions_rect);
+        self.last_preview_rect = Some(preview_rect);
+    }
+
+    pub fn set_list_scroll_offset(&mut self, offset: usize) {
+        self.last_list_scroll_offset = offset;
+    }
+
+    pub fn last_content_width(&self) -> Option<u16> {
+        Some(self.last_sessions_rect?.width.saturating_add(self.last_preview_rect?.width))
+    }
+
+    pub fn effective_width(&self, terminal_width: u16) -> u16 {
+        if self.collapsed {
+            return COLLAPSED_SESSIONS_SIDEBAR_WIDTH.min(terminal_width);
+        }
+
+        Self::clamp_width(self.preferred_width, terminal_width)
+    }
+
+    pub fn clamp_width(width: u16, terminal_width: u16) -> u16 {
+        if terminal_width <= COLLAPSED_SESSIONS_SIDEBAR_WIDTH {
+            return terminal_width;
+        }
+
+        let max_width = terminal_width.saturating_sub(SESSIONS_PREVIEW_RESERVE);
+        if max_width < MIN_SESSIONS_SIDEBAR_WIDTH {
+            return terminal_width.saturating_sub(1).max(1);
+        }
+
+        width.clamp(MIN_SESSIONS_SIDEBAR_WIDTH, max_width)
+    }
+
+    pub fn expanded_width(&self, terminal_width: u16) -> u16 {
+        Self::clamp_width(self.preferred_width, terminal_width)
+    }
+
+    pub fn edge_highlighted(&self) -> bool {
+        self.edge_hovered || self.resize_active
+    }
+
+    pub fn is_on_edge(&self, x: u16, y: u16) -> bool {
+        if self.collapsed {
+            return false;
+        }
+
+        let Some(rect) = self.last_sessions_rect else {
+            return false;
+        };
+        if y < rect.y || y >= rect.y.saturating_add(rect.height) || rect.width == 0 {
+            return false;
+        }
+
+        let edge_x = rect.x.saturating_add(rect.width.saturating_sub(1));
+        x.abs_diff(edge_x) <= 1
+    }
+
+    pub fn is_on_toggle(&self, x: u16, y: u16) -> bool {
+        let Some(rect) = self.last_sessions_rect else {
+            return false;
+        };
+        if rect.width == 0 {
+            return false;
+        }
+
+        let on_x = x >= rect.x && x < rect.x.saturating_add(rect.width);
+        if !on_x {
+            return false;
+        }
+
+        if self.collapsed {
+            // Expanded pane puts `[-]` in the block title on the top border.
+            // Collapsed rail renders `[+]` as first content row inside the block.
+            return y == rect.y || y == rect.y.saturating_add(1);
+        }
+
+        y == rect.y
+    }
+
+    pub fn contains_sessions_point(&self, x: u16, y: u16) -> bool {
+        let Some(rect) = self.last_sessions_rect else {
+            return false;
+        };
+        x >= rect.x
+            && x < rect.x.saturating_add(rect.width)
+            && y >= rect.y
+            && y < rect.y.saturating_add(rect.height)
+    }
+
+    pub fn contains_preview_point(&self, x: u16, y: u16) -> bool {
+        let Some(rect) = self.last_preview_rect else {
+            return false;
+        };
+        x >= rect.x
+            && x < rect.x.saturating_add(rect.width)
+            && y >= rect.y
+            && y < rect.y.saturating_add(rect.height)
+    }
+
+    pub fn row_index_at(&self, x: u16, y: u16) -> Option<usize> {
+        if self.collapsed {
+            return None;
+        }
+        let rect = self.last_sessions_rect?;
+        if x < rect.x
+            || x >= rect.x.saturating_add(rect.width)
+            || y <= rect.y
+            || y >= rect.y.saturating_add(rect.height.saturating_sub(1))
+        {
+            return None;
+        }
+
+        Some(self.last_list_scroll_offset + usize::from(y - rect.y - 1))
+    }
+
+    pub fn record_row_click(&mut self, target: SessionListRowTarget, now: Instant) -> bool {
+        let SessionListRowTarget::Attachable(target) = target else {
+            self.last_attachable_click = None;
+            return false;
+        };
+
+        let double_click = self
+            .last_attachable_click
+            .map(|(last_target, last_at)| {
+                last_target == target
+                    && now.saturating_duration_since(last_at) <= SESSIONS_ROW_DOUBLE_CLICK_WINDOW
+            })
+            .unwrap_or(false);
+        self.last_attachable_click = Some((target, now));
+        double_click
+    }
+
+    pub fn begin_resize(&mut self, x: u16, y: u16) -> bool {
+        if self.is_on_edge(x, y) {
+            self.resize_active = true;
+            self.edge_hovered = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn drag_resize(&mut self, x: u16, terminal_width: u16) {
+        if !self.resize_active || self.collapsed {
+            return;
+        }
+
+        let Some(rect) = self.last_sessions_rect else {
+            return;
+        };
+        let requested = x.saturating_sub(rect.x).saturating_add(1);
+        self.preferred_width = Self::clamp_width(requested, terminal_width);
+    }
+
+    pub fn finish_resize(&mut self) -> bool {
+        let was_active = self.resize_active;
+        self.resize_active = false;
+        was_active
+    }
+
+    pub fn update_hover(&mut self, x: u16, y: u16) {
+        self.edge_hovered = self.is_on_edge(x, y);
+    }
+
+    pub fn toggle_collapsed(&mut self) {
+        self.collapsed = !self.collapsed;
+        self.resize_active = false;
+        self.edge_hovered = false;
+    }
 }
 
 // View enum was replaced in Phase 2a by ScreenId (String) + the screens::ids
@@ -2038,6 +2260,8 @@ pub struct AppState {
 
     // Focus management for panes
     pub focused_pane: FocusedPane,
+    // Mouse/layout state for the Sessions split pane.
+    pub sessions_pane_state: SessionsPaneState,
     // Track if current directory is a git repository
     pub is_current_dir_git_repo: bool,
     // Track which session logs were last fetched to avoid unnecessary refetches
@@ -2129,14 +2353,16 @@ pub struct AppState {
     // Session recovery state (for orphaned agent sessions)
     pub session_recovery_state: crate::components::SessionRecoveryState,
 
+    /// Inbox screen state (ainb-hooks notifications: selection,
+    /// filters, in-process SQLite store handle).
+    pub inbox_state: crate::components::inbox::InboxState,
+
     /// WireBuffers freshly drained from plugins, keyed by screen id.
     /// `App::tick_plugin_renders` populates this before each frame so
     /// `PluginScreen::render` can paint without needing access to the
     /// plugin runtime (which lives on `App`, not `AppState`).
-    pub pending_plugin_renders: std::collections::HashMap<
-        crate::app::screens::ScreenId,
-        ainb_plugin_runtime::WireBuffer,
-    >,
+    pub pending_plugin_renders:
+        std::collections::HashMap<crate::app::screens::ScreenId, ainb_plugin_runtime::WireBuffer>,
 
     /// Last `(width, height)` `PluginScreen::render` was handed for each
     /// screen id. `tick_plugin_renders` reads this and forwards it to
@@ -2144,8 +2370,7 @@ pub struct AppState {
     /// size instead of falling back to its hard-coded default. One-frame
     /// stale is fine — the first frame still uses the plugin's fallback,
     /// every subsequent frame matches the host's layout.
-    pub plugin_render_areas:
-        std::collections::HashMap<crate::app::screens::ScreenId, (u16, u16)>,
+    pub plugin_render_areas: std::collections::HashMap<crate::app::screens::ScreenId, (u16, u16)>,
 
     /// Cheap Send + Clone façade onto the plugin runtime, populated by
     /// `App::init`. `None` when running plugin-free (e.g. tests, or
@@ -2484,6 +2709,13 @@ impl Default for AppState {
             warn!("Failed to load config, using defaults: {}", e);
             AppConfig::default()
         });
+        let mut home_screen_v2_state = HomeScreenV2State::default();
+        home_screen_v2_state.restore_sidebar_width(app_config.ui_preferences.home_sidebar_width);
+        let mut sessions_pane_state = SessionsPaneState::default();
+        sessions_pane_state.restore(
+            app_config.ui_preferences.sessions_sidebar_width,
+            app_config.ui_preferences.sessions_sidebar_collapsed.unwrap_or(false),
+        );
 
         Self {
             workspaces: Vec::new(),
@@ -2504,6 +2736,7 @@ impl Default for AppState {
             ui_needs_refresh: false,
             claude_chat_visible: false,
             focused_pane: FocusedPane::Sessions,
+            sessions_pane_state,
             is_current_dir_git_repo: false,
             last_logs_session_id: None,
             attached_session_id: None,
@@ -2546,7 +2779,7 @@ impl Default for AppState {
 
             // AINB 2.0: Home screen and agent selection
             home_screen_state: HomeScreenState::default(),
-            home_screen_v2_state: HomeScreenV2State::default(),
+            home_screen_v2_state,
             agent_selection_state: AgentSelectionState::default(),
             config_screen_state: ConfigScreenState::from_app_config(&app_config),
             auth_provider_popup_state: AuthProviderPopupState::from_app_config(&app_config),
@@ -2569,6 +2802,9 @@ impl Default for AppState {
 
             // Session recovery state (lazy-load when entering view)
             session_recovery_state: crate::components::SessionRecoveryState::default(),
+
+            // ainb-hooks inbox (lazy-opens SQLite on first refresh)
+            inbox_state: crate::components::inbox::InboxState::default(),
 
             pending_plugin_renders: std::collections::HashMap::new(),
             plugin_render_areas: std::collections::HashMap::new(),
@@ -4183,6 +4419,148 @@ impl AppState {
                 self.selected_other_tmux_index = Some(other_idx);
             }
         }
+    }
+
+    pub fn session_list_row_at_mouse(&self, x: u16, y: u16) -> Option<SessionListRowTarget> {
+        let row_index = self.sessions_pane_state.row_index_at(x, y)?;
+        self.session_list_row_target(row_index)
+    }
+
+    pub fn select_session_list_row(&mut self, target: SessionListRowTarget) {
+        self.focused_pane = FocusedPane::Sessions;
+
+        match target {
+            SessionListRowTarget::WorkspaceHeader { workspace_idx } => {
+                self.selected_workspace_index = Some(workspace_idx);
+                self.selected_session_index = None;
+                self.shell_selected = false;
+                self.selected_ssh_session_index = None;
+                self.selected_other_tmux_index = None;
+            }
+            SessionListRowTarget::SshHeader => {
+                self.selected_workspace_index = None;
+                self.selected_session_index = None;
+                self.shell_selected = false;
+                self.selected_other_tmux_index = None;
+                self.selected_ssh_session_index = None;
+                self.ssh_sessions_expanded = !self.ssh_sessions_expanded;
+            }
+            SessionListRowTarget::OtherTmuxHeader => {
+                self.selected_workspace_index = None;
+                self.selected_session_index = None;
+                self.shell_selected = false;
+                self.selected_ssh_session_index = None;
+                self.selected_other_tmux_index = None;
+                self.other_tmux_expanded = !self.other_tmux_expanded;
+            }
+            SessionListRowTarget::Attachable(target) => {
+                self.select_attachable(target);
+                if matches!(target, AttachableRef::WorkspaceSession { .. }) {
+                    self.queue_logs_fetch();
+                }
+            }
+        }
+    }
+
+    pub fn session_list_row_target(&self, row_index: usize) -> Option<SessionListRowTarget> {
+        let mut current_row = 0usize;
+
+        for (workspace_idx, workspace) in self.workspaces.iter().enumerate() {
+            let is_selected_workspace = self.selected_workspace_index == Some(workspace_idx);
+            let is_expanded = is_selected_workspace || self.expand_all_workspaces;
+
+            let visible_sessions: Vec<(usize, &Session)> = workspace
+                .sessions
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| self.session_passes_filter(s))
+                .collect();
+            let total_count =
+                visible_sessions.len() + usize::from(workspace.shell_session.is_some());
+            if total_count == 0 {
+                continue;
+            }
+
+            if current_row == row_index {
+                return Some(SessionListRowTarget::WorkspaceHeader { workspace_idx });
+            }
+            current_row += 1;
+
+            if is_expanded {
+                for (session_idx, _) in visible_sessions {
+                    if current_row == row_index {
+                        return Some(SessionListRowTarget::Attachable(
+                            AttachableRef::WorkspaceSession {
+                                workspace_idx,
+                                session_idx,
+                            },
+                        ));
+                    }
+                    current_row += 1;
+                }
+
+                if workspace.shell_session.is_some() {
+                    if current_row == row_index {
+                        return Some(SessionListRowTarget::Attachable(
+                            AttachableRef::WorkspaceShell { workspace_idx },
+                        ));
+                    }
+                    current_row += 1;
+                }
+            }
+        }
+
+        if !self.ssh_sessions.is_empty() {
+            if current_row > 0 {
+                if current_row == row_index {
+                    return None;
+                }
+                current_row += 1;
+            }
+
+            if current_row == row_index {
+                return Some(SessionListRowTarget::SshHeader);
+            }
+            current_row += 1;
+
+            if self.ssh_sessions_expanded {
+                for ssh_idx in 0..self.ssh_sessions.len() {
+                    if current_row == row_index {
+                        return Some(SessionListRowTarget::Attachable(
+                            AttachableRef::SshSession { ssh_idx },
+                        ));
+                    }
+                    current_row += 1;
+                }
+            }
+        }
+
+        if !self.other_tmux_sessions.is_empty() {
+            if current_row > 0 {
+                if current_row == row_index {
+                    return None;
+                }
+                current_row += 1;
+            }
+
+            if current_row == row_index {
+                return Some(SessionListRowTarget::OtherTmuxHeader);
+            }
+            current_row += 1;
+
+            if self.other_tmux_expanded {
+                for other_idx in 0..self.other_tmux_sessions.len() {
+                    if current_row == row_index {
+                        return Some(SessionListRowTarget::Attachable(AttachableRef::OtherTmux {
+                            other_idx,
+                        }));
+                    }
+                    current_row += 1;
+                }
+            }
+        }
+
+        None
     }
 
     pub fn next_session(&mut self) {
@@ -6902,6 +7280,10 @@ impl AppState {
     /// Run OAuth authentication setup
     async fn run_oauth_setup(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         use crossterm::{
+            event::{
+                DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
+                EnableMouseCapture,
+            },
             execute,
             terminal::{LeaveAlternateScreen, disable_raw_mode},
         };
@@ -6961,9 +7343,15 @@ impl AppState {
         // Temporarily exit TUI to run interactive container
         info!("Exiting TUI to run interactive authentication");
 
-        // Disable raw mode and restore terminal
+        // Disable raw mode and tear down input modes that match TUI startup
+        // (see main.rs: EnterAlternateScreen + EnableMouseCapture + EnableBracketedPaste).
         let _ = disable_raw_mode();
-        let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
+        let _ = execute!(
+            std::io::stdout(),
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            DisableBracketedPaste,
+        );
 
         println!("\n🔐 Claude Authentication Setup\n");
         println!("This will guide you through the OAuth authentication process.");
@@ -7029,10 +7417,17 @@ impl AppState {
             }
         }
 
-        // Re-enable raw mode and return to TUI
+        // Re-enable raw mode and the full input mode set established at startup —
+        // without re-enabling mouse capture + bracketed paste, mouse events stop
+        // arriving after the auth flow returns to the TUI.
         use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
         let _ = enable_raw_mode();
-        let _ = execute!(std::io::stdout(), EnterAlternateScreen);
+        let _ = execute!(
+            std::io::stdout(),
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            EnableBracketedPaste,
+        );
 
         // Force UI refresh
         self.ui_needs_refresh = true;
@@ -7335,10 +7730,7 @@ impl AppState {
                                 "Failed to restart CLI in tmux for session {}: {}",
                                 session_id, e
                             );
-                            self.add_error_notification(format!(
-                                "❌ Failed to restart CLI: {}",
-                                e
-                            ));
+                            self.add_error_notification(format!("❌ Failed to restart CLI: {}", e));
                         }
                     }
                 }
@@ -7868,9 +8260,8 @@ impl App {
         // Static plugin-screen routing table. Pairs a stable screen id
         // (consumed by `PluginScreen` and matched against
         // `state.current_screen`) with the plugin id that owns it.
-        const PLUGIN_SCREENS: &[(&str, &str)] = &[
-            (crate::app::screens::ids::ANALYTICS, "burndown"),
-        ];
+        const PLUGIN_SCREENS: &[(&str, &str)] =
+            &[(crate::app::screens::ids::ANALYTICS, "burndown")];
 
         for (screen_id, plugin_id) in PLUGIN_SCREENS {
             let pid = ainb_plugin_runtime::PluginId::from(*plugin_id);
@@ -7886,9 +8277,7 @@ impl App {
             // `plugin/render`; `try_recv_render` is the non-blocking
             // hand-off the render thread relies on.
             if let Some(buf) = handle.try_recv_render(&pid) {
-                self.state
-                    .pending_plugin_renders
-                    .insert((*screen_id).to_string(), buf);
+                self.state.pending_plugin_renders.insert((*screen_id).to_string(), buf);
             }
 
             // Kick the next render ONLY when something has actually
@@ -7913,12 +8302,8 @@ impl App {
             // before the first paint — the plugin treats that as "use
             // your own fallback size", which keeps the first frame
             // sensible until the area cache fills in.
-            let (width, height) = self
-                .state
-                .plugin_render_areas
-                .get(*screen_id)
-                .copied()
-                .unwrap_or((0, 0));
+            let (width, height) =
+                self.state.plugin_render_areas.get(*screen_id).copied().unwrap_or((0, 0));
             let viewport = ainb_plugin_runtime::Viewport { width, height };
             // Returned oneshot is intentionally dropped — the cache
             // pickup happens via `try_recv_render` next tick.

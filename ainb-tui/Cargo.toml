@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/ainb-core",
     "crates/ainb-plugin-burndown",
+    "crates/ainb-plugin-notifyd",
     "crates/ainb-plugin-protocol",
     "crates/ainb-plugin-runtime",
     "crates/ainb-plugin-sdk-rust",

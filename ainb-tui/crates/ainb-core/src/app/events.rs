@@ -11,6 +11,7 @@ use crate::cli::statusline_install::{InstallOutcome, StatuslineStatus, install_s
 use crate::credentials;
 use crate::models::live_window::Source as LiveSource;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::time::Instant;
 use tracing::info;
 
 // Layout configuration - sessions pane width as percentage of terminal width
@@ -23,7 +24,10 @@ pub enum AppEvent {
     /// identified by `plugin_id`. Phase 2c added this variant; the
     /// `usage_event_bridge` module decodes legacy `Usage*` variants through
     /// it pre-Phase-3 (when burndown is extracted into a real plugin).
-    Plugin { plugin_id: String, payload: Vec<u8> },
+    Plugin {
+        plugin_id: String,
+        payload: Vec<u8>,
+    },
     /// Navigate to a registered screen by id. Phase 2c added this variant to
     /// collapse the per-screen `GoTo*` variants behind one dispatch path —
     /// existing `GoTo*` variants are kept for now and translate through this
@@ -76,6 +80,10 @@ pub enum AppEvent {
         y: u16,
     },
     MouseDragging {
+        x: u16,
+        y: u16,
+    },
+    MouseMove {
         x: u16,
         y: u16,
     },
@@ -188,6 +196,17 @@ pub enum AppEvent {
     GoToStats,               // Navigate to stats view
     GoToSkills,              // Navigate to skills view
     GoToRecovery,            // Navigate to session recovery view
+    GoToInbox,               // Navigate to ainb-hooks notification inbox
+    InboxMoveUp,             // Inbox: move selection up one row
+    InboxMoveDown,           // Inbox: move selection down one row
+    InboxPageUp,             // Inbox: jump 10 rows up
+    InboxPageDown,           // Inbox: jump 10 rows down
+    InboxOpenSelected,       // Inbox: mark selected row read (Enter)
+    InboxDismissSelected,    // Inbox: dismiss selected row (d)
+    InboxDismissVisible,     // Inbox: dismiss every visible row (Shift+C)
+    InboxToggleArchived,     // Inbox: toggle dismissed filter (a)
+    InboxCycleAgent,         // Inbox: cycle agent filter (p)
+    InboxRefresh,            // Inbox: force-refresh from store (r)
     // AINB 2.0: Agent selection events
     AgentSelectionBack,         // Return to home screen (Esc)
     AgentSelectionNextProvider, // Navigate to next provider
@@ -390,10 +409,36 @@ fn derive_repo_label(source: &crate::git::repo_source::RepoSource) -> String {
 pub struct EventHandler;
 
 impl EventHandler {
+    fn persist_sessions_pane_preferences(state: &mut AppState) {
+        state.app_config.ui_preferences.sessions_sidebar_width =
+            Some(state.sessions_pane_state.preferred_width);
+        state.app_config.ui_preferences.sessions_sidebar_collapsed =
+            Some(state.sessions_pane_state.collapsed);
+        if let Err(e) = state.app_config.save() {
+            tracing::warn!("Failed to persist Sessions pane preferences: {}", e);
+        }
+    }
+
     /// Handle mouse events and convert to appropriate app events
     pub fn handle_mouse_event(event: AppEvent, state: &mut AppState) -> Option<AppEvent> {
         match event {
-            AppEvent::MouseClick { x, y: _ } => {
+            AppEvent::MouseClick { x, y } => {
+                if state.current_screen == screen_ids::HOME && !state.help_visible {
+                    if state.home_screen_v2_state.begin_sidebar_resize(x, y) {
+                        return None;
+                    }
+
+                    if let Some(outcome) =
+                        state.home_screen_v2_state.click_sidebar_item_at(x, y, Instant::now())
+                    {
+                        if outcome.double_click {
+                            return Some(AppEvent::HomeScreenSidebarSelect);
+                        }
+                    }
+
+                    return None;
+                }
+
                 // Determine which pane was clicked based on terminal dimensions
                 // The layout splits at 40% for sessions, 60% for logs
                 let term_width = crossterm::terminal::size().unwrap_or((80, 24)).0;
@@ -401,21 +446,42 @@ impl EventHandler {
 
                 // Check if we're in the main view (not in overlays)
                 if state.current_screen == screen_ids::SESSION_LIST && !state.help_visible {
-                    if x < split_point {
-                        // Clicked in sessions pane
-                        if state.focused_pane != crate::app::state::FocusedPane::Sessions {
-                            Some(AppEvent::SwitchPaneFocus)
-                        } else {
-                            None
-                        }
-                    } else {
-                        // Clicked in logs pane
-                        if state.focused_pane != crate::app::state::FocusedPane::LiveLogs {
-                            Some(AppEvent::SwitchPaneFocus)
-                        } else {
-                            None
-                        }
+                    if state.sessions_pane_state.is_on_toggle(x, y) {
+                        state.sessions_pane_state.toggle_collapsed();
+                        Self::persist_sessions_pane_preferences(state);
+                        return None;
                     }
+
+                    if state.sessions_pane_state.begin_resize(x, y) {
+                        return None;
+                    }
+
+                    if let Some(target) = state.session_list_row_at_mouse(x, y) {
+                        let double_click =
+                            state.sessions_pane_state.record_row_click(target, Instant::now());
+                        state.select_session_list_row(target);
+                        if double_click {
+                            return Some(AppEvent::AttachTmuxSession);
+                        }
+                        return None;
+                    }
+
+                    if state.sessions_pane_state.contains_sessions_point(x, y) {
+                        state.focused_pane = crate::app::state::FocusedPane::Sessions;
+                        return None;
+                    }
+
+                    if state.sessions_pane_state.contains_preview_point(x, y) {
+                        state.focused_pane = crate::app::state::FocusedPane::LiveLogs;
+                        return None;
+                    }
+
+                    if x < split_point {
+                        state.focused_pane = crate::app::state::FocusedPane::Sessions;
+                    } else {
+                        state.focused_pane = crate::app::state::FocusedPane::LiveLogs;
+                    }
+                    None
                 } else {
                     None
                 }
@@ -429,7 +495,22 @@ impl EventHandler {
                     None
                 }
             }
-            AppEvent::MouseDragging { x: _, y: _ } => {
+            AppEvent::MouseDragging { x, y: _ } => {
+                if state.current_screen == screen_ids::HOME && !state.help_visible {
+                    let term_width = crossterm::terminal::size().unwrap_or((80, 24)).0;
+                    state.home_screen_v2_state.drag_sidebar_resize(x, term_width);
+                    return None;
+                }
+
+                if state.current_screen == screen_ids::SESSION_LIST && !state.help_visible {
+                    let width = state
+                        .sessions_pane_state
+                        .last_content_width()
+                        .unwrap_or_else(|| crossterm::terminal::size().unwrap_or((80, 24)).0);
+                    state.sessions_pane_state.drag_resize(x, width);
+                    return None;
+                }
+
                 // Update selection during drag
                 if state.focused_pane == crate::app::state::FocusedPane::LiveLogs {
                     // This will be handled in Phase 2
@@ -438,7 +519,27 @@ impl EventHandler {
                     None
                 }
             }
-            AppEvent::MouseDragEnd { x: _, y: _ } => {
+            AppEvent::MouseDragEnd { x, y } => {
+                if state.current_screen == screen_ids::HOME && !state.help_visible {
+                    state.home_screen_v2_state.update_sidebar_edge_hover(x, y);
+                    if state.home_screen_v2_state.finish_sidebar_resize() {
+                        let width = state.home_screen_v2_state.sidebar.preferred_width;
+                        state.app_config.ui_preferences.home_sidebar_width = Some(width);
+                        if let Err(e) = state.app_config.save() {
+                            tracing::warn!("Failed to persist HomeScreen sidebar width: {}", e);
+                        }
+                    }
+                    return None;
+                }
+
+                if state.current_screen == screen_ids::SESSION_LIST && !state.help_visible {
+                    state.sessions_pane_state.update_hover(x, y);
+                    if state.sessions_pane_state.finish_resize() {
+                        Self::persist_sessions_pane_preferences(state);
+                    }
+                    return None;
+                }
+
                 // Finalize text selection
                 if state.focused_pane == crate::app::state::FocusedPane::LiveLogs {
                     // This will be handled in Phase 2
@@ -446,6 +547,15 @@ impl EventHandler {
                 } else {
                     None
                 }
+            }
+            AppEvent::MouseMove { x, y } => {
+                if state.current_screen == screen_ids::HOME && !state.help_visible {
+                    state.home_screen_v2_state.update_sidebar_edge_hover(x, y);
+                }
+                if state.current_screen == screen_ids::SESSION_LIST && !state.help_visible {
+                    state.sessions_pane_state.update_hover(x, y);
+                }
+                None
             }
             _ => None,
         }
@@ -777,6 +887,11 @@ impl EventHandler {
         // AINB 2.0: Handle home screen view
         if state.current_screen == screen_ids::HOME {
             return Self::handle_home_screen_keys(key_event, state);
+        }
+
+        // ainb-hooks Inbox screen
+        if state.current_screen == screen_ids::INBOX {
+            return Self::handle_inbox_keys(key_event, state);
         }
 
         // AINB 2.0: Handle agent selection view
@@ -1703,6 +1818,34 @@ impl EventHandler {
         }
     }
 
+    /// Inbox screen key dispatcher. Keys follow the spec:
+    ///
+    ///   - ↑/↓ k/j         move selection
+    ///   - PageUp/PageDown jump 10 rows
+    ///   - Enter           open + mark read
+    ///   - d               dismiss selected
+    ///   - C               dismiss every visible row (Shift+C)
+    ///   - a               toggle archived filter
+    ///   - p               cycle agent filter
+    ///   - r               refresh
+    ///   - q / Esc         back to previous screen (home if none)
+    fn handle_inbox_keys(key_event: KeyEvent, _state: &mut AppState) -> Option<AppEvent> {
+        match key_event.code {
+            KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::GoToHomeScreen),
+            KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::InboxMoveUp),
+            KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::InboxMoveDown),
+            KeyCode::PageUp => Some(AppEvent::InboxPageUp),
+            KeyCode::PageDown => Some(AppEvent::InboxPageDown),
+            KeyCode::Enter => Some(AppEvent::InboxOpenSelected),
+            KeyCode::Char('d') => Some(AppEvent::InboxDismissSelected),
+            KeyCode::Char('C') => Some(AppEvent::InboxDismissVisible),
+            KeyCode::Char('a') => Some(AppEvent::InboxToggleArchived),
+            KeyCode::Char('p') => Some(AppEvent::InboxCycleAgent),
+            KeyCode::Char('r') => Some(AppEvent::InboxRefresh),
+            _ => None,
+        }
+    }
+
     // AINB 2.0: Home screen key handling (V2 with sidebar and card grid)
     fn handle_home_screen_keys(key_event: KeyEvent, state: &AppState) -> Option<AppEvent> {
         use crate::components::home_screen_v2::HomeScreenFocus;
@@ -1710,6 +1853,18 @@ impl EventHandler {
         tracing::debug!("HomeScreen V2 key handler: {:?}", key_event.code);
 
         // Global shortcuts that work regardless of focus (matches HomeTile shortcuts)
+        // Inbox shortcut FIRST so the Shift+i path beats the plain
+        // 'i' arm (GoToStats) on terminals where crossterm delivers
+        // shifted letters as KeyCode::Char('i') + SHIFT modifier
+        // instead of KeyCode::Char('I'). The Linux tmux runner on
+        // GitHub Actions hits the modifier path; macOS hits the
+        // uppercase code-point path. Both must reach the Inbox.
+        if let KeyCode::Char(c) = key_event.code {
+            let shift_pressed = key_event.modifiers.contains(KeyModifiers::SHIFT);
+            if c == 'I' || (c == 'i' && shift_pressed) {
+                return Some(AppEvent::GoToInbox);
+            }
+        }
         match key_event.code {
             KeyCode::Char('a') => return Some(AppEvent::GoToAgentSelection),
             KeyCode::Char('c') => return Some(AppEvent::GoToCatalog),
@@ -2721,8 +2876,10 @@ impl EventHandler {
             }
             AppEvent::GitViewBack => {
                 // Return to the previous view (where user was before opening Git view)
-                state.current_screen =
-                    state.previous_screen.take().unwrap_or(crate::app::screens::ids::SESSION_LIST.to_string());
+                state.current_screen = state
+                    .previous_screen
+                    .take()
+                    .unwrap_or(crate::app::screens::ids::SESSION_LIST.to_string());
                 state.git_view_state = None;
             }
             // Commit message input events
@@ -2883,6 +3040,11 @@ impl EventHandler {
                     }
                     SidebarItem::Sessions => {
                         state.current_screen = screen_ids::SESSION_LIST.to_string();
+                    }
+                    SidebarItem::Inbox => {
+                        state.previous_screen = Some(state.current_screen.clone());
+                        state.current_screen = screen_ids::INBOX.to_string();
+                        state.inbox_state.refresh();
                     }
                     SidebarItem::Recovery => {
                         state.session_recovery_state.refresh();
@@ -3123,6 +3285,80 @@ impl EventHandler {
                 state.current_screen = screen_ids::SKILLS.to_string();
                 state.start_background_skills_load(false);
             }
+            AppEvent::GoToInbox => {
+                tracing::info!("Navigating to Inbox");
+                state.previous_screen = Some(state.current_screen.clone());
+                state.current_screen = screen_ids::INBOX.to_string();
+                state.inbox_state.refresh();
+            }
+            AppEvent::InboxMoveUp => state.inbox_state.move_up(1),
+            AppEvent::InboxMoveDown => state.inbox_state.move_down(1),
+            AppEvent::InboxPageUp => state.inbox_state.move_up(10),
+            AppEvent::InboxPageDown => state.inbox_state.move_down(10),
+            AppEvent::InboxOpenSelected => {
+                // Capture the cwd before mark_selected_read invalidates
+                // selection ordering on refresh.
+                let row_cwd = state
+                    .inbox_state
+                    .selected_row()
+                    .map(|r| r.cwd.clone())
+                    .unwrap_or_default();
+                state.inbox_state.mark_selected_read();
+                // cwd-based jump-to-tmux: find the ainb session whose
+                // workspace_path matches the notification's cwd (exact
+                // or prefix). If found, surface its tmux session name
+                // for the existing AttachToOtherTmux async action so
+                // ainb's tmux subsystem owns the attach itself.
+                if !row_cwd.is_empty() {
+                    let target = state
+                        .workspaces
+                        .iter()
+                        .find(|ws| {
+                            let p = ws.path.to_string_lossy().to_string();
+                            row_cwd == p
+                                || row_cwd.starts_with(&format!("{p}/"))
+                        })
+                        .and_then(|ws| {
+                            // Prefer a non-shell session (an agent-running
+                            // one) since hook events come from agents,
+                            // not shells. Fall back to the workspace
+                            // shell if no agent session has tmux.
+                            ws.sessions
+                                .iter()
+                                .find_map(|s| s.tmux_session_name.clone())
+                                .or_else(|| {
+                                    ws.shell_session
+                                        .as_ref()
+                                        .map(|s| s.tmux_session_name.clone())
+                                })
+                        });
+                    if let Some(tmux_name) = target {
+                        tracing::info!(
+                            cwd = %row_cwd,
+                            tmux = %tmux_name,
+                            "inbox: jumping to tmux session"
+                        );
+                        state.pending_async_action =
+                            Some(crate::app::state::AsyncAction::AttachToOtherTmux(
+                                tmux_name,
+                            ));
+                    } else {
+                        state.add_info_notification(format!(
+                            "no ainb session matches cwd {row_cwd}"
+                        ));
+                    }
+                }
+            }
+            AppEvent::InboxDismissSelected => {
+                state.inbox_state.dismiss_selected();
+            }
+            AppEvent::InboxDismissVisible => {
+                let n = state.inbox_state.dismiss_visible();
+                state.add_info_notification(format!("dismissed {n} row(s)"));
+            }
+            AppEvent::InboxToggleArchived => state.inbox_state.toggle_archived(),
+            AppEvent::InboxCycleAgent => state.inbox_state.cycle_agent_filter(),
+            AppEvent::InboxRefresh => state.inbox_state.refresh(),
             AppEvent::GoToRecovery => {
                 tracing::info!("Navigating to Session Recovery");
                 state.session_recovery_state.refresh();
@@ -4355,7 +4591,8 @@ impl EventHandler {
             AppEvent::MouseClick { .. }
             | AppEvent::MouseDragStart { .. }
             | AppEvent::MouseDragEnd { .. }
-            | AppEvent::MouseDragging { .. } => {
+            | AppEvent::MouseDragging { .. }
+            | AppEvent::MouseMove { .. } => {
                 // These are processed by handle_mouse_event
             }
             // Phase 2c plugin-shaped variants. Today the in-core burndown
@@ -4440,10 +4677,7 @@ mod navigate_to_tests {
     fn navigate_to_known_screen_updates_current() {
         let mut state = fresh_state();
         let starting = state.current_screen.clone();
-        EventHandler::process_event(
-            AppEvent::NavigateTo(ids::ANALYTICS.to_string()),
-            &mut state,
-        );
+        EventHandler::process_event(AppEvent::NavigateTo(ids::ANALYTICS.to_string()), &mut state);
         assert_eq!(state.current_screen, ids::ANALYTICS);
         assert_eq!(state.previous_screen.as_deref(), Some(starting.as_str()));
     }
