@@ -34,7 +34,7 @@ pub fn derive_branch_name(prefix: &str, existing: &[String]) -> String {
     for _ in 0..8 {
         let suffix = short_hex_suffix();
         let candidate = format!("{prefix}{suffix}");
-        if !existing.iter().any(|b| b == &candidate) {
+        if !existing.contains(&candidate) {
             return candidate;
         }
     }
@@ -60,7 +60,7 @@ fn disambiguate(candidate: &str, existing: &[String]) -> String {
     }
     for n in 2..u32::MAX {
         let next = format!("{candidate}-{n}");
-        if !existing.iter().any(|b| b == &next) {
+        if !existing.contains(&next) {
             return next;
         }
     }

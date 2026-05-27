@@ -1663,7 +1663,7 @@ fn handle_modal_key(state: &mut ConfigureState, key: KeyEvent) -> ConfigureOutco
             }
             let mut to_save = state.effective_preset();
             to_save.name = new_name.clone();
-            if let Ok(manager) = PresetManager::new() {
+            if let Ok(mut manager) = PresetManager::new() {
                 if let Err(err) = manager.save_preset(&to_save) {
                     tracing::warn!(error = %err, "save_preset failed");
                 }

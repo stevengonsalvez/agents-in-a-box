@@ -238,7 +238,7 @@ impl PresetManager {
     /// Save a preset to disk. Appends a new `[[preset]]` entry if the name is
     /// new, otherwise replaces the existing entry in-place. Preserves
     /// surrounding user comments + formatting via `toml_edit`.
-    pub fn save_preset(&self, preset: &RepositoryPreset) -> Result<()> {
+    pub fn save_preset(&mut self, preset: &RepositoryPreset) -> Result<()> {
         // Read existing document (or start a fresh one).
         let mut doc: DocumentMut = if self.presets_file.exists() {
             let content = fs::read_to_string(&self.presets_file).with_context(|| {
@@ -285,6 +285,14 @@ impl PresetManager {
 
         write_atomic(&self.presets_file, doc.to_string().as_bytes())
             .with_context(|| format!("Failed to write {}", self.presets_file.display()))?;
+
+        // Keep the in-memory cache in sync with the on-disk file so a reused
+        // manager instance reflects the just-saved preset without a reload.
+        if !self.presets.contains_key(&preset.name) {
+            self.order.push(preset.name.clone());
+        }
+        self.presets.insert(preset.name.clone(), preset.clone());
+
         Ok(())
     }
 
@@ -445,7 +453,7 @@ pub fn install_default_presets(file: &Path) -> Result<()> {
 
     // Merge any salvaged user-customised legacy presets into the new file.
     if !salvaged.is_empty() {
-        let manager = PresetManager::with_file(file.to_path_buf())?;
+        let mut manager = PresetManager::with_file(file.to_path_buf())?;
         for preset in salvaged {
             // Don't clobber a preset the bundled defaults already provide
             // under the same name — the on-disk version wins by being
@@ -811,7 +819,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let file = tmp.path().join("presets.toml");
         install_default_presets(&file).unwrap();
-        let mgr = PresetManager::with_file(file.clone()).unwrap();
+        let mut mgr = PresetManager::with_file(file.clone()).unwrap();
         let new_p = make_preset("my-haiku", "claude");
         mgr.save_preset(&new_p).unwrap();
         // Re-read fresh.
@@ -833,7 +841,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let file = tmp.path().join("presets.toml");
         install_default_presets(&file).unwrap();
-        let mgr = PresetManager::with_file(file.clone()).unwrap();
+        let mut mgr = PresetManager::with_file(file.clone()).unwrap();
         let mut p = make_preset("claude-interactive-yolo", "claude");
         p.description = "edited by user".to_string();
         mgr.save_preset(&p).unwrap();

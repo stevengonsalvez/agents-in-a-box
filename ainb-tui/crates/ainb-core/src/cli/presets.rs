@@ -255,7 +255,7 @@ fn cmd_create(
         ));
     }
 
-    let manager = PresetManager::new().context("Failed to initialize preset manager")?;
+    let mut manager = PresetManager::new().context("Failed to initialize preset manager")?;
     if manager.get(name).is_some() {
         return Err(anyhow!("Preset '{name}' already exists"));
     }
