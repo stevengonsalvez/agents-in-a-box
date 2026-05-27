@@ -273,6 +273,17 @@ pub enum AppEvent {
     GoToStats,               // Navigate to stats view
     GoToSkills,              // Navigate to skills view
     GoToRecovery,            // Navigate to session recovery view
+    GoToInbox,               // Navigate to ainb-hooks notification inbox
+    InboxMoveUp,             // Inbox: move selection up one row
+    InboxMoveDown,           // Inbox: move selection down one row
+    InboxPageUp,             // Inbox: jump 10 rows up
+    InboxPageDown,           // Inbox: jump 10 rows down
+    InboxOpenSelected,       // Inbox: mark selected row read (Enter)
+    InboxDismissSelected,    // Inbox: dismiss selected row (d)
+    InboxDismissVisible,     // Inbox: dismiss every visible row (Shift+C)
+    InboxToggleArchived,     // Inbox: toggle dismissed filter (a)
+    InboxCycleAgent,         // Inbox: cycle agent filter (p)
+    InboxRefresh,            // Inbox: force-refresh from store (r)
     // AINB 2.0: Agent selection events
     AgentSelectionBack,         // Return to home screen (Esc)
     AgentSelectionNextProvider, // Navigate to next provider
@@ -890,6 +901,11 @@ impl EventHandler {
         // AINB 2.0: Handle home screen view
         if state.current_screen == screen_ids::HOME {
             return Self::handle_home_screen_keys(key_event, state);
+        }
+
+        // ainb-hooks Inbox screen
+        if state.current_screen == screen_ids::INBOX {
+            return Self::handle_inbox_keys(key_event, state);
         }
 
         // AINB 2.0: Handle agent selection view
@@ -2093,6 +2109,34 @@ impl EventHandler {
         }
     }
 
+    /// Inbox screen key dispatcher. Keys follow the spec:
+    ///
+    ///   - ↑/↓ k/j         move selection
+    ///   - PageUp/PageDown jump 10 rows
+    ///   - Enter           open + mark read
+    ///   - d               dismiss selected
+    ///   - C               dismiss every visible row (Shift+C)
+    ///   - a               toggle archived filter
+    ///   - p               cycle agent filter
+    ///   - r               refresh
+    ///   - q / Esc         back to previous screen (home if none)
+    fn handle_inbox_keys(key_event: KeyEvent, _state: &mut AppState) -> Option<AppEvent> {
+        match key_event.code {
+            KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::GoToHomeScreen),
+            KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::InboxMoveUp),
+            KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::InboxMoveDown),
+            KeyCode::PageUp => Some(AppEvent::InboxPageUp),
+            KeyCode::PageDown => Some(AppEvent::InboxPageDown),
+            KeyCode::Enter => Some(AppEvent::InboxOpenSelected),
+            KeyCode::Char('d') => Some(AppEvent::InboxDismissSelected),
+            KeyCode::Char('C') => Some(AppEvent::InboxDismissVisible),
+            KeyCode::Char('a') => Some(AppEvent::InboxToggleArchived),
+            KeyCode::Char('p') => Some(AppEvent::InboxCycleAgent),
+            KeyCode::Char('r') => Some(AppEvent::InboxRefresh),
+            _ => None,
+        }
+    }
+
     // AINB 2.0: Home screen key handling (V2 with sidebar and card grid)
     fn handle_home_screen_keys(key_event: KeyEvent, state: &AppState) -> Option<AppEvent> {
         use crate::components::home_screen_v2::HomeScreenFocus;
@@ -2100,6 +2144,18 @@ impl EventHandler {
         tracing::debug!("HomeScreen V2 key handler: {:?}", key_event.code);
 
         // Global shortcuts that work regardless of focus (matches HomeTile shortcuts)
+        // Inbox shortcut FIRST so the Shift+i path beats the plain
+        // 'i' arm (GoToStats) on terminals where crossterm delivers
+        // shifted letters as KeyCode::Char('i') + SHIFT modifier
+        // instead of KeyCode::Char('I'). The Linux tmux runner on
+        // GitHub Actions hits the modifier path; macOS hits the
+        // uppercase code-point path. Both must reach the Inbox.
+        if let KeyCode::Char(c) = key_event.code {
+            let shift_pressed = key_event.modifiers.contains(KeyModifiers::SHIFT);
+            if c == 'I' || (c == 'i' && shift_pressed) {
+                return Some(AppEvent::GoToInbox);
+            }
+        }
         match key_event.code {
             KeyCode::Char('a') => return Some(AppEvent::GoToAgentSelection),
             KeyCode::Char('c') => return Some(AppEvent::GoToCatalog),
@@ -3685,6 +3741,29 @@ impl EventHandler {
                 state.current_screen = screen_ids::SKILLS.to_string();
                 state.start_background_skills_load(false);
             }
+            AppEvent::GoToInbox => {
+                tracing::info!("Navigating to Inbox");
+                state.previous_screen = Some(state.current_screen.clone());
+                state.current_screen = screen_ids::INBOX.to_string();
+                state.inbox_state.refresh();
+            }
+            AppEvent::InboxMoveUp => state.inbox_state.move_up(1),
+            AppEvent::InboxMoveDown => state.inbox_state.move_down(1),
+            AppEvent::InboxPageUp => state.inbox_state.move_up(10),
+            AppEvent::InboxPageDown => state.inbox_state.move_down(10),
+            AppEvent::InboxOpenSelected => {
+                state.inbox_state.mark_selected_read();
+            }
+            AppEvent::InboxDismissSelected => {
+                state.inbox_state.dismiss_selected();
+            }
+            AppEvent::InboxDismissVisible => {
+                let n = state.inbox_state.dismiss_visible();
+                state.add_info_notification(format!("dismissed {n} row(s)"));
+            }
+            AppEvent::InboxToggleArchived => state.inbox_state.toggle_archived(),
+            AppEvent::InboxCycleAgent => state.inbox_state.cycle_agent_filter(),
+            AppEvent::InboxRefresh => state.inbox_state.refresh(),
             AppEvent::GoToRecovery => {
                 tracing::info!("Navigating to Session Recovery");
                 state.session_recovery_state.refresh();

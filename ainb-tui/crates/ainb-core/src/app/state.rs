@@ -2336,6 +2336,10 @@ pub struct AppState {
     // Session recovery state (for orphaned agent sessions)
     pub session_recovery_state: crate::components::SessionRecoveryState,
 
+    /// Inbox screen state (ainb-hooks notifications: selection,
+    /// filters, in-process SQLite store handle).
+    pub inbox_state: crate::components::inbox::InboxState,
+
     /// WireBuffers freshly drained from plugins, keyed by screen id.
     /// `App::tick_plugin_renders` populates this before each frame so
     /// `PluginScreen::render` can paint without needing access to the
@@ -3003,6 +3007,9 @@ impl Default for AppState {
 
             // Session recovery state (lazy-load when entering view)
             session_recovery_state: crate::components::SessionRecoveryState::default(),
+
+            // ainb-hooks inbox (lazy-opens SQLite on first refresh)
+            inbox_state: crate::components::inbox::InboxState::default(),
 
             pending_plugin_renders: std::collections::HashMap::new(),
             plugin_render_areas: std::collections::HashMap::new(),
