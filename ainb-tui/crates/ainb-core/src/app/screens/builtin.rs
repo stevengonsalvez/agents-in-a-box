@@ -431,6 +431,22 @@ impl Screen for SessionRecoveryScreen {
     }
 }
 
+/// Inbox screen — surfaces ainb-hooks notifications from
+/// `~/.agents-in-a-box/notifications.db`. The screen pulls its
+/// per-session state from `AppState::inbox_state` so selection +
+/// filters survive cross-screen navigation.
+#[derive(Default)]
+pub struct InboxScreen;
+
+impl Screen for InboxScreen {
+    fn id(&self) -> &str {
+        ids::INBOX
+    }
+    fn render(&mut self, frame: &mut Frame, area: Rect, state: &mut AppState) {
+        crate::components::inbox::render(frame, area, &mut state.inbox_state);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Stateful screens — own their component instance
 // ---------------------------------------------------------------------------
@@ -704,6 +720,7 @@ pub fn register_builtins(registry: &mut ScreenRegistry) {
     registry.register(Box::new(SetupMenuScreen::new()));
     registry.register(Box::new(AuthSetupScreen::new()));
     registry.register(Box::new(AttachedTerminalScreen::new()));
+    registry.register(Box::new(InboxScreen));
 }
 
 #[cfg(test)]

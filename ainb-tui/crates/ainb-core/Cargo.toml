@@ -81,6 +81,8 @@ bincode = { workspace = true }
 # Plugin runtime (Phase 7 — subprocess + JSON-RPC, replaces wasmi host).
 ainb-plugin-runtime = { path = "../ainb-plugin-runtime", version = "0.1.0" }
 ainb-plugin-protocol = { path = "../ainb-plugin-protocol", version = "0.1.0" }
+# Notification daemon — used in-process for the Inbox screen reader.
+ainb-plugin-notifyd = { path = "../ainb-plugin-notifyd", version = "1.1.0" }
 # Zero-copy byte buffers — required for `RuntimeHandle::publish_snapshot`'s
 # `payload: bytes::Bytes` parameter, used by the Phase 7c CLI dispatcher.
 bytes = "1.6"
