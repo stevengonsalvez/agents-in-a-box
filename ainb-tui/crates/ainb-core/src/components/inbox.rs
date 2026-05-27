@@ -108,10 +108,7 @@ pub struct InboxState {
 impl Default for InboxState {
     fn default() -> Self {
         let paths = Paths::from_home().ok();
-        let db_path = paths
-            .as_ref()
-            .map(|p| p.db.clone())
-            .unwrap_or_default();
+        let db_path = paths.as_ref().map(|p| p.db.clone()).unwrap_or_default();
         // Eagerly open the store when the DB already exists so the
         // global unread badge (rendered by the bottom menu bar before
         // the Inbox screen is opened) sees a live count from the
@@ -327,11 +324,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut InboxState) {
 }
 
 fn render_title(frame: &mut Frame, area: Rect, state: &InboxState) {
-    let unread = state
-        .store
-        .as_ref()
-        .and_then(|s| s.unread_count().ok())
-        .unwrap_or(0);
+    let unread = state.store.as_ref().and_then(|s| s.unread_count().ok()).unwrap_or(0);
     let total = state.rows.len();
     let title = Line::from(vec![
         Span::styled(
@@ -401,10 +394,7 @@ fn render_list(frame: &mut Frame, area: Rect, state: &mut InboxState) {
             };
             let row = Line::from(vec![
                 Span::styled(glyph, glyph_style),
-                Span::styled(
-                    fmt_ts(r.ts),
-                    Style::default().fg(MUTED_GRAY),
-                ),
+                Span::styled(fmt_ts(r.ts), Style::default().fg(MUTED_GRAY)),
                 Span::raw("  "),
                 Span::styled(
                     format!("{:<7}", r.agent),
@@ -415,10 +405,7 @@ fn render_list(frame: &mut Frame, area: Rect, state: &mut InboxState) {
                     format!("{:<24}", fmt_event(&r.raw_event)),
                     Style::default().fg(SOFT_WHITE),
                 ),
-                Span::styled(
-                    project_label,
-                    Style::default().fg(MUTED_GRAY),
-                ),
+                Span::styled(project_label, Style::default().fg(MUTED_GRAY)),
             ]);
             ListItem::new(row)
         })
@@ -426,11 +413,7 @@ fn render_list(frame: &mut Frame, area: Rect, state: &mut InboxState) {
 
     let list = List::new(items)
         .block(block)
-        .highlight_style(
-            Style::default()
-                .fg(SELECTION_GREEN)
-                .add_modifier(Modifier::BOLD),
-        )
+        .highlight_style(Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD))
         .highlight_symbol("▶ ");
     let mut list_state = ListState::default();
     list_state.select(Some(state.selected));
@@ -459,10 +442,7 @@ fn render_detail(frame: &mut Frame, area: Rect, state: &InboxState) {
     let mut lines: Vec<Line> = Vec::new();
     let label = |k: &str, v: String| {
         Line::from(vec![
-            Span::styled(
-                format!("{k:<10}"),
-                Style::default().fg(MUTED_GRAY),
-            ),
+            Span::styled(format!("{k:<10}"), Style::default().fg(MUTED_GRAY)),
             Span::styled(v, Style::default().fg(SOFT_WHITE)),
         ])
     };
@@ -474,10 +454,7 @@ fn render_detail(frame: &mut Frame, area: Rect, state: &InboxState) {
     lines.push(label("ts:", fmt_ts(row.ts)));
     lines.push(label(
         "state:",
-        format!(
-            "read={} dismissed={}",
-            row.read as u8, row.dismissed as u8
-        ),
+        format!("read={} dismissed={}", row.read as u8, row.dismissed as u8),
     ));
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
@@ -497,9 +474,7 @@ fn render_detail(frame: &mut Frame, area: Rect, state: &InboxState) {
         )));
     }
 
-    let paragraph = Paragraph::new(lines)
-        .block(block)
-        .wrap(Wrap { trim: false });
+    let paragraph = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
     frame.render_widget(paragraph, area);
 }
 

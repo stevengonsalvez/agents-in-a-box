@@ -121,9 +121,13 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_protocol_version() {
-        let json = r#"{"protocol_version":99,"agent":"claude","raw_event":"Stop","ts":1,"payload":{}}"#;
+        let json =
+            r#"{"protocol_version":99,"agent":"claude","raw_event":"Stop","ts":1,"payload":{}}"#;
         let err = Envelope::from_bytes(json.as_bytes()).unwrap_err();
-        assert!(matches!(err, EnvelopeError::UnsupportedVersion { got: 99, .. }));
+        assert!(matches!(
+            err,
+            EnvelopeError::UnsupportedVersion { got: 99, .. }
+        ));
     }
 
     #[test]

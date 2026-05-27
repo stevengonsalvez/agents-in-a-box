@@ -481,12 +481,8 @@ mod tests {
         assert_eq!(deleted, 2);
         assert_eq!(store.count().unwrap(), 3);
         // Survivors are the newest 3.
-        let surviving_ts: Vec<i64> = store
-            .list(false, None, None, 10)
-            .unwrap()
-            .iter()
-            .map(|r| r.ts)
-            .collect();
+        let surviving_ts: Vec<i64> =
+            store.list(false, None, None, 10).unwrap().iter().map(|r| r.ts).collect();
         assert_eq!(surviving_ts, vec![4, 3, 2]);
     }
 

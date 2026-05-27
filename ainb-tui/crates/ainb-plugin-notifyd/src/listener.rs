@@ -72,9 +72,7 @@ pub async fn run_daemon(config: RunConfig) -> Result<()> {
         // socket the PID check below will keep us out.
         if let Ok(Some(pid)) = crate::pid::read(&config.paths.pid) {
             if crate::pid::is_running(pid) && pid != std::process::id() {
-                anyhow::bail!(
-                    "another notifyd is already running (pid {pid}); refusing to start"
-                );
+                anyhow::bail!("another notifyd is already running (pid {pid}); refusing to start");
             }
         }
         std::fs::remove_file(&config.paths.socket).ok();
@@ -96,9 +94,8 @@ pub async fn run_daemon(config: RunConfig) -> Result<()> {
         Err(e) => warn!(error = ?e, "fallback replay failed"),
     }
 
-    let listener = UnixListener::bind(&config.paths.socket).with_context(|| {
-        format!("binding unix socket {}", config.paths.socket.display())
-    })?;
+    let listener = UnixListener::bind(&config.paths.socket)
+        .with_context(|| format!("binding unix socket {}", config.paths.socket.display()))?;
     // chmod 0600 — only the owner can write.
     use std::os::unix::fs::PermissionsExt;
     if let Ok(meta) = std::fs::metadata(&config.paths.socket) {
@@ -340,9 +337,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = config_under(dir.path());
         let socket = config.paths.socket.clone();
-        let corrupt = FallbackFile::new(&config.paths.fallback)
-            .corrupt_path()
-            .to_path_buf();
+        let corrupt = FallbackFile::new(&config.paths.fallback).corrupt_path().to_path_buf();
         let handle = tokio::spawn(async move { run_daemon(config).await });
         wait_for_socket(&socket).await;
 

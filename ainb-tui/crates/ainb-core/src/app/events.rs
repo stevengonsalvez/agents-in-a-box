@@ -2120,10 +2120,7 @@ impl EventHandler {
     ///   - p               cycle agent filter
     ///   - r               refresh
     ///   - q / Esc         back to previous screen (home if none)
-    fn handle_inbox_keys(
-        key_event: KeyEvent,
-        _state: &mut AppState,
-    ) -> Option<AppEvent> {
+    fn handle_inbox_keys(key_event: KeyEvent, _state: &mut AppState) -> Option<AppEvent> {
         match key_event.code {
             KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::GoToHomeScreen),
             KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::InboxMoveUp),

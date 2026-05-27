@@ -36,8 +36,8 @@ impl Paths {
     /// (`~/.agents-in-a-box/`). Fails if the home directory cannot be
     /// determined.
     pub fn from_home() -> anyhow::Result<Self> {
-        let home = dirs::home_dir()
-            .ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?;
+        let home =
+            dirs::home_dir().ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?;
         Ok(Self::under(home.join(".agents-in-a-box")))
     }
 

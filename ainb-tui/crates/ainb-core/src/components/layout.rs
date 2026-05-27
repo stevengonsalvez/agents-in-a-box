@@ -134,7 +134,9 @@ impl LayoutComponent {
         }
 
         // Render new session overlay if visible
-        if state.current_screen == screen_ids::NEW_SESSION || state.current_screen == screen_ids::SEARCH_WORKSPACE {
+        if state.current_screen == screen_ids::NEW_SESSION
+            || state.current_screen == screen_ids::SEARCH_WORKSPACE
+        {
             self.new_session.render(frame, frame.size(), state);
         }
 
@@ -311,10 +313,7 @@ impl LayoutComponent {
             .unwrap_or(0);
         let mut line2_spans = line2_spans;
         if inbox_unread > 0 {
-            line2_spans.push(Span::styled(
-                " │ ",
-                Style::default().fg(SUBDUED_BORDER),
-            ));
+            line2_spans.push(Span::styled(" │ ", Style::default().fg(SUBDUED_BORDER)));
             line2_spans.push(Span::styled(
                 format!("● {inbox_unread} "),
                 Style::default().fg(WARNING_ORANGE).add_modifier(Modifier::BOLD),

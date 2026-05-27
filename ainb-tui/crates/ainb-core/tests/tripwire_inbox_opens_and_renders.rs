@@ -89,12 +89,8 @@ git_directories = []
         ts: now_ms - 30_000,
         payload: json!({}),
     };
-    store
-        .insert_and_prune(&claude, &no_retention)
-        .expect("seed claude row");
-    store
-        .insert_and_prune(&codex, &no_retention)
-        .expect("seed codex row");
+    store.insert_and_prune(&claude, &no_retention).expect("seed claude row");
+    store.insert_and_prune(&codex, &no_retention).expect("seed codex row");
 }
 
 fn capture_pane(session: &str) -> String {
@@ -120,9 +116,7 @@ where
 }
 
 fn kill_session(session: &str) {
-    let _ = Command::new("tmux")
-        .args(["kill-session", "-t", session])
-        .status();
+    let _ = Command::new("tmux").args(["kill-session", "-t", session]).status();
 }
 
 #[test]
@@ -139,16 +133,7 @@ fn inbox_opens_and_renders_seeded_notifications() {
     let ainb = ainb_bin();
 
     let status = Command::new("tmux")
-        .args([
-            "new-session",
-            "-d",
-            "-s",
-            &session,
-            "-x",
-            "180",
-            "-y",
-            "50",
-        ])
+        .args(["new-session", "-d", "-s", &session, "-x", "180", "-y", "50"])
         .status()
         .expect("tmux new-session");
     assert!(status.success(), "tmux new-session failed");
@@ -165,8 +150,9 @@ fn inbox_opens_and_renders_seeded_notifications() {
 
     // Wait for HomeScreen — same marker the other tripwire tests use.
     let home_deadline = Instant::now() + Duration::from_secs(45);
-    let pre_cap = poll_capture(&session, home_deadline, |c| c.contains("Stats")
-        && c.contains("[i]"));
+    let pre_cap = poll_capture(&session, home_deadline, |c| {
+        c.contains("Stats") && c.contains("[i]")
+    });
     let Some(pre) = pre_cap else {
         let last = capture_pane(&session);
         kill_session(&session);
@@ -192,7 +178,9 @@ fn inbox_opens_and_renders_seeded_notifications() {
 
     let inbox_deadline = Instant::now() + Duration::from_secs(15);
     let post_cap = poll_capture(&session, inbox_deadline, |c| {
-        c.contains("📥 Inbox") && c.contains("Notification:idle_prompt") && c.contains("agent-turn-complete")
+        c.contains("📥 Inbox")
+            && c.contains("Notification:idle_prompt")
+            && c.contains("agent-turn-complete")
     });
     if post_cap.is_none() {
         let last = capture_pane(&session);

@@ -27,8 +27,7 @@ use tracing::{info, warn};
 use crate::paths::Paths;
 
 /// The bash hook script, baked into the binary.
-const HOOK_SCRIPT: &str =
-    include_str!("../../../../plugins/ainb-hooks/hooks/notify.sh");
+const HOOK_SCRIPT: &str = include_str!("../../../../plugins/ainb-hooks/hooks/notify.sh");
 
 /// The Claude plugin manifest, baked into the binary.
 const CLAUDE_PLUGIN_JSON: &str =
@@ -36,8 +35,7 @@ const CLAUDE_PLUGIN_JSON: &str =
 
 /// The Codex hooks.json merge template (with the `__AINB_HOOK_SCRIPT__`
 /// placeholder that gets substituted at install time).
-const CODEX_HOOKS_TEMPLATE: &str =
-    include_str!("../../../../plugins/ainb-hooks/codex/hooks.json");
+const CODEX_HOOKS_TEMPLATE: &str = include_str!("../../../../plugins/ainb-hooks/codex/hooks.json");
 
 /// Sentinels used to delimit our managed block inside the user's
 /// `~/.codex/hooks.json`. Stable strings — never change without a
@@ -93,8 +91,8 @@ impl InstallRecord {
         if !p.exists() {
             return Ok(Self::default());
         }
-        let text = std::fs::read_to_string(&p)
-            .with_context(|| format!("reading {}", p.display()))?;
+        let text =
+            std::fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))?;
         Ok(serde_json::from_str(&text).with_context(|| format!("parsing {}", p.display()))?)
     }
 
@@ -105,8 +103,7 @@ impl InstallRecord {
             std::fs::create_dir_all(parent).ok();
         }
         let text = serde_json::to_string_pretty(self)?;
-        std::fs::write(&p, text)
-            .with_context(|| format!("writing {}", p.display()))?;
+        std::fs::write(&p, text).with_context(|| format!("writing {}", p.display()))?;
         Ok(())
     }
 }
@@ -128,8 +125,7 @@ pub fn extract_hook_script(paths: &Paths) -> Result<PathBuf> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
     }
-    std::fs::write(&dest, HOOK_SCRIPT)
-        .with_context(|| format!("writing {}", dest.display()))?;
+    std::fs::write(&dest, HOOK_SCRIPT).with_context(|| format!("writing {}", dest.display()))?;
     let mut perms = std::fs::metadata(&dest)?.permissions();
     perms.set_mode(0o755);
     std::fs::set_permissions(&dest, perms)?;
@@ -146,11 +142,7 @@ pub fn install(paths: &Paths, agents: &[Agent]) -> Result<InstallRecord> {
 
 /// Install variant that takes an explicit `$HOME` root. Lets tests
 /// stay isolated without mutating the process-wide environment.
-pub fn install_under_home(
-    paths: &Paths,
-    home: &Path,
-    agents: &[Agent],
-) -> Result<InstallRecord> {
+pub fn install_under_home(paths: &Paths, home: &Path, agents: &[Agent]) -> Result<InstallRecord> {
     if agents.is_empty() {
         bail!("install: must specify at least one agent");
     }
@@ -196,10 +188,7 @@ fn install_claude(home: &Path, hook_script_canonical: &Path) -> Result<PathBuf> 
 
     // Drop the manifest verbatim — it references `${CLAUDE_PLUGIN_ROOT}`
     // which Claude resolves at runtime.
-    std::fs::write(
-        claude_plugin_meta.join("plugin.json"),
-        CLAUDE_PLUGIN_JSON,
-    )?;
+    std::fs::write(claude_plugin_meta.join("plugin.json"), CLAUDE_PLUGIN_JSON)?;
 
     // Symlink the hook script into the plugin dir so a single edit to
     // notify.sh propagates. On platforms where symlink fails (rare on
@@ -246,8 +235,10 @@ fn install_codex(home: &Path, hook_script_canonical: &Path) -> Result<PathBuf> {
     };
 
     // Resolve our template against the actual hook script path.
-    let our_block_text = CODEX_HOOKS_TEMPLATE
-        .replace("__AINB_HOOK_SCRIPT__", &hook_script_canonical.to_string_lossy());
+    let our_block_text = CODEX_HOOKS_TEMPLATE.replace(
+        "__AINB_HOOK_SCRIPT__",
+        &hook_script_canonical.to_string_lossy(),
+    );
     let our_block: serde_json::Value = serde_json::from_str(&strip_line_comments(&our_block_text))
         .context("parsing embedded codex hooks template")?;
     let our_hooks = our_block
@@ -260,43 +251,29 @@ fn install_codex(home: &Path, hook_script_canonical: &Path) -> Result<PathBuf> {
     // already has entries for that event, we append a single managed
     // entry; we never replace user-authored hooks.
     let mut merged = existing.as_object().cloned().unwrap_or_default();
-    let mut merged_hooks = merged
-        .get("hooks")
-        .and_then(|v| v.as_object())
-        .cloned()
-        .unwrap_or_default();
+    let mut merged_hooks =
+        merged.get("hooks").and_then(|v| v.as_object()).cloned().unwrap_or_default();
 
     for (event, our_entries) in &our_hooks {
         // Drop any pre-existing ainb-managed entries for this event.
         let kept: Vec<serde_json::Value> = merged_hooks
             .get(event)
             .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter(|entry| !is_ainb_managed_entry(entry))
-                    .cloned()
-                    .collect()
-            })
+            .map(|arr| arr.iter().filter(|entry| !is_ainb_managed_entry(entry)).cloned().collect())
             .unwrap_or_default();
         let mut new_entries = kept;
         if let Some(arr) = our_entries.as_array() {
             for entry in arr {
                 let mut tagged = entry.clone();
                 if let Some(obj) = tagged.as_object_mut() {
-                    obj.insert(
-                        "_ainb_managed".to_string(),
-                        serde_json::Value::Bool(true),
-                    );
+                    obj.insert("_ainb_managed".to_string(), serde_json::Value::Bool(true));
                 }
                 new_entries.push(tagged);
             }
         }
         merged_hooks.insert(event.clone(), serde_json::Value::Array(new_entries));
     }
-    merged.insert(
-        "hooks".to_string(),
-        serde_json::Value::Object(merged_hooks),
-    );
+    merged.insert("hooks".to_string(), serde_json::Value::Object(merged_hooks));
 
     let text = serde_json::to_string_pretty(&serde_json::Value::Object(merged))?;
     std::fs::write(&hooks_json, text)
@@ -306,10 +283,7 @@ fn install_codex(home: &Path, hook_script_canonical: &Path) -> Result<PathBuf> {
 }
 
 fn is_ainb_managed_entry(entry: &serde_json::Value) -> bool {
-    entry
-        .get("_ainb_managed")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
+    entry.get("_ainb_managed").and_then(|v| v.as_bool()).unwrap_or(false)
         || entry
             .get("hooks")
             .and_then(|v| v.as_array())
@@ -377,10 +351,8 @@ pub fn uninstall(paths: &Paths, agents: &[Agent]) -> Result<()> {
 
 fn strip_codex_managed_entries(hooks_json: &Path) -> Result<()> {
     let text = std::fs::read_to_string(hooks_json)?;
-    let mut value: serde_json::Value =
-        serde_json::from_str(&strip_line_comments(&text)).with_context(|| {
-            format!("parsing {}", hooks_json.display())
-        })?;
+    let mut value: serde_json::Value = serde_json::from_str(&strip_line_comments(&text))
+        .with_context(|| format!("parsing {}", hooks_json.display()))?;
     if let Some(hooks_obj) = value
         .as_object_mut()
         .and_then(|o| o.get_mut("hooks"))
@@ -392,9 +364,7 @@ fn strip_codex_managed_entries(hooks_json: &Path) -> Result<()> {
             }
         }
         // Drop now-empty event arrays so we don't leave noise.
-        hooks_obj.retain(|_, v| {
-            v.as_array().map(|a| !a.is_empty()).unwrap_or(false)
-        });
+        hooks_obj.retain(|_, v| v.as_array().map(|a| !a.is_empty()).unwrap_or(false));
     }
     let out = serde_json::to_string_pretty(&value)?;
     std::fs::write(hooks_json, out)?;
@@ -470,7 +440,10 @@ mod tests {
         let dest = extract_hook_script(&p).unwrap();
         assert!(dest.exists());
         let mode = std::fs::metadata(&dest).unwrap().permissions().mode();
-        assert!(mode & 0o111 != 0, "script must be executable: mode={mode:o}");
+        assert!(
+            mode & 0o111 != 0,
+            "script must be executable: mode={mode:o}"
+        );
         let content = std::fs::read_to_string(&dest).unwrap();
         assert!(content.contains("ainb-hooks"));
     }
@@ -480,11 +453,8 @@ mod tests {
         let dir = fake_home();
         let p = paths_under_home(dir.path());
         let record = install_under_home(&p, dir.path(), &[Agent::Claude]).unwrap();
-        let plugin_json = record
-            .claude_plugin_dir
-            .as_ref()
-            .unwrap()
-            .join(".claude-plugin/plugin.json");
+        let plugin_json =
+            record.claude_plugin_dir.as_ref().unwrap().join(".claude-plugin/plugin.json");
         assert!(plugin_json.exists(), "missing: {}", plugin_json.display());
         let manifest: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&plugin_json).unwrap()).unwrap();
@@ -513,8 +483,14 @@ mod tests {
         assert!(record.codex_hooks_json.is_some());
         let text = std::fs::read_to_string(&hooks_json_path).unwrap();
         assert!(text.contains("echo user-hook"), "user hook lost: {text}");
-        assert!(text.contains("AINB_AGENT=codex"), "managed block missing: {text}");
-        assert!(text.contains("notify.sh"), "managed block lacks script: {text}");
+        assert!(
+            text.contains("AINB_AGENT=codex"),
+            "managed block missing: {text}"
+        );
+        assert!(
+            text.contains("notify.sh"),
+            "managed block lacks script: {text}"
+        );
     }
 
     #[test]

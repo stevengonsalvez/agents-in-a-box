@@ -23,10 +23,7 @@ fn hook_script() -> PathBuf {
     // `plugins/ainb-hooks/hooks/notify.sh`.
     let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
     let manifest = Path::new(&manifest);
-    let monorepo = manifest
-        .ancestors()
-        .nth(3)
-        .expect("walking up from manifest");
+    let monorepo = manifest.ancestors().nth(3).expect("walking up from manifest");
     monorepo.join("plugins/ainb-hooks/hooks/notify.sh")
 }
 
@@ -137,16 +134,12 @@ async fn hook_script_into_real_daemon_persists_both_agents() {
         by_agent.insert(row.agent.clone(), row.clone());
     }
 
-    let claude_row = by_agent
-        .get("claude")
-        .expect("claude row missing");
+    let claude_row = by_agent.get("claude").expect("claude row missing");
     assert_eq!(claude_row.raw_event, "Stop");
     assert_eq!(claude_row.session_id, "sess-claude-1");
     assert!(claude_row.project.contains("proj"));
 
-    let codex_row = by_agent
-        .get("codex")
-        .expect("codex row missing");
+    let codex_row = by_agent.get("codex").expect("codex row missing");
     assert_eq!(codex_row.raw_event, "agent-turn-complete");
     assert_eq!(codex_row.session_id, "sess-codex-1");
 

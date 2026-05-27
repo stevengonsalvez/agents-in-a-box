@@ -248,7 +248,10 @@ mod tests {
 
     #[test]
     fn render_title_includes_agent_name() {
-        assert_eq!(render_title(&env("Stop", "claude")), "Claude session finished");
+        assert_eq!(
+            render_title(&env("Stop", "claude")),
+            "Claude session finished"
+        );
         assert_eq!(
             render_title(&env("agent-turn-complete", "codex")),
             "Codex session finished"

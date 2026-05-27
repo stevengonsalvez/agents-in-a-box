@@ -57,10 +57,7 @@ impl FallbackFile {
             })
             .map(|name| path.with_file_name(name))
             .unwrap_or_else(|| path.with_extension("corrupt.jsonl"));
-        Self {
-            path,
-            corrupt_path,
-        }
+        Self { path, corrupt_path }
     }
 
     /// Path to the active fallback file.
@@ -94,11 +91,7 @@ impl FallbackFile {
     /// Replay the fallback file into the store, then remove the file.
     /// If the file does not exist, this is a no-op returning a zero
     /// summary.
-    pub fn replay_into(
-        &self,
-        store: &Store,
-        policy: &RetentionPolicy,
-    ) -> Result<ReplaySummary> {
+    pub fn replay_into(&self, store: &Store, policy: &RetentionPolicy) -> Result<ReplaySummary> {
         if !self.path.exists() {
             return Ok(ReplaySummary::default());
         }
@@ -108,9 +101,8 @@ impl FallbackFile {
         let mut summary = ReplaySummary::default();
         let mut corrupt_lines: Vec<String> = Vec::new();
         for line in reader.lines() {
-            let line = line.with_context(|| {
-                format!("reading line from {}", self.path.display())
-            })?;
+            let line =
+                line.with_context(|| format!("reading line from {}", self.path.display()))?;
             summary.lines_read += 1;
             if line.trim().is_empty() {
                 continue;
@@ -125,7 +117,8 @@ impl FallbackFile {
                         summary.envelopes_persisted += 1;
                     }
                 }
-                Err(EnvelopeError::Json(_)) | Err(EnvelopeError::MissingField(_))
+                Err(EnvelopeError::Json(_))
+                | Err(EnvelopeError::MissingField(_))
                 | Err(EnvelopeError::UnsupportedVersion { .. }) => {
                     corrupt_lines.push(line);
                     summary.lines_corrupt += 1;
@@ -137,9 +130,8 @@ impl FallbackFile {
         }
         // Remove the active fallback file last so a crash mid-replay
         // leaves a recoverable file behind.
-        std::fs::remove_file(&self.path).with_context(|| {
-            format!("removing replayed fallback {}", self.path.display())
-        })?;
+        std::fs::remove_file(&self.path)
+            .with_context(|| format!("removing replayed fallback {}", self.path.display()))?;
         Ok(summary)
     }
 
@@ -151,9 +143,7 @@ impl FallbackFile {
             .create(true)
             .append(true)
             .open(&self.corrupt_path)
-            .with_context(|| {
-                format!("opening corrupt file {}", self.corrupt_path.display())
-            })?;
+            .with_context(|| format!("opening corrupt file {}", self.corrupt_path.display()))?;
         for line in lines {
             writeln!(file, "{line}")?;
         }
@@ -219,10 +209,7 @@ mod tests {
         fb.append(&env(1)).unwrap();
         // Append a deliberately malformed line.
         {
-            let mut f = std::fs::OpenOptions::new()
-                .append(true)
-                .open(fb.path())
-                .unwrap();
+            let mut f = std::fs::OpenOptions::new().append(true).open(fb.path()).unwrap();
             writeln!(f, "not a json line").unwrap();
         }
         fb.append(&env(2)).unwrap();
