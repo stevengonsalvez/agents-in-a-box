@@ -491,20 +491,39 @@ pub fn maybe_show_discovery_banner(
     walker: WalkerOutput,
 ) {
     if data.banner.is_active() {
+        tracing::info!("discovery banner: skip — banner already active");
         return;
     }
-    let manifest = Manifest::load_from(&ainb_home.join("manifest.yaml")).unwrap_or_default();
+    let manifest_path = ainb_home.join("manifest.yaml");
+    let manifest = Manifest::load_from(&manifest_path).unwrap_or_default();
     if !manifest.units.is_empty() {
+        tracing::info!(
+            units = manifest.units.len(),
+            "discovery banner: skip — manifest non-empty"
+        );
         return;
     }
-    if ainb_home.join(SKIP_MARKER_FILE).exists() {
+    let skip_path = ainb_home.join(SKIP_MARKER_FILE);
+    if skip_path.exists() {
+        tracing::info!(?skip_path, "discovery banner: skip — skip marker present");
         return;
     }
     let counts = compute_counts(&walker);
     let total = counts.marketplace_plugins + counts.orphan_units_total;
+    tracing::info!(
+        ainb_home = %ainb_home.display(),
+        class_a = walker.class_a.len(),
+        class_c = walker.class_c.len(),
+        marketplace_plugins = counts.marketplace_plugins,
+        orphan_units_total = counts.orphan_units_total,
+        total,
+        "discovery banner: walker output"
+    );
     if total == 0 {
+        tracing::info!("discovery banner: skip — walker output empty");
         return;
     }
+    tracing::info!(total, "discovery banner: showing Visible");
     data.banner = DiscoveryBannerState::Visible(counts);
     data.walker_cache = Some(walker);
 }

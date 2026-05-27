@@ -3526,6 +3526,26 @@ impl EventHandler {
                     SidebarItem::SkillManager => {
                         tracing::info!("Navigating to SkillManager from sidebar (spec §10.1)");
                         state.current_screen = screen_ids::SKILL_MANAGER.to_string();
+                        // Mirror the discovery flow from the `m` keybind
+                        // handler (AppEvent::GoToSkillManager) — sidebar entry
+                        // must trigger the same hdt.9 live-data rehydrate +
+                        // hdt.6 banner overlay, otherwise the screen opens
+                        // empty and the user never sees their orphan units.
+                        let ainb_home = ainb_skill_core::default_ainb_home();
+                        state.skill_manager_state.reload_from_disk(&ainb_home);
+                        let claude_home = std::env::var_os("HOME")
+                            .map(std::path::PathBuf::from)
+                            .map(|h| h.join(".claude"))
+                            .unwrap_or_else(|| std::path::PathBuf::from(".claude"));
+                        let walker =
+                            crate::components::skill_manager_screen::run_discovery_walkers(
+                                &claude_home,
+                            );
+                        crate::components::skill_manager_screen::maybe_show_discovery_banner(
+                            &mut state.skill_manager_state,
+                            &ainb_home,
+                            walker,
+                        );
                     }
                     SidebarItem::Changelog => {
                         state.current_screen = screen_ids::CHANGELOG.to_string();
