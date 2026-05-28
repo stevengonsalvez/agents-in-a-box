@@ -18,10 +18,23 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{CoreError, Result};
 
-const CURRENT_SCHEMA_VERSION: u32 = 1;
+/// Current on-disk lockfile schema version.
+///
+/// - v1: sources + units + per-tool deployment records.
+/// - v2: adds per-unit [`UsageRecord`] (`usage` field). Bumped by
+///   skill-manager v1.2 (bead v12.B.1) to back the Detail-pane usage
+///   display. The bump is forward-only: a v1 lockfile loads cleanly with
+///   `usage` defaulting to empty (see [`Lockfile::load_from`]).
+///
+/// Note: load preserves the on-disk `schema_version` verbatim — a v1 file
+/// re-saved without reconstruction stays at `schema_version: 1`. Only
+/// [`Lockfile::default`] stamps the current version. Consumers must not
+/// treat `schema_version` as a feature-presence flag for `usage`; rely on
+/// the field's own default instead.
+pub const LOCKFILE_SCHEMA_VERSION: u32 = 2;
 
 fn current_schema_version() -> u32 {
-    CURRENT_SCHEMA_VERSION
+    LOCKFILE_SCHEMA_VERSION
 }
 
 /// Locked source — records the SHA we resolved a declared ref to and
@@ -57,6 +70,36 @@ pub enum DeployedRef {
     PendingUninstall,
 }
 
+/// Per-unit usage telemetry — when the unit was last invoked and how
+/// many times. Populated by `ainb skill usage` (bead v12.B.3) from a
+/// scan of each tool's session logs, and rendered in the Detail pane
+/// (bead v12.B.4).
+///
+/// Absent in v1 lockfiles; `#[serde(default)]` on the [`LockedUnit::usage`]
+/// field makes the whole record optional, and these fields default to
+/// `None` / `0` so a freshly-loaded legacy unit reads as "never used".
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageRecord {
+    /// RFC 3339 timestamp of the most recent detected invocation, or
+    /// `None` until usage is first computed. Stored as a string to match
+    /// the lockfile's existing timestamp convention (`generated_at`,
+    /// `fetched_at`); consumers parse it (e.g. with `chrono`) when they
+    /// need a "time-ago" rendering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_used_at: Option<String>,
+    /// Total detected invocations across every tool's session logs.
+    #[serde(default)]
+    pub invocations: u64,
+}
+
+impl UsageRecord {
+    /// `true` when no usage has been recorded (no last-used timestamp and
+    /// zero invocations). Used to omit the field from serialized lockfiles.
+    pub fn is_empty(&self) -> bool {
+        self.last_used_at.is_none() && self.invocations == 0
+    }
+}
+
 /// Locked unit — full deployment record across all targeted tools.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LockedUnit {
@@ -69,6 +112,11 @@ pub struct LockedUnit {
     pub sha: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub deployed: BTreeMap<String, DeployedRef>,
+    /// Usage telemetry (last-used + invocation count). Absent in v1
+    /// lockfiles; defaults to an empty record and is omitted from the
+    /// serialized form while empty.
+    #[serde(default, skip_serializing_if = "UsageRecord::is_empty")]
+    pub usage: UsageRecord,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,7 +137,7 @@ pub struct Lockfile {
 impl Default for Lockfile {
     fn default() -> Self {
         Self {
-            schema_version: CURRENT_SCHEMA_VERSION,
+            schema_version: LOCKFILE_SCHEMA_VERSION,
             generated_at: None,
             sources: Vec::new(),
             units: Vec::new(),

@@ -2,7 +2,9 @@
 
 use std::collections::BTreeMap;
 
-use ainb_skill_core::lockfile::{DeployedRef, LockedSource, LockedUnit, Lockfile};
+use ainb_skill_core::lockfile::{
+    DeployedRef, LockedSource, LockedUnit, Lockfile, UsageRecord, LOCKFILE_SCHEMA_VERSION,
+};
 use ainb_skill_core::paths::lockfile_path_in;
 
 fn tmp_home() -> tempfile::TempDir {
@@ -59,6 +61,7 @@ fn round_trip_with_deployed_and_skipped() {
             kind: "skill".into(),
             sha: Some("0e9bc28a1b".into()),
             deployed,
+            usage: Default::default(),
         }],
     };
 
@@ -82,6 +85,7 @@ fn pending_uninstall_round_trips() {
             kind: "skill".into(),
             sha: None,
             deployed,
+            usage: Default::default(),
         }],
         ..Lockfile::default()
     };
@@ -109,6 +113,7 @@ fn mark_units_pending_uninstall_by_source_uri() {
         kind: "skill".into(),
         sha: None,
         deployed: dep_a,
+        usage: Default::default(),
     });
 
     let mut dep_b = BTreeMap::new();
@@ -132,6 +137,7 @@ fn mark_units_pending_uninstall_by_source_uri() {
         kind: "skill".into(),
         sha: None,
         deployed: dep_b,
+        usage: Default::default(),
     });
 
     let affected = l.mark_units_pending_uninstall_by_source_uri("gh:org/drop");
@@ -147,6 +153,92 @@ fn mark_units_pending_uninstall_by_source_uri() {
     // The "drop" unit is flagged on every tool.
     let drop = l.units.iter().find(|u| u.declared_uri.contains("drop")).unwrap();
     assert!(drop.deployed.values().all(|d| matches!(d, DeployedRef::PendingUninstall)));
+}
+
+#[test]
+fn default_lockfile_uses_bumped_schema_version() {
+    // v12.B.1 bumps the lockfile schema to 2 to introduce per-unit usage.
+    assert_eq!(LOCKFILE_SCHEMA_VERSION, 2);
+    assert_eq!(Lockfile::default().schema_version, LOCKFILE_SCHEMA_VERSION);
+}
+
+#[test]
+fn legacy_lockfile_without_usage_reads_with_defaults() {
+    // A schema_version=1 lockfile predates the usage field. It must load
+    // without error and every unit's usage must default to empty
+    // (last_used_at = None, invocations = 0). The on-disk version is
+    // preserved as written (load does not silently rewrite it).
+    let home = tmp_home();
+    let path = lockfile_path_in(home.path());
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let legacy = "\
+schema_version: 1
+units:
+  - uri: gh:org/x@sha/skill
+    declared_uri: gh:org/x@main/skill
+    kind: skill
+";
+    std::fs::write(&path, legacy).unwrap();
+
+    let l = Lockfile::load_from(&path).expect("legacy lockfile loads");
+    assert_eq!(l.schema_version, 1, "load preserves on-disk version");
+    assert_eq!(l.units.len(), 1);
+    assert_eq!(l.units[0].usage, UsageRecord::default());
+    assert_eq!(l.units[0].usage.last_used_at, None);
+    assert_eq!(l.units[0].usage.invocations, 0);
+}
+
+#[test]
+fn usage_field_round_trips() {
+    let home = tmp_home();
+    let path = lockfile_path_in(home.path());
+
+    let l = Lockfile {
+        units: vec![LockedUnit {
+            uri: "gh:org/x@sha/skill".into(),
+            declared_uri: "gh:org/x@main/skill".into(),
+            kind: "skill".into(),
+            sha: None,
+            deployed: BTreeMap::new(),
+            usage: UsageRecord {
+                last_used_at: Some("2026-05-28T12:00:00Z".into()),
+                invocations: 12,
+            },
+        }],
+        ..Lockfile::default()
+    };
+
+    l.save_to(&path).unwrap();
+    let reloaded = Lockfile::load_from(&path).unwrap();
+    assert_eq!(reloaded, l);
+    assert_eq!(reloaded.units[0].usage.invocations, 12);
+    assert_eq!(
+        reloaded.units[0].usage.last_used_at.as_deref(),
+        Some("2026-05-28T12:00:00Z")
+    );
+}
+
+#[test]
+fn empty_usage_is_omitted_from_serialized_yaml() {
+    // An empty usage record must not clutter the lockfile — keeps existing
+    // lockfiles byte-stable when usage has never been computed.
+    let home = tmp_home();
+    let path = lockfile_path_in(home.path());
+
+    let l = Lockfile {
+        units: vec![LockedUnit {
+            uri: "gh:org/x@sha/skill".into(),
+            declared_uri: "gh:org/x@main/skill".into(),
+            kind: "skill".into(),
+            sha: None,
+            deployed: BTreeMap::new(),
+            usage: UsageRecord::default(),
+        }],
+        ..Lockfile::default()
+    };
+    l.save_to(&path).unwrap();
+    let yaml = std::fs::read_to_string(&path).unwrap();
+    assert!(!yaml.contains("usage"), "empty usage should be omitted, got:\n{yaml}");
 }
 
 #[test]

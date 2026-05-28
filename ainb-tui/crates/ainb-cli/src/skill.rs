@@ -170,6 +170,7 @@ fn install(home: &Path, args: InstallArgs, out: &mut dyn io::Write) -> Result<()
         kind: kind.to_string(),
         sha: locked.resolved_sha.clone(),
         deployed: deployed_map,
+        usage: Default::default(),
     });
     lockfile.save_to(&lockfile_path_in(home))?;
 

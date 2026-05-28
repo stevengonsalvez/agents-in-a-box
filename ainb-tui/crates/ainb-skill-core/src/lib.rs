@@ -13,7 +13,9 @@ pub mod uri;
 
 pub use error::CoreError;
 pub use kind::UnitKind;
-pub use lockfile::{DeployedRef, LockedSource, LockedUnit, Lockfile};
+pub use lockfile::{
+    DeployedRef, LockedSource, LockedUnit, Lockfile, UsageRecord, LOCKFILE_SCHEMA_VERSION,
+};
 pub use manifest::{Defaults, Manifest, Options, SourceEntry, SourceKind, UnitEntry};
 pub use paths::{
     default_ainb_home, default_cache_dir, default_lockfile_path, default_manifest_path,

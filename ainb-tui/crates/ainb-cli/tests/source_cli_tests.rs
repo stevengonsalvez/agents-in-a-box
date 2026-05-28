@@ -267,6 +267,7 @@ fn remove_flags_lockfile_units_pending_uninstall() {
         kind: "skill".into(),
         sha: None,
         deployed,
+        usage: Default::default(),
     });
     lockfile.save_to(&lockfile_path_in(home.path())).unwrap();
 

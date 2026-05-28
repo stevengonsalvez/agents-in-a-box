@@ -169,6 +169,7 @@ pub fn dispatch(home: &Path, args: PromoteArgs, out: &mut dyn io::Write) -> Resu
         kind: "skill".to_string(),
         sha: Some(new_sha.clone()),
         deployed,
+        usage: Default::default(),
     });
     lockfile.save_to(&lockfile_path)?;
 
