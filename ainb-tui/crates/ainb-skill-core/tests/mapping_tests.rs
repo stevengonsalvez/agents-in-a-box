@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use ainb_skill_core::manifest::{SourceEntry, TargetMapping};
-use ainb_skill_core::mapping::resolve_pair;
+use ainb_skill_core::mapping::{resolve_pair, BOOTSTRAP_DEFAULT_MAPPINGS};
 
 /// Build a `SourceEntry` carrying just the `target_layout` under test —
 /// every other field is irrelevant to `resolve_pair`.
@@ -32,9 +32,12 @@ fn mapping(glob: &str, home: &str, repo: &str) -> TargetMapping {
 }
 
 #[test]
-fn empty_target_layout_returns_none() {
+fn empty_target_layout_unmapped_path_returns_none() {
+    // With an empty target_layout, resolve_pair falls back to the
+    // BOOTSTRAP_DEFAULT_MAPPINGS (see the C.3 tests below). A unit that
+    // matches none of the defaults still resolves to None.
     let src = source_with(vec![]);
-    assert_eq!(resolve_pair(&src, Path::new("skills/commit/SKILL.md")), None);
+    assert_eq!(resolve_pair(&src, Path::new("hooks/pre-commit.sh")), None);
 }
 
 #[test]
@@ -194,6 +197,125 @@ fn single_star_does_not_cross_path_separator() {
         resolve_pair(&src, Path::new("commands/sub/deep.md")),
         None,
         "single-star glob must not cross a path separator"
+    );
+}
+
+// === v12.C.3 — BOOTSTRAP_DEFAULT_MAPPINGS fallback ===
+
+/// The six canonical agent subdirectories ported from bootstrap.js.
+const AGENT_SUBDIRS: [&str; 6] = [
+    "engineering",
+    "universal",
+    "orchestrators",
+    "design",
+    "meta",
+    "swarm",
+];
+
+#[test]
+fn default_mappings_cover_all_canonical_kinds() {
+    let globs: Vec<&str> = BOOTSTRAP_DEFAULT_MAPPINGS
+        .iter()
+        .map(|(g, _, _)| *g)
+        .collect();
+
+    assert!(
+        globs.iter().any(|g| g.starts_with("agents/")),
+        "missing agents mapping: {globs:?}"
+    );
+    assert!(
+        globs.iter().any(|g| g.starts_with("skills/")),
+        "missing skills mapping: {globs:?}"
+    );
+    assert!(
+        globs.iter().any(|g| g.starts_with("commands/")),
+        "missing commands mapping: {globs:?}"
+    );
+
+    // The agents glob must enumerate every canonical subdir.
+    let agents_glob = globs
+        .iter()
+        .find(|g| g.starts_with("agents/"))
+        .expect("agents glob present");
+    for sub in AGENT_SUBDIRS {
+        assert!(
+            agents_glob.contains(sub),
+            "agents glob `{agents_glob}` missing subdir `{sub}`"
+        );
+    }
+}
+
+#[test]
+fn empty_layout_falls_back_to_defaults_for_every_agent_subdir() {
+    let src = source_with(vec![]); // no explicit target_layout → defaults
+    for sub in AGENT_SUBDIRS {
+        let unit = format!("agents/{sub}/code-reviewer.md");
+        let got = resolve_pair(&src, Path::new(&unit));
+        assert_eq!(
+            got,
+            Some((
+                PathBuf::from(format!(".claude/agents/{sub}/code-reviewer.md")),
+                PathBuf::from(format!("agents/{sub}/code-reviewer.md")),
+            )),
+            "default mapping should resolve agents/{sub}"
+        );
+    }
+}
+
+#[test]
+fn empty_layout_falls_back_to_defaults_for_top_level_agents() {
+    // Agents that live directly under `agents/` (no subdir), e.g.
+    // distinguished-engineer.md — must still resolve via the defaults.
+    let src = source_with(vec![]);
+    assert_eq!(
+        resolve_pair(&src, Path::new("agents/distinguished-engineer.md")),
+        Some((
+            PathBuf::from(".claude/agents/distinguished-engineer.md"),
+            PathBuf::from("agents/distinguished-engineer.md"),
+        )),
+        "top-level agent files must resolve under the default agents mapping"
+    );
+}
+
+#[test]
+fn empty_layout_falls_back_to_defaults_for_skills() {
+    let src = source_with(vec![]);
+    assert_eq!(
+        resolve_pair(&src, Path::new("skills/commit/SKILL.md")),
+        Some((
+            PathBuf::from(".claude/skills/commit/SKILL.md"),
+            PathBuf::from("skills/commit/SKILL.md"),
+        ))
+    );
+}
+
+#[test]
+fn empty_layout_falls_back_to_defaults_for_commands() {
+    let src = source_with(vec![]);
+    assert_eq!(
+        resolve_pair(&src, Path::new("commands/prime.md")),
+        Some((
+            PathBuf::from(".claude/commands/prime.md"),
+            PathBuf::from("commands/prime.md"),
+        ))
+    );
+}
+
+#[test]
+fn explicit_layout_does_not_consult_defaults() {
+    // A source WITH an explicit target_layout uses only its own mappings;
+    // the bootstrap defaults are NOT a fallback in that case. Here the
+    // explicit layout covers only `commands`, so a skills unit (which a
+    // default WOULD match) must resolve to None.
+    let src = source_with(vec![mapping(
+        "commands/*.md",
+        ".claude/commands",
+        "commands",
+    )]);
+    assert_eq!(
+        resolve_pair(&src, Path::new("skills/commit/SKILL.md")),
+        None,
+        "explicit layout must not fall through to bootstrap defaults"
     );
 }
 

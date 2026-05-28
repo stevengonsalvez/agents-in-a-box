@@ -18,7 +18,7 @@ pub use lockfile::{DeployedRef, LockedSource, LockedUnit, Lockfile};
 pub use manifest::{
     Defaults, Manifest, Options, SourceEntry, SourceKind, TargetMapping, UnitEntry,
 };
-pub use mapping::resolve_pair;
+pub use mapping::{bootstrap_default_mappings, resolve_pair, BOOTSTRAP_DEFAULT_MAPPINGS};
 pub use paths::{
     default_ainb_home, default_cache_dir, default_lockfile_path, default_manifest_path,
 };

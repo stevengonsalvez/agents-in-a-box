@@ -30,33 +30,97 @@ use regex::Regex;
 
 use crate::manifest::{SourceEntry, TargetMapping};
 
+/// Canonical `(glob, home, repo)` folder mappings (bootstrap.js-style),
+/// used by [`resolve_pair`] when a source declares no explicit
+/// `target_layout`.
+///
+/// `home` is relative to the user home (`~`), so `.claude/agents` lands
+/// at `~/.claude/agents`. `repo` is relative to the source repo root and
+/// mirrors the glob's top-level directory, so a unit resolves to the same
+/// on-disk repo location it was matched at while `home` re-roots it under
+/// `.claude/<kind>`.
+///
+/// This is a *curated* subset, not a verbatim port of bootstrap.js's
+/// `packageMappings`: it covers `agents` (the six canonical subdirs plus
+/// top-level `agents/*.md` files such as `distinguished-engineer.md`),
+/// `skills`, and `commands`. bootstrap.js's `utilities/*` mappings are
+/// intentionally omitted, and `commands` is an addition.
+///
+/// Stored as `&str` triples because [`TargetMapping`] holds `String` /
+/// `PathBuf` and cannot be constructed in a `const`; use
+/// [`bootstrap_default_mappings`] for owned values.
+pub const BOOTSTRAP_DEFAULT_MAPPINGS: &[(&str, &str, &str)] = &[
+    (
+        "agents/{engineering,universal,orchestrators,design,meta,swarm}/*.md",
+        ".claude/agents",
+        "agents",
+    ),
+    // Top-level agent files that live directly under `agents/` (no subdir).
+    ("agents/*.md", ".claude/agents", "agents"),
+    ("skills/*/SKILL.md", ".claude/skills", "skills"),
+    ("commands/*.md", ".claude/commands", "commands"),
+];
+
+/// [`BOOTSTRAP_DEFAULT_MAPPINGS`] as owned [`TargetMapping`] values —
+/// convenient for migration code that writes the defaults into a manifest
+/// (bead v12.C.5).
+pub fn bootstrap_default_mappings() -> Vec<TargetMapping> {
+    BOOTSTRAP_DEFAULT_MAPPINGS
+        .iter()
+        .map(|(glob, home, repo)| TargetMapping {
+            glob: (*glob).to_string(),
+            home: PathBuf::from(home),
+            repo: PathBuf::from(repo),
+        })
+        .collect()
+}
+
 /// Resolve a unit's `(home, repo)` destination pair against a source's
 /// `target_layout`.
 ///
 /// Returns the first mapping (in declaration order) whose `glob` matches
 /// `unit_path`, with the matched path re-rooted under that mapping's
-/// `home` and `repo`. Returns `None` when no mapping matches — including
-/// when `target_layout` is empty. Pure: identical inputs always yield
-/// identical output.
+/// `home` and `repo`. Pure: identical inputs always yield identical
+/// output.
+///
+/// When `source.target_layout` is **empty**, resolution falls back to
+/// [`BOOTSTRAP_DEFAULT_MAPPINGS`] (bootstrap.js parity). When it is
+/// non-empty, only the source's own mappings are consulted — the
+/// defaults are not a secondary fallback. Returns `None` when nothing
+/// matches.
 ///
 /// `unit_path` is interpreted as repo-relative and matched using
 /// forward-slash separators regardless of host platform.
 pub fn resolve_pair(source: &SourceEntry, unit_path: &Path) -> Option<(PathBuf, PathBuf)> {
-    source
-        .target_layout
-        .iter()
-        .find_map(|mapping| translate(mapping, unit_path))
+    let unit = normalise(unit_path);
+    if source.target_layout.is_empty() {
+        BOOTSTRAP_DEFAULT_MAPPINGS
+            .iter()
+            .find_map(|(glob, home, repo)| {
+                translate_parts(glob, Path::new(home), Path::new(repo), &unit)
+            })
+    } else {
+        source
+            .target_layout
+            .iter()
+            .find_map(|m| translate_parts(&m.glob, &m.home, &m.repo, &unit))
+    }
 }
 
-/// Translate `unit_path` through a single mapping, or `None` if the glob
-/// does not match.
-fn translate(mapping: &TargetMapping, unit_path: &Path) -> Option<(PathBuf, PathBuf)> {
-    let unit = normalise(unit_path);
-    if !glob_matches(&mapping.glob, &unit) {
+/// Translate an already-normalised `unit` through one `(glob, home, repo)`
+/// mapping, or `None` if the glob does not match. Shared by both the
+/// explicit-`target_layout` and bootstrap-default code paths.
+fn translate_parts(
+    glob: &str,
+    home: &Path,
+    repo: &Path,
+    unit: &str,
+) -> Option<(PathBuf, PathBuf)> {
+    if !glob_matches(glob, unit) {
         return None;
     }
-    let tail = strip_static_prefix(&mapping.glob, &unit);
-    Some((join_tail(&mapping.home, &tail), join_tail(&mapping.repo, &tail)))
+    let tail = strip_static_prefix(glob, unit);
+    Some((join_tail(home, &tail), join_tail(repo, &tail)))
 }
 
 /// Path → forward-slash string for platform-independent glob matching.
