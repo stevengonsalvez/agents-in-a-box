@@ -14,6 +14,7 @@ name = "ainb_hangar_store"
 path = "src/lib.rs"
 
 [dependencies]
+ainb-hangar-core = { path = "../ainb-hangar-core" }
 sqlx = { version = "0.8", default-features = false, features = [
     "runtime-tokio-rustls",
     "sqlite",
@@ -24,9 +25,25 @@ tokio = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+dirs = { workspace = true }
+# Optional: only pulled in when `test-support` is enabled (it backs the
+# isolated-home tempdir). Kept out of normal builds of the store crate.
+tempfile = { workspace = true, optional = true }
+
+[features]
+# Exposes `test_support` (isolated `$HOME` + `ENV_LOCK`). Enabled automatically
+# for this crate's own integration tests via the self dev-dependency below, and
+# opt-in for downstream crates (e.g. the daemon's boot tripwire).
+test-support = ["dep:tempfile"]
 
 [dev-dependencies]
 tempfile = { workspace = true }
+dirs = { workspace = true }
+# Self dev-dependency enabling `test-support` so this crate's own integration
+# tests (tests/*.rs) can `use ainb_hangar_store::test_support`. Integration
+# tests do not inherit `#[cfg(test)]`, so the feature must be turned on
+# explicitly for the test build.
+ainb-hangar-store = { path = ".", features = ["test-support"] }
 
 # Local lint config rather than `workspace = true` because the
 # workspace-level lints declare lint groups (clippy::all, ::pedantic,

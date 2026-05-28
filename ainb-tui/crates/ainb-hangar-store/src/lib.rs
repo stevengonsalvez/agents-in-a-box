@@ -15,6 +15,24 @@
 
 use sqlx::SqlitePool;
 
+mod store;
+pub use store::Store;
+
+/// Typed repository wrappers over the Hangar schema.
+///
+/// One sub-module per logical table group: [`repo::agent`],
+/// [`repo::agent_runtime`], [`repo::issue`], [`repo::skill`], and
+/// [`repo::task`].
+pub mod repo;
+
+/// Test-only helpers (isolated `$HOME`, `ENV_LOCK`) for driving [`Store`].
+///
+/// Available in this crate's own tests and to any downstream crate that enables
+/// the `test-support` feature (the daemon's tripwire does this for its boot
+/// tests).
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
+
 /// Apply every embedded migration to `pool`, bringing a fresh or partially
 /// migrated database up to the current schema version.
 ///

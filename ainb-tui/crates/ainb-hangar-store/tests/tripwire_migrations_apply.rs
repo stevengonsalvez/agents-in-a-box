@@ -94,3 +94,418 @@ async fn migrations_apply_to_fresh_sqlite_and_create_workspace_user_member_table
 
     pool.close().await;
 }
+
+/// Return the `sql` definition recorded in `sqlite_master` for a named index,
+/// with runs of whitespace collapsed so assertions are not padding-sensitive.
+async fn index_sql(pool: &SqlitePool, name: &str) -> String {
+    let row = sqlx::query("SELECT sql FROM sqlite_master WHERE type='index' AND name = ?")
+        .bind(name)
+        .fetch_one(pool)
+        .await
+        .unwrap_or_else(|e| panic!("index {name} missing: {e}"));
+    let raw: String = row.get("sql");
+    raw.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[tokio::test]
+async fn migration_0002_creates_agent_runtime_table_and_unique_index() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = fresh_pool(dir.path()).await;
+
+    let rt = table_sql(&pool, "agent_runtime").await;
+    assert!(rt.contains("id TEXT PRIMARY KEY"), "agent_runtime.id PK: {rt}");
+    assert!(
+        rt.contains("workspace_id TEXT NOT NULL REFERENCES workspace(id)"),
+        "agent_runtime.workspace_id FK: {rt}"
+    );
+    assert!(
+        rt.contains("daemon_id TEXT NOT NULL"),
+        "agent_runtime.daemon_id: {rt}"
+    );
+    assert!(
+        rt.contains("provider TEXT NOT NULL"),
+        "agent_runtime.provider: {rt}"
+    );
+    assert!(
+        rt.contains("runtime_mode TEXT NOT NULL CHECK (runtime_mode IN ('local','cloud'))"),
+        "agent_runtime.runtime_mode CHECK: {rt}"
+    );
+    assert!(
+        rt.contains("last_seen_at INTEGER"),
+        "agent_runtime.last_seen_at: {rt}"
+    );
+    assert!(
+        rt.contains("status TEXT NOT NULL DEFAULT 'offline'"),
+        "agent_runtime.status default: {rt}"
+    );
+
+    let idx = index_sql(&pool, "idx_agent_runtime_workspace_daemon_provider").await;
+    assert!(
+        idx.contains("UNIQUE"),
+        "idx_agent_runtime_workspace_daemon_provider is UNIQUE: {idx}"
+    );
+    assert!(
+        idx.contains("agent_runtime") && idx.contains("(workspace_id, daemon_id, provider)"),
+        "idx_agent_runtime_workspace_daemon_provider columns: {idx}"
+    );
+
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn migration_0002_creates_agent_table() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = fresh_pool(dir.path()).await;
+
+    let agent = table_sql(&pool, "agent").await;
+    assert!(agent.contains("id TEXT PRIMARY KEY"), "agent.id PK: {agent}");
+    assert!(
+        agent.contains("workspace_id TEXT NOT NULL REFERENCES workspace(id)"),
+        "agent.workspace_id FK: {agent}"
+    );
+    assert!(agent.contains("name TEXT NOT NULL"), "agent.name: {agent}");
+    assert!(
+        agent.contains("runtime_id TEXT NOT NULL REFERENCES agent_runtime(id)"),
+        "agent.runtime_id FK (required by Multica pattern): {agent}"
+    );
+    assert!(
+        agent.contains("instructions TEXT"),
+        "agent.instructions: {agent}"
+    );
+    assert!(
+        agent.contains("visibility TEXT NOT NULL CHECK (visibility IN ('workspace','private'))"),
+        "agent.visibility CHECK: {agent}"
+    );
+    assert!(
+        agent.contains("owner_id TEXT NOT NULL REFERENCES user(id)"),
+        "agent.owner_id FK: {agent}"
+    );
+
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn migration_0002_creates_skill_tables_with_composite_keys() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = fresh_pool(dir.path()).await;
+
+    let skill = table_sql(&pool, "skill").await;
+    assert!(skill.contains("id TEXT PRIMARY KEY"), "skill.id PK: {skill}");
+    assert!(
+        skill.contains("workspace_id TEXT NOT NULL REFERENCES workspace(id)"),
+        "skill.workspace_id FK: {skill}"
+    );
+    assert!(skill.contains("name TEXT NOT NULL"), "skill.name: {skill}");
+    assert!(
+        skill.contains("description TEXT"),
+        "skill.description: {skill}"
+    );
+    assert!(skill.contains("content TEXT"), "skill.content: {skill}");
+
+    let skill_file = table_sql(&pool, "skill_file").await;
+    assert!(
+        skill_file.contains("skill_id TEXT NOT NULL REFERENCES skill(id)"),
+        "skill_file.skill_id FK: {skill_file}"
+    );
+    assert!(
+        skill_file.contains("path TEXT NOT NULL"),
+        "skill_file.path: {skill_file}"
+    );
+    assert!(
+        skill_file.contains("content TEXT"),
+        "skill_file.content: {skill_file}"
+    );
+    assert!(
+        skill_file.contains("PRIMARY KEY (skill_id, path)"),
+        "skill_file composite PK: {skill_file}"
+    );
+
+    let agent_skill = table_sql(&pool, "agent_skill").await;
+    assert!(
+        agent_skill.contains("agent_id TEXT NOT NULL REFERENCES agent(id)"),
+        "agent_skill.agent_id FK: {agent_skill}"
+    );
+    assert!(
+        agent_skill.contains("skill_id TEXT NOT NULL REFERENCES skill(id)"),
+        "agent_skill.skill_id FK: {agent_skill}"
+    );
+    assert!(
+        agent_skill.contains("PRIMARY KEY (agent_id, skill_id)"),
+        "agent_skill composite PK: {agent_skill}"
+    );
+
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn migration_0003_creates_issue_comment_with_polymorphic_actors() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = fresh_pool(dir.path()).await;
+
+    let issue = table_sql(&pool, "issue").await;
+    assert!(issue.contains("id TEXT PRIMARY KEY"), "issue.id PK: {issue}");
+    assert!(
+        issue.contains("workspace_id TEXT NOT NULL REFERENCES workspace(id)"),
+        "issue.workspace_id FK: {issue}"
+    );
+    assert!(issue.contains("title TEXT NOT NULL"), "issue.title: {issue}");
+    assert!(
+        issue.contains("description TEXT"),
+        "issue.description: {issue}"
+    );
+    assert!(
+        issue.contains("state TEXT NOT NULL DEFAULT 'open'"),
+        "issue.state default: {issue}"
+    );
+    assert!(
+        issue.contains("assignee_type TEXT CHECK (assignee_type IN ('member','agent'))"),
+        "issue.assignee_type CHECK: {issue}"
+    );
+    assert!(
+        issue.contains("assignee_id TEXT"),
+        "issue.assignee_id: {issue}"
+    );
+    assert!(
+        issue.contains("creator_type TEXT NOT NULL CHECK (creator_type IN ('member','agent'))"),
+        "issue.creator_type CHECK: {issue}"
+    );
+    assert!(
+        issue.contains("creator_id TEXT NOT NULL"),
+        "issue.creator_id: {issue}"
+    );
+    assert!(
+        issue.contains("created_at INTEGER NOT NULL"),
+        "issue.created_at: {issue}"
+    );
+
+    let comment = table_sql(&pool, "comment").await;
+    assert!(
+        comment.contains("id TEXT PRIMARY KEY"),
+        "comment.id PK: {comment}"
+    );
+    assert!(
+        comment.contains("issue_id TEXT NOT NULL REFERENCES issue(id) ON DELETE CASCADE"),
+        "comment.issue_id FK cascade: {comment}"
+    );
+    assert!(
+        comment.contains("author_type TEXT NOT NULL CHECK (author_type IN ('member','agent'))"),
+        "comment.author_type CHECK: {comment}"
+    );
+    assert!(
+        comment.contains("author_id TEXT NOT NULL"),
+        "comment.author_id: {comment}"
+    );
+    assert!(comment.contains("body TEXT NOT NULL"), "comment.body: {comment}");
+    assert!(
+        comment.contains("created_at INTEGER NOT NULL"),
+        "comment.created_at: {comment}"
+    );
+
+    let idx = index_sql(&pool, "idx_issue_workspace_state").await;
+    assert!(
+        idx.contains("issue") && idx.contains("(workspace_id, state)"),
+        "idx_issue_workspace_state columns: {idx}"
+    );
+
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn migration_0004_creates_agent_task_queue_with_partial_unique() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = fresh_pool(dir.path()).await;
+
+    let tq = table_sql(&pool, "agent_task_queue").await;
+    assert!(
+        tq.contains("id TEXT PRIMARY KEY"),
+        "agent_task_queue.id PK: {tq}"
+    );
+    assert!(
+        tq.contains("workspace_id TEXT NOT NULL REFERENCES workspace(id)"),
+        "agent_task_queue.workspace_id FK: {tq}"
+    );
+    assert!(
+        tq.contains("runtime_id TEXT NOT NULL REFERENCES agent_runtime(id)"),
+        "agent_task_queue.runtime_id FK: {tq}"
+    );
+    assert!(
+        tq.contains("agent_id TEXT NOT NULL REFERENCES agent(id)"),
+        "agent_task_queue.agent_id FK: {tq}"
+    );
+    assert!(
+        tq.contains("issue_id TEXT REFERENCES issue(id)"),
+        "agent_task_queue.issue_id nullable FK: {tq}"
+    );
+    assert!(
+        tq.contains(
+            "status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN \
+             ('queued','dispatched','running','done','failed','cancelled'))"
+        ),
+        "agent_task_queue.status default + CHECK: {tq}"
+    );
+    assert!(tq.contains("result TEXT"), "agent_task_queue.result: {tq}");
+    assert!(
+        tq.contains("session_id TEXT"),
+        "agent_task_queue.session_id: {tq}"
+    );
+    assert!(tq.contains("work_dir TEXT"), "agent_task_queue.work_dir: {tq}");
+    assert!(
+        tq.contains("attempt INTEGER NOT NULL DEFAULT 1"),
+        "agent_task_queue.attempt default: {tq}"
+    );
+    assert!(
+        tq.contains("max_attempts INTEGER NOT NULL DEFAULT 2"),
+        "agent_task_queue.max_attempts default: {tq}"
+    );
+    assert!(
+        tq.contains("parent_task_id TEXT REFERENCES agent_task_queue(id)"),
+        "agent_task_queue.parent_task_id self-FK: {tq}"
+    );
+    assert!(
+        tq.contains("failure_reason TEXT"),
+        "agent_task_queue.failure_reason: {tq}"
+    );
+    assert!(
+        tq.contains("created_at INTEGER NOT NULL"),
+        "agent_task_queue.created_at: {tq}"
+    );
+    assert!(
+        tq.contains("started_at INTEGER"),
+        "agent_task_queue.started_at: {tq}"
+    );
+    assert!(
+        tq.contains("finished_at INTEGER"),
+        "agent_task_queue.finished_at: {tq}"
+    );
+
+    let idx = index_sql(&pool, "idx_one_pending_task_per_issue").await;
+    assert!(
+        idx.contains("UNIQUE"),
+        "idx_one_pending_task_per_issue is UNIQUE: {idx}"
+    );
+    assert!(
+        idx.contains("agent_task_queue") && idx.contains("(issue_id)"),
+        "idx_one_pending_task_per_issue on agent_task_queue(issue_id): {idx}"
+    );
+    assert!(
+        idx.contains("WHERE") && idx.contains("status IN ('queued','dispatched')"),
+        "idx_one_pending_task_per_issue partial predicate: {idx}"
+    );
+
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn migration_0005_creates_pat_daemon_token_beads_mapping() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = fresh_pool(dir.path()).await;
+
+    // pat: personal access tokens, hashed.
+    let pat = table_sql(&pool, "pat").await;
+    assert!(pat.contains("id TEXT PRIMARY KEY"), "pat.id PK: {pat}");
+    assert!(
+        pat.contains("user_id TEXT NOT NULL REFERENCES user(id)"),
+        "pat.user_id FK: {pat}"
+    );
+    assert!(
+        pat.contains("sha256_token TEXT NOT NULL UNIQUE"),
+        "pat.sha256_token unique: {pat}"
+    );
+    assert!(pat.contains("scope TEXT"), "pat.scope: {pat}");
+    assert!(
+        pat.contains("created_at INTEGER NOT NULL"),
+        "pat.created_at: {pat}"
+    );
+    assert!(pat.contains("last_used INTEGER"), "pat.last_used: {pat}");
+
+    // daemon_token: per-runtime daemon bearer tokens, hashed.
+    let dt = table_sql(&pool, "daemon_token").await;
+    assert!(dt.contains("id TEXT PRIMARY KEY"), "daemon_token.id PK: {dt}");
+    assert!(
+        dt.contains("sha256_token TEXT NOT NULL UNIQUE"),
+        "daemon_token.sha256_token unique: {dt}"
+    );
+    assert!(
+        dt.contains("runtime_id TEXT NOT NULL REFERENCES agent_runtime(id)"),
+        "daemon_token.runtime_id FK: {dt}"
+    );
+    assert!(
+        dt.contains("created_at INTEGER NOT NULL"),
+        "daemon_token.created_at: {dt}"
+    );
+
+    // beads_mapping: hangar<->bd id correlation.
+    let bm = table_sql(&pool, "beads_mapping").await;
+    assert!(
+        bm.contains("hangar_id TEXT NOT NULL"),
+        "beads_mapping.hangar_id: {bm}"
+    );
+    assert!(
+        bm.contains("bd_id TEXT NOT NULL"),
+        "beads_mapping.bd_id: {bm}"
+    );
+    assert!(
+        bm.contains("hangar_kind TEXT NOT NULL CHECK (hangar_kind IN ('issue','task'))"),
+        "beads_mapping.hangar_kind CHECK: {bm}"
+    );
+    assert!(
+        bm.contains("bd_kind TEXT NOT NULL"),
+        "beads_mapping.bd_kind: {bm}"
+    );
+    assert!(
+        bm.contains("last_synced INTEGER NOT NULL"),
+        "beads_mapping.last_synced: {bm}"
+    );
+    assert!(
+        bm.contains("PRIMARY KEY (hangar_id, bd_id)"),
+        "beads_mapping composite PK: {bm}"
+    );
+
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn all_four_migrations_create_exactly_fourteen_tables() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = fresh_pool(dir.path()).await;
+
+    let names: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master \
+         WHERE type='table' AND name NOT LIKE 'sqlite_%' \
+           AND name <> '_sqlx_migrations' \
+         ORDER BY name",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("table list");
+
+    let expected = [
+        "agent",
+        "agent_runtime",
+        "agent_skill",
+        "agent_task_queue",
+        "beads_mapping",
+        "comment",
+        "daemon_token",
+        "issue",
+        "member",
+        "pat",
+        "skill",
+        "skill_file",
+        "user",
+        "workspace",
+    ];
+    assert_eq!(
+        names.len(),
+        14,
+        "expected 14 v1 tables, got {names:?}"
+    );
+    for table in expected {
+        assert!(
+            names.iter().any(|n| n == table),
+            "missing table {table} in {names:?}"
+        );
+    }
+
+    pool.close().await;
+}
