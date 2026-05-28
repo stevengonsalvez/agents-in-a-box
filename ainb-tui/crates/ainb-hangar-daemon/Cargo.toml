@@ -1,0 +1,62 @@
+[package]
+name = "ainb-hangar-daemon"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Hangar control-plane daemon: boots the persistence layer and idles. P0 ships a no-op idle stub; later phases add the task FSM and JSON-RPC handlers."
+categories = ["command-line-utilities"]
+keywords = ["ainb", "hangar", "daemon"]
+
+[[bin]]
+name = "ainb-hangar-daemon"
+path = "src/main.rs"
+
+[lib]
+name = "ainb_hangar_daemon"
+path = "src/lib.rs"
+
+[dependencies]
+ainb-hangar-store = { path = "../ainb-hangar-store" }
+ainb-hangar-core = { path = "../ainb-hangar-core" }
+tokio = { version = "1.36", default-features = false, features = [
+    "rt-multi-thread",
+    "macros",
+    "signal",
+] }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+assert_cmd = "2"
+tempfile = { workspace = true }
+# Enables `ainb_hangar_store::test_support` (isolated `$HOME` + `ENV_LOCK`) for
+# the boot tripwire. Integration tests do not inherit `#[cfg(test)]`, so the
+# store's `test-support` feature must be turned on explicitly here.
+ainb-hangar-store = { path = "../ainb-hangar-store", features = ["test-support"] }
+
+# Local lint config rather than `workspace = true`: the workspace-level lints
+# declare lint groups (clippy::all, ::pedantic, ::nursery, ::cargo) at the same
+# priority as specific lints, which rustc rejects with `lint group has the same
+# priority as a lint`. Mirror the workspace intent locally with explicit
+# priorities so this crate cleanly passes
+# `cargo clippy -p ainb-hangar-daemon -- -D warnings`.
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unused_imports = "warn"
+unused_variables = "warn"
+dead_code = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+similar_names = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"

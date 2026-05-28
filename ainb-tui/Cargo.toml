@@ -11,7 +11,10 @@ members = [
     "crates/ainb-plugin-testkit",
     "crates/ainb-plugin-types-sessions",
     "crates/ainb-plugin-cts-v2",
+    "crates/ainb-hangar-core",
     "crates/ainb-hangar-store",
+    "crates/ainb-hangar-proto",
+    "crates/ainb-hangar-daemon",
     "xtask",
 ]
 default-members = ["crates/ainb-core"]

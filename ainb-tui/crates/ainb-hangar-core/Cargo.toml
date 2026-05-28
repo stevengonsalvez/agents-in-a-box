@@ -1,0 +1,50 @@
+[package]
+name = "ainb-hangar-core"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Hangar domain core: pure, IO-free types (polymorphic actors, IDs, task status, clock/idgen traits) shared across the ainb managed-agents control plane"
+categories = ["data-structures"]
+keywords = ["ainb", "hangar", "domain", "types"]
+
+[lib]
+name = "ainb_hangar_core"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+ulid = "1"
+
+[features]
+# Exposes the deterministic test doubles (`FixedClock`, `FixedIdGen`) to
+# downstream crates' test builds. Within this crate they are also available
+# under `#[cfg(test)]` without enabling the feature.
+test-support = []
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+# Local lint config rather than `workspace = true`: this matches the sibling
+# ainb-hangar-store crate. The workspace-level lints would declare lint groups
+# at the same priority as specific lints, which rustc rejects; mirroring the
+# intent locally keeps `cargo clippy -p ainb-hangar-core -- -D warnings` clean.
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unused_imports = "warn"
+unused_variables = "warn"
+dead_code = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+similar_names = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
