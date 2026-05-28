@@ -412,20 +412,28 @@ fn derive_repo_label(source: &crate::git::repo_source::RepoSource) -> String {
 /// exist so a repo deleted or moved since the last scan cannot appear as a
 /// selectable local-scan row. (Favorite and recent rows are built from
 /// separate stores by `build_rows` and are not existence-checked here.)
-/// Falls back to active-session workspace paths when no cache has been
-/// written yet (first run).
+/// Falls back to active-session workspace paths when no cache exists yet
+/// (first run) or when every cached entry has been filtered out.
 fn picker_local_paths(
     cache: Option<crate::git::RepositoryCache>,
     workspaces: &[crate::models::Workspace],
 ) -> Vec<std::path::PathBuf> {
-    match cache {
-        Some(c) => c
-            .repositories
-            .into_iter()
-            .filter(|r| r.path.is_dir())
-            .map(|r| r.path)
-            .collect(),
-        None => workspaces.iter().map(|w| w.path.clone()).collect(),
+    let cached_paths: Vec<std::path::PathBuf> = cache
+        .map(|c| {
+            c.repositories
+                .into_iter()
+                .filter(|r| r.path.is_dir())
+                .map(|r| r.path)
+                .collect()
+        })
+        .unwrap_or_default();
+    // An empty filtered cache (no cache file yet, or every cached repo has
+    // been deleted/moved) falls back to active-session workspaces rather than
+    // leaving New Session with no local rows.
+    if cached_paths.is_empty() {
+        workspaces.iter().map(|w| w.path.clone()).collect()
+    } else {
+        cached_paths
     }
 }
 
@@ -471,6 +479,16 @@ mod picker_local_paths_tests {
     fn falls_back_to_workspace_paths_when_cache_absent() {
         let ws = vec![Workspace::new("w".to_string(), PathBuf::from("/ws/p"))];
         assert_eq!(picker_local_paths(None, &ws), vec![PathBuf::from("/ws/p")]);
+    }
+
+    #[test]
+    fn falls_back_to_workspace_paths_when_cache_filters_to_empty() {
+        // Cache present but every entry filtered out (here: empty) -> fall back.
+        let ws = vec![Workspace::new("w".to_string(), PathBuf::from("/ws/p"))];
+        assert_eq!(
+            picker_local_paths(Some(cache_with(vec![])), &ws),
+            vec![PathBuf::from("/ws/p")]
+        );
     }
 }
 
