@@ -682,6 +682,7 @@ pub enum ConfirmAction {
     DeleteSession(Uuid),
     StopSession(Uuid), // Soft-stop interactive session (tmux only; preserves worktree)
     KillOtherTmux(String), // Kill a non-agents-in-a-box tmux session by name
+    KillOtherTmuxSessions(Vec<String>), // Kill multiple non-agents-in-a-box tmux sessions by name
     KillWorkspaceShell(usize), // Kill workspace shell by workspace index
     Cancel,            // No-op terminator for tri-option dialogs
 }
@@ -2307,6 +2308,7 @@ pub struct AppState {
     pub other_tmux_sessions: Vec<crate::models::OtherTmuxSession>,
     pub other_tmux_expanded: bool,
     pub selected_other_tmux_index: Option<usize>,
+    pub selected_other_tmux_sessions: HashSet<String>, // Multi-selected external tmux names
     /// Whether we're in rename mode for the selected "Other tmux" session
     pub other_tmux_rename_mode: bool,
     /// Buffer for the new name being typed during rename
@@ -2688,6 +2690,7 @@ pub enum AsyncAction {
     CleanupOrphaned,             // Clean up orphaned containers without worktrees
     AttachToOtherTmux(String),   // Attach to a non-agents-in-a-box tmux session by name
     KillOtherTmux(String),       // Kill a non-agents-in-a-box tmux session by name
+    KillOtherTmuxSessions(Vec<String>), // Kill multiple non-agents-in-a-box tmux sessions by name
     ConfirmOtherTmuxRename,      // Confirm and execute rename for "Other tmux" session
     // Shell session actions (one shell per workspace)
     OpenWorkspaceShell {
@@ -2766,6 +2769,7 @@ impl Default for AppState {
             other_tmux_sessions: Vec::new(),
             other_tmux_expanded: true, // Default to expanded
             selected_other_tmux_index: None,
+            selected_other_tmux_sessions: HashSet::new(),
             other_tmux_rename_mode: false,
             other_tmux_rename_buffer: String::new(),
 
@@ -3973,6 +3977,7 @@ impl AppState {
                     e
                 );
                 self.other_tmux_sessions.clear();
+                self.selected_other_tmux_sessions.clear();
                 return;
             }
         };
@@ -3980,6 +3985,7 @@ impl AppState {
         if !output.status.success() {
             debug!("No tmux sessions found (tmux might not be running)");
             self.other_tmux_sessions.clear();
+            self.selected_other_tmux_sessions.clear();
             return;
         }
 
@@ -4104,6 +4110,13 @@ impl AppState {
             ssh_sessions.len()
         );
         self.other_tmux_sessions = other_sessions;
+        let live_other_names: HashSet<String> = self
+            .other_tmux_sessions
+            .iter()
+            .map(|session| session.name.clone())
+            .collect();
+        self.selected_other_tmux_sessions
+            .retain(|name| live_other_names.contains(name));
         self.ssh_sessions = ssh_sessions;
     }
 
@@ -4318,6 +4331,20 @@ impl AppState {
             } else {
                 self.selected_sessions.insert(id);
             }
+        } else if self.is_other_tmux_selected() {
+            self.toggle_select_other_tmux_session();
+        }
+    }
+
+    /// Toggle multi-select for the currently highlighted "Other tmux" session.
+    pub fn toggle_select_other_tmux_session(&mut self) {
+        if let Some(session) = self.selected_other_tmux_session() {
+            let name = session.name.clone();
+            if self.selected_other_tmux_sessions.contains(&name) {
+                self.selected_other_tmux_sessions.remove(&name);
+            } else {
+                self.selected_other_tmux_sessions.insert(name);
+            }
         }
     }
 
@@ -4460,6 +4487,48 @@ impl AppState {
                 }
             }
         }
+    }
+
+    /// Handle mouse-wheel or trackpad scrolling over the sessions screen.
+    ///
+    /// Returns true when the scroll was consumed by session-list navigation.
+    /// Returns false when the caller should preserve the existing live-log
+    /// scroll behavior.
+    pub fn scroll_session_list_by_mouse(
+        &mut self,
+        x: u16,
+        y: u16,
+        is_down: bool,
+        steps: usize,
+    ) -> bool {
+        if self.current_screen != screen_ids::SESSION_LIST || self.help_visible {
+            return false;
+        }
+
+        if self.sessions_pane_state.contains_preview_point(x, y) {
+            self.focused_pane = FocusedPane::LiveLogs;
+            return false;
+        }
+
+        let over_sessions = self.sessions_pane_state.contains_sessions_point(x, y)
+            && !self.sessions_pane_state.collapsed;
+        let should_scroll_sessions =
+            over_sessions || matches!(self.focused_pane, FocusedPane::Sessions);
+
+        if !should_scroll_sessions {
+            return false;
+        }
+
+        self.focused_pane = FocusedPane::Sessions;
+        for _ in 0..steps.max(1) {
+            if is_down {
+                self.next_session();
+            } else {
+                self.previous_session();
+            }
+        }
+        self.last_preview_update = None;
+        true
     }
 
     pub fn session_list_row_target(&self, row_index: usize) -> Option<SessionListRowTarget> {
@@ -4910,6 +4979,15 @@ impl AppState {
         self.selected_other_tmux_index.and_then(|idx| self.other_tmux_sessions.get(idx))
     }
 
+    /// Selected "Other tmux" names in current render order.
+    pub fn selected_other_tmux_names_in_order(&self) -> Vec<String> {
+        self.other_tmux_sessions
+            .iter()
+            .filter(|session| self.selected_other_tmux_sessions.contains(&session.name))
+            .map(|session| session.name.clone())
+            .collect()
+    }
+
     /// Check if the selection is in the "Other tmux" section
     pub fn is_other_tmux_selected(&self) -> bool {
         self.selected_other_tmux_index.is_some() && self.selected_workspace_index.is_none()
@@ -5193,6 +5271,24 @@ impl AppState {
             confirm_action: ConfirmAction::KillOtherTmux(session_name),
             selected_option: false, // Default to "No"
             warning: None,
+            options: None,
+            selected_index: 0,
+        });
+    }
+
+    /// Show confirmation dialog for killing multiple "other" tmux sessions
+    pub fn show_kill_other_tmux_sessions_confirmation(&mut self, session_names: Vec<String>) {
+        let count = session_names.len();
+        info!(
+            "Showing kill confirmation for {} other tmux sessions",
+            count
+        );
+        self.confirmation_dialog = Some(ConfirmationDialog {
+            title: "Kill tmux Sessions".to_string(),
+            message: format!("Are you sure you want to kill {} tmux session(s)?", count),
+            confirm_action: ConfirmAction::KillOtherTmuxSessions(session_names),
+            selected_option: false,
+            warning: Some("This closes all selected external tmux sessions.".to_string()),
             options: None,
             selected_index: 0,
         });
@@ -7219,6 +7315,10 @@ impl AppState {
                 }
                 action @ AsyncAction::KillOtherTmux(_) => {
                     debug!("KillOtherTmux action deferred to main loop");
+                    self.pending_async_action = Some(action);
+                }
+                action @ AsyncAction::KillOtherTmuxSessions(_) => {
+                    debug!("KillOtherTmuxSessions action deferred to main loop");
                     self.pending_async_action = Some(action);
                 }
                 AsyncAction::ConfirmOtherTmuxRename => {

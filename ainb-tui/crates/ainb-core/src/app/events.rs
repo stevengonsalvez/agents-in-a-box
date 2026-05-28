@@ -2404,8 +2404,28 @@ impl EventHandler {
                     state.selected_other_tmux_index
                 );
 
+                let managed_count = state.selected_sessions.len();
+                let other_names = state.selected_other_tmux_names_in_order();
+                let other_count = other_names.len();
+
+                // Checked rows win over cursor delete, so pressing `d` after
+                // multi-select cannot accidentally delete only the highlighted row.
+                if managed_count > 0 && other_count > 0 {
+                    state.add_warning_notification(
+                        "Delete managed and Other tmux sessions separately.".to_string(),
+                    );
+                } else if other_count > 0 {
+                    state.show_kill_other_tmux_sessions_confirmation(other_names);
+                } else if managed_count > 0 {
+                    let ids: Vec<uuid::Uuid> = state.selected_sessions.iter().copied().collect();
+                    state.add_success_notification(format!(
+                        "Deleting {} selected session(s)...",
+                        managed_count
+                    ));
+                    state.pending_async_action = Some(AsyncAction::BulkDeleteSessions(ids));
+                    state.selected_sessions.clear();
                 // Check if we're in the SSH Sessions section
-                if state.is_ssh_session_selected() {
+                } else if state.is_ssh_session_selected() {
                     if let Some(ssh_session) = state.selected_ssh_session() {
                         // SSH sessions are tmux sessions - use the tmux session name for kill
                         if let Some(tmux_name) = ssh_session.tmux_session_name.clone() {
@@ -2485,7 +2505,8 @@ impl EventHandler {
             }
             AppEvent::ToggleSelectSession => {
                 state.toggle_select_session();
-                let count = state.selected_sessions.len();
+                let count =
+                    state.selected_sessions.len() + state.selected_other_tmux_sessions.len();
                 if count > 0 {
                     state.add_success_notification(format!(
                         "{} session(s) selected — Shift+D to delete",
@@ -2494,16 +2515,24 @@ impl EventHandler {
                 }
             }
             AppEvent::DeleteSelectedSessions => {
-                let count = state.selected_sessions.len();
-                if count == 0 {
+                let managed_count = state.selected_sessions.len();
+                let other_names = state.selected_other_tmux_names_in_order();
+                let other_count = other_names.len();
+                if managed_count == 0 && other_count == 0 {
                     state.add_warning_notification(
                         "No sessions selected. Use Space to select sessions first.".to_string(),
                     );
+                } else if managed_count > 0 && other_count > 0 {
+                    state.add_warning_notification(
+                        "Delete managed and Other tmux sessions separately.".to_string(),
+                    );
+                } else if other_count > 0 {
+                    state.show_kill_other_tmux_sessions_confirmation(other_names);
                 } else {
                     let ids: Vec<uuid::Uuid> = state.selected_sessions.iter().copied().collect();
                     state.add_success_notification(format!(
                         "Deleting {} selected session(s)...",
-                        count
+                        managed_count
                     ));
                     state.pending_async_action = Some(AsyncAction::BulkDeleteSessions(ids));
                     state.selected_sessions.clear();
@@ -2634,6 +2663,13 @@ impl EventHandler {
                             crate::app::state::ConfirmAction::KillOtherTmux(session_name) => {
                                 state.pending_async_action =
                                     Some(AsyncAction::KillOtherTmux(session_name));
+                            }
+                            crate::app::state::ConfirmAction::KillOtherTmuxSessions(
+                                session_names,
+                            ) => {
+                                state.selected_other_tmux_sessions.clear();
+                                state.pending_async_action =
+                                    Some(AsyncAction::KillOtherTmuxSessions(session_names));
                             }
                             crate::app::state::ConfirmAction::KillWorkspaceShell(workspace_idx) => {
                                 state.pending_async_action =

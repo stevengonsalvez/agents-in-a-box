@@ -521,6 +521,15 @@ async fn run_tui_loop(
                                         app.state.log_history_state.scroll_up_by(SCROLL_LINES);
                                     }
                                 }
+                            } else if app.state.current_screen == screen_ids::SESSION_LIST
+                                && app.state.scroll_session_list_by_mouse(
+                                    mouse_event.column,
+                                    mouse_event.row,
+                                    is_down,
+                                    SCROLL_LINES,
+                                )
+                            {
+                                // Session-list scrolling was handled in-memory.
                             } else {
                                 // Default: scroll live logs
                                 if is_down {
@@ -691,6 +700,68 @@ async fn run_tui_loop(
                         }
 
                         // Refresh other tmux sessions list
+                        app.state.load_other_tmux_sessions().await;
+                        app.state.ui_needs_refresh = true;
+                    }
+
+                    AsyncAction::KillOtherTmuxSessions(session_names) => {
+                        use tokio::process::Command;
+
+                        let total = session_names.len();
+                        let mut killed = 0usize;
+                        let mut failed = 0usize;
+                        let selected_name = app
+                            .state
+                            .selected_other_tmux_session()
+                            .map(|session| session.name.clone());
+
+                        for session_name in &session_names {
+                            info!("Killing other tmux session '{}'", session_name);
+
+                            let output = Command::new("tmux")
+                                .args(["kill-session", "-t", session_name])
+                                .output()
+                                .await;
+
+                            match output {
+                                Ok(o) if o.status.success() => {
+                                    info!("Successfully killed tmux session '{}'", session_name);
+                                    killed += 1;
+                                }
+                                Ok(o) => {
+                                    let stderr = String::from_utf8_lossy(&o.stderr);
+                                    warn!(
+                                        "Failed to kill tmux session '{}': {}",
+                                        session_name,
+                                        stderr
+                                    );
+                                    failed += 1;
+                                }
+                                Err(e) => {
+                                    warn!("Failed to kill tmux session '{}': {}", session_name, e);
+                                    failed += 1;
+                                }
+                            }
+                        }
+
+                        if let Some(selected_name) = selected_name {
+                            if session_names.iter().any(|name| name == &selected_name) {
+                                app.state.selected_other_tmux_index = None;
+                            }
+                        }
+
+                        if failed > 0 {
+                            app.state.add_warning_notification(format!(
+                                "Killed {}/{} tmux session(s) ({} failed)",
+                                killed, total, failed
+                            ));
+                        } else {
+                            app.state.add_success_notification(format!(
+                                "Killed {} tmux session(s)",
+                                killed
+                            ));
+                        }
+
                         app.state.load_other_tmux_sessions().await;
                         app.state.ui_needs_refresh = true;
                     }
