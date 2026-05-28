@@ -67,10 +67,15 @@ fn commit_and_push_cli(worktree_path: &Path, commit_message: &str) -> Result<Str
             return Err(anyhow::anyhow!("git commit failed: {}", stderr));
         }
 
-        // Push changes - let git use its configured credential helper
-        // Don't set GIT_TERMINAL_PROMPT=0 as it breaks credential helpers
+        // Suppress interactive credential prompts — token-based helpers
+        // (gh, osxkeychain) work fine. Without this, git hangs waiting for
+        // stdin inside the TUI's raw-mode terminal.
         debug!("Pushing changes...");
-        let push_output = Command::new("git").args(&["push"]).output()?;
+        let push_output = Command::new("git")
+            .args(&["push"])
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_ASKPASS", "echo")
+            .output()?;
 
         if !push_output.status.success() {
             let stderr = String::from_utf8_lossy(&push_output.stderr);

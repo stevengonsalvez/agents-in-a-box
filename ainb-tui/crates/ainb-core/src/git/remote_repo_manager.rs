@@ -88,6 +88,8 @@ impl RemoteRepoManager {
 
         let output = Command::new("git")
             .args(["ls-remote", "--heads", "--refs", &url])
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_ASKPASS", "echo")
             .output()
             .map_err(|e| RemoteRepoError::NetworkError(e.to_string()))?;
 
@@ -154,6 +156,8 @@ impl RemoteRepoManager {
 
         let output = Command::new("git")
             .args(["ls-remote", "--symref", &url, "HEAD"])
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_ASKPASS", "echo")
             .output()
             .ok()?;
 
@@ -210,6 +214,8 @@ impl RemoteRepoManager {
         let output = Command::new("git")
             .args(["clone", &url])
             .arg(&cache_path)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_ASKPASS", "echo")
             .output()
             .map_err(|e| RemoteRepoError::CloneFailed(e.to_string()))?;
 
@@ -228,6 +234,8 @@ impl RemoteRepoManager {
 
         let output = Command::new("git")
             .args(["fetch", "--all", "--prune"])
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_ASKPASS", "echo")
             .current_dir(cache_path)
             .output()
             .map_err(|e| RemoteRepoError::NetworkError(e.to_string()))?;
