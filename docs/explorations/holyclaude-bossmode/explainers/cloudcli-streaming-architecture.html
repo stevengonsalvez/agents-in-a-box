@@ -1,0 +1,858 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>How CloudCLI's streaming pipe is plumbed</title>
+<style>
+  :root {
+    --ivory: #FAF9F5;
+    --slate: #141413;
+    --clay: #D97757;
+    --clay-d: #B85C3E;
+    --oat: #E3DACC;
+    --olive: #788C5D;
+    --olive-l: #E7EDDE;
+    --rust: #B04A3F;
+    --rust-l: #F5DDD4;
+    --sky: #6A8CAF;
+    --sky-l: #DCE5EF;
+    --plum: #8A5A78;
+    --gray-150: #F0EEE6;
+    --gray-300: #D1CFC5;
+    --gray-500: #87867F;
+    --gray-700: #3D3D3A;
+    --serif: ui-serif, Georgia, 'Times New Roman', serif;
+    --sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+    --mono: ui-monospace, 'SF Mono', Menlo, Monaco, monospace;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--ivory);
+    color: var(--gray-700);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.65;
+    padding: 48px 24px 80px;
+  }
+
+  .page {
+    max-width: 1180px;
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 300px;
+    gap: 40px;
+  }
+
+  @media (max-width: 980px) {
+    .page { grid-template-columns: 1fr; }
+  }
+
+  header {
+    grid-column: 1 / -1;
+    margin-bottom: 8px;
+  }
+
+  .repo-line {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    color: var(--gray-500);
+    margin-bottom: 10px;
+  }
+  .repo-line a { color: var(--clay-d); text-decoration: none; }
+  .repo-line a:hover { text-decoration: underline; }
+
+  h1 {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-size: 32px;
+    line-height: 1.25;
+    color: var(--slate);
+    margin-bottom: 16px;
+  }
+
+  .summary {
+    max-width: 820px;
+    font-size: 15.5px;
+  }
+  .summary code { font-family: var(--mono); font-size: 13px; background: var(--gray-150); padding: 1px 5px; border-radius: 4px; color: var(--slate); }
+  .summary strong { color: var(--slate); }
+
+  h2 {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-size: 22px;
+    color: var(--slate);
+    margin: 40px 0 8px;
+  }
+  h2 .pipe-tag {
+    display: inline-block; vertical-align: middle;
+    font-family: var(--mono); font-size: 11px; padding: 3px 9px; margin-left: 10px;
+    border-radius: 999px; letter-spacing: 0.05em; text-transform: uppercase;
+  }
+  h2 .pipe-tag.chat { background: var(--olive-l); color: var(--olive); }
+  h2 .pipe-tag.shell { background: var(--sky-l); color: var(--sky); }
+
+  .section-lead { max-width: 820px; font-size: 14px; color: var(--gray-500); margin-bottom: 18px; }
+  .section-lead code { font-family: var(--mono); background: var(--gray-150); padding: 1px 5px; border-radius: 4px; color: var(--slate); font-size: 12.5px; }
+
+  /* Diagram panel */
+  .diagram-panel {
+    border: 1.5px solid var(--gray-300);
+    border-radius: 12px;
+    background: #fff;
+    padding: 20px;
+    overflow-x: auto;
+    margin-bottom: 8px;
+  }
+
+  svg.flow { display: block; width: 100%; max-width: 760px; margin: 0 auto; }
+  .flow text {
+    font-family: var(--mono);
+    font-size: 11px;
+    fill: var(--slate);
+  }
+  .flow .sub { font-size: 9.5px; fill: var(--gray-500); }
+  .flow .box { fill: #fff; stroke: var(--gray-300); stroke-width: 1.5; }
+  .flow .box.hot { fill: rgba(217,119,87,0.10); stroke: var(--clay); }
+  .flow .box.olive { fill: var(--olive-l); stroke: var(--olive); }
+  .flow .box.sky { fill: var(--sky-l); stroke: var(--sky); }
+  .flow .box.plum { fill: #F2E3EB; stroke: var(--plum); }
+  .flow .arrow { stroke: var(--gray-500); stroke-width: 1.4; fill: none; }
+  .flow .arrow.hot { stroke: var(--clay); }
+  .flow .arrow.olive { stroke: var(--olive); }
+  .flow .arrow.sky { stroke: var(--sky); }
+  .flow .lbl-bg { fill: #fff; opacity: 0.92; }
+
+  /* Walkthrough */
+  .step {
+    display: grid;
+    grid-template-columns: 44px 1fr;
+    gap: 18px;
+    padding: 20px 0;
+    border-bottom: 1.5px solid var(--gray-150);
+  }
+  .step:last-of-type { border-bottom: none; }
+
+  .badge {
+    width: 34px; height: 34px;
+    border-radius: 50%;
+    background: var(--oat);
+    border: 1.5px solid var(--gray-300);
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--mono); font-weight: 600; color: var(--slate); font-size: 14px;
+  }
+  .step.hot .badge {
+    background: rgba(217,119,87,0.14);
+    border-color: var(--clay);
+    color: var(--clay);
+  }
+  .step.olive .badge {
+    background: var(--olive-l);
+    border-color: var(--olive);
+    color: var(--olive);
+  }
+  .step.sky .badge {
+    background: var(--sky-l);
+    border-color: var(--sky);
+    color: var(--sky);
+  }
+
+  .step-loc {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--slate);
+    margin-bottom: 6px;
+  }
+  .step-loc .range { color: var(--gray-500); }
+  .step-loc a { color: var(--clay-d); text-decoration: none; }
+  .step-loc a:hover { text-decoration: underline; }
+
+  .step-body p { margin-bottom: 10px; }
+  .step-body p code { font-family: var(--mono); font-size: 12.5px; background: var(--gray-150); padding: 1px 5px; border-radius: 3px; color: var(--slate); }
+  .step-body p strong { color: var(--slate); }
+  .step-body .callout {
+    background: var(--olive-l); border-left: 4px solid var(--olive);
+    padding: 10px 14px; border-radius: 6px; margin: 10px 0;
+    font-size: 14px; color: var(--gray-700);
+  }
+  .step-body .callout strong { color: var(--olive); }
+  .step-body .callout.warn { background: var(--rust-l); border-left-color: var(--rust); }
+  .step-body .callout.warn strong { color: var(--rust); }
+
+  details.snippet { margin-top: 6px; }
+  details.snippet summary {
+    list-style: none;
+    cursor: pointer;
+    font-size: 12.5px;
+    color: var(--gray-500);
+    font-family: var(--mono);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 0;
+    user-select: none;
+  }
+  details.snippet summary::-webkit-details-marker { display: none; }
+  details.snippet summary::before {
+    content: "▸"; font-size: 10px; transition: transform 0.15s ease;
+  }
+  details.snippet[open] summary::before { transform: rotate(90deg); }
+
+  pre.code {
+    background: var(--slate);
+    color: #E8E6DC;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    line-height: 1.65;
+    border-radius: 8px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    margin-top: 10px;
+  }
+  pre.code .dim { color: var(--gray-500); }
+  pre.code .kw  { color: #C9B98A; }
+  pre.code .str { color: #A8BC8C; }
+  pre.code .fn  { color: #D9B17C; }
+
+  /* Sidebar */
+  aside {
+    position: sticky;
+    top: 24px;
+    align-self: start;
+  }
+
+  .panel {
+    border: 1.5px solid var(--gray-300);
+    border-radius: 12px;
+    background: #fff;
+    padding: 18px 20px;
+    margin-bottom: 20px;
+  }
+
+  .panel h3 {
+    font-family: var(--sans);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--gray-500);
+    margin-bottom: 14px;
+  }
+
+  .key-files { list-style: none; padding: 0; }
+  .key-files li { margin-bottom: 14px; padding-bottom: 14px; border-bottom: 1px dashed var(--gray-150); }
+  .key-files li:last-child { margin-bottom: 0; padding-bottom: 0; border-bottom: none; }
+  .key-files .path {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--slate);
+    display: block;
+    margin-bottom: 4px;
+    word-break: break-all;
+    line-height: 1.4;
+  }
+  .key-files .desc {
+    font-size: 12px;
+    color: var(--gray-500);
+    line-height: 1.5;
+  }
+  .key-files .tag {
+    display: inline-block;
+    font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.05em;
+    padding: 1px 6px; border-radius: 3px; margin-right: 6px; text-transform: uppercase;
+    vertical-align: middle;
+  }
+  .key-files .tag.chat { background: var(--olive-l); color: var(--olive); }
+  .key-files .tag.shell { background: var(--sky-l); color: var(--sky); }
+  .key-files .tag.both { background: var(--oat); color: #6E5B33; }
+
+  .gotchas {
+    border: 1.5px solid var(--clay);
+    border-radius: 12px;
+    background: rgba(217,119,87,0.06);
+    padding: 18px 20px;
+  }
+  .gotchas h3 {
+    font-family: var(--sans);
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--clay);
+    margin-bottom: 10px;
+  }
+  .gotchas ul { list-style: none; padding: 0; }
+  .gotchas li {
+    position: relative;
+    padding-left: 16px;
+    font-size: 13px;
+    margin-bottom: 10px;
+    line-height: 1.55;
+  }
+  .gotchas li:last-child { margin-bottom: 0; }
+  .gotchas li::before {
+    content: "";
+    position: absolute;
+    left: 0; top: 8px;
+    width: 5px; height: 5px;
+    background: var(--clay);
+    border-radius: 2px;
+  }
+  .gotchas code { font-family: var(--mono); font-size: 11.5px; background: rgba(255,255,255,0.7); padding: 1px 4px; border-radius: 3px; }
+  .gotchas strong { color: var(--slate); }
+
+  .key-insight {
+    background: var(--olive-l); border: 1.5px solid var(--olive);
+    border-left: 6px solid var(--olive);
+    border-radius: 10px; padding: 16px 22px;
+    margin: 20px 0 0; max-width: 820px;
+    font-size: 14.5px; color: var(--gray-700);
+    line-height: 1.6;
+  }
+  .key-insight strong { color: var(--olive); }
+  .key-insight code { font-family: var(--mono); background: #fff; padding: 1px 5px; border-radius: 4px; color: var(--slate); font-size: 12.5px; }
+
+</style>
+<style data-claude-theme="injected">
+/* Claude brand polish layer for explain-to-me templates.
+ * Inject as a second <style> block AFTER the template's own <style>.
+ * Templates already use Claude's palette (ivory/slate/clay/oat/olive);
+ * this layer adds:
+ *   - Söhne-like sans stack (matches claude.ai)
+ *   - Tiempos Headline–like serif fallback for headings
+ *   - Subtle paper texture on body
+ *   - Brand badge (bottom-right)
+ *   - Clay focus ring
+ * Layout-safe: only touches typography, surface, and decoration.
+ */
+
+:root {
+  /* Re-affirm tokens in case template scoped them. */
+  --ivory:    #FAF9F5;
+  --slate:    #141413;
+  --clay:     #D97757;
+  --oat:      #E3DACC;
+  --olive:    #788C5D;
+  --gray-150: #F0EEE6;
+  --gray-300: #D1CFC5;
+  --gray-500: #87867F;
+  --gray-700: #3D3D3A;
+
+  /* claude.ai font stacks. Web fonts (Söhne, Tiempos) are licensed; the
+   * stack falls back to high-quality system fonts that read as similar. */
+  --sans:  "Söhne", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --serif: "Tiempos Headline", "Tiempos Text", "Source Serif Pro", "Iowan Old Style", "Charter", Georgia, serif;
+  --mono:  "Söhne Mono", "Berkeley Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+body {
+  background-image:
+    radial-gradient(rgba(20, 20, 19, 0.018) 1px, transparent 1px);
+  background-size: 4px 4px;
+}
+
+h1, h2, h3 {
+  letter-spacing: -0.012em;
+}
+
+.eyebrow::after {
+  content: " · explained by claude";
+  color: var(--clay);
+  letter-spacing: 0.08em;
+}
+
+:focus-visible {
+  outline: 2px solid var(--clay);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+pre, code {
+  font-feature-settings: "ss01", "cv11", "calt";
+}
+pre {
+  background: var(--gray-150) !important;
+  border: 1px solid var(--gray-300);
+}
+
+body::after {
+  content: "claude · explainer";
+  position: fixed;
+  bottom: 18px;
+  right: 18px;
+  z-index: 999;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--gray-500);
+  background: rgba(250, 249, 245, 0.92);
+  border: 1px solid var(--gray-300);
+  border-left: 3px solid var(--clay);
+  padding: 6px 10px 6px 12px;
+  border-radius: 4px;
+  backdrop-filter: blur(6px);
+  pointer-events: none;
+}
+
+@media print {
+  body::after { display: none; }
+  body { background-image: none; }
+}
+
+@media (max-width: 640px) {
+  body::after { display: none; }
+}
+
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header>
+    <div class="repo-line"><a href="https://github.com/siteboon/claudecodeui">siteboon/claudecodeui</a> · commit <code style="font-family:ui-monospace;font-size:12px;background:#F0EEE6;padding:1px 5px;border-radius:3px;color:#141413">10f721cf</code> · architecture deconstruction</div>
+    <h1>How CloudCLI's streaming pipe is plumbed</h1>
+    <p class="summary">
+      CloudCLI is a single Node/Express process that serves a React SPA + a WebSocket gateway. Two completely independent pipes run side by side: a <strong>chat pipe</strong> on <code>/ws</code> where the server calls the Claude SDK <em>in-process</em> (no subprocess!) and pushes normalized JSON events down to a React card UI, and a <strong>shell pipe</strong> on <code>/shell</code> where the server spawns the agent CLI inside a real <code>node-pty</code> pseudo-terminal and tunnels raw ANSI bytes both directions into xterm.js. Same WebSocket library, same JSON envelope shape — completely different rendering paths, completely different input mechanics. This is the map.
+    </p>
+    <div class="key-insight">
+      <strong>The most surprising fact:</strong> for the chat panel, Claude is <strong>not spawned as a child process</strong>. The server <code>import { query }</code> from <code>@anthropic-ai/claude-agent-sdk</code> and runs the agent in-process via an async generator — no PTY, no <code>spawn()</code>, no stdout listening. That's why the chat panel has structured tool cards and the shell panel has raw ANSI: they are literally not the same code path.
+    </div>
+  </header>
+
+  <main>
+
+    <!-- ──────────── DIAGRAM 1 · CHAT PIPE ──────────── -->
+    <h2>Chat pipe <span class="pipe-tag chat">/ws · in-process SDK</span></h2>
+    <p class="section-lead">Browser sends a JSON <code>claude-command</code> over WebSocket · server invokes Claude SDK directly · async generator yields events · normalizer types them · writer pushes JSON down WS · React dispatches on <code>kind</code> to render tool / message / thinking cards.</p>
+    <div class="diagram-panel">
+      <svg class="flow" viewBox="0 0 760 320" role="img" aria-label="Chat pipe flow">
+        <defs>
+          <marker id="arrChat" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#788C5D"></path>
+          </marker>
+        </defs>
+
+        <!-- Row 1: browser -->
+        <g>
+          <rect class="box" x="20" y="30" width="170" height="60" rx="10"/>
+          <text x="105" y="56" text-anchor="middle">Browser · React</text>
+          <text class="sub" x="105" y="72" text-anchor="middle">ChatComposer.tsx</text>
+        </g>
+
+        <!-- Row 1: WS chat-command -->
+        <g>
+          <rect class="box olive" x="270" y="30" width="200" height="60" rx="10"/>
+          <text x="370" y="56" text-anchor="middle">{type:'claude-command',</text>
+          <text x="370" y="72" text-anchor="middle">command,options}</text>
+        </g>
+
+        <!-- Row 1: WS server -->
+        <g>
+          <rect class="box" x="550" y="30" width="190" height="60" rx="10"/>
+          <text x="645" y="56" text-anchor="middle">handleChatConnection</text>
+          <text class="sub" x="645" y="72" text-anchor="middle">server/modules/websocket</text>
+        </g>
+
+        <!-- Row 2: SDK in-process -->
+        <g>
+          <rect class="box hot" x="550" y="140" width="190" height="64" rx="10"/>
+          <text x="645" y="166" text-anchor="middle">queryClaudeSDK()</text>
+          <text class="sub" x="645" y="182" text-anchor="middle">SDK.query() · in-process</text>
+          <text class="sub" x="645" y="195" text-anchor="middle">for await (msg)</text>
+        </g>
+
+        <!-- Row 2: normalize -->
+        <g>
+          <rect class="box olive" x="300" y="140" width="180" height="64" rx="10"/>
+          <text x="390" y="166" text-anchor="middle">normalizeMessage()</text>
+          <text class="sub" x="390" y="182" text-anchor="middle">→ NormalizedMessage</text>
+          <text class="sub" x="390" y="195" text-anchor="middle">{kind, ...}</text>
+        </g>
+
+        <!-- Row 2: writer -->
+        <g>
+          <rect class="box olive" x="50" y="140" width="180" height="64" rx="10"/>
+          <text x="140" y="166" text-anchor="middle">WebSocketWriter</text>
+          <text class="sub" x="140" y="182" text-anchor="middle">ws.send(JSON.stringify)</text>
+          <text class="sub" x="140" y="195" text-anchor="middle">no backpressure</text>
+        </g>
+
+        <!-- Row 3: react render -->
+        <g>
+          <rect class="box" x="50" y="250" width="180" height="60" rx="10"/>
+          <text x="140" y="276" text-anchor="middle">React dispatch</text>
+          <text class="sub" x="140" y="292" text-anchor="middle">switch(msg.kind)</text>
+        </g>
+
+        <g>
+          <rect class="box" x="300" y="250" width="180" height="60" rx="10"/>
+          <text x="390" y="276" text-anchor="middle">ToolRenderer</text>
+          <text class="sub" x="390" y="292" text-anchor="middle">Bash · Edit · TodoWrite ...</text>
+        </g>
+
+        <!-- Arrows -->
+        <line class="arrow olive" x1="190" y1="60" x2="270" y2="60" marker-end="url(#arrChat)"/>
+        <line class="arrow olive" x1="470" y1="60" x2="550" y2="60" marker-end="url(#arrChat)"/>
+        <line class="arrow olive" x1="645" y1="90" x2="645" y2="140" marker-end="url(#arrChat)"/>
+        <line class="arrow olive" x1="550" y1="172" x2="480" y2="172" marker-end="url(#arrChat)"/>
+        <line class="arrow olive" x1="300" y1="172" x2="230" y2="172" marker-end="url(#arrChat)"/>
+        <line class="arrow olive" x1="140" y1="204" x2="140" y2="250" marker-end="url(#arrChat)"/>
+        <line class="arrow olive" x1="230" y1="280" x2="300" y2="280" marker-end="url(#arrChat)"/>
+
+        <text class="sub" x="230" y="50" text-anchor="middle">WS /ws</text>
+        <text class="sub" x="515" y="135" text-anchor="middle">SDK events</text>
+        <text class="sub" x="160" y="240" text-anchor="end">JSON over /ws</text>
+      </svg>
+    </div>
+
+    <h2>Walkthrough · chat pipe</h2>
+
+    <div class="step olive">
+      <div class="badge">1</div>
+      <div class="step-body">
+        <div class="step-loc">src/components/chat/ChatComposer.tsx</div>
+        <p>Browser composes a <strong>chat-command JSON message</strong> and sends it over the <code>/ws</code> WebSocket. The whole prompt goes in one shot — there is no token-by-token typing on the wire; the <code>command</code> field is the entire user message. <code>options</code> carries <code>sessionId</code> (for resume), <code>cwd</code>, <code>model</code>, etc.</p>
+        <details class="snippet">
+          <summary>show source · message shape</summary>
+<pre class="code"><span class="dim">// wire shape sent over /ws</span>
+{
+  <span class="kw">type</span>: <span class="str">'claude-command'</span>,
+  <span class="kw">command</span>: <span class="str">'help me refactor this file...'</span>,
+  <span class="kw">options</span>: {
+    sessionId: <span class="str">'a1b2c3...'</span>,    <span class="dim">// optional · for resume</span>
+    cwd:       <span class="str">'/workspace'</span>,
+    model:     <span class="str">'sonnet'</span>,
+    permissionMode: <span class="str">'bypassPermissions'</span>,
+  },
+}</pre>
+        </details>
+      </div>
+    </div>
+
+    <div class="step hot">
+      <div class="badge">2</div>
+      <div class="step-body">
+        <div class="step-loc">server/claude-sdk.js<span class="range"> :15, :614–627</span></div>
+        <p><strong>The pivotal moment.</strong> The server does NOT spawn <code>claude</code> as a subprocess. It calls the SDK's async generator <code>query()</code> directly. No PTY, no <code>spawn()</code>, no stdio piping. The SDK itself invokes the Claude Code binary internally — but from CloudCLI's perspective it's just <code>for await (const message of queryInstance)</code> in the same Node process.</p>
+        <div class="callout"><strong>Why this matters for ainb:</strong> if you want ainb to drive Claude via CloudCLI's wire format, you're driving a Node process that links the SDK — not a CLI invocation. The "container holds a Claude process" mental model from <code>claude -p</code> doesn't apply here. The container holds a Node server that talks to Anthropic.</div>
+        <details class="snippet">
+          <summary>show source · in-process SDK call</summary>
+<pre class="code"><span class="dim">// server/claude-sdk.js</span>
+<span class="kw">import</span> { query } <span class="kw">from</span> <span class="str">'@anthropic-ai/claude-agent-sdk'</span>;
+
+<span class="kw">const</span> queryInstance = <span class="fn">query</span>({
+  prompt: command,
+  options: sdkOptions,   <span class="dim">// resume, model, permissionMode, etc.</span>
+});
+
+<span class="kw">for await</span> (<span class="kw">const</span> message <span class="kw">of</span> queryInstance) {
+  <span class="dim">// each iteration = one SDK event</span>
+  <span class="dim">// message.type: 'stream_event' | 'tool_use' | 'session_init' | ...</span>
+  ...
+}</pre>
+        </details>
+      </div>
+    </div>
+
+    <div class="step olive">
+      <div class="badge">3</div>
+      <div class="step-body">
+        <div class="step-loc">server/modules/sessions/services/sessions.service.ts · normalizeMessage()</div>
+        <p>Every raw SDK event is passed through <code>sessionsService.normalizeMessage('claude', msg, sid)</code> which maps it to a <strong>provider-agnostic shape</strong> with a <code>kind</code> discriminator: <code>stream_delta</code> (token text), <code>tool_use</code> (tool starting), <code>tool_result</code> (tool output), <code>thinking</code> (reasoning), <code>session_created</code> (new sid), <code>complete</code> (turn done), <code>error</code>, <code>permission_request</code>.</p>
+        <p>This normalizer is what allows Gemini, Cursor, and Codex (which DO spawn as subprocesses with <code>--output-format stream-json</code>) to feed the same React UI — every provider's events end up in the same <code>NormalizedMessage</code> shape.</p>
+      </div>
+    </div>
+
+    <div class="step olive">
+      <div class="badge">4</div>
+      <div class="step-body">
+        <div class="step-loc">server/modules/websocket/services/websocket-writer.service.ts<span class="range"> :24–28</span></div>
+        <p>Normalized message gets serialized with <code>JSON.stringify</code> and pushed over the WS via <code>ws.send()</code>. <strong>No buffering, no chunking, no backpressure.</strong> If the browser stalls, frames queue in the OS socket buffer and eventually back-pressure the Node event loop. The writer just guards on <code>readyState === WS_OPEN_STATE</code> and fires.</p>
+        <div class="callout warn"><strong>Production-grade limitation:</strong> a stalled browser can pin the Node event loop. CloudCLI's design assumes the browser keeps up. ainb integration should consider this when running large outputs.</div>
+        <details class="snippet">
+          <summary>show source · the entire send path</summary>
+<pre class="code"><span class="dim">// server/modules/websocket/services/websocket-writer.service.ts</span>
+<span class="fn">send</span>(data: <span class="kw">unknown</span>): <span class="kw">void</span> {
+  <span class="kw">if</span> (<span class="kw">this</span>.ws.readyState === WS_OPEN_STATE) {
+    <span class="kw">this</span>.ws.send(JSON.<span class="fn">stringify</span>(data));
+  }
+}
+<span class="dim">// ↑ that's literally the whole thing. no queue. no rate limit.</span></pre>
+        </details>
+      </div>
+    </div>
+
+    <div class="step olive">
+      <div class="badge">5</div>
+      <div class="step-body">
+        <div class="step-loc">src/components/chat/hooks/useChatRealtimeHandlers.ts · ToolRenderer.tsx</div>
+        <p>Browser receives the JSON, dispatches on <code>msg.kind</code>. <code>stream_delta</code> accumulates text · <code>tool_use</code> spawns a tool card · <code>tool_result</code> fills it · <code>thinking</code> renders a collapsible reasoning block · <code>complete</code> ends the turn. The chat panel is <strong>not</strong> a terminal — there's no ANSI parsing here. Each event becomes a typed React component.</p>
+        <p><code>ToolRenderer.tsx</code> maps every Claude tool name to a display: <code>Bash</code> → collapsible command+output, <code>Edit</code>/<code>Write</code>/<code>ApplyPatch</code> → diff viewer, <code>TodoWrite</code> → todo list, <code>Task</code> → subagent container with nested children, <code>AskUserQuestion</code> → answerable card.</p>
+      </div>
+    </div>
+
+    <!-- ──────────── DIAGRAM 2 · SHELL PIPE ──────────── -->
+    <h2>Shell pipe <span class="pipe-tag shell">/shell · raw PTY tunnel</span></h2>
+    <p class="section-lead">Browser xterm.js → <code>onData</code> → WS <code>{type:'input'}</code> → server <code>pty.write()</code> · agent CLI in PTY → <code>pty.onData</code> → WS <code>{type:'output'}</code> → xterm renders ANSI. <strong>Bidirectional raw bytes</strong>. Same WebSocket library as chat, completely different semantics.</p>
+    <div class="diagram-panel">
+      <svg class="flow" viewBox="0 0 760 320" role="img" aria-label="Shell pipe flow">
+        <defs>
+          <marker id="arrShell" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#6A8CAF"></path>
+          </marker>
+        </defs>
+
+        <!-- xterm browser -->
+        <g>
+          <rect class="box" x="20" y="30" width="190" height="80" rx="10"/>
+          <text x="115" y="56" text-anchor="middle">Browser · xterm.js</text>
+          <text class="sub" x="115" y="72" text-anchor="middle">Shell.tsx · useShellTerminal</text>
+          <text class="sub" x="115" y="86" text-anchor="middle">FitAddon · WebglAddon</text>
+          <text class="sub" x="115" y="100" text-anchor="middle">onData → keystrokes</text>
+        </g>
+
+        <!-- WS /shell -->
+        <g>
+          <rect class="box sky" x="280" y="40" width="200" height="60" rx="10"/>
+          <text x="380" y="66" text-anchor="middle">WebSocket /shell</text>
+          <text class="sub" x="380" y="82" text-anchor="middle">{type:'input',data}</text>
+          <text class="sub" x="380" y="95" text-anchor="middle">{type:'output',data}</text>
+        </g>
+
+        <!-- shell-websocket service -->
+        <g>
+          <rect class="box" x="550" y="30" width="190" height="80" rx="10"/>
+          <text x="645" y="56" text-anchor="middle">shell-websocket</text>
+          <text class="sub" x="645" y="72" text-anchor="middle">.service.ts</text>
+          <text class="sub" x="645" y="86" text-anchor="middle">pty.write(data)</text>
+          <text class="sub" x="645" y="100" text-anchor="middle">pty.onData → ws.send</text>
+        </g>
+
+        <!-- node-pty -->
+        <g>
+          <rect class="box plum" x="550" y="170" width="190" height="62" rx="10"/>
+          <text x="645" y="196" text-anchor="middle">node-pty</text>
+          <text class="sub" x="645" y="212" text-anchor="middle">spawn('bash','-c',...)</text>
+          <text class="sub" x="645" y="225" text-anchor="middle">xterm-256color</text>
+        </g>
+
+        <!-- claude / agent CLI -->
+        <g>
+          <rect class="box hot" x="280" y="170" width="200" height="62" rx="10"/>
+          <text x="380" y="196" text-anchor="middle">claude / codex / etc</text>
+          <text class="sub" x="380" y="212" text-anchor="middle">interactive (no -p)</text>
+          <text class="sub" x="380" y="225" text-anchor="middle">tty=true</text>
+        </g>
+
+        <!-- session persist -->
+        <g>
+          <rect class="box" x="20" y="170" width="200" height="62" rx="10"/>
+          <text x="120" y="196" text-anchor="middle">ptySessionsMap</text>
+          <text class="sub" x="120" y="212" text-anchor="middle">30-min reconnect window</text>
+          <text class="sub" x="120" y="225" text-anchor="middle">${projectPath}_${sid}</text>
+        </g>
+
+        <!-- bidirectional arrows -->
+        <line class="arrow sky" x1="210" y1="60" x2="280" y2="60" marker-end="url(#arrShell)"/>
+        <line class="arrow sky" x1="280" y1="85" x2="210" y2="85" marker-end="url(#arrShell)"/>
+        <line class="arrow sky" x1="480" y1="60" x2="550" y2="60" marker-end="url(#arrShell)"/>
+        <line class="arrow sky" x1="550" y1="85" x2="480" y2="85" marker-end="url(#arrShell)"/>
+        <line class="arrow" x1="645" y1="110" x2="645" y2="170" marker-end="url(#arrShell)"/>
+        <line class="arrow" x1="550" y1="200" x2="480" y2="200" marker-end="url(#arrShell)"/>
+        <line class="arrow" x1="280" y1="200" x2="220" y2="200" marker-end="url(#arrShell)" stroke-dasharray="3,3"/>
+
+        <text class="sub" x="245" y="44" text-anchor="middle">input</text>
+        <text class="sub" x="245" y="76" text-anchor="middle">output</text>
+        <text class="sub" x="515" y="50" text-anchor="middle">JSON over WS</text>
+        <text class="sub" x="660" y="135" text-anchor="middle">spawn / signal</text>
+        <text class="sub" x="250" y="240" text-anchor="middle">resume on reconnect</text>
+      </svg>
+    </div>
+
+    <h2>Walkthrough · shell pipe</h2>
+
+    <div class="step sky">
+      <div class="badge">1</div>
+      <div class="step-body">
+        <div class="step-loc"><a href="https://github.com/siteboon/claudecodeui/blob/10f721cf/src/components/shell/hooks/useShellTerminal.ts#L216-L220">src/components/shell/hooks/useShellTerminal.ts</a><span class="range"> :216–220</span></div>
+        <p>xterm.js's <code>onData</code> handler captures <strong>every keystroke as raw bytes</strong> — including escape sequences for arrow keys, <code>Ctrl-C</code> (<code>\x03</code>), paste content, etc. xterm has already translated keyboard events into the proper byte sequences before they hit <code>onData</code>; the frontend just forwards.</p>
+        <details class="snippet" open>
+          <summary>show source · the entire input forwarding</summary>
+<pre class="code"><span class="dim">// useShellTerminal.ts</span>
+<span class="kw">const</span> dataSubscription = nextTerminal.<span class="fn">onData</span>((data) =&gt; {
+  <span class="fn">sendSocketMessage</span>(wsRef.current, {
+    type: <span class="str">'input'</span>,
+    data,         <span class="dim">// raw byte string · Ctrl-C, arrows, paste, all</span>
+  });
+});</pre>
+        </details>
+      </div>
+    </div>
+
+    <div class="step sky">
+      <div class="badge">2</div>
+      <div class="step-body">
+        <div class="step-loc"><a href="https://github.com/siteboon/claudecodeui/blob/10f721cf/server/modules/websocket/services/shell-websocket.service.ts#L405-L408">server/modules/websocket/services/shell-websocket.service.ts</a><span class="range"> :405–408</span></div>
+        <p>Server side is symmetrically thin: <code>type: 'input'</code> messages get written <strong>straight into the PTY master</strong>. <code>node-pty</code> handles the rest — it forwards the bytes to the slave end where <code>claude</code> (or <code>codex</code>, <code>gemini</code>, etc.) is running as if a real user were typing.</p>
+        <p>Resize events <code>{type: 'resize', cols, rows}</code> get a separate handler that calls <code>shellProcess.resize(cols, rows)</code>. A <code>ResizeObserver</code> on the browser keeps xterm and the PTY in sync.</p>
+        <details class="snippet">
+          <summary>show source · the PTY write</summary>
+<pre class="code"><span class="dim">// shell-websocket.service.ts</span>
+<span class="kw">if</span> (data.type === <span class="str">'input'</span>) {
+  <span class="kw">if</span> (shellProcess) {
+    shellProcess.<span class="fn">write</span>(<span class="fn">readString</span>(data.data));
+  }
+  <span class="kw">return</span>;
+}</pre>
+        </details>
+      </div>
+    </div>
+
+    <div class="step hot">
+      <div class="badge">3</div>
+      <div class="step-body">
+        <div class="step-loc"><a href="https://github.com/siteboon/claudecodeui/blob/10f721cf/server/modules/websocket/services/shell-websocket.service.ts#L254-L270">server/modules/websocket/services/shell-websocket.service.ts</a><span class="range"> :254–270</span></div>
+        <p>The PTY itself is spawned with a <code>bash -c</code> wrapper that <strong>tries to resume the most recent session first</strong>, falling back to a fresh <code>claude</code> if resume fails. <code>name: 'xterm-256color'</code> means the agent sees a real terminal capable of 256-color ANSI rendering.</p>
+        <details class="snippet">
+          <summary>show source · PTY spawn</summary>
+<pre class="code"><span class="dim">// shell-websocket.service.ts · spawning the interactive shell</span>
+<span class="kw">const</span> shellProcess = pty.<span class="fn">spawn</span>(<span class="str">'bash'</span>, [<span class="str">'-c'</span>,
+  <span class="str">`claude --resume "${sessionId}" || claude`</span>
+], {
+  name: <span class="str">'xterm-256color'</span>,
+  cols, rows,
+  cwd: projectPath,
+  env: { ...process.env, FORCE_COLOR: <span class="str">'1'</span> },
+});</pre>
+        </details>
+      </div>
+    </div>
+
+    <div class="step sky">
+      <div class="badge">4</div>
+      <div class="step-body">
+        <div class="step-loc">server/modules/websocket/services/shell-websocket.service.ts · onData handler</div>
+        <p>The reverse direction: <code>shellProcess.onData</code> fires for every byte chunk the PTY emits. Server wraps it as <code>{type: 'output', data}</code> and sends down the WS. xterm.js receives it and writes directly to the terminal renderer — ANSI escape codes, cursor moves, colors, everything renders natively in the browser.</p>
+        <div class="callout"><strong>Two parsers, one transport.</strong> Same WebSocket lib. Same JSON envelope. The chat pipe parses <code>kind</code> and renders cards; the shell pipe ignores message structure beyond <code>type</code> and dumps <code>data</code> into xterm. The "renderer" is what makes them feel different.</div>
+      </div>
+    </div>
+
+    <div class="step sky">
+      <div class="badge">5</div>
+      <div class="step-body">
+        <div class="step-loc">shell-websocket.service.ts · ptySessionsMap<span class="range"> :26–29</span></div>
+        <p>When the user closes the browser tab, the PTY <strong>doesn't die immediately</strong>. The handler sets a 30-minute <code>setTimeout</code> to kill it. If the user reconnects within that window (same <code>projectPath + sessionId</code> key), the existing PTY handle is reused and the xterm buffer replays.</p>
+        <p>This is how CloudCLI makes long-running interactive sessions survive flaky network without losing the agent's state. It's also a memory cost — every disconnected PTY lives for 30 minutes by default.</p>
+      </div>
+    </div>
+
+    <!-- ──────────── AUTH FLOW ──────────── -->
+    <h2>Auth · just a Shell pipe in disguise</h2>
+    <p class="section-lead">"Sign in to Claude" doesn't have its own handler. CloudCLI opens a Shell pipe, runs <code>claude /login</code> in a PTY, scrapes the OAuth URL from terminal output, and pops it to the browser as a clickable link.</p>
+
+    <div class="step">
+      <div class="badge">1</div>
+      <div class="step-body">
+        <div class="step-loc">src/components/provider-auth/view/ProviderLoginModal.tsx<span class="range"> :27–30</span></div>
+        <p>Modal mounts <code>&lt;StandaloneShell command='claude --dangerously-skip-permissions /login' isPlainShell&gt;</code>. Same shell pipe, just with a fixed initial command.</p>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="badge">2</div>
+      <div class="step-body">
+        <div class="step-loc">server/modules/websocket/services/shell-websocket.service.ts<span class="range"> :297–335</span> · emitAuthUrl()</div>
+        <p>The server watches the PTY output buffer for URLs matching <code>https?://...</code>. When detected, it sends an extra <code>{type: 'auth_url', url}</code> message to the browser. The browser sets <code>authUrl</code> state, which renders a clickable overlay.</p>
+        <p>User opens the URL in a normal tab, completes Anthropic OAuth, the callback is captured by the Claude CLI inside the PTY (because <code>claude /login</code> ran a temp local server inside the container). PTY exits with <code>code 0</code>, modal closes.</p>
+      </div>
+    </div>
+
+  </main>
+
+  <aside>
+    <div class="panel">
+      <h3>Key files</h3>
+      <ul class="key-files">
+        <li>
+          <span class="tag both">root</span>
+          <span class="path">server/index.js</span>
+          <span class="desc">Express + ws server entry. Serves <code>dist/</code> in prod, routes <code>/ws</code> &amp; <code>/shell</code>.</span>
+        </li>
+        <li>
+          <span class="tag chat">chat</span>
+          <span class="path">server/claude-sdk.js</span>
+          <span class="desc">In-process SDK runner. <code>for await</code> on <code>query()</code>. Owns <code>activeSessions</code> map.</span>
+        </li>
+        <li>
+          <span class="tag chat">chat</span>
+          <span class="path">server/gemini-cli.js · cursor-cli.js</span>
+          <span class="desc">Subprocess paths with <code>--output-format stream-json</code>. Different from Claude.</span>
+        </li>
+        <li>
+          <span class="tag chat">chat</span>
+          <span class="path">server/modules/sessions/services/sessions.service.ts</span>
+          <span class="desc"><code>normalizeMessage()</code> · the provider-agnostic event mapper.</span>
+        </li>
+        <li>
+          <span class="tag chat">chat</span>
+          <span class="path">server/modules/websocket/services/websocket-writer.service.ts</span>
+          <span class="desc">The whole writer is 4 lines. <code>ws.send(JSON.stringify)</code>. No backpressure.</span>
+        </li>
+        <li>
+          <span class="tag shell">shell</span>
+          <span class="path">server/modules/websocket/services/shell-websocket.service.ts</span>
+          <span class="desc">PTY spawn, in/out forwarding, 30-min reconnect, auth-URL scraping.</span>
+        </li>
+        <li>
+          <span class="tag shell">shell</span>
+          <span class="path">src/components/shell/hooks/useShellTerminal.ts</span>
+          <span class="desc">xterm.js setup · <code>onData</code> → WS · resize observer.</span>
+        </li>
+        <li>
+          <span class="tag chat">chat</span>
+          <span class="path">src/components/chat/tools/ToolRenderer.tsx</span>
+          <span class="desc">Tool-name → component map. Bash, Edit, Write, TodoWrite, Task, AskUserQuestion.</span>
+        </li>
+        <li>
+          <span class="tag both">store</span>
+          <span class="path">server/modules/database/schema.ts<span class="range"> :82–97</span></span>
+          <span class="desc">SQLite <code>sessions</code> table. Survives restart. Watcher syncs JSONL files.</span>
+        </li>
+      </ul>
+    </div>
+
+    <div class="gotchas">
+      <h3>Gotchas / surprises</h3>
+      <ul>
+        <li><strong>Claude is not a subprocess.</strong> Chat pipe uses the SDK in-process. Only Gemini/Cursor spawn child processes. Mental model "container holds a Claude CLI process" is wrong for chat.</li>
+        <li><strong>No backpressure on WS writes.</strong> A stalled browser can pin the Node event loop. <code>ws.send</code> just guards on <code>readyState</code>.</li>
+        <li><strong>Shell pipe is browser-input-passthrough.</strong> Ctrl-C, arrow keys, paste — all the same <code>{type:'input'}</code> message. xterm does the byte encoding upstream.</li>
+        <li><strong>PTY survives 30 min after disconnect</strong> via <code>ptySessionsMap</code>. Disconnected sessions still use memory. No GC for "user abandoned".</li>
+        <li><strong>Two parsers, one transport.</strong> Same WS lib, same envelope — chat dispatches on <code>kind</code> to render cards, shell ignores structure and dumps to xterm.</li>
+        <li><strong>OAuth = a shell pipe in disguise.</strong> <code>claude /login</code> runs in a PTY, server regex-scrapes URLs from output, sends to browser as <code>{type:'auth_url'}</code>.</li>
+        <li><strong>"Continue in Shell" race condition</strong> — <code>useShellConnection.ts:197–203</code> guards on <code>isInitialized</code>. Click before xterm <code>useEffect</code> completes → no-op, no retry. This is what HolyClaude says is permanently broken.</li>
+        <li><strong>HolyClaude vendored patches</strong> address: WS frame binary-flag forwarding (plugin proxy), shell scroll position on reconnect, and Claude model propagation through <code>/model</code> commands. All <code>sed</code>/<code>perl</code> against minified JS.</li>
+      </ul>
+    </div>
+  </aside>
+
+</div>
+
+<script>
+  // Keep at most one snippet open at a time.
+  var snippets = document.querySelectorAll('details.snippet');
+  snippets.forEach(function (d) {
+    d.addEventListener('toggle', function () {
+      if (!d.open) return;
+      snippets.forEach(function (other) {
+        if (other !== d) other.open = false;
+      });
+    });
+  });
+</script>
+</body>
+</html>

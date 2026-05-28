@@ -1,0 +1,1027 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Operating modes for containerised coding agents</title>
+<style>
+  :root {
+    --ivory: #FAF9F5;
+    --slate: #141413;
+    --clay: #D97757;
+    --clay-d: #B85C3E;
+    --oat: #E3DACC;
+    --olive: #788C5D;
+    --olive-l: #E7EDDE;
+    --rust: #B0432D;
+    --rust-l: #F5DDD4;
+    --sky: #6A8CAF;
+    --sky-l: #DCE5EF;
+    --plum: #8A5A78;
+    --plum-l: #E9D9E3;
+    --sand: #C2A878;
+    --gray-100: #F0EEE6;
+    --gray-300: #D1CFC5;
+    --gray-500: #87867F;
+    --gray-700: #3D3D3A;
+    --white: #FFFFFF;
+
+    --serif: ui-serif, Georgia, serif;
+    --sans: system-ui, -apple-system, sans-serif;
+    --mono: ui-monospace, 'SF Mono', Menlo, monospace;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ivory);
+    color: var(--slate);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .page {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 0 28px 96px;
+  }
+
+  header.page-head {
+    padding: 56px 0 28px;
+  }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--gray-500);
+    margin-bottom: 10px;
+  }
+  header.page-head h1 {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-size: 38px;
+    letter-spacing: -0.01em;
+    margin: 0 0 14px;
+    color: var(--slate);
+    line-height: 1.15;
+  }
+  header.page-head p {
+    color: var(--gray-500);
+    font-size: 14.5px;
+    margin: 0;
+    max-width: 760px;
+  }
+  header.page-head p code { font-family: var(--mono); background: var(--gray-100); padding: 1px 5px; border-radius: 4px; color: var(--slate); font-size: 13px; }
+
+  .meta-row { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; font-size: 13px; color: var(--gray-500); margin-top: 14px; }
+  .meta-row .k { font-family: var(--mono); font-size: 11px; color: var(--gray-500); margin-right: 4px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .meta-row .v { color: var(--gray-700); }
+  .status-badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
+    padding: 5px 11px; border-radius: 999px;
+    border: 1.5px solid var(--sand); color: #6E5B33; background: #F4ECD9;
+  }
+  .status-badge::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; opacity: 0.85; }
+
+  section { margin: 0 0 56px; }
+  .sec-head { display: flex; align-items: baseline; gap: 14px; margin-bottom: 8px; }
+  .sec-head .num {
+    font-family: var(--mono); font-size: 12px;
+    background: var(--oat); color: var(--slate); padding: 3px 9px; border-radius: 8px;
+  }
+  .sec-head h2 {
+    font-family: var(--serif); font-weight: 500; font-size: 24px;
+    color: var(--slate); letter-spacing: -0.01em;
+    margin: 0;
+  }
+  .sec-intro { font-size: 14.5px; color: var(--gray-500); max-width: 820px; margin: 8px 0 28px; }
+  .sec-intro code { font-family: var(--mono); background: var(--gray-100); padding: 1px 5px; border-radius: 4px; color: var(--slate); font-size: 12.5px; }
+
+  /* TL;DR callout */
+  .tldr {
+    background: var(--olive-l); border: 1.5px solid var(--olive);
+    border-left: 6px solid var(--olive);
+    border-radius: 10px; padding: 18px 22px;
+    max-width: 880px; margin-bottom: 28px;
+  }
+  .tldr .lab { font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--olive); margin-bottom: 8px; }
+  .tldr ul { margin: 0; padding-left: 18px; }
+  .tldr li { font-size: 14px; color: var(--gray-700); margin-bottom: 6px; }
+  .tldr li:last-child { margin-bottom: 0; }
+  .tldr li code { font-family: var(--mono); background: var(--white); padding: 1px 5px; border-radius: 4px; color: var(--slate); font-size: 12.5px; }
+
+  /* Grid of mode cards */
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 22px;
+  }
+  @media (max-width: 920px) { .grid { grid-template-columns: 1fr; } }
+
+  .cell {}
+
+  .variant-label {
+    display: inline-flex; align-items: center;
+    height: 24px; padding: 0 11px;
+    font-family: var(--mono); font-size: 11px; font-weight: 500;
+    color: var(--gray-700); background: var(--gray-100);
+    border-radius: 999px;
+    margin-bottom: 10px; letter-spacing: 0.04em;
+  }
+  .variant-label .num { color: var(--clay-d); margin-right: 6px; }
+
+  .mode-card {
+    background: var(--white);
+    border: 1.5px solid var(--gray-300);
+    border-top: 5px solid var(--gray-300);
+    border-radius: 12px; padding: 22px;
+    display: flex; flex-direction: column;
+  }
+  .mode-card[data-tint="clay"]  { border-top-color: var(--clay); }
+  .mode-card[data-tint="olive"] { border-top-color: var(--olive); }
+  .mode-card[data-tint="sky"]   { border-top-color: var(--sky); }
+  .mode-card[data-tint="plum"]  { border-top-color: var(--plum); }
+  .mode-card[data-tint="rust"]  { border-top-color: var(--rust); }
+  .mode-card[data-tint="sand"]  { border-top-color: var(--sand); }
+  .mode-card[data-tint="olive-d"]  { border-top-color: #506840; }
+  .mode-card[data-tint="slate"] { border-top-color: var(--slate); }
+
+  .mode-card h3 {
+    font-family: var(--serif); font-weight: 500; font-size: 19px; color: var(--slate);
+    margin: 0 0 6px; letter-spacing: -0.01em;
+  }
+  .mode-card .summary { font-size: 13px; color: var(--gray-500); margin: 0 0 16px; line-height: 1.55; }
+  .mode-card .summary code { font-family: var(--mono); background: var(--gray-100); padding: 1px 5px; border-radius: 4px; color: var(--slate); font-size: 12px; }
+
+  .topology {
+    background: var(--ivory);
+    border: 1px solid var(--gray-300);
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 18px;
+    overflow: hidden;
+  }
+  .topology svg { display: block; width: 100%; height: auto; }
+
+  .listing { margin-bottom: 14px; }
+  .listing .lab {
+    font-family: var(--mono); font-size: 10px; color: var(--gray-500);
+    text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 6px;
+  }
+  .listing ul { list-style: none; padding: 0; margin: 0; }
+  .listing li {
+    font-size: 13px; color: var(--gray-700);
+    padding-left: 18px; position: relative; margin-bottom: 5px; line-height: 1.5;
+  }
+  .listing.works li::before {
+    content: "✓"; position: absolute; left: 0; color: var(--olive); font-size: 12px; font-weight: 600;
+  }
+  .listing.broken li::before {
+    content: "✗"; position: absolute; left: 0; color: var(--rust); font-size: 12px; font-weight: 600;
+  }
+  .listing code { font-family: var(--mono); background: var(--gray-100); padding: 1px 4px; border-radius: 3px; font-size: 11.5px; color: var(--slate); }
+
+  .use-when {
+    background: var(--oat); border-radius: 6px;
+    padding: 9px 12px; font-size: 13px; color: var(--gray-700); margin-bottom: 14px;
+  }
+  .use-when .lab {
+    font-family: var(--mono); font-size: 10px; color: #6E5B33;
+    text-transform: uppercase; letter-spacing: 0.06em; margin-right: 6px;
+  }
+
+  .agent-compat {
+    display: flex; gap: 8px; margin-top: auto; padding-top: 12px;
+    border-top: 1px dashed var(--gray-300);
+  }
+  .agent-pill {
+    flex: 1;
+    display: flex; align-items: center; justify-content: center; gap: 5px;
+    font-family: var(--mono); font-size: 11px; padding: 6px 8px;
+    border-radius: 6px; background: var(--gray-100); color: var(--gray-700);
+  }
+  .agent-pill .glyph { font-family: var(--sans); font-size: 12px; font-weight: 600; }
+  .agent-pill.ok { background: var(--olive-l); color: var(--olive); }
+  .agent-pill.ok .glyph { color: var(--olive); }
+  .agent-pill.warn { background: #F4ECD9; color: #6E5B33; }
+  .agent-pill.warn .glyph { color: #B85C3E; }
+  .agent-pill.no { background: var(--rust-l); color: var(--rust); }
+  .agent-pill.no .glyph { color: var(--rust); }
+  .agent-pill .name { font-weight: 500; }
+
+  /* Capability matrix */
+  .matrix-wrap {
+    background: var(--white); border: 1.5px solid var(--gray-300); border-radius: 12px;
+    padding: 20px; overflow-x: auto;
+  }
+  .matrix { width: 100%; border-collapse: separate; border-spacing: 0; min-width: 760px; }
+  .matrix th, .matrix td {
+    padding: 9px 8px; font-size: 12px; text-align: center;
+    border-bottom: 1px solid var(--gray-100);
+  }
+  .matrix th {
+    font-family: var(--mono); font-size: 10.5px; color: var(--gray-500);
+    text-transform: uppercase; letter-spacing: 0.05em; font-weight: 400;
+    vertical-align: bottom;
+  }
+  .matrix th.row {
+    text-align: left; color: var(--slate); font-size: 13px; font-family: var(--sans);
+    text-transform: none; letter-spacing: 0; font-weight: 500;
+    padding-right: 14px;
+  }
+  .matrix th.row .sub { display: block; font-family: var(--mono); font-size: 10px; color: var(--gray-500); font-weight: 400; margin-top: 2px; }
+  .matrix td.yes { background: var(--olive-l); color: var(--olive); font-weight: 600; }
+  .matrix td.no  { background: var(--rust-l); color: var(--rust); font-weight: 600; }
+  .matrix td.partial { background: #F4ECD9; color: #6E5B33; font-weight: 600; }
+  .matrix td.na  { background: var(--gray-100); color: var(--gray-500); }
+  .matrix tr:last-child th, .matrix tr:last-child td { border-bottom: none; }
+
+  /* Q&A */
+  .qa { display: grid; grid-template-columns: 1fr; gap: 14px; }
+  .qa-card {
+    background: var(--white); border: 1.5px solid var(--gray-300);
+    border-left: 6px solid var(--clay); border-radius: 10px; padding: 18px 22px;
+  }
+  .qa-card .q { font-family: var(--serif); font-weight: 500; font-size: 17px; color: var(--slate); margin: 0 0 8px; line-height: 1.35; }
+  .qa-card .a { font-size: 14px; color: var(--gray-700); margin: 0 0 8px; line-height: 1.6; }
+  .qa-card .a:last-child { margin-bottom: 0; }
+  .qa-card .a strong { color: var(--slate); }
+  .qa-card .a code { font-family: var(--mono); background: var(--gray-100); padding: 1px 5px; border-radius: 4px; color: var(--slate); font-size: 12.5px; }
+  .qa-card .ref { font-family: var(--mono); font-size: 11px; color: var(--gray-500); margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--gray-300); }
+  .qa-card .ref strong { color: var(--clay-d); }
+
+  /* Can't do panel */
+  .cant {
+    background: var(--white); border: 1.5px solid var(--rust);
+    border-left: 6px solid var(--rust); border-radius: 12px; padding: 22px 24px;
+  }
+  .cant ul { list-style: none; padding: 0; margin: 0; }
+  .cant li {
+    font-size: 14px; color: var(--gray-700);
+    padding-left: 24px; position: relative; margin-bottom: 12px; line-height: 1.5;
+  }
+  .cant li::before {
+    content: "✗"; position: absolute; left: 0; top: 0;
+    color: var(--rust); font-size: 14px; font-weight: 700;
+  }
+  .cant li:last-child { margin-bottom: 0; }
+  .cant li strong { color: var(--slate); }
+  .cant li code { font-family: var(--mono); background: var(--gray-100); padding: 1px 5px; border-radius: 4px; font-size: 12.5px; color: var(--slate); }
+</style>
+<style data-claude-theme="injected">
+/* Claude brand polish layer for explain-to-me templates.
+ * Inject as a second <style> block AFTER the template's own <style>.
+ * Templates already use Claude's palette (ivory/slate/clay/oat/olive);
+ * this layer adds:
+ *   - Söhne-like sans stack (matches claude.ai)
+ *   - Tiempos Headline–like serif fallback for headings
+ *   - Subtle paper texture on body
+ *   - Brand badge (bottom-right)
+ *   - Clay focus ring
+ * Layout-safe: only touches typography, surface, and decoration.
+ */
+
+:root {
+  /* Re-affirm tokens in case template scoped them. */
+  --ivory:    #FAF9F5;
+  --slate:    #141413;
+  --clay:     #D97757;
+  --oat:      #E3DACC;
+  --olive:    #788C5D;
+  --gray-150: #F0EEE6;
+  --gray-300: #D1CFC5;
+  --gray-500: #87867F;
+  --gray-700: #3D3D3A;
+
+  /* claude.ai font stacks. Web fonts (Söhne, Tiempos) are licensed; the
+   * stack falls back to high-quality system fonts that read as similar. */
+  --sans:  "Söhne", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --serif: "Tiempos Headline", "Tiempos Text", "Source Serif Pro", "Iowan Old Style", "Charter", Georgia, serif;
+  --mono:  "Söhne Mono", "Berkeley Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+body {
+  background-image:
+    radial-gradient(rgba(20, 20, 19, 0.018) 1px, transparent 1px);
+  background-size: 4px 4px;
+}
+
+h1, h2, h3 {
+  letter-spacing: -0.012em;
+}
+
+.eyebrow::after {
+  content: " · explained by claude";
+  color: var(--clay);
+  letter-spacing: 0.08em;
+}
+
+:focus-visible {
+  outline: 2px solid var(--clay);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+pre, code {
+  font-feature-settings: "ss01", "cv11", "calt";
+}
+pre {
+  background: var(--gray-150) !important;
+  border: 1px solid var(--gray-300);
+}
+
+body::after {
+  content: "claude · explainer";
+  position: fixed;
+  bottom: 18px;
+  right: 18px;
+  z-index: 999;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--gray-500);
+  background: rgba(250, 249, 245, 0.92);
+  border: 1px solid var(--gray-300);
+  border-left: 3px solid var(--clay);
+  padding: 6px 10px 6px 12px;
+  border-radius: 4px;
+  backdrop-filter: blur(6px);
+  pointer-events: none;
+}
+
+@media print {
+  body::after { display: none; }
+  body { background-image: none; }
+}
+
+@media (max-width: 640px) {
+  body::after { display: none; }
+}
+
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header class="page-head">
+    <div class="eyebrow">Brainstorm · operating modes</div>
+    <h1>How containerised coding agents actually run</h1>
+    <p>Eight operating modes for running <code>claude</code> / <code>codex</code> / <code>copilot</code> inside a container (HolyClaude or alt). For each: container topology, what works, what doesn't, when to use, agent compat. Then the cross-cutting capability matrix, Stevie's direct questions answered, and an honest list of what can't be done at all.</p>
+    <div class="meta-row">
+      <span><span class="k">Date</span><span class="v">2026-05-15</span></span>
+      <span><span class="k">For</span><span class="v">ainb bossmode refactor</span></span>
+      <span><span class="k">Backend</span><span class="v">HolyClaude (pinned <code style="font-family:ui-monospace;font-size:12px;background:#F0EEE6;padding:1px 4px;border-radius:3px">:v1.2.2</code>)</span></span>
+      <span class="status-badge">Pre-design · for discussion</span>
+    </div>
+  </header>
+
+  <!-- TL;DR -->
+  <section>
+    <div class="tldr">
+      <div class="lab">TL;DR · five things to internalise</div>
+      <ul>
+        <li><strong>Container ≠ session.</strong> One HolyClaude container can host many short-lived <code>claude -p</code> processes (or hold one long-lived <code>claude</code> REPL). The container is the <em>sandbox</em>; the process is the <em>agent</em>.</li>
+        <li><strong>CloudCLI UI is optional.</strong> Each container ships one CloudCLI on internal <code>:3001</code>. If you spawn N containers you have N CloudCLI instances. Map host ports as you see fit — or map none and use <code>docker exec</code> only.</li>
+        <li><strong>Session resume works if session files persist.</strong> <code>claude -c</code> / <code>--resume</code> read <code>~/.claude/projects/&lt;hash&gt;/&lt;uuid&gt;.jsonl</code>. Bind-mount the auth tree → resume works across container restarts.</li>
+        <li><strong>Cross-agent context sharing is impossible</strong> without a translation layer. <code>claude</code> and <code>codex</code> have different session formats and don't read each other's files.</li>
+        <li><strong>"Bossmode" is one mode among many.</strong> Today it's mode 1 (fire-and-forget). The refactor is a chance to enable modes 2–8 without breaking mode 1.</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- ───── 01. modes ───── -->
+  <section>
+    <div class="sec-head"><span class="num">01</span><h2>Eight operating modes</h2></div>
+    <p class="sec-intro">Each card: a topology sketch (host · containers · workspace mount · who-talks-to-who) · what works · what doesn't · when to reach for it · which agents support it. Read them as a spectrum from ephemeral &amp; cheap (mode 1) to long-lived &amp; complex (modes 5–7).</p>
+
+    <div class="grid">
+
+      <!-- MODE 1 -->
+      <div class="cell">
+        <span class="variant-label"><span class="num">01</span> · Fire-and-forget</span>
+        <div class="mode-card" data-tint="clay">
+          <h3>Fire-and-forget</h3>
+          <p class="summary">Ephemeral container per task. <code>claude -p "$PROMPT"</code> runs, JSON streams out, process &amp; container exit. <strong>Current ainb bossmode.</strong></p>
+          <div class="topology">
+            <svg viewBox="0 0 380 130" aria-label="topology">
+              <defs><marker id="m1" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="#87867F"/></marker></defs>
+              <rect x="10" y="15" width="100" height="40" rx="6" fill="#F4ECD9" stroke="#C2A878" stroke-width="1.2"/>
+              <text x="60" y="32" text-anchor="middle" font-family="ui-monospace" font-size="10" fill="#6E5B33">AINB HOST</text>
+              <text x="60" y="46" text-anchor="middle" font-family="system-ui" font-size="11" fill="#141413">tui</text>
+              <line x1="110" y1="35" x2="150" y2="35" stroke="#87867F" stroke-width="1.3" marker-end="url(#m1)"/>
+              <text x="130" y="29" text-anchor="middle" font-family="ui-monospace" font-size="9" fill="#87867F">spawn</text>
+              <rect x="150" y="10" width="220" height="100" rx="8" fill="#FAF9F5" stroke="#D97757" stroke-width="2" stroke-dasharray="5,3"/>
+              <text x="260" y="26" text-anchor="middle" font-family="ui-monospace" font-size="9" fill="#B85C3E">HolyClaude · ephemeral</text>
+              <rect x="170" y="38" width="110" height="22" rx="4" fill="#E7EDDE" stroke="#788C5D"/>
+              <text x="225" y="53" text-anchor="middle" font-family="system-ui" font-size="11" fill="#141413">claude -p "$P"</text>
+              <line x1="280" y1="49" x2="365" y2="49" stroke="#87867F" stroke-width="1.3" marker-end="url(#m1)"/>
+              <text x="322" y="44" text-anchor="middle" font-family="ui-monospace" font-size="9" fill="#87867F">json stream</text>
+              <line x1="365" y1="49" x2="365" y2="80" stroke="#87867F" stroke-width="1.3"/>
+              <line x1="365" y1="80" x2="115" y2="80" stroke="#87867F" stroke-width="1.3" marker-end="url(#m1)"/>
+              <rect x="170" y="70" width="180" height="30" rx="4" fill="#DCE5EF" stroke="#6A8CAF" stroke-dasharray="3,3"/>
+              <text x="260" y="89" text-anchor="middle" font-family="ui-monospace" font-size="10" fill="#3D5470">/workspace ← bind mount</text>
+            </svg>
+          </div>
+          <div class="listing works">
+            <div class="lab">Works</div>
+            <ul>
+              <li>Single-prompt task with structured JSON output</li>
+              <li>Strong per-task isolation — crash one, others unaffected</li>
+              <li>No state leakage between tasks</li>
+              <li>Easy to test (deterministic lifecycle)</li>
+            </ul>
+          </div>
+          <div class="listing broken">
+            <div class="lab">Doesn't work</div>
+            <ul>
+              <li>No follow-up — container gone before you can attach</li>
+              <li>~3GB image pull on cold start hurts first-task latency</li>
+              <li>Can't resume previous session — no persistent claude context</li>
+              <li>Wastes the CloudCLI UI (gone before you'd open it)</li>
+            </ul>
+          </div>
+          <div class="use-when"><span class="lab">use when</span>scripted one-shot tasks · CI · "explain this file" / "fix this bug" / "write tests for X"</div>
+          <div class="agent-compat">
+            <div class="agent-pill ok"><span class="glyph">✓</span><span class="name">claude</span></div>
+            <div class="agent-pill ok"><span class="glyph">✓</span><span class="name">codex</span></div>
+            <div class="agent-pill warn" title="copilot CLI lacks --print"><span class="glyph">⚠</span><span class="name">copilot</span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- MODE 2 -->
+      <div class="cell">
+        <span class="variant-label"><span class="num">02</span> · Sticky single-task</span>
+        <div class="mode-card" data-tint="sand">
+          <h3>Sticky single-task</h3>
+          <p class="summary">Fire-and-forget, but container <em>survives</em> after <code>claude -p</code> exits. User can <code>docker exec -it claude -c</code> to TTY-attach the same session — or just hand-inspect logs.</p>
+          <div class="topology">
+            <svg viewBox="0 0 380 130" aria-label="topology">
+              <defs><marker id="m2" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="#87867F"/></marker></defs>
+              <rect x="10" y="15" width="100" height="40" rx="6" fill="#F4ECD9" stroke="#C2A878" stroke-width="1.2"/>
+              <text x="60" y="32" text-anchor="middle" font-family="ui-monospace" font-size="10" fill="#6E5B33">AINB HOST</text>
+              <text x="60" y="46" text-anchor="middle" font-family="system-ui" font-size="11" fill="#141413">tui</text>
+              <line x1="110" y1="35" x2="150" y2="35" stroke="#87867F" stroke-width="1.3" marker-end="url(#m2)"/>
+              <text x="130" y="29" text-anchor="middle" font-family="ui-monospace" font-size="9" fill="#87867F">spawn</text>
+              <rect x="150" y="10" width="220" height="115" rx="8" fill="#FAF9F5" stroke="#C2A878" stroke-width="2"/>
+              <text x="260" y="26" text-anchor="middle" font-family="ui-monospace" font-size="9" fill="#6E5B33">HolyClaude · sticky</text>
+              <rect x="170" y="36" width="180" height="20" rx="4" fill="#E3DACC" stroke="#787F5D" stroke-dasharray="2,2"/>
+              <text x="260" y="50" text-anchor="middle" font-family="ui-monospace" font-size="10" fill="#506840">claude -p (exited 0)</text>
+              <rect x="170" y="62" width="180" height="20" rx="4" fill="#E7EDDE" stroke="#788C5D"/>
+              <text x="260" y="76" text-anchor="middle" font-family="system-ui" font-size="11" fill="#141413">claude -c (on attach)</text>
+              <line x1="60" y1="55" x2="60" y2="100" stroke="#D97757" stroke-width="1.3" stroke-dasharray="3,3"/>
+              <line x1="60" y1="100" x2="170" y2="100" stroke="#D97757" stroke-width="1.3" stroke-dasharray="3,3" marker-end="url(#m2)"/>
+              <text x="115" y="113" text-anchor="middle" font-family="ui-monospace" font-size="9" fill="#B85C3E">docker exec -it · later</text>
+            </svg>
+          </div>
+          <div class="listing works">
+            <div class="lab">Works</div>
+            <ul>
+              <li>Read logs / status long after task finished</li>
+              <li>Attach interactive REPL post-hoc (<code>claude -c</code>)</li>
+              <li>Open CloudCLI UI for a forensic browse</li>
+              <li>Resume the exact session that ran (jsonl is still there)</li>
+            </ul>
+          </div>
+          <div class="listing broken">
+            <div class="lab">Doesn't work</div>
+            <ul>
+              <li>Containers accumulate — need a reaper or explicit kill</li>
+              <li>Disk + memory cost grows with each kept-alive task</li>
+              <li>Auth tree shared if multiple sticky containers live concurrently — one bad token can cascade</li>
+            </ul>
+          </div>
+          <div class="use-when"><span class="lab">use when</span>you might want to follow up · forensic debugging · "what did it do exactly?"</div>
+          <div class="agent-compat">
+            <div class="agent-pill ok"><span class="glyph">✓</span><span class="name">claude</span></div>
+            <div class="agent-pill ok"><span class="glyph">✓</span><span class="name">codex</span></div>
+            <div class="agent-pill warn" title="copilot CLI session model differs"><span class="glyph">⚠</span><span class="name">copilot</span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- MODE 3 -->
+      <div class="cell">
+        <span class="variant-label"><span class="num">03</span> · Interactive REPL</span>
+        <div class="mode-card" data-tint="olive">
+          <h3>Interactive REPL</h3>
+          <p class="summary">Long-lived <code>claude</code> (no <code>-p</code>) in TTY. User drives via <code>docker exec -it</code> or via CloudCLI browser UI on <code>:3001</code>. Replaces ainb's current tmux Interactive mode.</p>
+          <div class="topology">
+            <svg viewBox="0 0 380 130" aria-label="topology">
+              <defs><marker id="m3" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="#87867F"/></marker></defs>
+              <rect x="10" y="15" width="100" height="50" rx="6" fill="#F4ECD9" stroke="#C2A878" stroke-width="1.2"/>
+              <text x="60" y="32" text-anchor="middle" font-family="ui-monospace" font-size="10" fill="#6E5B33">USER BROWSER</text>
+              <text x="60" y="46" text-anchor="middle" font-family="system-ui" font-size="11" fill="#141413">:3001</text>
+              <text x="60" y="58" text-anchor="middle" font-family="ui-monospace" font-size="9" fill="#788C5D">or tmux</text>
+              <line x1="110" y1="40" x2="150" y2="40" stroke="#788C5D" stroke-width="1.5" marker-end="url(#m3)"/>
+              <text x="130" y="34" text-anchor="middle" font-family="ui-monospace" font-size="9" fill="#506840">stdio</text>
+              <rect x="150" y="10" width="220" height="115" rx="8" fill="#FAF9F5" stroke="#788C5D" stroke-width="2"/>
+              <text x="260" y="26" text-anchor="middle" font-family="ui-monospace" font-size="9" fill="#506840">HolyClaude · long-lived</text>
+              <rect x="170" y="36" width="180" height="22" rx="4" fill="#E7EDDE" stroke="#788C5D"/>
+              <text x="260" y="51" text-anchor="middle" font-family="system-ui" font-size="11" fill="#141413">CloudCLI :3001</text>
+              <rect x="170" y="64" width="180" height="22" rx="4" fill="#E7EDDE" stroke="#788C5D"/>
+              <text x="260" y="79" text-anchor="middle" font-family="system-ui" font-size="11" fill="#141413">claude (REPL · TTY)</text>
+              <rect x="170" y="92" width="180" height="22" rx="4" fill="#DCE5EF" stroke="#6A8CAF" stroke-dasharray="3,3"/>
+              <text x="260" y="107" text-anchor="middle" font-family="ui-monospace" font-size="10" fill="#3D5470">/workspace · /home/claude/.claude</text>
+            </svg>
+          </div>
+          <div class="listing works">
+            <div class="lab">Works</div>
+            <ul>
+              <li>Native multi-turn conversation</li>
+              <li>User can interrupt / steer mid-response</li>
+              <li>Tool approval prompts (no <code>--dangerously-skip-permissions</code> needed)</li>
+              <li>CloudCLI UI in browser if the user wants it</li>
+            </ul>
+          </div>
+          <div class="listing broken">
+            <div class="lab">Doesn't work</div>
+            <ul>
+              <li>Hard to programmatically inject prompts (TTY semantics)</li>
+              <li>No structured JSON output — ainb can't parse events live</li>
+              <li>Container locks one host port (per-container <code>:3001</code> mapping)</li>
+            </ul>
+          </div>
+          <div class="use-when"><span class="lab">use when</span>exploratory work · pair programming · agent assists you in real-time</div>
+          <div class="agent-compat">
+            <div class="agent-pill ok"><span class="glyph">✓</span><span class="name">claude</span></div>
+            <div class="agent-pill ok"><span class="glyph">✓</span><span class="name">codex</span></div>
+            <div class="agent-pill ok"><span class="glyph">✓</span><span class="name">copilot</span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- MODE 4 -->
+      <div class="cell">
+        <span class="variant-label"><span class="num">04</span> · Multi-turn programmatic</span>
+        <div class="mode-card" data-tint="sky">
+          <h3>Multi-turn programmatic</h3>
+          <p class="summary">Long-lived container, ainb drives via repeated <code>docker exec claude -p</code> calls — each new prompt passes <code>--resume &lt;session-id&gt;</code> to keep context. Structured output, no TTY.</p>
+          <div class="topology">
+            <svg viewBox="0 0 380 130" aria-label="topology">
+              <defs><marker id="m4" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="#87867F"/></marker></defs>
+              <rect x="10" y="15" width="100" height="50" rx="6" fill="#F4ECD9" stroke="#C2A878" stroke-width="1.2"/>
+              <text x="60" y="32" text-anchor="middle" font-family="ui-monospace" font-size="10" fill="#6E5B33">AINB</text>
+              <text x="60" y="46" text-anchor="middle" font-family="system-ui" font-size="11" fill="#141413">orchestrator</text>
+              <text x="60" y="58" text-anchor="middle" font-family="ui-monospace" font-size="8" fill="#6A8CAF">prompt N</text>
+              <line x1="110" y1="40" x2="150" y2="40" stroke="#6A8CAF" stroke-width="1.5" marker-end="url(#m4)"/>
+              <text x="130" y="34" text-anchor="middle" font-family="ui-monospace" font-size="9" fill="#3D5470">exec</text>
+              <rect x="150" y="10" width="220" height="115" rx="8" fill="#FAF9F5" stroke="#6A8CAF" stroke-width="2"/>
+              <text x="260" y="26" text-anchor="middle" font-family="ui-monospace" font-size="9" fill="#3D5470">HolyClaude · long-lived</text>
+              <rect x="170" y="36" width="180" height="20" rx="4" fill="#DCE5EF" stroke="#6A8CAF"/>
+              <text x="260" y="50" text-anchor="middle" font-family="ui-monospace" font-size="10" fill="#3D5470">claude -p --resume &lt;sid&gt;</text>
+              <text x="170" y="72" font-family="ui-monospace" font-size="9" fill="#87867F">turn 1: -p "init"</text>
+              <text x="170" y="86" font-family="ui-monospace" font-size="9" fill="#87867F">turn 2: -p --resume "follow up"</text>
+              <text x="170" y="100" font-family="ui-monospace" font-size="9" fill="#87867F">turn N: -p --resume "..."</text>
+              <line x1="365" y1="46" x2="365" y2="115" stroke="#6A8CAF" stroke-width="1.3" stroke-dasharray="3,3"/>
+              <line x1="365" y1="115" x2="115" y2="115" stroke="#6A8CAF" stroke-width="1.3" stroke-dasharray="3,3" marker-end="url(#m4)"/>
+            </svg>
+          </div>
+          <div class="listing works">
+            <div class="lab">Works</div>
+            <ul>
+              <li>Multi-turn conversation driven by ainb (orchestrate the chat)</li>
+              <li>Structured JSON output preserved — live event parsing</li>
+              <li>Cheap turns (no container restart) once container is up</li>
+              <li>Session jsonl persists, restartable across machine reboots</li>
+            </ul>
+          </div>
+          <div class="listing broken">
+            <div class="lab">Doesn't work</div>
+            <ul>
+              <li>No mid-turn interrupt — each <code>claude -p</code> is atomic</li>
+              <li>Context window still bounded — long sessions need compaction strategy</li>
+              <li>Hardcoded prompt prefixes (current bossmode) bloat every turn</li>
+            </ul>
+          </div>
+          <div class="use-when"><span class="lab">use when</span>autonomous task with planned multi-step flow · ainb-driven dialog · agent-as-API</div>
+          <div class="agent-compat">
+            <div class="agent-pill ok"><span class="glyph">✓</span><span class="name">claude</span></div>
+            <div class="agent-pill warn" title="codex --resume support varies by version"><span class="glyph">⚠</span><span class="name">codex</span></div>
+            <div class="agent-pill no" title="copilot CLI has no --resume equivalent"><span class="glyph">✗</span><span class="name">copilot</span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- MODE 5 -->
+      <div class="cell">
+        <span class="variant-label"><span class="num">05</span> · Babysitter / autonomous loop</span>
+        <div class="mode-card" data-tint="plum">
+          <h3>Babysitter loop</h3>
+          <p class="summary">Agent receives a goal, self-loops with periodic status reports to ainb. Maps to <code>/loop</code> + cloud-coding-agent patterns. Human can interrupt; agent owns the next-action decision.</p>
+          <div class="topology">
+            <svg viewBox="0 0 380 130" aria-label="topology">
+              <defs><marker id="m5" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="#87867F"/></marker></defs>
+              <rect x="10" y="15" width="100" height="50" rx="6" fill="#F4ECD9" stroke="#C2A878" stroke-width="1.2"/>
+              <text x="60" y="32" text-anchor="middle" font-family="ui-monospace" font-size="10" fill="#6E5B33">AINB</text>
+              <text x="60" y="46" text-anchor="middle" font-family="system-ui" font-size="11" fill="#141413">babysitter</text>
+              <text x="60" y="58" text-anchor="middle" font-family="ui-monospace" font-size="8" fill="#8A5A78">poll · interrupt</text>
+              <line x1="110" y1="40" x2="150" y2="40" stroke="#8A5A78" stroke-width="1.3" marker-end="url(#m5)"/>
+              <text x="130" y="34" text-anchor="middle" font-family="ui-monospace" font-size="9" fill="#6E3D58">goal</text>
+              <rect x="150" y="10" width="220" height="115" rx="8" fill="#FAF9F5" stroke="#8A5A78" stroke-width="2"/>
+              <text x="260" y="26" text-anchor="middle" font-family="ui-monospace" font-size="9" fill="#6E3D58">HolyClaude · self-driving</text>
+              <rect x="170" y="36" width="180" height="22" rx="4" fill="#E9D9E3" stroke="#8A5A78"/>
+              <text x="260" y="51" text-anchor="middle" font-family="system-ui" font-size="11" fill="#141413">claude w/ goal loop</text>
+              <g font-family="ui-monospace" font-size="9" fill="#87867F">
+                <text x="170" y="76">→ plan</text>
+                <text x="170" y="89">→ act (tool calls)</text>
+                <text x="170" y="102">→ report status</text>
+                <text x="170" y="115">↑ loop until done</text>
+              </g>
+              <line x1="365" y1="46" x2="365" y2="120" stroke="#8A5A78" stroke-width="1.3" stroke-dasharray="3,3"/>
+              <line x1="365" y1="120" x2="115" y2="120" stroke="#8A5A78" stroke-width="1.3" stroke-dasharray="3,3" marker-end="url(#m5)"/>
+              <text x="240" y="129" text-anchor="middle" font-family="ui-monospace" font-size="9" fill="#6E3D58">heartbeat → ainb</text>
+            </svg>
+          </div>
+          <div class="listing works">
+            <div class="lab">Works</div>
+            <ul>
+              <li>Long-running goals without human babysitting</li>
+              <li>Status visibility via periodic JSON heartbeats</li>
+              <li>Interrupt-able from ainb (kill, pause, send new instructions)</li>
+              <li>Cost-cap-able (ainb stops when budget exceeded)</li>
+            </ul>
+          </div>
+          <div class="listing broken">
+            <div class="lab">Doesn't work</div>
+            <ul>
+              <li>No native loop primitive in <code>claude</code> CLI — ainb has to define the protocol</li>
+              <li>Stall detection is hard (agent thinking vs agent stuck)</li>
+              <li>Cost runaway without a hard cap; <code>/loop</code> guardrails apply</li>
+              <li>Reproducibility low — same goal can produce different paths</li>
+            </ul>
+          </div>
+          <div class="use-when"><span class="lab">use when</span>fix-this-issue-end-to-end · long refactor · "build me a goal" / set-and-forget</div>
+          <div class="agent-compat">
+            <div class="agent-pill ok"><span class="glyph">✓</span><span class="name">claude</span></div>
+            <div class="agent-pill ok"><span class="glyph">✓</span><span class="name">codex</span></div>
+            <div class="agent-pill warn" title="copilot lacks goal-loop primitives"><span class="glyph">⚠</span><span class="name">copilot</span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- MODE 6 -->
+      <div class="cell">
+        <span class="variant-label"><span class="num">06</span> · Parallel tasks · one container</span>
+        <div class="mode-card" data-tint="olive-d">
+          <h3>Parallel tasks · one container</h3>
+          <p class="summary">N concurrent <code>docker exec claude -p</code> calls inside the same HolyClaude container. Matches HolyClaude's <em>own</em> design. Shared auth + workspace tree.</p>
+          <div class="topology">
+            <svg viewBox="0 0 380 130" aria-label="topology">
+              <defs><marker id="m6" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="#87867F"/></marker></defs>
+              <rect x="10" y="15" width="100" height="60" rx="6" fill="#F4ECD9" stroke="#C2A878" stroke-width="1.2"/>
+              <text x="60" y="32" text-anchor="middle" font-family="ui-monospace" font-size="10" fill="#6E5B33">AINB</text>
+              <text x="60" y="46" text-anchor="middle" font-family="system-ui" font-size="11" fill="#141413">fan out</text>
+              <text x="60" y="58" text-anchor="middle" font-family="ui-monospace" font-size="8" fill="#506840">N prompts</text>
+              <text x="60" y="69" text-anchor="middle" font-family="ui-monospace" font-size="8" fill="#506840">parallel</text>
+              <line x1="110" y1="38" x2="150" y2="32" stroke="#506840" stroke-width="1.3" marker-end="url(#m6)"/>
+              <line x1="110" y1="45" x2="150" y2="50" stroke="#506840" stroke-width="1.3" marker-end="url(#m6)"/>
+              <line x1="110" y1="52" x2="150" y2="68" stroke="#506840" stroke-width="1.3" marker-end="url(#m6)"/>
+              <rect x="150" y="10" width="220" height="115" rx="8" fill="#FAF9F5" stroke="#506840" stroke-width="2"/>
+              <text x="260" y="26" text-anchor="middle" font-family="ui-monospace" font-size="9" fill="#506840">HolyClaude · shared</text>
+              <rect x="170" y="32" width="180" height="20" rx="4" fill="#E7EDDE" stroke="#788C5D"/>
+              <text x="260" y="46" text-anchor="middle" font-family="ui-monospace" font-size="10" fill="#141413">claude -p (task A)</text>
+              <rect x="170" y="56" width="180" height="20" rx="4" fill="#E7EDDE" stroke="#788C5D"/>
+              <text x="260" y="70" text-anchor="middle" font-family="ui-monospace" font-size="10" fill="#141413">claude -p (task B)</text>
+              <rect x="170" y="80" width="180" height="20" rx="4" fill="#E7EDDE" stroke="#788C5D"/>
+              <text x="260" y="94" text-anchor="middle" font-family="ui-monospace" font-size="10" fill="#141413">claude -p (task C)</text>
+              <rect x="170" y="104" width="180" height="17" rx="4" fill="#DCE5EF" stroke="#6A8CAF" stroke-dasharray="3,3"/>
+              <text x="260" y="116" text-anchor="middle" font-family="ui-monospace" font-size="9" fill="#3D5470">shared /workspace · shared auth</text>
+            </svg>
+          </div>
+          <div class="listing works">
+            <div class="lab">Works</div>
+            <ul>
+              <li>Spawn extra tasks for free (no container cold start)</li>
+              <li>Lower memory footprint than N containers</li>
+              <li>Matches HolyClaude's own one-container-per-user model</li>
+            </ul>
+          </div>
+          <div class="listing broken">
+            <div class="lab">Doesn't work</div>
+            <ul>
+              <li>Workspace race conditions if two tasks edit the same file</li>
+              <li>Shared <code>CLAUDE.md</code> memory — tasks pollute each other</li>
+              <li>Auth rate-limits collapse onto one Max plan account</li>
+              <li>Kill one task ≠ kill the others — careful PID management</li>
+            </ul>
+          </div>
+          <div class="use-when"><span class="lab">use when</span>multiple read-only tasks · "review these 5 files in parallel" · independent sandboxes within one project</div>
+          <div class="agent-compat">
+            <div class="agent-pill ok"><span class="glyph">✓</span><span class="name">claude</span></div>
+            <div class="agent-pill ok"><span class="glyph">✓</span><span class="name">codex</span></div>
+            <div class="agent-pill warn" title="copilot's session-locking unclear"><span class="glyph">⚠</span><span class="name">copilot</span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- MODE 7 -->
+      <div class="cell">
+        <span class="variant-label"><span class="num">07</span> · Multi-agent comparison</span>
+        <div class="mode-card" data-tint="rust">
+          <h3>Multi-agent comparison</h3>
+          <p class="summary">Same prompt → claude + codex + copilot in parallel (separate processes or separate containers). Diff the outputs. Useful for "which agent solves this better" + cross-validation.</p>
+          <div class="topology">
+            <svg viewBox="0 0 380 130" aria-label="topology">
+              <defs><marker id="m7" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="#87867F"/></marker></defs>
+              <rect x="10" y="15" width="100" height="80" rx="6" fill="#F4ECD9" stroke="#C2A878" stroke-width="1.2"/>
+              <text x="60" y="32" text-anchor="middle" font-family="ui-monospace" font-size="10" fill="#6E5B33">AINB</text>
+              <text x="60" y="46" text-anchor="middle" font-family="system-ui" font-size="11" fill="#141413">fan / diff</text>
+              <text x="60" y="62" text-anchor="middle" font-family="ui-monospace" font-size="8" fill="#B0432D">same prompt</text>
+              <text x="60" y="73" text-anchor="middle" font-family="ui-monospace" font-size="8" fill="#B0432D">3 agents</text>
+              <text x="60" y="86" text-anchor="middle" font-family="ui-monospace" font-size="8" fill="#B0432D">3 sandboxes</text>
+              <line x1="110" y1="32" x2="155" y2="25" stroke="#B0432D" stroke-width="1.3" marker-end="url(#m7)"/>
+              <line x1="110" y1="55" x2="155" y2="60" stroke="#B0432D" stroke-width="1.3" marker-end="url(#m7)"/>
+              <line x1="110" y1="78" x2="155" y2="95" stroke="#B0432D" stroke-width="1.3" marker-end="url(#m7)"/>
+              <rect x="155" y="13" width="215" height="34" rx="6" fill="#FAF9F5" stroke="#D97757" stroke-width="1.4" stroke-dasharray="4,3"/>
+              <text x="170" y="30" font-family="ui-monospace" font-size="10" fill="#B85C3E">container A</text>
+              <text x="260" y="42" text-anchor="middle" font-family="system-ui" font-size="11" fill="#141413">claude -p</text>
+              <rect x="155" y="50" width="215" height="34" rx="6" fill="#FAF9F5" stroke="#788C5D" stroke-width="1.4" stroke-dasharray="4,3"/>
+              <text x="170" y="67" font-family="ui-monospace" font-size="10" fill="#506840">container B</text>
+              <text x="260" y="79" text-anchor="middle" font-family="system-ui" font-size="11" fill="#141413">codex -e</text>
+              <rect x="155" y="87" width="215" height="34" rx="6" fill="#FAF9F5" stroke="#6A8CAF" stroke-width="1.4" stroke-dasharray="4,3"/>
+              <text x="170" y="104" font-family="ui-monospace" font-size="10" fill="#3D5470">container C</text>
+              <text x="260" y="116" text-anchor="middle" font-family="system-ui" font-size="11" fill="#141413">gh copilot suggest</text>
+            </svg>
+          </div>
+          <div class="listing works">
+            <div class="lab">Works</div>
+            <ul>
+              <li>Side-by-side agent quality comparison</li>
+              <li>Pick best output without committing upfront to one agent</li>
+              <li>True isolation — separate containers, no cross-contamination</li>
+            </ul>
+          </div>
+          <div class="listing broken">
+            <div class="lab">Doesn't work</div>
+            <ul>
+              <li>3× cost (3 LLM calls + 3 containers)</li>
+              <li>3× workspace state — diff merge is a UX problem</li>
+              <li>No native cross-agent context sharing (each starts fresh)</li>
+              <li>Voting / consensus needs an orchestration layer ainb doesn't have</li>
+            </ul>
+          </div>
+          <div class="use-when"><span class="lab">use when</span>high-stakes change · benchmark / eval runs · "let's see what each thinks"</div>
+          <div class="agent-compat">
+            <div class="agent-pill ok"><span class="glyph">✓</span><span class="name">claude</span></div>
+            <div class="agent-pill ok"><span class="glyph">✓</span><span class="name">codex</span></div>
+            <div class="agent-pill ok"><span class="glyph">✓</span><span class="name">copilot</span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- MODE 8 -->
+      <div class="cell">
+        <span class="variant-label"><span class="num">08</span> · Headless CI</span>
+        <div class="mode-card" data-tint="slate">
+          <h3>Headless CI</h3>
+          <p class="summary">No CloudCLI UI exposed, no TTY, no human in loop. <code>claude -p</code> runs · exit code is the signal · stdout is the artifact. Built for build agents.</p>
+          <div class="topology">
+            <svg viewBox="0 0 380 130" aria-label="topology">
+              <defs><marker id="m8" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="#87867F"/></marker></defs>
+              <rect x="10" y="15" width="100" height="50" rx="6" fill="#F4ECD9" stroke="#C2A878" stroke-width="1.2"/>
+              <text x="60" y="32" text-anchor="middle" font-family="ui-monospace" font-size="10" fill="#6E5B33">CI RUNNER</text>
+              <text x="60" y="46" text-anchor="middle" font-family="system-ui" font-size="11" fill="#141413">no UI</text>
+              <text x="60" y="58" text-anchor="middle" font-family="ui-monospace" font-size="8" fill="#141413">GHA / etc</text>
+              <line x1="110" y1="40" x2="150" y2="40" stroke="#141413" stroke-width="1.3" marker-end="url(#m8)"/>
+              <text x="130" y="34" text-anchor="middle" font-family="ui-monospace" font-size="9" fill="#141413">spawn</text>
+              <rect x="150" y="10" width="220" height="115" rx="8" fill="#FAF9F5" stroke="#141413" stroke-width="2" stroke-dasharray="6,3"/>
+              <text x="260" y="26" text-anchor="middle" font-family="ui-monospace" font-size="9" fill="#141413">HolyClaude · headless</text>
+              <rect x="170" y="36" width="180" height="22" rx="4" fill="#E7EDDE" stroke="#788C5D"/>
+              <text x="260" y="51" text-anchor="middle" font-family="ui-monospace" font-size="10" fill="#141413">claude -p (no --verbose)</text>
+              <rect x="170" y="64" width="180" height="22" rx="4" fill="#F5DDD4" stroke="#B0432D" stroke-dasharray="3,3"/>
+              <text x="260" y="79" text-anchor="middle" font-family="ui-monospace" font-size="10" fill="#B0432D">no :3001 mapped</text>
+              <rect x="170" y="92" width="180" height="22" rx="4" fill="#DCE5EF" stroke="#6A8CAF"/>
+              <text x="260" y="107" text-anchor="middle" font-family="ui-monospace" font-size="10" fill="#3D5470">exit code → CI verdict</text>
+            </svg>
+          </div>
+          <div class="listing works">
+            <div class="lab">Works</div>
+            <ul>
+              <li>Reproducible, exit-code-driven automation</li>
+              <li>API-key auth via env (no browser OAuth needed)</li>
+              <li>No port mapping = smaller attack surface</li>
+              <li>Pin to a Claude model version for deterministic-ish CI</li>
+            </ul>
+          </div>
+          <div class="listing broken">
+            <div class="lab">Doesn't work</div>
+            <ul>
+              <li>Most CI runners can't grant <code>SYS_ADMIN</code> / <code>seccomp=unconfined</code> — HolyClaude's Chromium will fail</li>
+              <li>No recovery path if auth lapses mid-run</li>
+              <li>Stream parsing for live dashboards harder (no <code>--verbose</code> for log volume)</li>
+            </ul>
+          </div>
+          <div class="use-when"><span class="lab">use when</span>PR-triggered tasks · scheduled rollouts · code-burn audits · machine workflows</div>
+          <div class="agent-compat">
+            <div class="agent-pill ok"><span class="glyph">✓</span><span class="name">claude</span></div>
+            <div class="agent-pill ok"><span class="glyph">✓</span><span class="name">codex</span></div>
+            <div class="agent-pill ok"><span class="glyph">✓</span><span class="name">copilot</span></div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ───── 02. matrix ───── -->
+  <section>
+    <div class="sec-head"><span class="num">02</span><h2>Capability matrix</h2></div>
+    <p class="sec-intro">What each mode supports across the dimensions Stevie's questions touch. <span style="color:var(--olive);font-weight:600">Yes</span> · <span style="color:#6E5B33;font-weight:600">Partial</span> · <span style="color:var(--rust);font-weight:600">No</span> · <span style="color:var(--gray-500)">N/A</span>.</p>
+    <div class="matrix-wrap">
+      <table class="matrix">
+        <thead>
+          <tr>
+            <th class="row">Mode</th>
+            <th>Resume<br/>previous<br/>conversation</th>
+            <th>Switch<br/>agent<br/>mid-flight</th>
+            <th>Live<br/>JSON<br/>stream</th>
+            <th>File-diff<br/>preview<br/>during exec</th>
+            <th>Port-forward<br/>dev server</th>
+            <th>CloudCLI<br/>UI<br/>accessible</th>
+            <th>Multi-prompt<br/>continuity</th>
+            <th>Survive<br/>container<br/>restart</th>
+            <th>Cost<br/>trackable</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th class="row">01 · Fire-and-forget<span class="sub">claude -p, ephemeral</span></th>
+            <td class="no">No</td>
+            <td class="no">No</td>
+            <td class="yes">Yes</td>
+            <td class="partial">Partial</td>
+            <td class="no">No</td>
+            <td class="no">No</td>
+            <td class="no">No</td>
+            <td class="partial">If jsonl persisted</td>
+            <td class="yes">Yes</td>
+          </tr>
+          <tr>
+            <th class="row">02 · Sticky single-task<span class="sub">survive after exit</span></th>
+            <td class="yes">Yes</td>
+            <td class="no">No</td>
+            <td class="yes">Yes</td>
+            <td class="yes">Yes</td>
+            <td class="yes">Yes</td>
+            <td class="yes">Yes</td>
+            <td class="yes">Yes</td>
+            <td class="yes">Yes</td>
+            <td class="yes">Yes</td>
+          </tr>
+          <tr>
+            <th class="row">03 · Interactive REPL<span class="sub">tty, long-lived</span></th>
+            <td class="yes">Native</td>
+            <td class="no">No</td>
+            <td class="no">No (TTY)</td>
+            <td class="yes">Yes</td>
+            <td class="yes">Yes</td>
+            <td class="yes">Yes</td>
+            <td class="yes">Native</td>
+            <td class="yes">Yes</td>
+            <td class="partial">Partial</td>
+          </tr>
+          <tr>
+            <th class="row">04 · Multi-turn programmatic<span class="sub">repeated -p --resume</span></th>
+            <td class="yes">Yes</td>
+            <td class="no">No</td>
+            <td class="yes">Yes</td>
+            <td class="yes">Yes</td>
+            <td class="yes">Yes</td>
+            <td class="yes">Yes</td>
+            <td class="yes">Yes</td>
+            <td class="yes">Yes</td>
+            <td class="yes">Yes</td>
+          </tr>
+          <tr>
+            <th class="row">05 · Babysitter loop<span class="sub">self-driving</span></th>
+            <td class="yes">Yes</td>
+            <td class="no">No</td>
+            <td class="partial">Partial</td>
+            <td class="yes">Yes</td>
+            <td class="yes">Yes</td>
+            <td class="yes">Yes</td>
+            <td class="yes">Yes</td>
+            <td class="yes">Yes</td>
+            <td class="yes">Required (cap)</td>
+          </tr>
+          <tr>
+            <th class="row">06 · Parallel · one container<span class="sub">shared workspace</span></th>
+            <td class="partial">Per-task</td>
+            <td class="no">No</td>
+            <td class="yes">Yes</td>
+            <td class="partial">Race risk</td>
+            <td class="partial">Single port</td>
+            <td class="yes">One UI</td>
+            <td class="partial">Per-task</td>
+            <td class="yes">Yes</td>
+            <td class="yes">Yes</td>
+          </tr>
+          <tr>
+            <th class="row">07 · Multi-agent comparison<span class="sub">claude+codex+copilot</span></th>
+            <td class="partial">Per-agent</td>
+            <td class="partial">Per-container</td>
+            <td class="yes">Yes</td>
+            <td class="partial">3-way diff</td>
+            <td class="partial">3 ports</td>
+            <td class="partial">3 UIs</td>
+            <td class="partial">Per-agent</td>
+            <td class="yes">Yes</td>
+            <td class="yes">3× cost</td>
+          </tr>
+          <tr>
+            <th class="row">08 · Headless CI<span class="sub">no UI, exit-code</span></th>
+            <td class="partial">If jsonl in artifact</td>
+            <td class="no">No</td>
+            <td class="yes">Yes</td>
+            <td class="no">No</td>
+            <td class="no">No</td>
+            <td class="na">N/A</td>
+            <td class="no">No</td>
+            <td class="partial">Cache-dependent</td>
+            <td class="yes">Yes</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ───── 03. Q&A ───── -->
+  <section>
+    <div class="sec-head"><span class="num">03</span><h2>Stevie's questions answered</h2></div>
+    <p class="sec-intro">Direct answers, with which modes apply. No ducking.</p>
+    <div class="qa">
+
+      <div class="qa-card">
+        <p class="q">If we have multiple containers, do we get multiple CloudCLI UIs?</p>
+        <p class="a"><strong>Yes — one CloudCLI per HolyClaude container.</strong> Each container ships a CloudCLI server bound to its internal <code>:3001</code>. To reach it from the host, you must map a unique host port per container — <code>:3001</code>, <code>:3002</code>, <code>:3003</code>, … — or rotate which container holds <code>:3001</code> at any moment, or skip CloudCLI entirely and use <code>docker exec</code>.</p>
+        <p class="a">For ainb: the cleanest default is <strong>no CloudCLI exposure</strong> (use <code>docker exec</code> + JSON streaming), with an opt-in flag (<code>ainb container ui</code>) that picks an unused host port and tells the user where to point their browser. CloudCLI becomes a forensic / interactive escape hatch, not the primary UX.</p>
+        <p class="ref"><strong>Modes affected:</strong> 02, 03, 06, 07 (UI-relevant). Modes 01, 04, 05, 08 typically skip the UI.</p>
+      </div>
+
+      <div class="qa-card">
+        <p class="q">Can I issue something else in that worktree while a task runs?</p>
+        <p class="a"><strong>Yes — depends on which mode.</strong> In <strong>mode 6</strong> (parallel-in-one-container), just <code>docker exec</code> a second <code>claude -p</code>. In <strong>mode 7</strong> (multi-container), spawn a second container with the same workspace bind mount. In <strong>mode 1</strong> (fire-and-forget ephemeral), you'd have to wait or spawn a peer container in parallel. <strong>Mode 3</strong> (REPL) blocks because the user is mid-interaction with one process.</p>
+        <p class="a">Warning: concurrent tasks against the same worktree files will race. If both tasks edit <code>src/foo.rs</code>, last-writer-wins. Mitigation: per-task worktrees (git worktree branch-per-task) or read-only mounts for non-mutating tasks.</p>
+        <p class="ref"><strong>Modes that support it cleanly:</strong> 06 (parallel-in-one), 07 (multi-container). <strong>Mode 03</strong> blocks (one REPL = one user attention).</p>
+      </div>
+
+      <div class="qa-card">
+        <p class="q">How do I look through status / result / whole execution after the fact?</p>
+        <p class="a"><strong>Three layers, depending on retention policy.</strong></p>
+        <p class="a"><strong>Live:</strong> ainb TUI tails the container's stdout (current bossmode pattern, parses <code>stream-json</code>). <strong>Post-hoc, container alive:</strong> <code>docker logs &lt;id&gt;</code>, or open CloudCLI UI on the container's <code>:3001</code> mapping. <strong>Post-hoc, container gone:</strong> persisted logs at <code>~/.agents-in-a-box/holyclaude/logs/&lt;session-id&gt;.jsonl</code> if ainb saves them on container teardown — and the session jsonl files at <code>~/.agents-in-a-box/holyclaude/claude/projects/&lt;hash&gt;/&lt;uuid&gt;.jsonl</code> are always recoverable via the bind mount.</p>
+        <p class="a"><strong>Interactive review:</strong> <code>docker exec -it &lt;id&gt; claude -c</code> opens the exact same session in a TTY for follow-up questions — works as long as the container is alive. Mode 2 (sticky) keeps this option open by design.</p>
+        <p class="ref"><strong>Best supported by:</strong> 02 (sticky) for live forensic access · 08 (CI) for artifact-driven review.</p>
+      </div>
+
+      <div class="qa-card">
+        <p class="q">Can I continue conversation from a previous session?</p>
+        <p class="a"><strong>Yes, with the right plumbing.</strong> <code>claude</code> CLI supports <code>claude -c</code> (continue most recent in cwd) and <code>claude --resume &lt;session-id&gt;</code> (specific session). Both read jsonl from <code>~/.claude/projects/&lt;project-hash&gt;/&lt;uuid&gt;.jsonl</code>. Because HolyClaude bind-mounts <code>~/.claude</code> from <code>./data/claude/</code> (in ainb's case: <code>~/.agents-in-a-box/holyclaude/claude/</code>), these files persist across container restarts.</p>
+        <p class="a">For ainb: surface a "resume this session" affordance in the TUI's session list. The trick is mapping a session UUID back to a human-readable label (current bossmode uses worktree branch + first prompt as the label — keep that).</p>
+        <p class="ref"><strong>Best supported by:</strong> 02 (sticky), 03 (REPL), 04 (programmatic), 05 (babysitter). <strong>Mode 01</strong> can do it too if jsonl persisted.</p>
+      </div>
+
+      <div class="qa-card">
+        <p class="q">Can I resume the same context after fire-and-forget exits?</p>
+        <p class="a"><strong>Yes, as long as the jsonl survives.</strong> In mode 1, the container is gone but the bind-mounted jsonl is on host disk. Spawn a new container with the same bind mount, <code>claude --resume &lt;uuid&gt;</code>, and you pick up exactly where the previous run left off.</p>
+        <p class="a">This is the bridge from mode 1 → mode 4 (multi-turn programmatic). The very same session can be "fire-and-forget today, follow up tomorrow" without changing mode operationally — just spawn a fresh container against the persisted state.</p>
+        <p class="ref"><strong>Architectural impact:</strong> ainb must record the session-id from each run (it's in the <code>stream-json</code> output's <code>init</code> event) so it can pass it back on resume.</p>
+      </div>
+
+      <div class="qa-card">
+        <p class="q">After fire-and-forget, can I start an interactive session on top to give more instructions?</p>
+        <p class="a"><strong>Yes — two clean paths.</strong></p>
+        <p class="a"><strong>Path A (recommended for ainb):</strong> Spawn a fresh container with the persisted bind mount, run <code>claude -c</code> in TTY via <code>docker exec -it</code> (mode 3 lifted onto the bones of mode 1). Context resumes, user types follow-up, agent responds. Closes mode 3 when user exits TTY.</p>
+        <p class="a"><strong>Path B:</strong> Use mode 2 (sticky) from the start — never let the original container exit. Then <code>docker exec -it &lt;id&gt; claude -c</code> on the still-running container. Faster (no cold start) but commits to the "container keeps running" cost.</p>
+        <p class="ref"><strong>UX hook:</strong> "Continue this task" button in the TUI's session list — defaults to Path A, falls back to Path B if the container is still alive.</p>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ───── 04. can't do at all ───── -->
+  <section>
+    <div class="sec-head"><span class="num">04</span><h2>What we can't do at all</h2></div>
+    <p class="sec-intro">Honest constraints. These aren't trade-offs to optimise — they're walls. Don't promise these in the UI.</p>
+    <div class="cant">
+      <ul>
+        <li><strong>True conversation forking</strong> — branching a mid-conversation agent state into two divergent paths needs CRIU-style process snapshotting of the <code>claude</code> CLI's in-memory state. Docker checkpoints exist but are flaky and don't preserve LLM connection state. Closest available: clone the jsonl, restart in two parallel containers, accept that the two paths see the world from slightly different starting points.</li>
+        <li><strong>Cross-agent session sharing</strong> — <code>claude</code> can't read <code>codex</code>'s session file (and vice versa). Different schema, different storage location, different mental model. To use claude's context in codex, ainb would need a translation layer that exports claude's jsonl to plain markdown / chat-format and feeds it as a fresh prompt to codex. Lossy by definition.</li>
+        <li><strong>Hot-swap container mid-task</strong> without losing state — Docker has no live-migrate for arbitrary processes. If you want to upgrade the HolyClaude image while a task runs, the task dies. Wait for idle, then swap.</li>
+        <li><strong>Multi-agent voting / consensus</strong> — mode 7 fans out, but the "pick the best" or "merge into one" step needs an orchestrator ainb doesn't have. Could be a future plugin (mode 7 + a judge LLM); not free.</li>
+        <li><strong>True streaming pause / resume mid-prompt</strong> — <code>claude -p</code> has no pause primitive. The closest: kill the process, lose the partial output, resume via <code>--resume</code> from the last committed turn. Interactive mode 3 lets the user interrupt with <code>Ctrl-C</code>, but that's a kill, not a pause.</li>
+        <li><strong>Native cost cap inside <code>claude</code> CLI</strong> — claude doesn't expose a "stop after N tokens" hard limit. Ainb has to enforce caps externally by watching usage events from <code>stream-json</code> and killing the container if budget exceeded. Crude but workable.</li>
+        <li><strong>Headless OAuth refresh inside a CI runner</strong> — if the bind-mounted token expires mid-run, the user (a human with a browser) is required to re-auth. CI uses <code>ANTHROPIC_API_KEY</code> for exactly this reason. Don't try to OAuth in CI.</li>
+      </ul>
+    </div>
+  </section>
+
+</div>
+</body>
+</html>
