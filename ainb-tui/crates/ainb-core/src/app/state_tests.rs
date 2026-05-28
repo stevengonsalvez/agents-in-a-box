@@ -4,7 +4,9 @@
 mod tests {
     use super::*;
     use crate::app::state::{AppState, NewSessionState, NewSessionStep, SessionAgentOption};
-    use crate::models::{SessionAgentType, SessionMode};
+    use crate::app::events::AppEvent;
+    use crate::app::EventHandler;
+    use crate::models::{OtherTmuxSession, SessionAgentType, SessionMode};
     use std::path::PathBuf;
 
     /// Test that pressing 'n' for new session should go through mode selection
@@ -423,7 +425,78 @@ mod tests {
     // Stop / Resume coverage
     // ========================================================================
 
-    use crate::app::state::{ConfirmAction, ConfirmationDialog, DialogOption};
+    use crate::app::state::{AsyncAction, ConfirmAction, ConfirmationDialog, DialogOption};
+
+    fn state_with_other_tmux_sessions(names: &[&str]) -> AppState {
+        let mut state = AppState::new();
+        state.selected_workspace_index = None;
+        state.selected_session_index = None;
+        state.selected_other_tmux_index = Some(0);
+        state.other_tmux_sessions = names
+            .iter()
+            .map(|name| OtherTmuxSession::new((*name).to_string(), false, 1))
+            .collect();
+        state
+    }
+
+    #[test]
+    fn test_toggle_select_other_tmux_session_supports_multiple_names() {
+        let mut state = state_with_other_tmux_sessions(&["alpha", "beta"]);
+
+        state.toggle_select_session();
+        state.selected_other_tmux_index = Some(1);
+        state.toggle_select_session();
+
+        assert_eq!(state.selected_other_tmux_sessions.len(), 2);
+        assert!(state.selected_other_tmux_sessions.contains("alpha"));
+        assert!(state.selected_other_tmux_sessions.contains("beta"));
+        assert_eq!(
+            state.selected_other_tmux_names_in_order(),
+            vec!["alpha".to_string(), "beta".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_delete_selected_other_tmux_sessions_opens_bulk_kill_confirmation() {
+        let mut state = state_with_other_tmux_sessions(&["alpha", "beta"]);
+        state.selected_other_tmux_sessions.insert("alpha".to_string());
+        state.selected_other_tmux_sessions.insert("beta".to_string());
+
+        EventHandler::process_event(AppEvent::DeleteSelectedSessions, &mut state);
+
+        let dialog = state
+            .confirmation_dialog
+            .as_ref()
+            .expect("bulk kill confirmation");
+        assert_eq!(dialog.title, "Kill tmux Sessions");
+        assert!(matches!(
+            &dialog.confirm_action,
+            ConfirmAction::KillOtherTmuxSessions(names)
+                if names == &vec!["alpha".to_string(), "beta".to_string()]
+        ));
+    }
+
+    #[test]
+    fn test_confirm_selected_other_tmux_sessions_queues_bulk_kill() {
+        let mut state = state_with_other_tmux_sessions(&["alpha", "beta"]);
+        state.selected_other_tmux_sessions.insert("alpha".to_string());
+        state.selected_other_tmux_sessions.insert("beta".to_string());
+        EventHandler::process_event(AppEvent::DeleteSelectedSessions, &mut state);
+
+        state
+            .confirmation_dialog
+            .as_mut()
+            .expect("bulk kill confirmation")
+            .selected_option = true;
+        EventHandler::process_event(AppEvent::ConfirmationConfirm, &mut state);
+
+        assert!(state.selected_other_tmux_sessions.is_empty());
+        assert!(matches!(
+            state.pending_async_action,
+            Some(AsyncAction::KillOtherTmuxSessions(ref names))
+                if names == &vec!["alpha".to_string(), "beta".to_string()]
+        ));
+    }
 
     /// Verify the tri-option dialog defaults to Stop and cycles forward through
     /// all three options before wrapping back to Stop.

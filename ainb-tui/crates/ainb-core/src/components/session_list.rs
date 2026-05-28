@@ -647,6 +647,9 @@ impl SessionListComponent {
                 for (idx, other_session) in state.other_tmux_sessions.iter().enumerate() {
                     let is_selected =
                         is_selected_other && state.selected_other_tmux_index == Some(idx);
+                    let is_multi_selected = state
+                        .selected_other_tmux_sessions
+                        .contains(&other_session.name);
                     let is_last = idx == session_len - 1;
 
                     let tree_prefix = if is_last { "└─" } else { "├─" };
@@ -670,11 +673,19 @@ impl SessionListComponent {
                     let is_being_renamed = is_selected && state.other_tmux_rename_mode;
 
                     let badge = next_badge(&mut attach_no);
+                    let checkbox = if is_multi_selected {
+                        Span::styled(
+                            "[x]",
+                            Style::default().fg(WARNING_ORANGE).add_modifier(Modifier::BOLD),
+                        )
+                    } else {
+                        Span::styled("[ ]", Style::default().fg(MUTED_GRAY))
+                    };
                     let session_line = if is_being_renamed {
                         // Show inline rename input
                         Line::from(vec![
                             badge,
-                            Span::styled("  ", Style::default()),
+                            checkbox,
                             Span::styled(tree_prefix, Style::default().fg(SUBDUED_BORDER)),
                             Span::styled(format!(" {} ", status), Style::default()),
                             Span::styled("✏️ ", Style::default()),
@@ -686,7 +697,7 @@ impl SessionListComponent {
                     } else {
                         Line::from(vec![
                             badge,
-                            Span::styled("  ", Style::default()),
+                            checkbox,
                             Span::styled(tree_prefix, Style::default().fg(SUBDUED_BORDER)),
                             Span::styled(format!(" {} ", status), Style::default()),
                             Span::styled(
