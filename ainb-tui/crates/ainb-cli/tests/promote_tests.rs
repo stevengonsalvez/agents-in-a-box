@@ -162,6 +162,7 @@ fn seed_orphan(sandbox: &Sandbox, unit_name: &str) {
             r#ref: "head".to_string(),
             enabled: true,
             read_only: false,
+            target_layout: Vec::new(),
         }],
         units: vec![UnitEntry {
             uri,
@@ -384,6 +385,7 @@ fn promote_bails_when_unit_already_remote() {
             r#ref: "main".to_string(),
             enabled: true,
             read_only: false,
+            target_layout: Vec::new(),
         }],
         units: vec![UnitEntry {
             uri: "gh:foo/bar@main/skills/already-remote".to_string(),

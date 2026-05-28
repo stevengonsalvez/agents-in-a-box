@@ -122,6 +122,7 @@ pub fn reconcile(walker_out: &WalkerOutput) -> ManifestPatch {
                 r#ref: "head".to_string(),
                 enabled: true,
                 read_only: false,
+                target_layout: Vec::new(),
             });
         }
         let unit_uri = format!("{source_uri}@head/{}", orphan.name);
@@ -157,6 +158,7 @@ pub fn reconcile(walker_out: &WalkerOutput) -> ManifestPatch {
                 r#ref: "head".to_string(),
                 enabled: true,
                 read_only: true,
+                target_layout: Vec::new(),
             });
         }
 

@@ -246,6 +246,7 @@ fn migrate_from_bootstrap(home: &Path, args: MigrateArgs, out: &mut dyn io::Writ
             r#ref: "main".into(),
             enabled: true,
             read_only: false,
+            target_layout: Vec::new(),
         });
         added_source = true;
     }
@@ -535,6 +536,7 @@ fn apply_legacy_yaml_match(patch: &mut ManifestPatch, path: &Path) -> Result<usi
                 r#ref: r#ref.clone(),
                 enabled: true,
                 read_only: false,
+                target_layout: Vec::new(),
             });
             source_name
         });

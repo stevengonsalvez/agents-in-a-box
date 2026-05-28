@@ -83,6 +83,23 @@ impl fmt::Display for SourceKind {
     }
 }
 
+/// One `glob → (home, repo)` folder mapping within a source. Declares
+/// where files matched by `glob` land: `home` is the path under the tool
+/// home (e.g. `~/.claude`), `repo` is the path within the source repo.
+/// Both are relative; the sync layer joins them onto the respective roots.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TargetMapping {
+    /// Glob matched against repo-relative paths (e.g. `skills/**`).
+    pub glob: String,
+
+    /// Destination relative to the tool home (e.g. `.claude/skills`).
+    pub home: PathBuf,
+
+    /// Source location relative to the repo root
+    /// (e.g. `toolkit/packages/skills`).
+    pub repo: PathBuf,
+}
+
 /// One configured source. The `uri` is the source-level identifier
 /// (e.g. `gh:org/repo`) — the `@ref/path` suffix is held separately so
 /// users can re-pin without rewriting the URI.
@@ -113,6 +130,12 @@ pub struct SourceEntry {
     /// v1 manifests written without this field load with the default.
     #[serde(default, skip_serializing_if = "is_false")]
     pub read_only: bool,
+
+    /// Optional per-source folder mappings (`glob → home/repo`). Empty by
+    /// default; legacy sources written without this field load with an
+    /// empty vec and round-trip without emitting `target_layout`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_layout: Vec<TargetMapping>,
 }
 
 impl SourceEntry {

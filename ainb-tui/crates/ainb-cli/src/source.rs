@@ -106,6 +106,7 @@ fn add(
             r#ref: ref_.clone(),
             enabled: true,
             read_only: false,
+            target_layout: Vec::new(),
         })
         .map_err(anyhow::Error::from)?;
     manifest.save_to(manifest_path)?;

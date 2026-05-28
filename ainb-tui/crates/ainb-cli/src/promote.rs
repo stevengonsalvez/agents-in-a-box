@@ -745,6 +745,7 @@ fn add_source_if_absent(manifest: &mut Manifest, source_uri: &str, target: &Remo
         r#ref: branch.to_string(),
         enabled: true,
         read_only: false,
+        target_layout: Vec::new(),
     });
 }
 
