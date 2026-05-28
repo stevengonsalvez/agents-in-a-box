@@ -35,6 +35,54 @@ pub struct UnitStats {
 /// Aggregate result keyed by unit name (`commit`, `reflect`, …).
 pub type UsageStats = BTreeMap<String, UnitStats>;
 
+/// Invocation summary for a single unit on a single tool, returned by
+/// [`detect_invocations`]. Structurally mirrors the lockfile's
+/// [`ainb_skill_core::UsageRecord`] (see bead v12.B.1) so a detected
+/// record drops straight into the lockfile via `.into()` — that is what
+/// the `ainb skill usage` CLI (bead v12.B.3) does after detecting.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InvocationRecord {
+    /// Total detected invocations of the unit across the tool's logs.
+    pub invocations: u64,
+    /// RFC 3339 timestamp of the most recent detected invocation, or
+    /// `None` when no timestamped invocation was found.
+    pub last_used_at: Option<String>,
+}
+
+impl From<UnitStats> for InvocationRecord {
+    fn from(s: UnitStats) -> Self {
+        Self { invocations: s.invocations, last_used_at: s.last_used }
+    }
+}
+
+impl From<InvocationRecord> for ainb_skill_core::UsageRecord {
+    fn from(r: InvocationRecord) -> Self {
+        Self { last_used_at: r.last_used_at, invocations: r.invocations }
+    }
+}
+
+/// Detect how many times `unit_name` was invoked under a single tool's
+/// home directory, and when it was last seen.
+///
+/// `tool_home` is the root of one tool's on-disk state — e.g. a
+/// sandboxed `~/.claude` (logs under `projects/**/*.jsonl`) or
+/// `~/.codex` (logs under `sessions/**/*.jsonl`). The directory is
+/// walked recursively for `*.jsonl` session logs using the same
+/// conservative heuristics as [`parse_claude_logs`] (`<command-name>`
+/// tags and `Skill` tool-use entries).
+///
+/// This is a **pure read**: it never mutates `tool_home`, writes a
+/// cache, or reads any path outside the supplied root. A missing or
+/// empty `tool_home` yields an empty [`InvocationRecord`] (zero
+/// invocations, no timestamp) rather than an error — usage detection is
+/// best-effort and must never derail a caller.
+pub fn detect_invocations(tool_home: &Path, unit_name: &str) -> InvocationRecord {
+    parse_claude_logs(tool_home)
+        .remove(unit_name)
+        .map(InvocationRecord::from)
+        .unwrap_or_default()
+}
+
 /// Cache file written to `$AINB_HOME/usage.cache`. Version stamped so
 /// future schema changes can invalidate stale on-disk state.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
