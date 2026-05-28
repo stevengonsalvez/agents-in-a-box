@@ -91,6 +91,9 @@ bytes = "1.6"
 # Fuzzy search
 nucleo-matcher = { workspace = true }
 
+# Fleet — filesystem watch for JSONL transcript tail (assistant-turn detection).
+notify = { workspace = true }
+
 [features]
 default = []
 visual-debug = []

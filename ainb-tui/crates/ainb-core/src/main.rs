@@ -39,6 +39,7 @@ mod config;
 mod credentials;
 mod docker;
 mod editors;
+mod fleet;
 mod git;
 mod interactive;
 mod models;
