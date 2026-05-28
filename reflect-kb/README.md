@@ -6,6 +6,15 @@
 [![Python](https://img.shields.io/badge/python-%3E%3D3.11-blue.svg)](https://www.python.org/)
 [![Version](https://img.shields.io/badge/version-0.1.1-green.svg)](./pyproject.toml)
 
+> **Two version streams — don't confuse them.** This directory hosts the `reflect`
+> **CLI** (Python package `reflect-kb`, semver `0.1.x`, version field in
+> [`pyproject.toml`](./pyproject.toml)). The Claude Code **plugin** that wires the
+> CLI into the agent harness lives at [`plugins/reflect/`](../plugins/reflect/)
+> and follows its **own** semver `3.x.x` (see
+> [`plugins/reflect/.claude-plugin/plugin.json`](../plugins/reflect/.claude-plugin/plugin.json)).
+> When asked "what version of reflect is installed?" you usually want **both**:
+> `reflect --version` for the CLI and the plugin manifest for the harness wiring.
+
 ## What it does
 
 reflect-kb implements the **capture → index → recall** loop for agent knowledge. After every session,

@@ -134,7 +134,9 @@ impl LayoutComponent {
         }
 
         // Render new session overlay if visible
-        if state.current_screen == screen_ids::NEW_SESSION || state.current_screen == screen_ids::SEARCH_WORKSPACE {
+        if state.current_screen == screen_ids::NEW_SESSION
+            || state.current_screen == screen_ids::SEARCH_WORKSPACE
+        {
             self.new_session.render(frame, frame.size(), state);
         }
 
@@ -297,6 +299,31 @@ impl LayoutComponent {
             ),
             Span::styled(" home", Style::default().fg(MUTED_GRAY)),
         ];
+
+        // ainb-hooks inbox shortcut on the menu bar. Always shown so
+        // users can discover the Inbox screen even on a fresh install
+        // with zero events. When the store reports unread + non-
+        // dismissed rows, a `● N` glyph is rendered alongside the
+        // `I inbox` hint to surface that there is something to read.
+        let inbox_unread = state
+            .inbox_state
+            .store
+            .as_ref()
+            .and_then(|s| s.unread_count().ok())
+            .unwrap_or(0);
+        let mut line2_spans = line2_spans;
+        line2_spans.push(Span::styled(" │ ", Style::default().fg(SUBDUED_BORDER)));
+        if inbox_unread > 0 {
+            line2_spans.push(Span::styled(
+                format!("● {inbox_unread} "),
+                Style::default().fg(WARNING_ORANGE).add_modifier(Modifier::BOLD),
+            ));
+        }
+        line2_spans.push(Span::styled(
+            "I",
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ));
+        line2_spans.push(Span::styled(" inbox", Style::default().fg(MUTED_GRAY)));
 
         let menu_lines = vec![Line::from(line1_spans), Line::from(line2_spans)];
 

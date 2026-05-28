@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/ainb-core",
     "crates/ainb-plugin-burndown",
+    "crates/ainb-plugin-notifyd",
     "crates/ainb-plugin-protocol",
     "crates/ainb-plugin-runtime",
     "crates/ainb-plugin-sdk-rust",
@@ -46,6 +47,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
 toml = "0.8"
+toml_edit = "0.22"
 
 # Claude API integration
 reqwest = { version = "0.11", default-features = false, features = ["json", "stream", "rustls-tls"] }

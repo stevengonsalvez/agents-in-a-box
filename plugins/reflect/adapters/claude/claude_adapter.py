@@ -163,6 +163,32 @@ class ClaudeAdapter(AdapterBase):
         if not with_hooks:
             return [], 0
         settings_path: Path = plan.extras["settings_path"]
+
+        # Detect whether Claude Code's plugin runtime has already installed
+        # reflect via ``/plugin install reflect@agents-in-a-box``. When it
+        # has, the plugin's ``plugin.json`` autowires SessionStart →
+        # ``${CLAUDE_PLUGIN_ROOT}/skills/recall/hooks/session_start_recall.py``
+        # from the cache at every SessionStart. Adding our own entry to
+        # settings.json would point at ``~/.claude/skills/recall/hooks/``
+        # (the toolkit-deployed location) and fire a SECOND copy on every
+        # SessionStart — typically a stale version of the same script. So
+        # if the plugin runtime owns this, the adapter steps aside (and
+        # also sweeps out any legacy duplicate we wrote on a prior run).
+        plugin_runtime_owns_it = self._plugin_runtime_owns_reflect(plan.target_harness_dir)
+        if plugin_runtime_owns_it:
+            try:
+                removed = self._remove_legacy_session_start_hook(settings_path)
+            except RuntimeError as exc:
+                print(str(exc), file=sys.stderr)
+                return [], 2
+            msg = (
+                f"plugin runtime owns reflect hooks; skipped settings.json merge"
+                f" ({settings_path})"
+            )
+            if removed:
+                msg += " — cleaned up legacy duplicate left by older installs"
+            return [msg], 0
+
         try:
             changed = self._merge_session_start_hook(settings_path)
         except RuntimeError as exc:
@@ -173,6 +199,68 @@ class ClaudeAdapter(AdapterBase):
         if changed:
             return [f"added SessionStart hook to {settings_path}"], 0
         return [f"SessionStart hook already present in {settings_path}"], 0
+
+    def _plugin_runtime_owns_reflect(self, claude_dir: Path) -> bool:
+        """Return True iff Claude Code's plugin runtime has installed the
+        reflect plugin (any version, any scope).
+
+        Heuristic: read ``~/.claude/plugins/installed_plugins.json`` and
+        look for any key matching ``reflect@*``. False on parse error /
+        missing file — safer to wire the hook than to skip and silently
+        leave the user with no recall.
+        """
+        installed_path = claude_dir / "plugins" / "installed_plugins.json"
+        try:
+            data = json.loads(installed_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            return False
+        plugins = data.get("plugins", {})
+        if not isinstance(plugins, dict):
+            return False
+        return any(
+            isinstance(name, str) and name.split("@", 1)[0] == "reflect"
+            for name in plugins.keys()
+        )
+
+    def _remove_legacy_session_start_hook(self, settings_path: Path) -> bool:
+        """Remove any adapter-written SessionStart entry the user may have
+        from a pre-plugin-runtime install. Returns True iff anything was
+        removed. Idempotent."""
+        if not settings_path.exists():
+            return False
+        try:
+            cfg = json.loads(settings_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            raise RuntimeError(
+                f"{settings_path} exists but is not valid JSON; refusing to overwrite"
+            )
+        wanted = _render_session_start_hook_command(settings_path.parent)
+        removable = {wanted, _LEGACY_SESSION_START_HOOK_COMMAND}
+        ss = cfg.get("hooks", {}).get("SessionStart", [])
+        new_ss: list = []
+        changed = False
+        for entry in ss:
+            kept = [h for h in entry.get("hooks", []) if h.get("command") not in removable]
+            if kept != entry.get("hooks", []):
+                changed = True
+            if kept:
+                new_entry = dict(entry)
+                new_entry["hooks"] = kept
+                new_ss.append(new_entry)
+        if not changed:
+            return False
+        hooks_block = cfg.setdefault("hooks", {})
+        if new_ss:
+            hooks_block["SessionStart"] = new_ss
+        else:
+            hooks_block.pop("SessionStart", None)
+        if not hooks_block:
+            cfg.pop("hooks", None)
+        settings_path.write_text(
+            json.dumps(cfg, indent=2, sort_keys=False) + "\n",
+            encoding="utf-8",
+        )
+        return True
 
     def uninstall_extra(
         self, *, home: Path, with_hooks: bool = True, **kwargs: Any,

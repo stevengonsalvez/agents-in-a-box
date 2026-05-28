@@ -115,6 +115,16 @@ _DRAIN_HOOK_TEMPLATE = (
     "(nohup {home_tool_dir}/skills/reflect/hooks/"
     "reflect-drain-bg.sh >/dev/null 2>&1 &) >/dev/null 2>&1"
 )
+# Three new hooks added in 3.6.0 (matching plugin.json autowire).
+_USER_PROMPT_RECALL_TEMPLATE = (
+    "uv run {home_tool_dir}/skills/recall/hooks/user_prompt_submit_recall.py"
+)
+_POSTTOOLUSE_MINILEARNING_TEMPLATE = (
+    "uv run {home_tool_dir}/skills/reflect/hooks/posttooluse_minilearning.py"
+)
+_STOP_REFLECT_TEMPLATE = (
+    "uv run {home_tool_dir}/skills/reflect/hooks/stop_reflect.py"
+)
 
 
 def _render(template: str, codex_dir: Path) -> str:
@@ -133,6 +143,18 @@ def _render_drain_hook_command(codex_dir: Path) -> str:
     return _render(_DRAIN_HOOK_TEMPLATE, codex_dir)
 
 
+def _render_user_prompt_recall_command(codex_dir: Path) -> str:
+    return _render(_USER_PROMPT_RECALL_TEMPLATE, codex_dir)
+
+
+def _render_posttooluse_minilearning_command(codex_dir: Path) -> str:
+    return _render(_POSTTOOLUSE_MINILEARNING_TEMPLATE, codex_dir)
+
+
+def _render_stop_reflect_command(codex_dir: Path) -> str:
+    return _render(_STOP_REFLECT_TEMPLATE, codex_dir)
+
+
 # Legacy literals that older buggy installs may have persisted (template
 # placeholder never substituted). Match them on re-install / uninstall so
 # we self-heal.
@@ -143,6 +165,15 @@ _LEGACY_PRECOMPACT_HOOK_COMMAND = _PRECOMPACT_HOOK_TEMPLATE.replace(
     "{home_tool_dir}", "{{HOME_TOOL_DIR}}"
 )
 _LEGACY_DRAIN_HOOK_COMMAND = _DRAIN_HOOK_TEMPLATE.replace(
+    "{home_tool_dir}", "{{HOME_TOOL_DIR}}"
+)
+_LEGACY_USER_PROMPT_RECALL_COMMAND = _USER_PROMPT_RECALL_TEMPLATE.replace(
+    "{home_tool_dir}", "{{HOME_TOOL_DIR}}"
+)
+_LEGACY_POSTTOOLUSE_MINILEARNING_COMMAND = _POSTTOOLUSE_MINILEARNING_TEMPLATE.replace(
+    "{home_tool_dir}", "{{HOME_TOOL_DIR}}"
+)
+_LEGACY_STOP_REFLECT_COMMAND = _STOP_REFLECT_TEMPLATE.replace(
     "{home_tool_dir}", "{{HOME_TOOL_DIR}}"
 )
 
@@ -274,6 +305,15 @@ class CodexAdapter(AdapterBase):
             describe_extra.append(
                 f"hook: add PreCompact reflect entry to {hooks_path}"
             )
+            describe_extra.append(
+                f"hook: add UserPromptSubmit recall entry to {hooks_path}"
+            )
+            describe_extra.append(
+                f"hook: add PostToolUse mini-learning entry to {hooks_path}"
+            )
+            describe_extra.append(
+                f"hook: add Stop reflect-enqueue entry to {hooks_path}"
+            )
         plan.extras["describe_extra"] = describe_extra
 
     def execute_extra(
@@ -349,6 +389,18 @@ class CodexAdapter(AdapterBase):
             "PreCompact": [
                 _render_precompact_hook_command(codex_dir),
                 _LEGACY_PRECOMPACT_HOOK_COMMAND,
+            ],
+            "UserPromptSubmit": [
+                _render_user_prompt_recall_command(codex_dir),
+                _LEGACY_USER_PROMPT_RECALL_COMMAND,
+            ],
+            "PostToolUse": [
+                _render_posttooluse_minilearning_command(codex_dir),
+                _LEGACY_POSTTOOLUSE_MINILEARNING_COMMAND,
+            ],
+            "Stop": [
+                _render_stop_reflect_command(codex_dir),
+                _LEGACY_STOP_REFLECT_COMMAND,
             ],
         }
         changed = False
@@ -440,8 +492,42 @@ class CodexAdapter(AdapterBase):
             }],
             legacy_commands=[_LEGACY_PRECOMPACT_HOOK_COMMAND],
         )
+        # New in 3.6.0: UserPromptSubmit (prompt-aware recall + dedupe),
+        # PostToolUse (mini-learning arming), Stop (short-session reflect
+        # enqueue). All wired with the same merge mechanics so they
+        # preserve unrelated user hooks already in hooks.json.
+        changed_ups = merge_hook_commands(
+            current,
+            event="UserPromptSubmit",
+            commands=[{
+                "type": "command",
+                "command": _render_user_prompt_recall_command(codex_dir),
+            }],
+            legacy_commands=[_LEGACY_USER_PROMPT_RECALL_COMMAND],
+        )
+        changed_ptu = merge_hook_commands(
+            current,
+            event="PostToolUse",
+            commands=[{
+                "type": "command",
+                "command": _render_posttooluse_minilearning_command(codex_dir),
+            }],
+            legacy_commands=[_LEGACY_POSTTOOLUSE_MINILEARNING_COMMAND],
+        )
+        changed_stop = merge_hook_commands(
+            current,
+            event="Stop",
+            commands=[{
+                "type": "command",
+                "command": _render_stop_reflect_command(codex_dir),
+            }],
+            legacy_commands=[_LEGACY_STOP_REFLECT_COMMAND],
+        )
 
-        if changed_ss or changed_pc:
+        any_changed = any([
+            changed_ss, changed_pc, changed_ups, changed_ptu, changed_stop,
+        ])
+        if any_changed:
             hooks_path.parent.mkdir(parents=True, exist_ok=True)
             hooks_path.write_text(
                 json.dumps(current, indent=2, sort_keys=False) + "\n",
@@ -451,6 +537,12 @@ class CodexAdapter(AdapterBase):
                 actions.append(f"merged SessionStart reflect hooks into {hooks_path}")
             if changed_pc:
                 actions.append(f"merged PreCompact reflect hook into {hooks_path}")
+            if changed_ups:
+                actions.append(f"merged UserPromptSubmit recall hook into {hooks_path}")
+            if changed_ptu:
+                actions.append(f"merged PostToolUse mini-learning hook into {hooks_path}")
+            if changed_stop:
+                actions.append(f"merged Stop reflect-enqueue hook into {hooks_path}")
         else:
             actions.append(f"reflect hooks already present in {hooks_path}")
         return actions

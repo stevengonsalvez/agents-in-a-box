@@ -15,6 +15,7 @@ pub mod git_view;
 pub mod help;
 pub mod home_screen;
 pub mod home_screen_v2;
+pub mod inbox;
 pub mod layout;
 pub mod live_logs_stream;
 // pub mod log_formatter;  // Complex version with borrow issues, using simple version instead
@@ -29,10 +30,10 @@ pub mod new_session;
 pub mod onboarding;
 pub mod session_list;
 pub mod session_recovery;
-pub mod slash;
 pub mod setup_menu;
 pub mod sidebar;
 pub mod skills;
+pub mod slash;
 pub mod tmux_preview;
 // `usage` removed in Phase 3 cutover — the burndown plugin owns the
 // Analytics screen UI now. See crates/ainb-plugin-burndown/src/ui.rs.

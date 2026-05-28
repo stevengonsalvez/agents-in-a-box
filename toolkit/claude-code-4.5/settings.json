@@ -2,8 +2,11 @@
   "env": {
     "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "80",
     "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+    "CLAUDE_CODE_WORKFLOWS": "1",
+    "DISABLE_GROWTHBOOK": "1",
     "ECC_HOOK_PROFILE": "standard"
   },
+  "includeCoAuthoredBy": false,
   "permissions": {
     "allow": [
       "Bash(mkdir:*)",
@@ -23,8 +26,6 @@
     "deny": [],
     "defaultMode": "bypassPermissions"
   },
-  "model": "claude-opus-4-6",
-  "includeCoAuthoredBy": false,
   "hooks": {
     "Notification": [
       {
@@ -93,8 +94,8 @@
           {
             "type": "command",
             "command": "uv run ~/.claude/hooks/cost_tracker.py",
-            "async": true,
-            "timeout": 10
+            "timeout": 10,
+            "async": true
           }
         ]
       },
@@ -206,7 +207,8 @@
   },
   "enabledPlugins": {
     "warp@claude-code-warp": true,
-    "reflect@agents-in-a-box": true
+    "reflect@agents-in-a-box": true,
+    "ainb-fleet@agents-in-a-box": true
   },
   "skipDangerousModePermissionPrompt": true,
   "teammateMode": "auto",

@@ -17,6 +17,7 @@ pub mod mcp;
 pub mod mcp_init;
 pub mod onboarding;
 pub mod presets;
+pub mod session_defaults;
 pub mod ssh_display_names;
 
 pub use container::{ContainerTemplate, ContainerTemplateConfig};
@@ -25,6 +26,7 @@ pub use mcp::{McpInitStrategy, McpServerConfig};
 pub use mcp_init::{McpInitResult, McpInitializer, apply_mcp_init_result};
 pub use onboarding::OnboardingConfig;
 pub use presets::{PermissionSet, PresetManager, RepositoryPreset, create_default_presets};
+pub use session_defaults::{PerRepoDefaults, SessionDefaults};
 pub use ssh_display_names::SshDisplayNameStore;
 
 /// Authentication provider for Claude API
@@ -246,6 +248,76 @@ pub struct AppConfig {
     /// Plugin enable/disable lists. See [`PluginsConfig`].
     #[serde(default)]
     pub plugins: PluginsConfig,
+
+    /// Where the single `presets.toml` lives. See [`PresetsConfig`].
+    #[serde(default)]
+    pub presets: PresetsConfig,
+}
+
+/// Where the single `presets.toml` file lives.
+///
+/// Path is interpreted relative to the config dir
+/// (`~/.agents-in-a-box/config/`) when not absolute; `~` is NOT expanded
+/// (use absolute paths for non-default locations).
+///
+/// Defaults to `../presets.toml` so the file sits alongside `config/` at
+/// `~/.agents-in-a-box/presets.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PresetsConfig {
+    /// Path to the presets file, relative to the config dir or absolute.
+    /// Defaults to `../presets.toml` (i.e. `~/.agents-in-a-box/presets.toml`).
+    #[serde(default = "default_presets_file")]
+    pub file: String,
+}
+
+impl Default for PresetsConfig {
+    fn default() -> Self {
+        Self {
+            file: default_presets_file(),
+        }
+    }
+}
+
+fn default_presets_file() -> String {
+    "../presets.toml".to_string()
+}
+
+impl PresetsConfig {
+    /// Resolve the configured `file` against the user config directory,
+    /// returning the absolute path to the presets file.
+    ///
+    /// Absolute paths are used verbatim. Relative paths are joined to
+    /// `~/.agents-in-a-box/config/` (the user config dir) and canonicalised
+    /// lexically (no filesystem touch) so the result is stable even when
+    /// the file doesn't exist yet.
+    pub fn resolve_path(&self) -> Result<PathBuf> {
+        let raw = PathBuf::from(&self.file);
+        if raw.is_absolute() {
+            return Ok(raw);
+        }
+        let cfg_dir = AppConfig::get_user_config_dir()?;
+        // Join + normalise (`Path::components` collapses `..`).
+        let joined = cfg_dir.join(&raw);
+        Ok(lexically_normalise(&joined))
+    }
+}
+
+/// Collapse `.` and `..` components in a path without touching the
+/// filesystem. Mirrors Python's `os.path.normpath` semantics — purely
+/// syntactic, safe for paths that don't yet exist on disk.
+fn lexically_normalise(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for comp in p.components() {
+        match comp {
+            Component::ParentDir => {
+                let _ = out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 /// Per-plugin filter persisted in `config.toml`.
@@ -463,6 +535,13 @@ pub struct UiPreferences {
     /// (the Budget-panel CTA remains visible for power users).
     #[serde(default)]
     pub statusline_decision: StatuslineDecision,
+
+    /// User's response to the "install ainb's rich tmux conf" prompt.
+    /// Same shape as `statusline_decision`. `Unset` re-prompts on next
+    /// `ainb init` if the on-disk conf is Missing or a known-old ainb
+    /// default; `Declined` suppresses the prompt entirely.
+    #[serde(default)]
+    pub tmux_decision: TmuxDecision,
 }
 
 /// The user's recorded decision on the Claude Code statusline wiring.
@@ -479,6 +558,20 @@ pub enum StatuslineDecision {
     Installed,
 }
 
+/// The user's recorded decision on the ainb rich tmux conf installation.
+/// Mirrors [`StatuslineDecision`] semantics.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TmuxDecision {
+    /// Never asked, or dismissed without accepting/declining.
+    #[default]
+    Unset,
+    /// Explicitly opted out — suppress future prompts.
+    Declined,
+    /// Accepted; ainb has written ~/.tmux.conf (and deployed helpers).
+    Installed,
+}
+
 impl Default for UiPreferences {
     fn default() -> Self {
         Self {
@@ -490,6 +583,7 @@ impl Default for UiPreferences {
             sessions_sidebar_width: None,
             sessions_sidebar_collapsed: None,
             statusline_decision: StatuslineDecision::default(),
+            tmux_decision: TmuxDecision::default(),
         }
     }
 }
@@ -715,6 +809,12 @@ impl AppConfig {
             self.ui_preferences.sessions_sidebar_collapsed =
                 other.ui_preferences.sessions_sidebar_collapsed;
         }
+        // Decision fields: always trust on-disk, even when the value equals
+        // the default. "Unset" is itself a meaningful decision (means: prompt
+        // again next time), and "Declined" must round-trip across loads or
+        // the wizard would re-pester the user every run.
+        self.ui_preferences.statusline_decision = other.ui_preferences.statusline_decision;
+        self.ui_preferences.tmux_decision = other.ui_preferences.tmux_decision;
 
         // Override Docker settings
         if other.docker.host.is_some() {
@@ -771,6 +871,7 @@ impl Default for AppConfig {
             docker: DockerConfig::default(),
             usage: UsageConfig::default(),
             plugins: PluginsConfig::default(),
+            presets: PresetsConfig::default(),
         };
 
         // Load built-in templates
@@ -1109,6 +1210,7 @@ mod old_config_tests {
                 sessions_sidebar_width: None,
                 sessions_sidebar_collapsed: None,
                 statusline_decision: StatuslineDecision::default(),
+                tmux_decision: TmuxDecision::default(),
             },
             docker: DockerConfig {
                 host: None,
@@ -1152,6 +1254,7 @@ mod old_config_tests {
                 sessions_sidebar_width: Some(46),
                 sessions_sidebar_collapsed: Some(true),
                 statusline_decision: StatuslineDecision::default(),
+                tmux_decision: TmuxDecision::default(),
             },
             docker: DockerConfig {
                 host: None,

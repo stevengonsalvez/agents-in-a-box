@@ -13,7 +13,7 @@
 
 use crate::audit::{self, AuditResult, AuditTrigger};
 use crate::git::WorktreeManager;
-use crate::models::{ClaudeModel, Session, SessionAgentType, SessionMode, SessionStatus};
+use crate::models::{ClaudeModel, CodexModel, Session, SessionAgentType, SessionMode, SessionStatus};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -217,10 +217,11 @@ impl InteractiveSessionManager {
         skip_permissions: bool,
         agent_type: SessionAgentType,
         model: Option<ClaudeModel>,
+        codex_model: Option<CodexModel>,
     ) -> Result<InteractiveSession, InteractiveSessionError> {
         info!(
-            "Creating Interactive session {} for branch '{}' in workspace '{}' (agent={:?}, model={:?}, skip_permissions={})",
-            session_id, branch_name, workspace_name, agent_type, model, skip_permissions
+            "Creating Interactive session {} for branch '{}' in workspace '{}' (agent={:?}, model={:?}, codex_model={:?}, skip_permissions={})",
+            session_id, branch_name, workspace_name, agent_type, model, codex_model, skip_permissions
         );
 
         // Check if session already exists
@@ -254,13 +255,14 @@ impl InteractiveSessionManager {
             | SessionAgentType::Gemini
             | SessionAgentType::Copilot => {
                 info!(
-                    "Starting {:?} CLI in tmux session (model={:?}, skip_permissions={})",
-                    agent_type, model, skip_permissions
+                    "Starting {:?} CLI in tmux session (model={:?}, codex_model={:?}, skip_permissions={})",
+                    agent_type, model, codex_model, skip_permissions
                 );
                 self.start_cli_in_tmux(
                     &tmux_session_name,
                     skip_permissions,
                     model,
+                    codex_model,
                     agent_type,
                     None,
                 )
@@ -345,13 +347,15 @@ impl InteractiveSessionManager {
         skip_permissions: bool,
         agent_type: SessionAgentType,
         model: Option<ClaudeModel>,
+        codex_model: Option<CodexModel>,
     ) -> Result<InteractiveSession, InteractiveSessionError> {
         info!(
-            "Creating Interactive session {} with existing worktree at '{}' (agent={:?}, model={:?})",
+            "Creating Interactive session {} with existing worktree at '{}' (agent={:?}, model={:?}, codex_model={:?})",
             session_id,
             existing_worktree_path.display(),
             agent_type,
-            model
+            model,
+            codex_model
         );
 
         // Check if session already exists
@@ -397,13 +401,14 @@ impl InteractiveSessionManager {
             | SessionAgentType::Gemini
             | SessionAgentType::Copilot => {
                 info!(
-                    "Starting {:?} CLI in tmux session (model={:?}, skip_permissions={})",
-                    agent_type, model, skip_permissions
+                    "Starting {:?} CLI in tmux session (model={:?}, codex_model={:?}, skip_permissions={})",
+                    agent_type, model, codex_model, skip_permissions
                 );
                 self.start_cli_in_tmux(
                     &tmux_session_name,
                     skip_permissions,
                     model,
+                    codex_model,
                     agent_type,
                     None,
                 )
@@ -1018,39 +1023,76 @@ impl InteractiveSessionManager {
 
         debug!("Waiting for shell prompt in session {}", session_name);
 
-        // Wait up to 3 seconds for shell to initialize (30 * 100ms)
-        for attempt in 0..30 {
-            // Capture the pane content - target pane explicitly with :0
+        // Two-stage detection:
+        //   1. Wait for a prompt indicator (`$ % > #`) in the captured pane.
+        //   2. Once seen, require the pane content to be STABLE — identical
+        //      across 3 consecutive captures spanning ≥600ms — before
+        //      declaring the shell ready. This catches heavy `.zshrc` setups
+        //      (Powerlevel10k, conda init, NVM, etc.) that emit greeting
+        //      lines AFTER the first prompt char appears, swallowing any
+        //      keystrokes typed during the gap.
+        //
+        // Stevie 2026-05-27: previous 3s flat poll fired `claude` keystrokes
+        // mid-`.zshrc`; the shell ate them and the user landed on an empty
+        // zsh prompt, not claude. Stable-detection is the durable fix.
+        const POLL_INTERVAL_MS: u64 = 100;
+        const MAX_ATTEMPTS: usize = 150; // 15s hard cap
+        const STABILITY_REQUIRED_POLLS: usize = 6; // 6 * 100ms = 600ms idle
+
+        let mut last_content = String::new();
+        let mut stable_count = 0usize;
+        let mut saw_prompt = false;
+
+        for attempt in 0..MAX_ATTEMPTS {
             let output = Command::new("tmux")
-                .args(["capture-pane", "-t", &format!("{}:0", session_name), "-p"])
+                .args(["capture-pane", "-t", session_name, "-p"])
                 .output()
                 .await?;
+            let content = String::from_utf8_lossy(&output.stdout).to_string();
 
-            let content = String::from_utf8_lossy(&output.stdout);
-
-            // Check for common shell prompt indicators ($ % > #)
-            // These typically appear at the end of the prompt when shell is ready
-            if content.contains('$')
+            let has_prompt = content.contains('$')
                 || content.contains('%')
                 || content.contains('>')
-                || content.contains('#')
-            {
-                debug!(
-                    "Shell prompt detected in session {} after {} attempts",
-                    session_name,
-                    attempt + 1
-                );
-                return Ok(());
+                || content.contains('#');
+
+            if has_prompt {
+                saw_prompt = true;
             }
 
-            sleep(Duration::from_millis(100)).await;
+            if saw_prompt {
+                if content == last_content {
+                    stable_count += 1;
+                    if stable_count >= STABILITY_REQUIRED_POLLS {
+                        debug!(
+                            "Shell ready in session {} (stable for {} polls after {} attempts)",
+                            session_name,
+                            stable_count,
+                            attempt + 1
+                        );
+                        // Safety pad — give the rendered prompt a moment to
+                        // accept input even after stability is declared.
+                        sleep(Duration::from_millis(200)).await;
+                        return Ok(());
+                    }
+                } else {
+                    stable_count = 0;
+                    last_content = content;
+                }
+            } else {
+                last_content = content;
+            }
+
+            sleep(Duration::from_millis(POLL_INTERVAL_MS)).await;
         }
 
-        // Proceed anyway after timeout - shell might be ready without standard prompt
         warn!(
-            "Timeout waiting for shell prompt in session {}, proceeding anyway",
-            session_name
+            "Timeout waiting for shell to settle in session {} ({}ms); proceeding with extra pad",
+            session_name,
+            MAX_ATTEMPTS as u64 * POLL_INTERVAL_MS
         );
+        // Even if we never declared stability, give the shell a 1s grace
+        // period — better to wait a bit than lose keystrokes.
+        sleep(Duration::from_millis(1000)).await;
         Ok(())
     }
 
@@ -1059,22 +1101,32 @@ impl InteractiveSessionManager {
     /// `resume_transcript`, when supplied for `agent_type == Claude`, appends
     /// `--resume <path>` to the CLI invocation. Mirrors `spawn-agent-lib.sh:508`.
     /// Ignored for other agent types since they have no equivalent flag yet.
+    ///
+    /// **Model flag emission (2026-05 refresh):**
+    ///   * Claude: `--model <id>` only when `claude_model` is a non-default
+    ///     `ClaudeModel`. `None` / `Some(SystemDefault)` ⇒ flag omitted (CLI
+    ///     default applies).
+    ///   * Codex: `--model <id>` only when `codex_model` is a non-default
+    ///     `CodexModel`. Same omit-on-default semantics as Claude.
+    ///   * Gemini / Copilot: never emit `--model`.
     pub async fn start_cli_in_tmux(
         &self,
         session_name: &str,
         skip_permissions: bool,
-        model: Option<ClaudeModel>,
+        claude_model: Option<ClaudeModel>,
+        codex_model: Option<CodexModel>,
         agent_type: SessionAgentType,
         resume_transcript: Option<PathBuf>,
     ) -> Result<(), InteractiveSessionError> {
         use crate::config::CliProvider;
 
-        // Wait for shell to be ready before sending command
-        // This prevents the race condition where send-keys fires before shell initializes
-        self.wait_for_shell_ready(session_name).await?;
-
-        // Build environment setup for API key injection
-        let env_setup = Self::build_env_setup_for_provider(agent_type);
+        // No more send-keys + wait_for_shell_ready dance. Heavy `.zshrc`
+        // setups (Powerlevel10k instant-prompt + conda + nvm + …) can stream
+        // content for 15+s, racing keystrokes that get eaten mid-startup.
+        // Stevie 2026-05-27 hit this twice. Cure: `tmux respawn-pane -k`
+        // REPLACES the pane's shell process with the CLI command directly.
+        // No shell, no .zshrc, no race. Env (PATH etc.) is inherited from
+        // the ainb-tui process which inherited Stevie's interactive shell.
 
         // Determine CLI provider from agent type
         let provider = match agent_type {
@@ -1085,16 +1137,33 @@ impl InteractiveSessionManager {
             _ => return Ok(()), // Shell and other types don't need CLI
         };
 
+        // Build environment setup for API key injection
+        let env_setup = Self::build_env_setup_for_provider(agent_type);
+
         // Build the CLI command with appropriate flags
         let mut cmd_parts = vec![provider.command().to_string()];
 
-        // Add model flag if specified (Claude-specific for now)
-        // TODO: Add model selection support for Codex and Gemini
-        if agent_type == SessionAgentType::Claude {
-            if let Some(m) = model {
-                cmd_parts.push("--model".to_string());
-                cmd_parts.push(m.cli_value().to_string());
+        // Add `--model` only when the provider's model resolves to a
+        // non-`SystemDefault` variant. SystemDefault → no flag (CLI default
+        // applies). Gemini / Copilot: never emit `--model` today.
+        match agent_type {
+            SessionAgentType::Claude => {
+                if let Some(m) = claude_model {
+                    if let Some(id) = m.cli_value() {
+                        cmd_parts.push("--model".to_string());
+                        cmd_parts.push(id.to_string());
+                    }
+                }
             }
+            SessionAgentType::Codex => {
+                if let Some(m) = codex_model {
+                    if let Some(id) = m.cli_value() {
+                        cmd_parts.push("--model".to_string());
+                        cmd_parts.push(id.to_string());
+                    }
+                }
+            }
+            _ => {}
         }
 
         // Add skip permissions flag if specified (provider-specific)
@@ -1128,18 +1197,64 @@ impl InteractiveSessionManager {
             cli_cmd
         );
 
-        // Send command to tmux to start CLI - target pane explicitly with :0
-        let target = format!("{}:0", session_name);
-        let output = Command::new("tmux")
+        // Target the session by NAME only — tmux resolves to the active pane
+        // of the active window, regardless of `base-index` / `pane-base-index`.
+        // Hardcoding `:0` broke on Stevie's config (base-index 1) with
+        // "can't find window: 0" — the actual root cause of the empty
+        // sessions (2026-05-27), not the shell race.
+        let target = session_name.to_string();
+
+        // First: set `remain-on-exit` so the pane stays visible if the CLI
+        // exits/crashes (e.g. claude can't auth, binary not on PATH) — the
+        // user sees the error instead of an empty closed pane.
+        let _ = Command::new("tmux")
             .args([
-                "send-keys",
+                "set-option",
+                "-w", // remain-on-exit is a window option
                 "-t",
                 &target,
-                &full_cmd,
-                "C-m", // C-m = Enter key
+                "remain-on-exit",
+                "on",
             ])
             .output()
-            .await?;
+            .await;
+
+        // Then: respawn-pane KILLS the pane's current process (the still-
+        // loading shell) and starts the CLI command directly. The pane's
+        // cwd from `tmux new-session -c <work_dir>` is preserved. Env (PATH,
+        // ANTHROPIC_API_KEY, etc.) inherits from the ainb-tui process.
+        //
+        // If `env_setup` contains an inline export (legacy path for API-key
+        // injection), we have to wrap in `sh -c '...'` since `respawn-pane`
+        // takes a single command, not a shell line. Without env_setup we
+        // pass argv directly for max speed and no shell-parsing surprises.
+        let output = if env_setup.trim().is_empty() {
+            // Pure argv path — fastest, no shell.
+            let mut tmux_args: Vec<String> = vec![
+                "respawn-pane".to_string(),
+                "-k".to_string(), // Kill current pane process first
+                "-t".to_string(),
+                target.clone(),
+            ];
+            tmux_args.extend(cmd_parts.iter().cloned());
+            Command::new("tmux").args(&tmux_args).output().await?
+        } else {
+            // Env-setup path: wrap in `sh -c` so the inline `export FOO=bar; …`
+            // gets evaluated. Use sh (not zsh) — no .zshrc, no race.
+            let full_line = format!("{env_setup}exec {cli_cmd}");
+            Command::new("tmux")
+                .args([
+                    "respawn-pane",
+                    "-k",
+                    "-t",
+                    &target,
+                    "sh",
+                    "-c",
+                    &full_line,
+                ])
+                .output()
+                .await?
+        };
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1151,10 +1266,11 @@ impl InteractiveSessionManager {
         }
 
         info!(
-            "Started {} CLI in tmux session: {} (model={:?}, skip_permissions={})",
+            "Started {} CLI in tmux session: {} (claude_model={:?}, codex_model={:?}, skip_permissions={})",
             provider.display_name(),
             session_name,
-            model,
+            claude_model,
+            codex_model,
             skip_permissions
         );
         Ok(())

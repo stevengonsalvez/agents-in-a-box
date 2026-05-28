@@ -35,6 +35,7 @@ pub enum SidebarItem {
     Catalog,   // Browse catalog/marketplace
     Config,    // Settings & presets
     Sessions,  // Session manager
+    Inbox,     // ainb-hooks notification inbox
     Recovery,  // Recover orphaned sessions
     Logs,      // Log history viewer
     Stats,     // Analytics & usage
@@ -52,6 +53,7 @@ impl SidebarItem {
             Self::Catalog => "📦",
             Self::Config => "⚙️",
             Self::Sessions => "🚀",
+            Self::Inbox => "📥",
             Self::Recovery => "🔄",
             Self::Logs => "📋",
             Self::Stats => "📊",
@@ -69,6 +71,7 @@ impl SidebarItem {
             Self::Catalog => "Catalog",
             Self::Config => "Config",
             Self::Sessions => "Sessions",
+            Self::Inbox => "Inbox",
             Self::Recovery => "Recovery",
             Self::Logs => "Logs",
             Self::Stats => "Stats",
@@ -86,6 +89,7 @@ impl SidebarItem {
             Self::Catalog => "Browse & Bootstrap",
             Self::Config => "Settings & Presets",
             Self::Sessions => "Manage Active",
+            Self::Inbox => "Hook Notifications",
             Self::Recovery => "Resume Orphaned",
             Self::Logs => "View Log History",
             Self::Stats => "Usage & Analytics",
@@ -103,6 +107,7 @@ impl SidebarItem {
             Self::Catalog => "c",
             Self::Config => "C",
             Self::Sessions => "s",
+            Self::Inbox => "I",
             Self::Recovery => "R",
             Self::Logs => "l",
             Self::Stats => "i",
@@ -120,6 +125,7 @@ impl SidebarItem {
             Self::Catalog,
             Self::Config,
             Self::Sessions,
+            Self::Inbox,
             Self::Recovery,
             Self::Logs,
             Self::Stats,
@@ -480,6 +486,29 @@ mod tests {
         let item = SidebarItem::Agents;
         assert_eq!(item.label(), "Agents");
         assert_eq!(item.icon(), "🤖");
+    }
+
+    #[test]
+    fn inbox_tile_registered_with_discoverable_shortcut() {
+        // The ainb-hooks Inbox screen is only useful if the user can
+        // find it. Lock in the tile shape + position so a future
+        // refactor doesn't quietly drop it from the home screen.
+        let all = SidebarItem::all();
+        let inbox_pos = all
+            .iter()
+            .position(|i| *i == SidebarItem::Inbox)
+            .expect("SidebarItem::Inbox missing from all()");
+        assert!(inbox_pos > 0, "Inbox shouldn't be first sidebar item");
+        assert_eq!(SidebarItem::Inbox.icon(), "📥");
+        assert_eq!(SidebarItem::Inbox.label(), "Inbox");
+        assert_eq!(SidebarItem::Inbox.shortcut(), "I");
+        assert_eq!(SidebarItem::Inbox.description(), "Hook Notifications");
+        // 'I' must not collide with any other tile shortcut.
+        let collisions = all
+            .iter()
+            .filter(|i| **i != SidebarItem::Inbox && i.shortcut() == "I")
+            .count();
+        assert_eq!(collisions, 0, "sidebar shortcut 'I' collides");
     }
 
     #[test]
