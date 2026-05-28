@@ -2720,6 +2720,8 @@ pub enum AsyncAction {
     /// the dispatcher so the async path doesn't re-derive it from
     /// `configure_state` (finding #7).
     CreateSessionFromConfigure(crate::components::new_session::configure::LaunchSpec),
+    /// Pre-check GitHub auth via `gh auth status` before allowing remote clone.
+    CheckGitAuth,
     DeleteSession(Uuid),         // New - delete session with container cleanup
     StopSession(Uuid),           // Soft-stop interactive session (kill tmux only)
     ResumeSession(Uuid, String), // Recreate tmux for a Stopped interactive session; String is the trigger key for audit
@@ -6268,6 +6270,114 @@ impl AppState {
     /// terminal errors. On failure: notifies the user, calls
     /// `cancel_new_session()` so the picker reopens, returns `Err(())`.
     ///
+    /// Transition from PickRepo → Configure for a given source. Extracted so
+    /// both the events.rs dispatcher and the async auth-check handler can call it.
+    pub fn advance_pick_repo_to_configure(
+        &mut self,
+        source: crate::git::repo_source::RepoSource,
+    ) {
+        use crate::components::new_session::configure::ConfigureState;
+        use crate::config::session_defaults::SessionDefaults;
+        use crate::git::repo_source::head_branch;
+
+        if let Some(pick) = self
+            .new_session_state
+            .as_ref()
+            .and_then(|ns| ns.pick_repo_state.as_ref())
+        {
+            let path = SessionDefaults::default_path();
+            if let Err(err) = pick.defaults.save_to(&path) {
+                tracing::warn!(error = %err, "advance_pick_repo_to_configure: persist session-defaults failed");
+            }
+        }
+        let defaults = SessionDefaults::load_from(&SessionDefaults::default_path());
+        let label = crate::app::events::derive_repo_label(&source);
+        let branch_source = match &source {
+            crate::git::repo_source::RepoSource::LocalPath(p) => head_branch(p),
+            _ => None,
+        };
+        let branch_prefix = self.app_config.workspace_defaults.branch_prefix.clone();
+        // Every branch already checked out in any worktree (ainb's by-session
+        // worktrees + the repo's own checkout + manual worktrees). Single
+        // source of truth so the collision guard matches what `git worktree
+        // add` will accept — the legacy `list_worktrees()` alone missed by-name
+        // worktrees (Stevie 2026-05-27: feat/blog re-launch slipped through;
+        // review P1, PR #211 added the repo's own checkout; deduped in #232).
+        let repo_path = match &source {
+            crate::git::repo_source::RepoSource::LocalPath(p) => Some(p.as_path()),
+            _ => None,
+        };
+        let existing_branches = crate::git::branch_list::in_use_branch_names(repo_path);
+        // All existing branch names (local heads + remote-tracking) for the
+        // base-off "⚠ exists" guard. Cheap for a local repo; a remote pick
+        // fills this in later when the base picker lists/fetches branches.
+        let repo_branch_names: Vec<String> = repo_path
+            .map(|p| {
+                crate::git::branch_list::list_repo_branches(p)
+                    .into_iter()
+                    .map(|e| e.short_name)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let cfg = ConfigureState::from_pick_repo(
+            source.clone(),
+            label,
+            &defaults,
+            branch_source,
+            &branch_prefix,
+            existing_branches,
+            repo_branch_names,
+        );
+        if let Some(ns) = self.new_session_state.as_mut() {
+            ns.configure_state = Some(cfg);
+            ns.step = NewSessionStep::Configure;
+        }
+        tracing::debug!(?source, "advance_pick_repo_to_configure → Configure");
+        self.ui_needs_refresh = true;
+    }
+
+    /// Pre-check GitHub authentication via `gh auth status`. Updates the
+    /// `git_auth_status` field on PickRepoState. If authenticated and a
+    /// `pending_clone_source` is waiting, automatically advances to Configure.
+    async fn check_git_auth(&mut self) {
+        use crate::components::new_session::pick_repo::GitAuthStatus;
+
+        let auth_ok = tokio::task::spawn_blocking(|| {
+            std::process::Command::new("gh")
+                .args(["auth", "status", "--hostname", "github.com"])
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        })
+        .await
+        .unwrap_or(false);
+
+        if let Some(pick) = self
+            .new_session_state
+            .as_mut()
+            .and_then(|ns| ns.pick_repo_state.as_mut())
+        {
+            if auth_ok {
+                tracing::info!("GitHub auth check passed");
+                pick.git_auth_status = Some(GitAuthStatus::Authenticated);
+                // Auto-advance: take the pending source and emit StartClone
+                // via the advance-to-configure path. We replicate the
+                // AdvanceTo → Configure transition inline here.
+                if let Some(source) = pick.pending_clone_source.take() {
+                    pick.git_auth_status = None;
+                    self.advance_pick_repo_to_configure(source);
+                }
+            } else {
+                tracing::warn!("GitHub auth check failed");
+                pick.git_auth_status = Some(GitAuthStatus::NotAuthenticated);
+            }
+        }
+        self.ui_needs_refresh = true;
+    }
+
     /// The clone itself runs on `spawn_blocking` because `git2` / `git` CLI
     /// are synchronous and would otherwise block the async runtime.
     async fn clone_remote_for_configure(
@@ -7644,6 +7754,9 @@ impl AppState {
             match action {
                 AsyncAction::CreateSessionFromConfigure(spec) => {
                     self.create_session_from_configure(spec).await;
+                }
+                AsyncAction::CheckGitAuth => {
+                    self.check_git_auth().await;
                 }
                 AsyncAction::DeleteSession(session_id) => {
                     if let Err(e) = self.delete_session(session_id).await {

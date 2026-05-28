@@ -361,6 +361,18 @@ pub fn head_branch(path: &Path) -> Option<String> {
     head.shorthand().map(str::to_string)
 }
 
+/// True when an HTTPS clone URL points at `github.com` (case-insensitive host
+/// match). Used to gate the `gh auth status` pre-check: that probe is
+/// GitHub-specific, so GitLab / Bitbucket / self-hosted HTTPS remotes must NOT
+/// be routed through it (they'd hit an irrelevant GitHub auth screen). Returns
+/// `false` for unparseable URLs and any non-GitHub host.
+pub fn is_github_host(https_url: &str) -> bool {
+    url::Url::parse(https_url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(|h| h.eq_ignore_ascii_case("github.com")))
+        .unwrap_or(false)
+}
+
 /// Expand ~ to home directory
 fn expand_tilde(path: &str) -> PathBuf {
     if let Some(rest) = path.strip_prefix('~') {
@@ -478,6 +490,24 @@ mod tests {
         let source = RepoSource::from_input("https://github.com/user/repo").unwrap();
         assert!(matches!(source, RepoSource::HttpsUrl(_)));
         assert!(source.is_remote());
+    }
+
+    #[test]
+    fn test_is_github_host_gates_the_auth_precheck() {
+        // GitHub HTTPS — the only HTTPS host that should trigger `gh auth`.
+        assert!(is_github_host("https://github.com/user/repo"));
+        assert!(is_github_host("https://github.com/user/repo.git"));
+        // Case-insensitive host match.
+        assert!(is_github_host("https://GitHub.com/user/repo"));
+        // Non-GitHub HTTPS remotes must NOT be routed through `gh auth status`.
+        assert!(!is_github_host("https://gitlab.com/user/repo"));
+        assert!(!is_github_host("https://bitbucket.org/user/repo"));
+        assert!(!is_github_host("https://git.example.com/user/repo"));
+        // A look-alike host that merely contains "github.com" is not GitHub.
+        assert!(!is_github_host("https://github.com.evil.example/user/repo"));
+        // Garbage / non-URL input fails closed.
+        assert!(!is_github_host("not a url"));
+        assert!(!is_github_host(""));
     }
 
     #[test]

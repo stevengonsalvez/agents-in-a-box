@@ -79,6 +79,19 @@ pub struct CloneProgress {
     pub error: Option<String>,
 }
 
+/// GitHub auth pre-check status shown inline on the picker when a remote
+/// URL requires authentication. The dispatcher runs `gh auth status` before
+/// advancing to Configure for HTTPS/GitHub sources.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GitAuthStatus {
+    /// Async check in flight.
+    Checking,
+    /// `gh auth status` succeeded — the dispatcher auto-advances.
+    Authenticated,
+    /// Not authenticated — show inline instructions.
+    NotAuthenticated,
+}
+
 /// Outcome of a single key press on the picker. The caller (events.rs)
 /// translates this into the appropriate `AppEvent` / async action.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,6 +141,11 @@ pub struct PickRepoState {
     pub selected: usize,
     /// Inline clone progress for the highlighted row (None when idle).
     pub clone_progress: Option<CloneProgress>,
+    /// GitHub auth pre-check status. Set by the dispatcher before allowing
+    /// HTTPS/GitHub clones. `None` = no check in progress or needed.
+    pub git_auth_status: Option<GitAuthStatus>,
+    /// Source that triggered the auth check, held until auth passes or user skips.
+    pub pending_clone_source: Option<RepoSource>,
     /// Snapshot of session-defaults — read on open, updated on `^R`.
     pub defaults: SessionDefaults,
     /// Snapshot of favorites — read on open, updated on `^F`.
@@ -150,6 +168,8 @@ impl PickRepoState {
             filtered_indices,
             selected,
             clone_progress: None,
+            git_auth_status: None,
+            pending_clone_source: None,
             defaults,
             favorites,
         }
@@ -477,12 +497,60 @@ pub fn render(f: &mut Frame, state: &PickRepoState, area: Rect) {
                 spans.push(Span::styled(detail, Style::default().fg(MUTED_GRAY)));
             }
 
-            // Inline clone progress shown directly under the highlighted row
-            // by appending a second visual span. Simpler than a sub-list:
-            // works inside ListItem::new(vec![Line, Line]).
+            // Inline status shown directly under the highlighted row
+            // by appending extra lines. Works inside ListItem::new(vec![…]).
             let mut lines = vec![Line::from(spans)];
             if is_selected {
-                if let Some(progress) = &state.clone_progress {
+                if let Some(auth) = &state.git_auth_status {
+                    match auth {
+                        GitAuthStatus::Checking => {
+                            lines.push(Line::from(vec![
+                                Span::raw("    "),
+                                Span::styled(
+                                    "\u{1f504} Checking GitHub auth...",
+                                    Style::default().fg(Color::Rgb(100, 200, 230)),
+                                ),
+                            ]));
+                        }
+                        GitAuthStatus::NotAuthenticated => {
+                            let amber = Color::Rgb(255, 191, 0);
+                            lines.push(Line::from(vec![
+                                Span::raw("    "),
+                                Span::styled(
+                                    "\u{1f511} GitHub auth required. In another terminal run:",
+                                    Style::default().fg(amber),
+                                ),
+                            ]));
+                            lines.push(Line::from(vec![
+                                Span::raw("      "),
+                                Span::styled(
+                                    "gh auth login && gh auth setup-git",
+                                    Style::default()
+                                        .fg(SELECTION_GREEN)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                            ]));
+                            lines.push(Line::from(vec![
+                                Span::raw("    "),
+                                Span::styled("Enter", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                                Span::styled("=Retry  ", Style::default().fg(MUTED_GRAY)),
+                                Span::styled("s", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                                Span::styled("=Skip auth  ", Style::default().fg(MUTED_GRAY)),
+                                Span::styled("Esc", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                                Span::styled("=Back", Style::default().fg(MUTED_GRAY)),
+                            ]));
+                        }
+                        GitAuthStatus::Authenticated => {
+                            lines.push(Line::from(vec![
+                                Span::raw("    "),
+                                Span::styled(
+                                    "\u{2705} Authenticated",
+                                    Style::default().fg(SELECTION_GREEN),
+                                ),
+                            ]));
+                        }
+                    }
+                } else if let Some(progress) = &state.clone_progress {
                     if let Some(err) = &progress.error {
                         lines.push(Line::from(vec![
                             Span::raw("    "),
@@ -558,6 +626,47 @@ pub fn render(f: &mut Frame, state: &PickRepoState, area: Rect) {
 ///   2. `^F` (favorite toggle) — already writes `favorites.yaml`
 ///      synchronously inside `toggle_favorite`.
 pub fn handle_key(state: &mut PickRepoState, key: KeyEvent) -> PickRepoOutcome {
+    // When an auth check is in flight or failed, intercept keys before
+    // normal picker handling. Checking → only Esc; NotAuthenticated →
+    // Enter retries, s skips, Esc clears.
+    if let Some(ref auth) = state.git_auth_status {
+        match auth {
+            GitAuthStatus::Checking => {
+                if matches!(key.code, KeyCode::Esc) {
+                    state.git_auth_status = None;
+                    state.pending_clone_source = None;
+                }
+                return PickRepoOutcome::Stay;
+            }
+            GitAuthStatus::NotAuthenticated => {
+                match key.code {
+                    KeyCode::Enter => {
+                        state.git_auth_status = Some(GitAuthStatus::Checking);
+                        return PickRepoOutcome::Stay; // dispatcher sees Checking → re-runs check
+                    }
+                    KeyCode::Char('s' | 'S') => {
+                        let source = state.pending_clone_source.take();
+                        state.git_auth_status = None;
+                        if let Some(src) = source {
+                            return PickRepoOutcome::StartClone(src);
+                        }
+                        return PickRepoOutcome::Stay;
+                    }
+                    KeyCode::Esc => {
+                        state.git_auth_status = None;
+                        state.pending_clone_source = None;
+                        return PickRepoOutcome::Stay;
+                    }
+                    _ => return PickRepoOutcome::Stay,
+                }
+            }
+            GitAuthStatus::Authenticated => {
+                // Auto-advance handled by dispatcher; shouldn't linger here
+                state.git_auth_status = None;
+            }
+        }
+    }
+
     let defaults_path = SessionDefaults::default_path();
     // Ctrl-modified keys take precedence over plain chars so `^R` / `^F`
     // never get swallowed by the filter-input branch below.
