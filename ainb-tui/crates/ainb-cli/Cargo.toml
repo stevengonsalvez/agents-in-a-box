@@ -9,6 +9,7 @@ ainb-adapters-tool = { path = "../ainb-adapters-tool" }
 ainb-skill-core = { path = "../ainb-skill-core" }
 ainb-diff = { path = "../ainb-diff" }
 ainb-fetch = { path = "../ainb-fetch" }
+ainb-usage = { path = "../ainb-usage" }
 anyhow = { workspace = true }
 clap = { workspace = true }
 serde_json = { workspace = true }

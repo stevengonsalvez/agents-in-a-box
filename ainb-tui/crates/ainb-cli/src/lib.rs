@@ -133,6 +133,10 @@ pub enum SkillCommand {
     /// Promote a `local:` orphan unit into a git-backed source repo,
     /// rewriting the manifest URI from `local:` to `gh:` / `git:`.
     Promote(PromoteArgs),
+    /// Refresh per-unit usage telemetry (invocation count + last-used)
+    /// by scanning each deploying tool's session logs, and record it in
+    /// the lockfile. Without a unit name, every locked unit is refreshed.
+    Usage(UsageArgs),
 }
 
 #[derive(Args, Debug)]
@@ -220,6 +224,17 @@ pub struct PromoteArgs {
     /// Skip the interactive confirmation prompt.
     #[arg(long)]
     pub yes: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct UsageArgs {
+    /// Optional unit name (the trailing path segment, e.g. `commit`).
+    /// Without it, every locked unit is refreshed.
+    pub unit_name: Option<String>,
+
+    /// Print each unit's invocation count + last-used as it is refreshed.
+    #[arg(long, short)]
+    pub verbose: bool,
 }
 
 #[derive(Args, Debug)]

@@ -25,16 +25,17 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use ainb_adapters_source::pick_adapter;
 use ainb_adapters_tool::{
-    AcceptDecision, ToolAdapter, adapter_by_name, all_adapters, plan::InstallPlan,
+    AcceptDecision, ToolAdapter, adapter_by_name, all_adapters, plan::InstallPlan, read_root_for,
 };
 use ainb_skill_core::lockfile::{LockedUnit, Lockfile};
 use ainb_skill_core::manifest::Manifest;
 use ainb_skill_core::paths::{cache_dir_in, lockfile_path_in, manifest_path_in};
 use ainb_skill_core::uri::Uri;
 use ainb_skill_core::{DeployedRef, UnitKind};
+use ainb_usage::{InvocationRecord, detect_invocations};
 
 use crate::source::run_fetcher;
-use crate::{InstallArgs, RemoveSkillArgs, SkillCommand, SyncArgs, UpdateArgs};
+use crate::{InstallArgs, RemoveSkillArgs, SkillCommand, SyncArgs, UpdateArgs, UsageArgs};
 
 pub fn dispatch(home: &Path, action: SkillCommand, out: &mut dyn io::Write) -> Result<()> {
     match action {
@@ -43,6 +44,7 @@ pub fn dispatch(home: &Path, action: SkillCommand, out: &mut dyn io::Write) -> R
         SkillCommand::Update(args) => update(home, args, out),
         SkillCommand::Sync(args) => sync(home, args, out),
         SkillCommand::Promote(args) => crate::promote::dispatch(home, args, out),
+        SkillCommand::Usage(args) => usage(home, args, out),
     }
 }
 
@@ -614,6 +616,123 @@ fn sync(home: &Path, args: SyncArgs, out: &mut dyn io::Write) -> Result<()> {
         "# sync done: {install_count} installed, {remove_count} removed"
     )?;
     Ok(())
+}
+
+/// `ainb skill usage [<unit-name>]`: refresh per-unit usage telemetry
+/// in the lockfile.
+///
+/// For each targeted unit, scans every tool the unit is deployed to
+/// (`read_root_for(tool)` — honours the `AINB_TOOL_HOME_<TOOL>` sandbox
+/// override) and sums [`detect_invocations`] across them, keeping the
+/// latest `last_used_at`. The aggregate is written to the unit's
+/// lockfile `usage` record. Detection is a pure read of the tool homes;
+/// the only mutation is the lockfile write, which is idempotent for
+/// unchanged logs.
+///
+/// Note on scan surface: with no `AINB_TOOL_HOME_<TOOL>` override set,
+/// `read_root_for` resolves each deployed tool's *real* home (`~/.claude`,
+/// `~/.codex`, …) — so a unit installed to every tool is scanned across
+/// every real tool home. This is a read-only telemetry scan; tests pin
+/// each home to a tempdir via the env override.
+fn usage(home: &Path, args: UsageArgs, out: &mut dyn io::Write) -> Result<()> {
+    let mut lockfile = Lockfile::load_from(&lockfile_path_in(home))?;
+    if lockfile.units.is_empty() {
+        writeln!(out, "# no units in lockfile")?;
+        return Ok(());
+    }
+
+    let target_indices: Vec<usize> = match args.unit_name.as_deref() {
+        Some(name) => {
+            let idxs: Vec<usize> = lockfile
+                .units
+                .iter()
+                .enumerate()
+                .filter(|(_, u)| matches_unit_name(&u.declared_uri, name))
+                .map(|(i, _)| i)
+                .collect();
+            if idxs.is_empty() {
+                bail!("no locked unit named `{name}`");
+            }
+            idxs
+        }
+        None => (0..lockfile.units.len()).collect(),
+    };
+
+    let mut total: u64 = 0;
+    let mut refreshed = 0usize;
+    for idx in target_indices {
+        let (maybe_name, tools): (Option<String>, Vec<String>) = {
+            let unit = &lockfile.units[idx];
+            (unit_short_name(&unit.declared_uri), unit.deployed.keys().cloned().collect())
+        };
+        // A unit URI with no path yields no detectable name — querying
+        // logs with a bogus name would silently record 0. Skip it
+        // honestly rather than mis-attribute "never used".
+        let Some(name) = maybe_name else {
+            if args.verbose {
+                writeln!(
+                    out,
+                    "# skip {}: cannot derive a unit name",
+                    lockfile.units[idx].declared_uri
+                )?;
+            }
+            continue;
+        };
+
+        // Sum detected invocations across every tool this unit deploys
+        // to, keeping the most recent timestamp.
+        let mut agg = InvocationRecord::default();
+        for tool in &tools {
+            let root = read_root_for(tool);
+            let rec = detect_invocations(&root, &name);
+            agg.invocations += rec.invocations;
+            agg.last_used_at = later_timestamp(agg.last_used_at.take(), rec.last_used_at);
+        }
+
+        total += agg.invocations;
+        if args.verbose {
+            match &agg.last_used_at {
+                Some(ts) => writeln!(out, "{name}: {} invocation(s), last used {ts}", agg.invocations)?,
+                None => writeln!(out, "{name}: {} invocation(s)", agg.invocations)?,
+            }
+        }
+        lockfile.units[idx].usage = agg.into();
+        refreshed += 1;
+    }
+
+    lockfile.save_to(&lockfile_path_in(home))?;
+    writeln!(out, "# usage refreshed for {refreshed} unit(s), {total} total invocation(s)")?;
+    Ok(())
+}
+
+/// The short unit name — the trailing path segment of a unit URI, e.g.
+/// `commit` for `gh:org/repo@main/skills/commit`. This is the name that
+/// shows up in tool session logs (slash-command tags / `Skill` args),
+/// so it is what [`detect_invocations`] matches against.
+fn unit_short_name(declared_uri: &str) -> Option<String> {
+    let uri = Uri::parse(declared_uri).ok()?;
+    let path = uri.path?;
+    Some(path.rsplit('/').next().unwrap_or(&path).to_string())
+}
+
+/// Whether `declared_uri` refers to the unit `name`, mirroring the
+/// trailing-segment match used by `skill promote`.
+fn matches_unit_name(declared_uri: &str, name: &str) -> bool {
+    Uri::parse(declared_uri)
+        .ok()
+        .and_then(|u| u.path)
+        .map(|p| p == name || p.ends_with(&format!("/{name}")))
+        .unwrap_or(false)
+}
+
+/// Return the later of two optional RFC 3339 timestamps. Lexicographic
+/// compare is correct for the canonical Zulu form these logs emit.
+fn later_timestamp(a: Option<String>, b: Option<String>) -> Option<String> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(if y > x { y } else { x }),
+        (Some(x), None) => Some(x),
+        (None, b) => b,
+    }
 }
 
 /// Translate a positional `uri` (or short unit name in the future)
