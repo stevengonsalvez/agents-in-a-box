@@ -477,6 +477,26 @@ mod tests {
     }
 
     #[test]
+    fn test_delete_session_uses_checked_other_tmux_sessions_before_cursor_row() {
+        let mut state = state_with_other_tmux_sessions(&["alpha", "beta"]);
+        state.selected_other_tmux_index = Some(1);
+        state.selected_other_tmux_sessions.insert("alpha".to_string());
+        state.selected_other_tmux_sessions.insert("beta".to_string());
+
+        EventHandler::process_event(AppEvent::DeleteSession, &mut state);
+
+        let dialog = state
+            .confirmation_dialog
+            .as_ref()
+            .expect("bulk kill confirmation");
+        assert!(matches!(
+            &dialog.confirm_action,
+            ConfirmAction::KillOtherTmuxSessions(names)
+                if names == &vec!["alpha".to_string(), "beta".to_string()]
+        ));
+    }
+
+    #[test]
     fn test_confirm_selected_other_tmux_sessions_queues_bulk_kill() {
         let mut state = state_with_other_tmux_sessions(&["alpha", "beta"]);
         state.selected_other_tmux_sessions.insert("alpha".to_string());
