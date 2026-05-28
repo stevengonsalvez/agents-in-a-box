@@ -1,0 +1,103 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 1000">
+  <defs>
+    <style>text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;}</style>
+    <marker id="arr" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><path d="M0,0 L10,3.5 L0,7 Z" fill="#5a4a3a"/></marker>
+    <marker id="arrBlue" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><path d="M0,0 L10,3.5 L0,7 Z" fill="#2563eb"/></marker>
+    <marker id="arrClay" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><path d="M0,0 L10,3.5 L0,7 Z" fill="#D97757"/></marker>
+    <marker id="arrOlive" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><path d="M0,0 L10,3.5 L0,7 Z" fill="#788C5D"/></marker>
+    <marker id="arrPurple" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><path d="M0,0 L10,3.5 L0,7 Z" fill="#7c3aed"/></marker>
+  </defs>
+  <rect width="1200" height="1000" fill="#f8f6f3"/>
+  <text x="600" y="32" text-anchor="middle" font-size="20" font-weight="700" fill="#141413">Multica user journey — assign issue to agent, agent ships PR</text>
+  <text x="600" y="52" text-anchor="middle" font-size="12" fill="#5a4a3a">Sequence diagram · the path Stevie wants to replicate verbatim</text>
+  <rect x="40" y="80" width="180" height="34" rx="6" fill="#D97757" stroke="#D97757" stroke-width="1.5"/>
+  <text x="130" y="103" text-anchor="middle" font-size="13" font-weight="700" fill="#ffffff">Human (Web)</text>
+  <line x1="130" y1="114" x2="130" y2="940" stroke="#5a4a3a" stroke-width="1" stroke-dasharray="3,4"/>
+  <rect x="270" y="80" width="180" height="34" rx="6" fill="#5a4a3a" stroke="#5a4a3a" stroke-width="1.5"/>
+  <text x="360" y="103" text-anchor="middle" font-size="13" font-weight="700" fill="#ffffff">Multica Server</text>
+  <line x1="360" y1="114" x2="360" y2="940" stroke="#5a4a3a" stroke-width="1" stroke-dasharray="3,4"/>
+  <rect x="490" y="80" width="180" height="34" rx="6" fill="#788C5D" stroke="#788C5D" stroke-width="1.5"/>
+  <text x="580" y="103" text-anchor="middle" font-size="13" font-weight="700" fill="#ffffff">Daemon</text>
+  <line x1="580" y1="114" x2="580" y2="940" stroke="#5a4a3a" stroke-width="1" stroke-dasharray="3,4"/>
+  <rect x="710" y="80" width="180" height="34" rx="6" fill="#7c3aed" stroke="#7c3aed" stroke-width="1.5"/>
+  <text x="800" y="103" text-anchor="middle" font-size="13" font-weight="700" fill="#ffffff">Agent CLI</text>
+  <line x1="800" y1="114" x2="800" y2="940" stroke="#5a4a3a" stroke-width="1" stroke-dasharray="3,4"/>
+  <rect x="930" y="80" width="180" height="34" rx="6" fill="#5a4a3a" stroke="#5a4a3a" stroke-width="1.5"/>
+  <text x="1020" y="103" text-anchor="middle" font-size="13" font-weight="700" fill="#ffffff">Git/GitHub</text>
+  <line x1="1020" y1="114" x2="1020" y2="940" stroke="#5a4a3a" stroke-width="1" stroke-dasharray="3,4"/>
+  <line x1="130" y1="150" x2="353" y2="150" stroke="#D97757" stroke-width="1.8" marker-end="url(#arrClay)"/>
+  <rect x="155.0" y="132" width="180" height="14" fill="#f8f6f3" opacity="0.95"/>
+  <text x="245.0" y="143" text-anchor="middle" font-size="11" fill="#D97757">POST /api/issues (assignee=agent_alice)</text>
+  <rect x="355" y="185" width="10" height="150" fill="#5a4a3a" opacity="0.3" stroke="#5a4a3a" stroke-width="0.5"/>
+  <rect x="290" y="185" width="140" height="56" rx="6" fill="#fdf4e3" stroke="#5a4a3a"/>
+  <text x="360" y="207" text-anchor="middle" font-size="11" font-weight="600" fill="#141413">INSERT issue +</text>
+  <text x="360" y="223" text-anchor="middle" font-size="11" fill="#141413">EnqueueTaskForIssue</text>
+  <text x="360" y="237" text-anchor="middle" font-size="11" fill="#141413">events.Bus.Publish</text>
+  <line x1="360" y1="260" x2="137" y2="260" stroke="#788C5D" stroke-width="1.8" stroke-dasharray="4,3" marker-end="url(#arr)"/>
+  <rect x="155.0" y="242" width="180" height="14" fill="#f8f6f3" opacity="0.95"/>
+  <text x="245.0" y="253" text-anchor="middle" font-size="11" fill="#788C5D">WSS issue:created broadcast</text>
+  <line x1="360" y1="290" x2="573" y2="290" stroke="#788C5D" stroke-width="1.8" marker-end="url(#arrOlive)"/>
+  <rect x="380.0" y="272" width="180" height="14" fill="#f8f6f3" opacity="0.95"/>
+  <text x="470.0" y="283" text-anchor="middle" font-size="11" fill="#788C5D">WSS daemon:task_available</text>
+  <rect x="575" y="320" width="10" height="200" fill="#788C5D" opacity="0.3" stroke="#788C5D" stroke-width="0.5"/>
+  <line x1="580" y1="320" x2="353" y2="320" stroke="#2563eb" stroke-width="1.8" marker-end="url(#arrBlue)"/>
+  <rect x="380.0" y="302" width="180" height="14" fill="#f8f6f3" opacity="0.95"/>
+  <text x="470.0" y="313" text-anchor="middle" font-size="11" fill="#2563eb">POST /api/daemon/runtimes/{id}/tasks/claim</text>
+  <line x1="360" y1="345" x2="587" y2="345" stroke="#2563eb" stroke-width="1.8" marker-end="url(#arr)"/>
+  <rect x="380.0" y="327" width="180" height="14" fill="#f8f6f3" opacity="0.95"/>
+  <text x="470.0" y="338" text-anchor="middle" font-size="11" fill="#2563eb">task + agent_skills + brief</text>
+  <rect x="500" y="375" width="160" height="56" rx="6" fill="#fdf4e3" stroke="#788C5D"/>
+  <text x="580" y="397" text-anchor="middle" font-size="11" font-weight="600" fill="#141413">prepare per-task env</text>
+  <text x="580" y="413" text-anchor="middle" font-size="11" fill="#141413">write skills · clone repo</text>
+  <text x="580" y="427" text-anchor="middle" font-size="11" fill="#141413">.gc_meta.json</text>
+  <line x1="580" y1="445" x2="353" y2="445" stroke="#2563eb" stroke-width="1.8" marker-end="url(#arrBlue)"/>
+  <rect x="380.0" y="427" width="180" height="14" fill="#f8f6f3" opacity="0.95"/>
+  <text x="470.0" y="438" text-anchor="middle" font-size="11" fill="#2563eb">POST /tasks/{id}/start</text>
+  <line x1="580" y1="470" x2="793" y2="470" stroke="#7c3aed" stroke-width="1.8" marker-end="url(#arrPurple)"/>
+  <rect x="600.0" y="452" width="180" height="14" fill="#f8f6f3" opacity="0.95"/>
+  <text x="690.0" y="463" text-anchor="middle" font-size="11" fill="#7c3aed">exec() agent CLI subprocess</text>
+  <rect x="795" y="495" width="10" height="200" fill="#7c3aed" opacity="0.3" stroke="#7c3aed" stroke-width="0.5"/>
+  <rect x="720" y="495" width="160" height="56" rx="6" fill="#fdf4e3" stroke="#7c3aed"/>
+  <text x="800" y="517" text-anchor="middle" font-size="11" font-weight="600" fill="#141413">LLM loop · tool calls</text>
+  <text x="800" y="533" text-anchor="middle" font-size="11" fill="#141413">edit files · run tests</text>
+  <text x="800" y="547" text-anchor="middle" font-size="11" fill="#141413">progress comments</text>
+  <line x1="800" y1="570" x2="587" y2="570" stroke="#7c3aed" stroke-width="1.8" marker-end="url(#arrPurple)"/>
+  <rect x="600.0" y="552" width="180" height="14" fill="#f8f6f3" opacity="0.95"/>
+  <text x="690.0" y="563" text-anchor="middle" font-size="11" fill="#7c3aed">progress JSON (CLI hook)</text>
+  <line x1="580" y1="595" x2="353" y2="595" stroke="#2563eb" stroke-width="1.8" marker-end="url(#arrBlue)"/>
+  <rect x="380.0" y="577" width="180" height="14" fill="#f8f6f3" opacity="0.95"/>
+  <text x="470.0" y="588" text-anchor="middle" font-size="11" fill="#2563eb">POST /tasks/{id}/progress (comment)</text>
+  <line x1="360" y1="620" x2="137" y2="620" stroke="#788C5D" stroke-width="1.8" stroke-dasharray="4,3" marker-end="url(#arr)"/>
+  <rect x="155.0" y="602" width="180" height="14" fill="#f8f6f3" opacity="0.95"/>
+  <text x="245.0" y="613" text-anchor="middle" font-size="11" fill="#788C5D">WSS comment:created</text>
+  <line x1="800" y1="655" x2="1013" y2="655" stroke="#5a4a3a" stroke-width="1.8" marker-end="url(#arr)"/>
+  <rect x="820.0" y="637" width="180" height="14" fill="#f8f6f3" opacity="0.95"/>
+  <text x="910.0" y="648" text-anchor="middle" font-size="11" fill="#5a4a3a">git push branch</text>
+  <line x1="1020" y1="685" x2="807" y2="685" stroke="#5a4a3a" stroke-width="1.8" marker-end="url(#arr)"/>
+  <rect x="820.0" y="667" width="180" height="14" fill="#f8f6f3" opacity="0.95"/>
+  <text x="910.0" y="678" text-anchor="middle" font-size="11" fill="#5a4a3a">remote ref created</text>
+  <line x1="800" y1="710" x2="1013" y2="710" stroke="#5a4a3a" stroke-width="1.8" marker-end="url(#arr)"/>
+  <rect x="820.0" y="692" width="180" height="14" fill="#f8f6f3" opacity="0.95"/>
+  <text x="910.0" y="703" text-anchor="middle" font-size="11" fill="#5a4a3a">gh pr create</text>
+  <line x1="1020" y1="735" x2="807" y2="735" stroke="#5a4a3a" stroke-width="1.8" marker-end="url(#arr)"/>
+  <rect x="820.0" y="717" width="180" height="14" fill="#f8f6f3" opacity="0.95"/>
+  <text x="910.0" y="728" text-anchor="middle" font-size="11" fill="#5a4a3a">PR url</text>
+  <line x1="1020" y1="770" x2="353" y2="770" stroke="#D97757" stroke-width="1.8" marker-end="url(#arrClay)"/>
+  <rect x="600.0" y="752" width="180" height="14" fill="#f8f6f3" opacity="0.95"/>
+  <text x="690.0" y="763" text-anchor="middle" font-size="11" fill="#D97757">GitHub App webhook pull_request.opened</text>
+  <line x1="360" y1="800" x2="137" y2="800" stroke="#788C5D" stroke-width="1.8" stroke-dasharray="4,3" marker-end="url(#arr)"/>
+  <rect x="155.0" y="782" width="180" height="14" fill="#f8f6f3" opacity="0.95"/>
+  <text x="245.0" y="793" text-anchor="middle" font-size="11" fill="#788C5D">WSS issue:pr_linked</text>
+  <line x1="800" y1="835" x2="587" y2="835" stroke="#7c3aed" stroke-width="1.8" marker-end="url(#arrPurple)"/>
+  <rect x="600.0" y="817" width="180" height="14" fill="#f8f6f3" opacity="0.95"/>
+  <text x="690.0" y="828" text-anchor="middle" font-size="11" fill="#7c3aed">exit 0 + result JSON + session_id + usage</text>
+  <line x1="580" y1="860" x2="353" y2="860" stroke="#15803d" stroke-width="1.8" marker-end="url(#arrBlue)"/>
+  <rect x="380.0" y="842" width="180" height="14" fill="#f8f6f3" opacity="0.95"/>
+  <text x="470.0" y="853" text-anchor="middle" font-size="11" fill="#15803d">POST /tasks/{id}/complete</text>
+  <line x1="360" y1="890" x2="137" y2="890" stroke="#788C5D" stroke-width="1.8" stroke-dasharray="4,3" marker-end="url(#arr)"/>
+  <rect x="155.0" y="872" width="180" height="14" fill="#f8f6f3" opacity="0.95"/>
+  <text x="245.0" y="883" text-anchor="middle" font-size="11" fill="#788C5D">WSS task:completed (UI updates)</text>
+  <rect x="60" y="935" width="1080" height="50" rx="6" fill="#fdf4e3" stroke="#E3DACC"/>
+  <text x="76" y="955" font-size="11" fill="#141413">Net effect: human did one action (assign issue) — agent went off and shipped a PR — UI never blanked, never refreshed manually.</text>
+  <text x="76" y="973" font-size="11" fill="#141413">The WS-driven UI watching task lifecycle + comments is the magic that makes it feel like a teammate, not a CLI tool.</text>
+</svg>
