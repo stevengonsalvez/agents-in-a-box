@@ -89,10 +89,7 @@ async fn exec_with_stub_timeout() {
     // if tokio's Child-drop reap ever regresses. 8s is enough margin
     // to prove the timeout fired before the stub would have exited
     // naturally.
-    let stub = stage_stub(
-        dir.path(),
-        "#!/bin/sh\n/bin/sleep 8\nexit 0\n",
-    );
+    let stub = stage_stub(dir.path(), "#!/bin/sh\n/bin/sleep 8\nexit 0\n");
 
     let result = exec_witr_json(&stub, "nginx").await;
     assert!(

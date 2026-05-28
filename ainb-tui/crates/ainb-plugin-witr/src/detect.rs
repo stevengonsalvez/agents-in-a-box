@@ -162,24 +162,19 @@ pub fn parse_version_output(raw: &str) -> Result<ParsedVersion, MissingReason> {
     // First matching line wins. Most callers pass a one-liner; for
     // pathological multi-line stdout (warnings then version) we walk
     // until we find the real version line.
-    let candidate = raw
-        .lines()
-        .map(|l| l.trim_end())
-        .find(|l| VERSION_RE.is_match(l))
-        .ok_or_else(|| {
-            // No line matched. Carry a short diagnostic from the
-            // first non-empty line for the empty-state log surface.
-            let preview = raw
-                .lines()
-                .map(|l| l.trim_end())
-                .find(|l| !l.is_empty())
-                .unwrap_or("");
-            MissingReason::UnparseableVersion(clamp_diagnostic(preview))
-        })?;
+    let candidate =
+        raw.lines()
+            .map(|l| l.trim_end())
+            .find(|l| VERSION_RE.is_match(l))
+            .ok_or_else(|| {
+                // No line matched. Carry a short diagnostic from the
+                // first non-empty line for the empty-state log surface.
+                let preview =
+                    raw.lines().map(|l| l.trim_end()).find(|l| !l.is_empty()).unwrap_or("");
+                MissingReason::UnparseableVersion(clamp_diagnostic(preview))
+            })?;
 
-    let caps = VERSION_RE
-        .captures(candidate)
-        .expect("matched line above must capture");
+    let caps = VERSION_RE.captures(candidate).expect("matched line above must capture");
 
     let ver_str = &caps["ver"];
     let version = Version::parse(ver_str).map_err(|e| {
@@ -252,10 +247,7 @@ pub async fn detect_witr() -> DetectResult {
         }
     };
 
-    let exec = Command::new(&path)
-        .arg("--version")
-        .stdin(std::process::Stdio::null())
-        .output();
+    let exec = Command::new(&path).arg("--version").stdin(std::process::Stdio::null()).output();
 
     let output = match timeout(VERSION_EXEC_TIMEOUT, exec).await {
         Ok(Ok(o)) => o,

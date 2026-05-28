@@ -104,7 +104,9 @@ fn stage_witr_stub_failing(dir: &Path) -> PathBuf {
 /// stub's tempdir — bare `sleep` wouldn't resolve.
 fn stage_witr_stub_hanging(dir: &Path) -> PathBuf {
     let bin = dir.join("witr");
-    let script = "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  /bin/sleep 30\n  exit 0\nfi\nexit 2\n".to_string();
+    let script =
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  /bin/sleep 30\n  exit 0\nfi\nexit 2\n"
+            .to_string();
     fs::write(&bin, script).expect("write hanging stub");
     let mut perms = fs::metadata(&bin).expect("stat stub").permissions();
     use std::os::unix::fs::PermissionsExt;

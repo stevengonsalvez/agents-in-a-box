@@ -292,8 +292,7 @@ mod tests {
             "Source": {"Type": "init", "Name": "init"},
             "Warnings": []
         }"#;
-        let snap: WitrSnapshot =
-            serde_json::from_str(raw).expect("minimal stable-6 must parse");
+        let snap: WitrSnapshot = serde_json::from_str(raw).expect("minimal stable-6 must parse");
         assert_eq!(snap.process.pid, 1234);
         assert_eq!(snap.restart_count, 0);
         assert!(snap.children.is_empty());
@@ -346,8 +345,7 @@ mod tests {
         // event-bus publisher re-emits the snapshot as msgpack via
         // serde_json::Value, which requires the Serialize impl to
         // round-trip cleanly.
-        let original: WitrSnapshot =
-            serde_json::from_str(SAMPLE_JSON).expect("sample parses");
+        let original: WitrSnapshot = serde_json::from_str(SAMPLE_JSON).expect("sample parses");
         let bytes = serde_json::to_vec(&original).expect("serialize");
         let back: WitrSnapshot = serde_json::from_slice(&bytes).expect("deserialize");
         assert_eq!(original, back);

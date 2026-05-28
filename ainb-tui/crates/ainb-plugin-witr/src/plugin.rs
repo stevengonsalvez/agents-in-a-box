@@ -35,11 +35,7 @@ impl Plugin for WitrPlugin {
         ))
     }
 
-    async fn handle_event(
-        &mut self,
-        _host: &HostClient,
-        _params: HandleEventParams,
-    ) -> Result<()> {
+    async fn handle_event(&mut self, _host: &HostClient, _params: HandleEventParams) -> Result<()> {
         Ok(())
     }
 
