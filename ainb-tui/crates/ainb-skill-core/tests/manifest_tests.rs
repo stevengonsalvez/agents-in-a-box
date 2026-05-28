@@ -3,7 +3,9 @@
 
 use std::path::PathBuf;
 
-use ainb_skill_core::manifest::{Defaults, Manifest, SourceEntry, SourceKind, UnitEntry};
+use ainb_skill_core::manifest::{
+    Defaults, Manifest, SourceEntry, SourceKind, TargetMapping, UnitEntry,
+};
 use ainb_skill_core::paths::manifest_path_in;
 use ainb_skill_core::Uri;
 
@@ -39,6 +41,7 @@ fn save_creates_parents_and_rounds_trip() {
         r#ref: "main".into(),
         enabled: true,
         read_only: false,
+        target_layout: Vec::new(),
     })
     .unwrap();
     m.units.push(UnitEntry {
@@ -67,6 +70,7 @@ fn add_source_rejects_duplicates() {
         r#ref: "main".into(),
         enabled: true,
         read_only: false,
+        target_layout: Vec::new(),
     };
     m.add_source(e.clone()).unwrap();
     let err = m.add_source(e).unwrap_err();
@@ -83,6 +87,7 @@ fn remove_source_returns_entry() {
         r#ref: "main".into(),
         enabled: true,
         read_only: false,
+        target_layout: Vec::new(),
     })
     .unwrap();
     let removed = m.remove_source("alpha").unwrap();
@@ -170,6 +175,7 @@ fn source_entry_read_only_roundtrips() {
         r#ref: "main".into(),
         enabled: true,
         read_only: true,
+        target_layout: Vec::new(),
     })
     .unwrap();
 
@@ -242,6 +248,7 @@ fn source_kind_typed_accessor_on_source_entry() {
         r#ref: "main".into(),
         enabled: true,
         read_only: true,
+        target_layout: Vec::new(),
     };
     assert_eq!(src.kind_typed(), Some(SourceKind::ClaudeMarketplace));
 
@@ -252,8 +259,110 @@ fn source_kind_typed_accessor_on_source_entry() {
         r#ref: "main".into(),
         enabled: true,
         read_only: false,
+        target_layout: Vec::new(),
     };
     assert!(src_no_kind.kind_typed().is_none());
+}
+
+// === v12.C.1 / Source.target_layout schema ===
+
+const TARGET_LAYOUT_MANIFEST_YAML: &str = r#"
+schema_version: 1
+sources:
+  - name: toolkit
+    type: manifest
+    uri: gh:stevengonsalvez/ai-coder-rules
+    ref: main
+    enabled: true
+    target_layout:
+      - glob: "skills/**"
+        home: .claude/skills
+        repo: toolkit/packages/skills
+      - glob: "agents/**"
+        home: .claude/agents
+        repo: toolkit/packages/agents
+"#;
+
+#[test]
+fn source_target_layout_parses_from_manifest() {
+    // A source declaring a target_layout block must parse, with each
+    // mapping's glob/home/repo populated in order.
+    let m: Manifest =
+        serde_yaml_ng::from_str(TARGET_LAYOUT_MANIFEST_YAML).expect("target_layout parses");
+    let src = &m.sources[0];
+    assert_eq!(src.target_layout.len(), 2, "two mappings parsed");
+
+    assert_eq!(src.target_layout[0].glob, "skills/**");
+    assert_eq!(src.target_layout[0].home, PathBuf::from(".claude/skills"));
+    assert_eq!(
+        src.target_layout[0].repo,
+        PathBuf::from("toolkit/packages/skills")
+    );
+
+    assert_eq!(src.target_layout[1].glob, "agents/**");
+    assert_eq!(src.target_layout[1].home, PathBuf::from(".claude/agents"));
+    assert_eq!(
+        src.target_layout[1].repo,
+        PathBuf::from("toolkit/packages/agents")
+    );
+}
+
+#[test]
+fn source_target_layout_defaults_empty_for_legacy_manifests() {
+    // v1 manifests written without `target_layout` must still load —
+    // the field defaults to an empty vec. Backward-compat guarantee.
+    let m: Manifest = serde_yaml_ng::from_str(V1_MANIFEST_YAML).expect("v1 parses");
+    let src = &m.sources[0];
+    assert!(
+        src.target_layout.is_empty(),
+        "target_layout must default to empty for legacy manifests"
+    );
+}
+
+#[test]
+fn empty_target_layout_skipped_in_serialised_output() {
+    // An empty target_layout must not be emitted, so legacy manifests
+    // round-trip without growing a `target_layout: []` row.
+    let m: Manifest = serde_yaml_ng::from_str(V1_MANIFEST_YAML).unwrap();
+    let dumped = serde_yaml_ng::to_string(&m).unwrap();
+    assert!(
+        !dumped.contains("target_layout"),
+        "default empty `target_layout` should be skipped, got:\n{dumped}"
+    );
+}
+
+#[test]
+fn source_target_layout_roundtrips() {
+    let home = tmp_home();
+    let path = manifest_path_in(home.path());
+
+    let mut m = Manifest::default();
+    m.add_source(SourceEntry {
+        name: "toolkit".into(),
+        kind: Some("manifest".into()),
+        uri: "gh:stevengonsalvez/ai-coder-rules".into(),
+        r#ref: "main".into(),
+        enabled: true,
+        read_only: false,
+        target_layout: vec![
+            TargetMapping {
+                glob: "skills/**".into(),
+                home: PathBuf::from(".claude/skills"),
+                repo: PathBuf::from("toolkit/packages/skills"),
+            },
+            TargetMapping {
+                glob: "agents/**".into(),
+                home: PathBuf::from(".claude/agents"),
+                repo: PathBuf::from("toolkit/packages/agents"),
+            },
+        ],
+    })
+    .unwrap();
+
+    m.save_to(&path).unwrap();
+    let loaded = Manifest::load_from(&path).unwrap();
+    assert_eq!(loaded, m, "target_layout round-trips through save/load");
+    assert_eq!(loaded.sources[0].target_layout.len(), 2);
 }
 
 #[test]
