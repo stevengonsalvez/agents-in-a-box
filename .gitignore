@@ -30,6 +30,9 @@ logs/
 # Claude local state
 .claude/
 
+# here.now publish state (contains claim tokens — never commit)
+.herenow/
+
 # Agent tool local state (npx skills add artifacts)
 .agents/
 .continue/
