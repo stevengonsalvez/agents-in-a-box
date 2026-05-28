@@ -11,6 +11,7 @@ members = [
     "crates/ainb-plugin-testkit",
     "crates/ainb-plugin-types-sessions",
     "crates/ainb-plugin-cts-v2",
+    "crates/ainb-hangar-store",
     "xtask",
 ]
 default-members = ["crates/ainb-core"]
@@ -81,7 +82,10 @@ syntect = "5.0"
 ansi-to-tui = "4"
 
 # Persistent usage analytics cache
-rusqlite = { version = "0.31", features = ["bundled", "blob"] }
+# Bumped 0.31 -> 0.32 so `libsqlite3-sys` (links = "sqlite3") resolves to a
+# single 0.30.1 copy shared with sqlx-sqlite 0.8 in ainb-hangar-store. Two
+# crates linking different libsqlite3-sys majors is a hard `links` collision.
+rusqlite = { version = "0.32", features = ["bundled", "blob"] }
 blake3 = "1"
 bincode = "1.3"
 
