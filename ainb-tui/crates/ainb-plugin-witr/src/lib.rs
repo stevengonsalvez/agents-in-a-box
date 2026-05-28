@@ -15,3 +15,4 @@ pub mod detect;
 pub mod exec;
 pub mod model;
 pub mod plugin;
+pub mod render;
