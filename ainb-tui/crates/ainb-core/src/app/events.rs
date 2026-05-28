@@ -286,6 +286,16 @@ pub enum AppEvent {
     /// unit and its conflict peer (spec §User Flow 3, hdt.8). No-op
     /// when the selected unit is not part of a conflict pair.
     SkillManagerConflictFlip,
+    /// Units panel: move selection up one row (k / Up arrow). Wraps
+    /// to last row when at top. Recomputes detail pane on move.
+    SkillManagerSelectPrev,
+    /// Units panel: move selection down one row (j / Down arrow).
+    /// Wraps to first row when at bottom. Recomputes detail pane.
+    SkillManagerSelectNext,
+    /// Units panel: jump selection to first row (g / Home).
+    SkillManagerSelectFirst,
+    /// Units panel: jump selection to last row (G / End).
+    SkillManagerSelectLast,
     GoToRecovery,            // Navigate to session recovery view
     // AINB 2.0: Agent selection events
     AgentSelectionBack,         // Return to home screen (Esc)
@@ -1018,7 +1028,7 @@ impl EventHandler {
                     _ => None,
                 };
             }
-            tracing::debug!("In skill-manager view, handling Esc/q/s");
+            tracing::debug!("In skill-manager view, handling nav/s/q");
             return match key_event.code {
                 KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::SkillManagerBack),
                 // Units panel `[s]` — flip the shadowed_by edge between
@@ -1027,6 +1037,14 @@ impl EventHandler {
                 // that the banner branch above intercepts `s` first
                 // when the discovery overlay is visible (skip-banner).
                 KeyCode::Char('s') => Some(AppEvent::SkillManagerConflictFlip),
+                // Selection navigation — arrows + vim-style j/k +
+                // Home/End/g/G. Wraps at list ends. Detail pane
+                // recomputed on every move so the right-hand pane
+                // mirrors the cursor without an extra keystroke.
+                KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::SkillManagerSelectPrev),
+                KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::SkillManagerSelectNext),
+                KeyCode::Home | KeyCode::Char('g') => Some(AppEvent::SkillManagerSelectFirst),
+                KeyCode::End | KeyCode::Char('G') => Some(AppEvent::SkillManagerSelectLast),
                 _ => None,
             };
         }
@@ -3837,6 +3855,38 @@ impl EventHandler {
                 {
                     tracing::warn!(error = %e, "conflict flip failed");
                 }
+            }
+            AppEvent::SkillManagerSelectPrev => {
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                crate::components::skill_manager_screen::move_selection(
+                    &mut state.skill_manager_state,
+                    &ainb_home,
+                    crate::components::skill_manager_screen::SelectionMove::Prev,
+                );
+            }
+            AppEvent::SkillManagerSelectNext => {
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                crate::components::skill_manager_screen::move_selection(
+                    &mut state.skill_manager_state,
+                    &ainb_home,
+                    crate::components::skill_manager_screen::SelectionMove::Next,
+                );
+            }
+            AppEvent::SkillManagerSelectFirst => {
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                crate::components::skill_manager_screen::move_selection(
+                    &mut state.skill_manager_state,
+                    &ainb_home,
+                    crate::components::skill_manager_screen::SelectionMove::First,
+                );
+            }
+            AppEvent::SkillManagerSelectLast => {
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                crate::components::skill_manager_screen::move_selection(
+                    &mut state.skill_manager_state,
+                    &ainb_home,
+                    crate::components::skill_manager_screen::SelectionMove::Last,
+                );
             }
             AppEvent::GoToRecovery => {
                 tracing::info!("Navigating to Session Recovery");

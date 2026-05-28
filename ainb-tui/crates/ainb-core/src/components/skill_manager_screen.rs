@@ -15,7 +15,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table},
+    widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, TableState},
 };
 
 use ainb_cli::discovery::{
@@ -34,6 +34,8 @@ const CORNFLOWER_BLUE: Color = Color::Rgb(100, 149, 237);
 const GOLD: Color = Color::Rgb(255, 215, 0);
 const SOFT_WHITE: Color = Color::Rgb(220, 220, 230);
 const MUTED_GRAY: Color = Color::Rgb(120, 120, 140);
+const SELECTION_GREEN: Color = Color::Rgb(100, 200, 100);
+const LIST_HIGHLIGHT_BG: Color = Color::Rgb(40, 40, 60);
 
 /// One source row in the left panel.
 #[derive(Debug, Clone)]
@@ -212,6 +214,36 @@ fn render_units_table(frame: &mut Frame, area: Rect, data: &SkillsScreenData) {
             Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
         ));
 
+    // Empty-state hint: when the manifest has no units, render a
+    // muted paragraph inside the panel pointing at the actions the
+    // user can take next. Skip the table render entirely — empty
+    // headers were the source of "looks broken" feedback.
+    if data.units.is_empty() {
+        let lines = vec![
+            Line::from(Span::styled(
+                "  No units installed yet",
+                Style::default().fg(MUTED_GRAY).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "  Press [i] to add a source (e.g. gh:owner/repo)",
+                Style::default().fg(SOFT_WHITE),
+            )),
+            Line::from(Span::styled(
+                "  Or press [m] again to refresh discovery",
+                Style::default().fg(SOFT_WHITE),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "  [q] to return home",
+                Style::default().fg(MUTED_GRAY),
+            )),
+        ];
+        let para = Paragraph::new(lines).block(block);
+        frame.render_widget(para, area);
+        return;
+    }
+
     let header = Row::new(vec![
         Cell::from("#"),
         Cell::from("name"),
@@ -238,16 +270,33 @@ fn render_units_table(frame: &mut Frame, area: Rect, data: &SkillsScreenData) {
         })
         .collect();
 
+    // Constraint mix: small numeric col fixed, name/source/targets
+    // share remaining width via Percentage so narrow terminals don't
+    // crop the targets list. Previously all Length-based which
+    // overflowed when total > area.width.
     let widths = [
         Constraint::Length(3),
-        Constraint::Length(18),
-        Constraint::Length(7),
-        Constraint::Length(14),
-        Constraint::Length(9),
-        Constraint::Min(8),
+        Constraint::Percentage(22),
+        Constraint::Length(8),
+        Constraint::Percentage(22),
+        Constraint::Length(10),
+        Constraint::Percentage(40),
     ];
-    let table = Table::new(rows, widths).header(header).block(block);
-    frame.render_widget(table, area);
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(block)
+        .highlight_style(
+            Style::default()
+                .bg(LIST_HIGHLIGHT_BG)
+                .fg(SELECTION_GREEN)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▶ ");
+
+    let mut table_state = TableState::default();
+    let last = data.units.len().saturating_sub(1);
+    table_state.select(Some(data.selected.min(last)));
+    frame.render_stateful_widget(table, area, &mut table_state);
 }
 
 fn render_detail_pane(frame: &mut Frame, area: Rect, data: &SkillsScreenData) {
@@ -783,6 +832,46 @@ impl SkillsScreenData {
         refresh_view_model_from_manifest(self, &manifest);
         self.detail = compute_detail_for_selected(self, &lockfile);
     }
+}
+
+/// Direction of selection-cursor movement on the Units panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionMove {
+    Prev,
+    Next,
+    First,
+    Last,
+}
+
+/// Move the Units-panel selection cursor and recompute the Detail
+/// pane so the right-hand view stays in sync. Wraps at list ends.
+/// No-op when units list is empty.
+pub fn move_selection(data: &mut SkillsScreenData, home: &Path, dir: SelectionMove) {
+    if data.units.is_empty() {
+        return;
+    }
+    let last = data.units.len() - 1;
+    let cur = data.selected.min(last);
+    data.selected = match dir {
+        SelectionMove::Prev => {
+            if cur == 0 {
+                last
+            } else {
+                cur - 1
+            }
+        }
+        SelectionMove::Next => {
+            if cur == last {
+                0
+            } else {
+                cur + 1
+            }
+        }
+        SelectionMove::First => 0,
+        SelectionMove::Last => last,
+    };
+    let lockfile = Lockfile::load_from(&lockfile_path_in(home)).unwrap_or_default();
+    data.detail = compute_detail_for_selected(data, &lockfile);
 }
 
 /// Build the detail-pane content for the currently-selected unit by
