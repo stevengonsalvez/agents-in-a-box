@@ -26,11 +26,18 @@ tempfile = { workspace = true }
 toml = { workspace = true }
 bytes = { version = "1.6", features = ["serde"] }
 async-trait = "0.1"
+base64 = "0.22"
 
 [dev-dependencies]
 ainb-plugin-protocol = { path = "../ainb-plugin-protocol" }
 ainb-plugin-runtime = { path = "../ainb-plugin-runtime" }
 tokio = { workspace = true }
+
+# A18 host-side test seeds + tears down a login-Keychain item to exercise
+# the real `host/secret_store_get` path on macOS. Linux runs the stub test
+# and needs no secret-store dependency.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+security-framework = "3"
 
 # --- Canary binaries ---
 # Each canary is a tiny plugin that speaks JSON-RPC over stdio.
@@ -135,6 +142,12 @@ doc = false
 [[bin]]
 name = "cts-a17-unix-socket"
 path = "tests/canaries/a17_unix_socket_dial/main.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "cts-a18-secret-store"
+path = "tests/canaries/a18_secret_store_get/main.rs"
 test = false
 doc = false
 

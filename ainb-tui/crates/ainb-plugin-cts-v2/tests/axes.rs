@@ -1033,3 +1033,236 @@ fn a17_unix_socket_dropped_on_plugin_restart() {
     // the runtime here must not panic and must not hang on a leaked task.
     drop(rt);
 }
+
+// =====================================================================
+// A18: secret_store_get — cap gating, service allow-list, bool-true
+//      unconditional read, not-found, platform stub (linux), anti-cheat
+//      sentinel verification (macOS real keychain)
+// =====================================================================
+
+/// Build an A18 manifest. `grant` selects the `secret_store_get` cap form:
+/// `Some(services)` = list grant, `None` = cap omitted (denied).
+fn a18_manifest(name: &str, grant: Option<Vec<String>>) -> Manifest {
+    let mut m = manifest(name);
+    m.provides.cli_namespaces = vec!["a18".into()];
+    if let Some(services) = grant {
+        m.capabilities.secret_store_get =
+            ainb_plugin_protocol::manifest::CapabilityGrant::List(services);
+    }
+    m
+}
+
+#[test]
+fn a18_secret_store_get_cap_denied() {
+    let (rt, handle) = build_runtime();
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-a18-secret-store"));
+    // Cap omitted entirely → -32001, no keychain hit.
+    let id = register(&rt, bin, a18_manifest("cts-a18-denied", None));
+
+    drop(block_render(&rt, &handle, &id, 1, 1));
+    wait_running(&handle, &id);
+
+    let code = cli_stdout(
+        &rt,
+        &handle,
+        &id,
+        "a18",
+        vec!["geterr".into(), "any-service".into(), "any-account".into()],
+    );
+    assert_eq!(
+        code,
+        ainb_plugin_protocol::errors::CAPABILITY_DENIED.to_string(),
+        "cap-omitted secret read must return -32001"
+    );
+}
+
+#[test]
+fn a18_secret_store_get_service_not_whitelisted() {
+    let (rt, handle) = build_runtime();
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-a18-secret-store"));
+    // Grant whitelists ONLY "ainb-hangar"; request a different service.
+    let id = register(
+        &rt,
+        bin,
+        a18_manifest("cts-a18-wl", Some(vec!["ainb-hangar".into()])),
+    );
+
+    drop(block_render(&rt, &handle, &id, 1, 1));
+    wait_running(&handle, &id);
+
+    let code = cli_stdout(
+        &rt,
+        &handle,
+        &id,
+        "a18",
+        vec!["geterr".into(), "evil-service".into(), "acct".into()],
+    );
+    assert_eq!(
+        code,
+        ainb_plugin_protocol::errors::CAPABILITY_DENIED.to_string(),
+        "service not on allow-list must return -32001"
+    );
+}
+
+/// macOS: seed the login Keychain, read it back through the cap, assert the
+/// bytes match and the anti-cheat sentinel fired host-side.
+#[cfg(target_os = "macos")]
+#[test]
+fn a18_secret_store_get_granted_reads_keychain_and_sentinel() {
+    use security_framework::passwords::{delete_generic_password, set_generic_password};
+
+    // Unique service name so parallel runs / leftover items never collide.
+    let service = format!("cts-a18-{}", std::process::id());
+    let account = "anthropic-api-key";
+    let secret = b"super-secret-token";
+
+    // Seed (best-effort cleanup of any stale item first).
+    let _ = delete_generic_password(&service, account);
+    set_generic_password(&service, account, secret).expect("seed keychain item");
+
+    let (rt, handle) = build_runtime();
+    let sentinels = handle.install_log_tap();
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-a18-secret-store"));
+    let id = register(
+        &rt,
+        bin,
+        a18_manifest("cts-a18-ok", Some(vec![service.clone()])),
+    );
+
+    drop(block_render(&rt, &handle, &id, 1, 1));
+    wait_running(&handle, &id);
+
+    let out = cli_stdout(
+        &rt,
+        &handle,
+        &id,
+        "a18",
+        vec!["get".into(), service.clone(), account.into()],
+    );
+
+    // Teardown the seeded item before any assertion can panic.
+    let _ = delete_generic_password(&service, account);
+
+    assert_eq!(out, "super-secret-token", "secret bytes mismatch: {out}");
+
+    // Anti-cheat: SECRET_READ_OK fired host-side — proves the genuine
+    // keychain path ran (not a fabricated value).
+    let logs = sentinels.lock().unwrap().clone();
+    assert!(
+        logs.iter().any(|l| l == "SECRET_READ_OK"),
+        "missing host-side SECRET_READ_OK sentinel; got {logs:?}"
+    );
+}
+
+/// macOS: bool-true grant reads any service unconditionally (no allow-list).
+#[cfg(target_os = "macos")]
+#[test]
+fn a18_secret_store_get_bool_true_grants_any_service() {
+    use security_framework::passwords::{delete_generic_password, set_generic_password};
+
+    let service = format!("cts-a18-bool-{}", std::process::id());
+    let account = "key";
+    let _ = delete_generic_password(&service, account);
+    set_generic_password(&service, account, b"v").expect("seed keychain item");
+
+    let (rt, handle) = build_runtime();
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-a18-secret-store"));
+    let mut m = manifest("cts-a18-bool");
+    m.provides.cli_namespaces = vec!["a18".into()];
+    m.capabilities.secret_store_get =
+        ainb_plugin_protocol::manifest::CapabilityGrant::Bool(true);
+    let id = register(&rt, bin, m);
+
+    drop(block_render(&rt, &handle, &id, 1, 1));
+    wait_running(&handle, &id);
+
+    let code = cli_stdout(
+        &rt,
+        &handle,
+        &id,
+        "a18",
+        vec!["geterr".into(), service.clone(), account.into()],
+    );
+    let _ = delete_generic_password(&service, account);
+    assert_eq!(code, "0", "bool-true grant must read any service: {code}");
+}
+
+/// macOS: service granted but no such item → -32004 `SECRET_NOT_FOUND`, and
+/// the `SECRET_READ_OK` sentinel must NOT fire (anti-cheat for the miss path).
+#[cfg(target_os = "macos")]
+#[test]
+fn a18_secret_store_get_not_found() {
+    use security_framework::passwords::delete_generic_password;
+
+    let service = format!("cts-a18-missing-{}", std::process::id());
+    let account = "absent";
+    // Ensure the item really is absent.
+    let _ = delete_generic_password(&service, account);
+
+    let (rt, handle) = build_runtime();
+    let sentinels = handle.install_log_tap();
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-a18-secret-store"));
+    let id = register(
+        &rt,
+        bin,
+        a18_manifest("cts-a18-missing", Some(vec![service.clone()])),
+    );
+
+    drop(block_render(&rt, &handle, &id, 1, 1));
+    wait_running(&handle, &id);
+
+    let code = cli_stdout(
+        &rt,
+        &handle,
+        &id,
+        "a18",
+        vec!["geterr".into(), service, account.into()],
+    );
+    assert_eq!(
+        code,
+        ainb_plugin_protocol::errors::SECRET_NOT_FOUND.to_string(),
+        "absent item must return -32004"
+    );
+    let logs = sentinels.lock().unwrap().clone();
+    assert!(
+        !logs.iter().any(|l| l == "SECRET_READ_OK"),
+        "SECRET_READ_OK must not fire on the not-found path: {logs:?}"
+    );
+}
+
+/// linux / non-macOS: the cap exists and is granted, but the backend is the
+/// `-32005 NOT_IMPLEMENTED` stub so the plugin can degrade to dotenv.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a18_secret_store_get_not_implemented_on_non_macos() {
+    let (rt, handle) = build_runtime();
+    let sentinels = handle.install_log_tap();
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-a18-secret-store"));
+    let id = register(
+        &rt,
+        bin,
+        a18_manifest("cts-a18-stub", Some(vec!["ainb-hangar".into()])),
+    );
+
+    drop(block_render(&rt, &handle, &id, 1, 1));
+    wait_running(&handle, &id);
+
+    let code = cli_stdout(
+        &rt,
+        &handle,
+        &id,
+        "a18",
+        vec!["geterr".into(), "ainb-hangar".into(), "acct".into()],
+    );
+    assert_eq!(
+        code,
+        ainb_plugin_protocol::errors::NOT_IMPLEMENTED.to_string(),
+        "non-macOS secret read must return -32005"
+    );
+    // Anti-cheat: the stub path must NOT emit the success sentinel.
+    let logs = sentinels.lock().unwrap().clone();
+    assert!(
+        !logs.iter().any(|l| l == "SECRET_READ_OK"),
+        "SECRET_READ_OK must not fire on the not-implemented stub path: {logs:?}"
+    );
+}
