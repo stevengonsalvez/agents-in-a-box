@@ -20,23 +20,51 @@ path = "src/lib.rs"
 [dependencies]
 ainb-hangar-store = { path = "../ainb-hangar-store" }
 ainb-hangar-core = { path = "../ainb-hangar-core" }
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio-rustls",
+    "sqlite",
+    "macros",
+] }
 tokio = { version = "1.36", default-features = false, features = [
     "rt-multi-thread",
     "macros",
     "signal",
+    "time",
+    "process",
+    "io-util",
 ] }
 clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Home-directory resolution for the per-task env tree root (mirrors the store's
+# `$AINB_HANGAR_HOME`-else-`~` resolution so env dirs and the db share a root).
+dirs = { workspace = true }
+# Unix process-group signalling: the runner spawns the provider in its own
+# process group so a timeout can SIGKILL the whole tree (the provider plus any
+# `sh -c sleep …` grandchild), closing inherited pipes so the stdout reader
+# EOFs immediately instead of blocking on the orphaned grandchild.
+nix = { workspace = true, features = ["signal"] }
 
 [dev-dependencies]
 assert_cmd = "2"
+serde_json = { workspace = true }
 tempfile = { workspace = true }
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio-rustls",
+    "sqlite",
+    "macros",
+] }
 # Enables `ainb_hangar_store::test_support` (isolated `$HOME` + `ENV_LOCK`) for
 # the boot tripwire. Integration tests do not inherit `#[cfg(test)]`, so the
 # store's `test-support` feature must be turned on explicitly here.
 ainb-hangar-store = { path = "../ainb-hangar-store", features = ["test-support"] }
+# Enables `ainb_hangar_core::clock::FixedClock` for the deterministic sweeper
+# tests (P1.4). Same rationale as the store dev-dep: the `test-support` cfg is
+# not inherited by integration tests, so it must be requested explicitly.
+ainb-hangar-core = { path = "../ainb-hangar-core", features = ["test-support"] }
 
 # Local lint config rather than `workspace = true`: the workspace-level lints
 # declare lint groups (clippy::all, ::pedantic, ::nursery, ::cargo) at the same
