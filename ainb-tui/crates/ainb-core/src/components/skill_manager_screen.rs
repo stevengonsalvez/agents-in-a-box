@@ -18,11 +18,14 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, TableState},
 };
 
+use std::collections::BTreeMap;
+
 use ainb_cli::discovery::{
     class_a,
     class_c,
     reconcile::{self, WalkerOutput},
 };
+use ainb_skill_core::drift::DriftStatus;
 use ainb_skill_core::lockfile::{DeployedRef, Lockfile};
 use ainb_skill_core::paths::{lockfile_path_in, manifest_path_in};
 use ainb_skill_core::{Manifest, UnitEntry};
@@ -54,6 +57,12 @@ pub struct UnitRow {
     pub source: String,
     pub git_ref: String,
     pub targets: Vec<String>,
+    /// The unit's declared URI as recorded in the manifest (`<source>@<ref>/<path>`).
+    /// Used as the lookup key into [`SkillsScreenData::drift_cache`] so the
+    /// rendered status column can find the right glyph. Reconstructed from
+    /// the underlying `UnitEntry.uri` when the row is built; matches the
+    /// `LockedUnit.declared_uri` recorded in the lockfile.
+    pub declared_uri: String,
 }
 
 /// Detail pane content for the currently-focused unit.
@@ -88,6 +97,11 @@ pub struct SkillsScreenData {
     /// doesn't see a different count than the banner advertised
     /// (e.g. if a file lands between paint and keypress).
     pub walker_cache: Option<WalkerOutput>,
+    /// Per-unit drift status, keyed by `UnitRow.declared_uri`. Populated
+    /// by the background drift poll (bead v12.E.4) on `GoToSkillManager`;
+    /// rows whose URI is missing from the cache render a "…" placeholder
+    /// in the status column until the poll lands. See [`drift_status_glyph`].
+    pub drift_cache: BTreeMap<String, DriftStatus>,
 }
 
 /// Discovery banner state machine.
@@ -251,6 +265,7 @@ fn render_units_table(frame: &mut Frame, area: Rect, data: &SkillsScreenData) {
         Cell::from("source"),
         Cell::from("ref"),
         Cell::from("targets"),
+        Cell::from("status"),
     ])
     .style(Style::default().fg(GOLD).add_modifier(Modifier::BOLD));
 
@@ -259,6 +274,8 @@ fn render_units_table(frame: &mut Frame, area: Rect, data: &SkillsScreenData) {
         .iter()
         .map(|u| {
             let targets = u.targets.join(" ");
+            let (glyph, glyph_color) =
+                drift_status_glyph(data.drift_cache.get(&u.declared_uri).copied());
             Row::new(vec![
                 Cell::from(u.idx.to_string()),
                 Cell::from(u.name.clone()),
@@ -266,6 +283,10 @@ fn render_units_table(frame: &mut Frame, area: Rect, data: &SkillsScreenData) {
                 Cell::from(u.source.clone()),
                 Cell::from(u.git_ref.clone()),
                 Cell::from(targets),
+                Cell::from(Span::styled(
+                    glyph.to_string(),
+                    Style::default().fg(glyph_color).add_modifier(Modifier::BOLD),
+                )),
             ])
         })
         .collect();
@@ -273,7 +294,9 @@ fn render_units_table(frame: &mut Frame, area: Rect, data: &SkillsScreenData) {
     // Constraint mix: small numeric col fixed, name/source/targets
     // share remaining width via Percentage so narrow terminals don't
     // crop the targets list. Previously all Length-based which
-    // overflowed when total > area.width.
+    // overflowed when total > area.width. The status column is fixed
+    // at 6 cols (room for the glyph + a 2-char count when we expand
+    // later).
     let widths = [
         Constraint::Length(3),
         Constraint::Percentage(22),
@@ -281,6 +304,7 @@ fn render_units_table(frame: &mut Frame, area: Rect, data: &SkillsScreenData) {
         Constraint::Percentage(22),
         Constraint::Length(10),
         Constraint::Percentage(40),
+        Constraint::Length(6),
     ];
     let table = Table::new(rows, widths)
         .header(header)
@@ -1009,6 +1033,25 @@ fn unit_row_from_entry(idx: usize, u: &UnitEntry) -> UnitRow {
         source,
         git_ref,
         targets: u.targets.clone().unwrap_or_default(),
+        declared_uri: u.uri.clone(),
+    }
+}
+
+/// Map a [`DriftStatus`] to the glyph + colour rendered in the Units
+/// panel's `status` column.
+///
+/// `None` (drift not yet computed) renders an ellipsis in muted gray —
+/// the cache is filled asynchronously on screen-enter (bead v12.E.4)
+/// and rows pop into colour as results arrive.
+fn drift_status_glyph(status: Option<DriftStatus>) -> (char, Color) {
+    match status {
+        None => ('…', MUTED_GRAY),
+        Some(DriftStatus::InSync) => ('✓', SELECTION_GREEN),
+        // Yellow-ish warning — picked from the same palette family the
+        // doctor screen uses for "needs attention" rows.
+        Some(DriftStatus::Outdated { .. }) => ('⚠', Color::Rgb(230, 200, 90)),
+        Some(DriftStatus::Ahead { .. }) => ('▲', Color::Rgb(120, 200, 240)),
+        Some(DriftStatus::Diverged { .. }) => ('⟷', Color::Rgb(230, 110, 110)),
     }
 }
 
