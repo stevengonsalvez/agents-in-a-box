@@ -243,6 +243,7 @@ clicks always show fresh data.
 | `reflect:recall` | Query the KB on demand (also runs automatically at SessionStart) |
 | `reflect:ingest` | Bulk-index existing memories from any tool (Claude/Codex/Copilot/Gemini) into the global KB |
 | `reflect:consolidate` | Project-level memory consolidation — merges orphaned worktree memory dirs into a single `.agents/MEMORY.md` |
+| `reflect:errors-ack` | Triage and acknowledge entries in the reflect errors sink (`~/.reflect/errors.json`) — drain poison, parser crashes, ingest failures, hook timeouts. Invoked from the statusline ⚠N badge. |
 | `reflect-status` | Read-only metrics: pending reviews, sidecar coverage, GraphRAG health. Approve/reject low-confidence items. |
 
 ---
