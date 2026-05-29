@@ -4,20 +4,39 @@ title: "Agents (37)"
 
 # Agents (37)
 
-> **Status:** stub. Authoritative content currently lives at `toolkit/packages/agents/`.
-> Migration of that file into this path is gated on Stevie's approval.
-
 37 specialised AI agents organised by domain.
 
-## What this page will contain
+## By category
 
-- Universal (backend-developer · frontend-developer · superstar-engineer)
-- Orchestrators (tech-lead, project-analyst, team-configurator)
-- Engineering (api-architect, security-agent, code-reviewer, …)
-- Design (ui-designer)
-- Swarm (worker · leader)
-- Meta (agentmaker · reflect)
-- Root (distinguished-engineer · web-search-researcher)
+37 agents across 6 nested categories plus 2 root-level agents.
+
+### Universal (3)
+
+`backend-developer` `frontend-developer` `superstar-engineer`
+
+### Orchestrators (3)
+
+`tech-lead-orchestrator` `project-analyst` `team-configurator`
+
+### Engineering (24)
+
+`api-architect` `architecture-reviewer` `code-archaeologist` `code-reviewer` `dev-cleanup-wizard` `devops-automator` `documentation-specialist` `focused-repository-analyzer` `gatekeeper` `integration-tests` `lead-orchestrator` `migration` `performance-optimizer` `planner` `playwright-test-validator` `property-mutation` `release-manager` `security-agent` `service-codegen` `solution-architect` `supabase-security-reviewer` `tailwind-css-expert` `test-analyser` `test-writer-fixer`
+
+### Design (1)
+
+`ui-designer`
+
+### Swarm (2)
+
+`worker` `leader`
+
+### Meta (2)
+
+`agentmaker` `reflect`
+
+### Root (2)
+
+`distinguished-engineer` `web-search-researcher`
 
 ## See also
 
