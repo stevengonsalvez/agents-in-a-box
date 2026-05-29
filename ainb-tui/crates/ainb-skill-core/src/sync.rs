@@ -489,7 +489,15 @@ pub fn apply_to_repo(
     if std::env::var(SYNC_SKIP_PUSH_ENV).ok().as_deref() == Some("1") {
         return Ok(());
     }
-    let out_push = git_capture(cache, &["push", "origin", &source.r#ref])?;
+    // Refuse argv-smuggled refspecs (e.g. `--force` or `--receive-pack=cmd`)
+    // and stop option parsing with `--` before the positional values.
+    if source.r#ref.starts_with('-') {
+        return Err(SyncEngineError::Io(std::io::Error::other(format!(
+            "refusing argv-smuggled ref: `{}`",
+            source.r#ref
+        ))));
+    }
+    let out_push = git_capture(cache, &["push", "--", "origin", &source.r#ref])?;
     require_success(&out_push, "git push")?;
     Ok(())
 }
