@@ -406,6 +406,92 @@ fn derive_repo_label(source: &crate::git::repo_source::RepoSource) -> String {
     }
 }
 
+/// Resolve the repo-picker's local candidate paths.
+///
+/// Prefers the `WorkspaceScanner` cache, filtered to directories that still
+/// exist so a repo deleted or moved since the last scan cannot appear as a
+/// selectable local-scan row. (Favorite and recent rows are built from
+/// separate stores by `build_rows` and are not existence-checked here.)
+/// Falls back to active-session workspace paths when no cache exists yet
+/// (first run) or when every cached entry has been filtered out.
+fn picker_local_paths(
+    cache: Option<crate::git::RepositoryCache>,
+    workspaces: &[crate::models::Workspace],
+) -> Vec<std::path::PathBuf> {
+    let cached_paths: Vec<std::path::PathBuf> = cache
+        .map(|c| {
+            c.repositories
+                .into_iter()
+                .filter(|r| r.path.is_dir())
+                .map(|r| r.path)
+                .collect()
+        })
+        .unwrap_or_default();
+    // An empty filtered cache (no cache file yet, or every cached repo has
+    // been deleted/moved) falls back to active-session workspaces rather than
+    // leaving New Session with no local rows.
+    if cached_paths.is_empty() {
+        workspaces.iter().map(|w| w.path.clone()).collect()
+    } else {
+        cached_paths
+    }
+}
+
+#[cfg(test)]
+mod picker_local_paths_tests {
+    use super::picker_local_paths;
+    use crate::git::workspace_scanner::CachedRepository;
+    use crate::git::RepositoryCache;
+    use crate::models::Workspace;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    fn cache_with(paths: Vec<PathBuf>) -> RepositoryCache {
+        RepositoryCache {
+            version: 1,
+            last_scan: chrono::Utc::now(),
+            scan_paths: Vec::new(),
+            scan_paths_mtime: HashMap::new(),
+            repositories: paths
+                .into_iter()
+                .map(|p| CachedRepository {
+                    name: p
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("repo")
+                        .to_string(),
+                    path: p,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn keeps_only_cache_entries_whose_dir_exists() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let real = dir.path().to_path_buf();
+        let gone = real.join("gone");
+        let out = picker_local_paths(Some(cache_with(vec![real.clone(), gone])), &[]);
+        assert_eq!(out, vec![real]);
+    }
+
+    #[test]
+    fn falls_back_to_workspace_paths_when_cache_absent() {
+        let ws = vec![Workspace::new("w".to_string(), PathBuf::from("/ws/p"))];
+        assert_eq!(picker_local_paths(None, &ws), vec![PathBuf::from("/ws/p")]);
+    }
+
+    #[test]
+    fn falls_back_to_workspace_paths_when_cache_filters_to_empty() {
+        // Cache present but every entry filtered out (here: empty) -> fall back.
+        let ws = vec![Workspace::new("w".to_string(), PathBuf::from("/ws/p"))];
+        assert_eq!(
+            picker_local_paths(Some(cache_with(vec![])), &ws),
+            vec![PathBuf::from("/ws/p")]
+        );
+    }
+}
+
 pub struct EventHandler;
 
 impl EventHandler {
@@ -2125,25 +2211,46 @@ impl EventHandler {
             }
             AppEvent::NewSession => {
                 // Phase 4 (new-session redesign): open the screen-1 unified
-                // picker synchronously. Initialise `pick_repo_state` from disk
-                // (favorites + session-defaults), set `step = PickRepo`, and
-                // route the user to the NEW_SESSION screen.
-                //
-                // Local-repo paths come from the already-loaded `state.workspaces`
-                // (populated async by `load_real_workspaces` on startup).
-                // Calling `WorkspaceScanner::scan()` here would block the event
-                // loop on slow filesystems — Stevie hit a freeze on first `n`
-                // when this was synchronous (2026-05-22).
-                //
-                // Track `previous_screen` so Esc on PickRepo returns to wherever
-                // the user invoked `n` from (Home, Sessions, etc.) rather than
-                // hardcoding HOME.
+                // picker synchronously, then route the user to the
+                // NEW_SESSION screen. Track `previous_screen` so Esc on
+                // PickRepo returns to wherever the user invoked `n` from
+                // (Home, Sessions, etc.) rather than hardcoding HOME.
                 use crate::components::new_session::pick_repo::PickRepoState;
-                let local_paths: Vec<std::path::PathBuf> = state
-                    .workspaces
-                    .iter()
-                    .map(|w| std::path::PathBuf::from(&w.path))
-                    .collect();
+                use crate::git::{RepositoryCache, WorkspaceScanner};
+
+                // Local-repo candidates come from the WorkspaceScanner cache
+                // (a cheap JSON read of
+                // ~/.agents-in-a-box/cache/repositories.json), NOT a
+                // synchronous filesystem walk — reading the cache surfaces
+                // every scanned repo to the fuzzy filter without the
+                // event-loop freeze that motivated dropping the inline scan
+                // here (2026-05-22). `picker_local_paths` also drops entries
+                // whose directory no longer exists, so a repo deleted since
+                // the last scan can't appear as a selectable dead row.
+                let local_paths =
+                    picker_local_paths(RepositoryCache::load(), &state.workspaces);
+
+                // Refresh the cache off the UI thread so a newly-created repo
+                // surfaces on a later open. `scan()` is read-through: instant
+                // while the cache is valid, full walk + atomic persist only
+                // once it goes stale. (A repo created directly under a scan
+                // root bumps that root's mtime and invalidates the cache
+                // immediately; one nested deeper is picked up on the 1h TTL.)
+                // `spawn_blocking` keeps this on tokio's managed blocking pool
+                // — consistent with every other blocking offload, and unlike a
+                // detached `std::thread` it is not torn down mid-write at
+                // shutdown.
+                let scan_paths =
+                    state.app_config.workspace_defaults.workspace_scan_paths.clone();
+                let exclude_paths =
+                    state.app_config.workspace_defaults.exclude_paths.clone();
+                tokio::task::spawn_blocking(move || {
+                    let scanner = WorkspaceScanner::with_additional_paths(scan_paths)
+                        .with_exclude_paths(exclude_paths);
+                    if let Err(err) = scanner.scan() {
+                        tracing::warn!(error = %err, "pick_repo: background repo rescan failed");
+                    }
+                });
                 let ns = crate::app::state::NewSessionState {
                     step: crate::app::state::NewSessionStep::PickRepo,
                     pick_repo_state: Some(PickRepoState::from_disk(&local_paths)),
