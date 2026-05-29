@@ -40,7 +40,8 @@
 //! [`NoOp`]: SyncDirection::NoOp
 //! [`SyncEngine`]: https://github.com/stevengonsalvez/agents-in-a-box
 
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use crate::manifest::{SourceEntry, TargetMapping};
 use crate::mapping::resolve_pair;
@@ -251,4 +252,130 @@ fn decide_both_present(
             "indeterminate: neither comparable shas nor mtimes on both sides",
         ),
     }
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// SyncEngine — TO_HOME path (bead v12.D.2).
+//
+// `plan_sync` decides *what* to do; `apply_to_home` *does* it for the
+// upstream-pull direction. It is deliberately I/O-narrow:
+//
+//   1. Skip when the action's direction is not `ToHome` (so callers can
+//      pass every action through the same loop without pre-filtering).
+//   2. Resolve `(home_rel, repo_rel)` via [`resolve_pair`] — must
+//      succeed (the action would never have been planned otherwise; we
+//      re-check so misuse can't silently write to the wrong place).
+//   3. Ask the [`ContentFetcher`] for the bytes at `repo_rel`@ref.
+//   4. Write atomically (tmp + rename) under `tool_home/home_rel`,
+//      creating parents as needed. Idempotent: re-applying the same
+//      action with the same fetched bytes leaves the file at byte-for-
+//      byte equal content.
+//
+// The fetcher dependency stays local to `sync` (rather than reusing
+// `ainb-fetch::Fetcher`) so `ainb-skill-core` does not depend on
+// `ainb-fetch`. The CLI / TUI layer wraps a real fetcher into this
+// trait at call time.
+// ──────────────────────────────────────────────────────────────────────
+
+/// Errors raised by the sync executors.
+#[derive(Debug, thiserror::Error)]
+pub enum SyncEngineError {
+    /// Could not resolve the unit's path under the source's effective
+    /// folder layout — the caller's plan must have desynced from the
+    /// layout. Carries the unit-relative path that failed.
+    #[error("no target_layout mapping covers `{0}`")]
+    LayoutNoMatch(String),
+
+    /// Forwarded from the [`ContentFetcher`].
+    #[error("fetcher error: {0}")]
+    Fetch(#[from] FetchError),
+
+    /// Filesystem I/O while writing the home file.
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+}
+
+/// Errors raised by a [`ContentFetcher`] implementation.
+#[derive(Debug, thiserror::Error)]
+pub enum FetchError {
+    /// Generic, formatted upstream error. Implementations format their
+    /// own context (URL, ref, status); the executor surfaces it through
+    /// `SyncEngineError::Fetch`.
+    #[error("{0}")]
+    Other(String),
+}
+
+/// Minimal byte-level fetch contract used by [`apply_to_home`].
+///
+/// Implementations resolve `(ref_name, repo_path)` to the corresponding
+/// file content. Path is repo-relative (forward-slash); ref is a git
+/// branch/tag/SHA as it appears in the source's manifest entry.
+pub trait ContentFetcher {
+    fn fetch_content(
+        &self,
+        ref_name: &str,
+        repo_path: &Path,
+    ) -> std::result::Result<Vec<u8>, FetchError>;
+}
+
+/// Apply one [`SyncDirection::ToHome`] action: write the upstream file
+/// bytes to the mapped home path under `tool_home`.
+///
+/// Non-`ToHome` actions short-circuit to `Ok(())` so callers can sweep
+/// a full plan through one loop without dispatching on direction.
+///
+/// Idempotent: re-running with an unchanged upstream leaves the home
+/// file byte-for-byte identical. Writes are atomic (write `*.tmp` next
+/// to the target, rename into place) so an interrupted apply never
+/// leaves a half-written home file.
+///
+/// `source` supplies the effective `target_layout` (via [`resolve_pair`])
+/// and the git `ref` to pass into the fetcher. `unit_path` is the
+/// repo-relative path of the unit being synced; the caller usually
+/// gets it from the [`UnitSnapshot`] that fed `plan_sync`.
+pub fn apply_to_home(
+    action: &SyncAction,
+    tool_home: &Path,
+    source: &SourceEntry,
+    unit_path: &Path,
+    fetcher: &dyn ContentFetcher,
+) -> std::result::Result<(), SyncEngineError> {
+    if action.direction != SyncDirection::ToHome {
+        return Ok(());
+    }
+
+    let (home_rel, repo_rel) = resolve_pair(source, unit_path)
+        .ok_or_else(|| SyncEngineError::LayoutNoMatch(path_lossy(unit_path)))?;
+
+    let bytes = fetcher.fetch_content(&source.r#ref, &repo_rel)?;
+    let target = tool_home.join(&home_rel);
+    write_atomic(&target, &bytes)?;
+    Ok(())
+}
+
+/// Display-friendly `Path` → `String` that prefers forward-slash for
+/// portability inside error messages.
+fn path_lossy(p: &Path) -> String {
+    p.to_string_lossy().replace('\\', "/")
+}
+
+/// Write `bytes` to `target` atomically: create parents, write to a
+/// sibling `*.tmp`, fsync, then rename into place. Idempotent for
+/// identical inputs.
+fn write_atomic(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = target.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    let mut tmp = target.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    {
+        let mut f = fs::File::create(&tmp)?;
+        use std::io::Write;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+    }
+    fs::rename(&tmp, target)
 }

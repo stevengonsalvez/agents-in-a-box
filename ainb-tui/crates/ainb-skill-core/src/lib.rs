@@ -27,5 +27,8 @@ pub use mapping::{bootstrap_default_mappings, resolve_pair, BOOTSTRAP_DEFAULT_MA
 pub use paths::{
     default_ainb_home, default_cache_dir, default_lockfile_path, default_manifest_path,
 };
-pub use sync::{plan_sync, SideSnapshot, SyncAction, SyncDirection, UnitSnapshot};
+pub use sync::{
+    apply_to_home, plan_sync, ContentFetcher, FetchError as SyncFetchError, SideSnapshot,
+    SyncAction, SyncDirection, SyncEngineError, UnitSnapshot,
+};
 pub use uri::{MarketplaceUri, SourceType, Uri};
