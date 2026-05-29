@@ -40,9 +40,12 @@ flowchart TD
         SS["reflect-status"]
     end
 
-    subgraph Hooks["Lifecycle Hooks"]
-        SSH["SessionStart\nsession_start_recall.py"]
-        PCH["PreCompact\nprecompact_reflect.py"]
+    subgraph Hooks["Lifecycle Hooks (plugin.json)"]
+        SSH["SessionStart\nsession_start_recall.py\n+ reflect-drain-bg.sh"]
+        UPH["UserPromptSubmit\nuser_prompt_submit_recall.py"]
+        PTH["PostToolUse\nposttooluse_minilearning.py"]
+        STH["Stop\nstop_reflect.py"]
+        PCH["PreCompact\nprecompact_reflect.py --auto --verbose"]
     end
 
     subgraph RecallPipeline["Recall Pipeline (recall.py)"]
@@ -98,8 +101,12 @@ flowchart TD
     XA --> Skills
     PA --> Skills
     CC -- "SessionStart" --> SSH
+    CC -- "UserPromptSubmit" --> UPH
+    CC -- "PostToolUse" --> PTH
+    CC -- "Stop" --> STH
     CC -- "PreCompact" --> PCH
     SSH --> RecallPipeline
+    UPH --> RecallPipeline
     RecallPipeline --> KB
     CapturePipeline --> KB
     HIGH --> KB
