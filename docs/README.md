@@ -96,8 +96,9 @@ The pre-restructure layout had docs scattered across three places. Here's the ma
 | `docs/plugins/changelog.md` | `docs/plugin-spec/CHANGELOG.md` |
 | `docs/knowledge/overview.md` | `docs/how-reflection-works.md` |
 
-Until the migration is approved, those legacy paths remain authoritative. Files
-in this new tree marked "stub — pulls from \<legacy path\>" are placeholders.
+The migration is complete: every page in this tree is now authoritative and the
+legacy paths have been removed. The table above is retained only to document
+provenance.
 
 ---
 
