@@ -561,47 +561,32 @@ Without this section, all dashboard commands exit 0 with "dashboard not configur
 
 ### `~/.claude/settings.json` — hooks (managed by Claude adapter)
 
-The Claude adapter writes and later removes these entries:
+As a Claude Code plugin, reflect declares its hooks in `.claude-plugin/plugin.json`; installing the plugin auto-wires all five lifecycle hooks (no manual settings.json editing required). The wired entries are:
 
 ```json
 {
   "hooks": {
-    "SessionStart": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "uv run /Users/<you>/.claude/skills/recall/hooks/session_start_recall.py"
-          }
-        ]
-      }
-    ]
+    "SessionStart":    [{ "matcher": "", "hooks": [
+      { "type": "command", "command": "uv run ${CLAUDE_PLUGIN_ROOT}/skills/recall/hooks/session_start_recall.py" },
+      { "type": "command", "command": "(nohup ${CLAUDE_PLUGIN_ROOT}/hooks/reflect-drain-bg.sh >/dev/null 2>&1 &) >/dev/null 2>&1", "timeout": 5 }
+    ]}],
+    "UserPromptSubmit":[{ "matcher": "", "hooks": [
+      { "type": "command", "command": "uv run ${CLAUDE_PLUGIN_ROOT}/skills/recall/hooks/user_prompt_submit_recall.py" }
+    ]}],
+    "PostToolUse":     [{ "matcher": "", "hooks": [
+      { "type": "command", "command": "uv run ${CLAUDE_PLUGIN_ROOT}/hooks/posttooluse_minilearning.py" }
+    ]}],
+    "Stop":            [{ "matcher": "", "hooks": [
+      { "type": "command", "command": "uv run ${CLAUDE_PLUGIN_ROOT}/hooks/stop_reflect.py" }
+    ]}],
+    "PreCompact":      [{ "matcher": "", "hooks": [
+      { "type": "command", "command": "uv run ${CLAUDE_PLUGIN_ROOT}/hooks/precompact_reflect.py --auto --verbose" }
+    ]}]
   }
 }
 ```
 
-The PreCompact hook is NOT auto-installed. Users copy it from `hooks/settings-snippet.json` manually:
-
-```json
-{
-  "hooks": {
-    "PreCompact": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "uv run /Users/<you>/.claude/skills/reflect/hooks/precompact_reflect.py --remind"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-Switch `--remind` to `--auto` after running `/reflect on` to enable automatic episode creation.
+The PreCompact hook IS auto-installed via `plugin.json` and runs `precompact_reflect.py --auto --verbose`, so PreCompact reflection capture is on by default — no manual settings.json edit is needed. The standalone snippet in `hooks/settings-snippet.json` is only a reference for users hand-wiring the hook outside the plugin install path.
 
 ### `reflect.toml` — plugin defaults (toolkit-bundled, layer 1)
 
