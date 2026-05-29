@@ -25,10 +25,12 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use ainb_adapters_source::pick_adapter;
 use ainb_adapters_tool::{
-    AcceptDecision, ToolAdapter, adapter_by_name, all_adapters, plan::InstallPlan, read_root_for,
+    AcceptDecision, ToolAdapter, adapter_by_name, all_adapters,
+    install_root_for, plan::{InstallPlan, PlanOp}, read_root_for,
 };
 use ainb_skill_core::lockfile::{LockedUnit, Lockfile};
-use ainb_skill_core::manifest::Manifest;
+use ainb_skill_core::manifest::{Manifest, SourceEntry};
+use ainb_skill_core::mapping::resolve_pair;
 use ainb_skill_core::paths::{cache_dir_in, lockfile_path_in, manifest_path_in};
 use ainb_skill_core::uri::Uri;
 use ainb_skill_core::{DeployedRef, UnitKind};
@@ -117,6 +119,18 @@ fn install(home: &Path, args: InstallArgs, out: &mut dyn io::Write) -> Result<()
                 let plan = tool
                     .plan_install(&resolved)
                     .with_context(|| format!("planning {} install", tool.name()))?;
+                // Remap every dst via the source's target_layout (or
+                // the bootstrap defaults when it's empty). This is what
+                // makes `target_layout` actually move files — the
+                // adapter's `plan_install` still emits convention-layout
+                // paths; we rewrite them here using `resolve_pair`. See
+                // bead v12.C.4.
+                let plan = remap_plan_via_target_layout(
+                    source,
+                    tool.name(),
+                    &install_root_for(tool.name()),
+                    plan,
+                );
                 plans.push((tool.name().to_string(), plan));
             }
             AcceptDecision::No { reason } => {
@@ -766,6 +780,143 @@ fn scope_to_source_names(
         }
     }
     bail!("`{input}` does not resolve to a known unit or source");
+}
+
+/// Rewrite every `dst` in `plan` through the source's `target_layout`
+/// (or [`BOOTSTRAP_DEFAULT_MAPPINGS`] when it is empty) — bead v12.C.4.
+///
+/// The tool adapter's `plan_install` emits convention-layout paths
+/// (`<install_root>/<rel>` where `rel` is the unit's repo-relative
+/// path). When the source declares a custom `target_layout`, those
+/// destinations must move. We re-resolve each rel via [`resolve_pair`]
+/// and reroot it under `install_root`, stripping the leading
+/// `.<tool>/` segment from the layout's `home` since `install_root_for`
+/// already points at the tool home (it embeds `.claude` / `.codex`).
+///
+/// Paths that don't resolve through the layout (e.g. files outside any
+/// declared glob) are left in their original convention location —
+/// preserving today's behavior for legacy sources without a layout.
+fn remap_plan_via_target_layout(
+    source: &SourceEntry,
+    tool_name: &str,
+    install_root: &Path,
+    mut plan: InstallPlan,
+) -> InstallPlan {
+    // Remap every op's dst.
+    for op in plan.ops.iter_mut() {
+        let dst_ptr: &mut PathBuf = match op {
+            PlanOp::Create { dst, .. }
+            | PlanOp::Update { dst, .. }
+            | PlanOp::Delete { dst } => dst,
+        };
+        if let Some(new_dst) = remap_dst(source, tool_name, install_root, dst_ptr) {
+            *dst_ptr = new_dst;
+        }
+    }
+
+    // Remap unit_install_path. It points at the unit directory under
+    // the install root (`<install_root>/<descriptor.path>`). We resolve
+    // the directory rel through the same layout — most globs are file-
+    // scoped (`skills/*/SKILL.md`) and won't match a directory, so we
+    // also accept any first-file-mapped path's parent as a fallback.
+    if let Some(new_unit) = remap_unit_install_path(source, tool_name, install_root, &plan) {
+        plan.unit_install_path = new_unit;
+    }
+
+    plan
+}
+
+/// Map one absolute `dst` (under `install_root`) through the source's
+/// layout. Returns `None` when the rel doesn't resolve — the caller
+/// keeps the original dst.
+fn remap_dst(
+    source: &SourceEntry,
+    tool_name: &str,
+    install_root: &Path,
+    dst: &Path,
+) -> Option<PathBuf> {
+    let rel = dst.strip_prefix(install_root).ok()?;
+    let (home_rel, _repo_rel) = resolve_pair(source, rel)?;
+    let stripped = strip_tool_dotdir(tool_name, &home_rel);
+    Some(install_root.join(&stripped))
+}
+
+/// Strip a leading dot-prefixed segment (`.<X>/`) from `home_rel`
+/// since `install_root_for(tool)` already points at the tool home.
+///
+/// The layout's `home` paths conventionally start with the tool's
+/// dotdir (`.claude/...`, `.codex/...`) so a manifest authored with
+/// "home is relative to the user `$HOME`" semantics still works. But
+/// `install_root_for` already resolves *to* the tool home (it embeds
+/// `.claude` / `.codex` for real-home mode, or points at the sandbox
+/// for `AINB_TOOL_HOME_<TOOL>`). Joining the layout's `home` onto it
+/// would double-count the dotdir.
+///
+/// Both the source's own explicit `target_layout` AND the bootstrap
+/// defaults — which are always rooted at `.claude/...` regardless of
+/// the active tool (they're claude-flavored, see
+/// `BOOTSTRAP_DEFAULT_MAPPINGS` in `ainb-skill-core::mapping`) — go
+/// through this strip. So a `.claude/skills` default applied to a
+/// non-claude tool (amazonq, gemini, …) ends up at the tool's
+/// `<install_root>/skills/...` rather than the absurd
+/// `<install_root>/.claude/skills/...`.
+///
+/// We strip the **first** segment when it begins with `.`. Examples:
+///   `.claude/skills/foo/SKILL.md` → `skills/foo/SKILL.md`
+///   `.codex/agents/x.md`          → `agents/x.md`
+///   `agents/x.md`                 → `agents/x.md` (no-op)
+///
+/// The `_tool_name` arg is kept for clarity / future per-tool needs
+/// (e.g. `claude-desktop` whose real-home root isn't a dotdir).
+fn strip_tool_dotdir(_tool_name: &str, home_rel: &Path) -> PathBuf {
+    let mut comps = home_rel.components();
+    if let Some(std::path::Component::Normal(os)) = comps.next() {
+        if let Some(s) = os.to_str() {
+            if s.starts_with('.') && s.len() > 1 {
+                return comps.as_path().to_path_buf();
+            }
+        }
+    }
+    home_rel.to_path_buf()
+}
+
+/// Derive the unit's install-path (the directory the lockfile will
+/// store as `deployed.path`) after the layout remap.
+///
+/// Strategy: resolve any one of the unit's files through the layout
+/// and strip back the suffix that lives *inside* the unit. That suffix
+/// is the original file's path relative to `descriptor.path` — the
+/// same suffix the new dst must end with. What remains is the new
+/// unit directory.
+fn remap_unit_install_path(
+    source: &SourceEntry,
+    tool_name: &str,
+    install_root: &Path,
+    plan: &InstallPlan,
+) -> Option<PathBuf> {
+    let orig_unit_rel = plan.unit_install_path.strip_prefix(install_root).ok()?;
+    // Pick the first op (any file under the unit will do).
+    let op = plan.ops.first()?;
+    let orig_file_abs = op.destination();
+    let orig_file_rel = orig_file_abs.strip_prefix(install_root).ok()?;
+    // The file's suffix inside the unit directory.
+    let suffix_within_unit = orig_file_rel.strip_prefix(orig_unit_rel).ok()?;
+
+    let (home_rel, _) = resolve_pair(source, orig_file_rel)?;
+    let mapped_file_rel = strip_tool_dotdir(tool_name, &home_rel);
+
+    // Drop the in-unit suffix off the mapped path's tail to recover the
+    // mapped unit directory. `Path::strip_prefix` only does *leading*
+    // stripping, so we do it by component count.
+    let n = suffix_within_unit.components().count();
+    let mut comps: Vec<_> = mapped_file_rel.components().collect();
+    if comps.len() < n {
+        return None;
+    }
+    comps.truncate(comps.len() - n);
+    let mapped_unit_rel: PathBuf = comps.iter().collect();
+
+    Some(install_root.join(mapped_unit_rel))
 }
 
 /// Render a short SHA prefix for human-readable drift reports. Falls
