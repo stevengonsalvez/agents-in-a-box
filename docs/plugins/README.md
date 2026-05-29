@@ -19,7 +19,7 @@ What the rest of this directory documents.
 - **Runtime:** the `ainb` TUI spawns each plugin as a native child process and talks JSON-RPC 2.0 over framed stdio
 - **What they can do:** own a TUI screen, claim a CLI subcommand tree, publish/subscribe to snapshot topics, paint statusline segments
 - **Capability model:** deny-by-default; manifest declares grants for filesystem, network, subprocess, event bus
-- **Reference plugins:** `burndown` (analytics) + `session-reader` (data backend) — both ship in-tree
+- **Reference plugins:** `burndown` (analytics), `notifyd` (notifications), and `session-reader` (data backend) — all ship in-tree
 
 If you want to **add a screen / CLI / dashboard to the TUI**, you want this kind of plugin. Continue to:
 - [overview.md](overview.md) — what a v2 plugin is, conceptually
