@@ -52,7 +52,11 @@ EXAMPLES:
 pub fn root_clap_command() -> Command {
     Command::new("ainb")
         .author(env!("CARGO_PKG_AUTHORS"))
+        // `-V` shows the bare semver; `--version` shows build identity
+        // (commit + date + origin) stamped by build.rs so a binary is traceable
+        // to a commit — the plain number is stale between releases.
         .version(env!("CARGO_PKG_VERSION"))
+        .long_version(env!("AINB_VERSION_LONG"))
         .about("AI agents in a box - spawn and manage AI coding sessions")
         .after_help(EXAMPLES)
         .arg(
