@@ -404,7 +404,9 @@ agents-in-a-box/
 │   └── pyproject.toml          #   Workspace member
 │
 ├── plugins/                    # Claude Code plugins (root-level, sibling to reflect-kb/)
-│   └── reflect/                #   `reflect@agents-in-a-box` plugin — skills, hooks, adapters
+│   ├── reflect/                #   `reflect@agents-in-a-box` plugin — skills, hooks, adapters
+│   ├── ainb-fleet/             #   Backs the `ainb fleet` CLI (standup/broadcast/sequence/needs/daemon)
+│   └── ainb-hooks/             #   ainb lifecycle hooks
 │
 ├── toolkit/                    # Portable AI agent toolkit (internal agent infrastructure)
 │   ├── packages/
