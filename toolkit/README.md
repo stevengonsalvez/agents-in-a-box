@@ -237,6 +237,7 @@ Frontmatter-native tools (Cursor, AmazonQ, Claude Code) use the frontmatter dire
 ## References
 
 - **Manifest**: [`external-dependencies.yaml`](external-dependencies.yaml)
+- **Internal catalog**: [`catalog.yaml`](catalog.yaml) — auto-generated filesystem-derived manifest of every toolkit-owned skill, plugin, agent, workflow, and utility (the "internal" set; anything installed but not listed here is external). Regenerate with `bash toolkit/bin/generate-catalog.sh`.
 - **Bootstrap source**: [`bootstrap.js`](bootstrap.js)
 - **Parity regression test**: [`test-bootstrap-parity.sh`](test-bootstrap-parity.sh)
 - **Main project README**: [`../README.md`](../README.md)
