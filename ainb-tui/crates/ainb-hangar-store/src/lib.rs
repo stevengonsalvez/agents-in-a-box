@@ -25,6 +25,18 @@ pub use store::Store;
 /// [`repo::task`].
 pub mod repo;
 
+/// Task-FSM services: clock-aware lifecycle transitions (claim, start,
+/// complete, fail, cancel) over the [`service::finalize`] idempotent primitive.
+pub mod service;
+
+/// The shared idempotent-finalize primitive, re-exported at the crate root.
+///
+/// Promoted out of [`service::finalize`] so the P1.4 retry sweeper (and any
+/// future finalizer) can reuse the exact same 0-row-UPDATE → re-read →
+/// success-or-mismatch algorithm the four P1.3 services share. Mirrors Multica
+/// `task.go:1010`.
+pub use service::finalize::{finalize_idempotent as idempotent_finalize, FinalizeError, FinalizeOutcome};
+
 /// Test-only helpers (isolated `$HOME`, `ENV_LOCK`) for driving [`Store`].
 ///
 /// Available in this crate's own tests and to any downstream crate that enables

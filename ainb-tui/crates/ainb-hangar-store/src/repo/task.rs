@@ -79,8 +79,13 @@ pub struct Task {
     pub parent_task_id: Option<String>,
     /// Last failure reason, or `None` if not failed.
     pub failure_reason: Option<String>,
-    /// Creation timestamp (epoch milliseconds).
+    /// Creation timestamp (epoch milliseconds) — the queued-at time.
     pub created_at: i64,
+    /// When the task was claimed (`queued -> dispatched`), epoch milliseconds,
+    /// or `None` while still `queued`. Distinct from [`Task::created_at`]
+    /// (queued-at) and [`Task::started_at`] (run-start); the P1.4 sweepers key
+    /// the reclaim window and dispatch TTL off it.
+    pub dispatched_at: Option<i64>,
     /// When the run started (epoch milliseconds), or `None` if not started.
     pub started_at: Option<i64>,
     /// When the run finished (epoch milliseconds), or `None` if not finished.
@@ -156,7 +161,7 @@ impl TaskRepo {
 /// reads them. Shared by every `SELECT` so the read shape stays in one place.
 const COLUMNS: &str = "id, workspace_id, runtime_id, agent_id, issue_id, status, result, \
      session_id, work_dir, attempt, max_attempts, parent_task_id, failure_reason, \
-     created_at, started_at, finished_at";
+     created_at, dispatched_at, started_at, finished_at";
 
 /// Map one raw `agent_task_queue` row into a [`Task`].
 fn task_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Task, sqlx::Error> {
@@ -175,6 +180,7 @@ fn task_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Task, sqlx::Error> {
         parent_task_id: row.try_get("parent_task_id")?,
         failure_reason: row.try_get("failure_reason")?,
         created_at: row.try_get("created_at")?,
+        dispatched_at: row.try_get("dispatched_at")?,
         started_at: row.try_get("started_at")?,
         finished_at: row.try_get("finished_at")?,
     })

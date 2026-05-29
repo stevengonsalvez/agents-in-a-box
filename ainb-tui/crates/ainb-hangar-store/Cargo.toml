@@ -26,15 +26,19 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 dirs = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 # Optional: only pulled in when `test-support` is enabled (it backs the
 # isolated-home tempdir). Kept out of normal builds of the store crate.
 tempfile = { workspace = true, optional = true }
 
 [features]
-# Exposes `test_support` (isolated `$HOME` + `ENV_LOCK`). Enabled automatically
-# for this crate's own integration tests via the self dev-dependency below, and
-# opt-in for downstream crates (e.g. the daemon's boot tripwire).
-test-support = ["dep:tempfile"]
+# Exposes `test_support` (isolated `$HOME` + `ENV_LOCK`) and pulls in the core
+# crate's deterministic test doubles (`FixedClock`/`FixedIdGen`) so integration
+# tests can inject a frozen clock. Enabled automatically for this crate's own
+# integration tests via the self dev-dependency below, and opt-in for downstream
+# crates (e.g. the daemon's boot tripwire).
+test-support = ["dep:tempfile", "ainb-hangar-core/test-support"]
 
 [dev-dependencies]
 tempfile = { workspace = true }
