@@ -114,9 +114,9 @@ URL). See the bootstrap's `installReflectKb()` function for details.
 </details>
 
 <details>
-<summary><b>Security & Observability</b> (4)</summary>
+<summary><b>Security & Observability</b> (6)</summary>
 
-`security-audit` · `security-scan` · `sentry-cli` · `posthog-replay-analysis`
+`security-audit` · `security-scan` · `sentry-cli` · `posthog-replay-analysis` · `claude-langfuse` · `langfuse-setup`
 </details>
 
 <details>
