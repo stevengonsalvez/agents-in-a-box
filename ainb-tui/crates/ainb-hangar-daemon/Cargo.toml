@@ -9,6 +9,13 @@ description = "Hangar control-plane daemon: boots the persistence layer and idle
 categories = ["command-line-utilities"]
 keywords = ["ainb", "hangar", "daemon"]
 
+[features]
+# Exposes the `bd` adapter test fixtures (`beads_adapter::fake_bd`) to
+# downstream crates' integration tests (P2.3+ reuse the fake-bd script writer).
+# Within this crate they are also available under `#[cfg(test)]` without the
+# feature.
+test-support = []
+
 [[bin]]
 name = "ainb-hangar-daemon"
 path = "src/main.rs"
@@ -37,6 +44,7 @@ clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
+thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # Home-directory resolution for the per-task env tree root (mirrors the store's
@@ -47,11 +55,30 @@ dirs = { workspace = true }
 # `sh -c sleep …` grandchild), closing inherited pipes so the stdout reader
 # EOFs immediately instead of blocking on the orphaned grandchild.
 nix = { workspace = true, features = ["signal"] }
+# Resolves the `bd` binary on PATH (or validates an explicit path) so the
+# adapter can fail fast with `BdNotInstalled` instead of an opaque exec error
+# when the issue tracker is absent. Used by `BdClient::new`.
+which = { workspace = true }
+chrono = { workspace = true }
+# CancellationToken for cooperative shutdown of the inbound beads poll loop
+# (P2.4): the loop selects on `cancel.cancelled()` so the daemon's supervisor can
+# stop it within one tick.
+tokio-util = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = "2"
 serde_json = { workspace = true }
 tempfile = { workspace = true }
+# The inbound-sync poll-loop tests (P2.4) drive `run_inbound_loop` with a
+# `CancellationToken` directly, so the integration suite needs tokio-util too.
+tokio-util = { workspace = true }
+# Self-dependency to activate this crate's own `test-support` feature for its
+# integration tests: integration tests compile against the lib's default
+# feature set and do NOT inherit `#[cfg(test)]`, so the shared `beads_adapter::
+# fake_bd` fixtures are only reachable when `test-support` is turned on here.
+# This lets the integration suite consume the one canonical fake-bd source of
+# truth instead of duplicating the script writer (P2.2 REFACTOR intent).
+ainb-hangar-daemon = { path = ".", features = ["test-support"] }
 sqlx = { version = "0.8", default-features = false, features = [
     "runtime-tokio-rustls",
     "sqlite",

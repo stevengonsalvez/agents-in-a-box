@@ -5,8 +5,10 @@
 //! (handled by `clap`) and `--once` (boot, log ready, exit 0). Without `--once`
 //! the daemon idles until interrupted.
 
+use ainb_hangar_daemon::beads_sync::reconcile;
+use ainb_hangar_daemon::beads_sync::reconcile::cli::{BeadsCli, BeadsCommand};
 use ainb_hangar_daemon::boot;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 /// Hangar control-plane daemon.
 #[derive(Parser, Debug)]
@@ -20,6 +22,18 @@ struct Args {
     /// a shutdown signal.
     #[arg(long)]
     once: bool,
+
+    /// Optional subcommand. When omitted the daemon boots and idles (P0/P1);
+    /// `beads reconcile` runs the on-demand Hangar ↔ bd drift repair (P2.5).
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+/// Top-level daemon subcommands.
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Sync Hangar issues with the beads (`bd`) tracker.
+    Beads(BeadsCli),
 }
 
 #[tokio::main]
@@ -32,5 +46,11 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
-    boot(args.once).await
+    match args.command {
+        Some(Command::Beads(cli)) => {
+            let BeadsCommand::Reconcile(reconcile_args) = cli.command;
+            reconcile::dispatch(&reconcile_args).await
+        }
+        None => boot(args.once).await,
+    }
 }

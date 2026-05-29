@@ -32,6 +32,10 @@ repository = "https://github.com/stevengonsalvez/agents-in-a-box"
 [workspace.dependencies]
 # Core
 tokio = { version = "1.36", features = ["full"] }
+# CancellationToken for cooperative shutdown of the daemon's poll loops
+# (ainb-hangar-daemon inbound beads sync, P2.4). The default `sync` feature
+# carries `CancellationToken`.
+tokio-util = "0.7"
 ratatui = "0.26"
 crossterm = "0.27"
 

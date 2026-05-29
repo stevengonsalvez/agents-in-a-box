@@ -13,6 +13,19 @@ use ainb_hangar_store::Store;
 
 use crate::run_loop::{run, DaemonConfig};
 
+/// Beads CLI adapter — shells out to `bd` and parses `--json` (P2.2).
+///
+/// [`beads_adapter::BdClient`] is the sync layer's gateway to Stevie's existing
+/// issue tracker: `create` / `close` / `list` / `show`, each passing `BEADS_DIR`
+/// explicitly and serialised by an O_EXCL pidfile lock.
+pub mod beads_adapter;
+/// Hangar ↔ Beads sync (P2.3): the outbound mirror of Hangar issue lifecycle
+/// changes into `bd`, recorded in `beads_mapping`.
+///
+/// [`beads_sync::OutboundSync`] is source-gated (swarm issues skip), idempotent
+/// (replays short-circuit via the mapping repo), and non-fatal (a `bd` failure
+/// surfaces a [`beads_sync::SyncError`] without corrupting Hangar state).
+pub mod beads_sync;
 /// Per-task execution-environment layout: workdir/output/logs + `.gc_meta.json`
 /// (P1.6).
 pub mod execenv;
