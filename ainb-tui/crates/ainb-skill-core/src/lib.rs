@@ -10,6 +10,7 @@ pub mod lockfile;
 pub mod manifest;
 pub mod mapping;
 pub mod paths;
+pub mod sync;
 pub mod uri;
 
 pub use error::CoreError;
@@ -24,4 +25,5 @@ pub use mapping::{bootstrap_default_mappings, resolve_pair, BOOTSTRAP_DEFAULT_MA
 pub use paths::{
     default_ainb_home, default_cache_dir, default_lockfile_path, default_manifest_path,
 };
+pub use sync::{plan_sync, SideSnapshot, SyncAction, SyncDirection, UnitSnapshot};
 pub use uri::{MarketplaceUri, SourceType, Uri};
