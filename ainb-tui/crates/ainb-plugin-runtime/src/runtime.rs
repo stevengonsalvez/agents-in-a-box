@@ -10,11 +10,14 @@ use parking_lot::RwLock;
 use tokio::runtime::Runtime as TokioRuntime;
 
 use crate::error::RuntimeError;
+use crate::event_stream::EventStreamRegistry;
 use crate::handle::{HandleInner, RuntimeHandle};
+use crate::managed_subprocess::ManagedSubprocessRegistry;
+use crate::unix_socket::UnixSocketRegistry;
 use crate::plugin_task::{self, DirtyMap, Inbox, InboxMap, KeyInbox, RenderCache};
 use crate::registry::{self, ChannelRegistry, RegisteredPlugin};
 use crate::snapshot::SnapshotStore;
-use crate::types::{LifecycleState, PluginId, RuntimeConfig};
+use crate::types::{LifecycleState, LogTap, PluginId, RuntimeConfig};
 
 /// Per-plugin handle bundle stored inside the runtime's plugin map.
 pub(crate) struct PluginHandle {
@@ -66,6 +69,21 @@ pub struct Runtime {
     /// `plugins`; shared with plugin tasks so plugin→plugin publishes
     /// can mark subscribers dirty without taking a `PluginHandle` dep.
     dirty: DirtyMap,
+    /// Cap-gated event-stream registry. Shared with every plugin task
+    /// (for subscribe / cancel / teardown) and the handle (for
+    /// `publish_stream_event` fan-out).
+    event_streams: EventStreamRegistry,
+    /// Cap-gated managed-subprocess registry. Shared with every plugin
+    /// task (spawn + per-plugin reap) and drained on `Runtime` drop so no
+    /// host-supervised child outlives the host.
+    managed_subprocess: ManagedSubprocessRegistry,
+    /// Cap-gated unix-socket dial registry. Shared with every plugin task
+    /// (dial + per-plugin teardown) so no `socket:<id>` frame outlives the
+    /// plugin that dialled it.
+    unix_sockets: UnixSocketRegistry,
+    /// Optional host-side log tap. Empty in production; tests install a
+    /// collector via [`RuntimeHandle::install_log_tap`].
+    log_tap: LogTap,
     /// Tunables.
     config: RuntimeConfig,
 }
@@ -89,6 +107,10 @@ impl Runtime {
             Arc::new(RwLock::new(HashMap::new()));
         let inboxes: InboxMap = Arc::new(parking_lot::RwLock::new(HashMap::new()));
         let dirty: DirtyMap = Arc::new(parking_lot::RwLock::new(HashMap::new()));
+        let event_streams = EventStreamRegistry::new();
+        let managed_subprocess = ManagedSubprocessRegistry::new();
+        let unix_sockets = UnixSocketRegistry::new();
+        let log_tap: LogTap = Arc::new(parking_lot::RwLock::new(None));
         let handle = RuntimeHandle::new(HandleInner {
             tokio: tokio.handle().clone(),
             snapshots: snapshots.clone(),
@@ -96,6 +118,10 @@ impl Runtime {
             plugins: plugins.clone(),
             inboxes: inboxes.clone(),
             dirty: dirty.clone(),
+            event_streams: event_streams.clone(),
+            managed_subprocess: managed_subprocess.clone(),
+            unix_sockets: unix_sockets.clone(),
+            log_tap: log_tap.clone(),
             config,
             key_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         });
@@ -107,6 +133,10 @@ impl Runtime {
                 plugins,
                 inboxes,
                 dirty,
+                event_streams,
+                managed_subprocess,
+                unix_sockets,
+                log_tap,
                 config,
             },
             handle,
@@ -143,6 +173,12 @@ impl Runtime {
         for (_, h) in self.plugins.read().iter() {
             let _ = h.inbox.send(crate::plugin_task::Command::Shutdown);
         }
+        // Reap every managed child synchronously. Per-plugin tasks also
+        // reap their own children on `Command::Shutdown`, but that runs
+        // asynchronously on the tokio runtime we're about to tear down —
+        // draining here guarantees no host-supervised process outlives
+        // the host even if the runtime shuts down before the tasks drain.
+        self.managed_subprocess.kill_all();
         // Take the runtime out so `Drop` (which runs right after this
         // function returns) sees `None` and skips the redundant
         // `shutdown_background` call. Without `take()` here, `Drop`
@@ -183,6 +219,10 @@ impl Runtime {
             self.snapshots.clone(),
             self.inboxes.clone(),
             self.dirty.clone(),
+            self.event_streams.clone(),
+            self.managed_subprocess.clone(),
+            self.unix_sockets.clone(),
+            self.log_tap.clone(),
             self.config,
             self.tokio
                 .as_ref()
@@ -231,6 +271,9 @@ impl Drop for Runtime {
         for (_, h) in self.plugins.read().iter() {
             let _ = h.inbox.send(crate::plugin_task::Command::Shutdown);
         }
+        // Backstop reap: kill every managed child before the runtime
+        // goes away. See `Self::shutdown` for the full rationale.
+        self.managed_subprocess.kill_all();
         // Tear down the tokio runtime non-blockingly so this is safe
         // to call from inside another runtime's task (e.g. when
         // `AppState` drops at the end of `#[tokio::main]`).

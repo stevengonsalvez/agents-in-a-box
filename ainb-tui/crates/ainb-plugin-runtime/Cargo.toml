@@ -24,6 +24,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 bytes = { version = "1.6", features = ["serde"] }
 parking_lot = "0.12"
+ulid = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
