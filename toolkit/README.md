@@ -108,9 +108,9 @@ URL). See the bootstrap's `installReflectKb()` function for details.
 </details>
 
 <details>
-<summary><b>Dev infra & tooling</b> (10)</summary>
+<summary><b>Dev infra & tooling</b> (12)</summary>
 
-`tmux-monitor` · `tmux-status` · `start-local` · `start-ios` · `start-android` · `expose` · `plugins` · `oracle` · `debug-bridge` · `media-processing`
+`tmux-monitor` · `tmux-status` · `start-local` · `start-ios` · `start-android` · `expose` · `plugins` · `oracle` · `debug-bridge` · `media-processing` · `standup` · `tmux-message`
 </details>
 
 <details>
