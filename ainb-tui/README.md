@@ -33,3 +33,17 @@ ainb usage yield --period week
 ```
 
 AINB reads `~/.claude/projects/**/*.jsonl` and `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` or `$CODEX_HOME/sessions/...`. Parsing is read-only. Cost values are estimates; unknown model prices are omitted while tokens/calls remain visible.
+
+## Fleet Orchestration
+
+`ainb fleet` drives every Claude session on the host. Subcommands:
+
+```bash
+ainb fleet standup      # live fleet status across ainb + peers + background jobs
+ainb fleet broadcast    # send one prompt to selected sessions (peers-first, tmux fallback)
+ainb fleet sequence     # ordered prompts with an ack between steps
+ainb fleet needs        # sessions blocked on input / errors / idle / waiting
+ainb fleet daemon       # watcher that registers as a peer and auto-continues API errors
+```
+
+Add `--format json` to any subcommand for machine-readable output. The in-tree `plugins/ainb-fleet/` package backs this command family.
