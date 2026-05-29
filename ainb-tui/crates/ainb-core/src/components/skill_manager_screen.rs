@@ -325,9 +325,16 @@ fn render_detail_pane(frame: &mut Frame, area: Rect, data: &SkillsScreenData) {
         if !d.deployed.is_empty() {
             lines.push(line_kv("Deployed", &d.deployed.join(", ")));
         }
-        if let Some(last) = d.last_used.as_deref() {
-            let inv = d.invocations.unwrap_or(0);
-            lines.push(line_kv("Last used", &format!("{last} ({inv} invocations)")));
+        if let Some(inv) = d.invocations {
+            let when = d
+                .last_used
+                .as_deref()
+                .map(format_time_ago)
+                .unwrap_or_else(|| "never".to_string());
+            lines.push(line_kv(
+                "Usage",
+                &format!("{inv} invocations · last used {when}"),
+            ));
         }
         if !d.requires.is_empty() {
             lines.push(line_kv("Requires", &d.requires.join(", ")));
@@ -383,6 +390,33 @@ fn key_span(key: &str) -> Span<'static> {
         format!("[{key}]"),
         Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
     )
+}
+
+/// Render an RFC 3339 timestamp as a human-friendly "Xs/m/h/d ago"
+/// string, anchored to the current wall clock. Unparseable input
+/// falls back to the raw value so the Detail pane stays informative
+/// even when the lockfile carries a non-standard timestamp.
+fn format_time_ago(rfc3339: &str) -> String {
+    let Ok(stamp) = chrono::DateTime::parse_from_rfc3339(rfc3339) else {
+        return rfc3339.to_string();
+    };
+    let now = chrono::Utc::now().with_timezone(stamp.offset());
+    let delta = now.signed_duration_since(stamp);
+    let secs = delta.num_seconds();
+    if secs < 0 {
+        // Stamp is in the future — fall back to the raw timestamp
+        // rather than printing a nonsensical negative duration.
+        return rfc3339.to_string();
+    }
+    if secs < 60 {
+        format!("{secs}s ago")
+    } else if secs < 60 * 60 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 60 * 60 * 24 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86_400)
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -888,15 +922,32 @@ fn compute_detail_for_selected(
     let idx = data.selected.min(data.units.len().saturating_sub(1));
     let row = data.units.get(idx)?;
     let manifest_uri = manifest_uri_for_row(row);
-    let deployed_paths = collect_deployed_paths(lockfile, &manifest_uri);
+    let locked = lockfile
+        .units
+        .iter()
+        .find(|u| u.declared_uri == manifest_uri);
+    let deployed_paths = locked
+        .map(|u| {
+            u.deployed
+                .values()
+                .filter_map(|d| match d {
+                    DeployedRef::Deployed { path, .. } => Some(path.clone()),
+                    DeployedRef::Skipped { .. } | DeployedRef::PendingUninstall => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let (last_used, invocations) = locked
+        .filter(|u| !u.usage.is_empty())
+        .map(|u| (u.usage.last_used_at.clone(), Some(u.usage.invocations)))
+        .unwrap_or((None, None));
     Some(UnitDetail {
         uri: manifest_uri,
         deployed: deployed_paths,
-        // Last-used / invocations / requires / upstream wiring is
-        // P8+1 work (usage-cache + adapters); MVP shows URI +
-        // deployed only.
-        last_used: None,
-        invocations: None,
+        last_used,
+        invocations,
+        // Requires / upstream wiring is follow-up work; MVP keeps
+        // these empty so the detail pane simply omits the lines.
         requires: Vec::new(),
         upstream_status: String::new(),
     })
@@ -916,26 +967,6 @@ fn manifest_uri_for_row(row: &UnitRow) -> String {
     } else {
         format!("{}@{}/{}", row.source, row.git_ref, row.name)
     }
-}
-
-/// Pull every `DeployedRef::Deployed.path` for `declared_uri` from
-/// the lockfile, joined into the order the lockfile records them.
-fn collect_deployed_paths(lockfile: &Lockfile, declared_uri: &str) -> Vec<String> {
-    let Some(locked) = lockfile
-        .units
-        .iter()
-        .find(|u| u.declared_uri == declared_uri)
-    else {
-        return Vec::new();
-    };
-    locked
-        .deployed
-        .values()
-        .filter_map(|d| match d {
-            DeployedRef::Deployed { path, .. } => Some(path.clone()),
-            DeployedRef::Skipped { .. } | DeployedRef::PendingUninstall => None,
-        })
-        .collect()
 }
 
 /// Rebuild the screen's view-model rows from a manifest. Called
