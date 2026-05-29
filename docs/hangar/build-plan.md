@@ -73,8 +73,8 @@ ainb workspace
 
 | Phase | Weeks | Title | Deliverable |
 |-------|-------|-------|-------------|
-| P0 | W1-2 | Schema + crates skeleton | 4 crates compile; SQLite migrations run; workspace + member + issue + task tables exist |
-| P1 | W3-4 | Daemon + task FSM | `ainb-hangar-daemon` claims/starts/completes a task; TTL sweepers + idempotent finalize + retry rows |
+| ✅ P0 | W1-2 | Schema + crates skeleton | 4 crates compile; SQLite migrations run; workspace + member + issue + task tables exist — **DONE** (7 beads, 41 tests) |
+| ✅ P1 | W3-4 | Daemon + task FSM | `ainb-hangar-daemon` claims/starts/completes a task; TTL sweepers + idempotent finalize + retry rows — **DONE** (7 beads, 115 tests, e2e tmux green) |
 | P2 | W5-6 | Beads sync adapter | Two-way sync: create issue in hangar → mirrors to beads; `bd close` → marks task done |
 | P3 | W7-8 | Plugin host caps + hangar-tui plugin scaffold | 4 new caps land in plugin host v2; `hangar-tui` plugin connects to daemon over unix socket via dial cap |
 | P4 | W9-10 | Core 5 TUI screens | Issue list / Task detail / Agent picker / Skill manager / Settings — all wired to daemon streams |
