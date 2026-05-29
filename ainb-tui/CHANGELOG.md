@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-05-29
+### Added
+- Merge pull request #172 from stevengonsalvez/worktree-hangar-enrich-model
+- Merge pull request #175 from stevengonsalvez/worktree-cli-version-info
+- **ainb-fleet**: make hangar enrich model configurable, default haiku
+- **ainb-tui**: stamp git commit + build date into ainb --version
+
+### Fixed
+- Merge pull request #174 from stevengonsalvez/worktree-fix-delete-stale-session
+- **ainb-tui**: purge sessions.json record even when worktree removal fails
+
+### Documentation
+- **ainb-tui**: document [plugins] enable/disable block in example config
+- **ainb-tui**: note Analytics screen is backed by the burndown plugin
+- add Plugins section covering toggle precedence and config
+
+
 ## [1.2.0] - 2026-05-29
 ### Added
 - Merge branch 'worktree-goal-skill': /goal skill
