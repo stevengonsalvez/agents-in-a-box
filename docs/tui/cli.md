@@ -35,7 +35,10 @@ Run `ainb` with no arguments to launch the TUI, or use any subcommand below for 
   - [`favorites`](#ainb-favorites) — saved repositories
   - [`init`](#ainb-init) — first-time setup & factory reset
   - [`presets`](#ainb-presets) — session presets
+  - [`claudecode`](#ainb-claudecode) — Claude Code provider-specific commands (statusline)
   - [`completion`](#ainb-completion) — shell completions
+  - [`plugin`](#ainb-plugin) — manage ainb plugins
+  - [`fleet`](#ainb-fleet) — orchestrate the claude session fleet
   - [`usage`](#ainb-usage) — local usage analytics and export
 - [Scripting recipes](#scripting-recipes)
 
