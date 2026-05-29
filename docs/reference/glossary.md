@@ -48,6 +48,22 @@ Definitions for the terms that recur across the agents-in-a-box docs. Where a te
 
 **Window** — a full-screen tab within a tmux session; a window contains one or more panes.
 
+## Plugin contract & runtime
+
+**ABI** — Application Binary Interface; the host/plugin runtime contract version. A v2 plugin declares `abi_version = 2` in its manifest and must match the host's `ABI_VERSION` (currently `2`). See [spec-v2 §5.4](../plugins/spec-v2.md).
+
+**Wire version** — the schema version of a snapshot/event type. Plugin types crates (e.g. `ainb-plugin-types-sessions`) carry a `pub const WIRE_VERSION: u32` (currently `3`); subscribers must check `event.version == WIRE_VERSION` and reject mismatches gracefully rather than panicking.
+
+**CTS (Conformance Test Suite)** — the executable form of the plugin spec. `ainb-plugin-cts-v2` covers **14 axes** (manifest round-trip, framing, method dispatch, capability gating, render determinism, snapshot pub/sub, action timeout, log filtering, fs path guard, graceful shutdown, crash recovery, quarantine, CLI dispatch capture, chunked publish ordering). A plugin author runs it via `cargo test` for a per-axis pass/fail report.
+
+**Canary** — a minimal plugin written to exercise exactly one CTS axis, living at `crates/ainb-plugin-cts-v2/tests/canaries/<axis>/`.
+
+**`cts-v2`** — the `ainb-plugin-cts-v2` crate: the host-side conformance test runner (14 axes) plus its canary plugins.
+
+**`testkit`** — the `ainb-plugin-testkit` crate: an in-process test harness for plugin authors. A plugin author hands their `Plugin` impl to testkit to exercise it without spawning a real subprocess.
+
+**`notifyd`** — the `ainb-plugin-notifyd` crate: the ainb-owned notification daemon. Listens on a Unix domain socket at `~/.agents-in-a-box/notify.sock` and is one of the in-tree v2 reference plugins (alongside `burndown` for analytics and `session-reader` for the session data backend).
+
 ## See also
 
 - [Architecture](./architecture.md)
