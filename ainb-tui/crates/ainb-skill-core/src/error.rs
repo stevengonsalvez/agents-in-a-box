@@ -30,6 +30,14 @@ pub enum CoreError {
 
     #[error("yaml error: {0}")]
     Yaml(#[from] serde_yaml_ng::Error),
+
+    /// Surfaces from the drift detector when the backend can't return a
+    /// drift answer (e.g. `git ls-remote` failed, mocked backend got an
+    /// unknown sha). Kept as a free-form string so the production
+    /// backend can wrap subprocess stderr without an extra layer of
+    /// nested error types.
+    #[error("drift backend error: {0}")]
+    DriftBackend(String),
 }
 
 /// Convenience result alias used throughout `ainb-core`.
