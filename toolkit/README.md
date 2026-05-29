@@ -78,9 +78,9 @@ URL). See the bootstrap's `installReflectKb()` function for details.
 </details>
 
 <details>
-<summary><b>Coding & GitHub</b> (12)</summary>
+<summary><b>Coding & GitHub</b> (13)</summary>
 
-`coding-agent` · `spawn-agent` · `attach-agent-worktree` · `list-agent-worktrees` · `cleanup-agent-worktree` · `merge-agent-work` · `do-issues` · `gh-issue` · `make-github-issues` · `find-missing-tests` · `commit` · `sync-learnings`
+`coding-agent` · `spawn-agent` · `attach-agent-worktree` · `list-agent-worktrees` · `cleanup-agent-worktree` · `merge-agent-work` · `do-issues` · `gh-issue` · `make-github-issues` · `find-missing-tests` · `commit` · `sync-learnings` · `git-history-surgery`
 </details>
 
 <details>
