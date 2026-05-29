@@ -103,7 +103,14 @@ impl GitLsRemoteBackend {
 
     fn git(&self) -> Command {
         let bin = self.git_bin.as_deref().unwrap_or_else(|| std::path::Path::new("git"));
-        Command::new(bin)
+        let mut cmd = Command::new(bin);
+        // Refuse interactive credential prompts. Without this, an
+        // unreachable / private repo blocks `git ls-remote` on a
+        // terminal prompt — which freezes the TUI's background drift
+        // poll and any test that walks an arbitrary manifest.
+        cmd.env("GIT_TERMINAL_PROMPT", "0");
+        cmd.env("GIT_ASKPASS", "/bin/true");
+        cmd
     }
 }
 
