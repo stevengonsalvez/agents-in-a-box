@@ -109,7 +109,7 @@ A Rust-based terminal application for managing AI coding sessions with git workt
 - **Usage analytics** — Built-in token + session tracking by day, week, provider, and project. Know where your budget went
 - **Easy onboarding** — First-run setup wizard checks dependencies, configures auth, and gets you creating sessions in minutes
 - **Live log streaming** — Real-time viewer with level filtering and search across all running sessions
-- **Scriptable CLI** — 15 commands with `--format json` output for every piece of state. **[📘 Full CLI reference →](docs/tui/cli.md)**
+- **Scriptable CLI** — 20 commands with `--format json` output for every piece of state. **[📘 Full CLI reference →](docs/tui/cli.md)**
 
 ### Feature Showcase
 
@@ -166,7 +166,7 @@ ainb config set authentication.default_model opus
 ainb completion zsh > ~/.zsh/completions/_ainb
 ```
 
-**15 top-level commands** — `run`, `list`, `logs`, `attach`, `status`, `kill`, `auth`, `recover`, `config`, `git`, `favorites`, `init`, `presets`, `completion`, `tui` — with nested subcommands for recover / config / git / favorites / presets.
+**20 top-level commands** — `tui`, `run`, `list`, `logs`, `attach`, `status`, `kill`, `auth`, `recover`, `config`, `git`, `favorites`, `init`, `presets`, `usage`, `claudecode`, `completion`, `plugin`, `fleet`, `help` — with nested subcommands for recover / config / git / favorites / presets / plugin / fleet.
 
 **[📘 Full CLI reference → docs/tui/cli.md](docs/tui/cli.md)**
 
