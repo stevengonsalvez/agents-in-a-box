@@ -121,6 +121,30 @@ impl IssueRepo {
         row.map(|r| issue_from_row(&r)).transpose()
     }
 
+    /// Overwrite an issue's lifecycle `state` (e.g. `"open"` → `"done"`).
+    ///
+    /// Used by the Beads → Hangar inbound sync (P2.4) to land a `bd`-side status
+    /// change on the mirrored Hangar issue. Idempotent at the SQL level: writing
+    /// the same `state` twice is a no-op UPDATE, and updating an absent id simply
+    /// affects zero rows (not an error) — callers that need to distinguish should
+    /// pre-check with [`get_by_id`](Self::get_by_id).
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the update fails.
+    pub async fn update_state(
+        pool: &SqlitePool,
+        id: &str,
+        state: &str,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE issue SET state = ? WHERE id = ?")
+            .bind(state)
+            .bind(id)
+            .execute(pool)
+            .await?;
+        Ok(())
+    }
+
     /// List issues in a workspace filtered by `state`, ordered by `created_at`.
     ///
     /// Backed by the `idx_issue_workspace_state` index.

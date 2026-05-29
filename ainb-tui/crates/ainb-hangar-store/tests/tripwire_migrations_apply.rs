@@ -434,31 +434,51 @@ async fn migration_0005_creates_pat_daemon_token_beads_mapping() {
         "daemon_token.created_at: {dt}"
     );
 
-    // beads_mapping: hangar<->bd id correlation.
+    // beads_mapping: P0 placeholder (0005). Its final P2-ready shape is
+    // re-built by 0007 and asserted in
+    // `migration_0007_reshapes_beads_mapping` below — `table_sql` reflects the
+    // schema after ALL migrations, so the 0005 placeholder columns no longer
+    // exist by the time this pool is queried.
+
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn migration_0007_reshapes_beads_mapping() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = fresh_pool(dir.path()).await;
+
+    // 0007 rebuilds beads_mapping for the P2 sync adapter: adds `source`,
+    // splits the composite PK into an independent UNIQUE per id side, and stores
+    // `last_synced` as ISO-8601 TEXT (not INTEGER ms).
     let bm = table_sql(&pool, "beads_mapping").await;
     assert!(
-        bm.contains("hangar_id TEXT NOT NULL"),
-        "beads_mapping.hangar_id: {bm}"
+        bm.contains("hangar_id TEXT NOT NULL PRIMARY KEY"),
+        "beads_mapping.hangar_id PK: {bm}"
     );
     assert!(
-        bm.contains("bd_id TEXT NOT NULL"),
-        "beads_mapping.bd_id: {bm}"
+        bm.contains("bd_id TEXT NOT NULL UNIQUE"),
+        "beads_mapping.bd_id UNIQUE: {bm}"
     );
     assert!(
         bm.contains("hangar_kind TEXT NOT NULL CHECK (hangar_kind IN ('issue','task'))"),
         "beads_mapping.hangar_kind CHECK: {bm}"
     );
     assert!(
-        bm.contains("bd_kind TEXT NOT NULL"),
-        "beads_mapping.bd_kind: {bm}"
+        bm.contains("bd_kind TEXT NOT NULL CHECK (bd_kind IN ('issue','task'))"),
+        "beads_mapping.bd_kind CHECK: {bm}"
     );
     assert!(
-        bm.contains("last_synced INTEGER NOT NULL"),
-        "beads_mapping.last_synced: {bm}"
+        bm.contains("source TEXT NOT NULL CHECK (source IN ('hangar','swarm'))"),
+        "beads_mapping.source CHECK: {bm}"
     );
     assert!(
-        bm.contains("PRIMARY KEY (hangar_id, bd_id)"),
-        "beads_mapping composite PK: {bm}"
+        bm.contains("last_synced TEXT NOT NULL"),
+        "beads_mapping.last_synced TEXT: {bm}"
+    );
+    assert!(
+        !bm.contains("PRIMARY KEY (hangar_id, bd_id)"),
+        "the 0005 composite PK must be gone: {bm}"
     );
 
     pool.close().await;

@@ -107,6 +107,46 @@ async fn insert_issue_with_agent_assignee_roundtrips() {
 }
 
 #[tokio::test]
+async fn update_state_overwrites_lifecycle_state() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("open store");
+    let workspace_id = seed_workspace(&store).await;
+
+    let new = NewIssue {
+        id: "issue-upd".to_string(),
+        workspace_id,
+        title: "Move me".to_string(),
+        description: None,
+        state: "open".to_string(),
+        assignee: None,
+        creator: ActorRef::new(ActorKind::Member, "user-1").expect("actor"),
+        created_at: 1_700_000_000_000,
+    };
+    IssueRepo::insert(store.pool(), &new)
+        .await
+        .expect("insert issue");
+
+    IssueRepo::update_state(store.pool(), "issue-upd", "done")
+        .await
+        .expect("update state");
+
+    let got = IssueRepo::get_by_id(store.pool(), "issue-upd")
+        .await
+        .expect("get issue")
+        .expect("issue present");
+    assert_eq!(got.state, "done");
+
+    // Idempotent: a second update to the same state is a no-op, not an error.
+    IssueRepo::update_state(store.pool(), "issue-upd", "done")
+        .await
+        .expect("update state idempotent");
+    // Updating an absent id affects zero rows but does not error.
+    IssueRepo::update_state(store.pool(), "no-such-issue", "done")
+        .await
+        .expect("update absent id is not an error");
+}
+
+#[tokio::test]
 async fn insert_issue_with_invalid_assignee_type_fails_at_check_constraint() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = Store::open_in(dir.path()).await.expect("open store");
