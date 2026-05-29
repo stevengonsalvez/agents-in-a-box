@@ -15,6 +15,7 @@ members = [
     "crates/ainb-hangar-store",
     "crates/ainb-hangar-proto",
     "crates/ainb-hangar-daemon",
+    "../plugins/hangar-tui",
     "xtask",
 ]
 default-members = ["crates/ainb-core"]

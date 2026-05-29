@@ -16,7 +16,6 @@ path = "src/lib.rs"
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
 
 # Local lint config rather than `workspace = true`: the workspace-level lints
 # declare lint groups (clippy::all/pedantic/nursery/cargo) at the same priority
