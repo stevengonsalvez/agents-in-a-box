@@ -514,6 +514,40 @@ Wire it into Claude Code's `settings.json` as the `statusLine` command so the TU
 
 ---
 
+### `ainb plugin`
+
+Manage ainb plugins — install from marketplaces, update, remove, and inspect runtime events.
+
+```bash
+ainb plugin <SUBCOMMAND>
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `install <PLUGIN> [-y]` | Install a plugin from a marketplace. `<PLUGIN>` is a plugin id, e.g. `burndown` or `ainb-plugins/burndown@0.1.0`. `-y, --yes` skips the capability-approval prompt. |
+| `update <PLUGIN> [-y]` | Update an installed plugin to the latest matching version. `-y, --yes` skips prompts when new capabilities are requested. |
+| `remove <PLUGIN> [-y]` | Remove an installed plugin. `-y, --yes` skips the data-directory deletion prompt. |
+| `list` | List installed plugins. |
+| `search <QUERY>` | Search registered marketplaces by plugin name. |
+| `marketplace <SUBCOMMAND>` | Manage marketplace registries: `add <URL\|PATH>`, `remove <NAME>`, `list`. |
+| `lint <PLUGIN>` | Validate a plugin manifest + binary (ABI 2.0 sanity checks). Accepts a plugin id, staging dir, or `manifest.toml` path. |
+| `watch <PLUGIN> [--duration <SECS>]` | Live-tail lifecycle + snapshot events for a registered plugin. `--duration` defaults to 30s. |
+| `tail <PLUGIN> [--level <LVL>] [--since <TS>] [--duration <SECS>]` | Stream the host's tracing layer filtered to one plugin id. `--level` is `trace\|debug\|info\|warn\|error` (default `debug`); `--since` is an RFC-3339 timestamp; `--duration` defaults to 30s. |
+
+**Examples**
+
+```bash
+ainb plugin marketplace add https://github.com/stevengonsalvez/ainb-plugins
+ainb plugin search burndown
+ainb plugin install burndown -y
+ainb plugin list --format json
+ainb plugin watch burndown --duration 60
+```
+
+In-tree v2 reference plugins: `burndown` (analytics), `notifyd` (notifications), `session-reader` (data backend).
+
+---
+
 ## Scripting recipes
 
 **Agent-friendly: list running sessions as JSON, exit non-zero if none**
