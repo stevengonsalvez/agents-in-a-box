@@ -34,9 +34,11 @@ use ainb_plugin_protocol::{
     framing,
     methods,
     params::{
-        ActionInvokeParams, ActionInvokeResult, LogLevel, LogParams, SnapshotGetParams,
-        SnapshotGetResult, SnapshotPublishParams, SnapshotSubscribeParams,
-        SnapshotSubscribeResult,
+        ActionInvokeParams, ActionInvokeResult, EventStreamCancelParams,
+        EventStreamSubscribeParams, EventStreamSubscribeResult, LogLevel, LogParams,
+        SnapshotGetParams, SnapshotGetResult, SnapshotPublishParams, SnapshotSubscribeParams,
+        SnapshotSubscribeResult, SpawnManagedSubprocessParams, SpawnManagedSubprocessResult,
+        UnixSocketCloseParams, UnixSocketDialParams, UnixSocketDialResult, UnixSocketSendParams,
     },
     RpcError,
 };
@@ -227,6 +229,130 @@ impl HostClient {
     /// Convenience: log at `info` with no structured fields.
     pub async fn log_info(&self, message: impl Into<String>) -> Result<()> {
         self.log(LogLevel::Info, message, None).await
+    }
+
+    /// Open a cancellable streaming subscription on `topic`.
+    ///
+    /// Capability-gated by the plugin's `event_stream_subscribe` grant.
+    /// On success the host returns an opaque, host-minted `stream_id`;
+    /// thereafter the host pushes
+    /// [`PLUGIN_HANDLE_EVENT`](ainb_plugin_protocol::methods::PLUGIN_HANDLE_EVENT)
+    /// notifications under topic `stream:<stream_id>` until the plugin
+    /// cancels (see [`Self::event_stream_cancel`]) or the plugin process
+    /// leaves the `Running` state. Returns
+    /// [`SdkError::Rpc`] carrying `-32001` when the cap is denied or the
+    /// topic isn't on the allow-list.
+    ///
+    /// `since_version` requests a replay from a known position; `None`
+    /// starts the stream from the topic's current version.
+    pub async fn event_stream_subscribe(
+        &self,
+        topic: impl Into<String>,
+        since_version: Option<u64>,
+    ) -> Result<EventStreamSubscribeResult> {
+        let params = EventStreamSubscribeParams {
+            topic: topic.into(),
+            since_version,
+        };
+        self.send_request(methods::HOST_EVENT_STREAM_SUBSCRIBE, &params)
+            .await
+    }
+
+    /// Cancel a previously opened event stream. Notification —
+    /// fire-and-forget. The host stops emitting `stream:<stream_id>`
+    /// events; cancellation is also implicit on plugin shutdown.
+    pub async fn event_stream_cancel(&self, stream_id: impl Into<String>) -> Result<()> {
+        let params = EventStreamCancelParams {
+            stream_id: stream_id.into(),
+        };
+        self.send_notification(methods::HOST_EVENT_STREAM_CANCEL, &params)
+            .await
+    }
+
+    /// Ask the host to spawn a host-supervised child process.
+    ///
+    /// Capability-gated by the plugin's `spawn_managed_subprocess` grant,
+    /// which MUST be list-form (a binary allow-list). The child inherits
+    /// only the env vars named in `env_allowlist`; every other variable is
+    /// stripped. The host owns the child's lifecycle and kills it when
+    /// this plugin shuts down / crashes or the host exits.
+    ///
+    /// Returns [`SdkError::Rpc`] carrying `-32001` when the cap is denied
+    /// or `bin` isn't on the allow-list, and `-32003` when the grant is
+    /// the (rejected) bool-true form.
+    ///
+    /// On success the result carries an opaque `handle` the plugin can
+    /// compose with [`Self::event_stream_subscribe`] on topic
+    /// `managed:<handle>:stdout`, plus the child's `pid`.
+    pub async fn spawn_managed_subprocess(
+        &self,
+        bin: impl Into<String>,
+        argv: Vec<String>,
+        env_allowlist: Vec<String>,
+        cwd: Option<String>,
+    ) -> Result<SpawnManagedSubprocessResult> {
+        let params = SpawnManagedSubprocessParams {
+            bin: bin.into(),
+            argv,
+            env_allowlist,
+            cwd,
+        };
+        self.send_request(methods::HOST_SPAWN_MANAGED_SUBPROCESS, &params)
+            .await
+    }
+
+    /// Dial a whitelisted `AF_UNIX` socket through the host.
+    ///
+    /// Capability-gated by the plugin's `unix_socket_dial` grant, which
+    /// MUST be list-form (a socket-path allow-list). The host expands
+    /// env vars / `~` and canonicalizes (symlink resolution) before
+    /// comparing against the list, so a symlink resolving outside the
+    /// whitelist is rejected.
+    ///
+    /// Returns [`SdkError::Rpc`] carrying `-32001` when the cap is denied
+    /// or `path` isn't on the allow-list, and `-32003` when the grant is
+    /// the (rejected) bool-true form.
+    ///
+    /// On success the result carries an opaque `stream_id`; thereafter the
+    /// host pushes
+    /// [`PLUGIN_HANDLE_EVENT`](ainb_plugin_protocol::methods::PLUGIN_HANDLE_EVENT)
+    /// notifications under topic `socket:<stream_id>` carrying
+    /// [`UnixSocketEvent`](ainb_plugin_protocol::params::UnixSocketEvent)
+    /// frames until the plugin closes (see [`Self::unix_socket_close`]) or
+    /// the plugin process leaves the `Running` state.
+    pub async fn unix_socket_dial(
+        &self,
+        path: impl Into<String>,
+    ) -> Result<UnixSocketDialResult> {
+        let params = UnixSocketDialParams { path: path.into() };
+        self.send_request(methods::HOST_UNIX_SOCKET_DIAL, &params)
+            .await
+    }
+
+    /// Write bytes to a previously dialled unix socket. Notification —
+    /// fire-and-forget.
+    pub async fn unix_socket_send(
+        &self,
+        stream_id: impl Into<String>,
+        bytes: impl Into<bytes::Bytes>,
+    ) -> Result<()> {
+        let params = UnixSocketSendParams {
+            stream_id: stream_id.into(),
+            bytes: bytes.into(),
+        };
+        self.send_notification(methods::HOST_UNIX_SOCKET_SEND, &params)
+            .await
+    }
+
+    /// Close a previously dialled unix socket. Notification —
+    /// fire-and-forget. The host stops emitting `socket:<stream_id>`
+    /// events; closure is also implicit on plugin shutdown.
+    pub async fn unix_socket_close(&self, stream_id: impl Into<String>) -> Result<()> {
+        let params = UnixSocketCloseParams {
+            stream_id: stream_id.into(),
+        };
+        self.send_notification(methods::HOST_UNIX_SOCKET_CLOSE, &params)
+            .await
     }
 
     /// Resolve a pending response, called by the server reader when a

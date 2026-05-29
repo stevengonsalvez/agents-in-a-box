@@ -42,12 +42,16 @@ pub use ainb_plugin_protocol::{
     methods,
     params::{
         ActionInvokeParams, ActionInvokeResult, CliDispatchParams, CliDispatchResult,
+        EventStreamCancelParams, EventStreamSubscribeParams, EventStreamSubscribeResult,
         FsDirEntry, FsReadDirParams, FsReadDirResult, FsReadFileParams, FsReadFileResult,
         HandleEventParams, HandleKeyParams, KEY_MOD_ALT, KEY_MOD_CTRL, KEY_MOD_SHIFT,
         KEY_MOD_SUPER, KeyCode, KeyEvent, KeyKind, LogLevel, LogParams, NetworkFetchParams,
         NetworkFetchResult, PluginInitParams, PluginInitResult, PluginShutdownParams,
         PluginShutdownResult, RenderParams, RenderResult, SnapshotGetParams, SnapshotGetResult,
-        SnapshotPublishParams, SnapshotSubscribeParams, SnapshotSubscribeResult, Viewport,
+        SnapshotPublishParams, SnapshotSubscribeParams, SnapshotSubscribeResult,
+        SpawnManagedSubprocessParams, SpawnManagedSubprocessResult, UnixSocketCloseParams,
+        UnixSocketDialParams, UnixSocketDialResult, UnixSocketEvent, UnixSocketEventKind,
+        UnixSocketSendParams, Viewport,
     },
     wire_buffer::{Cell, Color, Coord, WireBuffer},
 };
