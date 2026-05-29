@@ -40,7 +40,7 @@ Every TUI operation is also a CLI subcommand. `--format json` on every command. 
 
 ### A portable toolkit that follows you across tools
 
-86 skills (plan, implement, validate, reflect, swarm-create, …) and 37 specialised agents (backend-developer, code-reviewer, security-agent, …). Write them once; deploy to Claude Code, Codex, Copilot, Gemini, Amazon Q, Cursor, Cline, Roo, Hermes, nanoclaw, Clawdhub. One source, nine targets.
+86 skills (plan, implement, validate, reflect, swarm-create, …) and 37 specialised agents (backend-developer, code-reviewer, security-agent, …). Write them once; deploy to Claude Code, Codex, Copilot, Gemini, Amazon Q, Cursor, Cline, Roo, Hermes, nanoclaw, Clawdhub. One source, 11 targets.
 
 ### A plugin system you can actually use
 
