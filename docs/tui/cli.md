@@ -492,6 +492,28 @@ Supported: `bash`, `zsh`, `fish`, `powershell`, `elvish`.
 
 ---
 
+### `ainb claudecode`
+
+Provider-namespaced commands for Claude Code. Other providers grow their own namespace; today only the statusline hook lives here.
+
+```bash
+ainb claudecode <SUBCOMMAND>
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `statusline` | Claude Code statusline hook: reads session JSON on stdin, caches rate-limit windows for the TUI, and emits a powerline status string on stdout. |
+
+**`statusline` flags**
+
+| Flag | Description |
+|------|-------------|
+| `--cache-only` | Side-channel mode: write the rate-limit cache only and emit nothing on stdout. |
+
+Wire it into Claude Code's `settings.json` as the `statusLine` command so the TUI can surface live rate-limit windows.
+
+---
+
 ## Scripting recipes
 
 **Agent-friendly: list running sessions as JSON, exit non-zero if none**
