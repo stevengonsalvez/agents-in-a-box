@@ -38,6 +38,16 @@ Definitions for the terms that recur across the agents-in-a-box docs. Where a te
 
 **Community report** — a GraphRAG-generated summary of a cluster (community) of related entities, used to answer higher-level questions about a connected region of the graph.
 
+## Terminal & tmux
+
+**tmux** — terminal multiplexer used to run persistent, detachable agent and dev-server sessions. Sessions survive disconnects and are reattached with `tmux attach -t <session>`.
+
+**PTY** — pseudo-terminal; the kernel device pair that lets the TUI and tmux drive a child process as if it had a real terminal (handles resize, raw input, ANSI output).
+
+**Pane** — a single rectangular split inside a tmux window running one shell/process.
+
+**Window** — a full-screen tab within a tmux session; a window contains one or more panes.
+
 ## See also
 
 - [Architecture](./architecture.md)
