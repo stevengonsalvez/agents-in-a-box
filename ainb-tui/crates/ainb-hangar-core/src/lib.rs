@@ -10,6 +10,8 @@
 
 /// Polymorphic actor references (`member:<id>` / `agent:<id>`).
 pub mod actor;
+/// Polymorphic assignee crosswalk between Hangar actors and `bd` strings (P2.3).
+pub mod assignee_crosswalk;
 /// Wall-clock injection (`HangarClock` + `SystemClock` / `FixedClock`).
 pub mod clock;
 /// Id generation injection (`IdGen` + `SystemIdGen` / `FixedIdGen`).
