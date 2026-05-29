@@ -494,6 +494,143 @@ pub struct EventStreamCancelParams {
 }
 
 // =====================================================================
+// host/spawn_managed_subprocess
+// =====================================================================
+
+/// `host/spawn_managed_subprocess` params: ask the host to spawn a
+/// host-supervised child process.
+///
+/// `bin` must appear on the plugin's `spawn_managed_subprocess`
+/// capability allow-list (list form is mandatory; a bool-true grant is
+/// rejected at manifest validation). `env_allowlist` names the parent
+/// environment variables the child is permitted to inherit — every other
+/// variable is stripped before exec, so a plugin can't exfiltrate the
+/// host's secrets into an arbitrary child.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpawnManagedSubprocessParams {
+    /// Binary name or absolute path to spawn. Must be on the cap allow-list.
+    pub bin: String,
+    /// Arguments passed to the child, `argv[1..]` style.
+    #[serde(default)]
+    pub argv: Vec<String>,
+    /// Names of parent env vars the child may inherit. Everything not
+    /// listed is removed from the child's environment.
+    #[serde(default)]
+    pub env_allowlist: Vec<String>,
+    /// Optional working directory for the child. Inherits the host's
+    /// cwd when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+}
+
+/// `host/spawn_managed_subprocess` result: the host-allocated handle +
+/// the child's OS process id.
+///
+/// `handle` is an opaque, host-minted token the plugin uses to compose
+/// with `host/event_stream_subscribe` on topic `managed:<handle>:stdout`.
+/// `pid` is informational (e.g. for the plugin to surface in its UI).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpawnManagedSubprocessResult {
+    /// Host-allocated, opaque managed-subprocess handle.
+    pub handle: String,
+    /// OS process id of the spawned child.
+    pub pid: u32,
+}
+
+// =====================================================================
+// host/unix_socket_dial
+// =====================================================================
+
+/// `host/unix_socket_dial` params: ask the host to dial an `AF_UNIX` socket.
+///
+/// `path` must resolve (after symlink canonicalization) to an entry on
+/// the plugin's `unix_socket_dial` capability allow-list (list form is
+/// mandatory; a bool-true grant is rejected at manifest validation). The
+/// host expands env vars (`${XDG_RUNTIME_DIR}`) and `~` itself — the
+/// plugin always sends the literal path string from its manifest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnixSocketDialParams {
+    /// Filesystem path of the socket to dial. Must be on the cap allow-list.
+    pub path: String,
+}
+
+/// `host/unix_socket_dial` result: the host-allocated stream handle.
+///
+/// `stream_id` is a host-minted opaque token (ULID) the plugin cannot
+/// forge; subsequent socket frames arrive via `plugin/handle_event` under
+/// topic `socket:<stream_id>` and the plugin writes / closes using this
+/// same id.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnixSocketDialResult {
+    /// Host-allocated socket stream identifier.
+    pub stream_id: String,
+}
+
+// =====================================================================
+// host/unix_socket_send
+// =====================================================================
+
+/// `host/unix_socket_send` params (notification): write bytes to a dialled
+/// socket.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnixSocketSendParams {
+    /// Stream to write to — the `stream_id` returned by `unix_socket_dial`.
+    pub stream_id: String,
+    /// Bytes to write to the socket.
+    #[serde(with = "bytes_serde")]
+    pub bytes: bytes::Bytes,
+}
+
+// =====================================================================
+// host/unix_socket_close
+// =====================================================================
+
+/// `host/unix_socket_close` params (notification): tear down a dialled
+/// socket.
+///
+/// The host shuts the connection and stops emitting `socket:<stream_id>`
+/// events. Closure is also implicit on plugin shutdown / crash /
+/// quarantine.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnixSocketCloseParams {
+    /// Stream to close — the `stream_id` returned by `unix_socket_dial`.
+    pub stream_id: String,
+}
+
+/// Kind tag for a `socket:<stream_id>` delivery frame's payload.
+///
+/// The host wraps each inbound socket event in a small JSON envelope so
+/// the plugin can distinguish ordinary data from end-of-stream and from a
+/// transport error without an out-of-band channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UnixSocketEventKind {
+    /// Bytes read from the socket; `bytes` is populated.
+    Data,
+    /// The peer closed the socket; no further events follow.
+    Eof,
+    /// A transport error occurred; `error` describes it, no further events.
+    Error,
+}
+
+/// Payload of a `socket:<stream_id>` `plugin/handle_event` notification.
+///
+/// Carried as the event `payload` bytes (JSON-encoded). `bytes` is present
+/// only for [`UnixSocketEventKind::Data`]; `error` only for
+/// [`UnixSocketEventKind::Error`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnixSocketEvent {
+    /// What this frame represents.
+    pub kind: UnixSocketEventKind,
+    /// Bytes read from the socket (present iff `kind == Data`).
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "opt_bytes_serde")]
+    pub bytes: Option<bytes::Bytes>,
+    /// Human-readable transport error (present iff `kind == Error`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+// =====================================================================
 // (de)serialise bytes::Bytes as a JSON array of u8 (no base64 layer).
 // =====================================================================
 
@@ -702,6 +839,95 @@ mod tests {
         rt(&EventStreamCancelParams {
             stream_id: "01J9ZX8QK7".into(),
         });
+
+        rt(&SpawnManagedSubprocessParams {
+            bin: "ainb-hangar-daemon".into(),
+            argv: vec!["--socket".into(), "/tmp/x.sock".into()],
+            env_allowlist: vec!["HOME".into(), "PATH".into()],
+            cwd: Some("/tmp".into()),
+        });
+        rt(&SpawnManagedSubprocessParams {
+            bin: "ainb-hangar-daemon".into(),
+            argv: vec![],
+            env_allowlist: vec![],
+            cwd: None,
+        });
+        rt(&SpawnManagedSubprocessResult {
+            handle: "01J9ZX8QK7-0000002a".into(),
+            pid: 4242,
+        });
+
+        rt(&UnixSocketDialParams {
+            path: "/run/user/1000/ainb-hangar.sock".into(),
+        });
+        rt(&UnixSocketDialResult {
+            stream_id: "01J9ZX8QK7-0000002a".into(),
+        });
+        rt(&UnixSocketSendParams {
+            stream_id: "01J9ZX8QK7-0000002a".into(),
+            bytes: bytes::Bytes::from_static(b"ping\n"),
+        });
+        rt(&UnixSocketCloseParams {
+            stream_id: "01J9ZX8QK7-0000002a".into(),
+        });
+        rt(&UnixSocketEvent {
+            kind: UnixSocketEventKind::Data,
+            bytes: Some(bytes::Bytes::from_static(b"pong\n")),
+            error: None,
+        });
+        rt(&UnixSocketEvent {
+            kind: UnixSocketEventKind::Eof,
+            bytes: None,
+            error: None,
+        });
+        rt(&UnixSocketEvent {
+            kind: UnixSocketEventKind::Error,
+            bytes: None,
+            error: Some("connection reset".into()),
+        });
+    }
+
+    #[test]
+    fn unix_socket_event_data_kind_lowercased_on_wire() {
+        let s = serde_json::to_string(&UnixSocketEventKind::Eof).unwrap();
+        assert_eq!(s, "\"eof\"");
+    }
+
+    #[test]
+    fn unix_socket_event_omits_absent_optional_fields() {
+        // An EOF frame carries neither `bytes` nor `error`.
+        let ev = UnixSocketEvent {
+            kind: UnixSocketEventKind::Eof,
+            bytes: None,
+            error: None,
+        };
+        let j = serde_json::to_string(&ev).unwrap();
+        assert_eq!(j, r#"{"kind":"eof"}"#);
+    }
+
+    #[test]
+    fn spawn_managed_subprocess_skips_serializing_none_cwd() {
+        // None must not emit a `cwd: null` key — keeps the wire payload
+        // minimal and matches the optional contract.
+        let p = SpawnManagedSubprocessParams {
+            bin: "ainb-hangar-daemon".into(),
+            argv: vec![],
+            env_allowlist: vec![],
+            cwd: None,
+        };
+        let j = serde_json::to_string(&p).unwrap();
+        assert!(!j.contains("cwd"), "None cwd should be omitted: {j}");
+    }
+
+    #[test]
+    fn spawn_managed_subprocess_defaults_empty_argv_and_env() {
+        // Older/minimal peers may omit argv + env_allowlist entirely.
+        let j = r#"{"bin":"ainb-hangar-daemon"}"#;
+        let p: SpawnManagedSubprocessParams = serde_json::from_str(j).unwrap();
+        assert_eq!(p.bin, "ainb-hangar-daemon");
+        assert!(p.argv.is_empty());
+        assert!(p.env_allowlist.is_empty());
+        assert_eq!(p.cwd, None);
     }
 
     #[test]

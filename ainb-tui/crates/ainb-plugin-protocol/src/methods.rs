@@ -77,6 +77,47 @@ pub const HOST_EVENT_STREAM_SUBSCRIBE: &str = "host/event_stream_subscribe";
 /// quarantined.
 pub const HOST_EVENT_STREAM_CANCEL: &str = "host/event_stream_cancel";
 
+/// Plugin asks the host to spawn a host-supervised child process.
+///
+/// Capability-gated by the plugin's `spawn_managed_subprocess` grant,
+/// which MUST be list-form (an allow-list of binary names/paths) — a
+/// bool-true grant is rejected with `-32003 MANIFEST_VALIDATION`. The
+/// host owns the child's lifecycle: it spawns under the same pgrp /
+/// `PDEATHSIG` leak guard as plugin processes and kills every managed
+/// child on plugin shutdown or `Runtime` drop. On success the plugin
+/// receives an opaque `handle` it can compose with
+/// `host/event_stream_subscribe` (topic `managed:<handle>:stdout`).
+pub const HOST_SPAWN_MANAGED_SUBPROCESS: &str = "host/spawn_managed_subprocess";
+
+/// Plugin asks the host to dial a whitelisted `AF_UNIX` socket path.
+///
+/// Capability-gated by the plugin's `unix_socket_dial` grant, which MUST
+/// be list-form (an allow-list of socket paths) — a bool-true grant is
+/// rejected with `-32003 MANIFEST_VALIDATION` so there is no way to
+/// request an unrestricted "dial any socket" grant. The host
+/// canonicalizes the requested path (resolving symlinks) before
+/// comparing it against the allow-list, defending against a symlink that
+/// resolves outside the whitelist. On success the plugin receives an
+/// opaque, host-minted `stream_id`; thereafter the host emits
+/// `plugin/handle_event` notifications under topic `socket:<stream_id>`
+/// carrying `data` / `eof` / `error` frames, and the plugin writes via
+/// `host/unix_socket_send` and tears down via `host/unix_socket_close`.
+pub const HOST_UNIX_SOCKET_DIAL: &str = "host/unix_socket_dial";
+
+/// Plugin writes bytes to a previously dialled unix socket. Notification.
+///
+/// The host looks up the `stream_id`'s live connection and writes the
+/// supplied bytes to it. A `stream_id` the plugin does not own (or that
+/// has already closed) is silently dropped.
+pub const HOST_UNIX_SOCKET_SEND: &str = "host/unix_socket_send";
+
+/// Plugin closes a previously dialled unix socket. Notification.
+///
+/// The host shuts down the connection and stops emitting
+/// `socket:<stream_id>` events. Closure is also implicit when the plugin
+/// shuts down, crashes, or is quarantined.
+pub const HOST_UNIX_SOCKET_CLOSE: &str = "host/unix_socket_close";
+
 /// Every method name registered by the protocol, in stable order.
 ///
 /// Used by the runtime's static method-existence check and by the CTS
@@ -98,6 +139,10 @@ pub const ALL_METHODS: &[&str] = &[
     HOST_NETWORK_FETCH,
     HOST_EVENT_STREAM_SUBSCRIBE,
     HOST_EVENT_STREAM_CANCEL,
+    HOST_SPAWN_MANAGED_SUBPROCESS,
+    HOST_UNIX_SOCKET_DIAL,
+    HOST_UNIX_SOCKET_SEND,
+    HOST_UNIX_SOCKET_CLOSE,
 ];
 
 #[cfg(test)]
@@ -147,9 +192,44 @@ mod tests {
             HOST_NETWORK_FETCH,
             HOST_EVENT_STREAM_SUBSCRIBE,
             HOST_EVENT_STREAM_CANCEL,
+            HOST_SPAWN_MANAGED_SUBPROCESS,
+            HOST_UNIX_SOCKET_DIAL,
+            HOST_UNIX_SOCKET_SEND,
+            HOST_UNIX_SOCKET_CLOSE,
         ] {
             assert!(m.starts_with("host/"), "{m} missing host/ namespace");
         }
+    }
+
+    #[test]
+    fn all_methods_contains_unix_socket() {
+        assert!(
+            ALL_METHODS.contains(&HOST_UNIX_SOCKET_DIAL),
+            "HOST_UNIX_SOCKET_DIAL missing from ALL_METHODS registry"
+        );
+        assert!(
+            ALL_METHODS.contains(&HOST_UNIX_SOCKET_SEND),
+            "HOST_UNIX_SOCKET_SEND missing from ALL_METHODS registry"
+        );
+        assert!(
+            ALL_METHODS.contains(&HOST_UNIX_SOCKET_CLOSE),
+            "HOST_UNIX_SOCKET_CLOSE missing from ALL_METHODS registry"
+        );
+        assert_eq!(HOST_UNIX_SOCKET_DIAL, "host/unix_socket_dial");
+        assert_eq!(HOST_UNIX_SOCKET_SEND, "host/unix_socket_send");
+        assert_eq!(HOST_UNIX_SOCKET_CLOSE, "host/unix_socket_close");
+    }
+
+    #[test]
+    fn all_methods_contains_spawn_managed_subprocess() {
+        assert!(
+            ALL_METHODS.contains(&HOST_SPAWN_MANAGED_SUBPROCESS),
+            "HOST_SPAWN_MANAGED_SUBPROCESS missing from ALL_METHODS registry"
+        );
+        assert_eq!(
+            HOST_SPAWN_MANAGED_SUBPROCESS,
+            "host/spawn_managed_subprocess"
+        );
     }
 
     #[test]

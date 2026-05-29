@@ -133,6 +133,22 @@ pub struct Capabilities {
     /// bool-true grants wildcard subscribe across all topics.
     #[serde(default)]
     pub event_stream_subscribe: CapabilityGrant,
+    /// Ask the host to spawn host-supervised child processes via
+    /// `host/spawn_managed_subprocess`. List form is a mandatory allow-list
+    /// of binary names/paths (e.g. `["ainb-hangar-daemon"]`); a bool-true
+    /// grant is rejected at manifest validation (`-32003`) so there is no
+    /// way to request an unrestricted "spawn anything" grant.
+    #[serde(default)]
+    pub spawn_managed_subprocess: CapabilityGrant,
+    /// Dial whitelisted `AF_UNIX` sockets via `host/unix_socket_dial`. List
+    /// form is a mandatory allow-list of socket paths (e.g.
+    /// `["~/.ainb/hangar.sock"]`); a bool-true grant is rejected at
+    /// manifest validation (`-32003`) so there is no way to request an
+    /// unrestricted "dial any socket" grant. The host canonicalizes the
+    /// requested path (symlink resolution) before comparing it against the
+    /// list, defending shared dev boxes against arbitrary `AF_UNIX` abuse.
+    #[serde(default)]
+    pub unix_socket_dial: CapabilityGrant,
 }
 
 /// `[provides]` — what the plugin contributes to the host's UX.
@@ -217,6 +233,10 @@ mod tests {
                 read_claude_logs: CapabilityGrant::Bool(false),
                 read_codex_logs: CapabilityGrant::Bool(false),
                 event_stream_subscribe: CapabilityGrant::List(vec!["workspace:*".into()]),
+                spawn_managed_subprocess: CapabilityGrant::List(vec![
+                    "ainb-hangar-daemon".into()
+                ]),
+                unix_socket_dial: CapabilityGrant::List(vec!["~/.ainb/hangar.sock".into()]),
             },
             provides: Provides {
                 screens: vec!["analytics".into()],
@@ -320,6 +340,122 @@ abi_version = 2
 "#;
         let m: Manifest = toml::from_str(toml_src).unwrap();
         assert!(!m.capabilities.event_stream_subscribe.is_granted());
+    }
+
+    #[test]
+    fn spawn_managed_subprocess_cap_round_trips_list_form() {
+        // List form whitelists binary names/paths.
+        let toml_src = r#"
+[plugin]
+name = "hangar-tui"
+version = "0.1.0"
+abi_version = 2
+
+[capabilities]
+spawn_managed_subprocess = ["ainb-hangar-daemon"]
+"#;
+        let m: Manifest = toml::from_str(toml_src).unwrap();
+        assert_eq!(
+            m.capabilities.spawn_managed_subprocess.allow_list().unwrap(),
+            ["ainb-hangar-daemon"]
+        );
+        let s = toml::to_string(&m).unwrap();
+        let back: Manifest = toml::from_str(&s).unwrap();
+        assert_eq!(m, back);
+    }
+
+    #[test]
+    fn spawn_managed_subprocess_cap_round_trips_bool_form() {
+        // Bool-true grant survives the manifest round-trip at the SCHEMA
+        // level (semantic rejection happens at validation / handler time,
+        // returning -32003 — not here).
+        let toml_src = r#"
+[plugin]
+name = "x"
+version = "1.0.0"
+abi_version = 2
+
+[capabilities]
+spawn_managed_subprocess = true
+"#;
+        let m: Manifest = toml::from_str(toml_src).unwrap();
+        assert!(matches!(
+            m.capabilities.spawn_managed_subprocess,
+            CapabilityGrant::Bool(true)
+        ));
+        let s = toml::to_string(&m).unwrap();
+        let back: Manifest = toml::from_str(&s).unwrap();
+        assert_eq!(m, back);
+    }
+
+    #[test]
+    fn spawn_managed_subprocess_cap_defaults_denied() {
+        let toml_src = r#"
+[plugin]
+name = "x"
+version = "1.0.0"
+abi_version = 2
+"#;
+        let m: Manifest = toml::from_str(toml_src).unwrap();
+        assert!(!m.capabilities.spawn_managed_subprocess.is_granted());
+    }
+
+    #[test]
+    fn unix_socket_dial_cap_round_trips_list_form() {
+        // List form whitelists socket paths.
+        let toml_src = r#"
+[plugin]
+name = "hangar-tui"
+version = "0.1.0"
+abi_version = 2
+
+[capabilities]
+unix_socket_dial = ["~/.ainb/hangar.sock", "${XDG_RUNTIME_DIR}/ainb-hangar.sock"]
+"#;
+        let m: Manifest = toml::from_str(toml_src).unwrap();
+        assert_eq!(
+            m.capabilities.unix_socket_dial.allow_list().unwrap(),
+            ["~/.ainb/hangar.sock", "${XDG_RUNTIME_DIR}/ainb-hangar.sock"]
+        );
+        let s = toml::to_string(&m).unwrap();
+        let back: Manifest = toml::from_str(&s).unwrap();
+        assert_eq!(m, back);
+    }
+
+    #[test]
+    fn unix_socket_dial_cap_round_trips_bool_form() {
+        // Bool-true grant survives the manifest round-trip at the SCHEMA
+        // level (semantic rejection — `-32003` — happens at validation /
+        // handler time, not here).
+        let toml_src = r#"
+[plugin]
+name = "x"
+version = "1.0.0"
+abi_version = 2
+
+[capabilities]
+unix_socket_dial = true
+"#;
+        let m: Manifest = toml::from_str(toml_src).unwrap();
+        assert!(matches!(
+            m.capabilities.unix_socket_dial,
+            CapabilityGrant::Bool(true)
+        ));
+        let s = toml::to_string(&m).unwrap();
+        let back: Manifest = toml::from_str(&s).unwrap();
+        assert_eq!(m, back);
+    }
+
+    #[test]
+    fn unix_socket_dial_cap_defaults_denied() {
+        let toml_src = r#"
+[plugin]
+name = "x"
+version = "1.0.0"
+abi_version = 2
+"#;
+        let m: Manifest = toml::from_str(toml_src).unwrap();
+        assert!(!m.capabilities.unix_socket_dial.is_granted());
     }
 
     #[test]
