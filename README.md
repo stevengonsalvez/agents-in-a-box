@@ -439,7 +439,8 @@ agents-in-a-box/
 └── .github/workflows/
     ├── ci.yml                  #   Rust CI (fmt, clippy, test, deny, machete)
     ├── toolkit-validation.yml  #   Toolkit structure & install validation
-    └── release.yml             #   Cross-platform binary releases
+    ├── release.yml             #   Cross-platform binary releases
+    └── deploy-pages.yml        #   Build & deploy the website to GitHub Pages
 ```
 
 ---
