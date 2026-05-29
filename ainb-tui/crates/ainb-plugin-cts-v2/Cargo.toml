@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Conformance test suite for ainb plugin JSON-RPC subprocess ABI v2 (14 axes)"
+description = "Conformance test suite for ainb plugin JSON-RPC subprocess ABI v2 (17 axes)"
 categories = ["development-tools::testing"]
 keywords = ["ainb", "plugin", "cts", "conformance"]
 
@@ -120,7 +120,25 @@ path = "tests/canaries/a14_cli_dispatch_capture/main.rs"
 test = false
 doc = false
 
-# --- Host-side test harness (all 14 axes) ---
+[[bin]]
+name = "cts-a15-event-stream"
+path = "tests/canaries/a15_event_stream_subscribe/main.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "cts-a16-spawn-managed"
+path = "tests/canaries/a16_spawn_managed_subprocess/main.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "cts-a17-unix-socket"
+path = "tests/canaries/a17_unix_socket_dial/main.rs"
+test = false
+doc = false
+
+# --- Host-side test harness (all axes) ---
 
 [[test]]
 name = "axes"
