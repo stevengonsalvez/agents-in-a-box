@@ -76,7 +76,7 @@ ainb workspace
 | ✅ P0 | W1-2 | Schema + crates skeleton | 4 crates compile; SQLite migrations run; workspace + member + issue + task tables exist — **DONE** (7 beads, 41 tests) |
 | ✅ P1 | W3-4 | Daemon + task FSM | `ainb-hangar-daemon` claims/starts/completes a task; TTL sweepers + idempotent finalize + retry rows — **DONE** (7 beads, 115 tests, e2e tmux green) |
 | ✅ P2 | W5-6 | Beads sync adapter | Two-way sync: create issue in hangar → mirrors to beads; `bd close` → marks task done — **DONE** (6 beads, 61 tests, live-bd round-trip green). ⚠ CLI namespace wiring tracked as 174.11 |
-| P3 | W7-8 | Plugin host caps + hangar-tui plugin scaffold | 4 new caps land in plugin host v2; `hangar-tui` plugin connects to daemon over unix socket via dial cap |
+| ✅ P3 | W7-8 | Plugin host caps + hangar-tui plugin scaffold | 4 new caps land in plugin host v2; `hangar-tui` plugin connects to daemon over unix socket via dial cap — **DONE** (8 beads, CTS A15-A18 green, plugin scaffold + connect tripwire) |
 | P4 | W9-10 | Core 5 TUI screens | Issue list / Task detail / Agent picker / Skill manager / Settings — all wired to daemon streams |
 | P5 | W11-12 | Auth + workspace + secret store | OS keychain integration for LLM keys; allowlist env enforcement; workspace switching |
 | P6 | W13-14 | Skills + curated templates | Embedded `agent_template` JSONs; `ainb hangar skills sync` importer from `toolkit/packages/skills/` |
