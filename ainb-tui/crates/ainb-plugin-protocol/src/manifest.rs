@@ -128,6 +128,11 @@ pub struct Capabilities {
     /// Read the Codex session log directory specifically.
     #[serde(default)]
     pub read_codex_logs: CapabilityGrant,
+    /// Open cancellable streaming subscriptions via `host/event_stream_subscribe`.
+    /// List form is a topic-prefix allow-list (e.g. `["workspace:*"]`);
+    /// bool-true grants wildcard subscribe across all topics.
+    #[serde(default)]
+    pub event_stream_subscribe: CapabilityGrant,
 }
 
 /// `[provides]` — what the plugin contributes to the host's UX.
@@ -211,6 +216,7 @@ mod tests {
                 spawn_subprocess: CapabilityGrant::Bool(false),
                 read_claude_logs: CapabilityGrant::Bool(false),
                 read_codex_logs: CapabilityGrant::Bool(false),
+                event_stream_subscribe: CapabilityGrant::List(vec!["workspace:*".into()]),
             },
             provides: Provides {
                 screens: vec!["analytics".into()],
@@ -257,6 +263,63 @@ network = ["api.example.com", "raw.githubusercontent.com"]
             m.capabilities.network.allow_list().unwrap(),
             ["api.example.com", "raw.githubusercontent.com"]
         );
+    }
+
+    #[test]
+    fn event_stream_subscribe_cap_round_trips_list_form() {
+        // List form whitelists topic prefixes (e.g. `["workspace:*"]`).
+        let toml_src = r#"
+[plugin]
+name = "hangar-tui"
+version = "0.1.0"
+abi_version = 2
+
+[capabilities]
+event_stream_subscribe = ["workspace:*", "stream:*"]
+"#;
+        let m: Manifest = toml::from_str(toml_src).unwrap();
+        assert_eq!(
+            m.capabilities.event_stream_subscribe.allow_list().unwrap(),
+            ["workspace:*", "stream:*"]
+        );
+        // Round-trips byte-stable.
+        let s = toml::to_string(&m).unwrap();
+        let back: Manifest = toml::from_str(&s).unwrap();
+        assert_eq!(m, back);
+    }
+
+    #[test]
+    fn event_stream_subscribe_cap_round_trips_bool_form() {
+        // Bool-true grant = wildcard subscribe.
+        let toml_src = r#"
+[plugin]
+name = "x"
+version = "1.0.0"
+abi_version = 2
+
+[capabilities]
+event_stream_subscribe = true
+"#;
+        let m: Manifest = toml::from_str(toml_src).unwrap();
+        assert!(matches!(
+            m.capabilities.event_stream_subscribe,
+            CapabilityGrant::Bool(true)
+        ));
+        let s = toml::to_string(&m).unwrap();
+        let back: Manifest = toml::from_str(&s).unwrap();
+        assert_eq!(m, back);
+    }
+
+    #[test]
+    fn event_stream_subscribe_cap_defaults_denied() {
+        let toml_src = r#"
+[plugin]
+name = "x"
+version = "1.0.0"
+abi_version = 2
+"#;
+        let m: Manifest = toml::from_str(toml_src).unwrap();
+        assert!(!m.capabilities.event_stream_subscribe.is_granted());
     }
 
     #[test]

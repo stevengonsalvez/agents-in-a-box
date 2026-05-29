@@ -24,6 +24,7 @@ pub const PLUGIN_RENDER: &str = "plugin/render";
 pub const PLUGIN_HANDLE_EVENT: &str = "plugin/handle_event";
 
 /// Host forwards a single key event to the plugin owning the focused screen.
+///
 /// Notification — no response expected. Ordering is preserved across the same
 /// transport as `plugin/handle_event` so key sequences arrive in send order.
 pub const PLUGIN_HANDLE_KEY: &str = "plugin/handle_key";
@@ -62,6 +63,20 @@ pub const HOST_FS_READ_FILE: &str = "host/fs/read_file";
 /// Plugin fetches a URL through the host (capability-gated).
 pub const HOST_NETWORK_FETCH: &str = "host/network/fetch";
 
+/// Plugin opens a cancellable streaming subscription on a topic.
+///
+/// Capability-gated. Host allocates a `stream_id` and thereafter emits
+/// `plugin/handle_event` notifications under topic `stream:<stream_id>` until
+/// the plugin cancels or the plugin process leaves the `Running` state.
+pub const HOST_EVENT_STREAM_SUBSCRIBE: &str = "host/event_stream_subscribe";
+
+/// Plugin cancels a previously opened event stream.
+///
+/// Notification — no response expected. The host also implicitly cancels
+/// every stream a plugin holds when that plugin shuts down, crashes, or is
+/// quarantined.
+pub const HOST_EVENT_STREAM_CANCEL: &str = "host/event_stream_cancel";
+
 /// Every method name registered by the protocol, in stable order.
 ///
 /// Used by the runtime's static method-existence check and by the CTS
@@ -81,6 +96,8 @@ pub const ALL_METHODS: &[&str] = &[
     HOST_FS_READ_DIR,
     HOST_FS_READ_FILE,
     HOST_NETWORK_FETCH,
+    HOST_EVENT_STREAM_SUBSCRIBE,
+    HOST_EVENT_STREAM_CANCEL,
 ];
 
 #[cfg(test)]
@@ -128,8 +145,24 @@ mod tests {
             HOST_FS_READ_DIR,
             HOST_FS_READ_FILE,
             HOST_NETWORK_FETCH,
+            HOST_EVENT_STREAM_SUBSCRIBE,
+            HOST_EVENT_STREAM_CANCEL,
         ] {
             assert!(m.starts_with("host/"), "{m} missing host/ namespace");
         }
+    }
+
+    #[test]
+    fn all_methods_contains_event_stream() {
+        assert!(
+            ALL_METHODS.contains(&HOST_EVENT_STREAM_SUBSCRIBE),
+            "HOST_EVENT_STREAM_SUBSCRIBE missing from ALL_METHODS registry"
+        );
+        assert!(
+            ALL_METHODS.contains(&HOST_EVENT_STREAM_CANCEL),
+            "HOST_EVENT_STREAM_CANCEL missing from ALL_METHODS registry"
+        );
+        assert_eq!(HOST_EVENT_STREAM_SUBSCRIBE, "host/event_stream_subscribe");
+        assert_eq!(HOST_EVENT_STREAM_CANCEL, "host/event_stream_cancel");
     }
 }

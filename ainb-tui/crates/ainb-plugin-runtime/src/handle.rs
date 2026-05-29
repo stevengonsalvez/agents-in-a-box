@@ -38,7 +38,7 @@ pub(crate) struct HandleInner {
     pub(crate) snapshots: SnapshotStore,
     pub(crate) channels: ChannelRegistry,
     pub(crate) plugins: Arc<RwLock<HashMap<PluginId, Arc<PluginHandle>>>>,
-    /// Lightweight fan-out map (plugin_id → Inbox). Mirrors `plugins`
+    /// Lightweight fan-out map (`plugin_id` → Inbox). Mirrors `plugins`
     /// for the publish path; see [`crate::plugin_task::InboxMap`].
     pub(crate) inboxes: InboxMap,
     /// Parallel `plugin_id → render-dirty` map. See `runtime::PluginHandle`.

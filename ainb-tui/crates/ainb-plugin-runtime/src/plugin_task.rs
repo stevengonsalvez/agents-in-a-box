@@ -142,14 +142,16 @@ pub type Inbox = mpsc::UnboundedSender<Command>;
 /// responsiveness even during a multi-second chunk drain.
 pub type KeyInbox = mpsc::UnboundedSender<HandleKeyParams>;
 
-/// Map of `plugin_id → inbox` used by [`PluginTask`] to fan out
-/// subscriber notifications when a plugin issues `host/snapshot/publish`.
-/// Shared (clone-able `Arc`) with `Runtime`, which maintains it
-/// alongside the public plugin handle map.
+/// Map of `plugin_id → inbox` used by [`PluginTask`] to fan out notifications.
+///
+/// Fans out subscriber notifications when a plugin issues
+/// `host/snapshot/publish`. Shared (clone-able `Arc`) with `Runtime`, which
+/// maintains it alongside the public plugin handle map.
 pub type InboxMap = Arc<parking_lot::RwLock<HashMap<PluginId, Inbox>>>;
 
-/// Map of `plugin_id → render-dirty flag`. Mirrors [`InboxMap`] —
-/// when a plugin's `host/snapshot/publish` fans out to subscribers,
+/// Map of `plugin_id → render-dirty flag`. Mirrors [`InboxMap`].
+///
+/// When a plugin's `host/snapshot/publish` fans out to subscribers,
 /// each subscriber's flag is set so the host's render-tick loop knows
 /// to kick a `plugin/render` for it. Without this the dirty bit set
 /// on the host-side `publish_snapshot` path would miss every
@@ -277,9 +279,8 @@ impl PluginTask {
                 // 100k+ call dataset) would starve Esc and other
                 // navigation keys until the chunks drained.
                 biased;
-                key = self.key_rx.recv() => match key {
-                    Some(params) => self.handle_key_command(params).await,
-                    None => {}
+                key = self.key_rx.recv() => if let Some(params) = key {
+                    self.handle_key_command(params).await;
                 },
                 cmd = self.rx.recv() => match cmd {
                     Some(Command::Shutdown) | None => { self.shutdown().await; break; }
@@ -847,6 +848,7 @@ fn collect_granted_capabilities(m: &ainb_plugin_protocol::manifest::Manifest) ->
     if c.spawn_subprocess.is_granted() { out.push("spawn_subprocess".into()); }
     if c.read_claude_logs.is_granted() { out.push("read_claude_logs".into()); }
     if c.read_codex_logs.is_granted() { out.push("read_codex_logs".into()); }
+    if c.event_stream_subscribe.is_granted() { out.push("event_stream_subscribe".into()); }
     out
 }
 

@@ -444,16 +444,66 @@ pub struct NetworkFetchResult {
 }
 
 // =====================================================================
+// host/event_stream_subscribe
+// =====================================================================
+
+/// `host/event_stream_subscribe` params: open a cancellable streaming
+/// subscription on `topic`.
+///
+/// The host validates `topic` against the plugin's
+/// `event_stream_subscribe` capability allow-list (list form = topic-prefix
+/// whitelist; bool-true = wildcard) before allocating a stream.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventStreamSubscribeParams {
+    /// Topic to subscribe to (e.g. `workspace:default`).
+    pub topic: String,
+    /// Optional resume point. When present, the host replays from this
+    /// version; when omitted, the stream starts from the current version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since_version: Option<u64>,
+}
+
+/// `host/event_stream_subscribe` result: the host-allocated stream handle.
+///
+/// `stream_id` is a host-minted opaque token (ULID) the plugin cannot forge;
+/// subsequent events arrive via `plugin/handle_event` under topic
+/// `stream:<stream_id>` and the plugin cancels using this same id.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventStreamSubscribeResult {
+    /// Host-allocated stream identifier.
+    pub stream_id: String,
+    /// Topic version the stream is positioned at (first event the plugin
+    /// will observe is `> version` unless `since_version` requested a replay).
+    #[serde(default)]
+    pub version: u64,
+}
+
+// =====================================================================
+// host/event_stream_cancel
+// =====================================================================
+
+/// `host/event_stream_cancel` params (notification): tear down a stream.
+///
+/// Cancels a stream the plugin previously opened; the host stops emitting
+/// further `stream:<stream_id>` events. Cancellation is also implicit on
+/// plugin restart / shutdown / quarantine.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventStreamCancelParams {
+    /// Stream to cancel — the `stream_id` returned by `event_stream_subscribe`.
+    pub stream_id: String,
+}
+
+// =====================================================================
 // (de)serialise bytes::Bytes as a JSON array of u8 (no base64 layer).
 // =====================================================================
 
 /// Binary payloads ride the JSON-RPC envelope as **base64 strings**.
 ///
-/// serde_json's default for `&[u8]` (and `Vec<u8>`) is a JSON array of
+/// `serde_json`'s default for `&[u8]` (and `Vec<u8>`) is a JSON array of
 /// numbers — `[12, 34, 56, ...]` — which costs 3-4 ASCII chars per
 /// byte. For the session-reader → burndown handoff that ballooned a
 /// ~25 MB msgpack snapshot to ~80 MB of JSON, exceeding the host
-/// framer's `MAX_BODY_BYTES = 16 MiB` and OOMing the plugin process
+/// framer's `MAX_BODY_BYTES = 16 MiB` and `OOM`-ing the plugin process
 /// mid-write. Base64 costs ~1.33 chars per byte — fits the budget and
 /// matches how JSON-RPC servers in the wild ship binary blobs.
 ///
@@ -536,6 +586,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // exhaustive per-method round-trip list
     fn round_trip_each() {
         rt(&PluginInitParams {
             manifest_path: "/x/manifest.toml".into(),
@@ -635,6 +686,44 @@ mod tests {
             headers: vec![("content-type".into(), "application/json".into())],
             body: bytes::Bytes::from_static(b"{}"),
         });
+
+        rt(&EventStreamSubscribeParams {
+            topic: "workspace:default".into(),
+            since_version: Some(7),
+        });
+        rt(&EventStreamSubscribeParams {
+            topic: "workspace:default".into(),
+            since_version: None,
+        });
+        rt(&EventStreamSubscribeResult {
+            stream_id: "01J9ZX8QK7".into(),
+            version: 42,
+        });
+        rt(&EventStreamCancelParams {
+            stream_id: "01J9ZX8QK7".into(),
+        });
+    }
+
+    #[test]
+    fn event_stream_subscribe_since_version_omitted_decodes_none() {
+        // `since_version` is optional on the wire; older/absent peers omit it
+        // entirely and the host starts the stream from the current version.
+        let j = r#"{"topic":"workspace:default"}"#;
+        let p: EventStreamSubscribeParams = serde_json::from_str(j).unwrap();
+        assert_eq!(p.topic, "workspace:default");
+        assert_eq!(p.since_version, None);
+    }
+
+    #[test]
+    fn event_stream_subscribe_skips_serializing_none_since_version() {
+        // None must not emit a `since_version: null` key — keeps the wire
+        // payload minimal and matches the optional contract.
+        let p = EventStreamSubscribeParams {
+            topic: "workspace:default".into(),
+            since_version: None,
+        };
+        let j = serde_json::to_string(&p).unwrap();
+        assert_eq!(j, r#"{"topic":"workspace:default"}"#);
     }
 
     #[test]
