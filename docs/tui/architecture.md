@@ -56,6 +56,23 @@ crates/ainb-core/src/
 └── plugins.rs           # Plugin install/management CLI surface
 ```
 
+## Plugin runtime
+
+`ainb-plugin-runtime` is the host-side supervisor that loads v2 plugins as native subprocess binaries speaking JSON-RPC over stdio (the `ainb-plugin-protocol` types). Authors build against `ainb-plugin-sdk-rust` and validate with `ainb-plugin-testkit` and the `ainb-plugin-cts-v2` conformance suite. The three in-tree reference plugins — `burndown` (analytics), `notifyd` (notifications), and `session-reader` (data backend) — double as worked examples. Install and inspect plugins via `ainb plugin install|list|lint|watch|tail` (see the [CLI reference](cli.md)).
+
+## Style guide
+
+Components follow the shared palette in `.claude/skills/tui-screen/SKILL.md`: cornflower-blue borders (`Rgb(100,149,237)`), gold titles/CTAs (`Rgb(255,215,0)`), green active state (`Rgb(100,200,100)`), `BorderType::Rounded` on all panels, a `▶` selection indicator, and a gold-keys / muted-descriptions bottom help bar.
+
+## Testing surface
+
+Tests live under `crates/ainb-core/tests/`:
+
+- **Unit + model tests** — `test_app_state.rs`, `test_events.rs`, `test_session_model.rs`, etc.
+- **Behavioral** — `behavioral.rs` and the `behavioral/` suite.
+- **E2E PTY** — `e2e_pty_tests.rs`, `interactive_mode_tests.rs` (real PTY drive).
+- **Tripwires** — `tripwire_*.rs` tmux-driven end-to-end screen assertions (burndown, inbox, crash recovery, new-session, …).
+
 ## See also
 
 - [Overview](overview.md)
