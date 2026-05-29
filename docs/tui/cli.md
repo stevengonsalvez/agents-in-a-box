@@ -548,6 +548,36 @@ In-tree v2 reference plugins: `burndown` (analytics), `notifyd` (notifications),
 
 ---
 
+### `ainb fleet`
+
+Orchestrate every claude session running on the host — merged across ainb's registry, the claude-peers broker, and background jobs.
+
+```bash
+ainb fleet <SUBCOMMAND>
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `standup [--text]` | Live fleet status: every claude session across ainb + peers + background jobs. `--text` forces text output even with `--format json`. |
+| `broadcast <PROMPT> (--all \| --filter <REGEX> \| --cwd <SUBSTR>)` | Send one prompt to selected sessions (peers-first, tmux fallback). Requires an explicit targeting flag — no implicit fan-out. `--filter` matches a regex against tmux/workspace name; `--cwd` matches a substring of the session cwd. |
+| `sequence <STEPS>... [--all] [--timeout <SECS>]` | Send ordered prompts with an ack between each step. `--timeout` is the per-step timeout in seconds (default `300`). |
+| `needs [--idle-min <MIN>]` | Center control panel — list sessions blocked on input / errors / idle / waiting. `--idle-min` is minutes of assistant silence before flagging IDLE (default 5, env `AINB_FLEET_IDLE_MIN`). |
+| `daemon [-v]` | Watcher: registers as the `ainb-fleet-cp` peer and auto-continues sessions hitting API errors. `-v, --verbose` for detailed logging. |
+
+**Examples**
+
+```bash
+ainb fleet standup --format json | jq '.[] | .workspace_name'
+ainb fleet needs --idle-min 10
+ainb fleet broadcast "git pull" --filter '^feat-'
+ainb fleet sequence "run tests" "commit" --all --timeout 600
+ainb fleet daemon -v
+```
+
+Backed by the in-tree `plugins/ainb-fleet/` plugin.
+
+---
+
 ## Scripting recipes
 
 **Agent-friendly: list running sessions as JSON, exit non-zero if none**
