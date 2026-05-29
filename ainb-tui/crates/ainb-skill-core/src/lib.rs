@@ -28,7 +28,8 @@ pub use paths::{
     default_ainb_home, default_cache_dir, default_lockfile_path, default_manifest_path,
 };
 pub use sync::{
-    apply_to_home, plan_sync, ContentFetcher, FetchError as SyncFetchError, SideSnapshot,
-    SyncAction, SyncDirection, SyncEngineError, UnitSnapshot,
+    apply_to_home, apply_to_repo, plan_sync, ApplyToRepoOpts, ContentFetcher,
+    FetchError as SyncFetchError, SideSnapshot, SyncAction, SyncDirection, SyncEngineError,
+    UnitSnapshot, SYNC_SKIP_PUSH_ENV,
 };
 pub use uri::{MarketplaceUri, SourceType, Uri};
