@@ -149,6 +149,15 @@ pub struct Capabilities {
     /// list, defending shared dev boxes against arbitrary `AF_UNIX` abuse.
     #[serde(default)]
     pub unix_socket_dial: CapabilityGrant,
+    /// Read secrets from the platform secret store via
+    /// `host/secret_store_get`. List form is an allow-list of `service`
+    /// strings (e.g. `["ainb-hangar", "anthropic-api-key"]`). A bool-true
+    /// grant is an unconditional read of *any* service — permitted, but a
+    /// danger surface (document the negative impact when a plugin requests
+    /// it). On macOS the host reads the login Keychain; on linux it returns
+    /// `-32005 NOT_IMPLEMENTED` so the plugin degrades to dotenv.
+    #[serde(default)]
+    pub secret_store_get: CapabilityGrant,
 }
 
 /// `[provides]` — what the plugin contributes to the host's UX.
@@ -237,6 +246,7 @@ mod tests {
                     "ainb-hangar-daemon".into()
                 ]),
                 unix_socket_dial: CapabilityGrant::List(vec!["~/.ainb/hangar.sock".into()]),
+                secret_store_get: CapabilityGrant::List(vec!["ainb-hangar".into()]),
             },
             provides: Provides {
                 screens: vec!["analytics".into()],
@@ -456,6 +466,63 @@ abi_version = 2
 "#;
         let m: Manifest = toml::from_str(toml_src).unwrap();
         assert!(!m.capabilities.unix_socket_dial.is_granted());
+    }
+
+    #[test]
+    fn secret_store_get_cap_round_trips_list_form() {
+        // List form whitelists `service` strings.
+        let toml_src = r#"
+[plugin]
+name = "hangar-tui"
+version = "0.1.0"
+abi_version = 2
+
+[capabilities]
+secret_store_get = ["ainb-hangar", "anthropic-api-key"]
+"#;
+        let m: Manifest = toml::from_str(toml_src).unwrap();
+        assert_eq!(
+            m.capabilities.secret_store_get.allow_list().unwrap(),
+            ["ainb-hangar", "anthropic-api-key"]
+        );
+        let s = toml::to_string(&m).unwrap();
+        let back: Manifest = toml::from_str(&s).unwrap();
+        assert_eq!(m, back);
+    }
+
+    #[test]
+    fn secret_store_get_cap_round_trips_bool_form() {
+        // Bool-true grant = unconditional secret read (allowed, but flagged
+        // as a danger surface in the PR body). Survives the round-trip.
+        let toml_src = r#"
+[plugin]
+name = "x"
+version = "1.0.0"
+abi_version = 2
+
+[capabilities]
+secret_store_get = true
+"#;
+        let m: Manifest = toml::from_str(toml_src).unwrap();
+        assert!(matches!(
+            m.capabilities.secret_store_get,
+            CapabilityGrant::Bool(true)
+        ));
+        let s = toml::to_string(&m).unwrap();
+        let back: Manifest = toml::from_str(&s).unwrap();
+        assert_eq!(m, back);
+    }
+
+    #[test]
+    fn secret_store_get_cap_defaults_denied() {
+        let toml_src = r#"
+[plugin]
+name = "x"
+version = "1.0.0"
+abi_version = 2
+"#;
+        let m: Manifest = toml::from_str(toml_src).unwrap();
+        assert!(!m.capabilities.secret_store_get.is_granted());
     }
 
     #[test]

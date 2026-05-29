@@ -22,9 +22,10 @@ use ainb_plugin_protocol::params::{
     EventStreamCancelParams, EventStreamSubscribeParams, EventStreamSubscribeResult,
     HandleEventParams, HandleKeyParams, LogParams, PluginInitParams, PluginInitResult,
     PluginShutdownParams, RenderParams, RenderResult, SnapshotGetParams, SnapshotGetResult,
-    SnapshotPublishParams, SnapshotSubscribeParams, SnapshotSubscribeResult,
-    SpawnManagedSubprocessParams, SpawnManagedSubprocessResult, UnixSocketCloseParams,
-    UnixSocketDialParams, UnixSocketDialResult, UnixSocketSendParams, Viewport,
+    SecretStoreGetParams, SecretStoreGetResult, SnapshotPublishParams, SnapshotSubscribeParams,
+    SnapshotSubscribeResult, SpawnManagedSubprocessParams, SpawnManagedSubprocessResult,
+    UnixSocketCloseParams, UnixSocketDialParams, UnixSocketDialResult, UnixSocketSendParams,
+    Viewport,
 };
 use ainb_plugin_protocol::wire_buffer::WireBuffer;
 use bytes::Bytes;
@@ -637,6 +638,7 @@ impl PluginTask {
                 self.host_spawn_managed_subprocess(params)
             }
             methods::HOST_UNIX_SOCKET_DIAL => self.host_unix_socket_dial(params).await,
+            methods::HOST_SECRET_STORE_GET => self.host_secret_store_get(params),
             // host/action/invoke arriving FROM the plugin would be cross-plugin
             // routing — out of scope for the per-plugin task; rejected.
             other => Err(RpcError::method_not_found(other)),
@@ -827,6 +829,44 @@ impl PluginTask {
             .map_err(|e| RpcError::new(ainb_plugin_protocol::errors::INVALID_PARAMS, e.to_string()))?;
         let res = UnixSocketDialResult { stream_id };
         Ok(serde_json::to_value(res).expect("UnixSocketDialResult serializable"))
+    }
+
+    /// Handle `host/secret_store_get`.
+    ///
+    /// Cap gate (two stages, both returning before any keychain hit):
+    /// 1. The `secret_store_get` grant must be present at all
+    ///    (`is_granted`); otherwise reject with `-32001`.
+    /// 2. For a list-form grant, the requested `service` must be on the
+    ///    allow-list (exact match); otherwise reject with `-32001`. A
+    ///    bool-true grant is an unconditional read of any service and skips
+    ///    the allow-list check (the danger surface flagged in the PR body).
+    ///
+    /// On a permitted request the host performs the platform lookup:
+    /// macOS reads the login Keychain; non-macOS returns `-32005`. A missing
+    /// item returns `-32004`. The secret is base64-encoded into the result
+    /// so it never rides the wire as a raw byte array.
+    fn host_secret_store_get(&self, params: Value) -> Result<Value, RpcError> {
+        use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+
+        let p: SecretStoreGetParams =
+            serde_json::from_value(params).map_err(|e| RpcError::invalid_params(e.to_string()))?;
+        let grant = &self.plugin.manifest.capabilities.secret_store_get;
+        if !grant.is_granted() {
+            return Err(RpcError::capability_denied("secret_store_get"));
+        }
+        // List form = service allow-list; bool-true = any service.
+        if let Some(allow) = grant.allow_list() {
+            if !crate::secret_store::service_allowed(allow, &p.service) {
+                return Err(RpcError::capability_denied("secret_store_get")
+                    .with_data(serde_json::json!({ "service": p.service })));
+            }
+        }
+        let bytes = crate::secret_store::get_secret(&p.service, &p.account)
+            .map_err(|e| e.into_rpc(&p.service, &p.account))?;
+        let res = SecretStoreGetResult {
+            secret_b64: B64.encode(&bytes),
+        };
+        Ok(serde_json::to_value(res).expect("SecretStoreGetResult serializable"))
     }
 
     async fn handle_host_notification(&self, method: &str, params: Value) {
@@ -1102,6 +1142,7 @@ fn collect_granted_capabilities(m: &ainb_plugin_protocol::manifest::Manifest) ->
     if c.event_stream_subscribe.is_granted() { out.push("event_stream_subscribe".into()); }
     if c.spawn_managed_subprocess.is_granted() { out.push("spawn_managed_subprocess".into()); }
     if c.unix_socket_dial.is_granted() { out.push("unix_socket_dial".into()); }
+    if c.secret_store_get.is_granted() { out.push("secret_store_get".into()); }
     out
 }
 

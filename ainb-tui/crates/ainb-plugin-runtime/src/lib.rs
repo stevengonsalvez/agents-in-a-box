@@ -34,6 +34,7 @@ pub mod process;
 pub mod registry;
 pub mod rpc;
 pub mod runtime;
+pub mod secret_store;
 pub mod snapshot;
 pub mod types;
 pub mod unix_socket;

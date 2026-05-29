@@ -36,9 +36,10 @@ use ainb_plugin_protocol::{
     params::{
         ActionInvokeParams, ActionInvokeResult, EventStreamCancelParams,
         EventStreamSubscribeParams, EventStreamSubscribeResult, LogLevel, LogParams,
-        SnapshotGetParams, SnapshotGetResult, SnapshotPublishParams, SnapshotSubscribeParams,
-        SnapshotSubscribeResult, SpawnManagedSubprocessParams, SpawnManagedSubprocessResult,
-        UnixSocketCloseParams, UnixSocketDialParams, UnixSocketDialResult, UnixSocketSendParams,
+        SecretStoreGetParams, SecretStoreGetResult, SnapshotGetParams, SnapshotGetResult,
+        SnapshotPublishParams, SnapshotSubscribeParams, SnapshotSubscribeResult,
+        SpawnManagedSubprocessParams, SpawnManagedSubprocessResult, UnixSocketCloseParams,
+        UnixSocketDialParams, UnixSocketDialResult, UnixSocketSendParams,
     },
     RpcError,
 };
@@ -352,6 +353,32 @@ impl HostClient {
             stream_id: stream_id.into(),
         };
         self.send_notification(methods::HOST_UNIX_SOCKET_CLOSE, &params)
+            .await
+    }
+
+    /// Read a secret from the platform secret store through the host.
+    ///
+    /// Capability-gated by the plugin's `secret_store_get` grant. List form
+    /// is an allow-list of `service` strings; bool-true is an unconditional
+    /// read of any service.
+    ///
+    /// Returns [`SdkError::Rpc`] carrying `-32001` when the cap is denied or
+    /// the `service` isn't on the allow-list, `-32004` when no secret exists
+    /// for the `(service, account)` pair, and `-32005` on platforms where
+    /// the secret store backend is not implemented (e.g. linux).
+    ///
+    /// On success the result carries the secret base64-encoded in
+    /// `secret_b64`; the plugin decodes it itself.
+    pub async fn secret_store_get(
+        &self,
+        service: impl Into<String>,
+        account: impl Into<String>,
+    ) -> Result<SecretStoreGetResult> {
+        let params = SecretStoreGetParams {
+            service: service.into(),
+            account: account.into(),
+        };
+        self.send_request(methods::HOST_SECRET_STORE_GET, &params)
             .await
     }
 

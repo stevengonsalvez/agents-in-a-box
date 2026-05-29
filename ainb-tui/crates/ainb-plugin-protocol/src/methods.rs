@@ -118,6 +118,19 @@ pub const HOST_UNIX_SOCKET_SEND: &str = "host/unix_socket_send";
 /// shuts down, crashes, or is quarantined.
 pub const HOST_UNIX_SOCKET_CLOSE: &str = "host/unix_socket_close";
 
+/// Plugin asks the host to read a secret from the platform secret store.
+///
+/// Capability-gated by the plugin's `secret_store_get` grant. List form is
+/// an allow-list of `service` strings (e.g. `["ainb-hangar"]`); a bool-true
+/// grant is an unconditional read (allowed, but a danger surface — every
+/// `service` becomes readable). On macOS the host reads the generic
+/// password from the login Keychain; on linux the host returns
+/// `-32005 NOT_IMPLEMENTED` (Secret Service deferred to a later phase) so
+/// the plugin can degrade to dotenv. A missing entry returns
+/// `-32004 SECRET_NOT_FOUND`. The secret is returned base64-encoded so it
+/// never rides the wire as a raw byte array.
+pub const HOST_SECRET_STORE_GET: &str = "host/secret_store_get";
+
 /// Every method name registered by the protocol, in stable order.
 ///
 /// Used by the runtime's static method-existence check and by the CTS
@@ -143,6 +156,7 @@ pub const ALL_METHODS: &[&str] = &[
     HOST_UNIX_SOCKET_DIAL,
     HOST_UNIX_SOCKET_SEND,
     HOST_UNIX_SOCKET_CLOSE,
+    HOST_SECRET_STORE_GET,
 ];
 
 #[cfg(test)]
@@ -196,6 +210,7 @@ mod tests {
             HOST_UNIX_SOCKET_DIAL,
             HOST_UNIX_SOCKET_SEND,
             HOST_UNIX_SOCKET_CLOSE,
+            HOST_SECRET_STORE_GET,
         ] {
             assert!(m.starts_with("host/"), "{m} missing host/ namespace");
         }
@@ -230,6 +245,15 @@ mod tests {
             HOST_SPAWN_MANAGED_SUBPROCESS,
             "host/spawn_managed_subprocess"
         );
+    }
+
+    #[test]
+    fn all_methods_contains_secret_store_get() {
+        assert!(
+            ALL_METHODS.contains(&HOST_SECRET_STORE_GET),
+            "HOST_SECRET_STORE_GET missing from ALL_METHODS registry"
+        );
+        assert_eq!(HOST_SECRET_STORE_GET, "host/secret_store_get");
     }
 
     #[test]

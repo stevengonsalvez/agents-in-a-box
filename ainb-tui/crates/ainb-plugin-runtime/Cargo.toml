@@ -25,9 +25,16 @@ tracing = { workspace = true }
 bytes = { version = "1.6", features = ["serde"] }
 parking_lot = "0.12"
 ulid = "1"
+base64 = "0.22"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Platform secret store backend for `host/secret_store_get`. macOS only —
+# the linux/other build of the runtime uses the `-32005` stub in
+# `secret_store.rs`, so the crate carries no Secret Service dependency yet.
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
 
 [dev-dependencies]
 tempfile = { workspace = true }

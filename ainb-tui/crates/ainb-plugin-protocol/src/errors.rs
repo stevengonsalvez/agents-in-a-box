@@ -27,6 +27,14 @@ pub const ACTION_TIMEOUT: i32 = -32002;
 /// Manifest failed schema validation at install time or `plugin/init`.
 pub const MANIFEST_VALIDATION: i32 = -32003;
 
+/// `host/secret_store_get` found no secret for the requested
+/// `(service, account)` pair in the platform secret store.
+pub const SECRET_NOT_FOUND: i32 = -32004;
+
+/// The requested host capability is not implemented on this platform
+/// (e.g. the linux Secret Service backend, deferred to a later phase).
+pub const NOT_IMPLEMENTED: i32 = -32005;
+
 /// Wire shape of a JSON-RPC 2.0 error object.
 ///
 /// Carried inside a `{"jsonrpc":"2.0","id":..,"error":{..}}` envelope.
@@ -91,6 +99,23 @@ impl RpcError {
     #[must_use]
     pub fn invalid_params(reason: impl Into<String>) -> Self {
         Self::new(INVALID_PARAMS, reason)
+    }
+
+    /// Constructor for [`SECRET_NOT_FOUND`] naming the `(service, account)`
+    /// pair the platform secret store had no entry for.
+    #[must_use]
+    pub fn secret_not_found(service: impl Into<String>, account: impl Into<String>) -> Self {
+        let (s, a) = (service.into(), account.into());
+        Self::new(
+            SECRET_NOT_FOUND,
+            format!("secret not found: service={s} account={a}"),
+        )
+    }
+
+    /// Constructor for [`NOT_IMPLEMENTED`] with a free-form reason string.
+    #[must_use]
+    pub fn not_implemented(reason: impl Into<String>) -> Self {
+        Self::new(NOT_IMPLEMENTED, reason)
     }
 }
 
@@ -162,10 +187,34 @@ mod tests {
             CAPABILITY_DENIED,
             ACTION_TIMEOUT,
             MANIFEST_VALIDATION,
+            SECRET_NOT_FOUND,
+            NOT_IMPLEMENTED,
         ];
         let mut sorted = codes.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), codes.len());
+    }
+
+    #[test]
+    fn secret_store_error_codes_have_expected_values() {
+        // Locked by the P3.5 contract.
+        assert_eq!(SECRET_NOT_FOUND, -32004);
+        assert_eq!(NOT_IMPLEMENTED, -32005);
+    }
+
+    #[test]
+    fn secret_not_found_constructor_carries_code() {
+        let e = RpcError::secret_not_found("ainb-hangar", "anthropic");
+        assert_eq!(e.code, SECRET_NOT_FOUND);
+        assert!(e.message.contains("ainb-hangar"));
+        assert!(e.message.contains("anthropic"));
+    }
+
+    #[test]
+    fn not_implemented_constructor_carries_code() {
+        let e = RpcError::not_implemented("linux Secret Service deferred to P5");
+        assert_eq!(e.code, NOT_IMPLEMENTED);
+        assert!(e.message.contains("linux"));
     }
 }

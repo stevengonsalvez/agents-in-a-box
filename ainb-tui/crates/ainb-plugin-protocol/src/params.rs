@@ -631,6 +631,37 @@ pub struct UnixSocketEvent {
 }
 
 // =====================================================================
+// host/secret_store_get
+// =====================================================================
+
+/// `host/secret_store_get` params: read a secret from the platform secret
+/// store.
+///
+/// `service` must satisfy the plugin's `secret_store_get` capability
+/// allow-list (list form = `service`-string whitelist; bool-true = any
+/// service). The `(service, account)` pair keys the underlying generic
+/// password (macOS Keychain) or, on linux, would key the Secret Service
+/// item (deferred — the host returns `-32005` there).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecretStoreGetParams {
+    /// Secret store service name (e.g. `ainb-hangar`). Cap-gated.
+    pub service: String,
+    /// Account / key within the service (e.g. `anthropic-api-key`).
+    pub account: String,
+}
+
+/// `host/secret_store_get` result: the secret, base64-encoded.
+///
+/// The secret bytes are carried base64-encoded (not as a raw JSON byte
+/// array) so an arbitrary binary secret survives the JSON envelope and the
+/// payload stays compact. The plugin decodes `secret_b64` itself.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecretStoreGetResult {
+    /// Base64 (standard alphabet) encoding of the secret's raw bytes.
+    pub secret_b64: String,
+}
+
+// =====================================================================
 // (de)serialise bytes::Bytes as a JSON array of u8 (no base64 layer).
 // =====================================================================
 
@@ -885,6 +916,35 @@ mod tests {
             bytes: None,
             error: Some("connection reset".into()),
         });
+
+        rt(&SecretStoreGetParams {
+            service: "ainb-hangar".into(),
+            account: "anthropic-api-key".into(),
+        });
+        rt(&SecretStoreGetResult {
+            secret_b64: "c2VjcmV0".into(),
+        });
+    }
+
+    #[test]
+    fn secret_store_get_params_wire_shape() {
+        let p = SecretStoreGetParams {
+            service: "ainb-hangar".into(),
+            account: "anthropic-api-key".into(),
+        };
+        let j = serde_json::to_string(&p).unwrap();
+        assert_eq!(j, r#"{"service":"ainb-hangar","account":"anthropic-api-key"}"#);
+    }
+
+    #[test]
+    fn secret_store_get_result_wire_shape() {
+        // `secret_b64` carries the base64-encoded secret bytes (the secret
+        // is never sent as a raw byte array).
+        let r = SecretStoreGetResult {
+            secret_b64: "c2VjcmV0".into(),
+        };
+        let j = serde_json::to_string(&r).unwrap();
+        assert_eq!(j, r#"{"secret_b64":"c2VjcmV0"}"#);
     }
 
     #[test]
