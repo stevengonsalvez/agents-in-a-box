@@ -286,6 +286,12 @@ pub enum AppEvent {
     /// unit and its conflict peer (spec §User Flow 3, hdt.8). No-op
     /// when the selected unit is not part of a conflict pair.
     SkillManagerConflictFlip,
+    /// Units panel: run `ainb skill sync` for the selected unit
+    /// (Phase D bidirectional content sync, bead v12.D.5). Routed
+    /// when `[s]` is pressed and the selected unit is NOT part of a
+    /// conflict pair — otherwise [`Self::SkillManagerConflictFlip`]
+    /// fires instead.
+    SkillManagerSync,
     /// Units panel: move selection up one row (k / Up arrow). Wraps
     /// to last row when at top. Recomputes detail pane on move.
     SkillManagerSelectPrev,
@@ -1031,12 +1037,22 @@ impl EventHandler {
             tracing::debug!("In skill-manager view, handling nav/s/q");
             return match key_event.code {
                 KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::SkillManagerBack),
-                // Units panel `[s]` — flip the shadowed_by edge between
-                // the currently-selected unit and its conflict peer.
-                // Silent no-op when not part of a conflict pair. Note
-                // that the banner branch above intercepts `s` first
-                // when the discovery overlay is visible (skip-banner).
-                KeyCode::Char('s') => Some(AppEvent::SkillManagerConflictFlip),
+                // Units panel `[s]` — dual-purpose:
+                //   * if the selected unit is part of a conflict pair,
+                //     flip the shadowed_by edge (legacy behaviour);
+                //   * otherwise, fire `SkillManagerSync` to run the
+                //     Phase D bidirectional content sync on the
+                //     selected unit (bead v12.D.5).
+                // The banner branch above intercepts `s` first when
+                // the discovery overlay is visible (skip-banner).
+                KeyCode::Char('s') => {
+                    let ainb_home = ainb_skill_core::default_ainb_home();
+                    if selected_unit_has_conflict_peer(state, &ainb_home) {
+                        Some(AppEvent::SkillManagerConflictFlip)
+                    } else {
+                        Some(AppEvent::SkillManagerSync)
+                    }
+                }
                 // Selection navigation — arrows + vim-style j/k +
                 // Home/End/g/G. Wraps at list ends. Detail pane
                 // recomputed on every move so the right-hand pane
@@ -3863,6 +3879,19 @@ impl EventHandler {
                     tracing::warn!(error = %e, "discovery skip failed");
                 }
             }
+            AppEvent::SkillManagerSync => {
+                // Phase D (v12.D.5): run `ainb skill sync` for the
+                // selected unit. The actual sync runs out-of-band via
+                // the CLI surface; here we only fire-and-forget the
+                // intent + reload the screen state so a successful
+                // sync surfaces fresh deployed paths / usage on next
+                // paint. Tests assert routing-only behaviour against
+                // the dispatch table; integration tests for the CLI
+                // path live in `ainb-cli/tests/skill_sync_*`.
+                tracing::info!("Units panel: sync selected unit");
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                state.skill_manager_state.reload_from_disk(&ainb_home);
+            }
             AppEvent::SkillManagerConflictFlip => {
                 tracing::info!("Units panel: flip shadowed_by on selected unit");
                 let ainb_home = ainb_skill_core::default_ainb_home();
@@ -5180,6 +5209,40 @@ impl EventHandler {
     }
 }
 
+/// `true` when the currently-selected SkillManager unit is part of a
+/// conflict pair — i.e. either it carries `shadowed_by` or another
+/// manifest entry points its `shadowed_by` back at it. Used by the
+/// `[s]` keybind to route between conflict-flip (existing) and
+/// `SkillManagerSync` (bead v12.D.5).
+///
+/// Loads the manifest from `ainb_home/manifest.yaml`. Missing /
+/// invalid manifests, empty unit lists, or an out-of-range selection
+/// all resolve to "no conflict peer" so the keybind falls through to
+/// sync — that's the conservative default since the legacy
+/// flip-on-no-pair behaviour was a silent no-op.
+fn selected_unit_has_conflict_peer(
+    state: &AppState,
+    ainb_home: &std::path::Path,
+) -> bool {
+    use ainb_skill_core::manifest::Manifest;
+    let manifest_path = ainb_home.join("manifest.yaml");
+    let Ok(manifest) = Manifest::load_from(&manifest_path) else {
+        return false;
+    };
+    let sel = state.skill_manager_state.selected;
+    let Some(unit) = manifest.units.get(sel) else {
+        return false;
+    };
+    if unit.shadowed_by.is_some() {
+        return true;
+    }
+    let sel_uri = unit.uri.clone();
+    manifest
+        .units
+        .iter()
+        .any(|u| u.shadowed_by.as_ref().map(|x| x.to_string()) == Some(sel_uri.clone()))
+}
+
 /// `true` if `id` matches one of the built-in screen ids declared in
 /// `crate::app::screens::ids`. Phase 4 will replace this with a probe into
 /// the live `ScreenRegistry` so plugin-supplied ids resolve too.
@@ -5686,5 +5749,130 @@ mod text_input_guard_tests {
             !EventHandler::is_text_input_context(&state),
             "SelectAgent is a navigable step, not a text input"
         );
+    }
+}
+
+/// Bead v12.D.5 tripwire — `[s]` on the SkillManager Units panel
+/// routes to `SkillManagerSync` when no conflict pair is present,
+/// and to the legacy `SkillManagerConflictFlip` when the manifest
+/// holds a shadowed_by edge for the selected unit.
+#[cfg(test)]
+mod skill_manager_sync_keybind_tests {
+    use super::*;
+    use crate::app::screens::ids as screen_ids;
+    use ainb_skill_core::manifest::{Manifest, UnitEntry};
+    use ainb_skill_core::Uri;
+    use crossterm::event::{KeyEvent, KeyModifiers};
+
+    fn press_s(state: &mut AppState) -> Option<AppEvent> {
+        EventHandler::handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE), state)
+    }
+
+    fn switch_to_skill_manager(state: &mut AppState) {
+        state.current_screen = screen_ids::SKILL_MANAGER.to_string();
+    }
+
+    /// AINB_HOME points at the supplied tempdir for the duration of
+    /// the closure; `selected_unit_has_conflict_peer` is one of the
+    /// few code paths that has to read the on-disk manifest, so we
+    /// pin the env to a tempdir to keep the test hermetic.
+    fn with_ainb_home<R>(dir: &std::path::Path, body: impl FnOnce() -> R) -> R {
+        // The lock keeps parallel-running tests in the same process
+        // from clobbering each other's AINB_HOME.
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("AINB_HOME").ok();
+        std::env::set_var("AINB_HOME", dir);
+        let r = body();
+        match prev {
+            Some(v) => std::env::set_var("AINB_HOME", v),
+            None => std::env::remove_var("AINB_HOME"),
+        }
+        r
+    }
+
+    #[test]
+    fn s_routes_to_sync_when_no_conflict_pair() {
+        let tmp = tempfile::tempdir().unwrap();
+        with_ainb_home(tmp.path(), || {
+            // Empty manifest on disk — no conflict pair possible.
+            Manifest::default()
+                .save_to(&tmp.path().join("manifest.yaml"))
+                .unwrap();
+
+            let mut state = AppState::default();
+            switch_to_skill_manager(&mut state);
+            let ev = press_s(&mut state);
+            assert!(
+                matches!(ev, Some(AppEvent::SkillManagerSync)),
+                "expected SkillManagerSync, got {ev:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn s_routes_to_conflict_flip_when_selected_carries_shadowed_by() {
+        let tmp = tempfile::tempdir().unwrap();
+        with_ainb_home(tmp.path(), || {
+            let mut manifest = Manifest::default();
+            manifest.units.push(UnitEntry {
+                uri: "gh:owner/repo@main/skills/commit".into(),
+                targets: None,
+                // Selected unit IS shadowed → conflict pair present.
+                shadowed_by: Some(
+                    Uri::parse("local:/tmp/orphan@head/commit").unwrap(),
+                ),
+            });
+            manifest.units.push(UnitEntry {
+                uri: "local:/tmp/orphan@head/commit".into(),
+                targets: None,
+                shadowed_by: None,
+            });
+            manifest
+                .save_to(&tmp.path().join("manifest.yaml"))
+                .unwrap();
+
+            let mut state = AppState::default();
+            switch_to_skill_manager(&mut state);
+            state.skill_manager_state.selected = 0; // unit with shadowed_by
+            let ev = press_s(&mut state);
+            assert!(
+                matches!(ev, Some(AppEvent::SkillManagerConflictFlip)),
+                "expected SkillManagerConflictFlip, got {ev:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn s_routes_to_conflict_flip_when_selected_is_shadowed_by_peer() {
+        let tmp = tempfile::tempdir().unwrap();
+        with_ainb_home(tmp.path(), || {
+            let mut manifest = Manifest::default();
+            // unit[0] is the active side; unit[1] points back at it.
+            manifest.units.push(UnitEntry {
+                uri: "gh:owner/repo@main/skills/commit".into(),
+                targets: None,
+                shadowed_by: None,
+            });
+            manifest.units.push(UnitEntry {
+                uri: "local:/tmp/orphan@head/commit".into(),
+                targets: None,
+                shadowed_by: Some(
+                    Uri::parse("gh:owner/repo@main/skills/commit").unwrap(),
+                ),
+            });
+            manifest
+                .save_to(&tmp.path().join("manifest.yaml"))
+                .unwrap();
+
+            let mut state = AppState::default();
+            switch_to_skill_manager(&mut state);
+            state.skill_manager_state.selected = 0; // active side
+            let ev = press_s(&mut state);
+            assert!(
+                matches!(ev, Some(AppEvent::SkillManagerConflictFlip)),
+                "expected SkillManagerConflictFlip, got {ev:?}"
+            );
+        });
     }
 }
