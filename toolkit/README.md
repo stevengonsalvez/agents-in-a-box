@@ -72,9 +72,9 @@ URL). See the bootstrap's `installReflectKb()` function for details.
 ### Skills at a glance (91 total, grouped by purpose)
 
 <details>
-<summary><b>Planning & Workflow</b> (14)</summary>
+<summary><b>Planning & Workflow</b> (15)</summary>
 
-`plan` · `plan-gh` · `plan-tdd` · `implement` · `validate` · `workflow` · `discuss` · `brainstorm` · `interview` · `critique` · `research` · `handover` · `prime` · `recover-sessions`
+`plan` · `plan-gh` · `plan-tdd` · `implement` · `validate` · `workflow` · `discuss` · `brainstorm` · `interview` · `critique` · `research` · `handover` · `prime` · `recover-sessions` · `make-a-goal`
 </details>
 
 <details>
