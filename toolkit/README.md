@@ -40,7 +40,7 @@ The canonical source tree. Everything under `packages/` gets distributed to tool
 
 ```
 packages/
-├── skills/              86 skills — agent-invokable SKILL.md bundles
+├── skills/              91 skills — agent-invokable SKILL.md bundles
 ├── agents/              37 agents across 6 categories
 │   ├── design/          UI/UX designers
 │   ├── engineering/     backend, frontend, security, perf, code-review
