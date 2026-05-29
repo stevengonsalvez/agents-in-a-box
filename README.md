@@ -383,18 +383,19 @@ The `/reflect` skill captures learnings. The `/research` and `/prime` skills ret
 ```
 agents-in-a-box/
 │
-├── ainb-tui/                   # Rust TUI application
-│   ├── src/                    # 115 modules
-│   │   ├── app/                #   State machine & event handling
-│   │   ├── components/         #   TUI screen components
-│   │   ├── widgets/            #   Reusable UI widgets
-│   │   ├── docker/             #   Container management
-│   │   ├── tmux/               #   Session & PTY integration
-│   │   ├── git/                #   Worktree operations
-│   │   ├── claude/             #   Claude API client
-│   │   ├── models/             #   Data models
-│   │   └── config/             #   Configuration handling
-│   ├── Formula/                #   Homebrew formula
+├── ainb-tui/                   # Rust Cargo workspace
+│   ├── crates/
+│   │   ├── ainb-core/          #   TUI application (app, components, tmux, git, claude, config)
+│   │   ├── ainb-plugin-runtime/        #   Plugin host runtime
+│   │   ├── ainb-plugin-protocol/       #   Plugin JSON-RPC protocol
+│   │   ├── ainb-plugin-sdk-rust/       #   Rust plugin SDK
+│   │   ├── ainb-plugin-types-sessions/ #   Shared session types
+│   │   ├── ainb-plugin-burndown/       #   v2 analytics plugin
+│   │   ├── ainb-plugin-notifyd/        #   v2 notifications plugin
+│   │   ├── ainb-plugin-session-reader/ #   v2 data-backend plugin
+│   │   ├── ainb-plugin-cts-v2/         #   Conformance test suite (14 axes)
+│   │   └── ainb-plugin-testkit/        #   Plugin author test harness
+│   ├── config/                 #   Homebrew formula & packaging
 │   └── install.sh              #   One-liner installer
 │
 ├── reflect-kb/                 # Python library — `reflect` CLI + GraphRAG/QMD engine
