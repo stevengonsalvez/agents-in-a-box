@@ -69,7 +69,7 @@ via `uv tool install` by `bootstrap.js` (from the
 `git+https://github.com/stevengonsalvez/agents-in-a-box.git#subdirectory=reflect-kb`
 URL). See the bootstrap's `installReflectKb()` function for details.
 
-### Skills at a glance (86 total, grouped by purpose)
+### Skills at a glance (91 total, grouped by purpose)
 
 <details>
 <summary><b>Planning & Workflow</b> (14)</summary>
