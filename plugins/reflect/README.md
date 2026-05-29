@@ -201,7 +201,7 @@ Each sub-sparkline: 24 cells × 5 minutes = 2 hours, right edge = now. Heights e
 Wire it into your statusline by adding this block at the end (after `printf '%b\n %b' "$L1" "$L2"`):
 
 ```bash
-TIMELINE_HELPER="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/cache/agents-in-a-box/reflect/3.3.1}/scripts/reflect_timeline.sh"
+TIMELINE_HELPER="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/cache/agents-in-a-box/reflect/3.6.0}/scripts/reflect_timeline.sh"
 if [[ "${REFLECT_TIMELINE_DISABLE:-0}" != "1" ]] && [[ -x "$TIMELINE_HELPER" ]]; then
   "$TIMELINE_HELPER" 2>/dev/null
 fi
@@ -282,7 +282,7 @@ uv tool install --force --upgrade 'git+https://github.com/stevengonsalvez/agents
 ## Verify it's working
 
 ```bash
-# Should list reflect@agents-in-a-box, version 3.1.0
+# Should list reflect@agents-in-a-box, version 3.6.0
 claude plugin list
 
 # Should print pending reflections, KB stats, sidecar coverage
