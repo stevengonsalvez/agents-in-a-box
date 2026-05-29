@@ -514,7 +514,7 @@ node create-rule.js --tool=codex              # Deploy to ~/.codex/
 
 - [Website](https://stevengonsalvez.github.io/agents-in-a-box/)
 - [Releases](https://github.com/stevengonsalvez/agents-in-a-box/releases)
-- [Homebrew Tap](https://github.com/stevengonsalvez/homebrew-ainb)
+- [Homebrew Tap](https://github.com/stevengonsalvez/homebrew-agents-in-a-box)
 - [Issues](https://github.com/stevengonsalvez/agents-in-a-box/issues)
 - [Knowledge System Architecture](docs/knowledge/overview.md)
 - [Toolkit Documentation](toolkit/README.md)
