@@ -35,8 +35,12 @@ use ainb_skill_core::lockfile::{LockedUnit, Lockfile};
 use ainb_skill_core::manifest::{Manifest, SourceEntry};
 use ainb_skill_core::mapping::resolve_pair;
 use ainb_skill_core::paths::{cache_dir_in, lockfile_path_in, manifest_path_in};
+use ainb_skill_core::sync::{
+    apply_to_home, apply_to_repo, ApplyToRepoOpts, ContentFetcher, FetchError as SyncFetchError,
+    SyncAction, SyncDirection,
+};
 use ainb_skill_core::uri::Uri;
-use ainb_skill_core::{DeployedRef, UnitKind};
+use ainb_skill_core::{DeployedRef, SourceType, UnitKind};
 use ainb_usage::{InvocationRecord, detect_invocations};
 
 use crate::source::run_fetcher;
@@ -556,13 +560,27 @@ fn update_apply(home: &Path, args: UpdateArgs, out: &mut dyn io::Write) -> Resul
     Ok(())
 }
 
-/// `ainb skill sync`: reconcile manifest with lockfile. Install any
-/// manifest unit not yet in the lockfile; uninstall any lockfile unit
-/// whose `declared_uri` no longer appears in the manifest, or whose
-/// per-tool entry is flagged `pending_uninstall`.
+/// `ainb skill sync`: bidirectional reconciliation in two passes.
+///
+/// 1. **Content sync** (Phase D, bidirectional): for every locked unit
+///    sourced from a git-backed remote, compare home content vs repo
+///    content and apply the planner's direction. `--to-home` /
+///    `--to-repo` narrow which directions execute; default is both.
+///    `local:` sources skip — there is no remote to push to.
+///
+/// 2. **Manifest reconciliation** (existing): install any manifest unit
+///    missing from the lockfile; uninstall any lockfile unit whose
+///    `declared_uri` is no longer in the manifest, or whose per-tool
+///    entry is flagged `pending_uninstall`.
+///
+/// `--source-or-unit` scopes pass 1 to a single source name or unit
+/// URI. Pass 2 always considers everything (its semantics depend on
+/// the full manifest ↔ lockfile diff).
 fn sync(home: &Path, args: SyncArgs, out: &mut dyn io::Write) -> Result<()> {
     let manifest = Manifest::load_from(&manifest_path_in(home))?;
     let lockfile = Lockfile::load_from(&lockfile_path_in(home))?;
+
+    bidirectional_content_sync(home, &manifest, &lockfile, &args, out)?;
 
     let declared: BTreeSet<String> = manifest.units.iter().map(|u| u.uri.clone()).collect();
     let locked: BTreeSet<String> = lockfile.units.iter().map(|u| u.declared_uri.clone()).collect();
@@ -642,6 +660,346 @@ fn sync(home: &Path, args: SyncArgs, out: &mut dyn io::Write) -> Result<()> {
         "# sync done: {install_count} installed, {remove_count} removed"
     )?;
     Ok(())
+}
+
+/// Phase-D bidirectional content sync (D.4) — for each locked unit
+/// whose source is git-backed, plan the home↔repo direction and apply
+/// via [`apply_to_home`] / [`apply_to_repo`].
+///
+/// Skips:
+///   * units whose source is `local:` (no remote to push to);
+///   * units whose source is not in the manifest (orphan — handled in
+///     pass 2);
+///   * actions whose direction the caller's `--to-home` / `--to-repo`
+///     flags disable.
+///
+/// On `--dry-run`, prints the plan and returns without executing.
+/// `args.source_or_unit`, when set, scopes the iteration to one
+/// source (by source name) or one unit (by lockfile `declared_uri`).
+fn bidirectional_content_sync(
+    home: &Path,
+    manifest: &Manifest,
+    lockfile: &Lockfile,
+    args: &SyncArgs,
+    out: &mut dyn io::Write,
+) -> Result<()> {
+    // Direction allow-set: explicit flags narrow; neither means both.
+    let allow_to_home = args.to_home || !args.to_repo; // default true
+    let allow_to_repo = args.to_repo || !args.to_home; // default true
+
+    let mut planned: Vec<(String, String, SyncDirection, String)> = Vec::new(); // (unit_uri, file_rel, dir, reason)
+    let mut applied = 0usize;
+    let mut skipped_local = 0usize;
+
+    for unit in &lockfile.units {
+        if let Some(filter) = args.source_or_unit.as_deref() {
+            // Match by declared_uri or by source-name.
+            if filter != unit.declared_uri {
+                let Ok(uri) = Uri::parse(&unit.declared_uri) else { continue };
+                let source_uri = format!("{}:{}", uri.source_type, uri.locator);
+                let matches_source = manifest
+                    .sources
+                    .iter()
+                    .find(|s| s.uri == source_uri)
+                    .map(|s| s.name == filter)
+                    .unwrap_or(false);
+                if !matches_source {
+                    continue;
+                }
+            }
+        }
+
+        let parsed = match Uri::parse(&unit.declared_uri) {
+            Ok(u) => u,
+            Err(_) => continue,
+        };
+
+        // Local sources: skip (no remote to commit to).
+        if parsed.source_type == SourceType::Local {
+            skipped_local += 1;
+            continue;
+        }
+
+        // Source must still be in the manifest to know its ref / layout.
+        let source_uri = format!("{}:{}", parsed.source_type, parsed.locator);
+        let source = match manifest.sources.iter().find(|s| s.uri == source_uri) {
+            Some(s) => s.clone(),
+            None => continue,
+        };
+
+        // For each deployed tool entry, sync every file in its
+        // file_hashes catalog (those are the install-root-relative
+        // paths the install flow stored).
+        for (tool_name, dref) in &unit.deployed {
+            let DeployedRef::Deployed { file_hashes, .. } = dref else {
+                continue;
+            };
+            let install_root = install_root_for(tool_name);
+
+            for rel_str in file_hashes.keys() {
+                let unit_path = PathBuf::from(rel_str);
+                let home_file = install_root.join(&unit_path);
+                let short_name =
+                    unit_short_name(&unit.declared_uri).unwrap_or_else(|| unit.declared_uri.clone());
+                let action = match plan_file_action_via_clone(
+                    home,
+                    &source,
+                    &home_file,
+                    &unit_path,
+                    &short_name,
+                ) {
+                    Ok(Some(a)) => a,
+                    Ok(None) => continue,
+                    Err(e) => {
+                        writeln!(out, "# skip {}/{rel_str}: {e}", unit.declared_uri)?;
+                        continue;
+                    }
+                };
+
+                // Direction gate.
+                let allowed = match action.direction {
+                    SyncDirection::ToHome => allow_to_home,
+                    SyncDirection::ToRepo => allow_to_repo,
+                    SyncDirection::NoOp => true,
+                };
+                if !allowed {
+                    continue;
+                }
+                planned.push((
+                    unit.declared_uri.clone(),
+                    rel_str.clone(),
+                    action.direction,
+                    action.reason.clone(),
+                ));
+
+                if args.dry_run {
+                    continue;
+                }
+
+                match action.direction {
+                    SyncDirection::NoOp => {}
+                    SyncDirection::ToHome => {
+                        let fetcher = GitClonedFetcher {
+                            home: home.to_path_buf(),
+                            source: source.clone(),
+                        };
+                        apply_to_home(&action, &install_root, &source, &unit_path, &fetcher)
+                            .with_context(|| {
+                                format!("apply_to_home {}/{rel_str}", unit.declared_uri)
+                            })?;
+                        applied += 1;
+                    }
+                    SyncDirection::ToRepo => {
+                        let cache_dir = ensure_repo_clone(home, &source)?;
+                        let opts = ApplyToRepoOpts {
+                            repo_cache_dir: cache_dir,
+                        };
+                        apply_to_repo(&action, &install_root, &source, &unit_path, &opts)
+                            .with_context(|| {
+                                format!("apply_to_repo {}/{rel_str}", unit.declared_uri)
+                            })?;
+                        applied += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // Render plan to the user — keeps dry-run + applied flows
+    // observable. Empty plan stays silent so the existing manifest
+    // reconciliation drives the "already in sync" message when
+    // nothing else needs doing.
+    if !planned.is_empty() {
+        writeln!(out, "# content sync plan ({} action(s))", planned.len())?;
+        for (uri, file, dir, reason) in &planned {
+            let arrow = match dir {
+                SyncDirection::ToHome => "<-",
+                SyncDirection::ToRepo => "->",
+                SyncDirection::NoOp => "==",
+            };
+            writeln!(out, "    {arrow} {uri}/{file}  ({reason})")?;
+        }
+        if args.dry_run {
+            writeln!(out, "# dry-run: not applying")?;
+        } else {
+            writeln!(out, "# content sync applied {applied} action(s)")?;
+        }
+    }
+    if skipped_local > 0 {
+        writeln!(
+            out,
+            "# {skipped_local} unit(s) skipped (local: source — no remote)"
+        )?;
+    }
+    Ok(())
+}
+
+/// Plan a per-file [`SyncAction`] by clone-or-pulling the source and
+/// comparing the home file's bytes (+ mtime) against the upstream
+/// file's bytes (+ mtime).
+///
+/// Returns:
+///   * `Ok(None)` when neither side has the file (nothing to do).
+///   * `Ok(Some(NoOp))` when both sides have byte-identical content.
+///   * `Ok(Some(ToHome))` when only repo has the file, or the repo
+///     copy is newer than the home copy.
+///   * `Ok(Some(ToRepo))` when only home has the file, or the home
+///     copy is newer than the repo copy.
+///
+/// Uses the file-level direct comparison rather than feeding into
+/// [`plan_sync`] because the planner's per-unit `deployed_sha` model
+/// does not carry per-file SHA precision; for content sync we want
+/// "whichever side is byte-different and newer wins".
+fn plan_file_action_via_clone(
+    home: &Path,
+    source: &SourceEntry,
+    home_file: &Path,
+    repo_rel: &Path,
+    unit_uri: &str,
+) -> Result<Option<SyncAction>> {
+    let clone = ensure_repo_clone(home, source)?;
+    let repo_file = clone.join(repo_rel);
+
+    let home_bytes = std::fs::read(home_file).ok();
+    let repo_bytes = std::fs::read(&repo_file).ok();
+
+    let act = |dir: SyncDirection, reason: &str| {
+        Some(SyncAction {
+            unit_name: unit_uri.to_string(),
+            direction: dir,
+            reason: reason.to_string(),
+        })
+    };
+
+    Ok(match (home_bytes, repo_bytes) {
+        (None, None) => None,
+        (Some(_), None) => act(SyncDirection::ToRepo, "home has file, repo does not"),
+        (None, Some(_)) => act(SyncDirection::ToHome, "repo has file, home does not"),
+        (Some(h), Some(r)) if h == r => act(SyncDirection::NoOp, "home and repo bytes match"),
+        (Some(_), Some(_)) => {
+            let home_mtime = file_mtime_unix(home_file);
+            let repo_mtime = file_mtime_unix(&repo_file);
+            match (home_mtime, repo_mtime) {
+                (Some(h), Some(r)) if h >= r => {
+                    act(SyncDirection::ToRepo, "home newer than repo by mtime")
+                }
+                (Some(_), Some(_)) => {
+                    act(SyncDirection::ToHome, "repo newer than home by mtime")
+                }
+                // Indeterminate: prefer publishing local edits over
+                // overwriting them. Mirrors `plan_sync`'s conservative
+                // home-wins default.
+                _ => act(SyncDirection::ToRepo, "mtime indeterminate; defaulting to home->repo"),
+            }
+        }
+    })
+}
+
+fn file_mtime_unix(path: &Path) -> Option<i64> {
+    std::fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs() as i64)
+}
+
+/// `ContentFetcher` that resolves files by ensuring a git clone of
+/// the source under `<ainb-home>/promote-cache/<key>/` and reading
+/// the file at `<clone>/<repo_path>`.
+struct GitClonedFetcher {
+    home: PathBuf,
+    source: SourceEntry,
+}
+
+impl ContentFetcher for GitClonedFetcher {
+    fn fetch_content(
+        &self,
+        _ref_name: &str,
+        repo_path: &Path,
+    ) -> std::result::Result<Vec<u8>, SyncFetchError> {
+        let cache = ensure_repo_clone(&self.home, &self.source)
+            .map_err(|e| SyncFetchError::Other(format!("clone-or-pull: {e}")))?;
+        let target = cache.join(repo_path);
+        std::fs::read(&target).map_err(|e| {
+            SyncFetchError::Other(format!("read `{}`: {e}", target.display()))
+        })
+    }
+}
+
+/// Clone-or-pull the source repo into
+/// `<ainb-home>/promote-cache/<sanitised-remote>/` and return the
+/// checkout path. Sanitised remote key mirrors `promote.rs` so the
+/// two flows share the same cache directory.
+fn ensure_repo_clone(home: &Path, source: &SourceEntry) -> Result<PathBuf> {
+    let remote = git_remote_url(source)?;
+    let key = sanitise_cache_key(&remote);
+    let cache = home.join("promote-cache").join(&key);
+
+    if cache.join(".git").is_dir() {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&cache)
+            .args(["pull", "--ff-only"])
+            .output()
+            .context("git pull --ff-only")?;
+        if !out.status.success() {
+            // Pull failure should not be fatal — the cache may be on
+            // a branch behind origin/HEAD; future ops will surface
+            // the real error. Log + continue.
+            // Soft no-op (silent).
+        }
+    } else {
+        if let Some(parent) = cache.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let out = std::process::Command::new("git")
+            .args(["clone", &remote])
+            .arg(&cache)
+            .output()
+            .context("git clone")?;
+        if !out.status.success() {
+            bail!(
+                "git clone `{remote}` failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+    }
+    Ok(cache)
+}
+
+/// Compute the git HTTPS / `file://` clone URL for a source URI.
+/// Mirrors `git_remote_url` in `ainb-fetch::git` but works from a
+/// `SourceEntry` (which is what the sync flow has on hand).
+fn git_remote_url(source: &SourceEntry) -> Result<String> {
+    let uri = Uri::parse(&source.uri)
+        .with_context(|| format!("parsing source URI `{}`", source.uri))?;
+    match uri.source_type {
+        SourceType::Gh | SourceType::Marketplace => {
+            Ok(format!("https://github.com/{}.git", uri.locator))
+        }
+        SourceType::Gist => Ok(format!("https://gist.github.com/{}.git", uri.locator)),
+        SourceType::Git => Ok(uri.locator.clone()),
+        other => bail!("source `{}` is unsupported for content sync", other.as_str()),
+    }
+}
+
+/// Sanitise an arbitrary clone URL into a stable filesystem-safe
+/// directory name. Mirrors `promote.rs::sanitise_cache_key`.
+fn sanitise_cache_key(url: &str) -> String {
+    let mut out = String::with_capacity(url.len());
+    let mut last_underscore = false;
+    for c in url.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+            last_underscore = false;
+        } else if !last_underscore {
+            out.push('_');
+            last_underscore = true;
+        }
+    }
+    out.trim_matches('_').to_string()
 }
 
 /// `ainb skill usage [<unit-name>]`: refresh per-unit usage telemetry

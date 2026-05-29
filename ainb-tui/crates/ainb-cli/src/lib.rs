@@ -261,8 +261,12 @@ pub struct CheckArgs {
     pub json: bool,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Default)]
 pub struct SyncArgs {
+    /// Optional source name OR unit URI to scope the sync. Without it,
+    /// every unit eligible for content sync is considered.
+    pub source_or_unit: Option<String>,
+
     /// Skip the interactive confirmation prompt.
     #[arg(long)]
     pub yes: bool,
@@ -270,6 +274,19 @@ pub struct SyncArgs {
     /// Show the planned mutations but don't apply.
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Restrict bidirectional content sync to the upstream-pull
+    /// direction (`ToHome` only). Mutually compatible with
+    /// `--to-repo`: passing both is the same as the default
+    /// bidirectional behaviour.
+    #[arg(long)]
+    pub to_home: bool,
+
+    /// Restrict bidirectional content sync to the publish direction
+    /// (`ToRepo` only). See [`Self::to_home`] for combined-flag
+    /// behaviour.
+    #[arg(long)]
+    pub to_repo: bool,
 }
 
 #[derive(Args, Debug)]

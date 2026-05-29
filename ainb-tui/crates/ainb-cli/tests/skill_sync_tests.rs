@@ -109,6 +109,7 @@ fn sync_with_aligned_state_is_noop() {
             SkillCommand::Sync(SyncArgs {
                 yes: false,
                 dry_run: false,
+                ..Default::default()
             }),
         );
         res.expect("sync ok");
@@ -139,6 +140,7 @@ fn sync_installs_manifest_declared_missing_unit() {
             SkillCommand::Sync(SyncArgs {
                 yes: true,
                 dry_run: false,
+                ..Default::default()
             }),
         );
         res.expect("sync ok");
@@ -180,6 +182,7 @@ fn sync_removes_orphan_lockfile_unit() {
             SkillCommand::Sync(SyncArgs {
                 yes: true,
                 dry_run: false,
+                ..Default::default()
             }),
         );
         res.expect("sync ok");
@@ -220,6 +223,7 @@ fn sync_dry_run_reports_plan_without_mutating() {
             SkillCommand::Sync(SyncArgs {
                 yes: false,
                 dry_run: true,
+                ..Default::default()
             }),
         );
         res.expect("dry-run ok");
@@ -255,6 +259,7 @@ fn sync_without_yes_or_dry_run_errors_when_work_pending() {
             SkillCommand::Sync(SyncArgs {
                 yes: false,
                 dry_run: false,
+                ..Default::default()
             }),
         );
         let err = res.unwrap_err().to_string();

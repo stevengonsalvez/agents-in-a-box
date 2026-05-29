@@ -242,6 +242,7 @@ fn migrate_clean(home: &Path, args: MigrateArgs, out: &mut dyn io::Write) -> Res
         SkillCommand::Sync(SyncArgs {
             yes: true,
             dry_run: false,
+            ..Default::default()
         }),
         &mut sub,
     )?;
