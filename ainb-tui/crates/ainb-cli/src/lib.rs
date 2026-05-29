@@ -145,6 +145,10 @@ pub enum SkillCommand {
     /// by scanning each deploying tool's session logs, and record it in
     /// the lockfile. Without a unit name, every locked unit is refreshed.
     Usage(UsageArgs),
+    /// Report drift between each locked unit's pinned SHA and its
+    /// source's current upstream tip. Read-only; never mutates the
+    /// lockfile or any on-disk unit.
+    Check(CheckArgs),
 }
 
 #[derive(Args, Debug)]
@@ -243,6 +247,18 @@ pub struct UsageArgs {
     /// Print each unit's invocation count + last-used as it is refreshed.
     #[arg(long, short)]
     pub verbose: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct CheckArgs {
+    /// Optional source name to scope the report to a single source.
+    /// Without it, every locked unit's source is checked.
+    pub source: Option<String>,
+
+    /// Emit machine-readable JSON (`[{unit, status, ahead?, behind?}, …]`)
+    /// instead of the default tabular output. Useful for scripting.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Debug)]

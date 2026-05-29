@@ -28,6 +28,9 @@ use ainb_adapters_tool::{
     AcceptDecision, ToolAdapter, adapter_by_name, all_adapters,
     install_root_for, plan::{InstallPlan, PlanOp}, read_root_for,
 };
+use ainb_skill_core::drift::{
+    detect_all as drift_detect_all, DriftBackend, DriftStatus, GitLsRemoteBackend,
+};
 use ainb_skill_core::lockfile::{LockedUnit, Lockfile};
 use ainb_skill_core::manifest::{Manifest, SourceEntry};
 use ainb_skill_core::mapping::resolve_pair;
@@ -37,7 +40,9 @@ use ainb_skill_core::{DeployedRef, UnitKind};
 use ainb_usage::{InvocationRecord, detect_invocations};
 
 use crate::source::run_fetcher;
-use crate::{InstallArgs, RemoveSkillArgs, SkillCommand, SyncArgs, UpdateArgs, UsageArgs};
+use crate::{
+    CheckArgs, InstallArgs, RemoveSkillArgs, SkillCommand, SyncArgs, UpdateArgs, UsageArgs,
+};
 
 pub fn dispatch(home: &Path, action: SkillCommand, out: &mut dyn io::Write) -> Result<()> {
     match action {
@@ -47,6 +52,13 @@ pub fn dispatch(home: &Path, action: SkillCommand, out: &mut dyn io::Write) -> R
         SkillCommand::Sync(args) => sync(home, args, out),
         SkillCommand::Promote(args) => crate::promote::dispatch(home, args, out),
         SkillCommand::Usage(args) => usage(home, args, out),
+        SkillCommand::Check(args) => {
+            // Production backend: real `git ls-remote`. Tests bypass
+            // this top-level dispatch and call `run_check` directly
+            // with a `MockBackend`.
+            let backend = GitLsRemoteBackend::new();
+            run_check(home, args, &backend, out)
+        }
     }
 }
 
@@ -917,6 +929,142 @@ fn remap_unit_install_path(
     let mapped_unit_rel: PathBuf = comps.iter().collect();
 
     Some(install_root.join(mapped_unit_rel))
+}
+
+/// `ainb skill check [<source>] [--json]`: report drift between each
+/// locked unit's pinned SHA and its source's current upstream tip.
+/// Pure read; never mutates lockfile or unit files.
+///
+/// `backend` is the [`DriftBackend`] used to resolve upstream state —
+/// the top-level dispatch passes a [`GitLsRemoteBackend`]; tests inject
+/// a `MockBackend` so they stay offline.
+///
+/// Output:
+/// - default: a tabular human report (unit URI + drift status column).
+/// - `--json`: an array of `{ unit, status, ahead?, behind? }` objects,
+///   parseable by scripts.
+pub fn run_check(
+    home: &Path,
+    args: CheckArgs,
+    backend: &dyn DriftBackend,
+    out: &mut dyn io::Write,
+) -> Result<()> {
+    let manifest = Manifest::load_from(&manifest_path_in(home))?;
+    let lockfile = Lockfile::load_from(&lockfile_path_in(home))?;
+
+    if lockfile.units.is_empty() {
+        writeln!(out, "# no units in lockfile")?;
+        return Ok(());
+    }
+
+    // Per-source scope filter: when `args.source` is set, only units
+    // whose declared_uri resolves to that source name are reported on.
+    let source_scope: Option<String> = args.source.clone();
+    let filtered_units: Vec<&LockedUnit> = lockfile
+        .units
+        .iter()
+        .filter(|unit| {
+            let Some(scope) = source_scope.as_deref() else {
+                return true;
+            };
+            unit_source_name(unit, &manifest)
+                .map(|n| n == scope)
+                .unwrap_or(false)
+        })
+        .collect();
+
+    if filtered_units.is_empty() {
+        writeln!(out, "# no units match the requested source")?;
+        return Ok(());
+    }
+
+    // Subset manifest/lockfile to scoped units so `drift_detect_all`
+    // doesn't query outside the scope.
+    let scoped_lockfile = Lockfile {
+        schema_version: lockfile.schema_version,
+        generated_at: lockfile.generated_at.clone(),
+        sources: lockfile.sources.clone(),
+        units: filtered_units.iter().map(|u| (*u).clone()).collect(),
+    };
+    let drift_map = drift_detect_all(&manifest, &scoped_lockfile, backend);
+
+    if args.json {
+        let rows: Vec<serde_json::Value> = scoped_lockfile
+            .units
+            .iter()
+            .map(|u| drift_status_to_json(&u.declared_uri, drift_map.get(&u.declared_uri)))
+            .collect();
+        let payload = serde_json::Value::Array(rows);
+        writeln!(out, "{}", serde_json::to_string_pretty(&payload)?)?;
+        return Ok(());
+    }
+
+    // Tabular default: fixed-width columns for unit + status, no
+    // external table dep.
+    writeln!(out, "{:<60}  {}", "unit", "status")?;
+    writeln!(out, "{:-<60}  {:-<24}", "", "")?;
+    for unit in &scoped_lockfile.units {
+        let status_str =
+            drift_status_to_human(drift_map.get(&unit.declared_uri).copied());
+        writeln!(out, "{:<60}  {}", unit.declared_uri, status_str)?;
+    }
+    writeln!(out, "# {} unit(s) checked", scoped_lockfile.units.len())?;
+    Ok(())
+}
+
+/// Translate a [`DriftStatus`] into the JSON shape the CLI emits.
+fn drift_status_to_json(unit: &str, status: Option<&DriftStatus>) -> serde_json::Value {
+    use serde_json::json;
+    match status {
+        None => json!({ "unit": unit, "status": "unknown" }),
+        Some(DriftStatus::InSync) => json!({ "unit": unit, "status": "in-sync" }),
+        Some(DriftStatus::Outdated { behind }) => {
+            json!({ "unit": unit, "status": "outdated", "behind": behind })
+        }
+        Some(DriftStatus::Ahead { ahead }) => {
+            json!({ "unit": unit, "status": "ahead", "ahead": ahead })
+        }
+        Some(DriftStatus::Diverged { ahead, behind }) => {
+            json!({
+                "unit": unit,
+                "status": "diverged",
+                "ahead": ahead,
+                "behind": behind,
+            })
+        }
+    }
+}
+
+/// Render a [`DriftStatus`] as a human-readable cell for the tabular
+/// output (`"in-sync"`, `"outdated (behind 4)"`, …).
+fn drift_status_to_human(status: Option<DriftStatus>) -> String {
+    match status {
+        None => "unknown".to_string(),
+        Some(DriftStatus::InSync) => "in-sync".to_string(),
+        Some(DriftStatus::Outdated { behind }) => {
+            if behind == 0 {
+                "outdated".to_string()
+            } else {
+                format!("outdated (behind {behind})")
+            }
+        }
+        Some(DriftStatus::Ahead { ahead }) => {
+            format!("ahead {ahead}")
+        }
+        Some(DriftStatus::Diverged { ahead, behind }) => {
+            format!("diverged (ahead {ahead}, behind {behind})")
+        }
+    }
+}
+
+/// Look up the source name for a locked unit by re-parsing its URI and
+/// matching against `manifest.sources`. Returns `None` when the source
+/// is no longer declared (orphan unit) — those are excluded from
+/// per-source scopes.
+fn unit_source_name(unit: &LockedUnit, manifest: &Manifest) -> Option<String> {
+    let uri = Uri::parse(&unit.declared_uri).ok()?;
+    let source_uri = format!("{}:{}", uri.source_type, uri.locator);
+    manifest.sources.iter().find(|s| s.uri == source_uri).map(|s| s.name.clone())
 }
 
 /// Render a short SHA prefix for human-readable drift reports. Falls
