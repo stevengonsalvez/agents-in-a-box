@@ -1,12 +1,12 @@
 ---
 name: ainb-fleet:fleet-needs
 description: |
-  Workflow-backed Jarvis control panel. Runs the deterministic `fleet-needs`
-  workflow (discover → classify → enrich → prioritize), renders the Jarvis
-  HUD from its render-ready cards, fires AskUserQuestion per blocked session,
-  and routes each answer back via `ainb fleet broadcast`. Requires the
-  workflow gate (CLAUDE_CODE_WORKFLOWS=1). If the gate is off, fall back to
-  the prompt-driven `/ainb-fleet:needs` skill.
+  Workflow-backed Jarvis control panel. Runs the deterministic `hangar`
+  workflow with verb=needs (discover → enrich → prioritize), renders the
+  Jarvis HUD from its render-ready cards, fires AskUserQuestion per blocked
+  session, and routes each answer back via tmux send-keys (broker fallback
+  only). Requires the workflow gate (CLAUDE_CODE_WORKFLOWS=1). If the gate is
+  off, fall back to the prompt-driven `/ainb-fleet:needs` skill.
 version: "0.1.0"
 user-invocable: true
 triggers:
@@ -23,12 +23,12 @@ allowed-tools:
 # ainb fleet:fleet-needs — workflow-backed cockpit
 
 The session "face" of the sensor-fusion hybrid. The deterministic brain is the
-`fleet-needs` workflow; this skill renders its output and handles the
+`hangar` workflow (verb=needs); this skill renders its output and handles the
 irreducibly-interactive last mile (HUD + AskUserQuestion + routing).
 
 ```
-SESSION (this skill) ──Workflow({name:'ainb-fleet:fleet-needs'})──▶ brain
-   render HUD ◀──{banner,cards,asks}──────────────────────────────┘
+SESSION (this skill) ──Workflow({name:'ainb-fleet:hangar', args:{verb:'needs'}})──▶ brain
+   render HUD ◀──{banner,cards,asks}──────────────────────────────────────────┘
    AskUserQuestion per ask  ──answer──▶  tmux send-keys (write leg)
 ```
 
