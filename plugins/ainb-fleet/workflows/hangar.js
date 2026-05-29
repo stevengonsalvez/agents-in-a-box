@@ -4,7 +4,7 @@ export const meta = {
   whenToUse: 'Invoked by the per-verb skills under ainb-fleet (fleet-needs / standup-rich / sequence). Args = {verb, ...opts}. Default verb = "needs" when omitted.',
   phases: [
     { title: 'Discover',   detail: 'ainb fleet <verb> --json (Rust does the JSONL read)' },
-    { title: 'Enrich',     detail: 'parallel Haiku per blocked session — needs verb only' },
+    { title: 'Enrich',     detail: 'parallel enrich per blocked session (model configurable, default haiku) — needs verb only' },
     { title: 'Prioritize', detail: 'sort + render-ready {banner,cards,asks} — needs verb only' },
     { title: 'Step',       detail: 'per-step send-then-ack — sequence verb only' },
   ],
@@ -36,7 +36,12 @@ throw new Error('hangar: unknown verb "' + verb + '" — valid: needs | standup 
 // ===========================================================================
 // VERB: needs — the Jarvis panel (former fleet-needs flow)
 // ===========================================================================
-async function runNeeds(_opts) {
+async function runNeeds(opts) {
+  // Enrich model is configurable via args.enrichModel; defaults to haiku
+  // (cheap — one agent per blocked session, can fan out wide). Pass e.g.
+  // {verb:'needs', enrichModel:'sonnet'} or 'opus' for richer suggestions.
+  const enrichModel = (opts && typeof opts.enrichModel === 'string' && opts.enrichModel.trim()) || 'haiku'
+
   phase('Discover')
 
   const DISCOVER_SCHEMA = {
@@ -66,6 +71,7 @@ async function runNeeds(_opts) {
   log('discovered ' + sessions.length + ' · ASK:' + (kCounts.ASK || 0) + ' ERR:' + (kCounts.ERR || 0) + ' IDLE:' + (kCounts.IDLE || 0) + ' WAIT:' + (kCounts.WAIT || 0))
 
   phase('Enrich')
+  log('enrich model: ' + enrichModel)
 
   const ENRICH_SCHEMA = {
     type: 'object',
@@ -114,7 +120,7 @@ async function runNeeds(_opts) {
           'Return `line`: one terse operator-facing summary (<=12 words) of what this session needs.\n' +
           'Return `suggestion`: for ASK, the single best option label verbatim from the options; ' +
           'for ERR, one of retry|skip|investigate; for IDLE, one of resume|close; otherwise empty string.',
-        { label: label, phase: 'Enrich', schema: ENRICH_SCHEMA },
+        { label: label, phase: 'Enrich', model: enrichModel, schema: ENRICH_SCHEMA },
       )
         .then((e) => { onDone(); return { row: s, enriched: e } })
         .catch(() => { onDone(); return { row: s, enriched: null } })
