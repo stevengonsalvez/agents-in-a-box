@@ -60,7 +60,11 @@ pub enum DriftStatus {
 /// The unit data plane (manifest + lockfile loading, per-unit
 /// orchestration) lives in [`detect_drift`] / [`detect_all`]; backends
 /// only own the per-source upstream query.
-pub trait DriftBackend {
+///
+/// The trait bound is `Send + Sync` so backends can be shipped across
+/// thread boundaries to a background drift poll (see
+/// `AppState::start_background_drift_load`).
+pub trait DriftBackend: Send + Sync {
     /// Compare `deployed_sha` against the current upstream tip of
     /// `source` and return the resolved [`DriftStatus`].
     ///

@@ -2400,6 +2400,17 @@ pub struct AppState {
 
     // Skill-manager screen state (spec §10.1)
     pub skill_manager_state: crate::components::skill_manager_screen::SkillsScreenData,
+    /// Background drift-poll receiver. Present only while a drift scan
+    /// (kicked off by `GoToSkillManager`) is in flight; `tick()`
+    /// drains it into `skill_manager_state.drift_cache`.
+    pub drift_load_receiver: Option<
+        mpsc::UnboundedReceiver<
+            std::collections::BTreeMap<
+                String,
+                ainb_skill_core::drift::DriftStatus,
+            >,
+        >,
+    >,
 
     // Periodic session snapshot tracking
     pub last_snapshot_time: Option<Instant>,
@@ -3027,6 +3038,7 @@ impl Default for AppState {
             // Skill-manager screen state (spec §10.1)
             skill_manager_state: crate::components::skill_manager_screen::SkillsScreenData::default(
             ),
+            drift_load_receiver: None,
 
             // Periodic session snapshot tracking
             last_snapshot_time: None,
@@ -3957,6 +3969,74 @@ impl AppState {
                     self.add_warning_notification(
                         "Failed to parse skills; keeping cached data".to_string(),
                     );
+                    true
+                }
+            }
+        } else {
+            false
+        }
+    }
+
+    /// Kick off a background drift scan against `home` (the ainb data
+    /// dir holding `manifest.yaml` + `lock.yaml`), using `backend` as
+    /// the DriftBackend. Skipped if a scan is already in flight
+    /// (`drift_load_receiver` is `Some`). Returns true if a new scan
+    /// was spawned, false if coalesced.
+    ///
+    /// Called by the `GoToSkillManager` handler on every screen-open
+    /// so out-of-band edits to the manifest / lockfile show up the
+    /// next tick. Tests inject a `MockBackend`; the production
+    /// dispatch uses `GitLsRemoteBackend`.
+    pub fn start_background_drift_load(
+        &mut self,
+        home: &std::path::Path,
+        backend: std::sync::Arc<dyn ainb_skill_core::drift::DriftBackend + Send + Sync>,
+    ) -> bool {
+        if self.drift_load_receiver.is_some() {
+            return false;
+        }
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.drift_load_receiver = Some(rx);
+        let home = home.to_path_buf();
+        tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                use ainb_skill_core::lockfile::Lockfile;
+                use ainb_skill_core::manifest::Manifest;
+                use ainb_skill_core::paths::{lockfile_path_in, manifest_path_in};
+                let manifest =
+                    Manifest::load_from(&manifest_path_in(&home)).unwrap_or_default();
+                let lockfile =
+                    Lockfile::load_from(&lockfile_path_in(&home)).unwrap_or_default();
+                ainb_skill_core::drift::detect_all(&manifest, &lockfile, backend.as_ref())
+            })
+            .await;
+            match result {
+                Ok(map) => {
+                    let _ = tx.send(map);
+                }
+                Err(e) => {
+                    warn!("Drift detect task failed: {e}");
+                }
+            }
+        });
+        true
+    }
+
+    /// Poll the background drift scan. Returns true if results were
+    /// applied this tick. Drains a single message — backend returns
+    /// the whole map in one go so a single drain is enough.
+    pub fn check_drift_load_complete(&mut self) -> bool {
+        if let Some(ref mut receiver) = self.drift_load_receiver {
+            match receiver.try_recv() {
+                Ok(map) => {
+                    self.skill_manager_state.drift_cache = map;
+                    self.drift_load_receiver = None;
+                    true
+                }
+                Err(mpsc::error::TryRecvError::Empty) => false,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    self.drift_load_receiver = None;
+                    warn!("Drift detect task dropped its sender without delivering data");
                     true
                 }
             }
@@ -10545,6 +10625,12 @@ impl App {
 
         // Check for completed background skills scan
         if self.state.check_skills_load_complete() {
+            self.state.ui_needs_refresh = true;
+        }
+
+        // Check for completed background drift scan
+        // (skill-manager v1.2 bead v12.E.4).
+        if self.state.check_drift_load_complete() {
             self.state.ui_needs_refresh = true;
         }
 

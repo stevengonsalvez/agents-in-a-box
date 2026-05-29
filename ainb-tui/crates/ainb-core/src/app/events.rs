@@ -3551,6 +3551,13 @@ impl EventHandler {
                         // empty and the user never sees their orphan units.
                         let ainb_home = ainb_skill_core::default_ainb_home();
                         state.skill_manager_state.reload_from_disk(&ainb_home);
+                        // Also start the drift poll (bead v12.E.4).
+                        let backend: std::sync::Arc<
+                            dyn ainb_skill_core::drift::DriftBackend + Send + Sync,
+                        > = std::sync::Arc::new(
+                            ainb_skill_core::drift::GitLsRemoteBackend::new(),
+                        );
+                        state.start_background_drift_load(&ainb_home, backend);
                         let claude_home = std::env::var_os("HOME")
                             .map(std::path::PathBuf::from)
                             .map(|h| h.join(".claude"))
@@ -3790,6 +3797,18 @@ impl EventHandler {
                 // walkers find candidates, so the two steps compose
                 // cleanly.
                 state.skill_manager_state.reload_from_disk(&ainb_home);
+                // Bead v12.E.4: kick off a background drift scan so
+                // the Units panel's `status` column fills in (`✓` /
+                // `⚠` / `▲` / `⟷`) on the next tick. Until results
+                // land, the column shows the muted "…" placeholder.
+                // `start_background_drift_load` coalesces if a
+                // previous scan is still in flight.
+                let backend: std::sync::Arc<
+                    dyn ainb_skill_core::drift::DriftBackend + Send + Sync,
+                > = std::sync::Arc::new(
+                    ainb_skill_core::drift::GitLsRemoteBackend::new(),
+                );
+                state.start_background_drift_load(&ainb_home, backend);
                 // Spec §User Flow 1: on screen-enter, when the
                 // manifest is empty AND we have not been told to
                 // skip, run the discovery walkers and pop the
