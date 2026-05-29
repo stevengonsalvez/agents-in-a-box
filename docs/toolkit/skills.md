@@ -1,13 +1,13 @@
 ---
-title: "Skills (86)"
+title: "Skills (91)"
 ---
 
-# Skills (86)
+# Skills (91)
 
 > **Status:** stub. Authoritative content currently lives at `toolkit/packages/skills/*/SKILL.md + toolkit/README.md §Skills at a glance`.
 > Migration of that file into this path is gated on Stevie's approval.
 
-All 86 skills grouped by purpose. Each links to its SKILL.md source.
+All 91 skills grouped by purpose. Each links to its SKILL.md source.
 
 ## What this page will contain
 
