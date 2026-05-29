@@ -102,7 +102,7 @@ URL). See the bootstrap's `installReflectKb()` function for details.
 </details>
 
 <details>
-<summary><b>Design & UI</b> (12)</summary>
+<summary><b>Design & UI</b> (13)</summary>
 
 `frontend-design` · `frontend-slides` · `liquid-glass` · `tui-style-guide` · `ui-ux-pro-max` · `react-components` · `stitch-design` · `stitch-loop` · `shadcn-ui` · `design-md` · `enhance-prompt` · `remotion` · `remotion-best-practices`
 </details>
