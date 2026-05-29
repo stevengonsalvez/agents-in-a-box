@@ -114,10 +114,22 @@ impl DriftBackend for GitLsRemoteBackend {
         // verbatim (`git:` / `https:` are usable as-is).
         let repo = source_to_remote_url(&source.uri)?;
         let r#ref = source.r#ref.as_str();
+        // Refuse argv-smuggled values before invoking git. Without this,
+        // a malicious source URI starting with `-` could inject options
+        // like `--upload-pack=…` and turn `ls-remote` into arbitrary
+        // command execution. `--` after the option list closes the
+        // remaining vector defense-in-depth.
+        if repo.starts_with('-') || r#ref.starts_with('-') {
+            return Err(CoreError::DriftBackend(format!(
+                "refusing argv-smuggled value: repo=`{repo}` ref=`{}`",
+                r#ref
+            )));
+        }
         let output = self
             .git()
             .arg("ls-remote")
             .arg("--exit-code")
+            .arg("--")
             .arg(repo)
             .arg(r#ref)
             .output()
