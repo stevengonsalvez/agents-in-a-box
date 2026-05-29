@@ -90,7 +90,7 @@ URL). See the bootstrap's `installReflectKb()` function for details.
 </details>
 
 <details>
-<summary><b>Session & Learning</b> (9)</summary>
+<summary><b>Session & Learning</b> (8)</summary>
 
 `session-info` · `session-metrics` · `session-summary` · `health-check` · `instincts` · `reflect` · `compound-docs` · `research-cache`
 </details>
