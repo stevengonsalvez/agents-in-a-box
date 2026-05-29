@@ -1,6 +1,19 @@
 # AINB TUI
 
-Terminal UI and CLI for Agents-in-a-Box.
+Terminal UI and CLI for Agents-in-a-Box (`ainb`). Built in Rust (ratatui) as a Cargo workspace under `crates/`; the TUI and `ainb` binary live in `crates/ainb-core`.
+
+## Overview
+
+Run `ainb` (or `ainb tui`) for the interactive terminal UI, or use one of the CLI subcommands for scripted workflows: `run`, `list`, `logs`, `attach`, `status`, `kill`, `auth`, `recover`, `config`, `git`, `favorites`, `init`, `presets`, `usage`, `plugin`, and `fleet`. See `ainb --help` for the full list.
+
+Build and run from the workspace root:
+
+```bash
+cargo build --release   # build the ainb binary
+cargo run               # launch the TUI
+```
+
+Developer setup and architecture live in CLAUDE.md.
 
 ## Usage Analytics
 
