@@ -283,7 +283,7 @@ A portable AI coding agent toolkit: skills, agents, workflows, and configuration
 | **Roo** | Project root | Project directory |
 | **Clawdhub** | Project root | Project directory |
 
-### Skills (71)
+### Skills (91)
 
 Skills are reusable capabilities that any supported AI tool can invoke.
 
