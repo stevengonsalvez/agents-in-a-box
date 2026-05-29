@@ -16,5 +16,7 @@ pub mod clock;
 pub mod idgen;
 /// Strongly-typed entity id newtypes with a non-empty invariant.
 pub mod ids;
-/// The `agent_task_queue` lifecycle status enum.
+/// The task domain: the `agent_task_queue` lifecycle FSM.
+pub mod task;
+/// The `agent_task_queue` lifecycle status enum (P0 placeholder).
 pub mod task_status;
