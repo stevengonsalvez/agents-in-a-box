@@ -1,11 +1,12 @@
 export const meta = {
   name: 'hangar',
-  description: 'Multi-verb fleet orchestrator. One deterministic workflow that dispatches by args.verb. Verbs today: `needs` (the Jarvis panel — discover → enrich → prioritize → render-ready cards), `standup` (raw fleet listing via ainb), `sequence` (ordered ack-gated multi-step send via pipeline). Reads always go through ainb (which tails JSONL + pane); writes always happen in the calling session (tmux send-keys), never inside the sandbox.',
+  description: 'Multi-verb fleet orchestrator. One deterministic workflow that dispatches by args.verb. Verbs today: `needs` (the Jarvis panel — discover → enrich → prioritize → render-ready cards), `standup` (per-workspace briefing — discover → enrich → group; pass brief:false for a cheap raw roster), `sequence` (ordered ack-gated multi-step send via pipeline). Reads always go through ainb (which tails JSONL + pane); writes always happen in the calling session (tmux send-keys), never inside the sandbox. Enrich model configurable via args.enrichModel (default haiku).',
   whenToUse: 'Invoked by the per-verb skills under ainb-fleet (fleet-needs / standup-rich / sequence). Args = {verb, ...opts}. Default verb = "needs" when omitted.',
   phases: [
     { title: 'Discover',   detail: 'ainb fleet <verb> --json (Rust does the JSONL read)' },
-    { title: 'Enrich',     detail: 'parallel enrich per blocked session (model configurable, default haiku) — needs verb only' },
+    { title: 'Enrich',     detail: 'parallel enrich per session (model configurable, default haiku) — needs + standup' },
     { title: 'Prioritize', detail: 'sort + render-ready {banner,cards,asks} — needs verb only' },
+    { title: 'Group',      detail: 'group briefing by workspace — standup verb only' },
     { title: 'Step',       detail: 'per-step send-then-ack — sequence verb only' },
   ],
 }
@@ -183,7 +184,85 @@ async function runStandup(opts) {
 
   log('standup: ' + sessions.length + ' session(s)' + (filterArg ? ' after filter' : ''))
 
-  return { verb: 'standup', count: sessions.length, sessions }
+  // Thin mode (opts.brief === false): raw roster, no enrich — cheap, 1 agent.
+  if (opts && opts.brief === false) {
+    return { verb: 'standup', mode: 'roster', count: sessions.length, sessions }
+  }
+
+  // ---- Enrich: one agent per session drafts a real "what it's doing" line ----
+  const enrichModel = (opts && typeof opts.enrichModel === 'string' && opts.enrichModel.trim()) || 'haiku'
+
+  phase('Enrich')
+  log('enrich model: ' + enrichModel)
+
+  const STANDUP_ENRICH_SCHEMA = {
+    type: 'object',
+    required: ['activity', 'state', 'stale'],
+    properties: {
+      activity: { type: 'string', description: '<=10 words: what this session is working on, or idle/done' },
+      state: { type: 'string', enum: ['active', 'idle', 'done', 'stuck'] },
+      stale: { type: 'string', description: 'human relative age from last_seen_ms vs now, e.g. "3h", "20m", "2d"' },
+    },
+  }
+
+  let done = 0
+  const total = sessions.length
+  const enriched = await parallel(
+    sessions.map((s, i) => () => {
+      const ws = s.workspace_name || 'unknown'
+      const tmux = s.tmux_session || s.bg_job_id || ('session-' + i)
+      const cwd = s.cwd || ''
+      const onDone = () => { done++; if (done % 10 === 0 || done === total) log('briefed ' + done + '/' + total) }
+      return agent(
+        'A claude session. workspace=' + ws + ' tmux=' + tmux + ' cwd=' + cwd +
+          ' last_seen_ms=' + (s.last_seen_ms || 0) + ' raw_summary=' + JSON.stringify(s.summary || '') + '\n\n' +
+          'Determine what this session is actually doing. Read its recent transcript tail — try:\n' +
+          '  slug=$(echo "' + cwd + '" | sed "s#/#-#g"); f=$(ls -t ~/.claude/projects/$slug/*.jsonl 2>/dev/null | head -1); tail -n 40 "$f"\n' +
+          'If the tail is unreadable, fall back to the raw_summary.\n\n' +
+          'Return `activity`: <=10 words on what it is working on (or "idle"/"done" if nothing active — ignore noise like "No response requested").\n' +
+          'Return `state`: active | idle | done | stuck.\n' +
+          'Return `stale`: relative age computed from last_seen_ms vs the current time (run `date +%s%3N` if needed), e.g. "3h", "20m", "2d".',
+        { label: ws + ':' + tmux, phase: 'Enrich', model: enrichModel, schema: STANDUP_ENRICH_SCHEMA },
+      )
+        .then((e) => { onDone(); return { s, e } })
+        .catch(() => { onDone(); return { s, e: null } })
+    }),
+  )
+
+  // ---- Group: pure JS, by workspace ----
+  phase('Group')
+
+  const byWs = new Map()
+  for (const { s, e } of enriched.filter(Boolean)) {
+    const ws = s.workspace_name || 'unknown'
+    if (!byWs.has(ws)) byWs.set(ws, [])
+    byWs.get(ws).push({
+      tmux: s.tmux_session || s.bg_job_id || 'unknown',
+      activity: (e && e.activity) || (s.summary || '').slice(0, 60) || 'unknown',
+      state: (e && e.state) || 'idle',
+      stale: (e && e.stale) || '?',
+      routable: s.peer_id ? 'broker' : (s.tmux_session ? 'tmux' : 'none'),
+    })
+  }
+
+  const groups = Array.from(byWs.entries())
+    .map(([workspace, sess]) => ({ workspace, count: sess.length, sessions: sess }))
+    .sort((a, b) => b.count - a.count)
+
+  const stateCounts = enriched.filter(Boolean).reduce((acc, { e }) => {
+    const st = (e && e.state) || 'idle'; acc[st] = (acc[st] || 0) + 1; return acc
+  }, {})
+  log('briefing: ' + sessions.length + ' across ' + groups.length + ' workspace(s) · ' +
+    'active:' + (stateCounts.active || 0) + ' idle:' + (stateCounts.idle || 0) +
+    ' done:' + (stateCounts.done || 0) + ' stuck:' + (stateCounts.stuck || 0))
+
+  return {
+    verb: 'standup',
+    mode: 'briefing',
+    count: sessions.length,
+    states: stateCounts,
+    groups,
+  }
 }
 
 // ===========================================================================
