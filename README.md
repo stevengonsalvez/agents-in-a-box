@@ -39,7 +39,7 @@
 </p>
 
 <p align="center">
-  <code>115 Rust Modules</code> · <code>71 Skills</code> · <code>37 Agents</code> · <code>9 AI Tools</code> · <code>Knowledge Graph</code>
+  <code>115 Rust Modules</code> · <code>91 Skills</code> · <code>37 Agents</code> · <code>9 AI Tools</code> · <code>Knowledge Graph</code>
 </p>
 
 ---
