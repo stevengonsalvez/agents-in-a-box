@@ -517,8 +517,15 @@ fn clone_or_pull(home: &Path, target: &RemoteTarget) -> Result<PathBuf> {
         if let Some(parent) = cache.parent() {
             fs::create_dir_all(parent)?;
         }
+        // Refuse argv-smuggled URLs (a leading `-` would flow through
+        // as an option, e.g. `--upload-pack=...`) and stop option
+        // parsing with an explicit `--` before the positional values.
+        if target.git_url.starts_with('-') {
+            bail!("refusing remote URL starting with '-': {}", target.git_url);
+        }
         let out = ProcCommand::new("git")
-            .args(["clone", &target.git_url])
+            .args(["clone", "--"])
+            .arg(&target.git_url)
             .arg(&cache)
             .output()
             .context("running `git clone`")?;
