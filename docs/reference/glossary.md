@@ -28,6 +28,16 @@ Definitions for the terms that recur across the agents-in-a-box docs. Where a te
 
 **Workflow** — a multi-phase orchestration that chains skills (plan → implement → validate) under a structured delivery process.
 
+## Knowledge base
+
+**QMD** — the vector / semantic search engine of the knowledge base; answers "what matches?" via embedding similarity (BM25 + vector hybrid).
+
+**GraphRAG** — the graph search engine; answers "what's connected?" by traversing the entity-relationship graph. Built with `nano-graphrag` using a passthrough LLM that consumes pre-extracted entity sidecars (no external LLM calls during indexing).
+
+**Sidecar** — an `.entities.yaml` file sitting next to a knowledge document (`doc.md` + `doc.entities.yaml`). It carries the pre-extracted entities and relationships that feed GraphRAG indexing directly.
+
+**Community report** — a GraphRAG-generated summary of a cluster (community) of related entities, used to answer higher-level questions about a connected region of the graph.
+
 ## See also
 
 - [Architecture](./architecture.md)
