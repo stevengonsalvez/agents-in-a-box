@@ -408,7 +408,7 @@ agents-in-a-box/
 │
 ├── toolkit/                    # Portable AI agent toolkit (internal agent infrastructure)
 │   ├── packages/
-│   │   ├── skills/             #   71 reusable skills
+│   │   ├── skills/             #   91 reusable skills
 │   │   ├── agents/             #   37 agent definitions
 │   │   │   ├── universal/      #     Cross-stack specialists
 │   │   │   ├── engineering/    #     Backend & infra agents
