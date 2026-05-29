@@ -220,6 +220,25 @@ brew install stevengonsalvez/agents-in-a-box/ainb
 ```
 </details>
 
+### Plugins
+
+`ainb` boots a plugin host at startup. Some screens — notably **Analytics / Usage (the burndown dashboard)** — are provided by subprocess plugins that the host discovers and loads automatically. **All plugins are enabled by default**; you only need the controls below to turn them off or scope which ones load.
+
+There are four ways to filter plugins, with the following precedence (most specific wins):
+
+| Goal | How | Type |
+|------|-----|------|
+| All on (default) | *(nothing)* | — |
+| All off (kill switch) | `AINB_DISABLE_PLUGINS=1 ainb` | env |
+| Load only these | `AINB_ONLY_PLUGINS=burndown ainb` | env allowlist |
+| Load all except these | `AINB_DISABLE_PLUGIN=burndown ainb` | env denylist |
+| Persistent allowlist | `[plugins].enabled = ["burndown"]` in `config.toml` | config |
+| Persistent denylist | `[plugins].disabled = ["burndown"]` in `config.toml` | config |
+
+Resolution order: `AINB_DISABLE_PLUGINS` → `AINB_ONLY_PLUGINS` → `AINB_DISABLE_PLUGIN` → config `enabled` → config `disabled` → default all-on. **Env always beats config**, and an allowlist always beats a denylist.
+
+Config lives at `~/.agents-in-a-box/config/config.toml` under a `[plugins]` table — see [`example.config.toml`](ainb-tui/config/example.config.toml) for the annotated block. When a screen's plugin is disabled, the TUI shows a placeholder naming the exact variable that turned it off, rather than hanging.
+
 ### Keyboard Shortcuts
 
 | Key | Action |
