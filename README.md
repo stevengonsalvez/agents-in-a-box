@@ -344,7 +344,7 @@ Skills are reusable capabilities that any supported AI tool can invoke.
 <details>
 <summary><b>Agent Architecture</b></summary>
 
-`skill-creator` · `agent-ops` · `autonomous-loops` · `cost-aware-pipeline` · `media-processing` · `nano-banana-pro` · `sync-learnings` · `claude-developer-platform`
+`skill-creator` · `agent-ops` · `autonomous-loops` · `cost-aware-pipeline` · `media-processing` · `nano-banana-pro` · `sync-learnings`
 </details>
 
 ### Agents (37)
