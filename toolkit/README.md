@@ -120,9 +120,9 @@ URL). See the bootstrap's `installReflectKb()` function for details.
 </details>
 
 <details>
-<summary><b>Research & Knowledge</b> (3)</summary>
+<summary><b>Research & Knowledge</b> (4)</summary>
 
-`crypto-research` · `nano-banana-pro` · `notebooklm`
+`crypto-research` · `nano-banana-pro` · `notebooklm` · `explain-to-me`
 </details>
 
 <details>
