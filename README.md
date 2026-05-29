@@ -539,8 +539,15 @@ rewrites the manifest URI from `local:` to `gh:`.
   walker classes, reconciler conflict matrix, banner UX
 - [`ainb skill promote` reference →](docs/skill-manager/promote.md) —
   command surface, locked design, failure modes
+- [`ainb skill usage` reference →](docs/skill-manager/usage.md) —
+  per-unit invocation counts + last-used in the Detail pane (v1.2)
+- [`ainb skill sync` reference →](docs/skill-manager/sync.md) —
+  bidirectional home ↔ repo reconciliation with `[s]` keybind (v1.2)
+- [`ainb skill check` reference →](docs/skill-manager/check.md) —
+  drift detection + Units-panel status column (v1.2)
 
-Full spec at `.agents/goals/ainb-skill-manager-v1.1-discovery-spec.md`.
+Full spec at `.agents/goals/ainb-skill-manager-v1.1-discovery-spec.md`
+and `.agents/goals/ainb-skill-manager-v1.2-rollup-plan.md`.
 
 ### Contributing
 
