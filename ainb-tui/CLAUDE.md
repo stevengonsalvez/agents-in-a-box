@@ -105,16 +105,16 @@ const MUTED_GRAY: Color = Color::Rgb(120, 120, 140);
 
 ### Adding a New Component
 
-1. Create `src/components/my_component.rs`
+1. Create `crates/ainb-core/src/components/my_component.rs`
 2. Add state struct + render impl following template in skill
-3. Add to `src/components/mod.rs`
-4. Add events to `src/app/events.rs`
-5. Wire into `src/components/layout.rs`
+3. Add to `crates/ainb-core/src/components/mod.rs`
+4. Add events to `crates/ainb-core/src/app/events.rs`
+5. Wire into `crates/ainb-core/src/components/layout.rs`
 
 ### Adding a New Widget
 
-1. Create `src/widgets/my_widget.rs`
-2. Add to `src/widgets/mod.rs`
+1. Create `crates/ainb-core/src/widgets/my_widget.rs`
+2. Add to `crates/ainb-core/src/widgets/mod.rs`
 3. Use in components via `message_router.rs`
 
 ## Testing
