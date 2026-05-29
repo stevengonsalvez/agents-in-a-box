@@ -65,7 +65,7 @@ A terminal-native ecosystem for managing AI coding agents. Built around a Rust T
 | Component | What it does | Scale |
 |-----------|-------------|-------|
 | **[ainb TUI](#ainb--terminal-ui)** | Rust terminal app for managing Claude Code sessions | 115 modules |
-| **[Toolkit](#toolkit)** | Portable skills, agents, and workflows for AI coding tools | 71 skills, 37 agents |
+| **[Toolkit](#toolkit)** | Portable skills, agents, and workflows for AI coding tools | 91 skills, 37 agents |
 | **[Knowledge System](#knowledge-system)** | GraphRAG + QMD learning capture and retrieval | [Architecture docs](docs/knowledge/overview.md) |
 
 ---
