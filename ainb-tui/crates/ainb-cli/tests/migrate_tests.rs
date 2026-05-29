@@ -100,6 +100,7 @@ fn migrate_check_empty_roots_reports_no_units() {
                 discover: false,
                 legacy_yaml: None,
                 force: false,
+                upgrade_schema: false,
             },
         );
         res.expect("check ok");
@@ -177,6 +178,7 @@ fn migrate_check_reports_installed_units() {
                 discover: false,
                 legacy_yaml: None,
                 force: false,
+                upgrade_schema: false,
             },
         );
         res.expect("check ok");
@@ -203,6 +205,7 @@ fn migrate_clean_errors_when_manifest_has_no_units() {
                 discover: false,
                 legacy_yaml: None,
                 force: false,
+                upgrade_schema: false,
             },
         );
         let err = res.unwrap_err().to_string();
@@ -282,6 +285,7 @@ fn migrate_clean_wipes_and_syncs_from_manifest() {
                 discover: false,
                 legacy_yaml: None,
                 force: false,
+                upgrade_schema: false,
             },
         );
         res.expect("clean ok");
@@ -366,6 +370,7 @@ fn migrate_clean_backup_snapshots_existing_state() {
                 discover: false,
                 legacy_yaml: None,
                 force: false,
+                upgrade_schema: false,
             },
         );
         res.expect("clean ok");
@@ -446,6 +451,7 @@ fn migrate_clean_dry_run_does_not_wipe() {
                 discover: false,
                 legacy_yaml: None,
                 force: false,
+                upgrade_schema: false,
             },
         );
         res.expect("dry-run ok");
@@ -476,6 +482,7 @@ fn migrate_from_bootstrap_seeds_manifest_with_toolkit_source_and_units() {
             discover: false,
             legacy_yaml: None,
             force: false,
+            upgrade_schema: false,
         },
     );
     res.expect("from-bootstrap ok");
@@ -509,6 +516,7 @@ fn migrate_from_bootstrap_is_idempotent() {
                 discover: false,
                 legacy_yaml: None,
                 force: false,
+                upgrade_schema: false,
             },
         );
         res.expect("from-bootstrap ok");
@@ -540,6 +548,7 @@ fn migrate_from_bootstrap_errors_on_missing_yaml() {
             discover: false,
             legacy_yaml: None,
             force: false,
+            upgrade_schema: false,
         },
     );
     let err = res.unwrap_err().to_string();
@@ -562,6 +571,7 @@ fn migrate_without_any_mode_errors() {
             discover: false,
             legacy_yaml: None,
             force: false,
+            upgrade_schema: false,
         },
     );
     let err = res.unwrap_err().to_string();

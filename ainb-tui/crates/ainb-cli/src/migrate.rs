@@ -40,6 +40,7 @@ use serde_yaml_ng::Value as YamlValue;
 use ainb_adapters_tool::{all_adapters, install_root_for};
 use ainb_skill_core::lockfile::{DeployedRef, Lockfile};
 use ainb_skill_core::manifest::{Manifest, SourceEntry, UnitEntry};
+use ainb_skill_core::mapping::bootstrap_default_mappings;
 use ainb_skill_core::paths::{lockfile_path_in, manifest_path_in};
 
 use crate::discovery::class_a::walk as walk_class_a;
@@ -48,13 +49,20 @@ use crate::discovery::reconcile::{ManifestPatch, WalkerOutput, reconcile};
 use crate::{MigrateArgs, SkillCommand, SyncArgs};
 
 pub fn dispatch(home: &Path, args: MigrateArgs, out: &mut dyn io::Write) -> Result<()> {
-    match (args.check, args.clean, args.from_bootstrap, args.discover) {
-        (true, _, _, _) => migrate_check(home, out),
-        (_, true, _, _) => migrate_clean(home, args, out),
-        (_, _, true, _) => migrate_from_bootstrap(home, args, out),
-        (_, _, _, true) => migrate_discover(home, args, out),
+    match (
+        args.check,
+        args.clean,
+        args.from_bootstrap,
+        args.discover,
+        args.upgrade_schema,
+    ) {
+        (true, _, _, _, _) => migrate_check(home, out),
+        (_, true, _, _, _) => migrate_clean(home, args, out),
+        (_, _, true, _, _) => migrate_from_bootstrap(home, args, out),
+        (_, _, _, true, _) => migrate_discover(home, args, out),
+        (_, _, _, _, true) => migrate_upgrade_schema(home, out),
         _ => bail!(
-            "specify one of --check, --clean [--backup], --from-bootstrap, or --discover"
+            "specify one of --check, --clean [--backup], --from-bootstrap, --discover, or --upgrade-schema"
         ),
     }
 }
@@ -95,6 +103,63 @@ fn migrate_check(home: &Path, out: &mut dyn io::Write) -> Result<()> {
         )?;
     }
     writeln!(out, "# total: {total_units} unit(s), {total_files} file(s)")?;
+    Ok(())
+}
+
+/// `ainb migrate --upgrade-schema`: fill in every source's empty
+/// `target_layout` with the canonical bootstrap defaults so older
+/// manifests written before `target_layout` was a field benefit from
+/// the same explicit `glob → home/repo` mapping new manifests already
+/// declare.
+///
+/// Behaviour:
+///   - Sources with an already-populated `target_layout` are left
+///     untouched — the upgrade only fills in empty slots.
+///   - When at least one source is updated, the manifest is rewritten
+///     atomically; otherwise the file is left as-is and the run reports
+///     "0 sources updated".
+///   - Idempotent: a second invocation always reports 0 updates and
+///     leaves the manifest bytes identical.
+fn migrate_upgrade_schema(home: &Path, out: &mut dyn io::Write) -> Result<()> {
+    let manifest_path = manifest_path_in(home);
+    let mut manifest = Manifest::load_from(&manifest_path)?;
+    let defaults = bootstrap_default_mappings();
+    let added_per_source = defaults.len();
+
+    writeln!(out, "# migrate --upgrade-schema")?;
+    let mut updated = 0usize;
+    for source in manifest.sources.iter_mut() {
+        if !source.target_layout.is_empty() {
+            writeln!(
+                out,
+                "  {}: 0 mappings added (already populated)",
+                source.name
+            )?;
+            continue;
+        }
+        source.target_layout = defaults.clone();
+        updated += 1;
+        writeln!(
+            out,
+            "  {}: {added_per_source} mappings added",
+            source.name
+        )?;
+    }
+
+    if updated == 0 {
+        writeln!(
+            out,
+            "# 0 sources updated; manifest already up to date"
+        )?;
+        return Ok(());
+    }
+
+    manifest.save_to(&manifest_path)?;
+    writeln!(
+        out,
+        "# {updated} source(s) updated; manifest written to {}",
+        manifest_path.display()
+    )?;
     Ok(())
 }
 

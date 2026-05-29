@@ -61,12 +61,12 @@ pub struct DoctorArgs {
 pub struct MigrateArgs {
     /// Scan adapter install roots and report what would be wiped.
     /// Read-only; mutually exclusive with the other migrate modes.
-    #[arg(long, conflicts_with_all = ["clean", "from_bootstrap", "discover"])]
+    #[arg(long, conflicts_with_all = ["clean", "from_bootstrap", "discover", "upgrade_schema"])]
     pub check: bool,
 
     /// Wipe every adapter's install root (after optional backup) and
     /// then run `skill sync` to reconcile from the manifest.
-    #[arg(long, conflicts_with_all = ["from_bootstrap", "discover"])]
+    #[arg(long, conflicts_with_all = ["from_bootstrap", "discover", "upgrade_schema"])]
     pub clean: bool,
 
     /// Snapshot every adapter's install root to
@@ -78,7 +78,7 @@ pub struct MigrateArgs {
     /// Parse `toolkit/external-dependencies.yaml` from the supplied
     /// path (or the working directory if omitted) and populate the
     /// manifest with one source + matching unit entries.
-    #[arg(long = "from-bootstrap", conflicts_with = "discover")]
+    #[arg(long = "from-bootstrap", conflicts_with_all = ["discover", "upgrade_schema"])]
     pub from_bootstrap: bool,
 
     /// Override the toolkit root used by --from-bootstrap. Defaults
@@ -90,8 +90,16 @@ pub struct MigrateArgs {
     /// root for units the manifest does not yet know about and
     /// merge them in (skill-manager v1.1 discovery flow). Honors
     /// `--dry-run`, `--legacy-yaml=<path>`, and `--force`.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "upgrade_schema")]
     pub discover: bool,
+
+    /// Fill in every source's empty `target_layout` with the
+    /// canonical bootstrap defaults (`skills/*/SKILL.md → .claude/skills`,
+    /// `agents/...`, `commands/*.md → .claude/commands`). Existing
+    /// non-empty layouts are left alone. Idempotent: a second run is
+    /// a no-op.
+    #[arg(long = "upgrade-schema")]
+    pub upgrade_schema: bool,
 
     /// Opt-in `external-dependencies.yaml` name-match. Only valid
     /// with `--discover`; orphan units whose name matches a
