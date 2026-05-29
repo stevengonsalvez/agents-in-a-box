@@ -8,7 +8,7 @@ title: "ainb CLI Reference"
 
 Run `ainb` with no arguments to launch the TUI, or use any subcommand below for non-interactive work.
 
-> **Version documented:** `ainb 0.5.5-beta1`
+> **Version documented:** `ainb 1.2.0`
 > **Source of truth:** output of `ainb <cmd> --help`. If this doc drifts, trust `--help`.
 
 ---
