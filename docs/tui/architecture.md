@@ -26,6 +26,36 @@ Members are declared in `ainb-tui/Cargo.toml` (`default-members = ["crates/ainb-
 
 The workspace pins `version = "1.2.0"`, Rust edition 2021, and forbids `unsafe_code`.
 
+## ainb-core module tree
+
+App code lives under `ainb-tui/crates/ainb-core/src/`:
+
+```
+crates/ainb-core/src/
+├── main.rs              # Entry point, CLI parsing, TUI loop
+├── lib.rs               # Crate exports
+├── app/                 # App state machine + event handling (state.rs, events.rs)
+├── components/          # TUI screens (session_list, git_view, logs_viewer, home_screen, …)
+├── widgets/             # Reusable UI widgets
+├── cli/                 # Non-interactive subcommand implementations
+├── fleet/               # `ainb fleet` orchestration (standup/broadcast/sequence/needs/daemon)
+├── providers/           # Multi-provider (claude/codex/gemini/copilot) abstractions
+├── claude/              # Claude API client
+├── docker/              # Container management
+├── tmux/                # Tmux / PTY integration
+├── git/                 # Git + worktree operations
+├── config/              # Configuration loading
+├── models/              # Data models
+├── agents/              # Agent registry
+├── agent_parsers/       # Parse agent output
+├── interactive/         # Interactive-mode helpers
+├── usage_cache/         # Persistent usage-analytics cache
+├── audit.rs             # Audit helpers
+├── credentials.rs       # Credential storage
+├── editors.rs           # Editor integration
+└── plugins.rs           # Plugin install/management CLI surface
+```
+
 ## See also
 
 - [Overview](overview.md)
