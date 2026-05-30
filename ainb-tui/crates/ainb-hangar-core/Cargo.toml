@@ -15,6 +15,10 @@ path = "src/lib.rs"
 
 [dependencies]
 serde = { workspace = true }
+# P6.3: the embedded curated `agent_template` registry parses its 10
+# `include_str!`'d JSON files at first access. Pure parse — no IO — so the
+# crate's no-IO contract is preserved.
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
 ulid = "1"

@@ -27,6 +27,11 @@ pub mod ids;
 pub mod skill;
 /// The task domain: the `agent_task_queue` lifecycle FSM.
 pub mod task;
+/// Embedded curated `agent_template` registry (P6.3).
+///
+/// The 10 repo-only templates baked into the binary via `include_str!`, plus
+/// their skill-reference invariant (enforced by this crate's `build.rs`).
+pub mod template;
 /// The `agent_task_queue` lifecycle status enum (P0 placeholder).
 pub mod task_status;
 /// Token minting + verification primitives (PAT / daemon-token, `sha256` only).
