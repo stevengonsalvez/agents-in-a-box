@@ -504,23 +504,35 @@ pub fn apply_to_repo(
 
 /// Run `git <args>` in `cwd`, capturing stdout + stderr. Bubbles up
 /// io errors via `SyncEngineError::Io`.
+///
+/// `GIT_TERMINAL_PROMPT=0` + `GIT_ASKPASS=/bin/true` are forced so an
+/// unreachable / private remote fails fast instead of freezing the
+/// TUI on a terminal credential prompt — mirrors the drift backend's
+/// hardening (commit f34d851).
 fn git_capture(cwd: &Path, args: &[&str]) -> std::result::Result<std::process::Output, SyncEngineError> {
     std::process::Command::new("git")
         .args(args)
         .current_dir(cwd)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ASKPASS", "/bin/true")
         .output()
         .map_err(SyncEngineError::Io)
 }
 
 /// Run `git <args>` in `cwd` with extra env vars set (e.g.
-/// `LC_ALL=C`). Same capture shape as [`git_capture`].
+/// `LC_ALL=C`). Same capture shape as [`git_capture`], including the
+/// no-prompt env block — explicit `envs` entries override these
+/// defaults.
 fn git_with_env(
     cwd: &Path,
     args: &[&str],
     envs: &[(&str, &str)],
 ) -> std::result::Result<std::process::Output, SyncEngineError> {
     let mut cmd = std::process::Command::new("git");
-    cmd.args(args).current_dir(cwd);
+    cmd.args(args)
+        .current_dir(cwd)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ASKPASS", "/bin/true");
     for (k, v) in envs {
         cmd.env(k, v);
     }
@@ -569,12 +581,26 @@ fn ensure_committer_identity(cache: &Path) -> std::result::Result<(), SyncEngine
     };
     let email = resolve("user.email", "GIT_AUTHOR_EMAIL", "ainb-sync@example.invalid");
     let name = resolve("user.name", "GIT_AUTHOR_NAME", "ainb sync");
+    // Refuse argv-smuggled identity values. Without the leading-dash
+    // reject, a controlled `GIT_AUTHOR_EMAIL=--file=/tmp/evil` env
+    // would let `git config` write the value to an attacker-chosen
+    // file inside the cache repo.
+    if email.starts_with('-') {
+        return Err(SyncEngineError::Io(std::io::Error::other(format!(
+            "refusing argv-smuggled user.email: `{email}`"
+        ))));
+    }
+    if name.starts_with('-') {
+        return Err(SyncEngineError::Io(std::io::Error::other(format!(
+            "refusing argv-smuggled user.name: `{name}`"
+        ))));
+    }
     if !email.is_empty() {
-        let out = git_capture(cache, &["config", "user.email", &email])?;
+        let out = git_capture(cache, &["config", "--", "user.email", &email])?;
         require_success(&out, "git config user.email")?;
     }
     if !name.is_empty() {
-        let out = git_capture(cache, &["config", "user.name", &name])?;
+        let out = git_capture(cache, &["config", "--", "user.name", &name])?;
         require_success(&out, "git config user.name")?;
     }
     Ok(())

@@ -612,11 +612,20 @@ fn ensure_committer_identity(cache: &Path) -> Result<()> {
     };
     let email = resolve("user.email", "GIT_AUTHOR_EMAIL", "ainb-promote@example.invalid");
     let name = resolve("user.name", "GIT_AUTHOR_NAME", "ainb promote");
+    // Refuse argv-smuggled identity values from GIT_AUTHOR_EMAIL /
+    // GIT_AUTHOR_NAME — `--file=/tmp/evil` would otherwise let `git
+    // config` write the value to an attacker-chosen file.
+    if email.starts_with('-') {
+        bail!("refusing argv-smuggled user.email: `{email}`");
+    }
+    if name.starts_with('-') {
+        bail!("refusing argv-smuggled user.name: `{name}`");
+    }
     if !email.is_empty() {
         let out = ProcCommand::new("git")
             .arg("-C")
             .arg(cache)
-            .args(["config", "user.email", &email])
+            .args(["config", "--", "user.email", &email])
             .output()
             .context("setting cache repo user.email")?;
         require_success(&out, "git config user.email")?;
@@ -625,7 +634,7 @@ fn ensure_committer_identity(cache: &Path) -> Result<()> {
         let out = ProcCommand::new("git")
             .arg("-C")
             .arg(cache)
-            .args(["config", "user.name", &name])
+            .args(["config", "--", "user.name", &name])
             .output()
             .context("setting cache repo user.name")?;
         require_success(&out, "git config user.name")?;
@@ -634,10 +643,16 @@ fn ensure_committer_identity(cache: &Path) -> Result<()> {
 }
 
 fn git_push(cache: &Path, branch: &str) -> Result<()> {
+    // Refuse argv-smuggled branch names (e.g. a hostile remote's
+    // defaultBranchRef set to `--force`) and stop option parsing
+    // with `--` before the positional values.
+    if branch.starts_with('-') {
+        bail!("refusing argv-smuggled push branch: `{branch}`");
+    }
     let out = ProcCommand::new("git")
         .arg("-C")
         .arg(cache)
-        .args(["push", "origin", branch])
+        .args(["push", "--", "origin", branch])
         .output()
         .context("running `git push`")?;
     require_success(&out, "git push")?;
