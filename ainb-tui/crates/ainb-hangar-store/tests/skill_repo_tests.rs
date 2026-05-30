@@ -9,8 +9,8 @@
 
 use ainb_hangar_core::ids::WorkspaceId;
 use ainb_hangar_core::skill::SkillFileInput;
-use ainb_hangar_store::repo::skill::SkillRepo;
 use ainb_hangar_store::Store;
+use ainb_hangar_store::repo::skill::SkillRepo;
 
 /// Insert a workspace row (the FK target every skill needs).
 async fn seed_workspace(store: &Store, id: &str, slug: &str) {
@@ -100,10 +100,7 @@ async fn test_insert_skill_writes_row_and_files() {
     assert_eq!(skill_rows, 1, "exactly one skill row");
 
     // Name was normalised to kebab-case on write.
-    let stored = SkillRepo::get(store.pool(), &id)
-        .await
-        .expect("get")
-        .expect("present");
+    let stored = SkillRepo::get(store.pool(), &ws, &id).await.expect("get").expect("present");
     assert_eq!(stored.name.as_str(), "commit");
 
     // Two skill_file rows, ordered by path.
@@ -114,9 +111,7 @@ async fn test_insert_skill_writes_row_and_files() {
         .expect("count files");
     assert_eq!(file_rows, 2, "two skill_file rows");
 
-    let read = SkillRepo::files_for(store.pool(), &id)
-        .await
-        .expect("files_for");
+    let read = SkillRepo::files_for(store.pool(), &id).await.expect("files_for");
     assert_eq!(read, files, "files round-trip in path order");
 }
 
@@ -160,10 +155,10 @@ async fn test_attach_skill_to_agent_creates_junction() {
         .expect("create skill");
 
     // Attaching twice must be idempotent — one junction row.
-    SkillRepo::attach_to_agent(store.pool(), &agent, &skill)
+    SkillRepo::attach_to_agent(store.pool(), &ws, &agent, &skill)
         .await
         .expect("attach 1");
-    SkillRepo::attach_to_agent(store.pool(), &agent, &skill)
+    SkillRepo::attach_to_agent(store.pool(), &ws, &agent, &skill)
         .await
         .expect("attach 2 (idempotent)");
 
@@ -177,14 +172,14 @@ async fn test_attach_skill_to_agent_creates_junction() {
     assert_eq!(count, 1, "attach is idempotent");
 
     // skills_for_agent returns the attached skill with its files.
-    let attached = SkillRepo::skills_for_agent(store.pool(), &agent)
+    let attached = SkillRepo::skills_for_agent(store.pool(), &ws, &agent)
         .await
         .expect("skills_for_agent");
     assert_eq!(attached.len(), 1);
     assert_eq!(attached[0].name.as_str(), "commit");
 
     // detach removes the junction.
-    SkillRepo::detach_from_agent(store.pool(), &agent, &skill)
+    SkillRepo::detach_from_agent(store.pool(), &ws, &agent, &skill)
         .await
         .expect("detach");
     let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_skill WHERE agent_id = ?")
@@ -230,7 +225,7 @@ async fn test_skill_name_unique_per_workspace() {
     )
     .await
     .expect("upsert existing");
-    let after = SkillRepo::get(store.pool(), &id).await.unwrap().unwrap();
+    let after = SkillRepo::get(store.pool(), &ws1, &id).await.unwrap().unwrap();
     assert_eq!(after.description.as_deref(), Some("updated desc"));
     assert_eq!(after.content.as_deref(), Some("updated body"));
     // Still exactly one skill named commit in ws-1.
@@ -276,7 +271,7 @@ async fn test_skill_files_cascade_delete() {
         .expect("count before");
     assert_eq!(before, 2);
 
-    SkillRepo::delete(store.pool(), &id).await.expect("delete");
+    SkillRepo::delete(store.pool(), &ws, &id).await.expect("delete");
 
     let skill_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM skill WHERE id = ?")
         .bind(id.as_str())
@@ -290,5 +285,155 @@ async fn test_skill_files_cascade_delete() {
         .fetch_one(store.pool())
         .await
         .expect("count files after");
-    assert_eq!(files_after, 0, "child skill_file rows cascade-deleted in-app");
+    assert_eq!(
+        files_after, 0,
+        "child skill_file rows cascade-deleted in-app"
+    );
+}
+
+// --- Cross-tenant IDOR scoping (agents-in-a-box-4pe) -----------------------
+//
+// Every by-id method on the typed API must be workspace-scoped: holding an id
+// minted in workspace A must NOT let a caller read, delete, or attach against
+// workspace B's rows.
+
+#[tokio::test]
+async fn get_is_workspace_scoped() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("open store");
+    seed_workspace(&store, "ws-a", "alpha").await;
+    seed_workspace(&store, "ws-b", "beta").await;
+
+    let ws_a = WorkspaceId::from_str("ws-a").unwrap();
+    let ws_b = WorkspaceId::from_str("ws-b").unwrap();
+
+    let id = SkillRepo::create(store.pool(), &ws_a, "secret", None, Some("body"), vec![])
+        .await
+        .expect("create in ws-a");
+
+    // Owning workspace sees the row.
+    let mine = SkillRepo::get(store.pool(), &ws_a, &id).await.expect("get ws-a");
+    assert!(mine.is_some(), "ws-a can read its own skill");
+
+    // Foreign workspace must NOT, even holding the raw id.
+    let theirs = SkillRepo::get(store.pool(), &ws_b, &id).await.expect("get ws-b");
+    assert!(
+        theirs.is_none(),
+        "ws-b must not read ws-a's skill by id (IDOR)"
+    );
+}
+
+#[tokio::test]
+async fn delete_is_workspace_scoped() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("open store");
+    seed_workspace(&store, "ws-a", "alpha").await;
+    seed_workspace(&store, "ws-b", "beta").await;
+
+    let ws_a = WorkspaceId::from_str("ws-a").unwrap();
+    let ws_b = WorkspaceId::from_str("ws-b").unwrap();
+
+    let id = SkillRepo::create(
+        store.pool(),
+        &ws_a,
+        "secret",
+        None,
+        Some("body"),
+        vec![SkillFileInput::new("a.md", "a")],
+    )
+    .await
+    .expect("create in ws-a");
+
+    // A cross-tenant delete must be a no-op against ws-a's data.
+    SkillRepo::delete(store.pool(), &ws_b, &id)
+        .await
+        .expect("delete ws-b is not an error");
+
+    let still_there = SkillRepo::get(store.pool(), &ws_a, &id).await.expect("get ws-a");
+    assert!(
+        still_there.is_some(),
+        "ws-b's delete must not remove ws-a's skill (IDOR)"
+    );
+    // Child files must survive too (scoped cascade).
+    let files: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM skill_file WHERE skill_id = ?")
+        .bind(id.as_str())
+        .fetch_one(store.pool())
+        .await
+        .expect("count files");
+    assert_eq!(files, 1, "cross-tenant delete must not touch child files");
+
+    // The owning workspace can still delete it.
+    SkillRepo::delete(store.pool(), &ws_a, &id).await.expect("delete ws-a");
+    let gone = SkillRepo::get(store.pool(), &ws_a, &id).await.expect("get ws-a after delete");
+    assert!(gone.is_none(), "owning workspace delete succeeds");
+}
+
+#[tokio::test]
+async fn skills_for_agent_is_workspace_scoped() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("open store");
+    seed_workspace(&store, "ws-a", "alpha").await;
+    seed_workspace(&store, "ws-b", "beta").await;
+    let agent_id = seed_agent(&store, "ws-a", "a").await;
+
+    let ws_a = WorkspaceId::from_str("ws-a").unwrap();
+    let ws_b = WorkspaceId::from_str("ws-b").unwrap();
+    let agent = ainb_hangar_core::ids::AgentId::from_str(&agent_id).unwrap();
+
+    let skill = SkillRepo::create(store.pool(), &ws_a, "commit", None, None, vec![])
+        .await
+        .expect("create skill");
+    SkillRepo::attach_to_agent(store.pool(), &ws_a, &agent, &skill)
+        .await
+        .expect("attach");
+
+    // Owning workspace sees the attached skill.
+    let mine = SkillRepo::skills_for_agent(store.pool(), &ws_a, &agent)
+        .await
+        .expect("skills_for_agent ws-a");
+    assert_eq!(mine.len(), 1, "ws-a sees its agent's skill");
+
+    // A different workspace querying the same agent id sees nothing — the agent
+    // does not belong to ws-b.
+    let theirs = SkillRepo::skills_for_agent(store.pool(), &ws_b, &agent)
+        .await
+        .expect("skills_for_agent ws-b");
+    assert!(
+        theirs.is_empty(),
+        "ws-b must not read ws-a's agent skills (IDOR)"
+    );
+}
+
+#[tokio::test]
+async fn attach_rejects_cross_workspace() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("open store");
+    seed_workspace(&store, "ws-a", "alpha").await;
+    seed_workspace(&store, "ws-b", "beta").await;
+    let agent_id = seed_agent(&store, "ws-a", "a").await;
+
+    let ws_a = WorkspaceId::from_str("ws-a").unwrap();
+    let ws_b = WorkspaceId::from_str("ws-b").unwrap();
+    let agent = ainb_hangar_core::ids::AgentId::from_str(&agent_id).unwrap();
+
+    // Skill lives in ws-b; agent lives in ws-a.
+    let foreign_skill = SkillRepo::create(store.pool(), &ws_b, "secret", None, None, vec![])
+        .await
+        .expect("create skill in ws-b");
+
+    // Attaching a ws-b skill to a ws-a agent (scoped to ws-a) must error and
+    // create no junction row.
+    let res = SkillRepo::attach_to_agent(store.pool(), &ws_a, &agent, &foreign_skill).await;
+    assert!(
+        res.is_err(),
+        "attach across workspaces must be rejected (IDOR)"
+    );
+    let junction: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM agent_skill WHERE agent_id = ? AND skill_id = ?")
+            .bind(agent.as_str())
+            .bind(foreign_skill.as_str())
+            .fetch_one(store.pool())
+            .await
+            .expect("count junction");
+    assert_eq!(junction, 0, "rejected attach writes no junction row");
 }
