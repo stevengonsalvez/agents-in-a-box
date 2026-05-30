@@ -83,6 +83,46 @@ pub enum HangarCommand {
     /// Configure Hangar (env allowlist, …).
     #[command(subcommand)]
     Config(ConfigCommand),
+    /// Import + list workspace-scoped skills.
+    #[command(subcommand)]
+    Skills(SkillsCommand),
+}
+
+/// `hangar skills <verb>`.
+///
+/// `sync` imports a `toolkit/packages/skills/`-shaped directory into the default
+/// workspace (idempotent on `(workspace, name)`); `list` shows the imported
+/// skills. Both are workspace-scoped via `--workspace`.
+#[derive(Subcommand, Debug)]
+pub enum SkillsCommand {
+    /// Import skills from a toolkit directory into a workspace (idempotent).
+    Sync(SkillsSyncArgs),
+    /// List the skills imported into a workspace.
+    List(SkillsListArgs),
+}
+
+/// Arguments for `hangar skills sync`.
+#[derive(Args, Debug)]
+pub struct SkillsSyncArgs {
+    /// Workspace slug to import into. Defaults to the bootstrapped `default`
+    /// workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+    /// Source directory holding `<name>/SKILL.md` skill dirs. Defaults to
+    /// `$AINB_TOOLKIT_SKILLS_DIR`, else a walk up to `toolkit/packages/skills`.
+    #[arg(long)]
+    pub source: Option<std::path::PathBuf>,
+    /// Print the skills that would be imported without writing anything.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+/// Arguments for `hangar skills list`.
+#[derive(Args, Debug)]
+pub struct SkillsListArgs {
+    /// Workspace slug to list. Defaults to the bootstrapped `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 /// `hangar config <noun>`.
@@ -347,7 +387,114 @@ pub async fn dispatch(cmd: HangarCommand, format: OutputFormat) -> Result<()> {
         HangarCommand::Daemon(DaemonCommand::Status) => run_daemon_status().await,
         HangarCommand::Auth(c) => dispatch_auth(c, format).await,
         HangarCommand::Config(c) => dispatch_config(c, format),
+        HangarCommand::Skills(c) => dispatch_skills(c, format).await,
     }
+}
+
+/// Dispatch the `hangar skills` verbs.
+async fn dispatch_skills(cmd: SkillsCommand, format: OutputFormat) -> Result<()> {
+    let store = Store::open_default().await.context("open hangar database")?;
+    match cmd {
+        SkillsCommand::Sync(args) => run_skills_sync(&store, args).await,
+        SkillsCommand::List(args) => run_skills_list(&store, args, format).await,
+    }
+}
+
+/// Resolve the target workspace id for a skills verb: the named workspace slug
+/// when `--workspace` is given, else the bootstrapped `default` workspace
+/// (created lazily so a standalone CLI is usable without prior onboarding).
+async fn resolve_skills_workspace(store: &Store, slug: Option<&str>) -> Result<String> {
+    match slug {
+        Some(slug) => {
+            let id: Option<String> = sqlx::query_scalar("SELECT id FROM workspace WHERE slug = ?")
+                .bind(slug)
+                .fetch_optional(store.pool())
+                .await
+                .context("look up workspace by slug")?;
+            id.with_context(|| format!("no workspace with slug `{slug}`"))
+        }
+        None => ensure_default_workspace(store).await,
+    }
+}
+
+/// `hangar skills sync`: import a toolkit skills directory into a workspace.
+///
+/// Resolves the source directory (`--source`, else `$AINB_TOOLKIT_SKILLS_DIR`,
+/// else a walk up to `toolkit/packages/skills`), then either previews the
+/// imports (`--dry-run`) or upserts them workspace-scoped via the daemon's
+/// idempotent importer.
+async fn run_skills_sync(store: &Store, args: SkillsSyncArgs) -> Result<()> {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_daemon::skills_sync::{
+        default_source_dir, skills_sync_from, SkillImporter, ToolkitDirImporter,
+    };
+
+    let source = match args.source {
+        Some(p) => p,
+        None => default_source_dir().context(
+            "could not locate a skills source: set $AINB_TOOLKIT_SKILLS_DIR or pass --source PATH",
+        )?,
+    };
+
+    if args.dry_run {
+        // Walk + parse only; never touch the store.
+        let parsed = ToolkitDirImporter::new(&source)
+            .collect()
+            .context("scan skills source")?;
+        println!(
+            "dry-run: {} skill(s) would be imported from {}",
+            parsed.len(),
+            source.display()
+        );
+        for skill in &parsed {
+            println!("  {}  ({} file(s))", skill.name, skill.files.len());
+        }
+        return Ok(());
+    }
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    let report = skills_sync_from(store.pool(), &ws, &source)
+        .await
+        .context("import skills")?;
+    println!(
+        "imported {} skill(s) from {}",
+        report.imported.len(),
+        source.display()
+    );
+    for (name, _id) in &report.imported {
+        println!("  {name}");
+    }
+    Ok(())
+}
+
+/// `hangar skills list`: list the skills imported into a workspace.
+async fn run_skills_list(store: &Store, args: SkillsListArgs, format: OutputFormat) -> Result<()> {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::skill::SkillRepo;
+
+    // A missing/empty workspace lists as no skills, not an error.
+    let workspace_id = match args.workspace.as_deref() {
+        Some(slug) => {
+            let id: Option<String> = sqlx::query_scalar("SELECT id FROM workspace WHERE slug = ?")
+                .bind(slug)
+                .fetch_optional(store.pool())
+                .await
+                .context("look up workspace by slug")?;
+            id
+        }
+        None => find_default_workspace(store).await?,
+    };
+    let Some(workspace_id) = workspace_id else {
+        render_skill_list(&[], format);
+        return Ok(());
+    };
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    let skills = SkillRepo::list(store.pool(), &ws)
+        .await
+        .context("list skills")?;
+    render_skill_list(&skills, format);
+    Ok(())
 }
 
 /// Dispatch the `hangar config` verbs (synchronous — pure file IO, no database).
@@ -996,6 +1143,86 @@ fn render_task_list(tasks: &[Task], format: OutputFormat) {
     }
 }
 
+/// Render a skill list in the chosen format.
+fn render_skill_list(skills: &[ainb_hangar_core::skill::SkillWithFiles], format: OutputFormat) {
+    match format {
+        OutputFormat::Json => {
+            let body = skills
+                .iter()
+                .map(skill_to_json)
+                .collect::<Vec<_>>()
+                .join(",");
+            println!("[{body}]");
+        }
+        OutputFormat::Csv => {
+            println!("{}", skill_csv_header());
+            for s in skills {
+                println!("{}", skill_csv_row(s));
+            }
+        }
+        OutputFormat::Markdown => {
+            print!("{}", skill_md_header());
+            for s in skills {
+                println!("{}", skill_md_row(s));
+            }
+        }
+        OutputFormat::Text => {
+            if skills.is_empty() {
+                println!("no skills");
+            } else {
+                for s in skills {
+                    println!("{}", skill_line(s));
+                }
+            }
+        }
+    }
+}
+
+/// One-line text summary of a skill (name, file count, description).
+fn skill_line(s: &ainb_hangar_core::skill::SkillWithFiles) -> String {
+    format!(
+        "{}  files={}  {}",
+        s.name,
+        s.files.len(),
+        s.description.as_deref().unwrap_or("-")
+    )
+}
+const fn skill_csv_header() -> &'static str {
+    "name,files,description"
+}
+fn skill_csv_row(s: &ainb_hangar_core::skill::SkillWithFiles) -> String {
+    format!(
+        "{},{},{}",
+        csv_field(s.name.as_str()),
+        s.files.len(),
+        csv_field(s.description.as_deref().unwrap_or("")),
+    )
+}
+const fn skill_md_header() -> &'static str {
+    "| name | files | description |\n| --- | --- | --- |\n"
+}
+fn skill_md_row(s: &ainb_hangar_core::skill::SkillWithFiles) -> String {
+    format!(
+        "| {} | {} | {} |",
+        md_cell(s.name.as_str()),
+        s.files.len(),
+        md_cell(s.description.as_deref().unwrap_or("-")),
+    )
+}
+/// Minimal stable JSON object for one skill (name, file count, description).
+fn skill_to_json(s: &ainb_hangar_core::skill::SkillWithFiles) -> String {
+    let desc = s
+        .description
+        .as_deref()
+        .map_or_else(|| "null".to_string(), json_string);
+    format!(
+        "{{\"name\":{},\"files\":{},\"description\":{}}}",
+        json_string(s.name.as_str()),
+        s.files.len(),
+        desc,
+    )
+}
+
 // ---- csv / markdown renderers ----------------------------------------------
 
 /// Quote a CSV field if it contains a comma, quote, or newline (RFC-4180).
@@ -1216,6 +1443,69 @@ mod tests {
         let app = registry.build_clap(crate::cli::root_clap_command());
         let err = app.try_get_matches_from(["ainb", "hangar"]);
         assert!(err.is_err(), "bare `ainb hangar` must error (subcommand_required)");
+    }
+
+    #[test]
+    fn parses_skills_sync_with_all_flags() {
+        let cmd = parse_hangar(&[
+            "ainb", "hangar", "skills", "sync", "--workspace", "default", "--source",
+            "/tmp/skills", "--dry-run",
+        ]);
+        let HangarCommand::Skills(SkillsCommand::Sync(args)) = cmd else {
+            panic!("expected skills sync, got {cmd:?}");
+        };
+        assert_eq!(args.workspace.as_deref(), Some("default"));
+        assert_eq!(
+            args.source.as_deref(),
+            Some(std::path::Path::new("/tmp/skills"))
+        );
+        assert!(args.dry_run);
+    }
+
+    #[test]
+    fn parses_skills_sync_defaults() {
+        let cmd = parse_hangar(&["ainb", "hangar", "skills", "sync"]);
+        let HangarCommand::Skills(SkillsCommand::Sync(args)) = cmd else {
+            panic!("expected skills sync, got {cmd:?}");
+        };
+        assert!(args.workspace.is_none());
+        assert!(args.source.is_none());
+        assert!(!args.dry_run, "dry-run defaults off");
+    }
+
+    #[test]
+    fn parses_skills_list_optional_workspace() {
+        let cmd = parse_hangar(&["ainb", "hangar", "skills", "list", "--workspace", "team-a"]);
+        let HangarCommand::Skills(SkillsCommand::List(args)) = cmd else {
+            panic!("expected skills list, got {cmd:?}");
+        };
+        assert_eq!(args.workspace.as_deref(), Some("team-a"));
+
+        let cmd = parse_hangar(&["ainb", "hangar", "skills", "list"]);
+        let HangarCommand::Skills(SkillsCommand::List(args)) = cmd else {
+            panic!("expected skills list, got {cmd:?}");
+        };
+        assert!(args.workspace.is_none());
+    }
+
+    #[test]
+    fn skill_renderers_emit_name_files_description() {
+        use ainb_hangar_core::ids::SkillId;
+        use ainb_hangar_core::skill::{SkillFileInput, SkillName, SkillWithFiles};
+        let skill = SkillWithFiles {
+            id: SkillId::from_str("01SKILL").unwrap(),
+            workspace_id: "ws-1".into(),
+            name: SkillName::new("commit").unwrap(),
+            description: Some("make commits".into()),
+            content: Some("body".into()),
+            files: vec![SkillFileInput::new("SKILL.md", "body")],
+        };
+        assert!(skill_line(&skill).contains("commit"));
+        assert!(skill_line(&skill).contains("files=1"));
+        assert!(skill_to_json(&skill).contains("\"name\":\"commit\""));
+        assert!(skill_to_json(&skill).contains("\"files\":1"));
+        assert!(skill_csv_row(&skill).starts_with("commit,1,"));
+        assert!(skill_md_row(&skill).contains("| commit |"));
     }
 
     #[test]
