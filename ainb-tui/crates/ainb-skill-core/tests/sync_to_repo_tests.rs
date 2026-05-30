@@ -182,6 +182,114 @@ fn apply_to_repo_skips_non_to_repo_directions() {
     assert_eq!(head_before, head_after, "NoOp must leave HEAD untouched");
 }
 
+/// Exercise the push path against a bare local repo acting as the
+/// "remote". Distinguished-engineer review (M4) flagged that every
+/// other test sets `AINB_SYNC_SKIP_PUSH=1`, so the argv-smuggle check
+/// at the head of the push branch + the `git push -- origin <ref>`
+/// wire are entirely uncovered. This test removes that gate and
+/// asserts the bare remote sees the new commit.
+#[test]
+fn apply_to_repo_pushes_to_real_local_bare_remote() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::remove_var("AINB_SYNC_SKIP_PUSH");
+
+    let bare = tempfile::tempdir().unwrap();
+    let bare_init = git(&["init", "--bare", "-b", "main"], bare.path());
+    assert!(bare_init.status.success(), "bare init: {bare_init:?}");
+
+    let tool_home = tempfile::tempdir().unwrap();
+    let repo_dir = tempfile::tempdir().unwrap();
+    let clone_out = Command::new("git")
+        .args(["clone", "--", bare.path().to_str().unwrap(), repo_dir.path().to_str().unwrap()])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .expect("git clone");
+    assert!(clone_out.status.success(), "git clone: {clone_out:?}");
+    git(&["config", "user.email", "ainb-test@example.invalid"], repo_dir.path());
+    git(&["config", "user.name", "ainb-test"], repo_dir.path());
+    std::fs::write(repo_dir.path().join("README.md"), "seed\n").unwrap();
+    git(&["add", "README.md"], repo_dir.path());
+    let seed = git(&["commit", "-m", "seed"], repo_dir.path());
+    assert!(seed.status.success(), "seed commit: {seed:?}");
+    let initial_push = git(&["push", "--", "origin", "main"], repo_dir.path());
+    assert!(initial_push.status.success(), "initial push: {initial_push:?}");
+    let bare_head_before = {
+        let out = git(&["rev-parse", "main"], bare.path());
+        assert!(out.status.success(), "bare rev-parse: {out:?}");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    let body = b"---\nname: commit\n---\npublished via sync\n";
+    let home_file = tool_home.path().join(".claude/skills/commit/SKILL.md");
+    std::fs::create_dir_all(home_file.parent().unwrap()).unwrap();
+    std::fs::write(&home_file, body).unwrap();
+
+    let action = SyncAction {
+        unit_name: "commit".into(),
+        direction: SyncDirection::ToRepo,
+        reason: "first publish".into(),
+    };
+    let source = fake_source();
+    let unit_path = PathBuf::from("skills/commit/SKILL.md");
+    let opts = ApplyToRepoOpts {
+        repo_cache_dir: repo_dir.path().to_path_buf(),
+    };
+
+    apply_to_repo(&action, tool_home.path(), &source, &unit_path, &opts).expect("apply");
+
+    let bare_head_after = {
+        let out = git(&["rev-parse", "main"], bare.path());
+        assert!(out.status.success(), "bare rev-parse after: {out:?}");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    assert_ne!(
+        bare_head_before, bare_head_after,
+        "bare remote HEAD must advance after push"
+    );
+
+    let subj = git(&["log", "-1", "--pretty=%s", "main"], bare.path());
+    assert!(subj.status.success(), "bare log: {subj:?}");
+    let msg = String::from_utf8_lossy(&subj.stdout).trim().to_string();
+    assert_eq!(msg, "sync: commit", "bare remote commit subject");
+}
+
+/// Argv-smuggle hardening — TO_REPO push refuses ref values starting
+/// with `-`. Pairs with the production fix at sync.rs::apply_to_repo.
+#[test]
+fn apply_to_repo_rejects_argv_smuggled_ref() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::remove_var("AINB_SYNC_SKIP_PUSH");
+
+    let tool_home = tempfile::tempdir().unwrap();
+    let repo_dir = tempfile::tempdir().unwrap();
+    init_repo(repo_dir.path());
+
+    let body = b"body\n";
+    let home_file = tool_home.path().join(".claude/skills/commit/SKILL.md");
+    std::fs::create_dir_all(home_file.parent().unwrap()).unwrap();
+    std::fs::write(&home_file, body).unwrap();
+
+    let mut source = fake_source();
+    source.r#ref = "--upload-pack=cmd".into();
+
+    let action = SyncAction {
+        unit_name: "commit".into(),
+        direction: SyncDirection::ToRepo,
+        reason: "smuggle attempt".into(),
+    };
+    let unit_path = PathBuf::from("skills/commit/SKILL.md");
+    let opts = ApplyToRepoOpts {
+        repo_cache_dir: repo_dir.path().to_path_buf(),
+    };
+    let err = apply_to_repo(&action, tool_home.path(), &source, &unit_path, &opts)
+        .expect_err("argv-smuggled ref must be refused");
+    let msg = err.to_string().to_lowercase();
+    assert!(
+        msg.contains("argv") || msg.contains("smuggled") || msg.contains("ref"),
+        "expected argv-smuggle reject message; got: {err}"
+    );
+}
+
 #[test]
 fn apply_to_repo_errors_when_home_file_missing() {
     let tool_home = tempfile::tempdir().unwrap();
