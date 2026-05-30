@@ -107,6 +107,67 @@ fn daemon_status_reports_reachable() {
     assert!(out.contains("reachable"), "status not reachable:\n{out}");
 }
 
+/// RED test 5: `ainb hangar config warnings reset --provider claude` wipes only
+/// claude's per-session acks, so the next claude dispatch re-warns about
+/// danger-full-access — while first-run + other providers stay acknowledged.
+#[test]
+fn reset_cli_wipes_acks() {
+    let tmp = tempfile::tempdir().unwrap();
+    // state.toml resolves to $AINB_HANGAR_HOME/hangar/state.toml.
+    let state = tmp.path().join("hangar").join("state.toml");
+    std::fs::create_dir_all(state.parent().unwrap()).unwrap();
+    // Seed: a foreign workspace key + first_run + two claude sessions + a codex.
+    std::fs::write(
+        &state,
+        "active_workspace = \"01ID\"\n\
+         warnings_ack = [\"first_run\", \"provider:claude:session:s1\", \
+         \"provider:claude:session:s2\", \"provider:codex:session:s1\"]\n",
+    )
+    .unwrap();
+
+    let (ok, out) = run(
+        tmp.path(),
+        &["hangar", "config", "warnings", "reset", "--provider", "claude"],
+    );
+    assert!(ok, "warnings reset should exit 0; out={out}");
+    assert!(out.contains("re-warn"), "missing re-warn ack:\n{out}");
+
+    let raw = std::fs::read_to_string(&state).unwrap();
+    // Claude session acks gone → next claude dispatch re-warns.
+    assert!(
+        !raw.contains("provider:claude:session"),
+        "claude acks not wiped:\n{raw}"
+    );
+    // first_run + codex + the foreign workspace key survive.
+    assert!(raw.contains("first_run"), "first_run wrongly wiped:\n{raw}");
+    assert!(
+        raw.contains("provider:codex:session:s1"),
+        "codex ack wrongly wiped:\n{raw}"
+    );
+    assert!(raw.contains("active_workspace"), "foreign key lost:\n{raw}");
+}
+
+/// `ainb hangar config warnings reset` (no flag) wipes every ack, including
+/// first-run — the warnings show again from scratch.
+#[test]
+fn reset_cli_no_flag_wipes_all() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = tmp.path().join("hangar").join("state.toml");
+    std::fs::create_dir_all(state.parent().unwrap()).unwrap();
+    std::fs::write(
+        &state,
+        "warnings_ack = [\"first_run\", \"provider:claude:session:s1\"]\n",
+    )
+    .unwrap();
+
+    let (ok, out) = run(tmp.path(), &["hangar", "config", "warnings", "reset"]);
+    assert!(ok, "warnings reset should exit 0; out={out}");
+
+    let raw = std::fs::read_to_string(&state).unwrap();
+    assert!(!raw.contains("first_run"), "first_run not wiped:\n{raw}");
+    assert!(!raw.contains("provider:claude"), "provider ack not wiped:\n{raw}");
+}
+
 #[test]
 fn task_list_on_empty_db_is_clean_noop() {
     let tmp = tempfile::tempdir().unwrap();

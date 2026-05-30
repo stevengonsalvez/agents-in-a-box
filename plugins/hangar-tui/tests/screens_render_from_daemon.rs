@@ -326,6 +326,16 @@ async fn send_key<W: tokio::io::AsyncWrite + Unpin>(host_write: &mut W, ch: char
 async fn issue_list_renders_seeded_rows_then_tab_to_skills() {
     let body = async {
         let home = tempfile::tempdir().expect("home");
+        // P5.6: this test asserts issue-list rendering, not the first-run
+        // danger-full-access modal. Point the plugin's `state.toml` resolution at
+        // this isolated home (hermetic — no real `~/.ainb`) and pre-seed the
+        // `first_run` ack so the modal is deterministically skipped. Single test
+        // per binary, so the process-wide env set is race-free here.
+        std::env::set_var("AINB_HANGAR_HOME", home.path());
+        let state = home.path().join("hangar").join("state.toml");
+        std::fs::create_dir_all(state.parent().unwrap()).expect("state dir");
+        std::fs::write(&state, "warnings_ack = [\"first_run\"]\n").expect("seed ack");
+
         let socket_path = home.path().join("hangar.sock");
         let listener = UnixListener::bind(&socket_path).expect("bind daemon");
         spawn_seeded_daemon(listener);

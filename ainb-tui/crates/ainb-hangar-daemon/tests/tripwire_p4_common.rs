@@ -158,6 +158,12 @@ pub fn prepare_pipeline() -> Pipeline {
     // `default` workspace the plugin subscribes to.
     seed_database(&hangar_dir);
 
+    // P5.6: pre-ack the first-run danger-full-access warning so the per-screen
+    // tripwires (issue list, settings, …) aren't blocked by the modal overlay.
+    // The P5.6 tripwire that DOES want the modal calls `clear_first_run_ack`
+    // first to undo this.
+    seed_first_run_ack(home.path());
+
     // Spawn the daemon under the same $HOME (binds $HOME/.ainb/hangar.sock).
     let bin = daemon_bin().expect("gated by can_run_tripwire");
     let daemon = Command::new(bin)
@@ -178,6 +184,30 @@ pub fn prepare_pipeline() -> Pipeline {
     }
 
     Pipeline { home, daemon }
+}
+
+/// The plugin's `state.toml` path under an isolated `$HOME`:
+/// `{home}/.ainb/hangar/state.toml` (the plugin resolves `$HOME/.ainb` when no
+/// `$AINB_HANGAR_HOME` is set, as the TUI session is launched).
+fn state_toml_path(home: &Path) -> PathBuf {
+    home.join(".ainb").join("hangar").join("state.toml")
+}
+
+/// Pre-seed the `first_run` warning ack so the danger-full-access modal is
+/// skipped (the per-screen tripwires don't want it). Preserves any foreign keys.
+fn seed_first_run_ack(home: &Path) {
+    let path = state_toml_path(home);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, "warnings_ack = [\"first_run\"]\n");
+}
+
+/// Remove the `first_run` ack so the next TUI launch shows the danger-full-access
+/// modal. The P5.6 first-run tripwire calls this to undo
+/// [`prepare_pipeline`]'s default ack seed.
+pub fn clear_first_run_ack(home: &Path) {
+    let _ = std::fs::remove_file(state_toml_path(home));
 }
 
 /// Write a completed `onboarding.toml` under the isolated `$HOME` so the wizard
