@@ -7,6 +7,7 @@
 
 pub mod agent;
 pub mod agent_runtime;
+pub mod autopilot;
 pub mod beads_mapping;
 pub mod issue;
 pub mod skill;
