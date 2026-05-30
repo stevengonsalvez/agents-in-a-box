@@ -36,6 +36,7 @@ use ainb_hangar_core::clock::SystemClock;
 use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
 use ainb_hangar_store::repo::issue::{Issue, IssueRepo, NewIssue};
 use ainb_hangar_store::repo::task::{Task, TaskRepo};
+use ainb_hangar_store::repo::token::{mint_daemon_token, mint_pat, PatRecord, PatRepo};
 use ainb_hangar_store::service::cancel::CancelTaskService;
 use ainb_hangar_store::service::retry::{RetryDecision, RetryService};
 use ainb_hangar_store::Store;
@@ -76,6 +77,92 @@ pub enum HangarCommand {
     /// Inspect the Hangar control-plane daemon.
     #[command(subcommand)]
     Daemon(DaemonCommand),
+    /// Manage Hangar auth tokens (PATs + daemon tokens).
+    #[command(subcommand)]
+    Auth(AuthCommand),
+}
+
+/// `hangar auth <verb>`.
+#[derive(Subcommand, Debug)]
+pub enum AuthCommand {
+    /// Manage personal access tokens.
+    #[command(subcommand)]
+    Token(TokenCommand),
+    /// Manage daemon-to-daemon tokens (advanced).
+    #[command(subcommand, hide = true)]
+    DaemonToken(DaemonTokenCommand),
+}
+
+/// `hangar auth token <verb>`.
+#[derive(Subcommand, Debug)]
+pub enum TokenCommand {
+    /// Mint a new PAT. Prints the plaintext **once** — it is never recoverable.
+    Create(TokenCreateArgs),
+    /// List this user's PATs (id, scope, timestamps — never the plaintext).
+    List,
+    /// Revoke a PAT by id.
+    Revoke(TokenRevokeArgs),
+}
+
+/// Permitted scopes for a freshly minted PAT.
+///
+/// Stored as the opaque `pat.scope` column; the store treats it as a plain
+/// string, the CLI constrains it to this closed set.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TokenScope {
+    /// Read-only access.
+    Read,
+    /// Read + write access.
+    Write,
+    /// Full administrative access.
+    Admin,
+}
+
+impl TokenScope {
+    /// The string persisted into `pat.scope`.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Write => "write",
+            Self::Admin => "admin",
+        }
+    }
+}
+
+/// Arguments for `hangar auth token create`.
+#[derive(Args, Debug)]
+pub struct TokenCreateArgs {
+    /// Access scope to grant the token.
+    #[arg(long, value_enum, default_value_t = TokenScope::Read)]
+    pub scope: TokenScope,
+    /// Human-readable label (recorded as the token's scope context; advisory).
+    #[arg(long)]
+    pub name: Option<String>,
+}
+
+/// Arguments for `hangar auth token revoke`.
+#[derive(Args, Debug)]
+pub struct TokenRevokeArgs {
+    /// PAT id to revoke.
+    pub id: String,
+}
+
+/// `hangar auth daemon-token <verb>`.
+///
+/// Hidden from `--help` (the daemon-to-daemon path is advanced/future); the
+/// verbs still parse and run.
+#[derive(Subcommand, Debug)]
+pub enum DaemonTokenCommand {
+    /// Mint a daemon token bound to a runtime. Prints the plaintext once.
+    Create(DaemonTokenCreateArgs),
+}
+
+/// Arguments for `hangar auth daemon-token create`.
+#[derive(Args, Debug)]
+pub struct DaemonTokenCreateArgs {
+    /// Runtime id (`agent_runtime.id`) the token is bound to.
+    #[arg(long = "runtime-id")]
+    pub runtime_id: String,
 }
 
 /// `hangar issue <verb>`.
@@ -196,7 +283,99 @@ pub async fn dispatch(cmd: HangarCommand, format: OutputFormat) -> Result<()> {
         HangarCommand::Task(c) => dispatch_task(c, format).await,
         HangarCommand::Beads(BeadsCommand::Reconcile(args)) => run_beads_reconcile(args).await,
         HangarCommand::Daemon(DaemonCommand::Status) => run_daemon_status().await,
+        HangarCommand::Auth(c) => dispatch_auth(c, format).await,
     }
+}
+
+/// Dispatch the `hangar auth` verbs.
+async fn dispatch_auth(cmd: AuthCommand, format: OutputFormat) -> Result<()> {
+    let store = Store::open_default().await.context("open hangar database")?;
+    match cmd {
+        AuthCommand::Token(TokenCommand::Create(args)) => {
+            run_token_create(&store, args).await
+        }
+        AuthCommand::Token(TokenCommand::List) => run_token_list(&store, format).await,
+        AuthCommand::Token(TokenCommand::Revoke(args)) => run_token_revoke(&store, args).await,
+        AuthCommand::DaemonToken(DaemonTokenCommand::Create(args)) => {
+            run_daemon_token_create(&store, args).await
+        }
+    }
+}
+
+/// `hangar auth token create`: bootstrap the default owner, mint a PAT, and
+/// print the plaintext **once** with a no-second-chance warning.
+async fn run_token_create(store: &Store, args: TokenCreateArgs) -> Result<()> {
+    let pool = store.pool();
+    // Reuse the issue path's bootstrap so a standalone CLI has an owning user.
+    ensure_default_workspace(store).await?;
+    let user_id = default_owner_id(store)
+        .await?
+        .context("default owner user missing after bootstrap")?;
+
+    let clock = SystemClock;
+    let idgen = SystemIdGen;
+    let mut rng = rand::rngs::OsRng;
+    let (record, minted) = mint_pat(
+        pool,
+        &user_id,
+        Some(args.scope.as_str()),
+        &clock,
+        &idgen,
+        &mut rng,
+    )
+    .await
+    .context("mint personal access token")?;
+
+    // The plaintext is shown here and nowhere else, ever.
+    print!(
+        "{}",
+        token_create_output(&record.id, args.name.as_deref(), &minted.plaintext)
+    );
+    Ok(())
+}
+
+/// `hangar auth token list`: list the owner's PATs. Never prints a plaintext —
+/// the store has none to print (only the digest is persisted).
+async fn run_token_list(store: &Store, format: OutputFormat) -> Result<()> {
+    let pool = store.pool();
+    let Some(user_id) = default_owner_id(store).await? else {
+        render_token_list(&[], format);
+        return Ok(());
+    };
+    let tokens = PatRepo::list_by_user(pool, &user_id)
+        .await
+        .context("list personal access tokens")?;
+    render_token_list(&tokens, format);
+    Ok(())
+}
+
+/// `hangar auth token revoke`: revoke a PAT by id.
+async fn run_token_revoke(store: &Store, args: TokenRevokeArgs) -> Result<()> {
+    let removed = PatRepo::revoke(store.pool(), &args.id)
+        .await
+        .with_context(|| format!("revoke token {}", args.id))?;
+    if removed {
+        println!("revoked token {}", args.id);
+    } else {
+        println!("no token with id {} (nothing revoked)", args.id);
+    }
+    Ok(())
+}
+
+/// `hangar auth daemon-token create`: mint a daemon token, print plaintext once.
+async fn run_daemon_token_create(store: &Store, args: DaemonTokenCreateArgs) -> Result<()> {
+    let clock = SystemClock;
+    let idgen = SystemIdGen;
+    let mut rng = rand::rngs::OsRng;
+    let (record, minted) =
+        mint_daemon_token(store.pool(), &args.runtime_id, &clock, &idgen, &mut rng)
+            .await
+            .context("mint daemon token")?;
+    print!(
+        "{}",
+        token_create_output(&record.id, None, &minted.plaintext)
+    );
+    Ok(())
 }
 
 /// Dispatch the `hangar issue` verbs.
@@ -435,6 +614,122 @@ async fn ensure_default_workspace(store: &Store) -> Result<String> {
         .await
         .context("bootstrap default member")?;
     Ok(workspace_id)
+}
+
+/// Return the default owner user id (the first user, oldest first), or `None`
+/// if no user exists yet.
+async fn default_owner_id(store: &Store) -> Result<Option<String>> {
+    let id: Option<String> =
+        sqlx::query_scalar("SELECT id FROM user ORDER BY created_at LIMIT 1")
+            .fetch_optional(store.pool())
+            .await
+            .context("query default owner user")?;
+    Ok(id)
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Token render helpers (pure, so the "plaintext shown once" + "list never
+// prints plaintext" contracts are unit-testable without capturing stdout).
+// ──────────────────────────────────────────────────────────────────────────
+
+/// The output of a successful token mint: the id, an optional advisory label,
+/// the plaintext once, and an explicit no-second-chance warning. This is the
+/// **only** place a plaintext is ever surfaced.
+///
+/// `name` is advisory only: the `pat` schema carries no label column at v1, so
+/// the supplied `--name` is echoed back here rather than silently dropped (and
+/// is never persisted).
+fn token_create_output(id: &str, name: Option<&str>, plaintext: &str) -> String {
+    let label = name.map_or_else(String::new, |n| format!(" ({n})"));
+    format!(
+        "token {id}{label} created\n\
+         {plaintext}\n\
+         warning: this token is shown only once and is not recoverable — store it now.\n"
+    )
+}
+
+/// Render a PAT list in the chosen format. By construction this can never emit
+/// a plaintext: [`PatRecord`] carries only the digest, scope, and timestamps.
+fn render_token_list(tokens: &[PatRecord], format: OutputFormat) {
+    match format {
+        OutputFormat::Json => {
+            let body = tokens.iter().map(pat_to_json).collect::<Vec<_>>().join(",");
+            println!("[{body}]");
+        }
+        OutputFormat::Csv => {
+            println!("{}", pat_csv_header());
+            for t in tokens {
+                println!("{}", pat_csv_row(t));
+            }
+        }
+        OutputFormat::Markdown => {
+            print!("{}", pat_md_header());
+            for t in tokens {
+                println!("{}", pat_md_row(t));
+            }
+        }
+        OutputFormat::Text => {
+            if tokens.is_empty() {
+                println!("no tokens");
+            } else {
+                for t in tokens {
+                    println!("{}", pat_line(t));
+                }
+            }
+        }
+    }
+}
+
+/// One-line text summary of a PAT (id, scope, `created_at` — never the secret).
+fn pat_line(t: &PatRecord) -> String {
+    format!(
+        "{}  scope={}  created_at={}",
+        t.id,
+        t.scope.as_deref().unwrap_or("-"),
+        t.created_at
+    )
+}
+const fn pat_csv_header() -> &'static str {
+    "id,scope,created_at,last_used"
+}
+fn pat_csv_row(t: &PatRecord) -> String {
+    format!(
+        "{},{},{},{}",
+        csv_field(&t.id),
+        csv_field(t.scope.as_deref().unwrap_or("")),
+        t.created_at,
+        t.last_used.map_or_else(String::new, |v| v.to_string()),
+    )
+}
+const fn pat_md_header() -> &'static str {
+    "| id | scope | created_at | last_used |\n| --- | --- | --- | --- |\n"
+}
+fn pat_md_row(t: &PatRecord) -> String {
+    format!(
+        "| {} | {} | {} | {} |",
+        md_cell(&t.id),
+        md_cell(t.scope.as_deref().unwrap_or("-")),
+        t.created_at,
+        t.last_used.map_or_else(|| "-".to_string(), |v| v.to_string()),
+    )
+}
+/// Minimal stable JSON object for one PAT (digest deliberately omitted — the
+/// hash is a server-side secret-equivalent, not list output).
+fn pat_to_json(t: &PatRecord) -> String {
+    let scope = t
+        .scope
+        .as_deref()
+        .map_or_else(|| "null".to_string(), json_string);
+    let last_used = t
+        .last_used
+        .map_or_else(|| "null".to_string(), |v| v.to_string());
+    format!(
+        "{{\"id\":{},\"scope\":{},\"created_at\":{},\"last_used\":{}}}",
+        json_string(&t.id),
+        scope,
+        t.created_at,
+        last_used,
+    )
 }
 
 /// Render an issue list in the chosen format.
@@ -748,5 +1043,115 @@ mod tests {
     fn json_string_escapes_quotes_and_control() {
         assert_eq!(json_string("a\"b"), "\"a\\\"b\"");
         assert_eq!(json_string("x\ny"), "\"x\\ny\"");
+    }
+
+    #[test]
+    fn parses_token_create_scope_and_name() {
+        let cmd = parse_hangar(&[
+            "ainb", "hangar", "auth", "token", "create", "--scope", "write", "--name", "ci",
+        ]);
+        let HangarCommand::Auth(AuthCommand::Token(TokenCommand::Create(args))) = cmd else {
+            panic!("expected auth token create, got {cmd:?}");
+        };
+        assert_eq!(args.scope, TokenScope::Write);
+        assert_eq!(args.name.as_deref(), Some("ci"));
+    }
+
+    #[test]
+    fn token_create_defaults_to_read_scope() {
+        let cmd = parse_hangar(&["ainb", "hangar", "auth", "token", "create"]);
+        let HangarCommand::Auth(AuthCommand::Token(TokenCommand::Create(args))) = cmd else {
+            panic!("expected auth token create, got {cmd:?}");
+        };
+        assert_eq!(args.scope, TokenScope::Read);
+    }
+
+    #[test]
+    fn parses_token_list_and_revoke() {
+        let cmd = parse_hangar(&["ainb", "hangar", "auth", "token", "list"]);
+        assert!(matches!(
+            cmd,
+            HangarCommand::Auth(AuthCommand::Token(TokenCommand::List))
+        ));
+
+        let cmd = parse_hangar(&["ainb", "hangar", "auth", "token", "revoke", "pat-1"]);
+        let HangarCommand::Auth(AuthCommand::Token(TokenCommand::Revoke(args))) = cmd else {
+            panic!("expected auth token revoke, got {cmd:?}");
+        };
+        assert_eq!(args.id, "pat-1");
+    }
+
+    #[test]
+    fn parses_hidden_daemon_token_create() {
+        let cmd = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "auth",
+            "daemon-token",
+            "create",
+            "--runtime-id",
+            "rt-1",
+        ]);
+        let HangarCommand::Auth(AuthCommand::DaemonToken(DaemonTokenCommand::Create(args))) = cmd
+        else {
+            panic!("expected daemon-token create, got {cmd:?}");
+        };
+        assert_eq!(args.runtime_id, "rt-1");
+    }
+
+    #[test]
+    fn token_create_output_shows_plaintext_once_with_warning() {
+        let out = token_create_output("pat-1", None, "ainb_SECRETBODY");
+        assert!(out.contains("ainb_SECRETBODY"), "plaintext must be printed once");
+        assert_eq!(out.matches("ainb_SECRETBODY").count(), 1, "exactly once");
+        assert!(
+            out.to_lowercase().contains("once") && out.to_lowercase().contains("not recoverable"),
+            "must warn there is no second chance: {out}"
+        );
+    }
+
+    #[test]
+    fn token_create_output_echoes_advisory_name() {
+        let out = token_create_output("pat-1", Some("ci-bot"), "ainb_SECRETBODY");
+        assert!(out.contains("ci-bot"), "advisory --name must be echoed: {out}");
+        // The label is cosmetic; the plaintext is still shown exactly once.
+        assert_eq!(out.matches("ainb_SECRETBODY").count(), 1);
+    }
+
+    #[test]
+    fn token_scope_round_trips_to_storage_string() {
+        assert_eq!(TokenScope::Read.as_str(), "read");
+        assert_eq!(TokenScope::Write.as_str(), "write");
+        assert_eq!(TokenScope::Admin.as_str(), "admin");
+    }
+
+    #[test]
+    fn pat_list_renderers_never_emit_a_plaintext() {
+        // A PatRecord only ever carries the digest, never a plaintext. Render it
+        // through every format and confirm no `ainb_`/`mdt_` prefixed body
+        // appears — the list surface cannot leak a secret.
+        let rec = PatRecord {
+            id: "pat-1".into(),
+            user_id: "user-1".into(),
+            sha256_token: "a".repeat(64),
+            scope: Some("read".into()),
+            created_at: 1_700_000_000_000,
+            last_used: None,
+        };
+        for rendered in [
+            pat_line(&rec),
+            pat_csv_row(&rec),
+            pat_md_row(&rec),
+            pat_to_json(&rec),
+        ] {
+            assert!(
+                !rendered.contains("ainb_") && !rendered.contains("mdt_"),
+                "token list output must never contain a plaintext token: {rendered}"
+            );
+            assert!(
+                !rendered.contains(&"a".repeat(64)),
+                "token list output must not even leak the stored digest: {rendered}"
+            );
+        }
     }
 }
