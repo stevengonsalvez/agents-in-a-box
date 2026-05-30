@@ -35,6 +35,31 @@ if (verb === 'sequence') {
 throw new Error('hangar: unknown verb "' + verb + '" — valid: needs | standup | sequence')
 
 // ===========================================================================
+// Resilience: retry an agent call on transient failure (API throttle shows as
+// "subagent completed without calling StructuredOutput"). setTimeout is the
+// only timing primitive available in the SES sandbox (Date.now/Math.random are
+// blocked), so backoff is fixed-step, no jitter.
+// ===========================================================================
+async function withRetry(fn, label, attempts, baseDelayMs) {
+  const n = attempts || 3
+  const base = baseDelayMs || 1500
+  let lastErr
+  for (let i = 1; i <= n; i++) {
+    try {
+      return await fn()
+    } catch (e) {
+      lastErr = e
+      if (i < n) {
+        const msg = (e && e.message ? e.message : String(e)).slice(0, 80)
+        log('retry ' + label + ' (' + i + '/' + (n - 1) + ') after: ' + msg)
+        await new Promise((r) => setTimeout(r, base * i))
+      }
+    }
+  }
+  throw lastErr
+}
+
+// ===========================================================================
 // VERB: needs — the Jarvis panel (former fleet-needs flow)
 // ===========================================================================
 async function runNeeds(opts) {
@@ -51,13 +76,28 @@ async function runNeeds(opts) {
     properties: { json: { type: 'string', description: 'raw verbatim stdout of `ainb --format json fleet needs`' } },
   }
 
-  const discovered = await agent(
-    'Run EXACTLY this command and return its raw stdout verbatim in the `json` field — ' +
-      'no commentary, no markdown code fences, just the JSON the command printed:\n\n' +
-      '    ainb --format json fleet needs\n\n' +
-      'If the command errors, prints nothing, or there is no fleet, return json = "[]".',
-    { label: 'discover', phase: 'Discover', schema: DISCOVER_SCHEMA },
-  )
+  let discovered
+  try {
+    discovered = await withRetry(() => agent(
+      'Run EXACTLY this command and return its raw stdout verbatim in the `json` field — ' +
+        'no commentary, no markdown code fences, just the JSON the command printed:\n\n' +
+        '    ainb --format json fleet needs\n\n' +
+        'If the command errors, prints nothing, or there is no fleet, return json = "[]".',
+      { label: 'discover', phase: 'Discover', schema: DISCOVER_SCHEMA },
+    ), 'discover')
+  } catch (e) {
+    // Read genuinely failed (e.g. API throttle persisted across retries).
+    // Surface it — do NOT collapse to a false "0 NEED YOU".
+    const reason = (e && e.message ? e.message : String(e)).slice(0, 120)
+    log('discover failed after retries: ' + reason)
+    return {
+      verb: 'needs',
+      error: 'fleet read failed: ' + reason,
+      banner: { need: 0, err: 0, ask: 0, idle: 0, wait: 0, top: null },
+      cards: [],
+      asks: [],
+    }
+  }
 
   let sessions = []
   try {
@@ -114,7 +154,7 @@ async function runNeeds(opts) {
         done++
         if (done % 5 === 0 || done === total) log('enriched ' + done + '/' + total)
       }
-      return agent(
+      return withRetry(() => agent(
         'A claude session is blocked.\n' +
           'session_id=' + sid + ' kind=' + kind + '\n' +
           'context=' + ctxStr + '\n\n' +
@@ -122,7 +162,7 @@ async function runNeeds(opts) {
           'Return `suggestion`: for ASK, the single best option label verbatim from the options; ' +
           'for ERR, one of retry|skip|investigate; for IDLE, one of resume|close; otherwise empty string.',
         { label: label, phase: 'Enrich', model: enrichModel, schema: ENRICH_SCHEMA },
-      )
+      ), label, 2, 1000)
         .then((e) => { onDone(); return { row: s, enriched: e } })
         .catch(() => { onDone(); return { row: s, enriched: null } })
     }),
@@ -158,11 +198,18 @@ async function runStandup(opts) {
 
   const filterArg = opts && typeof opts.filter === 'string' ? (' (note: caller wants to filter on "' + opts.filter + '" client-side)') : ''
 
-  const discovered = await agent(
-    'Run EXACTLY: ainb --format json fleet standup\nReturn raw stdout verbatim in the `json` field. ' +
-      'No commentary, no markdown fences. If empty, return json = "[]".' + filterArg,
-    { label: 'standup', phase: 'Discover', schema: STANDUP_SCHEMA },
-  )
+  let discovered
+  try {
+    discovered = await withRetry(() => agent(
+      'Run EXACTLY: ainb --format json fleet standup\nReturn raw stdout verbatim in the `json` field. ' +
+        'No commentary, no markdown fences. If empty, return json = "[]".' + filterArg,
+      { label: 'standup', phase: 'Discover', schema: STANDUP_SCHEMA },
+    ), 'standup-discover')
+  } catch (e) {
+    const reason = (e && e.message ? e.message : String(e)).slice(0, 120)
+    log('standup discover failed after retries: ' + reason)
+    return { verb: 'standup', error: 'fleet read failed: ' + reason, count: 0, groups: [] }
+  }
 
   let sessions = []
   try {
@@ -213,7 +260,7 @@ async function runStandup(opts) {
       const tmux = s.tmux_session || s.bg_job_id || ('session-' + i)
       const cwd = s.cwd || ''
       const onDone = () => { done++; if (done % 10 === 0 || done === total) log('briefed ' + done + '/' + total) }
-      return agent(
+      return withRetry(() => agent(
         'A claude session. workspace=' + ws + ' tmux=' + tmux + ' cwd=' + cwd +
           ' last_seen_ms=' + (s.last_seen_ms || 0) + ' raw_summary=' + JSON.stringify(s.summary || '') + '\n\n' +
           'Determine what this session is actually doing. Read its recent transcript tail — try:\n' +
@@ -223,7 +270,7 @@ async function runStandup(opts) {
           'Return `state`: active | idle | done | stuck.\n' +
           'Return `stale`: relative age computed from last_seen_ms vs the current time (run `date +%s%3N` if needed), e.g. "3h", "20m", "2d".',
         { label: ws + ':' + tmux, phase: 'Enrich', model: enrichModel, schema: STANDUP_ENRICH_SCHEMA },
-      )
+      ), ws + ':' + tmux, 2, 1000)
         .then((e) => { onDone(); return { s, e } })
         .catch(() => { onDone(); return { s, e: null } })
     }),
