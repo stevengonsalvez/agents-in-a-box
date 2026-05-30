@@ -45,6 +45,11 @@ toml = { workspace = true }
 # stamps (`TaskStarted`); the proto crate re-exports the types but tests build
 # the values directly.
 chrono = { workspace = true }
+# Inline snapshot assertions for the P4.4 transcript render goldens. Inline
+# snapshots keep the goldens in-test (no `.snap` files); the glyph map is
+# `trim_end`-ed before comparison to dodge the insta trailing-newline trap
+# (`reference_insta_trailing_newline_trap`).
+insta = "1.40"
 
 # Local lint config rather than `workspace = true`, mirroring the sibling
 # ainb-hangar-* crates: the workspace-level lints declare lint groups at the
