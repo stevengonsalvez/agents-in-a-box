@@ -76,6 +76,14 @@ const SKILLS_SYNC_REQ_ID: i64 = 15;
 const SKILL_ATTACH_REQ_ID: i64 = 16;
 /// JSON-RPC id for a `hangar/skill_detach` request (P6.5).
 const SKILL_DETACH_REQ_ID: i64 = 17;
+/// JSON-RPC id for the `hangar/autopilots_list` snapshot request (P7.5).
+const AUTOPILOTS_REQ_ID: i64 = 18;
+/// JSON-RPC id for a `hangar/autopilot_runs` request (P7.5).
+const AUTOPILOT_RUNS_REQ_ID: i64 = 19;
+/// JSON-RPC id for a `hangar/autopilot_fire_now` request (P7.5).
+const AUTOPILOT_FIRE_REQ_ID: i64 = 20;
+/// JSON-RPC id for a `hangar/autopilot_set_enabled` request (P7.5).
+const AUTOPILOT_TOGGLE_REQ_ID: i64 = 21;
 
 /// Hangar plugin state.
 ///
@@ -104,6 +112,9 @@ pub struct HangarPlugin {
     /// detail reply can be folded onto the right skill. `None` when no detail
     /// request is pending.
     pending_detail_slug: Option<String>,
+    /// The id of the autopilot a `hangar/autopilot_runs` is in flight for (P7.5),
+    /// so the reply folds onto the right row. `None` when none pending.
+    pending_runs_autopilot: Option<String>,
 }
 
 impl HangarPlugin {
@@ -224,9 +235,18 @@ impl HangarPlugin {
             RpcId::Number(SKILLS_REQ_ID) => self.apply_skills(resp),
             RpcId::Number(HEALTH_REQ_ID) => self.apply_health(resp),
             RpcId::Number(SKILL_GET_REQ_ID) => self.apply_skill_detail(resp),
-            // Sync / attach / detach mutate the store; the daemon answers `{}`
-            // and we re-fetch the skill list to refresh names + `used` flags.
-            RpcId::Number(SKILLS_SYNC_REQ_ID | SKILL_ATTACH_REQ_ID | SKILL_DETACH_REQ_ID) => {
+            RpcId::Number(AUTOPILOTS_REQ_ID) => self.apply_autopilots(resp),
+            RpcId::Number(AUTOPILOT_RUNS_REQ_ID) => self.apply_autopilot_runs(resp),
+            // Mutating RPCs (skill sync/attach/detach, autopilot fire/toggle)
+            // answer `{}`; we re-fetch the relevant lists to refresh derived
+            // columns (`used`, next-tick, enabled, last-run).
+            RpcId::Number(
+                SKILLS_SYNC_REQ_ID
+                | SKILL_ATTACH_REQ_ID
+                | SKILL_DETACH_REQ_ID
+                | AUTOPILOT_FIRE_REQ_ID
+                | AUTOPILOT_TOGGLE_REQ_ID,
+            ) => {
                 self.fetch_pending = true;
                 self.conn.on_event();
             }
@@ -265,6 +285,43 @@ impl HangarPlugin {
             ) {
                 self.screens.set_skills(r.skills);
             }
+        }
+    }
+
+    /// Populate the autopilot-manager cache from an `hangar/autopilots_list`
+    /// result (P7.5).
+    fn apply_autopilots(&mut self, resp: &RpcResponse) {
+        if let Some(result) = &resp.result {
+            if let Ok(r) = serde_json::from_value::<
+                ainb_hangar_proto::snapshots::AutopilotsListResult,
+            >(result.clone())
+            {
+                self.screens.set_autopilots(r.autopilots);
+            }
+        }
+    }
+
+    /// Fold a `hangar/autopilot_runs` result onto the autopilot-manager screen
+    /// (P7.5), keyed by the autopilot id the request was issued for so a stale
+    /// reply for a since-changed selection is ignored by the reducer.
+    fn apply_autopilot_runs(&mut self, resp: &RpcResponse) {
+        let Some(autopilot_id) = self.pending_runs_autopilot.take() else {
+            return;
+        };
+        let Some(result) = &resp.result else {
+            return;
+        };
+        if let Ok(r) =
+            serde_json::from_value::<ainb_hangar_proto::snapshots::AutopilotRunsResult>(
+                result.clone(),
+            )
+        {
+            let event = crate::screen::autopilots::AutopilotsEvent::RunsLoaded {
+                autopilot_id,
+                runs: r.runs,
+            };
+            let out = crate::screen::autopilots::reduce_autopilots(&self.screens.autopilots, event);
+            self.screens.autopilots = out.state;
         }
     }
 
@@ -332,6 +389,11 @@ impl HangarPlugin {
             (
                 SKILLS_REQ_ID,
                 daemon_methods::HANGAR_SKILLS_LIST,
+                scoped.clone(),
+            ),
+            (
+                AUTOPILOTS_REQ_ID,
+                daemon_methods::HANGAR_AUTOPILOTS_LIST,
                 scoped.clone(),
             ),
             (
@@ -408,6 +470,57 @@ impl HangarPlugin {
         if let Err(e) = host.unix_socket_send(stream_id, body).await {
             let _ = host
                 .log_info(format!("hangar: skill rpc send failed: {e}"))
+                .await;
+        }
+    }
+
+    /// Fire a deferred autopilot RPC raised by the autopilot-manager screen
+    /// (P7.5).
+    ///
+    /// Maps each [`AutopilotAction`] to its daemon JSON-RPC, framed over the
+    /// socket cap: `LoadRuns` → `hangar/autopilot_runs`, `FireNow` →
+    /// `hangar/autopilot_fire_now`, `SetEnabled` →
+    /// `hangar/autopilot_set_enabled`. A send failure is logged but non-fatal —
+    /// the screen simply doesn't update.
+    async fn apply_autopilot_action(
+        &mut self,
+        host: &HostClient,
+        action: crate::screen::AutopilotAction,
+    ) {
+        use crate::screen::AutopilotAction;
+        let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
+            return;
+        };
+        let ws = self.app_state().ws_id.as_str().to_string();
+        let (id, method, params) = match action {
+            AutopilotAction::LoadRuns(ap) => {
+                self.pending_runs_autopilot = Some(ap.clone());
+                (
+                    AUTOPILOT_RUNS_REQ_ID,
+                    daemon_methods::HANGAR_AUTOPILOT_RUNS,
+                    serde_json::json!({ "workspace_id": ws, "autopilot_id": ap, "limit": 10 }),
+                )
+            }
+            AutopilotAction::FireNow(ap) => (
+                AUTOPILOT_FIRE_REQ_ID,
+                daemon_methods::HANGAR_AUTOPILOT_FIRE_NOW,
+                serde_json::json!({ "workspace_id": ws, "autopilot_id": ap }),
+            ),
+            AutopilotAction::SetEnabled {
+                autopilot_id,
+                enabled,
+            } => (
+                AUTOPILOT_TOGGLE_REQ_ID,
+                daemon_methods::HANGAR_AUTOPILOT_SET_ENABLED,
+                serde_json::json!({ "workspace_id": ws, "autopilot_id": autopilot_id, "enabled": enabled }),
+            ),
+        };
+        let Ok(body) = encode_request(id, method, params) else {
+            return;
+        };
+        if let Err(e) = host.unix_socket_send(stream_id, body).await {
+            let _ = host
+                .log_info(format!("hangar: autopilot rpc send failed: {e}"))
                 .await;
         }
     }
@@ -571,7 +684,7 @@ impl HangarPlugin {
 /// non-modal screen the per-screen reducer may want Esc, so it falls through.
 const fn routing_event(key: &ainb_plugin_sdk::KeyEvent, app: &AppState) -> Option<AppEvent> {
     match &key.code {
-        KeyCode::Char { ch } if matches!(*ch, '1' | '2' | '4' | ',' | '?' | 'q') => {
+        KeyCode::Char { ch } if matches!(*ch, '1' | '2' | '4' | '5' | ',' | '?' | 'q') => {
             Some(AppEvent::Key(*ch))
         }
         // Esc only routes through the router when a modal is open (close it);
@@ -643,6 +756,11 @@ impl Plugin for HangarPlugin {
         // raised by the skill-manager screen and fire it over the daemon socket.
         if let Some(action) = self.screens.take_pending_skill_action() {
             self.apply_skill_action(host, action).await;
+        }
+        // P7.5: drain any deferred autopilot RPC (load-runs / fire-now /
+        // set-enabled) raised by the autopilot-manager screen.
+        if let Some(action) = self.screens.take_pending_autopilot_action() {
+            self.apply_autopilot_action(host, action).await;
         }
         // P5.6: persist the first-run ack here (deferred from `handle_key`). The
         // modal is already `Dismissed` in state; this records it so a relaunch

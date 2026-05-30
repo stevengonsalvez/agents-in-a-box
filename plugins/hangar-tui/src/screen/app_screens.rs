@@ -13,11 +13,12 @@
 //! The plugin still owns **zero domain data** — every cache here is filled from a
 //! daemon snapshot and folded by the daemon's event stream.
 
-use ainb_hangar_proto::events::{ActorRow, IssueRow, SkillRow};
+use ainb_hangar_proto::events::{ActorRow, AutopilotRow, IssueRow, SkillRow};
 use ainb_hangar_proto::settings::{HealthSnapshot, KeyRow, ProviderRow, WorkspaceRow};
 use ainb_plugin_sdk::{KeyCode, KeyEvent, WireBuffer};
 
 use super::agent_picker::{reduce_agent_picker, AgentPickerEvent, AgentPickerState};
+use super::autopilots::{reduce_autopilots, AutopilotsEvent, AutopilotsIntent, AutopilotsState};
 use super::issue_list::{reduce_issue_list, IssueListEvent, IssueListIntent, IssueListState};
 use super::settings::{reduce_settings, SettingsEvent, SettingsIntent, SettingsState};
 use super::skill_manager::{
@@ -59,6 +60,28 @@ pub enum SkillAction {
     Detach(String),
 }
 
+/// A deferred daemon RPC raised by the autopilot-manager screen (P7.5).
+///
+/// Like [`SkillAction`], the sync key router can't `await`; it stashes the action
+/// on [`ScreenStates::pending_autopilot_action`] and the plugin's `render` pass
+/// drains it and fires the matching daemon JSON-RPC over the socket cap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutopilotAction {
+    /// Load an autopilot's run history (selection change / run event) —
+    /// `hangar/autopilot_runs`.
+    LoadRuns(String),
+    /// Fire the selected autopilot now (`r`) — `hangar/autopilot_fire_now`.
+    FireNow(String),
+    /// Toggle the selected autopilot's enabled flag (`d`) —
+    /// `hangar/autopilot_set_enabled`.
+    SetEnabled {
+        /// The autopilot to toggle.
+        autopilot_id: String,
+        /// The target enabled state.
+        enabled: bool,
+    },
+}
+
 /// The render-state cache for every Core 5 screen.
 ///
 /// Each field is the daemon's read model for one screen, pulled over the
@@ -71,6 +94,8 @@ pub struct ScreenStates {
     pub issue_list: IssueListState,
     /// Skill-manager screen cache.
     pub skill_manager: SkillManagerState,
+    /// Autopilot-manager screen cache.
+    pub autopilots: AutopilotsState,
     /// Settings screen cache (built once the four snapshots arrive).
     pub settings: Option<SettingsState>,
     /// Task-detail screen cache (present only while a task is open).
@@ -89,6 +114,10 @@ pub struct ScreenStates {
     /// screen, awaiting the `render` pass to fire it over the daemon socket
     /// (P6.5). `None` when idle.
     pub pending_skill_action: Option<SkillAction>,
+    /// An autopilot RPC (load-runs / fire-now / set-enabled) raised by the
+    /// autopilot-manager screen, awaiting the `render` pass to fire it over the
+    /// daemon socket (P7.5). `None` when idle.
+    pub pending_autopilot_action: Option<AutopilotAction>,
     /// Cached workspace catalogue from `host/workspace_list` (P5.5). Seeds the
     /// Settings Workspace pane regardless of which snapshot arrives first.
     pub workspace_rows: Vec<WorkspaceRow>,
@@ -109,6 +138,12 @@ impl ScreenStates {
     /// Replace the skill-manager rows from an `hangar/skills_list` snapshot.
     pub fn set_skills(&mut self, skills: Vec<SkillRow>) {
         self.skill_manager = SkillManagerState::new(skills);
+    }
+
+    /// Replace the autopilot-manager rows from an `hangar/autopilots_list`
+    /// snapshot (P7.5).
+    pub fn set_autopilots(&mut self, autopilots: Vec<AutopilotRow>) {
+        self.autopilots = AutopilotsState::new(autopilots);
     }
 
     /// Cache the agent snapshot rows; the picker is rebuilt from them on open.
@@ -163,6 +198,12 @@ impl ScreenStates {
     pub const fn take_pending_skill_action(&mut self) -> Option<SkillAction> {
         self.pending_skill_action.take()
     }
+
+    /// Take the pending autopilot RPC raised by the autopilot-manager screen,
+    /// if any.
+    pub const fn take_pending_autopilot_action(&mut self) -> Option<AutopilotAction> {
+        self.pending_autopilot_action.take()
+    }
 }
 
 /// The cached actor snapshot, stashed on [`ScreenStates`] so the picker can be
@@ -209,6 +250,9 @@ pub fn render_body(buf: &mut WireBuffer, w: u16, h: u16, app: &AppState, states:
         }
         Screen::SkillManager => {
             super::skill_manager::render_skill_manager(buf, w, top, bottom, &states.skill_manager);
+        }
+        Screen::Autopilots => {
+            super::autopilots::render_autopilots(buf, w, top, bottom, &states.autopilots);
         }
         Screen::Settings => {
             if let Some(s) = &states.settings {
@@ -316,6 +360,28 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
                     Some(SkillManagerIntent::Attach(slug)) => Some(SkillAction::Attach(slug)),
                     Some(SkillManagerIntent::Detach(slug)) => Some(SkillAction::Detach(slug)),
                     Some(SkillManagerIntent::LoadFiles(_)) | None => None,
+                };
+            }
+            None
+        }
+        Screen::Autopilots => {
+            if let Some(c) = key_char(key) {
+                let out = reduce_autopilots(&states.autopilots, AutopilotsEvent::Key(c));
+                states.autopilots = out.state;
+                // Lift the screen intent into a deferred daemon RPC the `render`
+                // pass drains + fires (the sync key router can't `await`). `Add` /
+                // `Edit` are create-flow intents with no P7.5 RPC yet.
+                states.pending_autopilot_action = match out.intent {
+                    Some(AutopilotsIntent::FireNow(id)) => Some(AutopilotAction::FireNow(id)),
+                    Some(AutopilotsIntent::SetEnabled {
+                        autopilot_id,
+                        enabled,
+                    }) => Some(AutopilotAction::SetEnabled {
+                        autopilot_id,
+                        enabled,
+                    }),
+                    Some(AutopilotsIntent::LoadRuns(id)) => Some(AutopilotAction::LoadRuns(id)),
+                    Some(AutopilotsIntent::Add | AutopilotsIntent::Edit(_)) | None => None,
                 };
             }
             None

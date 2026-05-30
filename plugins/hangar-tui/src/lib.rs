@@ -24,5 +24,8 @@ pub use screen::issue_list::{
     reduce_issue_list, FilterChip, IssueColumn, IssueListEvent, IssueListIntent, IssueListMode,
     IssueListReduction, IssueListState,
 };
+pub use screen::autopilots::{
+    reduce_autopilots, AutopilotsEvent, AutopilotsIntent, AutopilotsReduction, AutopilotsState,
+};
 pub use screen::{reduce, ActiveTaskBanner, AppEvent, AppState, Intent, Reduction, Screen};
 pub use stream::{Backoff, StreamClient, StreamError, SubscribeReplay};
