@@ -14,6 +14,7 @@
 //! [`crate::chrome`]; this module owns only the routing state it renders from.
 
 pub mod agent_picker;
+pub mod app_screens;
 pub mod banner_state;
 pub mod issue_list;
 mod router;
@@ -21,6 +22,7 @@ pub mod settings;
 pub mod skill_manager;
 pub mod task_detail;
 
+pub use app_screens::{render_body, route_key, NavIntent, ScreenStates};
 pub use router::reduce;
 
 use ainb_hangar_core::ids::{IssueId, TaskId, WorkspaceId};

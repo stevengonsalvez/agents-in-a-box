@@ -20,17 +20,17 @@
 //! `unix_socket_send`. `spawn_managed_subprocess` (auto-starting the
 //! daemon) and `secret_store_get` land in later phases.
 
-use ainb_hangar_proto::{methods as daemon_methods, RpcId};
+use ainb_hangar_proto::{methods as daemon_methods, RpcId, RpcResponse};
 use ainb_plugin_sdk::{
-    CliOutput, HandleEventParams, HostClient, Plugin, RenderParams, Result, RpcError,
-    UnixSocketEvent, UnixSocketEventKind, WireBuffer,
+    CliOutput, HandleEventParams, HandleKeyParams, HostClient, KeyCode, Plugin, RenderParams,
+    Result, RpcError, UnixSocketEvent, UnixSocketEventKind, WireBuffer,
 };
 use async_trait::async_trait;
 
 use crate::chrome::{render_footer, render_top_bar, Presence};
 use crate::connection::{ConnState, Connection, DEFAULT_WORKSPACE_ID};
 use crate::jsonrpc_over_socket::{encode_request, FrameDecoder};
-use crate::screen::AppState;
+use crate::screen::{render_body, route_key, AppEvent, AppState, NavIntent, Screen, ScreenStates};
 use ainb_hangar_core::ids::WorkspaceId;
 
 /// Static manifest TOML loaded at compile time. The [`Server`] uses
@@ -56,6 +56,15 @@ const DAEMON_SOCKET_PATH: &str = "~/.ainb/hangar.sock";
 /// reply as the handshake completion.
 const SUBSCRIBE_REQ_ID: i64 = 1;
 
+/// JSON-RPC id for the `hangar/issues_list` snapshot request.
+const ISSUES_REQ_ID: i64 = 10;
+/// JSON-RPC id for the `hangar/agents_list` snapshot request.
+const AGENTS_REQ_ID: i64 = 11;
+/// JSON-RPC id for the `hangar/skills_list` snapshot request.
+const SKILLS_REQ_ID: i64 = 12;
+/// JSON-RPC id for the `hangar/health` snapshot request.
+const HEALTH_REQ_ID: i64 = 13;
+
 /// Hangar plugin state.
 ///
 /// Holds the daemon [`Connection`] state machine and the inbound socket
@@ -66,6 +75,11 @@ pub struct HangarPlugin {
     conn: Connection,
     decoder: FrameDecoder,
     app: Option<AppState>,
+    /// Per-screen render-state caches filled from the daemon snapshot RPCs.
+    screens: ScreenStates,
+    /// Set when a subscribe ack just arrived, so `handle_event` knows to fire
+    /// the snapshot fetches (it has the `host` the sync decode path lacks).
+    fetch_pending: bool,
 }
 
 impl HangarPlugin {
@@ -168,19 +182,179 @@ impl HangarPlugin {
     }
 
     /// React to one fully-decoded daemon response.
-    fn on_daemon_response(&mut self, resp: &ainb_hangar_proto::RpcResponse) {
-        // The subscribe ack completes the handshake.
-        if resp.id == RpcId::Number(SUBSCRIBE_REQ_ID) {
-            if resp.error.is_some() {
-                self.conn
-                    .on_error("daemon rejected workspace/subscribe".to_string());
-            } else {
-                self.conn.on_subscribe_ack();
+    fn on_daemon_response(&mut self, resp: &RpcResponse) {
+        match resp.id {
+            // The subscribe ack completes the handshake and arms the snapshot
+            // fetch (issued by `handle_event`, which holds the `host`).
+            RpcId::Number(SUBSCRIBE_REQ_ID) => {
+                if resp.error.is_some() {
+                    self.conn
+                        .on_error("daemon rejected workspace/subscribe".to_string());
+                } else {
+                    self.conn.on_subscribe_ack();
+                    self.fetch_pending = true;
+                }
             }
-        } else {
-            // A post-subscribe workspace event: keep the link alive.
-            self.conn.on_event();
+            RpcId::Number(ISSUES_REQ_ID) => self.apply_issues(resp),
+            RpcId::Number(AGENTS_REQ_ID) => self.apply_agents(resp),
+            RpcId::Number(SKILLS_REQ_ID) => self.apply_skills(resp),
+            RpcId::Number(HEALTH_REQ_ID) => self.apply_health(resp),
+            // Any other response/event keeps the link alive.
+            _ => self.conn.on_event(),
         }
+    }
+
+    /// Populate the issue-list cache from an `hangar/issues_list` result.
+    fn apply_issues(&mut self, resp: &RpcResponse) {
+        if let Some(result) = &resp.result {
+            if let Ok(r) =
+                serde_json::from_value::<ainb_hangar_proto::snapshots::IssuesListResult>(result.clone())
+            {
+                self.screens.set_issues(r.issues);
+            }
+        }
+    }
+
+    /// Populate the actor cache from an `hangar/agents_list` result.
+    fn apply_agents(&mut self, resp: &RpcResponse) {
+        if let Some(result) = &resp.result {
+            if let Ok(r) =
+                serde_json::from_value::<ainb_hangar_proto::snapshots::AgentsListResult>(result.clone())
+            {
+                self.screens.set_actors(r.actors);
+            }
+        }
+    }
+
+    /// Populate the skill-manager cache from an `hangar/skills_list` result.
+    fn apply_skills(&mut self, resp: &RpcResponse) {
+        if let Some(result) = &resp.result {
+            if let Ok(r) =
+                serde_json::from_value::<ainb_hangar_proto::snapshots::SkillsListResult>(result.clone())
+            {
+                self.screens.set_skills(r.skills);
+            }
+        }
+    }
+
+    /// Build the settings cache from an `hangar/health` result.
+    fn apply_health(&mut self, resp: &RpcResponse) {
+        if let Some(result) = &resp.result {
+            if let Ok(h) = serde_json::from_value::<
+                ainb_hangar_proto::settings::HealthSnapshot,
+            >(result.clone())
+            {
+                let ws = self.app_state().ws_id.as_str().to_string();
+                self.screens.set_health(h, &ws);
+            }
+        }
+    }
+
+    /// Fire the four `hangar/*` snapshot requests over the daemon stream, framed
+    /// for the cap. A send failure is logged but non-fatal — the screens simply
+    /// stay empty until the next subscribe.
+    async fn fetch_snapshots(&mut self, host: &HostClient) {
+        let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
+            return;
+        };
+        let ws = self.app_state().ws_id.as_str().to_string();
+        let scoped = serde_json::json!({ "workspace_id": ws });
+        let requests = [
+            (ISSUES_REQ_ID, daemon_methods::HANGAR_ISSUES_LIST, scoped.clone()),
+            (AGENTS_REQ_ID, daemon_methods::HANGAR_AGENTS_LIST, scoped.clone()),
+            (SKILLS_REQ_ID, daemon_methods::HANGAR_SKILLS_LIST, scoped.clone()),
+            (HEALTH_REQ_ID, daemon_methods::HANGAR_HEALTH, serde_json::json!({})),
+        ];
+        for (id, method, params) in requests {
+            let Ok(body) = encode_request(id, method, params) else {
+                continue;
+            };
+            if let Err(e) = host.unix_socket_send(stream_id.clone(), body).await {
+                let _ = host.log_info(format!("hangar: snapshot send failed: {e}")).await;
+            }
+        }
+    }
+
+    /// Fold a forwarded key: tab-switch / modal keys go through the routing
+    /// reducer ([`crate::screen::reduce`]); everything else routes to the active
+    /// screen's reducer via [`route_key`], whose cross-screen [`NavIntent`]s
+    /// drive the routing-state transition + lazy modal construction here.
+    fn on_key(&mut self, key: &ainb_plugin_sdk::KeyEvent) {
+        // Snapshot the routing state so the borrow on `self.app` is released
+        // before we mutate `self.screens` and `self.app` below.
+        let app = self.app_state().clone();
+
+        // Routing-layer keys: tab switches, `?` help, Esc-close-modal, `q` quit.
+        if let Some(ev) = routing_event(key, &app) {
+            let reduction = crate::screen::reduce(&app, ev);
+            self.app = Some(reduction.state);
+            return;
+        }
+
+        // Per-screen keys → the active screen's reducer.
+        if let Some(nav) = route_key(&app, &mut self.screens, key) {
+            self.apply_nav(&app, nav);
+        }
+    }
+
+    /// Act on a cross-screen [`NavIntent`] surfaced by a screen reducer: open the
+    /// modal/screen on the routing state and build its cache.
+    fn apply_nav(&mut self, app: &AppState, nav: NavIntent) {
+        match nav {
+            NavIntent::OpenAgentPicker(issue_id) => {
+                self.screens.open_picker(issue_id.clone());
+                let reduction = crate::screen::reduce(app, AppEvent::OpenAgentPicker(issue_id));
+                self.app = Some(reduction.state);
+            }
+            NavIntent::OpenTaskForIssue(issue_id) => {
+                // Open task detail bound to the issue's row + the running task.
+                let issue = self
+                    .screens
+                    .issue_list
+                    .visible_rows()
+                    .find(|r| r.id == issue_id)
+                    .cloned();
+                if let Some(issue) = issue {
+                    // A synthetic task id keyed off the issue — the daemon binds
+                    // the real running task to the issue, and the task-detail
+                    // transcript folds events addressed to it.
+                    let task_id = ainb_hangar_core::ids::TaskId::from_str(format!(
+                        "task-{}",
+                        issue_id.as_str()
+                    ))
+                    .unwrap_or_else(|_| {
+                        ainb_hangar_core::ids::TaskId::from_str("task").expect("non-empty")
+                    });
+                    self.screens.open_task_detail(task_id.clone(), issue);
+                    let mut next = app.clone();
+                    next.screen = Screen::TaskDetail(task_id.clone());
+                    next.selected_task = Some(task_id);
+                    next.prior_screen = None;
+                    self.app = Some(next);
+                }
+            }
+            NavIntent::CloseModal => {
+                let reduction = crate::screen::reduce(app, AppEvent::Esc);
+                self.app = Some(reduction.state);
+            }
+        }
+    }
+}
+
+/// Map a wire key to a routing-layer [`AppEvent`] when it is a tab-switch / help
+/// / quit / Esc key, else `None` (the key belongs to the active screen reducer).
+///
+/// On a modal screen Esc closes the modal (handled by the screen router); on a
+/// non-modal screen the per-screen reducer may want Esc, so it falls through.
+const fn routing_event(key: &ainb_plugin_sdk::KeyEvent, app: &AppState) -> Option<AppEvent> {
+    match &key.code {
+        KeyCode::Char { ch } if matches!(*ch, '1' | '2' | '4' | ',' | '?' | 'q') => {
+            Some(AppEvent::Key(*ch))
+        }
+        // Esc only routes through the router when a modal is open (close it);
+        // otherwise it is a per-screen concern handled by `route_key`.
+        KeyCode::Esc if app.screen.is_modal() => Some(AppEvent::Esc),
+        _ => None,
     }
 }
 
@@ -195,7 +369,7 @@ impl Plugin for HangarPlugin {
         Ok(())
     }
 
-    async fn handle_event(&mut self, _host: &HostClient, params: HandleEventParams) -> Result<()> {
+    async fn handle_event(&mut self, host: &HostClient, params: HandleEventParams) -> Result<()> {
         // Only socket:<stream_id> deliveries for our current stream concern us.
         let want = self.conn.stream_id().map(|id| format!("socket:{id}"));
         if want.as_deref() != Some(params.topic.as_str()) {
@@ -205,6 +379,21 @@ impl Plugin for HangarPlugin {
             Ok(event) => self.on_socket_event(&event),
             Err(e) => self.conn.on_error(format!("bad socket event: {e}")),
         }
+        // The subscribe ack (decoded above) arms the snapshot fetch; fire it now
+        // that we hold the host. One fetch per subscribe.
+        if std::mem::take(&mut self.fetch_pending) {
+            self.fetch_snapshots(host).await;
+        }
+        Ok(())
+    }
+
+    async fn handle_key(&mut self, _host: &HostClient, params: HandleKeyParams) -> Result<()> {
+        // Only initial presses drive the reducers; ignore auto-repeat/release so a
+        // held key doesn't multi-fire a tab switch.
+        if matches!(params.key.kind, ainb_plugin_sdk::KeyKind::Release) {
+            return Ok(());
+        }
+        self.on_key(&params.key);
         Ok(())
     }
 
@@ -218,13 +407,13 @@ impl Plugin for HangarPlugin {
 
         // Shared chrome (P4.1): top tab bar on row 0, contextual footer on the
         // last row. The active screen body (rows 1..h-1) is filled by the
-        // per-screen renderers landing in P4.3..P4.7.
+        // per-screen renderers (P4.3..P4.7) dispatched via `render_body`.
         let presence = Self::presence(self.conn.state());
-        let app = self.app_state();
+        let app = self.app_state().clone();
         let ws_slug = app.ws_id.as_str().to_string();
-        let screen = app.screen.clone();
-        render_top_bar(&mut buf, w, &screen, &ws_slug, presence);
-        render_footer(&mut buf, w, h, &screen);
+        render_top_bar(&mut buf, w, &app.screen, &ws_slug, presence);
+        render_body(&mut buf, w, h, &app, &self.screens);
+        render_footer(&mut buf, w, h, &app.screen);
         Ok(buf)
     }
 
