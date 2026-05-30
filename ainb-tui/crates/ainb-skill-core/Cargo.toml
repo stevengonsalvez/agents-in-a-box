@@ -5,11 +5,13 @@ edition = "2021"
 
 [dependencies]
 anyhow = { workspace = true }
+fs2 = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
 serde_yaml_ng = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+fs2 = { workspace = true }
 proptest = "1"
 tempfile = "3"

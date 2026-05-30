@@ -43,6 +43,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use fs2::FileExt;
+
 use crate::manifest::{SourceEntry, TargetMapping};
 use crate::mapping::resolve_pair;
 
@@ -293,6 +295,15 @@ pub enum SyncEngineError {
     /// Filesystem I/O while writing the home file.
     #[error(transparent)]
     Io(#[from] std::io::Error),
+
+    /// Another `ainb skill sync` (in this process or another) already
+    /// holds the per-source advisory lock at
+    /// `<repo_cache_dir>/.ainb-sync.lock`. Carries the lock path so the
+    /// caller can surface "sync in progress on <path>" rather than the
+    /// inscrutable git-stderr error that would otherwise emerge from the
+    /// underlying `.git/index.lock` race.
+    #[error("sync already in progress (lock held at `{0}`)")]
+    SyncInProgress(String),
 }
 
 /// Errors raised by a [`ContentFetcher`] implementation.
@@ -407,6 +418,49 @@ fn write_atomic(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// hitting the network.
 pub const SYNC_SKIP_PUSH_ENV: &str = "AINB_SYNC_SKIP_PUSH";
 
+/// Path of the per-source advisory lock held for the duration of
+/// [`apply_to_repo`], relative to `<repo_cache_dir>`. Lives inside the
+/// repo's `.git/` so git treats it as metadata (never shows up in
+/// `git status`, never gets accidentally staged or pushed) while still
+/// being a stable inode shared by every `ainb skill sync` invocation
+/// against the same promote-cache.
+pub const SYNC_LOCK_FILENAME: &str = ".git/ainb-sync.lock";
+
+/// RAII guard for the per-source advisory lock. Holding the guard keeps
+/// the kernel lock alive; dropping it releases the lock by closing the
+/// underlying file descriptor (fs2 does not separate unlock from close
+/// in its `flock`-backed implementation, and we rely on Drop to release
+/// rather than calling `unlock_*` explicitly so a panic inside
+/// `apply_to_repo` still hands the lock back).
+struct SyncLockGuard {
+    _file: fs::File,
+}
+
+/// Acquire the per-source advisory lock at
+/// `<repo_cache_dir>/.ainb-sync.lock`. Non-blocking: if another holder
+/// already owns the lock, returns
+/// [`SyncEngineError::SyncInProgress`] immediately rather than waiting
+/// — the TUI must not freeze on a sister process's git operation.
+fn acquire_sync_lock(repo_cache_dir: &Path) -> std::result::Result<SyncLockGuard, SyncEngineError> {
+    let lock_path = repo_cache_dir.join(SYNC_LOCK_FILENAME);
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)?;
+    match FileExt::try_lock_exclusive(&file) {
+        Ok(()) => Ok(SyncLockGuard { _file: file }),
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            Err(SyncEngineError::SyncInProgress(lock_path.display().to_string()))
+        }
+        Err(e) => Err(SyncEngineError::Io(e)),
+    }
+}
+
 /// Configuration for [`apply_to_repo`].
 #[derive(Debug, Clone)]
 pub struct ApplyToRepoOpts {
@@ -434,6 +488,15 @@ pub fn apply_to_repo(
     if action.direction != SyncDirection::ToRepo {
         return Ok(());
     }
+
+    // Acquire the per-source advisory lock BEFORE any cache mutation.
+    // Two concurrent `ainb skill sync` invocations against the same
+    // source would otherwise race on `.git/index.lock` — corruption-
+    // safe (git protects itself) but UX-hostile, surfacing as
+    // "another git process running" stderr noise. Holding `_lock` for
+    // the lifetime of this call keeps the second caller out until the
+    // first finishes its commit + push.
+    let _lock = acquire_sync_lock(&opts.repo_cache_dir)?;
 
     let (home_rel, repo_rel) = resolve_pair(source, unit_path)
         .ok_or_else(|| SyncEngineError::LayoutNoMatch(path_lossy(unit_path)))?;
