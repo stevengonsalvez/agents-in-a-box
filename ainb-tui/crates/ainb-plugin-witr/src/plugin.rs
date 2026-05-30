@@ -129,7 +129,7 @@ impl Plugin for WitrPlugin {
         Ok(buf)
     }
 
-    async fn handle_key(&mut self, _host: &HostClient, params: HandleKeyParams) -> Result<()> {
+    async fn handle_key(&mut self, host: &HostClient, params: HandleKeyParams) -> Result<()> {
         // Capture pre-state so we can spot a transition that needs
         // async follow-up (re-detect on empty-state `r`, refresh on
         // Ready `r`). The pure dispatcher mutates state synchronously;
@@ -159,7 +159,7 @@ impl Plugin for WitrPlugin {
         // form; decode it back to a typed target for exec. Coalesced
         // via `ScanGate`; concurrent `r` presses are no-ops.
         if r_pressed && was_ready && !pre_target.is_empty() {
-            let _ = self.scan(&WitrTarget::parse(&pre_target)).await;
+            let _ = self.scan(&WitrTarget::parse(&pre_target), Some(host)).await;
         }
 
         Ok(())
@@ -268,8 +268,10 @@ impl WitrPlugin {
 
         // JSON-mode exec, routed through the single `scan()` authority
         // so the cache insert goes through `ScanGate` — one coalescing
-        // owner shared by the TUI `r`-refresh and this CLI path.
-        match self.scan(&target).await {
+        // owner shared by the TUI `r`-refresh and this CLI path. `None`
+        // host: a one-shot `ainb witr` run has no live bus subscribers,
+        // so the event-bus publish is skipped here.
+        match self.scan(&target, None).await {
             Some(ExecResult::Ok(snap)) => {
                 let body = if format == OutputFormat::Json {
                     match cli::format_json(&snap) {
@@ -382,8 +384,10 @@ impl WitrPlugin {
         self.current_target = target.cache_key();
         // Scan now so the overlay has data; ignore the result — render
         // reads from the cache, and a failed scan falls back to the
-        // empty-target hint.
-        let _ = self.scan(&target).await;
+        // empty-target hint. `None` host: the slash transport (host
+        // Phase 4, bead 6qc) will pass a real host so the snapshot
+        // publishes — until then there's no live channel anyway.
+        let _ = self.scan(&target, None).await;
         self.ui_mode = UiMode::DetailOpen;
         Ok(())
     }
@@ -399,7 +403,11 @@ impl WitrPlugin {
     /// and from `cli_dispatch`. Returns `None` when there's no witr
     /// binary cached (defensive — we shouldn't be `Ready` without one)
     /// or when a scan is already in flight.
-    pub async fn scan(&mut self, target: &WitrTarget) -> Option<ExecResult> {
+    pub async fn scan(
+        &mut self,
+        target: &WitrTarget,
+        host: Option<&HostClient>,
+    ) -> Option<ExecResult> {
         let path = self.witr_path.clone()?;
         let key = target.cache_key();
         if !self.scan_gate.try_acquire(&key) {
@@ -408,9 +416,35 @@ impl WitrPlugin {
         let result = exec_witr_json(&path, target).await;
         if let ExecResult::Ok(snap) = &result {
             self.cache.insert(key.clone(), (**snap).clone(), Instant::now());
+            // Publish the fresh snapshot on the event bus (cfx.8) when
+            // a live host channel is available. The CLI one-shot path
+            // passes `None` — no bus subscribers during a `ainb witr`
+            // invocation, so publishing there is moot.
+            if let Some(host) = host {
+                self.publish_snapshot(host, snap).await;
+            }
         }
         self.scan_gate.release(&key);
         Some(result)
+    }
+
+    /// Publish a snapshot to the `witr.snapshot` topic. Encoding
+    /// failures and host-channel errors are logged, not propagated —
+    /// a publish failure must never break the scan/render the user
+    /// asked for.
+    async fn publish_snapshot(&self, host: &HostClient, snap: &WitrSnapshot) {
+        match crate::publish::encode_snapshot_payload(snap) {
+            Ok(bytes) => {
+                if let Err(e) =
+                    host.snapshot_publish(crate::publish::WITR_SNAPSHOT_TOPIC, bytes).await
+                {
+                    tracing::warn!(error = %e, "failed to publish witr.snapshot");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to encode witr.snapshot payload");
+            }
+        }
     }
 }
 

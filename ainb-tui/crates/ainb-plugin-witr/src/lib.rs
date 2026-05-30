@@ -16,6 +16,7 @@ pub mod detect;
 pub mod exec;
 pub mod model;
 pub mod plugin;
+pub mod publish;
 pub mod render;
 pub mod slash;
 pub mod state;
