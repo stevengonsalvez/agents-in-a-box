@@ -8360,8 +8360,10 @@ impl App {
         // Static plugin-screen routing table. Pairs a stable screen id
         // (consumed by `PluginScreen` and matched against
         // `state.current_screen`) with the plugin id that owns it.
-        const PLUGIN_SCREENS: &[(&str, &str)] =
-            &[(crate::app::screens::ids::ANALYTICS, "burndown")];
+        const PLUGIN_SCREENS: &[(&str, &str)] = &[
+            (crate::app::screens::ids::ANALYTICS, "burndown"),
+            (crate::app::screens::ids::HANGAR, "hangar-tui"),
+        ];
 
         for (screen_id, plugin_id) in PLUGIN_SCREENS {
             let pid = ainb_plugin_runtime::PluginId::from(*plugin_id);

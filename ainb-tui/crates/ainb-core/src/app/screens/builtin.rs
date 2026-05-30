@@ -62,7 +62,8 @@ impl PluginScreen {
 /// authoritative list lives in one place.
 ///
 /// Keep this list in sync with `tick_plugin_renders` in `app/state.rs`.
-pub const PLUGIN_SCREENS: &[(&str, &str)] = &[(ids::ANALYTICS, "burndown")];
+pub const PLUGIN_SCREENS: &[(&str, &str)] =
+    &[(ids::ANALYTICS, "burndown"), (ids::HANGAR, "hangar-tui")];
 
 /// Resolve the plugin id that owns `screen_id`, if any.
 #[must_use]
@@ -734,6 +735,7 @@ pub fn register_builtins(registry: &mut ScreenRegistry) {
     registry.register(Box::new(LogHistoryScreen::new()));
     registry.register(Box::new(ChangelogScreen::default()));
     registry.register(Box::new(PluginScreen::new(ids::ANALYTICS)));
+    registry.register(Box::new(PluginScreen::new(ids::HANGAR)));
     registry.register(Box::new(SkillsScreen::default()));
     registry.register(Box::new(GitViewScreen::default()));
     registry.register(Box::new(SessionRecoveryScreen::default()));

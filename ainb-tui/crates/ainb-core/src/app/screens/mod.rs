@@ -39,6 +39,9 @@ pub mod ids {
     pub const SESSION_RECOVERY: &str = "session_recovery";
     pub const SKILLS: &str = "skills";
     pub const INBOX: &str = "inbox";
+    /// Hangar managed-agents control plane — a plugin-owned screen rendered by
+    /// the `hangar-tui` subprocess plugin (P4.10). Reached from home with `g`.
+    pub const HANGAR: &str = "hangar";
 }
 
 /// Outcome of a screen-handled event.
