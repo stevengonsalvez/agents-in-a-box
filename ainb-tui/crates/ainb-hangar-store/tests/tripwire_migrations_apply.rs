@@ -13,10 +13,7 @@ async fn fresh_pool(dir: &std::path::Path) -> SqlitePool {
     let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", db_path.display()))
         .expect("valid sqlite url")
         .create_if_missing(true);
-    let pool = SqlitePoolOptions::new()
-        .connect_with(opts)
-        .await
-        .expect("open pool");
+    let pool = SqlitePoolOptions::new().connect_with(opts).await.expect("open pool");
     apply_migrations(&pool).await.expect("migrations apply");
     pool
 }
@@ -113,7 +110,10 @@ async fn migration_0002_creates_agent_runtime_table_and_unique_index() {
     let pool = fresh_pool(dir.path()).await;
 
     let rt = table_sql(&pool, "agent_runtime").await;
-    assert!(rt.contains("id TEXT PRIMARY KEY"), "agent_runtime.id PK: {rt}");
+    assert!(
+        rt.contains("id TEXT PRIMARY KEY"),
+        "agent_runtime.id PK: {rt}"
+    );
     assert!(
         rt.contains("workspace_id TEXT NOT NULL REFERENCES workspace(id)"),
         "agent_runtime.workspace_id FK: {rt}"
@@ -158,7 +158,10 @@ async fn migration_0002_creates_agent_table() {
     let pool = fresh_pool(dir.path()).await;
 
     let agent = table_sql(&pool, "agent").await;
-    assert!(agent.contains("id TEXT PRIMARY KEY"), "agent.id PK: {agent}");
+    assert!(
+        agent.contains("id TEXT PRIMARY KEY"),
+        "agent.id PK: {agent}"
+    );
     assert!(
         agent.contains("workspace_id TEXT NOT NULL REFERENCES workspace(id)"),
         "agent.workspace_id FK: {agent}"
@@ -190,7 +193,10 @@ async fn migration_0002_creates_skill_tables_with_composite_keys() {
     let pool = fresh_pool(dir.path()).await;
 
     let skill = table_sql(&pool, "skill").await;
-    assert!(skill.contains("id TEXT PRIMARY KEY"), "skill.id PK: {skill}");
+    assert!(
+        skill.contains("id TEXT PRIMARY KEY"),
+        "skill.id PK: {skill}"
+    );
     assert!(
         skill.contains("workspace_id TEXT NOT NULL REFERENCES workspace(id)"),
         "skill.workspace_id FK: {skill}"
@@ -243,12 +249,18 @@ async fn migration_0003_creates_issue_comment_with_polymorphic_actors() {
     let pool = fresh_pool(dir.path()).await;
 
     let issue = table_sql(&pool, "issue").await;
-    assert!(issue.contains("id TEXT PRIMARY KEY"), "issue.id PK: {issue}");
+    assert!(
+        issue.contains("id TEXT PRIMARY KEY"),
+        "issue.id PK: {issue}"
+    );
     assert!(
         issue.contains("workspace_id TEXT NOT NULL REFERENCES workspace(id)"),
         "issue.workspace_id FK: {issue}"
     );
-    assert!(issue.contains("title TEXT NOT NULL"), "issue.title: {issue}");
+    assert!(
+        issue.contains("title TEXT NOT NULL"),
+        "issue.title: {issue}"
+    );
     assert!(
         issue.contains("description TEXT"),
         "issue.description: {issue}"
@@ -295,7 +307,10 @@ async fn migration_0003_creates_issue_comment_with_polymorphic_actors() {
         comment.contains("author_id TEXT NOT NULL"),
         "comment.author_id: {comment}"
     );
-    assert!(comment.contains("body TEXT NOT NULL"), "comment.body: {comment}");
+    assert!(
+        comment.contains("body TEXT NOT NULL"),
+        "comment.body: {comment}"
+    );
     assert!(
         comment.contains("created_at INTEGER NOT NULL"),
         "comment.created_at: {comment}"
@@ -348,7 +363,10 @@ async fn migration_0004_creates_agent_task_queue_with_partial_unique() {
         tq.contains("session_id TEXT"),
         "agent_task_queue.session_id: {tq}"
     );
-    assert!(tq.contains("work_dir TEXT"), "agent_task_queue.work_dir: {tq}");
+    assert!(
+        tq.contains("work_dir TEXT"),
+        "agent_task_queue.work_dir: {tq}"
+    );
     assert!(
         tq.contains("attempt INTEGER NOT NULL DEFAULT 1"),
         "agent_task_queue.attempt default: {tq}"
@@ -420,7 +438,10 @@ async fn migration_0005_creates_pat_daemon_token_beads_mapping() {
 
     // daemon_token: per-runtime daemon bearer tokens, hashed.
     let dt = table_sql(&pool, "daemon_token").await;
-    assert!(dt.contains("id TEXT PRIMARY KEY"), "daemon_token.id PK: {dt}");
+    assert!(
+        dt.contains("id TEXT PRIMARY KEY"),
+        "daemon_token.id PK: {dt}"
+    );
     assert!(
         dt.contains("sha256_token TEXT NOT NULL UNIQUE"),
         "daemon_token.sha256_token unique: {dt}"
@@ -485,7 +506,96 @@ async fn migration_0007_reshapes_beads_mapping() {
 }
 
 #[tokio::test]
-async fn all_four_migrations_create_exactly_fourteen_tables() {
+async fn migration_0009_creates_autopilot_tables_with_scoping_indexes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = fresh_pool(dir.path()).await;
+
+    let ap = table_sql(&pool, "autopilot").await;
+    assert!(ap.contains("id TEXT PRIMARY KEY"), "autopilot.id PK: {ap}");
+    assert!(
+        ap.contains("workspace_id TEXT NOT NULL REFERENCES workspace(id)"),
+        "autopilot.workspace_id FK: {ap}"
+    );
+    assert!(
+        ap.contains("agent_id TEXT NOT NULL REFERENCES agent(id)"),
+        "autopilot.agent_id FK: {ap}"
+    );
+    assert!(ap.contains("name TEXT NOT NULL"), "autopilot.name: {ap}");
+    assert!(
+        ap.contains("instructions TEXT"),
+        "autopilot.instructions: {ap}"
+    );
+    assert!(
+        ap.contains("cron_expr TEXT NOT NULL"),
+        "autopilot.cron_expr: {ap}"
+    );
+    assert!(
+        ap.contains("max_concurrent_runs INTEGER NOT NULL DEFAULT 1"),
+        "autopilot.max_concurrent_runs default: {ap}"
+    );
+    assert!(
+        ap.contains("next_tick_at INTEGER"),
+        "autopilot.next_tick_at epoch-ms INTEGER (nullable): {ap}"
+    );
+    assert!(
+        ap.contains("enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1))"),
+        "autopilot.enabled 0/1 INTEGER: {ap}"
+    );
+    assert!(
+        ap.contains("created_at INTEGER NOT NULL"),
+        "autopilot.created_at: {ap}"
+    );
+
+    let name_idx = index_sql(&pool, "idx_autopilot_workspace_name").await;
+    assert!(
+        name_idx.contains("UNIQUE"),
+        "idx_autopilot_workspace_name UNIQUE: {name_idx}"
+    );
+    assert!(
+        name_idx.contains("autopilot") && name_idx.contains("(workspace_id, name)"),
+        "idx_autopilot_workspace_name columns: {name_idx}"
+    );
+
+    let tick_idx = index_sql(&pool, "idx_autopilot_next_tick").await;
+    assert!(
+        tick_idx.contains("autopilot") && tick_idx.contains("(workspace_id, next_tick_at)"),
+        "idx_autopilot_next_tick columns: {tick_idx}"
+    );
+    assert!(
+        tick_idx.contains("WHERE enabled = 1"),
+        "idx_autopilot_next_tick is partial on enabled rows: {tick_idx}"
+    );
+
+    let run = table_sql(&pool, "autopilot_run").await;
+    assert!(
+        run.contains("id TEXT PRIMARY KEY"),
+        "autopilot_run.id PK: {run}"
+    );
+    assert!(
+        run.contains("autopilot_id TEXT NOT NULL REFERENCES autopilot(id)"),
+        "autopilot_run.autopilot_id FK: {run}"
+    );
+    assert!(
+        run.contains("started_at INTEGER NOT NULL"),
+        "autopilot_run.started_at: {run}"
+    );
+    assert!(
+        run.contains("completed_at INTEGER"),
+        "autopilot_run.completed_at nullable: {run}"
+    );
+    assert!(
+        run.contains(
+            "status TEXT NOT NULL DEFAULT 'running' CHECK (status IN \
+             ('running', 'completed', 'failed', 'cancelled'))"
+        ),
+        "autopilot_run.status default + CHECK: {run}"
+    );
+
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn all_migrations_create_exactly_sixteen_tables() {
     let dir = tempfile::tempdir().expect("tempdir");
     let pool = fresh_pool(dir.path()).await;
 
@@ -504,6 +614,8 @@ async fn all_four_migrations_create_exactly_fourteen_tables() {
         "agent_runtime",
         "agent_skill",
         "agent_task_queue",
+        "autopilot",
+        "autopilot_run",
         "beads_mapping",
         "comment",
         "daemon_token",
@@ -515,11 +627,7 @@ async fn all_four_migrations_create_exactly_fourteen_tables() {
         "user",
         "workspace",
     ];
-    assert_eq!(
-        names.len(),
-        14,
-        "expected 14 v1 tables, got {names:?}"
-    );
+    assert_eq!(names.len(), 16, "expected 16 v1 tables, got {names:?}");
     for table in expected {
         assert!(
             names.iter().any(|n| n == table),
