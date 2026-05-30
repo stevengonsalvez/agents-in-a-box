@@ -1035,28 +1035,51 @@ fn a17_unix_socket_dropped_on_plugin_restart() {
 }
 
 // =====================================================================
-// A18: secret_store_get — cap gating, service allow-list, bool-true
-//      unconditional read, not-found, platform stub (linux), anti-cheat
-//      sentinel verification (macOS real keychain)
+// A18: secret_store_get — scope/key contract (P5.2). Cap gating
+//      (`secrets:read`), key allow-list, bool-true unconditional read,
+//      base64 round-trip, scope isolation, not-found, anti-cheat sentinel.
+//
+// The golden injects an in-memory `SecretBackend` via the runtime's DI seam
+// (`Runtime::with_config_and_secret_backend`) so it is platform-independent
+// and never touches the real login Keychain. The real-keychain end-to-end
+// path lives in `ainb-hangar-secrets`'s own tripwire (P5.1).
 // =====================================================================
 
-/// Build an A18 manifest. `grant` selects the `secret_store_get` cap form:
-/// `Some(services)` = list grant, `None` = cap omitted (denied).
+use ainb_hangar_secrets::{InMemoryBackend, Scope, SecretBackend};
+use std::sync::Arc;
+
+/// Build a runtime whose `host/secret_store_get` reads from the supplied
+/// in-memory backend (already seeded by the caller).
+fn build_runtime_with_secret_backend(backend: Arc<InMemoryBackend>) -> (Runtime, RuntimeHandle) {
+    let cfg = RuntimeConfig {
+        respawn_backoff: [
+            Duration::from_millis(50),
+            Duration::from_millis(100),
+            Duration::from_millis(150),
+        ],
+        failure_window: Duration::from_secs(60),
+        ..RuntimeConfig::default()
+    };
+    Runtime::with_config_and_secret_backend(cfg, backend).expect("build runtime")
+}
+
+/// Build an A18 manifest. `grant` selects the `secrets:read` cap form:
+/// `Some(keys)` = list grant, `None` = cap omitted (denied).
 fn a18_manifest(name: &str, grant: Option<Vec<String>>) -> Manifest {
     let mut m = manifest(name);
     m.provides.cli_namespaces = vec!["a18".into()];
-    if let Some(services) = grant {
-        m.capabilities.secret_store_get =
-            ainb_plugin_protocol::manifest::CapabilityGrant::List(services);
+    if let Some(keys) = grant {
+        m.capabilities.secrets_read =
+            ainb_plugin_protocol::manifest::CapabilityGrant::List(keys);
     }
     m
 }
 
 #[test]
 fn a18_secret_store_get_cap_denied() {
-    let (rt, handle) = build_runtime();
+    let (rt, handle) = build_runtime_with_secret_backend(Arc::new(InMemoryBackend::new()));
     let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-a18-secret-store"));
-    // Cap omitted entirely → -32001, no keychain hit.
+    // Cap omitted entirely → -32001, no backend hit.
     let id = register(&rt, bin, a18_manifest("cts-a18-denied", None));
 
     drop(block_render(&rt, &handle, &id, 1, 1));
@@ -1067,7 +1090,7 @@ fn a18_secret_store_get_cap_denied() {
         &handle,
         &id,
         "a18",
-        vec!["geterr".into(), "any-service".into(), "any-account".into()],
+        vec!["geterr".into(), "global".into(), "-".into(), "any_key".into()],
     );
     assert_eq!(
         code,
@@ -1077,14 +1100,14 @@ fn a18_secret_store_get_cap_denied() {
 }
 
 #[test]
-fn a18_secret_store_get_service_not_whitelisted() {
-    let (rt, handle) = build_runtime();
+fn a18_secret_store_get_key_not_whitelisted() {
+    let (rt, handle) = build_runtime_with_secret_backend(Arc::new(InMemoryBackend::new()));
     let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-a18-secret-store"));
-    // Grant whitelists ONLY "ainb-hangar"; request a different service.
+    // Grant whitelists ONLY "anthropic_api_key"; request a different key.
     let id = register(
         &rt,
         bin,
-        a18_manifest("cts-a18-wl", Some(vec!["ainb-hangar".into()])),
+        a18_manifest("cts-a18-wl", Some(vec!["anthropic_api_key".into()])),
     );
 
     drop(block_render(&rt, &handle, &id, 1, 1));
@@ -1095,38 +1118,32 @@ fn a18_secret_store_get_service_not_whitelisted() {
         &handle,
         &id,
         "a18",
-        vec!["geterr".into(), "evil-service".into(), "acct".into()],
+        vec!["geterr".into(), "global".into(), "-".into(), "evil_key".into()],
     );
     assert_eq!(
         code,
         ainb_plugin_protocol::errors::CAPABILITY_DENIED.to_string(),
-        "service not on allow-list must return -32001"
+        "key not on allow-list must return -32001"
     );
 }
 
-/// macOS: seed the login Keychain, read it back through the cap, assert the
-/// bytes match and the anti-cheat sentinel fired host-side.
-#[cfg(target_os = "macos")]
+/// Granted + seeded: read a global-scope secret back through the cap, assert
+/// the base64-decoded bytes match and the anti-cheat sentinel fired
+/// host-side.
 #[test]
-fn a18_secret_store_get_granted_reads_keychain_and_sentinel() {
-    use security_framework::passwords::{delete_generic_password, set_generic_password};
+fn a18_secret_store_get_granted_reads_secret_and_sentinel() {
+    let backend = Arc::new(InMemoryBackend::new());
+    backend
+        .put(&Scope::Global, "anthropic_api_key", b"super-secret-token")
+        .unwrap();
 
-    // Unique service name so parallel runs / leftover items never collide.
-    let service = format!("cts-a18-{}", std::process::id());
-    let account = "anthropic-api-key";
-    let secret = b"super-secret-token";
-
-    // Seed (best-effort cleanup of any stale item first).
-    let _ = delete_generic_password(&service, account);
-    set_generic_password(&service, account, secret).expect("seed keychain item");
-
-    let (rt, handle) = build_runtime();
+    let (rt, handle) = build_runtime_with_secret_backend(backend);
     let sentinels = handle.install_log_tap();
     let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-a18-secret-store"));
     let id = register(
         &rt,
         bin,
-        a18_manifest("cts-a18-ok", Some(vec![service.clone()])),
+        a18_manifest("cts-a18-ok", Some(vec!["anthropic_api_key".into()])),
     );
 
     drop(block_render(&rt, &handle, &id, 1, 1));
@@ -1137,16 +1154,12 @@ fn a18_secret_store_get_granted_reads_keychain_and_sentinel() {
         &handle,
         &id,
         "a18",
-        vec!["get".into(), service.clone(), account.into()],
+        vec!["get".into(), "global".into(), "-".into(), "anthropic_api_key".into()],
     );
-
-    // Teardown the seeded item before any assertion can panic.
-    let _ = delete_generic_password(&service, account);
-
     assert_eq!(out, "super-secret-token", "secret bytes mismatch: {out}");
 
     // Anti-cheat: SECRET_READ_OK fired host-side — proves the genuine
-    // keychain path ran (not a fabricated value).
+    // backend path ran (not a fabricated value).
     let logs = sentinels.lock().unwrap().clone();
     assert!(
         logs.iter().any(|l| l == "SECRET_READ_OK"),
@@ -1154,22 +1167,72 @@ fn a18_secret_store_get_granted_reads_keychain_and_sentinel() {
     );
 }
 
-/// macOS: bool-true grant reads any service unconditionally (no allow-list).
-#[cfg(target_os = "macos")]
+/// Workspace scope isolates: a secret seeded under workspace `ws-aaa` is
+/// readable there, but a read under `ws-bbb` misses with `-32004`.
 #[test]
-fn a18_secret_store_get_bool_true_grants_any_service() {
-    use security_framework::passwords::{delete_generic_password, set_generic_password};
+fn a18_secret_store_get_workspace_scope_isolation() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let ws_a =
+        Scope::Workspace(ainb_hangar_core::ids::WorkspaceId::from_str("ws-aaa").unwrap());
+    backend.put(&ws_a, "anthropic_api_key", b"ws-a-secret").unwrap();
 
-    let service = format!("cts-a18-bool-{}", std::process::id());
-    let account = "key";
-    let _ = delete_generic_password(&service, account);
-    set_generic_password(&service, account, b"v").expect("seed keychain item");
+    let (rt, handle) = build_runtime_with_secret_backend(backend);
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-a18-secret-store"));
+    let id = register(
+        &rt,
+        bin,
+        a18_manifest("cts-a18-ws", Some(vec!["anthropic_api_key".into()])),
+    );
 
-    let (rt, handle) = build_runtime();
+    drop(block_render(&rt, &handle, &id, 1, 1));
+    wait_running(&handle, &id);
+
+    // Matching workspace reads it.
+    let out = cli_stdout(
+        &rt,
+        &handle,
+        &id,
+        "a18",
+        vec![
+            "get".into(),
+            "workspace".into(),
+            "ws-aaa".into(),
+            "anthropic_api_key".into(),
+        ],
+    );
+    assert_eq!(out, "ws-a-secret", "matching workspace must read the secret");
+
+    // A different workspace must NOT see it.
+    let code = cli_stdout(
+        &rt,
+        &handle,
+        &id,
+        "a18",
+        vec![
+            "geterr".into(),
+            "workspace".into(),
+            "ws-bbb".into(),
+            "anthropic_api_key".into(),
+        ],
+    );
+    assert_eq!(
+        code,
+        ainb_plugin_protocol::errors::SECRET_NOT_FOUND.to_string(),
+        "cross-workspace read must miss with -32004"
+    );
+}
+
+/// Bool-true grant reads any key unconditionally (no allow-list).
+#[test]
+fn a18_secret_store_get_bool_true_grants_any_key() {
+    let backend = Arc::new(InMemoryBackend::new());
+    backend.put(&Scope::Global, "any_key", b"v").unwrap();
+
+    let (rt, handle) = build_runtime_with_secret_backend(backend);
     let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-a18-secret-store"));
     let mut m = manifest("cts-a18-bool");
     m.provides.cli_namespaces = vec!["a18".into()];
-    m.capabilities.secret_store_get =
+    m.capabilities.secrets_read =
         ainb_plugin_protocol::manifest::CapabilityGrant::Bool(true);
     let id = register(&rt, bin, m);
 
@@ -1181,31 +1244,22 @@ fn a18_secret_store_get_bool_true_grants_any_service() {
         &handle,
         &id,
         "a18",
-        vec!["geterr".into(), service.clone(), account.into()],
+        vec!["geterr".into(), "global".into(), "-".into(), "any_key".into()],
     );
-    let _ = delete_generic_password(&service, account);
-    assert_eq!(code, "0", "bool-true grant must read any service: {code}");
+    assert_eq!(code, "0", "bool-true grant must read any key: {code}");
 }
 
-/// macOS: service granted but no such item → -32004 `SECRET_NOT_FOUND`, and
-/// the `SECRET_READ_OK` sentinel must NOT fire (anti-cheat for the miss path).
-#[cfg(target_os = "macos")]
+/// Key granted but no such secret → -32004 `SECRET_NOT_FOUND`, and the
+/// `SECRET_READ_OK` sentinel must NOT fire (anti-cheat for the miss path).
 #[test]
 fn a18_secret_store_get_not_found() {
-    use security_framework::passwords::delete_generic_password;
-
-    let service = format!("cts-a18-missing-{}", std::process::id());
-    let account = "absent";
-    // Ensure the item really is absent.
-    let _ = delete_generic_password(&service, account);
-
-    let (rt, handle) = build_runtime();
+    let (rt, handle) = build_runtime_with_secret_backend(Arc::new(InMemoryBackend::new()));
     let sentinels = handle.install_log_tap();
     let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-a18-secret-store"));
     let id = register(
         &rt,
         bin,
-        a18_manifest("cts-a18-missing", Some(vec![service.clone()])),
+        a18_manifest("cts-a18-missing", Some(vec!["openai_api_key".into()])),
     );
 
     drop(block_render(&rt, &handle, &id, 1, 1));
@@ -1216,53 +1270,16 @@ fn a18_secret_store_get_not_found() {
         &handle,
         &id,
         "a18",
-        vec!["geterr".into(), service, account.into()],
+        vec!["geterr".into(), "global".into(), "-".into(), "openai_api_key".into()],
     );
     assert_eq!(
         code,
         ainb_plugin_protocol::errors::SECRET_NOT_FOUND.to_string(),
-        "absent item must return -32004"
+        "absent secret must return -32004"
     );
     let logs = sentinels.lock().unwrap().clone();
     assert!(
         !logs.iter().any(|l| l == "SECRET_READ_OK"),
         "SECRET_READ_OK must not fire on the not-found path: {logs:?}"
-    );
-}
-
-/// linux / non-macOS: the cap exists and is granted, but the backend is the
-/// `-32005 NOT_IMPLEMENTED` stub so the plugin can degrade to dotenv.
-#[cfg(not(target_os = "macos"))]
-#[test]
-fn a18_secret_store_get_not_implemented_on_non_macos() {
-    let (rt, handle) = build_runtime();
-    let sentinels = handle.install_log_tap();
-    let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-a18-secret-store"));
-    let id = register(
-        &rt,
-        bin,
-        a18_manifest("cts-a18-stub", Some(vec!["ainb-hangar".into()])),
-    );
-
-    drop(block_render(&rt, &handle, &id, 1, 1));
-    wait_running(&handle, &id);
-
-    let code = cli_stdout(
-        &rt,
-        &handle,
-        &id,
-        "a18",
-        vec!["geterr".into(), "ainb-hangar".into(), "acct".into()],
-    );
-    assert_eq!(
-        code,
-        ainb_plugin_protocol::errors::NOT_IMPLEMENTED.to_string(),
-        "non-macOS secret read must return -32005"
-    );
-    // Anti-cheat: the stub path must NOT emit the success sentinel.
-    let logs = sentinels.lock().unwrap().clone();
-    assert!(
-        !logs.iter().any(|l| l == "SECRET_READ_OK"),
-        "SECRET_READ_OK must not fire on the not-implemented stub path: {logs:?}"
     );
 }
