@@ -83,6 +83,14 @@ pub mod seed;
 /// [`ainb_hangar_store::repo::skill::SkillRepo::upsert_by_name`] — idempotent
 /// and all-or-nothing.
 pub mod skills_sync;
+/// `ainb hangar templates use <name>` transactional materialisation (P6.3).
+///
+/// Turns an embedded curated [`ainb_hangar_core::template::AgentTemplate`] into a
+/// live `agent` row plus its `agent_skill` attachments in one transaction.
+/// Referenced skills must be pre-imported (P6.2 `skills sync`); a missing one is
+/// a hard [`templates::TemplateUseError::SkillNotImported`] with a sync hint and
+/// nothing is written. Idempotent by agent name within the workspace.
+pub mod templates;
 /// TTL sweepers + stale-dispatch reclaim (P1.4).
 ///
 /// The daemon's tokio runtime registers these as periodic tasks; they are also
