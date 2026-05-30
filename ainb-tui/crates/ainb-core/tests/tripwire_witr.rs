@@ -150,9 +150,51 @@ fn send_literal(session: &str, text: &str) {
 }
 
 fn kill_session(session: &str) {
+    // `tmux kill-session` only SIGHUPs the pane process, which the ainb
+    // TUI survives — the orphaned instance then starves the next test's
+    // event loop (input lag long enough to miss the `w`-nav poll). Grab
+    // the pane PID (ainb itself, via `exec` in the launch cmd) first and
+    // SIGKILL it after killing the session so nothing lingers. Killing
+    // ainb closes the plugin children's stdin → they exit on EOF, so no
+    // plugin orphans either. Only ever targets this session's own pane.
+    let pane_pid = Command::new("tmux")
+        .args(["list-panes", "-t", session, "-F", "#{pane_pid}"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| s.lines().next().map(str::trim).map(str::to_string))
+        .filter(|s| !s.is_empty());
     let _ = Command::new("tmux")
         .args(["kill-session", "-t", session])
         .status();
+    if let Some(pid) = pane_pid {
+        // The pane process often exits with the session; SIGKILL is a
+        // best-effort backstop, so silence "No such process" noise.
+        let _ = Command::new("kill")
+            .args(["-9", &pid])
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
+
+/// Re-send `key` until `cond` holds or `deadline` passes, polling a few
+/// seconds between sends. Robust against an occasional dropped keystroke
+/// when several heavy tmux tests run back-to-back in one binary — a
+/// single `send_key` + poll can miss the window if the freshly-spawned
+/// ainb's event loop is briefly busy. Navigation is idempotent, so a
+/// duplicate `w` that lands late is harmless.
+fn send_key_until<F>(session: &str, key: &str, deadline: Instant, mut cond: F) -> Option<String>
+where
+    F: FnMut(&str) -> bool,
+{
+    while Instant::now() < deadline {
+        send_key(session, key);
+        let attempt = (Instant::now() + Duration::from_secs(3)).min(deadline);
+        if let Some(cap) = poll_capture(session, attempt, &mut cond) {
+            return Some(cap);
+        }
+    }
+    None
 }
 
 fn new_session(session: &str) {
@@ -219,9 +261,8 @@ fn witr_screen_full_interaction() {
     // Positive: the four-tab strip. Negative: the home welcome panel
     // must be gone (the witr plugin renders full-screen, so a lingering
     // "Getting Started" proves nav didn't actually switch screens).
-    send_key(&session, "w");
-    let witr_deadline = Instant::now() + Duration::from_secs(15);
-    let screen = poll_capture(&session, witr_deadline, |c| {
+    let witr_deadline = Instant::now() + Duration::from_secs(20);
+    let screen = send_key_until(&session, "w", witr_deadline, |c| {
         c.contains("Processes")
             && c.contains("Ports")
             && c.contains("Containers")
@@ -286,22 +327,39 @@ fn witr_screen_full_interaction() {
         "process tree rendered but a pre-scan placeholder lingered:\n---\n{scanned}\n---"
     );
 
-    // === Switch to Ports tab (`2`) ===
-    // The active tab marker `[...]` moves from Processes to Ports. The
-    // stub snapshot has no port data, so the body shows the per-tab
-    // empty hint — proving the tab switch reached the plugin.
-    send_key(&session, "2");
-    let ports_deadline = Instant::now() + Duration::from_secs(10);
-    let ports = poll_capture(&session, ports_deadline, |c| c.contains("[Ports]"));
-    let Some(ports) = ports else {
-        let last = capture_pane(&session);
-        kill_session(&session);
-        panic!("`2` didn't switch to the Ports tab; last:\n---\n{last}\n---");
-    };
-    assert!(
-        !ports.contains("[Processes]"),
-        "Ports tab active but Processes still marked active:\n---\n{ports}\n---"
-    );
+    // === Tab cycle (`2`/`3`/`4`/`1`) ===
+    // Each key moves the active marker `[...]` and paints that tab's own
+    // body header — nav-1234 (the switch reaches the plugin) plus
+    // nav-each-paints (every tab renders its body). The stub snapshot
+    // only carries process + ancestry data, so Ports/Containers/Locks
+    // render their headers/empty hints; Processes renders the tree.
+    // Ends on Processes so the detail-overlay step below opens on it.
+    let tabs = [
+        ("2", "[Ports]", "PORT"),
+        ("3", "[Containers]", "Container & service"),
+        ("4", "[Locks]", "File locks & descriptors"),
+        ("1", "[Processes]", "PID"),
+    ];
+    for (key, marker, body) in tabs {
+        send_key(&session, key);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let cap = poll_capture(&session, deadline, |c| c.contains(marker) && c.contains(body));
+        let Some(cap) = cap else {
+            let last = capture_pane(&session);
+            kill_session(&session);
+            panic!("`{key}` didn't activate {marker} with its body ({body:?}); last:\n---\n{last}\n---");
+        };
+        // Exactly one tab active: the bracketed form of the other three
+        // must be absent (inactive tabs render unbracketed).
+        for (_, other, _) in tabs {
+            if other != marker {
+                assert!(
+                    !cap.contains(other),
+                    "{marker} active but {other} also marked active:\n---\n{cap}\n---"
+                );
+            }
+        }
+    }
 
     // === Open the detail overlay (`/`) ===
     send_key(&session, "/");
@@ -327,6 +385,89 @@ fn witr_screen_full_interaction() {
 }
 
 #[test]
+fn witr_target_entry_editing() {
+    if !tmux_available() {
+        eprintln!("SKIP: tmux not available");
+        return;
+    }
+    let Some(plugin_root) = plugins_staged() else {
+        eprintln!("SKIP: dist/plugins/witr not staged — run `scripts/build-plugins.sh` first");
+        return;
+    };
+
+    let home_tmp = tempfile::tempdir().expect("home tempdir");
+    seed_home(home_tmp.path());
+    let stub_dir = tempfile::tempdir().expect("stub tempdir");
+    write_stub_witr(stub_dir.path());
+
+    let session = format!("tripwire-witr-edit-{}", std::process::id());
+    new_session(&session);
+    launch_ainb(&session, home_tmp.path(), &plugin_root, stub_dir.path());
+
+    if wait_for_home(&session).is_none() {
+        let last = capture_pane(&session);
+        kill_session(&session);
+        panic!("HomeScreen never rendered; last capture:\n---\n{last}\n---");
+    }
+
+    // Open witr, then the target prompt.
+    if send_key_until(&session, "w", Instant::now() + Duration::from_secs(20), |c| {
+        c.contains("Processes") && c.contains("Locks")
+    })
+    .is_none()
+    {
+        let last = capture_pane(&session);
+        kill_session(&session);
+        panic!("witr screen never rendered after `w`; last:\n---\n{last}\n---");
+    }
+    send_key(&session, "t");
+    if poll_capture(&session, Instant::now() + Duration::from_secs(10), |c| c.contains("target>"))
+        .is_none()
+    {
+        let last = capture_pane(&session);
+        kill_session(&session);
+        panic!("`t` didn't open the target prompt; last:\n---\n{last}\n---");
+    }
+
+    // Type `abc`, then backspace once → `ab` (tgt-backspace).
+    send_literal(&session, "abc");
+    if poll_capture(&session, Instant::now() + Duration::from_secs(10), |c| {
+        c.contains("target> abc")
+    })
+    .is_none()
+    {
+        let last = capture_pane(&session);
+        kill_session(&session);
+        panic!("typed buffer never showed `abc`; last:\n---\n{last}\n---");
+    }
+    send_key(&session, "BSpace");
+    let after_bs = poll_capture(&session, Instant::now() + Duration::from_secs(10), |c| {
+        c.contains("target> ab") && !c.contains("target> abc")
+    });
+    let Some(_after_bs) = after_bs else {
+        let last = capture_pane(&session);
+        kill_session(&session);
+        panic!("Backspace didn't delete the last char (`abc`→`ab`); last:\n---\n{last}\n---");
+    };
+
+    // Backspace down to empty, then once more on the empty buffer →
+    // cancel back to Browsing, where the no-target hint reappears
+    // (tgt-cancel; Esc is host-reserved so the plugin rebinds cancel to
+    // Backspace-on-empty).
+    send_key(&session, "BSpace"); // ab -> a
+    send_key(&session, "BSpace"); // a  -> ""
+    send_key(&session, "BSpace"); // "" -> cancel
+    let cancelled = poll_capture(&session, Instant::now() + Duration::from_secs(10), |c| {
+        c.contains("no target selected") && !c.contains("target>")
+    });
+    kill_session(&session);
+    assert!(
+        cancelled.is_some(),
+        "Backspace on an empty buffer didn't cancel target entry back to the no-target hint"
+    );
+}
+
+#[test]
 fn witr_screen_missing_binary_shows_empty_state() {
     if !tmux_available() {
         eprintln!("SKIP: tmux not available");
@@ -339,21 +480,19 @@ fn witr_screen_missing_binary_shows_empty_state() {
 
     let home_tmp = tempfile::tempdir().expect("home tempdir");
     seed_home(home_tmp.path());
-    // Empty PATH-prefix dir: no `witr` stub. PATH still chains `:$PATH`
-    // for system tools, but witr installs live in brew/cargo dirs that
-    // aren't on the minimal launch PATH... so to *guarantee* witr is
-    // absent we point PATH at the empty dir ONLY (ainb is exec'd by
-    // absolute path, so it doesn't need PATH for itself).
-    let empty_dir = tempfile::tempdir().expect("empty tempdir");
 
     let session = format!("tripwire-witr-missing-{}", std::process::id());
     new_session(&session);
-    // Launch with PATH set to the empty dir only (no `:$PATH`) so no
-    // installed witr can satisfy detect.
+    // Pin PATH to the system bin dirs only. ainb boots normally (git,
+    // tmux probes resolve), but `witr` is absent: it installs into
+    // brew/cargo dirs (`/opt/homebrew/bin`, `~/.cargo/bin`), never
+    // `/usr/bin` or `/bin`, so detect lands Missing. (An empty-only PATH
+    // also works — ainb is exec'd by absolute path — but starves boot of
+    // system tools, which slowed the plugin spawn enough to flake the
+    // post-`w` poll under full-suite load.)
     let cmd = format!(
-        "HOME={} PATH={} AINB_PLUGIN_ROOT={} exec {} tui",
+        "HOME={} PATH=/usr/bin:/bin AINB_PLUGIN_ROOT={} exec {} tui",
         home_tmp.path().display(),
-        empty_dir.path().display(),
         plugin_root.display(),
         ainb_bin().display(),
     );
@@ -368,11 +507,10 @@ fn witr_screen_missing_binary_shows_empty_state() {
         panic!("HomeScreen never rendered; last capture:\n---\n{last}\n---");
     };
 
-    send_key(&session, "w");
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + Duration::from_secs(20);
     // Positive: the missing-binary empty state names witr and an install
     // path. Negative: no process tree / target prompt.
-    let empty = poll_capture(&session, deadline, |c| {
+    let empty = send_key_until(&session, "w", deadline, |c| {
         c.contains("witr not found") && c.contains("install")
     });
     let last = capture_pane(&session);
