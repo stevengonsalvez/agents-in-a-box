@@ -16,6 +16,7 @@
 //! so it never ships in the production daemon binary.
 
 use ainb_hangar_core::actor::{ActorKind, ActorRef};
+use ainb_hangar_core::ids::{AgentId, SkillId};
 use ainb_hangar_store::repo::agent::{Agent, AgentRepo};
 use ainb_hangar_store::repo::agent_runtime::{AgentRuntime, AgentRuntimeRepo};
 use ainb_hangar_store::repo::issue::{IssueRepo, NewIssue};
@@ -121,7 +122,9 @@ pub async fn seed_p4_fixture(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         .await?;
     }
     // `commit` is referenced by the agent → renders `used`.
-    SkillRepo::attach_to_agent(pool, "agent-1", "skill-commit").await?;
+    let agent_id = AgentId::from_str("agent-1").expect("non-empty agent id");
+    let skill_id = SkillId::from_str("skill-commit").expect("non-empty skill id");
+    SkillRepo::attach_to_agent(pool, &agent_id, &skill_id).await?;
 
     // Three Todo issues, the first assigned to the agent so it can carry a task.
     let creator = ActorRef::new(ActorKind::Member, "user-1").expect("valid member ref");
