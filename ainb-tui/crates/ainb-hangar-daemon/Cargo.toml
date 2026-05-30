@@ -15,6 +15,12 @@ keywords = ["ainb", "hangar", "daemon"]
 # Within this crate they are also available under `#[cfg(test)]` without the
 # feature.
 test-support = []
+# Exposes the advanceable test clock ([`scheduler::AdvanceableClock`]) to
+# integration tests (P7.6 e2e tripwires). Integration tests do not inherit
+# `#[cfg(test)]`, so the deterministic fast-forward seam must be reachable
+# behind an explicit feature. Off in production builds — nothing here ships in
+# the daemon binary.
+test-clock = []
 
 [[bin]]
 name = "ainb-hangar-daemon"
@@ -91,7 +97,7 @@ tokio-util = { workspace = true }
 # fake_bd` fixtures are only reachable when `test-support` is turned on here.
 # This lets the integration suite consume the one canonical fake-bd source of
 # truth instead of duplicating the script writer (P2.2 REFACTOR intent).
-ainb-hangar-daemon = { path = ".", features = ["test-support"] }
+ainb-hangar-daemon = { path = ".", features = ["test-support", "test-clock"] }
 sqlx = { version = "0.8", default-features = false, features = [
     "runtime-tokio-rustls",
     "sqlite",

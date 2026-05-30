@@ -44,6 +44,38 @@
 //! emitted, an [`SchedulerEvent::TickSkipped`] is published to the optional event
 //! sink, and `next_tick_at` is still advanced so the autopilot rejoins the
 //! schedule at its next slot.
+//!
+//! # The wake handle — re-evaluating when injected time jumps (the e2e seam)
+//!
+//! The loop derives its sleep from `(next_tick_at - clock.now_ms())` and then
+//! parks in [`tokio::time::sleep`], which counts down against the *real* monotonic
+//! clock. That is correct in production (the injected clock is [`SystemClock`], so
+//! injected-now and real-now advance together), but it breaks the deterministic
+//! e2e: a test that "fast-forwards" a [`HangarClock`] by mutating it while the
+//! loop is parked would leave the loop asleep on its old, now-stale deadline — it
+//! would not fire until real wall-clock time caught up (minutes later), defeating
+//! the whole point of an injected clock.
+//!
+//! The fix is an optional [`WakeHandle`] (a shared [`Notify`]) added as a third
+//! arm of the `select!`:
+//!
+//! ```text
+//! select! {
+//!   shutdown.cancelled() => break              // cooperative stop
+//!   sleep(delay)         => fire-or-skip        // the tick actually came due
+//!   wake.notified()      => continue (re-loop)  // injected time jumped; recompute
+//! }
+//! ```
+//!
+//! A clock that can be advanced (the test-only [`AdvanceableClock`]) bumps its
+//! epoch-ms *and* triggers the wake in one step. On the wake the loop simply
+//! re-iterates: it re-reads the enabled autopilots and recomputes the delay
+//! against the now-advanced `clock.now_ms()`. If the advance pushed `now` past the
+//! earliest `next_tick_at`, [`sleep_delay`] clamps the new delay to zero and the
+//! tick fires immediately and deterministically — no real-time wait, no busy
+//! spin. Production wires no wake handle, so the third arm never fires and the
+//! loop behaves exactly as before. The handle is the single seam the e2e
+//! tripwires (and a future graceful-reschedule signal) drive.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -55,6 +87,7 @@ use ainb_hangar_core::clock::HangarClock;
 use ainb_hangar_store::repo::autopilot::Autopilot;
 use ainb_hangar_store::repo::autopilot_run::fire_autopilot_tick;
 use sqlx::SqlitePool;
+use tokio::sync::Notify;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
@@ -95,6 +128,108 @@ pub enum SchedulerEvent {
     },
 }
 
+/// A shared signal that asks the scheduler loop to re-evaluate immediately
+/// rather than waiting out its current sleep.
+///
+/// Wraps a [`Notify`] in an [`Arc`] so the loop holds one end and an external
+/// driver (the test-only clock-advance entry point, or a future
+/// reschedule-on-config-change signal) holds clones of the other. [`wake`]
+/// triggers a re-loop; the scheduler arms it as the third arm of its `select!`.
+/// When no handle is attached the loop sleeps the full computed delay (production
+/// behaviour). See the module docs for why this is needed for deterministic,
+/// injected-clock e2e tests.
+///
+/// [`wake`]: WakeHandle::wake
+#[derive(Clone, Default)]
+pub struct WakeHandle(Arc<Notify>);
+
+impl WakeHandle {
+    /// Create a fresh, unconnected wake handle.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Arc::new(Notify::new()))
+    }
+
+    /// Ask the scheduler loop to wake and re-evaluate now.
+    ///
+    /// Best-effort: if the loop is not currently parked on `notified()` the
+    /// signal is held as a permit ([`Notify::notify_one`] semantics) so the next
+    /// `notified()` returns immediately — the wake is never lost across a single
+    /// in-flight iteration.
+    pub fn wake(&self) {
+        self.0.notify_one();
+    }
+
+    /// Wait for the next wake. Used internally by the loop's `select!`.
+    async fn notified(&self) {
+        self.0.notified().await;
+    }
+}
+
+impl std::fmt::Debug for WakeHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WakeHandle").finish_non_exhaustive()
+    }
+}
+
+/// A mutable, shareable [`HangarClock`] whose "now" can be fast-forwarded, paired
+/// with a [`WakeHandle`] so advancing it nudges a parked scheduler to
+/// re-evaluate.
+///
+/// This is the deterministic-time seam for the P7.6 e2e: the production clock is
+/// [`SystemClock`] (injected-now tracks real-now, so the loop's real-time sleep is
+/// correct), but a test needs to make minutes pass *instantly*. [`advance`] bumps
+/// the shared epoch-ms atomic **and** triggers the wake in one call, so a
+/// scheduler built with `.with_wake(clock.wake_handle())` immediately re-reads the
+/// clock, finds the tick now due, and fires — no real wall-clock wait. Gated to
+/// `test`/`test-clock` builds; it never compiles into the shipped daemon.
+///
+/// [`advance`]: AdvanceableClock::advance
+#[cfg(any(test, feature = "test-clock"))]
+#[derive(Clone)]
+pub struct AdvanceableClock {
+    now_ms: Arc<std::sync::atomic::AtomicI64>,
+    wake: WakeHandle,
+}
+
+#[cfg(any(test, feature = "test-clock"))]
+impl AdvanceableClock {
+    /// Create a clock frozen at `start_ms` with a fresh wake handle.
+    #[must_use]
+    pub fn new(start_ms: i64) -> Self {
+        Self {
+            now_ms: Arc::new(std::sync::atomic::AtomicI64::new(start_ms)),
+            wake: WakeHandle::new(),
+        }
+    }
+
+    /// The wake handle to attach to a scheduler via
+    /// [`AutopilotScheduler::with_wake`]. [`advance`](Self::advance) triggers it.
+    #[must_use]
+    pub fn wake_handle(&self) -> WakeHandle {
+        self.wake.clone()
+    }
+
+    /// Fast-forward the clock by `delta_ms` and wake any scheduler watching this
+    /// clock's handle so it re-evaluates against the new "now".
+    ///
+    /// This is the test-only `hangar.admin.clock_advance(duration_ms)` entry point
+    /// the P7.md plan calls for, expressed as a direct daemon handle (no RPC round
+    /// trip): the two operations the e2e needs — move injected time and unpark the
+    /// loop — happen atomically from the caller's view.
+    pub fn advance(&self, delta_ms: i64) {
+        self.now_ms.fetch_add(delta_ms, std::sync::atomic::Ordering::SeqCst);
+        self.wake.wake();
+    }
+}
+
+#[cfg(any(test, feature = "test-clock"))]
+impl HangarClock for AdvanceableClock {
+    fn now_ms(&self) -> i64 {
+        self.now_ms.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
 /// The autopilot scheduler: a daemon-global tick loop over every enabled
 /// autopilot.
 ///
@@ -108,6 +243,7 @@ pub struct AutopilotScheduler {
     clock: Arc<dyn HangarClock>,
     shutdown: CancellationToken,
     events: Option<UnboundedSender<SchedulerEvent>>,
+    wake: Option<WakeHandle>,
 }
 
 impl AutopilotScheduler {
@@ -119,7 +255,18 @@ impl AutopilotScheduler {
             clock,
             shutdown,
             events: None,
+            wake: None,
         }
+    }
+
+    /// Attach a [`WakeHandle`] the loop re-evaluates on. Triggering the handle's
+    /// [`WakeHandle::wake`] makes the loop break out of its current sleep and
+    /// recompute its delay against the (possibly-advanced) clock — the seam the
+    /// deterministic injected-clock e2e tests drive. Production attaches none.
+    #[must_use]
+    pub fn with_wake(mut self, wake: WakeHandle) -> Self {
+        self.wake = Some(wake);
+        self
     }
 
     /// Attach an event sink the loop publishes [`SchedulerEvent`]s to (in
@@ -164,9 +311,21 @@ impl AutopilotScheduler {
                 None => (NO_WORK_REPOLL, None),
             };
 
-            tokio::select! {
+            // The wake arm: a future that resolves when the handle is triggered,
+            // or — when no handle is attached (production) — never, so the arm is
+            // inert and the loop sleeps the full delay as before.
+            let woken = tokio::select! {
                 () = self.shutdown.cancelled() => break,
-                () = tokio::time::sleep(delay) => {}
+                () = tokio::time::sleep(delay) => false,
+                () = wait_for_wake(self.wake.as_ref()) => true,
+            };
+
+            // A wake means injected time may have jumped: re-loop to recompute the
+            // delay against the new `clock.now_ms()` rather than firing on a
+            // possibly-not-yet-due target. If the advance pushed `now` past the
+            // tick, the next iteration's `sleep_delay` clamps to zero and fires.
+            if woken {
+                continue;
             }
 
             if let Some(ap) = fire_target {
@@ -275,6 +434,19 @@ impl AutopilotScheduler {
         if let Some(tx) = &self.events {
             let _ = tx.send(event);
         }
+    }
+}
+
+/// Resolve when the attached [`WakeHandle`] is triggered; with no handle,
+/// pend forever so the `select!` arm is inert.
+///
+/// Splitting this out keeps the `select!` body free of the `match` and lets the
+/// "no wake handle ⇒ this arm never fires" production case be expressed as a
+/// `std::future::pending`, which `select!` simply never picks.
+async fn wait_for_wake(wake: Option<&WakeHandle>) {
+    match wake {
+        Some(w) => w.notified().await,
+        None => std::future::pending::<()>().await,
     }
 }
 
