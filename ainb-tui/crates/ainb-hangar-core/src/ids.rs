@@ -127,3 +127,11 @@ id_newtype! {
     /// Identifies a skill (the `skill` table PK).
     SkillId
 }
+id_newtype! {
+    /// Identifies an autopilot (the `autopilot` table PK).
+    AutopilotId
+}
+id_newtype! {
+    /// Identifies a single autopilot firing (the `autopilot_run` table PK).
+    AutopilotRunId
+}

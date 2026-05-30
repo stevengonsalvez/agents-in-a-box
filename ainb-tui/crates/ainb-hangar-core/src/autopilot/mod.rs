@@ -7,8 +7,13 @@
 //! # Submodules
 //!
 //! - [`cron`] — the cron-expression parser + next-tick calculator (P7.1).
-//!
-//! P7.2 will add the autopilot service/types alongside `cron`.
+//! - [`service`] — the IO-free, workspace-scoped autopilot CRUD service (P7.2).
 
 /// Cron-expression parsing and next-tick calculation (P7.1).
 pub mod cron;
+/// The IO-free autopilot CRUD service (P7.2).
+///
+/// Workspace-scoped orchestration over an [`service::AutopilotBackend`] the
+/// daemon wraps with sqlx (`AutopilotRepo`) and tests fake in memory. Owns the
+/// cron-validation-before-insert and enable-recompute-from-now logic.
+pub mod service;
