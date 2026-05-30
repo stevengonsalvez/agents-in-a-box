@@ -3,7 +3,8 @@
 //! [`reduce`] is the single entry point through which every key press and host
 //! event flows. It owns the tab-switch / modal / quit semantics of P4.1:
 //!
-//! - `1` / `4` / `,` switch to the issue-list / skill-manager / settings tabs.
+//! - `1` / `4` / `5` / `,` switch to the issue-list / skill-manager /
+//!   autopilot-manager / settings tabs.
 //! - `2` switches to task detail **only** when a task is selected (otherwise a
 //!   no-op, per the RED test `reduce_tab_key_2_only_valid_when_task_selected`).
 //! - `?` opens the [help overlay](Screen::Help) modal, remembering the screen
@@ -40,6 +41,7 @@ fn reduce_key(state: &AppState, c: char) -> Reduction {
             |task| switch_tab(state, Screen::TaskDetail(task.clone())),
         ),
         '4' => switch_tab(state, Screen::SkillManager),
+        '5' => switch_tab(state, Screen::Autopilots),
         ',' => switch_tab(state, Screen::Settings),
         // `?` opens the help overlay over the current screen (P4.1 deliverable,
         // P4.md:78). Esc restores the prior screen, like any modal.

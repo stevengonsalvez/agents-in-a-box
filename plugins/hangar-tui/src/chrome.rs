@@ -31,10 +31,11 @@ const OFFLINE_RED: Color = Color::rgb(220, 80, 80);
 /// its switch hotkey. `Task` (hotkey `2`) is intentionally part of the strip
 /// even though it is only reachable with a selection — it keeps the tab
 /// positions stable so the eye doesn't jump when a task is opened.
-const PRIMARY_TABS: [(char, &str); 4] = [
+const PRIMARY_TABS: [(char, &str); 5] = [
     ('1', "Issues"),
     ('2', "Task"),
     ('4', "Skills"),
+    ('5', "Autopilots"),
     (',', "Settings"),
 ];
 
@@ -139,6 +140,7 @@ fn footer_hints(active: &Screen) -> Vec<(&'static str, &'static str)> {
         Screen::TaskDetail(_) => vec![("R", "retry"), ("X", "cancel")],
         Screen::AgentPicker(_) => vec![("enter", "assign"), ("esc", "close")],
         Screen::SkillManager => vec![("i", "import"), ("/", "filter")],
+        Screen::Autopilots => vec![("a", "add"), ("r", "run"), ("d", "disable"), ("e", "edit")],
         Screen::Settings => vec![("n", "add key"), ("enter", "switch")],
         // The help overlay only needs the close hint; `?` is already pressed.
         Screen::Help => vec![("esc", "close")],
@@ -158,6 +160,7 @@ const fn tab_is_active(active: &Screen, hotkey: char) -> bool {
         '1' => matches!(active, Screen::IssueList),
         '2' => matches!(active, Screen::TaskDetail(_)),
         '4' => matches!(active, Screen::SkillManager),
+        '5' => matches!(active, Screen::Autopilots),
         ',' => matches!(active, Screen::Settings),
         _ => false,
     }
@@ -272,6 +275,7 @@ mod tests {
             Screen::TaskDetail(task),
             Screen::AgentPicker(issue),
             Screen::SkillManager,
+            Screen::Autopilots,
             Screen::Settings,
             Screen::Help,
         ] {
