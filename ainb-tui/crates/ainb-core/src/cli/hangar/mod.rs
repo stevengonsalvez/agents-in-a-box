@@ -257,7 +257,15 @@ async fn run_issue_show(store: &Store, args: IssueShowArgs, format: OutputFormat
         .with_context(|| format!("no issue with id {}", args.id))?;
     match format {
         OutputFormat::Json => println!("{}", issue_to_json(&issue)),
-        _ => println!("{}", issue_line(&issue)),
+        OutputFormat::Csv => {
+            println!("{}", issue_csv_header());
+            println!("{}", issue_csv_row(&issue));
+        }
+        OutputFormat::Markdown => {
+            print!("{}", issue_md_header());
+            println!("{}", issue_md_row(&issue));
+        }
+        OutputFormat::Text => println!("{}", issue_line(&issue)),
     }
     Ok(())
 }
@@ -436,7 +444,19 @@ fn render_issue_list(issues: &[Issue], format: OutputFormat) {
             let body = issues.iter().map(issue_to_json).collect::<Vec<_>>().join(",");
             println!("[{body}]");
         }
-        _ => {
+        OutputFormat::Csv => {
+            println!("{}", issue_csv_header());
+            for i in issues {
+                println!("{}", issue_csv_row(i));
+            }
+        }
+        OutputFormat::Markdown => {
+            print!("{}", issue_md_header());
+            for i in issues {
+                println!("{}", issue_md_row(i));
+            }
+        }
+        OutputFormat::Text => {
             if issues.is_empty() {
                 println!("no issues");
             } else {
@@ -478,19 +498,106 @@ fn render_task_list(tasks: &[Task], format: OutputFormat) {
             let body = tasks.iter().map(task_to_json).collect::<Vec<_>>().join(",");
             println!("[{body}]");
         }
-        _ => {
+        OutputFormat::Csv => {
+            println!("{}", task_csv_header());
+            for t in tasks {
+                println!("{}", task_csv_row(t));
+            }
+        }
+        OutputFormat::Markdown => {
+            print!("{}", task_md_header());
+            for t in tasks {
+                println!("{}", task_md_row(t));
+            }
+        }
+        OutputFormat::Text => {
             if tasks.is_empty() {
                 println!("no pending tasks");
             } else {
                 for t in tasks {
-                    println!(
-                        "{}  [{}]  runtime={} agent={}",
-                        t.id, t.status, t.runtime_id, t.agent_id
-                    );
+                    println!("{}", task_line(t));
                 }
             }
         }
     }
+}
+
+// ---- csv / markdown renderers ----------------------------------------------
+
+/// Quote a CSV field if it contains a comma, quote, or newline (RFC-4180).
+fn csv_field(s: &str) -> String {
+    if s.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+/// Escape a markdown table cell (only the pipe needs escaping).
+fn md_cell(s: &str) -> String {
+    s.replace('|', "\\|")
+}
+
+const fn issue_csv_header() -> &'static str {
+    "id,state,title,description,created_at"
+}
+fn issue_csv_row(i: &Issue) -> String {
+    format!(
+        "{},{},{},{},{}",
+        csv_field(&i.id),
+        csv_field(&i.state),
+        csv_field(&i.title),
+        csv_field(i.description.as_deref().unwrap_or("")),
+        i.created_at,
+    )
+}
+const fn issue_md_header() -> &'static str {
+    "| id | state | title | description |\n| --- | --- | --- | --- |\n"
+}
+fn issue_md_row(i: &Issue) -> String {
+    format!(
+        "| {} | {} | {} | {} |",
+        md_cell(&i.id),
+        md_cell(&i.state),
+        md_cell(&i.title),
+        md_cell(i.description.as_deref().unwrap_or("")),
+    )
+}
+
+/// One-line text summary of a task.
+fn task_line(t: &Task) -> String {
+    format!(
+        "{}  [{}]  runtime={} agent={}",
+        t.id, t.status, t.runtime_id, t.agent_id
+    )
+}
+const fn task_csv_header() -> &'static str {
+    "id,status,runtime_id,agent_id,attempt,max_attempts"
+}
+fn task_csv_row(t: &Task) -> String {
+    format!(
+        "{},{},{},{},{},{}",
+        csv_field(&t.id),
+        csv_field(&t.status),
+        csv_field(&t.runtime_id),
+        csv_field(&t.agent_id),
+        t.attempt,
+        t.max_attempts,
+    )
+}
+const fn task_md_header() -> &'static str {
+    "| id | status | runtime | agent | attempt |\n| --- | --- | --- | --- | --- |\n"
+}
+fn task_md_row(t: &Task) -> String {
+    format!(
+        "| {} | {} | {} | {} | {}/{} |",
+        md_cell(&t.id),
+        md_cell(&t.status),
+        md_cell(&t.runtime_id),
+        md_cell(&t.agent_id),
+        t.attempt,
+        t.max_attempts,
+    )
 }
 
 /// Minimal stable JSON object for one task.

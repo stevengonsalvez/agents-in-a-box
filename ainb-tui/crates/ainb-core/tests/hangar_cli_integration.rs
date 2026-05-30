@@ -114,3 +114,39 @@ fn task_list_on_empty_db_is_clean_noop() {
     assert!(ok, "task list on empty db should exit 0; out={out}");
     assert!(out.contains("no pending tasks"), "expected empty marker:\n{out}");
 }
+
+#[test]
+fn issue_list_all_four_formats_are_distinct() {
+    let tmp = tempfile::tempdir().unwrap();
+    // Title carries a comma so CSV quoting is exercised.
+    let (ok, _) = run(
+        tmp.path(),
+        &["hangar", "issue", "create", "--title", "Wire, up payments"],
+    );
+    assert!(ok, "create should exit 0");
+
+    let text = run(tmp.path(), &["hangar", "issue", "list", "--format", "text"]).1;
+    let json = run(tmp.path(), &["hangar", "issue", "list", "--format", "json"]).1;
+    let csv = run(tmp.path(), &["hangar", "issue", "list", "--format", "csv"]).1;
+    let md = run(tmp.path(), &["hangar", "issue", "list", "--format", "markdown"]).1;
+
+    // Every format must produce DISTINCT output (the regression that let
+    // csv/markdown silently alias text through a `_ =>` catch-all).
+    let all = [&text, &json, &csv, &md];
+    for (a, b) in [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)] {
+        assert_ne!(all[a], all[b], "formats {a} and {b} produced identical output");
+    }
+
+    // Format-specific markers.
+    assert!(json.trim_start().starts_with('['), "json not an array:\n{json}");
+    assert!(
+        csv.contains("id,state,title,description,created_at"),
+        "csv header missing:\n{csv}"
+    );
+    assert!(
+        csv.contains("\"Wire, up payments\""),
+        "csv must quote the comma-bearing title:\n{csv}"
+    );
+    assert!(md.contains("| --- |"), "markdown separator row missing:\n{md}");
+    assert!(md.contains("| state |"), "markdown header missing:\n{md}");
+}
