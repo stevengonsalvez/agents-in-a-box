@@ -1,17 +1,21 @@
-//! P4.6 — Skill manager screen: the pure reducer + three-pane width-aware render.
+//! P4.6 / P6.5 — Skill manager screen: the pure reducer + three-pane
+//! width-aware render.
 //!
 //! The skill manager (hotkey `4`) is a three-region screen: a left skill list, a
-//! middle file tree for the selected skill, and a right read-only editor pane.
-//! Filter chips (`All` / `Used` / `Unused` / `Mine`) narrow the list; `i`
-//! triggers the curated-skills importer (the daemon side lands in P6, so P4 wires
-//! the button to a stub intent). A remote [`HangarEvent::SkillUpdated`] surfaces a
-//! conflict banner *only* when the local copy is dirty — a clean copy refreshes
-//! silently.
+//! middle file tree for the selected skill, and a right detail/editor pane.
+//! Filter chips (`All` / `Used` / `Unused` / `Mine`) narrow the list. P6.5 wired
+//! the action keys to live daemon RPCs: `s` runs the curated-skills importer
+//! (`hangar/skills_sync`), `Enter` opens the detail pane (`hangar/skill_get`,
+//! body + file tree), and `i` / `d` attach / detach the selected skill to / from
+//! the selected agent (`hangar/skill_attach` / `hangar/skill_detach`). A remote
+//! [`HangarEvent::SkillUpdated`] surfaces a conflict banner *only* when the local
+//! copy is dirty — a clean copy refreshes silently.
 //!
 //! As with every Hangar screen the reducer ([`reduce_skill_manager`]) is **pure**:
 //! it folds a key / host event into a new [`SkillManagerState`] plus an optional
-//! [`SkillManagerIntent`]. The skill list + files come from the daemon
-//! (`hangar/skills_list`, `hangar/skill_files`); the plugin owns zero domain data
+//! [`SkillManagerIntent`] (which the plugin glue lifts into the matching daemon
+//! RPC). The skill list + detail come from the daemon (`hangar/skills_list`,
+//! `hangar/skill_get`); the plugin owns zero domain data
 //! (`project_ainb_plugin_owns_data_plane`).
 
 use std::collections::BTreeSet;
@@ -74,6 +78,21 @@ pub struct SkillManagerState {
     file_selected: usize,
     dirty: BTreeSet<String>,
     conflict_banner: Option<String>,
+    /// The detail body (`SKILL.md`) of the skill whose detail was last loaded,
+    /// keyed by slug so a stale reply for a since-changed selection is ignored.
+    /// `None` until the user opens a skill's detail (Enter). Drives the detail
+    /// pane (P6.5).
+    detail: Option<SkillDetail>,
+}
+
+/// The loaded detail of one skill: its slug (to guard stale replies) + the
+/// `SKILL.md` body the detail pane renders.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SkillDetail {
+    /// The skill the body belongs to.
+    slug: String,
+    /// The `SKILL.md` body (empty when the skill is file-only).
+    body: String,
 }
 
 impl SkillManagerState {
@@ -89,6 +108,7 @@ impl SkillManagerState {
             file_selected: 0,
             dirty: BTreeSet::new(),
             conflict_banner: None,
+            detail: None,
         }
     }
 
@@ -114,6 +134,18 @@ impl SkillManagerState {
     #[must_use]
     pub fn conflict_banner(&self) -> Option<&str> {
         self.conflict_banner.as_deref()
+    }
+
+    /// The loaded detail body for the currently-selected skill, if one is loaded
+    /// AND it still matches the selection (a stale body for a since-changed
+    /// selection reads as `None`). Drives the detail pane.
+    #[must_use]
+    pub fn detail_body(&self) -> Option<&str> {
+        let selected = self.selected_skill()?;
+        self.detail
+            .as_ref()
+            .filter(|d| d.slug == selected.slug)
+            .map(|d| d.body.as_str())
     }
 
     /// The skills visible under the active filter.
@@ -151,6 +183,16 @@ pub enum SkillManagerEvent {
         /// The flat file list.
         files: Vec<SkillFile>,
     },
+    /// The daemon replied to a [`SkillManagerIntent::LoadDetail`] with the skill's
+    /// detail: its `SKILL.md` body plus its file list (P6.5).
+    DetailLoaded {
+        /// The skill the detail belongs to.
+        slug: String,
+        /// The `SKILL.md` body (empty when file-only).
+        body: String,
+        /// The skill's file list (the file tree).
+        files: Vec<SkillFile>,
+    },
     /// Mark a skill's local copy dirty (an in-progress edit; P6 wires real edits,
     /// but the dirty flag drives the P4 conflict banner already).
     MarkDirty(String),
@@ -159,13 +201,27 @@ pub enum SkillManagerEvent {
 }
 
 /// A side-effect the plugin glue performs after a skill-manager reduction.
+///
+/// Each variant maps to one daemon JSON-RPC the plugin glue fires (P6.5):
+/// `LoadDetail` → `hangar/skill_get`, `Sync` → `hangar/skills_sync`,
+/// `Attach`/`Detach` → `hangar/skill_attach`/`hangar/skill_detach`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkillManagerIntent {
-    /// Load the file list for a skill (Enter on a list row).
+    /// Load the file list for a skill (legacy P4 Enter intent; superseded by
+    /// [`Self::LoadDetail`], retained for the file-tree-only path).
     LoadFiles(String),
-    /// Trigger the curated-skills importer (`i`). The daemon side lands in P6; at
-    /// P4 the glue answers "not implemented yet" gracefully.
-    Import,
+    /// Open the detail pane for a skill: fetch its `SKILL.md` body + files
+    /// (`hangar/skill_get`). Raised by Enter on a list row (P6.5).
+    LoadDetail(String),
+    /// Run the curated-skills importer (`s`) — `hangar/skills_sync` (P6.5).
+    Sync,
+    /// Attach the selected skill to the currently-selected agent (`i`) —
+    /// `hangar/skill_attach` (P6.5). Carries the skill slug; the glue supplies
+    /// the agent from the routing state's selected actor.
+    Attach(String),
+    /// Detach the selected skill from the selected agent (`d`) —
+    /// `hangar/skill_detach` (P6.5).
+    Detach(String),
 }
 
 /// The result of folding one [`SkillManagerEvent`] into a [`SkillManagerState`].
@@ -187,20 +243,42 @@ pub fn reduce_skill_manager(
         SkillManagerEvent::Key(c) => reduce_key(state, c),
         SkillManagerEvent::SetFilter(f) => set_filter(state, f),
         SkillManagerEvent::FilesLoaded { slug, files } => files_loaded(state, &slug, files),
+        SkillManagerEvent::DetailLoaded { slug, body, files } => {
+            detail_loaded(state, &slug, body, files)
+        }
         SkillManagerEvent::MarkDirty(slug) => mark_dirty(state, slug),
         SkillManagerEvent::Event(event) => fold_event(state, event),
     }
 }
 
-/// Handle a printable key.
+/// Handle a printable key (P6.5 bindings):
+/// - `j`/`k` move the list selection;
+/// - `s` runs the curated-skills sync (`hangar/skills_sync`);
+/// - `i`/`d` attach/detach the selected skill to/from the selected agent;
+/// - `Enter` opens the detail pane (`hangar/skill_get`);
+/// - `r` refreshes / dismisses the conflict banner.
 fn reduce_key(state: &SkillManagerState, c: char) -> SkillManagerReduction {
     match c {
         'j' => move_selection_down(state),
         'k' => move_selection_up(state),
-        'i' => with_intent(state.clone(), SkillManagerIntent::Import),
+        's' => with_intent(state.clone(), SkillManagerIntent::Sync),
+        'i' => skill_intent(state, SkillManagerIntent::Attach),
+        'd' => skill_intent(state, SkillManagerIntent::Detach),
         '\n' | '\r' => enter(state),
         'r' => refresh(state),
         _ => unchanged(state),
+    }
+}
+
+/// Build an intent that needs the selected skill's slug (`i`/`d`), or a no-op
+/// when nothing is selected.
+fn skill_intent(
+    state: &SkillManagerState,
+    make: impl FnOnce(String) -> SkillManagerIntent,
+) -> SkillManagerReduction {
+    match state.selected_skill() {
+        Some(skill) => with_intent(state.clone(), make(skill.slug)),
+        None => unchanged(state),
     }
 }
 
@@ -219,10 +297,11 @@ fn move_selection_up(state: &SkillManagerState) -> SkillManagerReduction {
     no_intent(next)
 }
 
-/// Enter on a skill: emit the load-files intent for the selected skill.
+/// Enter on a skill: emit the load-detail intent for the selected skill (fetches
+/// the `SKILL.md` body + file list for the detail pane).
 fn enter(state: &SkillManagerState) -> SkillManagerReduction {
     match state.selected_skill() {
-        Some(skill) => with_intent(state.clone(), SkillManagerIntent::LoadFiles(skill.slug)),
+        Some(skill) => with_intent(state.clone(), SkillManagerIntent::LoadDetail(skill.slug)),
         None => unchanged(state),
     }
 }
@@ -250,6 +329,26 @@ fn files_loaded(
     // Only adopt files for the still-selected skill (avoid a stale reply
     // clobbering a fresh selection).
     if next.selected_skill().is_some_and(|s| s.slug == slug) {
+        next.files = files;
+        next.file_selected = 0;
+    }
+    no_intent(next)
+}
+
+/// Populate the detail pane (body + file tree) for the selected skill from a
+/// daemon reply, ignoring a reply for a since-changed selection.
+fn detail_loaded(
+    state: &SkillManagerState,
+    slug: &str,
+    body: String,
+    files: Vec<SkillFile>,
+) -> SkillManagerReduction {
+    let mut next = state.clone();
+    if next.selected_skill().is_some_and(|s| s.slug == slug) {
+        next.detail = Some(SkillDetail {
+            slug: slug.to_string(),
+            body,
+        });
         next.files = files;
         next.file_selected = 0;
     }
@@ -331,9 +430,12 @@ pub fn render_skill_manager(
     bottom: u16,
     state: &SkillManagerState,
 ) {
-    // Chip bar on the top row.
+    // Chip bar on the top row, with the action-key hints painted to its right so
+    // each key sits next to the control it affects
+    // (`feedback_keybinding_hints_near_control`).
     let labels = SkillFilter::labels();
     render_chip_bar(buf, top, area_w, &labels, state.filter.index());
+    render_action_hints(buf, top, area_w);
 
     let mut content_top = top + 1;
     if let Some(banner) = state.conflict_banner() {
@@ -342,7 +444,11 @@ pub fn render_skill_manager(
     }
 
     let list_w: u16 = 22;
-    let tree_w: u16 = if area_w >= MIDDLE_COLLAPSE_WIDTH { 26 } else { 0 };
+    let tree_w: u16 = if area_w >= MIDDLE_COLLAPSE_WIDTH {
+        26
+    } else {
+        0
+    };
     let editor_x = list_w + tree_w;
     let editor_w = area_w.saturating_sub(editor_x);
 
@@ -358,9 +464,36 @@ pub fn render_skill_manager(
             state.file_selected,
         );
     }
-    // Editor pane is read-only at P4; content wiring lands in P6, so paint the
-    // placeholder.
-    render_editor_pane(buf, editor_x, content_top, bottom, editor_w, None);
+    // P6.5: the editor pane renders the loaded `SKILL.md` body for the selected
+    // skill (the detail pane). `None` until the user opens a skill (Enter), when
+    // the placeholder is shown.
+    render_editor_pane(
+        buf,
+        editor_x,
+        content_top,
+        bottom,
+        editor_w,
+        state.detail_body(),
+    );
+}
+
+/// Paint the action-key hints (`s sync · i attach · d detach · ⏎ open`) on the
+/// chip row, right-aligned so each key sits beside the chip bar it acts on. Kept
+/// short (caveman) and muted so it reads as a hint, not a chip.
+fn render_action_hints(buf: &mut WireBuffer, row: u16, area_w: u16) {
+    use ainb_plugin_sdk::{Cell, Color, Coord};
+    const HINT: Color = Color::rgb(120, 120, 140);
+    const HINTS: &str = "s sync · i attach · d detach · ⏎ open";
+    let hint_w = u16::try_from(HINTS.chars().count()).unwrap_or(0);
+    if hint_w >= area_w {
+        return;
+    }
+    let start = area_w.saturating_sub(hint_w);
+    for (ch, cx) in HINTS.chars().zip(start..area_w) {
+        let mut cell = Cell::new(ch.to_string());
+        cell.fg = Some(HINT);
+        buf.push(Coord::new(cx, row), cell);
+    }
 }
 
 /// Render the left skill list with a `▶` marker on the selection.

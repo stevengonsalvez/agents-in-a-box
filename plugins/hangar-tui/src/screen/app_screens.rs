@@ -20,7 +20,9 @@ use ainb_plugin_sdk::{KeyCode, KeyEvent, WireBuffer};
 use super::agent_picker::{reduce_agent_picker, AgentPickerEvent, AgentPickerState};
 use super::issue_list::{reduce_issue_list, IssueListEvent, IssueListIntent, IssueListState};
 use super::settings::{reduce_settings, SettingsEvent, SettingsIntent, SettingsState};
-use super::skill_manager::{reduce_skill_manager, SkillManagerEvent, SkillManagerState};
+use super::skill_manager::{
+    reduce_skill_manager, SkillManagerEvent, SkillManagerIntent, SkillManagerState,
+};
 use super::task_detail::{reduce_task_detail, TaskDetailEvent, TaskDetailState};
 use super::{AppState, Screen};
 
@@ -38,6 +40,23 @@ pub enum WorkspaceAction {
     SetActive(String),
     /// Toggle the workspace default (`d`) — `host/workspace_set_default`.
     SetDefault(String),
+}
+
+/// A deferred daemon RPC raised by the skill-manager screen (P6.5).
+///
+/// Like [`WorkspaceAction`], the sync key router can't `await`; it stashes the
+/// action on [`ScreenStates::pending_skill_action`] and the plugin's `render`
+/// pass drains it and fires the matching daemon JSON-RPC over the socket cap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkillAction {
+    /// Run the curated-skills importer (`s`) — `hangar/skills_sync`.
+    Sync,
+    /// Fetch a skill's detail body + files (Enter) — `hangar/skill_get`.
+    LoadDetail(String),
+    /// Attach a skill to the selected agent (`i`) — `hangar/skill_attach`.
+    Attach(String),
+    /// Detach a skill from the selected agent (`d`) — `hangar/skill_detach`.
+    Detach(String),
 }
 
 /// The render-state cache for every Core 5 screen.
@@ -66,6 +85,10 @@ pub struct ScreenStates {
     /// A workspace switch/default action raised by the Settings pane, awaiting
     /// the async key handler to call the host cap (P5.5). `None` when idle.
     pub pending_ws_action: Option<WorkspaceAction>,
+    /// A skill RPC (sync / detail / attach / detach) raised by the skill-manager
+    /// screen, awaiting the `render` pass to fire it over the daemon socket
+    /// (P6.5). `None` when idle.
+    pub pending_skill_action: Option<SkillAction>,
     /// Cached workspace catalogue from `host/workspace_list` (P5.5). Seeds the
     /// Settings Workspace pane regardless of which snapshot arrives first.
     pub workspace_rows: Vec<WorkspaceRow>,
@@ -134,6 +157,11 @@ impl ScreenStates {
     /// Take the pending workspace action raised by the Settings pane, if any.
     pub const fn take_pending_ws_action(&mut self) -> Option<WorkspaceAction> {
         self.pending_ws_action.take()
+    }
+
+    /// Take the pending skill RPC raised by the skill-manager screen, if any.
+    pub const fn take_pending_skill_action(&mut self) -> Option<SkillAction> {
+        self.pending_skill_action.take()
     }
 }
 
@@ -276,6 +304,19 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
             if let Some(c) = key_char(key) {
                 let out = reduce_skill_manager(&states.skill_manager, SkillManagerEvent::Key(c));
                 states.skill_manager = out.state;
+                // Lift the screen intent into a deferred daemon RPC; the async
+                // `render` pass drains `pending_skill_action` and fires it (the
+                // sync key router can't `await`). `LoadFiles` is the legacy P4
+                // file-only path and has no P6.5 RPC.
+                states.pending_skill_action = match out.intent {
+                    Some(SkillManagerIntent::Sync) => Some(SkillAction::Sync),
+                    Some(SkillManagerIntent::LoadDetail(slug)) => {
+                        Some(SkillAction::LoadDetail(slug))
+                    }
+                    Some(SkillManagerIntent::Attach(slug)) => Some(SkillAction::Attach(slug)),
+                    Some(SkillManagerIntent::Detach(slug)) => Some(SkillAction::Detach(slug)),
+                    Some(SkillManagerIntent::LoadFiles(_)) | None => None,
+                };
             }
             None
         }

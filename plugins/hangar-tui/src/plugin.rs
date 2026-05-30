@@ -68,6 +68,14 @@ const AGENTS_REQ_ID: i64 = 11;
 const SKILLS_REQ_ID: i64 = 12;
 /// JSON-RPC id for the `hangar/health` snapshot request.
 const HEALTH_REQ_ID: i64 = 13;
+/// JSON-RPC id for a `hangar/skill_get` detail request (P6.5).
+const SKILL_GET_REQ_ID: i64 = 14;
+/// JSON-RPC id for a `hangar/skills_sync` request (P6.5).
+const SKILLS_SYNC_REQ_ID: i64 = 15;
+/// JSON-RPC id for a `hangar/skill_attach` request (P6.5).
+const SKILL_ATTACH_REQ_ID: i64 = 16;
+/// JSON-RPC id for a `hangar/skill_detach` request (P6.5).
+const SKILL_DETACH_REQ_ID: i64 = 17;
 
 /// Hangar plugin state.
 ///
@@ -92,6 +100,10 @@ pub struct HangarPlugin {
     /// is persisted to `state.toml` in `render` (where host IO is safe, unlike
     /// the inline `handle_key`). One write per accept.
     first_run_ack_pending: bool,
+    /// The slug of the skill a `hangar/skill_get` is in flight for (P6.5), so the
+    /// detail reply can be folded onto the right skill. `None` when no detail
+    /// request is pending.
+    pending_detail_slug: Option<String>,
 }
 
 impl HangarPlugin {
@@ -211,6 +223,13 @@ impl HangarPlugin {
             RpcId::Number(AGENTS_REQ_ID) => self.apply_agents(resp),
             RpcId::Number(SKILLS_REQ_ID) => self.apply_skills(resp),
             RpcId::Number(HEALTH_REQ_ID) => self.apply_health(resp),
+            RpcId::Number(SKILL_GET_REQ_ID) => self.apply_skill_detail(resp),
+            // Sync / attach / detach mutate the store; the daemon answers `{}`
+            // and we re-fetch the skill list to refresh names + `used` flags.
+            RpcId::Number(SKILLS_SYNC_REQ_ID | SKILL_ATTACH_REQ_ID | SKILL_DETACH_REQ_ID) => {
+                self.fetch_pending = true;
+                self.conn.on_event();
+            }
             // Any other response/event keeps the link alive.
             _ => self.conn.on_event(),
         }
@@ -219,9 +238,9 @@ impl HangarPlugin {
     /// Populate the issue-list cache from an `hangar/issues_list` result.
     fn apply_issues(&mut self, resp: &RpcResponse) {
         if let Some(result) = &resp.result {
-            if let Ok(r) =
-                serde_json::from_value::<ainb_hangar_proto::snapshots::IssuesListResult>(result.clone())
-            {
+            if let Ok(r) = serde_json::from_value::<ainb_hangar_proto::snapshots::IssuesListResult>(
+                result.clone(),
+            ) {
                 self.screens.set_issues(r.issues);
             }
         }
@@ -230,9 +249,9 @@ impl HangarPlugin {
     /// Populate the actor cache from an `hangar/agents_list` result.
     fn apply_agents(&mut self, resp: &RpcResponse) {
         if let Some(result) = &resp.result {
-            if let Ok(r) =
-                serde_json::from_value::<ainb_hangar_proto::snapshots::AgentsListResult>(result.clone())
-            {
+            if let Ok(r) = serde_json::from_value::<ainb_hangar_proto::snapshots::AgentsListResult>(
+                result.clone(),
+            ) {
                 self.screens.set_actors(r.actors);
             }
         }
@@ -241,21 +260,49 @@ impl HangarPlugin {
     /// Populate the skill-manager cache from an `hangar/skills_list` result.
     fn apply_skills(&mut self, resp: &RpcResponse) {
         if let Some(result) = &resp.result {
-            if let Ok(r) =
-                serde_json::from_value::<ainb_hangar_proto::snapshots::SkillsListResult>(result.clone())
-            {
+            if let Ok(r) = serde_json::from_value::<ainb_hangar_proto::snapshots::SkillsListResult>(
+                result.clone(),
+            ) {
                 self.screens.set_skills(r.skills);
             }
+        }
+    }
+
+    /// Fold a `hangar/skill_get` detail result onto the skill-manager screen
+    /// (P6.5): the SKILL.md body + file list, keyed by the slug the request was
+    /// issued for so a stale reply for a since-changed selection is ignored.
+    fn apply_skill_detail(&mut self, resp: &RpcResponse) {
+        let Some(slug) = self.pending_detail_slug.take() else {
+            return;
+        };
+        // A `null` result (skill vanished / foreign workspace) leaves the pane
+        // empty rather than erroring.
+        let Some(result) = &resp.result else {
+            return;
+        };
+        if let Ok(Some(detail)) = serde_json::from_value::<
+            Option<ainb_hangar_proto::snapshots::SkillDetail>,
+        >(result.clone())
+        {
+            let event = crate::screen::skill_manager::SkillManagerEvent::DetailLoaded {
+                slug,
+                body: detail.body.unwrap_or_default(),
+                files: detail.files,
+            };
+            let out = crate::screen::skill_manager::reduce_skill_manager(
+                &self.screens.skill_manager,
+                event,
+            );
+            self.screens.skill_manager = out.state;
         }
     }
 
     /// Build the settings cache from an `hangar/health` result.
     fn apply_health(&mut self, resp: &RpcResponse) {
         if let Some(result) = &resp.result {
-            if let Ok(h) = serde_json::from_value::<
-                ainb_hangar_proto::settings::HealthSnapshot,
-            >(result.clone())
-            {
+            if let Ok(h) = serde_json::from_value::<ainb_hangar_proto::settings::HealthSnapshot>(
+                result.clone(),
+            ) {
                 let ws = self.app_state().ws_id.as_str().to_string();
                 self.screens.set_health(h, &ws);
             }
@@ -272,19 +319,108 @@ impl HangarPlugin {
         let ws = self.app_state().ws_id.as_str().to_string();
         let scoped = serde_json::json!({ "workspace_id": ws });
         let requests = [
-            (ISSUES_REQ_ID, daemon_methods::HANGAR_ISSUES_LIST, scoped.clone()),
-            (AGENTS_REQ_ID, daemon_methods::HANGAR_AGENTS_LIST, scoped.clone()),
-            (SKILLS_REQ_ID, daemon_methods::HANGAR_SKILLS_LIST, scoped.clone()),
-            (HEALTH_REQ_ID, daemon_methods::HANGAR_HEALTH, serde_json::json!({})),
+            (
+                ISSUES_REQ_ID,
+                daemon_methods::HANGAR_ISSUES_LIST,
+                scoped.clone(),
+            ),
+            (
+                AGENTS_REQ_ID,
+                daemon_methods::HANGAR_AGENTS_LIST,
+                scoped.clone(),
+            ),
+            (
+                SKILLS_REQ_ID,
+                daemon_methods::HANGAR_SKILLS_LIST,
+                scoped.clone(),
+            ),
+            (
+                HEALTH_REQ_ID,
+                daemon_methods::HANGAR_HEALTH,
+                serde_json::json!({}),
+            ),
         ];
         for (id, method, params) in requests {
             let Ok(body) = encode_request(id, method, params) else {
                 continue;
             };
             if let Err(e) = host.unix_socket_send(stream_id.clone(), body).await {
-                let _ = host.log_info(format!("hangar: snapshot send failed: {e}")).await;
+                let _ = host
+                    .log_info(format!("hangar: snapshot send failed: {e}"))
+                    .await;
             }
         }
+    }
+
+    /// Fire a deferred skill RPC raised by the skill-manager screen (P6.5).
+    ///
+    /// Maps each [`SkillAction`] to its daemon JSON-RPC, framed over the socket
+    /// cap. `Attach`/`Detach` need a target agent: the skill screen has no agent
+    /// selector yet, so the first cached agent actor is used (v1 is
+    /// single-agent-per-workspace in the seed; a richer selector lands later). A
+    /// send failure is logged but non-fatal — the screen simply doesn't update.
+    async fn apply_skill_action(&mut self, host: &HostClient, action: crate::screen::SkillAction) {
+        use crate::screen::SkillAction;
+        let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
+            return;
+        };
+        let ws = self.app_state().ws_id.as_str().to_string();
+        let (id, method, params) = match action {
+            SkillAction::Sync => (
+                SKILLS_SYNC_REQ_ID,
+                daemon_methods::HANGAR_SKILLS_SYNC,
+                serde_json::json!({ "workspace_id": ws }),
+            ),
+            SkillAction::LoadDetail(slug) => {
+                self.pending_detail_slug = Some(slug.clone());
+                (
+                    SKILL_GET_REQ_ID,
+                    daemon_methods::HANGAR_SKILL_GET,
+                    serde_json::json!({ "workspace_id": ws, "skill_id": slug }),
+                )
+            }
+            SkillAction::Attach(slug) => {
+                let Some(agent) = self.first_agent_ref() else {
+                    let _ = host.log_info("hangar: no agent to attach skill to").await;
+                    return;
+                };
+                (
+                    SKILL_ATTACH_REQ_ID,
+                    daemon_methods::HANGAR_SKILL_ATTACH,
+                    serde_json::json!({ "workspace_id": ws, "agent_id": agent, "skill_id": slug }),
+                )
+            }
+            SkillAction::Detach(slug) => {
+                let Some(agent) = self.first_agent_ref() else {
+                    let _ = host.log_info("hangar: no agent to detach skill from").await;
+                    return;
+                };
+                (
+                    SKILL_DETACH_REQ_ID,
+                    daemon_methods::HANGAR_SKILL_DETACH,
+                    serde_json::json!({ "workspace_id": ws, "agent_id": agent, "skill_id": slug }),
+                )
+            }
+        };
+        let Ok(body) = encode_request(id, method, params) else {
+            return;
+        };
+        if let Err(e) = host.unix_socket_send(stream_id, body).await {
+            let _ = host
+                .log_info(format!("hangar: skill rpc send failed: {e}"))
+                .await;
+        }
+    }
+
+    /// The bare id of the first cached agent actor (`agent:<id>` → `<id>`), or
+    /// `None` when no agent is cached. The attach/detach target until a proper
+    /// agent selector lands.
+    fn first_agent_ref(&self) -> Option<String> {
+        self.screens
+            .actors
+            .iter()
+            .find(|a| a.is_agent)
+            .and_then(|a| a.actor_ref.strip_prefix("agent:").map(str::to_string))
     }
 
     /// Apply a deferred Settings Workspace action (P5.5): call the matching
@@ -297,7 +433,9 @@ impl HangarPlugin {
         let result = match &action {
             // A bare refresh just pulls the list (no mutating cap call).
             WorkspaceAction::Refresh => Ok(()),
-            WorkspaceAction::SetActive(id) => host.workspace_set_active(id.clone()).await.map(|_| ()),
+            WorkspaceAction::SetActive(id) => {
+                host.workspace_set_active(id.clone()).await.map(|_| ())
+            }
             WorkspaceAction::SetDefault(id) => {
                 host.workspace_set_default(id.clone()).await.map(|_| ())
             }
@@ -453,10 +591,9 @@ impl Plugin for HangarPlugin {
         // P5.6: decide whether to show the first-run danger-full-access modal
         // from the recorded acks in `~/.ainb/hangar/state.toml`. A missing file
         // (fresh machine) → no acks → the modal shows once.
-        self.first_run = firstrun::state_path()
-            .map_or(FirstRunModal::Dismissed, |p| {
-                FirstRunModal::from_acks(&firstrun::read_acks(&p))
-            });
+        self.first_run = firstrun::state_path().map_or(FirstRunModal::Dismissed, |p| {
+            FirstRunModal::from_acks(&firstrun::read_acks(&p))
+        });
         self.connect(host).await;
         Ok(())
     }
@@ -501,6 +638,11 @@ impl Plugin for HangarPlugin {
         // host-cap response — awaiting a host request here can't deadlock.
         if let Some(action) = self.screens.take_pending_ws_action() {
             self.apply_workspace_action(host, action).await;
+        }
+        // P6.5: drain any deferred skill RPC (sync / detail / attach / detach)
+        // raised by the skill-manager screen and fire it over the daemon socket.
+        if let Some(action) = self.screens.take_pending_skill_action() {
+            self.apply_skill_action(host, action).await;
         }
         // P5.6: persist the first-run ack here (deferred from `handle_key`). The
         // modal is already `Dismissed` in state; this records it so a relaunch
