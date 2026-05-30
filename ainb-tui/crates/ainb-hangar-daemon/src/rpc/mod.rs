@@ -252,59 +252,10 @@ async fn handle(
         }
         methods::HANGAR_SKILL_ATTACH => attach_or_detach(pool, req, true).await,
         methods::HANGAR_SKILL_DETACH => attach_or_detach(pool, req, false).await,
-        methods::HANGAR_AUTOPILOTS_LIST => {
-            let autopilots = match resolve_wire_from_scoped(pool, req).await? {
-                Some(ws) => snapshots::autopilots_list(pool, &ws)
-                    .await
-                    .map_err(|e| autopilot_repo_err(&e))?,
-                None => Vec::new(),
-            };
-            to_value(&ainb_hangar_proto::snapshots::AutopilotsListResult { autopilots })
-        }
-        methods::HANGAR_AUTOPILOT_RUNS => {
-            let params: ainb_hangar_proto::snapshots::AutopilotRunsParams =
-                parse_params(req, "{ workspace_id, autopilot_id, limit }")?;
-            let runs = match resolve_wire(pool, &params.workspace_id).await? {
-                Some(ws) => {
-                    let id = autopilot_id(&params.autopilot_id)?;
-                    snapshots::autopilot_runs(pool, &ws, &id, params.limit)
-                        .await
-                        .map_err(|e| autopilot_repo_err(&e))?
-                }
-                None => Vec::new(),
-            };
-            to_value(&ainb_hangar_proto::snapshots::AutopilotRunsResult { runs })
-        }
-        methods::HANGAR_AUTOPILOT_FIRE_NOW => {
-            let params: ainb_hangar_proto::snapshots::AutopilotFireNowParams =
-                parse_params(req, "{ workspace_id, autopilot_id }")?;
-            let Some(ws) = resolve_wire(pool, &params.workspace_id).await? else {
-                return Err(invalid_params(&format!(
-                    "unknown workspace `{}`",
-                    params.workspace_id
-                )));
-            };
-            let id = autopilot_id(&params.autopilot_id)?;
-            snapshots::autopilot_fire_now(pool, &SystemClock, &ws, &id)
-                .await
-                .map_err(|e| internal(&format!("autopilot fire: {e}")))?;
-            Ok(serde_json::json!({}))
-        }
-        methods::HANGAR_AUTOPILOT_SET_ENABLED => {
-            let params: ainb_hangar_proto::snapshots::AutopilotSetEnabledParams =
-                parse_params(req, "{ workspace_id, autopilot_id, enabled }")?;
-            let Some(ws) = resolve_wire(pool, &params.workspace_id).await? else {
-                return Err(invalid_params(&format!(
-                    "unknown workspace `{}`",
-                    params.workspace_id
-                )));
-            };
-            let id = autopilot_id(&params.autopilot_id)?;
-            snapshots::autopilot_set_enabled(pool, &SystemClock, &ws, &id, params.enabled)
-                .await
-                .map_err(|e| autopilot_repo_err(&e))?;
-            Ok(serde_json::json!({}))
-        }
+        methods::HANGAR_AUTOPILOTS_LIST
+        | methods::HANGAR_AUTOPILOT_RUNS
+        | methods::HANGAR_AUTOPILOT_FIRE_NOW
+        | methods::HANGAR_AUTOPILOT_SET_ENABLED => handle_autopilot(pool, req).await,
         methods::HANGAR_HEALTH => to_value(&health.snapshot(true)),
         other => Err(RpcError {
             code: METHOD_NOT_FOUND,
@@ -472,6 +423,75 @@ async fn attach_or_detach(
             .map_err(|e| skill_repo_err(&e))?;
     }
     Ok(serde_json::json!({}))
+}
+
+/// Dispatch the four P7.5 autopilot-manager RPCs. Each resolves + scopes by
+/// workspace (a foreign id yields an empty snapshot for the reads, fires/toggles
+/// nothing for the mutations) and drives the workspace-scoped autopilot snapshot
+/// mappers. Split out of [`handle`] to keep that dispatcher within the line cap.
+async fn handle_autopilot(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    match req.method.as_str() {
+        methods::HANGAR_AUTOPILOTS_LIST => {
+            let autopilots = match resolve_wire_from_scoped(pool, req).await? {
+                Some(ws) => snapshots::autopilots_list(pool, &ws)
+                    .await
+                    .map_err(|e| autopilot_repo_err(&e))?,
+                None => Vec::new(),
+            };
+            to_value(&ainb_hangar_proto::snapshots::AutopilotsListResult { autopilots })
+        }
+        methods::HANGAR_AUTOPILOT_RUNS => {
+            let params: ainb_hangar_proto::snapshots::AutopilotRunsParams =
+                parse_params(req, "{ workspace_id, autopilot_id, limit }")?;
+            let runs = match resolve_wire(pool, &params.workspace_id).await? {
+                Some(ws) => {
+                    let id = autopilot_id(&params.autopilot_id)?;
+                    snapshots::autopilot_runs(pool, &ws, &id, params.limit)
+                        .await
+                        .map_err(|e| autopilot_repo_err(&e))?
+                }
+                None => Vec::new(),
+            };
+            to_value(&ainb_hangar_proto::snapshots::AutopilotRunsResult { runs })
+        }
+        methods::HANGAR_AUTOPILOT_FIRE_NOW => {
+            let params: ainb_hangar_proto::snapshots::AutopilotFireNowParams =
+                parse_params(req, "{ workspace_id, autopilot_id }")?;
+            let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+            let id = autopilot_id(&params.autopilot_id)?;
+            snapshots::autopilot_fire_now(pool, &SystemClock, &ws, &id)
+                .await
+                .map_err(|e| internal(&format!("autopilot fire: {e}")))?;
+            Ok(serde_json::json!({}))
+        }
+        methods::HANGAR_AUTOPILOT_SET_ENABLED => {
+            let params: ainb_hangar_proto::snapshots::AutopilotSetEnabledParams =
+                parse_params(req, "{ workspace_id, autopilot_id, enabled }")?;
+            let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+            let id = autopilot_id(&params.autopilot_id)?;
+            snapshots::autopilot_set_enabled(pool, &SystemClock, &ws, &id, params.enabled)
+                .await
+                .map_err(|e| autopilot_repo_err(&e))?;
+            Ok(serde_json::json!({}))
+        }
+        other => Err(RpcError {
+            code: METHOD_NOT_FOUND,
+            message: format!("unknown autopilot method: {other}"),
+            data: None,
+        }),
+    }
+}
+
+/// Resolve a wire workspace id, rejecting an unknown workspace with an
+/// `INVALID_PARAMS` error (the mutating autopilot handlers must not silently
+/// no-op on a typo'd workspace).
+async fn resolve_wire_or_reject(pool: &SqlitePool, wire: &str) -> Result<WorkspaceId, RpcError> {
+    resolve_wire(pool, wire)
+        .await?
+        .ok_or_else(|| invalid_params(&format!("unknown workspace `{wire}`")))
 }
 
 /// Serialize a result payload to a JSON value, mapping a (near-impossible)
