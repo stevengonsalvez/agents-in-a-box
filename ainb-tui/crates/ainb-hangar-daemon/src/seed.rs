@@ -79,33 +79,7 @@ pub async fn seed_p4_fixture(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         .execute(pool)
         .await?;
 
-    // Runtime + agent (the agent picker lists `claude-agent`, online presence).
-    AgentRuntimeRepo::insert(
-        pool,
-        &AgentRuntime {
-            id: "runtime-1".into(),
-            workspace_id: WS_ID.into(),
-            daemon_id: "daemon-1".into(),
-            provider: "claude".into(),
-            runtime_mode: "local".into(),
-            last_seen_at: Some(now),
-            status: "online".into(),
-        },
-    )
-    .await?;
-    AgentRepo::insert(
-        pool,
-        &Agent {
-            id: "agent-1".into(),
-            workspace_id: WS_ID.into(),
-            name: "claude-agent".into(),
-            runtime_id: "runtime-1".into(),
-            instructions: None,
-            visibility: "workspace".into(),
-            owner_id: "user-1".into(),
-        },
-    )
-    .await?;
+    seed_runtime_and_agent(pool, now).await?;
 
     // Skills (the skill manager lists `commit`; one is unused).
     for (id, name) in [("skill-commit", "commit"), ("skill-review", "review")] {
@@ -170,6 +144,39 @@ pub async fn seed_p4_fixture(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         .execute(pool)
         .await?;
 
+    Ok(())
+}
+
+/// Seed the runtime + agent rows (the agent picker lists `claude-agent` with an
+/// online presence). Extracted from [`seed_p4_fixture`] so the fixture body
+/// stays within the per-function line budget.
+async fn seed_runtime_and_agent(pool: &SqlitePool, now: i64) -> Result<(), sqlx::Error> {
+    AgentRuntimeRepo::insert(
+        pool,
+        &AgentRuntime {
+            id: "runtime-1".into(),
+            workspace_id: WS_ID.into(),
+            daemon_id: "daemon-1".into(),
+            provider: "claude".into(),
+            runtime_mode: "local".into(),
+            last_seen_at: Some(now),
+            status: "online".into(),
+        },
+    )
+    .await?;
+    AgentRepo::insert(
+        pool,
+        &Agent {
+            id: "agent-1".into(),
+            workspace_id: WS_ID.into(),
+            name: "claude-agent".into(),
+            runtime_id: "runtime-1".into(),
+            instructions: None,
+            visibility: "workspace".into(),
+            owner_id: "user-1".into(),
+        },
+    )
+    .await?;
     Ok(())
 }
 
