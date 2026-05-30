@@ -28,3 +28,5 @@ pub mod task;
 pub mod task_status;
 /// Token minting + verification primitives (PAT / daemon-token, `sha256` only).
 pub mod token;
+/// Danger-full-access warning ack keys + pure show/skip decision logic.
+pub mod warnings;
