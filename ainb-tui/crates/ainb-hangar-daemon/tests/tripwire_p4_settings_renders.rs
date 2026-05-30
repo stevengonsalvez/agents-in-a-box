@@ -1,17 +1,18 @@
 //! P4.9 — settings tripwire: `,` opens the four-section settings screen.
 //!
-//! Asserts the `Daemon` section header, the socket-path basename, and the
-//! `Providers` section render (POSITIVE), paired with a NEGATIVE check that we
-//! are not on the issue list. Forward (`,` → settings) is paired with a return
-//! (`1` → issue list).
+//! Asserts the `Daemon` section header, the socket-path basename (`hangar.sock`,
+//! from the live `hangar/health` snapshot), and the `Providers` section render
+//! (POSITIVE), paired with a NEGATIVE check that we are not on the issue list.
+//! Forward (`,` → settings) is paired with a return (`1` → issue list).
 //!
-//! SKIPs until the P5 render pipeline is standable — see `tripwire_p4_common.rs`.
+//! Runs for real when tmux + binaries + staged plugin are present; SKIPs
+//! gracefully otherwise (see `tripwire_p4_common.rs`).
 
 use std::time::{Duration, Instant};
 
 #[path = "tripwire_p4_common.rs"]
 mod common;
-use common::{can_run_tripwire, seed_isolated_home, skip, TuiSession};
+use common::{can_run_tripwire, prepare_pipeline, skip, TuiSession};
 
 #[test]
 fn settings_renders_sections() {
@@ -19,10 +20,9 @@ fn settings_renders_sections() {
         skip("settings");
         return;
     }
-    let home = seed_isolated_home();
+    let pipe = prepare_pipeline();
     let bin = common::ainb_bin().expect("gated by can_run_tripwire");
-    let sess = TuiSession::spawn(&bin, home.path());
-    sess.wait_ready().expect("issue list never rendered");
+    let (sess, _landing) = TuiSession::launch_to_hangar(&bin, pipe.home());
 
     sess.send_key(",");
     let settings = sess
@@ -31,7 +31,7 @@ fn settings_renders_sections() {
         })
         .expect("settings never rendered");
 
-    // POSITIVE: section headers + socket basename. NEGATIVE: not the issue list.
+    // POSITIVE: section headers + live socket basename. NEGATIVE: not the list.
     assert!(settings.contains("Daemon"), "Daemon section missing:\n{settings}");
     assert!(settings.contains("Providers"), "Providers section missing:\n{settings}");
     assert!(settings.contains("hangar.sock"), "socket basename missing:\n{settings}");

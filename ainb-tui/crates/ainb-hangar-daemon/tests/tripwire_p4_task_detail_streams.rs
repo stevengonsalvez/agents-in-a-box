@@ -1,47 +1,54 @@
-//! P4.9 — task-detail tripwire: `enter` on row 1 opens the streaming transcript.
+//! P4.9 — task-detail tripwire: `Enter` on the selected row opens task detail.
 //!
-//! Asserts the running task's agent (`claude-agent`), elapsed `9m`, and a
-//! transcript glyph `▌` render (POSITIVE), paired with a NEGATIVE check that the
-//! issue-list chrome is gone (we actually navigated). Forward (enter → detail) is
-//! paired with a return (`Esc`/`1` → issue list).
+//! Opening the first issue row's task detail renders the progressive-disclosure
+//! sidebar from the issue's row: the `Assignee` field bound to the seeded agent
+//! (`agent:agent-1`) and the `Status` field (POSITIVE), paired with a NEGATIVE
+//! check that the issue-list `Todo (3)` chrome is gone (we actually navigated).
+//! The transcript itself is empty until task events stream (P5 event push), so
+//! the assertions key on the sidebar that renders from the snapshot today.
+//! Forward (Enter → detail) is paired with a return (`1` → issue list).
 //!
-//! SKIPs until the P5 render pipeline is standable — see `tripwire_p4_common.rs`.
+//! Runs for real when tmux + binaries + staged plugin are present; SKIPs
+//! gracefully otherwise (see `tripwire_p4_common.rs`).
 
 use std::time::{Duration, Instant};
 
 #[path = "tripwire_p4_common.rs"]
 mod common;
-use common::{can_run_tripwire, seed_isolated_home, skip, TuiSession};
+use common::{can_run_tripwire, prepare_pipeline, skip, TuiSession};
 
 #[test]
-fn task_detail_streams_transcript() {
+fn task_detail_opens_for_selected_issue() {
     if !can_run_tripwire() {
         skip("task_detail");
         return;
     }
-    let home = seed_isolated_home();
+    let pipe = prepare_pipeline();
     let bin = common::ainb_bin().expect("gated by can_run_tripwire");
-    let sess = TuiSession::spawn(&bin, home.path());
-    sess.wait_ready().expect("issue list never rendered");
+    let (sess, _landing) = TuiSession::launch_to_hangar(&bin, pipe.home());
 
-    // Open the first row's task detail (Enter commits the row open).
+    // Open the selected (first) row's task detail. Enter commits the row open.
     sess.send_enter();
     let detail = sess
         .poll_capture(Instant::now() + Duration::from_secs(15), |c| {
-            c.contains("claude-agent") && c.contains('▌')
+            c.contains("Assignee") && c.contains("agent:agent-1")
         })
         .expect("task detail never rendered");
 
-    // POSITIVE: agent label + elapsed + transcript glyph. NEGATIVE: not the list.
-    assert!(detail.contains("claude-agent"), "agent label missing:\n{detail}");
-    assert!(detail.contains("9m"), "elapsed time missing:\n{detail}");
-    assert!(detail.contains('▌'), "transcript glyph missing:\n{detail}");
+    // POSITIVE: sidebar fields bound to the seeded issue/agent. NEGATIVE: the
+    // issue-list status-group header is gone, so we genuinely left the list.
+    assert!(detail.contains("Assignee"), "sidebar Assignee missing:\n{detail}");
+    assert!(detail.contains("agent:agent-1"), "seeded assignee missing:\n{detail}");
+    assert!(detail.contains("Project"), "sidebar Project missing:\n{detail}");
     assert!(!detail.contains("Todo (3)"), "still on the issue list:\n{detail}");
 
-    // Return navigation: back to the issue list.
+    // Return navigation: back to the issue list. The sidebar `Project` label is a
+    // task-detail-only marker (the issue list has no such field), so its absence
+    // proves we returned rather than the assignee VALUE (which legitimately shows
+    // in the issue list's assignee column).
     sess.send_key("1");
     let back = sess
-        .poll_capture(Instant::now() + Duration::from_secs(10), |c| c.contains("Refactor API"))
+        .poll_capture(Instant::now() + Duration::from_secs(10), |c| c.contains("Todo (3)"))
         .expect("issue list never returned from task detail");
-    assert!(!back.contains('▌'), "transcript bled into the issue list:\n{back}");
+    assert!(!back.contains("Project"), "task sidebar bled into the issue list:\n{back}");
 }

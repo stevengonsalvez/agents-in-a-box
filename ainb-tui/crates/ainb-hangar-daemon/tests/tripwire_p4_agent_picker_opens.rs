@@ -1,17 +1,22 @@
 //! P4.9 — agent-picker tripwire: `a` on a selected row opens the modal.
 //!
 //! Asserts the polymorphic actor list shows `claude-agent`, its `online`
-//! presence, and the violet agent glyph `⬡` (POSITIVE), paired with a NEGATIVE
-//! check that the modal is genuinely overlaid (the picker title is present).
-//! Forward (`a` → picker) is paired with a return (`Esc` → issue list).
+//! presence, and the violet agent glyph `⬡` (POSITIVE), paired with the modal
+//! title `Pick assignee` to prove the modal is genuinely overlaid. Forward (`a` →
+//! picker) is paired with a return (Esc leaves the modal; the title is gone).
 //!
-//! SKIPs until the P5 render pipeline is standable — see `tripwire_p4_common.rs`.
+//! Esc is host-reserved (it pops the plugin screen back to the host home screen
+//! rather than reaching the plugin), so the return leg asserts the picker title
+//! is *gone* after Esc — a one-way swallow of `a` could not satisfy both legs.
+//!
+//! Runs for real when tmux + binaries + staged plugin are present; SKIPs
+//! gracefully otherwise (see `tripwire_p4_common.rs`).
 
 use std::time::{Duration, Instant};
 
 #[path = "tripwire_p4_common.rs"]
 mod common;
-use common::{can_run_tripwire, seed_isolated_home, skip, TuiSession};
+use common::{can_run_tripwire, prepare_pipeline, skip, TuiSession};
 
 #[test]
 fn agent_picker_opens_with_actors() {
@@ -19,10 +24,9 @@ fn agent_picker_opens_with_actors() {
         skip("agent_picker");
         return;
     }
-    let home = seed_isolated_home();
+    let pipe = prepare_pipeline();
     let bin = common::ainb_bin().expect("gated by can_run_tripwire");
-    let sess = TuiSession::spawn(&bin, home.path());
-    sess.wait_ready().expect("issue list never rendered");
+    let (sess, _landing) = TuiSession::launch_to_hangar(&bin, pipe.home());
 
     // Open the agent picker for the selected row (single-char nav, no Enter).
     sess.send_key("a");
@@ -32,18 +36,17 @@ fn agent_picker_opens_with_actors() {
         })
         .expect("agent picker never opened");
 
-    // POSITIVE: actor + presence + agent glyph. NEGATIVE: still has the modal title.
+    // POSITIVE: actor + presence + agent glyph + modal title.
     assert!(picker.contains("claude-agent"), "agent actor missing:\n{picker}");
     assert!(picker.contains("online"), "presence label missing:\n{picker}");
     assert!(picker.contains('⬡'), "violet agent glyph missing:\n{picker}");
     assert!(picker.contains("Pick assignee"), "modal title missing:\n{picker}");
 
-    // Return navigation: Esc closes the modal back to the issue list.
+    // Return leg: Esc leaves the modal (host pops the screen). The picker title
+    // must be gone — proving the `a` open round-tripped rather than wedging.
     sess.send_key("Escape");
-    let back = sess
-        .poll_capture(Instant::now() + Duration::from_secs(10), |c| {
-            c.contains("Refactor API") && !c.contains("Pick assignee")
-        })
-        .expect("modal never closed back to the issue list");
-    assert!(!back.contains("Pick assignee"), "picker modal lingered:\n{back}");
+    let post_esc = sess
+        .poll_capture(Instant::now() + Duration::from_secs(10), |c| !c.contains("Pick assignee"))
+        .expect("modal never closed");
+    assert!(!post_esc.contains("Pick assignee"), "picker modal lingered:\n{post_esc}");
 }
