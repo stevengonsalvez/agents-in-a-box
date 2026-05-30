@@ -185,20 +185,31 @@ async fn handle(
         // `workspace/subscribe` acks with an (empty) snapshot envelope; the
         // event push side is the stream client's concern. The plugin only needs
         // a non-error ack to reach `Connected`, then pulls the screen snapshots.
-        methods::WORKSPACE_SUBSCRIBE => Ok(serde_json::json!({ "snapshot": {} })),
+        // We still resolve the wire id so an unknown workspace surfaces no error
+        // (the ack is unconditional; the screens pull real rows next).
+        methods::WORKSPACE_SUBSCRIBE => {
+            let _ = resolve(pool, req).await?;
+            Ok(serde_json::json!({ "snapshot": {} }))
+        }
         methods::HANGAR_ISSUES_LIST => {
-            let ws = workspace_id(req)?;
-            let issues = snapshots::issues_list(pool, &ws).await.map_err(|e| store_err(&e))?;
+            let issues = match resolve(pool, req).await? {
+                Some(ws) => snapshots::issues_list(pool, &ws).await.map_err(|e| store_err(&e))?,
+                None => Vec::new(),
+            };
             to_value(&ainb_hangar_proto::snapshots::IssuesListResult { issues })
         }
         methods::HANGAR_AGENTS_LIST => {
-            let ws = workspace_id(req)?;
-            let actors = snapshots::agents_list(pool, &ws).await.map_err(|e| store_err(&e))?;
+            let actors = match resolve(pool, req).await? {
+                Some(ws) => snapshots::agents_list(pool, &ws).await.map_err(|e| store_err(&e))?,
+                None => Vec::new(),
+            };
             to_value(&ainb_hangar_proto::snapshots::AgentsListResult { actors })
         }
         methods::HANGAR_SKILLS_LIST => {
-            let ws = workspace_id(req)?;
-            let skills = snapshots::skills_list(pool, &ws).await.map_err(|e| store_err(&e))?;
+            let skills = match resolve(pool, req).await? {
+                Some(ws) => snapshots::skills_list(pool, &ws).await.map_err(|e| store_err(&e))?,
+                None => Vec::new(),
+            };
             to_value(&ainb_hangar_proto::snapshots::SkillsListResult { skills })
         }
         methods::HANGAR_HEALTH => to_value(&health.snapshot(true)),
@@ -219,6 +230,34 @@ fn workspace_id(req: &RpcRequest) -> Result<String, RpcError> {
             data: None,
         })?;
     Ok(params.workspace_id)
+}
+
+/// Resolve a wire workspace identifier (slug OR id) to the real workspace row id.
+///
+/// v1 is single-workspace; the plugin subscribes by slug (`"default"`), but real
+/// workspaces are created with a ULID `id` distinct from their `slug`. The
+/// `id = ?1 OR slug = ?1` form accepts BOTH a slug (the plugin's wire value) and a
+/// literal id (any future id-passing caller). Returns `None` when no workspace
+/// matches; callers then return an empty snapshot rather than an error.
+async fn resolve_workspace_id(
+    pool: &SqlitePool,
+    wire: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar("SELECT id FROM workspace WHERE id = ?1 OR slug = ?1 LIMIT 1")
+        .bind(wire)
+        .fetch_optional(pool)
+        .await
+}
+
+/// Extract the wire `workspace_id` from `req` and resolve it to the real row id.
+///
+/// Returns `Ok(None)` (an empty-snapshot signal) when no workspace matches, and
+/// an `INVALID_PARAMS` error only when the params are malformed (no `workspace_id`).
+async fn resolve(pool: &SqlitePool, req: &RpcRequest) -> Result<Option<String>, RpcError> {
+    let wire = workspace_id(req)?;
+    resolve_workspace_id(pool, &wire)
+        .await
+        .map_err(|e| store_err(&e))
 }
 
 /// Serialize a result payload to a JSON value, mapping a (near-impossible)

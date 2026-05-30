@@ -23,8 +23,18 @@ use ainb_hangar_store::repo::skill::{Skill, SkillRepo};
 use ainb_hangar_store::repo::task::{NewTask, TaskRepo};
 use sqlx::SqlitePool;
 
-/// The workspace id the plugin subscribes to and every snapshot RPC scopes to.
-pub const WS_ID: &str = "default";
+/// The seeded workspace's real row id.
+///
+/// Deliberately a non-slug id (a fixed ULID-style string) so the fixture matches
+/// reality: real workspaces are created with a ULID `id` and a separate `slug`.
+/// The plugin subscribes by slug (`"default"`, see [`WS_SLUG`]); the daemon
+/// resolves that slug to this id. A fixture that bound `id == slug` would silently
+/// hide the slug→id resolution bug.
+pub const WS_ID: &str = "01HANGARFIXTUREWS000000000";
+
+/// The slug the plugin subscribes by (`workspace_id: "default"` on the wire). The
+/// daemon resolves this to [`WS_ID`] before scoping any snapshot query.
+pub const WS_SLUG: &str = "default";
 
 /// The three Todo issues the issue-list landing screen renders. The first is the
 /// `Refactor API` marker the tripwire asserts on.
@@ -50,7 +60,7 @@ pub async fn seed_p4_fixture(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     // Tenancy: workspace + user + member (the agent picker lists the member).
     sqlx::query("INSERT INTO workspace (id, slug, name, created_at) VALUES (?, ?, ?, ?)")
         .bind(WS_ID)
-        .bind("default")
+        .bind(WS_SLUG)
         .bind("Default Workspace")
         .bind(now)
         .execute(pool)
