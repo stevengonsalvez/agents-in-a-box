@@ -25,15 +25,20 @@ pub mod ids;
 /// Skill domain vocabulary: normalised [`skill::SkillName`], the
 /// [`skill::SkillWithFiles`] aggregate, and ordered file inputs.
 pub mod skill;
+/// The IO-free skill service (P6.5).
+///
+/// Workspace-scoped orchestration over a [`skill_service::SkillBackend`] the
+/// daemon wraps with sqlx and tests fake.
+pub mod skill_service;
 /// The task domain: the `agent_task_queue` lifecycle FSM.
 pub mod task;
+/// The `agent_task_queue` lifecycle status enum (P0 placeholder).
+pub mod task_status;
 /// Embedded curated `agent_template` registry (P6.3).
 ///
 /// The 10 repo-only templates baked into the binary via `include_str!`, plus
 /// their skill-reference invariant (enforced by this crate's `build.rs`).
 pub mod template;
-/// The `agent_task_queue` lifecycle status enum (P0 placeholder).
-pub mod task_status;
 /// Token minting + verification primitives (PAT / daemon-token, `sha256` only).
 pub mod token;
 /// Danger-full-access warning ack keys + pure show/skip decision logic.
