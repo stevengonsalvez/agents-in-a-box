@@ -91,6 +91,34 @@ pub enum ConfigCommand {
     /// Manage the provider-subprocess env allowlist.
     #[command(name = "env.allow", subcommand)]
     EnvAllow(EnvAllowCommand),
+    /// Manage danger-full-access warning acknowledgements.
+    #[command(subcommand)]
+    Warnings(WarningsCommand),
+}
+
+/// `hangar config warnings <verb>`.
+///
+/// The danger-full-access warnings are shown once on first run and once per
+/// provider per session. `reset` wipes the recorded acknowledgements so the
+/// warning is shown again — useful after handing a machine to a new user, or to
+/// re-confirm a specific provider.
+#[derive(Subcommand, Debug)]
+pub enum WarningsCommand {
+    /// Clear recorded warning acks so they show again.
+    ///
+    /// With no flag, wipes every ack (first-run + all per-provider sessions).
+    /// With `--provider <name>`, wipes only that provider's per-session acks so
+    /// its next dispatch re-warns, leaving first-run + other providers intact.
+    Reset(WarningsResetArgs),
+}
+
+/// Arguments for `hangar config warnings reset`.
+#[derive(Args, Debug)]
+pub struct WarningsResetArgs {
+    /// Reset only this provider's per-session acks (e.g. `claude`). Omit to
+    /// reset every warning ack.
+    #[arg(long)]
+    pub provider: Option<String>,
 }
 
 /// `hangar config env.allow <verb>`.
@@ -328,7 +356,39 @@ fn dispatch_config(cmd: ConfigCommand, format: OutputFormat) -> Result<()> {
         ConfigCommand::EnvAllow(EnvAllowCommand::List) => run_env_allow_list(format),
         ConfigCommand::EnvAllow(EnvAllowCommand::Add(args)) => run_env_allow_add(args),
         ConfigCommand::EnvAllow(EnvAllowCommand::Remove(args)) => run_env_allow_remove(args),
+        ConfigCommand::Warnings(WarningsCommand::Reset(args)) => run_warnings_reset(args),
     }
+}
+
+/// `hangar config warnings reset [--provider <name>]`: wipe recorded
+/// danger-full-access acks so they show again on the next launch / dispatch.
+///
+/// `--provider <name>` removes only `provider:<name>:session:*` acks (that
+/// provider re-warns next dispatch); no flag removes every ack including
+/// `first_run`. Preserves foreign `state.toml` sections.
+fn run_warnings_reset(args: WarningsResetArgs) -> Result<()> {
+    let path =
+        ainb_hangar_daemon::warnings::default_state_path().context("resolve state.toml path")?;
+    let removed = match &args.provider {
+        Some(provider) => {
+            let p = provider.clone();
+            ainb_hangar_daemon::warnings::reset_at(&path, move |k| {
+                ainb_hangar_core::warnings::is_provider_ack(k, &p)
+            })
+            .context("reset provider warning acks")?
+        }
+        None => ainb_hangar_daemon::warnings::reset_at(&path, |_| true)
+            .context("reset all warning acks")?,
+    };
+    match &args.provider {
+        Some(p) => println!(
+            "reset {removed} {p} warning ack(s); next {p} dispatch will re-warn about danger-full-access"
+        ),
+        None => println!(
+            "reset {removed} warning ack(s); danger-full-access warnings will show again"
+        ),
+    }
+    Ok(())
 }
 
 /// `hangar config env.allow list`: print the merged effective set.
