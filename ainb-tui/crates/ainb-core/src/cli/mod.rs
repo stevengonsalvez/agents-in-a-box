@@ -12,6 +12,7 @@ pub mod config_cmd;
 pub mod favorites;
 pub mod fleet;
 pub mod git_cmd;
+pub mod hangar;
 pub mod init;
 pub mod list;
 pub mod logs;
