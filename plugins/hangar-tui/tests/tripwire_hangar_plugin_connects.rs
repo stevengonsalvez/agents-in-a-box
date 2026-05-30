@@ -3,14 +3,16 @@
 //! This is the final P3 gate. It proves the user-visible end state of the
 //! whole phase: the **real** [`HangarPlugin`], driven behind the **real**
 //! `ainb-plugin-sdk-rust` [`Server`], dials a **real daemon socket**, sends
-//! `workspace/subscribe`, and renders the footer `"Hangar: Connected"` —
-//! within a deterministic budget and against an isolated `$HOME`.
+//! `workspace/subscribe`, and surfaces the connected state in the shared P4.1
+//! chrome as the `online` presence dot — within a deterministic budget and
+//! against an isolated `$HOME`. (P3.8 originally grepped a `"Hangar: Connected"`
+//! footer; P4.1 replaced that string with the chrome presence dot.)
 //!
 //! ## Why not the literal `ainb tui` + tmux skeleton in `P3.md`?
 //!
 //! The phase doc sketches spawning `ainb-hangar-daemon` + `ainb tui` (which
 //! would load `hangar-tui` via the host) inside tmux and grepping the pane
-//! for `"Hangar: Connected"`. That path has two **unmet cross-phase
+//! for the connected state. That path has two **unmet cross-phase
 //! prerequisites** the doc itself calls out (P3.md "Daemon-side requirement"
 //! lines 432-435):
 //!
@@ -31,9 +33,9 @@
 //!
 //! ## What is asserted (the user-visible deliverable)
 //!
-//!   * Happy path: footer reads `"Hangar: Connected"` within budget.
+//!   * Happy path: chrome presence dot reads `online` within budget.
 //!   * Failure injection (P3.8 acceptance): stop the daemon mid-stream and
-//!     assert the footer flips to `"Hangar: Disconnected"` within 2s.
+//!     assert the presence dot flips to `offline` within 2s.
 //!
 //! ## Determinism guards
 //!
@@ -150,8 +152,13 @@ fn host_frame(body: &serde_json::Value) -> Vec<u8> {
     framing::encode(&serde_json::to_vec(body).unwrap())
 }
 
-/// Extract the footer text from a `plugin/render` result frame.
-fn footer_text(render_resp: &serde_json::Value) -> String {
+/// Flatten every painted cell symbol from a `plugin/render` result frame.
+///
+/// P4.1 replaced the P3.x `"Hangar: Connected"` footer string with the shared
+/// chrome, where the daemon-link signal surfaces as the top-bar presence dot
+/// (`● online` / `○ offline`). This helper concatenates the whole buffer so
+/// the tripwire can look for that presence label.
+fn chrome_text(render_resp: &serde_json::Value) -> String {
     render_resp["result"]["buffer"]["cells"]
         .as_array()
         .map(|cells| {
@@ -163,10 +170,11 @@ fn footer_text(render_resp: &serde_json::Value) -> String {
         .unwrap_or_default()
 }
 
-/// Repeatedly `plugin/render` until the footer contains `want`, or the poll
-/// budget is exhausted. Returns the last footer seen so callers can assert a
-/// helpful message on miss.
-async fn poll_footer_for<W, R>(host_write: &mut W, host_read: &mut R, want: &str) -> (bool, String)
+/// Repeatedly `plugin/render` until the chrome contains `want`, or the poll
+/// budget is exhausted. Returns the last chrome text seen so callers can
+/// assert a helpful message on miss. Renders at the 80×24 chrome floor so the
+/// right-hand `<slug> · ● <presence>` cluster has room beside the tab strip.
+async fn poll_chrome_for<W, R>(host_write: &mut W, host_read: &mut R, want: &str) -> (bool, String)
 where
     W: tokio::io::AsyncWrite + Unpin,
     R: tokio::io::AsyncBufRead + Unpin,
@@ -176,14 +184,14 @@ where
         host_write
             .write_all(&host_frame(&serde_json::json!({
                 "jsonrpc": "2.0", "id": 99, "method": methods::PLUGIN_RENDER,
-                "params": { "viewport": {"width": 40, "height": 5}, "generation": 0 }
+                "params": { "viewport": {"width": 80, "height": 24}, "generation": 0 }
             })))
             .await
             .unwrap();
         loop {
             let f = read_frame(host_read).await.expect("plugin link alive");
             if f.get("id").and_then(serde_json::Value::as_i64) == Some(99) {
-                last = footer_text(&f);
+                last = chrome_text(&f);
                 if last.contains(want) {
                     return (true, last);
                 }
@@ -298,8 +306,9 @@ async fn push_socket_eof<W: tokio::io::AsyncWrite + Unpin>(host_write: &mut W, s
         .unwrap();
 }
 
-/// Happy path: real plugin dials real daemon socket and the footer reaches
-/// `"Hangar: Connected"`. This is the P3.8 user-visible deliverable.
+/// Happy path: real plugin dials real daemon socket and the chrome presence
+/// dot reaches `online`. This is the P3.8 user-visible deliverable, re-pointed
+/// at the P4.1 chrome (the old `"Hangar: Connected"` footer string is gone).
 #[tokio::test]
 async fn tripwire_hangar_plugin_connects() {
     let body = async {
@@ -326,12 +335,14 @@ async fn tripwire_hangar_plugin_connects() {
         let reply = read_frame(&mut dr).await.expect("daemon ack");
         push_socket_data(&mut host_write, &stream_id, &reply).await;
 
-        let (connected, last) =
-            poll_footer_for(&mut host_write, &mut host_read, "Hangar: Connected").await;
+        let (connected, last) = poll_chrome_for(&mut host_write, &mut host_read, "online").await;
 
         drop(host_write);
         server.abort();
-        assert!(connected, "footer never reached Connected; last footer = {last:?}");
+        assert!(
+            connected,
+            "presence never reached online; last chrome = {last:?}"
+        );
     };
 
     tokio::time::timeout(E2E_BUDGET, body)
@@ -339,8 +350,8 @@ async fn tripwire_hangar_plugin_connects() {
         .expect("tripwire exceeded e2e budget");
 }
 
-/// Failure injection (P3.8 acceptance): once Connected, killing the daemon
-/// connection must flip the footer to `"Hangar: Disconnected"` within 2s.
+/// Failure injection (P3.8 acceptance): once connected, killing the daemon
+/// connection must flip the chrome presence dot to `offline` within 2s.
 #[tokio::test]
 async fn tripwire_detects_daemon_drop() {
     let body = async {
@@ -364,9 +375,8 @@ async fn tripwire_detects_daemon_drop() {
         let reply = read_frame(&mut dr).await.expect("daemon ack");
         push_socket_data(&mut host_write, &stream_id, &reply).await;
 
-        let (connected, _) =
-            poll_footer_for(&mut host_write, &mut host_read, "Hangar: Connected").await;
-        assert!(connected, "precondition: must reach Connected before drop");
+        let (connected, _) = poll_chrome_for(&mut host_write, &mut host_read, "online").await;
+        assert!(connected, "precondition: must reach online before drop");
 
         // Stop the daemon mid-stream. In production the host's socket reader
         // observes the close and emits an Eof socket event; model that here.
@@ -374,13 +384,13 @@ async fn tripwire_detects_daemon_drop() {
         push_socket_eof(&mut host_write, &stream_id).await;
 
         let (disconnected, last) =
-            poll_footer_for(&mut host_write, &mut host_read, "Hangar: Disconnected").await;
+            poll_chrome_for(&mut host_write, &mut host_read, "offline").await;
 
         drop(host_write);
         server.abort();
         assert!(
             disconnected,
-            "footer did not flip to Disconnected after daemon drop; last = {last:?}"
+            "presence did not flip to offline after daemon drop; last = {last:?}"
         );
     };
 

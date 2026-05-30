@@ -9,13 +9,16 @@
 //! daemon's reply frames back to the plugin as a `socket:<id>`
 //! `plugin/handle_event` notification.
 //!
-//! Acceptance (P3.7): the plugin reaches `Connected` within 1s and the
-//! render footer reads `"Hangar: Connected"`.
+//! Acceptance (P3.7): the plugin reaches `Connected` within 1s; P4.1 re-points
+//! the render assertion at the shared chrome, whose presence dot reads
+//! `online` once the daemon acks the subscribe.
 
 use std::time::Duration;
 
 use ainb_plugin_hangar::HangarPlugin;
-use ainb_plugin_protocol::params::{HandleEventParams, UnixSocketEvent, UnixSocketEventKind, UnixSocketSendParams};
+use ainb_plugin_protocol::params::{
+    HandleEventParams, UnixSocketEvent, UnixSocketEventKind, UnixSocketSendParams,
+};
 use ainb_plugin_protocol::{framing, methods};
 use ainb_plugin_sdk::Server;
 use tokio::io::{AsyncWriteExt, BufReader};
@@ -73,8 +76,13 @@ fn host_frame(body: &serde_json::Value) -> Vec<u8> {
     framing::encode(&serde_json::to_vec(body).unwrap())
 }
 
-/// Extract the footer text from a `plugin/render` result frame.
-fn footer_text(render_resp: &serde_json::Value) -> String {
+/// Flatten every painted cell symbol from a `plugin/render` result frame.
+///
+/// P4.1 replaced the P3.7 `"Hangar: Connected"` footer string with the shared
+/// chrome: the daemon-link signal now surfaces as the top-bar presence dot
+/// (`● online` / `○ offline`). This helper concatenates the whole buffer so
+/// the connection test can look for that presence label.
+fn render_text(render_resp: &serde_json::Value) -> String {
     render_resp["result"]["buffer"]["cells"]
         .as_array()
         .map(|cells| {
@@ -86,8 +94,10 @@ fn footer_text(render_resp: &serde_json::Value) -> String {
         .unwrap_or_default()
 }
 
-/// Repeatedly `plugin/render` and inspect the footer until it reads
-/// `"Hangar: Connected"` or the retry budget is exhausted.
+/// Repeatedly `plugin/render` and inspect the chrome until the presence dot
+/// reads `online` (the P4.1 connected signal) or the retry budget is
+/// exhausted. Renders at the 80×24 chrome floor so the right-hand
+/// `<slug> · ● online` cluster has room beside the tab strip.
 async fn poll_until_connected<W, R>(host_write: &mut W, host_read: &mut R) -> bool
 where
     W: tokio::io::AsyncWrite + Unpin,
@@ -97,7 +107,7 @@ where
         host_write
             .write_all(&host_frame(&serde_json::json!({
                 "jsonrpc": "2.0", "id": 99, "method": methods::PLUGIN_RENDER,
-                "params": { "viewport": {"width": 40, "height": 5}, "generation": 0 }
+                "params": { "viewport": {"width": 80, "height": 24}, "generation": 0 }
             })))
             .await
             .unwrap();
@@ -105,7 +115,7 @@ where
         loop {
             let f = read_frame(host_read).await.expect("link alive");
             if f.get("id").and_then(serde_json::Value::as_i64) == Some(99) {
-                if footer_text(&f).contains("Hangar: Connected") {
+                if render_text(&f).contains("online") {
                     return true;
                 }
                 break;
@@ -200,7 +210,7 @@ async fn plugin_reaches_connected_against_mock_daemon() {
             .await
             .unwrap();
 
-        // 4. Poll render until the footer reads Connected.
+        // 4. Poll render until the chrome presence dot reads `online`.
         let connected = poll_until_connected(&mut host_write, &mut host_read).await;
 
         // Tear down: dropping the host write half won't reliably EOF the
