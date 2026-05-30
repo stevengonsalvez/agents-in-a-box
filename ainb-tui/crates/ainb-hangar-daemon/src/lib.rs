@@ -68,6 +68,8 @@ pub mod seed;
 /// The daemon's tokio runtime registers these as periodic tasks; they are also
 /// callable directly (with an injected clock) for deterministic testing.
 pub mod sweeper;
+/// Danger-full-access warning emission at provider invocation (P5.6).
+pub mod warnings;
 /// Git-worktree integration for per-task working dirs (P1.6).
 pub mod worktree;
 

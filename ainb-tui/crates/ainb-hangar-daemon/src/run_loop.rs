@@ -43,7 +43,7 @@ use ainb_hangar_store::service::start::StartTaskService;
 use sqlx::{Row, SqlitePool};
 
 use crate::execenv::prepare_env;
-use crate::runner::{RunOutcome, Runner, RunnerConfig};
+use crate::runner::{Provider, RunOutcome, Runner, RunnerConfig};
 use crate::sweeper::{
     sweep_expired_queued, sweep_stale_dispatched, sweep_stale_running, SweeperConfig,
 };
@@ -249,6 +249,16 @@ async fn execute_claimed(
     let policy = load_env_policy();
     let keychain_keys: Vec<(String, String)> = Vec::new();
     let task_env = crate::dispatch::build_task_env(&daemon_env, keychain_keys, &policy);
+
+    // P5.6: warn about `danger-full-access` on the first invocation of this
+    // provider in this session. The decision + ack persistence are authoritative
+    // here (a task may be dispatched from the CLI with no TUI attached); a
+    // re-dispatch in the same session is suppressed, a fresh session re-warns.
+    // The "session" is the resumed provider session id when present, else the
+    // task id (a fresh run is a fresh warning surface). A warning-IO fault is
+    // non-fatal — never block a dispatch on it.
+    warn_danger_access(&task, runner.name());
+
     let outcome = runner.run_claude(&env, task_env).await?;
 
     match outcome {
@@ -338,4 +348,18 @@ fn hangar_home() -> PathBuf {
             || dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")),
             PathBuf::from,
         )
+}
+
+/// Warn about `danger-full-access` on the first invocation of `provider` in this
+/// task's session (P5.6). Best-effort: a `state.toml` path-resolution or IO
+/// fault is logged and swallowed — a warning bookkeeping failure must never
+/// block a dispatch. The session id is the task's resumed provider session when
+/// present, else the task id (a fresh run is a fresh warning surface).
+fn warn_danger_access(task: &Task, provider: &str) {
+    let session = task.session_id.as_deref().unwrap_or(task.id.as_str());
+    let outcome = crate::warnings::default_state_path()
+        .and_then(|p| crate::warnings::maybe_warn_provider(&p, provider, session));
+    if let Err(e) = outcome {
+        tracing::warn!(error = %e, "danger-access warning bookkeeping failed; proceeding");
+    }
 }
