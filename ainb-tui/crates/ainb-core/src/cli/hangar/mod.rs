@@ -34,12 +34,12 @@ use clap::{Args, Subcommand};
 use ainb_hangar_core::actor::{ActorKind, ActorRef};
 use ainb_hangar_core::clock::SystemClock;
 use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
+use ainb_hangar_store::Store;
 use ainb_hangar_store::repo::issue::{Issue, IssueRepo, NewIssue};
 use ainb_hangar_store::repo::task::{Task, TaskRepo};
-use ainb_hangar_store::repo::token::{mint_daemon_token, mint_pat, PatRecord, PatRepo};
+use ainb_hangar_store::repo::token::{PatRecord, PatRepo, mint_daemon_token, mint_pat};
 use ainb_hangar_store::service::cancel::CancelTaskService;
 use ainb_hangar_store::service::retry::{RetryDecision, RetryService};
-use ainb_hangar_store::Store;
 
 use crate::cli::OutputFormat;
 
@@ -86,6 +86,46 @@ pub enum HangarCommand {
     /// Import + list workspace-scoped skills.
     #[command(subcommand)]
     Skills(SkillsCommand),
+    /// List, inspect, and apply curated agent templates.
+    #[command(subcommand)]
+    Templates(TemplatesCommand),
+}
+
+/// `hangar templates <verb>`.
+///
+/// `list` and `show` read the curated templates baked into the binary (no
+/// database). `use` materialises a template into a live agent + its skill
+/// attachments in the target workspace (the skills must already be imported via
+/// `hangar skills sync`).
+#[derive(Subcommand, Debug)]
+pub enum TemplatesCommand {
+    /// List every embedded curated template.
+    List,
+    /// Show one template in full (instructions + skill list).
+    Show(TemplatesShowArgs),
+    /// Create an agent from a template, attaching its bundled skills.
+    Use(TemplatesUseArgs),
+}
+
+/// Arguments for `hangar templates show`.
+#[derive(Args, Debug)]
+pub struct TemplatesShowArgs {
+    /// Template name (e.g. `code-reviewer`).
+    pub name: String,
+}
+
+/// Arguments for `hangar templates use`.
+#[derive(Args, Debug)]
+pub struct TemplatesUseArgs {
+    /// Template name to apply (e.g. `code-reviewer`).
+    pub name: String,
+    /// Workspace slug to create the agent in. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+    /// Name the created agent something other than the template name.
+    #[arg(long = "agent-name")]
+    pub agent_name: Option<String>,
 }
 
 /// `hangar skills <verb>`.
@@ -388,7 +428,83 @@ pub async fn dispatch(cmd: HangarCommand, format: OutputFormat) -> Result<()> {
         HangarCommand::Auth(c) => dispatch_auth(c, format).await,
         HangarCommand::Config(c) => dispatch_config(c, format),
         HangarCommand::Skills(c) => dispatch_skills(c, format).await,
+        HangarCommand::Templates(c) => dispatch_templates(c, format).await,
     }
+}
+
+/// Dispatch the `hangar templates` verbs.
+///
+/// `list` and `show` are pure reads of the embedded registry (no database).
+/// `use` opens the store, resolves the workspace, and materialises the template
+/// transactionally via [`ainb_hangar_daemon::templates::templates_use`].
+async fn dispatch_templates(cmd: TemplatesCommand, format: OutputFormat) -> Result<()> {
+    match cmd {
+        TemplatesCommand::List => {
+            run_templates_list(format);
+            Ok(())
+        }
+        TemplatesCommand::Show(args) => run_templates_show(args, format),
+        TemplatesCommand::Use(args) => {
+            let store = Store::open_default().await.context("open hangar database")?;
+            run_templates_use(&store, args).await
+        }
+    }
+}
+
+/// `hangar templates list`: print every embedded curated template.
+fn run_templates_list(format: OutputFormat) {
+    let templates = ainb_hangar_core::template::TemplateRegistry::list();
+    render_template_list(&templates, format);
+}
+
+/// `hangar templates show <name>`: dump one template in full.
+fn run_templates_show(args: TemplatesShowArgs, format: OutputFormat) -> Result<()> {
+    use ainb_hangar_core::template::TemplateRegistry;
+    let template = TemplateRegistry::get(&args.name)
+        .with_context(|| format!("no curated template named `{}`", args.name))?;
+    match format {
+        OutputFormat::Json => println!("{}", template_to_json(&template)),
+        OutputFormat::Csv => {
+            println!("{}", template_csv_header());
+            println!("{}", template_csv_row(&template));
+        }
+        OutputFormat::Markdown => {
+            print!("{}", template_md_header());
+            println!("{}", template_md_row(&template));
+        }
+        OutputFormat::Text => print!("{}", template_detail(&template)),
+    }
+    Ok(())
+}
+
+/// `hangar templates use <name>`: create an agent from a template + attach its
+/// skills, transactionally. Resolves the workspace the same way the skills verbs
+/// do (named slug, else the bootstrapped `default`).
+async fn run_templates_use(store: &Store, args: TemplatesUseArgs) -> Result<()> {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_daemon::templates::templates_use;
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+
+    let outcome = templates_use(store.pool(), &ws, &args.name, args.agent_name.as_deref())
+        .await
+        .with_context(|| format!("apply template `{}`", args.name))?;
+
+    if outcome.created {
+        println!(
+            "created agent {} from template `{}` with {} skill(s)",
+            outcome.agent_id,
+            args.name,
+            outcome.skill_ids.len()
+        );
+    } else {
+        println!(
+            "agent {} already exists for template `{}` (no change)",
+            outcome.agent_id, args.name
+        );
+    }
+    Ok(())
 }
 
 /// Dispatch the `hangar skills` verbs.
@@ -426,7 +542,7 @@ async fn resolve_skills_workspace(store: &Store, slug: Option<&str>) -> Result<S
 async fn run_skills_sync(store: &Store, args: SkillsSyncArgs) -> Result<()> {
     use ainb_hangar_core::ids::WorkspaceId;
     use ainb_hangar_daemon::skills_sync::{
-        default_source_dir, skills_sync_from, SkillImporter, ToolkitDirImporter,
+        SkillImporter, ToolkitDirImporter, default_source_dir, skills_sync_from,
     };
 
     let source = match args.source {
@@ -438,9 +554,7 @@ async fn run_skills_sync(store: &Store, args: SkillsSyncArgs) -> Result<()> {
 
     if args.dry_run {
         // Walk + parse only; never touch the store.
-        let parsed = ToolkitDirImporter::new(&source)
-            .collect()
-            .context("scan skills source")?;
+        let parsed = ToolkitDirImporter::new(&source).collect().context("scan skills source")?;
         println!(
             "dry-run: {} skill(s) would be imported from {}",
             parsed.len(),
@@ -454,9 +568,7 @@ async fn run_skills_sync(store: &Store, args: SkillsSyncArgs) -> Result<()> {
 
     let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
     let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
-    let report = skills_sync_from(store.pool(), &ws, &source)
-        .await
-        .context("import skills")?;
+    let report = skills_sync_from(store.pool(), &ws, &source).await.context("import skills")?;
     println!(
         "imported {} skill(s) from {}",
         report.imported.len(),
@@ -490,9 +602,7 @@ async fn run_skills_list(store: &Store, args: SkillsListArgs, format: OutputForm
         return Ok(());
     };
     let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
-    let skills = SkillRepo::list(store.pool(), &ws)
-        .await
-        .context("list skills")?;
+    let skills = SkillRepo::list(store.pool(), &ws).await.context("list skills")?;
     render_skill_list(&skills, format);
     Ok(())
 }
@@ -531,9 +641,9 @@ fn run_warnings_reset(args: WarningsResetArgs) -> Result<()> {
         Some(p) => println!(
             "reset {removed} {p} warning ack(s); next {p} dispatch will re-warn about danger-full-access"
         ),
-        None => println!(
-            "reset {removed} warning ack(s); danger-full-access warnings will show again"
-        ),
+        None => {
+            println!("reset {removed} warning ack(s); danger-full-access warnings will show again")
+        }
     }
     Ok(())
 }
@@ -582,7 +692,8 @@ fn run_env_allow_add(args: EnvAllowKeyArgs) -> Result<()> {
     }
     let path = ainb_hangar_daemon::dispatch::default_allow_path()
         .context("resolve env.allow.toml path")?;
-    let mut cfg = ainb_hangar_daemon::dispatch::load_allow_at(&path).context("load env.allow.toml")?;
+    let mut cfg =
+        ainb_hangar_daemon::dispatch::load_allow_at(&path).context("load env.allow.toml")?;
     if cfg.allow.insert(args.key.clone()) {
         ainb_hangar_daemon::dispatch::save_allow_at(&path, &cfg).context("save env.allow.toml")?;
         println!("added {} to the env allowlist", args.key);
@@ -596,12 +707,16 @@ fn run_env_allow_add(args: EnvAllowKeyArgs) -> Result<()> {
 fn run_env_allow_remove(args: EnvAllowKeyArgs) -> Result<()> {
     let path = ainb_hangar_daemon::dispatch::default_allow_path()
         .context("resolve env.allow.toml path")?;
-    let mut cfg = ainb_hangar_daemon::dispatch::load_allow_at(&path).context("load env.allow.toml")?;
+    let mut cfg =
+        ainb_hangar_daemon::dispatch::load_allow_at(&path).context("load env.allow.toml")?;
     if cfg.allow.remove(&args.key) {
         ainb_hangar_daemon::dispatch::save_allow_at(&path, &cfg).context("save env.allow.toml")?;
         println!("removed {} from the env allowlist", args.key);
     } else {
-        println!("{} was not on the env allowlist (nothing removed)", args.key);
+        println!(
+            "{} was not on the env allowlist (nothing removed)",
+            args.key
+        );
     }
     Ok(())
 }
@@ -617,9 +732,7 @@ fn json_string_array<'a, I: Iterator<Item = &'a str>>(items: I) -> String {
 async fn dispatch_auth(cmd: AuthCommand, format: OutputFormat) -> Result<()> {
     let store = Store::open_default().await.context("open hangar database")?;
     match cmd {
-        AuthCommand::Token(TokenCommand::Create(args)) => {
-            run_token_create(&store, args).await
-        }
+        AuthCommand::Token(TokenCommand::Create(args)) => run_token_create(&store, args).await,
         AuthCommand::Token(TokenCommand::List) => run_token_list(&store, format).await,
         AuthCommand::Token(TokenCommand::Revoke(args)) => run_token_revoke(&store, args).await,
         AuthCommand::DaemonToken(DaemonTokenCommand::Create(args)) => {
@@ -845,7 +958,10 @@ async fn run_task_retry(store: &Store, args: TaskIdArgs) -> Result<()> {
             println!("task {} retried: spawned {new_task_id}", args.id);
         }
         RetryDecision::DoNotRetry => {
-            println!("task {} not retried (non-retryable or attempts exhausted)", args.id);
+            println!(
+                "task {} not retried (non-retryable or attempts exhausted)",
+                args.id
+            );
         }
     }
     Ok(())
@@ -945,11 +1061,10 @@ async fn ensure_default_workspace(store: &Store) -> Result<String> {
 /// Return the default owner user id (the first user, oldest first), or `None`
 /// if no user exists yet.
 async fn default_owner_id(store: &Store) -> Result<Option<String>> {
-    let id: Option<String> =
-        sqlx::query_scalar("SELECT id FROM user ORDER BY created_at LIMIT 1")
-            .fetch_optional(store.pool())
-            .await
-            .context("query default owner user")?;
+    let id: Option<String> = sqlx::query_scalar("SELECT id FROM user ORDER BY created_at LIMIT 1")
+        .fetch_optional(store.pool())
+        .await
+        .context("query default owner user")?;
     Ok(id)
 }
 
@@ -1042,13 +1157,8 @@ fn pat_md_row(t: &PatRecord) -> String {
 /// Minimal stable JSON object for one PAT (digest deliberately omitted — the
 /// hash is a server-side secret-equivalent, not list output).
 fn pat_to_json(t: &PatRecord) -> String {
-    let scope = t
-        .scope
-        .as_deref()
-        .map_or_else(|| "null".to_string(), json_string);
-    let last_used = t
-        .last_used
-        .map_or_else(|| "null".to_string(), |v| v.to_string());
+    let scope = t.scope.as_deref().map_or_else(|| "null".to_string(), json_string);
+    let last_used = t.last_used.map_or_else(|| "null".to_string(), |v| v.to_string());
     format!(
         "{{\"id\":{},\"scope\":{},\"created_at\":{},\"last_used\":{}}}",
         json_string(&t.id),
@@ -1097,10 +1207,7 @@ fn issue_line(i: &Issue) -> String {
 /// Minimal stable JSON object for one issue (hand-rolled to avoid pulling a
 /// serde derive onto the store's `Issue` type from this crate).
 fn issue_to_json(i: &Issue) -> String {
-    let desc = i
-        .description
-        .as_deref()
-        .map_or_else(|| "null".to_string(), json_string);
+    let desc = i.description.as_deref().map_or_else(|| "null".to_string(), json_string);
     format!(
         "{{\"id\":{},\"workspace_id\":{},\"title\":{},\"description\":{},\"state\":{},\"created_at\":{}}}",
         json_string(&i.id),
@@ -1147,11 +1254,7 @@ fn render_task_list(tasks: &[Task], format: OutputFormat) {
 fn render_skill_list(skills: &[ainb_hangar_core::skill::SkillWithFiles], format: OutputFormat) {
     match format {
         OutputFormat::Json => {
-            let body = skills
-                .iter()
-                .map(skill_to_json)
-                .collect::<Vec<_>>()
-                .join(",");
+            let body = skills.iter().map(skill_to_json).collect::<Vec<_>>().join(",");
             println!("[{body}]");
         }
         OutputFormat::Csv => {
@@ -1211,15 +1314,104 @@ fn skill_md_row(s: &ainb_hangar_core::skill::SkillWithFiles) -> String {
 }
 /// Minimal stable JSON object for one skill (name, file count, description).
 fn skill_to_json(s: &ainb_hangar_core::skill::SkillWithFiles) -> String {
-    let desc = s
-        .description
-        .as_deref()
-        .map_or_else(|| "null".to_string(), json_string);
+    let desc = s.description.as_deref().map_or_else(|| "null".to_string(), json_string);
     format!(
         "{{\"name\":{},\"files\":{},\"description\":{}}}",
         json_string(s.name.as_str()),
         s.files.len(),
         desc,
+    )
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Template render helpers (pure, over the IO-free embedded registry type).
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Render a slice of templates as a list in the chosen format.
+fn render_template_list(
+    templates: &[ainb_hangar_core::template::AgentTemplate],
+    format: OutputFormat,
+) {
+    match format {
+        OutputFormat::Json => {
+            let body = templates.iter().map(template_to_json).collect::<Vec<_>>().join(",");
+            println!("[{body}]");
+        }
+        OutputFormat::Csv => {
+            println!("{}", template_csv_header());
+            for t in templates {
+                println!("{}", template_csv_row(t));
+            }
+        }
+        OutputFormat::Markdown => {
+            print!("{}", template_md_header());
+            for t in templates {
+                println!("{}", template_md_row(t));
+            }
+        }
+        OutputFormat::Text => {
+            if templates.is_empty() {
+                println!("no templates");
+            } else {
+                for t in templates {
+                    println!("{}", template_line(t));
+                }
+            }
+        }
+    }
+}
+
+/// One-line text summary of a template (name, skill count, description).
+fn template_line(t: &ainb_hangar_core::template::AgentTemplate) -> String {
+    format!("{}  skills={}  {}", t.name, t.skills.len(), t.description)
+}
+
+/// Full text dump of one template (for `templates show`).
+fn template_detail(t: &ainb_hangar_core::template::AgentTemplate) -> String {
+    format!(
+        "name: {}\ndescription: {}\nagent: {}\nskills: {}\n\ninstructions:\n{}\n",
+        t.name,
+        t.description,
+        t.agent_md_path,
+        t.skills.join(", "),
+        t.instructions,
+    )
+}
+
+const fn template_csv_header() -> &'static str {
+    "name,skills,agent_md_path,description"
+}
+fn template_csv_row(t: &ainb_hangar_core::template::AgentTemplate) -> String {
+    format!(
+        "{},{},{},{}",
+        csv_field(&t.name),
+        csv_field(&t.skills.join(" ")),
+        csv_field(&t.agent_md_path),
+        csv_field(&t.description),
+    )
+}
+const fn template_md_header() -> &'static str {
+    "| name | skills | agent | description |\n| --- | --- | --- | --- |\n"
+}
+fn template_md_row(t: &ainb_hangar_core::template::AgentTemplate) -> String {
+    format!(
+        "| {} | {} | {} | {} |",
+        md_cell(&t.name),
+        md_cell(&t.skills.join(", ")),
+        md_cell(&t.agent_md_path),
+        md_cell(&t.description),
+    )
+}
+/// Stable JSON object for one template (the full embedded shape).
+fn template_to_json(t: &ainb_hangar_core::template::AgentTemplate) -> String {
+    let skills = json_string_array(t.skills.iter().map(String::as_str));
+    format!(
+        "{{\"name\":{},\"description\":{},\"agent_md_path\":{},\"instructions\":{},\"skills\":{}}}",
+        json_string(&t.name),
+        json_string(&t.description),
+        json_string(&t.agent_md_path),
+        json_string(&t.instructions),
+        skills,
     )
 }
 
@@ -1359,7 +1551,14 @@ mod tests {
     #[test]
     fn parses_issue_create_with_title_and_description() {
         let cmd = parse_hangar(&[
-            "ainb", "hangar", "issue", "create", "--title", "Fix bug", "--description", "details",
+            "ainb",
+            "hangar",
+            "issue",
+            "create",
+            "--title",
+            "Fix bug",
+            "--description",
+            "details",
         ]);
         let HangarCommand::Issue(IssueCommand::Create(args)) = cmd else {
             panic!("expected issue create, got {cmd:?}");
@@ -1420,8 +1619,16 @@ mod tests {
     #[test]
     fn parses_beads_reconcile_flags() {
         let cmd = parse_hangar(&[
-            "ainb", "hangar", "beads", "reconcile", "--dry-run", "--label", "foo", "--label",
-            "bar", "--json",
+            "ainb",
+            "hangar",
+            "beads",
+            "reconcile",
+            "--dry-run",
+            "--label",
+            "foo",
+            "--label",
+            "bar",
+            "--json",
         ]);
         let HangarCommand::Beads(BeadsCommand::Reconcile(args)) = cmd else {
             panic!("expected beads reconcile, got {cmd:?}");
@@ -1442,14 +1649,24 @@ mod tests {
         let registry = CommandRegistry::built_ins();
         let app = registry.build_clap(crate::cli::root_clap_command());
         let err = app.try_get_matches_from(["ainb", "hangar"]);
-        assert!(err.is_err(), "bare `ainb hangar` must error (subcommand_required)");
+        assert!(
+            err.is_err(),
+            "bare `ainb hangar` must error (subcommand_required)"
+        );
     }
 
     #[test]
     fn parses_skills_sync_with_all_flags() {
         let cmd = parse_hangar(&[
-            "ainb", "hangar", "skills", "sync", "--workspace", "default", "--source",
-            "/tmp/skills", "--dry-run",
+            "ainb",
+            "hangar",
+            "skills",
+            "sync",
+            "--workspace",
+            "default",
+            "--source",
+            "/tmp/skills",
+            "--dry-run",
         ]);
         let HangarCommand::Skills(SkillsCommand::Sync(args)) = cmd else {
             panic!("expected skills sync, got {cmd:?}");
@@ -1506,6 +1723,89 @@ mod tests {
         assert!(skill_to_json(&skill).contains("\"files\":1"));
         assert!(skill_csv_row(&skill).starts_with("commit,1,"));
         assert!(skill_md_row(&skill).contains("| commit |"));
+    }
+
+    #[test]
+    fn parses_templates_list() {
+        let cmd = parse_hangar(&["ainb", "hangar", "templates", "list"]);
+        assert!(matches!(
+            cmd,
+            HangarCommand::Templates(TemplatesCommand::List)
+        ));
+    }
+
+    #[test]
+    fn parses_templates_show_with_name() {
+        let cmd = parse_hangar(&["ainb", "hangar", "templates", "show", "code-reviewer"]);
+        let HangarCommand::Templates(TemplatesCommand::Show(args)) = cmd else {
+            panic!("expected templates show, got {cmd:?}");
+        };
+        assert_eq!(args.name, "code-reviewer");
+    }
+
+    #[test]
+    fn parses_templates_use_with_workspace_and_agent_name() {
+        let cmd = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "templates",
+            "use",
+            "code-reviewer",
+            "--workspace",
+            "default",
+            "--agent-name",
+            "my-reviewer",
+        ]);
+        let HangarCommand::Templates(TemplatesCommand::Use(args)) = cmd else {
+            panic!("expected templates use, got {cmd:?}");
+        };
+        assert_eq!(args.name, "code-reviewer");
+        assert_eq!(args.workspace.as_deref(), Some("default"));
+        assert_eq!(args.agent_name.as_deref(), Some("my-reviewer"));
+    }
+
+    #[test]
+    fn parses_templates_use_defaults() {
+        let cmd = parse_hangar(&["ainb", "hangar", "templates", "use", "planner"]);
+        let HangarCommand::Templates(TemplatesCommand::Use(args)) = cmd else {
+            panic!("expected templates use, got {cmd:?}");
+        };
+        assert_eq!(args.name, "planner");
+        assert!(args.workspace.is_none());
+        assert!(args.agent_name.is_none());
+    }
+
+    #[test]
+    fn template_renderers_emit_name_skills_description() {
+        use ainb_hangar_core::template::AgentTemplate;
+        let t = AgentTemplate {
+            name: "code-reviewer".into(),
+            description: "review code".into(),
+            agent_md_path: "engineering/code-reviewer.md".into(),
+            instructions: "be careful".into(),
+            skills: vec!["commit".into(), "find-missing-tests".into()],
+        };
+        assert!(template_line(&t).contains("code-reviewer"));
+        assert!(template_line(&t).contains("skills=2"));
+        assert!(template_detail(&t).contains("instructions:"));
+        assert!(template_detail(&t).contains("commit, find-missing-tests"));
+        assert!(template_to_json(&t).contains("\"name\":\"code-reviewer\""));
+        assert!(template_to_json(&t).contains("\"skills\":[\"commit\",\"find-missing-tests\"]"));
+        assert!(template_csv_row(&t).starts_with("code-reviewer,commit find-missing-tests,"));
+        assert!(template_md_row(&t).contains("| code-reviewer |"));
+    }
+
+    #[test]
+    fn render_template_list_handles_empty() {
+        // Smoke: empty list path does not panic in any format.
+        for fmt in [
+            OutputFormat::Text,
+            OutputFormat::Json,
+            OutputFormat::Csv,
+            OutputFormat::Markdown,
+        ] {
+            render_template_list(&[], fmt);
+        }
     }
 
     #[test]
@@ -1605,7 +1905,10 @@ mod tests {
     #[test]
     fn token_create_output_shows_plaintext_once_with_warning() {
         let out = token_create_output("pat-1", None, "ainb_SECRETBODY");
-        assert!(out.contains("ainb_SECRETBODY"), "plaintext must be printed once");
+        assert!(
+            out.contains("ainb_SECRETBODY"),
+            "plaintext must be printed once"
+        );
         assert_eq!(out.matches("ainb_SECRETBODY").count(), 1, "exactly once");
         assert!(
             out.to_lowercase().contains("once") && out.to_lowercase().contains("not recoverable"),
@@ -1616,7 +1919,10 @@ mod tests {
     #[test]
     fn token_create_output_echoes_advisory_name() {
         let out = token_create_output("pat-1", Some("ci-bot"), "ainb_SECRETBODY");
-        assert!(out.contains("ci-bot"), "advisory --name must be echoed: {out}");
+        assert!(
+            out.contains("ci-bot"),
+            "advisory --name must be echoed: {out}"
+        );
         // The label is cosmetic; the plaintext is still shown exactly once.
         assert_eq!(out.matches("ainb_SECRETBODY").count(), 1);
     }
