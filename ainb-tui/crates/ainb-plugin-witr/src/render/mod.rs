@@ -16,7 +16,12 @@
 //! conversion (mirror `ainb-plugin-burndown/src/plugin.rs` ~lines 608–640)
 //! once the tab UI needs `Layout::default().constraints(...)`.
 
+pub mod containers;
 pub mod empty;
+pub mod locks;
+pub mod ports;
+pub mod processes;
+pub mod tabs;
 
 #[cfg(test)]
 pub(crate) mod test_support;

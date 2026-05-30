@@ -22,6 +22,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .compact()
         .init();
 
-    Server::new(WitrPlugin).run_stdio().await?;
+    Server::new(WitrPlugin::default()).run_stdio().await?;
     Ok(())
 }
