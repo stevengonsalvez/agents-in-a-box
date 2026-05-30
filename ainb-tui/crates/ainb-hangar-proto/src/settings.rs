@@ -46,15 +46,25 @@ pub struct KeyRow {
     pub masked: String,
 }
 
-/// A workspace row for the workspace-switch section.
+/// A workspace row for the workspace-switch section (P5.5).
+///
+/// The settings Workspace pane renders these as a table: `slug | name |
+/// default? | active?`. Switching keys on the stable ULID `id`, never the
+/// `slug` (the recently-fixed slug/id conflation bug): `slug` is display-only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceRow {
-    /// Workspace id.
+    /// Stable ULID workspace id — what `s`/`d` switch and default on.
     pub id: String,
-    /// Workspace display name / slug.
+    /// Short display handle (e.g. `default`). Display-only.
+    #[serde(default)]
+    pub slug: String,
+    /// Workspace display name.
     pub name: String,
     /// Whether this is the currently-active workspace.
     pub current: bool,
+    /// Whether this is the configured default workspace.
+    #[serde(default)]
+    pub default: bool,
 }
 
 #[cfg(test)]

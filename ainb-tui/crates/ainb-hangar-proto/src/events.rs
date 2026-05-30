@@ -113,6 +113,20 @@ pub enum HangarEvent {
         /// The remote update timestamp (epoch milliseconds).
         updated_at: i64,
     },
+    /// The host's active workspace changed (P5.5).
+    ///
+    /// Emitted when `host/workspace_set_active` switches the active workspace.
+    /// Subscribed plugins re-fetch their workspace-scoped snapshots
+    /// (`hangar/issues_list`, etc.) keyed on `to`. `from` is the previously
+    /// active workspace id, or `None` when none was set (first activation).
+    /// Both ids are the stable ULID workspace id, never the slug.
+    WorkspaceChanged {
+        /// The previously active workspace id, or `None` if unset before.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
+        /// The newly active workspace id.
+        to: String,
+    },
 }
 
 /// The 5-colour transcript taxonomy (Multica UX §7 verbatim).
