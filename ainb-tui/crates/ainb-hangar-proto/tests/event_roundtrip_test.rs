@@ -90,6 +90,10 @@ fn all_variants() -> Vec<HangarEvent> {
             agent_id: agent_id("claude"),
             state: PresenceState::Online,
         },
+        HangarEvent::SkillUpdated {
+            skill: "commit".to_string(),
+            updated_at: 1_700_000_002_000,
+        },
     ]
 }
 
@@ -116,6 +120,7 @@ fn every_variant_carries_a_stable_event_tag() {
         "task_finished",
         "comment_added",
         "agent_presence",
+        "skill_updated",
     ];
     for (ev, tag) in all_variants().iter().zip(expected) {
         let v = serde_json::to_value(ev).expect("encode");

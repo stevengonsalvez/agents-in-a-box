@@ -102,6 +102,17 @@ pub enum HangarEvent {
         /// Its new presence state.
         state: PresenceState,
     },
+    /// A skill's curated source was updated remotely (the daemon pulled a newer
+    /// version from `toolkit/packages/skills/`).
+    ///
+    /// The skill-manager screen (P4.6) folds this into a conflict banner only
+    /// when the local copy is dirty; a clean local copy refreshes silently.
+    SkillUpdated {
+        /// The slug of the skill whose source changed.
+        skill: String,
+        /// The remote update timestamp (epoch milliseconds).
+        updated_at: i64,
+    },
 }
 
 /// The 5-colour transcript taxonomy (Multica UX §7 verbatim).
@@ -174,6 +185,58 @@ pub struct IssueRow {
     pub creator: String,
     /// Creation timestamp (epoch milliseconds).
     pub created_at: i64,
+}
+
+/// A wire-side actor row for the agent-picker snapshot (`hangar/agents_list`).
+///
+/// Polymorphic: a member (human) and an agent share this one shape so the picker
+/// renders them in a single flat list (Multica UX §12.1 polymorphic-actor
+/// model). The `kind` discriminates the two; `presence` is only meaningful for
+/// agents (a member is rendered as plainly available / offline), but the daemon
+/// supplies it uniformly so the plugin never branches on kind to read a field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActorRow {
+    /// The actor reference in canonical `member:<id>` / `agent:<id>` form.
+    pub actor_ref: String,
+    /// Display name (e.g. `alice`, `claude-agent`).
+    pub display_name: String,
+    /// A short subtitle (e.g. `backend dev`, `agent · gpt5`).
+    pub subtitle: String,
+    /// Current presence (drives the inline 3-state dot).
+    pub presence: PresenceState,
+    /// Whether this actor is an agent (`true`) or a human member (`false`).
+    pub is_agent: bool,
+    /// Recent-use rank: `Some(n)` pins the actor in the `RECENT` section (lower
+    /// `n` = more recent); `None` falls into the alphabetical body.
+    pub recent_rank: Option<u32>,
+}
+
+/// A wire-side skill row for the skill-manager list (`hangar/skills_list`).
+///
+/// A skill is a curated directory (a `SKILL.md` plus child files). The list pane
+/// (P4.6) renders these; `used` drives the `Used` / `Unused` filter chips, and
+/// `updated_at` is compared against the locally cached stamp to surface the
+/// remote-conflict banner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillRow {
+    /// The skill slug (its directory name, the stable id).
+    pub slug: String,
+    /// Human-readable skill name.
+    pub name: String,
+    /// Whether any agent currently references this skill (`false` = orphan).
+    pub used: bool,
+    /// The remote update timestamp (epoch milliseconds).
+    pub updated_at: i64,
+}
+
+/// A wire-side file entry within a skill's directory (`hangar/skill_files`).
+///
+/// Flat list of the skill's files relative to its root; the file-tree widget
+/// (P4.6) renders them as a tree by splitting `path` on `/`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillFile {
+    /// The file path relative to the skill root (e.g. `SKILL.md`, `assets/x.md`).
+    pub path: String,
 }
 
 /// A wire-side comment row.
