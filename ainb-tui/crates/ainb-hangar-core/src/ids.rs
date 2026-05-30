@@ -123,3 +123,7 @@ id_newtype! {
     /// Identifies an issue comment (the `comment` table PK).
     CommentId
 }
+id_newtype! {
+    /// Identifies a skill (the `skill` table PK).
+    SkillId
+}

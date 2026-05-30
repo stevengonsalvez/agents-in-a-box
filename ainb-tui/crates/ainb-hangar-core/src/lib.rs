@@ -22,6 +22,9 @@ pub mod env_policy;
 pub mod idgen;
 /// Strongly-typed entity id newtypes with a non-empty invariant.
 pub mod ids;
+/// Skill domain vocabulary: normalised [`skill::SkillName`], the
+/// [`skill::SkillWithFiles`] aggregate, and ordered file inputs.
+pub mod skill;
 /// The task domain: the `agent_task_queue` lifecycle FSM.
 pub mod task;
 /// The `agent_task_queue` lifecycle status enum (P0 placeholder).
