@@ -7,8 +7,11 @@
 //! 2. **Providers** — registered LLM providers with online/offline status.
 //! 3. **LLM keys** — a masked list; `n` opens the key-entry modal (writes to the
 //!    OS keychain via the `host/secret_store_get` cap), `d` deletes.
-//! 4. **Workspace switch** — switching reloads every open subscription, so it
-//!    goes through a confirm modal rather than a single keystroke.
+//! 4. **Workspace** (P5.5) — a `slug · name [default]` table with the active
+//!    workspace marked `▶` in `SELECTION_GREEN`. `s` sets the selected row
+//!    active (emits a `SwitchWorkspace` intent → `host/workspace_set_active`),
+//!    `d` toggles default, `n` creates a new workspace, `r` renames the
+//!    selected one. `J`/`K` move the in-pane selection.
 //!
 //! The reducer ([`reduce_settings`]) is **pure**. The crucial security property
 //! (P4.7 risk register, "keychain write leaks key into log"): entered key
@@ -111,9 +114,9 @@ pub enum ConnectionStatus {
 /// The render-state cache for the settings screen.
 ///
 /// Holds the four daemon snapshots, the active section, the in-section list
-/// selection, the connection status, and the two modal flags (key entry +
-/// workspace-switch confirm). The in-flight key-entry buffer is held as
-/// [`KeyMaterial`] so it can never leak through a `Debug`.
+/// selection, the connection status, and the key-entry modal flag. The
+/// in-flight key-entry buffer is held as [`KeyMaterial`] so it can never leak
+/// through a `Debug`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettingsState {
     health: HealthSnapshot,
@@ -126,8 +129,6 @@ pub struct SettingsState {
     connection: ConnectionStatus,
     /// The key-entry modal's in-flight value, present while the modal is open.
     key_entry: Option<KeyMaterial>,
-    /// Whether the workspace-switch confirm modal is open.
-    confirm_modal: bool,
 }
 
 impl SettingsState {
@@ -154,7 +155,6 @@ impl SettingsState {
             list_selected: 0,
             connection,
             key_entry: None,
-            confirm_modal: false,
         }
     }
 
@@ -162,6 +162,23 @@ impl SettingsState {
     #[must_use]
     pub const fn section(&self) -> SettingsSection {
         self.section
+    }
+
+    /// Replace the workspace rows (e.g. after a switch re-fetch), keeping the
+    /// active section + selection clamped to the new list. Used by the plugin
+    /// glue to refresh the pane after `host/workspace_set_active`.
+    pub fn set_workspaces(&mut self, workspaces: Vec<WorkspaceRow>) {
+        let max = workspaces.len().saturating_sub(1);
+        if self.list_selected > max {
+            self.list_selected = max;
+        }
+        self.workspaces = workspaces;
+    }
+
+    /// The workspace rows currently rendered (for the glue / tests).
+    #[must_use]
+    pub fn workspaces(&self) -> &[WorkspaceRow] {
+        &self.workspaces
     }
 
     /// The daemon-connection status.
@@ -174,12 +191,6 @@ impl SettingsState {
     #[must_use]
     pub const fn key_entry_open(&self) -> bool {
         self.key_entry.is_some()
-    }
-
-    /// Whether the workspace-switch confirm modal is open.
-    #[must_use]
-    pub const fn confirm_modal_open(&self) -> bool {
-        self.confirm_modal
     }
 }
 
@@ -206,8 +217,18 @@ pub enum SettingsIntent {
         /// The secret, redacted in any `Debug`/log.
         key: KeyMaterial,
     },
-    /// Switch to a workspace (confirmed in the modal). Carries the workspace id.
+    /// Switch the active workspace (`s` on the Workspace pane). Carries the
+    /// stable ULID workspace id (never the slug). The plugin glue maps this to
+    /// the `host/workspace_set_active` cap.
     SwitchWorkspace(String),
+    /// Toggle the default workspace (`d`). Carries the workspace id; maps to
+    /// `host/workspace_set_default`.
+    ToggleDefault(String),
+    /// Create a new workspace (`n` on the Workspace pane). The plugin glue
+    /// opens the host's new-workspace flow.
+    NewWorkspace,
+    /// Rename the selected workspace (`r`). Carries the workspace id.
+    RenameWorkspace(String),
 }
 
 /// The result of folding one [`SettingsEvent`] into a [`SettingsState`].
@@ -234,9 +255,6 @@ fn reduce_key(state: &SettingsState, c: char) -> SettingsReduction {
     if state.key_entry.is_some() {
         return reduce_key_entry_key(state, c);
     }
-    if state.confirm_modal {
-        return reduce_confirm_key(state, c);
-    }
     match c {
         'j' => move_section(state, SettingsSection::next),
         'k' => move_section(state, SettingsSection::prev),
@@ -244,9 +262,39 @@ fn reduce_key(state: &SettingsState, c: char) -> SettingsReduction {
         'J' => move_list(state, 1),
         'K' => move_list(state, -1),
         'n' if state.section == SettingsSection::Keys => open_key_entry(state),
-        '\n' | '\r' if state.section == SettingsSection::Workspaces => open_confirm(state),
+        // Workspace pane controls (P5.5): s set-active, d toggle-default,
+        // n new, r rename. All scoped to the Workspaces section.
+        's' if state.section == SettingsSection::Workspaces => {
+            workspace_intent(state, SettingsIntent::SwitchWorkspace)
+        }
+        'd' if state.section == SettingsSection::Workspaces => {
+            workspace_intent(state, SettingsIntent::ToggleDefault)
+        }
+        'r' if state.section == SettingsSection::Workspaces => {
+            workspace_intent(state, SettingsIntent::RenameWorkspace)
+        }
+        'n' if state.section == SettingsSection::Workspaces => SettingsReduction {
+            state: state.clone(),
+            intent: Some(SettingsIntent::NewWorkspace),
+        },
         _ => unchanged(state),
     }
+}
+
+/// Emit a workspace intent for the currently-selected workspace row, mapping
+/// its stable ULID id through `make`. A no-op (unchanged) when the list is
+/// empty so a stray key on an empty pane can't emit a bogus intent.
+fn workspace_intent(
+    state: &SettingsState,
+    make: fn(String) -> SettingsIntent,
+) -> SettingsReduction {
+    state.workspaces.get(state.list_selected).map_or_else(
+        || unchanged(state),
+        |w| SettingsReduction {
+            state: state.clone(),
+            intent: Some(make(w.id.clone())),
+        },
+    )
 }
 
 /// Handle a key while the key-entry modal is open: Enter writes, Backspace
@@ -275,20 +323,10 @@ fn reduce_key_entry_key(state: &SettingsState, c: char) -> SettingsReduction {
     }
 }
 
-/// Handle a key while the workspace-switch confirm modal is open: Enter
-/// confirms the switch, anything else is a no-op (Esc aborts via its event).
-fn reduce_confirm_key(state: &SettingsState, c: char) -> SettingsReduction {
-    match c {
-        '\n' | '\r' => confirm_switch(state),
-        _ => unchanged(state),
-    }
-}
-
-/// Esc: abort whichever modal is open; otherwise a no-op.
+/// Esc: abort the key-entry modal if open; otherwise a no-op.
 fn reduce_esc(state: &SettingsState) -> SettingsReduction {
     let mut next = state.clone();
     next.key_entry = None;
-    next.confirm_modal = false;
     no_intent(next)
 }
 
@@ -353,29 +391,6 @@ fn confirm_key_entry(state: &SettingsState) -> SettingsReduction {
     }
 }
 
-/// Open the workspace-switch confirm modal (no intent yet).
-fn open_confirm(state: &SettingsState) -> SettingsReduction {
-    let mut next = state.clone();
-    next.confirm_modal = true;
-    no_intent(next)
-}
-
-/// Confirm the workspace switch: close the modal and emit the switch intent for
-/// the selected workspace.
-fn confirm_switch(state: &SettingsState) -> SettingsReduction {
-    let mut next = state.clone();
-    next.confirm_modal = false;
-    let ws_id = next
-        .workspaces
-        .get(next.list_selected)
-        .map(|w| w.id.clone())
-        .unwrap_or_default();
-    SettingsReduction {
-        state: next,
-        intent: Some(SettingsIntent::SwitchWorkspace(ws_id)),
-    }
-}
-
 /// A reduction that changes state but emits no intent.
 const fn no_intent(state: SettingsState) -> SettingsReduction {
     SettingsReduction {
@@ -412,6 +427,8 @@ pub fn render_settings(
     const GREEN: Color = Color::rgb(100, 200, 100);
     const RED: Color = Color::rgb(220, 100, 100);
     const TEXT: Color = Color::rgb(220, 220, 230);
+    // Active-workspace indicator colour (TUI palette SELECTION_GREEN).
+    const SELECTION_GREEN: Color = Color::rgb(100, 200, 100);
 
     let mut row = top;
     let put = |buf: &mut WireBuffer, x: u16, row: u16, s: &str, color: Color| {
@@ -466,12 +483,24 @@ pub fn render_settings(
                 }
             }
             SettingsSection::Workspaces => {
-                for w in &state.workspaces {
+                for (i, w) in state.workspaces.iter().enumerate() {
                     if row >= bottom {
                         break;
                     }
-                    let mark = if w.current { "* " } else { "  " };
-                    put(buf, 4, row, &format!("{mark}{}", w.name), TEXT);
+                    // `▶ <slug>` in SELECTION_GREEN marks the active workspace;
+                    // a leading two-space gutter keeps inactive rows aligned.
+                    let active_mark = if w.current { "▶ " } else { "  " };
+                    let default_mark = if w.default { " [default]" } else { "" };
+                    let selected = state.section == SettingsSection::Workspaces
+                        && i == state.list_selected;
+                    let cursor = if selected { "›" } else { " " };
+                    let line = format!(
+                        "{cursor}{active_mark}{} · {}{default_mark}",
+                        w.slug, w.name
+                    );
+                    // The active row paints in SELECTION_GREEN; others in TEXT.
+                    let color = if w.current { SELECTION_GREEN } else { TEXT };
+                    put(buf, 4, row, &line, color);
                     row += 1;
                 }
             }

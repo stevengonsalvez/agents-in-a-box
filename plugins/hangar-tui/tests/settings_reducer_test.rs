@@ -36,8 +36,20 @@ fn keys() -> Vec<KeyRow> {
 
 fn workspaces() -> Vec<WorkspaceRow> {
     vec![
-        WorkspaceRow { id: "ws1".into(), name: "acme".into(), current: true },
-        WorkspaceRow { id: "ws2".into(), name: "globex".into(), current: false },
+        WorkspaceRow {
+            id: "ws1".into(),
+            slug: "acme".into(),
+            name: "Acme".into(),
+            current: true,
+            default: true,
+        },
+        WorkspaceRow {
+            id: "ws2".into(),
+            slug: "globex".into(),
+            name: "Globex".into(),
+            current: false,
+            default: false,
+        },
     ]
 }
 
@@ -113,26 +125,60 @@ fn key_entry_value_never_appears_in_debug_repr() {
     assert_eq!(km.expose(), "sk-super-secret-0000");
 }
 
-/// Switching workspace requires a confirmation modal (the switch reloads all
-/// subscriptions, so it cannot be a single keystroke).
+/// P5.5: `s` on the Workspace pane sets the SELECTED workspace active and emits
+/// a `SwitchWorkspace` intent carrying the row's stable ULID id (never the
+/// slug). No confirm modal — it is a single keystroke.
 #[test]
-fn workspace_switch_requires_confirm_modal() {
+fn s_sets_selected_workspace_active() {
     let mut s = state();
     s = reduce_settings(&s, SettingsEvent::Key('j')).state;
     s = reduce_settings(&s, SettingsEvent::Key('j')).state;
     s = reduce_settings(&s, SettingsEvent::Key('j')).state; // Workspaces
-    // Select the non-current workspace and press Enter — opens the confirm modal,
-    // does NOT emit the switch intent yet.
-    s = reduce_settings(&s, SettingsEvent::Key('J')).state; // move within section list
-    let opened = reduce_settings(&s, SettingsEvent::Key('\n'));
-    assert!(opened.state.confirm_modal_open());
-    assert!(opened.intent.is_none());
-    // Enter confirms → switch intent.
-    let confirmed = reduce_settings(&opened.state, SettingsEvent::Key('\n'));
+    // Select the non-current workspace (ws2) then press `s`.
+    s = reduce_settings(&s, SettingsEvent::Key('J')).state;
+    let out = reduce_settings(&s, SettingsEvent::Key('s'));
+    match out.intent {
+        Some(SettingsIntent::SwitchWorkspace(id)) => {
+            assert_eq!(id, "ws2", "switch must carry the ULID id, not the slug");
+        }
+        other => panic!("expected SwitchWorkspace intent, got {other:?}"),
+    }
+}
+
+/// P5.5: `d` toggles the default for the selected workspace; `n` opens the
+/// new-workspace flow; `r` renames the selected one. All scoped to the
+/// Workspace pane.
+#[test]
+fn d_n_r_emit_workspace_intents() {
+    let mut s = state();
+    s = reduce_settings(&s, SettingsEvent::Key('j')).state;
+    s = reduce_settings(&s, SettingsEvent::Key('j')).state;
+    s = reduce_settings(&s, SettingsEvent::Key('j')).state; // Workspaces (ws1 selected)
+
+    let d = reduce_settings(&s, SettingsEvent::Key('d'));
     assert!(matches!(
-        confirmed.intent,
-        Some(SettingsIntent::SwitchWorkspace(_))
+        d.intent,
+        Some(SettingsIntent::ToggleDefault(ref id)) if id == "ws1"
     ));
+
+    let n = reduce_settings(&s, SettingsEvent::Key('n'));
+    assert!(matches!(n.intent, Some(SettingsIntent::NewWorkspace)));
+
+    let r = reduce_settings(&s, SettingsEvent::Key('r'));
+    assert!(matches!(
+        r.intent,
+        Some(SettingsIntent::RenameWorkspace(ref id)) if id == "ws1"
+    ));
+}
+
+/// The Workspace pane keys are section-scoped: `s`/`d`/`r` do nothing on the
+/// Daemon section (no accidental switch from another pane).
+#[test]
+fn workspace_keys_inert_outside_workspace_pane() {
+    let s = state(); // Daemon section
+    assert!(reduce_settings(&s, SettingsEvent::Key('s')).intent.is_none());
+    assert!(reduce_settings(&s, SettingsEvent::Key('d')).intent.is_none());
+    assert!(reduce_settings(&s, SettingsEvent::Key('r')).intent.is_none());
 }
 
 /// A daemon-disconnected event flips the connection section status to red.
