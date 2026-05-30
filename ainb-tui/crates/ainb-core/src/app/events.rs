@@ -4883,6 +4883,7 @@ fn is_known_screen_id(id: &str) -> bool {
             | ids::CONFIG
             | ids::CATALOG
             | ids::ANALYTICS
+            | ids::WITR
             | ids::SESSION_LIST
             | ids::LOGS
             | ids::LOG_HISTORY
@@ -4943,6 +4944,7 @@ mod navigate_to_tests {
             ids::CONFIG,
             ids::CATALOG,
             ids::ANALYTICS,
+            ids::WITR,
             ids::SESSION_LIST,
             ids::LOGS,
             ids::LOG_HISTORY,
