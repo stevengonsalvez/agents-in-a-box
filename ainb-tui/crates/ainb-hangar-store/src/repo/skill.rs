@@ -22,13 +22,30 @@
 //!
 //! # Workspace scoping
 //!
-//! Every read in the typed API is filtered by `workspace_id` (or, for
-//! agent-scoped reads, joins through an `agent` row that is itself
-//! workspace-bound). The `(workspace_id, name)` unique index
-//! (`idx_skill_workspace_name`, migration 0008) is the authoritative guard that
-//! a skill name resolves to exactly one row per tenant — `PRAGMA foreign_keys`
-//! is off in this crate, so uniqueness and cascade-on-delete are enforced in
-//! application code, not by the engine.
+//! **Every method in the typed API takes a [`WorkspaceId`] and enforces it in
+//! SQL — there is no by-id read or mutation that trusts a bare ULID.** This is
+//! the tenant-isolation boundary: a caller holding a [`SkillId`] or [`AgentId`]
+//! minted in workspace A can never read, delete, or attach against workspace B's
+//! rows.
+//!
+//! - by-name / list reads ([`SkillRepo::list`], [`SkillRepo::upsert_by_name`])
+//!   filter `WHERE workspace_id = ?`;
+//! - by-id reads/deletes ([`SkillRepo::get`], [`SkillRepo::delete`]) filter
+//!   `WHERE id = ? AND workspace_id = ?` (the delete cascade to `skill_file` is
+//!   itself scoped, so a cross-tenant delete touches no child rows);
+//! - the agent-scoped read ([`SkillRepo::skills_for_agent`]) joins through the
+//!   `agent` row and filters `WHERE a.workspace_id = ?`, so a foreign agent id
+//!   yields an empty set;
+//! - the junction mutations ([`SkillRepo::attach_to_agent`],
+//!   [`SkillRepo::detach_from_agent`]) verify that **both** the agent and the
+//!   skill belong to the supplied workspace before touching `agent_skill`, and
+//!   return [`SkillRepoError::CrossWorkspace`] otherwise.
+//!
+//! The `(workspace_id, name)` unique index (`idx_skill_workspace_name`,
+//! migration 0008) is the authoritative guard that a skill name resolves to
+//! exactly one row per tenant — `PRAGMA foreign_keys` is off in this crate, so
+//! uniqueness and cascade-on-delete are enforced in application code, not by the
+//! engine.
 
 use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
 use ainb_hangar_core::ids::{AgentId, SkillId, WorkspaceId};
@@ -167,12 +184,10 @@ impl SkillRepo {
         pool: &SqlitePool,
         agent_id: &str,
     ) -> Result<Vec<String>, sqlx::Error> {
-        sqlx::query_scalar(
-            "SELECT skill_id FROM agent_skill WHERE agent_id = ? ORDER BY skill_id",
-        )
-        .bind(agent_id)
-        .fetch_all(pool)
-        .await
+        sqlx::query_scalar("SELECT skill_id FROM agent_skill WHERE agent_id = ? ORDER BY skill_id")
+            .bind(agent_id)
+            .fetch_all(pool)
+            .await
     }
 
     // ---- P6.1 typed API -------------------------------------------------------
@@ -210,6 +225,10 @@ impl SkillRepo {
 
     /// Fetch one skill as a [`SkillWithFiles`] aggregate, or `None` if absent.
     ///
+    /// Workspace-scoped: the row is fetched with `WHERE id = ? AND workspace_id
+    /// = ?`, so a [`SkillId`] minted in another workspace resolves to `None`
+    /// (never another tenant's row).
+    ///
     /// # Errors
     ///
     /// Returns [`SkillRepoError::Db`] on a SQL failure, or
@@ -218,9 +237,18 @@ impl SkillRepo {
     /// on write).
     pub async fn get(
         pool: &SqlitePool,
+        workspace: &WorkspaceId,
         id: &SkillId,
     ) -> Result<Option<SkillWithFiles>, SkillRepoError> {
-        let Some(row) = Self::get_row(pool, id.as_str()).await? else {
+        let row = sqlx::query_as::<_, Skill>(
+            "SELECT id, workspace_id, name, description, content \
+             FROM skill WHERE id = ? AND workspace_id = ?",
+        )
+        .bind(id.as_str())
+        .bind(workspace.as_str())
+        .fetch_optional(pool)
+        .await?;
+        let Some(row) = row else {
             return Ok(None);
         };
         Ok(Some(Self::hydrate(pool, row).await?))
@@ -311,20 +339,25 @@ impl SkillRepo {
         SkillId::from_str(id).map_err(|_| SkillRepoError::EmptyId)
     }
 
-    /// Attach a skill to an agent (idempotent).
+    /// Attach a skill to an agent (idempotent), within a single workspace.
     ///
-    /// `INSERT ... ON CONFLICT (agent_id, skill_id) DO NOTHING`, so calling it
-    /// twice leaves exactly one junction row.
+    /// Both the `agent` and the `skill` must belong to `workspace`; otherwise
+    /// this returns [`SkillRepoError::CrossWorkspace`] and writes nothing — a
+    /// caller holding an id from another tenant can never forge a junction row.
+    /// When both checks pass it runs `INSERT ... ON CONFLICT (agent_id,
+    /// skill_id) DO NOTHING`, so calling it twice leaves exactly one row.
     ///
     /// # Errors
     ///
-    /// Returns a [`sqlx::Error`] on failure (e.g. an FK target that does not
-    /// exist when foreign keys are enforced).
+    /// Returns [`SkillRepoError::CrossWorkspace`] if either the agent or the
+    /// skill is not in `workspace`, or [`SkillRepoError::Db`] on a SQL failure.
     pub async fn attach_to_agent(
         pool: &SqlitePool,
+        workspace: &WorkspaceId,
         agent: &AgentId,
         skill: &SkillId,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<(), SkillRepoError> {
+        Self::ensure_same_workspace(pool, workspace, agent, skill).await?;
         sqlx::query(
             "INSERT INTO agent_skill (agent_id, skill_id) VALUES (?, ?) \
              ON CONFLICT (agent_id, skill_id) DO NOTHING",
@@ -336,17 +369,23 @@ impl SkillRepo {
         Ok(())
     }
 
-    /// Detach a skill from an agent. Removing an absent link affects zero rows
-    /// (not an error), so detach is idempotent too.
+    /// Detach a skill from an agent, within a single workspace. Removing an
+    /// absent link affects zero rows (not an error), so detach is idempotent.
+    ///
+    /// Both the `agent` and the `skill` must belong to `workspace`; otherwise
+    /// this returns [`SkillRepoError::CrossWorkspace`] and deletes nothing.
     ///
     /// # Errors
     ///
-    /// Returns a [`sqlx::Error`] if the delete fails.
+    /// Returns [`SkillRepoError::CrossWorkspace`] if either the agent or the
+    /// skill is not in `workspace`, or [`SkillRepoError::Db`] on a SQL failure.
     pub async fn detach_from_agent(
         pool: &SqlitePool,
+        workspace: &WorkspaceId,
         agent: &AgentId,
         skill: &SkillId,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<(), SkillRepoError> {
+        Self::ensure_same_workspace(pool, workspace, agent, skill).await?;
         sqlx::query("DELETE FROM agent_skill WHERE agent_id = ? AND skill_id = ?")
             .bind(agent.as_str())
             .bind(skill.as_str())
@@ -377,8 +416,11 @@ impl SkillRepo {
     /// List the skills attached to an agent as [`SkillWithFiles`], ordered by
     /// skill name.
     ///
-    /// Joins `agent_skill` → `skill`; the result carries each skill's full file
-    /// set (the shape the dispatch materialiser, P6.4, writes to disk).
+    /// Joins `agent_skill` → `skill` and additionally joins the `agent` row,
+    /// filtering `WHERE ag.workspace_id = ?`: a foreign agent id (one that does
+    /// not belong to `workspace`) yields an empty set rather than leaking
+    /// another tenant's skills. The result carries each skill's full file set
+    /// (the shape the dispatch materialiser, P6.4, writes to disk).
     ///
     /// # Errors
     ///
@@ -386,16 +428,19 @@ impl SkillRepo {
     /// [`SkillRepoError::Name`] on a corrupt stored name.
     pub async fn skills_for_agent(
         pool: &SqlitePool,
+        workspace: &WorkspaceId,
         agent: &AgentId,
     ) -> Result<Vec<SkillWithFiles>, SkillRepoError> {
         let rows = sqlx::query_as::<_, Skill>(
             "SELECT s.id, s.workspace_id, s.name, s.description, s.content \
              FROM skill s \
              JOIN agent_skill a ON a.skill_id = s.id \
-             WHERE a.agent_id = ? \
+             JOIN agent ag ON ag.id = a.agent_id \
+             WHERE a.agent_id = ? AND ag.workspace_id = ? \
              ORDER BY s.name",
         )
         .bind(agent.as_str())
+        .bind(workspace.as_str())
         .fetch_all(pool)
         .await?;
         let mut out = Vec::with_capacity(rows.len());
@@ -407,6 +452,12 @@ impl SkillRepo {
 
     /// Delete a skill and its child `skill_file` rows in one transaction.
     ///
+    /// Workspace-scoped: the delete only fires when the skill belongs to
+    /// `workspace`. The child `skill_file` cascade is scoped through the same
+    /// guard (a subquery confirming the parent is in `workspace`), so a
+    /// cross-tenant call is a complete no-op — it removes neither the parent nor
+    /// any child file.
+    ///
     /// `PRAGMA foreign_keys` is off in this crate (and the schema declares no
     /// `ON DELETE CASCADE` on `skill_file`), so the cascade is performed
     /// explicitly: child files are deleted first, then the parent, atomically.
@@ -416,14 +467,25 @@ impl SkillRepo {
     /// # Errors
     ///
     /// Returns a [`sqlx::Error`] if either delete fails.
-    pub async fn delete(pool: &SqlitePool, id: &SkillId) -> Result<(), sqlx::Error> {
+    pub async fn delete(
+        pool: &SqlitePool,
+        workspace: &WorkspaceId,
+        id: &SkillId,
+    ) -> Result<(), sqlx::Error> {
         let mut tx = pool.begin().await?;
-        sqlx::query("DELETE FROM skill_file WHERE skill_id = ?")
+        // Scope the child cascade through the parent's workspace: only delete
+        // files whose skill is owned by `workspace`.
+        sqlx::query(
+            "DELETE FROM skill_file WHERE skill_id IN \
+             (SELECT id FROM skill WHERE id = ? AND workspace_id = ?)",
+        )
+        .bind(id.as_str())
+        .bind(workspace.as_str())
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("DELETE FROM skill WHERE id = ? AND workspace_id = ?")
             .bind(id.as_str())
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("DELETE FROM skill WHERE id = ?")
-            .bind(id.as_str())
+            .bind(workspace.as_str())
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
@@ -431,6 +493,36 @@ impl SkillRepo {
     }
 
     // ---- private helpers ------------------------------------------------------
+
+    /// Verify that both `agent` and `skill` belong to `workspace` before a
+    /// junction mutation. Returns [`SkillRepoError::CrossWorkspace`] if either is
+    /// absent from the workspace (which also covers a non-existent id).
+    async fn ensure_same_workspace(
+        pool: &SqlitePool,
+        workspace: &WorkspaceId,
+        agent: &AgentId,
+        skill: &SkillId,
+    ) -> Result<(), SkillRepoError> {
+        let agent_ok: Option<String> =
+            sqlx::query_scalar("SELECT id FROM agent WHERE id = ? AND workspace_id = ?")
+                .bind(agent.as_str())
+                .bind(workspace.as_str())
+                .fetch_optional(pool)
+                .await?;
+        if agent_ok.is_none() {
+            return Err(SkillRepoError::CrossWorkspace);
+        }
+        let skill_ok: Option<String> =
+            sqlx::query_scalar("SELECT id FROM skill WHERE id = ? AND workspace_id = ?")
+                .bind(skill.as_str())
+                .bind(workspace.as_str())
+                .fetch_optional(pool)
+                .await?;
+        if skill_ok.is_none() {
+            return Err(SkillRepoError::CrossWorkspace);
+        }
+        Ok(())
+    }
 
     /// Write a new skill row plus its files in one transaction. Shared by
     /// [`create`]; uniqueness conflicts surface from the parent insert.
@@ -506,6 +598,12 @@ pub enum SkillRepoError {
     /// `unwrap`'d so a corrupt row fails loudly instead of panicking the daemon.
     #[error("corrupt skill row: empty primary key")]
     EmptyId,
+    /// A junction mutation ([`SkillRepo::attach_to_agent`] /
+    /// [`SkillRepo::detach_from_agent`]) referenced an agent and/or skill that
+    /// do not both belong to the supplied workspace. The mutation is rejected
+    /// (nothing written) — this is the tenant-isolation guard against IDOR.
+    #[error("agent and skill must belong to the same workspace")]
+    CrossWorkspace,
 }
 
 impl sqlx::FromRow<'_, sqlx::sqlite::SqliteRow> for Skill {
