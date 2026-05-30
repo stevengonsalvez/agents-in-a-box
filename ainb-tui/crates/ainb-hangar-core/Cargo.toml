@@ -18,6 +18,12 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
 ulid = "1"
+# Token minting + hashing (P5.4). `sha2` for the SHA-256 digest, `subtle` for
+# constant-time digest comparison, `rand` for the injectable CSPRNG seam. All
+# IO-free, keeping this crate's no-IO contract intact.
+sha2 = "0.10"
+subtle = "2.5"
+rand = "0.8"
 
 [features]
 # Exposes the deterministic test doubles (`FixedClock`, `FixedIdGen`) to

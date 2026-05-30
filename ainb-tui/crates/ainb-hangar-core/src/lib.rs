@@ -22,3 +22,5 @@ pub mod ids;
 pub mod task;
 /// The `agent_task_queue` lifecycle status enum (P0 placeholder).
 pub mod task_status;
+/// Token minting + verification primitives (PAT / daemon-token, `sha256` only).
+pub mod token;
