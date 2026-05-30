@@ -27,6 +27,7 @@ pub mod snapshots;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use ainb_hangar_core::ids::{AgentId, SkillId, WorkspaceId};
 use ainb_hangar_proto::methods;
 use ainb_hangar_proto::settings::HealthSnapshot;
 use ainb_hangar_proto::{RpcError, RpcId, RpcRequest, RpcResponse};
@@ -212,6 +213,44 @@ async fn handle(
             };
             to_value(&ainb_hangar_proto::snapshots::SkillsListResult { skills })
         }
+        methods::HANGAR_SKILL_GET => {
+            let params: ainb_hangar_proto::snapshots::SkillGetParams =
+                parse_params(req, "{ workspace_id, skill_id }")?;
+            let detail = match resolve_wire(pool, &params.workspace_id).await? {
+                Some(ws) => {
+                    let skill = skill_id(&params.skill_id)?;
+                    snapshots::skill_get(pool, &ws, &skill).await.map_err(|e| skill_repo_err(&e))?
+                }
+                None => None,
+            };
+            // A missing skill (or unknown workspace) answers `null` — the detail
+            // pane simply renders nothing, never an error.
+            to_value(&detail)
+        }
+        methods::HANGAR_SKILLS_SYNC => {
+            let params: ainb_hangar_proto::snapshots::SkillsSyncParams =
+                parse_params(req, "{ workspace_id, source_path? }")?;
+            let Some(ws) = resolve_wire(pool, &params.workspace_id).await? else {
+                return Err(invalid_params(&format!(
+                    "unknown workspace `{}`",
+                    params.workspace_id
+                )));
+            };
+            let source = match params.source_path.as_deref() {
+                Some(p) => std::path::PathBuf::from(p),
+                None => crate::skills_sync::default_source_dir().ok_or_else(|| {
+                    invalid_params(
+                        "no skills source: set $AINB_TOOLKIT_SKILLS_DIR or pass source_path",
+                    )
+                })?,
+            };
+            let report = snapshots::skills_sync(pool, &ws, &source)
+                .await
+                .map_err(|e| internal(&format!("skills sync: {e}")))?;
+            to_value(&report)
+        }
+        methods::HANGAR_SKILL_ATTACH => attach_or_detach(pool, req, true).await,
+        methods::HANGAR_SKILL_DETACH => attach_or_detach(pool, req, false).await,
         methods::HANGAR_HEALTH => to_value(&health.snapshot(true)),
         other => Err(RpcError {
             code: METHOD_NOT_FOUND,
@@ -255,9 +294,102 @@ async fn resolve_workspace_id(
 /// an `INVALID_PARAMS` error only when the params are malformed (no `workspace_id`).
 async fn resolve(pool: &SqlitePool, req: &RpcRequest) -> Result<Option<String>, RpcError> {
     let wire = workspace_id(req)?;
-    resolve_workspace_id(pool, &wire)
-        .await
-        .map_err(|e| store_err(&e))
+    resolve_workspace_id(pool, &wire).await.map_err(|e| store_err(&e))
+}
+
+/// Deserialize a request's `params` into `T`, mapping a shape mismatch to an
+/// `INVALID_PARAMS` error whose message names the expected shape.
+fn parse_params<T: serde::de::DeserializeOwned>(
+    req: &RpcRequest,
+    shape: &str,
+) -> Result<T, RpcError> {
+    serde_json::from_value(req.params.clone()).map_err(|e| RpcError {
+        code: INVALID_PARAMS,
+        message: format!("expected {shape}: {e}"),
+        data: None,
+    })
+}
+
+/// Resolve a wire workspace identifier (slug OR id) to the real row id,
+/// returning `None` when no workspace matches and mapping a store fault to an
+/// internal error. The id-bearing P6.5 handlers use this (they carry their own
+/// params struct, unlike [`resolve`] which extracts `workspace_id` itself).
+async fn resolve_wire(pool: &SqlitePool, wire: &str) -> Result<Option<WorkspaceId>, RpcError> {
+    let id = resolve_workspace_id(pool, wire).await.map_err(|e| store_err(&e))?;
+    Ok(id.and_then(|id| WorkspaceId::from_str(id).ok()))
+}
+
+/// Build a typed [`SkillId`] from a wire string, erroring on an empty id.
+fn skill_id(raw: &str) -> Result<SkillId, RpcError> {
+    SkillId::from_str(raw.to_string())
+        .map_err(|_| invalid_params("skill_id must be a non-empty string"))
+}
+
+/// Build a typed [`AgentId`] from a wire string, erroring on an empty id.
+fn agent_id(raw: &str) -> Result<AgentId, RpcError> {
+    AgentId::from_str(raw.to_string())
+        .map_err(|_| invalid_params("agent_id must be a non-empty string"))
+}
+
+/// An `INVALID_PARAMS` error with `message`.
+fn invalid_params(message: &str) -> RpcError {
+    RpcError {
+        code: INVALID_PARAMS,
+        message: message.to_string(),
+        data: None,
+    }
+}
+
+/// An `INTERNAL_ERROR` with `message`.
+fn internal(message: &str) -> RpcError {
+    RpcError {
+        code: INTERNAL_ERROR,
+        message: message.to_string(),
+        data: None,
+    }
+}
+
+/// Map a [`SkillRepoError`] onto an RPC error: the cross-workspace guard is a
+/// client error (`INVALID_PARAMS`, the caller used a foreign id), every other
+/// fault is an internal store error.
+fn skill_repo_err(e: &ainb_hangar_store::repo::skill::SkillRepoError) -> RpcError {
+    use ainb_hangar_store::repo::skill::SkillRepoError;
+    match e {
+        SkillRepoError::CrossWorkspace => {
+            invalid_params("agent and skill must belong to the subscribed workspace")
+        }
+        other => internal(&format!("skill store error: {other}")),
+    }
+}
+
+/// Shared handler for `hangar/skill_attach` (`attach = true`) and
+/// `hangar/skill_detach` (`attach = false`): resolve the subscribed workspace
+/// and thread it (with the typed agent + skill ids) into the secured repo.
+async fn attach_or_detach(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+    attach: bool,
+) -> Result<serde_json::Value, RpcError> {
+    let params: ainb_hangar_proto::snapshots::SkillAttachParams =
+        parse_params(req, "{ workspace_id, agent_id, skill_id }")?;
+    let Some(ws) = resolve_wire(pool, &params.workspace_id).await? else {
+        return Err(invalid_params(&format!(
+            "unknown workspace `{}`",
+            params.workspace_id
+        )));
+    };
+    let agent = agent_id(&params.agent_id)?;
+    let skill = skill_id(&params.skill_id)?;
+    if attach {
+        snapshots::skill_attach(pool, &ws, &agent, &skill)
+            .await
+            .map_err(|e| skill_repo_err(&e))?;
+    } else {
+        snapshots::skill_detach(pool, &ws, &agent, &skill)
+            .await
+            .map_err(|e| skill_repo_err(&e))?;
+    }
+    Ok(serde_json::json!({}))
 }
 
 /// Serialize a result payload to a JSON value, mapping a (near-impossible)
@@ -362,7 +494,12 @@ mod tests {
     async fn ping_acks() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open_in(dir.path()).await.unwrap();
-        let resp = dispatch(store.pool(), &req(methods::PING, serde_json::Value::Null), &health()).await;
+        let resp = dispatch(
+            store.pool(),
+            &req(methods::PING, serde_json::Value::Null),
+            &health(),
+        )
+        .await;
         assert!(resp.error.is_none());
         assert_eq!(resp.id, RpcId::Number(1));
     }
@@ -373,7 +510,10 @@ mod tests {
         let store = Store::open_in(dir.path()).await.unwrap();
         let resp = dispatch(
             store.pool(),
-            &req(methods::WORKSPACE_SUBSCRIBE, serde_json::json!({"workspace_id":"default"})),
+            &req(
+                methods::WORKSPACE_SUBSCRIBE,
+                serde_json::json!({"workspace_id":"default"}),
+            ),
             &health(),
         )
         .await;
@@ -385,7 +525,12 @@ mod tests {
     async fn unknown_method_is_method_not_found() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open_in(dir.path()).await.unwrap();
-        let resp = dispatch(store.pool(), &req("nope/nope", serde_json::Value::Null), &health()).await;
+        let resp = dispatch(
+            store.pool(),
+            &req("nope/nope", serde_json::Value::Null),
+            &health(),
+        )
+        .await;
         assert_eq!(resp.error.unwrap().code, METHOD_NOT_FOUND);
     }
 
@@ -393,7 +538,12 @@ mod tests {
     async fn health_reports_socket_and_connected() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open_in(dir.path()).await.unwrap();
-        let resp = dispatch(store.pool(), &req(methods::HANGAR_HEALTH, serde_json::json!({})), &health()).await;
+        let resp = dispatch(
+            store.pool(),
+            &req(methods::HANGAR_HEALTH, serde_json::json!({})),
+            &health(),
+        )
+        .await;
         let v = resp.result.unwrap();
         assert_eq!(v["socket_path"], "/tmp/hangar.sock");
         assert_eq!(v["connected"], true);
@@ -404,7 +554,109 @@ mod tests {
     async fn issues_list_missing_workspace_id_is_invalid_params() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open_in(dir.path()).await.unwrap();
-        let resp = dispatch(store.pool(), &req(methods::HANGAR_ISSUES_LIST, serde_json::json!({})), &health()).await;
+        let resp = dispatch(
+            store.pool(),
+            &req(methods::HANGAR_ISSUES_LIST, serde_json::json!({})),
+            &health(),
+        )
+        .await;
+        assert_eq!(resp.error.unwrap().code, INVALID_PARAMS);
+    }
+
+    /// `hangar/skill_get` returns the seeded `commit` skill's detail, scoped to
+    /// the subscribed workspace.
+    #[tokio::test]
+    async fn skill_get_returns_detail_for_seeded_skill() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        let resp = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_SKILL_GET,
+                serde_json::json!({"workspace_id":"default","skill_id":"skill-commit"}),
+            ),
+            &health(),
+        )
+        .await;
+        assert!(resp.error.is_none(), "{resp:?}");
+        let v = resp.result.unwrap();
+        assert_eq!(v["slug"], "skill-commit");
+        assert_eq!(v["name"], "commit");
+    }
+
+    /// A skill id from another workspace resolves to `null` (tenant isolation),
+    /// never another tenant's body.
+    #[tokio::test]
+    async fn skill_get_foreign_workspace_is_null() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        let resp = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_SKILL_GET,
+                serde_json::json!({"workspace_id":"nope","skill_id":"skill-commit"}),
+            ),
+            &health(),
+        )
+        .await;
+        assert!(resp.error.is_none());
+        assert!(resp.result.unwrap().is_null());
+    }
+
+    /// `hangar/skill_attach` then `hangar/skill_detach` toggle the junction for a
+    /// seeded agent + the unused `review` skill.
+    #[tokio::test]
+    async fn skill_attach_then_detach_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+
+        let attach = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_SKILL_ATTACH,
+                serde_json::json!({"workspace_id":"default","agent_id":"agent-1","skill_id":"skill-review"}),
+            ),
+            &health(),
+        )
+        .await;
+        assert!(attach.error.is_none(), "{attach:?}");
+        // `review` is now used.
+        let skills = snapshots::skills_list(store.pool(), crate::seed::WS_ID).await.unwrap();
+        assert!(skills.iter().any(|s| s.name == "review" && s.used));
+
+        let detach = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_SKILL_DETACH,
+                serde_json::json!({"workspace_id":"default","agent_id":"agent-1","skill_id":"skill-review"}),
+            ),
+            &health(),
+        )
+        .await;
+        assert!(detach.error.is_none(), "{detach:?}");
+        let skills = snapshots::skills_list(store.pool(), crate::seed::WS_ID).await.unwrap();
+        assert!(skills.iter().any(|s| s.name == "review" && !s.used));
+    }
+
+    /// A cross-workspace attach (foreign agent id) is rejected with
+    /// `INVALID_PARAMS` and writes nothing.
+    #[tokio::test]
+    async fn skill_attach_cross_workspace_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        let resp = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_SKILL_ATTACH,
+                serde_json::json!({"workspace_id":"default","agent_id":"nonexistent-agent","skill_id":"skill-commit"}),
+            ),
+            &health(),
+        )
+        .await;
         assert_eq!(resp.error.unwrap().code, INVALID_PARAMS);
     }
 
@@ -414,7 +666,10 @@ mod tests {
         let store = Store::open_in(dir.path()).await.unwrap();
         let resp = dispatch(
             store.pool(),
-            &req(methods::HANGAR_ISSUES_LIST, serde_json::json!({"workspace_id":"nope"})),
+            &req(
+                methods::HANGAR_ISSUES_LIST,
+                serde_json::json!({"workspace_id":"nope"}),
+            ),
             &health(),
         )
         .await;

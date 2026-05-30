@@ -14,12 +14,13 @@
 //! picker; the real online/away signal for humans lands with presence tracking
 //! in a later phase).
 
-use ainb_hangar_core::ids::IssueId;
-use ainb_hangar_proto::events::{ActorRow, IssueRow, PresenceState, SkillRow};
+use ainb_hangar_core::ids::{AgentId, IssueId, SkillId, WorkspaceId};
+use ainb_hangar_proto::events::{ActorRow, IssueRow, PresenceState, SkillFile, SkillRow};
+use ainb_hangar_proto::snapshots::{SkillDetail, SkillsSyncResult};
 use ainb_hangar_store::repo::agent::AgentRepo;
 use ainb_hangar_store::repo::agent_runtime::AgentRuntimeRepo;
 use ainb_hangar_store::repo::issue::IssueRepo;
-use ainb_hangar_store::repo::skill::SkillRepo;
+use ainb_hangar_store::repo::skill::{SkillRepo, SkillRepoError};
 use sqlx::{Row, SqlitePool};
 
 /// Every Hangar issue lifecycle state, queried per-state and concatenated so the
@@ -170,9 +171,103 @@ async fn members_of(pool: &SqlitePool, workspace_id: &str) -> Result<Vec<MemberR
 }
 
 /// The set of skill ids referenced by at least one agent (drives `used`).
-async fn used_skill_ids(pool: &SqlitePool) -> Result<std::collections::HashSet<String>, sqlx::Error> {
+async fn used_skill_ids(
+    pool: &SqlitePool,
+) -> Result<std::collections::HashSet<String>, sqlx::Error> {
     let ids: Vec<String> = sqlx::query_scalar("SELECT DISTINCT skill_id FROM agent_skill")
         .fetch_all(pool)
         .await?;
     Ok(ids.into_iter().collect())
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// P6.5 — skill detail / sync / attach / detach handlers.
+//
+// Every one resolves the subscribed `workspace` (already mapped slug→id by the
+// dispatcher) and threads it into the secured `SkillRepo` by-id methods, so a
+// skill or agent id minted in another tenant can never be read or mutated here.
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Fetch one skill's full detail (`hangar/skill_get`), scoped to `workspace`.
+///
+/// Returns `None` when the id resolves to no skill in `workspace` (a foreign id
+/// reads as absent, never another tenant's body). The wire [`SkillDetail`]
+/// carries the SKILL.md body plus the path-ordered file list the detail pane's
+/// file tree renders.
+///
+/// # Errors
+///
+/// Returns a [`SkillRepoError`] on a store failure or a corrupt stored row.
+pub async fn skill_get(
+    pool: &SqlitePool,
+    workspace: &WorkspaceId,
+    skill_id: &SkillId,
+) -> Result<Option<SkillDetail>, SkillRepoError> {
+    let Some(skill) = SkillRepo::get(pool, workspace, skill_id).await? else {
+        return Ok(None);
+    };
+    Ok(Some(SkillDetail {
+        slug: skill.id.as_str().to_string(),
+        name: skill.name.as_str().to_string(),
+        description: skill.description,
+        body: skill.content,
+        files: skill.files.into_iter().map(|f| SkillFile { path: f.path }).collect(),
+    }))
+}
+
+/// Import the curated toolkit skills into `workspace` (`hangar/skills_sync`).
+///
+/// `source` is the resolved source directory (the caller maps an absent
+/// `source_path` to [`crate::skills_sync::default_source_dir`]). Returns the
+/// imported names + count for the plugin's "Imported N skills" toast.
+///
+/// # Errors
+///
+/// Returns a [`crate::skills_sync::SyncError`] when the source can't be walked,
+/// a `SKILL.md` is malformed, or a store write fails (all-or-nothing).
+pub async fn skills_sync(
+    pool: &SqlitePool,
+    workspace: &WorkspaceId,
+    source: &std::path::Path,
+) -> Result<SkillsSyncResult, crate::skills_sync::SyncError> {
+    let report = crate::skills_sync::skills_sync_from(pool, workspace, source).await?;
+    let imported: Vec<String> = report.imported.into_iter().map(|(name, _id)| name).collect();
+    let count = imported.len();
+    Ok(SkillsSyncResult { imported, count })
+}
+
+/// Attach a skill to an agent within `workspace` (`hangar/skill_attach`).
+///
+/// Delegates to the secured [`SkillRepo::attach_to_agent`], which verifies both
+/// ids belong to `workspace` before touching `agent_skill` (the tenant guard);
+/// a cross-workspace id pair surfaces as [`SkillRepoError::CrossWorkspace`].
+///
+/// # Errors
+///
+/// Returns [`SkillRepoError::CrossWorkspace`] when either id is foreign, or
+/// [`SkillRepoError::Db`] on a store failure.
+pub async fn skill_attach(
+    pool: &SqlitePool,
+    workspace: &WorkspaceId,
+    agent: &AgentId,
+    skill: &SkillId,
+) -> Result<(), SkillRepoError> {
+    SkillRepo::attach_to_agent(pool, workspace, agent, skill).await
+}
+
+/// Detach a skill from an agent within `workspace` (`hangar/skill_detach`).
+///
+/// Idempotent + workspace-scoped, mirroring [`skill_attach`].
+///
+/// # Errors
+///
+/// Returns [`SkillRepoError::CrossWorkspace`] when either id is foreign, or
+/// [`SkillRepoError::Db`] on a store failure.
+pub async fn skill_detach(
+    pool: &SqlitePool,
+    workspace: &WorkspaceId,
+    agent: &AgentId,
+    skill: &SkillId,
+) -> Result<(), SkillRepoError> {
+    SkillRepo::detach_from_agent(pool, workspace, agent, skill).await
 }
