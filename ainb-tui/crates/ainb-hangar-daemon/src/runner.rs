@@ -54,6 +54,14 @@ pub const ENV_ALLOWLIST: &[&str] = &[
     "XDG_RUNTIME_DIR",
     "XDG_CONFIG_HOME",
     "XDG_DATA_HOME",
+    // P6.4: provider-home pointers the daemon sets deliberately at dispatch so a
+    // home-style provider (claude/codex/cursor) reads its materialised skills
+    // from the task-isolated home rather than the operator's real `$HOME`. These
+    // are daemon-controlled config (set from the materialise report), never
+    // inherited ambient values, so allowlisting them leaks nothing.
+    "CLAUDE_HOME",
+    "CODEX_HOME",
+    "CURSOR_HOME",
 ];
 
 /// The provider-log file written under [`ExecEnv::logs`].
@@ -166,19 +174,13 @@ impl Runner {
     ///
     /// Returns an [`std::io::Error`] if the binary cannot be spawned, the log
     /// file cannot be opened/written, or stdout cannot be read.
-    pub async fn run_claude<I>(
-        &self,
-        env: &ExecEnv,
-        source_env: I,
-    ) -> std::io::Result<RunOutcome>
+    pub async fn run_claude<I>(&self, env: &ExecEnv, source_env: I) -> std::io::Result<RunOutcome>
     where
         I: IntoIterator<Item = (String, String)>,
     {
         let allow: std::collections::HashSet<&str> = ENV_ALLOWLIST.iter().copied().collect();
-        let allowed: Vec<(String, String)> = source_env
-            .into_iter()
-            .filter(|(k, _)| allow.contains(k.as_str()))
-            .collect();
+        let allowed: Vec<(String, String)> =
+            source_env.into_iter().filter(|(k, _)| allow.contains(k.as_str())).collect();
 
         let log_path = env.logs.join(LOG_FILE);
         let log_file = std::fs::OpenOptions::new()
@@ -221,9 +223,8 @@ impl Runner {
         // tail. Both run concurrently with the wait so a chatty provider can
         // never deadlock on a full pipe buffer.
         let tail_lines = self.cfg.tail_lines;
-        let stdout_task = tokio::spawn(async move {
-            stream_stdout(stdout, log_file, tail_lines).await
-        });
+        let stdout_task =
+            tokio::spawn(async move { stream_stdout(stdout, log_file, tail_lines).await });
         let stderr_task = tokio::spawn(async move { tail_reader(stderr, tail_lines).await });
 
         let timed_out = match tokio::time::timeout(self.cfg.max_runtime, child.wait()).await {

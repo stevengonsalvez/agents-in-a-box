@@ -45,7 +45,7 @@ use sqlx::{Row, SqlitePool};
 use crate::execenv::prepare_env;
 use crate::runner::{Provider, RunOutcome, Runner, RunnerConfig};
 use crate::sweeper::{
-    sweep_expired_queued, sweep_stale_dispatched, sweep_stale_running, SweeperConfig,
+    SweeperConfig, sweep_expired_queued, sweep_stale_dispatched, sweep_stale_running,
 };
 
 /// Default claim-poll interval when `HANGAR_DAEMON_POLL_MS` is unset.
@@ -76,12 +76,11 @@ impl DaemonConfig {
     /// Build the config from the process environment (see the module table).
     #[must_use]
     pub fn from_env() -> Self {
-        let runtime_id = std::env::var("HANGAR_DAEMON_RUNTIME_ID")
-            .ok()
-            .filter(|s| !s.is_empty());
+        let runtime_id = std::env::var("HANGAR_DAEMON_RUNTIME_ID").ok().filter(|s| !s.is_empty());
         let claude_path = std::env::var_os("HANGAR_CLAUDE_PATH")
             .map_or_else(|| PathBuf::from("claude"), PathBuf::from);
-        let poll_interval = Duration::from_millis(env_u64("HANGAR_DAEMON_POLL_MS", DEFAULT_POLL_MS));
+        let poll_interval =
+            Duration::from_millis(env_u64("HANGAR_DAEMON_POLL_MS", DEFAULT_POLL_MS));
 
         let mut sweeper = SweeperConfig::default();
         if let Some(ms) = env_u64_opt("HANGAR_SWEEP_INTERVAL_MS") {
@@ -248,7 +247,18 @@ async fn execute_claimed(
     let daemon_env: std::collections::HashMap<String, String> = std::env::vars().collect();
     let policy = load_env_policy();
     let keychain_keys: Vec<(String, String)> = Vec::new();
-    let task_env = crate::dispatch::build_task_env(&daemon_env, keychain_keys, &policy);
+    let mut task_env = crate::dispatch::build_task_env(&daemon_env, keychain_keys, &policy);
+
+    // P6.4: materialise the agent's attached skills into the provider's layout
+    // before spawning. Home-style providers (claude/codex/cursor) land their
+    // skills under the *task root* (sibling of `workdir`, so the git worktree
+    // stays clean) and are pointed there via a `*_HOME` env var, which is
+    // folded into `task_env` here so the runner forwards it. A materialisation
+    // fault is non-fatal — a task must still dispatch even if a skill bundle
+    // cannot be written (the agent simply runs without its skills).
+    if let Some((key, path)) = materialise_skills(pool, &task, &env).await {
+        task_env.insert(key, path.to_string_lossy().into_owned());
+    }
 
     // P5.6: warn about `danger-full-access` on the first invocation of this
     // provider in this session. The decision + ack persistence are authoritative
@@ -289,6 +299,72 @@ async fn execute_claimed(
         }
     }
     Ok(())
+}
+
+/// Materialise the claimed task's agent skills into the provider layout, after
+/// the per-task env exists and before the provider spawns (P6.4).
+///
+/// Resolves the provider from the task's agent → its runtime, then copies every
+/// attached skill bundle to disk via [`crate::materialise::materialise_for_agent`].
+/// Returns the `*_HOME` env var (name, path) the runner must forward so a
+/// home-style provider (claude/codex/cursor) discovers the skills under the task
+/// root, or `None` when there is no env pointer (no skills, or an in-workdir
+/// provider).
+///
+/// Best-effort: any resolution or IO fault is logged and swallowed (`None`) — a
+/// task must still dispatch even if its skills cannot be materialised.
+async fn materialise_skills(
+    pool: &SqlitePool,
+    task: &Task,
+    env: &crate::execenv::ExecEnv,
+) -> Option<(String, PathBuf)> {
+    let provider = match resolve_provider(pool, &task.agent_id).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, task_id = %task.id, "skill materialise: provider resolve failed; skipping");
+            return None;
+        }
+    };
+    let Ok(agent) = ainb_hangar_core::ids::AgentId::from_str(task.agent_id.clone()) else {
+        return None;
+    };
+    let target = crate::materialise::MaterialiseTarget {
+        task_root: env.root().to_path_buf(),
+        workdir: env.workdir.clone(),
+        provider,
+    };
+    match crate::materialise::materialise_for_agent(pool, &agent, &target).await {
+        Ok(report) => {
+            if report.files_written > 0 {
+                tracing::info!(
+                    task_id = %task.id,
+                    files = report.files_written,
+                    bytes = report.total_bytes,
+                    skills = ?report.skill_names,
+                    "skills materialised"
+                );
+            }
+            report.home_env
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, task_id = %task.id, "skill materialise failed; proceeding without skills");
+            None
+        }
+    }
+}
+
+/// Resolve the provider wire name for a task's agent (agent → runtime →
+/// `provider`).
+async fn resolve_provider(pool: &SqlitePool, agent_id: &str) -> anyhow::Result<String> {
+    use ainb_hangar_store::repo::agent::AgentRepo;
+    use ainb_hangar_store::repo::agent_runtime::AgentRuntimeRepo;
+    let agent = AgentRepo::get(pool, agent_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("agent {agent_id} not found"))?;
+    let runtime = AgentRuntimeRepo::get(pool, &agent.runtime_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("runtime {} not found", agent.runtime_id))?;
+    Ok(runtime.provider)
 }
 
 /// Look up a workspace's slug by id.
@@ -342,12 +418,10 @@ fn load_env_policy() -> ainb_hangar_core::env_policy::EnvPolicy {
 /// [`crate::execenv::prepare_env`]). Mirrors [`ainb_hangar_store::Store`]'s home
 /// resolution so the daemon's env dirs and its database share a root.
 fn hangar_home() -> PathBuf {
-    std::env::var_os("AINB_HANGAR_HOME")
-        .filter(|p| !p.is_empty())
-        .map_or_else(
-            || dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")),
-            PathBuf::from,
-        )
+    std::env::var_os("AINB_HANGAR_HOME").filter(|p| !p.is_empty()).map_or_else(
+        || dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")),
+        PathBuf::from,
+    )
 }
 
 /// Warn about `danger-full-access` on the first invocation of `provider` in this
