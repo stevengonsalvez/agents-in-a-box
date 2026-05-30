@@ -68,6 +68,14 @@ impl LayoutComponent {
         if let Some(screen) = self.screens.get_mut(&state.current_screen) {
             tracing::debug!("Rendering screen via registry: {}", state.current_screen);
             screen.render(frame, frame_size, state);
+            // Notifications must render on registry-routed screens too —
+            // before this fix they only painted on the legacy
+            // fallthrough path, which silently masked any
+            // `state.add_*_notification` call from a screen-specific
+            // event handler (e.g. SkillManager's [s]→Sync routing,
+            // bead v12.1.T3). Painted before the help overlay so the
+            // help panel still wins z-order if both are visible.
+            self.render_notifications(frame, frame_size, state);
             if state.help_visible {
                 tracing::debug!("Rendering help overlay on {}", state.current_screen);
                 self.help.render(frame, frame_size);

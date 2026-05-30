@@ -3631,9 +3631,22 @@ impl EventHandler {
                 // paint. Tests assert routing-only behaviour against
                 // the dispatch table; integration tests for the CLI
                 // path live in `ainb-cli/tests/skill_sync_*`.
+                //
+                // Surface a `sync: <unit>` info notification so the user
+                // sees that `[s]` routed to Sync (not ConflictFlip) and
+                // so the live tmux tripwire (v12.1.T3) can observe the
+                // routing decision in the captured pane.
                 tracing::info!("Units panel: sync selected unit");
+                let unit_name = state
+                    .skill_manager_state
+                    .units
+                    .get(state.skill_manager_state.selected)
+                    .map(|u| u.name.clone());
                 let ainb_home = ainb_skill_core::default_ainb_home();
                 state.skill_manager_state.reload_from_disk(&ainb_home);
+                if let Some(name) = unit_name {
+                    state.add_info_notification(format!("sync: {name}"));
+                }
             }
             AppEvent::SkillManagerConflictFlip => {
                 tracing::info!("Units panel: flip shadowed_by on selected unit");
