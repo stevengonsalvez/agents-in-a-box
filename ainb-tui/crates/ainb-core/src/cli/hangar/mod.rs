@@ -80,6 +80,40 @@ pub enum HangarCommand {
     /// Manage Hangar auth tokens (PATs + daemon tokens).
     #[command(subcommand)]
     Auth(AuthCommand),
+    /// Configure Hangar (env allowlist, …).
+    #[command(subcommand)]
+    Config(ConfigCommand),
+}
+
+/// `hangar config <noun>`.
+#[derive(Subcommand, Debug)]
+pub enum ConfigCommand {
+    /// Manage the provider-subprocess env allowlist.
+    #[command(name = "env.allow", subcommand)]
+    EnvAllow(EnvAllowCommand),
+}
+
+/// `hangar config env.allow <verb>`.
+///
+/// The allowlist governs which *ambient* env vars pass through to a provider
+/// subprocess. A hardcoded code-injection deny family (`LD_PRELOAD`,
+/// `DYLD_INSERT_LIBRARIES`, …) always overrides — `add`ing one of those is
+/// rejected before it ever reaches the file.
+#[derive(Subcommand, Debug)]
+pub enum EnvAllowCommand {
+    /// Show the merged effective allowlist (`[deny-locked]` marks deny entries).
+    List,
+    /// Add an env-var name (or `*`-suffix glob) to the allowlist.
+    Add(EnvAllowKeyArgs),
+    /// Remove an env-var name from the allowlist.
+    Remove(EnvAllowKeyArgs),
+}
+
+/// Arguments for `hangar config env.allow add|remove`.
+#[derive(Args, Debug)]
+pub struct EnvAllowKeyArgs {
+    /// The env-var name (e.g. `FOO_BAR`) or `*`-suffix glob (e.g. `MY_*`).
+    pub key: String,
 }
 
 /// `hangar auth <verb>`.
@@ -284,7 +318,92 @@ pub async fn dispatch(cmd: HangarCommand, format: OutputFormat) -> Result<()> {
         HangarCommand::Beads(BeadsCommand::Reconcile(args)) => run_beads_reconcile(args).await,
         HangarCommand::Daemon(DaemonCommand::Status) => run_daemon_status().await,
         HangarCommand::Auth(c) => dispatch_auth(c, format).await,
+        HangarCommand::Config(c) => dispatch_config(c, format),
     }
+}
+
+/// Dispatch the `hangar config` verbs (synchronous — pure file IO, no database).
+fn dispatch_config(cmd: ConfigCommand, format: OutputFormat) -> Result<()> {
+    match cmd {
+        ConfigCommand::EnvAllow(EnvAllowCommand::List) => run_env_allow_list(format),
+        ConfigCommand::EnvAllow(EnvAllowCommand::Add(args)) => run_env_allow_add(args),
+        ConfigCommand::EnvAllow(EnvAllowCommand::Remove(args)) => run_env_allow_remove(args),
+    }
+}
+
+/// `hangar config env.allow list`: print the merged effective set.
+///
+/// Shows every allowlisted key, then every hardcoded-deny key with a
+/// `[deny-locked]` suffix (deny always overrides allow, so it is part of the
+/// effective policy the operator should see).
+fn run_env_allow_list(format: OutputFormat) -> Result<()> {
+    let path = ainb_hangar_daemon::dispatch::default_allow_path()
+        .context("resolve env.allow.toml path")?;
+    let cfg = ainb_hangar_daemon::dispatch::load_allow_at(&path).context("load env.allow.toml")?;
+
+    match format {
+        OutputFormat::Json => {
+            let allow: Vec<&String> = cfg.allow.iter().collect();
+            let deny: Vec<&&str> = ainb_hangar_core::env_policy::DENY.iter().collect();
+            println!(
+                "{{\"allow\":{},\"deny_locked\":{}}}",
+                json_string_array(allow.iter().map(|s| s.as_str())),
+                json_string_array(deny.iter().map(|s| **s)),
+            );
+        }
+        OutputFormat::Text | OutputFormat::Csv | OutputFormat::Markdown => {
+            for key in &cfg.allow {
+                println!("{key}");
+            }
+            for denied in ainb_hangar_core::env_policy::DENY {
+                println!("{denied} [deny-locked]");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `hangar config env.allow add <KEY>`: reject deny-family keys, else upsert +
+/// atomically save (preserving foreign sections).
+fn run_env_allow_add(args: EnvAllowKeyArgs) -> Result<()> {
+    if ainb_hangar_core::env_policy::DENY.contains(&args.key.as_str()) {
+        anyhow::bail!(
+            "{} is in the hardcoded deny family and can never be allowlisted (code-injection risk); \
+             refusing to write it",
+            args.key
+        );
+    }
+    let path = ainb_hangar_daemon::dispatch::default_allow_path()
+        .context("resolve env.allow.toml path")?;
+    let mut cfg = ainb_hangar_daemon::dispatch::load_allow_at(&path).context("load env.allow.toml")?;
+    if cfg.allow.insert(args.key.clone()) {
+        ainb_hangar_daemon::dispatch::save_allow_at(&path, &cfg).context("save env.allow.toml")?;
+        println!("added {} to the env allowlist", args.key);
+    } else {
+        println!("{} is already on the env allowlist", args.key);
+    }
+    Ok(())
+}
+
+/// `hangar config env.allow remove <KEY>`: remove + atomically save.
+fn run_env_allow_remove(args: EnvAllowKeyArgs) -> Result<()> {
+    let path = ainb_hangar_daemon::dispatch::default_allow_path()
+        .context("resolve env.allow.toml path")?;
+    let mut cfg = ainb_hangar_daemon::dispatch::load_allow_at(&path).context("load env.allow.toml")?;
+    if cfg.allow.remove(&args.key) {
+        ainb_hangar_daemon::dispatch::save_allow_at(&path, &cfg).context("save env.allow.toml")?;
+        println!("removed {} from the env allowlist", args.key);
+    } else {
+        println!("{} was not on the env allowlist (nothing removed)", args.key);
+    }
+    Ok(())
+}
+
+/// Render a slice of strings as a compact JSON array, reusing the module's
+/// JSON string escaper.
+fn json_string_array<'a, I: Iterator<Item = &'a str>>(items: I) -> String {
+    let body = items.map(json_string).collect::<Vec<_>>().join(",");
+    format!("[{body}]")
 }
 
 /// Dispatch the `hangar auth` verbs.
@@ -1043,6 +1162,40 @@ mod tests {
     fn json_string_escapes_quotes_and_control() {
         assert_eq!(json_string("a\"b"), "\"a\\\"b\"");
         assert_eq!(json_string("x\ny"), "\"x\\ny\"");
+    }
+
+    #[test]
+    fn parses_config_env_allow_list() {
+        let cmd = parse_hangar(&["ainb", "hangar", "config", "env.allow", "list"]);
+        assert!(matches!(
+            cmd,
+            HangarCommand::Config(ConfigCommand::EnvAllow(EnvAllowCommand::List))
+        ));
+    }
+
+    #[test]
+    fn parses_config_env_allow_add_with_key() {
+        let cmd = parse_hangar(&["ainb", "hangar", "config", "env.allow", "add", "FOO_BAR"]);
+        let HangarCommand::Config(ConfigCommand::EnvAllow(EnvAllowCommand::Add(args))) = cmd else {
+            panic!("expected config env.allow add, got {cmd:?}");
+        };
+        assert_eq!(args.key, "FOO_BAR");
+    }
+
+    #[test]
+    fn parses_config_env_allow_remove_with_key() {
+        let cmd = parse_hangar(&["ainb", "hangar", "config", "env.allow", "remove", "BAZ_QUX"]);
+        let HangarCommand::Config(ConfigCommand::EnvAllow(EnvAllowCommand::Remove(args))) = cmd
+        else {
+            panic!("expected config env.allow remove, got {cmd:?}");
+        };
+        assert_eq!(args.key, "BAZ_QUX");
+    }
+
+    #[test]
+    fn json_string_array_renders_compact_array() {
+        assert_eq!(json_string_array(["A", "B"].into_iter()), "[\"A\",\"B\"]");
+        assert_eq!(json_string_array(std::iter::empty()), "[]");
     }
 
     #[test]
