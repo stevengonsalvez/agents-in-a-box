@@ -29,6 +29,7 @@ use async_trait::async_trait;
 
 use crate::chrome::{render_footer, render_top_bar, Presence};
 use crate::connection::{ConnState, Connection, DEFAULT_WORKSPACE_ID};
+use crate::firstrun::{self, reduce_first_run, FirstRunIntent, FirstRunModal};
 use crate::jsonrpc_over_socket::{encode_request, FrameDecoder};
 use crate::screen::{
     render_body, route_key, AppEvent, AppState, NavIntent, Screen, ScreenStates, WorkspaceAction,
@@ -83,6 +84,14 @@ pub struct HangarPlugin {
     /// Set when a subscribe ack just arrived, so `handle_event` knows to fire
     /// the snapshot fetches (it has the `host` the sync decode path lacks).
     fetch_pending: bool,
+    /// The first-run danger-full-access modal (P5.6). `Showing` over the landing
+    /// screen on a fresh machine until the user accepts (`y`), then `Dismissed`.
+    /// Initialised from the recorded `warnings_ack` on `plugin/init`.
+    first_run: FirstRunModal,
+    /// Set when the user accepted the first-run modal (`y`); the `first_run` ack
+    /// is persisted to `state.toml` in `render` (where host IO is safe, unlike
+    /// the inline `handle_key`). One write per accept.
+    first_run_ack_pending: bool,
 }
 
 impl HangarPlugin {
@@ -336,6 +345,26 @@ impl HangarPlugin {
     /// screen's reducer via [`route_key`], whose cross-screen [`NavIntent`]s
     /// drive the routing-state transition + lazy modal construction here.
     fn on_key(&mut self, key: &ainb_plugin_sdk::KeyEvent) {
+        // P5.6: while the first-run danger-full-access modal is showing it is
+        // *modal* — it captures every key. `y` dismisses + arms the ack persist
+        // (drained in `render`, where host IO is safe); `q` falls through to the
+        // host's quit; every other key is swallowed so it can't leak to the
+        // screen beneath the warning.
+        if self.first_run.is_showing() {
+            if let KeyCode::Char { ch } = key.code {
+                if ch == 'q' {
+                    // Let the host handle quit; don't dismiss the warning.
+                    return;
+                }
+                let out = reduce_first_run(self.first_run, ch);
+                self.first_run = out.state;
+                if matches!(out.intent, Some(FirstRunIntent::AckFirstRun)) {
+                    self.first_run_ack_pending = true;
+                }
+            }
+            return;
+        }
+
         // Snapshot the routing state so the borrow on `self.app` is released
         // before we mutate `self.screens` and `self.app` below.
         let app = self.app_state().clone();
@@ -421,6 +450,13 @@ impl Plugin for HangarPlugin {
     }
 
     async fn on_init(&mut self, host: &HostClient, _granted: &[String]) -> Result<()> {
+        // P5.6: decide whether to show the first-run danger-full-access modal
+        // from the recorded acks in `~/.ainb/hangar/state.toml`. A missing file
+        // (fresh machine) → no acks → the modal shows once.
+        self.first_run = firstrun::state_path()
+            .map_or(FirstRunModal::Dismissed, |p| {
+                FirstRunModal::from_acks(&firstrun::read_acks(&p))
+            });
         self.connect(host).await;
         Ok(())
     }
@@ -466,6 +502,18 @@ impl Plugin for HangarPlugin {
         if let Some(action) = self.screens.take_pending_ws_action() {
             self.apply_workspace_action(host, action).await;
         }
+        // P5.6: persist the first-run ack here (deferred from `handle_key`). The
+        // modal is already `Dismissed` in state; this records it so a relaunch
+        // skips the warning. An IO fault is logged, not fatal.
+        if std::mem::take(&mut self.first_run_ack_pending) {
+            if let Some(path) = firstrun::state_path() {
+                if let Err(e) = firstrun::ack_first_run(&path) {
+                    let _ = host
+                        .log_info(format!("hangar: first-run ack persist failed: {e}"))
+                        .await;
+                }
+            }
+        }
         let (w, h) = if params.viewport.width == 0 || params.viewport.height == 0 {
             FALLBACK_VIEWPORT
         } else {
@@ -490,6 +538,11 @@ impl Plugin for HangarPlugin {
         render_top_bar(&mut buf, w, &app.screen, &ws_slug, presence);
         render_body(&mut buf, w, h, &app, &self.screens);
         render_footer(&mut buf, w, h, &app.screen);
+        // P5.6: the first-run danger-full-access modal overlays everything (last
+        // write wins on the sparse buffer) until the user accepts.
+        if self.first_run.is_showing() {
+            crate::widgets::danger_access_modal::render_danger_access_modal(&mut buf, w, h);
+        }
         Ok(buf)
     }
 

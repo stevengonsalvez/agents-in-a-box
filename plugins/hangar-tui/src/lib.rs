@@ -9,6 +9,7 @@
 
 pub mod chrome;
 pub mod connection;
+pub mod firstrun;
 pub mod jsonrpc_over_socket;
 pub mod plugin;
 pub mod screen;
@@ -17,6 +18,7 @@ pub mod widgets;
 
 pub use chrome::{render_footer, render_top_bar, Presence};
 pub use connection::{ConnState, Connection};
+pub use firstrun::{reduce_first_run, FirstRunIntent, FirstRunModal, FirstRunReduction};
 pub use plugin::{HangarPlugin, MANIFEST_TOML};
 pub use screen::issue_list::{
     reduce_issue_list, FilterChip, IssueColumn, IssueListEvent, IssueListIntent, IssueListMode,

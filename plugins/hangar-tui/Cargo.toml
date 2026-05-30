@@ -36,11 +36,13 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+# P5.6: the first-run danger-full-access flow reads/writes the `warnings_ack`
+# array of `~/.ainb/hangar/state.toml`, preserving foreign keys (TOML round-trip).
+toml = { workspace = true }
 
 [dev-dependencies]
 ainb-plugin-protocol = { path = "../../ainb-tui/crates/ainb-plugin-protocol" }
 tempfile = { workspace = true }
-toml = { workspace = true }
 # Event fixtures in the issue-list reducer tests carry `DateTime<Utc>` start
 # stamps (`TaskStarted`); the proto crate re-exports the types but tests build
 # the values directly.
