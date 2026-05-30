@@ -142,9 +142,7 @@ impl FrameDecoder {
 
 /// Find the first occurrence of `needle` in `haystack`.
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|w| w == needle)
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 /// An inbound-frame decoding failure.
@@ -164,9 +162,12 @@ mod tests {
 
     #[test]
     fn encode_request_round_trips_via_decoder() {
-        let frame =
-            encode_request(7, "workspace/subscribe", serde_json::json!({"workspace_id": "default"}))
-                .unwrap();
+        let frame = encode_request(
+            7,
+            "workspace/subscribe",
+            serde_json::json!({"workspace_id": "default"}),
+        )
+        .unwrap();
         // A request is not an RpcResponse, but the framing layer is shared —
         // re-decode the body manually to prove the header is well-formed.
         let sep = b"\r\n\r\n";
@@ -202,7 +203,10 @@ mod tests {
         let mut d = FrameDecoder::new();
         let f = response_frame(2, &serde_json::json!({}));
         let mid = f.len() / 2;
-        assert!(d.push(&f[..mid]).unwrap().is_empty(), "partial yields nothing");
+        assert!(
+            d.push(&f[..mid]).unwrap().is_empty(),
+            "partial yields nothing"
+        );
         let out = d.push(&f[mid..]).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].id, RpcId::Number(2));

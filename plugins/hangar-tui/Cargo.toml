@@ -24,9 +24,14 @@ path = "src/main.rs"
 [dependencies]
 ainb-plugin-sdk-rust = { path = "../../ainb-tui/crates/ainb-plugin-sdk-rust" }
 ainb-hangar-proto = { path = "../../ainb-tui/crates/ainb-hangar-proto" }
+# Pure, IO-free domain vocabulary (typed ids, actor refs). No SQLite/tokio,
+# so the plugin still "owns zero domain data" — it only borrows the type
+# names to address rows it pulls over RPC.
+ainb-hangar-core = { path = "../../ainb-tui/crates/ainb-hangar-core" }
 
 tokio = { workspace = true }
 async-trait = "0.1"
+serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
@@ -36,6 +41,10 @@ tracing-subscriber = { workspace = true }
 ainb-plugin-protocol = { path = "../../ainb-tui/crates/ainb-plugin-protocol" }
 tempfile = { workspace = true }
 toml = { workspace = true }
+# Event fixtures in the issue-list reducer tests carry `DateTime<Utc>` start
+# stamps (`TaskStarted`); the proto crate re-exports the types but tests build
+# the values directly.
+chrono = { workspace = true }
 
 # Local lint config rather than `workspace = true`, mirroring the sibling
 # ainb-hangar-* crates: the workspace-level lints declare lint groups at the

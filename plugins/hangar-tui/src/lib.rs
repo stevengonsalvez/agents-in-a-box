@@ -7,9 +7,20 @@
 //! `Plugin` trait. The connection state machine + daemon JSON-RPC
 //! client land in P3.7.
 
+pub mod chrome;
 pub mod connection;
 pub mod jsonrpc_over_socket;
 pub mod plugin;
+pub mod screen;
+pub mod stream;
+pub mod widgets;
 
+pub use chrome::{render_footer, render_top_bar, Presence};
 pub use connection::{ConnState, Connection};
 pub use plugin::{HangarPlugin, MANIFEST_TOML};
+pub use screen::issue_list::{
+    reduce_issue_list, FilterChip, IssueColumn, IssueListEvent, IssueListIntent, IssueListMode,
+    IssueListReduction, IssueListState,
+};
+pub use screen::{reduce, ActiveTaskBanner, AppEvent, AppState, Intent, Reduction, Screen};
+pub use stream::{Backoff, StreamClient, StreamError, SubscribeReplay};

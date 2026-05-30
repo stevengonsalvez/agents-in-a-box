@@ -9,10 +9,11 @@
 //! reassembles them with a [`FrameDecoder`] and acks the subscribe to
 //! reach [`ConnState::Connected`].
 //!
-//! `render` paints a colour-coded footer on the last viewport row:
-//! `"Hangar: <state>"` — gold when Connected, muted-gray while Dialing /
-//! Handshaking, red when Disconnected / Error. The body is left blank
-//! (P4 fills it with the Core 5 screens).
+//! `render` paints the shared P4.1 chrome: the [top tab bar](crate::chrome)
+//! on row 0 (four primary tabs + workspace slug + an online/offline presence
+//! dot derived from the daemon link) and the contextual key-hint footer on the
+//! last row. The screen body (rows `1..h-1`) is filled by the per-screen
+//! renderers landing in P4.3..P4.7.
 //!
 //! Everything declared in `manifest.toml` — the four P3 host caps — is
 //! requested here; this phase exercises `unix_socket_dial` +
@@ -21,13 +22,16 @@
 
 use ainb_hangar_proto::{methods as daemon_methods, RpcId};
 use ainb_plugin_sdk::{
-    Cell, CliOutput, Color, Coord, HandleEventParams, HostClient, Plugin, RenderParams, Result,
-    RpcError, UnixSocketEvent, UnixSocketEventKind, WireBuffer,
+    CliOutput, HandleEventParams, HostClient, Plugin, RenderParams, Result, RpcError,
+    UnixSocketEvent, UnixSocketEventKind, WireBuffer,
 };
 use async_trait::async_trait;
 
+use crate::chrome::{render_footer, render_top_bar, Presence};
 use crate::connection::{ConnState, Connection, DEFAULT_WORKSPACE_ID};
 use crate::jsonrpc_over_socket::{encode_request, FrameDecoder};
+use crate::screen::AppState;
+use ainb_hangar_core::ids::WorkspaceId;
 
 /// Static manifest TOML loaded at compile time. The [`Server`] uses
 /// this on `plugin/init` to echo `name`/`version` back to the host so
@@ -52,11 +56,6 @@ const DAEMON_SOCKET_PATH: &str = "~/.ainb/hangar.sock";
 /// reply as the handshake completion.
 const SUBSCRIBE_REQ_ID: i64 = 1;
 
-// Footer colours, mirroring the ainb TUI palette.
-const GOLD: Color = Color::rgb(255, 215, 0);
-const MUTED_GRAY: Color = Color::rgb(120, 120, 140);
-const RED: Color = Color::rgb(220, 80, 80);
-
 /// Hangar plugin state.
 ///
 /// Holds the daemon [`Connection`] state machine and the inbound socket
@@ -66,6 +65,7 @@ const RED: Color = Color::rgb(220, 80, 80);
 pub struct HangarPlugin {
     conn: Connection,
     decoder: FrameDecoder,
+    app: Option<AppState>,
 }
 
 impl HangarPlugin {
@@ -75,12 +75,28 @@ impl HangarPlugin {
         Self::default()
     }
 
-    /// Footer colour for the current connection state.
-    const fn footer_color(state: &ConnState) -> Color {
+    /// The routing state, lazily initialised on the `default` workspace.
+    ///
+    /// P4.1 lands routing state on the plugin so the shared chrome (top tab
+    /// bar + footer) can render the active screen. Later P4 sub-beads replace
+    /// the fixed `default` workspace with the one the daemon hands back on
+    /// `workspace/subscribe`.
+    fn app_state(&mut self) -> &AppState {
+        self.app.get_or_insert_with(|| {
+            let ws = WorkspaceId::from_str(DEFAULT_WORKSPACE_ID)
+                .expect("DEFAULT_WORKSPACE_ID is a non-empty literal");
+            AppState::new(ws)
+        })
+    }
+
+    /// Presence dot state derived from the daemon link.
+    const fn presence(state: &ConnState) -> Presence {
         match state {
-            ConnState::Connected => GOLD,
-            ConnState::Dialing | ConnState::Handshake => MUTED_GRAY,
-            ConnState::Disconnected | ConnState::Error(_) => RED,
+            ConnState::Connected => Presence::Online,
+            ConnState::Disconnected
+            | ConnState::Dialing
+            | ConnState::Handshake
+            | ConnState::Error(_) => Presence::Offline,
         }
     }
 
@@ -119,9 +135,7 @@ impl HangarPlugin {
             self.conn.on_error(format!("send subscribe failed: {e}"));
             return;
         }
-        let _ = host
-            .log_info("hangar: dialed daemon, subscribe sent")
-            .await;
+        let _ = host.log_info("hangar: dialed daemon, subscribe sent").await;
     }
 
     /// Feed an inbound `socket:<stream_id>` event into the connection.
@@ -183,10 +197,7 @@ impl Plugin for HangarPlugin {
 
     async fn handle_event(&mut self, _host: &HostClient, params: HandleEventParams) -> Result<()> {
         // Only socket:<stream_id> deliveries for our current stream concern us.
-        let want = self
-            .conn
-            .stream_id()
-            .map(|id| format!("socket:{id}"));
+        let want = self.conn.stream_id().map(|id| format!("socket:{id}"));
         if want.as_deref() != Some(params.topic.as_str()) {
             return Ok(());
         }
@@ -205,19 +216,15 @@ impl Plugin for HangarPlugin {
         };
         let mut buf = WireBuffer::new(w, h);
 
-        // Body stays blank (P4 fills it). Paint the footer on the last row.
-        let footer = format!("Hangar: {}", self.conn.state().label());
-        let color = Self::footer_color(self.conn.state());
-        let row = h.saturating_sub(1);
-        for (i, ch) in footer.chars().enumerate() {
-            let Ok(x) = u16::try_from(i) else { break };
-            if x >= w {
-                break;
-            }
-            let mut cell = Cell::new(ch.to_string());
-            cell.fg = Some(color);
-            buf.push(Coord::new(x, row), cell);
-        }
+        // Shared chrome (P4.1): top tab bar on row 0, contextual footer on the
+        // last row. The active screen body (rows 1..h-1) is filled by the
+        // per-screen renderers landing in P4.3..P4.7.
+        let presence = Self::presence(self.conn.state());
+        let app = self.app_state();
+        let ws_slug = app.ws_id.as_str().to_string();
+        let screen = app.screen.clone();
+        render_top_bar(&mut buf, w, &screen, &ws_slug, presence);
+        render_footer(&mut buf, w, h, &screen);
         Ok(buf)
     }
 
@@ -257,7 +264,10 @@ mod tests {
             ["workspace:*", "stream:*", "managed:*", "socket:*"]
         );
         assert_eq!(
-            m.capabilities.spawn_managed_subprocess.allow_list().unwrap(),
+            m.capabilities
+                .spawn_managed_subprocess
+                .allow_list()
+                .unwrap(),
             ["ainb-hangar-daemon"]
         );
         assert_eq!(
@@ -305,16 +315,29 @@ mod tests {
         ));
     }
 
-    /// The footer colour is Gold only when Connected, Red when down.
+    /// Presence maps to the top-bar dot: Online only when Connected, Offline
+    /// for every transient or failed link state.
     #[test]
-    fn footer_colors_map_state() {
-        assert_eq!(HangarPlugin::footer_color(&ConnState::Connected), GOLD);
-        assert_eq!(HangarPlugin::footer_color(&ConnState::Dialing), MUTED_GRAY);
-        assert_eq!(HangarPlugin::footer_color(&ConnState::Handshake), MUTED_GRAY);
-        assert_eq!(HangarPlugin::footer_color(&ConnState::Disconnected), RED);
+    fn presence_maps_state() {
         assert_eq!(
-            HangarPlugin::footer_color(&ConnState::Error("x".into())),
-            RED
+            HangarPlugin::presence(&ConnState::Connected),
+            Presence::Online
+        );
+        assert_eq!(
+            HangarPlugin::presence(&ConnState::Dialing),
+            Presence::Offline
+        );
+        assert_eq!(
+            HangarPlugin::presence(&ConnState::Handshake),
+            Presence::Offline
+        );
+        assert_eq!(
+            HangarPlugin::presence(&ConnState::Disconnected),
+            Presence::Offline
+        );
+        assert_eq!(
+            HangarPlugin::presence(&ConnState::Error("x".into())),
+            Presence::Offline
         );
     }
 
