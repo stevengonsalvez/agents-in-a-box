@@ -113,6 +113,24 @@ pub enum HangarEvent {
         /// The remote update timestamp (epoch milliseconds).
         updated_at: i64,
     },
+    /// An autopilot's fields changed (created / enabled toggled / next-tick
+    /// recomputed) (P7.5).
+    ///
+    /// The manager screen folds this to refresh the row in place. Carries the
+    /// full [`AutopilotRow`] so the screen needs no extra fetch.
+    AutopilotUpdated(AutopilotRow),
+    /// An autopilot fired (or skipped) a tick (P7.5).
+    ///
+    /// Emitted by the scheduler / fire path so the run-history pane can prepend a
+    /// fresh run without re-fetching. Carries the affected autopilot's id and the
+    /// run's terminal-or-running status (`running` / `completed` / `failed` /
+    /// `cancelled` / `skipped`).
+    AutopilotRunChanged {
+        /// The autopilot the run belongs to.
+        autopilot_id: String,
+        /// The run's current status.
+        status: String,
+    },
     /// The host's active workspace changed (P5.5).
     ///
     /// Emitted when `host/workspace_set_active` switches the active workspace.
@@ -251,6 +269,55 @@ pub struct SkillRow {
 pub struct SkillFile {
     /// The file path relative to the skill root (e.g. `SKILL.md`, `assets/x.md`).
     pub path: String,
+}
+
+/// A wire-side autopilot row for the manager list (`hangar/autopilots_list`).
+///
+/// A cron-scheduled autopilot (P7). The manager table (P7.5) renders these; the
+/// daemon flattens its rich store row (typed ids, epoch-ms `next_tick_at`) into
+/// this flat shape. The plugin owns zero domain data — it only renders the row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutopilotRow {
+    /// The autopilot id (ULID string, the stable id the table rows carry).
+    pub id: String,
+    /// Owning workspace id.
+    pub workspace_id: String,
+    /// The agent dispatched to at each tick.
+    pub agent_id: String,
+    /// Display name (unique within the workspace).
+    pub name: String,
+    /// The validated UTC cron expression (e.g. `"0 9 * * 1-5"`).
+    pub cron_expr: String,
+    /// Cached next-firing instant (epoch-ms); `None` when no future match or
+    /// while disabled with no recompute pending.
+    pub next_tick_at: Option<i64>,
+    /// Whether the scheduler currently considers this autopilot.
+    pub enabled: bool,
+    /// The most recent run's status (`completed` / `failed` / `running` /
+    /// `skipped` / `cancelled`), or `None` when the autopilot has never run.
+    /// Drives the `LAST RUN` column.
+    pub last_run_status: Option<String>,
+    /// The most recent run's start instant (epoch-ms), or `None` when never run.
+    pub last_run_at: Option<i64>,
+}
+
+/// A wire-side autopilot run row for the history pane (`hangar/autopilot_runs`).
+///
+/// One firing of an autopilot. The run-history pane (P7.5) renders these
+/// latest-first below the selected autopilot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutopilotRunRow {
+    /// The run id (ULID string).
+    pub id: String,
+    /// The autopilot this run belongs to.
+    pub autopilot_id: String,
+    /// When the run started (epoch-ms).
+    pub started_at: i64,
+    /// When the run finished (epoch-ms); `None` while in flight.
+    pub completed_at: Option<i64>,
+    /// Lifecycle status (`running` / `completed` / `failed` / `cancelled` /
+    /// `skipped`).
+    pub status: String,
 }
 
 /// A wire-side comment row.

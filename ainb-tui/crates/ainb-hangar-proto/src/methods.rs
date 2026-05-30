@@ -75,6 +75,36 @@ pub const HANGAR_SKILL_ATTACH: &str = "hangar/skill_attach";
 /// link is a no-op) and workspace-scoped like [`HANGAR_SKILL_ATTACH`].
 pub const HANGAR_SKILL_DETACH: &str = "hangar/skill_detach";
 
+/// `hangar/autopilots_list` — snapshot the autopilots of a workspace.
+///
+/// Params: `{ workspace_id: String }`. Result: a
+/// [`crate::snapshots::AutopilotsListResult`] (every autopilot row in the
+/// workspace, ordered by name). Drives the autopilot-manager table (P7.5).
+pub const HANGAR_AUTOPILOTS_LIST: &str = "hangar/autopilots_list";
+
+/// `hangar/autopilot_runs` — snapshot one autopilot's recent runs.
+///
+/// Params: `{ workspace_id: String, autopilot_id: String, limit: u32 }`. Result:
+/// a [`crate::snapshots::AutopilotRunsResult`] (latest-first run history, capped
+/// at `limit`). Drives the run-history pane below the selected autopilot (P7.5).
+/// Workspace-scoped: a foreign autopilot id yields an empty set.
+pub const HANGAR_AUTOPILOT_RUNS: &str = "hangar/autopilot_runs";
+
+/// `hangar/autopilot_fire_now` — manually fire one autopilot's tick immediately.
+///
+/// Params: `{ workspace_id: String, autopilot_id: String }`. Result: `{}`.
+/// Bypasses the schedule and runs the P7.4 enqueue path now (`r`/"run now" on the
+/// manager screen, P7.5). Workspace-scoped: a foreign id fires nothing.
+pub const HANGAR_AUTOPILOT_FIRE_NOW: &str = "hangar/autopilot_fire_now";
+
+/// `hangar/autopilot_set_enabled` — enable or disable one autopilot.
+///
+/// Params: `{ workspace_id: String, autopilot_id: String, enabled: bool }`.
+/// Result: `{}`. `false` disables (the scheduler stops considering it); `true`
+/// re-enables and recomputes `next_tick_at` from now (no missed-tick replay). The
+/// `d` key toggles the selected autopilot (P7.5). Workspace-scoped.
+pub const HANGAR_AUTOPILOT_SET_ENABLED: &str = "hangar/autopilot_set_enabled";
+
 /// `hangar/health` — snapshot the daemon's health for the settings screen.
 ///
 /// Params: `{}`. Result: a [`crate::settings::HealthSnapshot`]. Drives the
@@ -100,6 +130,10 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_SKILLS_SYNC,
     HANGAR_SKILL_ATTACH,
     HANGAR_SKILL_DETACH,
+    HANGAR_AUTOPILOTS_LIST,
+    HANGAR_AUTOPILOT_RUNS,
+    HANGAR_AUTOPILOT_FIRE_NOW,
+    HANGAR_AUTOPILOT_SET_ENABLED,
     HANGAR_HEALTH,
     PING,
 ];
@@ -148,6 +182,10 @@ mod tests {
             HANGAR_SKILLS_SYNC,
             HANGAR_SKILL_ATTACH,
             HANGAR_SKILL_DETACH,
+            HANGAR_AUTOPILOTS_LIST,
+            HANGAR_AUTOPILOT_RUNS,
+            HANGAR_AUTOPILOT_FIRE_NOW,
+            HANGAR_AUTOPILOT_SET_ENABLED,
             HANGAR_HEALTH,
         ] {
             assert!(m.starts_with("hangar/"), "{m:?} not under hangar/");
@@ -173,6 +211,10 @@ mod tests {
             HANGAR_SKILLS_SYNC,
             HANGAR_SKILL_ATTACH,
             HANGAR_SKILL_DETACH,
+            HANGAR_AUTOPILOTS_LIST,
+            HANGAR_AUTOPILOT_RUNS,
+            HANGAR_AUTOPILOT_FIRE_NOW,
+            HANGAR_AUTOPILOT_SET_ENABLED,
             HANGAR_HEALTH,
             PING,
         ];

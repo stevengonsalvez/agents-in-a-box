@@ -12,7 +12,7 @@
 
 use ainb_hangar_core::ids::{AgentId, CommentId, IssueId, TaskId};
 use ainb_hangar_proto::events::{
-    CommentRow, HangarEvent, IssueRow, MessageKind, PresenceState, TaskResult,
+    AutopilotRow, CommentRow, HangarEvent, IssueRow, MessageKind, PresenceState, TaskResult,
 };
 use chrono::{TimeZone, Utc};
 
@@ -94,6 +94,21 @@ fn all_variants() -> Vec<HangarEvent> {
             skill: "commit".to_string(),
             updated_at: 1_700_000_002_000,
         },
+        HangarEvent::AutopilotUpdated(AutopilotRow {
+            id: "ap-1".to_string(),
+            workspace_id: "default".to_string(),
+            agent_id: "agent-1".to_string(),
+            name: "daily-triage".to_string(),
+            cron_expr: "0 9 * * 1-5".to_string(),
+            next_tick_at: Some(1_700_000_300_000),
+            enabled: true,
+            last_run_status: Some("completed".to_string()),
+            last_run_at: Some(1_699_999_000_000),
+        }),
+        HangarEvent::AutopilotRunChanged {
+            autopilot_id: "ap-1".to_string(),
+            status: "running".to_string(),
+        },
         HangarEvent::WorkspaceChanged {
             from: Some("01J9ZX8QK7".to_string()),
             to: "01J9ZX8QK8".to_string(),
@@ -125,6 +140,8 @@ fn every_variant_carries_a_stable_event_tag() {
         "comment_added",
         "agent_presence",
         "skill_updated",
+        "autopilot_updated",
+        "autopilot_run_changed",
         "workspace_changed",
     ];
     for (ev, tag) in all_variants().iter().zip(expected) {

@@ -14,7 +14,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::events::{ActorRow, IssueRow, SkillFile, SkillRow};
+use crate::events::{ActorRow, AutopilotRow, AutopilotRunRow, IssueRow, SkillFile, SkillRow};
 
 /// The `{ workspace_id }` params shared by every workspace-scoped snapshot RPC.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -124,6 +124,59 @@ pub struct SkillAttachParams {
     pub agent_id: String,
     /// The skill being (de)attached.
     pub skill_id: String,
+}
+
+/// Result of [`crate::methods::HANGAR_AUTOPILOTS_LIST`]: the workspace's
+/// autopilots (P7.5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutopilotsListResult {
+    /// The autopilot rows, ordered by name.
+    pub autopilots: Vec<AutopilotRow>,
+}
+
+/// Params for [`crate::methods::HANGAR_AUTOPILOT_RUNS`].
+///
+/// The workspace (tenant guard) plus the autopilot id and a row cap. The
+/// `workspace_id` scopes the lookup so a foreign autopilot id yields an empty
+/// run set, never another tenant's history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutopilotRunsParams {
+    /// The subscribed workspace the autopilot must belong to.
+    pub workspace_id: String,
+    /// The autopilot whose runs to list.
+    pub autopilot_id: String,
+    /// Maximum number of runs to return (latest-first).
+    pub limit: u32,
+}
+
+/// Result of [`crate::methods::HANGAR_AUTOPILOT_RUNS`]: one autopilot's recent
+/// runs, latest-first (P7.5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutopilotRunsResult {
+    /// The run rows, latest-first, capped at the requested limit.
+    pub runs: Vec<AutopilotRunRow>,
+}
+
+/// Params for [`crate::methods::HANGAR_AUTOPILOT_FIRE_NOW`]: the workspace
+/// (tenant guard) plus the autopilot to fire immediately (P7.5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutopilotFireNowParams {
+    /// The subscribed workspace the autopilot must belong to.
+    pub workspace_id: String,
+    /// The autopilot to fire now (bypassing the schedule).
+    pub autopilot_id: String,
+}
+
+/// Params for [`crate::methods::HANGAR_AUTOPILOT_SET_ENABLED`]: the workspace
+/// (tenant guard), the autopilot, and the target enabled flag (P7.5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutopilotSetEnabledParams {
+    /// The subscribed workspace the autopilot must belong to.
+    pub workspace_id: String,
+    /// The autopilot to toggle.
+    pub autopilot_id: String,
+    /// `true` enables (recompute next-tick from now); `false` disables.
+    pub enabled: bool,
 }
 
 #[cfg(test)]
@@ -249,6 +302,76 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<SkillAttachParams>(&s).unwrap(),
             attach
+        );
+    }
+
+    /// The P7.5 autopilot envelopes round-trip through JSON.
+    #[test]
+    fn p7_autopilot_envelopes_roundtrip() {
+        let list = AutopilotsListResult {
+            autopilots: vec![AutopilotRow {
+                id: "ap-1".into(),
+                workspace_id: "ws-1".into(),
+                agent_id: "agent-1".into(),
+                name: "daily-triage".into(),
+                cron_expr: "0 9 * * 1-5".into(),
+                next_tick_at: Some(1_700_000_000_000),
+                enabled: true,
+                last_run_status: Some("completed".into()),
+                last_run_at: Some(1_699_000_000_000),
+            }],
+        };
+        let s = serde_json::to_string(&list).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AutopilotsListResult>(&s).unwrap(),
+            list
+        );
+
+        let runs_params = AutopilotRunsParams {
+            workspace_id: "ws-1".into(),
+            autopilot_id: "ap-1".into(),
+            limit: 10,
+        };
+        let s = serde_json::to_string(&runs_params).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AutopilotRunsParams>(&s).unwrap(),
+            runs_params
+        );
+
+        let runs = AutopilotRunsResult {
+            runs: vec![AutopilotRunRow {
+                id: "run-1".into(),
+                autopilot_id: "ap-1".into(),
+                started_at: 1_699_000_000_000,
+                completed_at: Some(1_699_000_120_000),
+                status: "completed".into(),
+            }],
+        };
+        let s = serde_json::to_string(&runs).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AutopilotRunsResult>(&s).unwrap(),
+            runs
+        );
+
+        let fire = AutopilotFireNowParams {
+            workspace_id: "ws-1".into(),
+            autopilot_id: "ap-1".into(),
+        };
+        let s = serde_json::to_string(&fire).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AutopilotFireNowParams>(&s).unwrap(),
+            fire
+        );
+
+        let toggle = AutopilotSetEnabledParams {
+            workspace_id: "ws-1".into(),
+            autopilot_id: "ap-1".into(),
+            enabled: false,
+        };
+        let s = serde_json::to_string(&toggle).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AutopilotSetEnabledParams>(&s).unwrap(),
+            toggle
         );
     }
 }
