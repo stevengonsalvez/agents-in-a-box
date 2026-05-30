@@ -14,11 +14,16 @@
 //! picker; the real online/away signal for humans lands with presence tracking
 //! in a later phase).
 
-use ainb_hangar_core::ids::{AgentId, IssueId, SkillId, WorkspaceId};
-use ainb_hangar_proto::events::{ActorRow, IssueRow, PresenceState, SkillFile, SkillRow};
+use ainb_hangar_core::clock::HangarClock;
+use ainb_hangar_core::ids::{AgentId, AutopilotId, IssueId, SkillId, WorkspaceId};
+use ainb_hangar_proto::events::{
+    ActorRow, AutopilotRow, AutopilotRunRow, IssueRow, PresenceState, SkillFile, SkillRow,
+};
 use ainb_hangar_proto::snapshots::{SkillDetail, SkillsSyncResult};
 use ainb_hangar_store::repo::agent::AgentRepo;
 use ainb_hangar_store::repo::agent_runtime::AgentRuntimeRepo;
+use ainb_hangar_store::repo::autopilot::{AutopilotRepo, AutopilotRepoError};
+use ainb_hangar_store::repo::autopilot_run::{FireError, fire_autopilot_tick};
 use ainb_hangar_store::repo::issue::IssueRepo;
 use ainb_hangar_store::repo::skill::{SkillRepo, SkillRepoError};
 use sqlx::{Row, SqlitePool};
@@ -270,4 +275,145 @@ pub async fn skill_detach(
     skill: &SkillId,
 ) -> Result<(), SkillRepoError> {
     SkillRepo::detach_from_agent(pool, workspace, agent, skill).await
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// P7.5 — autopilot manager: list / runs / fire-now / set-enabled handlers.
+//
+// Every one resolves the subscribed `workspace` (already mapped slug→id by the
+// dispatcher) and threads it into the workspace-scoped `AutopilotRepo`
+// by-id methods, so an autopilot id minted in another tenant can never be read,
+// fired, or toggled here.
+// ──────────────────────────────────────────────────────────────────────────
+
+/// How many recent runs to inspect when deriving an autopilot's `LAST RUN`
+/// columns for the list snapshot.
+const LAST_RUN_LOOKBACK: u32 = 1;
+
+/// Snapshot the autopilots of `workspace`, mapped to wire [`AutopilotRow`]s
+/// (`hangar/autopilots_list`, P7.5).
+///
+/// Each row carries the latest run's status + start instant (the `LAST RUN`
+/// columns), pulled via the workspace-scoped [`AutopilotRepo::list_runs`] so the
+/// derivation can never leak another tenant's history.
+///
+/// # Errors
+///
+/// Returns an [`AutopilotRepoError`] on a store failure or a corrupt stored id.
+pub async fn autopilots_list(
+    pool: &SqlitePool,
+    workspace: &WorkspaceId,
+) -> Result<Vec<AutopilotRow>, AutopilotRepoError> {
+    let autopilots = AutopilotRepo::list(pool, workspace).await?;
+    let mut out = Vec::with_capacity(autopilots.len());
+    for ap in autopilots {
+        let id = AutopilotId::from_str(ap.id.clone()).map_err(|_| AutopilotRepoError::EmptyId)?;
+        let last = AutopilotRepo::list_runs(pool, workspace, &id, LAST_RUN_LOOKBACK)
+            .await?
+            .into_iter()
+            .next();
+        out.push(AutopilotRow {
+            id: ap.id,
+            workspace_id: ap.workspace_id,
+            agent_id: ap.agent_id,
+            name: ap.name,
+            cron_expr: ap.cron_expr,
+            next_tick_at: ap.next_tick_at,
+            enabled: ap.enabled,
+            last_run_status: last.as_ref().map(|r| r.status.clone()),
+            last_run_at: last.as_ref().map(|r| r.started_at),
+        });
+    }
+    Ok(out)
+}
+
+/// Snapshot one autopilot's recent runs, latest-first (`hangar/autopilot_runs`,
+/// P7.5), scoped to `workspace`.
+///
+/// A foreign autopilot id yields an empty run set (the repo join verifies the
+/// workspace), never another tenant's history.
+///
+/// # Errors
+///
+/// Returns an [`AutopilotRepoError`] on a store failure.
+pub async fn autopilot_runs(
+    pool: &SqlitePool,
+    workspace: &WorkspaceId,
+    autopilot_id: &AutopilotId,
+    limit: u32,
+) -> Result<Vec<AutopilotRunRow>, AutopilotRepoError> {
+    let runs = AutopilotRepo::list_runs(pool, workspace, autopilot_id, limit).await?;
+    Ok(runs
+        .into_iter()
+        .map(|r| AutopilotRunRow {
+            id: r.id,
+            autopilot_id: r.autopilot_id,
+            started_at: r.started_at,
+            completed_at: r.completed_at,
+            status: r.status,
+        })
+        .collect())
+}
+
+/// Fire one autopilot's tick now (`hangar/autopilot_fire_now`, P7.5), scoped to
+/// `workspace`.
+///
+/// Resolves the autopilot within `workspace` (a foreign id resolves to `None`
+/// and fires nothing), then runs the P7.4 single-tx enqueue path. Returns `true`
+/// when a tick was fired, `false` when the id resolved to no autopilot in this
+/// tenant.
+///
+/// # Errors
+///
+/// Returns [`AutopilotFireError::Repo`] on a store failure resolving the row, or
+/// [`AutopilotFireError::Fire`] when the enqueue transaction fails (e.g. the
+/// autopilot's agent was deleted).
+pub async fn autopilot_fire_now(
+    pool: &SqlitePool,
+    clock: &dyn HangarClock,
+    workspace: &WorkspaceId,
+    autopilot_id: &AutopilotId,
+) -> Result<bool, AutopilotFireError> {
+    let Some(autopilot) = AutopilotRepo::get(pool, workspace, autopilot_id).await? else {
+        return Ok(false);
+    };
+    fire_autopilot_tick(pool, clock, &autopilot).await?;
+    Ok(true)
+}
+
+/// Enable or disable one autopilot (`hangar/autopilot_set_enabled`, P7.5),
+/// scoped to `workspace`.
+///
+/// `enabled = false` calls the workspace-scoped [`AutopilotRepo::disable`];
+/// `true` calls [`AutopilotRepo::enable`] (which recomputes `next_tick_at` from
+/// now). A foreign id touches no row in either case.
+///
+/// # Errors
+///
+/// Returns an [`AutopilotRepoError`] on a store failure (or a corrupt-row cron
+/// re-parse failure on enable).
+pub async fn autopilot_set_enabled(
+    pool: &SqlitePool,
+    clock: &dyn HangarClock,
+    workspace: &WorkspaceId,
+    autopilot_id: &AutopilotId,
+    enabled: bool,
+) -> Result<(), AutopilotRepoError> {
+    if enabled {
+        AutopilotRepo::enable(pool, clock, workspace, autopilot_id).await
+    } else {
+        AutopilotRepo::disable(pool, workspace, autopilot_id).await
+    }
+}
+
+/// Error surface for [`autopilot_fire_now`]: a store fault resolving the
+/// autopilot row, or a fire-path failure (the single-tx enqueue).
+#[derive(Debug, thiserror::Error)]
+pub enum AutopilotFireError {
+    /// A store fault while resolving the autopilot to fire.
+    #[error(transparent)]
+    Repo(#[from] AutopilotRepoError),
+    /// The fire/enqueue transaction failed (agent deleted, FK violation).
+    #[error(transparent)]
+    Fire(#[from] FireError),
 }

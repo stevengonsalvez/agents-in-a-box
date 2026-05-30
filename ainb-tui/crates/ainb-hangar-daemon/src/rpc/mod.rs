@@ -27,7 +27,8 @@ pub mod snapshots;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use ainb_hangar_core::ids::{AgentId, SkillId, WorkspaceId};
+use ainb_hangar_core::clock::SystemClock;
+use ainb_hangar_core::ids::{AgentId, AutopilotId, SkillId, WorkspaceId};
 use ainb_hangar_proto::methods;
 use ainb_hangar_proto::settings::HealthSnapshot;
 use ainb_hangar_proto::{RpcError, RpcId, RpcRequest, RpcResponse};
@@ -251,6 +252,59 @@ async fn handle(
         }
         methods::HANGAR_SKILL_ATTACH => attach_or_detach(pool, req, true).await,
         methods::HANGAR_SKILL_DETACH => attach_or_detach(pool, req, false).await,
+        methods::HANGAR_AUTOPILOTS_LIST => {
+            let autopilots = match resolve_wire_from_scoped(pool, req).await? {
+                Some(ws) => snapshots::autopilots_list(pool, &ws)
+                    .await
+                    .map_err(|e| autopilot_repo_err(&e))?,
+                None => Vec::new(),
+            };
+            to_value(&ainb_hangar_proto::snapshots::AutopilotsListResult { autopilots })
+        }
+        methods::HANGAR_AUTOPILOT_RUNS => {
+            let params: ainb_hangar_proto::snapshots::AutopilotRunsParams =
+                parse_params(req, "{ workspace_id, autopilot_id, limit }")?;
+            let runs = match resolve_wire(pool, &params.workspace_id).await? {
+                Some(ws) => {
+                    let id = autopilot_id(&params.autopilot_id)?;
+                    snapshots::autopilot_runs(pool, &ws, &id, params.limit)
+                        .await
+                        .map_err(|e| autopilot_repo_err(&e))?
+                }
+                None => Vec::new(),
+            };
+            to_value(&ainb_hangar_proto::snapshots::AutopilotRunsResult { runs })
+        }
+        methods::HANGAR_AUTOPILOT_FIRE_NOW => {
+            let params: ainb_hangar_proto::snapshots::AutopilotFireNowParams =
+                parse_params(req, "{ workspace_id, autopilot_id }")?;
+            let Some(ws) = resolve_wire(pool, &params.workspace_id).await? else {
+                return Err(invalid_params(&format!(
+                    "unknown workspace `{}`",
+                    params.workspace_id
+                )));
+            };
+            let id = autopilot_id(&params.autopilot_id)?;
+            snapshots::autopilot_fire_now(pool, &SystemClock, &ws, &id)
+                .await
+                .map_err(|e| internal(&format!("autopilot fire: {e}")))?;
+            Ok(serde_json::json!({}))
+        }
+        methods::HANGAR_AUTOPILOT_SET_ENABLED => {
+            let params: ainb_hangar_proto::snapshots::AutopilotSetEnabledParams =
+                parse_params(req, "{ workspace_id, autopilot_id, enabled }")?;
+            let Some(ws) = resolve_wire(pool, &params.workspace_id).await? else {
+                return Err(invalid_params(&format!(
+                    "unknown workspace `{}`",
+                    params.workspace_id
+                )));
+            };
+            let id = autopilot_id(&params.autopilot_id)?;
+            snapshots::autopilot_set_enabled(pool, &SystemClock, &ws, &id, params.enabled)
+                .await
+                .map_err(|e| autopilot_repo_err(&e))?;
+            Ok(serde_json::json!({}))
+        }
         methods::HANGAR_HEALTH => to_value(&health.snapshot(true)),
         other => Err(RpcError {
             code: METHOD_NOT_FOUND,
@@ -329,6 +383,34 @@ fn skill_id(raw: &str) -> Result<SkillId, RpcError> {
 fn agent_id(raw: &str) -> Result<AgentId, RpcError> {
     AgentId::from_str(raw.to_string())
         .map_err(|_| invalid_params("agent_id must be a non-empty string"))
+}
+
+/// Build a typed [`AutopilotId`] from a wire string, erroring on an empty id.
+fn autopilot_id(raw: &str) -> Result<AutopilotId, RpcError> {
+    AutopilotId::from_str(raw.to_string())
+        .map_err(|_| invalid_params("autopilot_id must be a non-empty string"))
+}
+
+/// Resolve a workspace-scoped request's `{ workspace_id }` to a typed
+/// [`WorkspaceId`], returning `None` (an empty-snapshot signal) when no
+/// workspace matches. Used by the autopilot *list* handler, which carries only
+/// the shared scoped params (unlike fire/runs/set which parse their own struct).
+async fn resolve_wire_from_scoped(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<Option<WorkspaceId>, RpcError> {
+    let wire = workspace_id(req)?;
+    resolve_wire(pool, &wire).await
+}
+
+/// Map an [`AutopilotRepoError`] onto an RPC error: a cron-validation failure is
+/// a client error (`INVALID_PARAMS`), every store fault an internal error.
+fn autopilot_repo_err(e: &ainb_hangar_store::repo::autopilot::AutopilotRepoError) -> RpcError {
+    use ainb_hangar_store::repo::autopilot::AutopilotRepoError;
+    match e {
+        AutopilotRepoError::Cron(c) => invalid_params(&format!("invalid cron: {c}")),
+        other => internal(&format!("autopilot store error: {other}")),
+    }
 }
 
 /// An `INVALID_PARAMS` error with `message`.
@@ -658,6 +740,233 @@ mod tests {
         )
         .await;
         assert_eq!(resp.error.unwrap().code, INVALID_PARAMS);
+    }
+
+    /// `hangar/autopilots_list` returns a seeded autopilot, scoped to the
+    /// subscribed workspace, with its latest run's status in `last_run_status`.
+    #[tokio::test]
+    async fn autopilots_list_returns_seeded_with_last_run() {
+        use ainb_hangar_core::clock::FixedClock;
+        use ainb_hangar_store::repo::autopilot::{AutopilotRepo, NewAutopilot};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+
+        let ws = WorkspaceId::from_str(crate::seed::WS_ID).unwrap();
+        let clock = FixedClock(1_700_000_000_000);
+        let ap_id = AutopilotRepo::create(
+            store.pool(),
+            &clock,
+            &NewAutopilot {
+                workspace_id: ws.clone(),
+                agent_id: AgentId::from_str("agent-1").unwrap(),
+                name: "daily-triage".into(),
+                instructions: Some("triage".into()),
+                cron_expr: "0 9 * * 1-5".into(),
+                max_concurrent_runs: 1,
+            },
+        )
+        .await
+        .unwrap();
+        AutopilotRepo::insert_run(store.pool(), &ap_id, 1_699_000_000_000, "completed")
+            .await
+            .unwrap();
+
+        let resp = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_AUTOPILOTS_LIST,
+                serde_json::json!({"workspace_id":"default"}),
+            ),
+            &health(),
+        )
+        .await;
+        assert!(resp.error.is_none(), "{resp:?}");
+        let v = resp.result.unwrap();
+        let rows = v["autopilots"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["name"], "daily-triage");
+        assert_eq!(rows[0]["cron_expr"], "0 9 * * 1-5");
+        assert_eq!(rows[0]["enabled"], true);
+        assert_eq!(rows[0]["last_run_status"], "completed");
+    }
+
+    /// A foreign workspace yields an empty autopilot list (tenant isolation).
+    #[tokio::test]
+    async fn autopilots_list_foreign_workspace_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        let resp = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_AUTOPILOTS_LIST,
+                serde_json::json!({"workspace_id":"nope"}),
+            ),
+            &health(),
+        )
+        .await;
+        assert!(resp.error.is_none());
+        assert_eq!(
+            resp.result.unwrap()["autopilots"].as_array().unwrap().len(),
+            0
+        );
+    }
+
+    /// `hangar/autopilot_set_enabled(false)` then `(true)` toggles the row;
+    /// `disable` clears the flag, `enable` sets it again.
+    #[tokio::test]
+    async fn autopilot_set_enabled_toggles_scoped_row() {
+        use ainb_hangar_core::clock::FixedClock;
+        use ainb_hangar_store::repo::autopilot::{AutopilotRepo, NewAutopilot};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        let ws = WorkspaceId::from_str(crate::seed::WS_ID).unwrap();
+        let clock = FixedClock(1_700_000_000_000);
+        let ap_id = AutopilotRepo::create(
+            store.pool(),
+            &clock,
+            &NewAutopilot {
+                workspace_id: ws.clone(),
+                agent_id: AgentId::from_str("agent-1").unwrap(),
+                name: "nightly".into(),
+                instructions: None,
+                cron_expr: "0 2 * * *".into(),
+                max_concurrent_runs: 1,
+            },
+        )
+        .await
+        .unwrap();
+
+        let disable = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_AUTOPILOT_SET_ENABLED,
+                serde_json::json!({"workspace_id":"default","autopilot_id":ap_id.as_str(),"enabled":false}),
+            ),
+            &health(),
+        )
+        .await;
+        assert!(disable.error.is_none(), "{disable:?}");
+        let ap = AutopilotRepo::get(store.pool(), &ws, &ap_id).await.unwrap().unwrap();
+        assert!(!ap.enabled, "disable must clear the enabled flag");
+
+        let enable = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_AUTOPILOT_SET_ENABLED,
+                serde_json::json!({"workspace_id":"default","autopilot_id":ap_id.as_str(),"enabled":true}),
+            ),
+            &health(),
+        )
+        .await;
+        assert!(enable.error.is_none(), "{enable:?}");
+        let ap = AutopilotRepo::get(store.pool(), &ws, &ap_id).await.unwrap().unwrap();
+        assert!(ap.enabled, "enable must set the enabled flag");
+    }
+
+    /// `hangar/autopilot_fire_now` runs the P7.4 enqueue path: a fresh
+    /// `autopilot_run` row appears for the seeded autopilot.
+    #[tokio::test]
+    async fn autopilot_fire_now_creates_a_run() {
+        use ainb_hangar_core::clock::FixedClock;
+        use ainb_hangar_store::repo::autopilot::{AutopilotRepo, NewAutopilot};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        let ws = WorkspaceId::from_str(crate::seed::WS_ID).unwrap();
+        let clock = FixedClock(1_700_000_000_000);
+        let ap_id = AutopilotRepo::create(
+            store.pool(),
+            &clock,
+            &NewAutopilot {
+                workspace_id: ws.clone(),
+                agent_id: AgentId::from_str("agent-1").unwrap(),
+                name: "manual".into(),
+                instructions: Some("go".into()),
+                cron_expr: "0 0 * * *".into(),
+                max_concurrent_runs: 1,
+            },
+        )
+        .await
+        .unwrap();
+
+        let before = AutopilotRepo::list_runs(store.pool(), &ws, &ap_id, 100).await.unwrap().len();
+        let fire = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_AUTOPILOT_FIRE_NOW,
+                serde_json::json!({"workspace_id":"default","autopilot_id":ap_id.as_str()}),
+            ),
+            &health(),
+        )
+        .await;
+        assert!(fire.error.is_none(), "{fire:?}");
+        let after = AutopilotRepo::list_runs(store.pool(), &ws, &ap_id, 100).await.unwrap().len();
+        assert_eq!(after, before + 1, "fire_now must create one autopilot_run");
+    }
+
+    /// `hangar/autopilot_runs` lists the seeded runs latest-first; a foreign
+    /// autopilot id yields an empty set (tenant isolation through the join).
+    #[tokio::test]
+    async fn autopilot_runs_latest_first_and_scoped() {
+        use ainb_hangar_core::clock::FixedClock;
+        use ainb_hangar_store::repo::autopilot::{AutopilotRepo, NewAutopilot};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        let ws = WorkspaceId::from_str(crate::seed::WS_ID).unwrap();
+        let clock = FixedClock(1_700_000_000_000);
+        let ap_id = AutopilotRepo::create(
+            store.pool(),
+            &clock,
+            &NewAutopilot {
+                workspace_id: ws.clone(),
+                agent_id: AgentId::from_str("agent-1").unwrap(),
+                name: "weekly".into(),
+                instructions: None,
+                cron_expr: "0 9 * * MON".into(),
+                max_concurrent_runs: 1,
+            },
+        )
+        .await
+        .unwrap();
+        AutopilotRepo::insert_run(store.pool(), &ap_id, 100, "failed").await.unwrap();
+        AutopilotRepo::insert_run(store.pool(), &ap_id, 200, "completed").await.unwrap();
+
+        let resp = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_AUTOPILOT_RUNS,
+                serde_json::json!({"workspace_id":"default","autopilot_id":ap_id.as_str(),"limit":10}),
+            ),
+            &health(),
+        )
+        .await;
+        assert!(resp.error.is_none(), "{resp:?}");
+        let runs = resp.result.unwrap()["runs"].as_array().unwrap().clone();
+        assert_eq!(runs.len(), 2);
+        // Latest-first: the 200-stamped completed run leads.
+        assert_eq!(runs[0]["status"], "completed");
+        assert_eq!(runs[1]["status"], "failed");
+
+        // A foreign autopilot id yields an empty set, never another tenant's runs.
+        let foreign = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_AUTOPILOT_RUNS,
+                serde_json::json!({"workspace_id":"default","autopilot_id":"01HANGARNOSUCHAUTOPILOT00","limit":10}),
+            ),
+            &health(),
+        )
+        .await;
+        assert!(foreign.error.is_none());
+        assert_eq!(foreign.result.unwrap()["runs"].as_array().unwrap().len(), 0);
     }
 
     #[tokio::test]
