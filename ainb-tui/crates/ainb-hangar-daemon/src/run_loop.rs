@@ -233,12 +233,23 @@ async fn execute_claimed(
     StartTaskService::start(pool, &task.id, clock).await?;
     tracing::info!(task_id = %task.id, "task running");
 
-    // Snapshot the daemon's env into an owned `Vec` *before* the await: the
+    // Snapshot the daemon's env into an owned map *before* the await: the
     // `std::env::Vars` iterator is `!Send`, so holding it across `.await` would
-    // make this future non-`Send` and unusable on the multi-thread runtime. The
-    // runner allowlist-filters this snapshot to the 12-var set.
-    let daemon_env: Vec<(String, String)> = std::env::vars().collect();
-    let outcome = runner.run_claude(&env, daemon_env).await?;
+    // make this future non-`Send` and unusable on the multi-thread runtime.
+    //
+    // P5.3: apply the configurable env-allowlist policy here (the authoritative
+    // pass), layering keychain-resident API keys on top via
+    // `dispatch::build_task_env`. The policy is loaded from
+    // `~/.ainb/hangar/env.allow.toml` (operator defaults when absent). The
+    // keychain key list is empty until P5.2 wires `host/secret_store_get` into
+    // dispatch; the seam is in place so adding keys is a one-line change. The
+    // runner re-applies its own deny-by-default 12-var filter as
+    // defense-in-depth (a strict subset of this policy).
+    let daemon_env: std::collections::HashMap<String, String> = std::env::vars().collect();
+    let policy = load_env_policy();
+    let keychain_keys: Vec<(String, String)> = Vec::new();
+    let task_env = crate::dispatch::build_task_env(&daemon_env, keychain_keys, &policy);
+    let outcome = runner.run_claude(&env, task_env).await?;
 
     match outcome {
         RunOutcome::Success(result) => {
@@ -295,6 +306,23 @@ async fn persist_session_id(
             .await?;
     }
     Ok(())
+}
+
+/// Load the env-allowlist policy from `~/.ainb/hangar/env.allow.toml`.
+///
+/// Falls back to the operator-default policy (the 12 built-ins + hardcoded deny)
+/// if the path can't be resolved or the file is unreadable — a missing/corrupt
+/// config must never down a daemon dispatch.
+fn load_env_policy() -> ainb_hangar_core::env_policy::EnvPolicy {
+    crate::dispatch::default_allow_path()
+        .and_then(|p| crate::dispatch::load_allow_at(&p))
+        .map_or_else(
+            |e| {
+                tracing::warn!(error = %e, "env allow config load failed; using defaults");
+                ainb_hangar_core::env_policy::EnvPolicy::default()
+            },
+            crate::dispatch::EnvAllowConfig::into_policy,
+        )
 }
 
 /// Resolve the Hangar home directory the per-task env tree is rooted under.
