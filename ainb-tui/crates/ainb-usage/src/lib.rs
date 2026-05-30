@@ -255,22 +255,7 @@ fn bump(stats: &mut UsageStats, name: &str, ts: Option<&str>) {
 }
 
 fn now_iso() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let days = secs / 86_400;
-    let rem = secs % 86_400;
-    let (h, m, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
-    let z = days as i64 + 719_468;
-    let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y_long = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let mo = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
-    let y = if mo <= 2 { y_long + 1 } else { y_long };
-    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
+    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
 #[cfg(test)]
@@ -389,5 +374,45 @@ mod tests {
         let path = dir.path().join("no.cache");
         let cache = load_cache(&path).unwrap();
         assert!(cache.units.is_empty());
+    }
+
+    #[test]
+    fn now_iso_shape_matches_rfc3339_seconds_z() {
+        // Pins the wire shape used by every downstream consumer of `generated_at`.
+        // Re-parseable by chrono, ends in 'Z', no fractional seconds, no offset.
+        let s = now_iso();
+        assert_eq!(s.len(), 20, "shape: YYYY-MM-DDTHH:MM:SSZ ({s})");
+        assert!(s.ends_with('Z'), "must end in Z: {s}");
+        let parsed = chrono::DateTime::parse_from_rfc3339(&s)
+            .unwrap_or_else(|e| panic!("re-parse failed for {s}: {e}"));
+        let round = parsed
+            .with_timezone(&chrono::Utc)
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        assert_eq!(round, s, "round-trip shape mismatch");
+    }
+
+    #[test]
+    fn now_iso_format_matches_chrono_on_fixed_instants() {
+        // Pins agreement with chrono's `%Y-%m-%dT%H:%M:%SZ` on a spread of
+        // representative epochs (epoch, mid-2009, 2025 new-year UTC,
+        // 2099-12-31 23:59:59 UTC). Catches off-by-one regressions if the
+        // formatter is ever swapped again.
+        use chrono::TimeZone;
+        let cases: [(i64, &str); 4] = [
+            (0, "1970-01-01T00:00:00Z"),
+            (1_234_567_890, "2009-02-13T23:31:30Z"),
+            (1_735_689_600, "2025-01-01T00:00:00Z"),
+            (4_102_444_799, "2099-12-31T23:59:59Z"),
+        ];
+        for (secs, expected) in cases {
+            let formatted = chrono::Utc
+                .timestamp_opt(secs, 0)
+                .single()
+                .expect("valid timestamp")
+                .format("%Y-%m-%dT%H:%M:%SZ")
+                .to_string();
+            assert_eq!(formatted, expected, "epoch={secs}");
+        }
     }
 }

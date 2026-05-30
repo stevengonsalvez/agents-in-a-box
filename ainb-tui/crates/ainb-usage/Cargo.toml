@@ -6,9 +6,11 @@ edition = "2021"
 [dependencies]
 ainb-skill-core = { path = "../ainb-skill-core" }
 anyhow = { workspace = true }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 walkdir = "2"
 
 [dev-dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tempfile = "3"
