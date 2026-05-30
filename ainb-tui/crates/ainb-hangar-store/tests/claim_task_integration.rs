@@ -117,6 +117,7 @@ fn new_task(
         issue_id: issue_id.map(str::to_string),
         work_dir: None,
         created_at,
+        autopilot_run_id: None,
     }
 }
 

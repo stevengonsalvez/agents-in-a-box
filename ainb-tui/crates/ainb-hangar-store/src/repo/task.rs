@@ -48,6 +48,11 @@ pub struct NewTask {
     pub work_dir: Option<String>,
     /// Creation timestamp (epoch milliseconds).
     pub created_at: i64,
+    /// The autopilot firing this task belongs to (`autopilot_run.id`), or `None`
+    /// for ordinary issue / chat tasks. A non-`None` value (paired with a `None`
+    /// `issue_id`) is the discriminator that marks the row as an autopilot task;
+    /// the finalize cascade follows it to stamp the run's `completed_at`.
+    pub autopilot_run_id: Option<String>,
 }
 
 /// A fully-materialised `agent_task_queue` row read back from the database.
@@ -90,6 +95,9 @@ pub struct Task {
     pub started_at: Option<i64>,
     /// When the run finished (epoch milliseconds), or `None` if not finished.
     pub finished_at: Option<i64>,
+    /// The autopilot run this task belongs to (`autopilot_run.id`), or `None`
+    /// for ordinary issue / chat tasks. See [`NewTask::autopilot_run_id`].
+    pub autopilot_run_id: Option<String>,
 }
 
 /// Stateless typed wrapper over the `agent_task_queue` table.
@@ -106,10 +114,37 @@ impl TaskRepo {
     /// task already exists for the same `issue_id`, or an FK violation on
     /// `workspace_id` / `runtime_id` / `agent_id` / `issue_id`.
     pub async fn insert(pool: &SqlitePool, task: &NewTask) -> Result<String, sqlx::Error> {
+        let mut tx = pool.begin().await?;
+        let id = Self::insert_in_tx(&mut tx, task).await?;
+        tx.commit().await?;
+        Ok(id)
+    }
+
+    /// Enqueue one task as `queued` **within an existing transaction**, leaving
+    /// every lifecycle/retry column at its schema default. Returns the new row's
+    /// `id` on success; the caller owns the commit/rollback.
+    ///
+    /// This is the variant the P7.4 autopilot fire path uses: it inserts the
+    /// `autopilot_run` row and the task row in one transaction, so a task-insert
+    /// failure (e.g. a bad `agent_id` FK) rolls the run back too. [`insert`]
+    /// wraps this in its own transaction for the standalone enqueue case.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the insert fails — notably a UNIQUE
+    /// constraint violation from `idx_one_pending_task_per_issue` when a pending
+    /// task already exists for the same `issue_id`, or an FK violation on
+    /// `workspace_id` / `runtime_id` / `agent_id` / `issue_id` /
+    /// `autopilot_run_id`.
+    pub async fn insert_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        task: &NewTask,
+    ) -> Result<String, sqlx::Error> {
         sqlx::query(
             "INSERT INTO agent_task_queue \
-             (id, workspace_id, runtime_id, agent_id, issue_id, work_dir, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+             (id, workspace_id, runtime_id, agent_id, issue_id, work_dir, created_at, \
+              autopilot_run_id) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&task.id)
         .bind(&task.workspace_id)
@@ -118,7 +153,8 @@ impl TaskRepo {
         .bind(&task.issue_id)
         .bind(&task.work_dir)
         .bind(task.created_at)
-        .execute(pool)
+        .bind(&task.autopilot_run_id)
+        .execute(&mut **tx)
         .await?;
         Ok(task.id.clone())
     }
@@ -129,10 +165,12 @@ impl TaskRepo {
     ///
     /// Returns a [`sqlx::Error`] if the query or row decode fails.
     pub async fn get_by_id(pool: &SqlitePool, id: &str) -> Result<Option<Task>, sqlx::Error> {
-        let row = sqlx::query(&format!("SELECT {COLUMNS} FROM agent_task_queue WHERE id = ?"))
-            .bind(id)
-            .fetch_optional(pool)
-            .await?;
+        let row = sqlx::query(&format!(
+            "SELECT {COLUMNS} FROM agent_task_queue WHERE id = ?"
+        ))
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
         row.map(|r| task_from_row(&r)).transpose()
     }
 
@@ -161,7 +199,7 @@ impl TaskRepo {
 /// reads them. Shared by every `SELECT` so the read shape stays in one place.
 const COLUMNS: &str = "id, workspace_id, runtime_id, agent_id, issue_id, status, result, \
      session_id, work_dir, attempt, max_attempts, parent_task_id, failure_reason, \
-     created_at, dispatched_at, started_at, finished_at";
+     created_at, dispatched_at, started_at, finished_at, autopilot_run_id";
 
 /// Map one raw `agent_task_queue` row into a [`Task`].
 fn task_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Task, sqlx::Error> {
@@ -183,5 +221,6 @@ fn task_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Task, sqlx::Error> {
         dispatched_at: row.try_get("dispatched_at")?,
         started_at: row.try_get("started_at")?,
         finished_at: row.try_get("finished_at")?,
+        autopilot_run_id: row.try_get("autopilot_run_id")?,
     })
 }

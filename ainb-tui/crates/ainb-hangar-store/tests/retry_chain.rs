@@ -114,6 +114,7 @@ async fn seed_failed_task(
             issue_id: issue_id.map(str::to_string),
             work_dir: work_dir.map(str::to_string),
             created_at: 1,
+            autopilot_run_id: None,
         },
     )
     .await
@@ -248,6 +249,7 @@ async fn child_row_is_created_atomically_with_retry_columns_set() {
             issue_id: Some(issue.clone()),
             work_dir: None,
             created_at: 6,
+            autopilot_run_id: None,
         },
     )
     .await
@@ -421,6 +423,7 @@ async fn partial_unique_index_blocks_retry_when_existing_pending() {
             issue_id: Some(issue.clone()),
             work_dir: None,
             created_at: 5,
+            autopilot_run_id: None,
         },
     )
     .await

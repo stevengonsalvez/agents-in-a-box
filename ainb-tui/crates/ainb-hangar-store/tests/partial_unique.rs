@@ -90,6 +90,7 @@ fn new_task(id: &str, issue_id: Option<&str>) -> NewTask {
         issue_id: issue_id.map(str::to_string),
         work_dir: None,
         created_at: 1_700_000_000_000,
+        autopilot_run_id: None,
     }
 }
 

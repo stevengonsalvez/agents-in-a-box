@@ -63,6 +63,7 @@ fn task_fixture(id: &str, issue_id: Option<&str>) -> Task {
         dispatched_at: Some(BASE_MS),
         started_at: None,
         finished_at: None,
+        autopilot_run_id: None,
     }
 }
 

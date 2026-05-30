@@ -887,6 +887,7 @@ async fn run_issue_create(store: &Store, args: IssueCreateArgs) -> Result<()> {
                 issue_id: Some(id.clone()),
                 work_dir: None,
                 created_at: now,
+                autopilot_run_id: None,
             },
         )
         .await
