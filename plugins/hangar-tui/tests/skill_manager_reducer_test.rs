@@ -30,9 +30,15 @@ fn skills() -> Vec<SkillRow> {
 
 fn files() -> Vec<SkillFile> {
     vec![
-        SkillFile { path: "SKILL.md".into() },
-        SkillFile { path: "assets/template.md".into() },
-        SkillFile { path: "assets/checklist.md".into() },
+        SkillFile {
+            path: "SKILL.md".into(),
+        },
+        SkillFile {
+            path: "assets/template.md".into(),
+        },
+        SkillFile {
+            path: "assets/checklist.md".into(),
+        },
     ]
 }
 
@@ -59,26 +65,51 @@ fn enter_on_skill_loads_file_tree() {
     let out = reduce_skill_manager(&s, SkillManagerEvent::Key('\n'));
     assert_eq!(
         out.intent,
-        Some(SkillManagerIntent::LoadFiles("commit".into()))
+        Some(SkillManagerIntent::LoadDetail("commit".into()))
     );
-    // The daemon replies with the file list; folding it populates the tree.
+    // The daemon replies with the detail (body + files); folding it populates
+    // the tree (P6.5: Enter opens the detail pane via `hangar/skill_get`).
     let loaded = reduce_skill_manager(
         &out.state,
-        SkillManagerEvent::FilesLoaded {
+        SkillManagerEvent::DetailLoaded {
             slug: "commit".into(),
+            body: "# Commit\n".into(),
             files: files(),
         },
     )
     .state;
     assert_eq!(loaded.files().len(), 3);
+    assert_eq!(loaded.detail_body(), Some("# Commit\n"));
 }
 
-/// `i` emits the import intent (the daemon-side importer lands in P6).
+/// `s` emits the sync intent (`hangar/skills_sync`, P6.5).
 #[test]
-fn i_emits_import_intent() {
+fn s_emits_sync_intent() {
+    let s = state();
+    let out = reduce_skill_manager(&s, SkillManagerEvent::Key('s'));
+    assert_eq!(out.intent, Some(SkillManagerIntent::Sync));
+}
+
+/// `i` attaches the selected skill to the selected agent (P6.5).
+#[test]
+fn i_emits_attach_intent_for_selected_skill() {
     let s = state();
     let out = reduce_skill_manager(&s, SkillManagerEvent::Key('i'));
-    assert_eq!(out.intent, Some(SkillManagerIntent::Import));
+    assert_eq!(
+        out.intent,
+        Some(SkillManagerIntent::Attach("commit".into()))
+    );
+}
+
+/// `d` detaches the selected skill from the selected agent (P6.5).
+#[test]
+fn d_emits_detach_intent_for_selected_skill() {
+    let s = state();
+    let out = reduce_skill_manager(&s, SkillManagerEvent::Key('d'));
+    assert_eq!(
+        out.intent,
+        Some(SkillManagerIntent::Detach("commit".into()))
+    );
 }
 
 /// The `Used` filter chip hides orphan (unused) skills.
