@@ -36,7 +36,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use ainb_hangar_core::ids::AgentId;
+use ainb_hangar_core::ids::{AgentId, WorkspaceId};
 use ainb_hangar_core::skill::SkillWithFiles;
 use ainb_hangar_store::repo::skill::{SkillRepo, SkillRepoError};
 use sqlx::SqlitePool;
@@ -137,6 +137,9 @@ pub struct MaterialiseReport {
 /// Where to materialise — the per-task paths plus the provider name.
 #[derive(Debug, Clone)]
 pub struct MaterialiseTarget {
+    /// The workspace the task's agent belongs to. The skill read is scoped to
+    /// it so a task can never materialise another tenant's skills.
+    pub workspace: WorkspaceId,
     /// The per-task root (`ExecEnv::root()`): sibling of `workdir`, outside the
     /// git worktree. Home-style provider layouts root here.
     pub task_root: PathBuf,
@@ -179,7 +182,7 @@ pub async fn materialise_for_agent(
     agent: &AgentId,
     target: &MaterialiseTarget,
 ) -> Result<MaterialiseReport, MaterialiseError> {
-    let skills = SkillRepo::skills_for_agent(pool, agent).await?;
+    let skills = SkillRepo::skills_for_agent(pool, &target.workspace, agent).await?;
     let layout = ProviderSkillLayout::from_provider(&target.provider);
 
     // No skills → no dirs, no env pointer. Dispatch proceeds with an empty

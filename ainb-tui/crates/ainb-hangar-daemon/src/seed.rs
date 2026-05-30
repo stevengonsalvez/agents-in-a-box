@@ -16,7 +16,7 @@
 //! so it never ships in the production daemon binary.
 
 use ainb_hangar_core::actor::{ActorKind, ActorRef};
-use ainb_hangar_core::ids::{AgentId, SkillId};
+use ainb_hangar_core::ids::{AgentId, SkillId, WorkspaceId};
 use ainb_hangar_store::repo::agent::{Agent, AgentRepo};
 use ainb_hangar_store::repo::agent_runtime::{AgentRuntime, AgentRuntimeRepo};
 use ainb_hangar_store::repo::issue::{IssueRepo, NewIssue};
@@ -95,10 +95,19 @@ pub async fn seed_p4_fixture(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         )
         .await?;
     }
-    // `commit` is referenced by the agent → renders `used`.
+    // `commit` is referenced by the agent → renders `used`. Both the agent and
+    // the skill live in `WS_ID`, so the workspace-scoped attach succeeds.
+    let ws = WorkspaceId::from_str(WS_ID).expect("non-empty workspace id");
     let agent_id = AgentId::from_str("agent-1").expect("non-empty agent id");
     let skill_id = SkillId::from_str("skill-commit").expect("non-empty skill id");
-    SkillRepo::attach_to_agent(pool, &agent_id, &skill_id).await?;
+    SkillRepo::attach_to_agent(pool, &ws, &agent_id, &skill_id)
+        .await
+        .map_err(|e| match e {
+            ainb_hangar_store::repo::skill::SkillRepoError::Db(db) => db,
+            // Both ids are seeded into WS_ID above, so a cross-workspace
+            // rejection here is an impossible-fixture bug; surface it loudly.
+            other => sqlx::Error::Protocol(format!("seed attach failed: {other}")),
+        })?;
 
     // Three Todo issues, the first assigned to the agent so it can carry a task.
     let creator = ActorRef::new(ActorKind::Member, "user-1").expect("valid member ref");

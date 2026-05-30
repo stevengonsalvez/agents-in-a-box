@@ -318,10 +318,13 @@ async fn materialise_skills(
     task: &Task,
     env: &crate::execenv::ExecEnv,
 ) -> Option<(String, PathBuf)> {
-    let provider = match resolve_provider(pool, &task.agent_id).await {
-        Ok(p) => p,
+    // Resolve provider AND the agent's owning workspace together (both read the
+    // agent row): the workspace scopes the skill materialise so a task can only
+    // ever materialise its own tenant's skills.
+    let (provider, workspace) = match resolve_provider_and_workspace(pool, &task.agent_id).await {
+        Ok(pw) => pw,
         Err(e) => {
-            tracing::warn!(error = %e, task_id = %task.id, "skill materialise: provider resolve failed; skipping");
+            tracing::warn!(error = %e, task_id = %task.id, "skill materialise: agent resolve failed; skipping");
             return None;
         }
     };
@@ -329,6 +332,7 @@ async fn materialise_skills(
         return None;
     };
     let target = crate::materialise::MaterialiseTarget {
+        workspace,
         task_root: env.root().to_path_buf(),
         workdir: env.workdir.clone(),
         provider,
@@ -353,18 +357,23 @@ async fn materialise_skills(
     }
 }
 
-/// Resolve the provider wire name for a task's agent (agent → runtime →
-/// `provider`).
-async fn resolve_provider(pool: &SqlitePool, agent_id: &str) -> anyhow::Result<String> {
+/// Resolve the provider wire name and owning workspace for a task's agent
+/// (agent → `workspace_id` + agent → runtime → `provider`).
+async fn resolve_provider_and_workspace(
+    pool: &SqlitePool,
+    agent_id: &str,
+) -> anyhow::Result<(String, ainb_hangar_core::ids::WorkspaceId)> {
     use ainb_hangar_store::repo::agent::AgentRepo;
     use ainb_hangar_store::repo::agent_runtime::AgentRuntimeRepo;
     let agent = AgentRepo::get(pool, agent_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("agent {agent_id} not found"))?;
+    let workspace = ainb_hangar_core::ids::WorkspaceId::from_str(agent.workspace_id.clone())
+        .map_err(|_| anyhow::anyhow!("agent {agent_id} has empty workspace_id"))?;
     let runtime = AgentRuntimeRepo::get(pool, &agent.runtime_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("runtime {} not found", agent.runtime_id))?;
-    Ok(runtime.provider)
+    Ok((runtime.provider, workspace))
 }
 
 /// Look up a workspace's slug by id.

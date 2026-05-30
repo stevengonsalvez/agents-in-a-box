@@ -155,7 +155,7 @@ async fn test_skills_sync_is_idempotent() {
         "skill_file row count unchanged on re-import"
     );
 
-    let after = SkillRepo::get(pool, &id_a)
+    let after = SkillRepo::get(pool, &ws, &id_a)
         .await
         .expect("get")
         .expect("skill-a still present under its original id");

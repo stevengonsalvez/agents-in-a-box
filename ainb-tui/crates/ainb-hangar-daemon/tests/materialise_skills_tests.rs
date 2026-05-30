@@ -74,7 +74,7 @@ async fn attach_skill(
     let id = SkillRepo::create(pool, ws, name, None, body, files)
         .await
         .expect("create skill");
-    SkillRepo::attach_to_agent(pool, agent, &id).await.expect("attach skill");
+    SkillRepo::attach_to_agent(pool, ws, agent, &id).await.expect("attach skill");
 }
 
 /// Build a per-task target whose `task_root` is the sibling-parent of a
@@ -86,6 +86,8 @@ fn target_in(home: &Path, provider: &str) -> (MaterialiseTarget, PathBuf) {
     std::fs::create_dir_all(&workdir).expect("create workdir");
     (
         MaterialiseTarget {
+            // Matches the id `seed()` writes; the materialise read is scoped to it.
+            workspace: WorkspaceId::from_str("ws-test-0001").unwrap(),
             task_root: task_root.clone(),
             workdir,
             provider: provider.to_string(),
