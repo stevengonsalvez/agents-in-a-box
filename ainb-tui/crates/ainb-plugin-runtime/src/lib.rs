@@ -38,6 +38,7 @@ pub mod secret_store;
 pub mod snapshot;
 pub mod types;
 pub mod unix_socket;
+pub mod warnings;
 pub mod workspace_store;
 
 pub use error::RuntimeError;
