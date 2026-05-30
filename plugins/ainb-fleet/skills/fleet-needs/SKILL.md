@@ -70,6 +70,22 @@ It runs in background; wait for completion. The result is render-ready:
                "multiSelect", "suggestion", "route": {target,hint} } ] }
 ```
 
+## Step 1.5 — handle a read failure
+
+If the result has a non-empty `error` field, the fleet read genuinely failed
+(e.g. an API throttle that persisted across the workflow's retries) — this is
+NOT an empty fleet. Render the error, do not show "0 NEED YOU":
+
+```
+╔════════════════════════════════════╗
+║  ⚠ FLEET READ FAILED               ║
+║  <result.error>                     ║
+║  retry in a moment                  ║
+╚════════════════════════════════════╝
+```
+
+Then stop (offer to re-run). Only proceed to Step 2 when `error` is absent.
+
 ## Step 2 — render the Jarvis HUD
 
 From `banner` + `cards`, render this exact layout in chat:
