@@ -18,7 +18,8 @@ use std::time::Duration;
 use ainb_hangar_proto::{methods as daemon_methods, RpcRequest, RpcResponse};
 use ainb_plugin_hangar::HangarPlugin;
 use ainb_plugin_protocol::params::{
-    HandleEventParams, KeyCode, KeyEvent, UnixSocketEvent, UnixSocketEventKind, UnixSocketSendParams,
+    HandleEventParams, KeyCode, KeyEvent, UnixSocketEvent, UnixSocketEventKind,
+    UnixSocketSendParams,
 };
 use ainb_plugin_protocol::{framing, methods};
 use ainb_plugin_sdk::Server;
@@ -54,6 +55,19 @@ async fn read_frame<R: tokio::io::AsyncBufRead + Unpin>(r: &mut R) -> Option<ser
 /// A mock daemon answering subscribe + the four `hangar/*` snapshots with a
 /// fixed, seed-shaped result so the plugin's screens have real rows to render.
 fn spawn_seeded_daemon(listener: UnixListener) {
+    spawn_recording_daemon(
+        listener,
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+    );
+}
+
+/// A mock daemon that, in addition to answering every request, records each
+/// received method name into the shared `seen` vec — so a test can assert the
+/// plugin issued a specific RPC (P6.5 `hangar/skills_sync`).
+fn spawn_recording_daemon(
+    listener: UnixListener,
+    seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) {
     tokio::spawn(async move {
         let Ok((stream, _)) = listener.accept().await else {
             return;
@@ -64,6 +78,7 @@ fn spawn_seeded_daemon(listener: UnixListener) {
             let Ok(req) = serde_json::from_value::<RpcRequest>(raw) else {
                 return;
             };
+            seen.lock().unwrap().push(req.method.clone());
             let result = result_for(&req.method);
             let resp = RpcResponse {
                 jsonrpc: "2.0".into(),
@@ -110,6 +125,9 @@ fn result_for(method: &str) -> serde_json::Value {
         }),
         m if m == daemon_methods::HANGAR_HEALTH => serde_json::json!({
             "socket_path":"/tmp/h.sock","pid":1,"uptime_secs":1,"version":"0.1.0","connected":true
+        }),
+        m if m == daemon_methods::HANGAR_SKILLS_SYNC => serde_json::json!({
+            "imported": ["commit","find-missing-tests","brainstorm"], "count": 3
         }),
         _ => serde_json::json!({}),
     }
@@ -348,15 +366,16 @@ async fn issue_list_renders_seeded_rows_then_tab_to_skills() {
         let mut host_read = BufReader::new(host_read_half);
 
         let stream_id = format!("sock-{}", std::process::id());
-        let daemon =
-            init_and_dial(&mut host_write, &mut host_read, &socket_path, &stream_id).await;
+        let daemon = init_and_dial(&mut host_write, &mut host_read, &socket_path, &stream_id).await;
         // One persistent reader over the daemon connection so over-reads don't
         // drop later snapshot replies.
         let (daemon_read, mut daemon_write) = daemon.into_split();
         let mut daemon_reader = BufReader::new(daemon_read);
 
         // Subscribe ack → arms snapshot fetch.
-        let ack = read_one_raw_frame(&mut daemon_reader).await.expect("subscribe ack");
+        let ack = read_one_raw_frame(&mut daemon_reader)
+            .await
+            .expect("subscribe ack");
         push_data(&mut host_write, &stream_id, &ack).await;
 
         // Pump the four snapshot requests + replies.
@@ -380,7 +399,10 @@ async fn issue_list_renders_seeded_rows_then_tab_to_skills() {
         send_key(&mut host_write, '4').await;
         let (skills, last2) = poll_render_for(&mut host_write, &mut host_read, "commit").await;
         assert!(skills, "tab to skills did not render `commit`:\n{last2}");
-        assert!(!last2.contains("Refactor API"), "issue list bled into skills:\n{last2}");
+        assert!(
+            !last2.contains("Refactor API"),
+            "issue list bled into skills:\n{last2}"
+        );
 
         drop(host_write);
         server.abort();
@@ -389,4 +411,131 @@ async fn issue_list_renders_seeded_rows_then_tab_to_skills() {
     tokio::time::timeout(BUDGET, body)
         .await
         .expect("exceeded e2e budget");
+}
+
+/// Relay one reverse `unix_socket_send` (the plugin firing a daemon RPC) to the
+/// daemon and pump its reply back — or drive one render. Returns `true` once a
+/// send was relayed. Reads exactly one host frame.
+async fn relay_one_send_or_render<W, R, DR, DW>(
+    host_write: &mut W,
+    host_read: &mut R,
+    daemon_reader: &mut DR,
+    daemon_write: &mut DW,
+    stream_id: &str,
+) -> bool
+where
+    W: tokio::io::AsyncWrite + Unpin,
+    R: tokio::io::AsyncBufRead + Unpin,
+    DR: tokio::io::AsyncBufRead + Unpin,
+    DW: tokio::io::AsyncWrite + Unpin,
+{
+    // Nudge a render so the plugin drains its pending skill action.
+    host_write
+        .write_all(&host_frame(&serde_json::json!({
+            "jsonrpc": "2.0", "id": 99, "method": methods::PLUGIN_RENDER,
+            "params": { "viewport": {"width": 120, "height": 40}, "generation": 0 }
+        })))
+        .await
+        .unwrap();
+    // Read frames until we either relay a send or see the render ack.
+    loop {
+        let Some(frame) = read_frame(host_read).await else {
+            return false;
+        };
+        if frame.get("method").and_then(|m| m.as_str()) == Some(methods::HOST_UNIX_SOCKET_SEND) {
+            let send: UnixSocketSendParams =
+                serde_json::from_value(frame["params"].clone()).unwrap();
+            daemon_write.write_all(&send.bytes).await.unwrap();
+            daemon_write.flush().await.unwrap();
+            if let Some(reply) = read_one_raw_frame(daemon_reader).await {
+                push_data(host_write, stream_id, &reply).await;
+            }
+            return true;
+        }
+        if frame.get("id").and_then(serde_json::Value::as_i64) == Some(99) {
+            return false; // render ack, no send this round
+        }
+    }
+}
+
+#[tokio::test]
+async fn skill_screen_s_invokes_skills_sync_rpc() {
+    let body = async {
+        let home = tempfile::tempdir().expect("home");
+        std::env::set_var("AINB_HANGAR_HOME", home.path());
+        let state = home.path().join("hangar").join("state.toml");
+        std::fs::create_dir_all(state.parent().unwrap()).expect("state dir");
+        std::fs::write(&state, "warnings_ack = [\"first_run\"]\n").expect("seed ack");
+
+        let socket_path = home.path().join("hangar.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind daemon");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        spawn_recording_daemon(listener, seen.clone());
+
+        let (host_side, plugin_side) = tokio::io::duplex(256 * 1024);
+        let (plugin_read, plugin_write) = tokio::io::split(plugin_side);
+        let server = tokio::spawn(Server::new(HangarPlugin::new()).run(plugin_read, plugin_write));
+
+        let (host_read_half, mut host_write) = tokio::io::split(host_side);
+        let mut host_read = BufReader::new(host_read_half);
+
+        let stream_id = format!("sock-sync-{}", std::process::id());
+        let daemon = init_and_dial(&mut host_write, &mut host_read, &socket_path, &stream_id).await;
+        let (daemon_read, mut daemon_write) = daemon.into_split();
+        let mut daemon_reader = BufReader::new(daemon_read);
+
+        // Subscribe ack → arms snapshot fetch.
+        let ack = read_one_raw_frame(&mut daemon_reader)
+            .await
+            .expect("subscribe ack");
+        push_data(&mut host_write, &stream_id, &ack).await;
+        pump_snapshots(
+            &mut host_write,
+            &mut host_read,
+            &mut daemon_reader,
+            &mut daemon_write,
+            &stream_id,
+        )
+        .await;
+
+        // Tab to the skill manager (`4`), then press `s` (sync).
+        send_key(&mut host_write, '4').await;
+        send_key(&mut host_write, 's').await;
+
+        // Pump renders until the plugin's deferred skill action fires the sync
+        // RPC and the daemon records it (bounded).
+        let mut sent = false;
+        for _ in 0..40 {
+            relay_one_send_or_render(
+                &mut host_write,
+                &mut host_read,
+                &mut daemon_reader,
+                &mut daemon_write,
+                &stream_id,
+            )
+            .await;
+            if seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|m| m == daemon_methods::HANGAR_SKILLS_SYNC)
+            {
+                sent = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            sent,
+            "pressing `s` on the skill screen must issue a `hangar/skills_sync` RPC; saw: {:?}",
+            seen.lock().unwrap()
+        );
+
+        drop(host_write);
+        server.abort();
+    };
+
+    tokio::time::timeout(BUDGET, body)
+        .await
+        .expect("exceeded sync-rpc budget");
 }
