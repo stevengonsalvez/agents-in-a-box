@@ -168,13 +168,30 @@ fn ensure_known(store: &dyn WorkspaceStore, id: &str) -> Result<(), RpcError> {
     }
 }
 
-/// The `workspace:write` cap gate: any granted form (bool-true or a non-empty
-/// list) permits the write; an ungranted plugin gets `-32001` before the store
-/// is touched.
+/// The `workspace:write` cap gate.
+///
+/// `workspace:write` is a **bool-only** capability — it grants the ability to
+/// set the active/default workspace, full stop. It is NOT a per-workspace-id
+/// allow-list. A list-form grant (`workspace:write = ["ws-A"]`) *looks* like it
+/// scopes writes to specific workspace ids, but the host has no per-id semantics
+/// for this cap: accepting it would silently grant blanket write (the
+/// "allowlist semantic escape"). So a list-form grant is rejected outright with
+/// `-32003 MANIFEST_VALIDATION`, leaving exactly one valid form (bool). This
+/// mirrors `spawn_managed_subprocess` / `unix_socket_dial`, which reject the
+/// inverse ambiguous form (bool-true) for the same "no ambiguous grant" reason.
 ///
 /// # Errors
-/// Returns `-32001 CAPABILITY_DENIED` when the grant is absent.
+/// - `-32003 MANIFEST_VALIDATION` when the grant is list-form (unsupported).
+/// - `-32001 CAPABILITY_DENIED` when the grant is absent (bool-false).
 pub fn ensure_write_granted(grant: &CapabilityGrant) -> Result<(), RpcError> {
+    // List-form is never valid for this cap — reject before consulting
+    // `is_granted()` (which would treat a non-empty list as a grant).
+    if grant.allow_list().is_some() {
+        return Err(RpcError::manifest_validation(
+            "workspace:write must be a bool grant, not a list; \
+             per-workspace-id allow-lists are not supported",
+        ));
+    }
     if grant.is_granted() {
         Ok(())
     } else {
@@ -469,5 +486,31 @@ mod tests {
         let err = ensure_known(&store, "01ID_GONE").unwrap_err();
         assert_eq!(err.code, ainb_plugin_protocol::errors::INVALID_PARAMS);
         assert!(ensure_known(&store, "01ID_ACME").is_ok());
+    }
+
+    #[test]
+    fn ensure_write_granted_accepts_bool_true_denies_bool_false() {
+        assert!(ensure_write_granted(&CapabilityGrant::Bool(true)).is_ok());
+        let err = ensure_write_granted(&CapabilityGrant::Bool(false)).unwrap_err();
+        assert_eq!(err.code, ainb_plugin_protocol::errors::CAPABILITY_DENIED);
+    }
+
+    #[test]
+    fn ensure_write_granted_rejects_list_form_as_manifest_validation() {
+        // The allowlist-semantic-escape guard: a list-form grant LOOKS like a
+        // per-workspace-id scope but the host has no per-id semantics, so it is
+        // rejected with -32003 rather than silently treated as a blanket grant.
+        // Both non-empty and empty lists are the wrong form for this bool cap.
+        for grant in [
+            CapabilityGrant::List(vec!["01ID_ACME".into()]),
+            CapabilityGrant::List(vec![]),
+        ] {
+            let err = ensure_write_granted(&grant).unwrap_err();
+            assert_eq!(
+                err.code,
+                ainb_plugin_protocol::errors::MANIFEST_VALIDATION,
+                "list-form workspace:write must be rejected as -32003, not accepted"
+            );
+        }
     }
 }
