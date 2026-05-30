@@ -18,6 +18,12 @@ pub const METHOD_NOT_FOUND: i32 = -32601;
 /// Spec: JSON-RPC 2.0 reserved code.
 pub const INVALID_PARAMS: i32 = -32602;
 
+/// Internal host error — an operation failed for a reason that is not the
+/// caller's fault (e.g. a state file the host could not write).
+///
+/// Spec: JSON-RPC 2.0 reserved code.
+pub const INTERNAL_ERROR: i32 = -32603;
+
 /// Plugin or host attempted a call outside the granted capability set.
 pub const CAPABILITY_DENIED: i32 = -32001;
 
@@ -107,6 +113,12 @@ impl RpcError {
     #[must_use]
     pub fn invalid_params(reason: impl Into<String>) -> Self {
         Self::new(INVALID_PARAMS, reason)
+    }
+
+    /// Constructor for [`INTERNAL_ERROR`] with a free-form reason string.
+    #[must_use]
+    pub fn internal(reason: impl Into<String>) -> Self {
+        Self::new(INTERNAL_ERROR, reason)
     }
 
     /// Constructor for [`SECRET_NOT_FOUND`] naming the `(scope, key)`

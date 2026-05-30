@@ -675,6 +675,87 @@ pub struct SecretStoreGetResult {
 }
 
 // =====================================================================
+// host/workspace_list
+// =====================================================================
+
+/// One workspace row in a `host/workspace_list` result.
+///
+/// The `id` is the workspace's stable ULID (what `state.toml` is keyed by and
+/// what `set_active`/`set_default` switch on); `slug` is the short display
+/// handle (e.g. `default`); `name` is the human-readable label. `active` and
+/// `default` are resolved against `~/.ainb/hangar/state.toml` at list time —
+/// `active` reflects the effective active workspace (explicit active, else
+/// default, else first), so exactly one row is `active` in a non-empty list.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceEntry {
+    /// Stable ULID workspace id. State + switching key on this, never the slug.
+    pub id: String,
+    /// Short display handle (e.g. `default`).
+    pub slug: String,
+    /// Human-readable display name.
+    pub name: String,
+    /// Whether this workspace is the effective active one.
+    pub active: bool,
+    /// Whether this workspace is the configured default.
+    pub default: bool,
+}
+
+/// `host/workspace_list` params: empty — the list is host-wide.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceListParams {}
+
+/// `host/workspace_list` result: every known workspace with its
+/// active/default flags resolved from `state.toml`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceListResult {
+    /// The workspace rows, in the host's list order.
+    pub workspaces: Vec<WorkspaceEntry>,
+}
+
+// =====================================================================
+// host/workspace_get_active
+// =====================================================================
+
+/// `host/workspace_get_active` params: empty.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceGetActiveParams {}
+
+/// `host/workspace_get_active` result: the effective active workspace id, or
+/// `None` when no workspaces exist.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceGetActiveResult {
+    /// The effective active workspace ULID, or `None` for an empty host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+}
+
+// =====================================================================
+// host/workspace_set_active / host/workspace_set_default
+// =====================================================================
+
+/// `host/workspace_set_active` params: the workspace ULID to make active.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceSetActiveParams {
+    /// The workspace ULID to switch to. Must name a known workspace.
+    pub workspace_id: String,
+}
+
+/// `host/workspace_set_active` result: empty acknowledgement.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceSetActiveResult {}
+
+/// `host/workspace_set_default` params: the workspace ULID to make default.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceSetDefaultParams {
+    /// The workspace ULID to set as default. Must name a known workspace.
+    pub workspace_id: String,
+}
+
+/// `host/workspace_set_default` result: empty acknowledgement.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceSetDefaultResult {}
+
+// =====================================================================
 // (de)serialise bytes::Bytes as a JSON array of u8 (no base64 layer).
 // =====================================================================
 
@@ -943,6 +1024,61 @@ mod tests {
         rt(&SecretStoreGetResult {
             value: "c2VjcmV0".into(),
         });
+
+        rt(&WorkspaceListParams::default());
+        rt(&WorkspaceListResult {
+            workspaces: vec![
+                WorkspaceEntry {
+                    id: "01J9ZX8QK7".into(),
+                    slug: "default".into(),
+                    name: "Default".into(),
+                    active: true,
+                    default: true,
+                },
+                WorkspaceEntry {
+                    id: "01J9ZX8QK8".into(),
+                    slug: "acme".into(),
+                    name: "Acme".into(),
+                    active: false,
+                    default: false,
+                },
+            ],
+        });
+        rt(&WorkspaceGetActiveParams::default());
+        rt(&WorkspaceGetActiveResult {
+            workspace_id: Some("01J9ZX8QK7".into()),
+        });
+        rt(&WorkspaceGetActiveResult { workspace_id: None });
+        rt(&WorkspaceSetActiveParams {
+            workspace_id: "01J9ZX8QK8".into(),
+        });
+        rt(&WorkspaceSetActiveResult::default());
+        rt(&WorkspaceSetDefaultParams {
+            workspace_id: "01J9ZX8QK8".into(),
+        });
+        rt(&WorkspaceSetDefaultResult::default());
+    }
+
+    #[test]
+    fn workspace_get_active_omits_none_id() {
+        // A host with no workspaces returns `{}` (no `workspace_id` key).
+        let r = WorkspaceGetActiveResult { workspace_id: None };
+        assert_eq!(serde_json::to_string(&r).unwrap(), "{}");
+    }
+
+    #[test]
+    fn workspace_entry_wire_shape() {
+        let e = WorkspaceEntry {
+            id: "01J9ZX8QK7".into(),
+            slug: "default".into(),
+            name: "Default".into(),
+            active: true,
+            default: false,
+        };
+        assert_eq!(
+            serde_json::to_string(&e).unwrap(),
+            r#"{"id":"01J9ZX8QK7","slug":"default","name":"Default","active":true,"default":false}"#
+        );
     }
 
     #[test]

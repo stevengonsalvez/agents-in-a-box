@@ -161,6 +161,21 @@ pub struct Capabilities {
     /// name); the Rust field is `secrets_read`.
     #[serde(rename = "secrets:read", default)]
     pub secrets_read: CapabilityGrant,
+    /// Mutate the host's workspace switching state (`active_workspace`,
+    /// `default_workspace` in `~/.ainb/hangar/state.toml`) via
+    /// `host/workspace_set_active` and `host/workspace_set_default`.
+    ///
+    /// This gates the *write* path only: `host/workspace_list` and
+    /// `host/workspace_get_active` are ungated reads. A bool-true grant
+    /// permits switching/defaulting any workspace; list form is reserved
+    /// for a future per-workspace-id allow-list (today any non-empty list
+    /// grants the write, no per-id filtering). Without the grant a write
+    /// returns `-32001 CAPABILITY_DENIED`.
+    ///
+    /// The TOML/wire key is `workspace:write` (the colon-namespaced
+    /// capability name); the Rust field is `workspace_write`.
+    #[serde(rename = "workspace:write", default)]
+    pub workspace_write: CapabilityGrant,
 }
 
 /// `[provides]` — what the plugin contributes to the host's UX.
@@ -250,6 +265,7 @@ mod tests {
                 ]),
                 unix_socket_dial: CapabilityGrant::List(vec!["~/.ainb/hangar.sock".into()]),
                 secrets_read: CapabilityGrant::List(vec!["anthropic_api_key".into()]),
+                workspace_write: CapabilityGrant::Bool(true),
             },
             provides: Provides {
                 screens: vec!["analytics".into()],
@@ -532,6 +548,45 @@ abi_version = 2
 "#;
         let m: Manifest = toml::from_str(toml_src).unwrap();
         assert!(!m.capabilities.secrets_read.is_granted());
+    }
+
+    #[test]
+    fn workspace_write_cap_round_trips_bool_form() {
+        // Bool-true grant = switch/default any workspace. The TOML key is the
+        // colon-namespaced `workspace:write`.
+        let toml_src = r#"
+[plugin]
+name = "hangar-tui"
+version = "0.1.0"
+abi_version = 2
+
+[capabilities]
+"workspace:write" = true
+"#;
+        let m: Manifest = toml::from_str(toml_src).unwrap();
+        assert!(matches!(
+            m.capabilities.workspace_write,
+            CapabilityGrant::Bool(true)
+        ));
+        let s = toml::to_string(&m).unwrap();
+        assert!(
+            s.contains("\"workspace:write\""),
+            "re-encoded manifest must use the `workspace:write` key: {s}"
+        );
+        let back: Manifest = toml::from_str(&s).unwrap();
+        assert_eq!(m, back);
+    }
+
+    #[test]
+    fn workspace_write_cap_defaults_denied() {
+        let toml_src = r#"
+[plugin]
+name = "x"
+version = "1.0.0"
+abi_version = 2
+"#;
+        let m: Manifest = toml::from_str(toml_src).unwrap();
+        assert!(!m.capabilities.workspace_write.is_granted());
     }
 
     #[test]

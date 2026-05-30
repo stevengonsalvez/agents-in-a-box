@@ -134,6 +134,37 @@ pub const HOST_UNIX_SOCKET_CLOSE: &str = "host/unix_socket_close";
 /// rides the wire as a raw byte array.
 pub const HOST_SECRET_STORE_GET: &str = "host/secret_store_get";
 
+/// Plugin asks the host for the list of workspaces, with each row's
+/// active/default flags resolved from `~/.ainb/hangar/state.toml`.
+///
+/// Ungated read. Result: `{ workspaces: [WorkspaceEntry, ...] }`, each entry
+/// carrying the ULID `id`, the display `slug`, the `name`, and the resolved
+/// `active` / `default` booleans.
+pub const HOST_WORKSPACE_LIST: &str = "host/workspace_list";
+
+/// Plugin asks the host which workspace is currently active.
+///
+/// Ungated read. Resolution order: the explicit `active_workspace` from
+/// `state.toml`, else the `default_workspace`, else the first listed
+/// workspace, else `None`. Result: `{ workspace_id: String | null }`.
+pub const HOST_WORKSPACE_GET_ACTIVE: &str = "host/workspace_get_active";
+
+/// Plugin asks the host to switch the active workspace.
+///
+/// Capability-gated by `workspace:write` (`-32001` when omitted). Writes
+/// `active_workspace = <id>` to `state.toml` (foreign sections preserved,
+/// atomic temp+rename) and broadcasts a `WorkspaceChanged { from, to }`
+/// event so subscribed plugins re-fetch. The `workspace_id` MUST be a known
+/// workspace id; an unknown id is `-32602 INVALID_PARAMS`.
+pub const HOST_WORKSPACE_SET_ACTIVE: &str = "host/workspace_set_active";
+
+/// Plugin asks the host to set the default workspace.
+///
+/// Capability-gated by `workspace:write` (`-32001` when omitted). Writes
+/// `default_workspace = <id>` to `state.toml`. Independent of the active
+/// workspace: setting the default never changes `active_workspace`.
+pub const HOST_WORKSPACE_SET_DEFAULT: &str = "host/workspace_set_default";
+
 /// Every method name registered by the protocol, in stable order.
 ///
 /// Used by the runtime's static method-existence check and by the CTS
@@ -160,6 +191,10 @@ pub const ALL_METHODS: &[&str] = &[
     HOST_UNIX_SOCKET_SEND,
     HOST_UNIX_SOCKET_CLOSE,
     HOST_SECRET_STORE_GET,
+    HOST_WORKSPACE_LIST,
+    HOST_WORKSPACE_GET_ACTIVE,
+    HOST_WORKSPACE_SET_ACTIVE,
+    HOST_WORKSPACE_SET_DEFAULT,
 ];
 
 #[cfg(test)]
@@ -214,9 +249,32 @@ mod tests {
             HOST_UNIX_SOCKET_SEND,
             HOST_UNIX_SOCKET_CLOSE,
             HOST_SECRET_STORE_GET,
+            HOST_WORKSPACE_LIST,
+            HOST_WORKSPACE_GET_ACTIVE,
+            HOST_WORKSPACE_SET_ACTIVE,
+            HOST_WORKSPACE_SET_DEFAULT,
         ] {
             assert!(m.starts_with("host/"), "{m} missing host/ namespace");
         }
+    }
+
+    #[test]
+    fn all_methods_contains_workspace_methods() {
+        for m in [
+            HOST_WORKSPACE_LIST,
+            HOST_WORKSPACE_GET_ACTIVE,
+            HOST_WORKSPACE_SET_ACTIVE,
+            HOST_WORKSPACE_SET_DEFAULT,
+        ] {
+            assert!(
+                ALL_METHODS.contains(&m),
+                "{m} missing from ALL_METHODS registry"
+            );
+        }
+        assert_eq!(HOST_WORKSPACE_LIST, "host/workspace_list");
+        assert_eq!(HOST_WORKSPACE_GET_ACTIVE, "host/workspace_get_active");
+        assert_eq!(HOST_WORKSPACE_SET_ACTIVE, "host/workspace_set_active");
+        assert_eq!(HOST_WORKSPACE_SET_DEFAULT, "host/workspace_set_default");
     }
 
     #[test]
