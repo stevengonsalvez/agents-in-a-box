@@ -14,6 +14,10 @@ pub mod actor;
 pub mod assignee_crosswalk;
 /// Wall-clock injection (`HangarClock` + `SystemClock` / `FixedClock`).
 pub mod clock;
+/// Environment allowlist policy (P5.3): allowlist passthrough with a hardcoded
+/// deny family that always overrides. Pure + IO-free; the TOML loader and
+/// daemon wiring live in `ainb-hangar-daemon`.
+pub mod env_policy;
 /// Id generation injection (`IdGen` + `SystemIdGen` / `FixedIdGen`).
 pub mod idgen;
 /// Strongly-typed entity id newtypes with a non-empty invariant.
