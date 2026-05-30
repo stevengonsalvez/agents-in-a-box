@@ -42,6 +42,20 @@ pub mod run_loop;
 /// first `session_id`, and enforces a runtime deadline. Returns a
 /// [`runner::RunOutcome`] the claim loop maps onto the FSM.
 pub mod runner;
+/// The daemon's `UnixListener` JSON-RPC server (P4.10).
+///
+/// Binds `{hangar_home}/hangar.sock`, serves `workspace/subscribe`, `ping`, and
+/// the four `hangar/*` snapshot RPCs ([`rpc::snapshots`]) backed by the store
+/// repos. The plugin dials this socket through the host `unix_socket_dial` cap
+/// to populate its screens with live data.
+pub mod rpc;
+/// Deterministic P4 seed fixture for the e2e tripwires (`test-support` only).
+///
+/// Writes a `default` workspace with issues/agents/skills + a running task into
+/// a fresh store so the tmux tripwires can launch `ainb tui` against a seeded
+/// `hangar.db` and assert live rows render.
+#[cfg(any(test, feature = "test-support"))]
+pub mod seed;
 /// TTL sweepers + stale-dispatch reclaim (P1.4).
 ///
 /// The daemon's tokio runtime registers these as periodic tasks; they are also
@@ -49,6 +63,19 @@ pub mod runner;
 pub mod sweeper;
 /// Git-worktree integration for per-task working dirs (P1.6).
 pub mod worktree;
+
+/// Resolve the directory that holds `hangar.db` (and the `hangar.sock` the RPC
+/// server binds). Mirrors [`ainb_hangar_store::Store`]'s resolution so the
+/// database, the per-task env tree, and the socket all share one root:
+/// `$AINB_HANGAR_HOME` when set and non-empty, else `~/.ainb`.
+fn hangar_dir() -> anyhow::Result<std::path::PathBuf> {
+    match std::env::var_os(ainb_hangar_store::Store::home_env()).filter(|p| !p.is_empty()) {
+        Some(p) => Ok(std::path::PathBuf::from(p)),
+        None => Ok(dirs::home_dir()
+            .ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?
+            .join(".ainb")),
+    }
+}
 
 /// Boot the daemon: open the persistence layer and run the claim loop.
 ///
@@ -67,7 +94,28 @@ pub mod worktree;
 /// Returns an error if the store cannot be opened (directory not writable, a
 /// migration fails) or if the run loop's shutdown handler fails.
 pub async fn boot(once: bool) -> anyhow::Result<()> {
-    let store: Store = Store::open_default().await?;
+    let dir = hangar_dir()?;
+    let store: Store = Store::open_in(&dir).await?;
+
+    // P4.10: bind the JSON-RPC socket beside the database and serve plugin
+    // connections on a background task. A bind failure is non-fatal — the
+    // daemon's claim loop must still run even if no plugin can reach it (and a
+    // stale socket from a crashed daemon is removed in `rpc::bind`).
+    let socket_path = rpc::socket_path_in(&dir);
+    match rpc::bind(&socket_path) {
+        Ok(listener) => {
+            let health = rpc::DaemonHealth {
+                socket_path: socket_path.to_string_lossy().into_owned(),
+                pid: std::process::id(),
+                started_at: std::time::Instant::now(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+            };
+            tracing::info!(socket = %socket_path.display(), "hangar rpc listening");
+            tokio::spawn(rpc::serve(listener, store.pool().clone(), health));
+        }
+        Err(e) => tracing::warn!(error = %e, socket = %socket_path.display(), "hangar rpc bind failed"),
+    }
+
     tracing::info!(idle = true, "ainb-hangar-daemon ready idle=true");
     if once {
         return Ok(());

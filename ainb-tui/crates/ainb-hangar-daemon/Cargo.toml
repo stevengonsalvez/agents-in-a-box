@@ -27,6 +27,9 @@ path = "src/lib.rs"
 [dependencies]
 ainb-hangar-store = { path = "../ainb-hangar-store" }
 ainb-hangar-core = { path = "../ainb-hangar-core" }
+# Shared JSON-RPC envelope + the P4 snapshot wire row types the RPC server
+# serialises over the unix socket (P4.10). Pure data — no host deps leak in.
+ainb-hangar-proto = { path = "../ainb-hangar-proto" }
 sqlx = { version = "0.8", default-features = false, features = [
     "runtime-tokio-rustls",
     "sqlite",
@@ -39,6 +42,9 @@ tokio = { version = "1.36", default-features = false, features = [
     "time",
     "process",
     "io-util",
+    # P4.10: the JSON-RPC server binds a `UnixListener` and accepts plugin
+    # connections, which needs tokio's `net` feature.
+    "net",
 ] }
 clap = { workspace = true }
 tracing = { workspace = true }
