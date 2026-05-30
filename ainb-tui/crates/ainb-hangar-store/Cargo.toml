@@ -29,6 +29,11 @@ tracing = { workspace = true }
 dirs = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# Injectable CSPRNG seam for token minting (P5.4). The `RngCore` trait appears
+# in the public `mint_pat` / `mint_daemon_token` signatures so callers (and
+# tests) supply their own random source; the actual hashing/encoding lives in
+# `ainb-hangar-core::token`.
+rand = "0.8"
 # Optional: only pulled in when `test-support` is enabled (it backs the
 # isolated-home tempdir). Kept out of normal builds of the store crate.
 tempfile = { workspace = true, optional = true }

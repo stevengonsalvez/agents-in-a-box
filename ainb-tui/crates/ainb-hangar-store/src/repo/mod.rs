@@ -11,3 +11,4 @@ pub mod beads_mapping;
 pub mod issue;
 pub mod skill;
 pub mod task;
+pub mod token;
