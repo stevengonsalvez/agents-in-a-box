@@ -281,7 +281,23 @@ async fn run_tui_loop(
                     // Slash-command palette: `:` opens it; while open, all
                     // keypresses go to the palette. Plugin-contributed slash
                     // commands hook in here in Phase 4.
-                    if slash_palette.is_open() || matches!(key_event.code, KeyCode::Char(':')) {
+                    //
+                    // Plugin-owned screens own every non-reserved key (the
+                    // same contract `forward_key_to_focused_plugin` enforces
+                    // downstream), so a focused plugin screen suppresses the
+                    // `:` open-trigger — otherwise the host steals `:` from a
+                    // plugin's own text input. witr, for one, addresses
+                    // targets as `port:5432` / `pid:4242` / `file:/x` /
+                    // `container:abc`, all of which need a literal `:`. An
+                    // already-open palette still consumes keys regardless, so
+                    // it can always be closed.
+                    let plugin_screen_focused = crate::app::screens::builtin::plugin_id_for_screen(
+                        &app.state.current_screen,
+                    )
+                    .is_some();
+                    if slash_palette.is_open()
+                        || (!plugin_screen_focused && matches!(key_event.code, KeyCode::Char(':')))
+                    {
                         match slash_palette.handle_key(key_event) {
                             SlashAction::Execute(cmd) => {
                                 tracing::info!(
