@@ -28,12 +28,20 @@ pub const ACTION_TIMEOUT: i32 = -32002;
 pub const MANIFEST_VALIDATION: i32 = -32003;
 
 /// `host/secret_store_get` found no secret for the requested
-/// `(service, account)` pair in the platform secret store.
+/// `(scope, key)` pair in the platform secret store.
 pub const SECRET_NOT_FOUND: i32 = -32004;
 
 /// The requested host capability is not implemented on this platform
 /// (e.g. the linux Secret Service backend, deferred to a later phase).
 pub const NOT_IMPLEMENTED: i32 = -32005;
+
+/// The platform secret store is locked (e.g. a macOS Keychain the user
+/// has not unlocked). The plugin may retry after the user unlocks it.
+pub const SECRET_BACKEND_LOCKED: i32 = -32006;
+
+/// Access to the platform secret store was denied (e.g. the user
+/// dismissed the Keychain authorization prompt).
+pub const SECRET_ACCESS_DENIED: i32 = -32007;
 
 /// Wire shape of a JSON-RPC 2.0 error object.
 ///
@@ -101,14 +109,36 @@ impl RpcError {
         Self::new(INVALID_PARAMS, reason)
     }
 
-    /// Constructor for [`SECRET_NOT_FOUND`] naming the `(service, account)`
+    /// Constructor for [`SECRET_NOT_FOUND`] naming the `(scope, key)`
     /// pair the platform secret store had no entry for.
     #[must_use]
-    pub fn secret_not_found(service: impl Into<String>, account: impl Into<String>) -> Self {
-        let (s, a) = (service.into(), account.into());
+    pub fn secret_not_found(scope: impl Into<String>, key: impl Into<String>) -> Self {
+        let (s, k) = (scope.into(), key.into());
         Self::new(
             SECRET_NOT_FOUND,
-            format!("secret not found: service={s} account={a}"),
+            format!("secret not found: scope={s} key={k}"),
+        )
+    }
+
+    /// Constructor for [`SECRET_BACKEND_LOCKED`] naming the `(scope, key)`
+    /// the locked backend refused to read.
+    #[must_use]
+    pub fn secret_backend_locked(scope: impl Into<String>, key: impl Into<String>) -> Self {
+        let (s, k) = (scope.into(), key.into());
+        Self::new(
+            SECRET_BACKEND_LOCKED,
+            format!("secret backend locked: scope={s} key={k}"),
+        )
+    }
+
+    /// Constructor for [`SECRET_ACCESS_DENIED`] naming the `(scope, key)`
+    /// the user/OS denied access to.
+    #[must_use]
+    pub fn secret_access_denied(scope: impl Into<String>, key: impl Into<String>) -> Self {
+        let (s, k) = (scope.into(), key.into());
+        Self::new(
+            SECRET_ACCESS_DENIED,
+            format!("secret access denied: scope={s} key={k}"),
         )
     }
 
@@ -189,6 +219,8 @@ mod tests {
             MANIFEST_VALIDATION,
             SECRET_NOT_FOUND,
             NOT_IMPLEMENTED,
+            SECRET_BACKEND_LOCKED,
+            SECRET_ACCESS_DENIED,
         ];
         let mut sorted = codes.to_vec();
         sorted.sort_unstable();
@@ -198,17 +230,34 @@ mod tests {
 
     #[test]
     fn secret_store_error_codes_have_expected_values() {
-        // Locked by the P3.5 contract.
+        // Locked by the P5.2 contract.
         assert_eq!(SECRET_NOT_FOUND, -32004);
         assert_eq!(NOT_IMPLEMENTED, -32005);
+        assert_eq!(SECRET_BACKEND_LOCKED, -32006);
+        assert_eq!(SECRET_ACCESS_DENIED, -32007);
     }
 
     #[test]
     fn secret_not_found_constructor_carries_code() {
-        let e = RpcError::secret_not_found("ainb-hangar", "anthropic");
+        let e = RpcError::secret_not_found("workspace:abc", "anthropic_api_key");
         assert_eq!(e.code, SECRET_NOT_FOUND);
-        assert!(e.message.contains("ainb-hangar"));
-        assert!(e.message.contains("anthropic"));
+        assert!(e.message.contains("workspace:abc"));
+        assert!(e.message.contains("anthropic_api_key"));
+    }
+
+    #[test]
+    fn secret_backend_locked_constructor_carries_code() {
+        let e = RpcError::secret_backend_locked("global", "openai_api_key");
+        assert_eq!(e.code, SECRET_BACKEND_LOCKED);
+        assert!(e.message.contains("global"));
+        assert!(e.message.contains("openai_api_key"));
+    }
+
+    #[test]
+    fn secret_access_denied_constructor_carries_code() {
+        let e = RpcError::secret_access_denied("global", "k");
+        assert_eq!(e.code, SECRET_ACCESS_DENIED);
+        assert!(e.message.contains("global"));
     }
 
     #[test]

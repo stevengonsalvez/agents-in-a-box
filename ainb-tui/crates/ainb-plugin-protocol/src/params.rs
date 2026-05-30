@@ -635,30 +635,43 @@ pub struct UnixSocketEvent {
 // =====================================================================
 
 /// `host/secret_store_get` params: read a secret from the platform secret
-/// store.
+/// store, addressed by `(scope, key)`.
 ///
-/// `service` must satisfy the plugin's `secret_store_get` capability
-/// allow-list (list form = `service`-string whitelist; bool-true = any
-/// service). The `(service, account)` pair keys the underlying generic
-/// password (macOS Keychain) or, on linux, would key the Secret Service
-/// item (deferred — the host returns `-32005` there).
+/// `scope` selects the addressing namespace and is one of `"workspace"` or
+/// `"global"`:
+///
+/// - `"workspace"` requires `workspace_id` and isolates the secret to a
+///   single workspace. The host folds `workspace_id` into the backend's
+///   service string so per-workspace secrets never collide with each other
+///   or with `"global"` secrets that share a `key`.
+/// - `"global"` is a host-wide secret shared across all workspaces;
+///   `workspace_id` is ignored.
+///
+/// The capability `secrets:read` must be granted (list form = an allow-list
+/// of permitted `key`s; bool-true = any key). On macOS the host reads the
+/// login Keychain; on linux the backend is deferred and the host returns
+/// `-32005`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecretStoreGetParams {
-    /// Secret store service name (e.g. `ainb-hangar`). Cap-gated.
-    pub service: String,
-    /// Account / key within the service (e.g. `anthropic-api-key`).
-    pub account: String,
+    /// Addressing scope: `"workspace"` or `"global"`.
+    pub scope: String,
+    /// Workspace id — required when `scope == "workspace"`, ignored for
+    /// `"global"`. Omitted from the wire when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    /// The secret key within the scope (e.g. `anthropic_api_key`). Cap-gated.
+    pub key: String,
 }
 
 /// `host/secret_store_get` result: the secret, base64-encoded.
 ///
 /// The secret bytes are carried base64-encoded (not as a raw JSON byte
 /// array) so an arbitrary binary secret survives the JSON envelope and the
-/// payload stays compact. The plugin decodes `secret_b64` itself.
+/// payload stays compact. The plugin decodes `value` itself.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecretStoreGetResult {
     /// Base64 (standard alphabet) encoding of the secret's raw bytes.
-    pub secret_b64: String,
+    pub value: String,
 }
 
 // =====================================================================
@@ -918,33 +931,55 @@ mod tests {
         });
 
         rt(&SecretStoreGetParams {
-            service: "ainb-hangar".into(),
-            account: "anthropic-api-key".into(),
+            scope: "workspace".into(),
+            workspace_id: Some("ws-123".into()),
+            key: "anthropic_api_key".into(),
+        });
+        rt(&SecretStoreGetParams {
+            scope: "global".into(),
+            workspace_id: None,
+            key: "openai_api_key".into(),
         });
         rt(&SecretStoreGetResult {
-            secret_b64: "c2VjcmV0".into(),
+            value: "c2VjcmV0".into(),
         });
     }
 
     #[test]
-    fn secret_store_get_params_wire_shape() {
+    fn secret_store_get_params_workspace_wire_shape() {
         let p = SecretStoreGetParams {
-            service: "ainb-hangar".into(),
-            account: "anthropic-api-key".into(),
+            scope: "workspace".into(),
+            workspace_id: Some("ws-123".into()),
+            key: "anthropic_api_key".into(),
         };
         let j = serde_json::to_string(&p).unwrap();
-        assert_eq!(j, r#"{"service":"ainb-hangar","account":"anthropic-api-key"}"#);
+        assert_eq!(
+            j,
+            r#"{"scope":"workspace","workspace_id":"ws-123","key":"anthropic_api_key"}"#
+        );
+    }
+
+    #[test]
+    fn secret_store_get_params_global_omits_workspace_id() {
+        // `workspace_id: None` must not ride the wire for a global read.
+        let p = SecretStoreGetParams {
+            scope: "global".into(),
+            workspace_id: None,
+            key: "openai_api_key".into(),
+        };
+        let j = serde_json::to_string(&p).unwrap();
+        assert_eq!(j, r#"{"scope":"global","key":"openai_api_key"}"#);
     }
 
     #[test]
     fn secret_store_get_result_wire_shape() {
-        // `secret_b64` carries the base64-encoded secret bytes (the secret
-        // is never sent as a raw byte array).
+        // `value` carries the base64-encoded secret bytes (the secret is
+        // never sent as a raw byte array).
         let r = SecretStoreGetResult {
-            secret_b64: "c2VjcmV0".into(),
+            value: "c2VjcmV0".into(),
         };
         let j = serde_json::to_string(&r).unwrap();
-        assert_eq!(j, r#"{"secret_b64":"c2VjcmV0"}"#);
+        assert_eq!(j, r#"{"value":"c2VjcmV0"}"#);
     }
 
     #[test]

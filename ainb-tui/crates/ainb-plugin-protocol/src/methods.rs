@@ -118,17 +118,20 @@ pub const HOST_UNIX_SOCKET_SEND: &str = "host/unix_socket_send";
 /// shuts down, crashes, or is quarantined.
 pub const HOST_UNIX_SOCKET_CLOSE: &str = "host/unix_socket_close";
 
-/// Plugin asks the host to read a secret from the platform secret store.
+/// Plugin asks the host to read a secret from the platform secret store,
+/// addressed by `(scope, key)`.
 ///
-/// Capability-gated by the plugin's `secret_store_get` grant. List form is
-/// an allow-list of `service` strings (e.g. `["ainb-hangar"]`); a bool-true
-/// grant is an unconditional read (allowed, but a danger surface — every
-/// `service` becomes readable). On macOS the host reads the generic
+/// Capability-gated by the plugin's `secrets:read` grant. List form is an
+/// allow-list of secret `key` names (e.g. `["anthropic_api_key"]`); a
+/// bool-true grant is an unconditional read (allowed, but a danger surface
+/// — every `key` becomes readable). `scope` is `"workspace"` (requires
+/// `workspace_id`) or `"global"`. On macOS the host reads the generic
 /// password from the login Keychain; on linux the host returns
 /// `-32005 NOT_IMPLEMENTED` (Secret Service deferred to a later phase) so
 /// the plugin can degrade to dotenv. A missing entry returns
-/// `-32004 SECRET_NOT_FOUND`. The secret is returned base64-encoded so it
-/// never rides the wire as a raw byte array.
+/// `-32004 SECRET_NOT_FOUND`; a locked backend `-32006`; denied access
+/// `-32007`. The secret is returned base64-encoded in `value` so it never
+/// rides the wire as a raw byte array.
 pub const HOST_SECRET_STORE_GET: &str = "host/secret_store_get";
 
 /// Every method name registered by the protocol, in stable order.
