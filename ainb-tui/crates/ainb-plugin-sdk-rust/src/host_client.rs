@@ -356,27 +356,35 @@ impl HostClient {
             .await
     }
 
-    /// Read a secret from the platform secret store through the host.
+    /// Read a secret from the platform secret store through the host,
+    /// addressed by `(scope, key)`.
     ///
-    /// Capability-gated by the plugin's `secret_store_get` grant. List form
-    /// is an allow-list of `service` strings; bool-true is an unconditional
-    /// read of any service.
+    /// `scope` is `"workspace"` or `"global"`. Pass `workspace_id` for a
+    /// workspace-scoped read; it is ignored (and may be `None`) for a
+    /// global read.
+    ///
+    /// Capability-gated by the plugin's `secrets:read` grant. List form is
+    /// an allow-list of secret `key` names; bool-true is an unconditional
+    /// read of any key.
     ///
     /// Returns [`SdkError::Rpc`] carrying `-32001` when the cap is denied or
-    /// the `service` isn't on the allow-list, `-32004` when no secret exists
-    /// for the `(service, account)` pair, and `-32005` on platforms where
-    /// the secret store backend is not implemented (e.g. linux).
+    /// the `key` isn't on the allow-list, `-32004` when no secret exists for
+    /// the `(scope, key)` pair, `-32005` on platforms where the secret store
+    /// backend is not implemented (e.g. linux), `-32006` when the backend is
+    /// locked, and `-32007` when access is denied.
     ///
-    /// On success the result carries the secret base64-encoded in
-    /// `secret_b64`; the plugin decodes it itself.
+    /// On success the result carries the secret base64-encoded in `value`;
+    /// the plugin decodes it itself.
     pub async fn secret_store_get(
         &self,
-        service: impl Into<String>,
-        account: impl Into<String>,
+        scope: impl Into<String>,
+        workspace_id: Option<String>,
+        key: impl Into<String>,
     ) -> Result<SecretStoreGetResult> {
         let params = SecretStoreGetParams {
-            service: service.into(),
-            account: account.into(),
+            scope: scope.into(),
+            workspace_id,
+            key: key.into(),
         };
         self.send_request(methods::HOST_SECRET_STORE_GET, &params)
             .await

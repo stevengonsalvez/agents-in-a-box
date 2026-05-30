@@ -55,9 +55,9 @@ fn discovery_finds_hangar_and_validates_all_four_caps() {
         "unix_socket_dial cap must validate"
     );
     assert_eq!(
-        caps.secret_store_get.allow_list().unwrap(),
-        ["ainb-hangar", "anthropic-api-key", "openai-api-key"],
-        "secret_store_get cap must validate"
+        caps.secrets_read.allow_list().unwrap(),
+        ["anthropic_api_key", "openai_api_key"],
+        "secrets:read cap must validate"
     );
 
     // The two bool-form caps survive too.
