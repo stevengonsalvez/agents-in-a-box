@@ -34,6 +34,7 @@ pub enum SidebarItem {
     Recovery,  // Recover orphaned sessions
     Logs,      // Log history viewer
     Stats,     // Analytics & usage
+    Witr,      // Process causality (witr plugin)
     Skills,    // Browse per-agent skills
     Changelog, // Version history
     Setup,     // Setup wizard & factory reset
@@ -51,6 +52,7 @@ impl SidebarItem {
             Self::Recovery => "🔄",
             Self::Logs => "📋",
             Self::Stats => "📊",
+            Self::Witr => "🌳",
             Self::Skills => "🧠",
             Self::Changelog => "📝",
             Self::Setup => "🛠️",
@@ -68,6 +70,7 @@ impl SidebarItem {
             Self::Recovery => "Recovery",
             Self::Logs => "Logs",
             Self::Stats => "Stats",
+            Self::Witr => "Witr",
             Self::Skills => "Skills",
             Self::Changelog => "Changelog",
             Self::Setup => "Setup",
@@ -85,6 +88,7 @@ impl SidebarItem {
             Self::Recovery => "Resume Orphaned",
             Self::Logs => "View Log History",
             Self::Stats => "Usage & Analytics",
+            Self::Witr => "Process Causality",
             Self::Skills => "Per-Agent Skills",
             Self::Changelog => "Version History",
             Self::Setup => "Setup & Reset",
@@ -102,6 +106,7 @@ impl SidebarItem {
             Self::Recovery => "R",
             Self::Logs => "l",
             Self::Stats => "i",
+            Self::Witr => "w",
             Self::Skills => "k",
             Self::Changelog => "v",
             Self::Setup => "S",
@@ -119,6 +124,7 @@ impl SidebarItem {
             Self::Recovery,
             Self::Logs,
             Self::Stats,
+            Self::Witr,
             Self::Skills,
             Self::Changelog,
             Self::Setup,

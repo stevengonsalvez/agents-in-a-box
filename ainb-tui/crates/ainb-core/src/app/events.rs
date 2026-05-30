@@ -3372,6 +3372,12 @@ impl EventHandler {
                         // now (Phase 3 cutover); host no longer
                         // pre-populates state for the analytics screen.
                     }
+                    SidebarItem::Witr => {
+                        tracing::info!("Navigating to witr (process causality) from sidebar");
+                        state.current_screen = screen_ids::WITR.to_string();
+                        // Like analytics/burndown, all data lives in the
+                        // witr plugin — the host just switches screens.
+                    }
                     SidebarItem::Skills => {
                         tracing::info!("Navigating to Skills from sidebar");
                         state.current_screen = screen_ids::SKILLS.to_string();
