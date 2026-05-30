@@ -31,6 +31,10 @@ unix_socket_dial = ["~/.ainb/hangar.sock", "${XDG_RUNTIME_DIR}/ainb-hangar.sock"
 # Read provider API keys from the platform secret store. List form is the
 # allow-list of secret `key` names (per-scope; see host/secret_store_get).
 "secrets:read" = ["anthropic_api_key", "openai_api_key"]
+# Switch / default the active workspace from the Settings Workspace pane
+# (host/workspace_set_active, host/workspace_set_default). Bool-true grants
+# the write for any workspace; the read caps (list / get_active) are ungated.
+"workspace:write" = true
 # Snapshot/event bus + plugin-local data dir.
 event_bus = true
 write_plugin_data = true

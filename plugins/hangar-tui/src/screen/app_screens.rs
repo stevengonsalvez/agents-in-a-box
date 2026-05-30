@@ -19,10 +19,26 @@ use ainb_plugin_sdk::{KeyCode, KeyEvent, WireBuffer};
 
 use super::agent_picker::{reduce_agent_picker, AgentPickerEvent, AgentPickerState};
 use super::issue_list::{reduce_issue_list, IssueListEvent, IssueListIntent, IssueListState};
-use super::settings::{reduce_settings, SettingsEvent, SettingsState};
+use super::settings::{reduce_settings, SettingsEvent, SettingsIntent, SettingsState};
 use super::skill_manager::{reduce_skill_manager, SkillManagerEvent, SkillManagerState};
 use super::task_detail::{reduce_task_detail, TaskDetailEvent, TaskDetailState};
 use super::{AppState, Screen};
+
+/// A deferred host-cap action raised by the Settings Workspace pane (P5.5).
+///
+/// The sync key router can't `await` a host call, so it stashes the action on
+/// [`ScreenStates::pending_ws_action`]; the plugin's async key handler drains
+/// it and calls the matching `host/workspace_*` cap, then re-fetches the list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkspaceAction {
+    /// Fetch the host workspace list to seed the pane — raised when the user
+    /// navigates into the Workspace section (`host/workspace_list`).
+    Refresh,
+    /// Set the workspace active (`s`) — `host/workspace_set_active`.
+    SetActive(String),
+    /// Toggle the workspace default (`d`) — `host/workspace_set_default`.
+    SetDefault(String),
+}
 
 /// The render-state cache for every Core 5 screen.
 ///
@@ -47,6 +63,12 @@ pub struct ScreenStates {
     pub actors: Vec<ActorRow>,
     /// Number of agents currently working (drives the working-agents chip).
     pub working_count: usize,
+    /// A workspace switch/default action raised by the Settings pane, awaiting
+    /// the async key handler to call the host cap (P5.5). `None` when idle.
+    pub pending_ws_action: Option<WorkspaceAction>,
+    /// Cached workspace catalogue from `host/workspace_list` (P5.5). Seeds the
+    /// Settings Workspace pane regardless of which snapshot arrives first.
+    pub workspace_rows: Vec<WorkspaceRow>,
 }
 
 impl Default for SkillManagerState {
@@ -83,12 +105,35 @@ impl ScreenStates {
             online: health.connected,
         }];
         let keys: Vec<KeyRow> = Vec::new();
-        let workspaces = vec![WorkspaceRow {
-            id: ws_id.to_string(),
-            name: ws_id.to_string(),
-            current: true,
-        }];
+        // Prefer the cached host workspace catalogue (P5.5); fall back to the
+        // single current workspace until the list lands.
+        let workspaces = if self.workspace_rows.is_empty() {
+            vec![WorkspaceRow {
+                id: ws_id.to_string(),
+                slug: ws_id.to_string(),
+                name: ws_id.to_string(),
+                current: true,
+                default: true,
+            }]
+        } else {
+            self.workspace_rows.clone()
+        };
         self.settings = Some(SettingsState::new(health, providers, keys, workspaces));
+    }
+
+    /// Refresh the Settings Workspace pane from a `host/workspace_list` result
+    /// (P5.5). Caches the rows so a later `set_health` rebuild keeps them, and
+    /// overlays the live settings state when it already exists.
+    pub fn set_workspaces(&mut self, workspaces: Vec<WorkspaceRow>) {
+        self.workspace_rows.clone_from(&workspaces);
+        if let Some(s) = self.settings.as_mut() {
+            s.set_workspaces(workspaces);
+        }
+    }
+
+    /// Take the pending workspace action raised by the Settings pane, if any.
+    pub const fn take_pending_ws_action(&mut self) -> Option<WorkspaceAction> {
+        self.pending_ws_action.take()
     }
 }
 
@@ -236,12 +281,40 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
         }
         Screen::Settings => {
             if let Some(s) = states.settings.take() {
-                let ev = match key.code {
-                    KeyCode::Esc => SettingsEvent::Esc,
-                    _ => SettingsEvent::Key(key_char(key)?),
+                // Build the settings event; a key the reducer doesn't model
+                // (not Char/Enter/Backspace/Esc) is a no-op — but we MUST put
+                // the state back before returning, never drop it on the floor
+                // (else the settings screen goes dead and stops navigating).
+                let ev = if matches!(key.code, KeyCode::Esc) {
+                    SettingsEvent::Esc
+                } else if let Some(c) = key_char(key) {
+                    SettingsEvent::Key(c)
+                } else {
+                    states.settings = Some(s);
+                    return None;
                 };
                 let out = reduce_settings(&s, ev);
+                let now_on_workspaces =
+                    out.state.section() == super::settings::SettingsSection::Workspaces;
                 states.settings = Some(out.state);
+                // Lift the workspace switch/default intents into a deferred host
+                // action; the async key handler drains it and calls the cap.
+                match out.intent {
+                    Some(SettingsIntent::SwitchWorkspace(id)) => {
+                        states.pending_ws_action = Some(WorkspaceAction::SetActive(id));
+                    }
+                    Some(SettingsIntent::ToggleDefault(id)) => {
+                        states.pending_ws_action = Some(WorkspaceAction::SetDefault(id));
+                    }
+                    // KeychainWrite / New / Rename land in their own beads.
+                    _ => {
+                        // Seed the pane from the live host workspace list the
+                        // first time the user lands on the Workspace section.
+                        if now_on_workspaces && states.workspace_rows.is_empty() {
+                            states.pending_ws_action = Some(WorkspaceAction::Refresh);
+                        }
+                    }
+                }
             }
             None
         }

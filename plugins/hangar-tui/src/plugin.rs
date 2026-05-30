@@ -30,8 +30,11 @@ use async_trait::async_trait;
 use crate::chrome::{render_footer, render_top_bar, Presence};
 use crate::connection::{ConnState, Connection, DEFAULT_WORKSPACE_ID};
 use crate::jsonrpc_over_socket::{encode_request, FrameDecoder};
-use crate::screen::{render_body, route_key, AppEvent, AppState, NavIntent, Screen, ScreenStates};
+use crate::screen::{
+    render_body, route_key, AppEvent, AppState, NavIntent, Screen, ScreenStates, WorkspaceAction,
+};
 use ainb_hangar_core::ids::WorkspaceId;
+use ainb_hangar_proto::settings::WorkspaceRow;
 
 /// Static manifest TOML loaded at compile time. The [`Server`] uses
 /// this on `plugin/init` to echo `name`/`version` back to the host so
@@ -275,6 +278,59 @@ impl HangarPlugin {
         }
     }
 
+    /// Apply a deferred Settings Workspace action (P5.5): call the matching
+    /// `host/workspace_*` cap, then re-fetch the workspace list and fold it into
+    /// the Settings pane + the routing state's active workspace.
+    ///
+    /// A cap error (e.g. `-32001` if the grant were withdrawn) is logged but
+    /// non-fatal: the pane simply stays on the prior active workspace.
+    async fn apply_workspace_action(&mut self, host: &HostClient, action: WorkspaceAction) {
+        let result = match &action {
+            // A bare refresh just pulls the list (no mutating cap call).
+            WorkspaceAction::Refresh => Ok(()),
+            WorkspaceAction::SetActive(id) => host.workspace_set_active(id.clone()).await.map(|_| ()),
+            WorkspaceAction::SetDefault(id) => {
+                host.workspace_set_default(id.clone()).await.map(|_| ())
+            }
+        };
+        if let Err(e) = result {
+            let _ = host
+                .log_info(format!("hangar: workspace action failed: {e}"))
+                .await;
+            return;
+        }
+        self.refresh_workspaces(host).await;
+    }
+
+    /// Pull the host workspace list and fold it into the Settings pane + the
+    /// routing state's active workspace slug.
+    async fn refresh_workspaces(&mut self, host: &HostClient) {
+        let Ok(list) = host.workspace_list().await else {
+            return;
+        };
+        let rows: Vec<WorkspaceRow> = list
+            .workspaces
+            .iter()
+            .map(|w| WorkspaceRow {
+                id: w.id.clone(),
+                slug: w.slug.clone(),
+                name: w.name.clone(),
+                current: w.active,
+                default: w.default,
+            })
+            .collect();
+        // Update the routing state's active workspace so the top-bar slug and
+        // every workspace-scoped fetch follow the switch.
+        if let Some(active) = list.workspaces.iter().find(|w| w.active) {
+            if let Ok(ws) = WorkspaceId::from_str(active.id.clone()) {
+                let mut next = self.app_state().clone();
+                next.ws_id = ws;
+                self.app = Some(next);
+            }
+        }
+        self.screens.set_workspaces(rows);
+    }
+
     /// Fold a forwarded key: tab-switch / modal keys go through the routing
     /// reducer ([`crate::screen::reduce`]); everything else routes to the active
     /// screen's reducer via [`route_key`], whose cross-screen [`NavIntent`]s
@@ -394,10 +450,22 @@ impl Plugin for HangarPlugin {
             return Ok(());
         }
         self.on_key(&params.key);
+        // A Workspace-pane action (s/d/Refresh) may have been raised. We must NOT
+        // perform the host-cap call here: `plugin/handle_key` runs INLINE on the
+        // SDK reader loop, so awaiting a host request whose response arrives on
+        // that same loop would deadlock. The deferred action is drained in
+        // `render` instead (a spawned handler where the reader is free).
         Ok(())
     }
 
-    async fn render(&mut self, _host: &HostClient, params: RenderParams) -> Result<WireBuffer> {
+    async fn render(&mut self, host: &HostClient, params: RenderParams) -> Result<WireBuffer> {
+        // Drain any deferred Workspace-pane action here: `plugin/render` is
+        // dispatched on a SPAWNED task (unlike the inline `handle_key`/
+        // `handle_event`), so the SDK reader loop stays free to deliver the
+        // host-cap response — awaiting a host request here can't deadlock.
+        if let Some(action) = self.screens.take_pending_ws_action() {
+            self.apply_workspace_action(host, action).await;
+        }
         let (w, h) = if params.viewport.width == 0 || params.viewport.height == 0 {
             FALLBACK_VIEWPORT
         } else {
@@ -410,7 +478,15 @@ impl Plugin for HangarPlugin {
         // per-screen renderers (P4.3..P4.7) dispatched via `render_body`.
         let presence = Self::presence(self.conn.state());
         let app = self.app_state().clone();
-        let ws_slug = app.ws_id.as_str().to_string();
+        // Display the active workspace's slug, not its raw ULID id: after a
+        // switch `ws_id` holds the ULID, so resolve it back to the slug via the
+        // cached workspace catalogue (falling back to the id when unknown).
+        let ws_slug = self
+            .screens
+            .workspace_rows
+            .iter()
+            .find(|r| r.id == app.ws_id.as_str())
+            .map_or_else(|| app.ws_id.as_str().to_string(), |r| r.slug.clone());
         render_top_bar(&mut buf, w, &app.screen, &ws_slug, presence);
         render_body(&mut buf, w, h, &app, &self.screens);
         render_footer(&mut buf, w, h, &app.screen);
@@ -464,8 +540,12 @@ mod tests {
             ["~/.ainb/hangar.sock", "${XDG_RUNTIME_DIR}/ainb-hangar.sock"]
         );
         assert_eq!(
-            m.capabilities.secret_store_get.allow_list().unwrap(),
-            ["ainb-hangar", "anthropic-api-key", "openai-api-key"]
+            m.capabilities.secrets_read.allow_list().unwrap(),
+            ["anthropic_api_key", "openai_api_key"]
+        );
+        assert!(
+            m.capabilities.workspace_write.is_granted(),
+            "workspace:write must be granted for the Settings switch pane"
         );
 
         let s = toml::to_string(&m).expect("serialize");
