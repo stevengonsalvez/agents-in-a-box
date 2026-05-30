@@ -2,10 +2,11 @@
 //! over stdio.
 //!
 //! cfx.5 wires the full UI loop: detect-on-init populates lifecycle,
-//! render dispatches to empty-state (cfx.4) or per-tab painters
-//! (this bead), and `handle_key` routes 1/2/3/4 (tab switch), `r`
-//! (refresh — coalesced via [`ScanGate`]), `t` (target entry), `/`
-//! (detail overlay placeholder — cfx.6), `q` (close detail).
+//! render dispatches to empty-state (cfx.4) or per-tab painters, and
+//! `handle_key` routes 1/2/3/4 (tab switch), `r` (refresh — coalesced
+//! via [`ScanGate`]), `t` (target entry), `/` (open detail overlay),
+//! `q` (close detail). cfx.6 paints the detail overlay modal on top
+//! of the tab body when `ui_mode` is `DetailOpen`.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -14,13 +15,13 @@ use async_trait::async_trait;
 
 use ainb_plugin_sdk::{
     HandleEventParams, HandleKeyParams, HostClient, KeyCode, Plugin, RenderParams, Result,
-    WireBuffer,
+    Viewport, WireBuffer,
 };
 
 use crate::detect::detect_witr;
 use crate::exec::{ExecResult, exec_witr_json};
 use crate::model::WitrSnapshot;
-use crate::render::{containers, empty, locks, ports, processes, tabs};
+use crate::render::{containers, detail, empty, locks, ports, processes, tabs};
 use crate::state::{Lifecycle, ScanGate, SnapshotCache, Tab, UiMode};
 
 /// The canonical manifest bytes. Compiled into the binary so the SDK's
@@ -324,12 +325,21 @@ fn render_screen(
     }
 
     match snapshot {
-        Some(snap) => match current_tab {
-            Tab::Processes => processes::render(buf, body_origin, body_height, width, &snap),
-            Tab::Ports => ports::render(buf, body_origin, body_height, width, &snap),
-            Tab::Containers => containers::render(buf, body_origin, body_height, width, &snap),
-            Tab::Locks => locks::render(buf, body_origin, body_height, width, &snap),
-        },
+        Some(snap) => {
+            match current_tab {
+                Tab::Processes => processes::render(buf, body_origin, body_height, width, &snap),
+                Tab::Ports => ports::render(buf, body_origin, body_height, width, &snap),
+                Tab::Containers => containers::render(buf, body_origin, body_height, width, &snap),
+                Tab::Locks => locks::render(buf, body_origin, body_height, width, &snap),
+            }
+            // Detail overlay paints on top of the current tab body so
+            // `q` drops straight back to the same tab + state. Works
+            // identically on all four tabs because it reads the
+            // snapshot's primary process, not tab-specific data.
+            if matches!(ui_mode, UiMode::DetailOpen) {
+                detail::render_overlay(buf, Viewport { width, height }, &snap);
+            }
+        }
         None => paint_empty_target_hint(buf, body_origin, body_height, width, target),
     }
 }
@@ -518,6 +528,34 @@ mod tests {
 
         p.dispatch_key_pure(&KeyCode::Char { ch: 'q' });
         assert_eq!(p.ui_mode, UiMode::Browsing);
+    }
+
+    #[test]
+    fn detail_overlay_open_close_preserves_current_tab() {
+        // Opening + closing the detail overlay on a non-default tab
+        // must not lose the tab selection (cfx.6 acceptance: "doesn't
+        // lose the underlying tab selection state" + "works on all 4
+        // tabs"). current_tab is structurally independent of ui_mode;
+        // this pins that invariant.
+        let mut p = WitrPlugin::default();
+        p.lifecycle = Lifecycle::Ready;
+        p.current_tab = Tab::Containers;
+
+        p.dispatch_key_pure(&KeyCode::Char { ch: '/' });
+        assert_eq!(p.ui_mode, UiMode::DetailOpen);
+        assert_eq!(
+            p.current_tab,
+            Tab::Containers,
+            "tab preserved while overlay open"
+        );
+
+        p.dispatch_key_pure(&KeyCode::Char { ch: 'q' });
+        assert_eq!(p.ui_mode, UiMode::Browsing);
+        assert_eq!(
+            p.current_tab,
+            Tab::Containers,
+            "tab preserved after overlay close"
+        );
     }
 
     #[test]

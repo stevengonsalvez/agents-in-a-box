@@ -17,6 +17,7 @@
 //! once the tab UI needs `Layout::default().constraints(...)`.
 
 pub mod containers;
+pub mod detail;
 pub mod empty;
 pub mod locks;
 pub mod ports;
