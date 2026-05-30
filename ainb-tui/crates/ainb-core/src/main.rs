@@ -39,6 +39,7 @@ mod config;
 mod credentials;
 mod docker;
 mod editors;
+mod fleet;
 mod git;
 mod interactive;
 mod models;
@@ -135,6 +136,25 @@ async fn tokio_main() -> Result<()> {
         // TUI: explicit `tui` subcommand or no subcommand at all.
         Some(("tui", _)) | None => {
             entered_tui = true;
+
+            // Best-effort: drop shipped default presets into
+            // ~/.agents-in-a-box/presets.toml on first run. Never overwrites
+            // user-edited files (see `install_default_presets`). Also migrates
+            // away from the legacy per-file `presets/` directory layout when
+            // present. Failure here is non-fatal — the TUI still launches;
+            // the user just won't see the defaults until they fix the
+            // underlying issue (e.g., unwriteable HOME).
+            if let Some(home) = dirs::home_dir() {
+                let presets_file = home.join(".agents-in-a-box").join("presets.toml");
+                if let Err(e) = config::presets::install_default_presets(&presets_file) {
+                    tracing::warn!(
+                        error = %e,
+                        file = %presets_file.display(),
+                        "failed to install default presets",
+                    );
+                }
+            }
+
             let mut app_state = App::new();
             app_state.init().await;
             let mut layout = LayoutComponent::new();
@@ -301,7 +321,23 @@ async fn run_tui_loop(
                     // Slash-command palette: `:` opens it; while open, all
                     // keypresses go to the palette. Plugin-contributed slash
                     // commands hook in here in Phase 4.
-                    if slash_palette.is_open() || matches!(key_event.code, KeyCode::Char(':')) {
+                    //
+                    // Text-input contexts (filter prompts, prompt textareas,
+                    // URL inputs) MUST consume `:` themselves — otherwise
+                    // typing an `ssh://...` URL into the new-session picker
+                    // is swallowed mid-word. The palette is still reachable
+                    // from non-text contexts.
+                    let palette_swallowed_by_text_input = matches!(
+                        key_event.code,
+                        KeyCode::Char(':')
+                    ) && !slash_palette.is_open()
+                        && crate::app::events::EventHandler::is_in_text_input_context(
+                            &app.state,
+                        );
+                    if !palette_swallowed_by_text_input
+                        && (slash_palette.is_open()
+                            || matches!(key_event.code, KeyCode::Char(':')))
+                    {
                         match slash_palette.handle_key(key_event) {
                             SlashAction::Execute(cmd) => {
                                 tracing::info!(
@@ -390,7 +426,6 @@ async fn run_tui_loop(
                             }
                             AppEvent::NewSession
                             | AppEvent::SearchWorkspace
-                            | AppEvent::NewSessionCreate
                             | AppEvent::ConfirmationConfirm => {
                                 // Process the event to queue the async action
                                 EventHandler::process_event(app_event, &mut app.state);
@@ -508,6 +543,15 @@ async fn run_tui_loop(
                                         app.state.log_history_state.scroll_up_by(SCROLL_LINES);
                                     }
                                 }
+                            } else if app.state.current_screen == screen_ids::SESSION_LIST
+                                && app.state.scroll_session_list_by_mouse(
+                                    mouse_event.column,
+                                    mouse_event.row,
+                                    is_down,
+                                    SCROLL_LINES,
+                                )
+                            {
+                                // Session-list scrolling was handled in-memory.
                             } else {
                                 // Default: scroll live logs
                                 if is_down {
@@ -678,6 +722,68 @@ async fn run_tui_loop(
                         }
 
                         // Refresh other tmux sessions list
+                        app.state.load_other_tmux_sessions().await;
+                        app.state.ui_needs_refresh = true;
+                    }
+
+                    AsyncAction::KillOtherTmuxSessions(session_names) => {
+                        use tokio::process::Command;
+
+                        let total = session_names.len();
+                        let mut killed = 0usize;
+                        let mut failed = 0usize;
+                        let selected_name = app
+                            .state
+                            .selected_other_tmux_session()
+                            .map(|session| session.name.clone());
+
+                        for session_name in &session_names {
+                            info!("Killing other tmux session '{}'", session_name);
+
+                            let output = Command::new("tmux")
+                                .args(["kill-session", "-t", session_name])
+                                .output()
+                                .await;
+
+                            match output {
+                                Ok(o) if o.status.success() => {
+                                    info!("Successfully killed tmux session '{}'", session_name);
+                                    killed += 1;
+                                }
+                                Ok(o) => {
+                                    let stderr = String::from_utf8_lossy(&o.stderr);
+                                    warn!(
+                                        "Failed to kill tmux session '{}': {}",
+                                        session_name,
+                                        stderr
+                                    );
+                                    failed += 1;
+                                }
+                                Err(e) => {
+                                    warn!("Failed to kill tmux session '{}': {}", session_name, e);
+                                    failed += 1;
+                                }
+                            }
+                        }
+
+                        if let Some(selected_name) = selected_name {
+                            if session_names.iter().any(|name| name == &selected_name) {
+                                app.state.selected_other_tmux_index = None;
+                            }
+                        }
+
+                        if failed > 0 {
+                            app.state.add_warning_notification(format!(
+                                "Killed {}/{} tmux session(s) ({} failed)",
+                                killed, total, failed
+                            ));
+                        } else {
+                            app.state.add_success_notification(format!(
+                                "Killed {} tmux session(s)",
+                                killed
+                            ));
+                        }
+
                         app.state.load_other_tmux_sessions().await;
                         app.state.ui_needs_refresh = true;
                     }
@@ -984,115 +1090,6 @@ async fn run_tui_loop(
                                 app.state
                                     .add_error_notification(format!("Failed to attach: {}", e));
                             }
-                        }
-
-                        app.state.ui_needs_refresh = true;
-                    }
-
-                    AsyncAction::CreateSshSession => {
-                        use crate::app::AttachHandler;
-                        use tokio::process::Command;
-
-                        info!("[ACTION] Creating SSH session");
-
-                        // Get SSH target from state
-                        let ssh_target = app.state.build_ssh_target();
-                        let repo_path = app
-                            .state
-                            .new_session_state
-                            .as_ref()
-                            .and_then(|s| s.get_selected_repo_path());
-
-                        // Clear new session state
-                        app.state.new_session_state = None;
-                        app.state.current_screen =
-                            crate::app::screens::ids::SESSION_LIST.to_string();
-
-                        if let Some(target) = ssh_target {
-                            let ssh_cmd = target.to_ssh_command();
-                            let display_name = target.display_name();
-
-                            // Generate tmux session name for SSH
-                            let timestamp = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.as_secs())
-                                .unwrap_or(0);
-                            let sanitized_host = target.host.replace('.', "-").replace(':', "-");
-                            let tmux_name = format!("ssh-{}-{}", sanitized_host, timestamp % 10000);
-
-                            // Determine working directory (use repo path if available, else home)
-                            let work_dir =
-                                repo_path.as_ref().and_then(|p| p.to_str()).unwrap_or("~");
-
-                            // Create tmux session first (detached)
-                            let create_result = Command::new("tmux")
-                                .args(["new-session", "-d", "-s", &tmux_name, "-c", work_dir])
-                                .output()
-                                .await;
-
-                            match create_result {
-                                Ok(output) if output.status.success() => {
-                                    info!("[ACTION] Created tmux session for SSH: {}", tmux_name);
-
-                                    // Configure clipboard
-                                    if let Err(e) =
-                                        crate::tmux::configure_clipboard(&tmux_name).await
-                                    {
-                                        warn!("[ACTION] Failed to configure clipboard: {}", e);
-                                    }
-
-                                    // Send SSH command to the tmux session
-                                    let send_result = Command::new("tmux")
-                                        .args(["send-keys", "-t", &tmux_name, &ssh_cmd, "Enter"])
-                                        .output()
-                                        .await;
-
-                                    if let Err(e) = send_result {
-                                        warn!("[ACTION] Failed to send SSH command: {}", e);
-                                    }
-
-                                    // Attach to the SSH session
-                                    let mut attach_handler =
-                                        AttachHandler::new_from_terminal(terminal)?;
-                                    match attach_handler.attach_to_session(&tmux_name).await {
-                                        Ok(()) => {
-                                            info!(
-                                                "[ACTION] Successfully attached to SSH session: {}",
-                                                display_name
-                                            );
-                                            app.state.add_success_notification(format!(
-                                                "SSH: {}",
-                                                display_name
-                                            ));
-                                        }
-                                        Err(e) => {
-                                            error!(
-                                                "[ACTION] Failed to attach to SSH session: {}",
-                                                e
-                                            );
-                                            app.state.add_error_notification(format!(
-                                                "SSH attach failed: {}",
-                                                e
-                                            ));
-                                        }
-                                    }
-                                }
-                                Ok(output) => {
-                                    let stderr = String::from_utf8_lossy(&output.stderr);
-                                    error!("[ACTION] SSH tmux session creation failed: {}", stderr);
-                                    app.state.add_error_notification(format!(
-                                        "SSH session failed: {}",
-                                        stderr
-                                    ));
-                                }
-                                Err(e) => {
-                                    error!("[ACTION] tmux command error for SSH: {}", e);
-                                    app.state.add_error_notification(format!("SSH error: {}", e));
-                                }
-                            }
-                        } else {
-                            app.state
-                                .add_error_notification("SSH target not configured".to_string());
                         }
 
                         app.state.ui_needs_refresh = true;

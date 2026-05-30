@@ -7,6 +7,484 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-05-29
+### Added
+- Merge pull request #172 from stevengonsalvez/worktree-hangar-enrich-model
+- Merge pull request #175 from stevengonsalvez/worktree-cli-version-info
+- **ainb-fleet**: make hangar enrich model configurable, default haiku
+- **ainb-tui**: stamp git commit + build date into ainb --version
+
+### Fixed
+- Merge pull request #174 from stevengonsalvez/worktree-fix-delete-stale-session
+- **ainb-tui**: purge sessions.json record even when worktree removal fails
+
+### Documentation
+- **ainb-tui**: document [plugins] enable/disable block in example config
+- **ainb-tui**: note Analytics screen is backed by the burndown plugin
+- add Plugins section covering toggle precedence and config
+
+
+## [1.2.0] - 2026-05-29
+### Added
+- Merge branch 'worktree-goal-skill': /goal skill
+- Merge pull request #101 from stevengonsalvez/swarm-1778540158-agent-1
+- Merge pull request #102 from stevengonsalvez/swarm-1778540158-agent-2
+- Merge pull request #103 from stevengonsalvez/swarm-1778540158-agent-1
+- Merge pull request #104 from stevengonsalvez/swarm-1778540158-agent-1
+- Merge pull request #106 from stevengonsalvez/feat/plugin-interactive-keys
+- Merge pull request #109 from stevengonsalvez/worktree-session-number-shortcuts
+- Merge pull request #119 from stevengonsalvez/feat/burndown-pivot-indicator
+- Merge pull request #122 from stevengonsalvez/feat/usage-cli-global-format
+- Merge pull request #123 from stevengonsalvez/feat/usage-export-folder-top-n
+- Merge pull request #124 from stevengonsalvez/feat/usage-providers-and-models-by-task
+- Merge pull request #131 from stevengonsalvez/feat/per-plugin-enable-disable
+- Merge pull request #134 from stevengonsalvez/feat/disabled-plugin-friendly-placeholder
+- Merge pull request #136 from stevengonsalvez/feat/session-list-loading-indicator
+- Merge pull request #137 from stevengonsalvez/feat/plugin
+- Merge pull request #147 from stevengonsalvez/feat/site-scaffold
+- Merge pull request #149 from stevengonsalvez/worktree-reflect-codex-adapter
+- Merge pull request #154 from stevengonsalvez/worktree-reflect-promptsubmit-hooks
+- Merge pull request #160 from stevengonsalvez/worktree-tmux-rich-conf
+- Merge pull request #161 from stevengonsalvez/worktree-brainstorm-ascii-revamp
+- Merge pull request #163 from stevengonsalvez/worktree-ainb-hooks-plugin
+- Merge pull request #164 from stevengonsalvez/worktree-ainb-hooks-plugin
+- Merge pull request #166 from stevengonsalvez/worktree-new-session-redesign-spec
+- Merge pull request #169 from stevengonsalvez/worktree-popa-skill
+- Merge pull request #171 from stevengonsalvez/worktree-popa-skill
+- Merge pull request #93 from stevengonsalvez/swarm-1778440729-agent-1
+- Merge pull request #94 from stevengonsalvez/swarm-1778440729-agent-2
+- Merge pull request #95 from stevengonsalvez/swarm-1778443661-agent-1
+- Merge pull request #96 from stevengonsalvez/swarm-1778445635-agent-1
+- Merge pull request #98 from stevengonsalvez/swarm-1778540158-agent-1
+- Merge pull request #99 from stevengonsalvez/swarm-1778540158-agent-2
+- **ainb-core**: add `ainb fleet` orchestration subcommand namespace
+- **ainb-core**: add tmux-tests feature for opt-in TUI integration
+- **ainb-core**: cli/usage.rs becomes plugin dispatch shim with exit-2 contract
+- **ainb-core**: route Analytics screen through PluginHost.render
+- **ainb-core**: wire PluginHost into App startup + load burndown.wasm
+- **ainb-fleet**: add hangar multi-verb workflow
+- **ainb-fleet**: fleet-needs cockpit skill (workflow-backed Jarvis)
+- **ainb-fleet**: split into colon-namespaced sub-skills
+- **ainb-fleet:standup**: auto-chain to /ainb-fleet:needs on ASK signals
+- **ainb-plugin-cts**: publishable v1 conformance harness
+- **ainb-tui**: numeric attach shortcuts on sessions screen
+- **ainb-tui**: restart Idle session with its original CLI
+- **app**: collapse plugin variants — AppEvent::Plugin + bridge + bus
+- **burndown**: AINB_NOW env override on date_range_for_period
+- **cli**: add Markdown variant to OutputFormat enum
+- **cli**: add `reflect timeline --explain` subcommand
+- **cli**: ainb tmux install|status subcommand
+- **cli**: emit sidecar parse warnings to errors sink
+- **cli**: handle Markdown in non-usage subcommand match arms
+- **cli**: import retrieval stack from ai-coder-rules toolkit
+- **cli**: real `ainb plugin` handlers replace Phase 2b stub
+- **cli**: replace Commands enum with CliCommand registry
+- **cli-usage**: 'usage models' + '--by-task' matrix subcommand
+- **cli-usage**: --top N flag on UsageReportArgs
+- **cli-usage**: expand --provider to cursor/copilot/gemini
+- **cli-usage**: wire host CLI dispatcher to burndown plugin (Phase 7c)
+- **cli/plugin**: add 'plugin lint' subcommand (Phase 7d-cli)
+- **cli/plugin**: add 'plugin tail' subcommand (Phase 7d-cli)
+- **cli/plugin**: add 'plugin watch' subcommand (Phase 7d-cli)
+- **core**: PluginScreen translates crossterm keys + reserves host bindings
+- **core**: add Screen trait + ScreenRegistry for screen dispatch
+- **core**: add Screen::handle_key trait stub
+- **core**: add built-in Screen impls for full-screen views
+- **core**: route keys through focused plugin before global dispatch
+- **core,plugin-runtime**: improve plugin lifecycle logging visibility
+- **cts**: six axis-2-5,9,10 canaries
+- **cts-v2**: add 14 canary plugin binaries for ABI v2 conformance
+- **cts-v2**: scaffold conformance test suite crate for JSON-RPC ABI v2
+- **errors**: structured pipeline error sink at errors.json
+- **events**: wire AppEvent::NavigateTo through ScreenRegistry ids
+- **explain-to-me**: add ADR + options-paper templates
+- **explain-to-me**: publish via here.now + visual-first selection
+- **fleet**: center control panel — `ainb fleet needs` v0.2
+- **fleet**: synthesise session summary from JSONL transcript
+- **init**: prompt for rich tmux conf in onboarding wizard
+- **live-window**: emit tracing on tier transitions and error paths
+- **marketplace**: seed first-party catalog at toolkit/.ainb-plugin/
+- **metrics**: JSONL metrics writer with 10MB rotation
+- **metrics+ci**: stats aggregator, dashboard sync, CI matrix, endpoint spec
+- **nix**: flake with nano-graphrag dep chain override
+- **notifyd**: add ainb-plugin-notifyd crate with daemon + install verbs
+- **packaging**: pipx-installable pyproject.toml with dev/graph extras
+- **plugin**: Phase 7 Wave 1+2 — subprocess runtime + host cutover (#90)
+- **plugin**: friendly placeholder when plugin is disabled
+- **plugin-api**: Request event variant + publish_reply host fn + cli_namespaces
+- **plugin-api**: [subscribes] table for declarative event subscriptions
+- **plugin-api**: add [paths] table to manifest schema
+- **plugin-api**: add ainb-plugin-api crate
+- **plugin-api**: bump ABI to 1.2.0 + catalogue Phase 6 host fns
+- **plugin-api,plugin-host**: PluginEvent::Custom carries opaque bytes
+- **plugin-burndown**: CLI handlers fetch UsageData via request_data
+- **plugin-burndown**: Phase 7c — migrate to subprocess plugin (#91)
+- **plugin-burndown**: _handle_event accepts Request{topic:sessions.usage_data}
+- **plugin-burndown**: _render paints WireBuffer through ainb_render_buffer
+- **plugin-burndown**: chunked ingest + refresh-request bootstrap
+- **plugin-burndown**: declare cli_namespaces=["usage"] in plugin.toml
+- **plugin-burndown**: drill-down on By Branch panel
+- **plugin-burndown**: drop fs caps + subscribe to sessions.usage_data
+- **plugin-burndown**: flash `↻ updated` chip-strip badge on pivot recompute
+- **plugin-burndown**: handle sessions.usage_data via msgpack + converter
+- **plugin-burndown**: implement SDK Plugin trait + main entry point
+- **plugin-burndown**: manifest v2 with lazy lifecycle + snapshot subscribe
+- **plugin-burndown**: markdown renderer for usage analytics
+- **plugin-burndown**: move CLI layer (cli/usage.rs) into plugin
+- **plugin-burndown**: move UI layer (components/usage.rs) into plugin
+- **plugin-burndown**: move data + cache layers from ainb-core
+- **plugin-burndown**: per-table CSV folder export with safety marker
+- **plugin-burndown**: port Phase 6c analytics source to subprocess crate
+- **plugin-burndown**: render scan-progress skeleton in cold-scan path
+- **plugin-burndown**: scaffold cdylib crate + WASI build helpers
+- **plugin-burndown**: subscribe to sessions.scan_progress in on_init
+- **plugin-burndown**: thread --top through text and markdown renderers
+- **plugin-burndown**: wire extern C ABI exports + plugin state singleton
+- **plugin-burndown**: wire keys to UI state via handle_key
+- **plugin-burndown,plugin-host**: real Analytics paint via ratatui Buffer
+- **plugin-host**: add ainb-plugin-host with wasmi loader + capability gate
+- **plugin-host**: add wasi-preview1 import stubs + fix wasm build script
+- **plugin-host**: cache layout + global install flock (Phase 4)
+- **plugin-host**: cross-plugin event bus + tick/render drivers + LoadOutcome
+- **plugin-host**: host_fns/{fs,cache,request} foundation
+- **plugin-host**: marketplace + lockfile schema (Phase 4)
+- **plugin-host**: path_guard with allowlist canonicalisation + adversarial guards
+- **plugin-host**: per-call fuel budget via PluginHost::with_fuel
+- **plugin-host**: pump req:/rep: with correlation-id routing + publish_reply
+- **plugin-host**: real ainb_fs_glob + ainb_data_read/write
+- **plugin-host**: real ainb_fs_read with capability allowlist
+- **plugin-host**: real ainb_render_buffer — decode + stash WireBuffer
+- **plugin-protocol**: add Content-Length stdio framing
+- **plugin-protocol**: add HandleKeyParams + KeyEvent wire types
+- **plugin-protocol**: add JSON-RPC error codes + thiserror enum
+- **plugin-protocol**: add JSON-RPC method-name constants
+- **plugin-protocol**: add WireBuffer cell-based render output
+- **plugin-protocol**: add manifest v2 schema (toml + serde)
+- **plugin-protocol**: add request/response param structs
+- **plugin-protocol**: register plugin/handle_key method
+- **plugin-protocol**: scaffold ainb-plugin-protocol crate
+- **plugin-protocol**: wire lib.rs re-exports + module map
+- **plugin-runtime**: add slow fixture plugin for nonblocking validation
+- **plugin-runtime**: scaffold ainb-plugin-runtime crate
+- **plugin-runtime**: wire send_key through host → plugin pipeline
+- **plugin-sdk-rust**: SdkError + Plugin trait + HostClient
+- **plugin-sdk-rust**: Server stdio JSON-RPC dispatch + tests
+- **plugin-sdk-rust**: add Plugin::handle_key trait method
+- **plugin-sdk-rust**: scaffold crate (Cargo.toml + workspace registration)
+- **plugin-sdk-rust**: wire plugin/handle_key inline dispatch
+- **plugin-session-reader**: Phase 7c — migrate to subprocess plugin (#92)
+- **plugin-session-reader**: Plugin trait impl + main.rs entry
+- **plugin-session-reader**: SQLite usage cache module
+- **plugin-session-reader**: cache-aware per-file parsers
+- **plugin-session-reader**: cdylib scaffold + ABI + host wrappers
+- **plugin-session-reader**: chunked publish gated on refresh_request
+- **plugin-session-reader**: cursor parser scaffold + scanner hookup
+- **plugin-session-reader**: emit host.log probes in on_init
+- **plugin-session-reader**: handle sync sessions.usage_data Request events
+- **plugin-session-reader**: open cache lazily and thread through scan
+- **plugin-session-reader**: per-provider parsers + cost estimation
+- **plugin-session-reader**: port FNV-1a hash + per-provider parsers
+- **plugin-session-reader**: port scan + UsageData aggregator
+- **plugin-session-reader**: publish sessions.scan_progress during scan
+- **plugin-session-reader**: rate-limited scan ProgressReporter
+- **plugin-session-reader**: scaffold subprocess crate (ABI v2)
+- **plugin-session-reader**: scanner aggregator producing UsageData
+- **plugin-testkit**: scaffold ainb-plugin-testkit crate with in-process Harness
+- **plugin-types-sessions**: Provider::Cursor + WIRE_VERSION=3
+- **plugin-types-sessions**: add ScanProgressEvent wire type
+- **plugin-types-sessions**: chunked UsageDataEvent (WIRE_VERSION=2)
+- **plugin-types-sessions**: wire schema for sessions.usage_data
+- **plugins**: AINB_DISABLE_PLUGINS escape hatch
+- **plugins**: per-plugin enable/disable via env + config.toml
+- **plugins**: replace popa with docs-only `ainb-fleet` skill
+- **plugins**: scaffold ainb-hooks plugin for claude + codex
+- **providers, agents**: trait + registry replacing closed enums
+- **reflect**: cache-aware token timeline with thrash detection
+- **reflect**: codex adapter wires SessionStart + PreCompact hooks
+- **reflect**: wire UserPromptSubmit recall + PostToolUse mini-learning + Stop enqueue
+- **reflect-plugin**: add reflect_timeline.sh dashboard renderer
+- **reflect-plugin**: drill-down via --explain mode + OSC 8 hyperlinks
+- **reflect-plugin**: emit structured errors from drain failures
+- **reflect-plugin**: show all 8 signals side-by-side (2 per row)
+- **reflect-plugin**: three-letter acronym labels for sparkline rows
+- **reflect-plugin**: warn at SessionStart when reflect-kb missing
+- **reflect-recall**: switch recall.py from legacy learnings CLI to reflect
+- **reflect:errors-ack**: wrap reflect_kb.errors ack as a slash skill
+- **schema**: YAML frontmatter JSON Schema (v4)
+- **schema**: pre-commit hook validating frontmatter
+- **scripts**: add live-validate-ainb-hooks.sh host smoke
+- **session-list**: spinner while workspaces are still scanning
+- **session-reader,burndown**: F key wipes parse cache and republishes
+- **session-reader,burndown**: pre-walk file count + N/M progress bar
+- **skills**: /explain-to-me — rich HTML explainer generator
+- **skills**: /goal — autonomous-run mega-prompt builder
+- **skills**: add standup — branch-scoped read-only situation report
+- **skills/brainstorm**: rewire as orchestrator delegating Q&A to /interview
+- **skills/interview**: scan brainstorm-stub sections + diagram + template selection
+- **statusline**: pass session_id + project_dir env to timeline helper
+- **statusline**: reflect error badge
+- **statusline**: side-channel feed to ainb-tui Live Window cache
+- **statusline**: wire timeline dashboard + ack-hint on errors badge
+- **team**: reflect team init/clone/sync commands
+- **tests**: drive snapshot_baselines through PluginHost
+- **tmux**: rich Catppuccin Mocha conf + git branch helper
+- **toolkit**: remove legacy global-learnings skill
+- **tui**: add Inbox screen for ainb-hooks notifications
+- **tui**: add home sidebar mouse resizing
+- **tui**: add sessions pane mouse controls
+- **tui**: attach sessions on row double-click
+- **tui**: cwd-based per-session badges + Enter-attaches-tmux
+- **tui**: global inbox-unread badge on the menu bar
+- **tui**: redesign new-session flow to 2-screen preset-driven wizard
+- **tui**: slash-command palette stub at `:` key
+- **website**: scaffold Astro Starlight site
+- **write-flow**: confidence-gated routing for learning writes
+- ainb usage CLI dispatches via plugin
+- byte-identical tripwire — plugin render matches in-tree (4 tabs)
+
+### Fixed
+- Merge pull request #112 from stevengonsalvez/fix/decouple-event-poll-from-app-tick
+- Merge pull request #113 from stevengonsalvez/fix/burndown-period-provider-filters
+- Merge pull request #114 from stevengonsalvez/fix/burndown-activity-mcp-data
+- Merge pull request #115 from stevengonsalvez/fix/burndown-drilldown
+- Merge pull request #116 from stevengonsalvez/fix/burndown-project-chip-resolved-repo
+- Merge pull request #125 from stevengonsalvez/fix/plugin-priority-key-channel
+- Merge pull request #128 from stevengonsalvez/fix/burndown-esc-and-scan-indicator
+- Merge pull request #129 from stevengonsalvez/fix/runtime-tokio-drop-panic
+- Merge pull request #130 from stevengonsalvez/worktree-tui-text-input-shortcut-guard
+- Merge pull request #133 from stevengonsalvez/worktree-address-gemini-review-130
+- Merge pull request #135 from stevengonsalvez/worktree-decouple-docker-workspace-load
+- Merge pull request #138 from stevengonsalvez/worktree-config-popup-text-input
+- Merge pull request #139 from stevengonsalvez/worktree-narrow-config-popup-predicate
+- Merge pull request #148 from stevengonsalvez/worktree-burndown-chunker-respawn-fix
+- Merge pull request #150 from stevengonsalvez/worktree-reflect-silent-fail
+- Merge pull request #151 from stevengonsalvez/worktree-precompact-codex-json
+- Merge pull request #152 from stevengonsalvez/worktree-claude-adapter-skip-plugin
+- Merge pull request #153 from stevengonsalvez/fix/hooks-svg-render
+- Merge pull request #156 from stevengonsalvez/worktree-bootstrap-reflect-cli-fixes
+- Merge pull request #157 from stevengonsalvez/fix/bootstrap-intel-mac-torch
+- Merge pull request #158 from stevengonsalvez/worktree-fix-mouse-after-detach
+- Merge pull request #165 from stevengonsalvez/worktree-ainb-hooks-plugin
+- Merge pull request #170 from deepaks7n/fix/new-session-picker-scanner-cache
+- chore(cli_burndown_tests): mark fixture-requiring tests as #[ignore]
+- feat(ainb-core): add tmux-tests feature for opt-in TUI integration
+- feat(metrics+ci): stats aggregator, dashboard sync, CI matrix, endpoint spec
+- feat(plugin-types-sessions): wire schema for sessions.usage_data
+- **ainb-core**: inject_session_reader_snapshot only touches sessions.usage_data
+- **ainb-tui**: O(N+M) workspace dedup + raw-path fallback
+- **ainb-tui**: address gemini-code-assist review on PR #130
+- **ainb-tui**: cap Boss-mode load in manual refresh path
+- **ainb-tui**: close help on Esc inside text inputs
+- **ainb-tui**: decouple Boss + Interactive workspace loading
+- **ainb-tui**: guard global char shortcuts in text inputs
+- **ainb-tui**: include config_popup_state in text-input predicate
+- **ainb-tui**: narrow config_popup gate to text-entry variants
+- **bootstrap**: ensure ~/.local/bin on PATH and upgrade reflect on drift
+- **bootstrap**: pin python 3.13 for reflect-kb install
+- **bootstrap**: skip reflect-kb [graph] extra on Intel macOS
+- **cli**: content-hash doc_id + --force + non-TTY guard for add
+- **cli-usage**: inject host --format global into plugin argv
+- **dashboard**: retry transport errors, MAC-derived id fallback, --window-days passthrough
+- **entity-store**: tolerate null/missing fields in sidecar parser
+- **host**: decouple event-poll cadence from app.tick() cadence
+- **logging**: default filter to ainb=debug,warn so logs actually flow
+- **logging**: exempt all short-lived CLI subcommands from JSONL file
+- **logging**: skip JSONL file for high-frequency statusline hook
+- **plugin**: reserve Esc for navigation, rebind burndown pop-state to Backspace
+- **plugin-api**: remove duplicate serde_bytes line from merge auto-resolve
+- **plugin-burndown**: bridge converter logs encode/decode failures
+- **plugin-burndown**: drop dead enable_card_tests mod after rebase
+- **plugin-burndown**: drop refresh_snapshot from cli_dispatch to break inline-event deadlock
+- **plugin-burndown**: eager-spawn so usage_data subscription beats publisher
+- **plugin-burndown**: empty-state copy reflects subscribe model
+- **plugin-burndown**: project chip matches calls by resolved repo, not just raw folder
+- **plugin-burndown**: rebuild activities + mcp_servers from raw calls on wire ingest
+- **plugin-burndown**: rename FilterCacheEntry.filters_hash -> inputs_hash for clarity
+- **plugin-burndown**: show scan-progress banner during mid-scan ingest
+- **plugin-burndown**: surface wire-version mismatch via stderr
+- **plugin-burndown**: sync ui.data before commit so Enter/X drill-down works
+- **plugin-burndown**: wire period + provider filters into render (grafana-style global filter)
+- **plugin-cts**: extend WASI floor to cover real-plugin imports
+- **plugin-cts**: handle GatedBy::LogsRead in cap_declared
+- **plugin-host**: add paths field to Manifest struct literals
+- **plugin-host**: pass real allocated area to plugin render
+- **plugin-host**: track inflight correlation-ids + drop late/sentinel replies
+- **plugin-protocol**: encode bytes as base64 strings on the JSON wire
+- **plugin-runtime**: auto-respawn eager plugins after exit
+- **plugin-runtime**: cancel-safe stdout reader + plugin-publish fanout
+- **plugin-runtime**: graceful shutdown to stop tokio drop-from-async panic
+- **plugin-runtime**: honour SpawnMode::Eager at registration time
+- **plugin-runtime**: priority key channel so Esc isn't queued behind chunked events
+- **plugin-runtime**: re-sign staged plugin binaries on macOS
+- **plugin-runtime**: route mark_render_dirty through inner.dirty + cover dirty-flag gate
+- **plugin-sdk-rust**: dispatch plugin/handle_event inline to preserve order
+- **reflect**: claude adapter detects plugin runtime to avoid dupe-fire
+- **reflect**: clean dead conditional in filter_to_new + drop unused param
+- **reflect**: harness-neutral log path + shared silent-fail helper + secret scrubbing
+- **reflect**: hooks silent-fail on uncaught exception + breadcrumb to status line
+- **reflect**: precompact hook emits empty stdout — codex schema compat
+- **reflect**: resolve project dir via git-common-dir, not env-var cwd
+- **reflect-discovery**: scan atomic memory files, not just MEMORY.md
+- **reflect-plugin**: AGT tracks Agent spawn tool, drop false-positive TaskCreate
+- **reflect-plugin**: ING parser accepts single AND double-quoted timestamps
+- **reflect-plugin**: drop alpha-dimming, sparkline cells stay full-color
+- **reflect-plugin**: re-enable auto-reflect after v3 state migration
+- **reflect-plugin**: render sparklines with absolute height, not row-max
+- **reflect-plugin**: resolve session JSONL via project root, not literal pwd
+- **reflect-plugin**: use printf %s not %b to preserve \E bytes
+- **reflect/adapters**: write full skill content, not pointer stub
+- **scripts**: point search-learnings + reflect-status at reflect-kb CLI
+- **session-reader,burndown**: review-pass — multi-spill chunker, robust flush, explicit pct cast
+- **session-reader,burndown,types-sessions**: tail-chunk sessions and shell_commands across publish chunks
+- **statusline**: resolve reflect plugin path dynamically
+- **tui**: add other tmux multi-delete
+- **tui**: expand sessions rail from visible control
+- **tui**: fall back to workspaces when filtered cache is empty
+- **tui**: handle Shift+i for Inbox on Linux tmux
+- **tui**: honor checked rows on session delete
+- **tui**: make Inbox discoverable — sidebar tile + always-on hint
+- **tui**: restore mouse capture and bracketed paste on TUI resume
+- **tui**: restore sessions mouse wheel scroll
+- **tui**: source new-session repo picker from scanner cache
+- **tui**: sync PresetManager in-memory cache on save_preset
+- **usage-cli**: make timeout configurable + retain dispatch error
+- **usage-export**: scrub stale CSVs + widen file-ext allow-list
+- **usage-matrix**: snake_case CSV headers + wire-compat test + CR quote
+- **usage-md**: truncate long project labels to 60 chars
+- **workspace**: set lint group priority -1 to satisfy clippy
+- test(cli-registry): update assertion 17->18 (claudecode + plugin)
+- test(plugin-host): burndown subscribes to sessions.usage_data e2e
+- test(tripwire): Phase 6f extension — full real two-plugin pipeline gate (4/4)
+
+### Documentation
+- Merge pull request #126 from stevengonsalvez/docs/plugin-spec-v2-subprocess
+- Merge pull request #127 from stevengonsalvez/docs/screenshots-burndown-home
+- Merge pull request #145 from stevengonsalvez/docs/website-brief-and-restructure
+- chore(ainb-fleet): gitignore workflow runtime logs + local scratch
+- **ainb-fleet**: fix fleet-needs skill refs to hangar workflow
+- **ainb-fleet**: update needs skill + add dod5_needs runbook
+- **compound-docs**: switch SKILL.md to reflect CLI
+- **explain-to-me**: clarify here.now publish-slug semantics
+- **knowledge**: add hooks-and-platform page with embedded SVGs
+- **knowledge**: fix SVG diagrams rendering as raw XML on hooks page
+- **plan**: Phase 7 — plugin runtime redesign (subprocess + JSON-RPC)
+- **plans**: Phase 6 data-plane plan + interview-resolved spec
+- **plugin-host**: document wasmi-sync deadlock in request_data rustdoc
+- **plugin-session-reader**: clarify activity/mcp classification is consumer-owned
+- **plugin-spec**: contract v1 + machine-readable contract.toml
+- **plugins**: authoring guide for plugin developers
+- **plugins**: consolidate plugin docs under docs/plugins/
+- **plugins**: fix authoring trait example to match real SDK
+- **plugins**: how to validate against ainb-plugin-cts
+- **plugins**: refresh module docstring after usage_state removal
+- **plugins**: rewrite for subprocess v2 contract, drop v1 wasm
+- **plugins**: user-facing reference for the plugin family
+- **reflect**: add mental-model section to README
+- **reflect**: document live timeline dashboard in README
+- **reflect**: drop legacy v1/v2 paths from canon skill instructions
+- **reflect**: fix learnings dest path — flat documents/, not documents/learnings/
+- **reflect**: standalone explainer + platform poster (here.now publishes)
+- **reflect**: update timeline mockup for paired layout
+- **reflect-kb**: clarify CLI vs plugin version streams
+- **reflect-plugin**: drop legacy LEARNINGS_CLI refs from ingest SKILL.md
+- **reflect-plugin**: shorten timeline drill-down hint to `reflect timeline`
+- **screenshots**: add reproducible vhs tapes for home + burndown
+- **screenshots**: regen home + burndown against real $HOME
+- **skills**: add tmux-ui-tripwire project-local skill
+- **toolkit**: drop global-learnings references
+- add Starlight-compatible title frontmatter to every page
+- add design brief for premium website
+- capture mouse tui learnings
+- relocate CLI, FAQ, and reflection docs into unified tree
+- rewrite README for v0.1.1 + new docs/usage.md
+- scaffold unified documentation tree
+- swap stale README + plugin screenshots, drop orphans
+- update README cross-links + architecture tree
+- fix(plugin-burndown): rename FilterCacheEntry.filters_hash -> inputs_hash for clarity
+
+### Other
+- Merge pull request #110 from stevengonsalvez/perf/plugin-render-latency
+- Merge pull request #117 from stevengonsalvez/perf/burndown-dimension-indices
+- Merge pull request #118 from stevengonsalvez/perf/burndown-arc-data
+- Merge pull request #162 from stevengonsalvez/worktree-fix-ainb-du-storm
+- **ainb-core**: delete obsolete usage_event_bridge
+- **ainb-core**: grep gate proves zero usage_data references in host
+- **ainb-fleet**: gitignore workflow runtime logs + local scratch
+- **catalog**: regenerate from filesystem
+- **ci**: opt into Node 24 for GitHub Actions
+- **cli_burndown_tests**: mark fixture-requiring tests as #[ignore]
+- **deps**: add insta dev-dep for snapshot testing
+- **explain-to-me**: drop /nano-banana-pro from augmentation list
+- **fixtures**: deterministic generator for tripwire_keys
+- **gitignore**: drop bare 'skills/' rule
+- **logging**: janitor for stale empty JSONL files on startup
+- **plugin**: bump reflect to 3.3.0
+- **plugin**: bump reflect to 3.3.1
+- **plugin**: bump reflect to 3.4.0
+- **plugin-burndown**: TODO ref for legacy event arms tied to broker removal
+- **plugin-host**: fix manifest_validate test fixture indent drift
+- **plugin-session-reader**: trim dead helpers + gate with_roots to test
+- **plugin-session-reader**: tune clippy lints + add toml dev-dep
+- **preflight**: record monorepo consolidation pre-flight audit
+- **reflect**: bump version 3.4.0 -> 3.4.1
+- **reflect**: bump version 3.4.1 -> 3.4.2
+- **reflect**: bump version 3.4.2 -> 3.4.3
+- **reflect**: bump version 3.4.3 -> 3.5.0
+- **reflect-plugin**: purge legacy LEARNINGS_CLI from config + docs
+- **settings**: default permissions to bypassPermissions
+- **settings**: forward-port live additions into toolkit
+- **skill**: drop stale existing-tests.md manifest
+- **skill**: tripwire return-path hard rule (#6)
+- **sync-learnings**: orphans + plugin audit are informational, not gated
+- **sync-learnings**: tidy output contract — one combined plan table
+- **test_support**: silence post-6d unused warnings with TODO ref
+- **tests**: drop obsolete test_reflect_workflow.py
+- **tests**: retire dead in-tree analytics UI tests
+- **usage**: expose report_json via test_support wrapper
+- **workspace**: add xtask crate + cargo xtask alias
+- **workspace**: register ainb-plugin-api + ainb-plugin-host members
+- **workspace**: relocate ainb-tui sources to crates/ainb-core
+- **workspace**: set explicit priority on clippy lint groups
+- **workspace**: split Cargo.toml into workspace + ainb-core member
+- remove dashboard track (no consumer exists)
+- remove scratch/preflight-report.md (Phase 1 audit artifact)
+- remove stale plans, design notes, issues, captured solutions
+- remove team CLI track (deferred, dependent share command)
+- scaffold reflect-kb repo
+- sync learnings to packages
+- update install URLs + plugin paths to monorepo form
+- **host**: event-driven plugin render tick + 33 ms event-poll
+- **plugin-burndown**: Arc<UsageData> between plugin and ui kills Enter-press clone
+- **plugin-burndown**: cache filter_usage_data by (data_gen, filters)
+- **plugin-burndown**: plug UsageIndices into the cached_filtered path
+- **plugin-burndown**: pre-index calls by dimension + indexed filter path
+- **plugin-burndown**: skip repo resolution when no project chip is active
+- **plugin-runtime**: render-dirty flag on PluginHandle
+- **tui**: remove du -sm storm from session recovery refresh
+- **ainb-core**: drop dead in-tree usage CLI handlers
+- **ainb-core**: drop unused analytics re-exports from models/mod.rs
+- **cli/plugin**: split into module dir for 7d-cli subcommands
+- **components**: delete in-tree usage UI + retire render parity test
+- **core**: move plugin_runtime handle from App to AppState
+- **core**: replace View enum with ScreenId across in-tree views
+- **events**: drop AppEvent::Usage* variants and handlers
+- **events**: drop handle_usage_keys + Analytics dispatcher
+- **events**: stop firing host-side analytics load on screen entry
+- **layout**: dispatch full-screen views through ScreenRegistry
+- **live-window**: heartbeat at trace, transitions at debug
+- **plugin**: move reflect from toolkit/packages/plugins/ to root plugins/
+- **plugin**: update marketplace.json paths + in-plugin self-references
+- **plugin-burndown**: drop rusqlite/blake3/bincode (item c)
+- **plugin-burndown**: render to ratatui Buffer instead of Frame
+- **plugin-host**: replace wasmi runtime with subprocess RuntimeHandle
+- **plugin-runtime**: expose discover_filtered helper
+- **reflect**: extract shared adapter helpers to base.py
+- **session-reader**: drop dead popped_from tracking in chunker
+- **state**: drop host-side analytics data load
+- **state**: drop usage_state field + simplify tick_plugin_renders
+- test(plugin-sdk-rust): assert handle_key ordering across 5-key burst
+
+
 ## [1.1.0] - 2026-05-10
 ### Added
 - Merge pull request #80 from stevengonsalvez/feat/burndown-default-stats

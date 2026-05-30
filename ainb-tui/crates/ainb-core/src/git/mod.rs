@@ -1,5 +1,6 @@
 // ABOUTME: Git integration module for workspace detection, worktree management, and git operations
 
+pub mod branch_namer;
 pub mod diff_analyzer;
 pub mod operations;
 pub mod remote_repo_manager;

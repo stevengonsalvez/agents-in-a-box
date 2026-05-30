@@ -63,7 +63,7 @@ The canonical source tree. Everything under `packages/` gets distributed to tool
 
 ```
 packages/
-├── skills/              86 skills — agent-invokable SKILL.md bundles
+├── skills/              91 skills — agent-invokable SKILL.md bundles
 ├── agents/              37 agents across 6 categories
 │   ├── design/          UI/UX designers
 │   ├── engineering/     backend, frontend, security, perf, code-review
@@ -92,18 +92,18 @@ via `uv tool install` by `bootstrap.js` (from the
 `git+https://github.com/stevengonsalvez/agents-in-a-box.git#subdirectory=reflect-kb`
 URL). See the bootstrap's `installReflectKb()` function for details.
 
-### Skills at a glance (86 total, grouped by purpose)
+### Skills at a glance (91 total, grouped by purpose)
 
 <details>
-<summary><b>Planning & Workflow</b> (14)</summary>
+<summary><b>Planning & Workflow</b> (15)</summary>
 
-`plan` · `plan-gh` · `plan-tdd` · `implement` · `validate` · `workflow` · `discuss` · `brainstorm` · `interview` · `critique` · `research` · `handover` · `prime` · `recover-sessions`
+`plan` · `plan-gh` · `plan-tdd` · `implement` · `validate` · `workflow` · `discuss` · `brainstorm` · `interview` · `critique` · `research` · `handover` · `prime` · `recover-sessions` · `make-a-goal`
 </details>
 
 <details>
-<summary><b>Coding & GitHub</b> (12)</summary>
+<summary><b>Coding & GitHub</b> (13)</summary>
 
-`coding-agent` · `spawn-agent` · `attach-agent-worktree` · `list-agent-worktrees` · `cleanup-agent-worktree` · `merge-agent-work` · `do-issues` · `gh-issue` · `make-github-issues` · `find-missing-tests` · `commit` · `sync-learnings`
+`coding-agent` · `spawn-agent` · `attach-agent-worktree` · `list-agent-worktrees` · `cleanup-agent-worktree` · `merge-agent-work` · `do-issues` · `gh-issue` · `make-github-issues` · `find-missing-tests` · `commit` · `sync-learnings` · `git-history-surgery`
 </details>
 
 <details>
@@ -113,7 +113,7 @@ URL). See the bootstrap's `installReflectKb()` function for details.
 </details>
 
 <details>
-<summary><b>Session & Learning</b> (9)</summary>
+<summary><b>Session & Learning</b> (8)</summary>
 
 `session-info` · `session-metrics` · `session-summary` · `health-check` · `instincts` · `reflect` · `compound-docs` · `research-cache`
 </details>
@@ -125,27 +125,27 @@ URL). See the bootstrap's `installReflectKb()` function for details.
 </details>
 
 <details>
-<summary><b>Design & UI</b> (12)</summary>
+<summary><b>Design & UI</b> (13)</summary>
 
 `frontend-design` · `frontend-slides` · `liquid-glass` · `tui-style-guide` · `ui-ux-pro-max` · `react-components` · `stitch-design` · `stitch-loop` · `shadcn-ui` · `design-md` · `enhance-prompt` · `remotion` · `remotion-best-practices`
 </details>
 
 <details>
-<summary><b>Dev infra & tooling</b> (10)</summary>
+<summary><b>Dev infra & tooling</b> (12)</summary>
 
-`tmux-monitor` · `tmux-status` · `start-local` · `start-ios` · `start-android` · `expose` · `plugins` · `oracle` · `debug-bridge` · `media-processing`
+`tmux-monitor` · `tmux-status` · `start-local` · `start-ios` · `start-android` · `expose` · `plugins` · `oracle` · `debug-bridge` · `media-processing` · `standup` · `tmux-message`
 </details>
 
 <details>
-<summary><b>Security & Observability</b> (4)</summary>
+<summary><b>Security & Observability</b> (6)</summary>
 
-`security-audit` · `security-scan` · `sentry-cli` · `posthog-replay-analysis`
+`security-audit` · `security-scan` · `sentry-cli` · `posthog-replay-analysis` · `claude-langfuse` · `langfuse-setup`
 </details>
 
 <details>
-<summary><b>Research & Knowledge</b> (3)</summary>
+<summary><b>Research & Knowledge</b> (4)</summary>
 
-`crypto-research` · `nano-banana-pro` · `notebooklm`
+`crypto-research` · `nano-banana-pro` · `notebooklm` · `explain-to-me`
 </details>
 
 <details>
@@ -260,6 +260,7 @@ Frontmatter-native tools (Cursor, AmazonQ, Claude Code) use the frontmatter dire
 ## References
 
 - **Manifest**: [`external-dependencies.yaml`](external-dependencies.yaml)
+- **Internal catalog**: [`catalog.yaml`](catalog.yaml) — auto-generated filesystem-derived manifest of every toolkit-owned skill, plugin, agent, workflow, and utility (the "internal" set; anything installed but not listed here is external). Regenerate with `bash toolkit/bin/generate-catalog.sh`.
 - **Bootstrap source**: [`bootstrap.js`](bootstrap.js)
 - **Parity regression test**: [`test-bootstrap-parity.sh`](test-bootstrap-parity.sh)
 - **Main project README**: [`../README.md`](../README.md)

@@ -15,6 +15,7 @@ pub mod git_view;
 pub mod help;
 pub mod home_screen;
 pub mod home_screen_v2;
+pub mod inbox;
 pub mod layout;
 pub mod live_logs_stream;
 // pub mod log_formatter;  // Complex version with borrow issues, using simple version instead

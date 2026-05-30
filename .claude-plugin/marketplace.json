@@ -22,6 +22,22 @@
         "recall",
         "retrieval"
       ]
+    },
+    {
+      "name": "ainb-fleet",
+      "source": "./plugins/ainb-fleet",
+      "description": "LLM-facing skill teaching agents how to use `ainb fleet ...` orchestration subcommands. Fleet covers multi-session broadcast, ack-gated sequence, blocked-session needs, and the auto-continue daemon. Replaces the deprecated `popa` plugin — the Node code is gone; the orchestration logic now lives in ainb's Rust binary.",
+      "strict": false,
+      "keywords": [
+        "ainb",
+        "fleet",
+        "tmux",
+        "claude-peers",
+        "orchestration",
+        "control-plane",
+        "broadcast",
+        "multi-session"
+      ]
     }
   ]
 }

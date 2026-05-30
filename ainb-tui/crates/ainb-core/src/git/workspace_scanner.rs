@@ -9,7 +9,7 @@ use git2::Repository;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::io::{BufReader, BufWriter};
+use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 use tracing::{debug, info, warn};
@@ -88,14 +88,25 @@ impl RepositoryCache {
     pub fn save(&self) -> Result<()> {
         let path = Self::cache_path();
 
-        // Ensure parent directory exists
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
+        // Serialize to a temp file in the cache directory, then atomically
+        // persist (rename) it onto the cache path. A concurrent reader — or a
+        // second rescan racing this one when the user opens New Session twice
+        // in quick succession — never observes a half-written cache, and the
+        // temp file is auto-removed if anything fails before the rename.
+        let parent = path
+            .parent()
+            .context("repository cache path has no parent directory")?;
+        fs::create_dir_all(parent)?;
 
-        let file = fs::File::create(&path)?;
-        let writer = BufWriter::new(file);
-        serde_json::to_writer_pretty(writer, self)?;
+        let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+        {
+            let mut writer = BufWriter::new(tmp.as_file_mut());
+            serde_json::to_writer_pretty(&mut writer, self)?;
+            writer.flush()?;
+        }
+        tmp.persist(&path)
+            .map_err(|e| e.error)
+            .with_context(|| format!("persisting repository cache to {}", path.display()))?;
 
         info!(
             "Saved repository cache to {} ({} repos)",

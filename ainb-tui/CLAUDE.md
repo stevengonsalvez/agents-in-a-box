@@ -28,39 +28,40 @@ just fix                       # Auto-fix formatting & lint
 ## Architecture
 
 ```
-src/
-├── main.rs              # Entry point, CLI parsing, TUI loop
-├── lib.rs               # Public API exports
-├── app/                 # Application state & event handling
-│   ├── state.rs         # App state machine
-│   ├── events.rs        # Event definitions
-│   └── attach_handler.rs
-├── components/          # TUI screen components
-│   ├── layout.rs        # Main layout orchestration
-│   ├── session_list.rs  # Session list view
-│   ├── git_view.rs      # Git operations panel
-│   ├── logs_viewer.rs   # Log streaming view
-│   └── ...
-├── widgets/             # Reusable UI widgets
-│   ├── message_router.rs
-│   ├── syntax_highlighter.rs
-│   └── ...
-├── docker/              # Container management
-│   ├── container_manager.rs
-│   ├── session_lifecycle.rs
-│   └── agents_dev.rs
-├── tmux/                # Tmux/PTY integration
-│   ├── session.rs
-│   ├── capture.rs
-│   └── pty_wrapper.rs
-├── git/                 # Git operations
-│   ├── repository.rs
-│   ├── operations.rs
-│   └── worktree_manager.rs
-├── claude/              # Claude API client
-├── models/              # Data models
-├── config/              # Configuration handling
-└── agent_parsers/       # Parse agent output
+ainb-tui/                       # Cargo workspace root
+├── Cargo.toml                  # [workspace] members + default-members = ainb-core
+├── xtask/                      # Workspace task runner crate
+└── crates/
+    ├── ainb-core/              # The TUI + CLI binary (default build target)
+    │   └── src/
+    │       ├── main.rs         # Entry point, clap CLI, TUI loop
+    │       ├── lib.rs          # Public API exports
+    │       ├── app/            # Application state & event handling
+    │       │   ├── state.rs        # App state machine
+    │       │   ├── events.rs       # Event definitions
+    │       │   └── attach_handler.rs
+    │       ├── cli/            # CLI subcommands (run, list, fleet/, plugin/, ...)
+    │       ├── components/     # TUI screen components (layout.rs, session_list.rs, ...)
+    │       ├── widgets/        # Reusable UI widgets (message_router.rs, ...)
+    │       ├── fleet/          # `ainb fleet` discover/read/send internals
+    │       ├── docker/         # Container management
+    │       ├── tmux/           # Tmux/PTY integration
+    │       ├── git/            # Git operations
+    │       ├── claude/         # Claude API client
+    │       ├── providers/      # Agent provider integrations
+    │       ├── plugins.rs      # Plugin host
+    │       ├── models/         # Data models
+    │       ├── config/         # Configuration handling
+    │       └── agent_parsers/  # Parse agent output
+    ├── ainb-plugin-protocol/   # v2 plugin JSON-RPC protocol types
+    ├── ainb-plugin-runtime/    # Plugin host runtime
+    ├── ainb-plugin-sdk-rust/   # Rust SDK for plugin authors
+    ├── ainb-plugin-types-sessions/ # Shared session types
+    ├── ainb-plugin-burndown/   # In-tree v2 plugin: usage analytics
+    ├── ainb-plugin-notifyd/    # In-tree v2 plugin: notifications
+    ├── ainb-plugin-session-reader/ # In-tree v2 plugin: data backend
+    ├── ainb-plugin-cts-v2/     # Conformance test suite (14 axes)
+    └── ainb-plugin-testkit/    # Plugin test harness for authors
 ```
 
 ## TUI Style Guide
@@ -104,16 +105,16 @@ const MUTED_GRAY: Color = Color::Rgb(120, 120, 140);
 
 ### Adding a New Component
 
-1. Create `src/components/my_component.rs`
+1. Create `crates/ainb-core/src/components/my_component.rs`
 2. Add state struct + render impl following template in skill
-3. Add to `src/components/mod.rs`
-4. Add events to `src/app/events.rs`
-5. Wire into `src/components/layout.rs`
+3. Add to `crates/ainb-core/src/components/mod.rs`
+4. Add events to `crates/ainb-core/src/app/events.rs`
+5. Wire into `crates/ainb-core/src/components/layout.rs`
 
 ### Adding a New Widget
 
-1. Create `src/widgets/my_widget.rs`
-2. Add to `src/widgets/mod.rs`
+1. Create `crates/ainb-core/src/widgets/my_widget.rs`
+2. Add to `crates/ainb-core/src/widgets/mod.rs`
 3. Use in components via `message_router.rs`
 
 ## Testing

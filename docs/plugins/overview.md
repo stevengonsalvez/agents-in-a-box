@@ -25,9 +25,10 @@ Plugins only see the host capabilities they declare in their manifest, and they 
 
 ## Reference plugins
 
-Two plugins ship in-tree as the canonical examples:
+Three plugins ship in-tree as the canonical examples:
 
 - **`burndown`** — owns the Analytics screen and the `ainb usage` CLI subcommand tree. Full screen-owner reference.
+- **`notifyd`** — owns the Inbox screen and runs a notification daemon that captures Claude Code and Codex hook events into SQLite (binary `ainb-notifyd`; also installs/uninstalls the `ainb-hooks` agent hooks). Reference for an event-capturing, screen-owning plugin.
 - **`session-reader`** — pure publisher. Scans `~/.claude/projects/**` and `~/.codex/sessions/**` and chunked-publishes usage snapshots on the `sessions.usage_data` topic for `burndown` to render. Canonical publisher example.
 
 <p align="center">
@@ -44,6 +45,9 @@ The host discovers plugins from a flat staging directory:
 dist/plugins/
 ├── burndown/
 │   ├── burndown            (native executable, ad-hoc signed on macOS)
+│   └── manifest.toml
+├── notifyd/
+│   ├── ainb-notifyd
 │   └── manifest.toml
 └── session-reader/
     ├── session-reader
