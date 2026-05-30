@@ -65,6 +65,9 @@ pub(crate) struct HandleInner {
     pub(crate) unix_sockets: UnixSocketRegistry,
     /// Optional host-side log tap (sentinel capture for tests).
     pub(crate) log_tap: LogTap,
+    /// Shared platform secret backend (DI). Held here so the `reload` path
+    /// re-spawns plugin tasks with the same backend the `Runtime` owns.
+    pub(crate) secret_backend: crate::secret_store::SharedSecretBackend,
     pub(crate) config: RuntimeConfig,
     /// Monotonic counter the host bumps once per `send_key` call.
     /// Stamped into `HandleKeyParams.generation`; the plugin echoes it
@@ -423,6 +426,7 @@ impl RuntimeHandle {
                 self.inner.event_streams.clone(),
                 self.inner.managed_subprocess.clone(),
                 self.inner.unix_sockets.clone(),
+                self.inner.secret_backend.clone(),
                 self.inner.log_tap.clone(),
                 self.inner.config,
                 &self.inner.tokio,

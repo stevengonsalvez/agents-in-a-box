@@ -6,10 +6,10 @@
 # with that type.
 #
 # Hangar is ainb's TUI-first managed-agents control plane. This manifest
-# declares the four P3 host caps (event_stream_subscribe,
-# spawn_managed_subprocess, unix_socket_dial, secret_store_get) even
-# though P3.6 ships only the scaffold — the handlers landed in P3.2-P3.5
-# and P3.7 wires the daemon connection that exercises them.
+# declares the four host caps (event_stream_subscribe,
+# spawn_managed_subprocess, unix_socket_dial, secrets:read). The
+# secrets:read handler is fully wired in P5.2 (scope/key addressing,
+# backed by the platform keychain via ainb-hangar-secrets).
 
 [plugin]
 name = "hangar-tui"
@@ -28,9 +28,9 @@ spawn_managed_subprocess = ["ainb-hangar-daemon"]
 # Dial exactly the hangar daemon socket. List form is mandatory; the host
 # canonicalizes + symlink-resolves the path before comparing.
 unix_socket_dial = ["~/.ainb/hangar.sock", "${XDG_RUNTIME_DIR}/ainb-hangar.sock"]
-# Read provider API keys + the hangar service secret from the platform
-# secret store. List form is the `service` allow-list.
-secret_store_get = ["ainb-hangar", "anthropic-api-key", "openai-api-key"]
+# Read provider API keys from the platform secret store. List form is the
+# allow-list of secret `key` names (per-scope; see host/secret_store_get).
+"secrets:read" = ["anthropic_api_key", "openai_api_key"]
 # Snapshot/event bus + plugin-local data dir.
 event_bus = true
 write_plugin_data = true

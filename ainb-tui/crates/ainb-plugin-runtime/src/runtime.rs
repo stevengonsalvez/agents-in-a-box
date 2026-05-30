@@ -84,6 +84,10 @@ pub struct Runtime {
     /// Optional host-side log tap. Empty in production; tests install a
     /// collector via [`RuntimeHandle::install_log_tap`].
     log_tap: LogTap,
+    /// Shared platform secret backend for `host/secret_store_get` (DI).
+    /// Defaults to the platform keychain/stub; tests inject an in-memory
+    /// double via [`Runtime::with_config_and_secret_backend`].
+    secret_backend: crate::secret_store::SharedSecretBackend,
     /// Tunables.
     config: RuntimeConfig,
 }
@@ -94,8 +98,22 @@ impl Runtime {
         Self::with_config(RuntimeConfig::default())
     }
 
-    /// Construct with explicit config.
+    /// Construct with explicit config and the platform-default secret
+    /// backend (macOS Keychain / linux stub).
     pub fn with_config(config: RuntimeConfig) -> Result<(Self, RuntimeHandle), RuntimeError> {
+        Self::with_config_and_secret_backend(config, crate::secret_store::default_backend())
+    }
+
+    /// Construct with explicit config and an injected secret backend.
+    ///
+    /// This is the DI seam for `host/secret_store_get`: production calls go
+    /// through [`Self::with_config`] (platform default), while tests pass an
+    /// `ainb_hangar_secrets::InMemoryBackend` so the handler can be exercised
+    /// without touching the real keychain.
+    pub fn with_config_and_secret_backend(
+        config: RuntimeConfig,
+        secret_backend: crate::secret_store::SharedSecretBackend,
+    ) -> Result<(Self, RuntimeHandle), RuntimeError> {
         let tokio = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .thread_name("ainb-plugin-rt")
@@ -122,6 +140,7 @@ impl Runtime {
             managed_subprocess: managed_subprocess.clone(),
             unix_sockets: unix_sockets.clone(),
             log_tap: log_tap.clone(),
+            secret_backend: secret_backend.clone(),
             config,
             key_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         });
@@ -137,6 +156,7 @@ impl Runtime {
                 managed_subprocess,
                 unix_sockets,
                 log_tap,
+                secret_backend,
                 config,
             },
             handle,
@@ -222,6 +242,7 @@ impl Runtime {
             self.event_streams.clone(),
             self.managed_subprocess.clone(),
             self.unix_sockets.clone(),
+            self.secret_backend.clone(),
             self.log_tap.clone(),
             self.config,
             self.tokio

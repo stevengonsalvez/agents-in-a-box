@@ -15,6 +15,12 @@ path = "src/lib.rs"
 
 [dependencies]
 ainb-plugin-protocol = { path = "../ainb-plugin-protocol" }
+# Platform secret store backend for `host/secret_store_get` (P5.2). The crate
+# owns the per-platform split internally (macOS Keychain via security-framework,
+# linux Secret Service stub returning NotImplemented), so the runtime takes it
+# unconditionally and injects a `SecretBackend` trait object via DI.
+ainb-hangar-secrets = { path = "../ainb-hangar-secrets" }
+ainb-hangar-core = { path = "../ainb-hangar-core" }
 
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -30,16 +36,13 @@ base64 = "0.22"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-# Platform secret store backend for `host/secret_store_get`. macOS only —
-# the linux/other build of the runtime uses the `-32005` stub in
-# `secret_store.rs`, so the crate carries no Secret Service dependency yet.
-[target.'cfg(target_os = "macos")'.dependencies]
-security-framework = "3"
-
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true }
 ainb-plugin-protocol = { path = "../ainb-plugin-protocol" }
+# In-memory `SecretBackend` double so the P5.2 handler tests can seed and read
+# secrets without touching the platform keychain.
+ainb-hangar-secrets = { path = "../ainb-hangar-secrets", features = ["test-backend"] }
 
 [[bin]]
 name = "ainb-fixture-plugin"

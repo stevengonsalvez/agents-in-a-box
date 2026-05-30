@@ -22,7 +22,7 @@ use ainb_plugin_protocol::params::{
     EventStreamCancelParams, EventStreamSubscribeParams, EventStreamSubscribeResult,
     HandleEventParams, HandleKeyParams, LogParams, PluginInitParams, PluginInitResult,
     PluginShutdownParams, RenderParams, RenderResult, SnapshotGetParams, SnapshotGetResult,
-    SecretStoreGetParams, SecretStoreGetResult, SnapshotPublishParams, SnapshotSubscribeParams,
+    SecretStoreGetParams, SnapshotPublishParams, SnapshotSubscribeParams,
     SnapshotSubscribeResult, SpawnManagedSubprocessParams, SpawnManagedSubprocessResult,
     UnixSocketCloseParams, UnixSocketDialParams, UnixSocketDialResult, UnixSocketSendParams,
     Viewport,
@@ -45,6 +45,7 @@ use crate::rpc::{
 };
 use crate::event_stream::{topic_allowed, EventStreamRegistry};
 use crate::managed_subprocess::ManagedSubprocessRegistry;
+use crate::secret_store::{secret_store_get_logic, SharedSecretBackend};
 use crate::snapshot::SnapshotStore;
 use crate::unix_socket::{path_allowed, UnixSocketRegistry};
 use crate::types::{
@@ -185,6 +186,7 @@ pub fn spawn(
     event_streams: EventStreamRegistry,
     managed_subprocess: ManagedSubprocessRegistry,
     unix_sockets: UnixSocketRegistry,
+    secret_backend: SharedSecretBackend,
     log_tap: LogTap,
     config: RuntimeConfig,
     handle: &tokio::runtime::Handle,
@@ -206,6 +208,7 @@ pub fn spawn(
         event_streams,
         managed_subprocess,
         unix_sockets,
+        secret_backend,
         // The task keeps a clone of its OWN inbox so the unix-socket read
         // loop can deliver `socket:<id>` frames back to this plugin.
         self_inbox: tx.clone(),
@@ -280,6 +283,10 @@ struct PluginTask {
     /// drops every socket this plugin owns on teardown so no `socket:<id>`
     /// frame leaks to a dead/quarantined process.
     unix_sockets: UnixSocketRegistry,
+    /// Shared platform secret backend (DI). `host/secret_store_get` reads
+    /// through this; production uses the macOS Keychain / linux stub, tests
+    /// inject an in-memory double.
+    secret_backend: SharedSecretBackend,
     /// Clone of this task's own [`Inbox`]. The unix-socket read loop holds
     /// it so reads from a dialled socket are delivered back to this plugin
     /// as `Command::HandleEvent` under topic `socket:<stream_id>`.
@@ -833,40 +840,23 @@ impl PluginTask {
 
     /// Handle `host/secret_store_get`.
     ///
-    /// Cap gate (two stages, both returning before any keychain hit):
-    /// 1. The `secret_store_get` grant must be present at all
-    ///    (`is_granted`); otherwise reject with `-32001`.
-    /// 2. For a list-form grant, the requested `service` must be on the
-    ///    allow-list (exact match); otherwise reject with `-32001`. A
-    ///    bool-true grant is an unconditional read of any service and skips
-    ///    the allow-list check (the danger surface flagged in the PR body).
+    /// A thin shell over [`secret_store_get_logic`]: it decodes the
+    /// `(scope, key)` params, then delegates the cap gate, scope parse,
+    /// injected-backend lookup, and base64 encode to the testable logic
+    /// function. The `secrets:read` grant is enforced there (grant present +
+    /// `key` on the list-form allow-list), never by omitting the method from
+    /// the dispatcher.
     ///
-    /// On a permitted request the host performs the platform lookup:
-    /// macOS reads the login Keychain; non-macOS returns `-32005`. A missing
-    /// item returns `-32004`. The secret is base64-encoded into the result
-    /// so it never rides the wire as a raw byte array.
+    /// On a permitted request the platform backend performs the lookup:
+    /// macOS reads the login Keychain; the linux stub returns `-32005`. A
+    /// miss returns `-32004`, a locked backend `-32006`, denied access
+    /// `-32007`. The secret is base64-encoded into `value` so it never rides
+    /// the wire as a raw byte array.
     fn host_secret_store_get(&self, params: Value) -> Result<Value, RpcError> {
-        use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-
         let p: SecretStoreGetParams =
             serde_json::from_value(params).map_err(|e| RpcError::invalid_params(e.to_string()))?;
-        let grant = &self.plugin.manifest.capabilities.secret_store_get;
-        if !grant.is_granted() {
-            return Err(RpcError::capability_denied("secret_store_get"));
-        }
-        // List form = service allow-list; bool-true = any service.
-        if let Some(allow) = grant.allow_list() {
-            if !crate::secret_store::service_allowed(allow, &p.service) {
-                return Err(RpcError::capability_denied("secret_store_get")
-                    .with_data(serde_json::json!({ "service": p.service })));
-            }
-        }
-        let bytes = crate::secret_store::get_secret(&p.service, &p.account)
-            .map_err(|e| e.into_rpc(&p.service, &p.account))?;
-        let res = SecretStoreGetResult {
-            secret_b64: B64.encode(&bytes),
-        };
-        Ok(serde_json::to_value(res).expect("SecretStoreGetResult serializable"))
+        let grant = &self.plugin.manifest.capabilities.secrets_read;
+        secret_store_get_logic(grant, self.secret_backend.as_ref(), &p)
     }
 
     async fn handle_host_notification(&self, method: &str, params: Value) {
@@ -1142,7 +1132,7 @@ fn collect_granted_capabilities(m: &ainb_plugin_protocol::manifest::Manifest) ->
     if c.event_stream_subscribe.is_granted() { out.push("event_stream_subscribe".into()); }
     if c.spawn_managed_subprocess.is_granted() { out.push("spawn_managed_subprocess".into()); }
     if c.unix_socket_dial.is_granted() { out.push("unix_socket_dial".into()); }
-    if c.secret_store_get.is_granted() { out.push("secret_store_get".into()); }
+    if c.secrets_read.is_granted() { out.push("secrets:read".into()); }
     out
 }
 

@@ -1,93 +1,198 @@
-//! Host-side backend for `host/secret_store_get`.
+//! Host-side logic for `host/secret_store_get`.
 //!
-//! Reads a secret keyed by `(service, account)` from the platform secret
-//! store. The capability gate (grant present, `service` on the allow-list)
-//! is enforced by the caller in `plugin_task.rs`; this module only owns the
-//! platform lookup and the cap-form-independent `service_allowed` helper.
+//! The wire contract is `(scope, key)`-addressed: a request names a `scope`
+//! (`"workspace"` — requiring `workspace_id` — or `"global"`) and a `key`.
+//! The actual platform lookup is delegated to a
+//! [`ainb_hangar_secrets::SecretBackend`] injected into the runtime (DI), so
+//! production reads the macOS Keychain (or the linux Secret Service stub)
+//! while tests use the in-memory double.
 //!
-//! Platform split (per P3.5 + `build-plan.md` Open Risks row 4):
+//! This module owns the cap-form-independent helpers so they can be unit
+//! tested without spinning up a plugin subprocess:
 //!
-//! - **macOS**: reads the generic password from the login Keychain via
-//!   `security-framework`. A missing item maps to
-//!   [`SecretStoreError::NotFound`].
-//! - **linux / other**: the Secret Service backend is deferred, so every
-//!   lookup returns [`SecretStoreError::NotImplemented`]. The capability,
-//!   the wire contract, and the cap gate all still exist — the plugin gets a
-//!   clean `-32005` and can fall back to dotenv.
+//! - [`key_allowed`] — does the `secrets:read` allow-list name this `key`?
+//! - [`parse_scope`] — turn `(scope, workspace_id)` into a [`Scope`].
+//! - [`secret_store_get_logic`] — the full cap-gate + backend lookup +
+//!   base64 encode, returning the wire result or an [`RpcError`].
+//!
+//! Capability gating is enforced HERE (grant present + `key` on the
+//! allow-list), matching the runtime's other host caps — never by omitting
+//! the method from the dispatcher.
 
+use std::sync::Arc;
+
+use ainb_hangar_core::ids::WorkspaceId;
+use ainb_hangar_secrets::{Scope, SecretBackend, SecretError};
 use ainb_plugin_protocol::errors::RpcError;
+use ainb_plugin_protocol::manifest::CapabilityGrant;
+use ainb_plugin_protocol::params::{SecretStoreGetParams, SecretStoreGetResult};
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use serde_json::Value;
 
-/// Failure modes of a platform secret lookup.
+/// A shared, thread-safe handle to the host's secret backend.
 ///
-/// These map 1:1 onto the JSON-RPC error codes the handler returns:
-/// [`Self::NotFound`] → `-32004`, [`Self::NotImplemented`] → `-32005`.
-#[derive(Debug)]
-pub enum SecretStoreError {
-    /// No secret exists for the requested `(service, account)` pair.
-    NotFound,
-    /// This platform has no secret-store backend wired up yet.
-    NotImplemented,
-    /// The backend returned an unexpected error (I/O, locked keychain, ...).
-    Backend(String),
-}
+/// `host/secret_store_get` is dispatched on the per-plugin task; every task
+/// holds a clone of this `Arc` so a single backend (e.g. one Keychain
+/// session) is shared across all plugins. Tests swap in an
+/// `ainb_hangar_secrets::InMemoryBackend` here.
+pub type SharedSecretBackend = Arc<dyn SecretBackend + Send + Sync>;
 
-impl SecretStoreError {
-    /// Convert into the wire [`RpcError`] for `(service, account)`.
-    #[must_use]
-    pub fn into_rpc(self, service: &str, account: &str) -> RpcError {
-        match self {
-            Self::NotFound => RpcError::secret_not_found(service, account),
-            Self::NotImplemented => {
-                RpcError::not_implemented("linux Secret Service deferred to P5")
-            }
-            Self::Backend(msg) => RpcError::new(
-                ainb_plugin_protocol::errors::SECRET_NOT_FOUND,
-                format!("secret store backend error: {msg}"),
-            ),
-        }
+/// Build the platform-default secret backend for production.
+///
+/// - macOS: the login-Keychain backend (`MacKeychainBackend`).
+/// - linux: the Secret Service stub (`LinuxSecretServiceBackend`), which
+///   reports `NotImplemented` until the D-Bus backend lands.
+/// - any other target: a `NotImplemented` stub so the runtime still builds.
+#[must_use]
+pub fn default_backend() -> SharedSecretBackend {
+    #[cfg(target_os = "macos")]
+    {
+        Arc::new(ainb_hangar_secrets::MacKeychainBackend::new())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Arc::new(ainb_hangar_secrets::LinuxSecretServiceBackend::new())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        Arc::new(UnsupportedSecretBackend)
     }
 }
 
-/// Whether `requested` service is permitted by a `secret_store_get`
-/// allow-list (list form). Comparison is exact — there is no wildcard /
-/// prefix semantics for service names.
+/// Fallback backend for non-macOS, non-linux targets: every op is
+/// `NotImplemented`. Keeps the runtime building on exotic targets without
+/// pulling a platform secret store dependency.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+struct UnsupportedSecretBackend;
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+impl SecretBackend for UnsupportedSecretBackend {
+    fn get(
+        &self,
+        _scope: &Scope,
+        _key: &str,
+    ) -> ainb_hangar_secrets::Result<Option<ainb_hangar_secrets::SecretBytes>> {
+        Err(SecretError::NotImplemented)
+    }
+    fn put(&self, _scope: &Scope, _key: &str, _value: &[u8]) -> ainb_hangar_secrets::Result<()> {
+        Err(SecretError::NotImplemented)
+    }
+    fn delete(&self, _scope: &Scope, _key: &str) -> ainb_hangar_secrets::Result<()> {
+        Err(SecretError::NotImplemented)
+    }
+}
+
+/// Whether `requested` key is permitted by a `secrets:read` allow-list
+/// (list form). Comparison is exact — there is no wildcard / prefix
+/// semantics for key names.
 ///
 /// The caller handles the bool-true form (unconditional grant) and the
 /// `is_granted()` gate separately; this only answers "does the allow-list
-/// name this service?".
+/// name this key?".
 #[must_use]
-pub fn service_allowed(allow_list: &[String], requested: &str) -> bool {
+pub fn key_allowed(allow_list: &[String], requested: &str) -> bool {
     allow_list.iter().any(|entry| entry == requested)
 }
 
-/// Read the secret bytes for `(service, account)` from the platform store.
+/// Map a `SecretError` from the backend onto the wire [`RpcError`] for the
+/// requested `(scope, key)`.
 ///
-/// macOS implementation: reads the generic password from the login
-/// Keychain. Returns [`SecretStoreError::NotFound`] when the item is
-/// absent.
-#[cfg(target_os = "macos")]
-pub fn get_secret(service: &str, account: &str) -> Result<Vec<u8>, SecretStoreError> {
-    use security_framework::passwords::get_generic_password;
-    match get_generic_password(service, account) {
-        Ok(bytes) => Ok(bytes),
-        Err(e) => {
-            // errSecItemNotFound (-25300) is the "no such item" sentinel.
-            if e.code() == -25300 {
-                Err(SecretStoreError::NotFound)
-            } else {
-                Err(SecretStoreError::Backend(e.to_string()))
-            }
+/// The variants map onto distinct codes so the plugin can branch its
+/// recovery: a locked backend (`-32006`) is retriable after unlock, denied
+/// access (`-32007`) needs the user to re-authorize, `NotImplemented`
+/// (`-32005`) is a permanent platform gap the plugin degrades around, and a
+/// genuine miss (`-32004`) is just "no such secret".
+fn secret_error_into_rpc(err: &SecretError, scope_label: &str, key: &str) -> RpcError {
+    match err {
+        SecretError::NotFound => RpcError::secret_not_found(scope_label, key),
+        SecretError::NotImplemented => {
+            RpcError::not_implemented("platform secret store backend not implemented")
         }
+        SecretError::BackendLocked => RpcError::secret_backend_locked(scope_label, key),
+        SecretError::AccessDenied => RpcError::secret_access_denied(scope_label, key),
+        SecretError::Backend(msg) => RpcError::new(
+            ainb_plugin_protocol::errors::SECRET_NOT_FOUND,
+            format!("secret store backend error: {msg}"),
+        ),
     }
 }
 
-/// Read the secret bytes for `(service, account)` from the platform store.
+/// Parse a `(scope, workspace_id)` wire pair into a [`Scope`].
 ///
-/// Non-macOS stub: the Secret Service backend is deferred, so this always
-/// reports [`SecretStoreError::NotImplemented`] (`-32005` on the wire).
-#[cfg(not(target_os = "macos"))]
-pub fn get_secret(_service: &str, _account: &str) -> Result<Vec<u8>, SecretStoreError> {
-    Err(SecretStoreError::NotImplemented)
+/// `"workspace"` requires a non-empty `workspace_id`; `"global"` ignores it.
+/// Any other scope string, or a workspace scope with a missing/empty id, is
+/// an [`RpcError::invalid_params`] (`-32602`).
+///
+/// # Errors
+///
+/// Returns [`RpcError`] (`-32602`) for an unknown scope or a workspace scope
+/// with a missing/empty `workspace_id`.
+pub fn parse_scope(scope: &str, workspace_id: Option<&str>) -> Result<Scope, RpcError> {
+    match scope {
+        "global" => Ok(Scope::Global),
+        "workspace" => {
+            let raw = workspace_id.ok_or_else(|| {
+                RpcError::invalid_params("scope=\"workspace\" requires workspace_id")
+            })?;
+            let id = WorkspaceId::from_str(raw)
+                .map_err(|e| RpcError::invalid_params(format!("invalid workspace_id: {e}")))?;
+            Ok(Scope::Workspace(id))
+        }
+        other => Err(RpcError::invalid_params(format!(
+            "unknown scope: {other:?} (expected \"workspace\" or \"global\")"
+        ))),
+    }
+}
+
+/// The full `host/secret_store_get` handler logic, decoupled from the
+/// plugin subprocess so it can be unit-tested with an in-memory backend.
+///
+/// Stages (every gate returns BEFORE any backend hit):
+/// 1. The `secrets:read` grant must be present (`is_granted`); otherwise
+///    `-32001`.
+/// 2. For a list-form grant, the requested `key` must be on the allow-list;
+///    otherwise `-32001`. A bool-true grant reads any key (the danger
+///    surface) and skips the allow-list check.
+/// 3. Parse `(scope, workspace_id)` into a [`Scope`] (`-32602` on bad input).
+/// 4. Look the secret up via the injected [`SecretBackend`]. A miss
+///    (`Ok(None)`) maps to `-32004`; a backend error maps per
+///    [`secret_error_into_rpc`].
+///
+/// On success the secret bytes are base64-encoded into `value`.
+///
+/// # Errors
+///
+/// Returns [`RpcError`] for a denied capability (`-32001`), bad params
+/// (`-32602`), a miss (`-32004`), or any backend failure (`-32005`/`-32006`/
+/// `-32007`/`-32004`).
+pub fn secret_store_get_logic(
+    grant: &CapabilityGrant,
+    backend: &dyn SecretBackend,
+    params: &SecretStoreGetParams,
+) -> Result<Value, RpcError> {
+    // Stage 1: cap present at all.
+    if !grant.is_granted() {
+        return Err(RpcError::capability_denied("secrets:read"));
+    }
+    // Stage 2: list form = key allow-list; bool-true = any key.
+    if let Some(allow) = grant.allow_list() {
+        if !key_allowed(allow, &params.key) {
+            return Err(RpcError::capability_denied("secrets:read")
+                .with_data(serde_json::json!({ "key": params.key })));
+        }
+    }
+    // Stage 3: resolve the scope.
+    let scope = parse_scope(&params.scope, params.workspace_id.as_deref())?;
+    let scope_label = scope.service_string();
+    // Stage 4: platform lookup via the injected backend.
+    let bytes = backend
+        .get(&scope, &params.key)
+        .map_err(|e| secret_error_into_rpc(&e, &scope_label, &params.key))?
+        .ok_or_else(|| RpcError::secret_not_found(&scope_label, &params.key))?;
+    let res = SecretStoreGetResult {
+        value: B64.encode(bytes.as_bytes()),
+    };
+    Ok(serde_json::to_value(res).expect("SecretStoreGetResult serializable"))
 }
 
 #[cfg(test)]
@@ -95,49 +200,77 @@ mod tests {
     use super::*;
 
     #[test]
-    fn service_allowed_exact_match_only() {
-        let allow = vec!["ainb-hangar".to_string(), "anthropic-api-key".to_string()];
-        assert!(service_allowed(&allow, "ainb-hangar"));
-        assert!(service_allowed(&allow, "anthropic-api-key"));
-        assert!(!service_allowed(&allow, "openai-api-key"));
+    fn key_allowed_exact_match_only() {
+        let allow = vec!["anthropic_api_key".to_string(), "openai_api_key".to_string()];
+        assert!(key_allowed(&allow, "anthropic_api_key"));
+        assert!(key_allowed(&allow, "openai_api_key"));
+        assert!(!key_allowed(&allow, "github_token"));
         // No prefix semantics.
-        assert!(!service_allowed(&allow, "ainb-hangar-extra"));
-        assert!(!service_allowed(&allow, "ainb"));
+        assert!(!key_allowed(&allow, "anthropic_api_key_extra"));
+        assert!(!key_allowed(&allow, "anthropic"));
     }
 
     #[test]
-    fn service_allowed_empty_list_denies() {
-        assert!(!service_allowed(&[], "anything"));
+    fn key_allowed_empty_list_denies() {
+        assert!(!key_allowed(&[], "anything"));
     }
 
     #[test]
-    fn not_found_maps_to_secret_not_found_code() {
-        let e = SecretStoreError::NotFound.into_rpc("svc", "acct");
-        assert_eq!(e.code, ainb_plugin_protocol::errors::SECRET_NOT_FOUND);
-        assert!(e.message.contains("svc"));
-        assert!(e.message.contains("acct"));
+    fn parse_scope_global_ignores_workspace_id() {
+        assert_eq!(parse_scope("global", None).unwrap(), Scope::Global);
+        // Even if a workspace_id is supplied, global ignores it.
+        assert_eq!(parse_scope("global", Some("ws-1")).unwrap(), Scope::Global);
     }
 
     #[test]
-    fn not_implemented_maps_to_not_implemented_code() {
-        let e = SecretStoreError::NotImplemented.into_rpc("svc", "acct");
-        assert_eq!(e.code, ainb_plugin_protocol::errors::NOT_IMPLEMENTED);
+    fn parse_scope_workspace_requires_id() {
+        let err = parse_scope("workspace", None).unwrap_err();
+        assert_eq!(err.code, ainb_plugin_protocol::errors::INVALID_PARAMS);
     }
 
     #[test]
-    fn backend_error_maps_to_secret_not_found_code_with_message() {
-        let e = SecretStoreError::Backend("locked".into()).into_rpc("svc", "acct");
-        assert_eq!(e.code, ainb_plugin_protocol::errors::SECRET_NOT_FOUND);
-        assert!(e.message.contains("locked"));
+    fn parse_scope_workspace_rejects_empty_id() {
+        let err = parse_scope("workspace", Some("")).unwrap_err();
+        assert_eq!(err.code, ainb_plugin_protocol::errors::INVALID_PARAMS);
     }
 
-    /// On non-macOS the stub always reports NotImplemented.
-    #[cfg(not(target_os = "macos"))]
     #[test]
-    fn get_secret_stub_is_not_implemented() {
-        assert!(matches!(
-            get_secret("svc", "acct"),
-            Err(SecretStoreError::NotImplemented)
-        ));
+    fn parse_scope_workspace_builds_scope() {
+        let s = parse_scope("workspace", Some("ws-123")).unwrap();
+        match s {
+            Scope::Workspace(id) => assert_eq!(id.as_str(), "ws-123"),
+            Scope::Global => panic!("expected workspace scope"),
+        }
+    }
+
+    #[test]
+    fn parse_scope_unknown_is_invalid_params() {
+        let err = parse_scope("nonsense", None).unwrap_err();
+        assert_eq!(err.code, ainb_plugin_protocol::errors::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn secret_error_mapping_codes() {
+        use ainb_plugin_protocol::errors;
+        assert_eq!(
+            secret_error_into_rpc(&SecretError::NotFound, "global", "k").code,
+            errors::SECRET_NOT_FOUND
+        );
+        assert_eq!(
+            secret_error_into_rpc(&SecretError::NotImplemented, "global", "k").code,
+            errors::NOT_IMPLEMENTED
+        );
+        assert_eq!(
+            secret_error_into_rpc(&SecretError::BackendLocked, "global", "k").code,
+            errors::SECRET_BACKEND_LOCKED
+        );
+        assert_eq!(
+            secret_error_into_rpc(&SecretError::AccessDenied, "global", "k").code,
+            errors::SECRET_ACCESS_DENIED
+        );
+        assert_eq!(
+            secret_error_into_rpc(&SecretError::Backend("io".into()), "global", "k").code,
+            errors::SECRET_NOT_FOUND
+        );
     }
 }
