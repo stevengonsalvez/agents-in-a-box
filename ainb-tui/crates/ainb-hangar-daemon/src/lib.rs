@@ -67,6 +67,15 @@ pub mod runner;
 /// repos. The plugin dials this socket through the host `unix_socket_dial` cap
 /// to populate its screens with live data.
 pub mod rpc;
+/// The autopilot scheduler thread + cron tick loop (P7.3).
+///
+/// [`scheduler::AutopilotScheduler`] is a daemon-global tokio task that wakes at
+/// the earliest enabled autopilot's `next_tick_at`, fires it through P7.4's
+/// [`ainb_hangar_store::repo::autopilot_run::fire_autopilot_tick`] (or skips when
+/// the autopilot is at its `max_concurrent_runs` limit, emitting
+/// `autopilot.tick_skipped`), then recomputes the next tick from the fired slot
+/// to avoid drift. A [`tokio_util::sync::CancellationToken`] exits it cleanly.
+pub mod scheduler;
 /// Deterministic P4 seed fixture for the e2e tripwires (`test-support` only).
 ///
 /// Writes a `default` workspace with issues/agents/skills + a running task into
@@ -151,6 +160,26 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
             tokio::spawn(rpc::serve(listener, store.pool().clone(), health));
         }
         Err(e) => tracing::warn!(error = %e, socket = %socket_path.display(), "hangar rpc bind failed"),
+    }
+
+    // P7.3: spawn the autopilot scheduler. It is a daemon-global cron tick loop
+    // over every enabled autopilot; guarded so a scheduler fault is non-fatal to
+    // the claim loop (one bad autopilot must never down the daemon). The token is
+    // never cancelled here (process exit tears the task down); a future
+    // supervisor can cancel it for graceful shutdown.
+    {
+        use std::sync::Arc;
+
+        use ainb_hangar_core::clock::SystemClock;
+        use tokio_util::sync::CancellationToken;
+
+        let scheduler = crate::scheduler::AutopilotScheduler::new(
+            store.pool().clone(),
+            Arc::new(SystemClock),
+            CancellationToken::new(),
+        );
+        tokio::spawn(scheduler.run());
+        tracing::info!("autopilot scheduler spawned");
     }
 
     tracing::info!(idle = true, "ainb-hangar-daemon ready idle=true");
