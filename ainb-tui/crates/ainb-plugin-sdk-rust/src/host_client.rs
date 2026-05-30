@@ -40,6 +40,9 @@ use ainb_plugin_protocol::{
         SnapshotPublishParams, SnapshotSubscribeParams, SnapshotSubscribeResult,
         SpawnManagedSubprocessParams, SpawnManagedSubprocessResult, UnixSocketCloseParams,
         UnixSocketDialParams, UnixSocketDialResult, UnixSocketSendParams,
+        WorkspaceGetActiveParams, WorkspaceGetActiveResult, WorkspaceListParams,
+        WorkspaceListResult, WorkspaceSetActiveParams, WorkspaceSetActiveResult,
+        WorkspaceSetDefaultParams, WorkspaceSetDefaultResult,
     },
     RpcError,
 };
@@ -387,6 +390,51 @@ impl HostClient {
             key: key.into(),
         };
         self.send_request(methods::HOST_SECRET_STORE_GET, &params)
+            .await
+    }
+
+    /// List the host's workspaces with each row's active/default flags
+    /// resolved from `state.toml`. Ungated read.
+    pub async fn workspace_list(&self) -> Result<WorkspaceListResult> {
+        self.send_request(methods::HOST_WORKSPACE_LIST, &WorkspaceListParams {})
+            .await
+    }
+
+    /// Ask the host which workspace is currently active (effective: explicit
+    /// active → default → first). Ungated read.
+    pub async fn workspace_get_active(&self) -> Result<WorkspaceGetActiveResult> {
+        self.send_request(
+            methods::HOST_WORKSPACE_GET_ACTIVE,
+            &WorkspaceGetActiveParams {},
+        )
+        .await
+    }
+
+    /// Switch the active workspace to `workspace_id` (a stable ULID id, never a
+    /// slug). Capability-gated by `workspace:write` (`-32001` when denied);
+    /// an unknown id is `-32602`. On success the host broadcasts
+    /// `WorkspaceChanged` so subscribed plugins re-fetch.
+    pub async fn workspace_set_active(
+        &self,
+        workspace_id: impl Into<String>,
+    ) -> Result<WorkspaceSetActiveResult> {
+        let params = WorkspaceSetActiveParams {
+            workspace_id: workspace_id.into(),
+        };
+        self.send_request(methods::HOST_WORKSPACE_SET_ACTIVE, &params)
+            .await
+    }
+
+    /// Set the default workspace to `workspace_id`. Capability-gated by
+    /// `workspace:write`; never changes the active workspace.
+    pub async fn workspace_set_default(
+        &self,
+        workspace_id: impl Into<String>,
+    ) -> Result<WorkspaceSetDefaultResult> {
+        let params = WorkspaceSetDefaultParams {
+            workspace_id: workspace_id.into(),
+        };
+        self.send_request(methods::HOST_WORKSPACE_SET_DEFAULT, &params)
             .await
     }
 
