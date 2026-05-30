@@ -25,10 +25,11 @@ Plugins only see the host capabilities they declare in their manifest, and they 
 
 ## Reference plugins
 
-Two plugins ship in-tree as the canonical examples:
+Three plugins ship in-tree as the canonical examples:
 
 - **`burndown`** — owns the Analytics screen and the `ainb usage` CLI subcommand tree. Full screen-owner reference.
 - **`session-reader`** — pure publisher. Scans `~/.claude/projects/**` and `~/.codex/sessions/**` and chunked-publishes usage snapshots on the `sessions.usage_data` topic for `burndown` to render. Canonical publisher example.
+- **`witr`** — owns the process-causality screen (press `w`) and the `ainb witr` CLI. Wraps the external [`witr`](https://github.com/pranshuparmar/witr) binary via the `spawn_subprocess` capability: execs `witr --json <target>`, parses stdout, and renders the ancestry tree. Canonical **subprocess-wrapping** reference — the pattern for surfacing any external CLI as a plugin.
 
 <p align="center">
   <img src="../assets/screenshots/burndown.png" alt="Burndown plugin — full analytics dashboard" width="900">
@@ -45,8 +46,11 @@ dist/plugins/
 ├── burndown/
 │   ├── burndown            (native executable, ad-hoc signed on macOS)
 │   └── manifest.toml
-└── session-reader/
-    ├── session-reader
+├── session-reader/
+│   ├── session-reader
+│   └── manifest.toml
+└── witr/
+    ├── witr
     └── manifest.toml
 ```
 
