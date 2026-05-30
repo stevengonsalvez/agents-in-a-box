@@ -107,10 +107,7 @@ pub async fn finalize_idempotent<'q>(
     )
         -> sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>>,
 ) -> Result<FinalizeOutcome, FinalizeError> {
-    let affected = bind_update(sqlx::query(update_sql))
-        .execute(pool)
-        .await?
-        .rows_affected();
+    let affected = bind_update(sqlx::query(update_sql)).execute(pool).await?.rows_affected();
 
     if affected == 1 {
         tracing::info!(
@@ -119,6 +116,11 @@ pub async fn finalize_idempotent<'q>(
             outcome = "transitioned",
             "task_finalize",
         );
+        // Cascade: if this task was fired by an autopilot and just reached a
+        // terminal state, stamp the parent run's completed_at + status. Runs on
+        // the real complete / fail / cancel path (every finalize service routes
+        // through here), not a separate caller-driven update.
+        cascade_autopilot_run(pool, task_id, target).await?;
         return Ok(FinalizeOutcome::Transitioned);
     }
 
@@ -130,6 +132,43 @@ pub async fn finalize_idempotent<'q>(
     // and matches Multica `task.go:1010`.
     let current = read_state(pool, task_id).await?;
     classify_no_op(task_id, target, expected_from, current)
+}
+
+/// Stamp the autopilot run a just-finalized task belongs to, if any.
+///
+/// When a task carrying a non-null `autopilot_run_id` reaches a *terminal*
+/// state, its parent `autopilot_run` is marked finished: `completed_at` is set
+/// to the task's own `finished_at` (the finalize UPDATE stamped it in the same
+/// call) and the run `status` is mapped from the task terminal state
+/// (`done -> completed`, `failed -> failed`, `cancelled -> cancelled`).
+///
+/// A no-op when `target` is non-terminal or the task is not an autopilot task
+/// (the `WHERE` clause matches no run row). The single correlated UPDATE is
+/// idempotent: re-running it re-writes the same values.
+async fn cascade_autopilot_run(
+    pool: &SqlitePool,
+    task_id: &str,
+    target: TaskState,
+) -> Result<(), FinalizeError> {
+    // Only terminal task states close a run; map onto the run status vocabulary.
+    let run_status = match target {
+        TaskState::Done => "completed",
+        TaskState::Failed => "failed",
+        TaskState::Cancelled => "cancelled",
+        // Non-terminal transitions (e.g. Start's `running`) never touch a run.
+        TaskState::Queued | TaskState::Dispatched | TaskState::Running => return Ok(()),
+    };
+    sqlx::query(
+        "UPDATE autopilot_run \
+         SET completed_at = (SELECT finished_at FROM agent_task_queue WHERE id = ?1), \
+             status = ?2 \
+         WHERE id = (SELECT autopilot_run_id FROM agent_task_queue WHERE id = ?1)",
+    )
+    .bind(task_id)
+    .bind(run_status)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 /// Re-read the current [`TaskState`] of a task, or `None` if the row is absent.
@@ -181,7 +220,10 @@ fn classify_no_op(
                 outcome = "terminal_mismatch",
                 "task_finalize",
             );
-            Err(FinalizeError::TerminalMismatch { found: state, target })
+            Err(FinalizeError::TerminalMismatch {
+                found: state,
+                target,
+            })
         }
         // A non-terminal state we did not expect, or a vanished row: the
         // `StartTask` case (target=running, expected_from=[dispatched]) maps an
@@ -200,7 +242,10 @@ fn classify_no_op(
                 outcome = "illegal_state",
                 "task_finalize",
             );
-            Err(FinalizeError::IllegalState { found: other, target })
+            Err(FinalizeError::IllegalState {
+                found: other,
+                target,
+            })
         }
     }
 }
