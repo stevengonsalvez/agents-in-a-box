@@ -10,6 +10,8 @@
 
 /// Polymorphic actor references (`member:<id>` / `agent:<id>`).
 pub mod actor;
+/// Cron-scheduled autopilots (P7): the IO-free cron parser + next-tick math.
+pub mod autopilot;
 /// Polymorphic assignee crosswalk between Hangar actors and `bd` strings (P2.3).
 pub mod assignee_crosswalk;
 /// Wall-clock injection (`HangarClock` + `SystemClock` / `FixedClock`).

@@ -21,6 +21,12 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
+# P7.1: cron-expression parsing + next-tick math. Parser only (no scheduler);
+# the daemon (P7.3) drives the tick loop. `chrono` (workspace) supplies the
+# `DateTime<Utc>` the parser computes against — the public API is chrono-typed
+# because `cron` requires it, but the storage layer stays epoch-millis i64
+# (see `autopilot::cron::{millis_to_utc, utc_to_millis}` for the boundary).
+cron = "0.12"
 ulid = "1"
 # Token minting + hashing (P5.4). `sha2` for the SHA-256 digest, `subtle` for
 # constant-time digest comparison, `rand` for the injectable CSPRNG seam. All
