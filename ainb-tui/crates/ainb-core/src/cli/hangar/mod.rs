@@ -330,6 +330,14 @@ pub struct IssueCreateArgs {
     /// Initial lifecycle state.
     #[arg(long, default_value = DEFAULT_ISSUE_STATE)]
     pub state: String,
+    /// Assign the issue to an agent (`agent.id`) and enqueue a task for it.
+    ///
+    /// When set, the issue's assignee is the agent and a `queued` task is
+    /// enqueued for the agent's runtime, so the daemon's claim loop picks it up,
+    /// materialises the agent's attached skills (P6.4), and dispatches the
+    /// provider. The created task id is printed alongside the issue id.
+    #[arg(long)]
+    pub assign: Option<String>,
 }
 
 /// Arguments for `hangar issue list`.
@@ -828,6 +836,11 @@ async fn dispatch_issue(cmd: IssueCommand, format: OutputFormat) -> Result<()> {
 }
 
 /// `hangar issue create`: bootstrap a workspace if absent, then insert.
+///
+/// With `--assign <agent_id>` the issue is created assigned to the agent AND a
+/// `queued` task is enqueued for the agent's runtime, so the daemon's claim loop
+/// dispatches it (and materialises the agent's skills, P6.4). The task id is
+/// printed alongside the issue id.
 async fn run_issue_create(store: &Store, args: IssueCreateArgs) -> Result<()> {
     let pool = store.pool();
     let workspace_id = ensure_default_workspace(store).await?;
@@ -836,18 +849,53 @@ async fn run_issue_create(store: &Store, args: IssueCreateArgs) -> Result<()> {
     let id = idgen.new_ulid();
     let creator = ActorRef::new(ActorKind::Member, DEFAULT_CREATOR_ID)
         .expect("default creator id is non-empty");
+
+    // Resolve the assignee (if any): the agent must exist in the workspace; its
+    // runtime is the queue the task lands on. Resolved BEFORE the issue insert so
+    // a bad agent id fails before any write.
+    let assignment = match args.assign.as_deref() {
+        Some(agent_id) => Some(resolve_agent_runtime(pool, &workspace_id, agent_id).await?),
+        None => None,
+    };
+    let now = ainb_hangar_core::clock::HangarClock::now_ms(&clock);
+
     let new = NewIssue {
         id: id.clone(),
-        workspace_id,
+        workspace_id: workspace_id.clone(),
         title: args.title,
         description: args.description,
         state: args.state,
-        assignee: None,
+        assignee: assignment
+            .as_ref()
+            .map(|a| ActorRef::new(ActorKind::Agent, &a.agent_id).expect("agent id non-empty")),
         creator,
-        created_at: ainb_hangar_core::clock::HangarClock::now_ms(&clock),
+        created_at: now,
     };
     IssueRepo::insert(pool, &new).await.context("insert issue")?;
-    println!("created issue {id}");
+
+    // When assigned, enqueue a task for the agent's runtime so the daemon claims
+    // + dispatches it (materialising the agent's skills first).
+    if let Some(a) = assignment {
+        let task_id = idgen.new_ulid();
+        TaskRepo::insert(
+            pool,
+            &ainb_hangar_store::repo::task::NewTask {
+                id: task_id.clone(),
+                workspace_id,
+                runtime_id: a.runtime_id,
+                agent_id: a.agent_id,
+                issue_id: Some(id.clone()),
+                work_dir: None,
+                created_at: now,
+            },
+        )
+        .await
+        .context("enqueue task for assigned agent")?;
+        println!("created issue {id}");
+        println!("queued task {task_id}");
+    } else {
+        println!("created issue {id}");
+    }
     Ok(())
 }
 
@@ -1006,6 +1054,38 @@ async fn run_daemon_status() -> Result<()> {
 // ──────────────────────────────────────────────────────────────────────────
 // Workspace bootstrap + render helpers.
 // ──────────────────────────────────────────────────────────────────────────
+
+/// An agent resolved for `issue create --assign`: its id + the runtime its task
+/// will queue on.
+struct AgentAssignment {
+    /// The agent (`agent.id`).
+    agent_id: String,
+    /// The agent's runtime (`agent_runtime.id`) — the task queue.
+    runtime_id: String,
+}
+
+/// Resolve an agent's runtime for assignment, erroring if the agent does not
+/// exist in `workspace_id`. The lookup is workspace-scoped so an agent id from
+/// another tenant can never be assigned a task here.
+async fn resolve_agent_runtime(
+    pool: &sqlx::SqlitePool,
+    workspace_id: &str,
+    agent_id: &str,
+) -> Result<AgentAssignment> {
+    let runtime_id: Option<String> =
+        sqlx::query_scalar("SELECT runtime_id FROM agent WHERE id = ? AND workspace_id = ?")
+            .bind(agent_id)
+            .bind(workspace_id)
+            .fetch_optional(pool)
+            .await
+            .context("look up agent runtime")?;
+    let runtime_id =
+        runtime_id.with_context(|| format!("no agent with id `{agent_id}` in this workspace"))?;
+    Ok(AgentAssignment {
+        agent_id: agent_id.to_string(),
+        runtime_id,
+    })
+}
 
 /// Return the default workspace id, or `None` if no workspace exists yet.
 async fn find_default_workspace(store: &Store) -> Result<Option<String>> {
