@@ -63,6 +63,15 @@ pub mod rpc;
 /// `hangar.db` and assert live rows render.
 #[cfg(any(test, feature = "test-support"))]
 pub mod seed;
+/// Toolkit-directory skill importer behind `ainb hangar skills sync` (P6.2).
+///
+/// Walks a `toolkit/packages/skills/`-shaped tree (`<name>/SKILL.md` + nested
+/// assets), parses each skill's YAML frontmatter, validates the whole batch
+/// (uniqueness + parse) before any write, then upserts every skill
+/// workspace-scoped via
+/// [`ainb_hangar_store::repo::skill::SkillRepo::upsert_by_name`] — idempotent
+/// and all-or-nothing.
+pub mod skills_sync;
 /// TTL sweepers + stale-dispatch reclaim (P1.4).
 ///
 /// The daemon's tokio runtime registers these as periodic tasks; they are also

@@ -53,6 +53,9 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# P6.2 skill importer: parse the YAML frontmatter block of each `SKILL.md`
+# (`name:` / `description:`) when syncing `toolkit/packages/skills/`.
+serde_yaml = { workspace = true }
 # Home-directory resolution for the per-task env tree root (mirrors the store's
 # `$AINB_HANGAR_HOME`-else-`~` resolution so env dirs and the db share a root).
 dirs = { workspace = true }
