@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 pub mod events;
 pub mod methods;
 pub mod settings;
+pub mod snapshots;
 
 /// The JSON-RPC protocol version string carried by every envelope.
 pub const JSONRPC_VERSION: &str = "2.0";

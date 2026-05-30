@@ -23,6 +23,32 @@ pub const WORKSPACE_SUBSCRIBE: &str = "workspace/subscribe";
 /// Params: `{}`. Result: `{ workspaces: [...] }`.
 pub const WORKSPACE_LIST: &str = "workspace/list";
 
+/// `hangar/issues_list` — snapshot the issues of a workspace.
+///
+/// Params: `{ workspace_id: String }`. Result: `{ issues: [IssueRow, ...] }`
+/// (every lifecycle state; the plugin buckets them into Todo / In Progress /
+/// Done client-side). Drives the issue-list landing screen (P4.3).
+pub const HANGAR_ISSUES_LIST: &str = "hangar/issues_list";
+
+/// `hangar/agents_list` — snapshot the assignable actors of a workspace.
+///
+/// Params: `{ workspace_id: String }`. Result: `{ actors: [ActorRow, ...] }`
+/// (members + agents in one polymorphic list). Drives the agent-picker modal
+/// (P4.5).
+pub const HANGAR_AGENTS_LIST: &str = "hangar/agents_list";
+
+/// `hangar/skills_list` — snapshot the skills of a workspace.
+///
+/// Params: `{ workspace_id: String }`. Result: `{ skills: [SkillRow, ...] }`.
+/// Drives the skill-manager list (P4.6).
+pub const HANGAR_SKILLS_LIST: &str = "hangar/skills_list";
+
+/// `hangar/health` — snapshot the daemon's health for the settings screen.
+///
+/// Params: `{}`. Result: a [`crate::settings::HealthSnapshot`]. Drives the
+/// settings daemon-connection section (P4.7).
+pub const HANGAR_HEALTH: &str = "hangar/health";
+
 /// `ping` — bare liveness probe. Params: `{}`. Result: `{}`.
 pub const PING: &str = "ping";
 
@@ -32,7 +58,15 @@ pub const PING: &str = "ping";
 /// `all_methods_covers_every_const` test guards against registry drift (a
 /// method const declared but never appended here), while `method_names_unique`
 /// and `methods_namespaced_or_ping` guard the shape of the wire surface.
-pub const ALL_METHODS: &[&str] = &[WORKSPACE_SUBSCRIBE, WORKSPACE_LIST, PING];
+pub const ALL_METHODS: &[&str] = &[
+    WORKSPACE_SUBSCRIBE,
+    WORKSPACE_LIST,
+    HANGAR_ISSUES_LIST,
+    HANGAR_AGENTS_LIST,
+    HANGAR_SKILLS_LIST,
+    HANGAR_HEALTH,
+    PING,
+];
 
 #[cfg(test)]
 mod tests {
@@ -67,6 +101,19 @@ mod tests {
         assert!(WORKSPACE_LIST.starts_with("workspace/"));
     }
 
+    /// The P4 snapshot methods live under the `hangar/` namespace.
+    #[test]
+    fn snapshot_methods_namespaced() {
+        for m in [
+            HANGAR_ISSUES_LIST,
+            HANGAR_AGENTS_LIST,
+            HANGAR_SKILLS_LIST,
+            HANGAR_HEALTH,
+        ] {
+            assert!(m.starts_with("hangar/"), "{m:?} not under hangar/");
+        }
+    }
+
     /// Registry-drift guard: every individually-declared method const must be
     /// present in [`ALL_METHODS`]. Rust has no compile-time reflection over
     /// module consts, so the full set is mirrored here explicitly — adding a
@@ -76,7 +123,15 @@ mod tests {
     fn all_methods_covers_every_const() {
         // Every method const known to this module. Keep in sync with the
         // `pub const` declarations above.
-        let declared: &[&str] = &[WORKSPACE_SUBSCRIBE, WORKSPACE_LIST, PING];
+        let declared: &[&str] = &[
+            WORKSPACE_SUBSCRIBE,
+            WORKSPACE_LIST,
+            HANGAR_ISSUES_LIST,
+            HANGAR_AGENTS_LIST,
+            HANGAR_SKILLS_LIST,
+            HANGAR_HEALTH,
+            PING,
+        ];
         for m in declared {
             assert!(
                 ALL_METHODS.contains(m),
