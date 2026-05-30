@@ -45,6 +45,89 @@ const STDOUT_EXCERPT_BYTES: usize = 256;
 /// caller error.
 const MAX_TARGET_LEN: usize = 256;
 
+/// A typed witr target.
+///
+/// Witr addresses targets by *kind*, not a bare positional: a bare
+/// arg is a process **name**, while PIDs/ports/files/containers need
+/// explicit flags (`witr --pid 1234`, `--port 5432`, `--file <p>`,
+/// `--container <c>`). Passing a PID as a positional makes witr search
+/// for a process *named* "1234" and fail — so the plugin must carry
+/// the kind through to argv construction. Discovered via real-witr
+/// smoke during cfx.7.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WitrTarget {
+    /// Process name (positional; witr fuzzy-matches unless `--exact`).
+    Name(String),
+    /// Process id — `witr --pid <n>`.
+    Pid(String),
+    /// Listening port — `witr --port <n>`.
+    Port(String),
+    /// File path whose holder to trace — `witr --file <path>`.
+    File(String),
+    /// Container name/id — `witr --container <c>`.
+    Container(String),
+}
+
+impl WitrTarget {
+    /// The raw value, regardless of kind (for validation + display).
+    #[must_use]
+    pub fn value(&self) -> &str {
+        match self {
+            Self::Name(v) | Self::Pid(v) | Self::Port(v) | Self::File(v) | Self::Container(v) => v,
+        }
+    }
+
+    /// Parse a target string into a typed target. The inverse of
+    /// [`cache_key`](Self::cache_key): `pid:1234` → `Pid`, `port:5432`
+    /// → `Port`, `file:/x` → `File`, `container:redis` → `Container`,
+    /// anything else → `Name`. Infallible — an unknown prefix is just
+    /// part of a name. Lets the rest of the plugin carry targets as
+    /// plain strings (TUI input buffer, `current_target`) and decode
+    /// the kind only at exec time.
+    #[must_use]
+    pub fn parse(s: &str) -> Self {
+        if let Some(v) = s.strip_prefix("pid:") {
+            Self::Pid(v.to_string())
+        } else if let Some(v) = s.strip_prefix("port:") {
+            Self::Port(v.to_string())
+        } else if let Some(v) = s.strip_prefix("file:") {
+            Self::File(v.to_string())
+        } else if let Some(v) = s.strip_prefix("container:") {
+            Self::Container(v.to_string())
+        } else {
+            Self::Name(s.to_string())
+        }
+    }
+
+    /// Stable display / cache-key string: `nginx`, `pid:1234`,
+    /// `port:5432`, `file:/x`, `container:redis`. Round-trips through
+    /// [`parse`](Self::parse).
+    #[must_use]
+    pub fn cache_key(&self) -> String {
+        match self {
+            Self::Name(v) => v.clone(),
+            Self::Pid(v) => format!("pid:{v}"),
+            Self::Port(v) => format!("port:{v}"),
+            Self::File(v) => format!("file:{v}"),
+            Self::Container(v) => format!("container:{v}"),
+        }
+    }
+
+    /// The witr argv tokens that select this target, appended after
+    /// `--json` (or after the bare binary for `--short`). Names use a
+    /// leading `--` so a name starting with `-` can't be read as a
+    /// flag; typed kinds use their explicit flag.
+    fn select_args(&self) -> Vec<String> {
+        match self {
+            Self::Name(v) => vec!["--".to_string(), v.clone()],
+            Self::Pid(v) => vec!["--pid".to_string(), v.clone()],
+            Self::Port(v) => vec!["--port".to_string(), v.clone()],
+            Self::File(v) => vec!["--file".to_string(), v.clone()],
+            Self::Container(v) => vec!["--container".to_string(), v.clone()],
+        }
+    }
+}
+
 /// Outcome of one `exec_witr_json` call. The render path (cfx.5)
 /// matches on these exhaustively — every variant maps to a distinct
 /// user-visible state (data / timeout banner / error banner /
@@ -148,36 +231,36 @@ fn excerpt(s: &str) -> String {
 /// — we don't re-resolve via `which` here so a manifest-renamed witr
 /// can't slip past the detect gate.
 ///
-/// `target` is validated via [`validate_target`] before any process
-/// is spawned. Returns [`ExecResult::SpawnFailed`] on a validation
-/// error (carrying the validation error message) rather than
-/// surfacing a separate error type — the renderer matches one enum.
-pub async fn exec_witr_json(path: &Path, target: &str) -> ExecResult {
-    if let Err(e) = validate_target(target) {
+/// `target`'s value is validated via [`validate_target`] before any
+/// process is spawned. Returns [`ExecResult::SpawnFailed`] on a
+/// validation error rather than surfacing a separate error type — the
+/// renderer matches one enum. The target *kind* selects witr's
+/// addressing flag (`--pid`/`--port`/… or a bare name).
+pub async fn exec_witr_json(path: &Path, target: &WitrTarget) -> ExecResult {
+    let value = target.value();
+    if let Err(e) = validate_target(value) {
         return ExecResult::SpawnFailed(format!("invalid target: {e}"));
     }
 
-    // `--` before the target defangs a leading `-` — without it,
-    // `witr --json -foo` would have witr's clap parser treat `-foo`
-    // as an option flag. Combined with `validate_target`'s rejection
-    // of control chars, this nails the last reasonable attack surface
-    // a malicious target string could exploit.
+    // `select_args` emits `["--", name]` for names (defangs a leading
+    // `-`) or `["--pid", n]` / `["--port", n]` / … for typed kinds.
+    // argv-array spawn (no shell) keeps injection structurally
+    // impossible regardless of the value's contents.
     let exec = Command::new(path)
         .arg("--json")
-        .arg("--")
-        .arg(target)
+        .args(target.select_args())
         .stdin(std::process::Stdio::null())
         .output();
 
     let output = match timeout(SCAN_TIMEOUT, exec).await {
         Ok(Ok(o)) => o,
         Ok(Err(e)) => {
-            tracing::warn!(?target, error = %e, "witr --json spawn failed");
+            tracing::warn!(target = %target.cache_key(), error = %e, "witr --json spawn failed");
             return ExecResult::SpawnFailed(e.to_string());
         }
         Err(_) => {
             tracing::warn!(
-                ?target,
+                target = %target.cache_key(),
                 timeout_secs = SCAN_TIMEOUT.as_secs(),
                 "witr --json timed out",
             );
@@ -192,7 +275,7 @@ pub async fn exec_witr_json(path: &Path, target: &str) -> ExecResult {
         // exit-1 path and a user will hit it constantly. The render
         // banner surfaces the stderr text; the runtime log shouldn't
         // shout about it.
-        tracing::debug!(?target, code, %stderr, "witr --json non-zero exit");
+        tracing::debug!(target = %target.cache_key(), code, %stderr, "witr --json non-zero exit");
         return ExecResult::NonZero { code, stderr };
     }
 
@@ -213,9 +296,104 @@ pub async fn exec_witr_json(path: &Path, target: &str) -> ExecResult {
     }
 }
 
+/// Outcome of a `--short` passthrough exec (`witr <target>` without
+/// `--json`). We don't parse the output — witr's own text rendering
+/// is forwarded verbatim.
+#[derive(Debug)]
+pub enum PassthroughResult {
+    /// Witr exited 0; carries its raw stdout.
+    Ok(String),
+    /// Ran past [`SCAN_TIMEOUT`].
+    Timeout,
+    /// Non-zero exit; carries trimmed stderr + code.
+    NonZero { code: Option<i32>, stderr: String },
+    /// Spawn / I/O / validation error.
+    SpawnFailed(String),
+}
+
+/// Run `witr <target-flags>` (no `--json`) and forward its raw stdout.
+/// Used by the `--short` CLI flag. Same validation + timeout + argv
+/// safety as [`exec_witr_json`], same typed-target addressing.
+pub async fn exec_witr_passthrough(path: &Path, target: &WitrTarget) -> PassthroughResult {
+    let value = target.value();
+    if let Err(e) = validate_target(value) {
+        return PassthroughResult::SpawnFailed(format!("invalid target: {e}"));
+    }
+    let exec = Command::new(path)
+        .args(target.select_args())
+        .stdin(std::process::Stdio::null())
+        .output();
+    let output = match timeout(SCAN_TIMEOUT, exec).await {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => return PassthroughResult::SpawnFailed(e.to_string()),
+        Err(_) => return PassthroughResult::Timeout,
+    };
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return PassthroughResult::NonZero {
+            code: output.status.code(),
+            stderr,
+        };
+    }
+    PassthroughResult::Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn witr_target_parse_round_trips_with_cache_key() {
+        for s in [
+            "nginx",
+            "pid:1234",
+            "port:5432",
+            "file:/var/x.lock",
+            "container:redis",
+        ] {
+            assert_eq!(WitrTarget::parse(s).cache_key(), s, "round-trip {s}");
+        }
+    }
+
+    #[test]
+    fn witr_target_parse_kinds() {
+        assert_eq!(WitrTarget::parse("nginx"), WitrTarget::Name("nginx".into()));
+        assert_eq!(WitrTarget::parse("pid:1"), WitrTarget::Pid("1".into()));
+        assert_eq!(WitrTarget::parse("port:80"), WitrTarget::Port("80".into()));
+        assert_eq!(
+            WitrTarget::parse("container:db"),
+            WitrTarget::Container("db".into())
+        );
+        // Unknown prefix stays a name (colons are legal in names).
+        assert_eq!(
+            WitrTarget::parse("weird:thing"),
+            WitrTarget::Name("weird:thing".into())
+        );
+    }
+
+    #[test]
+    fn witr_target_select_args_use_correct_flags() {
+        assert_eq!(
+            WitrTarget::Name("nginx".into()).select_args(),
+            ["--", "nginx"]
+        );
+        assert_eq!(
+            WitrTarget::Pid("1234".into()).select_args(),
+            ["--pid", "1234"]
+        );
+        assert_eq!(
+            WitrTarget::Port("5432".into()).select_args(),
+            ["--port", "5432"]
+        );
+        assert_eq!(
+            WitrTarget::File("/x".into()).select_args(),
+            ["--file", "/x"]
+        );
+        assert_eq!(
+            WitrTarget::Container("redis".into()).select_args(),
+            ["--container", "redis"]
+        );
+    }
 
     #[test]
     fn validate_target_accepts_ordinary_names() {

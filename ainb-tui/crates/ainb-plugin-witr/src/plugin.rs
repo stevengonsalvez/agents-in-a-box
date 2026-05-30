@@ -14,14 +14,18 @@ use std::time::Instant;
 use async_trait::async_trait;
 
 use ainb_plugin_sdk::{
-    HandleEventParams, HandleKeyParams, HostClient, KeyCode, Plugin, RenderParams, Result,
-    Viewport, WireBuffer,
+    CliOutput, HandleEventParams, HandleKeyParams, HostClient, KeyCode, Plugin, RenderParams,
+    Result, Viewport, WireBuffer,
 };
 
+use crate::cli::{self, OutputFormat};
 use crate::detect::detect_witr;
-use crate::exec::{ExecResult, exec_witr_json};
+use crate::exec::{
+    ExecResult, PassthroughResult, WitrTarget, exec_witr_json, exec_witr_passthrough,
+};
 use crate::model::WitrSnapshot;
 use crate::render::{containers, detail, empty, locks, ports, processes, tabs};
+use crate::slash::{SlashError, parse_slash};
 use crate::state::{Lifecycle, ScanGate, SnapshotCache, Tab, UiMode};
 
 /// The canonical manifest bytes. Compiled into the binary so the SDK's
@@ -151,13 +155,26 @@ impl Plugin for WitrPlugin {
         }
 
         // `r` on Ready with a target set — refresh the cached snapshot
-        // by re-exec'ing witr. Coalesced via `ScanGate`; concurrent
-        // `r` presses while a scan is in flight are no-ops.
+        // by re-exec'ing witr. `current_target` holds the cache-key
+        // form; decode it back to a typed target for exec. Coalesced
+        // via `ScanGate`; concurrent `r` presses are no-ops.
         if r_pressed && was_ready && !pre_target.is_empty() {
-            let _ = self.scan(&pre_target).await;
+            let _ = self.scan(&WitrTarget::parse(&pre_target)).await;
         }
 
         Ok(())
+    }
+
+    async fn cli_dispatch(
+        &mut self,
+        _host: &HostClient,
+        namespace: &str,
+        argv: &[String],
+    ) -> Result<CliOutput> {
+        // The host channel is unused — witr's CLI execs the binary
+        // directly. Delegate to the host-free core so tests can drive
+        // it without a HostClient (the SDK exposes no test constructor).
+        Ok(self.cli_dispatch_core(namespace, argv).await)
     }
 
     async fn handle_event(&mut self, _host: &HostClient, _params: HandleEventParams) -> Result<()> {
@@ -166,6 +183,134 @@ impl Plugin for WitrPlugin {
 }
 
 impl WitrPlugin {
+    /// Host-free body of [`Plugin::cli_dispatch`]. Public (doc-hidden)
+    /// so integration tests can exercise the full `ainb witr` surface
+    /// against a stub binary without constructing a [`HostClient`].
+    #[doc(hidden)]
+    pub async fn cli_dispatch_core(&mut self, namespace: &str, argv: &[String]) -> CliOutput {
+        if namespace != "witr" {
+            return CliOutput {
+                stdout: Vec::new(),
+                stderr: format!("witr: unknown namespace `{namespace}`\n").into_bytes(),
+                exit_code: 2,
+            };
+        }
+
+        // `--format` is a host-global flag — pull it out before clap
+        // (which doesn't declare it) parses the witr surface.
+        let format = cli::extract_format(argv);
+        let stripped = cli::strip_format_flag(argv);
+
+        let args = match cli::parse_args(&stripped) {
+            cli::ParseOutcome::Parsed(a) => *a,
+            // `--help` / `--version` → stdout, exit 0 (conventional).
+            cli::ParseOutcome::HelpOrVersion(text) => {
+                return CliOutput::ok(text.into_bytes());
+            }
+            cli::ParseOutcome::UsageError(usage) => {
+                return CliOutput {
+                    stdout: Vec::new(),
+                    stderr: usage.into_bytes(),
+                    exit_code: 2,
+                };
+            }
+        };
+
+        // `--short` (raw passthrough) + `--format json` is contradictory
+        // and can't be a clap conflict (`--format` is stripped before
+        // clap sees the args). Reject explicitly rather than silently
+        // dropping the requested format.
+        if args.short && format == OutputFormat::Json {
+            return CliOutput {
+                stdout: Vec::new(),
+                stderr: b"witr: --short cannot be combined with --format json\n".to_vec(),
+                exit_code: 2,
+            };
+        }
+
+        // Typed target — selects the right witr addressing flag.
+        let target = args.resolve_target();
+
+        // No usable witr binary — print the install hint to stdout and
+        // exit 1 (acceptance: "Missing-witr CLI exit 1").
+        let Some(path) = self.witr_path.clone() else {
+            let hint = match &self.lifecycle {
+                Lifecycle::Outdated {
+                    found_version,
+                    minimum,
+                } => format!(
+                    "witr {found_version} is too old (need >= {minimum}). Upgrade: brew upgrade witr\n"
+                ),
+                _ => "witr not found on PATH. Install: brew install witr\n".to_string(),
+            };
+            return CliOutput {
+                stdout: hint.into_bytes(),
+                stderr: Vec::new(),
+                exit_code: 1,
+            };
+        };
+
+        // `--short` forwards raw `witr <target>` text (no JSON parse).
+        if args.short {
+            return match exec_witr_passthrough(&path, &target).await {
+                PassthroughResult::Ok(out) => CliOutput::ok(out.into_bytes()),
+                PassthroughResult::Timeout => CliOutput::err(b"witr: scan timed out\n".to_vec()),
+                PassthroughResult::NonZero { code, stderr } => CliOutput {
+                    stdout: Vec::new(),
+                    stderr: format!("witr exited {}: {stderr}\n", code.unwrap_or(-1)).into_bytes(),
+                    exit_code: code.unwrap_or(1),
+                },
+                PassthroughResult::SpawnFailed(e) => {
+                    CliOutput::err(format!("witr: {e}\n").into_bytes())
+                }
+            };
+        }
+
+        // JSON-mode exec, routed through the single `scan()` authority
+        // so the cache insert goes through `ScanGate` — one coalescing
+        // owner shared by the TUI `r`-refresh and this CLI path.
+        match self.scan(&target).await {
+            Some(ExecResult::Ok(snap)) => {
+                let body = if format == OutputFormat::Json {
+                    match cli::format_json(&snap) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            return CliOutput::err(
+                                format!("witr: failed to serialise snapshot: {e}\n").into_bytes(),
+                            );
+                        }
+                    }
+                } else if args.tree {
+                    cli::format_tree(&snap)
+                } else if args.warnings {
+                    cli::format_warnings(&snap)
+                } else {
+                    cli::format_text(&snap)
+                };
+                CliOutput::ok(body.into_bytes())
+            }
+            Some(ExecResult::Timeout) => CliOutput::err(b"witr: scan timed out\n".to_vec()),
+            Some(ExecResult::NonZero { code, stderr }) => CliOutput {
+                stdout: Vec::new(),
+                stderr: format!("witr exited {}: {stderr}\n", code.unwrap_or(-1)).into_bytes(),
+                exit_code: code.unwrap_or(1),
+            },
+            Some(ExecResult::SpawnFailed(e)) => {
+                CliOutput::err(format!("witr: spawn failed: {e}\n").into_bytes())
+            }
+            Some(ExecResult::ParseError { error, .. }) => CliOutput::err(
+                format!("witr: could not parse --json output: {error}\n").into_bytes(),
+            ),
+            // scan() returns None only if a scan for this target is
+            // already in flight (ScanGate). The SDK serialises handlers
+            // so this is essentially unreachable from the CLI, but
+            // handle it rather than panic.
+            None => {
+                CliOutput::err(b"witr: a scan for this target is already in progress\n".to_vec())
+            }
+        }
+    }
+
     /// Pure key-dispatch — applies every non-host-touching binding
     /// to `self` and returns nothing. Lets unit tests exercise the
     /// state machine without spinning up a `HostClient`.
@@ -186,26 +331,85 @@ impl WitrPlugin {
         }
     }
 
-    /// Run a scan against `target`: exec `witr --json`, decode, and
-    /// insert the snapshot into the cache. Coalesced via
-    /// [`ScanGate`] — a second call while a scan is in flight against
-    /// the same target returns `None` immediately, letting the first
-    /// scan win and the user see its result.
+    /// Test seam: mark the plugin Ready with a known witr binary path
+    /// (bypasses the async detect handshake). Integration tests stage
+    /// a stub binary and inject it here.
+    #[doc(hidden)]
+    pub fn set_ready_for_test(&mut self, witr_path: std::path::PathBuf) {
+        self.witr_path = Some(witr_path);
+        self.lifecycle = Lifecycle::Ready;
+    }
+
+    /// Test seam: inspect the lifecycle gate.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn lifecycle_for_test(&self) -> &Lifecycle {
+        &self.lifecycle
+    }
+
+    /// Test seam: inspect the committed target.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn current_target_for_test(&self) -> &str {
+        &self.current_target
+    }
+
+    /// Test seam: is the detail overlay open?
+    #[doc(hidden)]
+    #[must_use]
+    pub fn is_detail_open_for_test(&self) -> bool {
+        matches!(self.ui_mode, UiMode::DetailOpen)
+    }
+
+    /// Handle a `/witr <target>` slash command: parse the line, set
+    /// the current target, scan it, and open the detail overlay (the
+    /// "focused overlay panel" the spec calls for). Returns the parse
+    /// result so the host can surface a usage error on a malformed line.
     ///
-    /// Called from `handle_key` on `r`-while-Ready and (in cfx.7)
-    /// from `cli_dispatch`. Returns `None` when there's no witr
-    /// binary cached (we should never be `Ready` without one — this
-    /// is defensive) or when a scan is already in flight.
-    pub async fn scan(&mut self, target: &str) -> Option<ExecResult> {
+    /// Leaves `current_tab` untouched so the overlay floats over
+    /// whatever tab the user was on — honours the cfx.6 tab-preservation
+    /// invariant.
+    ///
+    /// TODO(agents-in-a-box-6qc): no host transport reaches this yet —
+    /// the SDK `Plugin` trait has no slash method and the host slash
+    /// dispatch is stubbed (host Phase 4). This is the plugin-side
+    /// foundation + parser; wire `/witr` → `handle_slash` once the host
+    /// lands slash dispatch. Reachable today only from tests.
+    pub async fn handle_slash(&mut self, input: &str) -> std::result::Result<(), SlashError> {
+        let target = parse_slash(input)?;
+        // Store the cache-key form so render's `cached_snapshot` lookup
+        // (keyed on `current_target`) matches what `scan` cached.
+        self.current_target = target.cache_key();
+        // Scan now so the overlay has data; ignore the result — render
+        // reads from the cache, and a failed scan falls back to the
+        // empty-target hint.
+        let _ = self.scan(&target).await;
+        self.ui_mode = UiMode::DetailOpen;
+        Ok(())
+    }
+
+    /// Run a scan against `target`: exec `witr --json` with the right
+    /// addressing flag for the target kind, decode, and insert the
+    /// snapshot into the cache (keyed by [`WitrTarget::cache_key`]).
+    /// Coalesced via [`ScanGate`] — a second call while a scan is in
+    /// flight against the same target returns `None` immediately,
+    /// letting the first scan win.
+    ///
+    /// Called from `handle_key` on `r`-while-Ready, from `handle_slash`,
+    /// and from `cli_dispatch`. Returns `None` when there's no witr
+    /// binary cached (defensive — we shouldn't be `Ready` without one)
+    /// or when a scan is already in flight.
+    pub async fn scan(&mut self, target: &WitrTarget) -> Option<ExecResult> {
         let path = self.witr_path.clone()?;
-        if !self.scan_gate.try_acquire(target) {
+        let key = target.cache_key();
+        if !self.scan_gate.try_acquire(&key) {
             return None;
         }
         let result = exec_witr_json(&path, target).await;
         if let ExecResult::Ok(snap) = &result {
-            self.cache.insert(target.to_string(), (**snap).clone(), Instant::now());
+            self.cache.insert(key.clone(), (**snap).clone(), Instant::now());
         }
-        self.scan_gate.release(target);
+        self.scan_gate.release(&key);
         Some(result)
     }
 }

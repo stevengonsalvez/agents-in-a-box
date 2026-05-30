@@ -33,6 +33,9 @@ semver = "1.0"
 # Subprocess exec + JSON parse (cfx.3).
 thiserror = { workspace = true }
 
+# CLI surface — `ainb witr <target>` subcommand parsing (cfx.7).
+clap = { workspace = true }
+
 [dev-dependencies]
 toml = { workspace = true }
 ainb-plugin-protocol = { path = "../ainb-plugin-protocol" }

@@ -32,7 +32,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use ainb_plugin_witr::exec::{ExecResult, exec_witr_json};
+use ainb_plugin_witr::exec::{ExecResult, WitrTarget, exec_witr_json};
 
 fn stage_stub(dir: &Path, body: &str) -> PathBuf {
     let bin = dir.join("witr");
@@ -66,7 +66,7 @@ async fn exec_with_stub_returns_ok_snapshot() {
         ),
     );
 
-    let result = exec_witr_json(&stub, "nginx").await;
+    let result = exec_witr_json(&stub, &WitrTarget::Name("nginx".into())).await;
     match result {
         ExecResult::Ok(snap) => {
             // `snap` is `Box<WitrSnapshot>` — `Deref` makes field
@@ -91,7 +91,7 @@ async fn exec_with_stub_timeout() {
     // naturally.
     let stub = stage_stub(dir.path(), "#!/bin/sh\n/bin/sleep 8\nexit 0\n");
 
-    let result = exec_witr_json(&stub, "nginx").await;
+    let result = exec_witr_json(&stub, &WitrTarget::Name("nginx".into())).await;
     assert!(
         matches!(result, ExecResult::Timeout),
         "expected Timeout, got {result:?}",
@@ -106,7 +106,7 @@ async fn exec_with_stub_non_zero_exit() {
         "#!/bin/sh\nprintf 'target not found\\n' >&2\nexit 1\n",
     );
 
-    let result = exec_witr_json(&stub, "nonexistent-process").await;
+    let result = exec_witr_json(&stub, &WitrTarget::Name("nonexistent-process".into())).await;
     match result {
         ExecResult::NonZero { code, stderr } => {
             assert_eq!(code, Some(1));
@@ -127,7 +127,7 @@ async fn exec_with_stub_invalid_json() {
         "#!/bin/sh\nprintf 'this is not json at all'\nexit 0\n",
     );
 
-    let result = exec_witr_json(&stub, "x").await;
+    let result = exec_witr_json(&stub, &WitrTarget::Name("x".into())).await;
     match result {
         ExecResult::ParseError {
             error,
@@ -148,7 +148,7 @@ async fn exec_rejects_invalid_target_without_spawning() {
     // (SpawnFailed carrying "invalid target") proves the validator
     // ran first.
     let nonexistent = Path::new("/nonexistent/witr-binary-does-not-exist");
-    let result = exec_witr_json(nonexistent, "").await;
+    let result = exec_witr_json(nonexistent, &WitrTarget::Name("".into())).await;
     match result {
         ExecResult::SpawnFailed(msg) => {
             assert!(
