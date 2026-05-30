@@ -1,0 +1,40 @@
+document_id: lrn-ainb-tui-mouse-perf-ba7c57
+extracted_at: "2026-05-26T00:00:00Z"
+entities:
+  - name: ainb-tui
+    type: technology
+    description: Terminal UI for agents-in-a-box.
+  - name: mousemove handler
+    type: function
+    description: TUI event handler path for terminal mouse movement events.
+  - name: in-memory mouse hot path
+    type: pattern
+    description: Mouse event design that updates only local UI state during move and drag events.
+  - name: redraw-before-poll loop
+    type: pattern
+    description: Event loop pattern where the terminal redraw occurs before polling input events.
+  - name: config persistence
+    type: concept
+    description: Saving UI layout preferences to durable configuration.
+  - name: ui lag
+    type: error
+    description: Perceived terminal UI latency or jitter during interaction.
+  - name: mouse event jitter
+    type: error
+    description: Choppy redraw behavior during high-rate mouse movement events.
+relationships:
+  - source: in-memory mouse hot path
+    target: ui lag
+    type: solves
+    description: Avoids disk, async, Docker, tmux, and heavy allocation work in high-rate mouse paths.
+    strength: 9
+  - source: redraw-before-poll loop
+    target: mouse event jitter
+    type: caused_by
+    description: High-rate terminal mouse events can still create redraw pressure even when handlers are cheap.
+    strength: 8
+  - source: config persistence
+    target: mousemove handler
+    type: relates_to
+    description: Config persistence should happen on mouse-up or click, not on move or drag.
+    strength: 8

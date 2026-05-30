@@ -24,6 +24,10 @@ const ACCENT_CYAN: Color = Color::Rgb(80, 200, 220);
 const SELECTION_BG: Color = Color::Rgb(45, 55, 75);
 const HOVER_BG: Color = Color::Rgb(35, 40, 55);
 
+pub const DEFAULT_SIDEBAR_WIDTH: u16 = 26;
+pub const MIN_SIDEBAR_WIDTH: u16 = 16;
+pub const SIDEBAR_CONTENT_RESERVE: u16 = 50;
+
 /// Sidebar navigation items - matches HomeTile options
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidebarItem {
@@ -31,6 +35,7 @@ pub enum SidebarItem {
     Catalog,   // Browse catalog/marketplace
     Config,    // Settings & presets
     Sessions,  // Session manager
+    Inbox,     // ainb-hooks notification inbox
     Recovery,  // Recover orphaned sessions
     Logs,      // Log history viewer
     Stats,     // Analytics & usage
@@ -49,6 +54,7 @@ impl SidebarItem {
             Self::Catalog => "📦",
             Self::Config => "⚙️",
             Self::Sessions => "🚀",
+            Self::Inbox => "📥",
             Self::Recovery => "🔄",
             Self::Logs => "📋",
             Self::Stats => "📊",
@@ -67,6 +73,7 @@ impl SidebarItem {
             Self::Catalog => "Catalog",
             Self::Config => "Config",
             Self::Sessions => "Sessions",
+            Self::Inbox => "Inbox",
             Self::Recovery => "Recovery",
             Self::Logs => "Logs",
             Self::Stats => "Stats",
@@ -85,6 +92,7 @@ impl SidebarItem {
             Self::Catalog => "Browse & Bootstrap",
             Self::Config => "Settings & Presets",
             Self::Sessions => "Manage Active",
+            Self::Inbox => "Hook Notifications",
             Self::Recovery => "Resume Orphaned",
             Self::Logs => "View Log History",
             Self::Stats => "Usage & Analytics",
@@ -103,6 +111,7 @@ impl SidebarItem {
             Self::Catalog => "c",
             Self::Config => "C",
             Self::Sessions => "s",
+            Self::Inbox => "I",
             Self::Recovery => "R",
             Self::Logs => "l",
             Self::Stats => "i",
@@ -121,6 +130,7 @@ impl SidebarItem {
             Self::Catalog,
             Self::Config,
             Self::Sessions,
+            Self::Inbox,
             Self::Recovery,
             Self::Logs,
             Self::Stats,
@@ -144,6 +154,8 @@ pub struct SidebarState {
     pub show_labels: bool,
     /// Active sessions count (for badge display)
     pub active_sessions_count: usize,
+    /// Preferred sidebar width, clamped against the current terminal width at render time.
+    pub preferred_width: u16,
 }
 
 impl SidebarState {
@@ -153,6 +165,7 @@ impl SidebarState {
             is_focused: true,
             show_labels: true,
             active_sessions_count: 0,
+            preferred_width: DEFAULT_SIDEBAR_WIDTH,
         }
     }
 
@@ -182,6 +195,33 @@ impl SidebarState {
             self.selected_index = index;
         }
     }
+
+    pub fn select_index(&mut self, index: usize) {
+        if index < SidebarItem::all().len() {
+            self.selected_index = index;
+        }
+    }
+
+    pub fn set_preferred_width(&mut self, width: u16, terminal_width: u16) {
+        self.preferred_width = Self::clamp_width(width, terminal_width);
+    }
+
+    pub fn effective_width(&self, terminal_width: u16) -> u16 {
+        Self::clamp_width(self.preferred_width, terminal_width)
+    }
+
+    pub fn clamp_width(width: u16, terminal_width: u16) -> u16 {
+        if terminal_width == 0 {
+            return 0;
+        }
+
+        let max_with_content = terminal_width.saturating_sub(SIDEBAR_CONTENT_RESERVE);
+        let max_with_divider = terminal_width.saturating_sub(1).max(1);
+        let effective_max = max_with_content.max(MIN_SIDEBAR_WIDTH).min(max_with_divider);
+        let effective_min = MIN_SIDEBAR_WIDTH.min(effective_max);
+
+        width.clamp(effective_min, effective_max)
+    }
 }
 
 impl Default for SidebarState {
@@ -200,8 +240,20 @@ impl SidebarComponent {
 
     /// Render the sidebar with premium styling
     pub fn render(&self, frame: &mut Frame, area: Rect, state: &SidebarState) {
+        self.render_with_edge_highlight(frame, area, state, false);
+    }
+
+    pub fn render_with_edge_highlight(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        state: &SidebarState,
+        edge_highlighted: bool,
+    ) {
         // Outer block with subtle border
-        let border_color = if state.is_focused {
+        let border_color = if edge_highlighted {
+            GOLD
+        } else if state.is_focused {
             CORNFLOWER_BLUE
         } else {
             SUBDUED_BORDER
@@ -244,6 +296,22 @@ impl SidebarComponent {
                 None
             };
             self.render_premium_item(frame, layout[idx + 2], item, is_selected, state, badge);
+        }
+    }
+
+    pub fn item_index_at(area: Rect, y: u16) -> Option<usize> {
+        let inner_y = area.y;
+        let first_item_y = inner_y.saturating_add(3);
+        if y < first_item_y {
+            return None;
+        }
+
+        let relative = y - first_item_y;
+        let item_index = (relative / 2) as usize;
+        if relative % 2 <= 1 && item_index < SidebarItem::all().len() {
+            Some(item_index)
+        } else {
+            None
         }
     }
 
@@ -386,7 +454,7 @@ impl SidebarComponent {
     /// Get the recommended width for the sidebar
     pub fn recommended_width(state: &SidebarState) -> u16 {
         if state.show_labels {
-            24 // With labels + shortcuts
+            state.preferred_width // With labels + shortcuts
         } else {
             4 // Icons only
         }
@@ -427,9 +495,54 @@ mod tests {
     }
 
     #[test]
+    fn inbox_tile_registered_with_discoverable_shortcut() {
+        // The ainb-hooks Inbox screen is only useful if the user can
+        // find it. Lock in the tile shape + position so a future
+        // refactor doesn't quietly drop it from the home screen.
+        let all = SidebarItem::all();
+        let inbox_pos = all
+            .iter()
+            .position(|i| *i == SidebarItem::Inbox)
+            .expect("SidebarItem::Inbox missing from all()");
+        assert!(inbox_pos > 0, "Inbox shouldn't be first sidebar item");
+        assert_eq!(SidebarItem::Inbox.icon(), "📥");
+        assert_eq!(SidebarItem::Inbox.label(), "Inbox");
+        assert_eq!(SidebarItem::Inbox.shortcut(), "I");
+        assert_eq!(SidebarItem::Inbox.description(), "Hook Notifications");
+        // 'I' must not collide with any other tile shortcut.
+        let collisions = all
+            .iter()
+            .filter(|i| **i != SidebarItem::Inbox && i.shortcut() == "I")
+            .count();
+        assert_eq!(collisions, 0, "sidebar shortcut 'I' collides");
+    }
+
+    #[test]
     fn test_select_specific_item() {
         let mut state = SidebarState::new();
         state.select(SidebarItem::Config);
         assert_eq!(state.selected_item(), SidebarItem::Config);
+    }
+
+    #[test]
+    fn clamps_sidebar_width_to_default_bounds() {
+        assert_eq!(SidebarState::clamp_width(8, 120), MIN_SIDEBAR_WIDTH);
+        assert_eq!(SidebarState::clamp_width(90, 120), 70);
+        assert_eq!(SidebarState::clamp_width(24, 120), 24);
+    }
+
+    #[test]
+    fn locks_to_best_possible_width_on_tiny_terminals() {
+        assert_eq!(SidebarState::clamp_width(26, 60), MIN_SIDEBAR_WIDTH);
+        assert_eq!(SidebarState::clamp_width(26, 10), 9);
+    }
+
+    #[test]
+    fn maps_sidebar_item_rows_from_render_layout() {
+        let area = Rect::new(0, 5, 26, 30);
+        assert_eq!(SidebarComponent::item_index_at(area, 7), None);
+        assert_eq!(SidebarComponent::item_index_at(area, 8), Some(0));
+        assert_eq!(SidebarComponent::item_index_at(area, 9), Some(0));
+        assert_eq!(SidebarComponent::item_index_at(area, 10), Some(1));
     }
 }

@@ -1,0 +1,77 @@
+{
+  "//": "ainb-hooks managed block. Merged into ~/.codex/hooks.json by `ainb hooks install --codex`. Do not edit by hand.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "AINB_AGENT=codex __AINB_HOOK_SCRIPT__",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "AINB_AGENT=codex __AINB_HOOK_SCRIPT__",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "AINB_AGENT=codex __AINB_HOOK_SCRIPT__",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "AINB_AGENT=codex __AINB_HOOK_SCRIPT__",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "AINB_AGENT=codex __AINB_HOOK_SCRIPT__",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "AINB_AGENT=codex __AINB_HOOK_SCRIPT__",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

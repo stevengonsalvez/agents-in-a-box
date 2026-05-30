@@ -1,8 +1,23 @@
 # AINB TUI
 
-Terminal UI and CLI for Agents-in-a-Box.
+Terminal UI and CLI for Agents-in-a-Box (`ainb`). Built in Rust (ratatui) as a Cargo workspace under `crates/`; the TUI and `ainb` binary live in `crates/ainb-core`.
+
+## Overview
+
+Run `ainb` (or `ainb tui`) for the interactive terminal UI, or use one of the CLI subcommands for scripted workflows: `run`, `list`, `logs`, `attach`, `status`, `kill`, `auth`, `recover`, `config`, `git`, `favorites`, `init`, `presets`, `usage`, `plugin`, and `fleet`. See `ainb --help` for the full list.
+
+Build and run from the workspace root:
+
+```bash
+cargo build --release   # build the ainb binary
+cargo run               # launch the TUI
+```
+
+Developer setup and architecture live in CLAUDE.md.
 
 ## Usage Analytics
+
+The Analytics / Usage screen is backed by the **burndown plugin** — a subprocess the plugin host loads at startup (enabled by default). To turn it off or scope which plugins load, see the [Plugins section in the root README](../README.md#plugins) (`AINB_DISABLE_PLUGINS`, `AINB_ONLY_PLUGINS`, `AINB_DISABLE_PLUGIN`, or `[plugins]` in `config.toml`).
 
 Open Stats in the TUI with `i`. The Usage screen includes Daily, Weekly, Project, Burndown, and Optimize tabs. Burndown supports Claude Code and Codex local session histories, period switching, provider filtering, include/exclude project filters, and read-only optimization findings.
 
@@ -20,3 +35,17 @@ ainb usage yield --period week
 ```
 
 AINB reads `~/.claude/projects/**/*.jsonl` and `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` or `$CODEX_HOME/sessions/...`. Parsing is read-only. Cost values are estimates; unknown model prices are omitted while tokens/calls remain visible.
+
+## Fleet Orchestration
+
+`ainb fleet` drives every Claude session on the host. Subcommands:
+
+```bash
+ainb fleet standup      # live fleet status across ainb + peers + background jobs
+ainb fleet broadcast    # send one prompt to selected sessions (peers-first, tmux fallback)
+ainb fleet sequence     # ordered prompts with an ack between steps
+ainb fleet needs        # sessions blocked on input / errors / idle / waiting
+ainb fleet daemon       # watcher that registers as a peer and auto-continues API errors
+```
+
+Add `--format json` to any subcommand for machine-readable output. The in-tree `plugins/ainb-fleet/` package backs this command family.

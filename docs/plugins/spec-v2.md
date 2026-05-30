@@ -295,6 +295,8 @@ Denied capability → `RpcError { code: -32001, message: "capability denied: <ca
 
 Plugins MUST pass every axis their manifest's capability + provides surface implies. Axes for surface a plugin doesn't expose are skipped.
 
+> **Author tooling.** Two crates back this: `ainb-plugin-cts-v2` is the subprocess conformance runner described above (canary plugins + host-side `tests/axes.rs`), and `ainb-plugin-testkit` is an in-process harness that drives a `Plugin` trait impl over a `tokio::io::DuplexStream` pair — exercising the full JSON-RPC + Content-Length framing path without spawning a subprocess or staging a binary on disk. Use `testkit` for fast unit-style assertions while authoring; use `cts-v2` for the authoritative per-axis pass/fail gate.
+
 ## 11. Stability promise
 
 The host MUST NOT introduce a breaking change to any signature in this document inside the v2 series. Permitted additive changes that stay in v2:

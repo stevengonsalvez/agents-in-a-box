@@ -101,8 +101,10 @@ impl CommandRegistry {
         r.register(UsageCommand);
         r.register(StatuslineCommand);
         r.register(ClaudecodeCommand);
+        r.register(TmuxCommand);
         r.register(CompletionCommand);
         r.register(PluginCommand); // Phase 4 stub — surface reserved now
+        r.register(FleetCommand);
         r
     }
 
@@ -807,6 +809,64 @@ impl CliCommand for ClaudecodeCommand {
     }
 }
 
+/// `ainb tmux {install,status}` — manage the bundled rich tmux.conf at
+/// `~/.tmux.conf`. See `crate::cli::tmux_install` for the implementation.
+pub struct TmuxCommand;
+impl CliCommand for TmuxCommand {
+    fn name(&self) -> &'static str {
+        "tmux"
+    }
+    fn build(&self, app: Command) -> Command {
+        let install = <crate::cli::tmux_install::InstallArgs as clap::Args>::augment_args(
+            Command::new("install").about(
+                "Install or upgrade the bundled rich tmux.conf to ~/.tmux.conf \
+                 (backs up any existing file, shows a diff preview, then reloads \
+                 live sessions).",
+            ),
+        );
+        let status = <crate::cli::tmux_install::StatusArgs as clap::Args>::augment_args(
+            Command::new("status").about(
+                "Report whether ~/.tmux.conf is missing, up to date, or stale \
+                 relative to the bundled rich conf.",
+            ),
+        );
+        app.subcommand(
+            Command::new(self.name())
+                .about(
+                    "Manage the rich tmux.conf shipped with ainb-tui \
+                     (Catppuccin Mocha + TPM + resurrect/continuum/yank + \
+                     discoverable detach hints).",
+                )
+                .subcommand_required(true)
+                .arg_required_else_help(true)
+                .subcommand(install)
+                .subcommand(status),
+        )
+    }
+    fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
+        match matches.subcommand() {
+            Some(("install", m)) => match crate::cli::tmux_install::InstallArgs::from_arg_matches(m)
+            {
+                Ok(args) => Box::pin(async move {
+                    crate::cli::tmux_install::install(args, ctx.format).await
+                }),
+                Err(e) => boxed_err(e),
+            },
+            Some(("status", m)) => match crate::cli::tmux_install::StatusArgs::from_arg_matches(m) {
+                Ok(args) => {
+                    Box::pin(async move { crate::cli::tmux_install::status(args, ctx.format).await })
+                }
+                Err(e) => boxed_err(e),
+            },
+            _ => Box::pin(async move {
+                Err(anyhow::anyhow!(
+                    "tmux requires a subcommand: install | status"
+                ))
+            }),
+        }
+    }
+}
+
 pub struct CompletionCommand;
 impl CliCommand for CompletionCommand {
     fn name(&self) -> &'static str {
@@ -967,6 +1027,93 @@ impl CliCommand for PluginCommand {
     }
 }
 
+pub struct FleetCommand;
+impl CliCommand for FleetCommand {
+    fn name(&self) -> &'static str {
+        "fleet"
+    }
+    fn build(&self, app: Command) -> Command {
+        let standup = Command::new("standup")
+            .about("Live fleet status: every claude session across ainb + peers + bg jobs")
+            .arg(
+                clap::Arg::new("text")
+                    .long("text")
+                    .action(clap::ArgAction::SetTrue)
+                    .help("Force text output even with --format json"),
+            );
+        let broadcast = Command::new("broadcast")
+            .about("Send one prompt to selected sessions (peers-first, tmux fallback)")
+            .arg(clap::Arg::new("prompt").required(true))
+            .arg(
+                clap::Arg::new("all")
+                    .long("all")
+                    .action(clap::ArgAction::SetTrue)
+                    .help("Fan out to every running session"),
+            )
+            .arg(
+                clap::Arg::new("filter")
+                    .long("filter")
+                    .help("Regex against tmux/workspace name"),
+            )
+            .arg(
+                clap::Arg::new("cwd")
+                    .long("cwd")
+                    .help("Substring against cwd"),
+            );
+        let sequence = Command::new("sequence")
+            .about("Ordered prompts with ack between steps")
+            .arg(
+                clap::Arg::new("steps")
+                    .required(true)
+                    .num_args(1..)
+                    .action(clap::ArgAction::Append),
+            )
+            .arg(
+                clap::Arg::new("all")
+                    .long("all")
+                    .action(clap::ArgAction::SetTrue),
+            )
+            .arg(
+                clap::Arg::new("timeout")
+                    .long("timeout")
+                    .value_parser(clap::value_parser!(u64))
+                    .default_value("300")
+                    .help("Per-step timeout (seconds)"),
+            );
+        let needs = Command::new("needs")
+            .about("Center control panel — sessions blocked on input / errors / idle / waiting")
+            .arg(
+                clap::Arg::new("idle-min")
+                    .long("idle-min")
+                    .value_parser(clap::value_parser!(i64))
+                    .help("Minutes of assistant silence before flagging IDLE (default 5, env AINB_FLEET_IDLE_MIN)"),
+            );
+        let daemon = Command::new("daemon")
+            .about("Watcher: registers as ainb-fleet-cp peer, auto-continues API errors")
+            .arg(
+                clap::Arg::new("verbose")
+                    .long("verbose")
+                    .short('v')
+                    .action(clap::ArgAction::SetTrue),
+            );
+        app.subcommand(
+            Command::new(self.name())
+                .about("Fleet orchestration: standup / broadcast / sequence / needs / daemon")
+                .subcommand_required(true)
+                .arg_required_else_help(true)
+                .subcommand(standup)
+                .subcommand(broadcast)
+                .subcommand(sequence)
+                .subcommand(needs)
+                .subcommand(daemon),
+        )
+    }
+    fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
+        let matches = matches.clone();
+        Box::pin(async move { crate::cli::fleet::execute(&matches, ctx.format).await })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -976,13 +1123,13 @@ mod tests {
     }
 
     #[test]
-    fn built_ins_registers_eighteen_commands() {
+    fn built_ins_registers_twenty_commands() {
         let r = CommandRegistry::built_ins();
         let names = r.names();
-        // 16 user-facing built-ins + claudecode namespace + plugin stub = 18.
-        // The TUI is NOT in the registry — main.rs handles `tui` /
-        // no-subcommand inline.
-        assert_eq!(names.len(), 18, "expected 18 entries, got {names:?}");
+        // 16 user-facing built-ins + claudecode namespace + tmux namespace
+        // + plugin stub + fleet = 20. The TUI is NOT in the registry —
+        // main.rs handles `tui` / no-subcommand inline.
+        assert_eq!(names.len(), 20, "expected 20 entries, got {names:?}");
         for required in [
             "run",
             "list",
@@ -1000,8 +1147,10 @@ mod tests {
             "usage",
             "statusline",
             "claudecode",
+            "tmux",
             "completion",
             "plugin",
+            "fleet",
         ] {
             assert!(
                 names.contains(&required),

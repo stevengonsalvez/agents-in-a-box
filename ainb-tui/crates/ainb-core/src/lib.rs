@@ -13,6 +13,7 @@ pub mod config;
 pub mod credentials;
 pub mod docker;
 pub mod editors;
+pub mod fleet;
 pub mod git;
 pub mod interactive;
 pub mod models;

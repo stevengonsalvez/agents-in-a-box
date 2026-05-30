@@ -6,6 +6,15 @@
 [![Python](https://img.shields.io/badge/python-%3E%3D3.11-blue.svg)](https://www.python.org/)
 [![Version](https://img.shields.io/badge/version-0.1.1-green.svg)](./pyproject.toml)
 
+> **Two version streams — don't confuse them.** This directory hosts the `reflect`
+> **CLI** (Python package `reflect-kb`, semver `0.1.x`, version field in
+> [`pyproject.toml`](./pyproject.toml)). The Claude Code **plugin** that wires the
+> CLI into the agent harness lives at [`plugins/reflect/`](../plugins/reflect/)
+> and follows its **own** semver `3.x.x` (see
+> [`plugins/reflect/.claude-plugin/plugin.json`](../plugins/reflect/.claude-plugin/plugin.json)).
+> When asked "what version of reflect is installed?" you usually want **both**:
+> `reflect --version` for the CLI and the plugin manifest for the harness wiring.
+
 ## What it does
 
 reflect-kb implements the **capture → index → recall** loop for agent knowledge. After every session,
@@ -64,7 +73,8 @@ reflect timeline --explain TOK
 | [`reflect stats`](docs/usage.md#reflect-stats) | Show KB metrics (doc count, entities, relationships, confidence) |
 | [`reflect critical-patterns`](docs/usage.md#reflect-critical-patterns) | Surface high-confidence, widely-applicable patterns |
 | [`reflect generate-sidecars`](docs/usage.md#reflect-generate-sidecars) | Backfill missing `.entities.yaml` sidecars (heuristic, no LLM) |
-| [`reflect metrics stats`](docs/usage.md#reflect-metrics-stats) | Aggregate the recall-metrics JSONL log (hit rate, latency) |
+| [`reflect metrics`](docs/usage.md#reflect-metrics) | Command group for recall-metrics aggregation (subcommands below) |
+| &nbsp;&nbsp;↳ [`reflect metrics stats`](docs/usage.md#reflect-metrics-stats) | Aggregate the recall-metrics JSONL log: total events, hit rate, p50/p95 latency, top tags |
 | [`reflect timeline`](docs/usage.md#reflect-timeline) | Drill down on statusline dashboard rows (REC/MEM/ING/DRN/TOK/ERR/COM/AGT) |
 
 See [docs/usage.md](docs/usage.md) for per-subcommand synopsis, all flags, examples, and common errors.

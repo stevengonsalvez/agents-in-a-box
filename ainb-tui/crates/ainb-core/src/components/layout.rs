@@ -89,16 +89,22 @@ impl LayoutComponent {
         self.render_status_bar(frame, main_layout[0], state);
 
         // Simple 2-panel layout: session list | logs (Claude chat is now a popup)
+        let sessions_width = state.sessions_pane_state.effective_width(main_layout[1].width);
         let content_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Percentage(40), // Session list
-                Constraint::Percentage(60), // Live logs stream
+                Constraint::Length(sessions_width), // Session list
+                Constraint::Min(0),                 // Live logs stream
             ])
             .split(main_layout[1]);
+        state.sessions_pane_state.set_layout(content_chunks[0], content_chunks[1]);
 
         // Pass focus information to components
-        self.session_list.render(frame, content_chunks[0], state);
+        if state.sessions_pane_state.collapsed {
+            self.render_collapsed_sessions_rail(frame, content_chunks[0], state);
+        } else {
+            self.session_list.render(frame, content_chunks[0], state);
+        }
 
         // Render tmux preview if selected session has tmux, otherwise show live logs
         // This includes both regular Claude sessions AND shell sessions
@@ -128,7 +134,9 @@ impl LayoutComponent {
         }
 
         // Render new session overlay if visible
-        if state.current_screen == screen_ids::NEW_SESSION || state.current_screen == screen_ids::SEARCH_WORKSPACE {
+        if state.current_screen == screen_ids::NEW_SESSION
+            || state.current_screen == screen_ids::SEARCH_WORKSPACE
+        {
             self.new_session.render(frame, frame.size(), state);
         }
 
@@ -160,6 +168,36 @@ impl LayoutComponent {
     /// Get mutable reference to tmux preview component for scroll handling
     pub fn tmux_preview_mut(&mut self) -> &mut TmuxPreviewPane {
         &mut self.tmux_preview
+    }
+
+    fn render_collapsed_sessions_rail(&self, frame: &mut Frame, area: Rect, state: &AppState) {
+        let border_color = if state.sessions_pane_state.edge_highlighted() {
+            GOLD
+        } else if state.focused_pane == crate::app::state::FocusedPane::Sessions {
+            SELECTION_GREEN
+        } else {
+            SUBDUED_BORDER
+        };
+        let rail = Paragraph::new(vec![
+            Line::from(Span::styled(
+                "[+]",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled("S", Style::default().fg(CORNFLOWER_BLUE))),
+            Line::from(Span::styled("E", Style::default().fg(CORNFLOWER_BLUE))),
+            Line::from(Span::styled("S", Style::default().fg(CORNFLOWER_BLUE))),
+        ])
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(border_color))
+                .style(Style::default().bg(DARK_BG)),
+        )
+        .alignment(Alignment::Center);
+
+        frame.render_widget(rail, area);
     }
 
     fn render_menu_bar(&self, frame: &mut Frame, area: Rect, state: &AppState) {
@@ -261,6 +299,31 @@ impl LayoutComponent {
             ),
             Span::styled(" home", Style::default().fg(MUTED_GRAY)),
         ];
+
+        // ainb-hooks inbox shortcut on the menu bar. Always shown so
+        // users can discover the Inbox screen even on a fresh install
+        // with zero events. When the store reports unread + non-
+        // dismissed rows, a `● N` glyph is rendered alongside the
+        // `I inbox` hint to surface that there is something to read.
+        let inbox_unread = state
+            .inbox_state
+            .store
+            .as_ref()
+            .and_then(|s| s.unread_count().ok())
+            .unwrap_or(0);
+        let mut line2_spans = line2_spans;
+        line2_spans.push(Span::styled(" │ ", Style::default().fg(SUBDUED_BORDER)));
+        if inbox_unread > 0 {
+            line2_spans.push(Span::styled(
+                format!("● {inbox_unread} "),
+                Style::default().fg(WARNING_ORANGE).add_modifier(Modifier::BOLD),
+            ));
+        }
+        line2_spans.push(Span::styled(
+            "I",
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ));
+        line2_spans.push(Span::styled(" inbox", Style::default().fg(MUTED_GRAY)));
 
         let menu_lines = vec![Line::from(line1_spans), Line::from(line2_spans)];
 

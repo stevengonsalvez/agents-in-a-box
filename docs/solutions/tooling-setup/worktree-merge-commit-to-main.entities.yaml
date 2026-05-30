@@ -1,0 +1,40 @@
+document_id: lrn-worktree-merge-main-ba7c57
+extracted_at: "2026-05-26T00:00:00Z"
+entities:
+  - name: git worktree
+    type: tool
+    description: Git feature allowing multiple linked working trees for one repository.
+  - name: origin/main
+    type: concept
+    description: Remote tracking branch used as the clean integration base.
+  - name: temporary integration branch
+    type: pattern
+    description: Short-lived branch created from origin/main to perform a merge outside the dirty main worktree.
+  - name: merge commit
+    type: concept
+    description: Explicit no-fast-forward commit joining feature work into main.
+  - name: git push head main
+    type: tool
+    description: Push pattern using HEAD as source and main as remote destination.
+  - name: main checked out in another worktree
+    type: error
+    description: Git state where the main branch is unavailable because another linked worktree already uses it.
+  - name: checkout failure
+    type: error
+    description: Git refusing to switch branches due to linked worktree branch ownership.
+relationships:
+  - source: main checked out in another worktree
+    target: checkout failure
+    type: caused_by
+    description: Git blocks checking out the same branch in two linked worktrees.
+    strength: 9
+  - source: temporary integration branch
+    target: checkout failure
+    type: solves
+    description: Allows merging from origin/main without switching the occupied main branch.
+    strength: 9
+  - source: git push head main
+    target: origin/main
+    type: relates_to
+    description: Updates the remote main branch from the validated integration branch HEAD.
+    strength: 8

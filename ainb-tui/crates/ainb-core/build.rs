@@ -56,6 +56,13 @@ fn main() {
     let crate_root =
         PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set"));
 
+    // Stamp a build-identity string into the binary BEFORE the render-path lint
+    // (which may early-return). Exposed to clap as `--version` long output so a
+    // build is identifiable by commit + date, not just the Cargo version number
+    // — the bare number is stale between releases (Cargo.toml only bumps at
+    // release time, so a mid-cycle main build still reports the last release).
+    emit_version_info(&crate_root);
+
     let mut offenders: Vec<(PathBuf, usize, String)> = Vec::new();
 
     for dir in SCAN_DIRS {
@@ -218,4 +225,89 @@ fn brace_delta(line: &str) -> i32 {
         prev = c;
     }
     d
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Build-identity stamping
+//
+// Emits `AINB_VERSION_LONG` (read via `env!` in `cli::root_clap_command` as
+// clap's `--version` long output) shaped like:
+//   `1.2.0 (e9b6abd, 2026-05-29, ci)`           — release/CI build (brew ships this)
+//   `1.2.0 (ecec5a2-dirty, 2026-05-29, source)` — local build with edits
+//   `1.2.0 (2026-05-29, source)`                — no git available (rare)
+//
+// SHA precedence: `AINB_BUILD_GIT_SHA` env (release CI may inject) → `git
+// rev-parse`. Origin is `ci` (GITHUB_ACTIONS) else `source`. The SHA is the
+// real disambiguator — a release binary's SHA equals its tag's commit; a stale
+// local build shows an older SHA than `origin/main`.
+// ──────────────────────────────────────────────────────────────────────────
+fn emit_version_info(crate_root: &Path) {
+    use std::process::Command;
+
+    let pkg = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".into());
+
+    let git = |args: &[&str]| -> Option<String> {
+        let out = Command::new("git").args(args).current_dir(crate_root).output().ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if s.is_empty() { None } else { Some(s) }
+    };
+
+    let sha = std::env::var("AINB_BUILD_GIT_SHA")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| git(&["rev-parse", "--short", "HEAD"]));
+
+    // Dirty = tracked source differs from HEAD. Ignore untracked files
+    // (`-uno`) so stray artifacts like a local `uv.lock` don't falsely mark an
+    // otherwise-pristine checkout dirty.
+    let dirty = git(&["status", "--porcelain", "--untracked-files=no"])
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+
+    // Build date (UTC, YYYY-MM-DD). `date` is present on every macOS/Linux build
+    // host; if it's somehow missing we just omit the date.
+    let date = Command::new("date")
+        .args(["-u", "+%Y-%m-%d"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+
+    // Origin = build environment, and only what we can know reliably. We do NOT
+    // sniff HOMEBREW_* — those are exported into most macOS interactive shells
+    // by `brew shellenv`, so they'd falsely tag every local build "brew". The
+    // binary brew distributes is the release tarball built in CI, so "ci" is the
+    // honest tag for it; a local checkout build is "source".
+    let origin = if std::env::var_os("GITHUB_ACTIONS").is_some() {
+        "ci"
+    } else {
+        "source"
+    };
+
+    // Compose the parenthetical metadata: (sha[-dirty], date, origin).
+    let mut meta: Vec<String> = Vec::new();
+    if let Some(sha) = sha {
+        meta.push(if dirty { format!("{sha}-dirty") } else { sha });
+    } else if dirty {
+        meta.push("dirty".to_string());
+    }
+    if let Some(date) = date {
+        meta.push(date);
+    }
+    meta.push(origin.to_string());
+
+    let long = format!("{pkg} ({})", meta.join(", "));
+    println!("cargo:rustc-env=AINB_VERSION_LONG={long}");
+
+    // Rebuild the stamp when HEAD moves or the override changes. Best-effort:
+    // the .git pointer lives at the repo root, which `git` resolves for us; we
+    // watch the common locations so a `git checkout`/commit re-stamps the build.
+    println!("cargo:rerun-if-env-changed=AINB_BUILD_GIT_SHA");
+    if let Some(git_dir) = git(&["rev-parse", "--git-dir"]) {
+        let git_path = crate_root.join(&git_dir);
+        println!("cargo:rerun-if-changed={}", git_path.join("HEAD").display());
+    }
 }

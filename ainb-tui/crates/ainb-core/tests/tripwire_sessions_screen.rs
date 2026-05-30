@@ -49,9 +49,7 @@ git_directories = []
 fn is_on_sessions_screen(c: &str) -> bool {
     c.contains("Session Details")
         || c.contains("Select a session to view details")
-        || c.contains("attach")
-            && c.contains("restart")
-            && c.contains("cleanup")
+        || c.contains("attach") && c.contains("restart") && c.contains("cleanup")
 }
 
 fn capture(session: &str) -> String {
@@ -60,6 +58,30 @@ fn capture(session: &str) -> String {
         .output()
         .expect("capture");
     String::from_utf8_lossy(&out.stdout).to_string()
+}
+
+fn send_sgr_mouse(session: &str, code: u16, x: u16, y: u16, press_or_drag: bool) {
+    let suffix = if press_or_drag { 'M' } else { 'm' };
+    let sgr = format!("[<{};{};{}{}", code, x + 1, y + 1, suffix);
+    let status = Command::new("tmux")
+        .args(["send-keys", "-t", session, "Escape", &sgr])
+        .status()
+        .expect("send mouse");
+    assert!(status.success(), "tmux send mouse failed");
+}
+
+fn config_text(home: &Path) -> String {
+    fs::read_to_string(home.join(".agents-in-a-box/config/config.toml")).unwrap_or_default()
+}
+
+struct TmuxSessionGuard {
+    name: String,
+}
+
+impl Drop for TmuxSessionGuard {
+    fn drop(&mut self) {
+        let _ = Command::new("tmux").args(["kill-session", "-t", &self.name]).status();
+    }
 }
 
 fn poll<F>(session: &str, deadline: Instant, mut ok: F) -> Option<String>
@@ -87,19 +109,13 @@ fn tui_sessions_screen_renders_after_pressing_s() {
     seed_isolated_home(home_tmp.path());
 
     let session = format!("tripwire-sess-{}", std::process::id());
+    let _guard = TmuxSessionGuard {
+        name: session.clone(),
+    };
     let ainb = ainb_bin();
 
     let status = Command::new("tmux")
-        .args([
-            "new-session",
-            "-d",
-            "-s",
-            &session,
-            "-x",
-            "180",
-            "-y",
-            "50",
-        ])
+        .args(["new-session", "-d", "-s", &session, "-x", "180", "-y", "50"])
         .status()
         .expect("new-session");
     assert!(status.success());
@@ -123,9 +139,6 @@ fn tui_sessions_screen_renders_after_pressing_s() {
     });
     let Some(pre_cap) = pre else {
         let last = capture(&session);
-        let _ = Command::new("tmux")
-            .args(["kill-session", "-t", &session])
-            .status();
         panic!("HomeScreen never rendered; last:\n{last}");
     };
     assert!(
@@ -146,15 +159,40 @@ fn tui_sessions_screen_renders_after_pressing_s() {
     let post = poll(&session, nav_deadline, |c| is_on_sessions_screen(c));
 
     let final_cap = post.unwrap_or_else(|| capture(&session));
-    let _ = Command::new("tmux")
-        .args(["kill-session", "-t", &session])
-        .status();
 
     let on_sessions = is_on_sessions_screen(&final_cap);
     assert!(
         on_sessions,
         "sessions screen never rendered after 's'.\n{final_cap}"
     );
+
+    send_sgr_mouse(&session, 0, 2, 3, true);
+    send_sgr_mouse(&session, 0, 2, 3, false);
+    let collapsed = poll(&session, Instant::now() + Duration::from_secs(10), |c| {
+        c.contains("[+]")
+            && config_text(home_tmp.path()).contains("sessions_sidebar_collapsed = true")
+    });
+    assert!(
+        collapsed.is_some(),
+        "sessions sidebar did not collapse from mouse control; config:\n{}\npane:\n{}",
+        config_text(home_tmp.path()),
+        capture(&session)
+    );
+
+    send_sgr_mouse(&session, 0, 2, 4, true);
+    send_sgr_mouse(&session, 0, 2, 4, false);
+    let expanded = poll(&session, Instant::now() + Duration::from_secs(10), |c| {
+        !c.contains("[+]")
+            && is_on_sessions_screen(c)
+            && config_text(home_tmp.path()).contains("sessions_sidebar_collapsed = false")
+    });
+    assert!(
+        expanded.is_some(),
+        "sessions sidebar did not expand from visible [+] click; config:\n{}\npane:\n{}",
+        config_text(home_tmp.path()),
+        capture(&session)
+    );
+
     // Regression cross-check: must not be analytics by accident.
     assert!(
         !final_cap.contains("Usage Analytics"),
