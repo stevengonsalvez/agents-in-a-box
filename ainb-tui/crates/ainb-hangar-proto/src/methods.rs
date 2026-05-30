@@ -43,6 +43,38 @@ pub const HANGAR_AGENTS_LIST: &str = "hangar/agents_list";
 /// Drives the skill-manager list (P4.6).
 pub const HANGAR_SKILLS_LIST: &str = "hangar/skills_list";
 
+/// `hangar/skill_get` — fetch one skill's full detail (body + files) by id.
+///
+/// Params: `{ workspace_id: String, skill_id: String }`. Result: a
+/// [`crate::snapshots::SkillDetail`] (the SKILL.md body + ordered file list), or
+/// `null` when the id resolves to no skill in the subscribed workspace. Drives
+/// the skill-manager detail pane (P6.5). The lookup is workspace-scoped: a skill
+/// id from another tenant resolves to `null`, never another workspace's row.
+pub const HANGAR_SKILL_GET: &str = "hangar/skill_get";
+
+/// `hangar/skills_sync` — import the curated toolkit skills into a workspace.
+///
+/// Params: `{ workspace_id: String, source_path: Option<String> }`. Result: a
+/// [`crate::snapshots::SkillsSyncResult`] (the imported skill names + count).
+/// The `s` key on the skill-manager screen invokes this (P6.5). Idempotent on
+/// `(workspace_id, name)` — re-running updates existing rows in place.
+pub const HANGAR_SKILLS_SYNC: &str = "hangar/skills_sync";
+
+/// `hangar/skill_attach` — attach a skill to an agent within a workspace.
+///
+/// Params: `{ workspace_id: String, agent_id: String, skill_id: String }`.
+/// Result: `{}`. The `i` key attaches the selected skill to the selected agent
+/// (P6.5). Workspace-scoped: both ids must belong to the subscribed workspace or
+/// the daemon rejects with an error (the tenant-isolation guard).
+pub const HANGAR_SKILL_ATTACH: &str = "hangar/skill_attach";
+
+/// `hangar/skill_detach` — detach a skill from an agent within a workspace.
+///
+/// Params: `{ workspace_id: String, agent_id: String, skill_id: String }`.
+/// Result: `{}`. The `d` key detaches (P6.5). Idempotent (detaching an absent
+/// link is a no-op) and workspace-scoped like [`HANGAR_SKILL_ATTACH`].
+pub const HANGAR_SKILL_DETACH: &str = "hangar/skill_detach";
+
 /// `hangar/health` — snapshot the daemon's health for the settings screen.
 ///
 /// Params: `{}`. Result: a [`crate::settings::HealthSnapshot`]. Drives the
@@ -64,6 +96,10 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_ISSUES_LIST,
     HANGAR_AGENTS_LIST,
     HANGAR_SKILLS_LIST,
+    HANGAR_SKILL_GET,
+    HANGAR_SKILLS_SYNC,
+    HANGAR_SKILL_ATTACH,
+    HANGAR_SKILL_DETACH,
     HANGAR_HEALTH,
     PING,
 ];
@@ -108,6 +144,10 @@ mod tests {
             HANGAR_ISSUES_LIST,
             HANGAR_AGENTS_LIST,
             HANGAR_SKILLS_LIST,
+            HANGAR_SKILL_GET,
+            HANGAR_SKILLS_SYNC,
+            HANGAR_SKILL_ATTACH,
+            HANGAR_SKILL_DETACH,
             HANGAR_HEALTH,
         ] {
             assert!(m.starts_with("hangar/"), "{m:?} not under hangar/");
@@ -129,6 +169,10 @@ mod tests {
             HANGAR_ISSUES_LIST,
             HANGAR_AGENTS_LIST,
             HANGAR_SKILLS_LIST,
+            HANGAR_SKILL_GET,
+            HANGAR_SKILLS_SYNC,
+            HANGAR_SKILL_ATTACH,
+            HANGAR_SKILL_DETACH,
             HANGAR_HEALTH,
             PING,
         ];
