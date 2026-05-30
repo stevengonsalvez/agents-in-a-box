@@ -9922,6 +9922,7 @@ impl App {
         // `state.current_screen`) with the plugin id that owns it.
         const PLUGIN_SCREENS: &[(&str, &str)] = &[
             (crate::app::screens::ids::ANALYTICS, "burndown"),
+            (crate::app::screens::ids::WITR, "witr"),
         ];
 
         for (screen_id, plugin_id) in PLUGIN_SCREENS {

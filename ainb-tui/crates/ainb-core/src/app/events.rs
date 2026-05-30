@@ -263,6 +263,7 @@ pub enum AppEvent {
     GoToConfig,              // Navigate to config view
     GoToSessionList,         // Navigate to session list view
     GoToStats,               // Navigate to stats view
+    GoToWitr,                // Navigate to the witr (process causality) plugin screen
     GoToSkills,              // Navigate to skills view
     GoToRecovery,            // Navigate to session recovery view
     // AINB 2.0: Agent selection events
@@ -2007,6 +2008,7 @@ impl EventHandler {
             KeyCode::Char('C') => return Some(AppEvent::GoToConfig),
             KeyCode::Char('s') => return Some(AppEvent::GoToSessionList),
             KeyCode::Char('i') => return Some(AppEvent::GoToStats),
+            KeyCode::Char('w') => return Some(AppEvent::GoToWitr),
             KeyCode::Char('k') => return Some(AppEvent::GoToSkills),
             KeyCode::Char('R') => return Some(AppEvent::GoToRecovery),
             KeyCode::Char('v') => return Some(AppEvent::ShowChangelog),
@@ -3578,6 +3580,13 @@ impl EventHandler {
                 state.current_screen = screen_ids::ANALYTICS.to_string();
                 // Plugin owns its own data load; host no longer
                 // pre-populates analytics state.
+            }
+            AppEvent::GoToWitr => {
+                tracing::info!("Navigating to witr (process causality)");
+                // Generic plugin-screen nav — the witr plugin owns all
+                // rendering + data; the host just flips current_screen
+                // and the PLUGIN_SCREENS table routes frames + keys.
+                state.current_screen = screen_ids::WITR.to_string();
             }
             AppEvent::GoToSkills => {
                 tracing::info!("Navigating to Skills");
