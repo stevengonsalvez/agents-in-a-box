@@ -36,6 +36,17 @@ pub mod dispatch;
 /// Per-task execution-environment layout: workdir/output/logs + `.gc_meta.json`
 /// (P1.6).
 pub mod execenv;
+/// Dispatch-time materialisation of an agent's skills into its per-task env
+/// (P6.4).
+///
+/// After the worktree exists and before the provider spawns,
+/// [`materialise::materialise_for_agent`] copies each attached skill bundle into
+/// the provider's expected layout ([`materialise::ProviderSkillLayout`]):
+/// Claude/Codex/Cursor root under the task root (sibling of `workdir`, so the
+/// git worktree stays clean) and are pointed there via a `*_HOME` env var;
+/// Gemini/Default/Copilot root inside `workdir`. Files are copied, never
+/// symlinked; `scripts/` files get the unix executable bit.
+pub mod materialise;
 /// The daemon's claim loop + sweeper scheduler (P1.7).
 ///
 /// Polls [`ainb_hangar_store::service::claim`] for the oldest queued task bound
