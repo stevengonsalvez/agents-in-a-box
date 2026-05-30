@@ -13,6 +13,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod events;
 pub mod methods;
 
 /// The JSON-RPC protocol version string carried by every envelope.

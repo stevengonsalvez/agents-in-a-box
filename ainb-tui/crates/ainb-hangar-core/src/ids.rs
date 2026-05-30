@@ -32,8 +32,26 @@ pub enum IdError {
 macro_rules! id_newtype {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
-        #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize)]
+        #[serde(transparent)]
         pub struct $name(String);
+
+        impl<'de> serde::Deserialize<'de> for $name {
+            /// Decode from a bare JSON string, re-applying the non-empty
+            /// invariant so a peer can never inject an empty id over the wire.
+            ///
+            /// The wire form is transparent (just the inner string), matching
+            /// the [`serde::Serialize`] derive above, but decoding routes
+            /// through [`Self::from_str`] so [`IdError::Empty`] surfaces as a
+            /// serde error rather than a silently-empty id.
+            fn deserialize<D>(de: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                let s = String::deserialize(de)?;
+                Self::from_str(s).map_err(serde::de::Error::custom)
+            }
+        }
 
         impl $name {
             /// Construct from a string, rejecting the empty string.
@@ -100,4 +118,8 @@ id_newtype! {
 id_newtype! {
     /// Identifies a queued task (the `agent_task_queue` table PK).
     TaskId
+}
+id_newtype! {
+    /// Identifies an issue comment (the `comment` table PK).
+    CommentId
 }

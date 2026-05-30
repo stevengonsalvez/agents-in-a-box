@@ -16,6 +16,11 @@ path = "src/lib.rs"
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+# Pure, IO-free domain vocabulary (typed ids only). No SQLite/tokio, so the
+# proto crate keeps its "no host deps" discipline — it borrows the id newtypes
+# to address rows carried on the wire.
+ainb-hangar-core = { path = "../ainb-hangar-core" }
+chrono = { workspace = true }
 
 # Local lint config rather than `workspace = true`: the workspace-level lints
 # declare lint groups (clippy::all/pedantic/nursery/cargo) at the same priority
