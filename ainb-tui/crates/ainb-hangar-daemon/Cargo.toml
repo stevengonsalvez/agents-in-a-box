@@ -70,6 +70,10 @@ chrono = { workspace = true }
 # (P2.4): the loop selects on `cancel.cancelled()` so the daemon's supervisor can
 # stop it within one tick.
 tokio-util = { workspace = true }
+# P5.3 env allowlist config: parse/serialise `~/.ainb/hangar/env.allow.toml`
+# while preserving foreign sections (the daemon reads its `[env]` table but
+# round-trips the rest of the document untouched).
+toml = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = "2"

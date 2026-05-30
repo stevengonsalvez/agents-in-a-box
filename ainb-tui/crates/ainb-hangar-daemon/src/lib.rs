@@ -26,6 +26,13 @@ pub mod beads_adapter;
 /// (replays short-circuit via the mapping repo), and non-fatal (a `bd` failure
 /// surfaces a [`beads_sync::SyncError`] without corrupting Hangar state).
 pub mod beads_sync;
+/// Env allowlist config + task-env builder (P5.3).
+///
+/// Loads/saves `~/.ainb/hangar/env.allow.toml` (foreign sections preserved,
+/// atomic write) and exposes [`dispatch::build_task_env`] — the env-build seam
+/// the claim loop uses before spawning a provider: ambient env is filtered by
+/// [`ainb_hangar_core::env_policy`] then keychain keys are layered on top.
+pub mod dispatch;
 /// Per-task execution-environment layout: workdir/output/logs + `.gc_meta.json`
 /// (P1.6).
 pub mod execenv;
