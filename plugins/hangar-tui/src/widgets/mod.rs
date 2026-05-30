@@ -18,6 +18,7 @@
 //!   column (P4.4, Multica UX §12.8).
 
 pub mod actor_row;
+pub mod danger_access_modal;
 pub mod editor_pane;
 pub mod file_tree;
 pub mod filter_chip;
