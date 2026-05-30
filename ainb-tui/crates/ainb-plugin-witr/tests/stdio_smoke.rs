@@ -143,3 +143,95 @@ fn init_render_shutdown_round_trip() {
         }
     }
 }
+
+/// Full JSON-RPC lifecycle over the wire: init → render → cli_dispatch →
+/// shutdown. The existing test covers init/render/shutdown; this one
+/// adds the `plugin/cli_dispatch` leg so the CLI surface is proven over
+/// the actual stdio transport (the `cli_dispatch.rs` tests exercise the
+/// host-free core directly, not the wire). `ainb witr --help` returns
+/// help text via the `HelpOrVersion` path, so no witr binary is needed
+/// on PATH — the round-trip is deterministic.
+#[test]
+fn init_render_cli_dispatch_shutdown_round_trip() {
+    let mut child = Command::new(binary_path())
+        .env("RUST_LOG", "off")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn witr plugin");
+
+    let mut stdin = child.stdin.take().expect("stdin handle");
+    let stdout: ChildStdout = child.stdout.take().expect("stdout handle");
+    let mut stdout = BufReader::new(stdout);
+
+    // 1. init
+    write_frame(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0", "id": 1, "method": "plugin/init",
+            "params": {
+                "manifest_path": "/tmp/witr/manifest.toml",
+                "granted_capabilities": ["spawn_subprocess", "event_bus"],
+                "abi_version": 2
+            }
+        }),
+    );
+    let resp = read_frame(&mut stdout).expect("init response");
+    assert_eq!(resp["id"], 1);
+    assert_eq!(resp["result"]["name"], "witr", "init echo: {resp}");
+
+    // 2. render
+    write_frame(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0", "id": 2, "method": "plugin/render",
+            "params": { "viewport": { "width": 40_u16, "height": 4_u16 }, "generation": 0_u64 }
+        }),
+    );
+    let resp = read_frame(&mut stdout).expect("render response");
+    assert_eq!(resp["id"], 2);
+    assert!(resp["result"]["buffer"].is_object(), "render buffer: {resp}");
+
+    // 3. cli_dispatch — `ainb witr --help`. Returns help on stdout with
+    // exit 0 (conventional), no witr binary required.
+    write_frame(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0", "id": 3, "method": "plugin/cli_dispatch",
+            "params": { "namespace": "witr", "argv": ["--help"] }
+        }),
+    );
+    let resp = read_frame(&mut stdout).expect("cli_dispatch response");
+    assert_eq!(resp["id"], 3, "cli_dispatch id: {resp}");
+    let result = resp.get("result").expect("cli_dispatch must succeed");
+    assert_eq!(result["exit_code"], 0, "--help should exit 0: {resp}");
+    // stdout is base64-encoded; help text is non-empty.
+    let stdout_b64 = result["stdout"].as_str().expect("stdout is a base64 string");
+    assert!(
+        !stdout_b64.is_empty(),
+        "`ainb witr --help` produced no stdout over the wire: {resp}"
+    );
+
+    // 4. shutdown
+    write_frame(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "method": "plugin/shutdown", "params": {} }),
+    );
+    drop(stdin);
+
+    let exit_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match child.try_wait().expect("try_wait") {
+            Some(status) => {
+                assert!(status.success(), "plugin exited non-zero: {status:?}");
+                return;
+            }
+            None if Instant::now() > exit_deadline => {
+                let _ = child.kill();
+                panic!("plugin did not exit within 5s of shutdown notification");
+            }
+            None => std::thread::sleep(Duration::from_millis(50)),
+        }
+    }
+}
