@@ -32,6 +32,11 @@ bytes = { version = "1.6", features = ["serde"] }
 parking_lot = "0.12"
 ulid = "1"
 base64 = "0.22"
+# Resolve the user home for the default `state.toml` path (P5.5 workspace store).
+dirs = { workspace = true }
+# Wire event type (`HangarEvent::WorkspaceChanged`) broadcast on a workspace
+# switch so subscribed plugins re-fetch. Pure wire types, no host deps.
+ainb-hangar-proto = { path = "../ainb-hangar-proto" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

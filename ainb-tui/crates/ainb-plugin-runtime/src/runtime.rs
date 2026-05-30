@@ -88,6 +88,9 @@ pub struct Runtime {
     /// Defaults to the platform keychain/stub; tests inject an in-memory
     /// double via [`Runtime::with_config_and_secret_backend`].
     secret_backend: crate::secret_store::SharedSecretBackend,
+    /// Shared host workspace store for the `host/workspace_*` caps (DI).
+    /// Defaults to the `state.toml`-backed store; tests inject a double.
+    workspace_store: crate::workspace_store::SharedWorkspaceStore,
     /// Tunables.
     config: RuntimeConfig,
 }
@@ -113,6 +116,24 @@ impl Runtime {
     pub fn with_config_and_secret_backend(
         config: RuntimeConfig,
         secret_backend: crate::secret_store::SharedSecretBackend,
+    ) -> Result<(Self, RuntimeHandle), RuntimeError> {
+        Self::with_config_and_stores(
+            config,
+            secret_backend,
+            crate::workspace_store::default_store(),
+        )
+    }
+
+    /// Construct with explicit config + an injected secret backend + an
+    /// injected workspace store.
+    ///
+    /// The DI seam for the `host/workspace_*` caps (P5.5): production uses the
+    /// `state.toml`-backed store; tests pass an in-memory double so the
+    /// handlers can be exercised without touching the user's home directory.
+    pub fn with_config_and_stores(
+        config: RuntimeConfig,
+        secret_backend: crate::secret_store::SharedSecretBackend,
+        workspace_store: crate::workspace_store::SharedWorkspaceStore,
     ) -> Result<(Self, RuntimeHandle), RuntimeError> {
         let tokio = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -141,6 +162,7 @@ impl Runtime {
             unix_sockets: unix_sockets.clone(),
             log_tap: log_tap.clone(),
             secret_backend: secret_backend.clone(),
+            workspace_store: workspace_store.clone(),
             config,
             key_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         });
@@ -157,6 +179,7 @@ impl Runtime {
                 unix_sockets,
                 log_tap,
                 secret_backend,
+                workspace_store,
                 config,
             },
             handle,
@@ -243,6 +266,7 @@ impl Runtime {
             self.managed_subprocess.clone(),
             self.unix_sockets.clone(),
             self.secret_backend.clone(),
+            self.workspace_store.clone(),
             self.log_tap.clone(),
             self.config,
             self.tokio

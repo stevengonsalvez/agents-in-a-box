@@ -25,7 +25,7 @@ use ainb_plugin_protocol::params::{
     SecretStoreGetParams, SnapshotPublishParams, SnapshotSubscribeParams,
     SnapshotSubscribeResult, SpawnManagedSubprocessParams, SpawnManagedSubprocessResult,
     UnixSocketCloseParams, UnixSocketDialParams, UnixSocketDialResult, UnixSocketSendParams,
-    Viewport,
+    Viewport, WorkspaceSetActiveParams, WorkspaceSetDefaultParams,
 };
 use ainb_plugin_protocol::wire_buffer::WireBuffer;
 use bytes::Bytes;
@@ -46,6 +46,9 @@ use crate::rpc::{
 use crate::event_stream::{topic_allowed, EventStreamRegistry};
 use crate::managed_subprocess::ManagedSubprocessRegistry;
 use crate::secret_store::{secret_store_get_logic, SharedSecretBackend};
+use crate::workspace_store::{
+    get_active_logic, list_logic, set_active_logic, set_default_logic, SharedWorkspaceStore,
+};
 use crate::snapshot::SnapshotStore;
 use crate::unix_socket::{path_allowed, UnixSocketRegistry};
 use crate::types::{
@@ -187,6 +190,7 @@ pub fn spawn(
     managed_subprocess: ManagedSubprocessRegistry,
     unix_sockets: UnixSocketRegistry,
     secret_backend: SharedSecretBackend,
+    workspace_store: SharedWorkspaceStore,
     log_tap: LogTap,
     config: RuntimeConfig,
     handle: &tokio::runtime::Handle,
@@ -209,6 +213,7 @@ pub fn spawn(
         managed_subprocess,
         unix_sockets,
         secret_backend,
+        workspace_store,
         // The task keeps a clone of its OWN inbox so the unix-socket read
         // loop can deliver `socket:<id>` frames back to this plugin.
         self_inbox: tx.clone(),
@@ -287,6 +292,10 @@ struct PluginTask {
     /// through this; production uses the macOS Keychain / linux stub, tests
     /// inject an in-memory double.
     secret_backend: SharedSecretBackend,
+    /// Shared host workspace store (DI). The `host/workspace_*` caps read /
+    /// write the active+default switch state in `~/.ainb/hangar/state.toml`
+    /// and broadcast `WorkspaceChanged` through this; tests inject a double.
+    workspace_store: SharedWorkspaceStore,
     /// Clone of this task's own [`Inbox`]. The unix-socket read loop holds
     /// it so reads from a dialled socket are delivered back to this plugin
     /// as `Command::HandleEvent` under topic `socket:<stream_id>`.
@@ -646,6 +655,12 @@ impl PluginTask {
             }
             methods::HOST_UNIX_SOCKET_DIAL => self.host_unix_socket_dial(params).await,
             methods::HOST_SECRET_STORE_GET => self.host_secret_store_get(params),
+            methods::HOST_WORKSPACE_LIST => Ok(list_logic(self.workspace_store.as_ref())),
+            methods::HOST_WORKSPACE_GET_ACTIVE => {
+                Ok(get_active_logic(self.workspace_store.as_ref()))
+            }
+            methods::HOST_WORKSPACE_SET_ACTIVE => self.host_workspace_set_active(params),
+            methods::HOST_WORKSPACE_SET_DEFAULT => self.host_workspace_set_default(params),
             // host/action/invoke arriving FROM the plugin would be cross-plugin
             // routing — out of scope for the per-plugin task; rejected.
             other => Err(RpcError::method_not_found(other)),
@@ -857,6 +872,33 @@ impl PluginTask {
             serde_json::from_value(params).map_err(|e| RpcError::invalid_params(e.to_string()))?;
         let grant = &self.plugin.manifest.capabilities.secrets_read;
         secret_store_get_logic(grant, self.secret_backend.as_ref(), &p)
+    }
+
+    /// Handle `host/workspace_set_active`.
+    ///
+    /// Delegates to [`set_active_logic`], which gates on `workspace:write`
+    /// (`-32001` when the grant is absent, before any store hit), validates the
+    /// id against the catalogue (`-32602` for an unknown id), writes
+    /// `active_workspace` to `state.toml`, and broadcasts `WorkspaceChanged` so
+    /// subscribed plugins re-fetch.
+    fn host_workspace_set_active(&self, params: Value) -> Result<Value, RpcError> {
+        let p: WorkspaceSetActiveParams =
+            serde_json::from_value(params).map_err(|e| RpcError::invalid_params(e.to_string()))?;
+        let grant = &self.plugin.manifest.capabilities.workspace_write;
+        set_active_logic(grant, self.workspace_store.as_ref(), &p.workspace_id)
+    }
+
+    /// Handle `host/workspace_set_default`.
+    ///
+    /// Delegates to [`set_default_logic`] (gated by `workspace:write`).
+    /// Validates the id and writes `default_workspace` to `state.toml`; never
+    /// changes the active workspace and emits no event (a default change is
+    /// silent).
+    fn host_workspace_set_default(&self, params: Value) -> Result<Value, RpcError> {
+        let p: WorkspaceSetDefaultParams =
+            serde_json::from_value(params).map_err(|e| RpcError::invalid_params(e.to_string()))?;
+        let grant = &self.plugin.manifest.capabilities.workspace_write;
+        set_default_logic(grant, self.workspace_store.as_ref(), &p.workspace_id)
     }
 
     async fn handle_host_notification(&self, method: &str, params: Value) {
@@ -1133,6 +1175,7 @@ fn collect_granted_capabilities(m: &ainb_plugin_protocol::manifest::Manifest) ->
     if c.spawn_managed_subprocess.is_granted() { out.push("spawn_managed_subprocess".into()); }
     if c.unix_socket_dial.is_granted() { out.push("unix_socket_dial".into()); }
     if c.secrets_read.is_granted() { out.push("secrets:read".into()); }
+    if c.workspace_write.is_granted() { out.push("workspace:write".into()); }
     out
 }
 
