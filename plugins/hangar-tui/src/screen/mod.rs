@@ -13,8 +13,13 @@
 //! The shared chrome (top tab bar + footer) that wraps every screen lives in
 //! [`crate::chrome`]; this module owns only the routing state it renders from.
 
+pub mod agent_picker;
+pub mod banner_state;
 pub mod issue_list;
 mod router;
+pub mod settings;
+pub mod skill_manager;
+pub mod task_detail;
 
 pub use router::reduce;
 
