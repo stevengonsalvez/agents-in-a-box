@@ -35,6 +35,7 @@ use ainb_hangar_core::actor::{ActorKind, ActorRef};
 use ainb_hangar_core::clock::SystemClock;
 use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
 use ainb_hangar_store::Store;
+use ainb_hangar_store::repo::autopilot::Autopilot;
 use ainb_hangar_store::repo::issue::{Issue, IssueRepo, NewIssue};
 use ainb_hangar_store::repo::task::{Task, TaskRepo};
 use ainb_hangar_store::repo::token::{PatRecord, PatRepo, mint_daemon_token, mint_pat};
@@ -89,6 +90,74 @@ pub enum HangarCommand {
     /// List, inspect, and apply curated agent templates.
     #[command(subcommand)]
     Templates(TemplatesCommand),
+    /// Create and control cron-scheduled autopilots.
+    #[command(subcommand)]
+    Autopilot(AutopilotCommand),
+}
+
+/// `hangar autopilot <verb>`.
+///
+/// A cron-scheduled autopilot fires its bound agent on a recurring schedule.
+/// `create` validates the cron expression (P7.1) and **rejects it before any
+/// row is written** when malformed; `list` shows each autopilot's cron + an
+/// enabled/disabled badge + its last run; `disable`/`enable` toggle scheduling
+/// (enable recomputes the next tick from now, never replaying missed slots);
+/// `run` fires one tick immediately via the P7.4 enqueue path, bypassing the
+/// schedule. Every verb is workspace-scoped (the bootstrapped `default`
+/// workspace unless `--workspace` is given).
+#[derive(Subcommand, Debug)]
+pub enum AutopilotCommand {
+    /// Create a cron-scheduled autopilot (rejects an invalid cron expression).
+    Create(AutopilotCreateArgs),
+    /// List the workspace's autopilots (cron, next tick, last run, enabled).
+    List(AutopilotListArgs),
+    /// Disable an autopilot so the scheduler stops firing it.
+    Disable(AutopilotIdArgs),
+    /// Re-enable an autopilot, recomputing its next tick from now.
+    Enable(AutopilotIdArgs),
+    /// Fire one tick immediately (manual run), bypassing the schedule.
+    Run(AutopilotIdArgs),
+}
+
+/// Arguments for `hangar autopilot create`.
+#[derive(Args, Debug)]
+pub struct AutopilotCreateArgs {
+    /// Name, unique within the workspace.
+    #[arg(long)]
+    pub name: String,
+    /// Cron expression (UTC, 5-field) — validated before insert.
+    #[arg(long)]
+    pub cron: String,
+    /// Agent id to dispatch to at each tick (`agent.id`).
+    #[arg(long)]
+    pub agent: String,
+    /// Optional instructions handed to the agent on every tick.
+    #[arg(long)]
+    pub instructions: Option<String>,
+    /// Maximum simultaneous in-flight runs before a tick is skipped.
+    #[arg(long = "max-concurrent-runs", default_value_t = 1)]
+    pub max_concurrent_runs: i64,
+    /// Workspace slug to create in. Defaults to the bootstrapped `default`.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar autopilot list`.
+#[derive(Args, Debug)]
+pub struct AutopilotListArgs {
+    /// Workspace slug to list. Defaults to the bootstrapped `default`.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for the id-only autopilot verbs (`disable`, `enable`, `run`).
+#[derive(Args, Debug)]
+pub struct AutopilotIdArgs {
+    /// The autopilot id (`autopilot.id`).
+    pub id: String,
+    /// Workspace slug the autopilot belongs to. Defaults to `default`.
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 /// `hangar templates <verb>`.
@@ -437,7 +506,149 @@ pub async fn dispatch(cmd: HangarCommand, format: OutputFormat) -> Result<()> {
         HangarCommand::Config(c) => dispatch_config(c, format),
         HangarCommand::Skills(c) => dispatch_skills(c, format).await,
         HangarCommand::Templates(c) => dispatch_templates(c, format).await,
+        HangarCommand::Autopilot(c) => dispatch_autopilot(c, format).await,
     }
+}
+
+/// Dispatch the `hangar autopilot` verbs.
+///
+/// Opens the store, resolves the workspace the same way the skills/templates
+/// verbs do, and drives the workspace-scoped [`AutopilotRepo`]. `create` rejects
+/// an invalid cron expression *before* any insert (the repo validates first);
+/// `run` fires one tick immediately through the P7.4 enqueue path.
+async fn dispatch_autopilot(cmd: AutopilotCommand, format: OutputFormat) -> Result<()> {
+    let store = Store::open_default().await.context("open hangar database")?;
+    match cmd {
+        AutopilotCommand::Create(args) => run_autopilot_create(&store, args).await,
+        AutopilotCommand::List(args) => run_autopilot_list(&store, args, format).await,
+        AutopilotCommand::Disable(args) => run_autopilot_set_enabled(&store, args, false).await,
+        AutopilotCommand::Enable(args) => run_autopilot_set_enabled(&store, args, true).await,
+        AutopilotCommand::Run(args) => run_autopilot_run_now(&store, args).await,
+    }
+}
+
+/// `hangar autopilot create`: validate the cron (rejecting before insert) then
+/// persist a workspace-scoped autopilot.
+async fn run_autopilot_create(store: &Store, args: AutopilotCreateArgs) -> Result<()> {
+    use ainb_hangar_core::ids::{AgentId, WorkspaceId};
+    use ainb_hangar_store::repo::autopilot::{AutopilotRepo, NewAutopilot};
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    let agent = AgentId::from_str(args.agent).context("agent id was empty")?;
+
+    let req = NewAutopilot {
+        workspace_id: ws,
+        agent_id: agent,
+        name: args.name.clone(),
+        instructions: args.instructions,
+        cron_expr: args.cron.clone(),
+        max_concurrent_runs: args.max_concurrent_runs,
+    };
+
+    let id = AutopilotRepo::create(store.pool(), &SystemClock, &req)
+        .await
+        .with_context(|| format!("create autopilot `{}` (cron `{}`)", args.name, args.cron))?;
+    println!("created autopilot {id} `{}` (cron `{}`)", args.name, args.cron);
+    Ok(())
+}
+
+/// `hangar autopilot list`: list the workspace's autopilots with their last run.
+async fn run_autopilot_list(
+    store: &Store,
+    args: AutopilotListArgs,
+    format: OutputFormat,
+) -> Result<()> {
+    use ainb_hangar_core::ids::{AutopilotId, WorkspaceId};
+    use ainb_hangar_store::repo::autopilot::AutopilotRepo;
+
+    // A missing/empty workspace lists as no autopilots, not an error (mirrors
+    // skills list).
+    let workspace_id = match args.workspace.as_deref() {
+        Some(slug) => {
+            let id: Option<String> = sqlx::query_scalar("SELECT id FROM workspace WHERE slug = ?")
+                .bind(slug)
+                .fetch_optional(store.pool())
+                .await
+                .context("look up workspace by slug")?;
+            id
+        }
+        None => find_default_workspace(store).await?,
+    };
+    let Some(workspace_id) = workspace_id else {
+        render_autopilot_list(&[], format);
+        return Ok(());
+    };
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    let autopilots = AutopilotRepo::list(store.pool(), &ws).await.context("list autopilots")?;
+
+    // Pair each autopilot with its most-recent run's status (the "last run"
+    // column), looked up workspace-scoped through the repo's run history.
+    let mut rows = Vec::with_capacity(autopilots.len());
+    for ap in autopilots {
+        let last_run = {
+            let id = AutopilotId::from_str(ap.id.clone()).context("autopilot id was empty")?;
+            AutopilotRepo::list_runs(store.pool(), &ws, &id, 1)
+                .await
+                .context("list autopilot runs")?
+                .into_iter()
+                .next()
+                .map(|r| r.status)
+        };
+        rows.push((ap, last_run));
+    }
+    render_autopilot_list(&rows, format);
+    Ok(())
+}
+
+/// `hangar autopilot disable|enable`: toggle scheduling, workspace-scoped.
+async fn run_autopilot_set_enabled(
+    store: &Store,
+    args: AutopilotIdArgs,
+    enabled: bool,
+) -> Result<()> {
+    use ainb_hangar_core::ids::{AutopilotId, WorkspaceId};
+    use ainb_hangar_store::repo::autopilot::AutopilotRepo;
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    let id = AutopilotId::from_str(args.id.clone()).context("autopilot id was empty")?;
+
+    if enabled {
+        AutopilotRepo::enable(store.pool(), &SystemClock, &ws, &id)
+            .await
+            .with_context(|| format!("enable autopilot `{}`", args.id))?;
+        println!("enabled autopilot {}", args.id);
+    } else {
+        AutopilotRepo::disable(store.pool(), &ws, &id)
+            .await
+            .with_context(|| format!("disable autopilot `{}`", args.id))?;
+        println!("disabled autopilot {}", args.id);
+    }
+    Ok(())
+}
+
+/// `hangar autopilot run <id>`: fire one tick immediately via the P7.4 enqueue
+/// path, bypassing the schedule. Workspace-scoped: a foreign id is rejected.
+async fn run_autopilot_run_now(store: &Store, args: AutopilotIdArgs) -> Result<()> {
+    use ainb_hangar_core::ids::{AutopilotId, WorkspaceId};
+    use ainb_hangar_store::repo::autopilot::AutopilotRepo;
+    use ainb_hangar_store::repo::autopilot_run::fire_autopilot_tick;
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    let id = AutopilotId::from_str(args.id.clone()).context("autopilot id was empty")?;
+
+    let autopilot = AutopilotRepo::get(store.pool(), &ws, &id)
+        .await
+        .context("look up autopilot")?
+        .with_context(|| format!("no autopilot `{}` in this workspace", args.id))?;
+
+    let (run_id, task_id) = fire_autopilot_tick(store.pool(), &SystemClock, &autopilot)
+        .await
+        .with_context(|| format!("fire autopilot `{}`", args.id))?;
+    println!("fired autopilot {} → run {run_id} task {task_id}", args.id);
+    Ok(())
 }
 
 /// Dispatch the `hangar templates` verbs.
@@ -1300,6 +1511,117 @@ fn issue_to_json(i: &Issue) -> String {
     )
 }
 
+/// Render an autopilot list (each paired with its last run's status) in the
+/// chosen format.
+///
+/// The `enabled`/`disabled` badge and the cron expression are the load-bearing
+/// columns the CLI surface test asserts on; `last_run` is the most-recent run's
+/// status, or `-` when the autopilot has never fired.
+fn render_autopilot_list(rows: &[(Autopilot, Option<String>)], format: OutputFormat) {
+    match format {
+        OutputFormat::Json => {
+            let body = rows
+                .iter()
+                .map(|(a, last)| autopilot_to_json(a, last.as_deref()))
+                .collect::<Vec<_>>()
+                .join(",");
+            println!("[{body}]");
+        }
+        OutputFormat::Csv => {
+            println!("{}", autopilot_csv_header());
+            for (a, last) in rows {
+                println!("{}", autopilot_csv_row(a, last.as_deref()));
+            }
+        }
+        OutputFormat::Markdown => {
+            print!("{}", autopilot_md_header());
+            for (a, last) in rows {
+                println!("{}", autopilot_md_row(a, last.as_deref()));
+            }
+        }
+        OutputFormat::Text => {
+            if rows.is_empty() {
+                println!("no autopilots");
+            } else {
+                for (a, last) in rows {
+                    println!("{}", autopilot_line(a, last.as_deref()));
+                }
+            }
+        }
+    }
+}
+
+/// The enabled/disabled badge shown in every format (load-bearing for the CLI
+/// surface test's "disabled" assertion).
+const fn autopilot_badge(enabled: bool) -> &'static str {
+    if enabled { "enabled" } else { "disabled" }
+}
+
+/// One-line text summary of an autopilot.
+fn autopilot_line(a: &Autopilot, last_run: Option<&str>) -> String {
+    format!(
+        "{}  {}  cron={}  next_tick={}  last_run={}  [{}]",
+        a.id,
+        a.name,
+        a.cron_expr,
+        a.next_tick_at.map_or_else(|| "-".to_string(), |v| v.to_string()),
+        last_run.unwrap_or("-"),
+        autopilot_badge(a.enabled),
+    )
+}
+
+const fn autopilot_csv_header() -> &'static str {
+    "id,name,cron,next_tick_at,enabled,last_run"
+}
+fn autopilot_csv_row(a: &Autopilot, last_run: Option<&str>) -> String {
+    format!(
+        "{},{},{},{},{},{}",
+        csv_field(&a.id),
+        csv_field(&a.name),
+        csv_field(&a.cron_expr),
+        a.next_tick_at.map_or_else(String::new, |v| v.to_string()),
+        autopilot_badge(a.enabled),
+        csv_field(last_run.unwrap_or("")),
+    )
+}
+const fn autopilot_md_header() -> &'static str {
+    "| id | name | cron | next_tick_at | enabled | last_run |\n\
+     | --- | --- | --- | --- | --- | --- |\n"
+}
+fn autopilot_md_row(a: &Autopilot, last_run: Option<&str>) -> String {
+    format!(
+        "| {} | {} | {} | {} | {} | {} |",
+        md_cell(&a.id),
+        md_cell(&a.name),
+        md_cell(&a.cron_expr),
+        a.next_tick_at.map_or_else(|| "-".to_string(), |v| v.to_string()),
+        autopilot_badge(a.enabled),
+        md_cell(last_run.unwrap_or("-")),
+    )
+}
+/// Minimal stable JSON object for one autopilot (hand-rolled to avoid pulling a
+/// serde derive onto the store's `Autopilot` type from this crate).
+fn autopilot_to_json(a: &Autopilot, last_run: Option<&str>) -> String {
+    let instructions = a.instructions.as_deref().map_or_else(|| "null".to_string(), json_string);
+    let next_tick = a.next_tick_at.map_or_else(|| "null".to_string(), |v| v.to_string());
+    let last = last_run.map_or_else(|| "null".to_string(), json_string);
+    format!(
+        "{{\"id\":{},\"workspace_id\":{},\"agent_id\":{},\"name\":{},\"instructions\":{},\
+          \"cron_expr\":{},\"max_concurrent_runs\":{},\"next_tick_at\":{},\"enabled\":{},\
+          \"last_run\":{}}}",
+        json_string(&a.id),
+        json_string(&a.workspace_id),
+        json_string(&a.agent_id),
+        json_string(&a.name),
+        instructions,
+        json_string(&a.cron_expr),
+        a.max_concurrent_runs,
+        next_tick,
+        a.enabled,
+        last,
+    )
+}
+
 /// Render a task list in the chosen format.
 fn render_task_list(tasks: &[Task], format: OutputFormat) {
     match format {
@@ -2043,5 +2365,123 @@ mod tests {
                 "token list output must not even leak the stored digest: {rendered}"
             );
         }
+    }
+
+    #[test]
+    fn parses_autopilot_create_with_all_flags() {
+        let cmd = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "autopilot",
+            "create",
+            "--name",
+            "smoke",
+            "--cron",
+            "*/5 * * * *",
+            "--agent",
+            "ag-1",
+            "--instructions",
+            "say hi",
+            "--max-concurrent-runs",
+            "3",
+            "--workspace",
+            "default",
+        ]);
+        let HangarCommand::Autopilot(AutopilotCommand::Create(args)) = cmd else {
+            panic!("expected autopilot create, got {cmd:?}");
+        };
+        assert_eq!(args.name, "smoke");
+        assert_eq!(args.cron, "*/5 * * * *");
+        assert_eq!(args.agent, "ag-1");
+        assert_eq!(args.instructions.as_deref(), Some("say hi"));
+        assert_eq!(args.max_concurrent_runs, 3);
+        assert_eq!(args.workspace.as_deref(), Some("default"));
+    }
+
+    #[test]
+    fn parses_autopilot_create_defaults() {
+        let cmd = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "autopilot",
+            "create",
+            "--name",
+            "n",
+            "--cron",
+            "0 9 * * *",
+            "--agent",
+            "ag-1",
+        ]);
+        let HangarCommand::Autopilot(AutopilotCommand::Create(args)) = cmd else {
+            panic!("expected autopilot create, got {cmd:?}");
+        };
+        assert_eq!(args.max_concurrent_runs, 1, "default concurrency is 1");
+        assert!(args.instructions.is_none());
+        assert!(args.workspace.is_none());
+    }
+
+    #[test]
+    fn parses_autopilot_disable_enable_run_with_id() {
+        for (verb, is) in [
+            ("disable", "disable"),
+            ("enable", "enable"),
+            ("run", "run"),
+        ] {
+            let cmd = parse_hangar(&["ainb", "hangar", "autopilot", verb, "ap-1"]);
+            match (is, cmd) {
+                ("disable", HangarCommand::Autopilot(AutopilotCommand::Disable(a)))
+                | ("enable", HangarCommand::Autopilot(AutopilotCommand::Enable(a)))
+                | ("run", HangarCommand::Autopilot(AutopilotCommand::Run(a))) => {
+                    assert_eq!(a.id, "ap-1");
+                }
+                (_, other) => panic!("expected autopilot {verb}, got {other:?}"),
+            }
+        }
+    }
+
+    /// Build a stored autopilot fixture for the render tests.
+    fn sample_autopilot(enabled: bool) -> Autopilot {
+        Autopilot {
+            id: "01AP".into(),
+            workspace_id: "ws-1".into(),
+            agent_id: "ag-1".into(),
+            name: "daily".into(),
+            instructions: Some("triage".into()),
+            cron_expr: "0 9 * * *".into(),
+            max_concurrent_runs: 1,
+            next_tick_at: Some(1_767_258_000_000),
+            enabled,
+            created_at: 0,
+        }
+    }
+
+    #[test]
+    fn autopilot_renderers_emit_name_cron_and_badge() {
+        let ap = sample_autopilot(true);
+        let last = Some("completed".to_string());
+
+        let line = autopilot_line(&ap, last.as_deref());
+        assert!(line.contains("daily"), "text missing name: {line}");
+        assert!(line.contains("0 9 * * *"), "text missing cron: {line}");
+        assert!(line.contains("[enabled]"), "text missing badge: {line}");
+        assert!(line.contains("completed"), "text missing last_run: {line}");
+
+        let json = autopilot_to_json(&ap, last.as_deref());
+        assert!(json.contains("\"name\":\"daily\""), "json missing name: {json}");
+        assert!(json.contains("\"cron_expr\":\"0 9 * * *\""), "json missing cron: {json}");
+        assert!(json.contains("\"enabled\":true"), "json missing enabled: {json}");
+        assert!(json.contains("\"last_run\":\"completed\""), "json missing last_run: {json}");
+
+        assert!(autopilot_csv_row(&ap, last.as_deref()).contains("0 9 * * *"));
+        assert!(autopilot_md_row(&ap, last.as_deref()).contains("| daily |"));
+    }
+
+    #[test]
+    fn autopilot_renderers_show_disabled_badge_and_no_run() {
+        let ap = sample_autopilot(false);
+        assert!(autopilot_line(&ap, None).contains("[disabled]"));
+        assert!(autopilot_line(&ap, None).contains("last_run=-"));
+        assert!(autopilot_to_json(&ap, None).contains("\"enabled\":false"));
+        assert!(autopilot_to_json(&ap, None).contains("\"last_run\":null"));
     }
 }
