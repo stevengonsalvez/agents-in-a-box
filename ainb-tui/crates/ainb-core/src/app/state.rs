@@ -2700,6 +2700,7 @@ pub enum AsyncAction {
     RestartSession(Uuid),        // Restart a stopped session with new container
     CleanupOrphaned,             // Clean up orphaned containers without worktrees
     AttachToOtherTmux(String),   // Attach to a non-agents-in-a-box tmux session by name
+    AttachWitr, // Launch `witr -i` (process-causality browser) in a dedicated tmux session and attach full-screen
     KillOtherTmux(String),       // Kill a non-agents-in-a-box tmux session by name
     KillOtherTmuxSessions(Vec<String>), // Kill multiple non-agents-in-a-box tmux sessions by name
     ConfirmOtherTmuxRename,      // Confirm and execute rename for "Other tmux" session
@@ -7323,6 +7324,10 @@ impl AppState {
                 // PUT THE ACTION BACK so main loop can handle it
                 action @ AsyncAction::AttachToOtherTmux(_) => {
                     debug!("AttachToOtherTmux action deferred to main loop");
+                    self.pending_async_action = Some(action);
+                }
+                action @ AsyncAction::AttachWitr => {
+                    debug!("AttachWitr action deferred to main loop");
                     self.pending_async_action = Some(action);
                 }
                 action @ AsyncAction::KillOtherTmux(_) => {

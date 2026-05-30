@@ -667,6 +667,58 @@ async fn run_tui_loop(
                         app.state.ui_needs_refresh = true;
                     }
 
+                    AsyncAction::AttachWitr => {
+                        use crate::app::AttachHandler;
+                        use tokio::process::Command;
+
+                        const WITR_SESSION: &str = "ainb-witr";
+                        info!("[ACTION] Launching witr -i in tmux session '{}'", WITR_SESSION);
+
+                        // Atomic create-or-reuse: `-A` attaches if the session exists,
+                        // creates it otherwise; `-d` keeps it detached so we drive the
+                        // attach (with TUI suspend/resume) ourselves below. tmux runs
+                        // the command in its OWN pty, so `witr -i` gets a real TTY even
+                        // though ainb owns the alternate screen. The command is passed as
+                        // a single string so tmux doesn't parse `-i` as one of its flags.
+                        let created = Command::new("tmux")
+                            .args(["new-session", "-A", "-d", "-s", WITR_SESSION, "witr -i"])
+                            .status()
+                            .await;
+                        match created {
+                            Ok(s) if s.success() => {
+                                let mut attach_handler =
+                                    AttachHandler::new_from_terminal(terminal)?;
+                                if let Err(e) =
+                                    attach_handler.attach_to_session(WITR_SESSION).await
+                                {
+                                    error!("[ACTION] witr attach failed: {}", e);
+                                    app.state.add_error_notification(format!(
+                                        "Failed to open the witr browser: {}",
+                                        e
+                                    ));
+                                }
+                            }
+                            Ok(s) => {
+                                error!(
+                                    "[ACTION] failed to create witr tmux session (exit {:?})",
+                                    s.code()
+                                );
+                                app.state.add_error_notification(
+                                    "Could not start the witr browser — is `witr` installed and on PATH?"
+                                        .to_string(),
+                                );
+                            }
+                            Err(e) => {
+                                error!("[ACTION] tmux new-session for witr errored: {}", e);
+                                app.state.add_error_notification(format!(
+                                    "Failed to open the witr browser: {}",
+                                    e
+                                ));
+                            }
+                        }
+                        app.state.ui_needs_refresh = true;
+                    }
+
                     AsyncAction::KillOtherTmux(session_name) => {
                         use tokio::process::Command;
 

@@ -3211,10 +3211,11 @@ impl EventHandler {
                         // pre-populates state for the analytics screen.
                     }
                     SidebarItem::Witr => {
-                        tracing::info!("Navigating to witr (process causality) from sidebar");
-                        state.current_screen = screen_ids::WITR.to_string();
-                        // Like analytics/burndown, all data lives in the
-                        // witr plugin — the host just switches screens.
+                        tracing::info!("Launching witr -i (process-causality browser) from sidebar");
+                        // Hand the terminal to witr's own interactive TUI
+                        // (see AppEvent::GoToWitr) rather than a
+                        // plugin-rendered screen.
+                        state.pending_async_action = Some(AsyncAction::AttachWitr);
                     }
                     SidebarItem::Skills => {
                         tracing::info!("Navigating to Skills from sidebar");
@@ -3432,11 +3433,16 @@ impl EventHandler {
                 // pre-populates analytics state.
             }
             AppEvent::GoToWitr => {
-                tracing::info!("Navigating to witr (process causality)");
-                // Generic plugin-screen nav — the witr plugin owns all
-                // rendering + data; the host just flips current_screen
-                // and the PLUGIN_SCREENS table routes frames + keys.
-                state.current_screen = screen_ids::WITR.to_string();
+                tracing::info!("Launching witr -i (process-causality browser)");
+                // witr's value is its own interactive all-process browser
+                // (sortable list + ancestry pane), which has no JSON/
+                // WireBuffer equivalent — it lives only in `witr -i`. So
+                // instead of a plugin-rendered screen we hand the terminal
+                // to witr's native TUI full-screen (suspend/attach, like an
+                // agent session) and resume ainb when the user quits it.
+                // The witr plugin still owns the `ainb witr` CLI + `/witr`
+                // slash; only the screen is the embedded binary.
+                state.pending_async_action = Some(AsyncAction::AttachWitr);
             }
             AppEvent::GoToSkills => {
                 tracing::info!("Navigating to Skills");
