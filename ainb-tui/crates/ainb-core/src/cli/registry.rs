@@ -923,9 +923,14 @@ impl CliCommand for NotifydCommand {
         )
     }
     fn run(&self, matches: &ArgMatches, _ctx: CliContext) -> BoxFuture<'static, Result<()>> {
-        // Resolve the sub-verb synchronously, then move owned values
-        // into the async block (the trait requires a 'static future).
-        #[derive(Clone)]
+        use ainb_plugin_notifyd::cli;
+
+        // The verb (and, for install/uninstall, the resolved agent set)
+        // is computed synchronously here so only owned values cross into
+        // the 'static future. Every body delegates to the shared
+        // `ainb_plugin_notifyd::cli` functions — the same ones the
+        // standalone `ainb-notifyd` binary calls — so the two
+        // entrypoints can never diverge in behaviour or output.
         enum Verb {
             Run,
             Stop,
@@ -933,30 +938,16 @@ impl CliCommand for NotifydCommand {
             Uninstall(Vec<ainb_plugin_notifyd::Agent>),
             Status,
         }
-        fn agents_from(m: &ArgMatches) -> Vec<ainb_plugin_notifyd::Agent> {
-            use ainb_plugin_notifyd::Agent;
-            let claude = m.get_flag("claude");
-            let codex = m.get_flag("codex");
-            let all = m.get_flag("all");
-            if all || (!claude && !codex) {
-                return Agent::ALL.to_vec();
-            }
-            let mut out = Vec::new();
-            if claude {
-                out.push(Agent::Claude);
-            }
-            if codex {
-                out.push(Agent::Codex);
-            }
-            out
-        }
+        let agents = |m: &ArgMatches| {
+            cli::agents_from_flags(m.get_flag("claude"), m.get_flag("codex"), m.get_flag("all"))
+        };
         // No sub-verb → `run` (matches the standalone binary's default
         // and the lazy-spawn call `ainb notifyd`).
         let verb = match matches.subcommand() {
             Some(("run", _)) | None => Verb::Run,
             Some(("stop", _)) => Verb::Stop,
-            Some(("install", m)) => Verb::Install(agents_from(m)),
-            Some(("uninstall", m)) => Verb::Uninstall(agents_from(m)),
+            Some(("install", m)) => Verb::Install(agents(m)),
+            Some(("uninstall", m)) => Verb::Uninstall(agents(m)),
             Some(("status", _)) => Verb::Status,
             Some((other, _)) => {
                 let other = other.to_string();
@@ -966,55 +957,12 @@ impl CliCommand for NotifydCommand {
             }
         };
         Box::pin(async move {
-            use ainb_plugin_notifyd::{Paths, RunConfig};
             match verb {
-                Verb::Run => {
-                    let config = RunConfig::from_home()?;
-                    ainb_plugin_notifyd::run_daemon(config).await
-                }
-                Verb::Stop => {
-                    let paths = Paths::from_home()?;
-                    match ainb_plugin_notifyd::pid::read(&paths.pid)? {
-                        Some(p) if ainb_plugin_notifyd::pid::is_running(p) => {
-                            use nix::sys::signal::{Signal, kill};
-                            use nix::unistd::Pid;
-                            kill(Pid::from_raw(p as i32), Signal::SIGTERM)?;
-                            println!("sent SIGTERM to ainb-notifyd (pid {p})");
-                        }
-                        Some(p) => {
-                            std::fs::remove_file(&paths.pid).ok();
-                            println!("no live daemon (stale pid {p} cleaned up)");
-                        }
-                        None => println!("no daemon running"),
-                    }
-                    Ok(())
-                }
-                Verb::Install(agents) => {
-                    let paths = Paths::from_home()?;
-                    let record = ainb_plugin_notifyd::install_for(&paths, &agents)?;
-                    println!("installed for: {:?}", record.agents);
-                    Ok(())
-                }
-                Verb::Uninstall(agents) => {
-                    let paths = Paths::from_home()?;
-                    ainb_plugin_notifyd::uninstall(&paths, &agents)?;
-                    println!("uninstalled: {agents:?}");
-                    Ok(())
-                }
-                Verb::Status => {
-                    let paths = Paths::from_home()?;
-                    for r in ainb_plugin_notifyd::status(&paths)? {
-                        println!(
-                            "{:<8} installed={:<5} hook_ok={:<5} socket_ok={:<5} last={}",
-                            r.agent,
-                            r.installed,
-                            r.hook_script_ok,
-                            r.socket_ok,
-                            if r.last_event.is_empty() { "-" } else { &r.last_event }
-                        );
-                    }
-                    Ok(())
-                }
+                Verb::Run => cli::cmd_run().await,
+                Verb::Stop => cli::cmd_stop(),
+                Verb::Install(a) => cli::cmd_install(&a),
+                Verb::Uninstall(a) => cli::cmd_uninstall(&a),
+                Verb::Status => cli::cmd_status(),
             }
         })
     }

@@ -23,6 +23,7 @@
 #![deny(missing_docs)]
 #![allow(clippy::too_many_lines)]
 
+pub mod cli;
 pub mod envelope;
 pub mod fallback;
 pub mod install;
