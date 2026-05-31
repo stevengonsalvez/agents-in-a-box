@@ -34,6 +34,13 @@ ulid = "1"
 sha2 = "0.10"
 subtle = "2.5"
 rand = "0.8"
+# P8.6: the structured-log reader (`logs` module) is the one deliberate IO
+# exception to this crate's no-IO charter — it globs + reads the daemon's
+# `daemon.<date>` log files so the `ainb hangar logs tail` CLI and the TUI
+# `LogsScreen` share one parser. `dirs` resolves the default `~/.ainb` home the
+# same way `ainb-hangar-daemon::hangar_dir` does (without a dep on the daemon,
+# which the plugin can't take).
+dirs = { workspace = true }
 
 [features]
 # Exposes the deterministic test doubles (`FixedClock`, `FixedIdGen`) to
@@ -43,6 +50,9 @@ test-support = []
 
 [dev-dependencies]
 serde_json = { workspace = true }
+# P8.6: the `logs` reader tests seed temp `daemon.<date>` files to exercise the
+# glob + bounded-tail + level-filter paths.
+tempfile = { workspace = true }
 
 # Local lint config rather than `workspace = true`: this matches the sibling
 # ainb-hangar-store crate. The workspace-level lints would declare lint groups

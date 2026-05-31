@@ -24,6 +24,9 @@ pub mod env_policy;
 pub mod idgen;
 /// Strongly-typed entity id newtypes with a non-empty invariant.
 pub mod ids;
+/// Structured-log line model + `daemon.<date>` reader shared by the
+/// `ainb hangar logs tail` CLI verb and the TUI `LogsScreen` (P8.6).
+pub mod logs;
 /// Skill domain vocabulary: normalised [`skill::SkillName`], the
 /// [`skill::SkillWithFiles`] aggregate, and ordered file inputs.
 pub mod skill;
