@@ -4,7 +4,9 @@
 //! render (POSITIVE markers), paired with a NEGATIVE placeholder check that we are
 //! not stuck on a loading/empty screen. Forward (`g` → hangar issue list) is
 //! paired with a return navigation (`,` → settings → `1` → back to issue list)
-//! so a one-way key swallow can't pass silently.
+//! so a one-way key swallow can't pass silently. The settings hop is detected on
+//! a Settings-body-only marker (`Providers`), not the persistent tab strip — the
+//! `[D]Daemon` tab entry P8.5 added is present on every screen.
 //!
 //! Runs for real when tmux + the built binaries + the staged plugin are present;
 //! SKIPs gracefully otherwise (see `tripwire_p4_common.rs`).
@@ -32,9 +34,18 @@ fn issue_list_renders_seeded_issues() {
     assert!(!landing.contains("No issues"), "empty state shown:\n{landing}");
 
     // Return navigation: leave to settings (`,`) then back to issue list (`1`).
+    //
+    // Detect the Settings *body*, not the tab strip. P8.5 (`d0a81fa`) added a
+    // `[D]Daemon` entry to the persistent tab strip rendered on EVERY screen, so
+    // a bare `contains("Daemon")` now matches the issue-list landing screen too —
+    // it would fire before `,` took effect and capture the issue list. Gate on a
+    // Settings-body-only section header (`Providers`, which is not a tab) AND the
+    // section word so we only proceed once the body actually switched.
     sess.send_key(",");
     let settings = sess
-        .poll_capture(Instant::now() + Duration::from_secs(10), |c| c.contains("Daemon"))
+        .poll_capture(Instant::now() + Duration::from_secs(10), |c| {
+            c.contains("Daemon") && c.contains("Providers")
+        })
         .expect("settings never rendered on forward nav");
     assert!(!settings.contains("Refactor API"), "issue list bled into settings:\n{settings}");
 
