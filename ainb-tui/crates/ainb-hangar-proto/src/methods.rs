@@ -132,6 +132,17 @@ pub const HANGAR_TASK_TRANSITION: &str = "hangar/task_transition";
 /// settings daemon-connection section (P4.7).
 pub const HANGAR_HEALTH: &str = "hangar/health";
 
+/// `hangar/daemon_health` — snapshot the daemon-health pane (P8.5).
+///
+/// Params: `{ workspace_id: String }`. Result: a
+/// [`crate::settings::DaemonHealthSnapshot`] — the registered runtimes (from the
+/// `agent_runtime` table, workspace-scoped), the bounded claim-slot cache
+/// occupancy + the concurrent-task count (`agent_task_queue`
+/// `dispatched`/`running`), and the daemon's rolling 60-second task-throughput
+/// window (an in-memory ring buffer). Drives the daemon-health screen (`D`). A
+/// view-layer snapshot, **not** a persisted aggregate.
+pub const HANGAR_DAEMON_HEALTH: &str = "hangar/daemon_health";
+
 /// `ping` — bare liveness probe. Params: `{}`. Result: `{}`.
 pub const PING: &str = "ping";
 
@@ -158,6 +169,7 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_TASKS_LIST,
     HANGAR_TASK_TRANSITION,
     HANGAR_HEALTH,
+    HANGAR_DAEMON_HEALTH,
     PING,
 ];
 
@@ -212,6 +224,7 @@ mod tests {
             HANGAR_TASKS_LIST,
             HANGAR_TASK_TRANSITION,
             HANGAR_HEALTH,
+            HANGAR_DAEMON_HEALTH,
         ] {
             assert!(m.starts_with("hangar/"), "{m:?} not under hangar/");
         }
@@ -243,6 +256,7 @@ mod tests {
             HANGAR_TASKS_LIST,
             HANGAR_TASK_TRANSITION,
             HANGAR_HEALTH,
+            HANGAR_DAEMON_HEALTH,
             PING,
         ];
         for m in declared {

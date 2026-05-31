@@ -67,9 +67,112 @@ pub struct WorkspaceRow {
     pub default: bool,
 }
 
+/// The number of throughput samples in a daemon-health snapshot — one per second
+/// over the last rolling minute (P8.5). The daemon's ring buffer (and the
+/// sparkline that renders it) is fixed at this width.
+pub const THROUGHPUT_WINDOW: usize = 60;
+
+/// One second's task-completion tally in the daemon's rolling throughput window
+/// (`hangar/daemon_health`, P8.5).
+///
+/// The dual-dim sparkline encodes both signals independently: the cell **height**
+/// is the total throughput (`completed + failed`), and the **red proportion** of
+/// the cell is the failure rate (`failed / (completed + failed)`). A bucket with
+/// no terminal tasks renders an empty (zero-height) cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThroughputSample {
+    /// Bucket timestamp (epoch seconds) — the second this tally covers.
+    pub ts: i64,
+    /// Tasks that finished successfully (`done`) in this second.
+    pub completed: u32,
+    /// Tasks that finished unsuccessfully (`failed` / `cancelled`) in this second.
+    pub failed: u32,
+}
+
+/// The daemon's bounded claim-slot cache occupancy (`hangar/daemon_health`,
+/// P8.5).
+///
+/// `used / capacity` slots are in use; the health pane renders it as a fill bar.
+/// `capacity` is the daemon's configured concurrency ceiling (a fixed view-layer
+/// figure, not a tuned metric).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaimCache {
+    /// Slots currently in use.
+    pub used: u32,
+    /// Total slot capacity.
+    pub capacity: u32,
+}
+
+/// One registered runtime endpoint in the daemon-health pane (`hangar/daemon_health`,
+/// P8.5).
+///
+/// Flattened from an `agent_runtime` row (workspace-scoped): the provider, its
+/// liveness status, and the daemon pid hosting it. `connected` folds the raw
+/// status token (`"online"`) into a boolean the pane renders as a presence dot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeHealthRow {
+    /// Provider name (e.g. `"claude"`).
+    pub provider: String,
+    /// Whether the runtime is connected (`status == "online"`).
+    pub connected: bool,
+    /// The daemon process id hosting this runtime.
+    pub pid: u32,
+}
+
+/// The daemon-health snapshot (`hangar/daemon_health`, P8.5): the view-layer
+/// health pane's source of truth.
+///
+/// All in-memory + read-model facts the daemon-health screen (`D`) renders:
+/// registered runtimes (from the `agent_runtime` table), the bounded claim-slot
+/// cache occupancy, the count of concurrently-executing tasks (from
+/// `agent_task_queue`), and the rolling 60-second task-throughput window. This is
+/// a snapshot, **not** an aggregate table — the daemon never persists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonHealthSnapshot {
+    /// Registered provider runtimes in the workspace.
+    pub runtimes: Vec<RuntimeHealthRow>,
+    /// The bounded claim-slot cache occupancy.
+    pub claim_cache: ClaimCache,
+    /// Tasks currently `dispatched` or `running`.
+    pub concurrent_tasks: u32,
+    /// The rolling per-second throughput window — exactly [`THROUGHPUT_WINDOW`]
+    /// samples, oldest-first, the last sample being the most recent whole second.
+    pub task_throughput_60s: Vec<ThroughputSample>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The daemon-health snapshot round-trips through JSON, preserving the full
+    /// 60-sample throughput window and the dual-dim per-sample tallies (P8.5).
+    #[test]
+    fn daemon_health_snapshot_roundtrips() {
+        let snap = DaemonHealthSnapshot {
+            runtimes: vec![RuntimeHealthRow {
+                provider: "claude".into(),
+                connected: true,
+                pid: 14829,
+            }],
+            claim_cache: ClaimCache {
+                used: 12,
+                capacity: 64,
+            },
+            concurrent_tasks: 3,
+            task_throughput_60s: (0..THROUGHPUT_WINDOW)
+                .map(|i| ThroughputSample {
+                    ts: 1_700_000_000 + i64::try_from(i).unwrap(),
+                    completed: u32::try_from(i).unwrap(),
+                    failed: u32::from(i == 30),
+                })
+                .collect(),
+        };
+        let s = serde_json::to_string(&snap).unwrap();
+        let back: DaemonHealthSnapshot = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, snap);
+        assert_eq!(back.task_throughput_60s.len(), THROUGHPUT_WINDOW);
+        assert_eq!(back.task_throughput_60s[30].failed, 1);
+    }
 
     /// The settings snapshots round-trip through JSON.
     #[test]
