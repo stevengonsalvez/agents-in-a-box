@@ -513,10 +513,8 @@ mod tests {
         // over 'I' (Shift+i) to avoid the case-pair confusion with
         // Stats ('i') — both opening different screens off the same
         // letter was a UX bug.
-        let collisions = all
-            .iter()
-            .filter(|i| **i != SidebarItem::Inbox && i.shortcut() == "b")
-            .count();
+        let collisions =
+            all.iter().filter(|i| **i != SidebarItem::Inbox && i.shortcut() == "b").count();
         assert_eq!(collisions, 0, "sidebar shortcut 'b' collides");
     }
 
