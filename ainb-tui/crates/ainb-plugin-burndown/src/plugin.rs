@@ -228,6 +228,44 @@ impl Plugin for BurndownPlugin {
                     .await;
                 true
             }
+            // Yank the FULL (untruncated) focused zoom-table row to the
+            // clipboard. Data-dependent (needs `self.data` + the same
+            // filter view the table renders), so it lives here rather
+            // than in the pure dispatch. The visible cells are clipped
+            // to the column width — the clipboard gets the real path /
+            // session id regardless.
+            KeyCode::Char { ch: 'y' } if self.ui.is_zoomed() && !self.ui.zoom_search_active => {
+                if let Some(panel) = self.ui.zoom {
+                    // The on-screen rows reflect the cached filtered
+                    // view when a filter is active, else the raw
+                    // snapshot — mirror exactly what the renderer shows.
+                    let data = self.cached_filtered().or_else(|| self.data.clone());
+                    if let Some(data) = data {
+                        let rows = crate::ui::zoom_rows(&data, panel, &self.ui.zoom_search_query);
+                        let idx = self.ui.focus_row.min(rows.len().saturating_sub(1));
+                        if let Some(row) = rows.get(idx) {
+                            let text = row.join("\t");
+                            match copy_to_clipboard(&text) {
+                                Ok(()) => {
+                                    self.ui.copy_flash =
+                                        Some("✓ copied row to clipboard".to_string());
+                                }
+                                Err(e) => {
+                                    // Clipboard may be unavailable on
+                                    // headless Linux — degrade, don't
+                                    // crash. Surface it in the log only.
+                                    let _ = host
+                                        .log_info(format!("burndown: clipboard copy failed: {e}"))
+                                        .await;
+                                }
+                            }
+                        }
+                    }
+                }
+                // Always treat `y` as handled so generation bumps and the
+                // flash (or the no-op) renders.
+                true
+            }
             _ => self.dispatch_key_pure(&params.key.code),
         };
         // Plan-mandated invariant: only bump generation when the
@@ -795,6 +833,20 @@ impl BurndownPlugin {
     fn dispatch_key_pure(&mut self, code: &KeyCode) -> bool {
         use chrono::{Datelike, Local};
 
+        // The copy-confirmation flash is one-shot: any handled key that
+        // isn't `y` clears it so it disappears on the next interaction.
+        // (`y` lives in the async `handle_key`, which sets the flash and
+        // never routes here, so we can clear unconditionally.)
+        self.ui.copy_flash = None;
+
+        // Column count of the zoomed panel (0 when not zoomed / on a
+        // non-table panel). Used to clamp the column-nav/resize keys.
+        let zoom_n_cols = self
+            .ui
+            .zoom
+            .map(crate::ui::zoom_col_count)
+            .unwrap_or(0);
+
         match *code {
             KeyCode::Char { ch: '1' } => self.ui.set_period(UsagePeriod::Today),
             KeyCode::Char { ch: '2' } => self.ui.set_period(UsagePeriod::Week),
@@ -820,6 +872,40 @@ impl BurndownPlugin {
             KeyCode::Char { ch: 'z' } => self.ui.toggle_zoom(),
             KeyCode::Char { ch: '/' } if self.ui.is_zoomed() => self.ui.zoom_begin_search(),
             KeyCode::Char { ch: 'd' } if self.ui.is_zoomed() => self.ui.toggle_zoom_detail(),
+
+            // ── Zoom-table column focus / resize (zoomed only). Guarded
+            // with `!zoom_search_active` so these printable keys feed the
+            // `/` search box rather than the resize handler while typing.
+            // When NOT zoomed they fall through (return false), leaving
+            // `[ ] < > =` unbound on the dashboard.
+            KeyCode::Char { ch: '[' } if self.ui.is_zoomed() && !self.ui.zoom_search_active => {
+                self.ui.zoom_focus_col_prev()
+            }
+            KeyCode::Char { ch: ']' } if self.ui.is_zoomed() && !self.ui.zoom_search_active => {
+                self.ui.zoom_focus_col_next(zoom_n_cols)
+            }
+            KeyCode::Char { ch: '<' } if self.ui.is_zoomed() && !self.ui.zoom_search_active => {
+                if let Some(panel) = self.ui.zoom {
+                    self.ui.zoom_shrink_col(panel, zoom_n_cols);
+                }
+            }
+            KeyCode::Char { ch: '>' } if self.ui.is_zoomed() && !self.ui.zoom_search_active => {
+                if let Some(panel) = self.ui.zoom {
+                    self.ui.zoom_grow_col(panel, zoom_n_cols);
+                }
+            }
+            KeyCode::Char { ch: '=' } if self.ui.is_zoomed() && !self.ui.zoom_search_active => {
+                self.ui.zoom_reset_cols()
+            }
+
+            // ── Zoom-table row navigation (zoomed only). Arrows are safe
+            // even while searching; `j` is guarded like the resize keys
+            // so it can be typed into the search box.
+            KeyCode::Up if self.ui.is_zoomed() => self.ui.zoom_row_up(),
+            KeyCode::Down if self.ui.is_zoomed() => self.ui.zoom_row_down(),
+            KeyCode::Char { ch: 'j' } if self.ui.is_zoomed() && !self.ui.zoom_search_active => {
+                self.ui.zoom_row_down()
+            }
             KeyCode::Enter => {
                 // `commit_focused_row` resolves the row through
                 // `filtered_data()` which reads `self.ui.data`. The
@@ -850,11 +936,30 @@ impl BurndownPlugin {
                 }
             }
             KeyCode::Char { ch: 'p' } => self.ui.cycle_provider_filter(),
-            KeyCode::Char { ch: 'k' } => self.ui.scroll_up(),
+            KeyCode::Char { ch: 'k' } => {
+                // In zoom: move the focused table row up. On the
+                // dashboard: scroll the panel up (legacy behavior).
+                if self.ui.is_zoomed() {
+                    self.ui.zoom_row_up();
+                } else {
+                    self.ui.scroll_up();
+                }
+            }
             _ => return false,
         }
         true
     }
+}
+
+/// Copy `text` to the system clipboard via `arboard`.
+///
+/// Returns `Err(message)` on any failure (no clipboard backend, e.g. a
+/// headless Linux box with neither X11 nor Wayland) so the caller can
+/// degrade gracefully — clipboard access is best-effort, never fatal.
+fn copy_to_clipboard(text: &str) -> std::result::Result<(), String> {
+    arboard::Clipboard::new()
+        .and_then(|mut c| c.set_text(text.to_string()))
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -1074,6 +1179,71 @@ mod handle_key_dispatch_tests {
             g0 + 1,
             "unmapped key must NOT bump generation"
         );
+    }
+
+    /// Zoom into a focusable panel so the column-nav / resize / row-nav
+    /// keys are live. Returns the plugin already in zoom mode.
+    fn zoomed_plugin() -> BurndownPlugin {
+        let mut p = BurndownPlugin::default();
+        // Tab focuses the first panel; `z` zooms it.
+        assert!(p.dispatch_key_pure(&KeyCode::Tab));
+        assert!(p.dispatch_key_pure(&ch('z')));
+        assert!(p.ui.is_zoomed(), "setup: plugin must be zoomed");
+        p
+    }
+
+    #[test]
+    fn zoomed_bracket_advances_focus_col() {
+        let mut p = zoomed_plugin();
+        assert_eq!(p.ui.zoom_focus_col, 0);
+        assert!(p.dispatch_key_pure(&ch(']')), "] must be handled when zoomed");
+        assert_eq!(p.ui.zoom_focus_col, 1, "] advances column focus");
+        assert!(p.dispatch_key_pure(&ch('[')), "[ must be handled when zoomed");
+        assert_eq!(p.ui.zoom_focus_col, 0, "[ retreats column focus");
+    }
+
+    #[test]
+    fn zoomed_gt_grows_focused_column_delta() {
+        let mut p = zoomed_plugin();
+        // Focus col 1, then grow it.
+        assert!(p.dispatch_key_pure(&ch(']')));
+        assert!(p.dispatch_key_pure(&ch('>')), "> must be handled when zoomed");
+        assert_eq!(
+            p.ui.zoom_col_deltas[1], 4,
+            "> widens the focused column by COL_RESIZE_STEP (4)"
+        );
+        assert_eq!(p.ui.zoom_col_deltas[0], 0, "other columns untouched");
+    }
+
+    #[test]
+    fn zoomed_k_and_up_move_focus_row_up() {
+        let mut p = zoomed_plugin();
+        p.ui.focus_row = 5;
+        assert!(p.dispatch_key_pure(&ch('k')), "k handled when zoomed");
+        assert_eq!(p.ui.focus_row, 4, "k moves focus row up in zoom");
+        assert!(p.dispatch_key_pure(&KeyCode::Up), "Up handled when zoomed");
+        assert_eq!(p.ui.focus_row, 3, "Up moves focus row up in zoom");
+        // Down moves it back.
+        assert!(p.dispatch_key_pure(&KeyCode::Down), "Down handled when zoomed");
+        assert_eq!(p.ui.focus_row, 4, "Down moves focus row down in zoom");
+    }
+
+    #[test]
+    fn resize_keys_unbound_on_dashboard() {
+        // Not zoomed: the column keys must fall through (return false)
+        // so they keep their no-op behavior on the dashboard.
+        let mut p = BurndownPlugin::default();
+        assert!(!p.ui.is_zoomed());
+        for k in ['[', ']', '<', '>', '='] {
+            assert!(
+                !p.dispatch_key_pure(&ch(k)),
+                "`{k}` must be unhandled on the dashboard"
+            );
+        }
+        // Up / Down are also unbound off-zoom (they don't map to
+        // anything on the dashboard).
+        assert!(!p.dispatch_key_pure(&KeyCode::Up));
+        assert!(!p.dispatch_key_pure(&KeyCode::Down));
     }
 }
 

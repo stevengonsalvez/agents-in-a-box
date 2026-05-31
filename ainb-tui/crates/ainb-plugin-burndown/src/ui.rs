@@ -30,6 +30,7 @@ const DARK_BG: Color = Color::Rgb(25, 25, 35);
 const PANEL_BG: Color = Color::Rgb(30, 30, 40);
 const SOFT_WHITE: Color = Color::Rgb(220, 220, 230);
 const MUTED_GRAY: Color = Color::Rgb(120, 120, 140);
+const LIST_HIGHLIGHT_BG: Color = Color::Rgb(40, 40, 60);
 const BAR_COLOR: Color = Color::Rgb(80, 160, 230);
 const BAR_HIGH: Color = Color::Rgb(230, 120, 80);
 const BAR_MED: Color = Color::Rgb(200, 180, 80);
@@ -352,7 +353,33 @@ pub struct UsageViewState {
     /// recompute inline" (the default for unit tests and the CLI
     /// snapshot path, both of which set this to `None`).
     pub cached_filtered: Option<std::sync::Arc<UsageData>>,
+    /// Index of the zoom-table column currently targeted by the
+    /// `[`/`]` column-focus keys and the `<`/`>` resize keys. Clamped
+    /// to the column count at render time. Only meaningful while
+    /// `zoom_cols_panel == zoom`.
+    pub zoom_focus_col: usize,
+    /// Signed per-column width adjustment applied on top of the
+    /// auto-fit solve. Index-aligned with the zoomed panel's columns.
+    /// `<`/`>` nudge `zoom_col_deltas[zoom_focus_col]`; `=` zeroes the
+    /// whole vector. Empty until the first column-nav/resize keypress
+    /// (lazy init via `zoom_sync_cols`).
+    pub zoom_col_deltas: Vec<i16>,
+    /// Which panel `zoom_focus_col` / `zoom_col_deltas` belong to. When
+    /// the user zooms a *different* panel the deltas reset (a 6-col
+    /// table's deltas are meaningless for an 8-col one). `None` until
+    /// the first resize interaction.
+    pub zoom_cols_panel: Option<UsagePanel>,
+    /// Transient one-shot confirmation shown in the zoom breadcrumb
+    /// after a successful `y` clipboard copy. Cleared on the next
+    /// handled key so it flashes briefly then disappears.
+    pub copy_flash: Option<String>,
 }
+
+/// Per-column width step applied by `<` / `>` in the zoom table.
+const COL_RESIZE_STEP: i16 = 4;
+/// Floor for any solved zoom column width — columns never shrink below
+/// this even after large negative deltas, so a header is always legible.
+const MIN_COL: u16 = 3;
 
 impl Default for UsageViewState {
     fn default() -> Self {
@@ -379,6 +406,10 @@ impl Default for UsageViewState {
             oldest_call_day: None,
             scan_progress: None,
             cached_filtered: None,
+            zoom_focus_col: 0,
+            zoom_col_deltas: Vec::new(),
+            zoom_cols_panel: None,
+            copy_flash: None,
         }
     }
 }
@@ -814,6 +845,13 @@ impl UsageViewState {
             self.zoom_search_active = false;
             self.zoom_search_query.clear();
             self.zoom_detail_open = false;
+            self.copy_flash = None;
+            // Initialise column bookkeeping for the panel we're opening
+            // so the first `[`/`]` navigation isn't clobbered by the
+            // lazy "panel changed" reset on the first `<`/`>` resize.
+            self.zoom_focus_col = 0;
+            self.zoom_col_deltas = vec![0; zoom_col_count(target)];
+            self.zoom_cols_panel = Some(target);
         }
     }
 
@@ -824,6 +862,12 @@ impl UsageViewState {
         self.zoom_search_active = false;
         self.zoom_search_query.clear();
         self.zoom_detail_open = false;
+        // Reset column-resize bookkeeping so the next zoom starts from a
+        // clean auto-fit (deltas from the previous panel are stale).
+        self.zoom_focus_col = 0;
+        self.zoom_col_deltas.clear();
+        self.zoom_cols_panel = None;
+        self.copy_flash = None;
     }
 
     /// Begin fuzzy-search input inside the zoomed panel. Preserves the
@@ -889,6 +933,76 @@ impl UsageViewState {
         }
         self.exit_zoom();
         true
+    }
+
+    /// Ensure the column-resize bookkeeping matches the panel currently
+    /// being rendered. When the focused panel changes the prior deltas
+    /// are meaningless (a 6-col table's deltas don't map onto an 8-col
+    /// one), so reset focus to column 0 and zero a fresh delta vector.
+    ///
+    /// When only the *delta vector* is stale (e.g. the user pressed
+    /// `[`/`]` to move column focus before the first `<`/`>` — so the
+    /// vector is still lazily empty for the SAME panel) we (re)allocate
+    /// the zeroed vector but PRESERVE the already-chosen `zoom_focus_col`
+    /// (clamped to the column count). Resetting focus here would snap it
+    /// back to column 0 on the first resize and silently discard the
+    /// user's column navigation.
+    fn zoom_sync_cols(&mut self, panel: UsagePanel, n_cols: usize) {
+        if self.zoom_cols_panel != Some(panel) {
+            self.zoom_focus_col = 0;
+            self.zoom_col_deltas = vec![0; n_cols];
+            self.zoom_cols_panel = Some(panel);
+        } else if self.zoom_col_deltas.len() != n_cols {
+            self.zoom_col_deltas = vec![0; n_cols];
+            self.zoom_focus_col = self.zoom_focus_col.min(n_cols.saturating_sub(1));
+        }
+    }
+
+    /// Move the resize/focus cursor one column left (`[`).
+    pub fn zoom_focus_col_prev(&mut self) {
+        self.zoom_focus_col = self.zoom_focus_col.saturating_sub(1);
+    }
+
+    /// Move the resize/focus cursor one column right (`]`), clamped to
+    /// the last column.
+    pub fn zoom_focus_col_next(&mut self, n_cols: usize) {
+        self.zoom_focus_col = (self.zoom_focus_col + 1).min(n_cols.saturating_sub(1));
+    }
+
+    /// Widen the focused column by [`COL_RESIZE_STEP`] (`>`).
+    pub fn zoom_grow_col(&mut self, panel: UsagePanel, n_cols: usize) {
+        self.zoom_sync_cols(panel, n_cols);
+        if let Some(d) = self.zoom_col_deltas.get_mut(self.zoom_focus_col) {
+            *d = d.saturating_add(COL_RESIZE_STEP);
+        }
+    }
+
+    /// Narrow the focused column by [`COL_RESIZE_STEP`] (`<`). Negative
+    /// deltas are allowed; the render-time solve clamps the final width
+    /// to [`MIN_COL`].
+    pub fn zoom_shrink_col(&mut self, panel: UsagePanel, n_cols: usize) {
+        self.zoom_sync_cols(panel, n_cols);
+        if let Some(d) = self.zoom_col_deltas.get_mut(self.zoom_focus_col) {
+            *d = d.saturating_sub(COL_RESIZE_STEP);
+        }
+    }
+
+    /// Clear every manual width delta, returning the table to pure
+    /// auto-fit (`=`). Leaves `zoom_focus_col` where it is.
+    pub fn zoom_reset_cols(&mut self) {
+        self.zoom_col_deltas.iter_mut().for_each(|d| *d = 0);
+    }
+
+    /// Move the focused zoom-table row up one (`↑` / `k`).
+    pub fn zoom_row_up(&mut self) {
+        self.focus_row = self.focus_row.saturating_sub(1);
+    }
+
+    /// Move the focused zoom-table row down one (`↓` / `j`). The render
+    /// path clamps `focus_row` to the live row count, matching the
+    /// dashboard's "clamped at render time" contract — so no max needed.
+    pub fn zoom_row_down(&mut self) {
+        self.focus_row = self.focus_row.saturating_add(1);
     }
 }
 
@@ -1621,7 +1735,7 @@ fn render_burndown_zoomed(
         ])
         .split(area);
 
-    render_zoom_breadcrumb(buf, vertical[0], panel);
+    render_zoom_breadcrumb(buf, vertical[0], state, panel);
     if search_h > 0 {
         render_zoom_search_bar(buf, vertical[1], state);
     }
@@ -1645,19 +1759,29 @@ fn render_burndown_zoomed(
     }
 }
 
-fn render_zoom_breadcrumb(buf: &mut Buffer, area: Rect, panel: UsagePanel) {
-    let line = Line::from(vec![
+fn render_zoom_breadcrumb(buf: &mut Buffer, area: Rect, state: &UsageViewState, panel: UsagePanel) {
+    let mut spans = vec![
         Span::styled(
             format!(" [ Zoomed: {} ] ", panel.title()),
             Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
         ),
-        Span::styled("   ", Style::default()),
+        Span::styled("  ", Style::default()),
         Span::styled(
-            "◀ BkSp unzoom · Esc home ▶",
+            "↑↓ row · [ ] col · < > resize · y copy · = reset · / search · BkSp unzoom · Esc home",
             Style::default().fg(MUTED_GRAY),
         ),
-    ]);
-    ratatui::widgets::Widget::render(Paragraph::new(line), area, buf);
+    ];
+    // Transient confirmation after a `y` clipboard copy.
+    if let Some(msg) = &state.copy_flash {
+        spans.push(Span::styled("  ", Style::default()));
+        spans.push(Span::styled(
+            msg.clone(),
+            Style::default()
+                .fg(SELECTION_GREEN)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    ratatui::widgets::Widget::render(Paragraph::new(Line::from(spans)), area, buf);
 }
 
 /// Score `haystack` against `query` with nucleo-matcher; `None` means
@@ -1757,376 +1881,442 @@ fn render_zoom_panel_body(
     state: &UsageViewState,
     panel: UsagePanel,
 ) {
-    let q = state.zoom_search_query.as_str();
-    match panel {
-        UsagePanel::ByProject => render_zoom_by_project(buf, area, data, state, q),
-        UsagePanel::ByBranch => render_zoom_by_branch(buf, area, data, state, q),
-        UsagePanel::TopSessions => render_zoom_top_sessions(buf, area, data, state, q),
-        UsagePanel::Live => render_zoom_top_sessions(buf, area, data, state, q),
-        UsagePanel::ByModel => render_zoom_by_model(buf, area, data, state, q),
-        UsagePanel::ByActivity => render_zoom_by_activity(buf, area, data, state, q),
-        UsagePanel::DailyActivity => render_zoom_daily_activity(buf, area, data, state, q),
-        UsagePanel::Leaderboard => render_zoom_by_project(buf, area, data, state, q),
-        UsagePanel::CoreTools => render_zoom_named(buf, area, "Core Tools", &data.tools, state, q),
-        UsagePanel::ShellCommands => {
-            render_zoom_named(buf, area, "Shell Commands", &data.shell_commands, state, q)
+    // Optimize / Budget are summary cards, not row tables: keep their
+    // bespoke fullscreen renderers. Everything else is a spec-driven
+    // table — one helper, auto-fit + resizable columns + row focus.
+    let cols = zoom_cols(panel);
+    if cols.is_empty() {
+        let focus = FocusCtx::for_panel(state, panel);
+        if matches!(panel, UsagePanel::Optimize) {
+            render_optimize_compact_panel(buf, area, data, focus);
+        } else {
+            render_budget_panel(buf, area, data, &state.period, focus);
         }
-        UsagePanel::McpServers => {
-            render_zoom_named(buf, area, "MCP Servers", &data.mcp_servers, state, q)
-        }
-        UsagePanel::Optimize | UsagePanel::Budget => {
-            // These panels are summary cards rather than row lists. We
-            // reuse the standard renderers in a fullscreen frame.
-            let focus = FocusCtx::for_panel(state, panel);
-            if matches!(panel, UsagePanel::Optimize) {
-                render_optimize_compact_panel(buf, area, data, focus);
-            } else {
-                render_budget_panel(buf, area, data, &state.period, focus);
-            }
-        }
+        return;
+    }
+    let rows = zoom_rows(data, panel, state.zoom_search_query.as_str());
+    render_zoom_table(buf, area, &cols, &rows, state, panel);
+}
+
+/// How a single zoom-table column claims horizontal space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ColSizing {
+    /// Never grows — used for `#`, Cost, Tokens, Calls, dates, etc.
+    Fixed(u16),
+    /// Absorbs leftover terminal width after the fixed columns are
+    /// satisfied, distributed by `weight` and floored at `min`.
+    Flex { min: u16, weight: u16 },
+}
+
+/// One column in a zoomed usage table: its header label and how it
+/// sizes. Data-free — `zoom_cols` returns these statically per panel.
+#[derive(Debug, Clone, Copy)]
+struct ZoomCol {
+    header: &'static str,
+    sizing: ColSizing,
+}
+
+const fn fixed(header: &'static str, w: u16) -> ZoomCol {
+    ZoomCol {
+        header,
+        sizing: ColSizing::Fixed(w),
     }
 }
 
-// TODO(refactor): the 5 render_zoom_* fns below all build a header,
-// truncate to area.height-2 visible rows, build per-row cells, and
-// hand a Table back to the frame. Extract a `render_zoom_table` helper
-// taking `ZoomTableSpec { headers, widths, rows }` once snapshot tests
-// exist to assert visual identity — without them a refactor risks
-// silent column-spacing/header-style drift.
-fn render_zoom_by_project(
-    buf: &mut Buffer,
-    area: Rect,
-    data: &UsageData,
-    _state: &UsageViewState,
-    query: &str,
-) {
-    let rows = apply_zoom_filter(&data.projects, query, |p| p.name.clone());
-    let header = Row::new(vec![
-        "#",
-        "Project",
-        "Cost",
-        "Tokens",
-        "Calls",
-        "Sessions",
-        "First seen",
-        "Last seen",
-    ])
-    .style(Style::default().fg(GOLD).add_modifier(Modifier::BOLD))
-    .bottom_margin(1);
-
-    let visible_rows = area.height.saturating_sub(2) as usize;
-    let table_rows: Vec<Row> = rows
-        .iter()
-        .enumerate()
-        .take(visible_rows)
-        .map(|(idx, project)| {
-            let b = &project.bucket;
-            let (first, last) = project_seen_window(data, &project.name);
-            Row::new(vec![
-                format!("{}", idx + 1),
-                project.path.clone(),
-                format_cost(b.cost_usd),
-                format_tokens_short(b.total()),
-                b.call_count.to_string(),
-                b.session_count.to_string(),
-                first,
-                last,
-            ])
-            .style(Style::default().fg(SOFT_WHITE))
-        })
-        .collect();
-
-    let widths = [
-        Constraint::Length(4),
-        Constraint::Min(20),
-        Constraint::Length(10),
-        Constraint::Length(10),
-        Constraint::Length(8),
-        Constraint::Length(8),
-        Constraint::Length(11),
-        Constraint::Length(11),
-    ];
-    let table = Table::new(table_rows, widths).header(header).column_spacing(1);
-    ratatui::widgets::Widget::render(table, area, buf);
+const fn flex(header: &'static str, min: u16, weight: u16) -> ZoomCol {
+    ZoomCol {
+        header,
+        sizing: ColSizing::Flex { min, weight },
+    }
 }
 
-/// Zoom view for the By Branch panel. `BranchUsage` carries only the
-/// branch label and a `TokenBucket`, so the zoom table is intentionally
-/// narrow — `Branch | Tokens | Cost` is everything we have. Search
-/// matches on the branch name.
-fn render_zoom_by_branch(
-    buf: &mut Buffer,
-    area: Rect,
-    data: &UsageData,
-    _state: &UsageViewState,
-    query: &str,
-) {
-    let rows = apply_zoom_filter(&data.branches, query, |b| b.branch.clone());
-    let header = Row::new(vec!["#", "Branch", "Tokens", "Cost"])
-        .style(Style::default().fg(GOLD).add_modifier(Modifier::BOLD))
-        .bottom_margin(1);
-
-    let visible_rows = area.height.saturating_sub(2) as usize;
-    let table_rows: Vec<Row> = rows
-        .iter()
-        .enumerate()
-        .take(visible_rows)
-        .map(|(idx, row)| {
-            let b = &row.bucket;
-            Row::new(vec![
-                format!("{}", idx + 1),
-                row.branch.clone(),
-                format_tokens_short(b.total()),
-                format_cost(b.cost_usd),
-            ])
-            .style(Style::default().fg(SOFT_WHITE))
-        })
-        .collect();
-
-    let widths = [
-        Constraint::Length(4),
-        Constraint::Min(20),
-        Constraint::Length(10),
-        Constraint::Length(10),
-    ];
-    let table = Table::new(table_rows, widths).header(header).column_spacing(1);
-    ratatui::widgets::Widget::render(table, area, buf);
+/// Static column spec for a zoom panel. Encodes the exact headers and
+/// the sizing *intent* of the legacy per-panel renderers: the old
+/// `Constraint::Length(n)` maps to `Fixed(n)`, `Constraint::Min(n)` to
+/// `Flex{min:n, weight:..}`. Text columns flex to fill a wide terminal;
+/// numeric/date columns stay fixed. Optimize/Budget are summary cards,
+/// not tables, so they return an empty Vec.
+fn zoom_cols(panel: UsagePanel) -> Vec<ZoomCol> {
+    match panel {
+        UsagePanel::ByProject | UsagePanel::Leaderboard => vec![
+            fixed("#", 4),
+            flex("Project", 20, 1),
+            fixed("Cost", 10),
+            fixed("Tokens", 10),
+            fixed("Calls", 8),
+            fixed("Sessions", 8),
+            fixed("First seen", 11),
+            fixed("Last seen", 11),
+        ],
+        UsagePanel::ByBranch => vec![
+            fixed("#", 4),
+            flex("Branch", 20, 1),
+            fixed("Tokens", 10),
+            fixed("Cost", 10),
+        ],
+        UsagePanel::TopSessions | UsagePanel::Live => vec![
+            fixed("Provider", 8),
+            // Project gets the lion's share so long working-dir paths
+            // get room before the session id does.
+            flex("Project", 20, 3),
+            flex("Session", 18, 2),
+            fixed("Cost", 10),
+            fixed("Tokens", 8),
+            fixed("Calls", 7),
+            fixed("Duration", 8),
+            fixed("Last seen", 11),
+        ],
+        UsagePanel::ByModel => vec![
+            flex("Model", 20, 1),
+            fixed("Calls", 8),
+            fixed("Tokens", 10),
+            fixed("Cost", 10),
+            fixed("Cost/call", 11),
+            flex("Top projects", 20, 2),
+        ],
+        UsagePanel::ByActivity => vec![
+            flex("Activity", 14, 1),
+            fixed("Turns", 7),
+            fixed("Edit", 7),
+            fixed("1-shot", 7),
+            fixed("Retries", 8),
+            fixed("Tokens", 10),
+            fixed("Cost", 10),
+        ],
+        UsagePanel::DailyActivity => vec![
+            fixed("Date", 11),
+            fixed("Calls", 8),
+            fixed("Sessions", 9),
+            fixed("Projects", 9),
+            fixed("Tokens", 10),
+            fixed("Cost", 10),
+        ],
+        UsagePanel::CoreTools => vec![flex("Core Tools", 20, 1), fixed("Calls", 10)],
+        UsagePanel::ShellCommands => vec![flex("Shell Commands", 20, 1), fixed("Calls", 10)],
+        UsagePanel::McpServers => vec![flex("MCP Servers", 20, 1), fixed("Calls", 10)],
+        UsagePanel::Optimize | UsagePanel::Budget => Vec::new(),
+    }
 }
 
-fn render_zoom_top_sessions(
-    buf: &mut Buffer,
-    area: Rect,
-    data: &UsageData,
-    _state: &UsageViewState,
-    query: &str,
-) {
-    let rows = apply_zoom_filter(&data.sessions, query, |s| {
-        format!("{} {}", s.project, s.session_id)
-    });
-    let header = Row::new(vec![
-        "Provider",
-        "Project",
-        "Session",
-        "Cost",
-        "Tokens",
-        "Calls",
-        "Duration",
-        "Last seen",
-    ])
-    .style(Style::default().fg(GOLD).add_modifier(Modifier::BOLD))
-    .bottom_margin(1);
-
-    let visible_rows = area.height.saturating_sub(2) as usize;
-    let table_rows: Vec<Row> = rows
-        .iter()
-        .take(visible_rows)
-        .map(|sess| {
-            let b = &sess.bucket;
-            let dur = (sess.last_timestamp - sess.first_timestamp).num_seconds().max(0);
-            let dur_str = format_duration_min(dur as u64);
-            Row::new(vec![
-                sess.provider.clone(),
-                truncate_string(&sess.project, 24),
-                truncate_string(&sess.session_id, 18),
-                format_cost(b.cost_usd),
-                format_tokens_short(b.total()),
-                b.call_count.to_string(),
-                dur_str,
-                sess.last_timestamp.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string(),
-            ])
-            .style(Style::default().fg(SOFT_WHITE))
-        })
-        .collect();
-    let widths = [
-        Constraint::Length(8),
-        Constraint::Length(24),
-        Constraint::Length(18),
-        Constraint::Length(10),
-        Constraint::Length(10),
-        Constraint::Length(8),
-        Constraint::Length(10),
-        Constraint::Length(11),
-    ];
-    let table = Table::new(table_rows, widths).header(header).column_spacing(1);
-    ratatui::widgets::Widget::render(table, area, buf);
+/// Number of columns the given panel's zoom table has (0 for the
+/// non-table Optimize/Budget summary cards). Exposed for the plugin's
+/// key dispatch so it can clamp column-nav keys.
+pub fn zoom_col_count(panel: UsagePanel) -> usize {
+    zoom_cols(panel).len()
 }
 
-fn render_zoom_by_model(
-    buf: &mut Buffer,
-    area: Rect,
-    data: &UsageData,
-    _state: &UsageViewState,
-    query: &str,
-) {
-    let rows = apply_zoom_filter(&data.models, query, |m| m.model.clone());
-    let header = Row::new(vec![
-        "Model",
-        "Calls",
-        "Tokens",
-        "Cost",
-        "Cost/call",
-        "Top projects",
-    ])
-    .style(Style::default().fg(GOLD).add_modifier(Modifier::BOLD))
-    .bottom_margin(1);
-    let visible_rows = area.height.saturating_sub(2) as usize;
-    let table_rows: Vec<Row> = rows
-        .iter()
-        .take(visible_rows)
-        .map(|m| {
-            let b = &m.bucket;
-            let cost_per_call = b
-                .cost_usd
-                .map(|c| {
-                    if b.call_count == 0 {
-                        0.0
-                    } else {
-                        c / (b.call_count as f64)
-                    }
+/// Build the full, untruncated cell strings for every filtered row of a
+/// zoom panel, preserving the legacy content/formatting/order/filtering
+/// exactly — minus the per-cell `truncate_string` (now done at render
+/// time against the solved width) and minus the `.take(visible_rows)`
+/// (windowing happens in `render_zoom_table`). Returns ALL filtered
+/// rows in display order. Optimize/Budget return an empty Vec.
+///
+/// Public so the plugin's `y` key handler can resolve the full
+/// untruncated cell strings of the focused row for clipboard copy.
+pub fn zoom_rows(data: &UsageData, panel: UsagePanel, query: &str) -> Vec<Vec<String>> {
+    match panel {
+        UsagePanel::ByProject | UsagePanel::Leaderboard => {
+            apply_zoom_filter(&data.projects, query, |p| p.name.clone())
+                .iter()
+                .enumerate()
+                .map(|(idx, project)| {
+                    let b = &project.bucket;
+                    let (first, last) = project_seen_window(data, &project.name);
+                    vec![
+                        format!("{}", idx + 1),
+                        project.path.clone(),
+                        format_cost(b.cost_usd),
+                        format_tokens_short(b.total()),
+                        b.call_count.to_string(),
+                        b.session_count.to_string(),
+                        first,
+                        last,
+                    ]
                 })
-                .map(|c| format!("${c:.4}"))
-                .unwrap_or_else(|| "—".to_string());
-            let top_projects = top_projects_for_model(data, &m.model, 3);
-            Row::new(vec![
-                m.model.clone(),
-                b.call_count.to_string(),
-                format_tokens_short(b.total()),
-                format_cost(b.cost_usd),
-                cost_per_call,
-                top_projects,
-            ])
-            .style(Style::default().fg(SOFT_WHITE))
-        })
-        .collect();
-    let widths = [
-        Constraint::Min(20),
-        Constraint::Length(8),
-        Constraint::Length(10),
-        Constraint::Length(10),
-        Constraint::Length(11),
-        Constraint::Min(20),
-    ];
-    let table = Table::new(table_rows, widths).header(header).column_spacing(1);
-    ratatui::widgets::Widget::render(table, area, buf);
-}
-
-fn render_zoom_by_activity(
-    buf: &mut Buffer,
-    area: Rect,
-    data: &UsageData,
-    _state: &UsageViewState,
-    query: &str,
-) {
-    let rows = apply_zoom_filter(&data.activities, query, |a| a.category.label().to_string());
-    let header = Row::new(vec![
-        "Activity", "Turns", "Edit", "1-shot", "Retries", "Tokens", "Cost",
-    ])
-    .style(Style::default().fg(GOLD).add_modifier(Modifier::BOLD))
-    .bottom_margin(1);
-    let visible_rows = area.height.saturating_sub(2) as usize;
-    let table_rows: Vec<Row> = rows
-        .iter()
-        .take(visible_rows)
-        .map(|a| {
-            let b = &a.bucket;
-            Row::new(vec![
-                a.category.label().to_string(),
-                a.turns.to_string(),
-                a.edit_turns.to_string(),
-                a.one_shot_turns.to_string(),
-                a.retries.to_string(),
-                format_tokens_short(b.total()),
-                format_cost(b.cost_usd),
-            ])
-            .style(Style::default().fg(SOFT_WHITE))
-        })
-        .collect();
-    let widths = [
-        Constraint::Length(14),
-        Constraint::Length(7),
-        Constraint::Length(7),
-        Constraint::Length(7),
-        Constraint::Length(8),
-        Constraint::Length(10),
-        Constraint::Length(10),
-    ];
-    let table = Table::new(table_rows, widths).header(header).column_spacing(1);
-    ratatui::widgets::Widget::render(table, area, buf);
-}
-
-fn render_zoom_daily_activity(
-    buf: &mut Buffer,
-    area: Rect,
-    data: &UsageData,
-    _state: &UsageViewState,
-    query: &str,
-) {
-    // Daily rows are (date, bucket) tuples — search over the date string.
-    let rows: Vec<&(NaiveDate, crate::data::usage::TokenBucket)> = if query.is_empty() {
-        data.daily.iter().collect()
-    } else {
-        data.daily
+                .collect()
+        }
+        UsagePanel::ByBranch => apply_zoom_filter(&data.branches, query, |b| b.branch.clone())
             .iter()
-            .filter(|(date, _)| date.format("%Y-%m-%d").to_string().contains(query))
+            .enumerate()
+            .map(|(idx, row)| {
+                let b = &row.bucket;
+                vec![
+                    format!("{}", idx + 1),
+                    row.branch.clone(),
+                    format_tokens_short(b.total()),
+                    format_cost(b.cost_usd),
+                ]
+            })
+            .collect(),
+        UsagePanel::TopSessions | UsagePanel::Live => {
+            apply_zoom_filter(&data.sessions, query, |s| {
+                format!("{} {}", s.project, s.session_id)
+            })
+            .iter()
+            .map(|sess| {
+                let b = &sess.bucket;
+                let dur = (sess.last_timestamp - sess.first_timestamp).num_seconds().max(0);
+                vec![
+                    sess.provider.clone(),
+                    sess.project.clone(),
+                    sess.session_id.clone(),
+                    format_cost(b.cost_usd),
+                    format_tokens_short(b.total()),
+                    b.call_count.to_string(),
+                    format_duration_min(dur as u64),
+                    sess.last_timestamp
+                        .with_timezone(&chrono::Local)
+                        .format("%Y-%m-%d")
+                        .to_string(),
+                ]
+            })
             .collect()
-    };
-    let header = Row::new(vec![
-        "Date", "Calls", "Sessions", "Projects", "Tokens", "Cost",
-    ])
-    .style(Style::default().fg(GOLD).add_modifier(Modifier::BOLD))
-    .bottom_margin(1);
-    let visible_rows = area.height.saturating_sub(2) as usize;
-    let table_rows: Vec<Row> = rows
-        .iter()
-        .rev()
-        .take(visible_rows)
-        .map(|(date, b)| {
-            Row::new(vec![
-                date.format("%Y-%m-%d").to_string(),
-                b.call_count.to_string(),
-                b.session_count.to_string(),
-                b.project_count.to_string(),
-                format_tokens_short(b.total()),
-                format_cost(b.cost_usd),
-            ])
-            .style(Style::default().fg(SOFT_WHITE))
-        })
-        .collect();
-    let widths = [
-        Constraint::Length(11),
-        Constraint::Length(8),
-        Constraint::Length(9),
-        Constraint::Length(9),
-        Constraint::Length(10),
-        Constraint::Length(10),
-    ];
-    let table = Table::new(table_rows, widths).header(header).column_spacing(1);
-    ratatui::widgets::Widget::render(table, area, buf);
+        }
+        UsagePanel::ByModel => apply_zoom_filter(&data.models, query, |m| m.model.clone())
+            .iter()
+            .map(|m| {
+                let b = &m.bucket;
+                let cost_per_call = b
+                    .cost_usd
+                    .map(|c| {
+                        if b.call_count == 0 {
+                            0.0
+                        } else {
+                            c / (b.call_count as f64)
+                        }
+                    })
+                    .map(|c| format!("${c:.4}"))
+                    .unwrap_or_else(|| "—".to_string());
+                vec![
+                    m.model.clone(),
+                    b.call_count.to_string(),
+                    format_tokens_short(b.total()),
+                    format_cost(b.cost_usd),
+                    cost_per_call,
+                    top_projects_for_model(data, &m.model, 3),
+                ]
+            })
+            .collect(),
+        UsagePanel::ByActivity => {
+            apply_zoom_filter(&data.activities, query, |a| a.category.label().to_string())
+                .iter()
+                .map(|a| {
+                    let b = &a.bucket;
+                    vec![
+                        a.category.label().to_string(),
+                        a.turns.to_string(),
+                        a.edit_turns.to_string(),
+                        a.one_shot_turns.to_string(),
+                        a.retries.to_string(),
+                        format_tokens_short(b.total()),
+                        format_cost(b.cost_usd),
+                    ]
+                })
+                .collect()
+        }
+        UsagePanel::DailyActivity => {
+            // Daily rows are (date, bucket) tuples — search the date
+            // string, then reverse so the most-recent day leads.
+            let filtered: Vec<&(NaiveDate, crate::data::usage::TokenBucket)> = if query.is_empty() {
+                data.daily.iter().collect()
+            } else {
+                data.daily
+                    .iter()
+                    .filter(|(date, _)| date.format("%Y-%m-%d").to_string().contains(query))
+                    .collect()
+            };
+            filtered
+                .iter()
+                .rev()
+                .map(|(date, b)| {
+                    vec![
+                        date.format("%Y-%m-%d").to_string(),
+                        b.call_count.to_string(),
+                        b.session_count.to_string(),
+                        b.project_count.to_string(),
+                        format_tokens_short(b.total()),
+                        format_cost(b.cost_usd),
+                    ]
+                })
+                .collect()
+        }
+        UsagePanel::CoreTools => named_zoom_rows(&data.tools, query),
+        UsagePanel::ShellCommands => named_zoom_rows(&data.shell_commands, query),
+        UsagePanel::McpServers => named_zoom_rows(&data.mcp_servers, query),
+        UsagePanel::Optimize | UsagePanel::Budget => Vec::new(),
+    }
 }
 
-fn render_zoom_named(
-    buf: &mut Buffer,
-    area: Rect,
-    title: &str,
-    rows: &[NamedUsage],
-    _state: &UsageViewState,
-    query: &str,
-) {
-    let filtered = apply_zoom_filter(rows, query, |n| n.name.clone());
-    let header = Row::new(vec![title, "Calls"])
-        .style(Style::default().fg(GOLD).add_modifier(Modifier::BOLD))
-        .bottom_margin(1);
-    let visible_rows = area.height.saturating_sub(2) as usize;
-    let table_rows: Vec<Row> = filtered
+/// Shared row builder for the three name+calls named-usage tables.
+fn named_zoom_rows(rows: &[NamedUsage], query: &str) -> Vec<Vec<String>> {
+    apply_zoom_filter(rows, query, |n| n.name.clone())
         .iter()
-        .take(visible_rows)
-        .map(|row| {
-            Row::new(vec![row.name.clone(), row.calls.to_string()])
-                .style(Style::default().fg(SOFT_WHITE))
+        .map(|row| vec![row.name.clone(), row.calls.to_string()])
+        .collect()
+}
+
+/// Resolve final per-column widths for a zoom table.
+///
+/// `Fixed` columns consume their declared width verbatim. The leftover
+/// (`usable - sum(fixed)`) is split across `Flex` columns by weight,
+/// each floored at its `min`. When leftover is smaller than the sum of
+/// the mins, every flex column still gets at least its `min` (the table
+/// then overflows and ratatui clips — never a panic). Finally each
+/// width takes its signed `delta` and is clamped to
+/// `[MIN_COL, total_width]`.
+fn solve_zoom_widths(total_width: u16, cols: &[ZoomCol], deltas: &[i16], spacing: u16) -> Vec<u16> {
+    let n = cols.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let spacing_total = spacing.saturating_mul(n.saturating_sub(1) as u16);
+    let usable = total_width.saturating_sub(spacing_total);
+
+    let fixed_total: u16 = cols
+        .iter()
+        .filter_map(|c| match c.sizing {
+            ColSizing::Fixed(w) => Some(w),
+            ColSizing::Flex { .. } => None,
+        })
+        .sum();
+    let flex_weight_total: u32 = cols
+        .iter()
+        .filter_map(|c| match c.sizing {
+            ColSizing::Flex { weight, .. } => Some(u32::from(weight)),
+            ColSizing::Fixed(_) => None,
+        })
+        .sum();
+    let leftover = usable.saturating_sub(fixed_total);
+
+    // Distribute `leftover` across flex columns by weight. Track the
+    // running consumed total so the last flex column soaks up any
+    // integer-division remainder (no dropped pixels on the right edge).
+    let mut flex_assigned: u16 = 0;
+    let last_flex_idx = cols
+        .iter()
+        .rposition(|c| matches!(c.sizing, ColSizing::Flex { .. }));
+
+    let mut widths: Vec<u16> = cols
+        .iter()
+        .enumerate()
+        .map(|(i, c)| match c.sizing {
+            ColSizing::Fixed(w) => w,
+            ColSizing::Flex { min, weight } => {
+                let share = if flex_weight_total == 0 {
+                    0
+                } else if Some(i) == last_flex_idx {
+                    // Last flex col gets the remainder of `leftover`.
+                    leftover.saturating_sub(flex_assigned)
+                } else {
+                    let s = (u32::from(leftover) * u32::from(weight) / flex_weight_total) as u16;
+                    flex_assigned = flex_assigned.saturating_add(s);
+                    s
+                };
+                share.max(min)
+            }
         })
         .collect();
-    let widths = [Constraint::Min(20), Constraint::Length(10)];
-    let table = Table::new(table_rows, widths).header(header).column_spacing(1);
+
+    // Apply manual deltas, clamp every column into a sane range so a
+    // large negative delta can't underflow and a large positive one
+    // can't exceed the screen width.
+    for (w, d) in widths.iter_mut().zip(deltas.iter().chain(std::iter::repeat(&0))) {
+        let adjusted = i32::from(*w) + i32::from(*d);
+        let clamped = adjusted.clamp(i32::from(MIN_COL), i32::from(total_width.max(MIN_COL)));
+        *w = clamped as u16;
+    }
+    widths
+}
+
+/// Render a zoom panel as an auto-fit, row-focused, column-resizable
+/// table. The single helper behind all nine zoom tables.
+///
+/// - Auto-fit: `solve_zoom_widths` fills the terminal width; flex
+///   columns absorb the slack so a wide terminal shows full data.
+/// - Row focus: `state.focus_row` (clamped locally — state is `&`) is
+///   highlighted, and the visible window scrolls to keep it on screen.
+/// - Column resize: the header cell at `state.zoom_focus_col` is
+///   underlined to show which column `<`/`>` will resize; the
+///   panel-matched `state.zoom_col_deltas` shift the solved widths.
+fn render_zoom_table(
+    buf: &mut Buffer,
+    area: Rect,
+    cols: &[ZoomCol],
+    rows: &[Vec<String>],
+    state: &UsageViewState,
+    panel: UsagePanel,
+) {
+    if cols.is_empty() {
+        return;
+    }
+    // header row + bottom_margin == 2 reserved rows (matches legacy).
+    let visible_rows = area.height.saturating_sub(2) as usize;
+
+    // Clamp focus_row locally (state is shared/immutable here).
+    let focus_row = state
+        .focus_row
+        .min(rows.len().saturating_sub(1));
+
+    // Scroll window: keep the focused row on screen. `start` is the
+    // smallest offset such that `focus_row` falls inside the
+    // `visible_rows`-tall window; the body slice is `rows[start..end]`.
+    let start = if visible_rows == 0 || focus_row < visible_rows {
+        0
+    } else {
+        focus_row + 1 - visible_rows
+    };
+    let end = (start + visible_rows).min(rows.len());
+
+    // Use the manual deltas only when they belong to this panel and
+    // match the column count; otherwise treat as pure auto-fit.
+    let empty_deltas: Vec<i16> = Vec::new();
+    let deltas: &[i16] = if state.zoom_cols_panel == Some(panel)
+        && state.zoom_col_deltas.len() == cols.len()
+    {
+        &state.zoom_col_deltas
+    } else {
+        &empty_deltas
+    };
+    let widths = solve_zoom_widths(area.width, cols, deltas, 1);
+
+    let focus_col = state.zoom_focus_col.min(cols.len().saturating_sub(1));
+    let header = Row::new(
+        cols.iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let mut style = Style::default().fg(GOLD).add_modifier(Modifier::BOLD);
+                if i == focus_col {
+                    // Show which column `<`/`>` resizes.
+                    style = style.add_modifier(Modifier::UNDERLINED);
+                }
+                ratatui::widgets::Cell::from(c.header).style(style)
+            })
+            .collect::<Vec<_>>(),
+    )
+    .bottom_margin(1);
+
+    let body: Vec<Row> = rows[start..end]
+        .iter()
+        .enumerate()
+        .map(|(offset, cells)| {
+            let abs_idx = start + offset;
+            let cell_strs: Vec<String> = cells
+                .iter()
+                .zip(widths.iter())
+                .map(|(cell, w)| truncate_string(cell, *w as usize))
+                .collect();
+            let style = if abs_idx == focus_row {
+                Style::default().bg(LIST_HIGHLIGHT_BG).fg(SOFT_WHITE)
+            } else {
+                Style::default().fg(SOFT_WHITE)
+            };
+            Row::new(cell_strs).style(style)
+        })
+        .collect();
+
+    let constraints: Vec<Constraint> = widths.iter().map(|w| Constraint::Length(*w)).collect();
+    let table = Table::new(body, constraints).header(header).column_spacing(1);
     ratatui::widgets::Widget::render(table, area, buf);
 }
 
@@ -5413,5 +5603,340 @@ mod scan_progress_tests {
             !gauge_row.contains("120%"),
             "no over-100% label: {gauge_row:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod zoom_table_tests {
+    use super::*;
+    use crate::data::usage::{SessionUsage, TokenBucket};
+    use chrono::Utc;
+
+    /// A working-dir path far longer than the legacy 24-char Project
+    /// cutoff — the regression the auto-fit work targets.
+    const LONG_PATH: &str = "/Users/dev/work/very-long-project-directory-name-that-overflows";
+
+    fn bucket(call_count: usize) -> TokenBucket {
+        TokenBucket {
+            input_tokens: 100,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            output_tokens: 50,
+            reasoning_tokens: 0,
+            session_count: 1,
+            project_count: 1,
+            call_count,
+            cost_usd: Some(call_count as f64),
+        }
+    }
+
+    fn sessions_fixture() -> UsageData {
+        let now = Utc::now();
+        let mut data = UsageData {
+            daily: vec![],
+            weekly: vec![],
+            projects: vec![],
+            grand_total: bucket(5),
+            calls: vec![],
+            sessions: vec![
+                SessionUsage {
+                    provider: "claude".into(),
+                    project: LONG_PATH.into(),
+                    session_id: "01HXYZABCDEFGHJKMNPQRSTVWX".into(),
+                    first_timestamp: now,
+                    last_timestamp: now,
+                    bucket: bucket(3),
+                },
+                SessionUsage {
+                    provider: "codex".into(),
+                    project: "beta".into(),
+                    session_id: "sess-B".into(),
+                    first_timestamp: now,
+                    last_timestamp: now,
+                    bucket: bucket(2),
+                },
+            ],
+            models: vec![],
+            activities: vec![],
+            tools: vec![],
+            mcp_servers: vec![],
+            shell_commands: vec![],
+            branches: vec![],
+            model_project_counts: std::collections::HashMap::new(),
+        };
+        // Many extra rows so the visible-window scroll math has something
+        // to slice past on a short terminal.
+        for i in 0..20 {
+            data.sessions.push(SessionUsage {
+                provider: "claude".into(),
+                project: format!("proj-{i}"),
+                session_id: format!("sid-{i}"),
+                first_timestamp: now,
+                last_timestamp: now,
+                bucket: bucket(1),
+            });
+        }
+        data
+    }
+
+    fn flatten(buffer: &ratatui::buffer::Buffer) -> String {
+        (0..buffer.area().height)
+            .flat_map(|y| (0..buffer.area().width).map(move |x| (x, y)))
+            .map(|(x, y)| buffer.get(x, y).symbol().to_string())
+            .collect()
+    }
+
+    // ── solve_zoom_widths ────────────────────────────────────────────
+
+    #[test]
+    fn solve_widths_flex_absorbs_leftover_and_sums_to_usable() {
+        // 2 fixed (4 + 10 = 14) + 1 flex, spacing 1 between 3 cols (2).
+        let cols = vec![fixed("#", 4), flex("Name", 20, 1), fixed("Cost", 10)];
+        let total = 100u16;
+        let widths = solve_zoom_widths(total, &cols, &[], 1);
+        assert_eq!(widths[0], 4, "fixed col unchanged");
+        assert_eq!(widths[2], 10, "fixed col unchanged");
+        // usable = 100 - 2(spacing) = 98; flex = 98 - 14 = 84.
+        assert_eq!(widths[1], 84, "flex absorbs all leftover");
+        let sum: u16 = widths.iter().sum::<u16>() + 2; // + spacing
+        assert_eq!(sum, total, "solved widths + spacing == total");
+    }
+
+    #[test]
+    fn solve_widths_splits_leftover_by_weight() {
+        // Two flex cols, weights 3:2. Project should get more room.
+        let cols = vec![
+            fixed("P", 8),
+            flex("Project", 20, 3),
+            flex("Session", 18, 2),
+            fixed("Cost", 10),
+        ];
+        let widths = solve_zoom_widths(180, &cols, &[], 1);
+        assert!(
+            widths[1] > widths[2],
+            "weight 3 column ({}) must beat weight 2 column ({})",
+            widths[1],
+            widths[2]
+        );
+        assert!(widths[1] >= 20 && widths[2] >= 18, "mins respected");
+    }
+
+    #[test]
+    fn solve_widths_deltas_shift_and_clamp_at_min() {
+        let cols = vec![fixed("#", 4), flex("Name", 20, 1), fixed("Cost", 10)];
+        // +12 to the flex col, -8 to the fixed Cost col.
+        let widths = solve_zoom_widths(100, &cols, &[0, 12, -8], 1);
+        let base = solve_zoom_widths(100, &cols, &[], 1);
+        assert_eq!(widths[1], base[1] + 12, "positive delta widens flex");
+        // Cost was 10, -8 -> 2, clamped up to MIN_COL (3).
+        assert_eq!(widths[2], MIN_COL, "negative delta clamps at MIN_COL");
+    }
+
+    #[test]
+    fn solve_widths_degrades_without_panic_when_too_narrow() {
+        let cols = vec![flex("A", 20, 1), flex("B", 20, 1), flex("C", 20, 1)];
+        // total far smaller than 3 * min(20). The distribution floors
+        // each col at its min (20); the final per-column clamp then caps
+        // every width at `total_width` (10) — so the table overflows and
+        // ratatui clips, but nothing panics and every col stays
+        // >= MIN_COL.
+        let widths = solve_zoom_widths(10, &cols, &[], 1);
+        assert_eq!(widths.len(), 3);
+        for w in widths {
+            assert!(w >= MIN_COL, "every col stays >= MIN_COL: {w}");
+            assert!(w <= 10, "per-col width capped at total_width: {w}");
+        }
+    }
+
+    // ── zoom_cols / zoom_rows ────────────────────────────────────────
+
+    #[test]
+    fn zoom_cols_count_per_panel() {
+        assert_eq!(zoom_col_count(UsagePanel::TopSessions), 8);
+        assert_eq!(zoom_col_count(UsagePanel::Live), 8);
+        assert_eq!(zoom_col_count(UsagePanel::ByProject), 8);
+        assert_eq!(zoom_col_count(UsagePanel::ByBranch), 4);
+        assert_eq!(zoom_col_count(UsagePanel::ByModel), 6);
+        assert_eq!(zoom_col_count(UsagePanel::ByActivity), 7);
+        assert_eq!(zoom_col_count(UsagePanel::DailyActivity), 6);
+        assert_eq!(zoom_col_count(UsagePanel::CoreTools), 2);
+        // Summary cards are not tables.
+        assert_eq!(zoom_col_count(UsagePanel::Optimize), 0);
+        assert_eq!(zoom_col_count(UsagePanel::Budget), 0);
+    }
+
+    #[test]
+    fn zoom_rows_returns_full_untruncated_cells() {
+        let data = sessions_fixture();
+        let rows = zoom_rows(&data, UsagePanel::TopSessions, "");
+        // First row (sorted as-is) carries the long path in col index 1.
+        let project_cell = &rows[0][1];
+        assert_eq!(
+            project_cell, LONG_PATH,
+            "project cell must be full path, not …-clipped: {project_cell}"
+        );
+        assert!(
+            project_cell.len() > 24,
+            "regression guard: row builder must not pre-truncate to 24"
+        );
+        // Session id likewise untruncated.
+        assert_eq!(rows[0][2], "01HXYZABCDEFGHJKMNPQRSTVWX");
+    }
+
+    #[test]
+    fn zoom_rows_empty_for_summary_panels() {
+        let data = sessions_fixture();
+        assert!(zoom_rows(&data, UsagePanel::Optimize, "").is_empty());
+        assert!(zoom_rows(&data, UsagePanel::Budget, "").is_empty());
+    }
+
+    // ── render_zoom_table ────────────────────────────────────────────
+
+    #[test]
+    fn wide_render_shows_more_of_long_path_than_legacy_cutoff() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let data = sessions_fixture();
+        let mut state = UsageViewState::default();
+        state.zoom = Some(UsagePanel::TopSessions);
+        state.focused_panel = Some(UsagePanel::TopSessions);
+
+        let backend = TestBackend::new(180, 30);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|frame| {
+                let area = frame.size();
+                let cols = zoom_cols(UsagePanel::TopSessions);
+                let rows = zoom_rows(&data, UsagePanel::TopSessions, "");
+                render_zoom_table(
+                    frame.buffer_mut(),
+                    area,
+                    &cols,
+                    &rows,
+                    &state,
+                    UsagePanel::TopSessions,
+                );
+            })
+            .expect("render_zoom_table must not panic on a wide frame");
+
+        let flat = flatten(terminal.backend().buffer());
+        // Legacy hard-truncated to 24 chars: this 32-char prefix proves
+        // auto-fit widened the Project column past the old cutoff.
+        let prefix = &LONG_PATH[..32];
+        assert!(
+            flat.contains(prefix),
+            "wide auto-fit must show >24 chars of the path; got buffer:\n{flat}"
+        );
+    }
+
+    #[test]
+    fn narrow_render_does_not_panic() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let data = sessions_fixture();
+        let mut state = UsageViewState::default();
+        state.zoom = Some(UsagePanel::TopSessions);
+        // Focus a row deep in the list so the scroll window slices.
+        state.focus_row = 15;
+
+        let backend = TestBackend::new(40, 6);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|frame| {
+                let area = frame.size();
+                let cols = zoom_cols(UsagePanel::TopSessions);
+                let rows = zoom_rows(&data, UsagePanel::TopSessions, "");
+                render_zoom_table(
+                    frame.buffer_mut(),
+                    area,
+                    &cols,
+                    &rows,
+                    &state,
+                    UsagePanel::TopSessions,
+                );
+            })
+            .expect("render_zoom_table must not panic on a narrow frame");
+    }
+
+    // ── state methods ────────────────────────────────────────────────
+
+    #[test]
+    fn focus_col_next_clamps_at_last_column() {
+        let mut state = UsageViewState::default();
+        let n = 4;
+        for _ in 0..10 {
+            state.zoom_focus_col_next(n);
+        }
+        assert_eq!(state.zoom_focus_col, n - 1, "clamped to last column");
+        for _ in 0..10 {
+            state.zoom_focus_col_prev();
+        }
+        assert_eq!(state.zoom_focus_col, 0, "clamped to first column");
+    }
+
+    #[test]
+    fn grow_and_shrink_move_focused_column_delta() {
+        let mut state = UsageViewState::default();
+        let panel = UsagePanel::TopSessions;
+        let n = zoom_col_count(panel);
+        // Enter zoom the way the user does (toggle_zoom seeds the col
+        // bookkeeping for this panel) so the subsequent `[`/`]`
+        // navigation survives the first resize.
+        state.focused_panel = Some(panel);
+        state.toggle_zoom();
+        state.zoom_focus_col_next(n); // focus col 1
+        state.zoom_grow_col(panel, n);
+        assert_eq!(state.zoom_col_deltas[1], COL_RESIZE_STEP);
+        assert_eq!(state.zoom_col_deltas[0], 0, "other cols untouched");
+        state.zoom_shrink_col(panel, n);
+        state.zoom_shrink_col(panel, n);
+        assert_eq!(state.zoom_col_deltas[1], -COL_RESIZE_STEP);
+    }
+
+    #[test]
+    fn reset_cols_zeros_all_deltas() {
+        let mut state = UsageViewState::default();
+        let panel = UsagePanel::TopSessions;
+        let n = zoom_col_count(panel);
+        state.zoom_grow_col(panel, n);
+        state.zoom_focus_col_next(n);
+        state.zoom_grow_col(panel, n);
+        assert!(state.zoom_col_deltas.iter().any(|d| *d != 0));
+        state.zoom_reset_cols();
+        assert!(
+            state.zoom_col_deltas.iter().all(|d| *d == 0),
+            "= must zero every delta"
+        );
+    }
+
+    #[test]
+    fn panel_switch_resets_deltas_and_focus() {
+        let mut state = UsageViewState::default();
+        let sessions = UsagePanel::TopSessions; // 8 cols
+        let branches = UsagePanel::ByBranch; // 4 cols
+        state.zoom_focus_col_next(zoom_col_count(sessions));
+        state.zoom_grow_col(sessions, zoom_col_count(sessions));
+        assert_eq!(state.zoom_cols_panel, Some(sessions));
+        assert_eq!(state.zoom_col_deltas.len(), 8);
+
+        // Zooming a different panel must reset focus + delta vector to
+        // the new shape.
+        state.zoom_grow_col(branches, zoom_col_count(branches));
+        assert_eq!(state.zoom_cols_panel, Some(branches));
+        assert_eq!(state.zoom_col_deltas.len(), 4);
+        assert_eq!(state.zoom_focus_col, 0, "focus reset on panel switch");
+        assert_eq!(state.zoom_col_deltas[0], COL_RESIZE_STEP);
+    }
+
+    #[test]
+    fn row_up_down_move_focus_row() {
+        let mut state = UsageViewState::default();
+        state.zoom_row_down();
+        state.zoom_row_down();
+        assert_eq!(state.focus_row, 2);
+        state.zoom_row_up();
+        assert_eq!(state.focus_row, 1);
+        // saturates at 0.
+        state.zoom_row_up();
+        state.zoom_row_up();
+        assert_eq!(state.focus_row, 0);
     }
 }
