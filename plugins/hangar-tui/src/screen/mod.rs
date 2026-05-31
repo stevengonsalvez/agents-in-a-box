@@ -20,6 +20,7 @@ pub mod banner_state;
 pub mod daemon_health;
 pub mod issue_list;
 pub mod kanban;
+pub mod logs;
 mod router;
 pub mod settings;
 pub mod skill_manager;
@@ -57,6 +58,9 @@ pub enum Screen {
     /// Daemon health (hotkey `D`) — runtimes, claim cache, concurrency, and the
     /// dual-dim throughput sparkline (P8.5).
     DaemonHealth,
+    /// Logs tail (hotkey `L`) — a read-only, level-filterable view over the
+    /// daemon's structured JSON log file (P8.6).
+    Logs,
     /// Settings (hotkey `,`).
     Settings,
     /// Help overlay (hotkey `?`) — a modal listing global + screen-local
@@ -76,6 +80,7 @@ impl Screen {
             Self::Autopilots => "Autopilots",
             Self::Kanban => "Kanban",
             Self::DaemonHealth => "Daemon",
+            Self::Logs => "Logs",
             Self::Settings => "Settings",
             Self::Help => "Help",
         }

@@ -24,6 +24,7 @@ use super::autopilots::{reduce_autopilots, AutopilotsEvent, AutopilotsIntent, Au
 use super::daemon_health::DaemonHealthState;
 use super::issue_list::{reduce_issue_list, IssueListEvent, IssueListIntent, IssueListState};
 use super::kanban::{reduce_kanban, KanbanEvent, KanbanIntent, KanbanState};
+use super::logs::LogsState;
 use super::settings::{reduce_settings, SettingsEvent, SettingsIntent, SettingsState};
 use super::skill_manager::{
     reduce_skill_manager, SkillManagerEvent, SkillManagerIntent, SkillManagerState,
@@ -121,6 +122,9 @@ pub struct ScreenStates {
     pub kanban: KanbanState,
     /// Daemon-health screen cache (P8.5), built from `hangar/daemon_health`.
     pub daemon_health: DaemonHealthState,
+    /// Logs-tail screen cache (P8.6), filled by reading the newest `daemon.*`
+    /// structured-log file directly from disk (no daemon RPC).
+    pub logs: LogsState,
     /// Settings screen cache (built once the four snapshots arrive).
     pub settings: Option<SettingsState>,
     /// Task-detail screen cache (present only while a task is open).
@@ -150,6 +154,10 @@ pub struct ScreenStates {
     /// Cached workspace catalogue from `host/workspace_list` (P5.5). Seeds the
     /// Settings Workspace pane regardless of which snapshot arrives first.
     pub workspace_rows: Vec<WorkspaceRow>,
+    /// Set when the logs screen's level filter changed (P8.6), asking the glue
+    /// to re-read the structured-log file under the new `--level` floor. Drained
+    /// by the `render` pass. `false` when idle.
+    pub pending_logs_refresh: bool,
 }
 
 impl Default for SkillManagerState {
@@ -186,6 +194,23 @@ impl ScreenStates {
     /// (P8.5).
     pub fn set_daemon_health(&mut self, snap: DaemonHealthSnapshot) {
         self.daemon_health = DaemonHealthState::from_snapshot(snap);
+    }
+
+    /// Replace the logs-tail rows from a fresh read of the `daemon.*` file
+    /// (P8.6), preserving the active level filter so a re-read under the same
+    /// chip keeps the chip lit.
+    pub fn set_logs(&mut self, lines: Vec<ainb_hangar_core::logs::LogLine>) {
+        let filter = self.logs.filter();
+        let mut state = LogsState::from_lines(lines);
+        state.set_filter(filter);
+        self.logs = state;
+    }
+
+    /// Take the pending logs-refresh request (filter changed), if any (P8.6).
+    pub const fn take_pending_logs_refresh(&mut self) -> bool {
+        let pending = self.pending_logs_refresh;
+        self.pending_logs_refresh = false;
+        pending
     }
 
     /// Cache the agent snapshot rows; the picker is rebuilt from them on open.
@@ -312,6 +337,9 @@ pub fn render_body(buf: &mut WireBuffer, w: u16, h: u16, app: &AppState, states:
                 bottom,
                 &states.daemon_health,
             );
+        }
+        Screen::Logs => {
+            super::logs::render_logs(buf, w, top, bottom, &states.logs);
         }
         Screen::Settings => {
             if let Some(s) = &states.settings {
@@ -509,6 +537,17 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
             None
         }
         Screen::AgentPicker(_) => route_agent_picker(states, key),
+        Screen::Logs => {
+            // The logs pane owns the level-filter chips (`a`/`i`/`w`/`e`). A
+            // filter change flags a deferred re-read of the `daemon.*` file
+            // under the new `--level` floor; the `render` pass drains it.
+            if let Some(c) = key_char(key) {
+                if states.logs.handle_key(c) {
+                    states.pending_logs_refresh = true;
+                }
+            }
+            None
+        }
         // Read-only / overlay screens with no per-screen keys: the daemon-health
         // pane (P8.5) and the help overlay (the `D`/`?` tab-switch + global keys
         // are handled by the router before reaching here).

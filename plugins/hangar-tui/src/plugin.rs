@@ -90,6 +90,10 @@ const TASKS_REQ_ID: i64 = 22;
 const TASK_TRANSITION_REQ_ID: i64 = 23;
 /// JSON-RPC id for the `hangar/daemon_health` snapshot request (P8.5).
 const DAEMON_HEALTH_REQ_ID: i64 = 24;
+/// How many trailing log lines the logs pane reads from the newest `daemon.*`
+/// file on each refresh (P8.6). Bounded so a huge log file never blows up the
+/// pane; the daily rotation keeps a single day's file the practical ceiling.
+const LOGS_TAIL_LINES: usize = 500;
 
 /// Hangar plugin state.
 ///
@@ -333,6 +337,20 @@ impl HangarPlugin {
                 self.screens.set_daemon_health(snap);
             }
         }
+    }
+
+    /// Re-read the daemon's structured-log file into the logs pane (P8.6).
+    ///
+    /// Resolves the log dir the same way the daemon writes it
+    /// ([`ainb_hangar_core::logs::default_log_dir`]) and reads the newest
+    /// `daemon.*` file's last `LOGS_TAIL_LINES` lines under the screen's active
+    /// `--level` floor. A missing dir / file yields an empty pane (no panic).
+    fn refresh_logs(&mut self) {
+        let filter = self.screens.logs.filter();
+        let lines = ainb_hangar_core::logs::default_log_dir().map_or_else(Vec::new, |dir| {
+            ainb_hangar_core::logs::read_tail(&dir, LOGS_TAIL_LINES, filter)
+        });
+        self.screens.set_logs(lines);
     }
 
     /// Fold a `hangar/autopilot_runs` result onto the autopilot-manager screen
@@ -761,7 +779,9 @@ impl HangarPlugin {
 /// non-modal screen the per-screen reducer may want Esc, so it falls through.
 const fn routing_event(key: &ainb_plugin_sdk::KeyEvent, app: &AppState) -> Option<AppEvent> {
     match &key.code {
-        KeyCode::Char { ch } if matches!(*ch, '1' | '2' | '4' | '5' | 'K' | ',' | '?' | 'q') => {
+        KeyCode::Char { ch }
+            if matches!(*ch, '1' | '2' | '4' | '5' | 'K' | 'D' | 'L' | ',' | '?' | 'q') =>
+        {
             Some(AppEvent::Key(*ch))
         }
         // Esc only routes through the router when a modal is open (close it);
@@ -843,6 +863,13 @@ impl Plugin for HangarPlugin {
         // board and fire `hangar/task_transition` over the daemon socket.
         if let Some(action) = self.screens.take_pending_kanban_action() {
             self.apply_kanban_action(host, action).await;
+        }
+        // P8.6: the logs pane reads the daemon's structured-log file directly
+        // (not a daemon RPC). Re-read on every render while it is the active
+        // screen so live events surface, and on a pending level-filter change.
+        let on_logs = matches!(self.app_state().screen, Screen::Logs);
+        if on_logs || self.screens.take_pending_logs_refresh() {
+            self.refresh_logs();
         }
         // P5.6: persist the first-run ack here (deferred from `handle_key`). The
         // modal is already `Dismissed` in state; this records it so a relaunch
