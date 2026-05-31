@@ -105,6 +105,27 @@ pub const HANGAR_AUTOPILOT_FIRE_NOW: &str = "hangar/autopilot_fire_now";
 /// `d` key toggles the selected autopilot (P7.5). Workspace-scoped.
 pub const HANGAR_AUTOPILOT_SET_ENABLED: &str = "hangar/autopilot_set_enabled";
 
+/// `hangar/tasks_list` — snapshot the task queue of a workspace for the Kanban
+/// board (P8.4).
+///
+/// Params: `{ workspace_id: String }`. Result: a
+/// [`crate::snapshots::TasksListResult`] (every task row in the workspace, each
+/// carrying its raw lifecycle `status`). The plugin buckets the six statuses into
+/// the four board columns client-side (queued+dispatched → queued, running →
+/// running, done → done, failed+cancelled → failed). Workspace-scoped: a foreign
+/// id yields an empty set.
+pub const HANGAR_TASKS_LIST: &str = "hangar/tasks_list";
+
+/// `hangar/task_transition` — move one task to a new lifecycle status (P8.4).
+///
+/// Params: `{ workspace_id: String, task_id: String, to_status: String }`.
+/// Result: `{}`. Drives the store FSM column-move when a Kanban card is dragged
+/// across columns (`Shift+←` / `Shift+→`). Workspace-scoped: a foreign task id
+/// touches no row. The `to_status` must be one of the six
+/// [`ainb_hangar_core::task_status::TaskStatus`] wire tokens; an illegal token or
+/// transition is an `INVALID_PARAMS` error.
+pub const HANGAR_TASK_TRANSITION: &str = "hangar/task_transition";
+
 /// `hangar/health` — snapshot the daemon's health for the settings screen.
 ///
 /// Params: `{}`. Result: a [`crate::settings::HealthSnapshot`]. Drives the
@@ -134,6 +155,8 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_AUTOPILOT_RUNS,
     HANGAR_AUTOPILOT_FIRE_NOW,
     HANGAR_AUTOPILOT_SET_ENABLED,
+    HANGAR_TASKS_LIST,
+    HANGAR_TASK_TRANSITION,
     HANGAR_HEALTH,
     PING,
 ];
@@ -186,6 +209,8 @@ mod tests {
             HANGAR_AUTOPILOT_RUNS,
             HANGAR_AUTOPILOT_FIRE_NOW,
             HANGAR_AUTOPILOT_SET_ENABLED,
+            HANGAR_TASKS_LIST,
+            HANGAR_TASK_TRANSITION,
             HANGAR_HEALTH,
         ] {
             assert!(m.starts_with("hangar/"), "{m:?} not under hangar/");
@@ -215,6 +240,8 @@ mod tests {
             HANGAR_AUTOPILOT_RUNS,
             HANGAR_AUTOPILOT_FIRE_NOW,
             HANGAR_AUTOPILOT_SET_ENABLED,
+            HANGAR_TASKS_LIST,
+            HANGAR_TASK_TRANSITION,
             HANGAR_HEALTH,
             PING,
         ];

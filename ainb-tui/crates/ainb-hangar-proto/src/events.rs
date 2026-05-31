@@ -320,6 +320,31 @@ pub struct AutopilotRunRow {
     pub status: String,
 }
 
+/// A wire-side task card row for the Kanban board (`hangar/tasks_list`, P8.4).
+///
+/// One `agent_task_queue` row flattened for the board. The plugin buckets these
+/// into the four board columns by their raw [`status`](TaskCardRow::status) — one
+/// of the six [`ainb_hangar_core::task_status::TaskStatus`] wire tokens
+/// (`queued` / `dispatched` / `running` / `done` / `failed` / `cancelled`). The
+/// plugin owns zero domain data: the daemon's `SQLite` store is the source of
+/// truth; this is only the render shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskCardRow {
+    /// The task id (ULID string, the stable id the card carries).
+    pub id: TaskId,
+    /// Owning workspace id.
+    pub workspace_id: String,
+    /// The agent executing the task (`agent.id`).
+    pub agent_id: String,
+    /// The originating issue id, or `None` for chat / autopilot tasks.
+    pub issue_id: Option<String>,
+    /// Raw lifecycle status — one of the six `TaskStatus` wire tokens. The board
+    /// buckets these into its four columns client-side.
+    pub status: String,
+    /// Creation (queued-at) timestamp (epoch milliseconds) — drives the card age.
+    pub created_at: i64,
+}
+
 /// A wire-side comment row.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommentRow {

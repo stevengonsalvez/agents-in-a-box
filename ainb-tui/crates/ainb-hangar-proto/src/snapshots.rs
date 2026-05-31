@@ -14,7 +14,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::events::{ActorRow, AutopilotRow, AutopilotRunRow, IssueRow, SkillFile, SkillRow};
+use crate::events::{
+    ActorRow, AutopilotRow, AutopilotRunRow, IssueRow, SkillFile, SkillRow, TaskCardRow,
+};
 
 /// The `{ workspace_id }` params shared by every workspace-scoped snapshot RPC.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -177,6 +179,27 @@ pub struct AutopilotSetEnabledParams {
     pub autopilot_id: String,
     /// `true` enables (recompute next-tick from now); `false` disables.
     pub enabled: bool,
+}
+
+/// Result of [`crate::methods::HANGAR_TASKS_LIST`]: every task in the workspace
+/// for the Kanban board (P8.4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TasksListResult {
+    /// The task card rows, in daemon order (`created_at` ascending). The plugin
+    /// buckets them into the four board columns by their `status`.
+    pub tasks: Vec<TaskCardRow>,
+}
+
+/// Params for [`crate::methods::HANGAR_TASK_TRANSITION`]: the workspace (tenant
+/// guard), the task to move, and the target status (P8.4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskTransitionParams {
+    /// The subscribed workspace the task must belong to.
+    pub workspace_id: String,
+    /// The task to move.
+    pub task_id: String,
+    /// The target lifecycle status — one of the six `TaskStatus` wire tokens.
+    pub to_status: String,
 }
 
 #[cfg(test)]
@@ -372,6 +395,34 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<AutopilotSetEnabledParams>(&s).unwrap(),
             toggle
+        );
+    }
+
+    /// The P8.4 Kanban task envelopes round-trip through JSON.
+    #[test]
+    fn p8_task_envelopes_roundtrip() {
+        let list = TasksListResult {
+            tasks: vec![TaskCardRow {
+                id: ainb_hangar_core::ids::TaskId::from_str("task-1").unwrap(),
+                workspace_id: "ws-1".into(),
+                agent_id: "agent-1".into(),
+                issue_id: Some("issue-1".into()),
+                status: "running".into(),
+                created_at: 1_700_000_000_000,
+            }],
+        };
+        let s = serde_json::to_string(&list).unwrap();
+        assert_eq!(serde_json::from_str::<TasksListResult>(&s).unwrap(), list);
+
+        let transition = TaskTransitionParams {
+            workspace_id: "ws-1".into(),
+            task_id: "task-1".into(),
+            to_status: "done".into(),
+        };
+        let s = serde_json::to_string(&transition).unwrap();
+        assert_eq!(
+            serde_json::from_str::<TaskTransitionParams>(&s).unwrap(),
+            transition
         );
     }
 }
