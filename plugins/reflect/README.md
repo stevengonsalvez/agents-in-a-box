@@ -146,9 +146,17 @@ All of these flow through ONE pipeline and land in ONE place: `~/.learnings/docu
 |---|---|
 | You type something the agent finds important | Writer A creates a `feedback_*.md` in your project's memory dir. Silent. Always. |
 | You explicitly run `/reflect` | Writer B reads the *current conversation*, writes a knowledge note in `docs/solutions/<cat>/` + indexes it. One transcript at a time. |
-| PreCompact fires (auto) | Drain queues the transcript → child session runs `/reflect` (Writer B') on it. Same outputs. Background. |
+| PreCompact / Stop fires (auto) | Transcript is **queued**, then a background drain runs `/reflect` (Writer B') on it. Same outputs. Background. |
 | You explicitly run `/reflect:ingest` | Harvester reads everything Writer A ever made + similar across other tools, batch-indexes them all. Periodic. |
 | You run `/recall` | Searches the unified KB built by all of the above. |
+
+> **v4.0.0 — the auto-drain is cheap by default.** Before spending a single
+> token, the drain gates the queued transcript ($0 regex) and skips
+> reflect-on-reflect, clean, and no-signal sessions; for anything worth
+> reflecting it slices the transcript down to just the signal-bearing windows
+> (~10x smaller) and runs `/reflect` on **Sonnet** under hard caps (8 turns,
+> 180s, 2M-token budget poison). Inspect spend with `reflect cost` and see
+> [CHANGELOG.md](./CHANGELOG.md) for the full rearchitecture.
 
 ### Worked example — one fact, full trip
 
