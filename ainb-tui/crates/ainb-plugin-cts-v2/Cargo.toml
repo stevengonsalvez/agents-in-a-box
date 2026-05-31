@@ -9,6 +9,11 @@ description = "Conformance test suite for ainb plugin JSON-RPC subprocess ABI v2
 categories = ["development-tools::testing"]
 keywords = ["ainb", "plugin", "cts", "conformance"]
 
+# cargo-machete matches the package name, but the SDK's [lib] name is
+# `ainb_plugin_sdk`; the rename hides real usage in the canary binaries.
+[package.metadata.cargo-machete]
+ignored = ["ainb-plugin-sdk-rust"]
+
 [lib]
 name = "ainb_plugin_cts_v2"
 path = "src/lib.rs"
@@ -19,10 +24,7 @@ ainb-plugin-runtime = { path = "../ainb-plugin-runtime" }
 ainb-plugin-sdk-rust = { path = "../ainb-plugin-sdk-rust" }
 
 tokio = { workspace = true }
-anyhow = { workspace = true }
 serde_json = { workspace = true }
-serde = { workspace = true }
-tempfile = { workspace = true }
 toml = { workspace = true }
 bytes = { version = "1.6", features = ["serde"] }
 async-trait = "0.1"
