@@ -593,7 +593,7 @@ fn paint_target_prompt(buf: &mut WireBuffer, origin_y: u16, height: u16, width: 
             buf,
             origin_y + 1,
             width,
-            "  (Enter to commit · Esc to cancel)",
+            "  (Enter to commit · Backspace to cancel)",
         );
     }
 }
