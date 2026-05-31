@@ -193,6 +193,92 @@ impl TaskRepo {
         .await?;
         rows.iter().map(task_from_row).collect()
     }
+
+    /// List **every** task in `workspace_id`, oldest first. Backs the Kanban
+    /// board snapshot (P8.4), which buckets the six lifecycle statuses into its
+    /// four columns client-side, so this returns terminal rows too (unlike
+    /// [`list_pending_for_runtime`](Self::list_pending_for_runtime)).
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the query or a row decode fails.
+    pub async fn list_by_workspace(
+        pool: &SqlitePool,
+        workspace_id: &str,
+    ) -> Result<Vec<Task>, sqlx::Error> {
+        let rows = sqlx::query(&format!(
+            "SELECT {COLUMNS} FROM agent_task_queue \
+             WHERE workspace_id = ? ORDER BY created_at, id"
+        ))
+        .bind(workspace_id)
+        .fetch_all(pool)
+        .await?;
+        rows.iter().map(task_from_row).collect()
+    }
+
+    /// Move one task to `to_status`, **scoped to `workspace_id`**, stamping the
+    /// lifecycle timestamps the new status implies. Backs the Kanban card-move
+    /// (P8.4): `Shift+←/→` drags a card to a new column.
+    ///
+    /// The `WHERE id = ? AND workspace_id = ?` clause is the tenant guard — a
+    /// task id from another workspace touches no row and returns `Ok(false)`,
+    /// never another tenant's task. `Ok(true)` means exactly one row moved.
+    ///
+    /// Timestamp coherence (so the board's derived age / state stay sane):
+    /// - moving to `running` stamps `started_at = clock` if not already set;
+    /// - moving to a terminal status (`done`/`failed`/`cancelled`) stamps
+    ///   `finished_at = clock`;
+    /// - moving back to `queued` clears `dispatched_at`/`started_at`/`finished_at`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] on a store fault. (Status-token validity is the
+    /// caller's concern — the daemon parses it via [`TaskStatus`] before calling
+    /// here; the DB `CHECK` constraint is the final guard.)
+    ///
+    /// [`TaskStatus`]: ainb_hangar_core::task_status::TaskStatus
+    pub async fn transition_status(
+        pool: &SqlitePool,
+        workspace_id: &str,
+        id: &str,
+        to_status: ainb_hangar_core::task_status::TaskStatus,
+        now_ms: i64,
+    ) -> Result<bool, sqlx::Error> {
+        use ainb_hangar_core::task_status::TaskStatus;
+        // One UPDATE expresses every timestamp rule via CASE so the move is a
+        // single atomic statement (the board reflects it on the next snapshot).
+        let started = if to_status == TaskStatus::Running {
+            // Preserve an existing start; only stamp when first entering running.
+            "started_at = COALESCE(started_at, ?2)"
+        } else if to_status == TaskStatus::Queued {
+            "started_at = NULL"
+        } else {
+            "started_at = started_at"
+        };
+        let finished = if to_status.is_terminal() {
+            "finished_at = ?2"
+        } else {
+            "finished_at = NULL"
+        };
+        let dispatched = if to_status == TaskStatus::Queued {
+            "dispatched_at = NULL"
+        } else {
+            "dispatched_at = dispatched_at"
+        };
+        let sql = format!(
+            "UPDATE agent_task_queue \
+             SET status = ?1, {started}, {finished}, {dispatched} \
+             WHERE id = ?3 AND workspace_id = ?4"
+        );
+        let res = sqlx::query(&sql)
+            .bind(to_status.as_str())
+            .bind(now_ms)
+            .bind(id)
+            .bind(workspace_id)
+            .execute(pool)
+            .await?;
+        Ok(res.rows_affected() == 1)
+    }
 }
 
 /// The full `agent_task_queue` column list, in the order [`task_from_row`]
