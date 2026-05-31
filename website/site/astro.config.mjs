@@ -65,6 +65,15 @@ export default defineConfig({
             { label: 'Skills', slug: 'toolkit/skills' },
             { label: 'Agents', slug: 'toolkit/agents' },
             { label: 'Bootstrap engine', slug: 'toolkit/bootstrap' },
+            {
+              label: 'Claude Code plugins',
+              items: [
+                { label: 'Overview', slug: 'toolkit/plugins/overview' },
+                { label: 'reflect', slug: 'toolkit/plugins/reflect' },
+                { label: 'ainb-fleet', slug: 'toolkit/plugins/ainb-fleet' },
+                { label: 'ainb-hooks', slug: 'toolkit/plugins/ainb-hooks' },
+              ],
+            },
           ],
         },
         {
