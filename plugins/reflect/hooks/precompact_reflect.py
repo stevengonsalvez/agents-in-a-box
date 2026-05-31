@@ -147,6 +147,25 @@ def run_reflection_analysis(input_data: dict) -> dict:
     queue_dir = get_state_dir()
     queue_dir.mkdir(parents=True, exist_ok=True)
     queue_file = queue_dir / 'pending_reflections.jsonl'
+    cost_file = queue_dir / 'drain-cost.jsonl'
+
+    # Enqueue gate + dedup ($0 regex). Skip reflect-on-reflect / clean /
+    # no-signal transcripts and anything already queued/processed, so the
+    # drainer never spends a model call on them. Fail-open: if the gate
+    # module is unavailable we enqueue as before.
+    try:
+        from reflect_gate import should_enqueue  # noqa: E402
+        ok, reason = should_enqueue(transcript_path, queue_file, cost_file)
+        if not ok:
+            forensics_log(_HOOK_NAME, f"gate skip ({reason}): {transcript_path}")
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreCompact",
+                    "additionalContext": f"Auto-reflect: transcript skipped ({reason}).",
+                }
+            }
+    except Exception:  # noqa: BLE001 — never block enqueue on a gate error
+        pass
 
     entry = {
         "ts": datetime.now().isoformat(),
