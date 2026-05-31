@@ -16,8 +16,10 @@
 
 use ainb_hangar_core::clock::HangarClock;
 use ainb_hangar_core::ids::{AgentId, AutopilotId, IssueId, SkillId, WorkspaceId};
+use ainb_hangar_core::task_status::TaskStatus;
 use ainb_hangar_proto::events::{
     ActorRow, AutopilotRow, AutopilotRunRow, IssueRow, PresenceState, SkillFile, SkillRow,
+    TaskCardRow,
 };
 use ainb_hangar_proto::snapshots::{SkillDetail, SkillsSyncResult};
 use ainb_hangar_store::repo::agent::AgentRepo;
@@ -26,6 +28,7 @@ use ainb_hangar_store::repo::autopilot::{AutopilotRepo, AutopilotRepoError};
 use ainb_hangar_store::repo::autopilot_run::{FireError, fire_autopilot_tick};
 use ainb_hangar_store::repo::issue::IssueRepo;
 use ainb_hangar_store::repo::skill::{SkillRepo, SkillRepoError};
+use ainb_hangar_store::repo::task::TaskRepo;
 use sqlx::{Row, SqlitePool};
 
 /// Every Hangar issue lifecycle state, queried per-state and concatenated so the
@@ -404,6 +407,69 @@ pub async fn autopilot_set_enabled(
     } else {
         AutopilotRepo::disable(pool, workspace, autopilot_id).await
     }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// P8.4 — Kanban board: tasks list + card-move transition handlers.
+//
+// Both resolve the subscribed `workspace` (already mapped slug→id by the
+// dispatcher) and thread it into the workspace-scoped `TaskRepo`, so a task id
+// minted in another tenant can never be read or moved here.
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Snapshot every task in `workspace`, mapped to wire [`TaskCardRow`]s for the
+/// Kanban board (`hangar/tasks_list`, P8.4).
+///
+/// Carries every lifecycle status (terminal rows included) so the board can
+/// bucket the six statuses into its four columns; a foreign workspace yields an
+/// empty set.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] on a store failure or a corrupt stored id.
+pub async fn tasks_list(
+    pool: &SqlitePool,
+    workspace_id: &str,
+) -> Result<Vec<TaskCardRow>, sqlx::Error> {
+    let tasks = TaskRepo::list_by_workspace(pool, workspace_id).await?;
+    let mut out = Vec::with_capacity(tasks.len());
+    for t in tasks {
+        let id = ainb_hangar_core::ids::TaskId::from_str(&t.id).map_err(|e| {
+            sqlx::Error::ColumnDecode {
+                index: "id".to_string(),
+                source: format!("malformed task id {:?}: {e}", t.id).into(),
+            }
+        })?;
+        out.push(TaskCardRow {
+            id,
+            workspace_id: t.workspace_id,
+            agent_id: t.agent_id,
+            issue_id: t.issue_id,
+            status: t.status,
+            created_at: t.created_at,
+        });
+    }
+    Ok(out)
+}
+
+/// Move one task to `to_status`, scoped to `workspace` (`hangar/task_transition`,
+/// P8.4). Backs the Kanban card-move; the daemon parses + validates the wire
+/// status token before this call.
+///
+/// Returns `true` when exactly one row moved, `false` when the task id resolved
+/// to no task in this tenant (a foreign id moves nothing).
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] on a store fault (e.g. the DB `CHECK` constraint).
+pub async fn task_transition(
+    pool: &SqlitePool,
+    clock: &dyn HangarClock,
+    workspace_id: &str,
+    task_id: &str,
+    to_status: TaskStatus,
+) -> Result<bool, sqlx::Error> {
+    TaskRepo::transition_status(pool, workspace_id, task_id, to_status, clock.now_ms()).await
 }
 
 /// Error surface for [`autopilot_fire_now`]: a store fault resolving the

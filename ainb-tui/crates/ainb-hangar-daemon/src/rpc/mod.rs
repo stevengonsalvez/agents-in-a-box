@@ -256,6 +256,32 @@ async fn handle(
         | methods::HANGAR_AUTOPILOT_RUNS
         | methods::HANGAR_AUTOPILOT_FIRE_NOW
         | methods::HANGAR_AUTOPILOT_SET_ENABLED => handle_autopilot(pool, req).await,
+        methods::HANGAR_TASKS_LIST => {
+            let tasks = match resolve(pool, req).await? {
+                Some(ws) => snapshots::tasks_list(pool, &ws).await.map_err(|e| store_err(&e))?,
+                None => Vec::new(),
+            };
+            to_value(&ainb_hangar_proto::snapshots::TasksListResult { tasks })
+        }
+        methods::HANGAR_TASK_TRANSITION => {
+            let params: ainb_hangar_proto::snapshots::TaskTransitionParams =
+                parse_params(req, "{ workspace_id, task_id, to_status }")?;
+            // The mutating handler must not silently no-op on a typo'd workspace.
+            let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+            let to = parse_task_status(&params.to_status)?;
+            snapshots::task_transition(
+                pool,
+                &SystemClock,
+                ws.as_str(),
+                &params.task_id,
+                to,
+            )
+            .await
+            .map_err(|e| store_err(&e))?;
+            // A foreign / unknown task id moves nothing; that is a no-op, not an
+            // error (mirrors the autopilot fire-now foreign-id behaviour).
+            Ok(serde_json::json!({}))
+        }
         methods::HANGAR_HEALTH => to_value(&health.snapshot(true)),
         other => Err(RpcError {
             code: METHOD_NOT_FOUND,
@@ -340,6 +366,24 @@ fn agent_id(raw: &str) -> Result<AgentId, RpcError> {
 fn autopilot_id(raw: &str) -> Result<AutopilotId, RpcError> {
     AutopilotId::from_str(raw.to_string())
         .map_err(|_| invalid_params("autopilot_id must be a non-empty string"))
+}
+
+/// Parse a Kanban card-move target status from its wire token, rejecting an
+/// unknown token with `INVALID_PARAMS` (P8.4). The six valid tokens are the
+/// `snake_case` [`TaskStatus`] variants.
+///
+/// [`TaskStatus`]: ainb_hangar_core::task_status::TaskStatus
+fn parse_task_status(
+    raw: &str,
+) -> Result<ainb_hangar_core::task_status::TaskStatus, RpcError> {
+    serde_json::from_value::<ainb_hangar_core::task_status::TaskStatus>(
+        serde_json::Value::String(raw.to_string()),
+    )
+    .map_err(|_| {
+        invalid_params(&format!(
+            "to_status must be one of queued/dispatched/running/done/failed/cancelled, got `{raw}`"
+        ))
+    })
 }
 
 /// Resolve a workspace-scoped request's `{ workspace_id }` to a typed
@@ -987,6 +1031,136 @@ mod tests {
         .await;
         assert!(foreign.error.is_none());
         assert_eq!(foreign.result.unwrap()["runs"].as_array().unwrap().len(), 0);
+    }
+
+    /// `hangar/tasks_list` returns the seeded running task, scoped to the
+    /// subscribed workspace, carrying its raw lifecycle status.
+    #[tokio::test]
+    async fn tasks_list_returns_seeded_running_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        let resp = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_TASKS_LIST,
+                serde_json::json!({"workspace_id":"default"}),
+            ),
+            &health(),
+        )
+        .await;
+        assert!(resp.error.is_none(), "{resp:?}");
+        let v = resp.result.unwrap();
+        let tasks = v["tasks"].as_array().unwrap();
+        assert_eq!(tasks.len(), 1, "the fixture seeds exactly one task");
+        assert_eq!(tasks[0]["id"], "task-1");
+        assert_eq!(tasks[0]["status"], "running");
+        assert_eq!(tasks[0]["agent_id"], "agent-1");
+    }
+
+    /// A foreign workspace yields an empty task list (tenant isolation).
+    #[tokio::test]
+    async fn tasks_list_foreign_workspace_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        let resp = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_TASKS_LIST,
+                serde_json::json!({"workspace_id":"nope"}),
+            ),
+            &health(),
+        )
+        .await;
+        assert!(resp.error.is_none());
+        assert_eq!(resp.result.unwrap()["tasks"].as_array().unwrap().len(), 0);
+    }
+
+    /// `hangar/task_transition` drives the real store FSM: moving the seeded
+    /// `running` task to `done` updates the row's status (visible on the next
+    /// `tasks_list`).
+    #[tokio::test]
+    async fn task_transition_moves_card_via_fsm() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+
+        let resp = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_TASK_TRANSITION,
+                serde_json::json!({"workspace_id":"default","task_id":"task-1","to_status":"done"}),
+            ),
+            &health(),
+        )
+        .await;
+        assert!(resp.error.is_none(), "{resp:?}");
+
+        // The board snapshot now reports the task in `done`.
+        let tasks = snapshots::tasks_list(store.pool(), crate::seed::WS_ID).await.unwrap();
+        let moved = tasks.iter().find(|t| t.id.as_str() == "task-1").unwrap();
+        assert_eq!(moved.status, "done", "transition must move the task to done");
+    }
+
+    /// A foreign workspace task-transition is rejected (`INVALID_PARAMS` on the
+    /// unknown workspace) and moves no row — the mutation must not silently no-op.
+    #[tokio::test]
+    async fn task_transition_foreign_workspace_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        let resp = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_TASK_TRANSITION,
+                serde_json::json!({"workspace_id":"nope","task_id":"task-1","to_status":"done"}),
+            ),
+            &health(),
+        )
+        .await;
+        assert_eq!(resp.error.unwrap().code, INVALID_PARAMS);
+        // The seeded task stays `running` (no cross-tenant move).
+        let tasks = snapshots::tasks_list(store.pool(), crate::seed::WS_ID).await.unwrap();
+        assert_eq!(tasks[0].status, "running");
+    }
+
+    /// A foreign task id (right workspace, wrong task) moves nothing but is not an
+    /// error (a no-op, mirroring the autopilot fire-now foreign-id behaviour).
+    #[tokio::test]
+    async fn task_transition_foreign_task_id_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        let resp = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_TASK_TRANSITION,
+                serde_json::json!({"workspace_id":"default","task_id":"no-such-task","to_status":"done"}),
+            ),
+            &health(),
+        )
+        .await;
+        assert!(resp.error.is_none(), "foreign task id is a no-op, not an error");
+    }
+
+    /// An illegal `to_status` token is rejected with `INVALID_PARAMS` before any
+    /// store write.
+    #[tokio::test]
+    async fn task_transition_illegal_status_is_invalid_params() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        let resp = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_TASK_TRANSITION,
+                serde_json::json!({"workspace_id":"default","task_id":"task-1","to_status":"banana"}),
+            ),
+            &health(),
+        )
+        .await;
+        assert_eq!(resp.error.unwrap().code, INVALID_PARAMS);
     }
 
     #[tokio::test]
