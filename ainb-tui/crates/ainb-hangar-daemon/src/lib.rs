@@ -36,6 +36,13 @@ pub mod dispatch;
 /// Per-task execution-environment layout: workdir/output/logs + `.gc_meta.json`
 /// (P1.6).
 pub mod execenv;
+/// Daemon observability bootstrap (P8.1).
+///
+/// Installs the `tracing` subscriber with the rolling JSONL sink under
+/// `<hangar_home>/hangar/logs` and an `RUST_LOG` env filter.
+/// [`observability::install`] returns a `WorkerGuard` the daemon `main` holds
+/// for the process lifetime, and exposes an `otlp` seam for P8.2.
+pub mod observability;
 /// Dispatch-time materialisation of an agent's skills into its per-task env
 /// (P6.4).
 ///
@@ -110,17 +117,37 @@ pub mod warnings;
 /// Git-worktree integration for per-task working dirs (P1.6).
 pub mod worktree;
 
-/// Resolve the directory that holds `hangar.db` (and the `hangar.sock` the RPC
-/// server binds). Mirrors [`ainb_hangar_store::Store`]'s resolution so the
-/// database, the per-task env tree, and the socket all share one root:
-/// `$AINB_HANGAR_HOME` when set and non-empty, else `~/.ainb`.
-fn hangar_dir() -> anyhow::Result<std::path::PathBuf> {
+/// Resolve the directory that holds `hangar.db`.
+///
+/// Mirrors [`ainb_hangar_store::Store`]'s resolution so the database, the
+/// per-task env tree, the `hangar.sock` the RPC server binds, and the log dir
+/// all share one root: `$AINB_HANGAR_HOME` when set and non-empty, else
+/// `~/.ainb`.
+///
+/// # Errors
+///
+/// Returns an error if neither `$AINB_HANGAR_HOME` is set nor a home directory
+/// can be resolved.
+pub fn hangar_dir() -> anyhow::Result<std::path::PathBuf> {
     match std::env::var_os(ainb_hangar_store::Store::home_env()).filter(|p| !p.is_empty()) {
         Some(p) => Ok(std::path::PathBuf::from(p)),
         None => Ok(dirs::home_dir()
             .ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?
             .join(".ainb")),
     }
+}
+
+/// Resolve the daemon's structured-log directory: `<hangar_home>/hangar/logs`.
+///
+/// Defaults to `~/.ainb/hangar/logs`. The P8.1 rolling JSONL sink writes
+/// `daemon.<date>` files here; the P8.6 CLI/TUI logs-tail surfaces read them
+/// back. Shares the one home resolution with [`hangar_dir`].
+///
+/// # Errors
+///
+/// Propagates [`hangar_dir`]'s error if the Hangar home cannot be resolved.
+pub fn log_dir() -> anyhow::Result<std::path::PathBuf> {
+    Ok(hangar_dir()?.join("hangar").join("logs"))
 }
 
 /// Boot the daemon: open the persistence layer and run the claim loop.
@@ -141,6 +168,19 @@ fn hangar_dir() -> anyhow::Result<std::path::PathBuf> {
 /// migration fails) or if the run loop's shutdown handler fails.
 pub async fn boot(once: bool) -> anyhow::Result<()> {
     let dir = hangar_dir()?;
+
+    // Observability tripwire seam (P8.1): when `$AINB_HANGAR_BOOT_TASK_ID` is set
+    // the daemon emits exactly one structured boot event carrying that id. The
+    // `it_subscriber_writes_jsonl` integration test sets it to prove the JSONL
+    // sink installed in `main` lays down a single matching JSON line. Production
+    // boots never set it, so this is a no-op in normal operation.
+    if let Some(task_id) = std::env::var_os("AINB_HANGAR_BOOT_TASK_ID")
+        .and_then(|v| v.into_string().ok())
+        .filter(|v| !v.is_empty())
+    {
+        tracing::info!(task_id = %task_id, "boot");
+    }
+
     let store: Store = Store::open_in(&dir).await?;
 
     // P4.10: bind the JSON-RPC socket beside the database and serve plugin

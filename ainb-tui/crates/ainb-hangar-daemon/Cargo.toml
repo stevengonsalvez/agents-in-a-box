@@ -55,6 +55,12 @@ tokio = { version = "1.36", default-features = false, features = [
 clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+# P8.1 observability: the non-blocking rolling JSONL sink. `rolling` builds the
+# daily-rotated `daemon.<date>` file under `~/.ainb/hangar/logs`; `non_blocking`
+# moves the actual writes onto a background thread and hands back a
+# `WorkerGuard` the daemon `main` must hold for the whole process lifetime
+# (dropping it early flushes and stops the writer, losing buffered lines).
+tracing-appender = "0.2"
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }

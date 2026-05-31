@@ -1,13 +1,14 @@
 //! `ainb-hangar-daemon` entry point.
 //!
-//! Parses CLI args, initialises tracing, and hands off to
-//! [`ainb_hangar_daemon::boot`]. P0 supports two behaviours: `--version`
+//! Parses CLI args, installs the observability subscriber (P8.1), and hands off
+//! to [`ainb_hangar_daemon::boot`]. P0 supports two behaviours: `--version`
 //! (handled by `clap`) and `--once` (boot, log ready, exit 0). Without `--once`
 //! the daemon idles until interrupted.
 
 use ainb_hangar_daemon::beads_sync::reconcile;
 use ainb_hangar_daemon::beads_sync::reconcile::cli::{BeadsCli, BeadsCommand};
-use ainb_hangar_daemon::boot;
+use ainb_hangar_daemon::observability::{self, ObservabilityOpts};
+use ainb_hangar_daemon::{boot, log_dir};
 use clap::{Parser, Subcommand};
 
 /// Hangar control-plane daemon.
@@ -38,12 +39,14 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    // P8.1: install the observability subscriber BEFORE any service constructs so
+    // every span/event from boot onwards is captured. `install` returns the
+    // non-blocking appender's `WorkerGuard`; it is bound to `_guard` and held for
+    // the whole `main` body — dropping it early would flush and stop the
+    // background writer, silently losing buffered JSONL lines. The JSON sink
+    // writes `daemon.<date>` under `<hangar_home>/hangar/logs`; the `otlp` seam is
+    // left unset (wired in P8.2).
+    let _guard = observability::install(ObservabilityOpts::new(log_dir()?))?;
 
     let args = Args::parse();
     match args.command {
