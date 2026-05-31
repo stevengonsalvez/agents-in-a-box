@@ -320,7 +320,7 @@ impl LayoutComponent {
             ));
         }
         line2_spans.push(Span::styled(
-            "I",
+            "b",
             Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
         ));
         line2_spans.push(Span::styled(" inbox", Style::default().fg(MUTED_GRAY)));

@@ -1914,20 +1914,12 @@ impl EventHandler {
         tracing::debug!("HomeScreen V2 key handler: {:?}", key_event.code);
 
         // Global shortcuts that work regardless of focus (matches HomeTile shortcuts)
-        // Inbox shortcut FIRST so the Shift+i path beats the plain
-        // 'i' arm (GoToStats) on terminals where crossterm delivers
-        // shifted letters as KeyCode::Char('i') + SHIFT modifier
-        // instead of KeyCode::Char('I'). The Linux tmux runner on
-        // GitHub Actions hits the modifier path; macOS hits the
-        // uppercase code-point path. Both must reach the Inbox.
-        if let KeyCode::Char(c) = key_event.code {
-            let shift_pressed = key_event.modifiers.contains(KeyModifiers::SHIFT);
-            if c == 'I' || (c == 'i' && shift_pressed) {
-                return Some(AppEvent::GoToInbox);
-            }
-        }
+        // Inbox is bound to plain 'b' ("in-Box") to avoid the
+        // i/I case-pair confusion with Stats ('i'). 'b' is otherwise
+        // unused across every screen handler.
         match key_event.code {
             KeyCode::Char('a') => return Some(AppEvent::GoToAgentSelection),
+            KeyCode::Char('b') => return Some(AppEvent::GoToInbox),
             KeyCode::Char('c') => return Some(AppEvent::GoToCatalog),
             KeyCode::Char('C') => return Some(AppEvent::GoToConfig),
             KeyCode::Char('s') => return Some(AppEvent::GoToSessionList),
