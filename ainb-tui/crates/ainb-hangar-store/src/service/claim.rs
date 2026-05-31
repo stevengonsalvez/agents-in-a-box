@@ -62,6 +62,11 @@ impl ClaimTaskService {
     /// # Errors
     ///
     /// Returns a [`sqlx::Error`] if the statement or the row decode fails.
+    #[tracing::instrument(
+        name = "task.claim",
+        skip(pool, clock),
+        fields(runtime_id = %runtime_id, task_id = tracing::field::Empty, workspace_id = tracing::field::Empty)
+    )]
     pub async fn claim_for_runtime(
         pool: &SqlitePool,
         runtime_id: &str,
@@ -73,6 +78,15 @@ impl ClaimTaskService {
             .bind(runtime_id)
             .fetch_optional(pool)
             .await?;
+        // Record the claimed identity onto the span once known. `workspace_id`
+        // comes back in the RETURNING projection purely for observability (it is
+        // not part of the [`ClaimedTask`] the caller consumes). An empty queue
+        // leaves both fields unset.
+        if let Some(r) = row.as_ref() {
+            let span = tracing::Span::current();
+            span.record("task_id", r.try_get::<String, _>("id")?.as_str());
+            span.record("workspace_id", r.try_get::<String, _>("workspace_id")?.as_str());
+        }
         row.map(|r| claimed_from_row(&r)).transpose()
     }
 }
@@ -98,7 +112,7 @@ WHERE id = ( \
     ORDER BY q.created_at, q.id \
     LIMIT 1 \
 ) \
-RETURNING id, agent_id, runtime_id, issue_id, session_id, work_dir, dispatched_at";
+RETURNING id, workspace_id, agent_id, runtime_id, issue_id, session_id, work_dir, dispatched_at";
 
 /// Decode a [`ClaimedTask`] from the `RETURNING` row of [`CLAIM_SQL`].
 ///

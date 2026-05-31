@@ -74,6 +74,11 @@ impl FailTaskService {
     ///   `cancelled`.
     /// - [`FinalizeError::IllegalState`] if the row is `dispatched` or absent.
     /// - [`FinalizeError::Db`] on an underlying database error.
+    #[tracing::instrument(
+        name = "task.fail",
+        skip(pool, clock),
+        fields(task_id = %task_id, failure_reason = reason.as_db_str())
+    )]
     pub async fn fail(
         pool: &SqlitePool,
         task_id: &str,

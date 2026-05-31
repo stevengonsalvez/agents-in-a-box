@@ -22,12 +22,22 @@ impl CancelTaskService {
     /// Transition `task_id` to `cancelled`, stamping
     /// `finished_at = clock.now_ms()`. Legal from any non-terminal state.
     ///
+    /// Emits a `task.cancel` span. The store-level cancel is source-agnostic
+    /// (it takes no caller identity), so the span's `cancel_source` is the
+    /// stable `"fsm"` token marking this FSM entrypoint; richer attribution
+    /// (the user / sweeper that requested the cancel) is the caller's to log.
+    ///
     /// # Errors
     ///
     /// - [`FinalizeError::TerminalMismatch`] if the row is already `done` /
     ///   `failed`.
     /// - [`FinalizeError::IllegalState`] if the row is absent.
     /// - [`FinalizeError::Db`] on an underlying database error.
+    #[tracing::instrument(
+        name = "task.cancel",
+        skip(pool, clock),
+        fields(task_id = %task_id, cancel_source = "fsm")
+    )]
     pub async fn cancel(
         pool: &SqlitePool,
         task_id: &str,

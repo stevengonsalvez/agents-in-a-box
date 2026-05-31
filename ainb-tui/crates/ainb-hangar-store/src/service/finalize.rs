@@ -171,6 +171,26 @@ async fn cascade_autopilot_run(
     Ok(())
 }
 
+/// Record the task's `workspace_id` onto the current `tracing` span, if known.
+///
+/// The FSM finalize services take only a `task_id`, but P8.3 wants the owning
+/// `workspace_id` on the span so an operator can scope a query to one workspace.
+/// This is a single indexed-PK `SELECT` on a per-run (not per-loop) transition,
+/// so the cost is negligible. Best-effort: a missing row or DB hiccup just
+/// leaves the field unset rather than failing the transition — observability
+/// must never break the FSM.
+pub(crate) async fn record_workspace_id(pool: &SqlitePool, task_id: &str) {
+    if let Ok(Some(row)) = sqlx::query("SELECT workspace_id FROM agent_task_queue WHERE id = ?")
+        .bind(task_id)
+        .fetch_optional(pool)
+        .await
+    {
+        if let Ok(workspace_id) = row.try_get::<String, _>("workspace_id") {
+            tracing::Span::current().record("workspace_id", workspace_id.as_str());
+        }
+    }
+}
+
 /// Re-read the current [`TaskState`] of a task, or `None` if the row is absent.
 async fn read_state(pool: &SqlitePool, task_id: &str) -> Result<Option<TaskState>, FinalizeError> {
     let row = sqlx::query("SELECT status FROM agent_task_queue WHERE id = ?")

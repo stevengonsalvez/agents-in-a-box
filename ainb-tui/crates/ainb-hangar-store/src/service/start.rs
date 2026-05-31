@@ -12,7 +12,7 @@ use ainb_hangar_core::clock::HangarClock;
 use ainb_hangar_core::task::state::TaskState;
 use sqlx::SqlitePool;
 
-use super::finalize::{finalize_idempotent, FinalizeError, FinalizeOutcome};
+use super::finalize::{finalize_idempotent, record_workspace_id, FinalizeError, FinalizeOutcome};
 
 /// Stateless `dispatched -> running` service over `agent_task_queue`.
 pub struct StartTaskService;
@@ -29,12 +29,18 @@ impl StartTaskService {
     /// - [`FinalizeError::TerminalMismatch`] if the row is already terminal.
     /// - [`FinalizeError::IllegalState`] if the row is `queued` or absent.
     /// - [`FinalizeError::Db`] on an underlying database error.
+    #[tracing::instrument(
+        name = "task.start",
+        skip(pool, clock),
+        fields(task_id = %task_id, workspace_id = tracing::field::Empty)
+    )]
     pub async fn start(
         pool: &SqlitePool,
         task_id: &str,
         clock: &dyn HangarClock,
     ) -> Result<FinalizeOutcome, FinalizeError> {
         let now = clock.now_ms();
+        record_workspace_id(pool, task_id).await;
         finalize_idempotent(
             pool,
             task_id,

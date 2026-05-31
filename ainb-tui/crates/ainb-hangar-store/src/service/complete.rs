@@ -40,6 +40,11 @@ impl CompleteTaskService {
     /// - [`FinalizeError::IllegalState`] if the row is non-terminal-but-unexpected
     ///   (e.g. still `queued` / `dispatched`) or absent.
     /// - [`FinalizeError::Db`] on a serialize or database failure.
+    #[tracing::instrument(
+        name = "task.complete",
+        skip(pool, params, clock),
+        fields(task_id = %task_id, outcome = tracing::field::Empty)
+    )]
     pub async fn complete(
         pool: &SqlitePool,
         task_id: &str,
@@ -49,7 +54,7 @@ impl CompleteTaskService {
         let now = clock.now_ms();
         let result_json = serde_json::to_string(&params.result)
             .map_err(|e| FinalizeError::Db(sqlx::Error::Encode(Box::new(e))))?;
-        finalize_idempotent(
+        let outcome = finalize_idempotent(
             pool,
             task_id,
             TaskState::Done,
@@ -65,6 +70,11 @@ impl CompleteTaskService {
                     .bind(task_id)
             },
         )
-        .await
+        .await?;
+        // The terminal state this transition lands in, recorded once known so the
+        // span carries the resolved outcome (`done`) regardless of whether this
+        // call won the transition or replayed an already-done row.
+        tracing::Span::current().record("outcome", TaskState::Done.as_db_str());
+        Ok(outcome)
     }
 }
