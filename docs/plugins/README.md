@@ -2,8 +2,6 @@
 title: "Plugins — disambiguation"
 ---
 
-# Plugins — disambiguation
-
 > **Read this first.** The word "plugin" means two different things in this monorepo. Picking the wrong path costs you hours.
 
 ---

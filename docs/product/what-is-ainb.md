@@ -2,8 +2,6 @@
 title: "What is agents-in-a-box?"
 ---
 
-# What is agents-in-a-box?
-
 A terminal-native ecosystem for managing AI coding agents. Three components share one monorepo, plus a supporting knowledge library:
 
 | # | Component | What it is |

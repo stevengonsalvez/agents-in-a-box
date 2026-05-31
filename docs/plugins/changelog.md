@@ -2,8 +2,6 @@
 title: "Plugin contract changelog"
 ---
 
-# Plugin contract changelog
-
 Tracks how the plugin contract (`./spec-v2.md`) evolves.
 
 ## Versioning policy

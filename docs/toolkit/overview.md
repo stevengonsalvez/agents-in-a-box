@@ -2,8 +2,6 @@
 title: "Toolkit overview"
 ---
 
-# Toolkit overview
-
 One canonical source tree, many AI tools. Author a skill, agent, or workflow once under `toolkit/packages/` and `bootstrap.js` deploys it into each supported tool's home directory.
 
 ## What lives in `toolkit/packages/`

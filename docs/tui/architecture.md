@@ -2,8 +2,6 @@
 title: "TUI architecture"
 ---
 
-# TUI architecture
-
 `ainb` is a Cargo **workspace** rooted at `ainb-tui/`. The TUI application and CLI live in the `ainb-core` crate; the rest of the workspace is the v2 plugin platform (runtime, SDK, reference plugins, conformance + test tooling).
 
 ## Workspace crates

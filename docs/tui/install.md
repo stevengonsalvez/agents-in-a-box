@@ -2,8 +2,6 @@
 title: "Install the TUI"
 ---
 
-# Install the TUI
-
 ## Quick install (curl)
 
 The install script detects your platform and downloads a prebuilt binary from GitHub Releases:

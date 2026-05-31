@@ -2,8 +2,6 @@
 title: "`reflect` CLI reference"
 ---
 
-# `reflect` CLI reference
-
 The `reflect` command is the command-line interface to the agents-in-a-box knowledge base. It is shipped by the Python package **`reflect-kb`** (source: [`reflect-kb/`](https://github.com/stevengonsalvez/agents-in-a-box/tree/main/reflect-kb)) and provides the **capture → index → recall** loop: `reflect add` captures a learning, `reflect reindex` rebuilds the GraphRAG + vector index, and `reflect search` recalls the most relevant prior learnings.
 
 ## Two version streams

@@ -2,8 +2,6 @@
 title: "Architecture deep-dive"
 ---
 
-# Architecture deep-dive
-
 > **Status:** stub. Authoritative content currently lives at `docs/product/architecture.md + ainb-tui/CLAUDE.md`.
 > Migration of that file into this path is gated on Stevie's approval.
 

@@ -2,8 +2,6 @@
 title: "Quickstart — first session in 60 seconds"
 ---
 
-# Quickstart — first session in 60 seconds
-
 From install to your first running agent session.
 
 ## 1. Pre-flight

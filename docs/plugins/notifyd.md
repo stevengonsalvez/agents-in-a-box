@@ -3,8 +3,6 @@ title: "notifyd plugin"
 description: "Notification daemon + Inbox screen that captures Claude Code and Codex hook events into SQLite."
 ---
 
-# notifyd
-
 `notifyd` owns the **Inbox** screen and ships a standalone notification daemon (`ainb-notifyd`) that captures Claude Code and Codex lifecycle hook events into SQLite. It is the reference for an **event-capturing, screen-owning** integration — but, unlike the subprocess plugins (`burndown`, `session-reader`, `witr`), it is **compiled in-tree into the host** rather than spawned over JSON-RPC. The `ainb-plugin-notifyd` crate is a library + daemon binary that `ainb-core` links against directly.
 
 ## How it works

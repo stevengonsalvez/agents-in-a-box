@@ -2,8 +2,6 @@
 title: "ainb CLI Reference"
 ---
 
-# ainb CLI Reference
-
 `ainb` is both an interactive terminal UI and a scriptable CLI. Every session operation the TUI can perform is also exposed as a subcommand, so agents and automation can drive it end-to-end without opening the UI.
 
 Run `ainb` with no arguments to launch the TUI, or use any subcommand below for non-interactive work.

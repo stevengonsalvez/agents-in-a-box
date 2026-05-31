@@ -2,8 +2,6 @@
 title: "Whole-system architecture"
 ---
 
-# Whole-system architecture
-
 How the four components of agents-in-a-box fit together.
 
 > For component-level deep dives, see [TUI architecture](../tui/architecture.md), [plugin spec v2](../plugins/spec-v2.md), and [knowledge system overview](../knowledge/overview.md).

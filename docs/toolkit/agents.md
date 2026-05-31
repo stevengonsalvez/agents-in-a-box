@@ -2,8 +2,6 @@
 title: "Agents (37)"
 ---
 
-# Agents (37)
-
 37 specialised AI agents organised by domain.
 
 ## By category

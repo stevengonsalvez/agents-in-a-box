@@ -2,8 +2,6 @@
 title: "Value proposition"
 ---
 
-# Value proposition
-
 What you get when you adopt agents-in-a-box.
 
 ---
