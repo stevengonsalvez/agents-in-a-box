@@ -1,7 +1,6 @@
 // ABOUTME: Non-interactive usage analytics commands.
 // Provides CodeBurn-style reports, exports, plans, optimization, compare, and yield.
 
-use crate::output_format::OutputFormat;
 use crate::config::{AppConfig, CurrencyConfig, UsagePlan, UsagePlanId, UsagePlanProvider};
 use crate::data::usage::{
     ActivityUsage, NamedUsage, ProjectUsage, SessionUsage, UsageData, UsageFilters, UsagePeriod,
@@ -9,6 +8,7 @@ use crate::data::usage::{
     compare_models, disabled_cache, optimize_usage, parse_usage_for,
     parse_usage_for_with_roots_and_cache, shared_cache,
 };
+use crate::output_format::OutputFormat;
 use anyhow::{Result, anyhow, bail};
 use chrono::{Local, NaiveDate};
 use clap::{Args, Subcommand, ValueEnum};
@@ -278,14 +278,11 @@ pub fn execute_for_plugin(
         UsageCommands::Models(args) => print_models_with_data(data, &args, format),
         // Plan / Currency / Cache stay in the host-side `cli/usage.rs`
         // shim — they're config admin, not analytics.
-        UsageCommands::Plan { .. }
-        | UsageCommands::Currency(_)
-        | UsageCommands::Cache { .. } => anyhow::bail!(
-            "subcommand handled in host (config admin), not the burndown plugin"
-        ),
+        UsageCommands::Plan { .. } | UsageCommands::Currency(_) | UsageCommands::Cache { .. } => {
+            anyhow::bail!("subcommand handled in host (config admin), not the burndown plugin")
+        }
     }
 }
-
 
 fn print_report_with_data(
     data: &UsageData,
@@ -324,12 +321,8 @@ fn print_status_with_data(
     args: &UsageReportArgs,
     format: OutputFormat,
 ) -> Result<()> {
-    let projection = AppConfig::load()
-        .unwrap_or_default()
-        .usage
-        .plan
-        .as_ref()
-        .map(|plan| {
+    let projection =
+        AppConfig::load().unwrap_or_default().usage.plan.as_ref().map(|plan| {
             crate::data::usage::project_plan_usage(data, plan, Local::now().date_naive())
         });
     match format {
@@ -386,7 +379,10 @@ fn export_usage_with_data(
             Ok(())
         }
         (None, OutputFormat::Markdown) => {
-            print!("{}", render_markdown_report("Usage Export", data, args.report.top));
+            print!(
+                "{}",
+                render_markdown_report("Usage Export", data, args.report.top)
+            );
             Ok(())
         }
         (None, OutputFormat::Csv | OutputFormat::Text) => {
@@ -464,9 +460,7 @@ pub(crate) fn write_csv_folder(dir: &Path, data: &UsageData) -> Result<()> {
     let marker = dir.join(".ainb-export");
     if dir.exists() {
         let already_export_dir = marker.exists();
-        let empty = fs::read_dir(dir)
-            .map(|mut d| d.next().is_none())
-            .unwrap_or(true);
+        let empty = fs::read_dir(dir).map(|mut d| d.next().is_none()).unwrap_or(true);
         if !empty && !already_export_dir {
             bail!(
                 "refusing to overwrite non-empty directory {} (no .ainb-export marker — \
@@ -739,7 +733,10 @@ fn print_models_with_data(
     let matrix = build_models_by_task_matrix(&view);
     match format {
         OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&matrix_to_json(&matrix))?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&matrix_to_json(&matrix))?
+            );
         }
         OutputFormat::Csv => {
             print!("{}", matrix_to_csv(&matrix));
@@ -767,7 +764,10 @@ fn print_models_flat(data: &UsageData, format: OutputFormat, top: usize) -> Resu
                     })
                 })
                 .collect();
-            println!("{}", serde_json::to_string_pretty(&json!({"models": rows}))?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({"models": rows}))?
+            );
         }
         OutputFormat::Csv => {
             println!("model,calls,tokens,cost_usd");
@@ -961,7 +961,10 @@ fn matrix_to_markdown(matrix: &(Vec<String>, Vec<ModelTaskRow>)) -> String {
     for row in rows {
         out.push_str(&format!("| {}", md_escape(&row.model)));
         for c in &row.cells {
-            out.push_str(&format!(" | {} | {} | ${:.2}", c.calls, c.tokens, c.cost_usd));
+            out.push_str(&format!(
+                " | {} | {} | ${:.2}",
+                c.calls, c.tokens, c.cost_usd
+            ));
         }
         out.push_str(" |\n");
     }
@@ -1076,9 +1079,10 @@ fn print_report(args: &UsageReportArgs, format: OutputFormat, title: &str) -> Re
 fn print_status(args: &UsageReportArgs, format: OutputFormat) -> Result<()> {
     let data = load_usage(args)?;
     let config = AppConfig::load().unwrap_or_default();
-    let projection = config.usage.plan.as_ref().map(|plan| {
-        crate::data::usage::project_plan_usage(&data, plan, Local::now().date_naive())
-    });
+    let projection =
+        config.usage.plan.as_ref().map(|plan| {
+            crate::data::usage::project_plan_usage(&data, plan, Local::now().date_naive())
+        });
     match format {
         OutputFormat::Json => println!(
             "{}",
@@ -1089,7 +1093,10 @@ fn print_status(args: &UsageReportArgs, format: OutputFormat) -> Result<()> {
         ),
         OutputFormat::Csv => print!("{}", combined_csv(&data)),
         OutputFormat::Markdown => {
-            print!("{}", render_markdown_report("Usage Status", &data, args.top));
+            print!(
+                "{}",
+                render_markdown_report("Usage Status", &data, args.top)
+            );
             if let Some(projection) = &projection {
                 println!(
                     "\n## Plan\n\n- **Spent:** ${:.2} / ${:.2} ({:.0}%)\n- **Status:** {:?}\n",

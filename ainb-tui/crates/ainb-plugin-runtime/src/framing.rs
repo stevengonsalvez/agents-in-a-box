@@ -7,7 +7,7 @@
 //! version.
 
 use ainb_plugin_protocol::errors::ProtocolError;
-use ainb_plugin_protocol::framing::{encode, MAX_BODY_BYTES};
+use ainb_plugin_protocol::framing::{MAX_BODY_BYTES, encode};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// Header block soft cap (matches the sync decoder).
@@ -27,10 +27,7 @@ where
 
     loop {
         let mut line = String::new();
-        let n = r
-            .read_line(&mut line)
-            .await
-            .map_err(ProtocolError::Transport)?;
+        let n = r.read_line(&mut line).await.map_err(ProtocolError::Transport)?;
 
         if n == 0 {
             if any_byte_read {
@@ -54,18 +51,15 @@ where
         }
         let trimmed = line.trim_end_matches("\r\n");
         if trimmed.is_empty() {
-            let len = content_length.ok_or_else(|| {
-                ProtocolError::Decode("missing Content-Length header".into())
-            })?;
+            let len = content_length
+                .ok_or_else(|| ProtocolError::Decode("missing Content-Length header".into()))?;
             if len > MAX_BODY_BYTES {
                 return Err(ProtocolError::Decode(format!(
                     "Content-Length {len} exceeds MAX_BODY_BYTES {MAX_BODY_BYTES}"
                 )));
             }
             let mut body = vec![0u8; len];
-            r.read_exact(&mut body)
-                .await
-                .map_err(ProtocolError::Transport)?;
+            r.read_exact(&mut body).await.map_err(ProtocolError::Transport)?;
             return Ok(Some(body));
         }
         let Some((name, value)) = trimmed.split_once(':') else {
@@ -81,9 +75,7 @@ where
             })?;
             content_length = Some(parsed);
         } else {
-            return Err(ProtocolError::Decode(format!(
-                "unsupported header: {name}"
-            )));
+            return Err(ProtocolError::Decode(format!("unsupported header: {name}")));
         }
     }
 }

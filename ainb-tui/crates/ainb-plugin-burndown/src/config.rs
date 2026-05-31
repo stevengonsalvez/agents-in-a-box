@@ -144,7 +144,10 @@ impl AppConfig {
             .context("failed to deserialize [usage] table")?
             .unwrap_or_default();
 
-        Ok(Self { usage, _original: Some(original) })
+        Ok(Self {
+            usage,
+            _original: Some(original),
+        })
     }
 
     /// Atomic write of `~/.agents-in-a-box/config.toml`. Replaces only
@@ -163,12 +166,12 @@ impl AppConfig {
             .clone()
             .unwrap_or_else(|| toml::Value::Table(toml::map::Map::new()));
         if let toml::Value::Table(ref mut table) = root {
-            let usage_value = toml::Value::try_from(&self.usage)
-                .context("failed to serialise [usage] table")?;
+            let usage_value =
+                toml::Value::try_from(&self.usage).context("failed to serialise [usage] table")?;
             table.insert("usage".to_string(), usage_value);
         }
-        let content = toml::to_string_pretty(&root)
-            .context("failed to serialise config to TOML")?;
+        let content =
+            toml::to_string_pretty(&root).context("failed to serialise config to TOML")?;
 
         // Best-effort atomic write: tmp + rename.
         let tmp = path.with_extension("toml.tmp");

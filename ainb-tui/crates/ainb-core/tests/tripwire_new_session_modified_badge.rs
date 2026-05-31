@@ -4,7 +4,6 @@
 //!
 //! Phase 5 of `plans/new-session-redesign-spec.md`.
 
-
 #[allow(dead_code)]
 mod tripwire_new_session_common;
 use tripwire_new_session_common::*;
@@ -29,9 +28,7 @@ fn modified_badge_toggles_with_preset_cycle() {
     let ainb = ainb_bin();
 
     let status = Command::new("tmux")
-        .args([
-            "new-session", "-d", "-s", &session, "-x", "180", "-y", "50",
-        ])
+        .args(["new-session", "-d", "-s", &session, "-x", "180", "-y", "50"])
         .status()
         .expect("tmux new-session");
     assert!(status.success());
@@ -59,9 +56,7 @@ fn modified_badge_toggles_with_preset_cycle() {
 
     send_key(&session, "n");
     let pick_deadline = Instant::now() + Duration::from_secs(5);
-    let mut on_pick = poll_capture(&session, pick_deadline, |c| {
-        c.contains("Enter=Select")
-    });
+    let mut on_pick = poll_capture(&session, pick_deadline, |c| c.contains("Enter=Select"));
     if on_pick.is_none() {
         send_key(&session, "n");
         let retry_deadline = Instant::now() + Duration::from_secs(8);
@@ -139,9 +134,7 @@ fn modified_badge_toggles_with_mode_toggle_alone() {
     let ainb = ainb_bin();
 
     let status = Command::new("tmux")
-        .args([
-            "new-session", "-d", "-s", &session, "-x", "180", "-y", "50",
-        ])
+        .args(["new-session", "-d", "-s", &session, "-x", "180", "-y", "50"])
         .status()
         .expect("tmux new-session");
     assert!(status.success());
@@ -169,9 +162,7 @@ fn modified_badge_toggles_with_mode_toggle_alone() {
 
     send_key(&session, "n");
     let pick_deadline = Instant::now() + Duration::from_secs(5);
-    let mut on_pick = poll_capture(&session, pick_deadline, |c| {
-        c.contains("Enter=Select")
-    });
+    let mut on_pick = poll_capture(&session, pick_deadline, |c| c.contains("Enter=Select"));
     if on_pick.is_none() {
         send_key(&session, "n");
         let retry_deadline = Instant::now() + Duration::from_secs(8);

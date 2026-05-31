@@ -11,9 +11,7 @@
 
 use crate::cli::OutputFormat;
 use crate::config::{AppConfig, CurrencyConfig, UsagePlan, UsagePlanId, UsagePlanProvider};
-use crate::models::usage::{
-    ActivityUsage, NamedUsage, ProjectUsage, SessionUsage, UsageData,
-};
+use crate::models::usage::{ActivityUsage, NamedUsage, ProjectUsage, SessionUsage, UsageData};
 use anyhow::{Result, anyhow, bail};
 use chrono::Local;
 use clap::{Args, Subcommand, ValueEnum};
@@ -531,14 +529,8 @@ mod tests {
     fn last_n_days_conflicts_with_ytd_at_clap_parse_time() {
         let app = crate::cli::registry::CommandRegistry::built_ins()
             .build_clap(crate::cli::root_clap_command());
-        let result = app.try_get_matches_from([
-            "ainb",
-            "usage",
-            "report",
-            "--last-n-days",
-            "14",
-            "--ytd",
-        ]);
+        let result =
+            app.try_get_matches_from(["ainb", "usage", "report", "--last-n-days", "14", "--ytd"]);
         assert!(
             result.is_err(),
             "clap should reject --last-n-days and --ytd together"

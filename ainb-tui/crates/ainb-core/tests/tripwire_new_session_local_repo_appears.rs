@@ -74,7 +74,10 @@ fn local_scan_path_surfaces_repo_as_folder_row() {
         .expect("tmux launch");
 
     let home_deadline = Instant::now() + Duration::from_secs(45);
-    if poll_capture(&session, home_deadline, |c| c.contains("Stats") && c.contains("[i]")).is_none()
+    if poll_capture(&session, home_deadline, |c| {
+        c.contains("Stats") && c.contains("[i]")
+    })
+    .is_none()
     {
         let last = capture(&session);
         kill_session(&session);
@@ -116,7 +119,12 @@ fn seed_local_git_repo_at(parent: &Path, name: &str) -> std::path::PathBuf {
     fs::write(repo.join("README.md"), "seeded\n").unwrap();
     let _ = Command::new("git")
         .args([
-            "-c", "user.email=trip@example.com", "-c", "user.name=trip", "add", "README.md",
+            "-c",
+            "user.email=trip@example.com",
+            "-c",
+            "user.name=trip",
+            "add",
+            "README.md",
         ])
         .current_dir(&repo)
         .status();

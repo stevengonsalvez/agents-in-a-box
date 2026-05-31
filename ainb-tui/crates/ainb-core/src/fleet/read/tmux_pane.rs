@@ -25,11 +25,7 @@ pub async fn capture_pane(tmux_session: &str, lines: u32) -> Result<String> {
 pub fn detect_signals_from_pane(pane: &str, at_ms: i64) -> Vec<Signal> {
     let mut out = Vec::new();
     // AskUserQuestion UI has a recognisable header band; refine as samples accrue.
-    if pane.contains('?')
-        && pane.contains('│')
-        && pane.contains('┌')
-        && pane.contains('└')
-    {
+    if pane.contains('?') && pane.contains('│') && pane.contains('┌') && pane.contains('└') {
         let snippet_start = pane.len().saturating_sub(400);
         out.push(Signal::AskUserQuestion {
             at: at_ms,

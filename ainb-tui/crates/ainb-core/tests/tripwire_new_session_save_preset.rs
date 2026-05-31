@@ -4,7 +4,6 @@
 //!
 //! Phase 5 of `plans/new-session-redesign-spec.md`.
 
-
 #[allow(dead_code)]
 mod tripwire_new_session_common;
 use tripwire_new_session_common::*;
@@ -31,9 +30,7 @@ fn ctrl_s_saves_new_preset_and_selects_it() {
     let ainb = ainb_bin();
 
     let status = Command::new("tmux")
-        .args([
-            "new-session", "-d", "-s", &session, "-x", "180", "-y", "50",
-        ])
+        .args(["new-session", "-d", "-s", &session, "-x", "180", "-y", "50"])
         .status()
         .expect("tmux new-session");
     assert!(status.success());
@@ -61,9 +58,7 @@ fn ctrl_s_saves_new_preset_and_selects_it() {
 
     send_key(&session, "n");
     let pick_deadline = Instant::now() + Duration::from_secs(5);
-    let mut on_pick = poll_capture(&session, pick_deadline, |c| {
-        c.contains("Enter=Select")
-    });
+    let mut on_pick = poll_capture(&session, pick_deadline, |c| c.contains("Enter=Select"));
     if on_pick.is_none() {
         send_key(&session, "n");
         let retry_deadline = Instant::now() + Duration::from_secs(8);
@@ -100,8 +95,7 @@ fn ctrl_s_saves_new_preset_and_selects_it() {
     // ^S opens save-preset modal.
     send_key(&session, "C-s");
     let modal_deadline = Instant::now() + Duration::from_secs(5);
-    if poll_capture(&session, modal_deadline, |c| c.contains("Save preset as")).is_none()
-    {
+    if poll_capture(&session, modal_deadline, |c| c.contains("Save preset as")).is_none() {
         let last = capture(&session);
         kill_session(&session);
         panic!("^S did not open save-preset modal; last:\n---\n{last}\n---");

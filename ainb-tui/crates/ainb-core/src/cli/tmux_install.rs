@@ -29,8 +29,7 @@ const BUNDLED_CONF: &str = include_str!("../../../../config/tmux.conf");
 
 /// Helper script the rich conf shells out to from status-right to render the
 /// active pane's git branch.
-const GIT_BRANCH_HELPER: &str =
-    include_str!("../../../../config/tmux-helpers/git_branch.sh");
+const GIT_BRANCH_HELPER: &str = include_str!("../../../../config/tmux-helpers/git_branch.sh");
 
 /// Known-old ainb default tmux confs. If the user's `~/.tmux.conf` byte-matches
 /// any entry, the onboarding wizard treats it as "an old ainb default we shipped
@@ -39,9 +38,9 @@ const GIT_BRANCH_HELPER: &str =
 ///
 /// Add a new entry every time the bundled conf header/structure changes in a
 /// way users may already have on disk from a prior ainb install.
-const KNOWN_OLD_AINB_CONFS: &[&str] = &[
-    include_str!("../../../../config/known-old-confs/v1-88lines.tmux.conf"),
-];
+const KNOWN_OLD_AINB_CONFS: &[&str] = &[include_str!(
+    "../../../../config/known-old-confs/v1-88lines.tmux.conf"
+)];
 
 /// Where the git-branch helper gets deployed.
 fn helper_script_path() -> Result<PathBuf> {
@@ -52,7 +51,9 @@ fn helper_script_path() -> Result<PathBuf> {
 /// Deploy the embedded helper script and chmod +x. Best-effort: returns false
 /// on I/O failure but never errors the install.
 fn deploy_helpers() -> bool {
-    let Ok(dest) = helper_script_path() else { return false };
+    let Ok(dest) = helper_script_path() else {
+        return false;
+    };
     if let Some(parent) = dest.parent() {
         if fs::create_dir_all(parent).is_err() {
             return false;
@@ -108,8 +109,8 @@ fn detect_state(path: &Path) -> Result<InstallState> {
     if !path.exists() {
         return Ok(InstallState::Missing);
     }
-    let on_disk = fs::read_to_string(path)
-        .with_context(|| format!("read existing {}", path.display()))?;
+    let on_disk =
+        fs::read_to_string(path).with_context(|| format!("read existing {}", path.display()))?;
     Ok(if on_disk == BUNDLED_CONF {
         InstallState::UpToDate
     } else {
@@ -159,8 +160,8 @@ pub fn detect_onboarding_state(path: &Path) -> Result<OnboardingTmuxState> {
     if !path.exists() {
         return Ok(OnboardingTmuxState::Missing);
     }
-    let on_disk = fs::read_to_string(path)
-        .with_context(|| format!("read existing {}", path.display()))?;
+    let on_disk =
+        fs::read_to_string(path).with_context(|| format!("read existing {}", path.display()))?;
     if on_disk == BUNDLED_CONF {
         return Ok(OnboardingTmuxState::UpToDate);
     }
@@ -284,7 +285,9 @@ fn run_tpm_install() -> bool {
     if !script.exists() {
         return false;
     }
-    let Ok(home) = dirs::home_dir().ok_or(()) else { return false };
+    let Ok(home) = dirs::home_dir().ok_or(()) else {
+        return false;
+    };
     let plugin_dir = home.join(".tmux/plugins/");
     let script_str = script.to_str().unwrap_or("");
 
@@ -327,9 +330,7 @@ fn reload_live_sessions(path: &Path) -> usize {
     if count == 0 {
         return 0;
     }
-    let _ = Command::new("tmux")
-        .args(["source-file", path.to_str().unwrap_or("")])
-        .status();
+    let _ = Command::new("tmux").args(["source-file", path.to_str().unwrap_or("")]).status();
     count
 }
 
@@ -464,9 +465,7 @@ pub fn install_sync(args: InstallArgs, _format: OutputFormat) -> Result<()> {
             if !args.no_reload {
                 let n = reload_live_sessions(&target);
                 if n > 0 {
-                    println!(
-                        "✓ Re-sourced {n} session(s) so plugin bindings activate"
-                    );
+                    println!("✓ Re-sourced {n} session(s) so plugin bindings activate");
                 }
             }
         } else {
@@ -614,11 +613,7 @@ pub fn run_tmux_setup_step<R: std::io::BufRead, W: std::io::Write>(
 
     // Reaching here means: Missing or KnownOldAinb AND no prior decline.
     writeln!(out).ok();
-    writeln!(
-        out,
-        "  ainb ships a rich tmux conf:"
-    )
-    .ok();
+    writeln!(out, "  ainb ships a rich tmux conf:").ok();
     writeln!(
         out,
         "    Catppuccin Mocha theme · TPM (resurrect + continuum + yank)"
@@ -629,11 +624,7 @@ pub fn run_tmux_setup_step<R: std::io::BufRead, W: std::io::Write>(
         "    Vim h/j/k/l pane nav · | and - splits · prefix-Left detach"
     )
     .ok();
-    writeln!(
-        out,
-        "    Status bar with detach/reload hints + git branch"
-    )
-    .ok();
+    writeln!(out, "    Status bar with detach/reload hints + git branch").ok();
     writeln!(out).ok();
     write!(out, "  Install? [Y/n] ").ok();
     out.flush().ok();
@@ -642,7 +633,11 @@ pub fn run_tmux_setup_step<R: std::io::BufRead, W: std::io::Write>(
     if answer == "n" || answer == "no" {
         app_config.ui_preferences.tmux_decision = TmuxDecision::Declined;
         let _ = app_config.save();
-        writeln!(out, "  Skipped. (Run `ainb tmux install` any time to enable.)").ok();
+        writeln!(
+            out,
+            "  Skipped. (Run `ainb tmux install` any time to enable.)"
+        )
+        .ok();
         return Ok(TmuxStepOutcome::Declined);
     }
 

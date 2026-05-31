@@ -240,14 +240,8 @@ pub fn scan_with_cache_and_progress(
     // Pre-walk: count the files the progress-aware parsers will visit
     // so the UI can render an `N/M` ratio. Each branch returns 0 if the
     // root is None or unreadable — same semantics as the parse path.
-    let claude_files = roots
-        .claude_projects
-        .as_deref()
-        .map_or(0, count_jsonl_in_two_level_tree);
-    let codex_files = roots
-        .codex_sessions
-        .as_deref()
-        .map_or(0, count_jsonl_recursive);
+    let claude_files = roots.claude_projects.as_deref().map_or(0, count_jsonl_in_two_level_tree);
+    let codex_files = roots.codex_sessions.as_deref().map_or(0, count_jsonl_recursive);
     let total = claude_files.saturating_add(codex_files);
     if total > 0 {
         // Saturate at u32::MAX — unlikely in practice (would require
@@ -297,12 +291,7 @@ fn count_jsonl_in_two_level_tree(root: &Path) -> usize {
             continue;
         };
         for session_entry in session_entries.flatten() {
-            if session_entry
-                .path()
-                .extension()
-                .and_then(|s| s.to_str())
-                == Some("jsonl")
-            {
+            if session_entry.path().extension().and_then(|s| s.to_str()) == Some("jsonl") {
                 count = count.saturating_add(1);
             }
         }
@@ -326,9 +315,7 @@ fn count_jsonl_recursive(root: &Path) -> usize {
             let Ok(ft) = entry.file_type() else { continue };
             if ft.is_dir() {
                 stack.push(p);
-            } else if ft.is_file()
-                && p.extension().and_then(|s| s.to_str()) == Some("jsonl")
-            {
+            } else if ft.is_file() && p.extension().and_then(|s| s.to_str()) == Some("jsonl") {
                 count = count.saturating_add(1);
             }
         }
@@ -369,46 +356,37 @@ pub fn aggregate(mut calls: Vec<ProviderCall>) -> UsageData {
 
         merge(&mut grand_total, &bucket);
 
-        daily
-            .entry(day)
-            .or_default()
-            .ingest(&bucket, &call.project, &session_key);
-        weekly
-            .entry(week)
-            .or_default()
-            .ingest(&bucket, &call.project, &session_key);
+        daily.entry(day).or_default().ingest(&bucket, &call.project, &session_key);
+        weekly.entry(week).or_default().ingest(&bucket, &call.project, &session_key);
         models
             .entry(call.model.clone())
             .or_default()
             .ingest(&bucket, &call.project, &session_key);
         if let Some(branch) = call.branch.as_deref().filter(|b| !b.is_empty()) {
-            branches
-                .entry(branch.to_string())
-                .or_default()
-                .ingest(&bucket, &call.project, &session_key);
+            branches.entry(branch.to_string()).or_default().ingest(
+                &bucket,
+                &call.project,
+                &session_key,
+            );
         }
 
-        let project = projects
-            .entry(call.project.clone())
-            .or_insert_with(|| ProjectAccumulator {
-                path: call.project_path.clone(),
-                bucket: TokenBucket::default(),
-                sessions: HashSet::new(),
-            });
+        let project = projects.entry(call.project.clone()).or_insert_with(|| ProjectAccumulator {
+            path: call.project_path.clone(),
+            bucket: TokenBucket::default(),
+            sessions: HashSet::new(),
+        });
         project.path = call.project_path.clone();
         project.sessions.insert(session_key.clone());
         merge(&mut project.bucket, &bucket);
 
-        let session = sessions
-            .entry(session_key.clone())
-            .or_insert_with(|| SessionAccumulator {
-                provider: call.provider,
-                project: call.project.clone(),
-                session_id: call.session_id.clone(),
-                first_timestamp: call.timestamp,
-                last_timestamp: call.timestamp,
-                bucket: TokenBucket::default(),
-            });
+        let session = sessions.entry(session_key.clone()).or_insert_with(|| SessionAccumulator {
+            provider: call.provider,
+            project: call.project.clone(),
+            session_id: call.session_id.clone(),
+            first_timestamp: call.timestamp,
+            last_timestamp: call.timestamp,
+            bucket: TokenBucket::default(),
+        });
         if call.timestamp < session.first_timestamp {
             session.first_timestamp = call.timestamp;
         }
@@ -608,10 +586,8 @@ fn sort_sessions_by_recency(mut rows: Vec<SessionUsage>) -> Vec<SessionUsage> {
 }
 
 fn map_to_named_usage_sorted(map: BTreeMap<String, usize>) -> Vec<NamedUsage> {
-    let mut rows: Vec<NamedUsage> = map
-        .into_iter()
-        .map(|(name, calls)| NamedUsage { name, calls })
-        .collect();
+    let mut rows: Vec<NamedUsage> =
+        map.into_iter().map(|(name, calls)| NamedUsage { name, calls }).collect();
     rows.sort_by(|a, b| b.calls.cmp(&a.calls).then(a.name.cmp(&b.name)));
     rows
 }
@@ -739,8 +715,24 @@ mod tests {
     #[test]
     fn aggregates_grand_total_correctly() {
         let calls = vec![
-            call(Provider::Claude, "p", "s1", 1_700_000_000, 10, 20, Some(0.001)),
-            call(Provider::Claude, "p", "s1", 1_700_000_001, 30, 40, Some(0.002)),
+            call(
+                Provider::Claude,
+                "p",
+                "s1",
+                1_700_000_000,
+                10,
+                20,
+                Some(0.001),
+            ),
+            call(
+                Provider::Claude,
+                "p",
+                "s1",
+                1_700_000_001,
+                30,
+                40,
+                Some(0.002),
+            ),
         ];
         let data = aggregate(calls);
         assert_eq!(data.grand_total.input_tokens, 40);

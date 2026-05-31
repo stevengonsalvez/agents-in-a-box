@@ -350,7 +350,7 @@ pub enum AppEvent {
     /// dispatcher / async path doesn't have to re-derive the same fields
     /// (finding #7).
     ConfigureLaunch(crate::components::new_session::configure::LaunchSpec),
-    ConfigureBack,      // Esc on Configure → return to PickRepo
+    ConfigureBack,              // Esc on Configure → return to PickRepo
     ConfigureOpenPresetManager, // ^P stub until Phase 7 polish
 }
 
@@ -360,14 +360,14 @@ pub enum AppEvent {
 /// picker's `recent_source` will fall back to favorites or `parse_with`.
 fn source_provenance(
     source: &crate::git::repo_source::RepoSource,
-) -> (Option<crate::config::favorites_store::SourceType>, Option<String>) {
+) -> (
+    Option<crate::config::favorites_store::SourceType>,
+    Option<String>,
+) {
     use crate::config::favorites_store::SourceType;
     use crate::git::repo_source::RepoSource;
     match source {
-        RepoSource::LocalPath(p) => (
-            Some(SourceType::LocalPath),
-            Some(p.display().to_string()),
-        ),
+        RepoSource::LocalPath(p) => (Some(SourceType::LocalPath), Some(p.display().to_string())),
         RepoSource::HttpsUrl(u) => (Some(SourceType::HttpsUrl), Some(u.clone())),
         RepoSource::SshUrl(u) => (Some(SourceType::SshUrl), Some(u.clone())),
         RepoSource::GithubShorthand { owner, repo } => (
@@ -420,13 +420,7 @@ fn picker_local_paths(
     workspaces: &[crate::models::Workspace],
 ) -> Vec<std::path::PathBuf> {
     let cached_paths: Vec<std::path::PathBuf> = cache
-        .map(|c| {
-            c.repositories
-                .into_iter()
-                .filter(|r| r.path.is_dir())
-                .map(|r| r.path)
-                .collect()
-        })
+        .map(|c| c.repositories.into_iter().filter(|r| r.path.is_dir()).map(|r| r.path).collect())
         .unwrap_or_default();
     // An empty filtered cache (no cache file yet, or every cached repo has
     // been deleted/moved) falls back to active-session workspaces rather than
@@ -441,8 +435,8 @@ fn picker_local_paths(
 #[cfg(test)]
 mod picker_local_paths_tests {
     use super::picker_local_paths;
-    use crate::git::workspace_scanner::CachedRepository;
     use crate::git::RepositoryCache;
+    use crate::git::workspace_scanner::CachedRepository;
     use crate::models::Workspace;
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -456,11 +450,7 @@ mod picker_local_paths_tests {
             repositories: paths
                 .into_iter()
                 .map(|p| CachedRepository {
-                    name: p
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("repo")
-                        .to_string(),
+                    name: p.file_name().and_then(|n| n.to_str()).unwrap_or("repo").to_string(),
                     path: p,
                 })
                 .collect(),
@@ -722,9 +712,7 @@ impl EventHandler {
             && state
                 .new_session_state
                 .as_ref()
-                .map(|s| {
-                    matches!(s.step, NewSessionStep::PickRepo | NewSessionStep::Configure)
-                })
+                .map(|s| matches!(s.step, NewSessionStep::PickRepo | NewSessionStep::Configure))
                 .unwrap_or(false);
 
         // Analytics is plugin-owned post-Phase 7; the host can't
@@ -1339,9 +1327,7 @@ impl EventHandler {
                 ConfigureOutcome::Stay => None,
                 ConfigureOutcome::BackToPickRepo => Some(AppEvent::ConfigureBack),
                 ConfigureOutcome::Launch(spec) => Some(AppEvent::ConfigureLaunch(spec)),
-                ConfigureOutcome::OpenPresetManager => {
-                    Some(AppEvent::ConfigureOpenPresetManager)
-                }
+                ConfigureOutcome::OpenPresetManager => Some(AppEvent::ConfigureOpenPresetManager),
             };
         }
 
@@ -1369,10 +1355,8 @@ impl EventHandler {
                     // (finding #3) so arrow/Esc no longer write on every
                     // keypress. Best-effort — non-fatal IO error.
                     use crate::config::session_defaults::SessionDefaults;
-                    if let Some(pick) = state
-                        .new_session_state
-                        .as_ref()
-                        .and_then(|ns| ns.pick_repo_state.as_ref())
+                    if let Some(pick) =
+                        state.new_session_state.as_ref().and_then(|ns| ns.pick_repo_state.as_ref())
                     {
                         let path = SessionDefaults::default_path();
                         if let Err(err) = pick.defaults.save_to(&path) {
@@ -1392,8 +1376,7 @@ impl EventHandler {
                     state.current_screen = prev;
                     None
                 }
-                PickRepoOutcome::AdvanceTo(source)
-                | PickRepoOutcome::StartClone(source) => {
+                PickRepoOutcome::AdvanceTo(source) | PickRepoOutcome::StartClone(source) => {
                     // Phase 5: transition into Configure. StartClone for now
                     // skips the real async clone (Phase 6+ wires it) and
                     // advances straight in — the tripwires don't depend on
@@ -1412,28 +1395,21 @@ impl EventHandler {
                     use crate::config::session_defaults::SessionDefaults;
                     use crate::git::repo_source::head_branch;
                     use crate::git::worktree_manager::WorktreeManager;
-                    if let Some(pick) = state
-                        .new_session_state
-                        .as_ref()
-                        .and_then(|ns| ns.pick_repo_state.as_ref())
+                    if let Some(pick) =
+                        state.new_session_state.as_ref().and_then(|ns| ns.pick_repo_state.as_ref())
                     {
                         let path = SessionDefaults::default_path();
                         if let Err(err) = pick.defaults.save_to(&path) {
                             tracing::warn!(error = %err, "PickRepo advance: persist session-defaults failed");
                         }
                     }
-                    let defaults =
-                        SessionDefaults::load_from(&SessionDefaults::default_path());
+                    let defaults = SessionDefaults::load_from(&SessionDefaults::default_path());
                     let label = derive_repo_label(&source);
                     let branch_source = match &source {
                         crate::git::repo_source::RepoSource::LocalPath(p) => head_branch(p),
                         _ => None,
                     };
-                    let branch_prefix = state
-                        .app_config
-                        .workspace_defaults
-                        .branch_prefix
-                        .clone();
+                    let branch_prefix = state.app_config.workspace_defaults.branch_prefix.clone();
                     // Use `list_all_worktrees` (scans by-session symlinks →
                     // real git branch via head.shorthand()), NOT
                     // `list_worktrees` which only finds legacy UUID-named
@@ -1443,9 +1419,7 @@ impl EventHandler {
                     let existing_branches: Vec<String> = WorktreeManager::new()
                         .ok()
                         .and_then(|m| m.list_all_worktrees().ok())
-                        .map(|infos| {
-                            infos.into_iter().map(|(_, i)| i.branch_name).collect()
-                        })
+                        .map(|infos| infos.into_iter().map(|(_, i)| i.branch_name).collect())
                         .unwrap_or_default();
                     let cfg = ConfigureState::from_pick_repo(
                         source.clone(),
@@ -2229,8 +2203,7 @@ impl EventHandler {
                 // here (2026-05-22). `picker_local_paths` also drops entries
                 // whose directory no longer exists, so a repo deleted since
                 // the last scan can't appear as a selectable dead row.
-                let local_paths =
-                    picker_local_paths(RepositoryCache::load(), &state.workspaces);
+                let local_paths = picker_local_paths(RepositoryCache::load(), &state.workspaces);
 
                 // Refresh the cache off the UI thread so a newly-created repo
                 // surfaces on a later open. `scan()` is read-through: instant
@@ -2242,10 +2215,8 @@ impl EventHandler {
                 // — consistent with every other blocking offload, and unlike a
                 // detached `std::thread` it is not torn down mid-write at
                 // shutdown.
-                let scan_paths =
-                    state.app_config.workspace_defaults.workspace_scan_paths.clone();
-                let exclude_paths =
-                    state.app_config.workspace_defaults.exclude_paths.clone();
+                let scan_paths = state.app_config.workspace_defaults.workspace_scan_paths.clone();
+                let exclude_paths = state.app_config.workspace_defaults.exclude_paths.clone();
                 tokio::task::spawn_blocking(move || {
                     let scanner = WorkspaceScanner::with_additional_paths(scan_paths)
                         .with_exclude_paths(exclude_paths);
@@ -2260,8 +2231,7 @@ impl EventHandler {
                 };
                 state.new_session_state = Some(ns);
                 state.previous_screen = Some(state.current_screen.clone());
-                state.current_screen =
-                    crate::app::screens::ids::NEW_SESSION.to_string();
+                state.current_screen = crate::app::screens::ids::NEW_SESSION.to_string();
                 tracing::debug!(
                     previous = %state.previous_screen.as_deref().unwrap_or(""),
                     "AppEvent::NewSession -> PickRepo opened"
@@ -2293,10 +2263,7 @@ impl EventHandler {
                 if !repo_label.is_empty() {
                     let path = SessionDefaults::default_path();
                     let mut defaults = SessionDefaults::load_from(&path);
-                    let entry = defaults
-                        .per_repo
-                        .entry(repo_label.clone())
-                        .or_default();
+                    let entry = defaults.per_repo.entry(repo_label.clone()).or_default();
                     entry.last_prompt = if prompt_text.is_empty() {
                         None
                     } else {
@@ -2309,10 +2276,8 @@ impl EventHandler {
                     // on PickRepo doesn't clobber the prompt we just wrote.
                     // The picker carries its own `defaults` copy from open
                     // time; mutations elsewhere are invisible to it.
-                    if let Some(pick) = state
-                        .new_session_state
-                        .as_mut()
-                        .and_then(|ns| ns.pick_repo_state.as_mut())
+                    if let Some(pick) =
+                        state.new_session_state.as_mut().and_then(|ns| ns.pick_repo_state.as_mut())
                     {
                         pick.defaults = defaults;
                     }
@@ -2357,8 +2322,7 @@ impl EventHandler {
                 if let Some(ns) = state.new_session_state.as_mut() {
                     ns.step = crate::app::state::NewSessionStep::Creating;
                 }
-                state.pending_async_action =
-                    Some(AsyncAction::CreateSessionFromConfigure(spec));
+                state.pending_async_action = Some(AsyncAction::CreateSessionFromConfigure(spec));
             }
             AppEvent::ConfigureOpenPresetManager => {
                 // Phase 7 polish — stub for now.
@@ -3211,7 +3175,9 @@ impl EventHandler {
                         // pre-populates state for the analytics screen.
                     }
                     SidebarItem::Witr => {
-                        tracing::info!("Launching witr -i (process-causality browser) from sidebar");
+                        tracing::info!(
+                            "Launching witr -i (process-causality browser) from sidebar"
+                        );
                         // Hand the terminal to witr's own interactive TUI
                         // (see AppEvent::GoToWitr) rather than a
                         // plugin-rendered screen.
@@ -3462,11 +3428,8 @@ impl EventHandler {
             AppEvent::InboxOpenSelected => {
                 // Capture the cwd before mark_selected_read invalidates
                 // selection ordering on refresh.
-                let row_cwd = state
-                    .inbox_state
-                    .selected_row()
-                    .map(|r| r.cwd.clone())
-                    .unwrap_or_default();
+                let row_cwd =
+                    state.inbox_state.selected_row().map(|r| r.cwd.clone()).unwrap_or_default();
                 state.inbox_state.mark_selected_read();
                 // cwd-based jump-to-tmux: find the ainb session whose
                 // workspace_path matches the notification's cwd (exact
@@ -3479,22 +3442,16 @@ impl EventHandler {
                         .iter()
                         .find(|ws| {
                             let p = ws.path.to_string_lossy().to_string();
-                            row_cwd == p
-                                || row_cwd.starts_with(&format!("{p}/"))
+                            row_cwd == p || row_cwd.starts_with(&format!("{p}/"))
                         })
                         .and_then(|ws| {
                             // Prefer a non-shell session (an agent-running
                             // one) since hook events come from agents,
                             // not shells. Fall back to the workspace
                             // shell if no agent session has tmux.
-                            ws.sessions
-                                .iter()
-                                .find_map(|s| s.tmux_session_name.clone())
-                                .or_else(|| {
-                                    ws.shell_session
-                                        .as_ref()
-                                        .map(|s| s.tmux_session_name.clone())
-                                })
+                            ws.sessions.iter().find_map(|s| s.tmux_session_name.clone()).or_else(
+                                || ws.shell_session.as_ref().map(|s| s.tmux_session_name.clone()),
+                            )
                         });
                     if let Some(tmux_name) = target {
                         tracing::info!(
@@ -3503,9 +3460,7 @@ impl EventHandler {
                             "inbox: jumping to tmux session"
                         );
                         state.pending_async_action =
-                            Some(crate::app::state::AsyncAction::AttachToOtherTmux(
-                                tmux_name,
-                            ));
+                            Some(crate::app::state::AsyncAction::AttachToOtherTmux(tmux_name));
                     } else {
                         state.add_info_notification(format!(
                             "no ainb session matches cwd {row_cwd}"

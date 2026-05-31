@@ -231,7 +231,9 @@ fn cmd_check(format: OutputFormat) -> Result<()> {
                 .context("Failed to serialize prerequisite report")?;
             println!("{json}");
         }
-        OutputFormat::Text | OutputFormat::Csv | OutputFormat::Markdown => print_report_text(&report),
+        OutputFormat::Text | OutputFormat::Csv | OutputFormat::Markdown => {
+            print_report_text(&report)
+        }
     }
 
     if !report.all_required_present {
@@ -397,7 +399,10 @@ fn cmd_status(format: OutputFormat) -> Result<()> {
                 _ => "\u{26A0}",                              // ⚠ for missing / old
             };
             println!("  {tmux_marker} Tmux conf:    {}", report.tmux_conf_state);
-            if matches!(report.tmux_conf_state.as_str(), "missing" | "old ainb default (upgradable)") {
+            if matches!(
+                report.tmux_conf_state.as_str(),
+                "missing" | "old ainb default (upgradable)"
+            ) {
                 println!("    \u{21B3} run `ainb tmux install` to install the rich conf");
             }
         }

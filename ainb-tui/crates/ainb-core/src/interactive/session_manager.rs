@@ -13,7 +13,9 @@
 
 use crate::audit::{self, AuditResult, AuditTrigger};
 use crate::git::WorktreeManager;
-use crate::models::{ClaudeModel, CodexModel, Session, SessionAgentType, SessionMode, SessionStatus};
+use crate::models::{
+    ClaudeModel, CodexModel, Session, SessionAgentType, SessionMode, SessionStatus,
+};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -226,7 +228,13 @@ impl InteractiveSessionManager {
     ) -> Result<InteractiveSession, InteractiveSessionError> {
         info!(
             "Creating Interactive session {} for branch '{}' in workspace '{}' (agent={:?}, model={:?}, codex_model={:?}, skip_permissions={})",
-            session_id, branch_name, workspace_name, agent_type, model, codex_model, skip_permissions
+            session_id,
+            branch_name,
+            workspace_name,
+            agent_type,
+            model,
+            codex_model,
+            skip_permissions
         );
 
         // Check if session already exists
@@ -1289,15 +1297,7 @@ impl InteractiveSessionManager {
             // gets evaluated. Use sh (not zsh) — no .zshrc, no race.
             let full_line = format!("{env_setup}exec {cli_cmd}");
             Command::new("tmux")
-                .args([
-                    "respawn-pane",
-                    "-k",
-                    "-t",
-                    &target,
-                    "sh",
-                    "-c",
-                    &full_line,
-                ])
+                .args(["respawn-pane", "-k", "-t", &target, "sh", "-c", &full_line])
                 .output()
                 .await?
         };

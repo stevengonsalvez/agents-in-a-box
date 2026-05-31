@@ -14,11 +14,7 @@ use crate::fleet::types::{Block, Liveness, Session, SessionState, Signal};
 pub fn derive_state(session: Session, signals: Vec<Signal>) -> SessionState {
     let liveness = pick_liveness(&signals);
     let block = pick_block(&signals);
-    let last_activity_ms = signals
-        .iter()
-        .map(signal_at)
-        .max()
-        .or(session.last_seen_ms);
+    let last_activity_ms = signals.iter().map(signal_at).max().or(session.last_seen_ms);
 
     SessionState {
         session,
@@ -67,10 +63,7 @@ fn pick_block(signals: &[Signal]) -> Block {
     }) {
         return Block::NeedsInput;
     }
-    if signals
-        .iter()
-        .any(|s| matches!(s, Signal::WaitingSummary { .. }))
-    {
+    if signals.iter().any(|s| matches!(s, Signal::WaitingSummary { .. })) {
         return Block::WaitingSummary;
     }
     Block::None

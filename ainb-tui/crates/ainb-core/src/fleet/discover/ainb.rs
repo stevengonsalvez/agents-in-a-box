@@ -22,8 +22,8 @@ pub async fn list_ainb_sessions() -> Result<Vec<AinbSession>> {
         anyhow::bail!("ainb list exited non-zero: {stderr}");
     }
 
-    let parsed: Vec<AinbSession> = serde_json::from_slice(&output.stdout)
-        .context("`ainb list` produced invalid JSON")?;
+    let parsed: Vec<AinbSession> =
+        serde_json::from_slice(&output.stdout).context("`ainb list` produced invalid JSON")?;
     Ok(parsed)
 }
 
@@ -52,7 +52,5 @@ pub async fn discover_from_ainb() -> Result<Vec<Session>> {
 }
 
 fn parse_iso8601_ms(s: &str) -> Option<i64> {
-    chrono::DateTime::parse_from_rfc3339(s)
-        .ok()
-        .map(|dt| dt.timestamp_millis())
+    chrono::DateTime::parse_from_rfc3339(s).ok().map(|dt| dt.timestamp_millis())
 }

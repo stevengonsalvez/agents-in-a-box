@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, warn};
 
-use crate::data::repo_lookup;
 use crate::cache::{Cache, ParseHint, ParseResult};
+use crate::data::repo_lookup;
 
 /// Usage period selector shared by TUI and CLI report queries.
 ///
@@ -48,7 +48,10 @@ pub enum UsagePeriod {
     YearToDate,
     Month,
     All,
-    Custom { from: NaiveDate, to: NaiveDate },
+    Custom {
+        from: NaiveDate,
+        to: NaiveDate,
+    },
 }
 
 impl Default for UsagePeriod {
@@ -290,9 +293,8 @@ impl UsageFilters {
         category: ActivityCategory,
         resolved_repo: Option<&str>,
     ) -> bool {
-        let project_matches = |chip: &String| {
-            chip == &call.project || resolved_repo.is_some_and(|repo| chip == repo)
-        };
+        let project_matches =
+            |chip: &String| chip == &call.project || resolved_repo.is_some_and(|repo| chip == repo);
         if !self.project.is_empty() && !self.project.iter().any(project_matches) {
             return false;
         }
@@ -1041,13 +1043,7 @@ pub(crate) fn collect_recent_claude_calls_within_at(
                     }
                 }
             }
-            parse_claude_jsonl_within(
-                &jsonl_path,
-                &project,
-                &project_path,
-                cutoff,
-                &mut calls,
-            );
+            parse_claude_jsonl_within(&jsonl_path, &project, &project_path, cutoff, &mut calls);
         }
     }
     calls
@@ -1243,10 +1239,7 @@ fn parse_claude_source_append(
 /// string and the next assistant turn's `user_message` is empty (same
 /// fallback as before this fix). Leaves the file cursor at an
 /// undefined offset; the caller must re-seek to `from_offset`.
-fn recover_user_message_before(
-    file: &mut std::fs::File,
-    from_offset: u64,
-) -> String {
+fn recover_user_message_before(file: &mut std::fs::File, from_offset: u64) -> String {
     if from_offset == 0 {
         return String::new();
     }
@@ -1856,9 +1849,7 @@ fn aggregate_calls_with_analysis(
 /// Build the `model -> [(project, count), ...]` index used by the
 /// burndown render path's "top N projects for model X" lookup. Sorted
 /// desc by count so the render call is `take(n)` with no extra work.
-fn build_model_project_counts(
-    calls: &[ProviderCall],
-) -> HashMap<String, Vec<(String, usize)>> {
+fn build_model_project_counts(calls: &[ProviderCall]) -> HashMap<String, Vec<(String, usize)>> {
     let mut by_model: HashMap<String, HashMap<String, usize>> = HashMap::new();
     for call in calls {
         *by_model
@@ -1991,10 +1982,7 @@ impl UsageIndices {
         let mut by_activity: HashMap<ActivityCategory, Vec<usize>> = HashMap::new();
         let mut repo_cache: HashMap<String, Option<String>> = HashMap::new();
         for (idx, call) in data.calls.iter().enumerate() {
-            by_project_raw
-                .entry(call.project.clone())
-                .or_default()
-                .push(idx);
+            by_project_raw.entry(call.project.clone()).or_default().push(idx);
             if let Some(repo) = repo_lookup::resolve_repo(&call.project_path, &mut repo_cache) {
                 by_project_resolved.entry(repo).or_default().push(idx);
             }
@@ -2002,10 +1990,7 @@ impl UsageIndices {
             if let Some(branch) = call.recorded_branch() {
                 by_branch.entry(branch.to_string()).or_default().push(idx);
             }
-            by_activity
-                .entry(classify_activity(call))
-                .or_default()
-                .push(idx);
+            by_activity.entry(classify_activity(call)).or_default().push(idx);
         }
         Self {
             by_project_raw,
@@ -2081,8 +2066,7 @@ pub fn filter_usage_data_indexed(
     // within it.
     let seed = indices.and_then(|idx| select_seed_indices(idx, filters));
     let turn_analysis = analyze_turns(&data.calls);
-    let needs_repo_lookup =
-        !filters.project.is_empty() || !filters.exclude_project.is_empty();
+    let needs_repo_lookup = !filters.project.is_empty() || !filters.exclude_project.is_empty();
     let mut repo_cache: HashMap<String, Option<String>> = HashMap::new();
 
     let filtered_calls: Vec<ProviderCall> = match seed {
@@ -2233,8 +2217,7 @@ pub fn filter_usage_data_full(
     // distinct project_path resolves at most once. Only pay for the
     // resolution when there's actually a project chip to test against —
     // model/activity/session/branch pivots leave this empty.
-    let needs_repo_lookup =
-        !filters.project.is_empty() || !filters.exclude_project.is_empty();
+    let needs_repo_lookup = !filters.project.is_empty() || !filters.exclude_project.is_empty();
     let mut repo_cache: HashMap<String, Option<String>> = HashMap::new();
     let filtered_calls: Vec<ProviderCall> = data
         .calls
@@ -3295,9 +3278,7 @@ fn sort_by_bucket_desc<T, F>(rows: &mut Vec<T>, key: F)
 where
     F: Fn(&T) -> &TokenBucket,
 {
-    rows.sort_by(|a, b| {
-        bucket_sort_value(key(b)).total_cmp(&bucket_sort_value(key(a)))
-    });
+    rows.sort_by(|a, b| bucket_sort_value(key(b)).total_cmp(&bucket_sort_value(key(a))));
 }
 
 /// Merge `bucket` into the entry at `key` in a `String -> TokenBucket`
@@ -3508,7 +3489,11 @@ mod tests {
         bash_commands: &[&str],
         input_tokens: u64,
     ) -> ProviderCall {
-        let model = if provider == "codex" { "gpt-5" } else { "claude-sonnet-4-5" };
+        let model = if provider == "codex" {
+            "gpt-5"
+        } else {
+            "claude-sonnet-4-5"
+        };
         crate::test_support::ProviderCallBuilder::new()
             .with_id(next_test_call_id())
             .with_provider(provider)
@@ -4189,23 +4174,17 @@ mod tests {
     #[test]
     fn last_n_days_period_covers_n_calendar_days() {
         for n in [1u32, 7, 14, 90] {
-            let (start, end) =
-                date_range_for_period(&UsagePeriod::LastNDays(n)).unwrap();
+            let (start, end) = date_range_for_period(&UsagePeriod::LastNDays(n)).unwrap();
             let start_d = start.with_timezone(&Local).date_naive();
             let end_d = end.with_timezone(&Local).date_naive();
-            assert_eq!(
-                (end_d - start_d).num_days() + 1,
-                i64::from(n),
-                "n={n}"
-            );
+            assert_eq!((end_d - start_d).num_days() + 1, i64::from(n), "n={n}");
         }
     }
 
     #[test]
     fn specific_month_period_starts_on_day_one_and_ends_on_last_day() {
         let anchor = NaiveDate::from_ymd_opt(2026, 4, 17).unwrap();
-        let (start, end) =
-            date_range_for_period(&UsagePeriod::SpecificMonth(anchor)).unwrap();
+        let (start, end) = date_range_for_period(&UsagePeriod::SpecificMonth(anchor)).unwrap();
         assert_eq!(
             start.with_timezone(&Local).date_naive(),
             NaiveDate::from_ymd_opt(2026, 4, 1).unwrap()
@@ -4253,8 +4232,7 @@ mod tests {
         assert_eq!(today_anchor.day(), 11);
         assert_eq!(today_end.with_timezone(&Local).date_naive(), today_anchor);
 
-        let (ytd_start, _) =
-            date_range_for_period(&UsagePeriod::YearToDate).expect("ytd range");
+        let (ytd_start, _) = date_range_for_period(&UsagePeriod::YearToDate).expect("ytd range");
         let ytd_start_d = ytd_start.with_timezone(&Local).date_naive();
         assert_eq!(ytd_start_d, NaiveDate::from_ymd_opt(2026, 1, 1).unwrap());
 
@@ -4270,8 +4248,7 @@ mod tests {
         let prev = std::env::var("AINB_NOW").ok();
         std::env::set_var("AINB_NOW", "not-a-timestamp");
 
-        let (today_start, _) =
-            date_range_for_period(&UsagePeriod::Today).expect("today range");
+        let (today_start, _) = date_range_for_period(&UsagePeriod::Today).expect("today range");
         let today_anchor = today_start.with_timezone(&Local).date_naive();
         // Anchor should be within a day of real now — i.e. the override
         // didn't accidentally swap to epoch or 1970.
@@ -4291,7 +4268,10 @@ mod tests {
         assert_eq!(quarter_of(NaiveDate::from_ymd_opt(2026, 3, 31).unwrap()), 1);
         assert_eq!(quarter_of(NaiveDate::from_ymd_opt(2026, 4, 1).unwrap()), 2);
         assert_eq!(quarter_of(NaiveDate::from_ymd_opt(2026, 7, 1).unwrap()), 3);
-        assert_eq!(quarter_of(NaiveDate::from_ymd_opt(2026, 12, 31).unwrap()), 4);
+        assert_eq!(
+            quarter_of(NaiveDate::from_ymd_opt(2026, 12, 31).unwrap()),
+            4
+        );
     }
 
     #[test]
@@ -4434,19 +4414,13 @@ mod tests {
         write_file(&project_dir.join("session.jsonl"), &payload);
 
         let cutoff = now - Duration::hours(5);
-        let calls = collect_recent_claude_calls_within_at(
-            &claude_projects,
-            cutoff,
-            Duration::hours(1),
-        );
+        let calls =
+            collect_recent_claude_calls_within_at(&claude_projects, cutoff, Duration::hours(1));
 
         assert_eq!(calls.len(), 1, "only the in-window call should survive");
         let call = &calls[0];
         assert_eq!(call.input_tokens, 200);
-        assert!(
-            call.timestamp >= cutoff,
-            "kept call must be within cutoff"
-        );
+        assert!(call.timestamp >= cutoff, "kept call must be within cutoff");
     }
 
     #[test]
@@ -4468,20 +4442,14 @@ mod tests {
         let session = project_dir.join("session.jsonl");
         write_file(&session, &payload);
         // Backdate mtime to 24h ago — well past the (5h + 1h) gate.
-        let f = std::fs::OpenOptions::new()
-            .write(true)
-            .open(&session)
-            .unwrap();
-        let twenty_four_hours_ago = std::time::SystemTime::now()
-            - std::time::Duration::from_secs(60 * 60 * 24);
+        let f = std::fs::OpenOptions::new().write(true).open(&session).unwrap();
+        let twenty_four_hours_ago =
+            std::time::SystemTime::now() - std::time::Duration::from_secs(60 * 60 * 24);
         f.set_modified(twenty_four_hours_ago).unwrap();
 
         let cutoff = now - Duration::hours(5);
-        let calls = collect_recent_claude_calls_within_at(
-            &claude_projects,
-            cutoff,
-            Duration::hours(1),
-        );
+        let calls =
+            collect_recent_claude_calls_within_at(&claude_projects, cutoff, Duration::hours(1));
         assert!(
             calls.is_empty(),
             "files older than (cutoff - grace) should be skipped",
@@ -4634,7 +4602,12 @@ mod tests {
             .with_id(1)
             .with_timestamp(now)
             .with_input_tokens(10)
-            .with_tools(&["Read", "Bash", "mcp__github__create_issue", "mcp__github__list_prs"])
+            .with_tools(&[
+                "Read",
+                "Bash",
+                "mcp__github__create_issue",
+                "mcp__github__list_prs",
+            ])
             .build();
         let mut data = UsageData::default();
         data.calls = vec![call];
@@ -4642,8 +4615,14 @@ mod tests {
         rebuild_activity_and_mcp_columns(&mut data);
 
         let tool_names: Vec<&str> = data.tools.iter().map(|n| n.name.as_str()).collect();
-        assert!(tool_names.contains(&"Read"), "Read survives as a plain tool");
-        assert!(tool_names.contains(&"Bash"), "Bash survives as a plain tool");
+        assert!(
+            tool_names.contains(&"Read"),
+            "Read survives as a plain tool"
+        );
+        assert!(
+            tool_names.contains(&"Bash"),
+            "Bash survives as a plain tool"
+        );
         assert!(
             !tool_names.iter().any(|name| name.starts_with("mcp__")),
             "no mcp__ tools should leak into the tools column: {tool_names:?}"
@@ -4751,18 +4730,11 @@ mod tests {
     /// resolved-repo path.
     #[test]
     fn matches_with_resolved_repo_keeps_raw_folder_chip_working() {
-        let call = ProviderCallBuilder::new()
-            .with_id(1)
-            .with_project("local-folder")
-            .build();
+        let call = ProviderCallBuilder::new().with_id(1).with_project("local-folder").build();
         let mut filters = UsageFilters::default();
         filters.project.push("local-folder".to_string());
 
-        assert!(filters.matches_with_resolved_repo(
-            &call,
-            ActivityCategory::Conversation,
-            None
-        ));
+        assert!(filters.matches_with_resolved_repo(&call, ActivityCategory::Conversation, None));
         // And still works when resolved_repo is Some but differs.
         assert!(filters.matches_with_resolved_repo(
             &call,
@@ -4780,9 +4752,7 @@ mod tests {
             .with_project("worktree-folder-name")
             .build();
         let mut filters = UsageFilters::default();
-        filters
-            .exclude_project
-            .push("shotclubhouse/shotclubhouse".to_string());
+        filters.exclude_project.push("shotclubhouse/shotclubhouse".to_string());
 
         assert!(
             !filters.matches_with_resolved_repo(
@@ -4794,11 +4764,7 @@ mod tests {
         );
         // Without the resolved repo, the call survives (chip can't
         // identify it).
-        assert!(filters.matches_with_resolved_repo(
-            &call,
-            ActivityCategory::Conversation,
-            None,
-        ));
+        assert!(filters.matches_with_resolved_repo(&call, ActivityCategory::Conversation, None,));
     }
 
     // ────────────────────────────────────────────────────────────────
@@ -4850,12 +4816,8 @@ mod tests {
         let mut filters = UsageFilters::default();
         filters.project.push("alpha-folder".to_string());
 
-        let linear = filter_usage_data_full(
-            &data,
-            &filters,
-            &UsagePeriod::All,
-            UsageProviderFilter::All,
-        );
+        let linear =
+            filter_usage_data_full(&data, &filters, &UsagePeriod::All, UsageProviderFilter::All);
         let indexed = filter_usage_data_indexed(
             &data,
             Some(&indices),
@@ -4883,12 +4845,8 @@ mod tests {
         let mut filters = UsageFilters::default();
         filters.model.push("claude-opus-4-7".to_string());
 
-        let linear = filter_usage_data_full(
-            &data,
-            &filters,
-            &UsagePeriod::All,
-            UsageProviderFilter::All,
-        );
+        let linear =
+            filter_usage_data_full(&data, &filters, &UsagePeriod::All, UsageProviderFilter::All);
         let indexed = filter_usage_data_indexed(
             &data,
             Some(&indices),
@@ -4927,12 +4885,8 @@ mod tests {
         let mut filters = UsageFilters::default();
         filters.project.push("alpha-folder".to_string());
 
-        let linear = filter_usage_data_full(
-            &data,
-            &filters,
-            &UsagePeriod::All,
-            UsageProviderFilter::All,
-        );
+        let linear =
+            filter_usage_data_full(&data, &filters, &UsagePeriod::All, UsageProviderFilter::All);
         // Calling with indices=None must produce the same result as
         // the linear pass — the indexed function is `None`-tolerant.
         let no_indices = filter_usage_data_indexed(

@@ -510,10 +510,8 @@ mod tests {
         assert_eq!(SidebarItem::Inbox.shortcut(), "I");
         assert_eq!(SidebarItem::Inbox.description(), "Hook Notifications");
         // 'I' must not collide with any other tile shortcut.
-        let collisions = all
-            .iter()
-            .filter(|i| **i != SidebarItem::Inbox && i.shortcut() == "I")
-            .count();
+        let collisions =
+            all.iter().filter(|i| **i != SidebarItem::Inbox && i.shortcut() == "I").count();
         assert_eq!(collisions, 0, "sidebar shortcut 'I' collides");
     }
 

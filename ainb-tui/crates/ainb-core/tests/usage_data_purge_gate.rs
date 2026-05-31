@@ -37,8 +37,7 @@ fn ainb_core_src() -> PathBuf {
 
 fn read(path: &str) -> String {
     let full = ainb_core_src().join(path);
-    std::fs::read_to_string(&full)
-        .unwrap_or_else(|e| panic!("read {}: {e}", full.display()))
+    std::fs::read_to_string(&full).unwrap_or_else(|e| panic!("read {}: {e}", full.display()))
 }
 
 #[test]

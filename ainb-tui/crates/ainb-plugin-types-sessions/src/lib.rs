@@ -467,10 +467,7 @@ mod tests {
                 branch: "main".into(),
                 bucket,
             }],
-            model_project_counts: vec![(
-                "claude-3-5-sonnet".into(),
-                vec![("ainb".into(), 1)],
-            )],
+            model_project_counts: vec![("claude-3-5-sonnet".into(), vec![("ainb".into(), 1)])],
         }
     }
 

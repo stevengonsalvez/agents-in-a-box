@@ -107,9 +107,7 @@ fn has_session(session: &str) -> bool {
 }
 
 fn kill_session(session: &str) {
-    let _ = Command::new("tmux")
-        .args(["kill-session", "-t", session])
-        .status();
+    let _ = Command::new("tmux").args(["kill-session", "-t", session]).status();
 }
 
 #[test]
@@ -119,7 +117,9 @@ fn pressing_w_embeds_witr_interactive_browser() {
         return;
     }
     if !witr_available() {
-        eprintln!("SKIP: real `witr` binary not on PATH — the embed runs `witr -i`, which can't be stubbed");
+        eprintln!(
+            "SKIP: real `witr` binary not on PATH — the embed runs `witr -i`, which can't be stubbed"
+        );
         return;
     }
 
@@ -140,7 +140,11 @@ fn pressing_w_embeds_witr_interactive_browser() {
     // Launch ainb inheriting the real PATH so /opt/homebrew/bin/witr (etc.)
     // resolves. Single send-keys + Enter to avoid the launch-command
     // truncation race.
-    let cmd = format!("HOME={} exec {} tui", home_tmp.path().display(), ainb_bin().display());
+    let cmd = format!(
+        "HOME={} exec {} tui",
+        home_tmp.path().display(),
+        ainb_bin().display()
+    );
     Command::new("tmux")
         .args(["send-keys", "-t", &session, &cmd, "Enter"])
         .status()
@@ -159,7 +163,9 @@ fn pressing_w_embeds_witr_interactive_browser() {
 
     // Press `w` → ainb should spawn the ainb-witr session running `witr -i`.
     send_key(&session, "w");
-    let spawned = poll(Instant::now() + Duration::from_secs(20), || has_session(WITR_SESSION));
+    let spawned = poll(Instant::now() + Duration::from_secs(20), || {
+        has_session(WITR_SESSION)
+    });
     if !spawned {
         let last = capture_pane(&session);
         kill_session(&session);

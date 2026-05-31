@@ -11,7 +11,7 @@
 
 #![forbid(unsafe_code)]
 
-use ainb_plugin_sdk::{Server, SdkError};
+use ainb_plugin_sdk::{SdkError, Server};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod cache;

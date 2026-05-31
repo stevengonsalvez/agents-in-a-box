@@ -34,21 +34,21 @@ pub async fn execute(matches: &clap::ArgMatches, _format: OutputFormat) -> Resul
 
 async fn tick(seen: &mut HashSet<String>, verbose: bool) -> Result<()> {
     let (ainb, peers) = tokio::join!(discover_from_ainb(), async { discover_from_peers() });
-    let merged = merge_sessions(vec![
-        ainb.unwrap_or_default(),
-        peers.unwrap_or_default(),
-    ]);
+    let merged = merge_sessions(vec![ainb.unwrap_or_default(), peers.unwrap_or_default()]);
 
     let now_ms = chrono::Utc::now().timestamp_millis();
     for s in merged {
-        let Some(name) = s.tmux_session.as_deref() else { continue };
+        let Some(name) = s.tmux_session.as_deref() else {
+            continue;
+        };
         let pane = capture_pane(name, 80).await.unwrap_or_default();
         let errors = detect_error_signals(&pane, now_ms);
 
         let Some(Signal::ApiError { pattern, raw, .. }) = errors.into_iter().next() else {
             continue;
         };
-        let raw_tail: String = raw.chars().rev().take(40).collect::<String>().chars().rev().collect();
+        let raw_tail: String =
+            raw.chars().rev().take(40).collect::<String>().chars().rev().collect();
         let key = format!("{}::{pattern}::{raw_tail}", s.id);
         if seen.contains(&key) {
             continue;

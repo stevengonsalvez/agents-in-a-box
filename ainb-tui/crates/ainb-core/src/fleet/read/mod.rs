@@ -6,14 +6,14 @@ pub mod needs;
 pub mod state;
 pub mod tmux_pane;
 
-pub use errors::{detect_error_signals, API_ERROR_PATTERNS};
+pub use errors::{API_ERROR_PATTERNS, detect_error_signals};
 pub use jsonl_tail::{
-    cwd_to_project_slug, last_ask_user_question, last_assistant_info, last_narrative_snapshot,
-    latest_transcript_for_cwd, wait_for_turn_end, AskUserQuestionData, LastAssistantInfo,
+    AskUserQuestionData, LastAssistantInfo, cwd_to_project_slug, last_ask_user_question,
+    last_assistant_info, last_narrative_snapshot, latest_transcript_for_cwd, wait_for_turn_end,
 };
 pub use needs::{
-    classify, ClassifyInput, ErrContext, IdleContext, NeedsContext, NeedsRow, RouteHint,
-    WaitContext,
+    ClassifyInput, ErrContext, IdleContext, NeedsContext, NeedsRow, RouteHint, WaitContext,
+    classify,
 };
 pub use state::derive_state;
 pub use tmux_pane::{capture_pane, detect_signals_from_pane};
