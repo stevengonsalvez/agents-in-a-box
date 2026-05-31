@@ -915,7 +915,9 @@ impl CliCommand for NotifydCommand {
                 .hide(true)
                 .subcommand(Command::new("run").about("Run the daemon in the foreground (default)"))
                 .subcommand(Command::new("stop").about("Stop a running daemon via its PID file"))
-                .subcommand(agent_flags(Command::new("install").about("Install the ainb-hooks hook")))
+                .subcommand(agent_flags(
+                    Command::new("install").about("Install the ainb-hooks hook"),
+                ))
                 .subcommand(agent_flags(
                     Command::new("uninstall").about("Uninstall the ainb-hooks hook"),
                 ))
