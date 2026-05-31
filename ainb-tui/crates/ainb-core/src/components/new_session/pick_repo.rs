@@ -16,7 +16,9 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph},
 };
-use std::path::PathBuf;
+use std::borrow::Cow;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use crate::config::favorites_store::{Favorite, FavoritesStore, SourceType};
 use crate::config::session_defaults::SessionDefaults;
@@ -313,6 +315,40 @@ fn pick_default_selection(
     0
 }
 
+/// A dimmed locator shown after the row name so identically-named repos are
+/// distinguishable. Derived from the row's `RepoSource`: a `~`-abbreviated path
+/// for local repos, the URL for remotes, `owner/repo` for shorthand. `Filter`
+/// rows carry no real source, so they get nothing.
+fn row_detail(source: &RepoSource) -> Option<Cow<'_, str>> {
+    match source {
+        RepoSource::LocalPath(p) => Some(Cow::Owned(abbreviate_home(p))),
+        RepoSource::HttpsUrl(u) | RepoSource::SshUrl(u) | RepoSource::SshSession(u) => {
+            Some(Cow::Borrowed(u))
+        }
+        RepoSource::GithubShorthand { owner, repo } => Some(Cow::Owned(format!("{owner}/{repo}"))),
+        RepoSource::Filter(_) => None,
+    }
+}
+
+/// Collapse the home-directory prefix to `~` for display. Returns `~` for the
+/// home dir itself and the unchanged full path when it lies outside home or
+/// when `dirs::home_dir()` is unavailable. The home lookup is cached for the
+/// process so it stays off the per-frame render path.
+fn abbreviate_home(path: &Path) -> String {
+    static HOME: OnceLock<Option<PathBuf>> = OnceLock::new();
+    let home = HOME.get_or_init(dirs::home_dir);
+    if let Some(home) = home {
+        if let Ok(rest) = path.strip_prefix(home) {
+            if rest.as_os_str().is_empty() {
+                return "~".to_string();
+            }
+            // `Path::join` so the platform's native separator is used.
+            return Path::new("~").join(rest).display().to_string();
+        }
+    }
+    path.display().to_string()
+}
+
 /// Render the picker into `area`. Layout: title bar → filter prompt → list →
 /// help bar at the bottom. `BorderType::Rounded` everywhere.
 #[allow(clippy::too_many_lines)]
@@ -390,7 +426,13 @@ pub fn render(f: &mut Frame, state: &PickRepoState, area: Rect) {
             } else {
                 Style::default().fg(SOFT_WHITE)
             };
-            let spans = vec![arrow, marker, Span::styled(row.label.clone(), label_style)];
+            let mut spans = vec![arrow, marker, Span::styled(row.label.clone(), label_style)];
+            // Dimmed locator after the name so identically-named repos are
+            // distinguishable (e.g. two `Rosetta` rows in different folders).
+            if let Some(detail) = row_detail(&row.source) {
+                spans.push(Span::raw("  "));
+                spans.push(Span::styled(detail, Style::default().fg(MUTED_GRAY)));
+            }
 
             // Inline clone progress shown directly under the highlighted row
             // by appending a second visual span. Simpler than a sub-list:
@@ -776,5 +818,50 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(pick_default_selection(&rows, &filtered, &defaults), 0);
+    }
+
+    #[test]
+    fn row_detail_renders_locator_per_source() {
+        // A path outside home is shown unchanged (home collapsing is covered
+        // separately so this stays independent of the test environment).
+        assert_eq!(
+            row_detail(&RepoSource::LocalPath(PathBuf::from("/opt/repos/Rosetta"))).as_deref(),
+            Some("/opt/repos/Rosetta")
+        );
+        assert_eq!(
+            row_detail(&RepoSource::HttpsUrl("https://github.com/o/r.git".into())).as_deref(),
+            Some("https://github.com/o/r.git")
+        );
+        assert_eq!(
+            row_detail(&RepoSource::SshUrl("git@github.com:o/r.git".into())).as_deref(),
+            Some("git@github.com:o/r.git")
+        );
+        assert_eq!(
+            row_detail(&RepoSource::SshSession("ssh://deploy@prod-1".into())).as_deref(),
+            Some("ssh://deploy@prod-1")
+        );
+        let shorthand = RepoSource::GithubShorthand {
+            owner: "o".into(),
+            repo: "r".into(),
+        };
+        assert_eq!(row_detail(&shorthand).as_deref(), Some("o/r"));
+        // Unparseable filter text carries no real source — nothing to show.
+        assert_eq!(
+            row_detail(&RepoSource::Filter("rose".into())).as_deref(),
+            None
+        );
+    }
+
+    #[test]
+    fn abbreviate_home_collapses_home_prefix() {
+        let Some(home) = dirs::home_dir() else {
+            return; // No home dir in this environment — nothing to assert.
+        };
+        let nested = home.join("Code-Zero").join("Rosetta");
+        let expected = Path::new("~").join("Code-Zero").join("Rosetta");
+        assert_eq!(abbreviate_home(&nested), expected.display().to_string());
+        assert_eq!(abbreviate_home(&home), "~");
+        let outside = Path::new("/opt/elsewhere/Rosetta");
+        assert_eq!(abbreviate_home(outside), outside.display().to_string());
     }
 }
