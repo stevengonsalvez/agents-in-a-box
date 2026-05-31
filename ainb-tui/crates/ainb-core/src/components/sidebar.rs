@@ -111,7 +111,7 @@ impl SidebarItem {
             Self::Catalog => "c",
             Self::Config => "C",
             Self::Sessions => "s",
-            Self::Inbox => "I",
+            Self::Inbox => "b",
             Self::Recovery => "R",
             Self::Logs => "l",
             Self::Stats => "i",
@@ -507,14 +507,17 @@ mod tests {
         assert!(inbox_pos > 0, "Inbox shouldn't be first sidebar item");
         assert_eq!(SidebarItem::Inbox.icon(), "📥");
         assert_eq!(SidebarItem::Inbox.label(), "Inbox");
-        assert_eq!(SidebarItem::Inbox.shortcut(), "I");
+        assert_eq!(SidebarItem::Inbox.shortcut(), "b");
         assert_eq!(SidebarItem::Inbox.description(), "Hook Notifications");
-        // 'I' must not collide with any other tile shortcut.
+        // 'b' must not collide with any other tile shortcut. Picked
+        // over 'I' (Shift+i) to avoid the case-pair confusion with
+        // Stats ('i') — both opening different screens off the same
+        // letter was a UX bug.
         let collisions = all
             .iter()
-            .filter(|i| **i != SidebarItem::Inbox && i.shortcut() == "I")
+            .filter(|i| **i != SidebarItem::Inbox && i.shortcut() == "b")
             .count();
-        assert_eq!(collisions, 0, "sidebar shortcut 'I' collides");
+        assert_eq!(collisions, 0, "sidebar shortcut 'b' collides");
     }
 
     #[test]
