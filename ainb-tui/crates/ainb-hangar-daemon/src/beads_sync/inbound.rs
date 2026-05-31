@@ -141,6 +141,11 @@ impl<'a> InboundSync<'a> {
     /// Returns `Ok(true)` when the Hangar issue's state was changed, `Ok(false)`
     /// when the row was skipped (no mapping, swarm-sourced, missing Hangar issue,
     /// or already in sync), or a [`SyncError`] on a store failure.
+    #[tracing::instrument(
+        name = "beads.pull",
+        skip(self, bd_issue, now),
+        fields(bd_id = %bd_issue.id, hangar_id = tracing::field::Empty)
+    )]
     async fn reconcile_issue(
         &self,
         bd_issue: &crate::beads_adapter::BdIssue,
@@ -151,6 +156,10 @@ impl<'a> InboundSync<'a> {
             tracing::debug!(bd_id = %bd_issue.id, "unmapped bd issue; out of scope, skipping");
             return Ok(false);
         };
+
+        // The Hangar id is only known once the mapping row resolves; record it
+        // onto the `beads.pull` span so a mapped pull carries the full id pair.
+        tracing::Span::current().record("hangar_id", row.hangar_id.as_str());
 
         // Swarm-sourced rows belong to a leader's bd lifecycle — never reconcile.
         if row.source == MappingSource::Swarm {

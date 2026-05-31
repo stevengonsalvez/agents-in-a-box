@@ -117,6 +117,11 @@ impl<'a> OutboundSync<'a> {
     /// if reading or writing `beads_mapping` fails, or [`SyncError::BadClock`]
     /// if the injected clock is out of range. On any error **no** mapping row is
     /// written.
+    #[tracing::instrument(
+        name = "beads.push",
+        skip(self, issue, source, labels),
+        fields(hangar_id = %issue.id, bd_id = tracing::field::Empty)
+    )]
     pub async fn mirror_create(
         &self,
         issue: &Issue,
@@ -140,6 +145,10 @@ impl<'a> OutboundSync<'a> {
             labels: labels.to_vec(),
             assignee: issue.assignee.as_ref().map(assignee_crosswalk::hangar_to_bd),
         })?;
+
+        // The `bd` id is only known after the create call returns; record it onto
+        // the `beads.push` span now so the span carries the full id correlation.
+        tracing::Span::current().record("bd_id", bd_issue.id.to_string().as_str());
 
         self.mapping
             .insert(&BeadsMappingRow {
