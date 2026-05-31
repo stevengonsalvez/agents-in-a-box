@@ -26,7 +26,8 @@
 //! Hangar screen. [`can_run_tripwire`] gates on tmux + both binaries + the staged
 //! plugin, SKIPping (never failing) when any is missing.
 
-#![allow(dead_code)] // each tripwire uses a subset of these helpers.
+#![allow(dead_code)]
+// each tripwire uses a subset of these helpers.
 // `Duration::from_secs(60)` reads fine as a poll budget; `from_mins` is unstable.
 // Same rationale as `run_loop.rs`'s crate-level allow.
 #![allow(clippy::duration_suboptimal_units)]
@@ -44,10 +45,7 @@ pub const READY_MARKER: &str = "Refactor API";
 
 /// `true` when the `tmux` binary is usable.
 pub fn tmux_available() -> bool {
-    Command::new("tmux")
-        .arg("-V")
-        .output()
-        .is_ok_and(|o| o.status.success())
+    Command::new("tmux").arg("-V").output().is_ok_and(|o| o.status.success())
 }
 
 /// Best-effort locate the built `ainb` binary the tripwire drives.
@@ -79,7 +77,8 @@ pub fn daemon_bin() -> Option<PathBuf> {
 /// `<target>/dist/plugins/hangar-tui/hangar-tui`. `ainb tui` only renders the
 /// Hangar screen when this is present + signed (`just stage-plugins`).
 pub fn staged_plugin() -> Option<PathBuf> {
-    plugin_root().map(|r| r.join("hangar-tui").join("hangar-tui"))
+    plugin_root()
+        .map(|r| r.join("hangar-tui").join("hangar-tui"))
         .filter(|p| p.exists())
 }
 
@@ -145,6 +144,23 @@ impl Drop for Pipeline {
 ///
 /// Panics only after [`can_run_tripwire`] has gated the caller.
 pub fn prepare_pipeline() -> Pipeline {
+    // RPC-only daemon (the default for the per-screen render tripwires): no claim
+    // loop, so it never tries to spawn `claude`.
+    prepare_pipeline_with(&[("HANGAR_DAEMON_DISABLE_CLAIM", "1")])
+}
+
+/// Seed an isolated `$HOME` with the P4 fixture and spawn the daemon against it
+/// with the given `extra_env` overrides layered on top of the common ones.
+///
+/// Factors out the seed + spawn + socket-wait shared by [`prepare_pipeline`]
+/// (RPC-only) and the claim-enabled health tripwire (which passes
+/// `HANGAR_DAEMON_RUNTIME_ID` + `HANGAR_CLAUDE_PATH` so the daemon actually
+/// claims + executes seeded tasks, populating the in-memory throughput ring the
+/// daemon-health sparkline reads). `HOME` and `AINB_HANGAR_HOME` are always set
+/// here; `extra_env` cannot override them.
+///
+/// Panics only after [`can_run_tripwire`] has gated the caller.
+pub fn prepare_pipeline_with(extra_env: &[(&str, &str)]) -> Pipeline {
     let home = tempfile::tempdir().expect("isolated HOME tempdir");
     let hangar_dir = home.path().join(".ainb");
     std::fs::create_dir_all(&hangar_dir).expect("create ~/.ainb");
@@ -166,15 +182,16 @@ pub fn prepare_pipeline() -> Pipeline {
 
     // Spawn the daemon under the same $HOME (binds $HOME/.ainb/hangar.sock).
     let bin = daemon_bin().expect("gated by can_run_tripwire");
-    let daemon = Command::new(bin)
-        .env("HOME", home.path())
+    let mut cmd = Command::new(bin);
+    cmd.env("HOME", home.path())
         .env_remove("AINB_HANGAR_HOME")
-        .env("HANGAR_DAEMON_DISABLE_CLAIM", "1") // serve RPC only; don't run claude.
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn ainb-hangar-daemon");
+        .stderr(std::process::Stdio::null());
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
+    let daemon = cmd.spawn().expect("spawn ainb-hangar-daemon");
 
     // Wait for the socket to appear (the daemon binds it during boot).
     let socket = hangar_dir.join("hangar.sock");
@@ -237,10 +254,7 @@ fn seed_onboarding(home: &Path) {
 fn workspace_version() -> String {
     // .../ainb-tui/crates/ainb-hangar-daemon → up two to ainb-tui (workspace root).
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let root_cargo = manifest_dir
-        .parent()
-        .and_then(Path::parent)
-        .map(|p| p.join("Cargo.toml"));
+    let root_cargo = manifest_dir.parent().and_then(Path::parent).map(|p| p.join("Cargo.toml"));
     if let Some(path) = root_cargo {
         if let Ok(text) = std::fs::read_to_string(&path) {
             // Find the `[workspace.package]` section's `version = "x.y.z"`.
@@ -271,13 +285,217 @@ fn seed_database(hangar_dir: &Path) {
         .build()
         .expect("seed runtime");
     rt.block_on(async {
-        let store = ainb_hangar_store::Store::open_in(hangar_dir)
-            .await
-            .expect("open seed store");
+        let store = ainb_hangar_store::Store::open_in(hangar_dir).await.expect("open seed store");
         ainb_hangar_daemon::seed::seed_p4_fixture(store.pool())
             .await
             .expect("seed P4 fixture");
     });
+}
+
+/// Insert one extra task per non-`running` board column into an already-seeded
+/// `{home}/.ainb/hangar.db` so the Kanban board (`K`) has a card in every
+/// column.
+///
+/// The P4 fixture (`seed_p4_fixture`) lands a single `running` task (`task-1`)
+/// against `issue-1`. To prove the four-column board renders cards across the
+/// whole lifecycle, this adds one `queued`, one `done`, and one `failed` task
+/// on the same workspace / runtime / agent the fixture seeded. Each gets a
+/// distinct `id` so the board's `#<short_id>` card identifier is greppable. The
+/// inserts carry **no** `issue_id` (`NULL`) so the partial-unique
+/// `idx_one_pending_task_per_issue` index never collides with the fixture's
+/// `issue-1` task.
+///
+/// Must run after [`prepare_pipeline`] (which seeds the fixture) and against the
+/// same isolated `$HOME`. Panics on any insert failure (the caller is already
+/// gated by [`can_run_tripwire`]).
+pub fn seed_kanban_spread(home: &Path) {
+    let hangar_dir = home.join(".ainb");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("kanban-seed runtime");
+    rt.block_on(async {
+        let store = ainb_hangar_store::Store::open_in(&hangar_dir)
+            .await
+            .expect("open kanban-seed store");
+        let pool = store.pool();
+        // (id, status). `created_at` is the fixture's fixed epoch so card ages
+        // are deterministic; the `running` task already comes from the fixture.
+        // The ids end in a unique 6-char suffix (`kq0001` / `kd0002` / `kf0003`)
+        // so the board's `#<short_id>` (last 6 chars) is a distinctive,
+        // greppable token that can never alias a column header label
+        // (`queued` / `done` / `failed`).
+        let now: i64 = 1_700_000_000_000;
+        for (id, status) in [
+            ("task-kanban-kq0001", "queued"),
+            ("task-kanban-kd0002", "done"),
+            ("task-kanban-kf0003", "failed"),
+        ] {
+            sqlx::query(
+                "INSERT INTO agent_task_queue \
+                 (id, workspace_id, runtime_id, agent_id, issue_id, status, created_at) \
+                 VALUES (?, ?, ?, ?, NULL, ?, ?)",
+            )
+            .bind(id)
+            .bind(ainb_hangar_daemon::seed::WS_ID)
+            .bind("runtime-1")
+            .bind("agent-1")
+            .bind(status)
+            .bind(now)
+            .execute(pool)
+            .await
+            .unwrap_or_else(|e| panic!("seed kanban {status} task: {e}"));
+        }
+    });
+}
+
+/// Write an executable fake-`claude` under `dir` that drives a deterministic
+/// **mix** of successful and failed runs, returning its path.
+///
+/// On each invocation the script reads + increments a counter file at
+/// `$HOME/.fake-claude-count` (`$HOME` is the only stable, allowlisted env the
+/// runner forwards — it is the daemon's isolated tempdir). The first
+/// `fail_first` invocations emit a provider error and `exit 1`
+/// ([`RunOutcome::Failed`] → `record_failed`, the sparkline's red band); every
+/// later invocation emits a `system` + `result` line and `exit 0`
+/// ([`RunOutcome::Success`] → `record_completed`, the green band). So a batch of
+/// `n > fail_first` seeded tasks yields exactly `fail_first` failures + the rest
+/// successes, populating the throughput ring with a known green/red shape.
+pub fn fake_claude_mixed(dir: &Path, fail_first: u32) -> PathBuf {
+    let path = dir.join("fake-claude-mixed.sh");
+    let body = format!(
+        "#!/bin/sh\n\
+         COUNT_FILE=\"$HOME/.fake-claude-count\"\n\
+         n=$(cat \"$COUNT_FILE\" 2>/dev/null || echo 0)\n\
+         n=$((n + 1))\n\
+         echo \"$n\" > \"$COUNT_FILE\"\n\
+         if [ \"$n\" -le {fail_first} ]; then\n\
+         \techo '{{\"type\":\"system\",\"session_id\":\"fail-'\"$n\"'\"}}'\n\
+         \techo '{{\"type\":\"result\",\"content\":\"boom\"}}'\n\
+         \texit 1\n\
+         fi\n\
+         echo '{{\"type\":\"system\",\"session_id\":\"ok-'\"$n\"'\"}}'\n\
+         echo '{{\"type\":\"result\",\"content\":\"ok\"}}'\n\
+         exit 0\n"
+    );
+    std::fs::write(&path, body).expect("write fake-claude-mixed");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&path).expect("stat script").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).expect("chmod script");
+    }
+    path
+}
+
+/// Enqueue `count` `queued` tasks (ids `seed-<prefix>-<i>`) on the seeded
+/// `runtime-1` / `agent-1` / `default` workspace into `{home}/.ainb/hangar.db`,
+/// so a claim-enabled daemon claims + executes them.
+///
+/// `created_at` is set to wall-clock "now" (not the fixture's 1970-relative
+/// epoch) so the queued-TTL sweeper does not reap them before the claim loop
+/// runs. Each task carries no `issue_id` (`NULL`) so the partial-unique pending
+/// index never collides. Used by the daemon-health tripwire to drive real
+/// completions into the throughput ring.
+pub fn enqueue_tasks(home: &Path, prefix: &str, count: usize) {
+    let hangar_dir = home.join(".ainb");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("enqueue runtime");
+    rt.block_on(async {
+        let store = ainb_hangar_store::Store::open_in(&hangar_dir)
+            .await
+            .expect("open enqueue store");
+        let now_ms = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis()),
+        )
+        .unwrap_or(i64::MAX);
+        for i in 0..count {
+            sqlx::query(
+                "INSERT INTO agent_task_queue \
+                 (id, workspace_id, runtime_id, agent_id, issue_id, status, created_at) \
+                 VALUES (?, ?, ?, ?, NULL, 'queued', ?)",
+            )
+            .bind(format!("seed-{prefix}-{i}"))
+            .bind(ainb_hangar_daemon::seed::WS_ID)
+            .bind("runtime-1")
+            .bind("agent-1")
+            .bind(now_ms)
+            .execute(store.pool())
+            .await
+            .unwrap_or_else(|e| panic!("enqueue seed task {prefix}-{i}: {e}"));
+        }
+    });
+}
+
+/// Raise the seeded `agent-1`'s `max_concurrent_tasks` to `cap` in
+/// `{home}/.ainb/hangar.db`.
+///
+/// The P4 fixture seeds `agent-1` at the schema default cap of **1** and leaves
+/// its `task-1` in the `running` state — which fully consumes that single slot,
+/// so a claim-enabled daemon would never claim any further queued task. The
+/// daemon-health tripwire raises the cap (and/or clears `task-1`) so the seeded
+/// queue actually drains, driving the throughput ring.
+pub fn set_agent_concurrency(home: &Path, cap: u32) {
+    let hangar_dir = home.join(".ainb");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("cap runtime");
+    rt.block_on(async {
+        let store = ainb_hangar_store::Store::open_in(&hangar_dir).await.expect("open cap store");
+        sqlx::query("UPDATE agent SET max_concurrent_tasks = ? WHERE id = 'agent-1'")
+            .bind(i64::from(cap))
+            .execute(store.pool())
+            .await
+            .expect("raise agent concurrency");
+        // Free the fixture's running slot so the cap math counts only the
+        // seeded batch (the fixture's `task-1` is a render-only prop here).
+        sqlx::query(
+            "UPDATE agent_task_queue SET status = 'done', finished_at = created_at \
+                     WHERE id = 'task-1'",
+        )
+        .execute(store.pool())
+        .await
+        .expect("clear fixture running task");
+    });
+}
+
+/// Poll `{home}/.ainb/hangar.db` until at least `want` tasks with id prefix
+/// `seed-<prefix>-` have reached a terminal status (`done`/`failed`/`cancelled`),
+/// or `deadline` passes. Returns the terminal count actually observed.
+///
+/// The daemon-health tripwire uses this to wait for the claim-enabled daemon to
+/// finish executing the seeded tasks (driving the throughput ring) before
+/// opening the `D` screen.
+pub fn wait_for_terminal(home: &Path, prefix: &str, want: usize, deadline: Instant) -> usize {
+    let hangar_dir = home.join(".ainb");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("wait runtime");
+    rt.block_on(async {
+        let store = ainb_hangar_store::Store::open_in(&hangar_dir).await.expect("open wait store");
+        let like = format!("seed-{prefix}-%");
+        loop {
+            let n: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM agent_task_queue \
+                 WHERE id LIKE ? AND status IN ('done','failed','cancelled')",
+            )
+            .bind(&like)
+            .fetch_one(store.pool())
+            .await
+            .expect("count terminal tasks");
+            let n = usize::try_from(n).unwrap_or(0);
+            if n >= want || Instant::now() >= deadline {
+                return n;
+            }
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+    })
 }
 
 /// A uniquely-named tmux session that kills itself by **exact name** on drop.
@@ -358,13 +576,22 @@ impl TuiSession {
             )
     }
 
+    /// Capture the visible pane text **with SGR escape sequences** (`-e`), so the
+    /// caller can grep for ANSI colour codes (the daemon-health sparkline's red
+    /// failure band). Empty on error.
+    pub fn capture_escaped(&self) -> String {
+        Command::new("tmux")
+            .args(["capture-pane", "-p", "-e", "-t", &self.name])
+            .output()
+            .map_or_else(
+                |_| String::new(),
+                |o| String::from_utf8_lossy(&o.stdout).into_owned(),
+            )
+    }
+
     /// Poll the pane until `pred` holds or `deadline` passes, returning the
     /// matching capture. No bare sleep: a 200ms inter-poll gap, deadline-bounded.
-    pub fn poll_capture(
-        &self,
-        deadline: Instant,
-        pred: impl Fn(&str) -> bool,
-    ) -> Option<String> {
+    pub fn poll_capture(&self, deadline: Instant, pred: impl Fn(&str) -> bool) -> Option<String> {
         loop {
             let cap = self.capture();
             if pred(&cap) {
@@ -391,7 +618,10 @@ impl TuiSession {
             c.contains("Tab content") && c.contains("navigate")
         })?;
         // Negative: we are NOT already on the hangar issue list before pressing g.
-        assert!(!home.contains(READY_MARKER), "issue list rendered before `g`:\n{home}");
+        assert!(
+            !home.contains(READY_MARKER),
+            "issue list rendered before `g`:\n{home}"
+        );
 
         // 2. Open the Hangar plugin screen (single-char nav, no Enter). The home
         //    screen's first frames race the initial tmux/session discovery, so a
@@ -421,6 +651,32 @@ impl TuiSession {
         self.poll_capture(deadline, |c| c.contains(READY_MARKER))
     }
 
+    /// From the Hangar issue-list landing screen, switch to a top-level tab by
+    /// its single-char nav key (no `Enter`, per HARD RULE 3), retrying the key
+    /// until `pred` holds on the captured pane or `deadline` passes.
+    ///
+    /// The first frames after a tab switch can race the plugin's snapshot fetch,
+    /// so (like [`open_hangar_and_wait_ready`](Self::open_hangar_and_wait_ready))
+    /// the key is re-sent every ~1.5s until the target screen's marker appears.
+    /// Returns the matching capture, or `None` on timeout.
+    pub fn switch_tab_until(
+        &self,
+        key: &str,
+        deadline: Instant,
+        pred: impl Fn(&str) -> bool,
+    ) -> Option<String> {
+        loop {
+            self.send_key(key);
+            if let Some(c) = self.poll_capture(Instant::now() + Duration::from_millis(1500), &pred)
+            {
+                return Some(c);
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+        }
+    }
+
     /// Convenience: spawn `ainb tui`, open the Hangar screen, and return the
     /// landing capture. Panics if the seeded screen never rendered.
     pub fn launch_to_hangar(bin: &Path, home: &Path) -> (Self, String) {
@@ -435,9 +691,7 @@ impl TuiSession {
 impl Drop for TuiSession {
     fn drop(&mut self) {
         // Exact-name kill only — never wildcard or kill-server.
-        let _ = Command::new("tmux")
-            .args(["kill-session", "-t", &self.name])
-            .status();
+        let _ = Command::new("tmux").args(["kill-session", "-t", &self.name]).status();
     }
 }
 
