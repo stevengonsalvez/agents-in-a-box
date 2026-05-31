@@ -175,6 +175,23 @@ async fn handle_connection(
                 }
                 match Envelope::from_bytes(trimmed.as_bytes()) {
                     Ok(env) => {
+                        // Only persist events that need the human. The
+                        // hook script delivers every registered lifecycle
+                        // event, but high-frequency telemetry
+                        // (SessionStart / UserPromptSubmit / PostToolUse /
+                        // PreCompact) would bury the actionable signal —
+                        // a single agent turn fires dozens of PostToolUse.
+                        // Drop them here using the same `is_user_facing`
+                        // predicate that gates OS notifications, so the
+                        // inbox + per-session badge only ever reflect
+                        // "come look at this session". This is the
+                        // belt-and-suspenders filter: fresh installs also
+                        // stop *firing* the telemetry hooks at the source
+                        // (see plugins/ainb-hooks manifests), but this
+                        // guard keeps stale installs clean too.
+                        if !crate::osnotify::is_user_facing(&env) {
+                            continue;
+                        }
                         // Persist on the blocking pool; rusqlite is sync.
                         let store_for_blocking = Arc::clone(&store);
                         let env_clone = env.clone();
@@ -294,6 +311,50 @@ mod tests {
         // cleanup on drop is not required for this test.
         handle.abort();
         let _ = pid_path; // pid file cleanup tested elsewhere
+    }
+
+    #[tokio::test]
+    async fn daemon_drops_telemetry_keeps_actionable() {
+        // The daemon must only persist events that need the human.
+        // Fire two telemetry events (PostToolUse, SessionStart) and
+        // two actionable ones (Stop, Notification:idle_prompt); only
+        // the actionable pair should land in SQLite.
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_under(dir.path());
+        let socket = config.paths.socket.clone();
+        let db = config.paths.db.clone();
+        let handle = tokio::spawn(async move { run_daemon(config).await });
+        wait_for_socket(&socket).await;
+
+        let envelopes = [
+            r#"{"protocol_version":1,"agent":"claude","raw_event":"PostToolUse","session_id":"s","cwd":"/tmp/x","project":"x","ts":1,"payload":{}}"#,
+            r#"{"protocol_version":1,"agent":"claude","raw_event":"SessionStart","session_id":"s","cwd":"/tmp/x","project":"x","ts":2,"payload":{}}"#,
+            r#"{"protocol_version":1,"agent":"claude","raw_event":"Stop","session_id":"s","cwd":"/tmp/x","project":"x","ts":3,"payload":{}}"#,
+            r#"{"protocol_version":1,"agent":"claude","raw_event":"Notification:idle_prompt","session_id":"s","cwd":"/tmp/x","project":"x","ts":4,"payload":{}}"#,
+        ];
+        for env_json in envelopes {
+            let mut stream = UnixStream::connect(&socket).await.unwrap();
+            stream.write_all(env_json.as_bytes()).await.unwrap();
+            stream.write_all(b"\n").await.unwrap();
+            stream.shutdown().await.unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        let store = Store::open(&db).unwrap();
+        // Only Stop + Notification:idle_prompt survived.
+        assert_eq!(store.count().unwrap(), 2, "telemetry should be dropped");
+        let events: std::collections::HashSet<String> = store
+            .list(false, None, None, 10)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.raw_event)
+            .collect();
+        assert!(events.contains("Stop"));
+        assert!(events.contains("Notification:idle_prompt"));
+        assert!(!events.contains("PostToolUse"));
+        assert!(!events.contains("SessionStart"));
+
+        handle.abort();
     }
 
     #[tokio::test]

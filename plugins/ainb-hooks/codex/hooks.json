@@ -1,42 +1,6 @@
 {
-  "//": "ainb-hooks managed block. Merged into ~/.codex/hooks.json by `ainb hooks install --codex`. Do not edit by hand.",
+  "//": "ainb-hooks managed block, merged into ~/.codex/hooks.json by `ainb-notifyd install --codex`. Do not edit by hand. Only the events that need the human are registered (Notification = awaiting-input/permission, Stop = turn finished). Telemetry (SessionStart / UserPromptSubmit / PostToolUse / PreCompact) is intentionally NOT hooked — it would bury the signal. The daemon also drops any non-user-facing event defensively.",
   "hooks": {
-    "SessionStart": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "AINB_AGENT=codex __AINB_HOOK_SCRIPT__",
-            "timeout": 5
-          }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "AINB_AGENT=codex __AINB_HOOK_SCRIPT__",
-            "timeout": 5
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "AINB_AGENT=codex __AINB_HOOK_SCRIPT__",
-            "timeout": 5
-          }
-        ]
-      }
-    ],
     "Notification": [
       {
         "matcher": "",
@@ -50,18 +14,6 @@
       }
     ],
     "Stop": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "AINB_AGENT=codex __AINB_HOOK_SCRIPT__",
-            "timeout": 5
-          }
-        ]
-      }
-    ],
-    "PreCompact": [
       {
         "matcher": "",
         "hooks": [
