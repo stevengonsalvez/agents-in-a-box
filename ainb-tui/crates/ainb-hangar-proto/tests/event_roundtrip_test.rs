@@ -39,6 +39,7 @@ fn sample_issue() -> IssueRow {
         assignee: Some("agent:claude".to_string()),
         creator: "member:alice".to_string(),
         created_at: 1_700_000_000_000,
+        pr_url: Some("https://github.com/o/r/pull/42".to_string()),
     }
 }
 
@@ -179,6 +180,35 @@ fn presence_state_three_states_roundtrip() {
         let back: PresenceState = serde_json::from_value(v).expect("decode");
         assert_eq!(back, s);
     }
+}
+
+/// P9.2: an `IssueRow` with no PR omits the `pr_url` key entirely (additive
+/// wire — a pre-P9.2 reader never sees a new `"pr_url": null`), and a legacy
+/// row without the key still decodes (`pr_url` defaults to `None`).
+#[test]
+fn issue_row_pr_url_is_additive() {
+    let no_pr = IssueRow {
+        pr_url: None,
+        ..sample_issue()
+    };
+    let json = serde_json::to_string(&no_pr).expect("encode");
+    assert!(
+        !json.contains("pr_url"),
+        "a no-PR issue row must omit pr_url, got {json}"
+    );
+
+    // A present URL serializes into the key.
+    let with_pr = sample_issue();
+    let json = serde_json::to_string(&with_pr).expect("encode");
+    assert!(
+        json.contains("\"pr_url\":\"https://github.com/o/r/pull/42\""),
+        "got {json}"
+    );
+
+    // A legacy row (pre-P9.2, no key) decodes with pr_url == None.
+    let legacy = r#"{"id":"issue-1","workspace_id":"default","title":"t","description":null,"state":"open","assignee":null,"creator":"member:alice","created_at":0}"#;
+    let row: IssueRow = serde_json::from_str(legacy).expect("decode legacy");
+    assert_eq!(row.pr_url, None);
 }
 
 #[test]

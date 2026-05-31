@@ -217,6 +217,13 @@ pub struct IssueRow {
     pub creator: String,
     /// Creation timestamp (epoch milliseconds).
     pub created_at: i64,
+    /// The PR URL captured from this issue's latest completed task's
+    /// `result.pr_url` (P9.1 capture, P9.2 surface), or `None` when no task on
+    /// the issue opened a PR. Omitted from the JSON entirely when `None`
+    /// (`skip_serializing_if`) so the wire shape only grows when a task actually
+    /// produced a PR — a pre-P9.2 reader never sees a new `"pr_url": null` key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_url: Option<String>,
 }
 
 /// A wire-side actor row for the agent-picker snapshot (`hangar/agents_list`).

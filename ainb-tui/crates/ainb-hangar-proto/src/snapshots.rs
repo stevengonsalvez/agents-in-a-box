@@ -229,6 +229,7 @@ mod tests {
                 assignee: None,
                 creator: "member:alice".into(),
                 created_at: 0,
+                pr_url: None,
             }],
         };
         let s = serde_json::to_string(&issues).unwrap();
