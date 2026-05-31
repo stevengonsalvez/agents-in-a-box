@@ -27,17 +27,17 @@ If you want to **add a screen / CLI / dashboard to the TUI**, you want this kind
 
 ### 2. **Claude Code plugins** (Anthropic's plugin system)
 
-A separate system owned by Claude Code itself. The monorepo ships **one** Claude Code plugin: `reflect`.
+A separate system owned by Claude Code itself. The monorepo ships **three** Claude Code plugins, all under `plugins/<name>/` at the repo root (not inside `ainb-tui/`):
 
-- **Where it lives:** `plugins/reflect/` at the repo root (not inside `ainb-tui/`)
+- **[`reflect`](../toolkit/plugins/reflect.md)** — agent self-improvement + retrieval (skills + SessionStart/PostToolUse/Stop hooks). `claude plugin install reflect@agents-in-a-box`
+- **[`ainb-fleet`](../toolkit/plugins/ainb-fleet.md)** — LLM-facing skill bundle teaching agents to drive `ainb fleet …` multi-session orchestration. `claude plugin install ainb-fleet@agents-in-a-box`
+- **[`ainb-hooks`](../toolkit/plugins/ainb-hooks.md)** — emits Claude Code / Codex lifecycle events to the ainb notification inbox (pairs with the `notifyd` in-tree plugin); wired by `ainb-notifyd install`.
+
 - **Distribution:** through `.claude-plugin/marketplace.json` at the repo root, which the Claude Code CLI reads
-- **Runtime:** Claude Code itself loads it as a skill/hook bundle; ainb is not involved
-- **What it does:** captures and retrieves learnings inside Claude Code sessions via the `reflect-kb` library
-- **Install:** `claude plugin install reflect@agents-in-a-box`
+- **Runtime:** Claude Code itself loads them as skill/hook bundles; the ainb TUI is not involved
+- **Full docs:** [Toolkit → Claude Code plugins](../toolkit/plugins/overview.md) — a page per plugin with how-it-works diagrams
 
-If you want to **add behaviour to Claude Code itself**, you want a Claude Code plugin. Documentation for that system is upstream:
-- [Claude Code plugin docs](https://docs.anthropic.com/en/docs/claude-code) — Anthropic's authoritative reference
-- The `plugins/reflect/` directory in this repo is a working example you can read
+If you want to **add behaviour to Claude Code itself**, you want a Claude Code plugin. Anthropic's authoritative reference is the [Claude Code plugin docs](https://docs.anthropic.com/en/docs/claude-code); the `plugins/*/` directories here are working examples.
 
 ---
 
