@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Reflect cost rearchitecture — v4.0.0</title>
+  <style>
+    :root {
+      --ivory:#FAF9F5; --slate:#141413; --clay:#D97757; --oat:#E3DACC;
+      --olive:#788C5D; --gray-150:#F0EEE6; --gray-300:#D1CFC5; --gray-500:#87867F;
+      --gray-700:#3D3D3A; --white:#FFFFFF;
+      --serif: ui-serif, Georgia, 'Times New Roman', serif;
+      --sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+      --mono: ui-monospace, 'SF Mono', Menlo, Monaco, monospace;
+    }
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { font-family:var(--sans); background:var(--ivory); color:var(--gray-700); line-height:1.55; padding:56px 32px 120px; -webkit-font-smoothing:antialiased; }
+    .page { max-width:1120px; margin:0 auto; }
+    header.page-head { margin-bottom:48px; max-width:860px; }
+    .eyebrow { font-size:12px; letter-spacing:0.08em; text-transform:uppercase; color:var(--gray-500); margin-bottom:12px; }
+    h1 { font-family:var(--serif); font-weight:500; font-size:38px; line-height:1.15; color:var(--slate); margin-bottom:18px; letter-spacing:-0.01em; }
+    .prompt-box { background:var(--gray-150); border:1.5px solid var(--gray-300); border-radius:12px; padding:16px 20px; font-size:14.5px; color:var(--gray-700); }
+    .prompt-box .label { font-family:var(--mono); font-size:11px; text-transform:uppercase; letter-spacing:0.06em; color:var(--gray-500); display:block; margin-bottom:6px; }
+    section { margin-bottom:64px; }
+    .sec-head { display:flex; align-items:baseline; gap:14px; margin-bottom:8px; }
+    .sec-head .num { font-family:var(--mono); font-size:12px; background:var(--oat); color:var(--slate); padding:3px 9px; border-radius:8px; }
+    .sec-head h2 { font-family:var(--serif); font-weight:500; font-size:26px; color:var(--slate); letter-spacing:-0.01em; }
+    .sec-intro { font-size:14.5px; color:var(--gray-500); max-width:760px; margin-bottom:28px; }
+    .summary { display:grid; grid-template-columns:repeat(4,1fr); gap:16px; margin-bottom:64px; }
+    @media (max-width:900px){ .summary{ grid-template-columns:repeat(2,1fr);} }
+    .summary .cell { background:var(--white); border:1.5px solid var(--gray-300); border-radius:12px; padding:18px 20px; }
+    .summary .k { font-family:var(--mono); font-size:11px; text-transform:uppercase; letter-spacing:0.06em; color:var(--gray-500); margin-bottom:6px; }
+    .summary .v { font-size:17px; color:var(--slate); font-weight:600; }
+    .summary .v.accent { color:var(--clay); }
+    .summary .v.good { color:var(--olive); }
+    .milestones { display:flex; flex-direction:column; gap:0; }
+    .milestone { display:grid; grid-template-columns:140px 28px 1fr; gap:0 18px; position:relative; }
+    .milestone .when { text-align:right; font-family:var(--mono); font-size:12px; color:var(--gray-500); padding-top:4px; }
+    .milestone .dot-col { display:flex; flex-direction:column; align-items:center; }
+    .milestone .dot { width:14px; height:14px; border-radius:50%; background:var(--white); border:3px solid var(--clay); margin-top:4px; flex-shrink:0; }
+    .milestone .dot.done { background:var(--olive); border-color:var(--olive); }
+    .milestone .line { width:2px; flex:1; background:var(--gray-300); margin:4px 0; }
+    .milestone:last-child .line { display:none; }
+    .milestone .body { padding-bottom:36px; }
+    .milestone .body h3 { font-family:var(--serif); font-weight:500; font-size:19px; color:var(--slate); margin-bottom:4px; }
+    .milestone .body p { font-size:14px; color:var(--gray-500); margin-bottom:10px; max-width:660px; }
+    .milestone .tags { display:flex; gap:8px; flex-wrap:wrap; }
+    .milestone .tag { font-family:var(--mono); font-size:11.5px; background:var(--gray-150); border:1px solid var(--gray-300); border-radius:6px; padding:3px 8px; color:var(--gray-700); }
+    .milestone .tag.done { background:#E4E9DC; border-color:#B9C7A6; color:#4B5C39; }
+    .diagram { background:var(--white); border:1.5px solid var(--gray-300); border-radius:12px; padding:20px; overflow-x:auto; }
+    .diagram svg { display:block; min-width:760px; width:100%; height:auto; }
+    .caption { font-size:13px; color:var(--gray-500); margin-top:12px; }
+    .mocks { display:grid; grid-template-columns:1fr 1fr; gap:28px; }
+    @media (max-width:900px){ .mocks{ grid-template-columns:1fr;} }
+    .mock { background:var(--white); border:1.5px solid var(--gray-300); border-radius:12px; overflow:hidden; }
+    .mock .mock-label { padding:12px 18px; border-bottom:1.5px solid var(--gray-300); font-family:var(--mono); font-size:11.5px; text-transform:uppercase; letter-spacing:0.06em; color:var(--gray-500); background:var(--gray-150); }
+    .mock .mock-body { padding:22px; }
+    .kv { width:100%; border-collapse:collapse; font-size:13px; }
+    .kv td { padding:7px 4px; border-bottom:1px dashed var(--gray-300); }
+    .kv td:last-child { text-align:right; font-family:var(--mono); color:var(--slate); }
+    .kv tr:last-child td { border-bottom:none; }
+    .kv .bad { color:#8A3B1E; font-weight:600; }
+    .kv .good { color:#4B5C39; font-weight:600; }
+    .causes { list-style:none; display:flex; flex-direction:column; gap:12px; }
+    .causes li { font-size:13.5px; color:var(--gray-700); padding-left:26px; position:relative; }
+    .causes li::before { content:"✕"; position:absolute; left:0; top:0; color:#C0532E; font-weight:700; }
+    .causes li b { color:var(--slate); }
+    .code-grid { display:grid; grid-template-columns:1fr 1fr; gap:28px; }
+    @media (max-width:980px){ .code-grid{ grid-template-columns:1fr;} }
+    .code-block { display:flex; flex-direction:column; gap:10px; }
+    .code-block .file-label { font-family:var(--mono); font-size:12px; color:var(--gray-500); }
+    .code { background:var(--slate); border-radius:12px; padding:18px 20px; overflow-x:auto; flex:1; }
+    .code pre { font-family:var(--mono); font-size:12.5px; line-height:1.65; color:#E8E6DE; white-space:pre; }
+    .code .kw{color:var(--clay);} .code .str{color:var(--olive);} .code .cm{color:var(--gray-500);} .code .fn{color:#C9B98A;}
+    .risks { border:1.5px solid var(--gray-300); border-radius:12px; overflow:hidden; background:var(--white); }
+    .risks .row { display:grid; grid-template-columns:1.6fr 110px 1.6fr; gap:0; }
+    @media (max-width:780px){ .risks .row{ grid-template-columns:1fr;} }
+    .risks .row + .row { border-top:1.5px solid var(--gray-300); }
+    .risks .cell { padding:14px 18px; font-size:13.5px; }
+    .risks .cell + .cell { border-left:1.5px solid var(--gray-300); }
+    @media (max-width:780px){ .risks .cell + .cell{ border-left:none; border-top:1px dashed var(--gray-300);} }
+    .risks .head { background:var(--gray-150); font-weight:600; color:var(--slate); font-size:12px; text-transform:uppercase; letter-spacing:0.04em; }
+    .sev { display:inline-block; font-family:var(--mono); font-size:11px; padding:2px 8px; border-radius:6px; font-weight:600; }
+    .sev.high{ background:#F3D9CC; color:#8A3B1E; } .sev.med{ background:var(--oat); color:var(--slate); } .sev.low{ background:#E4E9DC; color:#4B5C39; }
+    .open-q { display:flex; flex-direction:column; gap:14px; max-width:860px; }
+    .q { background:var(--white); border:1.5px solid var(--gray-300); border-left:4px solid var(--clay); border-radius:10px; padding:16px 20px; }
+    .q .qt { font-weight:600; font-size:15px; color:var(--slate); margin-bottom:4px; }
+    .q .qd { font-size:13.5px; color:var(--gray-500); }
+    .q .owner { font-family:var(--mono); font-size:11.5px; color:var(--gray-500); margin-top:8px; }
+  </style>
+<style data-claude-theme="injected">
+/* Claude brand polish layer for explain-to-me templates.
+ * Inject as a second <style> block AFTER the template's own <style>.
+ * Templates already use Claude's palette (ivory/slate/clay/oat/olive);
+ * this layer adds:
+ *   - Söhne-like sans stack (matches claude.ai)
+ *   - Tiempos Headline–like serif fallback for headings
+ *   - Subtle paper texture on body
+ *   - Brand badge (bottom-right)
+ *   - Clay focus ring
+ * Layout-safe: only touches typography, surface, and decoration.
+ */
+
+:root {
+  /* Re-affirm tokens in case template scoped them. */
+  --ivory:    #FAF9F5;
+  --slate:    #141413;
+  --clay:     #D97757;
+  --oat:      #E3DACC;
+  --olive:    #788C5D;
+  --gray-150: #F0EEE6;
+  --gray-300: #D1CFC5;
+  --gray-500: #87867F;
+  --gray-700: #3D3D3A;
+
+  /* claude.ai font stacks. Web fonts (Söhne, Tiempos) are licensed; the
+   * stack falls back to high-quality system fonts that read as similar. */
+  --sans:  "Söhne", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --serif: "Tiempos Headline", "Tiempos Text", "Source Serif Pro", "Iowan Old Style", "Charter", Georgia, serif;
+  --mono:  "Söhne Mono", "Berkeley Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+body {
+  background-image:
+    radial-gradient(rgba(20, 20, 19, 0.018) 1px, transparent 1px);
+  background-size: 4px 4px;
+}
+
+h1, h2, h3 {
+  letter-spacing: -0.012em;
+}
+
+.eyebrow::after {
+  content: " · explained by claude";
+  color: var(--clay);
+  letter-spacing: 0.08em;
+}
+
+:focus-visible {
+  outline: 2px solid var(--clay);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+pre, code {
+  font-feature-settings: "ss01", "cv11", "calt";
+}
+pre {
+  background: var(--gray-150) !important;
+  border: 1px solid var(--gray-300);
+}
+
+body::after {
+  content: "claude · explainer";
+  position: fixed;
+  bottom: 18px;
+  right: 18px;
+  z-index: 999;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--gray-500);
+  background: rgba(250, 249, 245, 0.92);
+  border: 1px solid var(--gray-300);
+  border-left: 3px solid var(--clay);
+  padding: 6px 10px 6px 12px;
+  border-radius: 4px;
+  backdrop-filter: blur(6px);
+  pointer-events: none;
+}
+
+@media print {
+  body::after { display: none; }
+  body { background-image: none; }
+}
+
+@media (max-width: 640px) {
+  body::after { display: none; }
+}
+
+</style>
+</head>
+<body>
+  <div class="page">
+
+    <header class="page-head">
+      <div class="eyebrow">Implementation · reflect plugin · v4.0.0 (shipped)</div>
+      <h1>Reflect cost rearchitecture</h1>
+      <div class="prompt-box">
+        <span class="label">Why this exists</span>
+        One background <code>/reflect</code> drain run burned <strong>41.5M tokens in 9.6&nbsp;min (~$713)</strong>
+        for <strong>zero net-new learnings</strong> — it handed a 123K-token transcript to an Opus agent that
+        roamed with Bash for 223 turns, the same transcript was reflected 16×, and the daily cap blew 20→61.
+        A 30-day backfill showed reflect was burning ~1.2B tokens / 446 runs / ~$7k, almost all on Opus. This is
+        the five-workstream fix that stops it.
+      </div>
+    </header>
+
+    <div class="summary">
+      <div class="cell"><div class="k">Incident run</div><div class="v accent">41.5M tok · ~$713</div></div>
+      <div class="cell"><div class="k">30-day reflect spend</div><div class="v accent">~1.2B tok · ~$7k</div></div>
+      <div class="cell"><div class="k">Backlog re-gate</div><div class="v good">114 → 13 (−89%)</div></div>
+      <div class="cell"><div class="k">Version</div><div class="v">3.6.0 → 4.0.0</div></div>
+    </div>
+
+    <!-- 01 ============================================================= -->
+    <section>
+      <div class="sec-head"><span class="num">01</span><h2>Five workstreams</h2></div>
+      <p class="sec-intro">Sequenced so the bleeding stops first (W1–W3, low-risk additive guards), then capture behaviour (W4), then the structural rebuild (W5). All shipped; 82 in-scope tests green.</p>
+      <div class="milestones">
+        <div class="milestone">
+          <div class="when">W1 · <span style="color:#4B5C39">done</span></div>
+          <div class="dot-col"><span class="dot done"></span><span class="line"></span></div>
+          <div class="body">
+            <h3>Circuit breaker</h3>
+            <p>Hard caps (<code>--max-turns 8</code>, 180s wall, &gt;2M-token poison), an atomic <code>mkdir</code> lock replacing the racy PID file, a debounce window, a <code>REFLECT_DISABLED</code> kill switch, and <code>sonnet</code> as the default model. The runaway is now structurally impossible.</p>
+            <div class="tags"><span class="tag done">reflect-drain-bg.sh</span><span class="tag">6 tests</span><span class="tag">50131d2</span></div>
+          </div>
+        </div>
+        <div class="milestone">
+          <div class="when">W2 · <span style="color:#4B5C39">done</span></div>
+          <div class="dot-col"><span class="dot done"></span><span class="line"></span></div>
+          <div class="body">
+            <h3>Skip-gate + dedup</h3>
+            <p>A $0 regex gate over a transcript's dialogue: skips reflect-on-reflect / no-signal / clean sessions and anything already queued or processed. The incident transcript now skips at enqueue for $0.</p>
+            <div class="tags"><span class="tag done">reflect_gate.py</span><span class="tag">+ both producers</span><span class="tag">15 tests</span><span class="tag">2c421d9</span></div>
+          </div>
+        </div>
+        <div class="milestone">
+          <div class="when">W3 · <span style="color:#4B5C39">done</span></div>
+          <div class="dot-col"><span class="dot done"></span><span class="line"></span></div>
+          <div class="body">
+            <h3>Cost observability</h3>
+            <p>Full token envelope per run in the cost log, a <code>reflect cost</code> CLI (by day/transcript/model/outcome with the cached-vs-uncached split + outlier flags), and a backfill that reconstructs history. This is how the ~$7k/30d figure surfaced.</p>
+            <div class="tags"><span class="tag done">reflect_cost.py</span><span class="tag done">backfill_costs.py</span><span class="tag">8 tests</span><span class="tag">73e0241</span></div>
+          </div>
+        </div>
+        <div class="milestone">
+          <div class="when">W4 · <span style="color:#4B5C39">done</span></div>
+          <div class="dot-col"><span class="dot done"></span><span class="line"></span></div>
+          <div class="body">
+            <h3>Cascade (gate + slice)</h3>
+            <p>Slices the transcript to just signal-bearing windows (~10× smaller) before <code>/reflect</code>, which then runs on Sonnet under the W1 caps. A real 150K-token dialogue sliced to 15K. Reuses the existing write workflow — no KB-layer reinvention.</p>
+            <div class="tags"><span class="tag done">reflect_cascade.py</span><span class="tag">default-on</span><span class="tag">9 tests</span><span class="tag">cfe39cb</span></div>
+          </div>
+        </div>
+        <div class="milestone">
+          <div class="when">W5 · <span style="color:#4B5C39">done</span></div>
+          <div class="dot-col"><span class="dot done"></span></div>
+          <div class="body">
+            <h3>Structural rebuild</h3>
+            <p>Surfacer retired (single consumer), <code>graphml_repair.py</code> self-heals the doubled-close-tag corruption that caused the rabbit hole, neutral cwd, a one-shot backlog re-gate (114→13), and a weekly Opus synthesis pass + launchd timers.</p>
+            <div class="tags"><span class="tag done">graphml_repair.py</span><span class="tag done">regate_backlog.py</span><span class="tag done">reflect_synthesis.py</span><span class="tag">11 tests</span><span class="tag">2eca356</span></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 02 ============================================================= -->
+    <section>
+      <div class="sec-head"><span class="num">02</span><h2>Architecture — before &amp; after</h2></div>
+      <p class="sec-intro">The old design ran <em>every</em> transcript through one fat Opus path. The new design puts a $0 gate in front that drops most work, then runs the survivors sliced and cheap on Sonnet under hard caps. The surfacer is gone; a launchd timer (not per-session spawns) drives the single drainer.</p>
+      <div class="diagram">
+<svg viewBox="0 0 960 560" xmlns="http://www.w3.org/2000/svg" font-family="ui-monospace, Menlo, monospace">
+  <defs>
+    <marker id="aG" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#87867F"/></marker>
+    <marker id="aC" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#D97757"/></marker>
+    <marker id="aO" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#788C5D"/></marker>
+  </defs>
+  <rect x="0" y="0" width="960" height="560" fill="#FAF9F5"/>
+  <text x="40" y="40" font-size="13" font-weight="700" fill="#8A3B1E">BEFORE — v3.6 · unbounded</text>
+  <text x="40" y="58" font-size="11" fill="#87867F">one fat path · every transcript → full Opus agent</text>
+  <rect x="30" y="78" width="150" height="56" rx="10" fill="#FFFFFF" stroke="#D1CFC5" stroke-width="1.5"/>
+  <text x="105.0" y="104.0" text-anchor="middle" font-size="12" font-weight="600" fill="#141413">2 producers</text>
+  <text x="105.0" y="121.0" text-anchor="middle" font-size="10" fill="#87867F">PreCompact · Stop</text>
+  <rect x="220" y="78" width="120" height="56" rx="10" fill="#FFFFFF" stroke="#D1CFC5" stroke-width="1.5"/>
+  <text x="280.0" y="104.0" text-anchor="middle" font-size="12" font-weight="600" fill="#141413">JSONL queue</text>
+  <text x="280.0" y="121.0" text-anchor="middle" font-size="10" fill="#87867F">flat · no dedup</text>
+  <rect x="380" y="78" width="150" height="56" rx="10" fill="#FFFFFF" stroke="#D1CFC5" stroke-width="1.5"/>
+  <text x="455.0" y="104.0" text-anchor="middle" font-size="12" font-weight="600" fill="#141413">2 consumers</text>
+  <text x="455.0" y="121.0" text-anchor="middle" font-size="10" fill="#87867F">surfacer + drainer</text>
+  <rect x="570" y="70" width="210" height="72" rx="10" fill="#F3D9CC" stroke="#C0532E" stroke-width="1.5"/>
+  <text x="675.0" y="104.0" text-anchor="middle" font-size="12.5" font-weight="700" fill="#8A3B1E">UNBOUNDED Opus agent</text>
+  <text x="675.0" y="121.0" text-anchor="middle" font-size="10" fill="#A6502F">FULL 123K ctx · Bash · 223 turns</text>
+  <rect x="810" y="78" width="120" height="56" rx="10" fill="#FFFFFF" stroke="#D1CFC5" stroke-width="1.5"/>
+  <text x="870.0" y="104.0" text-anchor="middle" font-size="12" font-weight="600" fill="#141413">reindex</text>
+  <text x="870.0" y="121.0" text-anchor="middle" font-size="10" fill="#87867F">inline</text>
+  <text x="675" y="160" text-anchor="middle" font-size="12" font-weight="700" fill="#8A3B1E">41.5M tokens · ~$713 · 0 net-new</text>
+  <path d="M180 106 L220 106" stroke="#87867F" stroke-width="1.5" fill="none" marker-end="url(#aG)"/>
+  <path d="M340 106 L380 106" stroke="#87867F" stroke-width="1.5" fill="none" marker-end="url(#aG)"/>
+  <path d="M530 106 L570 106" stroke="#87867F" stroke-width="1.5" fill="none" marker-end="url(#aG)"/>
+  <path d="M780 106 L810 106" stroke="#87867F" stroke-width="1.5" fill="none" marker-end="url(#aG)"/>
+  <line x1="30" y1="210" x2="930" y2="210" stroke="#E3DACC" stroke-width="1.5"/>
+  <text x="40" y="248" font-size="13" font-weight="700" fill="#4B5C39">AFTER — v4.0 · gated + capped</text>
+  <text x="40" y="266" font-size="11" fill="#87867F">$0 gate drops most work · survivors run sliced on Sonnet under hard caps</text>
+  <rect x="30" y="286" width="150" height="56" rx="10" fill="#FFFFFF" stroke="#D1CFC5" stroke-width="1.5"/>
+  <text x="105.0" y="312.0" text-anchor="middle" font-size="12" font-weight="600" fill="#141413">2 producers</text>
+  <text x="105.0" y="329.0" text-anchor="middle" font-size="10" fill="#87867F">PreCompact · Stop</text>
+  <rect x="220" y="278" width="150" height="72" rx="10" fill="#E4E9DC" stroke="#788C5D" stroke-width="1.5"/>
+  <text x="295.0" y="312.0" text-anchor="middle" font-size="12.5" font-weight="700" fill="#3C4A2C">$0 SKIP-GATE</text>
+  <text x="295.0" y="329.0" text-anchor="middle" font-size="10" fill="#5B6E45">reflect-on-reflect /</text>
+  <text x="295" y="343" text-anchor="middle" font-size="10" fill="#5B6E45">no-signal / dup → drop</text>
+  <rect x="410" y="286" width="140" height="56" rx="10" fill="#FFFFFF" stroke="#D1CFC5" stroke-width="1.5"/>
+  <text x="480.0" y="312.0" text-anchor="middle" font-size="12" font-weight="600" fill="#141413">bg drainer</text>
+  <text x="480.0" y="329.0" text-anchor="middle" font-size="10" fill="#87867F">sole consumer</text>
+  <rect x="590" y="278" width="200" height="72" rx="10" fill="#E4E9DC" stroke="#788C5D" stroke-width="1.5"/>
+  <text x="690.0" y="312.0" text-anchor="middle" font-size="12.5" font-weight="700" fill="#3C4A2C">CASCADE</text>
+  <text x="690.0" y="329.0" text-anchor="middle" font-size="10" fill="#5B6E45">slice ~10% → Sonnet</text>
+  <text x="690" y="343" text-anchor="middle" font-size="10" fill="#5B6E45">caps 8t · 180s · 2M poison</text>
+  <rect x="820" y="286" width="110" height="56" rx="10" fill="#FFFFFF" stroke="#D1CFC5" stroke-width="1.5"/>
+  <text x="875.0" y="312.0" text-anchor="middle" font-size="12" font-weight="600" fill="#141413">write +</text>
+  <text x="875.0" y="329.0" text-anchor="middle" font-size="10" fill="#87867F">heal · reindex</text>
+  <path d="M180 314 L220 314" stroke="#788C5D" stroke-width="1.5" fill="none" marker-end="url(#aO)"/>
+  <text x="200" y="306" text-anchor="middle" font-size="9" fill="#5B6E45">gate</text>
+  <path d="M370 314 L410 314" stroke="#788C5D" stroke-width="1.5" fill="none" marker-end="url(#aO)"/>
+  <path d="M550 314 L590 314" stroke="#788C5D" stroke-width="1.5" fill="none" marker-end="url(#aO)"/>
+  <path d="M790 314 L820 314" stroke="#788C5D" stroke-width="1.5" fill="none" marker-end="url(#aO)"/>
+  <path d="M270 350 L270 392" stroke="#D97757" stroke-width="1.5" fill="none" stroke-dasharray="5 4" marker-end="url(#aC)"/>
+  <text x="278" y="378" font-size="10" fill="#D97757">$0 drop (89% of backlog)</text>
+  <rect x="220" y="392" width="150" height="42" rx="10" fill="#FAF9F5" stroke="#D1CFC5" stroke-width="1.5"/>
+  <text x="295.0" y="417.0" text-anchor="middle" font-size="12" font-weight="600" fill="#141413">skipped · $0</text>
+  <rect x="410" y="392" width="140" height="46" rx="10" fill="#F0EEE6" stroke="#D1CFC5" stroke-width="1.5"/>
+  <text x="480.0" y="413.0" text-anchor="middle" font-size="11" font-weight="600" fill="#3D3D3A">launchd 600s</text>
+  <text x="480.0" y="430.0" text-anchor="middle" font-size="10" fill="#87867F">atomic lock · debounce</text>
+  <path d="M480 392 L480 342" stroke="#87867F" stroke-width="1.5" fill="none" stroke-dasharray="4 3" marker-end="url(#aG)"/>
+  <text x="488" y="372" font-size="9" fill="#87867F">drives (not per-session)</text>
+  <text x="480" y="510" text-anchor="middle" font-size="12" fill="#3D3D3A">surfacer retired · neutral cwd · weekly Opus synthesis (separate batch)</text>
+  <text x="480" y="530" text-anchor="middle" font-size="11" fill="#87867F">diagram via /fireworks-tech-graph</text>
+</svg>
+      </div>
+      <p class="caption">Red = the unbounded v3.6 path that caused the incident. Olive = the v4.0 gated/sliced path. Clay dashed = the $0 drop that eliminates ~89% of work before any model runs.</p>
+    </section>
+
+    <!-- 03 ============================================================= -->
+    <section>
+      <div class="sec-head"><span class="num">03</span><h2>The failure mode</h2></div>
+      <p class="sec-intro">Two things compounded: the cache never amortised (so 223 turns each re-paid a ~180K context), and five independent guard-rails were missing. The cost lever was <em>context × turns × cache-miss</em>, not model price.</p>
+      <div class="mocks">
+        <div class="mock">
+          <div class="mock-label">A · Inverted cache (per-turn, ×223)</div>
+          <div class="mock-body">
+            <table class="kv">
+              <tr><td>cache_read (cheap reuse)</td><td class="bad">frozen 21,670</td></tr>
+              <tr><td>cache_creation (2× writes)</td><td class="bad">grew 59K → 199K</td></tr>
+              <tr><td>creation share of 41.5M</td><td class="bad">67%</td></tr>
+              <tr><td>read share</td><td>27%</td></tr>
+              <tr><td>avg context replayed / turn</td><td>176K (max 221K)</td></tr>
+            </table>
+            <p style="font-size:12.5px;color:var(--gray-500);margin-top:14px;">Only the static ~21.7K system head was ever reused; a volatile block above the transcript busted the cache for everything below it, so the 123K transcript was re-cached <em>every turn</em> at 2× rates.</p>
+          </div>
+        </div>
+        <div class="mock">
+          <div class="mock-label">B · Five missing guard-rails</div>
+          <div class="mock-body">
+            <ul class="causes">
+              <li><b>No turn/token bound</b> — only a 600s wall-clock; the agent did 223 turns inside it. → <b>W1</b></li>
+              <li><b>No gate</b> — reflect-on-reflect transcript processed in full for 0 net-new. → <b>W2/W4</b></li>
+              <li><b>No dedup</b> — same transcript reflected 16×. → <b>W2</b></li>
+              <li><b>Cap race</b> — check-then-write PID file let the 20/day cap hit 61. → <b>W1</b></li>
+              <li><b>Wrong cwd</b> — ran in research-tech while analysing a cochilli transcript. → <b>W5</b></li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 04 ============================================================= -->
+    <section>
+      <div class="sec-head"><span class="num">04</span><h2>Key code</h2></div>
+      <p class="sec-intro">The two load-bearing pieces: the $0 gate verdict (W2) and the drain's hard caps + atomic lock (W1).</p>
+      <div class="code-grid">
+        <div class="code-block">
+          <div class="file-label">scripts/reflect_gate.py — verdict (W2)</div>
+          <div class="code"><pre><span class="kw">def</span> <span class="fn">evaluate</span>(path):
+    <span class="kw">if</span> is_reflect_on_reflect(path):
+        <span class="kw">return</span> <span class="fn">GateVerdict</span>(<span class="str">"skip"</span>, <span class="str">"reflect-on-reflect"</span>)
+    text    = extract_dialogue(path)   <span class="cm"># user/asst text only,</span>
+                                       <span class="cm"># NOT tool output noise</span>
+    signals = detect_signals(text)
+    <span class="kw">if not</span> signals:
+        <span class="kw">return</span> <span class="fn">GateVerdict</span>(<span class="str">"skip"</span>, <span class="str">"no-signal"</span>)
+    <span class="kw">return</span> <span class="fn">GateVerdict</span>(<span class="str">"reflect"</span>, <span class="str">"has-signal"</span>, len(signals))
+
+<span class="cm"># dedup: already in queue OR terminal in cost log → skip</span></pre></div>
+        </div>
+        <div class="code-block">
+          <div class="file-label">hooks/reflect-drain-bg.sh — caps + lock (W1)</div>
+          <div class="code"><pre><span class="cm"># hard caps (was --max-turns 25, 600s, no token cap)</span>
+MAX_TURNS=<span class="str">8</span>; ENTRY_TIMEOUT=<span class="str">180</span>; TOKEN_MAX=<span class="str">2000000</span>
+DRAIN_MODEL=<span class="str">sonnet</span>
+
+<span class="cm"># atomic mkdir lock (was racy check-then-write PID file)</span>
+<span class="fn">acquire_lock</span>() {
+  <span class="kw">if</span> mkdir <span class="str">"$LOCK_DIR"</span> 2&gt;/dev/null; <span class="kw">then return</span> 0; <span class="kw">fi</span>
+  <span class="cm"># owner alive? defer : reclaim stale</span>
+}
+<span class="cm"># post-hoc: run &gt; TOKEN_MAX → poison (never retried)</span></pre></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 05 ============================================================= -->
+    <section>
+      <div class="sec-head"><span class="num">05</span><h2>Risks &amp; honest edges</h2></div>
+      <div class="risks">
+        <div class="row"><div class="cell head">Edge</div><div class="cell head">Sev</div><div class="cell head">Handling</div></div>
+        <div class="row">
+          <div class="cell">Cascade extraction misses a real lesson (straight-to-default, no A/B).</div>
+          <div class="cell"><span class="sev med">MED</span></div>
+          <div class="cell"><code>reflect cost</code> flags zero-output runs; manual <code>/reflect</code> re-run retained; weekly synthesis is a backstop.</div>
+        </div>
+        <div class="row">
+          <div class="cell">Live Sonnet extract quality, KB vector dedup, launchd timers, weekly Opus call — not unit-testable in a bare worktree.</div>
+          <div class="cell"><span class="sev med">MED</span></div>
+          <div class="cell">Deterministic cores are unit-tested (82 in-scope tests); LLM/launchd edges verify on deploy.</div>
+        </div>
+        <div class="row">
+          <div class="cell">Cache-miss root cause (volatile block busting the prefix) is a hypothesis.</div>
+          <div class="cell"><span class="sev low">LOW</span></div>
+          <div class="cell">Evidence is the frozen-21,670-read / growing-creation signature across all 223 turns; the fix (slice + caps) holds regardless of exact trigger.</div>
+        </div>
+        <div class="row">
+          <div class="cell">graphml truncate-repair could in theory drop valid trailing data.</div>
+          <div class="cell"><span class="sev low">LOW</span></div>
+          <div class="cell">Repairs only on parse-failure, backs up first, re-validates, and restores the original if the repair doesn't parse.</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 06 ============================================================= -->
+    <section>
+      <div class="sec-head"><span class="num">06</span><h2>Deferred &amp; open</h2></div>
+      <div class="open-q">
+        <div class="q">
+          <div class="qt">Full sqlite-queue migration — deferred</div>
+          <div class="qd">W2 dedup (path + processed-set) and W4 signal-hash already deliver idempotency in practice. The sqlite rewrite is robustness polish at the highest migration risk — tracked as a focused follow-up; the JSONL queue + <code>regate_backlog.py</code> cover the immediate need.</div>
+          <div class="owner">Follow-up · own PR</div>
+        </div>
+        <div class="q">
+          <div class="qt">Deploy-time steps</div>
+          <div class="qd">Run <code>regate_backlog.py</code> once to collapse the live 114-entry backlog; load the two launchd plists (drain 600s, synthesis weekly); verify Sonnet extract quality on the first few real runs via <code>reflect cost</code>.</div>
+          <div class="owner">On deploy</div>
+        </div>
+        <div class="q">
+          <div class="qt">Tunables left at sane defaults</div>
+          <div class="qd">Weekly synthesis cadence (Sun 03:00), launchd drain interval (10&nbsp;min), vector-dedup threshold (cos&nbsp;&gt;&nbsp;0.85). All overridable; revisit once cost telemetry accrues.</div>
+          <div class="owner">Tune later</div>
+        </div>
+      </div>
+    </section>
+
+  </div>
+</body>
+</html>
