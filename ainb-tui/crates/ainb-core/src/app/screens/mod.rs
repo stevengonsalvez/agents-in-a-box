@@ -21,6 +21,10 @@ pub mod ids {
     pub const CONFIG: &str = "config";
     pub const CATALOG: &str = "catalog";
     pub const ANALYTICS: &str = "analytics";
+    /// Process-causality screen, owned by the `witr` plugin. Generic
+    /// plugin-screen registration — no witr domain logic in the host;
+    /// the same plumbing the `analytics` screen uses for `burndown`.
+    pub const WITR: &str = "witr";
     pub const SESSION_LIST: &str = "session_list";
     pub const LOGS: &str = "logs";
     pub const LOG_HISTORY: &str = "log_history";

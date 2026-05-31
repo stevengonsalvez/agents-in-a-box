@@ -1,0 +1,48 @@
+[package]
+name = "ainb-plugin-witr"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Process causality tracing — wraps github.com/pranshuparmar/witr as a native ainb plugin (ABI v2)"
+
+[lib]
+name = "ainb_plugin_witr"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ainb-plugin-witr"
+path = "src/main.rs"
+
+[dependencies]
+ainb-plugin-sdk-rust = { path = "../ainb-plugin-sdk-rust" }
+
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+async-trait = "0.1"
+
+# Binary discovery + version-string parsing (cfx.2).
+which = { workspace = true }
+regex = { workspace = true }
+semver = "1.0"
+
+# Subprocess exec + JSON parse (cfx.3).
+thiserror = { workspace = true }
+
+# CLI surface — `ainb witr <target>` subcommand parsing (cfx.7).
+clap = { workspace = true }
+
+# Event-bus publisher — msgpack-encode the witr.snapshot payload (cfx.8).
+# No `bytes` dep needed: `Vec<u8>: Into<bytes::Bytes>` so
+# `host.snapshot_publish` takes our encoded Vec directly.
+rmp-serde = "1.3"
+
+[dev-dependencies]
+toml = { workspace = true }
+ainb-plugin-protocol = { path = "../ainb-plugin-protocol" }
+# Stub-witr binaries staged in tempdirs by detect_subprocess + exec_subprocess.
+tempfile = { workspace = true }

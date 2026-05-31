@@ -28,7 +28,7 @@ Surface area (full reference in [v2.md](./v2.md)):
 - **Chunked publishes**: `WIRE_VERSION` + `chunk_index` + `is_final` ordering contract; subscribers MUST drop follow-on chunks that arrived without chunk 0.
 - **Priority key channel** (2026-05-15): host runtime drains `plugin/handle_key` notifications ahead of `plugin/handle_event` to prevent FIFO starvation during chunked publishes.
 
-`ainb-plugin-cts-v2` ships with 14 conformance axes. In-tree dogfood plugins: `burndown` (analytics screen + `ainb usage` CLI) and `session-reader` (chunked usage_data publisher).
+`ainb-plugin-cts-v2` ships with 14 conformance axes. In-tree dogfood plugins: `burndown` (analytics screen + `ainb usage` CLI), `session-reader` (chunked usage_data publisher), and `witr` (process-causality screen + `ainb witr` CLI; wraps the external `witr` binary via `spawn_subprocess`).
 
 ## v1 — historical, removed 2026-05-15
 

@@ -20,7 +20,7 @@ A plugin can:
 - **Read host-managed state** — sessions, Claude/Codex logs (capability-gated)
 - **Invoke host actions** — call out to host-owned operations via `host/action/invoke`
 
-The bundled `ainb-plugin-burndown` is the canonical reference: owns the Analytics screen, the `ainb usage` CLI tree, and a statusline segment. `ainb-plugin-session-reader` is the canonical pure-publisher example.
+The bundled `ainb-plugin-burndown` is the canonical reference: owns the Analytics screen, the `ainb usage` CLI tree, and a statusline segment. `ainb-plugin-session-reader` is the canonical pure-publisher example. `ainb-plugin-witr` is the canonical **subprocess-wrapping** example: it declares `spawn_subprocess`, detects an external binary (`witr`) on `PATH`, gates its UI on a version check, and execs `witr --json <target>` to back its screen and `ainb witr` CLI — the template for surfacing any external tool as a plugin without vendoring its code.
 
 ## Scaffold
 

@@ -194,6 +194,7 @@ pub enum AppEvent {
     GoToConfig,              // Navigate to config view
     GoToSessionList,         // Navigate to session list view
     GoToStats,               // Navigate to stats view
+    GoToWitr,                // Navigate to the witr (process causality) plugin screen
     GoToSkills,              // Navigate to skills view
     GoToRecovery,            // Navigate to session recovery view
     GoToInbox,               // Navigate to ainb-hooks notification inbox
@@ -1957,6 +1958,7 @@ impl EventHandler {
             KeyCode::Char('C') => return Some(AppEvent::GoToConfig),
             KeyCode::Char('s') => return Some(AppEvent::GoToSessionList),
             KeyCode::Char('i') => return Some(AppEvent::GoToStats),
+            KeyCode::Char('w') => return Some(AppEvent::GoToWitr),
             KeyCode::Char('k') => return Some(AppEvent::GoToSkills),
             KeyCode::Char('R') => return Some(AppEvent::GoToRecovery),
             KeyCode::Char('v') => return Some(AppEvent::ShowChangelog),
@@ -3208,6 +3210,13 @@ impl EventHandler {
                         // now (Phase 3 cutover); host no longer
                         // pre-populates state for the analytics screen.
                     }
+                    SidebarItem::Witr => {
+                        tracing::info!("Launching witr -i (process-causality browser) from sidebar");
+                        // Hand the terminal to witr's own interactive TUI
+                        // (see AppEvent::GoToWitr) rather than a
+                        // plugin-rendered screen.
+                        state.pending_async_action = Some(AsyncAction::AttachWitr);
+                    }
                     SidebarItem::Skills => {
                         tracing::info!("Navigating to Skills from sidebar");
                         state.current_screen = screen_ids::SKILLS.to_string();
@@ -3422,6 +3431,18 @@ impl EventHandler {
                 state.current_screen = screen_ids::ANALYTICS.to_string();
                 // Plugin owns its own data load; host no longer
                 // pre-populates analytics state.
+            }
+            AppEvent::GoToWitr => {
+                tracing::info!("Launching witr -i (process-causality browser)");
+                // witr's value is its own interactive all-process browser
+                // (sortable list + ancestry pane), which has no JSON/
+                // WireBuffer equivalent — it lives only in `witr -i`. So
+                // instead of a plugin-rendered screen we hand the terminal
+                // to witr's native TUI full-screen (suspend/attach, like an
+                // agent session) and resume ainb when the user quits it.
+                // The witr plugin still owns the `ainb witr` CLI + `/witr`
+                // slash; only the screen is the embedded binary.
+                state.pending_async_action = Some(AsyncAction::AttachWitr);
             }
             AppEvent::GoToSkills => {
                 tracing::info!("Navigating to Skills");
@@ -4787,6 +4808,7 @@ fn is_known_screen_id(id: &str) -> bool {
             | ids::CONFIG
             | ids::CATALOG
             | ids::ANALYTICS
+            | ids::WITR
             | ids::SESSION_LIST
             | ids::LOGS
             | ids::LOG_HISTORY
@@ -4844,6 +4866,7 @@ mod navigate_to_tests {
             ids::CONFIG,
             ids::CATALOG,
             ids::ANALYTICS,
+            ids::WITR,
             ids::SESSION_LIST,
             ids::LOGS,
             ids::LOG_HISTORY,

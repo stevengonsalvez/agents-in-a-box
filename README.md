@@ -224,6 +224,12 @@ brew install stevengonsalvez/agents-in-a-box/ainb
 
 `ainb` boots a plugin host at startup. Some screens — notably **Analytics / Usage (the burndown dashboard)** — are provided by subprocess plugins that the host discovers and loads automatically. **All plugins are enabled by default**; you only need the controls below to turn them off or scope which ones load.
 
+<p align="center">
+  <img src="docs/assets/diagrams/plugin-architecture.svg" alt="ainb v2 plugin architecture — host, JSON-RPC stdio, plugin subprocesses, capability gate, event bus" width="860">
+</p>
+
+**How it works (in brief):** a v2 plugin is a **native subprocess** that speaks **JSON-RPC 2.0 over Content-Length-framed stdio** — no wasm, no in-process linking. The host (`ainb-core`) discovers each plugin from `dist/plugins/<id>/`, spawns it, and exchanges messages: `plugin/render` (the plugin returns a `WireBuffer` of cells the host blits), `plugin/handle_key`, `plugin/cli_dispatch` (routes `ainb <namespace> …`), plus reverse `host/snapshot/publish` calls over an **event bus**. Each plugin declares its `[capabilities]` in `manifest.toml`; the runtime denies any ungranted host call with JSON-RPC `-32001`. A plugin screen can render **two ways**: in-process via a `WireBuffer` (host owns the terminal — e.g. **burndown**), or as a **host-embedded foreign TTY** where ainb suspends and hands the terminal to an external interactive program (e.g. **witr**'s `witr -i` browser). Full walkthrough: [`docs/plugins/`](docs/plugins/overview.md).
+
 There are four ways to filter plugins, with the following precedence (most specific wins):
 
 | Goal | How | Type |
