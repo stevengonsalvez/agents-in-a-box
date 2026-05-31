@@ -16,9 +16,7 @@ Plugins only see the host capabilities they declare in their manifest, and they 
 
 ## Architecture at a glance
 
-<p align="center">
-  <img src="../assets/diagrams/plugin-architecture.svg" alt="ainb v2 plugin architecture — host, JSON-RPC stdio, plugin subprocesses, capability gate, event bus" width="900">
-</p>
+![ainb v2 plugin architecture — host, JSON-RPC stdio, plugin subprocesses, capability gate, event bus](../assets/diagrams/plugin-architecture.svg)
 
 The host (`ainb-core`) spawns each plugin as a child process and drives it over **JSON-RPC 2.0 / Content-Length-framed stdio**. Host→plugin methods: `plugin/init` (with the granted capabilities), `plugin/render` (host sends a `Viewport`, plugin returns a `WireBuffer`), `plugin/handle_key`, `plugin/handle_event`, `plugin/cli_dispatch`, `plugin/shutdown`. Plugin→host (reverse) calls: `host/snapshot/publish` + `host/snapshot/subscribe` (the **event bus**) and `host/action/invoke`. The `ainb-plugin-runtime` enforces capabilities — an ungranted host-fn call comes back as JSON-RPC `-32001` (`CAPABILITY_DENIED`).
 
@@ -40,16 +38,16 @@ The host (`ainb-core`) spawns each plugin as a child process and drives it over 
 
 Four plugins ship in-tree as the canonical examples:
 
-- **`burndown`** — owns the Analytics screen and the `ainb usage` CLI subcommand tree. Full screen-owner reference.
-- **`notifyd`** — owns the Inbox screen and runs a notification daemon that captures Claude Code and Codex hook events into SQLite (binary `ainb-notifyd`; also installs/uninstalls the `ainb-hooks` agent hooks). Reference for an event-capturing, screen-owning plugin.
-- **`session-reader`** — pure publisher. Scans `~/.claude/projects/**` and `~/.codex/sessions/**` and chunked-publishes usage snapshots on the `sessions.usage_data` topic for `burndown` to render. Canonical publisher example.
-- **`witr`** — owns the process-causality screen (press `w`) and the `ainb witr` CLI. Wraps the external [`witr`](https://github.com/pranshuparmar/witr) binary via the `spawn_subprocess` capability: execs `witr --json <target>`, parses stdout, and renders the ancestry tree. Canonical **subprocess-wrapping** reference — the pattern for surfacing any external CLI as a plugin.
+- **[`burndown`](./burndown.md)** — screen-owner reference. Owns the Analytics screen (renders a ratatui dashboard into a `WireBuffer` each frame) and the `ainb usage` CLI tree; subscribes to `sessions.usage_data` from `session-reader`.
+- **[`session-reader`](./session-reader.md)** — pure-publisher reference. No screen. Scans `~/.claude/projects/**`, `~/.codex/sessions/**` (and more) and chunk-publishes usage snapshots on `sessions.usage_data` for `burndown` to render.
+- **[`witr`](./witr.md)** — subprocess-wrapper reference. The `ainb witr <target>` CLI + `/witr` slash run `witr --json <target>` and parse the ancestry JSON; its **screen** is a host-embedded foreign TTY (`w` hands the terminal to `witr -i` — see [the two render paths](#two-ways-a-plugin-screen-renders)). Declares `spawn_subprocess` + `event_bus`.
+- **[`notifyd`](./notifyd.md)** — note: *not* a v2 subprocess plugin. It's an in-tree daemon (binary `ainb-notifyd`) compiled into `ainb-core` that owns the Inbox screen and captures Claude Code / Codex hook events into SQLite; documented here as a sibling for completeness.
 
-<p align="center">
-  <img src="../assets/screenshots/burndown.png" alt="Burndown plugin — full analytics dashboard" width="900">
-  <br>
-  <em>The burndown plugin rendering the full analytics dashboard against real <code>~/.claude/projects</code> data.</em>
-</p>
+Each links to its own page with a `/fireworks-tech-graph` diagram of how it works.
+
+![Burndown plugin — full analytics dashboard](../assets/screenshots/burndown.png)
+
+*The burndown plugin rendering the full analytics dashboard against real `~/.claude/projects` data.*
 
 ## Where plugins live on disk
 
@@ -60,9 +58,6 @@ dist/plugins/
 ├── burndown/
 │   ├── burndown            (native executable, ad-hoc signed on macOS)
 │   └── manifest.toml
-├── notifyd/
-│   ├── ainb-notifyd
-│   └── manifest.toml
 ├── session-reader/
 │   ├── session-reader
 │   └── manifest.toml
@@ -70,6 +65,8 @@ dist/plugins/
     ├── witr
     └── manifest.toml
 ```
+
+(`notifyd` is **not** here — it's a daemon compiled into `ainb-core`, not a staged subprocess plugin; see [its page](./notifyd.md).)
 
 That layout is what `just stage-plugins` produces from in-tree crates, and what the host walks on startup. The `AINB_PLUGIN_ROOT` env var overrides it (defaults to `<workspace-root>/dist/plugins`).
 
