@@ -75,6 +75,15 @@ export default defineConfig({
             { label: 'User guide', slug: 'plugins/user-guide' },
             { label: 'Authoring guide', slug: 'plugins/authoring' },
             { label: 'Wire spec v2', slug: 'plugins/spec-v2' },
+            {
+              label: 'In-tree plugins',
+              items: [
+                { label: 'burndown', slug: 'plugins/burndown' },
+                { label: 'session-reader', slug: 'plugins/session-reader' },
+                { label: 'witr', slug: 'plugins/witr' },
+                { label: 'notifyd', slug: 'plugins/notifyd' },
+              ],
+            },
             { label: 'Changelog', slug: 'plugins/changelog' },
           ],
         },
