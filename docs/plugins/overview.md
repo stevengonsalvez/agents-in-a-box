@@ -14,6 +14,19 @@ A plugin is a self-contained capsule that adds a screen, CLI subcommand, sidebar
 
 Plugins only see the host capabilities they declare in their manifest, and they cannot reach the network, filesystem, or subprocess launcher unless you grant those capabilities.
 
+## Architecture at a glance
+
+<p align="center">
+  <img src="../assets/diagrams/plugin-architecture.svg" alt="ainb v2 plugin architecture — host, JSON-RPC stdio, plugin subprocesses, capability gate, event bus" width="900">
+</p>
+
+The host (`ainb-core`) spawns each plugin as a child process and drives it over **JSON-RPC 2.0 / Content-Length-framed stdio**. Host→plugin methods: `plugin/init` (with the granted capabilities), `plugin/render` (host sends a `Viewport`, plugin returns a `WireBuffer`), `plugin/handle_key`, `plugin/handle_event`, `plugin/cli_dispatch`, `plugin/shutdown`. Plugin→host (reverse) calls: `host/snapshot/publish` + `host/snapshot/subscribe` (the **event bus**) and `host/action/invoke`. The `ainb-plugin-runtime` enforces capabilities — an ungranted host-fn call comes back as JSON-RPC `-32001` (`CAPABILITY_DENIED`).
+
+### Two ways a plugin screen renders
+
+- **In-process `WireBuffer`** — the host owns the terminal; the plugin paints a sparse cell grid the host blits each frame. Integrated and themeable. This is how **`burndown`** draws the Analytics dashboard.
+- **Host-embedded foreign TTY** — for an interactive program that has no machine-readable render (only its own TUI), the host *suspends* and hands the whole terminal to the external binary, resuming when it exits — the same mechanism ainb uses to attach to agent sessions. This is how **`witr`** opens its all-process browser (`witr -i`): there's no JSON for witr's live process list, so pressing `w` runs `tmux new-session -A -d -s ainb-witr "witr -i"` and attaches full-screen.
+
 ## What a plugin can own
 
 - **A TUI screen** — implement `Plugin::render` and paint a `WireBuffer` per frame; the host blits it onto the terminal.
