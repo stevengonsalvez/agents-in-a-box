@@ -49,6 +49,9 @@ test-support = ["dep:tempfile", "ainb-hangar-core/test-support"]
 [dev-dependencies]
 tempfile = { workspace = true }
 dirs = { workspace = true }
+# P8.3 span-emission tests install a hand-rolled `Layer` to capture each FSM
+# transition's span name + fields; the registry + Layer trait come from here.
+tracing-subscriber = { workspace = true }
 # Self dev-dependency enabling `test-support` so this crate's own integration
 # tests (tests/*.rs) can `use ainb_hangar_store::test_support`. Integration
 # tests do not inherit `#[cfg(test)]`, so the feature must be turned on
