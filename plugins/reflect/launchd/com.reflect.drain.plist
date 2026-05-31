@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd template (W5): decouple the drainer from per-SessionStart spawns.
+
+  Replaces the plugin.json SessionStart trigger as the PRIMARY drain cadence:
+  a single timer every 600s with the script's own atomic lock + debounce, so a
+  burst of session starts can never fan out into a thundering herd of drains.
+
+  INSTALL (replace {{PLUGIN_ROOT}} with the absolute reflect plugin path, e.g.
+  ~/.claude/plugins/cache/agents-in-a-box/reflect/<ver> or the toolkit source):
+    sed "s|{{PLUGIN_ROOT}}|$HOME/.claude/.../reflect|g" \
+      com.reflect.drain.plist > ~/Library/LaunchAgents/com.reflect.drain.plist
+    launchctl load ~/Library/LaunchAgents/com.reflect.drain.plist
+  UNINSTALL:
+    launchctl unload ~/Library/LaunchAgents/com.reflect.drain.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.reflect.drain</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>{{PLUGIN_ROOT}}/hooks/reflect-drain-bg.sh</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>600</integer>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/tmp/reflect-drain-launchd.out</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/reflect-drain-launchd.err</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>REFLECT_DRAIN_DEBOUNCE_SEC</key>
+        <string>0</string>
+    </dict>
+</dict>
+</plist>

@@ -64,7 +64,19 @@ def get_state_dir() -> Path:
 
 
 def _main_body():
-    queue_file = get_state_dir() / 'pending_reflections.jsonl'
+    # ── RETIRED (W5, decision #1) ──────────────────────────────────────────────
+    # This SessionStart "surfacer" used to inject the pending-reflection queue
+    # into the new session's context so the live agent would run /reflect inline.
+    # The background drainer (reflect-drain-bg.sh, wired in plugin.json) is now
+    # the SOLE consumer of the queue. Running both was the dual-consumer problem:
+    # the same transcripts got processed twice and the queue polluted live
+    # sessions' context. plugin.json no longer wires this hook; we keep the file
+    # as a no-op so any stale settings.json that still references the path exits
+    # cleanly instead of erroring. Safe to delete once no config references it.
+    forensics_log(_HOOK_NAME, "retired no-op (bg drainer is sole queue consumer)")
+    sys.exit(0)
+    # (unreachable — retained below for git history / reference)
+    queue_file = get_state_dir() / 'pending_reflections.jsonl'  # noqa: F841
 
     # No queue, no work — exit silently so SessionStart isn't noisy.
     if not queue_file.exists() or queue_file.stat().st_size == 0:

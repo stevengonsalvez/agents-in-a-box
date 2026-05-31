@@ -72,6 +72,7 @@ TOKEN_MAX="${REFLECT_DRAIN_TOKEN_MAX:-2000000}"
 DRAIN_MODEL="${REFLECT_DRAIN_MODEL:-sonnet}"
 DEBOUNCE_SEC="${REFLECT_DRAIN_DEBOUNCE_SEC:-600}"
 CASCADE_ENABLED="${REFLECT_DRAIN_CASCADE:-1}"   # W4: gate+slice before /reflect
+DRAIN_CWD="${REFLECT_DRAIN_CWD:-$HOME}"          # W5: neutral cwd for claude -p
 
 # Locate sibling scripts (cascade) relative to this hook, robust to symlinks.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -382,7 +383,11 @@ Process the transcript at: ${reflect_target}
 Extract any HIGH-confidence corrections, MEDIUM-confidence approved approaches, and noteworthy patterns. Write each as a learning document via the standard reflect workflow. When done, summarize what you captured. Do NOT touch the queue file — the drain script handles archiving."
 
     local out_json exit_code
-    out_json=$(timeout "$ENTRY_TIMEOUT" "$CLAUDE_BIN" \
+    # Neutral cwd (W5): the bg drainer inherits the cwd of whatever session
+    # triggered it, so reflect used to run inside a random repo (the incident
+    # ran in research-tech while analysing a cochilli transcript). Pin it to a
+    # neutral dir so reflect can't accidentally touch a project tree.
+    out_json=$(cd "$DRAIN_CWD" && timeout "$ENTRY_TIMEOUT" "$CLAUDE_BIN" \
         -p "$prompt" \
         --model "$DRAIN_MODEL" \
         --output-format json \
@@ -560,6 +565,19 @@ main() {
             log "  → without it, learnings are still captured to disk; just won't appear in /recall"
             log "    until a manual 'reflect reindex' runs"
         else
+            # Self-heal the graphml BEFORE reindex (W5). A doubled close-tag
+            # corruption ("not well-formed: invalid token") is what the incident
+            # agent spent ~200 turns investigating — here it's a cheap batch
+            # step that repairs or flags for full rebuild, never an agent loop.
+            local repair_script="${SCRIPT_DIR}/../scripts/graphml_repair.py"
+            if [[ -f "$repair_script" ]]; then
+                if python3 "$repair_script" --repair --quiet >>"$LOG_FILE" 2>&1; then
+                    log "graphml validated/repaired OK"
+                else
+                    log "graphml corrupt + unrepairable; reindex may need --force rebuild"
+                    emit_error warn graphml_corrupt "graphml unrepairable by truncate; full rebuild advised" ""
+                fi
+            fi
             log "running reflect reindex (incremental)"
             if timeout 300 reflect reindex >>"$LOG_FILE" 2>&1; then
                 log "reindex OK"
