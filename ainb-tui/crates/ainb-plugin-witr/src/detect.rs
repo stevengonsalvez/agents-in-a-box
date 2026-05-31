@@ -247,7 +247,14 @@ pub async fn detect_witr() -> DetectResult {
         }
     };
 
-    let exec = Command::new(&path).arg("--version").stdin(std::process::Stdio::null()).output();
+    let exec = Command::new(&path)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        // Kill the child if the timeout below cancels (drops) this
+        // future — tokio's default `kill_on_drop(false)` would leave it
+        // running, leaking a `witr --version` process per detection.
+        .kill_on_drop(true)
+        .output();
 
     let output = match timeout(VERSION_EXEC_TIMEOUT, exec).await {
         Ok(Ok(o)) => o,

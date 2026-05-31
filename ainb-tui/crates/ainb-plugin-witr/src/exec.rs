@@ -17,9 +17,11 @@
 //!    nuisance exec or leak weird strings into logs.
 //!
 //! The exec is bounded by [`SCAN_TIMEOUT`] (5s, per
-//! `plans/witr-plugin-spec.md` § Performance). On timeout the child
-//! is dropped — tokio reaps it via `Child::kill()` semantics on
-//! drop. No process leak.
+//! `plans/witr-plugin-spec.md` § Performance). Tokio does **not** kill a
+//! child when the `output()` future is dropped unless `kill_on_drop` is
+//! set (default is `false` — the child would otherwise keep running and
+//! leak on every timeout). We set [`Command::kill_on_drop(true)`] so the
+//! `timeout` cancellation drops the future and tokio kills the child.
 
 use std::path::Path;
 use std::time::Duration;
@@ -250,6 +252,10 @@ pub async fn exec_witr_json(path: &Path, target: &WitrTarget) -> ExecResult {
         .arg("--json")
         .args(target.select_args())
         .stdin(std::process::Stdio::null())
+        // Kill the child if the `timeout` below cancels (drops) this
+        // future — tokio's default leaves it running, leaking a witr
+        // process on every scan timeout.
+        .kill_on_drop(true)
         .output();
 
     let output = match timeout(SCAN_TIMEOUT, exec).await {
@@ -322,6 +328,8 @@ pub async fn exec_witr_passthrough(path: &Path, target: &WitrTarget) -> Passthro
     let exec = Command::new(path)
         .args(target.select_args())
         .stdin(std::process::Stdio::null())
+        // See `exec_witr_json`: kill the child on timeout-drop.
+        .kill_on_drop(true)
         .output();
     let output = match timeout(SCAN_TIMEOUT, exec).await {
         Ok(Ok(o)) => o,
