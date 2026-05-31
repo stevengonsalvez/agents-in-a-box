@@ -105,6 +105,7 @@ impl CommandRegistry {
         r.register(CompletionCommand);
         r.register(PluginCommand); // Phase 4 stub — surface reserved now
         r.register(FleetCommand);
+        r.register(NotifydCommand); // hidden — ainb-hooks daemon alias
         r
     }
 
@@ -867,6 +868,158 @@ impl CliCommand for TmuxCommand {
     }
 }
 
+/// `ainb notifyd {run,stop,install,uninstall,status}` — the ainb-hooks
+/// notification daemon, exposed as a hidden subcommand of the main
+/// binary.
+///
+/// The standalone `ainb-notifyd` binary remains the documented
+/// entrypoint, but `notify.sh`'s lazy-spawn fires `ainb notifyd` (the
+/// host binary is the one guaranteed to be on `PATH` after a normal
+/// install). This subcommand makes that path real: it delegates to the
+/// same `ainb_plugin_notifyd` functions the standalone binary uses, so
+/// both entrypoints share one implementation. Hidden from `--help`
+/// because end users should reach for `ainb-notifyd` or the TUI Inbox;
+/// this exists for the hook script's auto-start.
+pub struct NotifydCommand;
+impl CliCommand for NotifydCommand {
+    fn name(&self) -> &'static str {
+        "notifyd"
+    }
+    fn build(&self, app: Command) -> Command {
+        let agent_flags = |c: Command| {
+            c.arg(
+                clap::Arg::new("claude")
+                    .long("claude")
+                    .action(clap::ArgAction::SetTrue)
+                    .help("Target Claude Code"),
+            )
+            .arg(
+                clap::Arg::new("codex")
+                    .long("codex")
+                    .action(clap::ArgAction::SetTrue)
+                    .help("Target Codex CLI"),
+            )
+            .arg(
+                clap::Arg::new("all")
+                    .long("all")
+                    .action(clap::ArgAction::SetTrue)
+                    .help("Target every known agent"),
+            )
+        };
+        app.subcommand(
+            Command::new(self.name())
+                .about(
+                    "ainb-hooks notification daemon (alias of the ainb-notifyd \
+                     binary; used by notify.sh lazy-spawn).",
+                )
+                .hide(true)
+                .subcommand(Command::new("run").about("Run the daemon in the foreground (default)"))
+                .subcommand(Command::new("stop").about("Stop a running daemon via its PID file"))
+                .subcommand(agent_flags(Command::new("install").about("Install the ainb-hooks hook")))
+                .subcommand(agent_flags(
+                    Command::new("uninstall").about("Uninstall the ainb-hooks hook"),
+                ))
+                .subcommand(Command::new("status").about("Report install + daemon status")),
+        )
+    }
+    fn run(&self, matches: &ArgMatches, _ctx: CliContext) -> BoxFuture<'static, Result<()>> {
+        // Resolve the sub-verb synchronously, then move owned values
+        // into the async block (the trait requires a 'static future).
+        #[derive(Clone)]
+        enum Verb {
+            Run,
+            Stop,
+            Install(Vec<ainb_plugin_notifyd::Agent>),
+            Uninstall(Vec<ainb_plugin_notifyd::Agent>),
+            Status,
+        }
+        fn agents_from(m: &ArgMatches) -> Vec<ainb_plugin_notifyd::Agent> {
+            use ainb_plugin_notifyd::Agent;
+            let claude = m.get_flag("claude");
+            let codex = m.get_flag("codex");
+            let all = m.get_flag("all");
+            if all || (!claude && !codex) {
+                return Agent::ALL.to_vec();
+            }
+            let mut out = Vec::new();
+            if claude {
+                out.push(Agent::Claude);
+            }
+            if codex {
+                out.push(Agent::Codex);
+            }
+            out
+        }
+        // No sub-verb → `run` (matches the standalone binary's default
+        // and the lazy-spawn call `ainb notifyd`).
+        let verb = match matches.subcommand() {
+            Some(("run", _)) | None => Verb::Run,
+            Some(("stop", _)) => Verb::Stop,
+            Some(("install", m)) => Verb::Install(agents_from(m)),
+            Some(("uninstall", m)) => Verb::Uninstall(agents_from(m)),
+            Some(("status", _)) => Verb::Status,
+            Some((other, _)) => {
+                let other = other.to_string();
+                return Box::pin(async move {
+                    Err(anyhow::anyhow!("unknown notifyd subcommand: {other}"))
+                });
+            }
+        };
+        Box::pin(async move {
+            use ainb_plugin_notifyd::{Paths, RunConfig};
+            match verb {
+                Verb::Run => {
+                    let config = RunConfig::from_home()?;
+                    ainb_plugin_notifyd::run_daemon(config).await
+                }
+                Verb::Stop => {
+                    let paths = Paths::from_home()?;
+                    match ainb_plugin_notifyd::pid::read(&paths.pid)? {
+                        Some(p) if ainb_plugin_notifyd::pid::is_running(p) => {
+                            use nix::sys::signal::{Signal, kill};
+                            use nix::unistd::Pid;
+                            kill(Pid::from_raw(p as i32), Signal::SIGTERM)?;
+                            println!("sent SIGTERM to ainb-notifyd (pid {p})");
+                        }
+                        Some(p) => {
+                            std::fs::remove_file(&paths.pid).ok();
+                            println!("no live daemon (stale pid {p} cleaned up)");
+                        }
+                        None => println!("no daemon running"),
+                    }
+                    Ok(())
+                }
+                Verb::Install(agents) => {
+                    let paths = Paths::from_home()?;
+                    let record = ainb_plugin_notifyd::install_for(&paths, &agents)?;
+                    println!("installed for: {:?}", record.agents);
+                    Ok(())
+                }
+                Verb::Uninstall(agents) => {
+                    let paths = Paths::from_home()?;
+                    ainb_plugin_notifyd::uninstall(&paths, &agents)?;
+                    println!("uninstalled: {agents:?}");
+                    Ok(())
+                }
+                Verb::Status => {
+                    let paths = Paths::from_home()?;
+                    for r in ainb_plugin_notifyd::status(&paths)? {
+                        println!(
+                            "{:<8} installed={:<5} hook_ok={:<5} socket_ok={:<5} last={}",
+                            r.agent,
+                            r.installed,
+                            r.hook_script_ok,
+                            r.socket_ok,
+                            if r.last_event.is_empty() { "-" } else { &r.last_event }
+                        );
+                    }
+                    Ok(())
+                }
+            }
+        })
+    }
+}
+
 pub struct CompletionCommand;
 impl CliCommand for CompletionCommand {
     fn name(&self) -> &'static str {
@@ -1123,13 +1276,13 @@ mod tests {
     }
 
     #[test]
-    fn built_ins_registers_twenty_commands() {
+    fn built_ins_registers_twenty_one_commands() {
         let r = CommandRegistry::built_ins();
         let names = r.names();
         // 16 user-facing built-ins + claudecode namespace + tmux namespace
-        // + plugin stub + fleet = 20. The TUI is NOT in the registry —
-        // main.rs handles `tui` / no-subcommand inline.
-        assert_eq!(names.len(), 20, "expected 20 entries, got {names:?}");
+        // + plugin stub + fleet + hidden notifyd = 21. The TUI is NOT in
+        // the registry — main.rs handles `tui` / no-subcommand inline.
+        assert_eq!(names.len(), 21, "expected 21 entries, got {names:?}");
         for required in [
             "run",
             "list",
@@ -1151,6 +1304,7 @@ mod tests {
             "completion",
             "plugin",
             "fleet",
+            "notifyd",
         ] {
             assert!(
                 names.contains(&required),
