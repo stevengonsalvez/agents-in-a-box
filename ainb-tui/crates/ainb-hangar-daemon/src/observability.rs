@@ -54,16 +54,105 @@ pub struct ObservabilityOpts {
     pub otlp: Option<OtlpOpts>,
 }
 
-/// Placeholder for the P8.2 OTLP exporter configuration.
+/// P8.2 OTLP exporter configuration.
 ///
-/// P8.1 only defines the seam so [`ObservabilityOpts`] is forward-compatible;
-/// the endpoint/protocol fields and the `#[cfg(feature = "otlp")]` wiring land
-/// in P8.2 (`hangar:P8.2`). Constructing one today has no effect on [`install`].
+/// Carries the collector endpoint the OTLP/HTTP exporter sends spans to. The
+/// daemon populates this from `OTEL_EXPORTER_OTLP_ENDPOINT` (see
+/// [`OtlpOpts::from_env`]); when that var is unset the daemon leaves
+/// [`ObservabilityOpts::otlp`] `None` and [`install`] attaches no OTLP layer —
+/// the JSONL sink stays the sole telemetry path (silent fallback, no error).
+///
+/// Honoured by [`install`] **only** under the `otlp` cargo feature. On a default
+/// build the OTEL crates are not linked and any [`OtlpOpts`] is ignored.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct OtlpOpts {
-    /// The `OTEL_EXPORTER_OTLP_ENDPOINT` the P8.2 exporter will POST spans to.
+    /// The OTLP/HTTP collector base URL spans are sent to (the exporter
+    /// appends `/v1/traces`). Sourced from `OTEL_EXPORTER_OTLP_ENDPOINT`.
     pub endpoint: String,
+}
+
+impl OtlpOpts {
+    /// Construct from an explicit endpoint URL.
+    ///
+    /// Production code prefers [`OtlpOpts::from_env`]; this is the constructor
+    /// integration tests use to point the exporter at a mock receiver (the
+    /// `#[non_exhaustive]` marker otherwise blocks struct-literal construction
+    /// from outside this crate).
+    #[must_use]
+    pub fn new(endpoint: impl Into<String>) -> Self {
+        Self {
+            endpoint: endpoint.into(),
+        }
+    }
+
+    /// Read the OTLP endpoint from `OTEL_EXPORTER_OTLP_ENDPOINT`.
+    ///
+    /// Returns `None` when the var is unset or empty — the caller then leaves
+    /// [`ObservabilityOpts::otlp`] `None` and [`install`] keeps JSONL as the
+    /// only sink. This is the endpoint-discovery seam: OTLP is opt-in by the
+    /// operator setting the standard OTEL env var, never on by default.
+    #[must_use]
+    pub fn from_env() -> Option<Self> {
+        std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+            .ok()
+            .filter(|e| !e.trim().is_empty())
+            .map(|endpoint| Self { endpoint })
+    }
+}
+
+/// Tracer name attached to OTLP-exported spans (the instrumentation scope).
+#[cfg(feature = "otlp")]
+const OTLP_TRACER_NAME: &str = "ainb-hangar-daemon";
+
+/// Build the OTLP `tracing` layer + the tracer provider that backs it.
+///
+/// Returns `(None, None)` when no endpoint is configured — the silent
+/// JSONL-only fallback. When an endpoint is present it builds an OTLP/HTTP
+/// (protobuf) [`SpanExporter`](opentelemetry_otlp::SpanExporter) targeting that
+/// endpoint, wraps it in an [`SdkTracerProvider`](opentelemetry_sdk::trace::SdkTracerProvider)
+/// with a `BatchSpanProcessor` (its own dedicated OS thread — no tokio runtime
+/// entanglement), and returns a [`tracing_opentelemetry`] layer plus the provider
+/// so the caller can flush + shut it down explicitly at process exit.
+///
+/// The returned layer is `Option<L>`: `Option<L: Layer<S>>` itself implements
+/// `Layer<S>`, so the `None` arm composes as a true no-op without changing the
+/// subscriber's type.
+#[cfg(feature = "otlp")]
+#[allow(clippy::type_complexity)]
+fn build_otlp_layer<S>(
+    otlp: Option<&OtlpOpts>,
+) -> anyhow::Result<(
+    Option<
+        tracing_opentelemetry::OpenTelemetryLayer<S, opentelemetry_sdk::trace::SdkTracer>,
+    >,
+    Option<opentelemetry_sdk::trace::SdkTracerProvider>,
+)>
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    use opentelemetry::trace::TracerProvider as _;
+    use opentelemetry_otlp::WithExportConfig as _;
+
+    let Some(OtlpOpts { endpoint }) = otlp else {
+        // Endpoint discovery came back empty: no OTLP layer, JSONL stays sole sink.
+        return Ok((None, None));
+    };
+
+    let exporter = opentelemetry_otlp::SpanExporter::builder()
+        .with_http()
+        .with_endpoint(endpoint)
+        .build()
+        .map_err(|e| anyhow::anyhow!("build OTLP span exporter for {endpoint}: {e}"))?;
+
+    let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+        .with_batch_exporter(exporter)
+        .build();
+
+    let tracer = provider.tracer(OTLP_TRACER_NAME);
+    let layer = tracing_opentelemetry::layer().with_tracer(tracer);
+
+    Ok((Some(layer), Some(provider)))
 }
 
 impl ObservabilityOpts {
@@ -79,10 +168,56 @@ impl ObservabilityOpts {
     }
 }
 
-/// Install the global `tracing` subscriber, returning the appender's guard.
+/// Held-for-the-process-lifetime handle returned by [`install`].
 ///
-/// Composes the `RUST_LOG`-driven [`EnvFilter`], the JSON rolling-file layer,
-/// and (when [`ObservabilityOpts::stderr`]) a human-readable stderr mirror.
+/// Always owns the non-blocking appender's [`WorkerGuard`] (dropping it flushes
+/// and stops the JSONL writer thread — the classic footgun). Under the `otlp`
+/// feature it *also* owns the OpenTelemetry tracer provider so the daemon can
+/// flush + tear it down **explicitly** at shutdown.
+///
+/// ## Why explicit shutdown, not Drop
+///
+/// The OTLP exporter runs on / blocks the tokio runtime. Letting the provider
+/// drop implicitly from inside `#[tokio::main]` re-enters the runtime during
+/// teardown and can hang or panic (`reference_tokio_runtime_drop_trap`). So the
+/// daemon calls [`Guard::shutdown`] from its shutdown handler, which force-flushes
+/// pending spans and shuts the provider down on a controlled path, *then* drops
+/// the worker guard.
+pub struct Guard {
+    /// Keeps the non-blocking JSONL writer thread alive. Dropped last.
+    _worker: WorkerGuard,
+    /// The OTLP tracer provider, present only when the `otlp` feature is on AND
+    /// an endpoint was configured. `Option` so the no-OTLP path carries nothing.
+    #[cfg(feature = "otlp")]
+    otlp_provider: Option<opentelemetry_sdk::trace::SdkTracerProvider>,
+}
+
+impl Guard {
+    /// Flush and tear down telemetry explicitly (never via Drop in the runtime).
+    ///
+    /// Under the `otlp` feature, force-flushes and shuts down the OTLP tracer
+    /// provider so buffered spans are exported before the process exits. Without
+    /// the feature (or with no endpoint configured) this only drops the JSONL
+    /// worker guard. Safe to call exactly once from the daemon shutdown handler.
+    pub fn shutdown(self) {
+        #[cfg(feature = "otlp")]
+        if let Some(provider) = self.otlp_provider {
+            // Force-flush exports buffered spans; shutdown stops the exporter on a
+            // controlled path rather than during a runtime-entangled Drop.
+            let _ = provider.force_flush();
+            let _ = provider.shutdown();
+        }
+        // `_worker` drops here, flushing + stopping the JSONL writer thread.
+    }
+}
+
+/// Install the global `tracing` subscriber, returning the lifetime [`Guard`].
+///
+/// Composes, in order: the `RUST_LOG`-driven [`EnvFilter`]; the OTLP layer (only
+/// under the `otlp` feature, and only when [`ObservabilityOpts::otlp`] is `Some`);
+/// the JSON rolling-file layer; and (when [`ObservabilityOpts::stderr`]) a
+/// human-readable stderr mirror. The JSONL sink is **always** installed — OTLP is
+/// purely additive, so an unset endpoint silently falls back to JSONL-only.
 ///
 /// Idempotency: this installs the process-global default subscriber and must be
 /// called **exactly once**, before any spans are emitted. Calling it twice
@@ -90,21 +225,18 @@ impl ObservabilityOpts {
 ///
 /// # Errors
 ///
-/// Returns an error if the log directory cannot be created or the rolling
-/// appender cannot open its file (e.g. the directory is not writable).
+/// Returns an error if the log directory cannot be created, the rolling appender
+/// cannot open its file, or (under the `otlp` feature) the OTLP exporter pipeline
+/// cannot be built for the configured endpoint.
 ///
 /// # Panics
 ///
 /// Panics if the global subscriber has already been installed (second call).
-pub fn install(opts: ObservabilityOpts) -> anyhow::Result<WorkerGuard> {
+pub fn install(opts: ObservabilityOpts) -> anyhow::Result<Guard> {
     let ObservabilityOpts {
         log_dir,
         stderr,
-        // P8.2 seam: the OTLP config is intentionally unused in P8.1. When the
-        // `otlp` cargo feature lands, P8.2 reads it here and composes a
-        // `tracing_opentelemetry` layer before `.init()`. Binding it to `_` keeps
-        // the default build free of the OTEL crates.
-        otlp: _otlp,
+        otlp,
     } = opts;
 
     std::fs::create_dir_all(&log_dir)
@@ -117,7 +249,7 @@ pub fn install(opts: ObservabilityOpts) -> anyhow::Result<WorkerGuard> {
         .filename_prefix(LOG_FILE_PREFIX)
         .build(&log_dir)
         .map_err(|e| anyhow::anyhow!("build rolling appender in {}: {e}", log_dir.display()))?;
-    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+    let (non_blocking, worker) = tracing_appender::non_blocking(file_appender);
 
     // `RUST_LOG` drives the level; default to `info`. Honoured per invocation
     // since the daemon reads the env at startup.
@@ -136,11 +268,24 @@ pub fn install(opts: ObservabilityOpts) -> anyhow::Result<WorkerGuard> {
     // is always installed regardless.
     let stderr_layer = stderr.then(|| fmt::layer().with_writer(std::io::stderr));
 
-    tracing_subscriber::registry()
-        .with(env_filter)
-        .with(json_layer)
-        .with(stderr_layer)
-        .init();
+    // OTLP layer is additive and lives *before* the JSONL layer in the registry
+    // (composition order does not change which events each layer sees — both see
+    // every event passing the shared `EnvFilter` — but mirrors the spec's
+    // `.with(otlp_layer).with(jsonl_layer)` ordering). Off entirely without the
+    // feature or without a configured endpoint.
+    #[cfg(feature = "otlp")]
+    let (otlp_layer, otlp_provider) = build_otlp_layer(otlp.as_ref())?;
+    #[cfg(not(feature = "otlp"))]
+    let _ = &otlp; // endpoint discovery is a no-op without the feature.
 
-    Ok(guard)
+    let registry = tracing_subscriber::registry().with(env_filter);
+    #[cfg(feature = "otlp")]
+    let registry = registry.with(otlp_layer);
+    registry.with(json_layer).with(stderr_layer).init();
+
+    Ok(Guard {
+        _worker: worker,
+        #[cfg(feature = "otlp")]
+        otlp_provider,
+    })
 }

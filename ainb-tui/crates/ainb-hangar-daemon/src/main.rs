@@ -39,21 +39,38 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // P8.1: install the observability subscriber BEFORE any service constructs so
-    // every span/event from boot onwards is captured. `install` returns the
-    // non-blocking appender's `WorkerGuard`; it is bound to `_guard` and held for
-    // the whole `main` body — dropping it early would flush and stop the
-    // background writer, silently losing buffered JSONL lines. The JSON sink
-    // writes `daemon.<date>` under `<hangar_home>/hangar/logs`; the `otlp` seam is
-    // left unset (wired in P8.2).
-    let _guard = observability::install(ObservabilityOpts::new(log_dir()?))?;
+    // P8.1/P8.2: install the observability subscriber BEFORE any service
+    // constructs so every span/event from boot onwards is captured. `install`
+    // returns a `Guard` owning the non-blocking appender's worker (held for the
+    // whole `main` body — dropping it early flushes and stops the JSONL writer,
+    // silently losing buffered lines) and, under the `otlp` feature with
+    // `OTEL_EXPORTER_OTLP_ENDPOINT` set, the OTLP tracer provider. The JSON sink
+    // writes `daemon.<date>` under `<hangar_home>/hangar/logs`.
+    //
+    // P8.2 endpoint discovery: `OtlpOpts::from_env` reads the standard
+    // `OTEL_EXPORTER_OTLP_ENDPOINT`; unset ⇒ `None` ⇒ no OTLP layer (silent JSONL
+    // fallback). Without the `otlp` cargo feature this is a no-op and no OTEL
+    // crates are linked.
+    let mut opts = ObservabilityOpts::new(log_dir()?);
+    opts.otlp = observability::OtlpOpts::from_env();
+    let guard = observability::install(opts)?;
 
     let args = Args::parse();
-    match args.command {
+    let result = match args.command {
         Some(Command::Beads(cli)) => {
             let BeadsCommand::Reconcile(reconcile_args) = cli.command;
             reconcile::dispatch(&reconcile_args).await
         }
         None => boot(args.once).await,
-    }
+    };
+
+    // P8.2 graceful shutdown (tokio-runtime-drop trap): the daemon's run loop
+    // returns here on Ctrl-C / one-shot completion. Flush + tear the OTLP tracer
+    // provider down EXPLICITLY rather than via Drop inside `#[tokio::main]` —
+    // dropping the provider while the runtime is live can hang/panic. This also
+    // drops the JSONL worker guard, flushing the file sink. Done on both the Ok
+    // and Err paths so a daemon error still exports its final spans.
+    guard.shutdown();
+
+    result
 }

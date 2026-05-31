@@ -21,6 +21,18 @@ test-support = []
 # behind an explicit feature. Off in production builds — nothing here ships in
 # the daemon binary.
 test-clock = []
+# P8.2: opt-in OTLP span export. OFF by default so a plain `cargo build` links
+# ZERO OpenTelemetry crates — the JSONL sink stays the daemon's only telemetry
+# path in the shipped binary. Turning this on pulls the `opentelemetry*` +
+# `tracing-opentelemetry` stack (all declared `optional = true`) and lets
+# `observability::install` attach an OTLP layer when `OTEL_EXPORTER_OTLP_ENDPOINT`
+# is set. Endpoint unset => silent JSONL-only fallback even with the feature on.
+otlp = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+]
 
 [[bin]]
 name = "ainb-hangar-daemon"
@@ -89,6 +101,23 @@ tokio-util = { workspace = true }
 # while preserving foreign sections (the daemon reads its `[env]` table but
 # round-trips the rest of the document untouched).
 toml = { workspace = true }
+
+# P8.2 OTLP export (ALL optional, only pulled under `--features otlp`). A plain
+# `cargo build` resolves none of these, so the shipped daemon links zero OTEL
+# code. The OTLP exporter uses HTTP/protobuf (`http-proto` + the reqwest blocking
+# client) so it has no separate async-grpc runtime to coordinate with the daemon's
+# tokio runtime, and force-flush on shutdown is a synchronous call.
+opentelemetry = { version = "0.30", optional = true }
+# Default `BatchSpanProcessor` runs on its own dedicated OS thread (no tokio
+# runtime), so the export path never re-enters the daemon's tokio runtime — the
+# `reference_tokio_runtime_drop_trap` safe configuration. No `rt-tokio` needed.
+opentelemetry_sdk = { version = "0.30", optional = true }
+opentelemetry-otlp = { version = "0.30", optional = true, default-features = false, features = [
+    "trace",
+    "http-proto",
+    "reqwest-blocking-client",
+] }
+tracing-opentelemetry = { version = "0.31", optional = true }
 
 [dev-dependencies]
 assert_cmd = "2"
