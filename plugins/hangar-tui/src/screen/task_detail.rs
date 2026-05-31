@@ -42,13 +42,22 @@
 
 use ainb_hangar_core::ids::TaskId;
 use ainb_hangar_proto::events::{HangarEvent, IssueRow, MessageKind, TaskResult};
-use ainb_plugin_sdk::WireBuffer;
+use ainb_plugin_sdk::{Cell, Color, Coord, WireBuffer};
 
-use crate::widgets::transcript::{render_transcript, transcript_glyph, transcript_color};
+use crate::widgets::transcript::{render_transcript, transcript_color, transcript_glyph};
 
 /// A consecutive run of this many [`MessageKind::Thinking`] lines (or more)
 /// folds into a single collapsed-group entry in the visible view (UX §7).
 pub const THINKING_COLLAPSE_THRESHOLD: usize = 4;
+
+/// Gold accent for the PR badge (matches the ainb-tui chrome CTA gold).
+const BADGE_GOLD: Color = Color::rgb(255, 215, 0);
+/// Muted gray for the `[o] open` keybinding hint next to the badge.
+const HINT_MUTED: Color = Color::rgb(120, 120, 140);
+/// The leading badge glyph + label painted before the URL (`▶ PR `).
+const BADGE_PREFIX: &str = "▶ PR ";
+/// The keybinding hint painted next to the URL (two-space gap + `[o] open`).
+const BADGE_HINT: &str = "  [o] open";
 
 /// Where the task is in its lifecycle, derived from the task event stream.
 ///
@@ -185,6 +194,15 @@ impl TaskDetailState {
         &self.issue
     }
 
+    /// The PR URL captured for this task's issue (P9.1 capture, P9.2 surface), or
+    /// `None` when no task on the issue opened a PR. Drives the gold PR badge and
+    /// gates the `o` (open-in-browser) key — when this is `None` the badge is
+    /// absent and `o` is a no-op (no silent open of nothing).
+    #[must_use]
+    pub fn pr_url(&self) -> Option<&str> {
+        self.issue.pr_url.as_deref()
+    }
+
     /// The current lifecycle.
     #[must_use]
     pub const fn lifecycle(&self) -> TaskLifecycle {
@@ -260,6 +278,10 @@ impl TaskDetailState {
 /// Key presses arrive as [`TaskDetailEvent::Key`]; `Esc` is modelled separately
 /// because it is not a printable char (it aborts the cancel modal); host stream
 /// events arrive wrapped in [`TaskDetailEvent::Event`].
+// Reduction enum: `Event(HangarEvent)` dominates the size, the rest are scalar
+// key inputs. Short-lived, reducer-folded, not a hot allocation path — left
+// unboxed for consistency with the other screen reducers.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskDetailEvent {
     /// A printable key was pressed (`'j'`, `'R'`, `'X'`, `'\n'`, …).
@@ -294,10 +316,7 @@ pub struct TaskDetailReduction {
 /// Fold one [`TaskDetailEvent`] into `state`, returning the next state and any
 /// [`TaskDetailIntent`]. Pure: no IO, no mutation of the input `state`.
 #[must_use]
-pub fn reduce_task_detail(
-    state: &TaskDetailState,
-    ev: TaskDetailEvent,
-) -> TaskDetailReduction {
+pub fn reduce_task_detail(state: &TaskDetailState, ev: TaskDetailEvent) -> TaskDetailReduction {
     match ev {
         TaskDetailEvent::Key(c) => reduce_key(state, c),
         TaskDetailEvent::Esc => reduce_esc(state),
@@ -387,7 +406,11 @@ fn scroll_down(state: &TaskDetailState) -> TaskDetailReduction {
 fn fold_event(state: &TaskDetailState, event: HangarEvent) -> TaskDetailReduction {
     let mut next = state.clone();
     match event {
-        HangarEvent::TaskMessage { task_id, kind, body } if task_id == state.task_id => {
+        HangarEvent::TaskMessage {
+            task_id,
+            kind,
+            body,
+        } if task_id == state.task_id => {
             push_entry(
                 &mut next,
                 TranscriptEntry {
@@ -411,7 +434,9 @@ fn fold_event(state: &TaskDetailState, event: HangarEvent) -> TaskDetailReductio
         HangarEvent::TaskStarted { task_id, .. } if task_id == state.task_id => {
             next.lifecycle = TaskLifecycle::Running;
         }
-        HangarEvent::TaskFinished { task_id, result, .. } if task_id == state.task_id => {
+        HangarEvent::TaskFinished {
+            task_id, result, ..
+        } if task_id == state.task_id => {
             next.lifecycle = match result {
                 TaskResult::Success => TaskLifecycle::Succeeded,
                 TaskResult::Failure => TaskLifecycle::Failed,
@@ -443,10 +468,7 @@ const fn no_intent(state: TaskDetailState) -> TaskDetailReduction {
 }
 
 /// A reduction carrying `intent` alongside `state`.
-const fn with_intent(
-    state: TaskDetailState,
-    intent: TaskDetailIntent,
-) -> TaskDetailReduction {
+const fn with_intent(state: TaskDetailState, intent: TaskDetailIntent) -> TaskDetailReduction {
     TaskDetailReduction {
         state,
         intent: Some(intent),
@@ -480,20 +502,63 @@ pub fn render_task_detail(
     bottom: u16,
     state: &TaskDetailState,
 ) {
+    // The PR badge (P9.2) takes the first row of the whole area when present,
+    // pushing the transcript + sidebar down one row. When absent there is NO
+    // badge row at all (the layout shifts up) — never a `PR: none` placeholder.
+    let body_top = state.pr_url().map_or(top, |url| {
+        render_pr_badge(buf, area_w, top, url);
+        top.saturating_add(1)
+    });
+
     // Sidebar takes a right-hand cap; it collapses when the area is too narrow
     // to leave the transcript a usable column.
     let sidebar_w: u16 = if area_w >= 60 { 24 } else { 0 };
     let main_w = area_w.saturating_sub(sidebar_w);
 
     // The transcript paints the visible (collapsed) view linearly.
-    render_transcript(buf, main_w, top, bottom, &state.visible_entries());
+    render_transcript(buf, main_w, body_top, bottom, &state.visible_entries());
 
     if sidebar_w > 0 {
         let sidebar_x = main_w;
         crate::widgets::sidebar::render_sidebar(
-            buf, sidebar_x, top, bottom, sidebar_w, &state.issue,
+            buf,
+            sidebar_x,
+            body_top,
+            bottom,
+            sidebar_w,
+            &state.issue,
         );
     }
+}
+
+/// Paint the single-row PR badge at `(0, row)`: `▶ PR <url>` in gold followed by
+/// a muted `[o] open` keybinding hint next to it (hint-near-control).
+///
+/// The whole row is clipped at `area_w` by **chars** (never bytes —
+/// `reference_rust_utf8_truncate_trap`) so a narrow pane truncates a long URL
+/// without panicking on a multi-byte boundary. The gold prefix + URL share the
+/// badge colour; the trailing hint is muted gray.
+fn render_pr_badge(buf: &mut WireBuffer, area_w: u16, row: u16, url: &str) {
+    let mut cx = 0u16;
+    cx = put_clipped(buf, cx, row, BADGE_PREFIX, BADGE_GOLD, area_w);
+    cx = put_clipped(buf, cx, row, url, BADGE_GOLD, area_w);
+    let _ = put_clipped(buf, cx, row, BADGE_HINT, HINT_MUTED, area_w);
+}
+
+/// Write `s` at `(x, row)` in `color`, clipping by **chars** at column `right`
+/// (exclusive). Returns the next free column. Multi-byte safe.
+fn put_clipped(buf: &mut WireBuffer, x: u16, row: u16, s: &str, color: Color, right: u16) -> u16 {
+    let mut cx = x;
+    for ch in s.chars() {
+        if cx >= right {
+            break;
+        }
+        let mut cell = Cell::new(ch.to_string());
+        cell.fg = Some(color);
+        buf.push(Coord::new(cx, row), cell);
+        cx = cx.saturating_add(1);
+    }
+    cx
 }
 
 /// Convenience accessor re-exporting the transcript glyph for a [`MessageKind`]

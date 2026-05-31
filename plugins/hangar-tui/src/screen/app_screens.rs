@@ -300,6 +300,11 @@ pub enum NavIntent {
     OpenAgentPicker(ainb_hangar_core::ids::IssueId),
     /// Open task detail for the issue under the selection (raised by Enter).
     OpenTaskForIssue(ainb_hangar_core::ids::IssueId),
+    /// Open the task's captured PR URL in the host browser (raised by `o` on the
+    /// task-detail screen, P9.2). Only surfaced when the task has a `pr_url` — `o`
+    /// is a no-op (no intent) when none, so there is never a silent open of
+    /// nothing.
+    OpenPrUrl(String),
     /// Close the active modal back to its prior screen (raised by Esc on a modal).
     CloseModal,
 }
@@ -330,13 +335,7 @@ pub fn render_body(buf: &mut WireBuffer, w: u16, h: u16, app: &AppState, states:
             super::kanban::render_kanban(buf, w, top, bottom, &states.kanban, now_ms());
         }
         Screen::DaemonHealth => {
-            super::daemon_health::render_daemon_health(
-                buf,
-                w,
-                top,
-                bottom,
-                &states.daemon_health,
-            );
+            super::daemon_health::render_daemon_health(buf, w, top, bottom, &states.daemon_health);
         }
         Screen::Logs => {
             super::logs::render_logs(buf, w, top, bottom, &states.logs);
@@ -525,17 +524,7 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
             }
             None
         }
-        Screen::TaskDetail(_) => {
-            if let Some(td) = states.task_detail.take() {
-                let ev = match key.code {
-                    KeyCode::Esc => TaskDetailEvent::Esc,
-                    _ => TaskDetailEvent::Key(key_char(key)?),
-                };
-                let out = reduce_task_detail(&td, ev);
-                states.task_detail = Some(out.state);
-            }
-            None
-        }
+        Screen::TaskDetail(_) => route_task_detail(states, key),
         Screen::AgentPicker(_) => route_agent_picker(states, key),
         Screen::Logs => {
             // The logs pane owns the level-filter chips (`a`/`i`/`w`/`e`). A
@@ -568,6 +557,38 @@ fn route_issue_list(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInte
         // CreateIssue is a P5 flow; ignored at P4.
         _ => None,
     }
+}
+
+/// Task-detail key routing (P4.4 + P9.2): fold keys into the pure reducer, but
+/// intercept `o` (open PR) at the routing layer first.
+///
+/// `o` is not a reducer key (the reducer owns scroll / retry / cancel); it is a
+/// cross-screen side effect (launch the host browser), so it surfaces a
+/// [`NavIntent::OpenPrUrl`] the plugin glue acts on — and **only** when the task
+/// carries a `pr_url`. When there is no PR, `o` raises no intent (it folds into
+/// the reducer as an unmodelled no-op), so there is never a silent open of
+/// nothing. Esc + all other keys fold into the reducer as before.
+fn route_task_detail(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavIntent> {
+    let td = states.task_detail.take()?;
+    // Intercept `o` before the reducer: open the captured PR URL, if any.
+    if key.code == (KeyCode::Char { ch: 'o' }) {
+        let nav = td.pr_url().map(|url| NavIntent::OpenPrUrl(url.to_string()));
+        states.task_detail = Some(td);
+        return nav;
+    }
+    // Esc folds in directly; any other printable char becomes a `Key` event;
+    // a non-printable key is an unmodelled no-op (restore state and bail).
+    let ev = if key.code == KeyCode::Esc {
+        TaskDetailEvent::Esc
+    } else if let Some(c) = key_char(key) {
+        TaskDetailEvent::Key(c)
+    } else {
+        states.task_detail = Some(td);
+        return None;
+    };
+    let out = reduce_task_detail(&td, ev);
+    states.task_detail = Some(out.state);
+    None
 }
 
 /// Kanban board key routing (P8.4): map the arrow keys (plus Shift) into the

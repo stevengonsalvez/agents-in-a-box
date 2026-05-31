@@ -269,6 +269,10 @@ fn short_id(id: &str) -> String {
 }
 
 /// An input the Kanban reducer folds into [`KanbanState`].
+// Reduction enum: `Event(HangarEvent)` dominates the size, the rest are scalar
+// focus/drag inputs. Short-lived, reducer-folded, not a hot allocation path —
+// left unboxed for consistency with the other screen reducers.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KanbanEvent {
     /// Move focus one column left (`←`).

@@ -101,6 +101,7 @@ mod tests {
             assignee: assignee.map(String::from),
             creator: "member:alice".into(),
             created_at: 0,
+            pr_url: None,
         }
     }
 

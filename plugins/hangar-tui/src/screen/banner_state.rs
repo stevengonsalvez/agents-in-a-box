@@ -48,6 +48,12 @@ impl BannerState {
 }
 
 /// An input the banner reducer folds into [`BannerState`].
+// `Event(HangarEvent)` is the largest variant; the others are scalar keys/ticks.
+// These are short-lived input events folded by a pure reducer, not a hot
+// allocation path, so boxing the payload would add churn (and an indirection
+// per keystroke) for no real gain. The reduction enums across this crate are
+// deliberately left unboxed for consistency.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BannerEvent {
     /// A host stream event (task lifecycle / progress / message).
@@ -128,7 +134,11 @@ fn fold_event(state: &BannerState, event: HangarEvent) -> BannerReduction {
                 tool_calls: 0,
             });
         }
-        HangarEvent::TaskProgress { task_id, tool_calls, .. } => {
+        HangarEvent::TaskProgress {
+            task_id,
+            tool_calls,
+            ..
+        } => {
             if let Some(banner) = next.banner.as_mut().filter(|b| b.task_id == task_id) {
                 banner.tool_calls = tool_calls;
             }

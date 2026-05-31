@@ -100,7 +100,7 @@ const LOGS_TAIL_LINES: usize = 500;
 /// Holds the daemon [`Connection`] state machine and the inbound socket
 /// [`FrameDecoder`]. The SDK serialises handler access behind a mutex, so
 /// `&mut self` mutation here is race-free.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct HangarPlugin {
     conn: Connection,
     decoder: FrameDecoder,
@@ -125,6 +125,28 @@ pub struct HangarPlugin {
     /// The id of the autopilot a `hangar/autopilot_runs` is in flight for (P7.5),
     /// so the reply folds onto the right row. `None` when none pending.
     pending_runs_autopilot: Option<String>,
+    /// The host-shell opener used by the `o` (open-PR) action (P9.2). Defaults to
+    /// the real [`SystemOpener`] (or, when `$HANGAR_OPENER_PROBE_FILE` is set, a
+    /// [`RecordingOpener`] for the tmux tripwire — see [`crate::shell`]). Held as
+    /// a trait object so tests can inject a recording opener.
+    opener: Box<dyn crate::shell::Opener>,
+}
+
+impl Default for HangarPlugin {
+    fn default() -> Self {
+        Self {
+            conn: Connection::default(),
+            decoder: FrameDecoder::default(),
+            app: None,
+            screens: ScreenStates::default(),
+            fetch_pending: false,
+            first_run: FirstRunModal::default(),
+            first_run_ack_pending: false,
+            pending_detail_slug: None,
+            pending_runs_autopilot: None,
+            opener: crate::shell::default_opener(),
+        }
+    }
 }
 
 impl HangarPlugin {
@@ -132,6 +154,18 @@ impl HangarPlugin {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Construct a plugin with a custom [`Opener`](crate::shell::Opener) for the
+    /// `o` (open-PR) action. Used by tests to inject a
+    /// [`RecordingOpener`](crate::shell::RecordingOpener) so the open is
+    /// observable without launching a real browser.
+    #[must_use]
+    pub fn with_opener(opener: Box<dyn crate::shell::Opener>) -> Self {
+        Self {
+            opener,
+            ..Self::default()
+        }
     }
 
     /// The routing state, lazily initialised on the `default` workspace.
@@ -762,6 +796,15 @@ impl HangarPlugin {
                     next.selected_task = Some(task_id);
                     next.prior_screen = None;
                     self.app = Some(next);
+                }
+            }
+            NavIntent::OpenPrUrl(url) => {
+                // Open the captured PR URL in the host browser (P9.2). The
+                // routing layer only raises this when the task has a `pr_url`, so
+                // there is no silent open of nothing. A launch failure is logged
+                // to the daemon-link footer log rather than crashing the plugin.
+                if let Err(e) = self.opener.open(&url) {
+                    tracing::warn!(%url, error = %e, "hangar: failed to open PR url");
                 }
             }
             NavIntent::CloseModal => {

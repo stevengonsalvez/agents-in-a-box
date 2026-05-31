@@ -13,6 +13,7 @@ pub mod firstrun;
 pub mod jsonrpc_over_socket;
 pub mod plugin;
 pub mod screen;
+pub mod shell;
 pub mod stream;
 pub mod widgets;
 
@@ -32,4 +33,5 @@ pub use screen::kanban::{
     KanbanState,
 };
 pub use screen::{reduce, ActiveTaskBanner, AppEvent, AppState, Intent, Reduction, Screen};
+pub use shell::{default_opener, Opener, RecordingOpener, SystemOpener};
 pub use stream::{Backoff, StreamClient, StreamError, SubscribeReplay};

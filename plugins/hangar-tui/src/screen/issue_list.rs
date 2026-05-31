@@ -276,6 +276,10 @@ impl IssueListState {
 /// variant ([`IssueListEvent::SetFilter`]) because it is raised by the chip bar
 /// rather than a single keystroke; host stream events arrive wrapped in
 /// [`IssueListEvent::Event`].
+// Reduction enum: `Event(HangarEvent)` dominates the size, the rest are scalar
+// inputs. Short-lived, reducer-folded, not a hot allocation path — left unboxed
+// for consistency with the other screen reducers (boxing would only add churn).
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IssueListEvent {
     /// A printable key was pressed (`'j'`, `'\n'` for enter, `'/'`, `'c'`, …).
@@ -337,12 +341,22 @@ fn reduce_normal_key(state: &IssueListState, c: char) -> IssueListReduction {
         'c' => with_intent(state.clone(), IssueListIntent::CreateIssue),
         'a' => state.selected_row().map_or_else(
             || unchanged(state),
-            |row| with_intent(state.clone(), IssueListIntent::OpenAgentPicker(row.id.clone())),
+            |row| {
+                with_intent(
+                    state.clone(),
+                    IssueListIntent::OpenAgentPicker(row.id.clone()),
+                )
+            },
         ),
         // Enter (delivered as '\n' or '\r') opens the selected row's task detail.
         '\n' | '\r' => state.selected_row().map_or_else(
             || unchanged(state),
-            |row| with_intent(state.clone(), IssueListIntent::OpenTaskDetail(row.id.clone())),
+            |row| {
+                with_intent(
+                    state.clone(),
+                    IssueListIntent::OpenTaskDetail(row.id.clone()),
+                )
+            },
         ),
         _ => unchanged(state),
     }
@@ -414,7 +428,8 @@ fn fold_event(state: &IssueListState, event: HangarEvent) -> IssueListReduction 
         } => {
             // Remember which issue this task belongs to so a later TaskStarted
             // (which carries only the task id) can promote the right issue.
-            next.task_issue.insert(task_id.as_str().to_string(), issue_id);
+            next.task_issue
+                .insert(task_id.as_str().to_string(), issue_id);
         }
         HangarEvent::TaskStarted { task_id, .. } => {
             if let Some(issue_id) = next.task_issue.get(task_id.as_str()).cloned() {
@@ -534,15 +549,33 @@ pub fn render_issue_list(
                 break;
             }
             let selected = visible_index == state.selected;
-            let marker_color = if selected { SELECTION_GREEN } else { MUTED_GRAY };
-            put_str(buf, 0, row, if selected { "▶ " } else { "  " }, marker_color, area_w);
+            let marker_color = if selected {
+                SELECTION_GREEN
+            } else {
+                MUTED_GRAY
+            };
+            put_str(
+                buf,
+                0,
+                row,
+                if selected { "▶ " } else { "  " },
+                marker_color,
+                area_w,
+            );
 
             let text_color = if selected { SOFT_WHITE } else { MUTED_GRAY };
             put_str(buf, 2, row, &clip(&r.title, title_w), text_color, area_w);
 
             let ax = 2u16.saturating_add(title_w).saturating_add(1);
             let assignee = r.assignee.as_deref().unwrap_or("—");
-            put_str(buf, ax, row, &clip(assignee, assignee_w), MUTED_GRAY, area_w);
+            put_str(
+                buf,
+                ax,
+                row,
+                &clip(assignee, assignee_w),
+                MUTED_GRAY,
+                area_w,
+            );
 
             visible_index = visible_index.saturating_add(1);
             row = row.saturating_add(1);
@@ -585,6 +618,7 @@ mod tests {
             assignee: assignee.map(ToString::to_string),
             creator: "member:alice".into(),
             created_at: 0,
+            pr_url: None,
         }
     }
 
@@ -593,7 +627,10 @@ mod tests {
     fn unknown_state_buckets_to_todo() {
         assert_eq!(IssueColumn::for_state("open"), IssueColumn::Todo);
         assert_eq!(IssueColumn::for_state("weird"), IssueColumn::Todo);
-        assert_eq!(IssueColumn::for_state("in_progress"), IssueColumn::InProgress);
+        assert_eq!(
+            IssueColumn::for_state("in_progress"),
+            IssueColumn::InProgress
+        );
         assert_eq!(IssueColumn::for_state("done"), IssueColumn::Done);
         assert_eq!(IssueColumn::for_state("closed"), IssueColumn::Done);
     }
@@ -601,10 +638,7 @@ mod tests {
     /// `k` moves the selection up and saturates at the top.
     #[test]
     fn k_key_moves_selection_up_and_saturates() {
-        let s = IssueListState::with_rows(vec![
-            row("i1", "open", None),
-            row("i2", "open", None),
-        ]);
+        let s = IssueListState::with_rows(vec![row("i1", "open", None), row("i2", "open", None)]);
         let down = reduce_issue_list(&s, IssueListEvent::Key('j'));
         assert_eq!(down.state.selected_index(), 1);
         let up = reduce_issue_list(&down.state, IssueListEvent::Key('k'));
@@ -621,7 +655,9 @@ mod tests {
         let out = reduce_issue_list(&s, IssueListEvent::Key('a'));
         assert_eq!(
             out.intent,
-            Some(IssueListIntent::OpenAgentPicker(IssueId::from_str("i1").unwrap()))
+            Some(IssueListIntent::OpenAgentPicker(
+                IssueId::from_str("i1").unwrap()
+            ))
         );
     }
 
@@ -667,7 +703,13 @@ mod tests {
         const FLOOR_W: u16 = 80;
         const FLOOR_H: u16 = 24;
         let rows: Vec<IssueRow> = (0..50)
-            .map(|i| row(&format!("i{i}"), if i % 3 == 0 { "done" } else { "open" }, Some("agent:c")))
+            .map(|i| {
+                row(
+                    &format!("i{i}"),
+                    if i % 3 == 0 { "done" } else { "open" },
+                    Some("agent:c"),
+                )
+            })
             .collect();
         let s = IssueListState::with_rows(rows);
 
