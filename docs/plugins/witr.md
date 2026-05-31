@@ -3,8 +3,6 @@ title: "witr plugin"
 description: "Wraps the external witr binary to surface process-causality tracing as an ainb screen, CLI, and slash command."
 ---
 
-# witr
-
 `witr` surfaces process-causality tracing inside ainb by wrapping the external [`witr`](https://github.com/pranshuparmar/witr) binary (>= 0.3.2 on `PATH`). It is the canonical **subprocess-wrapping** reference — and it exemplifies *two* integration patterns at once: a host-embedded **foreign TTY** for its interactive screen, and a `spawn_subprocess` **exec-and-parse** flow for its CLI and slash command.
 
 ## How it works

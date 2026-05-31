@@ -2,8 +2,6 @@
 title: "ainb v2 plugins — overview"
 ---
 
-# ainb v2 plugins — overview
-
 What a v2 subprocess plugin is, conceptually. New here? Read [README.md](./README.md) first — it disambiguates from Claude Code plugins.
 
 For the user CLI flow, jump to [user-guide.md](./user-guide.md). To write one, [authoring.md](./authoring.md). For the wire contract, [spec-v2.md](./spec-v2.md).

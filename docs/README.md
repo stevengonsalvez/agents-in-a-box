@@ -2,8 +2,6 @@
 title: "agents-in-a-box — documentation"
 ---
 
-# agents-in-a-box — documentation
-
 Canonical source of truth for the monorepo. Everything published to the website
 under `/docs/*` is rendered from these files.
 

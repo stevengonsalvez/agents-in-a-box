@@ -2,8 +2,6 @@
 title: "Keyboard shortcuts"
 ---
 
-# Keyboard shortcuts
-
 Keys verified against the in-app help overlay (`?`) and the event handlers in `crates/ainb-core/src/app/events.rs`.
 
 ## Home screen navigation

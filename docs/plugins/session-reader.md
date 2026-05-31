@@ -3,8 +3,6 @@ title: "session-reader plugin"
 description: "Pure-publisher reference plugin — scans per-provider session logs and chunk-publishes a UsageData snapshot on the event bus."
 ---
 
-# session-reader
-
 A pure data-plane plugin: it owns **no screen and no CLI namespace**. It walks the per-provider session-log directories, aggregates a `UsageData` snapshot, and chunk-publishes it on the `sessions.usage_data` topic for downstream consumers (`burndown`, and the host) to render. It is the canonical **publisher** example — the inverse of a screen-owning plugin, exercising only the event bus, log-read, and plugin-data capabilities.
 
 ## How it works

@@ -2,8 +2,6 @@
 title: "Glossary"
 ---
 
-# Glossary
-
 Definitions for the terms that recur across the agents-in-a-box docs. Where a term has a precise contract, the authoritative source is linked.
 
 ## Agents, sessions, worktrees

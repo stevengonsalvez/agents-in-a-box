@@ -2,8 +2,6 @@
 title: "ainb plugin contract — v2 (subprocess)"
 ---
 
-# ainb plugin contract — v2 (subprocess)
-
 **Status:** stable.
 **Host versions covered:** `2.x.y` (additive minor bumps stay in v2).
 **Successor:** tracked in [CHANGELOG.md](./CHANGELOG.md). A new contract version (`v3`) ships only when an existing signature changes incompatibly.
