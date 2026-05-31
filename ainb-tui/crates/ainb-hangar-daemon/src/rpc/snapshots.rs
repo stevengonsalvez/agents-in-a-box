@@ -54,6 +54,9 @@ pub async fn issues_list(
                 index: "id".to_string(),
                 source: format!("malformed issue id {:?}: {e}", issue.id).into(),
             })?;
+            // P9.2: surface the PR URL captured by P9.1 from this issue's latest
+            // completed task's `result.pr_url`, or `None` when no task opened a PR.
+            let pr_url = latest_pr_url_for_issue(pool, workspace_id, &issue.id).await?;
             out.push(IssueRow {
                 id,
                 workspace_id: issue.workspace_id,
@@ -63,10 +66,45 @@ pub async fn issues_list(
                 assignee: issue.assignee.map(|a| format!("{}:{}", a.kind().as_str(), a.id())),
                 creator: format!("{}:{}", issue.creator.kind().as_str(), issue.creator.id()),
                 created_at: issue.created_at,
+                pr_url,
             });
         }
     }
     Ok(out)
+}
+
+/// The PR URL captured into the latest completed task's `result.pr_url` for
+/// `issue_id` in `workspace_id`, or `None` when no task on the issue produced a
+/// PR (P9.2).
+///
+/// Reads `result->>'pr_url'` directly via `SQLite`'s JSON1 operator over the
+/// `agent_task_queue` rows for the issue, taking the most recently finished
+/// task that actually carries a non-NULL `pr_url`. The `WHERE` clause filters to
+/// rows whose `result` JSON has the key, so a task with no PR (the byte-identical
+/// pre-P9 `result` shape) is skipped, never surfaced as an empty string.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] on a store fault.
+async fn latest_pr_url_for_issue(
+    pool: &SqlitePool,
+    workspace_id: &str,
+    issue_id: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    let url: Option<String> = sqlx::query_scalar(
+        "SELECT result ->> 'pr_url' AS pr_url \
+         FROM agent_task_queue \
+         WHERE workspace_id = ?1 AND issue_id = ?2 \
+           AND result ->> 'pr_url' IS NOT NULL \
+         ORDER BY COALESCE(finished_at, created_at) DESC, id DESC \
+         LIMIT 1",
+    )
+    .bind(workspace_id)
+    .bind(issue_id)
+    .fetch_optional(pool)
+    .await?
+    .flatten();
+    Ok(url)
 }
 
 /// Snapshot the assignable actors of `workspace_id` — human members and agents
