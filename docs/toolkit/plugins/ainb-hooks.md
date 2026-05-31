@@ -9,7 +9,9 @@ description: "Claude Code / Codex plugin that emits session lifecycle events to 
 
 ![ainb-hooks — how it works](../../assets/diagrams/ainb-hooks.svg)
 
-The plugin's `.claude-plugin/plugin.json` registers the host agent's lifecycle events with a single command: `AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh`. The same six events are registered for Codex via `codex/hooks.json` (with `AINB_AGENT=codex`). Each hook has a 5-second timeout so a slow delivery never stalls the agent.
+The plugin's `.claude-plugin/plugin.json` registers only the **actionable** lifecycle events with a single command: `AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh`. The same events are registered for Codex via `codex/hooks.json` (with `AINB_AGENT=codex`). Each hook has a 5-second timeout so a slow delivery never stalls the agent.
+
+**Only events that need the human are hooked** — `Notification` (Claude surfaces both idle/awaiting-input and permission prompts through this event) and `Stop` (turn finished). Telemetry — `SessionStart`, `UserPromptSubmit`, `PostToolUse`, `PreCompact` — is **not** registered: `PostToolUse` alone fires dozens of times per turn and would bury the signal in the inbox. As a second line of defence, `ainb-notifyd` also drops any non-user-facing event on arrival (see `crates/ainb-plugin-notifyd/src/listener.rs`), so even a stale install never accumulates noise.
 
 `hooks/notify.sh` is the universal normalizer. Claude Code pipes the hook payload as JSON on stdin; Codex passes it as `argv[1]`. The script autodetects the source, extracts the event name, session id, and cwd (via `jq`, falling back to `grep` in minimal environments), and wraps the verbatim original payload in a normalized envelope: `{protocol_version, agent, raw_event, session_id, cwd, project, ts, payload}`. The `raw_event` field preserves the original event name (e.g. `Notification:idle_prompt`) so semantic mapping happens in the consumer, not on the wire.
 
@@ -23,14 +25,14 @@ This plugin ships only hooks plus the shared `notify.sh` script — no skills, c
 
 ### Hooks (registered for both Claude Code and Codex)
 
-| Event | What fires |
-| --- | --- |
-| `SessionStart` | Session begins — emits an envelope marking the session live |
-| `UserPromptSubmit` | User submits a prompt to the agent |
-| `PostToolUse` | A tool call completes |
-| `Notification` | Agent notifications, incl. `Notification:idle_prompt` ("awaiting user input") |
-| `Stop` | Agent turn / session stops |
-| `PreCompact` | Context is about to be compacted |
+Only the events that need the human are registered:
+
+| Event | What fires | Why it's actionable |
+| --- | --- | --- |
+| `Notification` | Agent notifications, incl. `Notification:idle_prompt` ("awaiting user input") and permission prompts | the agent is blocked on you |
+| `Stop` | Agent turn / session stops | the agent finished — come back |
+
+Deliberately **not** registered (telemetry / activity noise — would bury the signal): `SessionStart`, `UserPromptSubmit`, `PostToolUse`, `PreCompact`. `PostToolUse` alone fires once per tool call (dozens per turn). The daemon additionally drops any non-user-facing event on arrival as a safety net.
 
 ### Components
 
@@ -56,7 +58,7 @@ The installer drops `plugin.json` at `~/.claude/plugins/ainb-hooks/` (Claude), m
 
 ## Using it
 
-- Once installed, delivery is fully automatic — every registered lifecycle event on the host agent (SessionStart, UserPromptSubmit, PostToolUse, Notification, Stop, PreCompact) is forwarded to the inbox with no user action.
+- Once installed, delivery is fully automatic — every registered actionable event on the host agent (`Notification`, `Stop`) is forwarded to the inbox with no user action. Telemetry events are not hooked, so the inbox only ever shows things that need you.
 - `Notification:idle_prompt` events surface in `ainb-tui` as "awaiting input" so you can see which sessions need you.
 - Events show up as session-state badges and in the dedicated Inbox screen in `ainb-tui`; the inbox detail view exposes the full original hook JSON (carried in `payload`) for forensics.
 - Run `ainb-notifyd status` to confirm the plugin is wired for each agent; if `ainb-notifyd` is not running, the next hook fire lazily spawns it (or buffers to the fallback file).
