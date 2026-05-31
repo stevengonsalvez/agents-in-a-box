@@ -27,19 +27,38 @@
 # REFLECT_DRAIN_DRY_RUN       If "1", don't call claude -p; just log. Default: 0
 # REFLECT_STATE_DIR           State dir.                               Default: ~/.reflect
 # REFLECT_DRAIN_CLAUDE_BIN    Path to claude binary.                  Default: claude (PATH)
-# REFLECT_DRAIN_TIMEOUT       Per-entry claude -p timeout (sec).      Default: 600
-# REFLECT_DRAIN_MAX_TURNS     Per-entry claude -p turn budget.        Default: 25
+# REFLECT_DRAIN_TIMEOUT       Per-entry claude -p wall-clock cap (s). Default: 180
+# REFLECT_DRAIN_MAX_TURNS     Per-entry claude -p turn budget.        Default: 8
+# REFLECT_DRAIN_TOKEN_MAX     Poison a transcript whose run reports   Default: 2000000
+#                             more than this many total tokens.
+# REFLECT_DRAIN_MODEL         Model alias for claude -p (--model).    Default: sonnet
+# REFLECT_DRAIN_DEBOUNCE_SEC  Min seconds between drain runs.         Default: 600
+# REFLECT_DISABLED            If "1", drainer is a hard no-op.        Default: 0
+#
+# Circuit-breaker rationale (2026-05-31 incident: a single drain ran 223 Opus
+# turns / 41.5M tokens in 9.6min because the only bound was a 600s wall-clock).
+# Defence in depth: turn cap + wall-clock cap + post-hoc token-budget poison +
+# an ATOMIC (mkdir) lock so concurrent SessionStart spawns can't each slip past
+# the daily cap (that race blew a cap of 20 to 61 in one day), plus a debounce
+# so a burst of session starts triggers at most one drain per window.
 
 set -uo pipefail
+
+# ── Hard kill switch ────────────────────────────────────────────────────────
+# Honoured before any work so an operator can stop all drains instantly.
+if [[ "${REFLECT_DISABLED:-0}" == "1" ]]; then
+    exit 0
+fi
 
 # ── Config ────────────────────────────────────────────────────────────────────
 STATE_DIR="${REFLECT_STATE_DIR:-$HOME/.reflect}"
 QUEUE_FILE="${STATE_DIR}/pending_reflections.jsonl"
-LOCK_FILE="${STATE_DIR}/drain.lock"
+LOCK_DIR="${STATE_DIR}/drain.lock.d"          # atomic mkdir lock (replaces racy PID file)
 LOG_FILE="${STATE_DIR}/drain.log"
 RETRY_FILE="${STATE_DIR}/retry-count.jsonl"
 COST_FILE="${STATE_DIR}/drain-cost.jsonl"
 POISON_FILE="${STATE_DIR}/poison-reflections.jsonl"
+DEBOUNCE_FILE="${STATE_DIR}/drain.last-run"   # epoch seconds of last drain start
 
 MAX_PER_RUN="${REFLECT_DRAIN_MAX:-3}"
 DAILY_MAX="${REFLECT_DRAIN_DAILY_MAX:-20}"
@@ -47,10 +66,16 @@ MAX_RETRIES="${REFLECT_DRAIN_MAX_RETRIES:-3}"
 LOG_MAX_BYTES="${REFLECT_DRAIN_LOG_MAX_BYTES:-10485760}"
 DRY_RUN="${REFLECT_DRAIN_DRY_RUN:-0}"
 CLAUDE_BIN="${REFLECT_DRAIN_CLAUDE_BIN:-claude}"
-ENTRY_TIMEOUT="${REFLECT_DRAIN_TIMEOUT:-600}"
-MAX_TURNS="${REFLECT_DRAIN_MAX_TURNS:-25}"
+ENTRY_TIMEOUT="${REFLECT_DRAIN_TIMEOUT:-180}"
+MAX_TURNS="${REFLECT_DRAIN_MAX_TURNS:-8}"
+TOKEN_MAX="${REFLECT_DRAIN_TOKEN_MAX:-2000000}"
+DRAIN_MODEL="${REFLECT_DRAIN_MODEL:-sonnet}"
+DEBOUNCE_SEC="${REFLECT_DRAIN_DEBOUNCE_SEC:-600}"
 
 mkdir -p "$STATE_DIR"
+
+# Current epoch seconds, portable (date +%s works on macOS + Linux).
+now_epoch() { date +%s; }
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 rotate_log_if_needed() {
@@ -78,28 +103,64 @@ emit_error() {
         >/dev/null 2>&1 || true
 }
 
-# ── Locking ───────────────────────────────────────────────────────────────────
+# ── Locking (atomic) ────────────────────────────────────────────────────────
+# `mkdir` is atomic on POSIX (create-or-fail in one syscall), so it is a safe
+# cross-machine mutex — unlike the old check-then-write PID file, where two
+# concurrent SessionStart spawns could both see "no lock" and both proceed,
+# each passing the daily-cap check independently (the 20→61 overspend bug).
+# macOS ships no `flock`, so mkdir is the portable primitive here. We stash the
+# PID inside for stale-lock reclamation after a crash.
 acquire_lock() {
-    if [[ -f "$LOCK_FILE" ]]; then
-        local existing_pid
-        existing_pid=$(cat "$LOCK_FILE" 2>/dev/null || echo "")
-        if [[ -n "$existing_pid" ]] && kill -0 "$existing_pid" 2>/dev/null; then
-            log "another drain is running (pid=$existing_pid); exiting"
-            exit 0
-        fi
-        log "stale lock detected (pid=$existing_pid not running); reclaiming"
-        rm -f "$LOCK_FILE"
+    if mkdir "$LOCK_DIR" 2>/dev/null; then
+        echo $$ > "$LOCK_DIR/pid"
+        return 0
     fi
-    echo $$ > "$LOCK_FILE"
+    # Lock dir exists — is the owner still alive?
+    local existing_pid
+    existing_pid=$(cat "$LOCK_DIR/pid" 2>/dev/null || echo "")
+    if [[ -n "$existing_pid" ]] && kill -0 "$existing_pid" 2>/dev/null; then
+        log "another drain is running (pid=$existing_pid); exiting"
+        exit 0
+    fi
+    log "stale lock detected (pid=${existing_pid:-?} not running); reclaiming"
+    rm -rf "$LOCK_DIR"
+    if mkdir "$LOCK_DIR" 2>/dev/null; then
+        echo $$ > "$LOCK_DIR/pid"
+        return 0
+    fi
+    # Lost a race to reclaim — another drain won it. Defer to them.
+    log "lost lock-reclaim race; exiting"
+    exit 0
 }
 
 release_lock() {
-    rm -f "$LOCK_FILE"
+    rm -rf "$LOCK_DIR"
 }
 
 # Make sure we always release the lock and never leave a non-zero exit code.
 trap 'release_lock' EXIT
 trap 'release_lock; exit 0' INT TERM
+
+# ── Debounce ──────────────────────────────────────────────────────────────────
+# SessionStart fires the drainer on every new session. A burst of starts (a
+# fleet/swarm spinning up, or rapid /clear) would otherwise spawn a drain each.
+# Once the lock is held, collapse a burst to one drain per window. MUST run
+# while holding the lock so the check+update is atomic.
+debounce_ok() {
+    local last now delta
+    now=$(now_epoch)
+    if [[ -f "$DEBOUNCE_FILE" ]]; then
+        last=$(cat "$DEBOUNCE_FILE" 2>/dev/null || echo 0)
+        [[ "$last" =~ ^[0-9]+$ ]] || last=0
+        delta=$((now - last))
+        if [[ "$delta" -lt "$DEBOUNCE_SEC" ]]; then
+            log "debounce: last drain ${delta}s ago (< ${DEBOUNCE_SEC}s); skipping"
+            return 1
+        fi
+    fi
+    echo "$now" > "$DEBOUNCE_FILE"
+    return 0
+}
 
 # ── Daily cost cap ────────────────────────────────────────────────────────────
 today_drain_count() {
@@ -256,6 +317,7 @@ Extract any HIGH-confidence corrections, MEDIUM-confidence approved approaches, 
     local out_json exit_code
     out_json=$(timeout "$ENTRY_TIMEOUT" "$CLAUDE_BIN" \
         -p "$prompt" \
+        --model "$DRAIN_MODEL" \
         --output-format json \
         --permission-mode bypassPermissions \
         --max-turns "$MAX_TURNS" 2>>"$LOG_FILE")
@@ -263,12 +325,24 @@ Extract any HIGH-confidence corrections, MEDIUM-confidence approved approaches, 
 
     # We expect a JSON object on stdout regardless of exit code (claude -p
     # writes the result envelope even on max_turns / errors).
-    local is_error result_summary cost terminal_reason num_turns
+    local is_error result_summary cost terminal_reason num_turns total_tokens
     is_error=$(printf '%s' "$out_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("is_error", True))' 2>/dev/null || echo "True")
     result_summary=$(printf '%s' "$out_json" | python3 -c 'import json,sys; r=json.load(sys.stdin).get("result","")[:200]; print(r.replace(chr(10)," | "))' 2>/dev/null || echo "")
     cost=$(printf '%s' "$out_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("total_cost_usd","?"))' 2>/dev/null || echo "?")
     terminal_reason=$(printf '%s' "$out_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("terminal_reason",""))' 2>/dev/null || echo "")
     num_turns=$(printf '%s' "$out_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("num_turns",0))' 2>/dev/null || echo "0")
+    # Sum every token bucket the result envelope reports (input + output +
+    # cache read + cache creation) for the post-hoc budget check.
+    total_tokens=$(printf '%s' "$out_json" | python3 -c '
+import json,sys
+try:
+    u=json.load(sys.stdin).get("usage",{}) or {}
+except Exception:
+    print(0); sys.exit()
+print(sum(int(u.get(k,0) or 0) for k in (
+    "input_tokens","output_tokens",
+    "cache_read_input_tokens","cache_creation_input_tokens")))' 2>/dev/null || echo "0")
+    [[ "$total_tokens" =~ ^[0-9]+$ ]] || total_tokens=0
 
     # Fatal subprocess errors (signal, timeout, process couldn't start) — no JSON.
     if [[ -z "$out_json" ]]; then
@@ -277,6 +351,18 @@ Extract any HIGH-confidence corrections, MEDIUM-confidence approved approaches, 
         bump_retry_count "$transcript" >/dev/null
         record_cost_event 1 "$transcript" "fail_no_output_exit_${exit_code}"
         return 1
+    fi
+
+    # ── Token-budget circuit breaker (post-hoc poison) ─────────────────────────
+    # claude -p only reports usage at completion, so turns + wall-clock are the
+    # mid-run hard stops; this catches a run that finished but cost too much and
+    # poisons the transcript so a retry can never repeat the spend.
+    if [[ "$total_tokens" -gt "$TOKEN_MAX" ]]; then
+        log "    BUDGET poison: run used ${total_tokens} tokens (> ${TOKEN_MAX}); archiving transcript"
+        emit_error error drain_budget_exceeded "run used ${total_tokens} tokens (> ${TOKEN_MAX})" "$transcript"
+        printf '%s\n' "$entry_json" >> "$POISON_FILE"
+        record_cost_event 1 "$transcript" "poison_budget_${total_tokens}"
+        return 2
     fi
 
     # max_turns: claude probably did useful work — write_flow may have already
@@ -317,7 +403,7 @@ Extract any HIGH-confidence corrections, MEDIUM-confidence approved approaches, 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 main() {
-    log "──── drain start (pid=$$ max_per_run=$MAX_PER_RUN daily_max=$DAILY_MAX dry_run=$DRY_RUN) ────"
+    log "──── drain start (pid=$$ model=$DRAIN_MODEL max_per_run=$MAX_PER_RUN daily_max=$DAILY_MAX max_turns=$MAX_TURNS timeout=${ENTRY_TIMEOUT}s token_max=$TOKEN_MAX dry_run=$DRY_RUN) ────"
 
     if [[ ! -s "$QUEUE_FILE" ]]; then
         log "queue empty or missing; nothing to do"
@@ -325,6 +411,11 @@ main() {
     fi
 
     acquire_lock
+
+    # Atomic under the lock: collapse a burst of session starts to one drain.
+    if ! debounce_ok; then
+        return 0
+    fi
 
     local already_today
     already_today=$(today_drain_count | tr -d '[:space:]')
@@ -385,8 +476,9 @@ main() {
 
     log "summary: processed=$count ok=$ok perm_skip=$perm retryable_fail=$fail"
 
-    # Reindex if anything succeeded.
-    if [[ "$ok" -gt 0 ]]; then
+    # Reindex if anything succeeded. Never in DRY_RUN (a dry run must have no
+    # side effects beyond logging) or when explicitly skipped (tests).
+    if [[ "$ok" -gt 0 && "$DRY_RUN" != "1" && "${REFLECT_DRAIN_SKIP_REINDEX:-0}" != "1" ]]; then
         if ! command -v reflect >/dev/null 2>&1; then
             log "reindex SKIP: 'reflect' CLI not on PATH"
             log "  → install reflect-kb to enable GraphRAG reindex of new learnings:"
