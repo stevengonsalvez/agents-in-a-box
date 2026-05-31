@@ -95,7 +95,10 @@ fn reproduced_snapshot_round_trip() {
     let v1 = handle.publish_snapshot("from.host", Bytes::from_static(b"v1"));
     let v2 = handle.publish_snapshot("from.host", Bytes::from_static(b"v2"));
     assert!(v2 > v1, "version must increase");
-    assert_eq!(handle.snapshot_get("from.host").as_deref(), Some(&b"v2"[..]));
+    assert_eq!(
+        handle.snapshot_get("from.host").as_deref(),
+        Some(&b"v2"[..])
+    );
 }
 
 /// Phase 6 tripwire 3/4 reproduced: action invoke round-trip.

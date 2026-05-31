@@ -82,7 +82,10 @@ fn enter_on_recent_advances_to_configure_not_stay() {
 
     // 1. HomeScreen
     let home_deadline = Instant::now() + Duration::from_secs(45);
-    if poll_capture(&session, home_deadline, |c| c.contains("Stats") && c.contains("[i]")).is_none()
+    if poll_capture(&session, home_deadline, |c| {
+        c.contains("Stats") && c.contains("[i]")
+    })
+    .is_none()
     {
         let last = capture(&session);
         kill_session(&session);

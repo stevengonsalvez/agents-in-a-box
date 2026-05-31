@@ -111,9 +111,7 @@ impl ProviderRegistry {
 
     /// All registered providers in registration order.
     pub fn iter(&self) -> impl Iterator<Item = Arc<dyn Provider>> + '_ {
-        self.ids
-            .iter()
-            .filter_map(|id| self.by_id.get(*id).cloned())
+        self.ids.iter().filter_map(|id| self.by_id.get(*id).cloned())
     }
 
     /// `true` if the registry has no providers.
@@ -183,11 +181,17 @@ mod tests {
         let claude = r.get("claude").unwrap();
         assert_eq!(claude.command(), "claude");
         assert_eq!(claude.api_key_env_var(), Some("ANTHROPIC_API_KEY"));
-        assert_eq!(claude.skip_permissions_flag(), Some("--dangerously-skip-permissions"));
+        assert_eq!(
+            claude.skip_permissions_flag(),
+            Some("--dangerously-skip-permissions")
+        );
 
         let codex = r.get("codex").unwrap();
         assert_eq!(codex.command(), "codex");
-        assert_eq!(codex.skip_permissions_flag(), Some("--dangerously-bypass-approvals-and-sandbox"));
+        assert_eq!(
+            codex.skip_permissions_flag(),
+            Some("--dangerously-bypass-approvals-and-sandbox")
+        );
 
         let gemini = r.get("gemini").unwrap();
         assert_eq!(gemini.skip_permissions_flag(), Some("-y"));

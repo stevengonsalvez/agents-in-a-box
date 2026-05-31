@@ -2,22 +2,69 @@
 title: "Bootstrap engine"
 ---
 
-# Bootstrap engine
+`toolkit/bootstrap.js` deploys packages from `toolkit/packages/` into each supported tool's home directory. It is driven by a `TOOL_CONFIG` map (13 entries) plus an `external-dependencies.yaml` manifest.
 
-> **Status:** stub. Authoritative content currently lives at `toolkit/bootstrap.js`.
-> Migration of that file into this path is gated on Stevie's approval.
+## Per-tool home directories
 
-How toolkit/bootstrap.js auto-deploys packages to each supported tool's home directory.
+Each `TOOL_CONFIG` entry sets a `targetSubdir` and a `ruleDir`. The eleven user-facing targets:
 
-## What this page will contain
+| Tool key | `targetSubdir` |
+|---|---|
+| `claude-code-4.5` | `.claude` |
+| `codex` | `.codex` |
+| `copilot` | `.copilot` |
+| `gemini` | `.gemini` |
+| `hermes-agent` | `.hermes` |
+| `nanoclaw` | `.claude` (shared with Claude) |
+| `amazonq` | `.amazonq/rules` |
+| `cursor` | `.cursor/rules` |
+| `cline` | `.clinerules` |
+| `roo` | `.roo/rules` |
+| `clawdhub` | `skills` |
 
-- Per-tool home directories + naming conventions
-- Template substitutions ({{TOOL_DIR}}, {{HOME_TOOL_DIR}})
-- The skills-lock.json catalog
-- `--verify` mode
-- Adding a new target tool
-- External-dependencies manifest schema
+Two additional internal entries, `claude` and `packages`, back the rules-glob and copy-entire-folder code paths and are not selected directly as deploy targets.
+
+## Package mappings
+
+For tools with `usePackagesStructure: true`, `packageMappings` controls which `packages/` subtrees land where. For `claude-code-4.5`:
+
+| Source under `packages/` | Target under `~/.claude/` |
+|---|---|
+| `skills` | `skills` |
+| `agents` | `agents` |
+| `utilities/utils` | `utils` |
+| `utilities/hooks` | `hooks` |
+| `utilities/output-styles` | `output-styles` |
+| `utilities/reflections` | `reflections` |
+
+`codex` and `copilot` map only `skills` and `utilities/reflections` (no agents).
+
+## Template substitutions
+
+Each tool config declares `templateSubstitutions` keyed by glob (`**/*.md`, `**/*.sh`, `**/*.py`, `**/*.js`, `**/*.ts`, `**/*.json`, `**/*.yaml`, `**/*.yml`, `**/*.toml`). Two tokens are rewritten per tool so deployed files reference the correct home dir:
+
+| Token | `claude-code-4.5` | `codex` | `copilot` |
+|---|---|---|---|
+| `TOOL_DIR` | `.claude` | `.codex` | `.copilot` |
+| `HOME_TOOL_DIR` | `~/.claude` | `~/.codex` | `~/.copilot` |
+
+This is why skills must use `{{TOOL_DIR}}` / `{{HOME_TOOL_DIR}}` placeholders rather than hardcoded `.claude` paths.
+
+## `--verify` mode
+
+```bash
+node bootstrap.js --tool=<X> --verify
+```
+
+Read-only. Checks every applicable manifest entry has its `SKILL.md` at the expected path, and reports per-tool parity and orphans. Makes no changes.
+
+## Adding a new target tool
+
+1. Add a `TOOL_CONFIG` entry with `ruleDir`, `targetSubdir`, `packageMappings`, and `templateSubstitutions`.
+2. If the tool consumes the manifest, add it to the relevant `applies-to` lists in `external-dependencies.yaml` (and to `TOOL_CANONICAL_NAMES` if its manifest name differs from its key).
+3. Run `node bootstrap.js --tool=<new> --verify` to confirm parity.
 
 ## See also
 
+- [Toolkit overview](overview.md)
 - [Docs hub](../README.md)

@@ -114,7 +114,5 @@ impl Default for ProviderCallBuilder {
 }
 
 fn default_timestamp() -> DateTime<Utc> {
-    Utc.with_ymd_and_hms(2026, 4, 29, 10, 0, 0)
-        .single()
-        .unwrap_or_else(Utc::now)
+    Utc.with_ymd_and_hms(2026, 4, 29, 10, 0, 0).single().unwrap_or_else(Utc::now)
 }

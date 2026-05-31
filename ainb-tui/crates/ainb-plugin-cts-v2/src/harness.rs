@@ -46,12 +46,9 @@ pub fn canary_manifest(name: &str) -> Manifest {
 
 /// Register a canary plugin with a custom manifest, resolved from the
 /// `CARGO_BIN_EXE_<name>` env var that cargo sets for `[[bin]]` targets.
-pub fn register_canary(
-    rt: &Runtime,
-    bin_path: PathBuf,
-    manifest: Manifest,
-) -> PluginId {
-    let plugin = RegisteredPlugin::new(manifest, bin_path, PathBuf::from("/dev/null/manifest.toml"));
+pub fn register_canary(rt: &Runtime, bin_path: PathBuf, manifest: Manifest) -> PluginId {
+    let plugin =
+        RegisteredPlugin::new(manifest, bin_path, PathBuf::from("/dev/null/manifest.toml"));
     let id = plugin.id.clone();
     rt.register(plugin);
     id
@@ -76,7 +73,10 @@ pub fn wait_running(handle: &RuntimeHandle, id: &PluginId) {
 pub fn wait_quarantined(handle: &RuntimeHandle, id: &PluginId, timeout: Duration) {
     let deadline = std::time::Instant::now() + timeout;
     while std::time::Instant::now() < deadline {
-        if matches!(handle.lifecycle_state(id), Some(LifecycleState::Quarantined)) {
+        if matches!(
+            handle.lifecycle_state(id),
+            Some(LifecycleState::Quarantined)
+        ) {
             return;
         }
         std::thread::sleep(Duration::from_millis(50));

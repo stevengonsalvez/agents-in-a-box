@@ -117,7 +117,13 @@ impl UsageCache {
             .query_row(
                 "SELECT mtime, size, parsed FROM file_cache WHERE path = ?1",
                 params![path],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, Vec<u8>>(2)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                    ))
+                },
             )
             .optional()?;
 
@@ -188,9 +194,7 @@ impl UsageCache {
     /// Future bumps append additional `if version < N` blocks before
     /// the final `pragma_update`.
     fn migrate(conn: &Connection) -> Result<(), CacheError> {
-        let version: i64 = conn
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .unwrap_or(0);
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap_or(0);
 
         if version < 1 {
             conn.execute_batch(
@@ -294,14 +298,9 @@ mod tests {
     fn insert_then_lookup_hits_for_same_mtime_and_size() {
         let (_dir, mut cache) = open_in_tmp();
         let calls = vec![fake_call(1), fake_call(2)];
-        cache
-            .insert("/tmp/a.jsonl", 42, 100, 0xDEADBEEF, &calls)
-            .expect("insert");
+        cache.insert("/tmp/a.jsonl", 42, 100, 0xDEADBEEF, &calls).expect("insert");
 
-        let hit = cache
-            .lookup("/tmp/a.jsonl", 42, 100)
-            .expect("lookup")
-            .expect("hit");
+        let hit = cache.lookup("/tmp/a.jsonl", 42, 100).expect("lookup").expect("hit");
         assert_eq!(hit.len(), 2);
         assert_eq!(hit[0].id, 1);
         assert_eq!(hit[1].id, 2);
@@ -310,26 +309,18 @@ mod tests {
     #[test]
     fn lookup_misses_when_mtime_differs() {
         let (_dir, mut cache) = open_in_tmp();
-        cache
-            .insert("/tmp/a.jsonl", 42, 100, 0, &[fake_call(1)])
-            .expect("insert");
+        cache.insert("/tmp/a.jsonl", 42, 100, 0, &[fake_call(1)]).expect("insert");
 
-        let miss = cache
-            .lookup("/tmp/a.jsonl", 43, 100)
-            .expect("lookup");
+        let miss = cache.lookup("/tmp/a.jsonl", 43, 100).expect("lookup");
         assert!(miss.is_none(), "mtime mismatch must miss");
     }
 
     #[test]
     fn lookup_misses_when_size_differs() {
         let (_dir, mut cache) = open_in_tmp();
-        cache
-            .insert("/tmp/a.jsonl", 42, 100, 0, &[fake_call(1)])
-            .expect("insert");
+        cache.insert("/tmp/a.jsonl", 42, 100, 0, &[fake_call(1)]).expect("insert");
 
-        let miss = cache
-            .lookup("/tmp/a.jsonl", 42, 101)
-            .expect("lookup");
+        let miss = cache.lookup("/tmp/a.jsonl", 42, 101).expect("lookup");
         assert!(miss.is_none(), "size mismatch must miss");
     }
 
@@ -344,9 +335,7 @@ mod tests {
     fn fingerprint_persists_through_insert() {
         let (_dir, mut cache) = open_in_tmp();
         let fp = fingerprint(b"some-file-bytes");
-        cache
-            .insert("/tmp/a.jsonl", 1, 2, fp, &[fake_call(1)])
-            .expect("insert");
+        cache.insert("/tmp/a.jsonl", 1, 2, fp, &[fake_call(1)]).expect("insert");
 
         // Read fingerprint back out via raw SQL to assert it was
         // stored byte-stably (reinterpret cast through ne_bytes).
@@ -404,9 +393,7 @@ mod tests {
     #[test]
     fn clear_drops_rows_but_preserves_schema_version() {
         let (_dir, mut cache) = open_in_tmp();
-        cache
-            .insert("/tmp/a.jsonl", 1, 1, 0, &[fake_call(1)])
-            .expect("insert");
+        cache.insert("/tmp/a.jsonl", 1, 1, 0, &[fake_call(1)]).expect("insert");
         cache.clear().expect("clear");
         let miss = cache.lookup("/tmp/a.jsonl", 1, 1).expect("lookup");
         assert!(miss.is_none(), "clear drops rows");
@@ -421,17 +408,12 @@ mod tests {
     #[test]
     fn insert_overwrites_stale_row() {
         let (_dir, mut cache) = open_in_tmp();
-        cache
-            .insert("/tmp/a.jsonl", 1, 1, 0, &[fake_call(1)])
-            .expect("insert v1");
+        cache.insert("/tmp/a.jsonl", 1, 1, 0, &[fake_call(1)]).expect("insert v1");
         cache
             .insert("/tmp/a.jsonl", 2, 2, 0, &[fake_call(2), fake_call(3)])
             .expect("insert v2");
 
-        let hit = cache
-            .lookup("/tmp/a.jsonl", 2, 2)
-            .expect("lookup")
-            .expect("hit");
+        let hit = cache.lookup("/tmp/a.jsonl", 2, 2).expect("lookup").expect("hit");
         assert_eq!(hit.len(), 2);
         assert_eq!(hit[0].id, 2);
         assert_eq!(hit[1].id, 3);

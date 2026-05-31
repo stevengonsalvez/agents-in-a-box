@@ -99,7 +99,10 @@ fn plugin_lint_missing_binary_exits_nonzero() {
         .expect("spawn ainb");
 
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(!out.status.success(), "expected non-zero exit on missing binary");
+    assert!(
+        !out.status.success(),
+        "expected non-zero exit on missing binary"
+    );
     assert!(
         stdout.contains("err") && stdout.contains("binary_exists"),
         "expected binary_exists error in report; stdout={stdout}"
@@ -110,7 +113,13 @@ fn plugin_lint_missing_binary_exits_nonzero() {
 fn plugin_watch_unknown_plugin_exits_nonzero() {
     let tmp = tempfile::tempdir().unwrap();
     let out = Command::new(ainb_bin())
-        .args(["plugin", "watch", "definitely-not-installed", "--duration", "1"])
+        .args([
+            "plugin",
+            "watch",
+            "definitely-not-installed",
+            "--duration",
+            "1",
+        ])
         .env("AINB_PLUGIN_ROOT", "/definitely/not/a/real/path")
         .env("HOME", tmp.path())
         .output()

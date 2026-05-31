@@ -198,9 +198,9 @@ impl RepoSource {
             // SshSession is an interactive session, not a clone — no components
             // to extract. Filter is unparseable text and likewise has no
             // owner/repo to expose.
-            RepoSource::SshSession(s) | RepoSource::Filter(s) => Err(
-                RepoSourceError::ParseError(format!("not a clonable repo: {s}")),
-            ),
+            RepoSource::SshSession(s) | RepoSource::Filter(s) => Err(RepoSourceError::ParseError(
+                format!("not a clonable repo: {s}"),
+            )),
         }
     }
 }

@@ -36,13 +36,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ainb_plugin_runtime::PluginId;
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use chrono::{DateTime, FixedOffset, Utc};
 use tracing::field::{Field, Visit};
 use tracing::{Event, Level, Subscriber};
+use tracing_subscriber::Layer;
 use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::registry::Registry;
-use tracing_subscriber::Layer;
 
 /// Default window when the user passes no `--duration`.
 const DEFAULT_DURATION_SECS: u64 = 30;
@@ -69,9 +69,7 @@ pub async fn run(
     // Same drop dance as `watch::run` — moving the inner runtime onto a
     // blocking thread keeps tokio's "Cannot drop a runtime in a context
     // where blocking is not allowed" panic from biting us.
-    tokio::task::spawn_blocking(move || drop(runtime))
-        .await
-        .ok();
+    tokio::task::spawn_blocking(move || drop(runtime)).await.ok();
     outcome
 }
 
@@ -85,23 +83,15 @@ pub(crate) async fn tail_with_handle(
     duration: Duration,
 ) -> Result<()> {
     let pid = PluginId::from(plugin_id);
-    if !handle
-        .registered_plugins()
-        .iter()
-        .any(|p| p.id == pid)
-    {
-        bail!(
-            "plugin '{plugin_id}' is not registered — try 'ainb plugin list'"
-        );
+    if !handle.registered_plugins().iter().any(|p| p.id == pid) {
+        bail!("plugin '{plugin_id}' is not registered — try 'ainb plugin list'");
     }
 
     let layer = PluginTailLayer::new(plugin_id.to_string(), level, since);
     let subscriber = Registry::default().with(layer);
     let guard = tracing::subscriber::set_default(subscriber);
 
-    println!(
-        "tailing plugin {plugin_id} level>={level} for {duration:?} (Ctrl-C to exit)",
-    );
+    println!("tailing plugin {plugin_id} level>={level} for {duration:?} (Ctrl-C to exit)",);
 
     tokio::time::sleep(duration).await;
     drop(guard);
@@ -110,17 +100,13 @@ pub(crate) async fn tail_with_handle(
 
 fn parse_level(s: &str) -> Result<Level> {
     Level::from_str(s).map_err(|_| {
-        anyhow!(
-            "invalid log level '{s}' — expected one of: trace, debug, info, warn, error"
-        )
+        anyhow!("invalid log level '{s}' — expected one of: trace, debug, info, warn, error")
     })
 }
 
 fn parse_since(s: &str) -> Result<DateTime<FixedOffset>> {
     DateTime::parse_from_rfc3339(s).map_err(|e| {
-        anyhow!(
-            "invalid --since '{s}' (expected RFC-3339, e.g. 2026-05-10T20:00:00Z): {e}"
-        )
+        anyhow!("invalid --since '{s}' (expected RFC-3339, e.g. 2026-05-10T20:00:00Z): {e}")
     })
 }
 
@@ -210,18 +196,15 @@ impl Visit for FieldVisitor {
     }
 
     fn record_i64(&mut self, field: &Field, value: i64) {
-        self.extras
-            .push((field.name().to_owned(), value.to_string()));
+        self.extras.push((field.name().to_owned(), value.to_string()));
     }
 
     fn record_u64(&mut self, field: &Field, value: u64) {
-        self.extras
-            .push((field.name().to_owned(), value.to_string()));
+        self.extras.push((field.name().to_owned(), value.to_string()));
     }
 
     fn record_bool(&mut self, field: &Field, value: bool) {
-        self.extras
-            .push((field.name().to_owned(), value.to_string()));
+        self.extras.push((field.name().to_owned(), value.to_string()));
     }
 }
 
@@ -323,10 +306,7 @@ mod tests {
         // same code regardless.
         use ainb_plugin_runtime::Runtime;
         let (runtime, handle) = Runtime::new().expect("runtime");
-        let test_rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
+        let test_rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let res = test_rt.block_on(tail_with_handle(
             &handle,
             "nonexistent",

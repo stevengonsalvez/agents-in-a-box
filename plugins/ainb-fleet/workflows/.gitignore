@@ -1,0 +1,8 @@
+# Runtime + agent-scratch artifacts that land in this dir when it's the cwd.
+# Never ship these with the plugin.
+logs/
+.agents/
+
+# Process docs kept local-only (proof reports, brainstormed strategy).
+DELIVERABLE.md
+TEST-STRATEGY.md

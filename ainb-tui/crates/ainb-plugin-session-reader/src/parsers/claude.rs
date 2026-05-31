@@ -151,7 +151,12 @@ fn parse_dir_uncached(projects_root: &Path) -> Vec<ProviderCall> {
             };
             let path_str = path.to_string_lossy().into_owned();
             let project_path_str = project_path.to_string_lossy().into_owned();
-            calls.extend(parse_source(&path_str, &project, &project_path_str, &content));
+            calls.extend(parse_source(
+                &path_str,
+                &project,
+                &project_path_str,
+                &content,
+            ));
         }
     }
     calls
@@ -289,9 +294,7 @@ fn extract_bash_commands(content: Option<&Value>) -> Vec<String> {
                 )
         })
         .filter_map(|item| {
-            item.get("input")
-                .and_then(|input| input.get("command"))
-                .and_then(Value::as_str)
+            item.get("input").and_then(|input| input.get("command")).and_then(Value::as_str)
         })
         .map(ToString::to_string)
         .collect()

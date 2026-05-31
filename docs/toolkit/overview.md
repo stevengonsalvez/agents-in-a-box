@@ -2,21 +2,65 @@
 title: "Toolkit overview"
 ---
 
-# Toolkit overview
+One canonical source tree, many AI tools. Author a skill, agent, or workflow once under `toolkit/packages/` and `bootstrap.js` deploys it into each supported tool's home directory.
 
-> **Status:** stub. Authoritative content currently lives at `toolkit/README.md`.
-> Migration of that file into this path is gated on Stevie's approval.
+## What lives in `toolkit/packages/`
 
-Portable skills, agents, workflows that deploy to 9 AI tools from one source.
+| Path | Contents |
+|---|---|
+| `packages/skills/` | 91 agent-invokable `SKILL.md` bundles |
+| `packages/agents/` | 37 agent definitions across 6 categories (`design/`, `engineering/`, `meta/`, `orchestrators/`, `swarm/`, `universal/`) |
+| `packages/utilities/` | Shared `config/`, `hooks/`, `output-styles/`, `reflections/`, and `utils/` |
+| `packages/workflows/single-agent/` | Guided plan -> implement -> validate flows |
+| `packages/knowledge/` | Knowledge/docs templates |
 
-## What this page will contain
+The `reflect` Claude Code plugin lives at root-level `plugins/reflect/` (beside its companion library), not under `toolkit/packages/`. The reflect/recall knowledge-base CLI lives at root-level `reflect-kb/` and is installed via `uv tool install` by `bootstrap.js`.
 
-- What lives in `toolkit/packages/`
-- Supported tools (Claude Code, Codex, Copilot, Gemini, Hermes, nanoclaw, Amazon Q, Cursor, Cline, Roo, Clawdhub)
-- How bootstrap deploys to each
-- External dependencies (`external-dependencies.yaml`)
-- Spec-Driven Development integration
+## Supported tools
+
+`bootstrap.js` defines 13 `TOOL_CONFIG` entries. Eleven are user-facing deploy targets; two (`claude` and `packages`) are internal aliases used by the rules/full-copy code paths.
+
+| Tool key | Home dir | Notes |
+|---|---|---|
+| `claude-code-4.5` | `~/.claude/` | Primary. Plugins + npx-skills + agent-skills |
+| `codex` | `~/.codex/` | `AGENTS.md` copied to project root |
+| `copilot` | `~/.copilot/` | GitHub Copilot CLI |
+| `gemini` | `~/.gemini/` | Gemini CLI |
+| `hermes-agent` | `~/.hermes/` | Reads `~/.claude/skills/` via `external_dirs`; no direct external installs |
+| `nanoclaw` | `~/.claude/` (shared) | Successor to OpenClaw, shares the Claude dir |
+| `amazonq` | `PROJECT/.amazonq/rules/` | Project-scoped |
+| `cursor` | `PROJECT/.cursor/rules/` | Project-scoped rule files |
+| `cline` | `PROJECT/.clinerules/` | Project-scoped rule files |
+| `roo` | `PROJECT/.roo/rules/` | Project-scoped rule files |
+| `clawdhub` | `workspace/skills/` | Clawdhub skill format |
+
+## How bootstrap deploys
+
+```bash
+cd toolkit && npm install
+node bootstrap.js --tool=claude-code-4.5   # one tool
+node bootstrap.js --tool=claude-code-4.5 --verify   # read-only parity check
+```
+
+Each target gets its own home-dir population; repeat per tool. See [Bootstrap engine](bootstrap.md) for the deploy mechanics.
+
+## External dependencies
+
+Externally-authored skills and plugins are declared in `toolkit/external-dependencies.yaml` and installed by the generated `setup-external.sh`. Sections include `agent-skills` (git clones), `npx-skills`, `claude-plugins`, `nanoclaw-skills`, `mcp-servers`, `mcporter-servers`, and `marketplaces`. Each entry's `applies-to` field controls which tools install it.
+
+## Spec-Driven Development
+
+Spec Kit integration drives a spec -> plan -> tasks flow via slash commands:
+
+```bash
+node bootstrap.js --sdd --targetFolder=<project>
+```
+
+Artifacts land under `specs/<feature-branch>/`.
 
 ## See also
 
+- [Bootstrap engine](bootstrap.md)
+- [Skills](skills.md)
+- [Agents](agents.md)
 - [Docs hub](../README.md)

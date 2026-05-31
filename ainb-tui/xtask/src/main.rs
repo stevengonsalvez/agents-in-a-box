@@ -16,7 +16,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 
 /// Each canary's directory name matches its Cargo crate name. The wasm
 /// output basename is the same name with hyphens turned into underscores
@@ -88,8 +88,7 @@ fn build_canaries() -> Result<()> {
         bail!("canary build failed (exit {status})");
     }
 
-    fs::create_dir_all(&fixtures)
-        .with_context(|| format!("create {}", fixtures.display()))?;
+    fs::create_dir_all(&fixtures).with_context(|| format!("create {}", fixtures.display()))?;
 
     let wasm_release_dir = canaries.join("target/wasm32-wasip1/release");
     for canary in CANARIES {
@@ -111,7 +110,11 @@ fn build_canaries() -> Result<()> {
             .with_context(|| format!("copy {} -> {}", src_toml.display(), dst_toml.display()))?;
         println!("[xtask] {canary} → fixtures/{canary}.{{wasm,toml}}");
     }
-    println!("[xtask] {} canaries staged in {}", CANARIES.len(), fixtures.display());
+    println!(
+        "[xtask] {} canaries staged in {}",
+        CANARIES.len(),
+        fixtures.display()
+    );
     Ok(())
 }
 

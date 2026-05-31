@@ -33,8 +33,7 @@ const fn default_mode() -> SessionMode {
 
 /// Shipped bundled presets TOML — installed verbatim to
 /// `~/.agents-in-a-box/presets.toml` on first run.
-const BUNDLED_PRESETS_TOML: &str =
-    include_str!("../../../../config/default-presets/presets.toml");
+const BUNDLED_PRESETS_TOML: &str = include_str!("../../../../config/default-presets/presets.toml");
 
 /// A repository preset that defines default agent and configuration settings
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -175,8 +174,9 @@ impl PresetManager {
         // can write immediately.
         if let Some(parent) = presets_file.parent() {
             if !parent.as_os_str().is_empty() && !parent.exists() {
-                fs::create_dir_all(parent)
-                    .with_context(|| format!("Failed to create presets dir: {}", parent.display()))?;
+                fs::create_dir_all(parent).with_context(|| {
+                    format!("Failed to create presets dir: {}", parent.display())
+                })?;
             }
         }
 
@@ -208,7 +208,10 @@ impl PresetManager {
             return Ok(());
         }
         let content = fs::read_to_string(&self.presets_file).with_context(|| {
-            format!("Failed to read presets file: {}", self.presets_file.display())
+            format!(
+                "Failed to read presets file: {}",
+                self.presets_file.display()
+            )
         })?;
         // Empty file is fine.
         if content.trim().is_empty() {
@@ -303,10 +306,7 @@ impl PresetManager {
 
     /// Get all presets in the order they appear on disk.
     pub fn all(&self) -> Vec<&RepositoryPreset> {
-        self.order
-            .iter()
-            .filter_map(|n| self.presets.get(n))
-            .collect()
+        self.order.iter().filter_map(|n| self.presets.get(n)).collect()
     }
 
     /// List all preset names in disk order.
@@ -336,10 +336,7 @@ impl PresetManager {
         if let Some(array) = doc.get_mut("preset").and_then(Item::as_array_of_tables_mut) {
             let before = array.len();
             array.retain(|tbl| {
-                tbl.get("name")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s != name)
-                    .unwrap_or(true)
+                tbl.get("name").and_then(|v| v.as_str()).map(|s| s != name).unwrap_or(true)
             });
             changed = array.len() != before;
         }
@@ -362,8 +359,7 @@ impl PresetManager {
         // Prefer the new multi-entry file.
         let multi = repo_path.join(".agents-box").join("presets.toml");
         if multi.exists() {
-            let content =
-                fs::read_to_string(&multi).context("Failed to read repo presets.toml")?;
+            let content = fs::read_to_string(&multi).context("Failed to read repo presets.toml")?;
             let parsed: PresetsFile =
                 toml::from_str(&content).context("Failed to parse repo presets.toml")?;
             return Ok(parsed.preset.into_iter().next());
@@ -372,8 +368,7 @@ impl PresetManager {
         // Fall back to the legacy single-document file.
         let single = repo_path.join(".agents-box").join("preset.toml");
         if single.exists() {
-            let content =
-                fs::read_to_string(&single).context("Failed to read repo preset.toml")?;
+            let content = fs::read_to_string(&single).context("Failed to read repo preset.toml")?;
             let preset: RepositoryPreset =
                 toml::from_str(&content).context("Failed to parse repo preset.toml")?;
             return Ok(Some(preset));
@@ -529,11 +524,7 @@ fn cleanup_legacy_default_presets(dir: &Path) -> Vec<RepositoryPreset> {
             }
         };
 
-        let stem = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_string();
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
         if matches_shipped_legacy_signature(&stem, &preset) {
             // Drop silently — superseded by the new bundled defaults.
             tracing::info!(
@@ -744,10 +735,7 @@ mod tests {
 
     #[test]
     fn bundled_defaults_include_four_in_order() {
-        let names: Vec<String> = create_default_presets()
-            .into_iter()
-            .map(|p| p.name)
-            .collect();
+        let names: Vec<String> = create_default_presets().into_iter().map(|p| p.name).collect();
         assert_eq!(
             names,
             vec![
@@ -783,7 +771,11 @@ mod tests {
     fn default_presets_not_overwritten_if_present() {
         let tmp = tempfile::tempdir().unwrap();
         let file = tmp.path().join("presets.toml");
-        std::fs::write(&file, "# user-edited marker\n[[preset]]\nname = \"my-only\"\n").unwrap();
+        std::fs::write(
+            &file,
+            "# user-edited marker\n[[preset]]\nname = \"my-only\"\n",
+        )
+        .unwrap();
         install_default_presets(&file).unwrap();
         let content = std::fs::read_to_string(&file).unwrap();
         assert!(
@@ -828,12 +820,15 @@ mod tests {
         assert_eq!(names.len(), 5);
         assert!(names.contains(&"my-haiku"));
         // Original four still present and ordered.
-        assert_eq!(names[..4], [
-            "claude-interactive-yolo",
-            "codex-interactive-yolo",
-            "opusplan",
-            "shell",
-        ]);
+        assert_eq!(
+            names[..4],
+            [
+                "claude-interactive-yolo",
+                "codex-interactive-yolo",
+                "opusplan",
+                "shell",
+            ]
+        );
     }
 
     #[test]
@@ -925,9 +920,7 @@ skip_all = false
         install_default_presets(&file).unwrap();
         assert!(!presets_dir.exists());
         let mgr = PresetManager::with_file(file).unwrap();
-        let p = mgr
-            .get("my-custom")
-            .expect("user-customised preset should have been migrated");
+        let p = mgr.get("my-custom").expect("user-customised preset should have been migrated");
         assert_eq!(p.skills, vec!["my-skill".to_string()]);
     }
 
@@ -961,7 +954,10 @@ skip_all = true
         // intentionally do not clobber the bundled entry, so this stays
         // empty. The user's customisation is logged but not lost from the
         // backup we just created (assuming admin curation).
-        assert!(p.skills.is_empty(), "bundled default should win on name collision");
+        assert!(
+            p.skills.is_empty(),
+            "bundled default should win on name collision"
+        );
     }
 
     #[test]

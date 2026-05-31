@@ -19,13 +19,13 @@
 
 use std::time::Duration;
 
-use ainb_plugin_testkit::{
-    methods, run_plugin, CliDispatchParams, CliDispatchResult, HarnessError, RenderResult,
-    Viewport, WireBuffer,
-};
-use ainb_plugin_sdk::{CliOutput, HostClient, Plugin, Result as SdkResult};
 use ainb_plugin_protocol::params::RenderParams;
 use ainb_plugin_protocol::wire_buffer::{Cell, Coord};
+use ainb_plugin_sdk::{CliOutput, HostClient, Plugin, Result as SdkResult};
+use ainb_plugin_testkit::{
+    CliDispatchParams, CliDispatchResult, HarnessError, RenderResult, Viewport, WireBuffer,
+    methods, run_plugin,
+};
 use async_trait::async_trait;
 
 struct FixturePlugin;
@@ -36,20 +36,12 @@ impl Plugin for FixturePlugin {
         "[plugin]\nname = \"fixture\"\nversion = \"0.1.0\"\nabi_version = 2\n"
     }
 
-    async fn on_init(
-        &mut self,
-        host: &HostClient,
-        _granted: &[String],
-    ) -> SdkResult<()> {
+    async fn on_init(&mut self, host: &HostClient, _granted: &[String]) -> SdkResult<()> {
         host.snapshot_publish("fixture.greeting", bytes::Bytes::from_static(b"hello"))
             .await
     }
 
-    async fn render(
-        &mut self,
-        _host: &HostClient,
-        _params: RenderParams,
-    ) -> SdkResult<WireBuffer> {
+    async fn render(&mut self, _host: &HostClient, _params: RenderParams) -> SdkResult<WireBuffer> {
         let mut buf = WireBuffer::new(1, 1);
         buf.push(Coord::new(0, 0), Cell::new("X"));
         Ok(buf)
@@ -113,11 +105,7 @@ async fn harness_surfaces_default_cli_dispatch_unknown_namespace() -> Result<(),
         fn manifest(&self) -> &'static str {
             "[plugin]\nname = \"no-cli\"\nversion = \"0.0.0\"\nabi_version = 2\n"
         }
-        async fn render(
-            &mut self,
-            _h: &HostClient,
-            _p: RenderParams,
-        ) -> SdkResult<WireBuffer> {
+        async fn render(&mut self, _h: &HostClient, _p: RenderParams) -> SdkResult<WireBuffer> {
             Ok(WireBuffer::new(0, 0))
         }
     }
@@ -150,11 +138,7 @@ async fn close_unblocks_when_plugin_did_no_work() -> Result<(), HarnessError> {
         fn manifest(&self) -> &'static str {
             "[plugin]\nname = \"bare\"\nversion = \"0.0.0\"\nabi_version = 2\n"
         }
-        async fn render(
-            &mut self,
-            _h: &HostClient,
-            _p: RenderParams,
-        ) -> SdkResult<WireBuffer> {
+        async fn render(&mut self, _h: &HostClient, _p: RenderParams) -> SdkResult<WireBuffer> {
             Ok(WireBuffer::new(0, 0))
         }
     }

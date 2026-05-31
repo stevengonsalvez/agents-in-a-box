@@ -43,7 +43,12 @@ pub struct WorktreeManager {
 
 impl WorktreeManager {
     pub fn new() -> Result<Self> {
-        let home_dir = dirs::home_dir().context("Failed to get home directory")?;
+        // Honor `AINB_HOME` as a base-dir override (matches SessionStore), keeping
+        // production at `~/.agents-in-a-box/worktrees` while letting tests isolate.
+        let home_dir = match std::env::var_os("AINB_HOME") {
+            Some(h) => PathBuf::from(h),
+            None => dirs::home_dir().context("Failed to get home directory")?,
+        };
         let base_dir = home_dir.join(".agents-in-a-box").join("worktrees");
 
         std::fs::create_dir_all(&base_dir).with_context(|| {

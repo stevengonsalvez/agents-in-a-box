@@ -5,7 +5,6 @@
 //! Discoverability fix from the 2026-05-27 redesign — users couldn't tell
 //! which other agents were available without cycling through them blindly.
 
-
 #[allow(dead_code)]
 mod tripwire_new_session_common;
 use tripwire_new_session_common::*;
@@ -29,9 +28,7 @@ fn agent_row_renders_inline_pills_in_custom() {
     let ainb = ainb_bin();
 
     let status = Command::new("tmux")
-        .args([
-            "new-session", "-d", "-s", &session, "-x", "200", "-y", "50",
-        ])
+        .args(["new-session", "-d", "-s", &session, "-x", "200", "-y", "50"])
         .status()
         .expect("tmux new-session");
     assert!(status.success());
@@ -120,10 +117,7 @@ fn agent_row_renders_inline_pills_in_custom() {
 
     let cap = final_cap.unwrap_or_else(|| String::from("(no capture)"));
     // Look for the Agent row rendering all four pills inline.
-    let agent_line = cap
-        .lines()
-        .find(|l| l.contains("Agent:"))
-        .unwrap_or("");
+    let agent_line = cap.lines().find(|l| l.contains("Agent:")).unwrap_or("");
     assert!(
         agent_line.contains("Claude"),
         "Agent row missing Claude pill: {agent_line}"
@@ -142,8 +136,7 @@ fn agent_row_renders_inline_pills_in_custom() {
     );
     // Negative: should NOT be using the lone cycle-arrow display where the
     // OTHER pills are absent. Older render had `◀ Claude ▶` only.
-    let has_inline_separator =
-        agent_line.contains("\u{00b7}") || agent_line.contains("·");
+    let has_inline_separator = agent_line.contains("\u{00b7}") || agent_line.contains("·");
     assert!(
         has_inline_separator,
         "Agent row should render dot-separated pills, got: {agent_line}\nFull capture:\n---\n{cap}\n---"

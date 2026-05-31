@@ -2,8 +2,6 @@
 title: "Value proposition"
 ---
 
-# Value proposition
-
 What you get when you adopt agents-in-a-box.
 
 ---
@@ -40,7 +38,7 @@ Every TUI operation is also a CLI subcommand. `--format json` on every command. 
 
 ### A portable toolkit that follows you across tools
 
-86 skills (plan, implement, validate, reflect, swarm-create, …) and 37 specialised agents (backend-developer, code-reviewer, security-agent, …). Write them once; deploy to Claude Code, Codex, Copilot, Gemini, Amazon Q, Cursor, Cline, Roo, Hermes, nanoclaw, Clawdhub. One source, nine targets.
+86 skills (plan, implement, validate, reflect, swarm-create, …) and 37 specialised agents (backend-developer, code-reviewer, security-agent, …). Write them once; deploy to Claude Code, Codex, Copilot, Gemini, Amazon Q, Cursor, Cline, Roo, Hermes, nanoclaw, Clawdhub. One source, 11 targets.
 
 ### A plugin system you can actually use
 
@@ -56,7 +54,7 @@ Add a TUI screen, a CLI subcommand, a statusline segment without forking the hos
 
 - **One install command.** `brew install ainb` (macOS, Linux). One-liner `install.sh` for everything else.
 - **No subscription.** MIT-licensed. No accounts, no metering.
-- **No vendor lock-in.** Toolkit deploys to nine AI tools; the TUI orchestrates four providers. You can swap out any layer.
+- **No vendor lock-in.** Toolkit deploys to 11 AI tools; the TUI orchestrates four providers. You can swap out any layer.
 - **No cloud dependency.** Everything runs locally. The only network traffic is what your AI provider (Claude, Codex, etc.) makes on your behalf.
 
 ---

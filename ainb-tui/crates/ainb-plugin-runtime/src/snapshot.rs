@@ -82,12 +82,7 @@ impl SnapshotStore {
 
     /// Register `plugin` as a subscriber to `topic`.
     pub fn subscribe(&self, topic: Topic, plugin: PluginId) {
-        self.inner
-            .write()
-            .subscribers
-            .entry(topic)
-            .or_default()
-            .insert(plugin);
+        self.inner.write().subscribers.entry(topic).or_default().insert(plugin);
     }
 
     /// Drop a subscriber. Used by lifecycle teardown.
@@ -112,12 +107,7 @@ impl SnapshotStore {
     /// Snapshot of all `(topic, version)` pairs. Test helper.
     #[must_use]
     pub fn topics(&self) -> Vec<(Topic, Version)> {
-        self.inner
-            .read()
-            .entries
-            .iter()
-            .map(|(t, (_, v))| (t.clone(), *v))
-            .collect()
+        self.inner.read().entries.iter().map(|(t, (_, v))| (t.clone(), *v)).collect()
     }
 }
 

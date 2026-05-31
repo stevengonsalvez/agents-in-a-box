@@ -140,10 +140,7 @@ pub fn parse_dir_cached_with_progress(
                 };
                 for file_entry in files.flatten() {
                     let path = file_entry.path();
-                    let basename = path
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or_default();
+                    let basename = path.file_name().and_then(|s| s.to_str()).unwrap_or_default();
                     if !basename.starts_with("rollout-") || !basename.ends_with(".jsonl") {
                         continue;
                     }
@@ -198,10 +195,7 @@ fn parse_dir_uncached(sessions_root: &Path) -> Vec<ProviderCall> {
                 };
                 for file_entry in files.flatten() {
                     let path = file_entry.path();
-                    let basename = path
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or_default();
+                    let basename = path.file_name().and_then(|s| s.to_str()).unwrap_or_default();
                     if !basename.starts_with("rollout-") || !basename.ends_with(".jsonl") {
                         continue;
                     }
@@ -318,10 +312,8 @@ pub fn parse_source(path: &str, content: &str) -> Vec<ProviderCall> {
             continue;
         };
 
-        let cumulative_total = info
-            .total_token_usage
-            .and_then(|usage| usage.total_tokens)
-            .unwrap_or(0);
+        let cumulative_total =
+            info.total_token_usage.and_then(|usage| usage.total_tokens).unwrap_or(0);
         if cumulative_total > 0 && cumulative_total == previous_cumulative_total {
             continue;
         }
@@ -336,12 +328,10 @@ pub fn parse_source(path: &str, content: &str) -> Vec<ProviderCall> {
 
                 if let Some(total) = info.total_token_usage {
                     previous_input = total.input_tokens.unwrap_or(previous_input + input);
-                    previous_cached =
-                        total.cached_input_tokens.unwrap_or(previous_cached + cached);
+                    previous_cached = total.cached_input_tokens.unwrap_or(previous_cached + cached);
                     previous_output = total.output_tokens.unwrap_or(previous_output + output);
-                    previous_reasoning = total
-                        .reasoning_output_tokens
-                        .unwrap_or(previous_reasoning + reasoning);
+                    previous_reasoning =
+                        total.reasoning_output_tokens.unwrap_or(previous_reasoning + reasoning);
                 } else {
                     previous_input += input;
                     previous_cached += cached;
@@ -352,15 +342,10 @@ pub fn parse_source(path: &str, content: &str) -> Vec<ProviderCall> {
                 (input, cached, output, reasoning)
             } else if let Some(total) = info.total_token_usage {
                 let input = total.input_tokens.unwrap_or(0).saturating_sub(previous_input);
-                let cached = total
-                    .cached_input_tokens
-                    .unwrap_or(0)
-                    .saturating_sub(previous_cached);
+                let cached = total.cached_input_tokens.unwrap_or(0).saturating_sub(previous_cached);
                 let output = total.output_tokens.unwrap_or(0).saturating_sub(previous_output);
-                let reasoning = total
-                    .reasoning_output_tokens
-                    .unwrap_or(0)
-                    .saturating_sub(previous_reasoning);
+                let reasoning =
+                    total.reasoning_output_tokens.unwrap_or(0).saturating_sub(previous_reasoning);
 
                 previous_input = total.input_tokens.unwrap_or(0);
                 previous_cached = total.cached_input_tokens.unwrap_or(0);

@@ -13,7 +13,9 @@
 
 use crate::audit::{self, AuditResult, AuditTrigger};
 use crate::git::WorktreeManager;
-use crate::models::{ClaudeModel, CodexModel, Session, SessionAgentType, SessionMode, SessionStatus};
+use crate::models::{
+    ClaudeModel, CodexModel, Session, SessionAgentType, SessionMode, SessionStatus,
+};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -21,7 +23,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 use tokio::process::Command;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 #[derive(Error, Debug)]
@@ -134,11 +136,16 @@ impl SessionStore {
     }
 
     /// Get the storage file path
+    ///
+    /// Honors the `AINB_HOME` environment variable as an override for the base
+    /// directory (otherwise the user's home dir). This keeps the production path
+    /// at `~/.agents-in-a-box/sessions.json` while letting tests point the store
+    /// at an isolated temp directory.
     pub fn storage_path() -> PathBuf {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".agents-in-a-box")
-            .join("sessions.json")
+        let base = std::env::var_os("AINB_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")));
+        base.join(".agents-in-a-box").join("sessions.json")
     }
 
     /// Add or update a session
@@ -221,7 +228,13 @@ impl InteractiveSessionManager {
     ) -> Result<InteractiveSession, InteractiveSessionError> {
         info!(
             "Creating Interactive session {} for branch '{}' in workspace '{}' (agent={:?}, model={:?}, codex_model={:?}, skip_permissions={})",
-            session_id, branch_name, workspace_name, agent_type, model, codex_model, skip_permissions
+            session_id,
+            branch_name,
+            workspace_name,
+            agent_type,
+            model,
+            codex_model,
+            skip_permissions
         );
 
         // Check if session already exists
@@ -768,15 +781,21 @@ impl InteractiveSessionManager {
         let session_opt = self.active_sessions.remove(&session_id);
         info!("Session in active_sessions: {}", session_opt.is_some());
 
-        // Step 1: Kill tmux session
-        // If we have the session in memory, use its tmux_session_name
-        // Otherwise, try to find it by discovering from worktree
-        let tmux_session_name = if let Some(ref session) = session_opt {
+        // Step 1: Resolve the tmux session name, then kill it.
+        //
+        // Resolution order: in-memory session → worktree-derived name → the
+        // persisted sessions.json entry. The store fallback is what makes
+        // orphaned records deletable: an entry whose worktree/symlink is already
+        // gone (e.g. a shared worktree removed by a sibling session, or a record
+        // imported without a `by-session/<uuid>` symlink) still carries its
+        // `tmux_session_name`, so we can kill the tmux session and — crucially —
+        // always fall through to the store cleanup in Step 3 instead of bailing.
+        let tmux_session_name: Option<String> = if let Some(ref session) = session_opt {
             info!(
                 "Using tmux session name from memory: {}",
                 session.tmux_session_name
             );
-            session.tmux_session_name.clone()
+            Some(session.tmux_session_name.clone())
         } else {
             // Try to get worktree info and derive tmux session name
             info!("Session not in memory, discovering from worktree");
@@ -798,53 +817,88 @@ impl InteractiveSessionManager {
                         info!("Trying legacy tmux session name: {}", legacy_name);
                         legacy_name
                     };
-                    final_name
+                    Some(final_name)
                 }
                 Err(e) => {
-                    // Couldn't find worktree, can't determine tmux session name
-                    error!("Could not find worktree for session {}: {}", session_id, e);
-                    // Still try to remove worktree in case it exists
-                    if let Err(remove_err) = self.worktree_manager.remove_worktree(session_id) {
-                        warn!("Failed to remove worktree: {}", remove_err);
+                    // Couldn't resolve from the worktree (it's gone / never had a
+                    // symlink). Fall back to the persisted store so we can still
+                    // kill tmux and purge the record. Do NOT bail — bailing here is
+                    // exactly what left orphaned entries stuck in the UI.
+                    warn!(
+                        "Could not derive tmux name from worktree for session {} ({}); \
+                         falling back to sessions.json",
+                        session_id, e
+                    );
+                    let store_name = SessionStore::load()
+                        .sessions()
+                        .values()
+                        .find(|m| m.session_id == session_id)
+                        .map(|m| m.tmux_session_name.clone());
+                    if let Some(ref n) = store_name {
+                        info!("Resolved tmux name from sessions.json: {}", n);
+                    } else {
+                        info!(
+                            "No sessions.json entry for {} either — proceeding to cleanup by id",
+                            session_id
+                        );
                     }
-                    return Err(InteractiveSessionError::SessionNotFound(session_id));
+                    store_name
                 }
             }
         };
 
-        info!("Attempting to kill tmux session: {}", tmux_session_name);
-        let output = Command::new("tmux")
-            .args(["kill-session", "-t", &tmux_session_name])
-            .output()
-            .await?;
+        if let Some(ref name) = tmux_session_name {
+            info!("Attempting to kill tmux session: {}", name);
+            let output = Command::new("tmux").args(["kill-session", "-t", name]).output().await?;
 
-        if output.status.success() {
-            info!("Successfully killed tmux session: {}", tmux_session_name);
+            if output.status.success() {
+                info!("Successfully killed tmux session: {}", name);
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                warn!("Failed to kill tmux session '{}': {}", name, stderr);
+                // Continue anyway - session might already be dead
+            }
         } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!(
-                "Failed to kill tmux session '{}': {}",
-                tmux_session_name, stderr
+            info!(
+                "No tmux session name to kill for {} — skipping tmux step",
+                session_id
             );
-            // Continue anyway - session might already be dead
         }
 
         // Step 2: Remove worktree
+        //
+        // Worktree removal must NEVER block the sessions.json cleanup in Step 3.
+        // If it did, any session whose worktree is already gone (already deleted,
+        // a shared worktree removed by a sibling session, or an orphaned entry that
+        // never had a `by-session/<uuid>` symlink) could never be removed from the
+        // store — every delete would die here and the record would reappear in the
+        // UI on the next reload. A `NotFound` worktree already satisfies the
+        // post-condition (no worktree on disk), so we treat it as success; for any
+        // other error we log and still continue so the UI record is always cleared.
         info!("Attempting to remove worktree for session {}", session_id);
         match self.worktree_manager.remove_worktree(session_id) {
             Ok(()) => info!("Successfully removed worktree for session {}", session_id),
+            Err(crate::git::WorktreeError::NotFound(path)) => {
+                info!(
+                    "Worktree for session {} already gone ({}) — continuing to store cleanup",
+                    session_id, path
+                );
+            }
             Err(e) => {
-                error!(
-                    "Failed to remove worktree for session {}: {}",
+                // Non-fatal: leave any on-disk worktree for separate GC, but still
+                // purge the sessions.json record so the session leaves the UI.
+                warn!(
+                    "Failed to remove worktree for session {} ({}) — continuing to store cleanup",
                     session_id, e
                 );
-                return Err(e.into());
             }
         }
 
         // Step 3: Remove from sessions.json
         let mut store = SessionStore::load();
-        store.remove_by_tmux_name(&tmux_session_name);
+        if let Some(ref name) = tmux_session_name {
+            store.remove_by_tmux_name(name);
+        }
         store.remove_by_session_id(session_id); // Also remove by ID in case tmux name changed
         if let Err(e) = store.save() {
             warn!("Failed to update sessions.json after removal: {}", e);
@@ -1243,15 +1297,7 @@ impl InteractiveSessionManager {
             // gets evaluated. Use sh (not zsh) — no .zshrc, no race.
             let full_line = format!("{env_setup}exec {cli_cmd}");
             Command::new("tmux")
-                .args([
-                    "respawn-pane",
-                    "-k",
-                    "-t",
-                    &target,
-                    "sh",
-                    "-c",
-                    &full_line,
-                ])
+                .args(["respawn-pane", "-k", "-t", &target, "sh", "-c", &full_line])
                 .output()
                 .await?
         };

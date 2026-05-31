@@ -3,9 +3,9 @@
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::state::{AppState, NewSessionState, NewSessionStep, SessionAgentOption};
-    use crate::app::events::AppEvent;
     use crate::app::EventHandler;
+    use crate::app::events::AppEvent;
+    use crate::app::state::{AppState, NewSessionState, NewSessionStep, SessionAgentOption};
     use crate::models::{OtherTmuxSession, SessionAgentType, SessionMode};
     use std::path::PathBuf;
 
@@ -52,10 +52,7 @@ mod tests {
 
         EventHandler::process_event(AppEvent::DeleteSelectedSessions, &mut state);
 
-        let dialog = state
-            .confirmation_dialog
-            .as_ref()
-            .expect("bulk kill confirmation");
+        let dialog = state.confirmation_dialog.as_ref().expect("bulk kill confirmation");
         assert_eq!(dialog.title, "Kill tmux Sessions");
         assert!(matches!(
             &dialog.confirm_action,
@@ -73,10 +70,7 @@ mod tests {
 
         EventHandler::process_event(AppEvent::DeleteSession, &mut state);
 
-        let dialog = state
-            .confirmation_dialog
-            .as_ref()
-            .expect("bulk kill confirmation");
+        let dialog = state.confirmation_dialog.as_ref().expect("bulk kill confirmation");
         assert!(matches!(
             &dialog.confirm_action,
             ConfirmAction::KillOtherTmuxSessions(names)

@@ -11,6 +11,7 @@ members = [
     "crates/ainb-plugin-testkit",
     "crates/ainb-plugin-types-sessions",
     "crates/ainb-plugin-cts-v2",
+    "crates/ainb-plugin-witr",
     "xtask",
 ]
 default-members = ["crates/ainb-core"]
@@ -19,7 +20,7 @@ default-members = ["crates/ainb-core"]
 # parallel under agents-in-a-box-4is.
 
 [workspace.package]
-version = "1.1.0"
+version = "1.2.1"
 edition = "2021"
 authors = ["Agents-in-a-Box Team"]
 license = "MIT"
@@ -67,7 +68,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 clap = { version = "4.4", features = ["derive"] }
 clap_complete = "4.4"
 tempfile = "3.8"
-nix = { version = "0.27", features = ["user"] }
+nix = { version = "0.27", features = ["user", "signal"] }
 arboard = "3.3"
 keyring = { version = "3", features = ["apple-native", "linux-native"] }
 regex = "1.10"
@@ -90,6 +91,9 @@ nucleo-matcher = "0.3"
 
 # File-locking for concurrent plugin install protection
 fs2 = "0.4"
+
+# Filesystem watch for fleet JSONL transcript tail
+notify = "6.1"
 
 # Dev / test
 mockall = "0.12"

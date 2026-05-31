@@ -4,7 +4,6 @@
 //!
 //! Phase 5 of `plans/new-session-redesign-spec.md`.
 
-
 #[allow(dead_code)]
 mod tripwire_new_session_common;
 use tripwire_new_session_common::*;
@@ -29,9 +28,7 @@ fn ssh_url_morphs_configure_to_ssh_variant() {
     let ainb = ainb_bin();
 
     let status = Command::new("tmux")
-        .args([
-            "new-session", "-d", "-s", &session, "-x", "180", "-y", "50",
-        ])
+        .args(["new-session", "-d", "-s", &session, "-x", "180", "-y", "50"])
         .status()
         .expect("tmux new-session");
     assert!(status.success());
@@ -59,9 +56,7 @@ fn ssh_url_morphs_configure_to_ssh_variant() {
 
     send_key(&session, "n");
     let pick_deadline = Instant::now() + Duration::from_secs(5);
-    let mut on_pick = poll_capture(&session, pick_deadline, |c| {
-        c.contains("Enter=Select")
-    });
+    let mut on_pick = poll_capture(&session, pick_deadline, |c| c.contains("Enter=Select"));
     if on_pick.is_none() {
         send_key(&session, "n");
         let retry_deadline = Instant::now() + Duration::from_secs(8);
@@ -76,9 +71,7 @@ fn ssh_url_morphs_configure_to_ssh_variant() {
     // Type SSH session URL (no repo segment → SshSession).
     send_text(&session, "ssh://deploy@prod-1.internal");
     let typed_deadline = Instant::now() + Duration::from_secs(5);
-    if poll_capture(&session, typed_deadline, |c| c.contains("prod-1.internal"))
-        .is_none()
-    {
+    if poll_capture(&session, typed_deadline, |c| c.contains("prod-1.internal")).is_none() {
         let last = capture(&session);
         kill_session(&session);
         panic!("filter never typed; last:\n---\n{last}\n---");
@@ -94,9 +87,7 @@ fn ssh_url_morphs_configure_to_ssh_variant() {
     kill_session(&session);
 
     let Some(cap) = on_cfg else {
-        panic!(
-            "SSH variant did not render. Final:\n---\n{final_cap}\n---"
-        );
+        panic!("SSH variant did not render. Final:\n---\n{final_cap}\n---");
     };
     // Positive markers.
     assert!(cap.contains("Host:"), "SSH variant missing Host:\n{cap}");

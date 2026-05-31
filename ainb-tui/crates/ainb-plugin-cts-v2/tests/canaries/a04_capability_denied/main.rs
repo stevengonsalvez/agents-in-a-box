@@ -1,6 +1,6 @@
 use ainb_plugin_sdk::{
-    CliOutput, HostClient, Plugin, Result, SdkError, Server,
-    RenderParams, RpcError, WireBuffer, Cell, Coord,
+    Cell, CliOutput, Coord, HostClient, Plugin, RenderParams, Result, RpcError, SdkError, Server,
+    WireBuffer,
 };
 use async_trait::async_trait;
 
@@ -24,7 +24,9 @@ impl Plugin for A04 {
         _namespace: &str,
         _argv: &[String],
     ) -> Result<CliOutput> {
-        Err(SdkError::Rpc(Box::new(RpcError::capability_denied("fs.read"))))
+        Err(SdkError::Rpc(Box::new(RpcError::capability_denied(
+            "fs.read",
+        ))))
     }
 }
 

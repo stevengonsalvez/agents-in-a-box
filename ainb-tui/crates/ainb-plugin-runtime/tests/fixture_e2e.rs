@@ -274,7 +274,10 @@ fn snapshot_round_trip() {
     let v1 = handle.publish_snapshot("from.host", Bytes::from_static(b"v1"));
     let v2 = handle.publish_snapshot("from.host", Bytes::from_static(b"v2"));
     assert!(v2 > v1);
-    assert_eq!(handle.snapshot_get("from.host").as_deref(), Some(&b"v2"[..]));
+    assert_eq!(
+        handle.snapshot_get("from.host").as_deref(),
+        Some(&b"v2"[..])
+    );
 }
 
 #[test]
@@ -283,11 +286,7 @@ fn action_round_trip() {
     let _id = register_fixture(&rt);
 
     // The fixture echoes the payload back through host/action/invoke.
-    let rx = handle.invoke_action(
-        "echo",
-        Bytes::from_static(b"ping"),
-        Duration::from_secs(2),
-    );
+    let rx = handle.invoke_action("echo", Bytes::from_static(b"ping"), Duration::from_secs(2));
     let outcome = rt.tokio_handle().block_on(async {
         tokio::time::timeout(Duration::from_secs(5), rx)
             .await
@@ -311,10 +310,7 @@ fn sigkill_triggers_respawn_then_quarantine() {
     // Wait for it to reach Running.
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while std::time::Instant::now() < deadline {
-        if matches!(
-            handle.lifecycle_state(&id),
-            Some(LifecycleState::Running)
-        ) {
+        if matches!(handle.lifecycle_state(&id), Some(LifecycleState::Running)) {
             break;
         }
         std::thread::sleep(Duration::from_millis(20));

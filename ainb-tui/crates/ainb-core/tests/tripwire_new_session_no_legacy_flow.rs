@@ -7,7 +7,6 @@
 //!
 //! Phase 6 of `plans/new-session-redesign-spec.md`.
 
-
 #[allow(dead_code)]
 mod tripwire_new_session_common;
 use tripwire_new_session_common::*;
@@ -50,16 +49,7 @@ fn no_legacy_step_strings_appear_in_new_session_flow() {
     let ainb = ainb_bin();
 
     let status = Command::new("tmux")
-        .args([
-            "new-session",
-            "-d",
-            "-s",
-            &session,
-            "-x",
-            "180",
-            "-y",
-            "50",
-        ])
+        .args(["new-session", "-d", "-s", &session, "-x", "180", "-y", "50"])
         .status()
         .expect("tmux new-session");
     assert!(status.success(), "tmux new-session failed");

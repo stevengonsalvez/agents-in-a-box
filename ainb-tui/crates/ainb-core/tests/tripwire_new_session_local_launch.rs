@@ -9,7 +9,6 @@
 //! endpoint and are flaky in CI. Those are manual-test items; the dispatch
 //! logic is covered by the `ssh_session_url_tests` unit module in `state.rs`.
 
-
 #[allow(dead_code)]
 mod tripwire_new_session_common;
 use tripwire_new_session_common::*;
@@ -39,9 +38,7 @@ fn launching_local_repo_hits_create_session_dispatch_not_stub() {
     let ainb = ainb_bin();
 
     let status = Command::new("tmux")
-        .args([
-            "new-session", "-d", "-s", &session, "-x", "180", "-y", "50",
-        ])
+        .args(["new-session", "-d", "-s", &session, "-x", "180", "-y", "50"])
         .status()
         .expect("tmux new-session");
     assert!(status.success(), "tmux new-session failed");

@@ -95,11 +95,7 @@ impl TextEditor {
     #[must_use]
     pub fn to_non_empty_string(&self) -> Option<String> {
         let s = self.to_string();
-        if s.is_empty() {
-            None
-        } else {
-            Some(s)
-        }
+        if s.is_empty() { None } else { Some(s) }
     }
 
     pub fn insert_char(&mut self, ch: char) {
@@ -2374,6 +2370,17 @@ pub struct AppState {
     /// every subsequent frame matches the host's layout.
     pub plugin_render_areas: std::collections::HashMap<crate::app::screens::ScreenId, (u16, u16)>,
 
+    /// Viewport `(width, height)` the last `plugin/render` kick used for
+    /// each screen id. `tick_plugin_renders` forces a fresh render kick
+    /// whenever the live area (from `plugin_render_areas`) differs from
+    /// this — covering the first paint (the seed `(0, 0)` render becomes
+    /// the real allocated size once `PluginScreen::render` runs) and any
+    /// later resize. Without this, a plugin screen whose dirty flag was
+    /// already consumed at `(0, 0)` (e.g. one with no host-published
+    /// snapshot to re-mark it) would paint blank forever.
+    pub plugin_last_render_viewport:
+        std::collections::HashMap<crate::app::screens::ScreenId, (u16, u16)>,
+
     /// Cheap Send + Clone façade onto the plugin runtime, populated by
     /// `App::init`. `None` when running plugin-free (e.g. tests, or
     /// installs that haven't completed bundled-plugin discovery yet).
@@ -2689,9 +2696,10 @@ pub enum AsyncAction {
     RestartSession(Uuid),        // Restart a stopped session with new container
     CleanupOrphaned,             // Clean up orphaned containers without worktrees
     AttachToOtherTmux(String),   // Attach to a non-agents-in-a-box tmux session by name
-    KillOtherTmux(String),       // Kill a non-agents-in-a-box tmux session by name
+    AttachWitr, // Launch `witr -i` (process-causality browser) in a dedicated tmux session and attach full-screen
+    KillOtherTmux(String), // Kill a non-agents-in-a-box tmux session by name
     KillOtherTmuxSessions(Vec<String>), // Kill multiple non-agents-in-a-box tmux sessions by name
-    ConfirmOtherTmuxRename,      // Confirm and execute rename for "Other tmux" session
+    ConfirmOtherTmuxRename, // Confirm and execute rename for "Other tmux" session
     // Shell session actions (one shell per workspace)
     OpenWorkspaceShell {
         workspace_index: usize,                 // Index of workspace to open shell for
@@ -2812,6 +2820,7 @@ impl Default for AppState {
 
             pending_plugin_renders: std::collections::HashMap::new(),
             plugin_render_areas: std::collections::HashMap::new(),
+            plugin_last_render_viewport: std::collections::HashMap::new(),
             plugin_runtime: None,
 
             statusline_status_cache: None,
@@ -4110,13 +4119,9 @@ impl AppState {
             ssh_sessions.len()
         );
         self.other_tmux_sessions = other_sessions;
-        let live_other_names: HashSet<String> = self
-            .other_tmux_sessions
-            .iter()
-            .map(|session| session.name.clone())
-            .collect();
-        self.selected_other_tmux_sessions
-            .retain(|name| live_other_names.contains(name));
+        let live_other_names: HashSet<String> =
+            self.other_tmux_sessions.iter().map(|session| session.name.clone()).collect();
+        self.selected_other_tmux_sessions.retain(|name| live_other_names.contains(name));
         self.ssh_sessions = ssh_sessions;
     }
 
@@ -5812,10 +5817,7 @@ impl AppState {
             Ok(p) => p,
             Err(e) => {
                 tracing::error!(?source, error = %e, "clone_remote_for_configure: parse_components failed");
-                self.add_error_notification(format!(
-                    "Could not parse repository: {}",
-                    e
-                ));
+                self.add_error_notification(format!("Could not parse repository: {}", e));
                 self.cancel_new_session();
                 return Err(());
             }
@@ -5831,10 +5833,7 @@ impl AppState {
             Ok(m) => m,
             Err(e) => {
                 tracing::error!(error = %e, "clone_remote_for_configure: RemoteRepoManager::new failed");
-                self.add_error_notification(format!(
-                    "Could not initialise repo cache: {}",
-                    e
-                ));
+                self.add_error_notification(format!("Could not initialise repo cache: {}", e));
                 self.cancel_new_session();
                 return Err(());
             }
@@ -5844,10 +5843,9 @@ impl AppState {
         let parsed_owned = parsed.clone();
         // git2 / git CLI are synchronous — push the clone onto a blocking
         // thread so the async runtime stays responsive.
-        let clone_result = tokio::task::spawn_blocking(move || {
-            manager.clone_repo(&source_owned, &parsed_owned)
-        })
-        .await;
+        let clone_result =
+            tokio::task::spawn_blocking(move || manager.clone_repo(&source_owned, &parsed_owned))
+                .await;
 
         let cache_path = match clone_result {
             Ok(Ok(path)) => path,
@@ -5862,10 +5860,7 @@ impl AppState {
             }
             Err(join_err) => {
                 tracing::error!(error = %join_err, "clone_remote_for_configure: blocking task panicked");
-                self.add_error_notification(format!(
-                    "Clone task panicked: {}",
-                    join_err
-                ));
+                self.add_error_notification(format!("Clone task panicked: {}", join_err));
                 self.cancel_new_session();
                 return Err(());
             }
@@ -5950,10 +5945,7 @@ impl AppState {
             }
             Err(e) => {
                 tracing::error!(error = %e, "launch_ssh_session_from_configure: tmux spawn failed");
-                self.add_error_notification(format!(
-                    "Failed to spawn tmux for SSH session: {}",
-                    e
-                ));
+                self.add_error_notification(format!("Failed to spawn tmux for SSH session: {}", e));
                 self.cancel_new_session();
             }
         }
@@ -7313,6 +7305,10 @@ impl AppState {
                     debug!("AttachToOtherTmux action deferred to main loop");
                     self.pending_async_action = Some(action);
                 }
+                action @ AsyncAction::AttachWitr => {
+                    debug!("AttachWitr action deferred to main loop");
+                    self.pending_async_action = Some(action);
+                }
                 action @ AsyncAction::KillOtherTmux(_) => {
                     debug!("KillOtherTmux action deferred to main loop");
                     self.pending_async_action = Some(action);
@@ -8360,8 +8356,10 @@ impl App {
         // Static plugin-screen routing table. Pairs a stable screen id
         // (consumed by `PluginScreen` and matched against
         // `state.current_screen`) with the plugin id that owns it.
-        const PLUGIN_SCREENS: &[(&str, &str)] =
-            &[(crate::app::screens::ids::ANALYTICS, "burndown")];
+        const PLUGIN_SCREENS: &[(&str, &str)] = &[
+            (crate::app::screens::ids::ANALYTICS, "burndown"),
+            (crate::app::screens::ids::WITR, "witr"),
+        ];
 
         for (screen_id, plugin_id) in PLUGIN_SCREENS {
             let pid = ainb_plugin_runtime::PluginId::from(*plugin_id);
@@ -8380,23 +8378,6 @@ impl App {
                 self.state.pending_plugin_renders.insert((*screen_id).to_string(), buf);
             }
 
-            // Kick the next render ONLY when something has actually
-            // changed since the last paint — a keystroke landed
-            // (`send_key`), a snapshot event arrived (host or plugin
-            // `publish_snapshot`), or the screen has never painted
-            // yet (registration seeds the flag to `true`).
-            //
-            // Before this gate the loop fired a render kick every
-            // tick (~4/s at the 250 ms cadence) regardless of state
-            // changes, which compounded with the per-tick `event::poll`
-            // idle wait to produce ~250-300 ms of perceived lag per
-            // keystroke. With the gate the kick is event-driven, so
-            // each key arrives at the plugin within one tick interval
-            // and the response paints on the *next* tick.
-            if !handle.take_render_dirty(&pid) {
-                continue;
-            }
-
             // Viewport comes from the previous frame's allocated area
             // (stashed by `PluginScreen::render`). Falls back to (0, 0)
             // before the first paint — the plugin treats that as "use
@@ -8404,6 +8385,42 @@ impl App {
             // sensible until the area cache fills in.
             let (width, height) =
                 self.state.plugin_render_areas.get(*screen_id).copied().unwrap_or((0, 0));
+
+            // Force a render kick whenever the live area differs from
+            // the one our last kick used. This is what carries a plugin
+            // screen from the seed `(0, 0)` render (which paints into the
+            // plugin's fallback size, off-screen for the real layout) to
+            // a render at the actual allocated viewport once
+            // `PluginScreen::render` has stashed it — and likewise on any
+            // resize. Plugins fed by a host-published snapshot get
+            // re-marked dirty by that publish, but a screen with no such
+            // feed (e.g. `witr` before a scan) would otherwise stay blank
+            // forever after its dirty flag was consumed at `(0, 0)`.
+            let last_viewport = self.state.plugin_last_render_viewport.get(*screen_id).copied();
+            let viewport_changed = last_viewport != Some((width, height));
+
+            // Kick the next render when something has actually changed
+            // since the last paint — a keystroke landed (`send_key`), a
+            // snapshot event arrived (host or plugin `publish_snapshot`),
+            // the screen has never painted yet (registration seeds the
+            // flag to `true`), or the allocated viewport changed.
+            //
+            // The dirty gate turns the loop from a fixed-cadence render
+            // storm (~4/s at the 250 ms tick) into an event-driven
+            // repaint: before it, the per-tick kick compounded with the
+            // `event::poll` idle wait to add ~250-300 ms of perceived lag
+            // per keystroke. `take_render_dirty` swaps the flag to false,
+            // so evaluate the viewport-change escape hatch first to avoid
+            // short-circuiting past it.
+            let dirty = handle.take_render_dirty(&pid);
+            if !dirty && !viewport_changed {
+                continue;
+            }
+
+            self.state
+                .plugin_last_render_viewport
+                .insert((*screen_id).to_string(), (width, height));
+
             let viewport = ainb_plugin_runtime::Viewport { width, height };
             // Returned oneshot is intentionally dropped — the cache
             // pickup happens via `try_recv_render` next tick.

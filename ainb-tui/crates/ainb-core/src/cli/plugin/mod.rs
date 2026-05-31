@@ -21,7 +21,7 @@
 //! Phase 7d-cli grows three live-DevX subcommands on top of the install
 //! flow — `lint`, `watch`, and `tail` — each in its own submodule below.
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 
 use crate::cli::OutputFormat;
 
@@ -36,10 +36,9 @@ pub async fn execute(matches: &clap::ArgMatches, format: OutputFormat) -> Result
             Some(("add", _)) | Some(("list", _)) | Some(("remove", _)) => not_yet_ported(),
             _ => bail!("unknown plugin marketplace subcommand"),
         },
-        Some(("install", _))
-        | Some(("update", _))
-        | Some(("remove", _))
-        | Some(("search", _)) => not_yet_ported(),
+        Some(("install", _)) | Some(("update", _)) | Some(("remove", _)) | Some(("search", _)) => {
+            not_yet_ported()
+        }
         Some(("list", _)) => list_installed(format),
         Some(("lint", sub)) => {
             let arg = sub
@@ -61,10 +60,8 @@ pub async fn execute(matches: &clap::ArgMatches, format: OutputFormat) -> Result
                 .get_one::<String>("plugin")
                 .ok_or_else(|| anyhow!("missing <plugin>"))?
                 .clone();
-            let level = sub
-                .get_one::<String>("level")
-                .cloned()
-                .unwrap_or_else(|| "debug".to_string());
+            let level =
+                sub.get_one::<String>("level").cloned().unwrap_or_else(|| "debug".to_string());
             let since = sub.get_one::<String>("since").cloned();
             let duration_secs = sub.get_one::<u64>("duration").copied();
             tail::run(&id, &level, since.as_deref(), duration_secs).await

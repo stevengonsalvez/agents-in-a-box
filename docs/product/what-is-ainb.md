@@ -2,14 +2,12 @@
 title: "What is agents-in-a-box?"
 ---
 
-# What is agents-in-a-box?
-
 A terminal-native ecosystem for managing AI coding agents. Three components share one monorepo, plus a supporting knowledge library:
 
 | # | Component | What it is |
 |---|---|---|
 | 1 | **`ainb` TUI + CLI** | Rust terminal app for spawning and supervising AI coding sessions. Each session gets its own git worktree and tmux session. Multi-provider: Claude Code, Codex, Gemini, Copilot, Kiro, raw shell, SSH. |
-| 2 | **Toolkit** | Portable skills + agents + workflows that deploy to 9 different AI coding tools from a single source. 86 skills, 37 agents. |
+| 2 | **Toolkit** | Portable skills + agents + workflows that deploy to 11 different AI coding tools from a single source. 86 skills, 37 agents. |
 | 3 | **Plugins (v2 ABI)** | Native-binary plugins for the TUI host. Capability-gated, JSON-RPC over stdio. Own screens, CLIs, statusline segments. Two reference plugins ship in-tree (`burndown`, `session-reader`). |
 | 4 | **`reflect-kb`** | Knowledge capture and retrieval library. Two-tier: QMD for fast vector search + nano-graphrag for cross-project entity-relation queries. Installed as the `reflect` CLI. |
 

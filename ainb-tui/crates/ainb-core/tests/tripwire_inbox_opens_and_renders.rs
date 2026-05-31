@@ -167,24 +167,26 @@ fn inbox_opens_and_renders_seeded_notifications() {
 
     // Pre-assertion 2 (discoverability gate): the HomeScreen V2
     // sidebar MUST list the Inbox tile. Without this, a fresh user
-    // has no visual cue that an inbox exists — the `I` shortcut
+    // has no visual cue that an inbox exists — the `b` shortcut
     // works but is undiscoverable. Tile shape:
     //
-    //     📥  Inbox          [I]
+    //     📥  Inbox          [b]
     //
     // We tolerate trailing whitespace by checking for the icon +
-    // label + shortcut tag separately.
+    // label + shortcut tag separately. The shortcut moved from
+    // `I` (Shift+i) to `b` ("in-Box") to avoid the case-pair
+    // confusion with Stats (`i`).
     assert!(
-        pre.contains("📥") && pre.contains("Inbox") && pre.contains("[I]"),
+        pre.contains("📥") && pre.contains("Inbox") && pre.contains("[b]"),
         "HomeScreen V2 sidebar missing Inbox tile — \
          discoverability regression. Pre-capture:\n{pre}"
     );
 
     // Drive the inbox open shortcut.
     Command::new("tmux")
-        .args(["send-keys", "-t", &session, "I"])
+        .args(["send-keys", "-t", &session, "b"])
         .status()
-        .expect("send-keys I");
+        .expect("send-keys b");
 
     let inbox_deadline = Instant::now() + Duration::from_secs(15);
     let post_cap = poll_capture(&session, inbox_deadline, |c| {

@@ -36,10 +36,7 @@ fn plugins_staged() -> Option<PathBuf> {
     for _ in 0..6 {
         let candidate = dir.join("dist").join("plugins");
         if candidate.join("burndown").join("burndown").exists()
-            && candidate
-                .join("session-reader")
-                .join("session-reader")
-                .exists()
+            && candidate.join("session-reader").join("session-reader").exists()
         {
             return Some(candidate);
         }
@@ -61,10 +58,7 @@ git_directories = []
         env!("CARGO_PKG_VERSION")
     );
     fs::write(cfg.join("onboarding.toml"), onboarding).unwrap();
-    let proj_dir = home
-        .join(".claude")
-        .join("projects")
-        .join("-tripwire-fixture-project");
+    let proj_dir = home.join(".claude").join("projects").join("-tripwire-fixture-project");
     fs::create_dir_all(&proj_dir).unwrap();
     // Two assistant turns so the matrix has at least one row of real
     // data to bucket into a category (Conversation since user_message
@@ -96,9 +90,16 @@ fn usage_models_flat_rollup_renders_in_each_format() {
     seed_isolated_home(home.path());
 
     let json = run_models(&plugin_root, home.path(), &["--format", "json"]);
-    assert!(json.status.success(), "stderr: {}", String::from_utf8_lossy(&json.stderr));
+    assert!(
+        json.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&json.stderr)
+    );
     let json_out = String::from_utf8_lossy(&json.stdout);
-    assert!(json_out.contains("\"models\""), "json missing models key:\n{json_out}");
+    assert!(
+        json_out.contains("\"models\""),
+        "json missing models key:\n{json_out}"
+    );
 
     let csv = run_models(&plugin_root, home.path(), &["--format", "csv"]);
     assert!(csv.status.success());
@@ -111,12 +112,18 @@ fn usage_models_flat_rollup_renders_in_each_format() {
     let md = run_models(&plugin_root, home.path(), &["--format", "markdown"]);
     assert!(md.status.success());
     let md_out = String::from_utf8_lossy(&md.stdout);
-    assert!(md_out.starts_with("# Models"), "markdown flat heading wrong:\n{md_out}");
+    assert!(
+        md_out.starts_with("# Models"),
+        "markdown flat heading wrong:\n{md_out}"
+    );
 
     let text = run_models(&plugin_root, home.path(), &["--format", "text"]);
     assert!(text.status.success());
     let text_out = String::from_utf8_lossy(&text.stdout);
-    assert!(text_out.contains("By Model"), "text flat heading wrong:\n{text_out}");
+    assert!(
+        text_out.contains("By Model"),
+        "text flat heading wrong:\n{text_out}"
+    );
 }
 
 #[test]
@@ -129,8 +136,16 @@ fn usage_models_by_task_matrix_renders_in_each_format() {
     let home = tempfile::tempdir().unwrap();
     seed_isolated_home(home.path());
 
-    let json = run_models(&plugin_root, home.path(), &["--by-task", "--format", "json"]);
-    assert!(json.status.success(), "stderr: {}", String::from_utf8_lossy(&json.stderr));
+    let json = run_models(
+        &plugin_root,
+        home.path(),
+        &["--by-task", "--format", "json"],
+    );
+    assert!(
+        json.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&json.stderr)
+    );
     let out = String::from_utf8_lossy(&json.stdout);
     assert!(
         out.contains("\"schema\": \"ainb.usage.models_by_task.v1\""),
@@ -138,8 +153,14 @@ fn usage_models_by_task_matrix_renders_in_each_format() {
     );
     assert!(out.contains("\"columns\""), "missing columns array:\n{out}");
     assert!(out.contains("Coding"), "missing Coding column:\n{out}");
-    assert!(out.contains("Conversation"), "missing Conversation column:\n{out}");
-    assert!(out.contains("claude-sonnet-4-5"), "missing seeded model row:\n{out}");
+    assert!(
+        out.contains("Conversation"),
+        "missing Conversation column:\n{out}"
+    );
+    assert!(
+        out.contains("claude-sonnet-4-5"),
+        "missing seeded model row:\n{out}"
+    );
 
     let csv = run_models(&plugin_root, home.path(), &["--by-task", "--format", "csv"]);
     assert!(csv.status.success());
@@ -148,9 +169,16 @@ fn usage_models_by_task_matrix_renders_in_each_format() {
         csv_out.starts_with("model,Coding_calls,Coding_tokens,Coding_cost_usd"),
         "csv matrix header wrong:\n{csv_out}"
     );
-    assert!(csv_out.contains("claude-sonnet-4-5"), "missing model row in csv:\n{csv_out}");
+    assert!(
+        csv_out.contains("claude-sonnet-4-5"),
+        "missing model row in csv:\n{csv_out}"
+    );
 
-    let md = run_models(&plugin_root, home.path(), &["--by-task", "--format", "markdown"]);
+    let md = run_models(
+        &plugin_root,
+        home.path(),
+        &["--by-task", "--format", "markdown"],
+    );
     assert!(md.status.success());
     let md_out = String::from_utf8_lossy(&md.stdout);
     assert!(
@@ -158,7 +186,11 @@ fn usage_models_by_task_matrix_renders_in_each_format() {
         "markdown matrix heading wrong:\n{md_out}"
     );
 
-    let text = run_models(&plugin_root, home.path(), &["--by-task", "--format", "text"]);
+    let text = run_models(
+        &plugin_root,
+        home.path(),
+        &["--by-task", "--format", "text"],
+    );
     assert!(text.status.success());
     let text_out = String::from_utf8_lossy(&text.stdout);
     assert!(

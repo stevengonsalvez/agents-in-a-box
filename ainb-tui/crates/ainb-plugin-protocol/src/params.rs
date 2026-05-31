@@ -461,9 +461,9 @@ pub struct NetworkFetchResult {
 /// peers (host paired with an older plugin, or vice versa) keep
 /// working across the version bump.
 mod bytes_serde {
-    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+    use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
     use bytes::Bytes;
-    use serde::{de::Error as _, Deserialize, Deserializer, Serializer};
+    use serde::{Deserialize, Deserializer, Serializer, de::Error as _};
 
     pub(super) fn serialize<S: Serializer>(b: &Bytes, s: S) -> Result<S::Ok, S::Error> {
         s.serialize_str(&B64.encode(b.as_ref()))
@@ -477,19 +477,16 @@ mod bytes_serde {
             Bytes(Vec<u8>),
         }
         match Repr::deserialize(d)? {
-            Repr::B64(s) => B64
-                .decode(s.as_bytes())
-                .map(Bytes::from)
-                .map_err(D::Error::custom),
+            Repr::B64(s) => B64.decode(s.as_bytes()).map(Bytes::from).map_err(D::Error::custom),
             Repr::Bytes(v) => Ok(Bytes::from(v)),
         }
     }
 }
 
 mod opt_bytes_serde {
-    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+    use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
     use bytes::Bytes;
-    use serde::{de::Error as _, Deserialize, Deserializer, Serializer};
+    use serde::{Deserialize, Deserializer, Serializer, de::Error as _};
 
     // serde's serialize_with signature requires `&Option<T>` here —
     // can't reshape to the otherwise-idiomatic `Option<&T>`.
@@ -511,10 +508,9 @@ mod opt_bytes_serde {
         let opt = Option::<Repr>::deserialize(d)?;
         match opt {
             None => Ok(None),
-            Some(Repr::B64(s)) => B64
-                .decode(s.as_bytes())
-                .map(|v| Some(Bytes::from(v)))
-                .map_err(D::Error::custom),
+            Some(Repr::B64(s)) => {
+                B64.decode(s.as_bytes()).map(|v| Some(Bytes::from(v))).map_err(D::Error::custom)
+            }
             Some(Repr::Bytes(v)) => Ok(Some(Bytes::from(v))),
         }
     }
@@ -572,9 +568,7 @@ mod tests {
             exit_code: 0,
         });
 
-        rt(&SnapshotGetParams {
-            topic: "t".into(),
-        });
+        rt(&SnapshotGetParams { topic: "t".into() });
         rt(&SnapshotGetResult {
             payload: Some(bytes::Bytes::from_static(b"x")),
             version: 1,
@@ -587,9 +581,7 @@ mod tests {
             topic: "t".into(),
             payload: bytes::Bytes::from_static(b"x"),
         });
-        rt(&SnapshotSubscribeParams {
-            topic: "t".into(),
-        });
+        rt(&SnapshotSubscribeParams { topic: "t".into() });
         rt(&SnapshotSubscribeResult::default());
 
         rt(&ActionInvokeParams {

@@ -2,8 +2,6 @@
 title: "Plugin user guide"
 ---
 
-# Plugin user guide
-
 User-facing reference for the `ainb plugin` family of commands. New to plugins? Read [overview.md](./overview.md) first. Writing one? [authoring.md](./authoring.md). Wire contract: [spec-v2.md](./spec-v2.md).
 
 ## Status of the install / marketplace flow

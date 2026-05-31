@@ -1,7 +1,4 @@
-use ainb_plugin_sdk::{
-    HostClient, Plugin, Result, Server,
-    RenderParams, WireBuffer, Cell, Coord,
-};
+use ainb_plugin_sdk::{Cell, Coord, HostClient, Plugin, RenderParams, Result, Server, WireBuffer};
 use async_trait::async_trait;
 
 struct A02;

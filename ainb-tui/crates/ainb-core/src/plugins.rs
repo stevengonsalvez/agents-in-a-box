@@ -465,12 +465,11 @@ mod plugin_filter_tests {
     fn describe_renders_sorted_names_for_logs() {
         // Log line stability — sorting prevents iteration-order churn
         // between processes (HashSet has no order guarantee).
-        let f = resolve_plugin_filter(
-            Some("zebra,alpha,middle"),
-            None,
-            &PluginsConfig::default(),
-        );
+        let f = resolve_plugin_filter(Some("zebra,alpha,middle"), None, &PluginsConfig::default());
         let desc = f.describe().expect("Allow filter must describe");
-        assert!(desc.contains(r#"["alpha", "middle", "zebra"]"#), "got: {desc}");
+        assert!(
+            desc.contains(r#"["alpha", "middle", "zebra"]"#),
+            "got: {desc}"
+        );
     }
 }
