@@ -19,6 +19,6 @@ claude plugin install ainb-fleet@agents-in-a-box
 |---|---|---|
 | [reflect](./reflect.md) | Agent self-improvement + retrieval — captures learnings and auto-injects relevant prior ones at session start. | `claude plugin install reflect@agents-in-a-box` |
 | [ainb-fleet](./ainb-fleet.md) | LLM-facing skill bundle teaching agents to drive `ainb fleet …` multi-session orchestration (broadcast, sequence, needs, daemon). | `claude plugin install ainb-fleet@agents-in-a-box` |
-| [ainb-hooks](./ainb-hooks.md) | Emits Claude Code / Codex lifecycle events to the ainb notification inbox (pairs with the [`notifyd`](../../plugins/notifyd.md) in-tree plugin). | `ainb-notifyd install --claude --codex` |
+| [ainb-hooks](./ainb-hooks.md) | Emits Claude Code / Codex lifecycle events to the ainb notification inbox (consumed by the [Inbox & notifications](../../tui/inbox-notifications.md) daemon — host code, not a plugin). | `ainb-notifyd install --claude --codex` |
 
 Each page below has a `/fireworks-tech-graph` diagram of how the plugin works, the exact hooks/skills it registers, and how to use it.

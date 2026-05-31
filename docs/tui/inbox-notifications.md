@@ -1,13 +1,15 @@
 ---
-title: "notifyd plugin"
-description: "Notification daemon + Inbox screen that captures Claude Code and Codex hook events into SQLite."
+title: "Inbox & notifications"
+description: "The ainb-tui Inbox screen + the ainb-notifyd daemon that captures Claude Code and Codex hook events into SQLite. Host code, not a plugin."
 ---
 
-`notifyd` owns the **Inbox** screen and ships a standalone notification daemon (`ainb-notifyd`) that captures Claude Code and Codex lifecycle hook events into SQLite. It is the reference for an **event-capturing, screen-owning** integration — but, unlike the subprocess plugins (`burndown`, `session-reader`, `witr`), it is **compiled in-tree into the host** rather than spawned over JSON-RPC. The `ainb-plugin-notifyd` crate is a library + daemon binary that `ainb-core` links against directly.
+The **Inbox** screen and the **`ainb-notifyd`** daemon are part of the `ainb` host binary — **not** an ainb plugin. This page documents them together because they are two halves of one feature: the daemon captures Claude Code / Codex lifecycle hook events into SQLite, and the Inbox screen (plus the per-session `●N` badges) renders them inside `ainb-tui`.
+
+> **Why it's not a plugin.** The crate is *named* `ainb-plugin-notifyd` (it lives alongside the example plugin crates), but it has no `manifest.toml`, no JSON-RPC boundary, and is never spawned as a subprocess. `ainb-core` links it as an ordinary Rust path-dependency and compiles it straight into the host. Contrast with the real v2 subprocess plugins — `burndown`, `session-reader`, `witr` — which run as spawned child processes over stdio JSON-RPC and are governed by the capability gate. The **only** plugin in this feature is [`ainb-hooks`](../toolkit/plugins/ainb-hooks.md), and that is a plugin of the *host agent* (Claude Code / Codex), installed into their config dirs — not a plugin of `ainb`.
 
 ## How it works
 
-![notifyd plugin — how it works](../assets/diagrams/notifyd.svg)
+![Inbox & notifications — how it works](../assets/diagrams/notifyd.svg)
 
 The capture path starts outside ainb. The `ainb-hooks` plugin (a thin bash hook, `notify.sh`) is installed into Claude Code (`~/.claude/plugins/ainb-hooks/`) and Codex (`~/.codex/hooks.json`). When a host agent fires a lifecycle hook — `SessionStart`, `UserPromptSubmit`, `PostToolUse`, `Notification`, `Stop`, `PreCompact` — the script normalizes the payload into a JSON `Envelope` (`protocol_version`, `agent`, `raw_event`, `session_id`, `cwd`, `project`, `ts`, `payload`) and writes one newline-terminated line to the Unix socket at `~/.agents-in-a-box/notify.sock`. If the socket is absent it lazy-spawns the daemon; if delivery still fails it appends the envelope to `notify.fallback.jsonl`. The hook always exits `0` so a delivery failure never blocks the agent.
 
@@ -17,9 +19,9 @@ Storage is a dedicated SQLite database, `~/.agents-in-a-box/notifications.db`, o
 
 The render side lives in `ainb-core`. The **Inbox** screen (`components/inbox.rs`) holds a long-lived `Store` handle and re-queries SQLite on every render tick (cheap with WAL + `LIMIT 200`). It paints a two-pane list + detail view, and supports mark-read, dismiss, dismiss-all-visible, an archived toggle, and an agent filter. The Sessions screen also reads the store's `unread_by_cwd` grouping to draw a per-session `●N` unread badge, correlating an ainb session to its hook events by working directory. Because `notifyd` is in-tree, it reaches the filesystem, the socket, and the OS notifier directly — there is no JSON-RPC boundary, no `plugin/render` / `plugin/cli_dispatch`, and no `host/snapshot/publish`.
 
-## Capabilities
+## Host resources it touches
 
-`notifyd` is **not** a v2 subprocess plugin: it has no `manifest.toml` and declares **no capabilities**. It is part of the host binary (the `ainb-plugin-notifyd` crate is a path dependency of `ainb-core`), so the capability gate that governs subprocess plugins does not apply to it. For reference, the host-side resources it touches directly are:
+Because this is host code, there is **no manifest and no capability declaration** — the capability gate that governs subprocess plugins does not apply. It reaches the filesystem, the socket, and the OS notifier directly. For reference, the host-side resources it touches are:
 
 | Resource | Why it is needed |
 |----------|------------------|
