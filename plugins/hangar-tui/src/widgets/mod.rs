@@ -26,5 +26,6 @@ pub mod frosted_banner;
 pub mod key_entry;
 pub mod presence_dot;
 pub mod sidebar;
+pub mod sparkline_dual;
 pub mod transcript;
 pub mod working_chip;
