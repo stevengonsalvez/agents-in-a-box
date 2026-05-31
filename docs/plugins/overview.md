@@ -34,14 +34,15 @@ The host (`ainb-core`) spawns each plugin as a child process and drives it over 
 
 ## Reference plugins
 
-Four plugins ship in-tree as the canonical examples:
+Three plugins ship in-tree as the canonical examples:
 
 - **[`burndown`](./burndown.md)** — screen-owner reference. Owns the Analytics screen (renders a ratatui dashboard into a `WireBuffer` each frame) and the `ainb usage` CLI tree; subscribes to `sessions.usage_data` from `session-reader`.
 - **[`session-reader`](./session-reader.md)** — pure-publisher reference. No screen. Scans `~/.claude/projects/**`, `~/.codex/sessions/**` (and more) and chunk-publishes usage snapshots on `sessions.usage_data` for `burndown` to render.
 - **[`witr`](./witr.md)** — subprocess-wrapper reference. The `ainb witr <target>` CLI + `/witr` slash run `witr --json <target>` and parse the ancestry JSON; its **screen** is a host-embedded foreign TTY (`w` hands the terminal to `witr -i` — see [the two render paths](#two-ways-a-plugin-screen-renders)). Declares `spawn_subprocess` + `event_bus`.
-- **[`notifyd`](./notifyd.md)** — note: *not* a v2 subprocess plugin. It's an in-tree daemon (binary `ainb-notifyd`) compiled into `ainb-core` that owns the Inbox screen and captures Claude Code / Codex hook events into SQLite; documented here as a sibling for completeness.
 
 Each links to its own page with a `/fireworks-tech-graph` diagram of how it works.
+
+> **Not a plugin:** the Inbox screen + `ainb-notifyd` daemon are sometimes mistaken for an in-tree plugin (the crate is named `ainb-plugin-notifyd`). They are **host code compiled into `ainb-core`** — no manifest, no JSON-RPC, no capability gate. They're documented under [TUI → Inbox & notifications](../tui/inbox-notifications.md), not here.
 
 ![Burndown plugin — full analytics dashboard](../assets/screenshots/burndown.png)
 
@@ -64,7 +65,7 @@ dist/plugins/
     └── manifest.toml
 ```
 
-(`notifyd` is **not** here — it's a daemon compiled into `ainb-core`, not a staged subprocess plugin; see [its page](./notifyd.md).)
+(`notifyd` is **not** here — it's a daemon compiled into `ainb-core`, not a staged subprocess plugin; see [TUI → Inbox & notifications](../tui/inbox-notifications.md).)
 
 That layout is what `just stage-plugins` produces from in-tree crates, and what the host walks on startup. The `AINB_PLUGIN_ROOT` env var overrides it (defaults to `<workspace-root>/dist/plugins`).
 

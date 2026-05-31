@@ -17,7 +17,7 @@ What the rest of this directory documents.
 - **Runtime:** the `ainb` TUI spawns each plugin as a native child process and talks JSON-RPC 2.0 over framed stdio
 - **What they can do:** own a TUI screen, claim a CLI subcommand tree, publish/subscribe to snapshot topics, paint statusline segments
 - **Capability model:** deny-by-default; manifest declares grants for filesystem, network, subprocess, event bus
-- **Reference plugins:** `burndown` (analytics), `notifyd` (notifications), `session-reader` (data backend), and `witr` (process causality, wraps an external binary) — all ship in-tree
+- **Reference plugins:** `burndown` (analytics), `session-reader` (data backend), and `witr` (process causality, wraps an external binary) — all ship in-tree as real subprocess plugins. (Notifications are **not** a plugin — the Inbox + `ainb-notifyd` daemon are host code compiled into `ainb-core`; see [TUI → Inbox & notifications](../tui/inbox-notifications.md).)
 
 If you want to **add a screen / CLI / dashboard to the TUI**, you want this kind of plugin. Continue to:
 - [overview.md](overview.md) — what a v2 plugin is, conceptually
@@ -31,7 +31,7 @@ A separate system owned by Claude Code itself. The monorepo ships **three** Clau
 
 - **[`reflect`](../toolkit/plugins/reflect.md)** — agent self-improvement + retrieval (skills + SessionStart/PostToolUse/Stop hooks). `claude plugin install reflect@agents-in-a-box`
 - **[`ainb-fleet`](../toolkit/plugins/ainb-fleet.md)** — LLM-facing skill bundle teaching agents to drive `ainb fleet …` multi-session orchestration. `claude plugin install ainb-fleet@agents-in-a-box`
-- **[`ainb-hooks`](../toolkit/plugins/ainb-hooks.md)** — emits Claude Code / Codex lifecycle events to the ainb notification inbox (pairs with the `notifyd` in-tree plugin); wired by `ainb-notifyd install`.
+- **[`ainb-hooks`](../toolkit/plugins/ainb-hooks.md)** — emits Claude Code / Codex lifecycle events to the ainb notification inbox (consumed by the [Inbox & notifications](../tui/inbox-notifications.md) daemon — host code, not a plugin); wired by `ainb-notifyd install`.
 
 - **Distribution:** through `.claude-plugin/marketplace.json` at the repo root, which the Claude Code CLI reads
 - **Runtime:** Claude Code itself loads them as skill/hook bundles; the ainb TUI is not involved

@@ -3,7 +3,7 @@ title: "ainb-hooks"
 description: "Claude Code / Codex plugin that emits session lifecycle events to the ainb notification inbox over a Unix socket."
 ---
 
-`ainb-hooks` (v0.1.0) is a **Claude Code plugin** — it is loaded by the Claude Code (and Codex CLI) host agent, not by the `ainb` TUI. (Contrast with the ainb v2 subprocess plugins such as `burndown` and `witr`, which run inside `ainb`.) It registers lifecycle hooks on the host agent and forwards each event to the **ainb notification inbox** — the `ainb-notifyd` daemon — over a Unix socket, powering session-state badges, the Inbox screen, and optional OS notifications in `ainb-tui`. It pairs with the in-tree [notifyd](../../plugins/notifyd.md) plugin, which is the consumer on the other end of the socket.
+`ainb-hooks` (v0.1.0) is a **Claude Code plugin** — it is loaded by the Claude Code (and Codex CLI) host agent, not by the `ainb` TUI. (Contrast with the ainb v2 subprocess plugins such as `burndown` and `witr`, which run inside `ainb`.) It registers lifecycle hooks on the host agent and forwards each event to the **ainb notification inbox** — the `ainb-notifyd` daemon — over a Unix socket, powering session-state badges, the Inbox screen, and optional OS notifications in `ainb-tui`. It pairs with the [Inbox & notifications](../../tui/inbox-notifications.md) daemon (`ainb-notifyd`) — host code compiled into `ainb-core`, not a plugin — which is the consumer on the other end of the socket.
 
 ## How it works
 
