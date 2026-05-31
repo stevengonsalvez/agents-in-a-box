@@ -30,7 +30,27 @@
 
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+/// Deserialize a value witr may emit as `null`, mapping `null` to
+/// `T::default()`.
+///
+/// witr is written in Go, whose `encoding/json` marshals a **nil** slice
+/// or map as JSON `null` rather than `[]`/`{}`. A process with no open
+/// sockets serializes `"Sockets": null`, an empty source-details map
+/// serializes `"Details": null`, and so on. `#[serde(default)]` only
+/// supplies the default when the key is *absent* — an explicit `null`
+/// still hits the field's `Deserialize` impl and errors ("invalid type:
+/// null, expected a sequence"). Every collection field witr can leave
+/// empty therefore pairs `default` with this so `null` decodes to the
+/// empty collection.
+fn null_to_default<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
+}
 
 /// Top-level witr snapshot. Renamed from Go's `Result` to avoid
 /// colliding with [`std::result::Result`] in Rust call sites; the
@@ -51,19 +71,21 @@ pub struct WitrSnapshot {
     #[serde(default)]
     pub restart_count: i64,
     /// Chain of ancestors (parents up to PID 1).
+    #[serde(default, deserialize_with = "null_to_default")]
     pub ancestry: Vec<Process>,
     /// Child processes (omitted by upstream when empty). Note the
     /// type difference vs [`Process::children`]: this field carries
     /// full resolved `Process` structs (one tree level down from the
     /// target), whereas `Process::children` is `Vec<i64>` of PIDs
     /// only. The naming collision is upstream's; the types diverge.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub children: Vec<Process>,
     /// Where this process came from (systemd / launchd / container /
     /// shell / cron / ...).
     pub source: Source,
     /// Soft warnings the detector wants surfaced — e.g. "running as
     /// root", "executable deleted".
+    #[serde(default, deserialize_with = "null_to_default")]
     pub warnings: Vec<String>,
     /// Socket state for `port`-typed targets. Held opaque for v1 —
     /// refine in cfx.5 if the Ports tab needs typed access.
@@ -146,7 +168,7 @@ pub struct Process {
     pub service: String,
     /// All sockets owned by the process. Opaque for v1 — typed in
     /// cfx.5 when the Ports tab needs each socket's fields.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub sockets: Vec<serde_json::Value>,
     /// Health classification (`"healthy"` / `"zombie"` / `"stopped"` /
     /// `"high-cpu"` / `"high-mem"`).
@@ -156,14 +178,14 @@ pub struct Process {
     #[serde(default)]
     pub forked: String,
     /// Environment variables as `KEY=value` strings.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub env: Vec<String>,
     /// True if the on-disk executable was deleted after the process
     /// started — common with rolling deploys.
     #[serde(default)]
     pub exe_deleted: bool,
     /// Linux capabilities the process holds.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub capabilities: Vec<String>,
     /// Detailed memory breakdown. Opaque for v1.
     #[serde(default)]
@@ -172,7 +194,7 @@ pub struct Process {
     #[serde(default, rename = "IO")]
     pub io: Option<serde_json::Value>,
     /// File descriptors as strings.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub file_descs: Vec<String>,
     /// Count of open FDs.
     #[serde(default, rename = "FDCount")]
@@ -184,7 +206,7 @@ pub struct Process {
     /// field carries `Vec<Process>` (resolved structs); this is just
     /// the PID numbers. Same name in upstream's JSON, different
     /// types depending on which struct owns the field.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub children: Vec<i64>,
     /// Thread count.
     #[serde(default)]
@@ -211,7 +233,7 @@ pub struct Source {
     #[serde(default)]
     pub unit_file: String,
     /// Source-specific extra metadata as opaque key/value pairs.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub details: BTreeMap<String, String>,
 }
 
@@ -319,6 +341,49 @@ mod tests {
         let snap: WitrSnapshot =
             serde_json::from_str(raw).expect("unknown field must not break parse");
         assert_eq!(snap.target.value, "x");
+    }
+
+    #[test]
+    fn decodes_go_null_collections() {
+        // witr is Go; `encoding/json` marshals a nil slice/map as JSON
+        // `null`, not `[]`/`{}`. A real `witr --json` against a process
+        // with no open sockets / no source details / no warnings emits
+        // explicit `null` for those fields. `#[serde(default)]` alone
+        // does NOT cover an explicit `null` (only a missing key), so
+        // without `null_to_default` this used to fail with "invalid
+        // type: null, expected a sequence" and the whole snapshot was
+        // discarded as ExecResult::NonZero. Pin every nullable
+        // collection here so that regression can't return.
+        let raw = r#"{
+            "Target": {"Type": "pid", "Value": "4242"},
+            "ResolvedTarget": "zsh",
+            "Process": {
+                "PID": 4242,
+                "PPID": 800,
+                "Command": "zsh",
+                "Sockets": null,
+                "Env": null,
+                "Capabilities": null,
+                "FileDescs": null,
+                "Children": null
+            },
+            "Ancestry": null,
+            "Children": null,
+            "Source": {"Type": "shell", "Name": "zsh", "Details": null},
+            "Warnings": null
+        }"#;
+        let snap: WitrSnapshot =
+            serde_json::from_str(raw).expect("Go-style null collections must decode");
+        assert_eq!(snap.process.pid, 4242);
+        assert!(snap.ancestry.is_empty());
+        assert!(snap.warnings.is_empty());
+        assert!(snap.children.is_empty());
+        assert!(snap.process.sockets.is_empty());
+        assert!(snap.process.env.is_empty());
+        assert!(snap.process.capabilities.is_empty());
+        assert!(snap.process.file_descs.is_empty());
+        assert!(snap.process.children.is_empty());
+        assert!(snap.source.details.is_empty());
     }
 
     #[test]

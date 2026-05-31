@@ -274,28 +274,41 @@ pub async fn exec_witr_json(path: &Path, target: &WitrTarget) -> ExecResult {
         }
     };
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let code = output.status.code();
-        // `debug!` not `warn!` — "target not found" is witr's normal
-        // exit-1 path and a user will hit it constantly. The render
-        // banner surfaces the stderr text; the runtime log shouldn't
-        // shout about it.
-        tracing::debug!(target = %target.cache_key(), code, %stderr, "witr --json non-zero exit");
-        return ExecResult::NonZero { code, stderr };
-    }
-
-    // Decode straight from bytes so non-UTF-8 stdout surfaces as a
-    // serde error rather than being silently smoothed over by
-    // `from_utf8_lossy`. Only the error branch pays for the lossy
-    // string conversion (for the bounded excerpt).
+    // Decode FIRST, regardless of exit status. witr signals "warnings
+    // present" (suspicious env / args / parents) by exiting non-zero
+    // even when it printed a complete, valid JSON snapshot to stdout —
+    // those warnings live in the snapshot's `Warnings` field, so a
+    // non-zero exit is a status code, not a failure. A successful decode
+    // therefore wins regardless of the exit code; only when there's no
+    // parseable snapshot do we fall back to NonZero (the genuine
+    // not-found / error path, which carries empty or non-JSON stdout).
+    //
+    // Decode straight from bytes so non-UTF-8 stdout surfaces as a serde
+    // error rather than being silently smoothed over by `from_utf8_lossy`;
+    // only the error branches pay for the lossy conversion.
     match serde_json::from_slice::<WitrSnapshot>(&output.stdout) {
         Ok(snap) => ExecResult::Ok(Box::new(snap)),
-        Err(e) => {
-            tracing::warn!(?target, error = %e, "witr --json output failed to decode");
+        Err(parse_err) if !output.status.success() => {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let code = output.status.code();
+            // `debug!` not `warn!` — "target not found" is witr's normal
+            // exit-non-zero-without-output path and a user will hit it
+            // constantly. The render banner surfaces the stderr text; the
+            // runtime log shouldn't shout about it.
+            tracing::debug!(
+                target = %target.cache_key(),
+                code,
+                %stderr,
+                "witr --json non-zero exit with no parseable snapshot"
+            );
+            ExecResult::NonZero { code, stderr }
+        }
+        Err(parse_err) => {
+            // Exit 0 but undecodable — genuine schema drift / corruption.
+            tracing::warn!(?target, error = %parse_err, "witr --json output failed to decode");
             let lossy = String::from_utf8_lossy(&output.stdout);
             ExecResult::ParseError {
-                error: e.to_string(),
+                error: parse_err.to_string(),
                 raw_stdout_excerpt: excerpt(&lossy),
             }
         }

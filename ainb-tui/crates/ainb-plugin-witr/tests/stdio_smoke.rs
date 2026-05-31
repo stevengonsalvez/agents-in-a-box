@@ -191,7 +191,10 @@ fn init_render_cli_dispatch_shutdown_round_trip() {
     );
     let resp = read_frame(&mut stdout).expect("render response");
     assert_eq!(resp["id"], 2);
-    assert!(resp["result"]["buffer"].is_object(), "render buffer: {resp}");
+    assert!(
+        resp["result"]["buffer"].is_object(),
+        "render buffer: {resp}"
+    );
 
     // 3. cli_dispatch — `ainb witr --help`. Returns help on stdout with
     // exit 0 (conventional), no witr binary required.

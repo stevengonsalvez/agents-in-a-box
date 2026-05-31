@@ -54,14 +54,15 @@ async fn real_witr_self_pid_parses_into_model() {
                 snap.ancestry.len()
             );
         }
-        // A NonZero is tolerated only as a last resort on a hostile
-        // host — what must NOT happen is a parse failure (schema drift)
-        // or spawn failure against a present binary + our own PID.
-        ExecResult::NonZero { code, stderr } => {
-            eprintln!("witr --pid {self_pid} exited {code:?}: {stderr} — tolerated");
-        }
+        // Once the binary is present (we skip above otherwise), scanning
+        // our OWN live PID must succeed — `witr --pid <self>` always has a
+        // valid target. A non-zero exit, parse failure, or spawn failure
+        // here signals a real regression (witr CLI contract drift, schema
+        // change, or our exec breaking), so fail loudly instead of staying
+        // green. (The skip-when-absent guard already covers hosts without
+        // witr; this branch is only reached with the binary installed.)
         other => panic!(
-            "real witr against our own PID must parse or cleanly exit non-zero, got {other:?}"
+            "real witr --pid {self_pid} (our own live PID) must decode to ExecResult::Ok, got {other:?}"
         ),
     }
 }
