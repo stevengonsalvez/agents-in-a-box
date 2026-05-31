@@ -71,6 +71,11 @@ MAX_TURNS="${REFLECT_DRAIN_MAX_TURNS:-8}"
 TOKEN_MAX="${REFLECT_DRAIN_TOKEN_MAX:-2000000}"
 DRAIN_MODEL="${REFLECT_DRAIN_MODEL:-sonnet}"
 DEBOUNCE_SEC="${REFLECT_DRAIN_DEBOUNCE_SEC:-600}"
+CASCADE_ENABLED="${REFLECT_DRAIN_CASCADE:-1}"   # W4: gate+slice before /reflect
+
+# Locate sibling scripts (cascade) relative to this hook, robust to symlinks.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CASCADE_SCRIPT="${SCRIPT_DIR}/../scripts/reflect_cascade.py"
 
 mkdir -p "$STATE_DIR"
 
@@ -163,12 +168,33 @@ debounce_ok() {
 }
 
 # ── Daily cost cap ────────────────────────────────────────────────────────────
+# Sum the `entries` field for today (NOT line count): LLM-invoking outcomes set
+# entries=1, while $0 outcomes (cascade skip, stale, pre-run poison) set
+# entries=0 — so gated skips never consume the daily budget the cap protects.
 today_drain_count() {
     if [[ ! -f "$COST_FILE" ]]; then echo 0; return; fi
     local today
     today=$(date -u +%Y-%m-%d)
-    # Count entries from today.
-    grep -c "\"day\":\"${today}\"" "$COST_FILE" 2>/dev/null || echo 0
+    python3 - "$COST_FILE" "$today" <<'PY' 2>/dev/null || echo 0
+import json, sys
+path, today = sys.argv[1], sys.argv[2]
+n = 0
+try:
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                e = json.loads(line)
+            except Exception:
+                continue
+            if e.get("day") == today:
+                n += int(e.get("entries", 1) or 0)
+except FileNotFoundError:
+    pass
+print(n)
+PY
 }
 
 record_cost_event() {
@@ -311,18 +337,47 @@ process_entry() {
 
     log "  process: session=$session_id trigger=$trigger retries=$retry transcript=$transcript"
 
+    # ── Cascade (W4): gate + slice before any model spend ──────────────────────
+    # Default-on. Skips reflect-on-reflect / no-signal / already-captured for $0,
+    # and shrinks the input from the full transcript to just the signal-bearing
+    # windows (~10x) so /reflect runs cheap on Sonnet with a low turn budget.
+    local reflect_target="$transcript" slice_path=""
+    if [[ "$CASCADE_ENABLED" == "1" && -f "$CASCADE_SCRIPT" ]]; then
+        local prep_json prep_action prep_reason prep_slice
+        # prepare exits 0=reflect / 1=skip but ALWAYS prints valid JSON to
+        # stdout. Capture stdout directly — do NOT `|| echo {}`, which would
+        # append a second object and corrupt the parse. Empty (true crash)
+        # falls through to the "reflect" default below (fail-open).
+        prep_json=$(python3 "$CASCADE_SCRIPT" prepare "$transcript" 2>>"$LOG_FILE")
+        [[ -z "$prep_json" ]] && prep_json='{}'
+        prep_action=$(printf '%s' "$prep_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("action","reflect"))' 2>/dev/null || echo "reflect")
+        prep_reason=$(printf '%s' "$prep_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("reason",""))' 2>/dev/null || echo "")
+        if [[ "$prep_action" == "skip" ]]; then
+            log "  cascade skip ($prep_reason): no model spend"
+            record_cost_event 0 "$transcript" "skip_${prep_reason//[^a-zA-Z0-9_]/_}"
+            return 2  # permanent skip — drop from queue
+        fi
+        prep_slice=$(printf '%s' "$prep_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("slice_path") or "")' 2>/dev/null || echo "")
+        if [[ -n "$prep_slice" && -f "$prep_slice" ]]; then
+            reflect_target="$prep_slice"
+            slice_path="$prep_slice"
+            log "  cascade: sliced transcript -> $prep_slice (reflecting on slice)"
+        fi
+    fi
+
     if [[ "$DRY_RUN" == "1" ]]; then
-        log "    DRY_RUN=1 → would have called: $CLAUDE_BIN -p ... /reflect $transcript"
+        log "    DRY_RUN=1 → would have called: $CLAUDE_BIN -p --model $DRAIN_MODEL ... /reflect $reflect_target"
+        [[ -n "$slice_path" ]] && rm -f "$slice_path"
         record_cost_event 1 "$transcript" "dry_run"
         return 0
     fi
 
-    # Build the prompt. The /reflect skill expects to analyze the transcript;
-    # we hand it the explicit path so it doesn't have to guess.
+    # Build the prompt. The /reflect skill analyzes whatever path we hand it —
+    # the cascade slice when enabled, else the full transcript.
     local prompt
     prompt="/reflect
 
-Process the transcript at: ${transcript}
+Process the transcript at: ${reflect_target}
 
 Extract any HIGH-confidence corrections, MEDIUM-confidence approved approaches, and noteworthy patterns. Write each as a learning document via the standard reflect workflow. When done, summarize what you captured. Do NOT touch the queue file — the drain script handles archiving."
 
@@ -334,6 +389,9 @@ Extract any HIGH-confidence corrections, MEDIUM-confidence approved approaches, 
         --permission-mode bypassPermissions \
         --max-turns "$MAX_TURNS" 2>>"$LOG_FILE")
     exit_code=$?
+
+    # Slice is consumed — remove it regardless of how the run turns out.
+    [[ -n "$slice_path" ]] && rm -f "$slice_path"
 
     # We expect a JSON object on stdout regardless of exit code (claude -p
     # writes the result envelope even on max_turns / errors).

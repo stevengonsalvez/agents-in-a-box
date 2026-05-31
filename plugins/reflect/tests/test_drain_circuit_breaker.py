@@ -50,6 +50,9 @@ def _run(state_dir: Path, **env_overrides) -> subprocess.CompletedProcess:
             "REFLECT_DRAIN_DRY_RUN": "1",
             "REFLECT_DRAIN_SKIP_REINDEX": "1",
             "REFLECT_DRAIN_DEBOUNCE_SEC": "0",
+            # Isolate circuit-breaker mechanics from the W4 cascade gate, which
+            # would otherwise skip the synthetic `{}` transcript as no-signal.
+            "REFLECT_DRAIN_CASCADE": "0",
         }
     )
     env.update({k: str(v) for k, v in env_overrides.items()})
