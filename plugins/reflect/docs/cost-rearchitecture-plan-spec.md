@@ -178,6 +178,36 @@ Re-architect the reflect drain pipeline after a background drain burned **41.5M 
 - [ ] launchd drain interval (default: 10 min) — confirm.
 - [ ] Vector dedup threshold (default cos > 0.85) — tune after telemetry.
 
+## Implementation status (2026-05-31)
+
+All five workstreams implemented on branch `worktree-reflect-cost-rearchitecture`;
+82 in-scope tests green (pre-existing recall-integration failures are unrelated —
+verified identical on clean `main`).
+
+| WS | commit | what landed | tests |
+|---|---|---|---|
+| W1 | `50131d2` | caps 8t/180s + 2M poison, atomic mkdir lock, debounce, kill switch, sonnet model, dry-run isolation | 6 |
+| W2 | `2c421d9` | `reflect_gate.py` skip-gate + dedup, wired into both producers | 15 |
+| W3 | `73e0241` | full token envelope in cost log, `reflect_cost.py`, `backfill_costs.py` | 8 |
+| W4 | `cfe39cb` | `reflect_cascade.py` gate+slice (~10× input cut), drainer wiring default-on | 9 |
+| W5 | `2eca356` | surfacer retired, `graphml_repair.py` self-heal, neutral cwd, `regate_backlog.py`, `reflect_synthesis.py` + launchd | 11 |
+
+**Validation highlights (real data):**
+- Backfill: ~1.2B tokens / 446 reflect runs / ~$7k est. in 30 days, almost all Opus; incident run `5ff8b14d` = 41.5M tok ≈ $713.
+- Backlog re-gate dry-run: **114 queued → 13 kept / 101 dropped** (81 reflect-on-reflect, 20 dups) — 89% was worthless.
+- The incident transcript `5ff8b14d` now SKIPs at the gate (reflect-on-reflect), $0.
+
+**De-scoped (with rationale):** the full sqlite-queue migration. W2 dedup
+(path + processed-set) and W4 signal-hash already deliver idempotency in
+practice; the sqlite rewrite is robustness polish at the highest migration
+risk — tracked as a focused follow-up. The JSONL queue + `regate_backlog.py`
+cover the immediate need.
+
+**Deploy-verified (not unit-testable here — no reflect-kb/KB/launchd in worktree):**
+live Sonnet `/reflect` extract quality on slices, KB vector candidate-dedup,
+the launchd timers, and the weekly Opus synthesis model call. The deterministic
+cores of each are unit-tested; the LLM/launchd edges verify on deploy.
+
 ---
 
-*Generated through systematic interview of `cost-rearchitecture-plan.md`. Eight decisions locked; ready for `/implement` on approval.*
+*Generated through systematic interview of `cost-rearchitecture-plan.md`. Eight decisions locked; implemented W1–W5.*
