@@ -25,14 +25,17 @@
 pub mod snapshots;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
-use ainb_hangar_core::clock::SystemClock;
+use ainb_hangar_core::clock::{HangarClock, SystemClock};
 use ainb_hangar_core::ids::{AgentId, AutopilotId, SkillId, WorkspaceId};
 use ainb_hangar_proto::methods;
-use ainb_hangar_proto::settings::HealthSnapshot;
+use ainb_hangar_proto::settings::{DaemonHealthSnapshot, HealthSnapshot};
 use ainb_hangar_proto::{RpcError, RpcId, RpcRequest, RpcResponse};
 use sqlx::SqlitePool;
+
+use crate::health_stats::HealthStats;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
@@ -60,6 +63,10 @@ pub struct DaemonHealth {
     pub started_at: Instant,
     /// Daemon version string (crate version).
     pub version: String,
+    /// Shared in-memory health stats collector (the rolling throughput ring +
+    /// claim-cache figure) backing the `hangar/daemon_health` pane (P8.5). Shared
+    /// with the FSM finalize path that records terminal task outcomes.
+    pub stats: Arc<HealthStats>,
 }
 
 impl DaemonHealth {
@@ -283,6 +290,7 @@ async fn handle(
             Ok(serde_json::json!({}))
         }
         methods::HANGAR_HEALTH => to_value(&health.snapshot(true)),
+        methods::HANGAR_DAEMON_HEALTH => handle_daemon_health(pool, req, health).await,
         other => Err(RpcError {
             code: METHOD_NOT_FOUND,
             message: format!("unknown method: {other}"),
@@ -529,6 +537,54 @@ async fn handle_autopilot(
     }
 }
 
+/// Dispatch `hangar/daemon_health` (P8.5).
+///
+/// Resolves the workspace (an unknown one yields empty runtimes + zero
+/// concurrency, but the daemon-global throughput window + claim-cache figure
+/// still report), then builds + serialises the snapshot.
+async fn handle_daemon_health(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+    health: &DaemonHealth,
+) -> Result<serde_json::Value, RpcError> {
+    let ws = resolve(pool, req).await?;
+    let snapshot = daemon_health_snapshot(pool, health, ws.as_deref(), &SystemClock)
+        .await
+        .map_err(|e| store_err(&e))?;
+    to_value(&snapshot)
+}
+
+/// Build the [`DaemonHealthSnapshot`] for the `hangar/daemon_health` pane (P8.5).
+///
+/// Mixes real read-model state (the workspace's registered runtimes + its
+/// concurrent-task count, both empty/zero for an unknown workspace) with the
+/// daemon's in-memory stats (the rolling 60-second throughput window and the
+/// claim-cache figure, whose `used` mirrors the concurrent count).
+///
+/// The throughput window is rendered against the clock's current second so it
+/// slides forward even during a quiet period.
+async fn daemon_health_snapshot(
+    pool: &SqlitePool,
+    health: &DaemonHealth,
+    workspace_id: Option<&str>,
+    clock: &dyn HangarClock,
+) -> Result<DaemonHealthSnapshot, sqlx::Error> {
+    let (runtimes, concurrent_tasks) = match workspace_id {
+        Some(ws) => (
+            snapshots::runtime_health(pool, ws, health.pid).await?,
+            snapshots::concurrent_task_count(pool, ws).await?,
+        ),
+        None => (Vec::new(), 0),
+    };
+    let now_sec = clock.now_ms() / 1_000;
+    Ok(DaemonHealthSnapshot {
+        runtimes,
+        claim_cache: health.stats.claim_cache(concurrent_tasks),
+        concurrent_tasks,
+        task_throughput_60s: health.stats.throughput_window(now_sec),
+    })
+}
+
 /// Resolve a wire workspace id, rejecting an unknown workspace with an
 /// `INVALID_PARAMS` error (the mutating autopilot handlers must not silently
 /// no-op on a typo'd workspace).
@@ -624,6 +680,7 @@ mod tests {
             pid: 42,
             started_at: Instant::now(),
             version: "0.1.0".into(),
+            stats: Arc::new(HealthStats::default()),
         }
     }
 
@@ -1161,6 +1218,84 @@ mod tests {
         )
         .await;
         assert_eq!(resp.error.unwrap().code, INVALID_PARAMS);
+    }
+
+    /// `hangar/daemon_health` reports the seeded running task as a concurrent
+    /// task, the claim-cache figure (used = concurrent, fixed capacity), and a
+    /// full 60-sample throughput window seeded from the shared stats collector.
+    #[tokio::test]
+    async fn daemon_health_reports_concurrency_and_throughput_window() {
+        use crate::health_stats::THROUGHPUT_WINDOW;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+
+        // Seed the in-memory throughput ring with a completion + a failure at the
+        // current second so they fall inside the `now-59..=now` snapshot window
+        // (the handler renders the ring against the live `SystemClock`).
+        let health = health();
+        let now_sec = ainb_hangar_core::clock::SystemClock.now_ms() / 1_000;
+        health.stats.record_completed(now_sec);
+        health.stats.record_failed(now_sec);
+
+        let resp = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_DAEMON_HEALTH,
+                serde_json::json!({"workspace_id":"default"}),
+            ),
+            &health,
+        )
+        .await;
+        assert!(resp.error.is_none(), "{resp:?}");
+        let snap: DaemonHealthSnapshot =
+            serde_json::from_value(resp.result.unwrap()).unwrap();
+
+        // The fixture seeds exactly one `running` task → concurrency 1.
+        assert_eq!(snap.concurrent_tasks, 1);
+        assert_eq!(snap.claim_cache.used, 1);
+        assert_eq!(
+            snap.claim_cache.capacity,
+            crate::health_stats::DEFAULT_CLAIM_CAPACITY
+        );
+        // The throughput window is always the full minute.
+        assert_eq!(snap.task_throughput_60s.len(), THROUGHPUT_WINDOW);
+        // The seeded second carries one completion + one failure somewhere in
+        // the window.
+        assert!(
+            snap.task_throughput_60s
+                .iter()
+                .any(|s| s.completed == 1 && s.failed == 1),
+            "the seeded throughput second must appear in the window"
+        );
+    }
+
+    /// A foreign workspace yields empty runtimes + zero concurrency, but still
+    /// reports the daemon-global throughput window (in-memory state is not
+    /// workspace-scoped).
+    #[tokio::test]
+    async fn daemon_health_foreign_workspace_empty_runtimes() {
+        use crate::health_stats::THROUGHPUT_WINDOW;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        let resp = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_DAEMON_HEALTH,
+                serde_json::json!({"workspace_id":"nope"}),
+            ),
+            &health(),
+        )
+        .await;
+        assert!(resp.error.is_none());
+        let snap: DaemonHealthSnapshot =
+            serde_json::from_value(resp.result.unwrap()).unwrap();
+        assert!(snap.runtimes.is_empty());
+        assert_eq!(snap.concurrent_tasks, 0);
+        assert_eq!(snap.task_throughput_60s.len(), THROUGHPUT_WINDOW);
     }
 
     #[tokio::test]

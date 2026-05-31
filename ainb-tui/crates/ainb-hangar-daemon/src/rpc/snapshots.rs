@@ -472,6 +472,56 @@ pub async fn task_transition(
     TaskRepo::transition_status(pool, workspace_id, task_id, to_status, clock.now_ms()).await
 }
 
+/// Snapshot the registered runtimes of `workspace` for the daemon-health pane.
+///
+/// Maps each `agent_runtime` row to a wire [`RuntimeHealthRow`] for
+/// `hangar/daemon_health` (P8.5).
+///
+/// Reads the `agent_runtime` table (workspace-scoped) and folds each row's raw
+/// liveness `status` into a `connected` boolean (`"online"` → connected). `pid`
+/// is the daemon process id hosting the pane (every runtime in a single-daemon
+/// deployment shares it). A foreign workspace yields an empty set.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] on a store fault.
+pub async fn runtime_health(
+    pool: &SqlitePool,
+    workspace_id: &str,
+    pid: u32,
+) -> Result<Vec<ainb_hangar_proto::settings::RuntimeHealthRow>, sqlx::Error> {
+    let runtimes = AgentRuntimeRepo::list_by_workspace(pool, workspace_id).await?;
+    Ok(runtimes
+        .into_iter()
+        .map(|r| ainb_hangar_proto::settings::RuntimeHealthRow {
+            provider: r.provider,
+            connected: r.status == "online",
+            pid,
+        })
+        .collect())
+}
+
+/// Count the tasks of `workspace` that are currently executing (`dispatched` or
+/// `running`) for the daemon-health pane's concurrency figure
+/// (`hangar/daemon_health`, P8.5).
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] on a store fault.
+pub async fn concurrent_task_count(
+    pool: &SqlitePool,
+    workspace_id: &str,
+) -> Result<u32, sqlx::Error> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_task_queue \
+         WHERE workspace_id = ?1 AND status IN ('dispatched','running')",
+    )
+    .bind(workspace_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(u32::try_from(count).unwrap_or(u32::MAX))
+}
+
 /// Error surface for [`autopilot_fire_now`]: a store fault resolving the
 /// autopilot row, or a fire-path failure (the single-tx enqueue).
 #[derive(Debug, thiserror::Error)]

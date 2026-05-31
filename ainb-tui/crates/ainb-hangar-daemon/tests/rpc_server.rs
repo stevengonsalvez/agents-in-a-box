@@ -72,6 +72,7 @@ async fn seeded_snapshots_round_trip_over_real_socket() {
         pid: std::process::id(),
         started_at: Instant::now(),
         version: "0.1.0".into(),
+        stats: std::sync::Arc::new(ainb_hangar_daemon::health_stats::HealthStats::default()),
     };
     tokio::spawn(rpc::serve(listener, store.pool().clone(), health));
 
