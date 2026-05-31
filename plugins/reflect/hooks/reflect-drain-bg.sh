@@ -172,15 +172,27 @@ today_drain_count() {
 }
 
 record_cost_event() {
-    local entry_count="$1"
-    local transcript="$2"
-    local outcome="$3"
-    local today
+    # record_cost_event <entries> <transcript> <outcome> \
+    #   [tokens] [cost_usd] [turns] [model] [cache_read] [cache_creation] [input] [output]
+    # The token/cost fields default to 0 so pre-run outcomes (stale/poison) and
+    # the legacy 3-arg call shape still emit valid JSON. `reflect cost` reads
+    # these for the cached-vs-uncached timeline (W3).
+    local entry_count="$1" transcript="$2" outcome="$3"
+    local tokens="${4:-0}" cost="${5:-0}" turns="${6:-0}" model="${7:-}"
+    local cache_read="${8:-0}" cache_creation="${9:-0}" input_tok="${10:-0}" output_tok="${11:-0}"
+    # Coerce anything non-numeric to 0/valid so the JSON line never breaks.
+    [[ "$tokens"         =~ ^[0-9]+$        ]] || tokens=0
+    [[ "$cost"           =~ ^[0-9]+([.][0-9]+)?$ ]] || cost=0
+    [[ "$turns"          =~ ^[0-9]+$        ]] || turns=0
+    [[ "$cache_read"     =~ ^[0-9]+$        ]] || cache_read=0
+    [[ "$cache_creation" =~ ^[0-9]+$        ]] || cache_creation=0
+    [[ "$input_tok"      =~ ^[0-9]+$        ]] || input_tok=0
+    [[ "$output_tok"     =~ ^[0-9]+$        ]] || output_tok=0
+    local today ts
     today=$(date -u +%Y-%m-%d)
-    local ts
     ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    printf '{"ts":"%s","day":"%s","entries":%d,"transcript":"%s","outcome":"%s"}\n' \
-        "$ts" "$today" "$entry_count" "$transcript" "$outcome" >> "$COST_FILE"
+    printf '{"ts":"%s","day":"%s","entries":%d,"transcript":"%s","outcome":"%s","model":"%s","turns":%s,"tokens":%s,"cost_usd":%s,"input":%s,"output":%s,"cache_read":%s,"cache_creation":%s}\n' \
+        "$ts" "$today" "$entry_count" "$transcript" "$outcome" "$model" "$turns" "$tokens" "$cost" "$input_tok" "$output_tok" "$cache_read" "$cache_creation" >> "$COST_FILE"
 }
 
 # ── Retry counters (sidecar JSONL keyed by transcript_path) ───────────────────
@@ -331,18 +343,22 @@ Extract any HIGH-confidence corrections, MEDIUM-confidence approved approaches, 
     cost=$(printf '%s' "$out_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("total_cost_usd","?"))' 2>/dev/null || echo "?")
     terminal_reason=$(printf '%s' "$out_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("terminal_reason",""))' 2>/dev/null || echo "")
     num_turns=$(printf '%s' "$out_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("num_turns",0))' 2>/dev/null || echo "0")
-    # Sum every token bucket the result envelope reports (input + output +
-    # cache read + cache creation) for the post-hoc budget check.
-    total_tokens=$(printf '%s' "$out_json" | python3 -c '
+    # Extract every token bucket the result envelope reports — for the budget
+    # check AND the cost timeline (W3 cached-vs-uncached split).
+    local input_tok output_tok cache_read cache_creation usage_line
+    usage_line=$(printf '%s' "$out_json" | python3 -c '
 import json,sys
 try:
     u=json.load(sys.stdin).get("usage",{}) or {}
 except Exception:
-    print(0); sys.exit()
-print(sum(int(u.get(k,0) or 0) for k in (
-    "input_tokens","output_tokens",
-    "cache_read_input_tokens","cache_creation_input_tokens")))' 2>/dev/null || echo "0")
-    [[ "$total_tokens" =~ ^[0-9]+$ ]] || total_tokens=0
+    u={}
+i=int(u.get("input_tokens",0) or 0); o=int(u.get("output_tokens",0) or 0)
+cr=int(u.get("cache_read_input_tokens",0) or 0); cc=int(u.get("cache_creation_input_tokens",0) or 0)
+print(i,o,cr,cc,i+o+cr+cc)' 2>/dev/null || echo "0 0 0 0 0")
+    read -r input_tok output_tok cache_read cache_creation total_tokens <<< "$usage_line"
+    [[ "$total_tokens" =~ ^[0-9]+$ ]] || { input_tok=0; output_tok=0; cache_read=0; cache_creation=0; total_tokens=0; }
+    # Sanitize cost ("?" on parse failure) to a JSON-safe number.
+    [[ "$cost" =~ ^[0-9]+([.][0-9]+)?$ ]] || cost=0
 
     # Fatal subprocess errors (signal, timeout, process couldn't start) — no JSON.
     if [[ -z "$out_json" ]]; then
@@ -361,7 +377,7 @@ print(sum(int(u.get(k,0) or 0) for k in (
         log "    BUDGET poison: run used ${total_tokens} tokens (> ${TOKEN_MAX}); archiving transcript"
         emit_error error drain_budget_exceeded "run used ${total_tokens} tokens (> ${TOKEN_MAX})" "$transcript"
         printf '%s\n' "$entry_json" >> "$POISON_FILE"
-        record_cost_event 1 "$transcript" "poison_budget_${total_tokens}"
+        record_cost_event 1 "$transcript" "poison_budget" "$total_tokens" "$cost" "$num_turns" "$DRAIN_MODEL" "$cache_read" "$cache_creation" "$input_tok" "$output_tok"
         return 2
     fi
 
@@ -372,8 +388,8 @@ print(sum(int(u.get(k,0) or 0) for k in (
     if [[ "$terminal_reason" == "max_turns" ]]; then
         local retries_after
         retries_after=$(bump_retry_count "$transcript")
-        log "    partial: terminal=max_turns turns=${num_turns} cost=\$${cost} retries=${retries_after}"
-        record_cost_event 1 "$transcript" "partial_max_turns"
+        log "    partial: terminal=max_turns turns=${num_turns} cost=\$${cost} tokens=${total_tokens} retries=${retries_after}"
+        record_cost_event 1 "$transcript" "partial_max_turns" "$total_tokens" "$cost" "$num_turns" "$DRAIN_MODEL" "$cache_read" "$cache_creation" "$input_tok" "$output_tok"
         # If we've hit max_turns repeatedly, give up and drop from queue.
         if [[ "$retries_after" -ge "$MAX_RETRIES" ]]; then
             emit_error warn drain_max_turns_exhausted "max_turns hit $MAX_RETRIES times" "$transcript"
@@ -385,19 +401,19 @@ print(sum(int(u.get(k,0) or 0) for k in (
     if [[ "$is_error" == "True" || "$is_error" == "true" ]]; then
         log "    claude reported is_error=true terminal=${terminal_reason} result=${result_summary}"
         bump_retry_count "$transcript" >/dev/null
-        record_cost_event 1 "$transcript" "fail_is_error"
+        record_cost_event 1 "$transcript" "fail_is_error" "$total_tokens" "$cost" "$num_turns" "$DRAIN_MODEL" "$cache_read" "$cache_creation" "$input_tok" "$output_tok"
         return 1
     fi
 
     if [[ $exit_code -ne 0 ]]; then
         log "    claude -p exit=$exit_code (but is_error=false; treating as soft fail)"
         bump_retry_count "$transcript" >/dev/null
-        record_cost_event 1 "$transcript" "fail_exit_${exit_code}"
+        record_cost_event 1 "$transcript" "fail_exit_${exit_code}" "$total_tokens" "$cost" "$num_turns" "$DRAIN_MODEL" "$cache_read" "$cache_creation" "$input_tok" "$output_tok"
         return 1
     fi
 
-    log "    OK turns=${num_turns} cost=\$${cost} result=${result_summary}"
-    record_cost_event 1 "$transcript" "ok"
+    log "    OK turns=${num_turns} cost=\$${cost} tokens=${total_tokens} result=${result_summary}"
+    record_cost_event 1 "$transcript" "ok" "$total_tokens" "$cost" "$num_turns" "$DRAIN_MODEL" "$cache_read" "$cache_creation" "$input_tok" "$output_tok"
     return 0
 }
 
