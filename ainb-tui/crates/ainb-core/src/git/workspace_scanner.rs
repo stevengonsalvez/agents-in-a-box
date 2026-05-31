@@ -93,9 +93,7 @@ impl RepositoryCache {
         // second rescan racing this one when the user opens New Session twice
         // in quick succession — never observes a half-written cache, and the
         // temp file is auto-removed if anything fails before the rename.
-        let parent = path
-            .parent()
-            .context("repository cache path has no parent directory")?;
+        let parent = path.parent().context("repository cache path has no parent directory")?;
         fs::create_dir_all(parent)?;
 
         let mut tmp = tempfile::NamedTempFile::new_in(parent)?;

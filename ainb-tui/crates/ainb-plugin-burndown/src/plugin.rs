@@ -7,11 +7,11 @@
 //! clap and falls back to `host.snapshot_get` when no event push has
 //! arrived yet.
 
+use crate::data::usage::UsagePeriod;
 use ainb_plugin_sdk::{
     Cell, CliOutput, Color, Coord, HandleKeyParams, HostClient, KeyCode, Plugin, RenderParams,
     Result, SdkError, WireBuffer,
 };
-use crate::data::usage::UsagePeriod;
 use ainb_plugin_types_sessions::{
     ScanProgressEvent, UsageData as WireUsageData, UsageDataEvent, WIRE_VERSION,
 };
@@ -156,9 +156,7 @@ impl Plugin for BurndownPlugin {
         // the `sessions.refresh_request` topic asks session-reader
         // to rescan and re-publish from scratch, this time with us
         // already subscribed. Best-effort: failure is non-fatal.
-        let _ = host
-            .snapshot_publish("sessions.refresh_request", bytes::Bytes::new())
-            .await;
+        let _ = host.snapshot_publish("sessions.refresh_request", bytes::Bytes::new()).await;
         Ok(())
     }
 
@@ -213,9 +211,8 @@ impl Plugin for BurndownPlugin {
                 // Ask session-reader to re-publish from scratch. Best
                 // effort — failure is silently dropped, the existing
                 // snapshot stays on screen.
-                let _ = host
-                    .snapshot_publish("sessions.refresh_request", bytes::Bytes::new())
-                    .await;
+                let _ =
+                    host.snapshot_publish("sessions.refresh_request", bytes::Bytes::new()).await;
                 true
             }
             KeyCode::Char { ch: 'F' } => {
@@ -501,9 +498,7 @@ impl BurndownPlugin {
     /// already paints the wait/skeleton screen in that case) or when
     /// every filter dimension is at its default ("no-op" — render
     /// path uses the raw `data` reference).
-    fn cached_filtered(
-        &mut self,
-    ) -> Option<std::sync::Arc<crate::data::usage::UsageData>> {
+    fn cached_filtered(&mut self) -> Option<std::sync::Arc<crate::data::usage::UsageData>> {
         let data = self.data.as_ref()?;
         // No-op fast path: nothing to filter. The render path falls
         // back to the raw `data` reference and never consults the
@@ -593,16 +588,10 @@ fn paint_schema_mismatch(buf: &mut RBuffer, area: RRect) {
     if area.height == 0 || area.width == 0 {
         return;
     }
-    let msg =
-        "  ⚠ Schema mismatch — upgrade session-reader/burndown plugins to matching versions.";
+    let msg = "  ⚠ Schema mismatch — upgrade session-reader/burndown plugins to matching versions.";
     let max = area.width as usize;
     let truncated: String = msg.chars().take(max).collect();
-    buf.set_string(
-        area.x,
-        area.y,
-        truncated,
-        ratatui::style::Style::default(),
-    );
+    buf.set_string(area.x, area.y, truncated, ratatui::style::Style::default());
 }
 
 /// Convert a ratatui `Buffer` to the SDK's `WireBuffer` cell stream.
@@ -1144,8 +1133,7 @@ mod chunk_accumulator_tests {
     #[test]
     fn single_chunk_finalises_immediately() {
         let mut p = BurndownPlugin::default();
-        let outcome =
-            p.apply_chunk_pure(chunk(0, true, vec![fake_call(1), fake_call(2)]));
+        let outcome = p.apply_chunk_pure(chunk(0, true, vec![fake_call(1), fake_call(2)]));
         assert_eq!(outcome, ChunkOutcome::Finalised);
         assert!(p.pending.is_none());
         let d = p.data.as_ref().expect("snapshot finalised");
@@ -1301,7 +1289,11 @@ mod chunk_accumulator_tests {
         assert_eq!(d.calls[2].id, 3);
         // Sessions and shell_commands also accumulated.
         assert_eq!(d.sessions.len(), 3, "sessions extended across chunks");
-        assert_eq!(d.shell_commands.len(), 3, "shell_commands extended across chunks");
+        assert_eq!(
+            d.shell_commands.len(),
+            3,
+            "shell_commands extended across chunks"
+        );
         // Aggregates from chunk 0 survived.
         assert_eq!(d.projects.len(), 1);
     }
@@ -1333,9 +1325,7 @@ mod pivot_seq_tests {
     //! render path's snapshot-before/after compare relies on this to
     //! decide when to flash the `↻ updated` chip-strip badge.
     use super::*;
-    use crate::data::usage::{
-        BranchUsage, TokenBucket, UsageData, UsagePeriod,
-    };
+    use crate::data::usage::{BranchUsage, TokenBucket, UsageData, UsagePeriod};
 
     fn plugin_with_one_branch() -> BurndownPlugin {
         let mut p = BurndownPlugin::default();

@@ -243,12 +243,7 @@ pub fn sample_usage_data() -> UsageData {
 // the lib-build sees it as unused. Keep alive for upcoming session-
 // reader plugin parser fixtures.
 #[allow(dead_code)]
-pub fn claude_jsonl_turn(
-    branch: Option<&str>,
-    model: &str,
-    in_tok: u64,
-    out_tok: u64,
-) -> String {
+pub fn claude_jsonl_turn(branch: Option<&str>, model: &str, in_tok: u64, out_tok: u64) -> String {
     let branch_field = match branch {
         Some(b) => format!(r#","gitBranch":"{b}""#),
         None => String::new(),

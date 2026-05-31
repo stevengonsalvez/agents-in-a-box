@@ -5,7 +5,6 @@
 //!
 //! Part of the new-session redesign polish (`docs/specs/new-session-redesign-spec.md`).
 
-
 #[allow(dead_code)]
 mod tripwire_new_session_common;
 use tripwire_new_session_common::*;
@@ -28,9 +27,7 @@ fn yolo_toggle_key_flips_on_off_and_marks_modified() {
     let ainb = ainb_bin();
 
     let status = Command::new("tmux")
-        .args([
-            "new-session", "-d", "-s", &session, "-x", "180", "-y", "50",
-        ])
+        .args(["new-session", "-d", "-s", &session, "-x", "180", "-y", "50"])
         .status()
         .expect("tmux new-session");
     assert!(status.success());
@@ -58,9 +55,7 @@ fn yolo_toggle_key_flips_on_off_and_marks_modified() {
 
     send_key(&session, "n");
     let pick_deadline = Instant::now() + Duration::from_secs(5);
-    let mut on_pick = poll_capture(&session, pick_deadline, |c| {
-        c.contains("Enter=Select")
-    });
+    let mut on_pick = poll_capture(&session, pick_deadline, |c| c.contains("Enter=Select"));
     if on_pick.is_none() {
         send_key(&session, "n");
         let retry_deadline = Instant::now() + Duration::from_secs(8);
@@ -118,9 +113,7 @@ fn yolo_toggle_key_flips_on_off_and_marks_modified() {
     if to_off.is_none() {
         let last = capture(&session);
         kill_session(&session);
-        panic!(
-            "Right-arrow on Yolo row (Custom) did not flip ON→OFF; last:\n---\n{last}\n---"
-        );
+        panic!("Right-arrow on Yolo row (Custom) did not flip ON→OFF; last:\n---\n{last}\n---");
     }
 
     // Flip back to ON.

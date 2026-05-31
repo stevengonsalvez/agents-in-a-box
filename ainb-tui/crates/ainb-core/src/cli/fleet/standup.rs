@@ -14,9 +14,7 @@ use crate::fleet::types::Session;
 pub async fn execute(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
     let want_text = matches.get_flag("text");
 
-    let (ainb_res, jobs_res) = tokio::join!(discover_from_ainb(), async {
-        discover_from_jobs()
-    });
+    let (ainb_res, jobs_res) = tokio::join!(discover_from_ainb(), async { discover_from_jobs() });
     let ainb = ainb_res.unwrap_or_default();
     let peers = discover_from_peers().unwrap_or_default();
     let jobs = jobs_res.unwrap_or_default();
@@ -55,16 +53,9 @@ async fn enrich_with_jsonl_summary(sessions: &mut [Session]) {
 
 fn print_text(sessions: &[crate::fleet::types::Session]) {
     println!("ainb fleet standup — {} sessions", sessions.len());
-    println!(
-        "{:<36}  {:<14}  {}",
-        "name", "sources", "cwd"
-    );
+    println!("{:<36}  {:<14}  {}", "name", "sources", "cwd");
     for s in sessions {
-        let name = s
-            .tmux_session
-            .as_deref()
-            .or(s.workspace_name.as_deref())
-            .unwrap_or(&s.id);
+        let name = s.tmux_session.as_deref().or(s.workspace_name.as_deref()).unwrap_or(&s.id);
         let sources = s
             .sources
             .iter()

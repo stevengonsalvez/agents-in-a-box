@@ -10,17 +10,17 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
+    Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph},
-    Frame,
 };
 use std::path::PathBuf;
 
 use crate::config::favorites_store::{Favorite, FavoritesStore, SourceType};
 use crate::config::session_defaults::SessionDefaults;
-use crate::git::repo_source::{parse_with, RealFs, RepoSource};
+use crate::git::repo_source::{RealFs, RepoSource, parse_with};
 
 // Palette — matches `components/layout.rs` style guide. Kept module-local so
 // the picker doesn't reach into layout internals.
@@ -155,16 +155,18 @@ impl PickRepoState {
             .rows
             .iter()
             .enumerate()
-            .filter(|(_, r)| q.is_empty() || r.label.to_lowercase().contains(&q) || r.id.to_lowercase().contains(&q))
+            .filter(|(_, r)| {
+                q.is_empty()
+                    || r.label.to_lowercase().contains(&q)
+                    || r.id.to_lowercase().contains(&q)
+            })
             .map(|(i, _)| i)
             .collect();
         // Restore the highlight if the previously selected row still matches.
         self.selected = match prev_id {
-            Some(id) => self
-                .filtered_indices
-                .iter()
-                .position(|&i| self.rows[i].id == id)
-                .unwrap_or(0),
+            Some(id) => {
+                self.filtered_indices.iter().position(|&i| self.rows[i].id == id).unwrap_or(0)
+            }
             None => 0,
         };
     }
@@ -347,9 +349,7 @@ pub fn render(f: &mut Frame, state: &PickRepoState, area: Rect) {
             Span::styled("> ", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
             Span::styled(
                 "type to filter, or paste owner/repo · https://… · ssh://user@host · /local/path",
-                Style::default()
-                    .fg(MUTED_GRAY)
-                    .add_modifier(Modifier::ITALIC),
+                Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
             ),
         ])
     } else {
@@ -370,7 +370,10 @@ pub fn render(f: &mut Frame, state: &PickRepoState, area: Rect) {
             let row = state.rows.get(row_idx)?;
             let is_selected = visible_idx == state.selected;
             let arrow = if is_selected {
-                Span::styled("\u{25b8} ", Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD))
+                Span::styled(
+                    "\u{25b8} ",
+                    Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
+                )
             } else {
                 Span::raw("  ")
             };
@@ -424,11 +427,7 @@ pub fn render(f: &mut Frame, state: &PickRepoState, area: Rect) {
         .collect();
 
     let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::NONE)
-                .style(Style::default().bg(DARK_BG)),
-        )
+        .block(Block::default().borders(Borders::NONE).style(Style::default().bg(DARK_BG)))
         .highlight_style(Style::default().bg(LIST_HIGHLIGHT_BG));
 
     let mut list_state = ListState::default();
@@ -441,9 +440,15 @@ pub fn render(f: &mut Frame, state: &PickRepoState, area: Rect) {
 
     // Help bar — gold keys + muted descriptions, single line.
     let help = Line::from(vec![
-        Span::styled("Enter", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "Enter",
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ),
         Span::styled("=Select  ", Style::default().fg(MUTED_GRAY)),
-        Span::styled("Esc", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "Esc",
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ),
         Span::styled("=Quit  ", Style::default().fg(MUTED_GRAY)),
         Span::styled("^R", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
         Span::styled("=Reset  ", Style::default().fg(MUTED_GRAY)),
@@ -577,12 +582,10 @@ pub fn handle_key(state: &mut PickRepoState, key: KeyEvent) -> PickRepoOutcome {
 /// - `Filter` → `Stay` (just an unparseable string)
 fn resolve_outcome(source: RepoSource) -> PickRepoOutcome {
     match source {
-        RepoSource::LocalPath(_) | RepoSource::SshSession(_) => {
-            PickRepoOutcome::AdvanceTo(source)
+        RepoSource::LocalPath(_) | RepoSource::SshSession(_) => PickRepoOutcome::AdvanceTo(source),
+        RepoSource::HttpsUrl(_) | RepoSource::SshUrl(_) | RepoSource::GithubShorthand { .. } => {
+            PickRepoOutcome::StartClone(source)
         }
-        RepoSource::HttpsUrl(_)
-        | RepoSource::SshUrl(_)
-        | RepoSource::GithubShorthand { .. } => PickRepoOutcome::StartClone(source),
         RepoSource::Filter(_) => PickRepoOutcome::Stay,
     }
 }

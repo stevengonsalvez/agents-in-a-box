@@ -38,10 +38,7 @@ fn plugins_staged() -> Option<PathBuf> {
     for _ in 0..6 {
         let candidate = dir.join("dist").join("plugins");
         if candidate.join("burndown").join("burndown").exists()
-            && candidate
-                .join("session-reader")
-                .join("session-reader")
-                .exists()
+            && candidate.join("session-reader").join("session-reader").exists()
         {
             return Some(candidate);
         }
@@ -166,7 +163,12 @@ fn send_key_and_settle(session: &str, key: &str) -> String {
 /// `↻ updated` badge) that can be overwritten by a subsequent render
 /// before the settle predicate fires — async scan_progress / tick
 /// events can race a settle loop and produce false negatives.
-fn send_key_and_poll_for(session: &str, key: &str, marker: &str, window: Duration) -> Option<String> {
+fn send_key_and_poll_for(
+    session: &str,
+    key: &str,
+    marker: &str,
+    window: Duration,
+) -> Option<String> {
     send_key(session, key);
     let deadline = Instant::now() + window;
     while Instant::now() < deadline {
@@ -180,9 +182,7 @@ fn send_key_and_poll_for(session: &str, key: &str, marker: &str, window: Duratio
 }
 
 fn kill_session(session: &str) {
-    let _ = Command::new("tmux")
-        .args(["kill-session", "-t", session])
-        .status();
+    let _ = Command::new("tmux").args(["kill-session", "-t", session]).status();
 }
 
 /// Marker the plugin emits on the chip strip when `cached_filtered`
@@ -211,16 +211,7 @@ fn fresh_pivot_badge_appears_on_recompute_and_clears_on_next_render() {
     let ainb = ainb_bin();
 
     let status = Command::new("tmux")
-        .args([
-            "new-session",
-            "-d",
-            "-s",
-            &session,
-            "-x",
-            "200",
-            "-y",
-            "50",
-        ])
+        .args(["new-session", "-d", "-s", &session, "-x", "200", "-y", "50"])
         .status()
         .expect("tmux new-session");
     assert!(status.success(), "tmux new-session failed");
@@ -262,9 +253,7 @@ fn fresh_pivot_badge_appears_on_recompute_and_clears_on_next_render() {
     let Some(initial) = initial else {
         let last = capture_pane(&session);
         kill_session(&session);
-        panic!(
-            "burndown never rendered data with the fixture HOME; last:\n---\n{last}\n---"
-        );
+        panic!("burndown never rendered data with the fixture HOME; last:\n---\n{last}\n---");
     };
 
     // The first frame after initial ingest may legitimately bump
@@ -293,12 +282,7 @@ fn fresh_pivot_badge_appears_on_recompute_and_clears_on_next_render() {
     // so pressing `2` from a fresh state is a no-op (cache hit, no
     // bump, no badge). Always pick a key whose target period differs
     // from the current state.
-    let post_pivot = send_key_and_poll_for(
-        &session,
-        "3",
-        PIVOT_BADGE,
-        Duration::from_secs(3),
-    );
+    let post_pivot = send_key_and_poll_for(&session, "3", PIVOT_BADGE, Duration::from_secs(3));
     if post_pivot.is_none() {
         let last = capture_pane(&session);
         kill_session(&session);
@@ -327,12 +311,8 @@ fn fresh_pivot_badge_appears_on_recompute_and_clears_on_next_render() {
     // plugin uses the raw data reference in that case. That's
     // correct behavior — nothing was actually filtered — but it
     // makes `a` a poor choice for "second pivot must show badge".
-    let post_second_pivot = send_key_and_poll_for(
-        &session,
-        "1",
-        PIVOT_BADGE,
-        Duration::from_secs(3),
-    );
+    let post_second_pivot =
+        send_key_and_poll_for(&session, "1", PIVOT_BADGE, Duration::from_secs(3));
     if post_second_pivot.is_none() {
         let last = capture_pane(&session);
         kill_session(&session);

@@ -323,8 +323,7 @@ async fn run_tui_loop(
                             || crate::app::events::EventHandler::is_in_text_input_context(
                                 &app.state,
                             ));
-                    if !palette_open_suppressed && (slash_palette.is_open() || colon)
-                    {
+                    if !palette_open_suppressed && (slash_palette.is_open() || colon) {
                         match slash_palette.handle_key(key_event) {
                             SlashAction::Execute(cmd) => {
                                 tracing::info!(
@@ -672,7 +671,10 @@ async fn run_tui_loop(
                         use tokio::process::Command;
 
                         const WITR_SESSION: &str = "ainb-witr";
-                        info!("[ACTION] Launching witr -i in tmux session '{}'", WITR_SESSION);
+                        info!(
+                            "[ACTION] Launching witr -i in tmux session '{}'",
+                            WITR_SESSION
+                        );
 
                         // Atomic create-or-reuse: `-A` attaches if the session exists,
                         // creates it otherwise; `-d` keeps it detached so we drive the
@@ -688,8 +690,7 @@ async fn run_tui_loop(
                             Ok(s) if s.success() => {
                                 let mut attach_handler =
                                     AttachHandler::new_from_terminal(terminal)?;
-                                if let Err(e) =
-                                    attach_handler.attach_to_session(WITR_SESSION).await
+                                if let Err(e) = attach_handler.attach_to_session(WITR_SESSION).await
                                 {
                                     error!("[ACTION] witr attach failed: {}", e);
                                     app.state.add_error_notification(format!(
@@ -793,8 +794,7 @@ async fn run_tui_loop(
                                     let stderr = String::from_utf8_lossy(&o.stderr);
                                     warn!(
                                         "Failed to kill tmux session '{}': {}",
-                                        session_name,
-                                        stderr
+                                        session_name, stderr
                                     );
                                     failed += 1;
                                 }

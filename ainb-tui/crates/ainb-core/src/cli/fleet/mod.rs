@@ -4,7 +4,7 @@
 // matched by `matches.subcommand()`. Each subcommand has its own module with
 // an `execute(args, format) -> Result<()>` function.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 use crate::cli::OutputFormat;
 

@@ -95,7 +95,5 @@ pub fn discover_from_peers() -> Result<Vec<Session>> {
 }
 
 fn parse_iso8601_ms(s: &str) -> Option<i64> {
-    chrono::DateTime::parse_from_rfc3339(s)
-        .ok()
-        .map(|dt| dt.timestamp_millis())
+    chrono::DateTime::parse_from_rfc3339(s).ok().map(|dt| dt.timestamp_millis())
 }

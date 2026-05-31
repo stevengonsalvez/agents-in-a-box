@@ -12,8 +12,8 @@
 use ainb_plugin_protocol::errors::RpcError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Monotonic id allocator for outbound requests.
 #[derive(Debug, Clone, Default)]
@@ -148,9 +148,7 @@ pub fn parse_inbound(body: &[u8]) -> Result<Inbound, ainb_plugin_protocol::error
     }
 
     let id = raw.id.ok_or_else(|| {
-        ainb_plugin_protocol::errors::ProtocolError::Decode(
-            "response envelope missing id".into(),
-        )
+        ainb_plugin_protocol::errors::ProtocolError::Decode("response envelope missing id".into())
     })?;
     if let Some(err) = raw.error {
         return Ok(Inbound::Response {
@@ -194,7 +192,10 @@ pub fn build_response(id: u64, result: Value) -> Result<Vec<u8>, serde_json::Err
 }
 
 /// Build an error response body.
-pub fn build_error_response(id: Option<u64>, error: RpcError) -> Result<Vec<u8>, serde_json::Error> {
+pub fn build_error_response(
+    id: Option<u64>,
+    error: RpcError,
+) -> Result<Vec<u8>, serde_json::Error> {
     serde_json::to_vec(&ErrorEnvelope {
         jsonrpc: "2.0",
         id,

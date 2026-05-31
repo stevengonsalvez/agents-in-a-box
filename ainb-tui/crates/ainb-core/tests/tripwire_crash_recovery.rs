@@ -16,7 +16,9 @@ use std::time::Duration;
 
 use ainb_plugin_protocol::params::Viewport;
 use ainb_plugin_runtime::types::LifecycleState;
-use tripwire_helpers::{ensure_running, fast_runtime, register_plugin, sibling_bin, wait_for_state};
+use tripwire_helpers::{
+    ensure_running, fast_runtime, register_plugin, sibling_bin, wait_for_state,
+};
 
 #[test]
 fn single_crash_triggers_respawn() {
@@ -37,7 +39,12 @@ fn single_crash_triggers_respawn() {
     drop(handle.render(&id, Viewport::new(10, 1), 1));
 
     assert!(
-        wait_for_state(&handle, &id, LifecycleState::Running, Duration::from_secs(5)),
+        wait_for_state(
+            &handle,
+            &id,
+            LifecycleState::Running,
+            Duration::from_secs(5)
+        ),
         "plugin never recovered to Running after single crash; state = {:?}",
         handle.lifecycle_state(&id)
     );

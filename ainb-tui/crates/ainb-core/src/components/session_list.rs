@@ -466,9 +466,7 @@ impl SessionListComponent {
                         session_spans.push(Span::raw("  "));
                         session_spans.push(Span::styled(
                             format!("● {session_unread}"),
-                            Style::default()
-                                .fg(WARNING_ORANGE)
-                                .add_modifier(Modifier::BOLD),
+                            Style::default().fg(WARNING_ORANGE).add_modifier(Modifier::BOLD),
                         ));
                     }
                     let session_line = Line::from(session_spans);
@@ -679,9 +677,8 @@ impl SessionListComponent {
                 for (idx, other_session) in state.other_tmux_sessions.iter().enumerate() {
                     let is_selected =
                         is_selected_other && state.selected_other_tmux_index == Some(idx);
-                    let is_multi_selected = state
-                        .selected_other_tmux_sessions
-                        .contains(&other_session.name);
+                    let is_multi_selected =
+                        state.selected_other_tmux_sessions.contains(&other_session.name);
                     let is_last = idx == session_len - 1;
 
                     let tree_prefix = if is_last { "└─" } else { "├─" };

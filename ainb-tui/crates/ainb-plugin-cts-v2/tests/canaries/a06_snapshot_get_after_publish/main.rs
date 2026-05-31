@@ -1,7 +1,4 @@
-use ainb_plugin_sdk::{
-    HostClient, Plugin, Result, Server,
-    RenderParams, WireBuffer, Cell, Coord,
-};
+use ainb_plugin_sdk::{Cell, Coord, HostClient, Plugin, RenderParams, Result, Server, WireBuffer};
 use async_trait::async_trait;
 
 struct A06;
@@ -13,7 +10,8 @@ impl Plugin for A06 {
     }
 
     async fn on_init(&mut self, host: &HostClient, _caps: &[String]) -> Result<()> {
-        host.snapshot_publish("cts.a06", bytes::Bytes::from_static(b"a06-payload")).await
+        host.snapshot_publish("cts.a06", bytes::Bytes::from_static(b"a06-payload"))
+            .await
     }
 
     async fn render(&mut self, _host: &HostClient, _p: RenderParams) -> Result<WireBuffer> {

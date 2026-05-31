@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 use crate::cli::OutputFormat;
 use crate::fleet::discover::{discover_from_ainb, discover_from_peers, merge_sessions};
@@ -31,10 +31,7 @@ pub async fn execute(matches: &clap::ArgMatches, _format: OutputFormat) -> Resul
     let timeout_s = matches.get_one::<u64>("timeout").copied().unwrap_or(300);
 
     let (ainb, peers) = tokio::join!(discover_from_ainb(), async { discover_from_peers() });
-    let targets = merge_sessions(vec![
-        ainb.unwrap_or_default(),
-        peers.unwrap_or_default(),
-    ]);
+    let targets = merge_sessions(vec![ainb.unwrap_or_default(), peers.unwrap_or_default()]);
 
     let n = steps.len();
     for (idx, step) in steps.iter().enumerate() {

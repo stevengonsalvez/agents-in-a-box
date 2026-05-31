@@ -65,7 +65,13 @@ fn wait_running(handle: &RuntimeHandle, id: &PluginId) {
     );
 }
 
-fn block_render(rt: &Runtime, handle: &RuntimeHandle, id: &PluginId, w: u16, h: u16) -> RenderOutcome {
+fn block_render(
+    rt: &Runtime,
+    handle: &RuntimeHandle,
+    id: &PluginId,
+    w: u16,
+    h: u16,
+) -> RenderOutcome {
     let rx = handle.render(id, Viewport::new(w, h), 0);
     rt.tokio_handle().block_on(async {
         tokio::time::timeout(Duration::from_secs(5), rx)
@@ -75,7 +81,13 @@ fn block_render(rt: &Runtime, handle: &RuntimeHandle, id: &PluginId, w: u16, h: 
     })
 }
 
-fn block_cli(rt: &Runtime, handle: &RuntimeHandle, id: &PluginId, ns: &str, argv: Vec<String>) -> CliOutcome {
+fn block_cli(
+    rt: &Runtime,
+    handle: &RuntimeHandle,
+    id: &PluginId,
+    ns: &str,
+    argv: Vec<String>,
+) -> CliOutcome {
     let rx = handle.dispatch_cli(id, ns, argv);
     rt.tokio_handle().block_on(async {
         tokio::time::timeout(Duration::from_secs(5), rx)
@@ -271,9 +283,9 @@ fn a08_action_invoke_timeout() {
     wait_running(&handle, &id);
 
     let rx = handle.dispatch_cli(&id, "a08", vec!["slow".into()]);
-    let result = rt.tokio_handle().block_on(async {
-        tokio::time::timeout(Duration::from_secs(3), rx).await
-    });
+    let result = rt
+        .tokio_handle()
+        .block_on(async { tokio::time::timeout(Duration::from_secs(3), rx).await });
     assert!(result.is_err(), "expected timeout but got a response");
 }
 
@@ -408,10 +420,7 @@ fn a13_quarantine() {
     handle.reload(&id).expect("reload");
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     while std::time::Instant::now() < deadline {
-        if matches!(
-            handle.lifecycle_state(&id),
-            Some(LifecycleState::Idle)
-        ) {
+        if matches!(handle.lifecycle_state(&id), Some(LifecycleState::Idle)) {
             return;
         }
         std::thread::sleep(Duration::from_millis(20));
