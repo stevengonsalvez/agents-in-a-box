@@ -91,6 +91,60 @@ pub fn fake_claude_happy(dir: &Path, session_id: &str) -> PathBuf {
     write_executable(dir, "fake-claude.sh", &body)
 }
 
+/// Write an executable `gh` stand-in into a fresh `bin/` subdir of `dir` that,
+/// on `gh pr create …`, prints `pr_url` on its own line then exits 0 (mimicking
+/// the real `gh pr create` success output). Returns the **bin directory** to
+/// prepend to `PATH` so the agent subprocess resolves this `gh`.
+///
+/// `gh` invoked with any other first arg (e.g. `pr list`) prints a table-ish
+/// blob and exits 0 — never a bare PR URL — so the parser must not match it.
+pub fn fake_gh_pr_create(dir: &Path, pr_url: &str) -> PathBuf {
+    let bin = dir.join("fakebin");
+    std::fs::create_dir_all(&bin).expect("mk fakebin dir");
+    // `case` on the second positional ($2) — `gh pr create` vs `gh pr list`.
+    let body = format!(
+        "#!/bin/sh\n\
+         if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"create\" ]; then\n\
+         \techo '{pr_url}'\n\
+         \texit 0\n\
+         fi\n\
+         echo 'gh: other verb'\n\
+         exit 0\n"
+    );
+    write_executable(&bin, "gh", &body);
+    bin
+}
+
+/// Write an executable `gh` stand-in that **fails** (exit 3) on `pr create`,
+/// printing an error to stderr and NO PR URL — the failure-mode fixture.
+/// Returns the bin directory to prepend to `PATH`.
+pub fn fake_gh_pr_create_fails(dir: &Path) -> PathBuf {
+    let bin = dir.join("fakebin");
+    std::fs::create_dir_all(&bin).expect("mk fakebin dir");
+    let body = "#!/bin/sh\n\
+         echo 'gh: a pull request for branch already exists' 1>&2\n\
+         exit 3\n";
+    write_executable(&bin, "gh", body);
+    bin
+}
+
+/// Write an executable `fake-claude.sh` that pins `session_id`, runs
+/// `gh pr create …` (ignoring its exit so the *agent* completes regardless of
+/// what `gh` did — the v1 "agent shells out to whatever it wants" contract),
+/// echoes a result line, then exits 0. The captured `gh` stdout (a PR URL on
+/// success) flows through the provider's stdout tail, which is where the daemon
+/// scans for the PR URL.
+pub fn fake_claude_runs_gh(dir: &Path, session_id: &str) -> PathBuf {
+    let body = format!(
+        "#!/bin/sh\n\
+         echo '{{\"type\":\"system\",\"session_id\":\"{session_id}\"}}'\n\
+         gh pr create --title X --body Y || true\n\
+         echo '{{\"type\":\"result\",\"content\":\"ok\"}}'\n\
+         exit 0\n"
+    );
+    write_executable(dir, "fake-claude.sh", &body)
+}
+
 /// Write `body` to `dir/name` and mark it executable (0755).
 fn write_executable(dir: &Path, name: &str, body: &str) -> PathBuf {
     let path = dir.join(name);
