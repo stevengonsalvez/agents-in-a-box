@@ -84,6 +84,10 @@ const AUTOPILOT_RUNS_REQ_ID: i64 = 19;
 const AUTOPILOT_FIRE_REQ_ID: i64 = 20;
 /// JSON-RPC id for a `hangar/autopilot_set_enabled` request (P7.5).
 const AUTOPILOT_TOGGLE_REQ_ID: i64 = 21;
+/// JSON-RPC id for the `hangar/tasks_list` snapshot request (P8.4).
+const TASKS_REQ_ID: i64 = 22;
+/// JSON-RPC id for a `hangar/task_transition` request (P8.4).
+const TASK_TRANSITION_REQ_ID: i64 = 23;
 
 /// Hangar plugin state.
 ///
@@ -237,15 +241,18 @@ impl HangarPlugin {
             RpcId::Number(SKILL_GET_REQ_ID) => self.apply_skill_detail(resp),
             RpcId::Number(AUTOPILOTS_REQ_ID) => self.apply_autopilots(resp),
             RpcId::Number(AUTOPILOT_RUNS_REQ_ID) => self.apply_autopilot_runs(resp),
-            // Mutating RPCs (skill sync/attach/detach, autopilot fire/toggle)
-            // answer `{}`; we re-fetch the relevant lists to refresh derived
-            // columns (`used`, next-tick, enabled, last-run).
+            RpcId::Number(TASKS_REQ_ID) => self.apply_tasks(resp),
+            // Mutating RPCs (skill sync/attach/detach, autopilot fire/toggle,
+            // kanban task transition) answer `{}`; we re-fetch the relevant lists
+            // to refresh derived columns (`used`, next-tick, enabled, last-run,
+            // task status buckets).
             RpcId::Number(
                 SKILLS_SYNC_REQ_ID
                 | SKILL_ATTACH_REQ_ID
                 | SKILL_DETACH_REQ_ID
                 | AUTOPILOT_FIRE_REQ_ID
-                | AUTOPILOT_TOGGLE_REQ_ID,
+                | AUTOPILOT_TOGGLE_REQ_ID
+                | TASK_TRANSITION_REQ_ID,
             ) => {
                 self.fetch_pending = true;
                 self.conn.on_event();
@@ -297,6 +304,17 @@ impl HangarPlugin {
             >(result.clone())
             {
                 self.screens.set_autopilots(r.autopilots);
+            }
+        }
+    }
+
+    /// Populate the Kanban board cache from a `hangar/tasks_list` result (P8.4).
+    fn apply_tasks(&mut self, resp: &RpcResponse) {
+        if let Some(result) = &resp.result {
+            if let Ok(r) = serde_json::from_value::<ainb_hangar_proto::snapshots::TasksListResult>(
+                result.clone(),
+            ) {
+                self.screens.set_tasks(&r.tasks);
             }
         }
     }
@@ -397,6 +415,11 @@ impl HangarPlugin {
                 scoped.clone(),
             ),
             (
+                TASKS_REQ_ID,
+                daemon_methods::HANGAR_TASKS_LIST,
+                scoped.clone(),
+            ),
+            (
                 HEALTH_REQ_ID,
                 daemon_methods::HANGAR_HEALTH,
                 serde_json::json!({}),
@@ -470,6 +493,39 @@ impl HangarPlugin {
         if let Err(e) = host.unix_socket_send(stream_id, body).await {
             let _ = host
                 .log_info(format!("hangar: skill rpc send failed: {e}"))
+                .await;
+        }
+    }
+
+    /// Fire a deferred Kanban card-move RPC raised by the board (P8.4).
+    ///
+    /// Maps the [`KanbanAction::MoveCard`] to `hangar/task_transition`, framed over
+    /// the socket cap. A send failure is logged but non-fatal — the board simply
+    /// doesn't move (the next snapshot reconciles).
+    async fn apply_kanban_action(
+        &mut self,
+        host: &HostClient,
+        action: crate::screen::KanbanAction,
+    ) {
+        use crate::screen::KanbanAction;
+        let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
+            return;
+        };
+        let ws = self.app_state().ws_id.as_str().to_string();
+        let KanbanAction::MoveCard { task_id, to_status } = action;
+        let params = serde_json::json!({
+            "workspace_id": ws, "task_id": task_id, "to_status": to_status
+        });
+        let Ok(body) = encode_request(
+            TASK_TRANSITION_REQ_ID,
+            daemon_methods::HANGAR_TASK_TRANSITION,
+            params,
+        ) else {
+            return;
+        };
+        if let Err(e) = host.unix_socket_send(stream_id, body).await {
+            let _ = host
+                .log_info(format!("hangar: task transition send failed: {e}"))
                 .await;
         }
     }
@@ -684,7 +740,7 @@ impl HangarPlugin {
 /// non-modal screen the per-screen reducer may want Esc, so it falls through.
 const fn routing_event(key: &ainb_plugin_sdk::KeyEvent, app: &AppState) -> Option<AppEvent> {
     match &key.code {
-        KeyCode::Char { ch } if matches!(*ch, '1' | '2' | '4' | '5' | ',' | '?' | 'q') => {
+        KeyCode::Char { ch } if matches!(*ch, '1' | '2' | '4' | '5' | 'K' | ',' | '?' | 'q') => {
             Some(AppEvent::Key(*ch))
         }
         // Esc only routes through the router when a modal is open (close it);
@@ -761,6 +817,11 @@ impl Plugin for HangarPlugin {
         // set-enabled) raised by the autopilot-manager screen.
         if let Some(action) = self.screens.take_pending_autopilot_action() {
             self.apply_autopilot_action(host, action).await;
+        }
+        // P8.4: drain any deferred Kanban card-move (`Shift+←/→`) raised by the
+        // board and fire `hangar/task_transition` over the daemon socket.
+        if let Some(action) = self.screens.take_pending_kanban_action() {
+            self.apply_kanban_action(host, action).await;
         }
         // P5.6: persist the first-run ack here (deferred from `handle_key`). The
         // modal is already `Dismissed` in state; this records it so a relaunch

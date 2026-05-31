@@ -27,5 +27,9 @@ pub use screen::issue_list::{
 pub use screen::autopilots::{
     reduce_autopilots, AutopilotsEvent, AutopilotsIntent, AutopilotsReduction, AutopilotsState,
 };
+pub use screen::kanban::{
+    reduce_kanban, BoardColumn, CardSummary, Column, KanbanEvent, KanbanIntent, KanbanReduction,
+    KanbanState,
+};
 pub use screen::{reduce, ActiveTaskBanner, AppEvent, AppState, Intent, Reduction, Screen};
 pub use stream::{Backoff, StreamClient, StreamError, SubscribeReplay};

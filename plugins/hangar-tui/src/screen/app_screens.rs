@@ -13,13 +13,14 @@
 //! The plugin still owns **zero domain data** — every cache here is filled from a
 //! daemon snapshot and folded by the daemon's event stream.
 
-use ainb_hangar_proto::events::{ActorRow, AutopilotRow, IssueRow, SkillRow};
+use ainb_hangar_proto::events::{ActorRow, AutopilotRow, IssueRow, SkillRow, TaskCardRow};
 use ainb_hangar_proto::settings::{HealthSnapshot, KeyRow, ProviderRow, WorkspaceRow};
 use ainb_plugin_sdk::{KeyCode, KeyEvent, WireBuffer};
 
 use super::agent_picker::{reduce_agent_picker, AgentPickerEvent, AgentPickerState};
 use super::autopilots::{reduce_autopilots, AutopilotsEvent, AutopilotsIntent, AutopilotsState};
 use super::issue_list::{reduce_issue_list, IssueListEvent, IssueListIntent, IssueListState};
+use super::kanban::{reduce_kanban, KanbanEvent, KanbanIntent, KanbanState};
 use super::settings::{reduce_settings, SettingsEvent, SettingsIntent, SettingsState};
 use super::skill_manager::{
     reduce_skill_manager, SkillManagerEvent, SkillManagerIntent, SkillManagerState,
@@ -82,6 +83,23 @@ pub enum AutopilotAction {
     },
 }
 
+/// A deferred daemon RPC raised by the Kanban board (P8.4).
+///
+/// Like [`AutopilotAction`], the sync key router can't `await`; it stashes the
+/// action on [`ScreenStates::pending_kanban_action`] and the plugin's `render`
+/// pass drains it and fires `hangar/task_transition` over the daemon socket cap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KanbanAction {
+    /// Move a card to a new column (`Shift+←` / `Shift+→`) —
+    /// `hangar/task_transition`.
+    MoveCard {
+        /// The task being moved.
+        task_id: String,
+        /// The target status wire token (the destination column's drop status).
+        to_status: String,
+    },
+}
+
 /// The render-state cache for every Core 5 screen.
 ///
 /// Each field is the daemon's read model for one screen, pulled over the
@@ -96,6 +114,8 @@ pub struct ScreenStates {
     pub skill_manager: SkillManagerState,
     /// Autopilot-manager screen cache.
     pub autopilots: AutopilotsState,
+    /// Kanban board screen cache (P8.4).
+    pub kanban: KanbanState,
     /// Settings screen cache (built once the four snapshots arrive).
     pub settings: Option<SettingsState>,
     /// Task-detail screen cache (present only while a task is open).
@@ -118,6 +138,10 @@ pub struct ScreenStates {
     /// autopilot-manager screen, awaiting the `render` pass to fire it over the
     /// daemon socket (P7.5). `None` when idle.
     pub pending_autopilot_action: Option<AutopilotAction>,
+    /// A Kanban card-move RPC raised by the board (`Shift+←/→`), awaiting the
+    /// `render` pass to fire `hangar/task_transition` over the daemon socket
+    /// (P8.4). `None` when idle.
+    pub pending_kanban_action: Option<KanbanAction>,
     /// Cached workspace catalogue from `host/workspace_list` (P5.5). Seeds the
     /// Settings Workspace pane regardless of which snapshot arrives first.
     pub workspace_rows: Vec<WorkspaceRow>,
@@ -144,6 +168,13 @@ impl ScreenStates {
     /// snapshot (P7.5).
     pub fn set_autopilots(&mut self, autopilots: Vec<AutopilotRow>) {
         self.autopilots = AutopilotsState::new(autopilots);
+    }
+
+    /// Rebuild the Kanban board from a `hangar/tasks_list` snapshot (P8.4). Ages
+    /// are recomputed at render time, so a placeholder `now` is fine here — the
+    /// renderer is passed the live clock.
+    pub fn set_tasks(&mut self, tasks: &[TaskCardRow]) {
+        self.kanban = KanbanState::from_tasks(tasks, 0);
     }
 
     /// Cache the agent snapshot rows; the picker is rebuilt from them on open.
@@ -204,6 +235,11 @@ impl ScreenStates {
     pub const fn take_pending_autopilot_action(&mut self) -> Option<AutopilotAction> {
         self.pending_autopilot_action.take()
     }
+
+    /// Take the pending Kanban card-move RPC raised by the board, if any (P8.4).
+    pub const fn take_pending_kanban_action(&mut self) -> Option<KanbanAction> {
+        self.pending_kanban_action.take()
+    }
 }
 
 /// The cached actor snapshot, stashed on [`ScreenStates`] so the picker can be
@@ -254,6 +290,9 @@ pub fn render_body(buf: &mut WireBuffer, w: u16, h: u16, app: &AppState, states:
         Screen::Autopilots => {
             super::autopilots::render_autopilots(buf, w, top, bottom, &states.autopilots);
         }
+        Screen::Kanban => {
+            super::kanban::render_kanban(buf, w, top, bottom, &states.kanban, now_ms());
+        }
         Screen::Settings => {
             if let Some(s) = &states.settings {
                 super::settings::render_settings(buf, w, h, top, bottom, s);
@@ -276,6 +315,15 @@ pub fn render_body(buf: &mut WireBuffer, w: u16, h: u16, app: &AppState, states:
         }
         Screen::Help => render_help(buf, w, h),
     }
+}
+
+/// The current wall-clock time in epoch milliseconds, for card-age derivation.
+/// A clock skew before the epoch saturates to `0` (ages read `0m`).
+fn now_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 
 /// Render the screen a modal overlays (so the modal floats over real content).
@@ -386,6 +434,10 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
             }
             None
         }
+        Screen::Kanban => {
+            route_kanban(states, key);
+            None
+        }
         Screen::Settings => {
             if let Some(s) = states.settings.take() {
                 // Build the settings event; a key the reducer doesn't model
@@ -453,6 +505,49 @@ fn route_issue_list(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInte
         Some(IssueListIntent::OpenTaskDetail(id)) => Some(NavIntent::OpenTaskForIssue(id)),
         // CreateIssue is a P5 flow; ignored at P4.
         _ => None,
+    }
+}
+
+/// Kanban board key routing (P8.4): map the arrow keys (plus Shift) into the
+/// board reducer. `←/→/↑/↓` move focus; `Shift+←/→` drag the focused card and
+/// lift the resulting [`KanbanIntent::MoveCard`] into a deferred
+/// `hangar/task_transition` RPC (the sync key router can't `await`; the `render`
+/// pass drains `pending_kanban_action` and fires it). `h/j/k/l` mirror the arrows
+/// for vi-style navigation.
+fn route_kanban(states: &mut ScreenStates, key: &KeyEvent) {
+    let shift = key.mods & ainb_plugin_sdk::KEY_MOD_SHIFT != 0;
+    let ev = match &key.code {
+        KeyCode::Left => Some(if shift {
+            KanbanEvent::MoveCardLeft
+        } else {
+            KanbanEvent::FocusLeft
+        }),
+        KeyCode::Right => Some(if shift {
+            KanbanEvent::MoveCardRight
+        } else {
+            KanbanEvent::FocusRight
+        }),
+        KeyCode::Up => Some(KanbanEvent::FocusUp),
+        KeyCode::Down => Some(KanbanEvent::FocusDown),
+        // vi-style fallbacks: capital H/L drag a card, lowercase navigate.
+        KeyCode::Char { ch } => match ch {
+            'h' => Some(KanbanEvent::FocusLeft),
+            'l' => Some(KanbanEvent::FocusRight),
+            'k' => Some(KanbanEvent::FocusUp),
+            'j' => Some(KanbanEvent::FocusDown),
+            'H' => Some(KanbanEvent::MoveCardLeft),
+            'L' => Some(KanbanEvent::MoveCardRight),
+            _ => None,
+        },
+        _ => None,
+    };
+    let Some(ev) = ev else {
+        return;
+    };
+    let out = reduce_kanban(&states.kanban, ev);
+    states.kanban = out.state;
+    if let Some(KanbanIntent::MoveCard { task_id, to_status }) = out.intent {
+        states.pending_kanban_action = Some(KanbanAction::MoveCard { task_id, to_status });
     }
 }
 

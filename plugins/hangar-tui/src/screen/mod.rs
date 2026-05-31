@@ -18,13 +18,15 @@ pub mod app_screens;
 pub mod autopilots;
 pub mod banner_state;
 pub mod issue_list;
+pub mod kanban;
 mod router;
 pub mod settings;
 pub mod skill_manager;
 pub mod task_detail;
 
 pub use app_screens::{
-    render_body, route_key, AutopilotAction, NavIntent, ScreenStates, SkillAction, WorkspaceAction,
+    render_body, route_key, AutopilotAction, KanbanAction, NavIntent, ScreenStates, SkillAction,
+    WorkspaceAction,
 };
 pub use router::reduce;
 
@@ -49,6 +51,8 @@ pub enum Screen {
     SkillManager,
     /// Autopilot manager (hotkey `5`).
     Autopilots,
+    /// Kanban board (hotkey `K`) — the task queue laid out as four columns.
+    Kanban,
     /// Settings (hotkey `,`).
     Settings,
     /// Help overlay (hotkey `?`) — a modal listing global + screen-local
@@ -66,6 +70,7 @@ impl Screen {
             Self::AgentPicker(_) => "Agent",
             Self::SkillManager => "Skills",
             Self::Autopilots => "Autopilots",
+            Self::Kanban => "Kanban",
             Self::Settings => "Settings",
             Self::Help => "Help",
         }

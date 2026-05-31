@@ -31,11 +31,12 @@ const OFFLINE_RED: Color = Color::rgb(220, 80, 80);
 /// its switch hotkey. `Task` (hotkey `2`) is intentionally part of the strip
 /// even though it is only reachable with a selection — it keeps the tab
 /// positions stable so the eye doesn't jump when a task is opened.
-const PRIMARY_TABS: [(char, &str); 5] = [
+const PRIMARY_TABS: [(char, &str); 6] = [
     ('1', "Issues"),
     ('2', "Task"),
     ('4', "Skills"),
     ('5', "Autopilots"),
+    ('K', "Kanban"),
     (',', "Settings"),
 ];
 
@@ -141,6 +142,7 @@ fn footer_hints(active: &Screen) -> Vec<(&'static str, &'static str)> {
         Screen::AgentPicker(_) => vec![("enter", "assign"), ("esc", "close")],
         Screen::SkillManager => vec![("i", "import"), ("/", "filter")],
         Screen::Autopilots => vec![("a", "add"), ("r", "run"), ("d", "disable"), ("e", "edit")],
+        Screen::Kanban => vec![("←→", "focus"), ("⇧←→", "move")],
         Screen::Settings => vec![("n", "add key"), ("enter", "switch")],
         // The help overlay only needs the close hint; `?` is already pressed.
         Screen::Help => vec![("esc", "close")],
@@ -161,6 +163,7 @@ const fn tab_is_active(active: &Screen, hotkey: char) -> bool {
         '2' => matches!(active, Screen::TaskDetail(_)),
         '4' => matches!(active, Screen::SkillManager),
         '5' => matches!(active, Screen::Autopilots),
+        'K' => matches!(active, Screen::Kanban),
         ',' => matches!(active, Screen::Settings),
         _ => false,
     }
@@ -239,16 +242,19 @@ mod tests {
         assert_eq!(right_start(40, 22, 18), None);
     }
 
-    /// The top bar renders the tab hotkeys onto row 0 without panicking at the
-    /// 80×24 floor, and the issue-list tab label is present.
+    /// The top bar renders every tab hotkey + the workspace slug on row 0 at a
+    /// realistic width. The six-tab strip (P8.4 added Kanban) needs >80 cols to
+    /// also fit the right cluster; the slug-yields-to-tabs behaviour at the 80×24
+    /// floor is covered by `chrome_renders_at_80x24_floor_without_overflow`.
     #[test]
-    fn top_bar_renders_at_floor_width() {
-        let mut buf = WireBuffer::new(80, 24);
-        render_top_bar(&mut buf, 80, &Screen::IssueList, "acme", Presence::Online);
+    fn top_bar_renders_tabs_and_slug() {
+        let mut buf = WireBuffer::new(120, 24);
+        render_top_bar(&mut buf, 120, &Screen::IssueList, "acme", Presence::Online);
         // Reconstruct row 0 text from the wire buffer cells.
-        let row0 = row_text(&buf, 0, 80);
+        let row0 = row_text(&buf, 0, 120);
         assert!(row0.contains("Issues"), "row0 = {row0:?}");
         assert!(row0.contains("Skills"), "row0 = {row0:?}");
+        assert!(row0.contains("Kanban"), "row0 = {row0:?}");
         assert!(row0.contains("acme"), "row0 = {row0:?}");
     }
 
@@ -276,6 +282,7 @@ mod tests {
             Screen::AgentPicker(issue),
             Screen::SkillManager,
             Screen::Autopilots,
+            Screen::Kanban,
             Screen::Settings,
             Screen::Help,
         ] {

@@ -42,6 +42,8 @@ fn reduce_key(state: &AppState, c: char) -> Reduction {
         ),
         '4' => switch_tab(state, Screen::SkillManager),
         '5' => switch_tab(state, Screen::Autopilots),
+        // `K` (capital) opens the Kanban board from anywhere (P8.4).
+        'K' => switch_tab(state, Screen::Kanban),
         ',' => switch_tab(state, Screen::Settings),
         // `?` opens the help overlay over the current screen (P4.1 deliverable,
         // P4.md:78). Esc restores the prior screen, like any modal.
