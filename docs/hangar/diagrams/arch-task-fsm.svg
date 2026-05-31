@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 760" font-family="ui-monospace, monospace">
+<defs>
+<style>.title{font-size:18px;fill:#e2e8f0;font-weight:bold}.state{font-size:14px;fill:#e2e8f0;font-weight:bold}.sub{font-size:11px;fill:#94a3b8}.albl{font-size:11px;fill:#e2e8f0}</style>
+<marker id="aOrange" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#fb923c"/></marker>
+<marker id="aBlue" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#38bdf8"/></marker>
+<marker id="aGray" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#94a3b8"/></marker>
+</defs>
+<rect width="1200" height="760" fill="#0a1628"/>
+<text x="40" y="44" class="title">Hangar — Task FSM (migration 0004 statuses)</text>
+<circle cx="90" cy="140" r="9" fill="#e2e8f0"/>
+<rect x="160" y="110" width="150" height="60" rx="6" fill="#13243f" stroke="#38bdf8" stroke-width="2"/>
+<text x="235.0" y="145.0" text-anchor="middle" class="state">queued</text>
+<rect x="380" y="110" width="150" height="60" rx="6" fill="#13243f" stroke="#38bdf8" stroke-width="2"/>
+<text x="455.0" y="145.0" text-anchor="middle" class="state">dispatched</text>
+<rect x="600" y="110" width="150" height="60" rx="6" fill="#13243f" stroke="#38bdf8" stroke-width="2"/>
+<text x="675.0" y="145.0" text-anchor="middle" class="state">running</text>
+<rect x="820" y="60" width="170" height="56" rx="6" fill="#13243f" stroke="#2dd4bf" stroke-width="2"/>
+<text x="905.0" y="86.0" text-anchor="middle" class="state">done</text>
+<text x="905.0" y="102.0" text-anchor="middle" class="sub">(final)</text>
+<rect x="820" y="150" width="170" height="56" rx="6" fill="#13243f" stroke="#f87171" stroke-width="2"/>
+<text x="905.0" y="176.0" text-anchor="middle" class="state">failed</text>
+<text x="905.0" y="192.0" text-anchor="middle" class="sub">(final)</text>
+<rect x="820" y="240" width="170" height="56" rx="6" fill="#13243f" stroke="#94a3b8" stroke-width="2"/>
+<text x="905.0" y="266.0" text-anchor="middle" class="state">cancelled</text>
+<text x="905.0" y="282.0" text-anchor="middle" class="sub">(final)</text>
+<path d="M99,140 L160,140" stroke="#fb923c" stroke-width="2" fill="none" marker-end="url(#aOrange)"/>
+<path d="M310,140 L380,140" stroke="#fb923c" stroke-width="2" fill="none" marker-end="url(#aOrange)"/>
+<rect x="290.0" y="116" width="110.0" height="17" rx="3" fill="#0a1628" opacity="0.95"/>
+<text x="345" y="128" text-anchor="middle" class="albl">claim_for_runtime</text>
+<path d="M530,140 L600,140" stroke="#fb923c" stroke-width="2" fill="none" marker-end="url(#aOrange)"/>
+<rect x="546.0" y="116" width="38.0" height="17" rx="3" fill="#0a1628" opacity="0.95"/>
+<text x="565" y="128" text-anchor="middle" class="albl">start</text>
+<path d="M750,128 L820,90" stroke="#fb923c" stroke-width="2" fill="none" marker-end="url(#aOrange)"/>
+<rect x="762.0" y="96" width="56.0" height="17" rx="3" fill="#0a1628" opacity="0.95"/>
+<text x="790" y="108" text-anchor="middle" class="albl">complete</text>
+<path d="M750,148 L820,176" stroke="#fb923c" stroke-width="2" fill="none" marker-end="url(#aOrange)"/>
+<rect x="725.0" y="146" width="134.0" height="17" rx="3" fill="#0a1628" opacity="0.95"/>
+<text x="792" y="158" text-anchor="middle" class="albl">fail [failure_reason]</text>
+<path d="M675,170 L820,255" stroke="#fb923c" stroke-width="2" fill="none" marker-end="url(#aOrange)"/>
+<rect x="690.0" y="216" width="140.0" height="17" rx="3" fill="#0a1628" opacity="0.95"/>
+<text x="760" y="228" text-anchor="middle" class="albl">cancel [cancel_source]</text>
+<path d="M905,206 L905,360" stroke="#38bdf8" stroke-width="2" fill="none" marker-end="url(#aBlue)"/>
+<path d="M905,360 L235,360" stroke="#38bdf8" stroke-width="2" fill="none" marker-end="url(#aBlue)"/>
+<rect x="460.0" y="338" width="200.0" height="17" rx="3" fill="#0a1628" opacity="0.95"/>
+<text x="560" y="350" text-anchor="middle" class="albl">retry: new task (parent_task_id)</text>
+<path d="M235,360 L235,170" stroke="#38bdf8" stroke-width="2" fill="none" marker-end="url(#aBlue)"/>
+<text x="560" y="375" text-anchor="middle" class="sub">guarded by max_attempts</text>
+<path d="M455,170 L455,460" stroke="#94a3b8" stroke-width="2" fill="none" marker-end="url(#aGray)" stroke-dasharray="4,2"/>
+<path d="M455,460 L895,460" stroke="#94a3b8" stroke-width="2" fill="none" marker-end="url(#aGray)" stroke-dasharray="4,2"/>
+<rect x="614.0" y="438" width="122.0" height="17" rx="3" fill="#0a1628" opacity="0.95"/>
+<text x="675" y="450" text-anchor="middle" class="albl">TTL sweeper (stale)</text>
+<path d="M895,460 L895,206" stroke="#94a3b8" stroke-width="2" fill="none" marker-end="url(#aGray)" stroke-dasharray="4,2"/>
+<text x="675" y="476" text-anchor="middle" class="sub">idempotent finalize</text>
+<rect x="160" y="540" width="900" height="86" rx="6" fill="#0f2942" stroke="#fbbf24" stroke-width="1.5"/>
+<text x="180" y="566" class="sub" style="font-size:13px;fill:#fbbf24">finalize side-effect</text>
+<text x="180" y="590" class="sub">When autopilot_run_id is set, terminal finalize (done/failed/cancelled) stamps autopilot_run.completed_at.</text>
+<text x="180" y="610" class="sub">Finalize is idempotent — repeated sweeps / completes do not double-stamp.</text>
+<rect x="160" y="650" width="640" height="80" rx="6" fill="#0f2942" stroke="#334155" stroke-width="1"/>
+<text x="176" y="672" class="sub">Legend</text>
+<line x1="240" y1="667" x2="280" y2="667" stroke="#fb923c" stroke-width="2"/><text x="290" y="671" class="sub">FSM transition</text>
+<line x1="240" y1="691" x2="280" y2="691" stroke="#38bdf8" stroke-width="2"/><text x="290" y="695" class="sub">retry (new task)</text>
+<line x1="240" y1="715" x2="280" y2="715" stroke="#94a3b8" stroke-width="2" stroke-dasharray="4,2"/><text x="290" y="719" class="sub">TTL sweeper (async)</text>
+<rect x="500" y="660" width="20" height="14" rx="3" fill="#13243f" stroke="#2dd4bf" stroke-width="2"/><text x="528" y="671" class="sub">terminal / final</text>
+</svg>
