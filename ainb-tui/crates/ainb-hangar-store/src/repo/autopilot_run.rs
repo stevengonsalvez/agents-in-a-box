@@ -79,6 +79,11 @@ impl From<IdError> for FireError {
 /// - [`FireError::Db`] on any SQL failure — notably a task-insert FK violation,
 ///   after which the run insert is rolled back too.
 /// - [`FireError::EmptyId`] on the unreachable empty-PK invariant break.
+#[tracing::instrument(
+    name = "autopilot.tick",
+    skip(pool, clock, autopilot),
+    fields(autopilot_id = %autopilot.id, cron_expr = %autopilot.cron_expr)
+)]
 pub async fn fire_autopilot_tick(
     pool: &SqlitePool,
     clock: &dyn HangarClock,
