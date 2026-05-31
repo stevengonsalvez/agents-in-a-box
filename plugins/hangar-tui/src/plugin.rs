@@ -88,6 +88,8 @@ const AUTOPILOT_TOGGLE_REQ_ID: i64 = 21;
 const TASKS_REQ_ID: i64 = 22;
 /// JSON-RPC id for a `hangar/task_transition` request (P8.4).
 const TASK_TRANSITION_REQ_ID: i64 = 23;
+/// JSON-RPC id for the `hangar/daemon_health` snapshot request (P8.5).
+const DAEMON_HEALTH_REQ_ID: i64 = 24;
 
 /// Hangar plugin state.
 ///
@@ -242,6 +244,7 @@ impl HangarPlugin {
             RpcId::Number(AUTOPILOTS_REQ_ID) => self.apply_autopilots(resp),
             RpcId::Number(AUTOPILOT_RUNS_REQ_ID) => self.apply_autopilot_runs(resp),
             RpcId::Number(TASKS_REQ_ID) => self.apply_tasks(resp),
+            RpcId::Number(DAEMON_HEALTH_REQ_ID) => self.apply_daemon_health(resp),
             // Mutating RPCs (skill sync/attach/detach, autopilot fire/toggle,
             // kanban task transition) answer `{}`; we re-fetch the relevant lists
             // to refresh derived columns (`used`, next-tick, enabled, last-run,
@@ -315,6 +318,19 @@ impl HangarPlugin {
                 result.clone(),
             ) {
                 self.screens.set_tasks(&r.tasks);
+            }
+        }
+    }
+
+    /// Populate the daemon-health pane from a `hangar/daemon_health` result
+    /// (P8.5).
+    fn apply_daemon_health(&mut self, resp: &RpcResponse) {
+        if let Some(result) = &resp.result {
+            if let Ok(snap) = serde_json::from_value::<
+                ainb_hangar_proto::settings::DaemonHealthSnapshot,
+            >(result.clone())
+            {
+                self.screens.set_daemon_health(snap);
             }
         }
     }
@@ -417,6 +433,11 @@ impl HangarPlugin {
             (
                 TASKS_REQ_ID,
                 daemon_methods::HANGAR_TASKS_LIST,
+                scoped.clone(),
+            ),
+            (
+                DAEMON_HEALTH_REQ_ID,
+                daemon_methods::HANGAR_DAEMON_HEALTH,
                 scoped.clone(),
             ),
             (

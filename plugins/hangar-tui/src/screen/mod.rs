@@ -17,6 +17,7 @@ pub mod agent_picker;
 pub mod app_screens;
 pub mod autopilots;
 pub mod banner_state;
+pub mod daemon_health;
 pub mod issue_list;
 pub mod kanban;
 mod router;
@@ -53,6 +54,9 @@ pub enum Screen {
     Autopilots,
     /// Kanban board (hotkey `K`) — the task queue laid out as four columns.
     Kanban,
+    /// Daemon health (hotkey `D`) — runtimes, claim cache, concurrency, and the
+    /// dual-dim throughput sparkline (P8.5).
+    DaemonHealth,
     /// Settings (hotkey `,`).
     Settings,
     /// Help overlay (hotkey `?`) — a modal listing global + screen-local
@@ -71,6 +75,7 @@ impl Screen {
             Self::SkillManager => "Skills",
             Self::Autopilots => "Autopilots",
             Self::Kanban => "Kanban",
+            Self::DaemonHealth => "Daemon",
             Self::Settings => "Settings",
             Self::Help => "Help",
         }

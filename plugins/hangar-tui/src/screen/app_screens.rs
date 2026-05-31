@@ -14,11 +14,14 @@
 //! daemon snapshot and folded by the daemon's event stream.
 
 use ainb_hangar_proto::events::{ActorRow, AutopilotRow, IssueRow, SkillRow, TaskCardRow};
-use ainb_hangar_proto::settings::{HealthSnapshot, KeyRow, ProviderRow, WorkspaceRow};
+use ainb_hangar_proto::settings::{
+    DaemonHealthSnapshot, HealthSnapshot, KeyRow, ProviderRow, WorkspaceRow,
+};
 use ainb_plugin_sdk::{KeyCode, KeyEvent, WireBuffer};
 
 use super::agent_picker::{reduce_agent_picker, AgentPickerEvent, AgentPickerState};
 use super::autopilots::{reduce_autopilots, AutopilotsEvent, AutopilotsIntent, AutopilotsState};
+use super::daemon_health::DaemonHealthState;
 use super::issue_list::{reduce_issue_list, IssueListEvent, IssueListIntent, IssueListState};
 use super::kanban::{reduce_kanban, KanbanEvent, KanbanIntent, KanbanState};
 use super::settings::{reduce_settings, SettingsEvent, SettingsIntent, SettingsState};
@@ -116,6 +119,8 @@ pub struct ScreenStates {
     pub autopilots: AutopilotsState,
     /// Kanban board screen cache (P8.4).
     pub kanban: KanbanState,
+    /// Daemon-health screen cache (P8.5), built from `hangar/daemon_health`.
+    pub daemon_health: DaemonHealthState,
     /// Settings screen cache (built once the four snapshots arrive).
     pub settings: Option<SettingsState>,
     /// Task-detail screen cache (present only while a task is open).
@@ -175,6 +180,12 @@ impl ScreenStates {
     /// renderer is passed the live clock.
     pub fn set_tasks(&mut self, tasks: &[TaskCardRow]) {
         self.kanban = KanbanState::from_tasks(tasks, 0);
+    }
+
+    /// Rebuild the daemon-health pane from a `hangar/daemon_health` snapshot
+    /// (P8.5).
+    pub fn set_daemon_health(&mut self, snap: DaemonHealthSnapshot) {
+        self.daemon_health = DaemonHealthState::from_snapshot(snap);
     }
 
     /// Cache the agent snapshot rows; the picker is rebuilt from them on open.
@@ -292,6 +303,15 @@ pub fn render_body(buf: &mut WireBuffer, w: u16, h: u16, app: &AppState, states:
         }
         Screen::Kanban => {
             super::kanban::render_kanban(buf, w, top, bottom, &states.kanban, now_ms());
+        }
+        Screen::DaemonHealth => {
+            super::daemon_health::render_daemon_health(
+                buf,
+                w,
+                top,
+                bottom,
+                &states.daemon_health,
+            );
         }
         Screen::Settings => {
             if let Some(s) = &states.settings {
@@ -489,7 +509,10 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
             None
         }
         Screen::AgentPicker(_) => route_agent_picker(states, key),
-        Screen::Help => None,
+        // Read-only / overlay screens with no per-screen keys: the daemon-health
+        // pane (P8.5) and the help overlay (the `D`/`?` tab-switch + global keys
+        // are handled by the router before reaching here).
+        Screen::DaemonHealth | Screen::Help => None,
     }
 }
 
