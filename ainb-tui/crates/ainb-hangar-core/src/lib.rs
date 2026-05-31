@@ -27,6 +27,10 @@ pub mod ids;
 /// Structured-log line model + `daemon.<date>` reader shared by the
 /// `ainb hangar logs tail` CLI verb and the TUI `LogsScreen` (P8.6).
 pub mod logs;
+/// Parse the canonical `gh pr create` PR-URL line from agent stdout (P9.1).
+pub mod pr_url;
+/// The structured `agent_task_queue.result` JSON shape ([`result::TaskResult`]).
+pub mod result;
 /// Skill domain vocabulary: normalised [`skill::SkillName`], the
 /// [`skill::SkillWithFiles`] aggregate, and ordered file inputs.
 pub mod skill;

@@ -41,6 +41,10 @@ rand = "0.8"
 # same way `ainb-hangar-daemon::hangar_dir` does (without a dep on the daemon,
 # which the plugin can't take).
 dirs = { workspace = true }
+# P9.1: line-anchored match for the canonical `gh pr create` PR-URL line so the
+# daemon can stamp `agent_task_queue.result.pr_url`. Pure string match — no IO —
+# so the crate's no-IO charter is preserved. Compiled once via `std::sync::LazyLock`.
+regex = { workspace = true }
 
 [features]
 # Exposes the deterministic test doubles (`FixedClock`, `FixedIdGen`) to
