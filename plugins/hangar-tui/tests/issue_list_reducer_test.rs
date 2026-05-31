@@ -27,6 +27,7 @@ fn row(id: &str, state: &str, assignee: Option<&str>) -> IssueRow {
         assignee: assignee.map(ToString::to_string),
         creator: "member:alice".to_string(),
         created_at: 0,
+        pr_url: None,
     }
 }
 

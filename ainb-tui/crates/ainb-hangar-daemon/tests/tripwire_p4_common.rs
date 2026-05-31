@@ -35,6 +35,7 @@
 // paragraphs, plain words that aren't code items) are intentional here.
 #![allow(clippy::too_long_first_doc_paragraph, clippy::doc_markdown)]
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
@@ -388,6 +389,36 @@ pub fn fake_claude_mixed(dir: &Path, fail_first: u32) -> PathBuf {
     path
 }
 
+/// Mark the fixture's `task-1` (on `issue-1`) `done` with a `result.pr_url` so
+/// the task-detail screen surfaces the PR badge (P9.2).
+///
+/// `issues_list` reads `result ->> 'pr_url'` from an issue's latest completed
+/// task, so a completed `task-1` carrying `pr_url` makes `issue-1`'s wire row
+/// (and thus the opened task detail) badge `pr_url`. Must run after
+/// [`prepare_pipeline`] and against the same isolated `$HOME`.
+pub fn seed_completed_task_with_pr(home: &Path, pr_url: &str) {
+    let hangar_dir = home.join(".ainb");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("pr-seed runtime");
+    rt.block_on(async {
+        let store = ainb_hangar_store::Store::open_in(&hangar_dir)
+            .await
+            .expect("open pr-seed store");
+        let result = format!("{{\"content\":\"done\",\"exit_code\":0,\"pr_url\":\"{pr_url}\"}}");
+        sqlx::query(
+            "UPDATE agent_task_queue \
+             SET status = 'done', result = ?, finished_at = ? WHERE id = 'task-1'",
+        )
+        .bind(result)
+        .bind(1_700_000_100_000i64)
+        .execute(store.pool())
+        .await
+        .expect("seed completed task with pr");
+    });
+}
+
 /// Enqueue `count` `queued` tasks (ids `seed-<prefix>-<i>`) on the seeded
 /// `runtime-1` / `agent-1` / `default` workspace into `{home}/.ainb/hangar.db`,
 /// so a claim-enabled daemon claims + executes them.
@@ -513,6 +544,18 @@ impl TuiSession {
     /// Panics only on a tmux spawn failure (the caller has gated on
     /// [`can_run_tripwire`]).
     pub fn spawn(bin: &Path, home: &Path) -> Self {
+        Self::spawn_with_env(bin, home, &[])
+    }
+
+    /// Like [`spawn`](Self::spawn) but layers `extra_env` (`KEY=value`) into the
+    /// launched `ainb tui` command's environment.
+    ///
+    /// The host `ainb tui` process inherits these and passes them to the plugin
+    /// subprocess it spawns. P9.2's tripwire uses this to set
+    /// `HANGAR_OPENER_PROBE_FILE`, flipping the plugin's PR opener to a recording
+    /// opener (so the `o` action writes to a probe file instead of launching a
+    /// real browser).
+    pub fn spawn_with_env(bin: &Path, home: &Path, extra_env: &[(&str, &str)]) -> Self {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos());
@@ -531,8 +574,13 @@ impl TuiSession {
             .map(|p| format!("AINB_PLUGIN_ROOT='{}' ", p.display()))
             .unwrap_or_default();
 
+        let mut env_prefix = String::new();
+        for (k, v) in extra_env {
+            let _ = write!(env_prefix, "{k}='{v}' ");
+        }
+
         let cmd = format!(
-            "HOME='{}' {plugin_root}exec '{}' tui",
+            "HOME='{}' {plugin_root}{env_prefix}exec '{}' tui",
             home.display(),
             bin.display()
         );
