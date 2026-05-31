@@ -93,6 +93,39 @@ pub enum HangarCommand {
     /// Create and control cron-scheduled autopilots.
     #[command(subcommand)]
     Autopilot(AutopilotCommand),
+    /// Read the daemon's structured logs.
+    #[command(subcommand)]
+    Logs(LogsCommand),
+}
+
+/// `hangar logs <verb>`.
+///
+/// Surfaces the daemon's P8.1 structured-log file
+/// (`<hangar_home>/hangar/logs/daemon.<date>`, daily-rotated — never a literal
+/// `daemon.jsonl`). `tail` pretty-prints the newest file's recent events,
+/// optionally following live or bounded to the last N.
+#[derive(Subcommand, Debug)]
+pub enum LogsCommand {
+    /// Pretty-print recent log events; `--follow` streams live.
+    Tail(LogsTailArgs),
+}
+
+/// Arguments for `hangar logs tail`.
+#[derive(Args, Debug)]
+pub struct LogsTailArgs {
+    /// Stream new events live as the daemon writes them (poll-append loop).
+    #[arg(long, short = 'f')]
+    pub follow: bool,
+    /// Print the last N events and exit (the bounded tail window).
+    #[arg(long, default_value_t = 200)]
+    pub lines: usize,
+    /// Only show events at or above this level
+    /// (`trace`/`debug`/`info`/`warn`/`error`).
+    #[arg(long)]
+    pub level: Option<String>,
+    /// Print + exit even when `--follow` is set (bounded mode for tests/CI).
+    #[arg(long)]
+    pub no_follow: bool,
 }
 
 /// `hangar autopilot <verb>`.
@@ -507,7 +540,141 @@ pub async fn dispatch(cmd: HangarCommand, format: OutputFormat) -> Result<()> {
         HangarCommand::Skills(c) => dispatch_skills(c, format).await,
         HangarCommand::Templates(c) => dispatch_templates(c, format).await,
         HangarCommand::Autopilot(c) => dispatch_autopilot(c, format).await,
+        HangarCommand::Logs(LogsCommand::Tail(args)) => run_logs_tail(args).await,
     }
+}
+
+/// `hangar logs tail`: pretty-print the daemon's structured-log events.
+///
+/// Resolves the log dir the daemon writes (`<hangar_home>/hangar/logs`) via the
+/// shared [`ainb_hangar_core::logs::default_log_dir`], reads the newest
+/// `daemon.<date>` file's last `--lines` events (the file is daily-rotated —
+/// never a literal `daemon.jsonl`), applies the optional `--level` floor, and
+/// prints each as `{ts} {LVL} {target} {msg} {k=v}` coloured by level. A
+/// missing log dir / file prints nothing and exits 0 (a fresh install with no
+/// daemon run yet is not an error).
+///
+/// With `--follow`/`-f` (and not `--no-follow`) it then polls the file for
+/// appended lines and prints them as they arrive, exiting cleanly on Ctrl-C.
+async fn run_logs_tail(args: LogsTailArgs) -> Result<()> {
+    use ainb_hangar_core::logs::{self, LogLevel};
+
+    let min_level = match &args.level {
+        Some(s) => Some(
+            LogLevel::parse(s)
+                .with_context(|| format!("unknown log level `{s}` (use trace/debug/info/warn/error)"))?,
+        ),
+        None => None,
+    };
+
+    let dir = logs::default_log_dir().context("resolve hangar log dir")?;
+
+    // Bounded pass: print the last `--lines` events (chronological).
+    let tail = logs::read_tail(&dir, args.lines, min_level);
+    for line in &tail {
+        println!("{}", logs_pretty_line(line));
+    }
+
+    // Follow loop: poll the newest file for appended lines and print them as
+    // they arrive. `--no-follow` short-circuits (the bounded tail above is the
+    // whole output) so tests + CI never hang on the loop.
+    if args.follow && !args.no_follow {
+        follow_logs(&dir, min_level).await?;
+    }
+    Ok(())
+}
+
+/// Poll the newest `daemon.*` file for appended lines, printing each new event.
+///
+/// Tracks how many lines have already been emitted and re-reads on a fixed
+/// interval, printing only the tail past the watermark. A daily rotation that
+/// swaps in a newer file resets the watermark (the new file starts fresh). Runs
+/// until the process is interrupted (Ctrl-C), which Tokio delivers as a
+/// `ctrl_c` signal that exits the loop cleanly.
+async fn follow_logs(
+    dir: &std::path::Path,
+    min_level: Option<ainb_hangar_core::logs::LogLevel>,
+) -> Result<()> {
+    use ainb_hangar_core::logs;
+    use std::time::Duration;
+
+    /// Poll cadence for the follow loop.
+    const POLL: Duration = Duration::from_millis(500);
+
+    let mut current = logs::log_files_newest_first(dir).into_iter().next();
+    let mut emitted = current
+        .as_deref()
+        .map_or(0, |p| std::fs::read_to_string(p).map(|c| c.lines().count()).unwrap_or(0));
+
+    loop {
+        tokio::select! {
+            // Clean exit on Ctrl-C.
+            res = tokio::signal::ctrl_c() => {
+                res.context("listen for ctrl-c")?;
+                return Ok(());
+            }
+            () = tokio::time::sleep(POLL) => {
+                let newest = logs::log_files_newest_first(dir).into_iter().next();
+                // A daily rotation swapped in a newer file: reset the watermark.
+                if newest != current {
+                    current = newest;
+                    emitted = 0;
+                }
+                let Some(path) = current.as_deref() else {
+                    continue;
+                };
+                let Ok(contents) = std::fs::read_to_string(path) else {
+                    continue;
+                };
+                let all: Vec<&str> = contents.lines().collect();
+                if all.len() > emitted {
+                    for raw in &all[emitted..] {
+                        if let Some(line) = logs::LogLine::parse(raw) {
+                            if line.passes_level(min_level) {
+                                println!("{}", logs_pretty_line(&line));
+                            }
+                        }
+                    }
+                    emitted = all.len();
+                }
+            }
+        }
+    }
+}
+
+/// Pretty-print one log event as `{ts} {LVL} {target} {msg} {k=v…}`, with the
+/// level token coloured by severity via crossterm (a workspace dep; ANSI is
+/// auto-suppressed when stdout is not a TTY). Missing fields are simply skipped
+/// — the printer never panics on a partial event (the P8.6 acceptance criterion).
+fn logs_pretty_line(line: &ainb_hangar_core::logs::LogLine) -> String {
+    use ainb_hangar_core::logs::LogLevel;
+    use crossterm::style::Stylize;
+
+    let mut parts: Vec<String> = Vec::new();
+    if !line.timestamp.is_empty() {
+        parts.push(line.timestamp.clone());
+    }
+    if !line.level.is_empty() {
+        // Colour the level token by severity; non-TTY stdout drops the codes.
+        let colored = match line.level_enum() {
+            Some(LogLevel::Info) => line.level.clone().blue().to_string(),
+            Some(LogLevel::Warn) => line.level.clone().yellow().to_string(),
+            Some(LogLevel::Error) => line.level.clone().red().to_string(),
+            Some(LogLevel::Debug | LogLevel::Trace) => line.level.clone().dark_grey().to_string(),
+            None => line.level.clone(),
+        };
+        parts.push(colored);
+    }
+    if !line.target.is_empty() {
+        parts.push(line.target.clone());
+    }
+    if !line.message.is_empty() {
+        parts.push(line.message.clone());
+    }
+    for (k, v) in &line.fields {
+        parts.push(format!("{k}={v}"));
+    }
+    parts.join(" ")
 }
 
 /// Dispatch the `hangar autopilot` verbs.
@@ -2106,6 +2273,73 @@ mod tests {
             panic!("expected skills list, got {cmd:?}");
         };
         assert!(args.workspace.is_none());
+    }
+
+    #[test]
+    fn parses_logs_tail_with_all_flags() {
+        let cmd = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "logs",
+            "tail",
+            "--follow",
+            "--lines",
+            "50",
+            "--level",
+            "warn",
+        ]);
+        let HangarCommand::Logs(LogsCommand::Tail(args)) = cmd else {
+            panic!("expected logs tail, got {cmd:?}");
+        };
+        assert!(args.follow);
+        assert_eq!(args.lines, 50);
+        assert_eq!(args.level.as_deref(), Some("warn"));
+        assert!(!args.no_follow);
+    }
+
+    #[test]
+    fn parses_logs_tail_no_follow_defaults() {
+        let cmd = parse_hangar(&["ainb", "hangar", "logs", "tail", "--no-follow"]);
+        let HangarCommand::Logs(LogsCommand::Tail(args)) = cmd else {
+            panic!("expected logs tail, got {cmd:?}");
+        };
+        assert!(args.no_follow);
+        assert!(!args.follow);
+        assert_eq!(args.lines, 200, "default tail window");
+        assert!(args.level.is_none());
+    }
+
+    #[test]
+    fn logs_pretty_line_renders_full_event() {
+        use ainb_hangar_core::logs::LogLine;
+        let line = LogLine {
+            timestamp: "2026-05-31T12:00:00.000001Z".into(),
+            level: "INFO".into(),
+            target: "ainb_hangar_daemon".into(),
+            message: "daemon ready".into(),
+            fields: vec![("task_id".into(), "t-aaa".into())],
+        };
+        let out = logs_pretty_line(&line);
+        assert!(out.contains("daemon ready"), "message: {out}");
+        assert!(out.contains("INFO"), "level: {out}");
+        assert!(out.contains("ainb_hangar_daemon"), "target: {out}");
+        assert!(out.contains("task_id=t-aaa"), "field tail: {out}");
+    }
+
+    #[test]
+    fn logs_pretty_line_tolerates_missing_fields() {
+        use ainb_hangar_core::logs::LogLine;
+        // Every field absent — the printer must not panic and must yield a
+        // (possibly empty) string (the P8.6 acceptance criterion).
+        let empty = LogLine::default();
+        assert_eq!(logs_pretty_line(&empty), "");
+
+        // Only a message, no timestamp/level/target/fields.
+        let msg_only = LogLine {
+            message: "just a message".into(),
+            ..LogLine::default()
+        };
+        assert_eq!(logs_pretty_line(&msg_only), "just a message");
     }
 
     #[test]
