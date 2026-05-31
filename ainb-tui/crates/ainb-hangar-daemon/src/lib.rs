@@ -36,6 +36,10 @@ pub mod dispatch;
 /// Per-task execution-environment layout: workdir/output/logs + `.gc_meta.json`
 /// (P1.6).
 pub mod execenv;
+/// In-memory daemon health stats for the daemon-health pane (P8.5).
+///
+/// The rolling task-throughput ring buffer + the bounded claim-slot cache figure.
+pub mod health_stats;
 /// Daemon observability bootstrap (P8.1).
 ///
 /// Installs the `tracing` subscriber with the rolling JSONL sink under
@@ -183,6 +187,12 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
 
     let store: Store = Store::open_in(&dir).await?;
 
+    // P8.5: the in-memory health stats collector — shared between the RPC server
+    // (which snapshots the rolling throughput ring for the `hangar/daemon_health`
+    // pane) and the run loop's FSM finalize path (which records each task's
+    // terminal outcome into the ring).
+    let stats = std::sync::Arc::new(crate::health_stats::HealthStats::default());
+
     // P4.10: bind the JSON-RPC socket beside the database and serve plugin
     // connections on a background task. A bind failure is non-fatal — the
     // daemon's claim loop must still run even if no plugin can reach it (and a
@@ -195,6 +205,7 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
                 pid: std::process::id(),
                 started_at: std::time::Instant::now(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
+                stats: stats.clone(),
             };
             tracing::info!(socket = %socket_path.display(), "hangar rpc listening");
             tokio::spawn(rpc::serve(listener, store.pool().clone(), health));
@@ -227,5 +238,5 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
         return Ok(());
     }
     let cfg = DaemonConfig::from_env();
-    run(store.pool().clone(), cfg).await
+    run(store.pool().clone(), cfg, stats).await
 }

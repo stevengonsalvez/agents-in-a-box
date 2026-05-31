@@ -32,6 +32,7 @@
 #![allow(clippy::duration_suboptimal_units)]
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use ainb_hangar_core::clock::{HangarClock, SystemClock};
@@ -43,6 +44,7 @@ use ainb_hangar_store::service::start::StartTaskService;
 use sqlx::{Row, SqlitePool};
 
 use crate::execenv::prepare_env;
+use crate::health_stats::HealthStats;
 use crate::runner::{Provider, RunOutcome, Runner, RunnerConfig};
 use crate::sweeper::{
     SweeperConfig, sweep_expired_queued, sweep_stale_dispatched, sweep_stale_running,
@@ -117,12 +119,21 @@ fn env_u64_opt(key: &str) -> Option<u64> {
 /// Run the daemon's steady state: spawn sweepers, then poll-claim-execute until
 /// `Ctrl-C`.
 ///
+/// `stats` is the shared in-memory health collector (P8.5): each task's terminal
+/// outcome is recorded into its rolling throughput ring as the FSM finalises, so
+/// the `hangar/daemon_health` pane sees live per-second completed / failed
+/// counts. The collector is shared with the RPC server (which snapshots it).
+///
 /// # Errors
 ///
 /// Returns an error if installing the shutdown handler fails. Per-task failures
 /// (provider errors, FSM races) are logged and recorded on the row, never
 /// propagated — one bad task must not down the daemon.
-pub async fn run(pool: SqlitePool, cfg: DaemonConfig) -> anyhow::Result<()> {
+pub async fn run(
+    pool: SqlitePool,
+    cfg: DaemonConfig,
+    stats: Arc<HealthStats>,
+) -> anyhow::Result<()> {
     spawn_sweepers(pool.clone(), cfg.sweeper);
 
     if cfg.disable_claim || cfg.runtime_id.is_none() {
@@ -152,7 +163,7 @@ pub async fn run(pool: SqlitePool, cfg: DaemonConfig) -> anyhow::Result<()> {
 
         match ClaimTaskService::claim_for_runtime(&pool, &runtime_id, &clock).await {
             Ok(Some(claimed)) => {
-                if let Err(e) = execute_claimed(&pool, &runner, &claimed, &clock).await {
+                if let Err(e) = execute_claimed(&pool, &runner, &claimed, &clock, &stats).await {
                     tracing::error!(task_id = %claimed.id, error = %e, "task execution errored");
                 }
             }
@@ -219,6 +230,7 @@ async fn execute_claimed(
     runner: &Runner,
     claimed: &ClaimedTask,
     clock: &dyn HangarClock,
+    stats: &HealthStats,
 ) -> anyhow::Result<()> {
     let task: Task = TaskRepo::get_by_id(pool, &claimed.id)
         .await?
@@ -288,6 +300,9 @@ async fn execute_claimed(
                 clock,
             )
             .await?;
+            // P8.5: record the successful terminal outcome into the rolling
+            // throughput ring so the daemon-health pane's sparkline sees it.
+            stats.record_completed(clock.now_ms() / 1_000);
             tracing::info!(task_id = %task.id, "task done");
         }
         RunOutcome::Failed { reason, result } => {
@@ -295,6 +310,9 @@ async fn execute_claimed(
             // resume the provider conversation.
             persist_session_id(pool, &task.id, result.session_id.as_deref()).await?;
             FailTaskService::fail(pool, &task.id, reason, clock).await?;
+            // P8.5: record the failed terminal outcome (drives the sparkline's
+            // red proportion for this second).
+            stats.record_failed(clock.now_ms() / 1_000);
             tracing::warn!(task_id = %task.id, reason = reason.as_db_str(), "task failed");
         }
     }
