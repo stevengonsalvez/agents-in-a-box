@@ -37,7 +37,8 @@ mod listener;
 pub use envelope::{Envelope, EnvelopeError};
 pub use fallback::FallbackFile;
 pub use install::{
-    Agent, InstallRecord, StatusRow, install as install_for, install_under_home, status, uninstall,
+    Agent, InstallPrompt, InstallRecord, StatusRow, dismiss_prompt, embedded_plugin_version,
+    install as install_for, install_under_home, prompt_state, status, uninstall,
 };
 pub use listener::{RunConfig, run_daemon};
 pub use paths::Paths;

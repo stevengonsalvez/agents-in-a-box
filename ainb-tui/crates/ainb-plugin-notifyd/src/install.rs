@@ -78,6 +78,18 @@ pub struct InstallRecord {
     pub claude_plugin_dir: Option<PathBuf>,
     /// Resolved per-agent config path (Codex only).
     pub codex_hooks_json: Option<PathBuf>,
+    /// The plugin manifest version that was written to disk at install
+    /// time. Compared against [`embedded_plugin_version`] on startup to
+    /// detect drift after an `ainb` upgrade. `None` for records written
+    /// before this field existed (treated as "0.0.0" → always stale).
+    #[serde(default)]
+    pub plugin_version: Option<String>,
+    /// Set when the user explicitly declined the first-run install
+    /// prompt ("don't ask again"). Suppresses the offer-to-install
+    /// prompt; does not affect the offer-to-update prompt (which only
+    /// applies once something is actually installed).
+    #[serde(default)]
+    pub prompt_dismissed: bool,
 }
 
 impl InstallRecord {
@@ -153,6 +165,11 @@ pub fn install_under_home(paths: &Paths, home: &Path, agents: &[Agent]) -> Resul
 
     let mut record = InstallRecord::load(paths)?;
     record.hook_script = hook_script.clone();
+    // Stamp the manifest version we're writing so a later `ainb`
+    // upgrade can detect drift (see `prompt_state`). A fresh install
+    // also clears any prior "don't ask again" — the user is opting in.
+    record.plugin_version = Some(embedded_plugin_version());
+    record.prompt_dismissed = false;
     for agent in agents {
         match agent {
             Agent::Claude => {
@@ -169,6 +186,92 @@ pub fn install_under_home(paths: &Paths, home: &Path, agents: &[Agent]) -> Resul
     }
     record.save(paths)?;
     Ok(record)
+}
+
+/// The plugin manifest version baked into this binary — parsed from
+/// the embedded `plugin.json`. Single source of truth: bump the
+/// version in `plugins/ainb-hooks/.claude-plugin/plugin.json` and both
+/// the install record and the drift check pick it up automatically.
+pub fn embedded_plugin_version() -> String {
+    serde_json::from_str::<serde_json::Value>(CLAUDE_PLUGIN_JSON)
+        .ok()
+        .and_then(|v| {
+            v.get("version")
+                .and_then(|s| s.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "0.0.0".to_string())
+}
+
+/// Parse a `major.minor.patch` string into a comparable tuple. Any
+/// non-numeric suffix on a component (e.g. `-rc1`) is ignored; missing
+/// components default to 0. Robust to the `v` prefix.
+fn parse_semver(v: &str) -> (u64, u64, u64) {
+    let mut parts = v.trim_start_matches('v').split('.').map(|p| {
+        p.split(|c: char| !c.is_ascii_digit())
+            .next()
+            .unwrap_or("0")
+            .parse::<u64>()
+            .unwrap_or(0)
+    });
+    (
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+    )
+}
+
+/// What the TUI should do about the notification hooks on startup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InstallPrompt {
+    /// Nothing installed and the user hasn't declined — offer to
+    /// install.
+    OfferInstall,
+    /// Installed, but this binary embeds a newer manifest — offer to
+    /// re-install (drift after an `ainb` upgrade).
+    OfferUpdate {
+        /// Version currently on disk.
+        installed: String,
+        /// Version this binary would write.
+        embedded: String,
+    },
+    /// Up to date, or the user declined — show nothing.
+    None,
+}
+
+/// Decide whether the TUI should prompt the user about notification
+/// hooks. This is the single entry point the host calls on startup;
+/// it reads the install record and compares versions. Never errors —
+/// a missing/corrupt record is treated as "not installed".
+pub fn prompt_state(paths: &Paths) -> InstallPrompt {
+    let record = InstallRecord::load(paths).unwrap_or_default();
+    let embedded = embedded_plugin_version();
+    if record.agents.is_empty() {
+        if record.prompt_dismissed {
+            InstallPrompt::None
+        } else {
+            InstallPrompt::OfferInstall
+        }
+    } else {
+        let installed = record
+            .plugin_version
+            .clone()
+            .unwrap_or_else(|| "0.0.0".to_string());
+        if parse_semver(&installed) < parse_semver(&embedded) {
+            InstallPrompt::OfferUpdate { installed, embedded }
+        } else {
+            InstallPrompt::None
+        }
+    }
+}
+
+/// Persist the user's "don't ask again" choice so the offer-to-install
+/// prompt never fires again on this machine. Writes a record with no
+/// agents and `prompt_dismissed = true`.
+pub fn dismiss_prompt(paths: &Paths) -> Result<()> {
+    let mut record = InstallRecord::load(paths).unwrap_or_default();
+    record.prompt_dismissed = true;
+    record.save(paths)
 }
 
 fn push_unique<T: PartialEq>(v: &mut Vec<T>, item: T) {
@@ -544,5 +647,98 @@ mod tests {
             assert!(!r.installed);
             assert!(!r.socket_ok);
         }
+    }
+
+    #[test]
+    fn embedded_plugin_version_is_parsed_from_manifest() {
+        // Must match the version in
+        // plugins/ainb-hooks/.claude-plugin/plugin.json.
+        let v = embedded_plugin_version();
+        assert!(!v.is_empty() && v != "0.0.0", "got {v:?}");
+        // It parses as a semver tuple.
+        assert!(parse_semver(&v) > (0, 0, 0));
+    }
+
+    #[test]
+    fn parse_semver_handles_components_and_suffixes() {
+        assert_eq!(parse_semver("0.2.0"), (0, 2, 0));
+        assert_eq!(parse_semver("v1.2.3"), (1, 2, 3));
+        assert_eq!(parse_semver("0.10.0"), (0, 10, 0));
+        assert!(parse_semver("0.9.0") < parse_semver("0.10.0"), "numeric, not lexical");
+        assert_eq!(parse_semver("1.0.0-rc1"), (1, 0, 0));
+        assert_eq!(parse_semver("garbage"), (0, 0, 0));
+    }
+
+    #[test]
+    fn prompt_state_offers_install_when_nothing_installed() {
+        let dir = fake_home();
+        let p = paths_under_home(dir.path());
+        std::fs::create_dir_all(&p.base).unwrap();
+        assert_eq!(prompt_state(&p), InstallPrompt::OfferInstall);
+    }
+
+    #[test]
+    fn prompt_state_silent_after_dismiss() {
+        let dir = fake_home();
+        let p = paths_under_home(dir.path());
+        std::fs::create_dir_all(&p.base).unwrap();
+        dismiss_prompt(&p).unwrap();
+        assert_eq!(prompt_state(&p), InstallPrompt::None);
+    }
+
+    #[test]
+    fn prompt_state_silent_when_up_to_date() {
+        let dir = fake_home();
+        let p = paths_under_home(dir.path());
+        std::fs::create_dir_all(&p.base).unwrap();
+        let mut rec = InstallRecord::default();
+        rec.agents.push(Agent::Claude);
+        rec.plugin_version = Some(embedded_plugin_version());
+        rec.save(&p).unwrap();
+        assert_eq!(prompt_state(&p), InstallPrompt::None);
+    }
+
+    #[test]
+    fn prompt_state_offers_update_on_version_drift() {
+        let dir = fake_home();
+        let p = paths_under_home(dir.path());
+        std::fs::create_dir_all(&p.base).unwrap();
+        // Installed an older version than the binary embeds.
+        let mut rec = InstallRecord::default();
+        rec.agents.push(Agent::Claude);
+        rec.plugin_version = Some("0.0.1".to_string());
+        rec.save(&p).unwrap();
+        match prompt_state(&p) {
+            InstallPrompt::OfferUpdate { installed, embedded } => {
+                assert_eq!(installed, "0.0.1");
+                assert_eq!(embedded, embedded_plugin_version());
+            }
+            other => panic!("expected OfferUpdate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prompt_state_treats_missing_version_as_stale() {
+        // Records written before the version field existed parse with
+        // plugin_version = None → treated as 0.0.0 → offer update.
+        let dir = fake_home();
+        let p = paths_under_home(dir.path());
+        std::fs::create_dir_all(&p.base).unwrap();
+        std::fs::write(
+            p.base.join("install.json"),
+            r#"{"agents":["claude"],"hook_script":"/x/notify.sh"}"#,
+        )
+        .unwrap();
+        assert!(matches!(prompt_state(&p), InstallPrompt::OfferUpdate { .. }));
+    }
+
+    #[test]
+    fn install_then_prompt_state_is_none() {
+        // End-to-end: install stamps the current version, so an
+        // immediate prompt_state is silent.
+        let dir = fake_home();
+        let p = paths_under_home(dir.path());
+        install_under_home(&p, dir.path(), &[Agent::Claude]).unwrap();
+        assert_eq!(prompt_state(&p), InstallPrompt::None);
     }
 }
