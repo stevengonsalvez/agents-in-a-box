@@ -7,6 +7,10 @@ The **Inbox** screen and the **`ainb-notifyd`** daemon are part of the `ainb` ho
 
 > **Why it's not a plugin.** The crate is *named* `ainb-plugin-notifyd` (it lives alongside the example plugin crates), but it has no `manifest.toml`, no JSON-RPC boundary, and is never spawned as a subprocess. `ainb-core` links it as an ordinary Rust path-dependency and compiles it straight into the host. Contrast with the real v2 subprocess plugins — `burndown`, `session-reader`, `witr` — which run as spawned child processes over stdio JSON-RPC and are governed by the capability gate. The **only** plugin in this feature is [`ainb-hooks`](../toolkit/plugins/ainb-hooks.md), and that is a plugin of the *host agent* (Claude Code / Codex), installed into their config dirs — not a plugin of `ainb`.
 
+![The Inbox screen in ainb-tui](../assets/screenshots/notifyd-inbox.png)
+
+*Press `I` (Shift+i) in ainb to open the Inbox — captured Claude Code / Codex lifecycle events with a list + detail pane, agent filter, and per-session unread badges.*
+
 ## How it works
 
 ![Inbox & notifications — how it works](../assets/diagrams/notifyd.svg)

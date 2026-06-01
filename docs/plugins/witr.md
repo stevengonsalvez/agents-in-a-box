@@ -5,6 +5,10 @@ description: "Wraps the external witr binary to surface process-causality tracin
 
 `witr` surfaces process-causality tracing inside ainb by wrapping the external [`witr`](https://github.com/pranshuparmar/witr) binary (>= 0.3.2 on `PATH`). It is the canonical **subprocess-wrapping** reference — and it exemplifies *two* integration patterns at once: a host-embedded **foreign TTY** for its interactive screen, and a `spawn_subprocess` **exec-and-parse** flow for its CLI and slash command.
 
+![witr's interactive process browser embedded in ainb](../assets/screenshots/witr-browser.png)
+
+*Press `w` in ainb to open witr's interactive browser full-screen — a sortable all-process list with a live ancestry pane.*
+
 ## How it works
 
 ![witr plugin — how it works](../assets/diagrams/witr.svg)
