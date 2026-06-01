@@ -207,8 +207,8 @@ fn provider_dirs_for_home(home: PathBuf) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn provider_dirs_cover_five_providers_with_expected_suffixes() {
@@ -224,12 +224,9 @@ mod tests {
 
     #[test]
     fn start_with_no_dirs_returns_none() {
-        let out = UsageDirWatcher::start_with_trigger(
-            Vec::new(),
-            DEBOUNCE,
-            MIN_INTERVAL,
-            || unreachable!("no dirs => never triggers"),
-        );
+        let out = UsageDirWatcher::start_with_trigger(Vec::new(), DEBOUNCE, MIN_INTERVAL, || {
+            unreachable!("no dirs => never triggers")
+        });
         assert!(out.is_none());
     }
 
@@ -258,7 +255,11 @@ mod tests {
 
         // After debounce, exactly one fire for the whole burst.
         tokio::time::sleep(Duration::from_millis(160)).await;
-        assert_eq!(count.load(Ordering::SeqCst), 1, "burst coalesced to one fire");
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "burst coalesced to one fire"
+        );
 
         drop(tx); // close channel so the task can exit
     }

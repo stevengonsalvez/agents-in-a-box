@@ -39,6 +39,7 @@ toml = { workspace = true }
 async-trait = "0.1"
 nucleo-matcher = "0.3"
 dirs = { workspace = true }
+arboard = { workspace = true }
 
 # UI: ratatui without termion/crossterm backends — we paint into a
 # ratatui Buffer and convert to a WireBuffer cell stream for the host.
