@@ -195,11 +195,7 @@ pub fn install_under_home(paths: &Paths, home: &Path, agents: &[Agent]) -> Resul
 pub fn embedded_plugin_version() -> String {
     serde_json::from_str::<serde_json::Value>(CLAUDE_PLUGIN_JSON)
         .ok()
-        .and_then(|v| {
-            v.get("version")
-                .and_then(|s| s.as_str())
-                .map(str::to_string)
-        })
+        .and_then(|v| v.get("version").and_then(|s| s.as_str()).map(str::to_string))
         .unwrap_or_else(|| "0.0.0".to_string())
 }
 
@@ -253,12 +249,12 @@ pub fn prompt_state(paths: &Paths) -> InstallPrompt {
             InstallPrompt::OfferInstall
         }
     } else {
-        let installed = record
-            .plugin_version
-            .clone()
-            .unwrap_or_else(|| "0.0.0".to_string());
+        let installed = record.plugin_version.clone().unwrap_or_else(|| "0.0.0".to_string());
         if parse_semver(&installed) < parse_semver(&embedded) {
-            InstallPrompt::OfferUpdate { installed, embedded }
+            InstallPrompt::OfferUpdate {
+                installed,
+                embedded,
+            }
         } else {
             InstallPrompt::None
         }
