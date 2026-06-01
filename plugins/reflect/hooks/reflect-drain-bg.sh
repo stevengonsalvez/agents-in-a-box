@@ -102,10 +102,14 @@ log() {
 emit_error() {
     # emit_error <severity> <kind> <message> [transcript_path]
     local severity="$1" kind="$2" message="$3" transcript="${4:-}"
+    # Build the context JSON with json.dumps so a transcript path containing a
+    # quote or backslash can't produce a malformed --context argument.
+    local context
+    context=$(python3 -c 'import json,sys; print(json.dumps({"transcript_path": sys.argv[1]}))' "$transcript" 2>/dev/null || printf '{}')
     python3 -m reflect_kb.errors append \
         --severity "$severity" --source drain --kind "$kind" \
         --message "$message" \
-        --context "$(printf '{"transcript_path":"%s"}' "$transcript")" \
+        --context "$context" \
         >/dev/null 2>&1 || true
 }
 
@@ -218,8 +222,33 @@ record_cost_event() {
     local today ts
     today=$(date -u +%Y-%m-%d)
     ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    printf '{"ts":"%s","day":"%s","entries":%d,"transcript":"%s","outcome":"%s","model":"%s","turns":%s,"tokens":%s,"cost_usd":%s,"input":%s,"output":%s,"cache_read":%s,"cache_creation":%s}\n' \
-        "$ts" "$today" "$entry_count" "$transcript" "$outcome" "$model" "$turns" "$tokens" "$cost" "$input_tok" "$output_tok" "$cache_read" "$cache_creation" >> "$COST_FILE"
+    # Emit the JSON line via json.dumps: transcript/outcome/model are strings
+    # that could contain a quote or backslash, which raw printf %s would turn
+    # into a malformed line — and today_drain_count silently drops malformed
+    # lines, so a broken line would under-count the daily cap. Numeric fields
+    # are already coerced above so they serialise as bare numbers.
+    python3 - "$ts" "$today" "$entry_count" "$transcript" "$outcome" "$model" \
+        "$turns" "$tokens" "$cost" "$input_tok" "$output_tok" "$cache_read" "$cache_creation" \
+        >> "$COST_FILE" <<'PY'
+import json, sys
+(ts, day, entries, transcript, outcome, model,
+ turns, tokens, cost, inp, out, cr, cc) = sys.argv[1:14]
+def _num(x):
+    try:
+        return int(x)
+    except ValueError:
+        try:
+            return float(x)
+        except ValueError:
+            return 0
+print(json.dumps({
+    "ts": ts, "day": day, "entries": _num(entries),
+    "transcript": transcript, "outcome": outcome, "model": model,
+    "turns": _num(turns), "tokens": _num(tokens), "cost_usd": _num(cost),
+    "input": _num(inp), "output": _num(out),
+    "cache_read": _num(cr), "cache_creation": _num(cc),
+}))
+PY
 }
 
 # ── Retry counters (sidecar JSONL keyed by transcript_path) ───────────────────
@@ -257,8 +286,14 @@ bump_retry_count() {
     local next=$((current + 1))
     local ts
     ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    printf '{"ts":"%s","transcript":"%s","count":%d}\n' \
-        "$ts" "$transcript" "$next" >> "$RETRY_FILE"
+    # json.dumps so a transcript path with a quote/backslash can't corrupt the
+    # retry log (get_retry_count parses it to decide poison). The python stdout
+    # is redirected into the file; the echo below is this function's return.
+    python3 - "$ts" "$transcript" "$next" >> "$RETRY_FILE" <<'PY'
+import json, sys
+ts, transcript, count = sys.argv[1], sys.argv[2], sys.argv[3]
+print(json.dumps({"ts": ts, "transcript": transcript, "count": int(count)}))
+PY
     echo "$next"
 }
 
