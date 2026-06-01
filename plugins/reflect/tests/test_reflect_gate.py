@@ -78,6 +78,30 @@ def test_evaluate_clean_session_skips(tmp_path):
     assert v.action == "skip" and v.reason == "no-signal"
 
 
+def test_reflect_on_reflect_marker_past_first_records(tmp_path):
+    """The bg-drainer marker can land after several preamble turns — the gate
+    must still catch it (scan window widened beyond the first 4 user records)."""
+    p = tmp_path / "late.jsonl"
+    turns = [("user", f"warming up turn {i}") for i in range(8)]
+    turns.append(("user", "Process the transcript at: /some/other.jsonl"))
+    _write_transcript(p, turns)
+    v = reflect_gate.evaluate(p)
+    assert v.action == "skip" and v.reason == "reflect-on-reflect"
+
+
+def test_human_message_mentioning_reflect_is_not_skipped(tmp_path):
+    """A human session whose text merely starts with '/reflect' (no machine
+    command-tag, no drainer marker) carries a real lesson and must NOT be
+    dropped as reflect-on-reflect — regression guard for DE review H2."""
+    p = tmp_path / "human.jsonl"
+    _write_transcript(p, [
+        ("user", "/reflect later, but first: never use var here, the root cause was a missing index."),
+        ("assistant", "Got it — switching to const and adding the index."),
+    ])
+    v = reflect_gate.evaluate(p)
+    assert v.action == "reflect", f"human multi-intent message over-skipped: {v}"
+
+
 def test_evaluate_signal_session_reflects(tmp_path):
     v = reflect_gate.evaluate(_has_signal(tmp_path / "sig.jsonl"))
     assert v.action == "reflect" and v.signal_count > 0

@@ -116,21 +116,41 @@ def extract_dialogue(path: Path, max_chars: int = _MAX_SCAN_CHARS) -> str:
     return "\n".join(parts)
 
 
+# Machine-generated markers that unambiguously identify a /reflect run.
+# Both are emitted by tooling — the bg-drainer prompt and Claude Code's
+# slash-command expansion — never typed free-hand by a human. We deliberately
+# do NOT match a bare "/reflect" text prefix: a human message such as
+# "/reflect later, but first never use var again" carries a real lesson, and a
+# prefix match would skip the whole transcript and silently drop that signal.
+_REFLECT_RUN_MARKERS = (
+    "<command-name>reflect</command-name>",
+    "process the transcript at:",
+)
+
+# The markers live in the opening exchange, but interleaved system /
+# queue-operation records can push the first user turns back. Scan a bounded
+# prefix wide enough to clear them rather than only the first 4 user records.
+_REFLECT_SCAN_MAX_RECORDS = 60
+_REFLECT_SCAN_MAX_CHARS = 50_000
+
+
 def is_reflect_on_reflect(path: Path) -> bool:
     """True when the transcript is itself a /reflect run.
 
-    Detected from the first handful of user records: a `/reflect` slash command
-    or the bg-drainer prompt ("Process the transcript at:"). These produce zero
-    net-new learnings (the lesson was already harvested) — the exact case that
-    burned 41.5M tokens.
+    Detected from machine-generated markers in the opening records: the
+    bg-drainer prompt ("Process the transcript at:") or a Claude Code
+    `/reflect` slash-command expansion. These produce zero net-new learnings
+    (the lesson was already harvested) — the exact case that burned 41.5M
+    tokens. A human message that merely mentions /reflect is NOT matched.
     """
-    seen_user = 0
+    records = 0
+    scanned = 0
     for rec in _iter_records(path):
+        records += 1
         msg = rec.get("message")
         content = None
         if isinstance(msg, dict) and msg.get("role") == "user":
             content = msg.get("content")
-            seen_user += 1
         elif rec.get("type") == "queue-operation":
             # bg-drainer prompt lands as a queue-operation record before the
             # first user message is materialised.
@@ -138,14 +158,10 @@ def is_reflect_on_reflect(path: Path) -> bool:
         if content is not None:
             blob = content if isinstance(content, str) else json.dumps(content)
             low = blob.lower()
-            if (
-                "<command-name>reflect</command-name>" in low
-                or "process the transcript at:" in low
-                or "/reflect\n" in low
-                or low.strip().startswith("/reflect")
-            ):
+            scanned += len(low)
+            if any(marker in low for marker in _REFLECT_RUN_MARKERS):
                 return True
-        if seen_user >= 4:
+        if records >= _REFLECT_SCAN_MAX_RECORDS or scanned >= _REFLECT_SCAN_MAX_CHARS:
             break
     return False
 
