@@ -5335,7 +5335,10 @@ impl AppState {
                     .to_string(),
                 "Install",
             ),
-            InstallPrompt::OfferUpdate { installed, embedded } => (
+            InstallPrompt::OfferUpdate {
+                installed,
+                embedded,
+            } => (
                 "Update notification hooks?".to_string(),
                 format!(
                     "ainb-hooks is installed at v{installed}, but this build \

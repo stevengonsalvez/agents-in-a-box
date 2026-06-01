@@ -2745,13 +2745,12 @@ impl EventHandler {
                                 // in-process (ainb-core links ainb-plugin-notifyd).
                                 // Sync + fast — writes a few small files. The
                                 // daemon lazy-spawns on the first hook event.
-                                match ainb_plugin_notifyd::Paths::from_home()
-                                    .and_then(|p| {
-                                        ainb_plugin_notifyd::install_for(
-                                            &p,
-                                            ainb_plugin_notifyd::Agent::ALL,
-                                        )
-                                    }) {
+                                match ainb_plugin_notifyd::Paths::from_home().and_then(|p| {
+                                    ainb_plugin_notifyd::install_for(
+                                        &p,
+                                        ainb_plugin_notifyd::Agent::ALL,
+                                    )
+                                }) {
                                     Ok(record) => {
                                         state.add_info_notification(format!(
                                             "Notifications enabled for {:?} — the Inbox (b) \
