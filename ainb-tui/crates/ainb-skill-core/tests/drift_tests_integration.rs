@@ -28,7 +28,9 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use ainb_skill_core::manifest::{SourceEntry, TargetMapping};
-use ainb_skill_core::{DriftBackend, DriftStatus, GitLsRemoteBackend};
+use ainb_skill_core::{
+    build_skill_manager_sandbox, DriftBackend, DriftStatus, GitLsRemoteBackend, SandboxTier,
+};
 
 fn git_available() -> bool {
     Command::new("git")
@@ -38,40 +40,19 @@ fn git_available() -> bool {
         .unwrap_or(false)
 }
 
-fn git(args: &[&str], cwd: &Path) -> std::process::Output {
-    Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .env("GIT_AUTHOR_NAME", "ainb-test")
-        .env("GIT_AUTHOR_EMAIL", "ainb-test@example.invalid")
-        .env("GIT_COMMITTER_NAME", "ainb-test")
-        .env("GIT_COMMITTER_EMAIL", "ainb-test@example.invalid")
+/// Resolve the bare-remote tip SHA via `git rev-parse main`. Used after
+/// the sandbox fixture seeds the bare repo so each drift test knows
+/// what SHA counts as "in sync".
+fn bare_remote_tip(bare: &Path) -> String {
+    let out = Command::new("git")
+        .args(["rev-parse", "main"])
+        .current_dir(bare)
         .output()
-        .expect("git")
-}
-
-/// Build a real bare git repo with one commit on `main`. Returns the
-/// path to the bare repo + the resolved 40-char tip SHA.
-fn build_bare_repo_with_one_commit(scratch: &Path) -> (PathBuf, String) {
-    let work = scratch.join("seed-work");
-    let bare = scratch.join("seed-bare.git");
-
-    std::fs::create_dir_all(&work).unwrap();
-    git(&["init", "-b", "main"], &work);
-    git(&["config", "user.email", "ainb-test@example.invalid"], &work);
-    git(&["config", "user.name", "ainb-test"], &work);
-    std::fs::write(work.join("README.md"), "drift-int\n").unwrap();
-    git(&["add", "README.md"], &work);
-    let out = git(&["commit", "-m", "seed"], &work);
-    assert!(out.status.success(), "seed commit failed: {out:?}");
-
-    git(&["clone", "--bare", work.to_str().unwrap(), bare.to_str().unwrap()], scratch);
-
-    let tip = git(&["rev-parse", "HEAD"], &work);
-    let tip = String::from_utf8_lossy(&tip.stdout).trim().to_string();
+        .expect("git rev-parse");
+    assert!(out.status.success(), "git rev-parse main on bare: {out:?}");
+    let tip = String::from_utf8_lossy(&out.stdout).trim().to_string();
     assert_eq!(tip.len(), 40, "tip SHA expected 40 chars, got `{tip}`");
-
-    (bare, tip)
+    tip
 }
 
 fn source_with_uri(uri: String) -> SourceEntry {
@@ -98,7 +79,10 @@ fn git_ls_remote_backend_reports_in_sync_when_deployed_sha_equals_tip() {
     }
 
     let scratch = tempfile::tempdir().expect("scratch tempdir");
-    let (bare, tip) = build_bare_repo_with_one_commit(scratch.path());
+    let layout = build_skill_manager_sandbox(scratch.path(), SandboxTier::Minimal)
+        .expect("sandbox fixture");
+    let bare = layout.bare_remote.clone();
+    let tip = bare_remote_tip(&bare);
     let source = source_with_uri(format!("git:file://{}", bare.display()));
     let backend = GitLsRemoteBackend::new();
 
@@ -114,7 +98,10 @@ fn git_ls_remote_backend_reports_outdated_when_deployed_sha_differs() {
     }
 
     let scratch = tempfile::tempdir().expect("scratch tempdir");
-    let (bare, tip) = build_bare_repo_with_one_commit(scratch.path());
+    let layout = build_skill_manager_sandbox(scratch.path(), SandboxTier::Minimal)
+        .expect("sandbox fixture");
+    let bare = layout.bare_remote.clone();
+    let tip = bare_remote_tip(&bare);
     let stale = "0000000000000000000000000000000000000000";
     assert_ne!(stale, tip);
 
