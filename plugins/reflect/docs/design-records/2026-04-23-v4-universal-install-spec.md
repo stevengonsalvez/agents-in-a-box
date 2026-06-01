@@ -1,5 +1,10 @@
 # Specification: reflect-kb v4 — Universal Cross-Harness Install
 
+> **Version reslot (2026-05-31):** the plugin's `4.0.0` release was taken by the
+> cost rearchitecture (W1–W5; see `../../CHANGELOG.md`). This "universal install"
+> effort now targets **5.0.0**. The "v4" here is the original codename, not the
+> plugin version it ships under.
+
 **Generated from:** Interview session 2026-04-23 with Stevie
 **Scope:** The follow-up work after PR #43 (v3.1.0) ships.
 **Version:** 1.0
