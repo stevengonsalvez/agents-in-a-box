@@ -1,0 +1,11 @@
+# Pin the Rust toolchain so local builds/formatting and CI use the SAME
+# compiler + rustfmt. Without this, CI's `dtolnay/rust-toolchain@stable`
+# floats to the newest stable while a contributor runs whatever they last
+# `rustup update`'d — a rustfmt version gap then produces "fmt clean
+# locally, Rustfmt red in CI" on files nobody touched (see PRs #189/#192).
+#
+# Bump `channel` deliberately when adopting a newer stable; rustup
+# auto-installs it on the next cargo invocation.
+[toolchain]
+channel = "1.96.0"
+components = ["rustfmt", "clippy"]
