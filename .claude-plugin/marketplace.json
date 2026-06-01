@@ -12,7 +12,7 @@
     {
       "name": "reflect",
       "source": "./plugins/reflect",
-      "description": "Agent self-improvement + retrieval. Captures learnings via colon-namespaced sub-skills (reflect, reflect:consolidate, reflect:ingest, reflect:recall, reflect-status) and auto-injects relevant prior learnings at SessionStart via hook.",
+      "description": "Agent self-improvement + retrieval. Captures learnings via colon-namespaced sub-skills (reflect, reflect:consolidate, reflect:ingest, reflect:recall, reflect:cost, reflect-status) and auto-injects relevant prior learnings at SessionStart via hook.",
       "strict": false,
       "keywords": [
         "self-improvement",

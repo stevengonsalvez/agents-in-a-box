@@ -252,6 +252,7 @@ clicks always show fresh data.
 | `reflect:ingest` | Bulk-index existing memories from any tool (Claude/Codex/Copilot/Gemini) into the global KB |
 | `reflect:consolidate` | Project-level memory consolidation — merges orphaned worktree memory dirs into a single `.agents/MEMORY.md` |
 | `reflect:errors-ack` | Triage and acknowledge entries in the reflect errors sink (`~/.reflect/errors.json`) — drain poison, parser crashes, ingest failures, hook timeouts. Invoked from the statusline ⚠N badge. |
+| `reflect:cost` | Drain spend report over a window (default 1 day) — tokens split by cached / uncached writes / io, with a $ estimate and outlier flagging, grouped by day / outcome / model / transcript. |
 | `reflect-status` | Read-only metrics: pending reviews, sidecar coverage, GraphRAG health. Approve/reject low-confidence items. |
 
 ---

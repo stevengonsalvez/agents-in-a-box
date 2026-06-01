@@ -21,6 +21,10 @@ and the daily cap was blown 20→61. A 30-day backfill showed reflect was burnin
 - **`reflect cost` CLI** (`scripts/reflect_cost.py`) — drain spend by
   day/transcript/model/outcome with the cached-vs-uncached token split,
   outlier flagging, and an approximate per-model $ estimate.
+- **`/reflect:cost` sub-skill** (`skills/cost/`) — slash-command wrapper over
+  the cost reporter: parses a window (default 1 day), renders the
+  cached/uncached/io split by outcome+model+transcript, and falls back to the
+  backfill when historical events predate the v4 token envelope.
 - **`scripts/backfill_costs.py`** — reconstruct the cost timeline from existing
   `~/.claude/projects` logs into a separate `drain-cost-backfill.jsonl`.
 - **Enqueue skip-gate + dedup** (`scripts/reflect_gate.py`) — $0 regex over a
