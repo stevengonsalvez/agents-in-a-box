@@ -253,7 +253,11 @@ impl Plugin for BurndownPlugin {
                                 Err(e) => {
                                     // Clipboard may be unavailable on
                                     // headless Linux — degrade, don't
-                                    // crash. Surface it in the log only.
+                                    // crash. Surface a failure flash (so a
+                                    // failed copy never shows a stale "✓"
+                                    // from an earlier success) plus a log.
+                                    self.ui.copy_flash =
+                                        Some("⚠ clipboard unavailable".to_string());
                                     let _ = host
                                         .log_info(format!("burndown: clipboard copy failed: {e}"))
                                         .await;
@@ -272,6 +276,13 @@ impl Plugin for BurndownPlugin {
         // dispatch matched a binding, so unmapped keys can't trigger
         // an avoidable re-render.
         if handled {
+            // The copy-confirmation flash is one-shot: any HANDLED key
+            // other than the `y` that just set it clears the banner.
+            // Unhandled keys leave it untouched (clearing there would
+            // wipe state without a re-render — a stale paint).
+            if !matches!(params.key.code, KeyCode::Char { ch: 'y' }) {
+                self.ui.copy_flash = None;
+            }
             self.generation = self.generation.wrapping_add(1);
         }
         Ok(())
@@ -832,12 +843,6 @@ impl BurndownPlugin {
     /// lives in the async `handle_key` because it needs the host.
     fn dispatch_key_pure(&mut self, code: &KeyCode) -> bool {
         use chrono::{Datelike, Local};
-
-        // The copy-confirmation flash is one-shot: any handled key that
-        // isn't `y` clears it so it disappears on the next interaction.
-        // (`y` lives in the async `handle_key`, which sets the flash and
-        // never routes here, so we can clear unconditionally.)
-        self.ui.copy_flash = None;
 
         // Zoom fuzzy-search text entry. While the `/` overlay is active,
         // printable keys build the query, Backspace deletes (or cancels
