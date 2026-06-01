@@ -2014,10 +2014,65 @@ pub fn zoom_col_count(panel: UsagePanel) -> usize {
 ///
 /// Public so the plugin's `y` key handler can resolve the full
 /// untruncated cell strings of the focused row for clipboard copy.
+/// Fuzzy-match label for a project row. Matches on BOTH the short name
+/// and the full path because the table renders `project.path` — without
+/// the path, searching a visible directory segment would miss the row.
+fn zoom_project_label(p: &ProjectUsage) -> String {
+    format!("{} {}", p.name, p.path)
+}
+
+// ── Filtered + display-ordered source records, per zoom panel ────────
+//
+// These are the SINGLE source of truth for which records a zoom table
+// shows and in what order. Both `zoom_rows` (cell building) and
+// `build_detail_lines` (the `d` detail drawer) resolve through them, so
+// a row's highlight, `y` copy, and detail drawer always point at the
+// SAME record — even when a `/` fuzzy query is active. (Previously the
+// drawer indexed the unfiltered vec and diverged from the highlighted
+// row once a query narrowed the table.)
+
+fn zoom_projects<'a>(data: &'a UsageData, query: &str) -> Vec<&'a ProjectUsage> {
+    apply_zoom_filter(&data.projects, query, zoom_project_label)
+}
+fn zoom_branches<'a>(data: &'a UsageData, query: &str) -> Vec<&'a BranchUsage> {
+    apply_zoom_filter(&data.branches, query, |b| b.branch.clone())
+}
+fn zoom_sessions<'a>(data: &'a UsageData, query: &str) -> Vec<&'a SessionUsage> {
+    apply_zoom_filter(&data.sessions, query, |s| {
+        format!("{} {}", s.project, s.session_id)
+    })
+}
+fn zoom_models<'a>(data: &'a UsageData, query: &str) -> Vec<&'a ModelUsage> {
+    apply_zoom_filter(&data.models, query, |m| m.model.clone())
+}
+fn zoom_activities<'a>(data: &'a UsageData, query: &str) -> Vec<&'a ActivityUsage> {
+    apply_zoom_filter(&data.activities, query, |a| a.category.label().to_string())
+}
+/// Daily rows filtered by date substring, most-recent-first to match the
+/// table's leading `.rev()`.
+fn zoom_daily<'a>(
+    data: &'a UsageData,
+    query: &str,
+) -> Vec<&'a (NaiveDate, crate::data::usage::TokenBucket)> {
+    let mut v: Vec<&'a (NaiveDate, crate::data::usage::TokenBucket)> = if query.is_empty() {
+        data.daily.iter().collect()
+    } else {
+        data.daily
+            .iter()
+            .filter(|(date, _)| date.format("%Y-%m-%d").to_string().contains(query))
+            .collect()
+    };
+    v.reverse();
+    v
+}
+fn zoom_named<'a>(rows: &'a [NamedUsage], query: &str) -> Vec<&'a NamedUsage> {
+    apply_zoom_filter(rows, query, |n| n.name.clone())
+}
+
 pub fn zoom_rows(data: &UsageData, panel: UsagePanel, query: &str) -> Vec<Vec<String>> {
     match panel {
         UsagePanel::ByProject | UsagePanel::Leaderboard => {
-            apply_zoom_filter(&data.projects, query, |p| p.name.clone())
+            zoom_projects(data, query)
                 .iter()
                 .enumerate()
                 .map(|(idx, project)| {
@@ -2036,7 +2091,7 @@ pub fn zoom_rows(data: &UsageData, panel: UsagePanel, query: &str) -> Vec<Vec<St
                 })
                 .collect()
         }
-        UsagePanel::ByBranch => apply_zoom_filter(&data.branches, query, |b| b.branch.clone())
+        UsagePanel::ByBranch => zoom_branches(data, query)
             .iter()
             .enumerate()
             .map(|(idx, row)| {
@@ -2050,11 +2105,9 @@ pub fn zoom_rows(data: &UsageData, panel: UsagePanel, query: &str) -> Vec<Vec<St
             })
             .collect(),
         UsagePanel::TopSessions | UsagePanel::Live => {
-            apply_zoom_filter(&data.sessions, query, |s| {
-                format!("{} {}", s.project, s.session_id)
-            })
-            .iter()
-            .map(|sess| {
+            zoom_sessions(data, query)
+                .iter()
+                .map(|sess| {
                 let b = &sess.bucket;
                 let dur = (sess.last_timestamp - sess.first_timestamp).num_seconds().max(0);
                 vec![
@@ -2073,7 +2126,7 @@ pub fn zoom_rows(data: &UsageData, panel: UsagePanel, query: &str) -> Vec<Vec<St
             })
             .collect()
         }
-        UsagePanel::ByModel => apply_zoom_filter(&data.models, query, |m| m.model.clone())
+        UsagePanel::ByModel => zoom_models(data, query)
             .iter()
             .map(|m| {
                 let b = &m.bucket;
@@ -2099,7 +2152,7 @@ pub fn zoom_rows(data: &UsageData, panel: UsagePanel, query: &str) -> Vec<Vec<St
             })
             .collect(),
         UsagePanel::ByActivity => {
-            apply_zoom_filter(&data.activities, query, |a| a.category.label().to_string())
+            zoom_activities(data, query)
                 .iter()
                 .map(|a| {
                     let b = &a.bucket;
@@ -2116,19 +2169,8 @@ pub fn zoom_rows(data: &UsageData, panel: UsagePanel, query: &str) -> Vec<Vec<St
                 .collect()
         }
         UsagePanel::DailyActivity => {
-            // Daily rows are (date, bucket) tuples — search the date
-            // string, then reverse so the most-recent day leads.
-            let filtered: Vec<&(NaiveDate, crate::data::usage::TokenBucket)> = if query.is_empty() {
-                data.daily.iter().collect()
-            } else {
-                data.daily
-                    .iter()
-                    .filter(|(date, _)| date.format("%Y-%m-%d").to_string().contains(query))
-                    .collect()
-            };
-            filtered
+            zoom_daily(data, query)
                 .iter()
-                .rev()
                 .map(|(date, b)| {
                     vec![
                         date.format("%Y-%m-%d").to_string(),
@@ -2150,7 +2192,7 @@ pub fn zoom_rows(data: &UsageData, panel: UsagePanel, query: &str) -> Vec<Vec<St
 
 /// Shared row builder for the three name+calls named-usage tables.
 fn named_zoom_rows(rows: &[NamedUsage], query: &str) -> Vec<Vec<String>> {
-    apply_zoom_filter(rows, query, |n| n.name.clone())
+    zoom_named(rows, query)
         .iter()
         .map(|row| vec![row.name.clone(), row.calls.to_string()])
         .collect()
@@ -2349,6 +2391,10 @@ fn build_detail_lines(
     panel: UsagePanel,
 ) -> Vec<Line<'static>> {
     let row = state.focus_row;
+    // Resolve through the SAME filtered+ordered helpers the table uses
+    // (keyed by the live `/` query) so the drawer always describes the
+    // highlighted row, never the unfiltered vec's row N.
+    let query = state.zoom_search_query.as_str();
     let mut lines = Vec::new();
     let kv = |k: &str, v: String| -> Line<'static> {
         Line::from(vec![
@@ -2361,7 +2407,7 @@ fn build_detail_lines(
     };
     match panel {
         UsagePanel::ByProject | UsagePanel::Leaderboard => {
-            if let Some(p) = data.projects.get(row) {
+            if let Some(p) = zoom_projects(data, query).get(row).copied() {
                 lines.push(kv("Project", p.name.clone()));
                 lines.push(kv("Path", p.path.clone()));
                 lines.push(kv("Cost", format_cost(p.bucket.cost_usd)));
@@ -2371,7 +2417,7 @@ fn build_detail_lines(
             }
         }
         UsagePanel::ByBranch => {
-            if let Some(b) = data.branches.get(row) {
+            if let Some(b) = zoom_branches(data, query).get(row).copied() {
                 lines.push(kv("Branch", b.branch.clone()));
                 lines.push(kv("Cost", format_cost(b.bucket.cost_usd)));
                 lines.push(kv("Tokens", format_tokens_short(b.bucket.total())));
@@ -2379,7 +2425,7 @@ fn build_detail_lines(
             }
         }
         UsagePanel::TopSessions | UsagePanel::Live => {
-            if let Some(s) = data.sessions.get(row) {
+            if let Some(s) = zoom_sessions(data, query).get(row).copied() {
                 lines.push(kv("Session", s.session_id.clone()));
                 lines.push(kv("Project", s.project.clone()));
                 lines.push(kv("Provider", s.provider.clone()));
@@ -2403,7 +2449,7 @@ fn build_detail_lines(
             }
         }
         UsagePanel::ByModel => {
-            if let Some(m) = data.models.get(row) {
+            if let Some(m) = zoom_models(data, query).get(row).copied() {
                 lines.push(kv("Model", m.model.clone()));
                 lines.push(kv("Cost", format_cost(m.bucket.cost_usd)));
                 lines.push(kv("Tokens", format_tokens_short(m.bucket.total())));
@@ -2415,7 +2461,7 @@ fn build_detail_lines(
             }
         }
         UsagePanel::ByActivity => {
-            if let Some(a) = data.activities.get(row) {
+            if let Some(a) = zoom_activities(data, query).get(row).copied() {
                 lines.push(kv("Activity", a.category.label().to_string()));
                 lines.push(kv("Turns", a.turns.to_string()));
                 lines.push(kv("Edit turns", a.edit_turns.to_string()));
@@ -2426,7 +2472,7 @@ fn build_detail_lines(
             }
         }
         UsagePanel::DailyActivity => {
-            if let Some((date, b)) = data.daily.iter().rev().nth(row) {
+            if let Some((date, b)) = zoom_daily(data, query).get(row).copied() {
                 lines.push(kv("Date", date.format("%Y-%m-%d").to_string()));
                 lines.push(kv("Calls", b.call_count.to_string()));
                 lines.push(kv("Sessions", b.session_count.to_string()));
@@ -2435,12 +2481,12 @@ fn build_detail_lines(
                 lines.push(kv("Cost", format_cost(b.cost_usd)));
             }
         }
-        UsagePanel::CoreTools => detail_named(&mut lines, &data.tools, row, "Tool", &kv),
+        UsagePanel::CoreTools => detail_named(&mut lines, &data.tools, query, row, "Tool", &kv),
         UsagePanel::ShellCommands => {
-            detail_named(&mut lines, &data.shell_commands, row, "Command", &kv)
+            detail_named(&mut lines, &data.shell_commands, query, row, "Command", &kv)
         }
         UsagePanel::McpServers => {
-            detail_named(&mut lines, &data.mcp_servers, row, "MCP server", &kv)
+            detail_named(&mut lines, &data.mcp_servers, query, row, "MCP server", &kv)
         }
         UsagePanel::Optimize | UsagePanel::Budget => {
             lines.push(Line::from(Span::styled(
@@ -2461,13 +2507,16 @@ fn build_detail_lines(
 fn detail_named<F>(
     lines: &mut Vec<Line<'static>>,
     rows: &[NamedUsage],
+    query: &str,
     idx: usize,
     name_label: &str,
     kv: &F,
 ) where
     F: Fn(&str, String) -> Line<'static>,
 {
-    if let Some(row) = rows.get(idx) {
+    // Resolve through the same `/`-filtered, display-ordered view the
+    // table renders, so the drawer tracks the highlighted row.
+    if let Some(row) = zoom_named(rows, query).get(idx).copied() {
         lines.push(kv(name_label, row.name.clone()));
         lines.push(kv("Calls", row.calls.to_string()));
     }
@@ -5886,6 +5935,65 @@ mod zoom_table_tests {
             .expect("render_zoom_table must not panic on an empty row set");
         // Header still paints.
         assert!(flatten(terminal.backend().buffer()).contains("Provider"));
+    }
+
+    #[test]
+    fn detail_drawer_tracks_filtered_row_under_search() {
+        // Regression for the detail-drawer / filtered-table divergence:
+        // with a `/` query active, `build_detail_lines` must describe the
+        // SAME record the table highlights + `y` copies (filtered row N),
+        // not the unfiltered vec's row N.
+        let data = sessions_fixture();
+        // "beta" matches ONLY the codex/beta session: LONG_PATH and the
+        // proj-*/sid-* labels contain no `b`, so they can't subsequence-
+        // match "beta". This guarantees filtered[0] != unfiltered[0].
+        let query = "beta";
+        let rows = zoom_rows(&data, UsagePanel::TopSessions, query);
+        assert_eq!(rows.len(), 1, "precondition: query isolates one row");
+        let filtered_session = rows[0][2].clone();
+        let unfiltered_session = data.sessions[0].session_id.clone();
+        assert_ne!(
+            filtered_session, unfiltered_session,
+            "precondition: filter must reorder row 0"
+        );
+
+        let mut state = UsageViewState::default();
+        state.zoom = Some(UsagePanel::TopSessions);
+        state.zoom_search_query = query.to_string();
+        state.focus_row = 0;
+        let detail: String = build_detail_lines(&data, &state, UsagePanel::TopSessions)
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            detail.contains(&filtered_session),
+            "detail must describe filtered row 0 ({filtered_session}); got: {detail}"
+        );
+        assert!(
+            !detail.contains(&unfiltered_session),
+            "detail must NOT show the unfiltered row 0 ({unfiltered_session})"
+        );
+    }
+
+    #[test]
+    fn by_project_search_matches_visible_path() {
+        // The Project column renders `project.path`; searching a visible
+        // path segment must hit the row even when the segment is not in
+        // `name` (the fuzzy label now spans name + path).
+        use crate::data::usage::ProjectUsage;
+        let data = UsageData {
+            projects: vec![ProjectUsage {
+                name: "myproj".into(),
+                path: "/Users/dev/work/very-long-project-dir".into(),
+                bucket: bucket(3),
+                repo: None,
+            }],
+            ..UsageData::default()
+        };
+        let rows = zoom_rows(&data, UsagePanel::ByProject, "very-long-project");
+        assert_eq!(rows.len(), 1, "path-segment search must match the row");
+        assert!(rows[0][1].contains("very-long-project"));
     }
 
     // ── state methods ────────────────────────────────────────────────
