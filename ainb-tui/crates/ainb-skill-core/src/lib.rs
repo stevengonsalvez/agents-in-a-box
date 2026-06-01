@@ -35,3 +35,13 @@ pub use sync::{
     UnitSnapshot, SYNC_SKIP_PUSH_ENV,
 };
 pub use uri::{MarketplaceUri, SourceType, Uri};
+
+// Test-fixture builder. Gated so the production binary never links
+// the fixture seeding code or the bytes of seeded SKILL.md content.
+// Enabled by integration tests via `--features test-fixtures`.
+#[cfg(feature = "test-fixtures")]
+pub mod fixtures;
+#[cfg(feature = "test-fixtures")]
+pub use fixtures::{
+    build_skill_manager_sandbox, SandboxLayout, SandboxTier, SANDBOX_MARKER_FILE,
+};
