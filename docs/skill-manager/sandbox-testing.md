@@ -59,7 +59,25 @@ in place between TUI sessions.
 `Full` (~2s) is for tripwires that need multi-tool coverage,
 conflict-flip exercises, or the upcoming provenance matcher.
 
-## Manual workflow (bash script)
+## Manual workflow (just — recommended)
+
+`brew install just`, then from the worktree root:
+
+```bash
+just skill-manager up --tier full       # build the sandbox
+just skill-manager tui                  # launch TUI against it
+just skill-manager cli skill check      # drive CLI against it
+just skill-manager inspect              # see what's seeded
+just skill-manager down                 # teardown
+just --list skill-manager               # list every recipe
+```
+
+All env vars (`HOME`, `AINB_HOME`, `AINB_TOOL_HOME_*`,
+`GIT_TERMINAL_PROMPT`, `GIT_ASKPASS`) are set inside the justfile
+itself — no `source env.sh` step. Override the sandbox root with
+`AINB_SANDBOX_ROOT=/tmp/foo just skill-manager up`.
+
+## Manual workflow (raw bash — no just)
 
 ```bash
 # 1. Build a sandbox (default ~/.cache/ainb-sandbox, default Minimal)
