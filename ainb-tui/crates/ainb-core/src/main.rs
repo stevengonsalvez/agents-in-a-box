@@ -142,6 +142,13 @@ async fn main() -> Result<()> {
             if app::state::AppState::needs_onboarding() {
                 tracing::info!("First-time setup detected - starting onboarding wizard");
                 app_state.state.start_onboarding(false, None);
+            } else {
+                // Existing user (no onboarding to run): offer to install /
+                // update the ainb-hooks notification plugin if it's absent
+                // or stale. New users get this same prompt at the end of
+                // onboarding instead (see `complete_onboarding`). No-op
+                // when already up to date or previously declined.
+                app_state.state.maybe_prompt_notify_install();
             }
 
             // Always clear pending async actions after init to ensure clean startup

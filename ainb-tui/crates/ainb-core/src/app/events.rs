@@ -2740,8 +2740,40 @@ impl EventHandler {
                                 state.pending_async_action =
                                     Some(AsyncAction::KillWorkspaceShell(workspace_idx));
                             }
+                            crate::app::state::ConfirmAction::InstallNotifyHooks => {
+                                // Install the ainb-hooks plugin for both agents
+                                // in-process (ainb-core links ainb-plugin-notifyd).
+                                // Sync + fast — writes a few small files. The
+                                // daemon lazy-spawns on the first hook event.
+                                match ainb_plugin_notifyd::Paths::from_home().and_then(|p| {
+                                    ainb_plugin_notifyd::install_for(
+                                        &p,
+                                        ainb_plugin_notifyd::Agent::ALL,
+                                    )
+                                }) {
+                                    Ok(record) => {
+                                        state.add_info_notification(format!(
+                                            "Notifications enabled for {:?} — the Inbox (b) \
+                                             will light up when a session needs you.",
+                                            record.agents
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        state.add_error_notification(format!(
+                                            "Failed to install notification hooks: {e}"
+                                        ));
+                                    }
+                                }
+                            }
+                            crate::app::state::ConfirmAction::DismissNotifyPrompt => {
+                                if let Ok(paths) = ainb_plugin_notifyd::Paths::from_home() {
+                                    let _ = ainb_plugin_notifyd::dismiss_prompt(&paths);
+                                }
+                            }
                             crate::app::state::ConfirmAction::Cancel => {
-                                // Explicit Cancel: dialog already taken; nothing to do.
+                                // Explicit Cancel ("Not now"): dialog already
+                                // taken; nothing persisted, so we re-ask next
+                                // launch.
                             }
                         }
                     }

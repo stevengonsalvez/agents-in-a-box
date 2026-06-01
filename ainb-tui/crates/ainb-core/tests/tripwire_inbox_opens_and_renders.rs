@@ -91,6 +91,20 @@ git_directories = []
     };
     store.insert_and_prune(&claude, &no_retention).expect("seed claude row");
     store.insert_and_prune(&codex, &no_retention).expect("seed codex row");
+
+    // Seed an install.json marking hooks installed at the current
+    // version. A real machine with inbox data necessarily has the hooks
+    // installed (that's how the rows got there), so this matches
+    // reality — and crucially it makes `prompt_state` return `None`, so
+    // the first-run "install notification hooks?" dialog does NOT fire
+    // on startup. Without this the dialog pops on the HomeScreen and
+    // intercepts the `b` keypress before the Inbox can open.
+    let install_json = format!(
+        r#"{{"agents":["claude","codex"],"hook_script":"{}","plugin_version":"{}"}}"#,
+        paths.base.join("hooks/notify.sh").display(),
+        ainb_plugin_notifyd::embedded_plugin_version(),
+    );
+    fs::write(paths.base.join("install.json"), install_json).expect("seed install.json");
 }
 
 fn capture_pane(session: &str) -> String {

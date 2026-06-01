@@ -680,6 +680,8 @@ pub enum ConfirmAction {
     KillOtherTmux(String), // Kill a non-agents-in-a-box tmux session by name
     KillOtherTmuxSessions(Vec<String>), // Kill multiple non-agents-in-a-box tmux sessions by name
     KillWorkspaceShell(usize), // Kill workspace shell by workspace index
+    InstallNotifyHooks, // Install the ainb-hooks notification plugin into Claude Code + Codex
+    DismissNotifyPrompt, // Remember "don't ask again" for the notify-install prompt
     Cancel,            // No-op terminator for tri-option dialogs
 }
 
@@ -3300,6 +3302,11 @@ impl AppState {
         self.onboarding_state = None;
         self.current_screen = screen_ids::HOME.to_string();
 
+        // New-user path: now that onboarding is done, offer to install
+        // the ainb-hooks notification plugin (existing users get this at
+        // startup in main.rs instead). No-op if declined or up to date.
+        self.maybe_prompt_notify_install();
+
         Ok(())
     }
 
@@ -5295,6 +5302,74 @@ impl AppState {
             selected_option: false,
             warning: Some("This closes all selected external tmux sessions.".to_string()),
             options: None,
+            selected_index: 0,
+        });
+    }
+
+    /// First-run / post-upgrade prompt for the ainb-hooks notification
+    /// plugin. Reads `ainb_plugin_notifyd::prompt_state`: offers to
+    /// install when nothing is set up (and the user hasn't declined),
+    /// or to update when this binary embeds a newer manifest than what's
+    /// on disk. A no-op when there's nothing to prompt, so callers can
+    /// fire it unconditionally on startup / after onboarding.
+    ///
+    /// Never shown while a dialog is already up or the user is mid-
+    /// onboarding — callers gate on that.
+    pub fn maybe_prompt_notify_install(&mut self) {
+        use ainb_plugin_notifyd::{InstallPrompt, Paths, prompt_state};
+
+        if self.confirmation_dialog.is_some() {
+            return;
+        }
+        let Ok(paths) = Paths::from_home() else {
+            return;
+        };
+        let (title, message, install_label) = match prompt_state(&paths) {
+            InstallPrompt::OfferInstall => (
+                "Get notified when a session needs you?".to_string(),
+                "Install ainb-hooks into Claude Code + Codex so the Inbox \
+                 (press b) and per-session badges light up when an agent is \
+                 awaiting input or has finished. Only actionable events are \
+                 captured — no activity-log noise. Writes ~/.claude/plugins \
+                 and ~/.codex/hooks.json."
+                    .to_string(),
+                "Install",
+            ),
+            InstallPrompt::OfferUpdate {
+                installed,
+                embedded,
+            } => (
+                "Update notification hooks?".to_string(),
+                format!(
+                    "ainb-hooks is installed at v{installed}, but this build \
+                     ships v{embedded}. Re-install to pick up the latest hook \
+                     set."
+                ),
+                "Update",
+            ),
+            InstallPrompt::None => return,
+        };
+        self.confirmation_dialog = Some(ConfirmationDialog {
+            title,
+            message,
+            // Binary mode is unused here; tri-option drives the choice.
+            confirm_action: ConfirmAction::InstallNotifyHooks,
+            selected_option: false,
+            warning: None,
+            options: Some(vec![
+                DialogOption {
+                    label: install_label.to_string(),
+                    action: ConfirmAction::InstallNotifyHooks,
+                },
+                DialogOption {
+                    label: "Not now".to_string(),
+                    action: ConfirmAction::Cancel,
+                },
+                DialogOption {
+                    label: "Don't ask again".to_string(),
+                    action: ConfirmAction::DismissNotifyPrompt,
+                },
+            ]),
             selected_index: 0,
         });
     }
