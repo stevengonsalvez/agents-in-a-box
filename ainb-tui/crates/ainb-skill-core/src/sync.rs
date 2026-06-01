@@ -268,7 +268,7 @@ fn decide_both_present(
 //      succeed (the action would never have been planned otherwise; we
 //      re-check so misuse can't silently write to the wrong place).
 //   3. Ask the [`ContentFetcher`] for the bytes at `repo_rel`@ref.
-//   4. Write atomically (tmp + rename) under `tool_home/home_rel`,
+//   4. Write atomically (tmp + rename) under `install_root/home_rel`,
 //      creating parents as needed. Idempotent: re-applying the same
 //      action with the same fetched bytes leaves the file at byte-for-
 //      byte equal content.
@@ -330,7 +330,7 @@ pub trait ContentFetcher {
 }
 
 /// Apply one [`SyncDirection::ToHome`] action: write the upstream file
-/// bytes to the mapped home path under `tool_home`.
+/// bytes to the mapped home path under `install_root`.
 ///
 /// Non-`ToHome` actions short-circuit to `Ok(())` so callers can sweep
 /// a full plan through one loop without dispatching on direction.
@@ -344,9 +344,19 @@ pub trait ContentFetcher {
 /// and the git `ref` to pass into the fetcher. `unit_path` is the
 /// repo-relative path of the unit being synced; the caller usually
 /// gets it from the [`UnitSnapshot`] that fed `plan_sync`.
+///
+/// `install_root` is the per-tool home root — the same value the install
+/// path receives from `install_root_for(tool_name)` and that
+/// `apply_to_home` previously called `tool_home`. `tool_name` is passed
+/// alongside so the executor can strip the leading `.<tool>/` segment
+/// the layout `home` conventionally carries, mirroring the install
+/// path's existing `strip_tool_dotdir` shave. Without that strip the
+/// join would land at `<install_root>/.claude/skills/...` (the bug fixed
+/// here — bead `agents-in-a-box-bsi`).
 pub fn apply_to_home(
     action: &SyncAction,
-    tool_home: &Path,
+    install_root: &Path,
+    tool_name: &str,
     source: &SourceEntry,
     unit_path: &Path,
     fetcher: &dyn ContentFetcher,
@@ -355,11 +365,12 @@ pub fn apply_to_home(
         return Ok(());
     }
 
-    let (home_rel, repo_rel) = resolve_pair(source, unit_path)
+    let (home_rel_raw, repo_rel) = resolve_pair(source, unit_path)
         .ok_or_else(|| SyncEngineError::LayoutNoMatch(path_lossy(unit_path)))?;
 
     let bytes = fetcher.fetch_content(&source.r#ref, &repo_rel)?;
-    let target = tool_home.join(&home_rel);
+    let home_rel = crate::mapping::strip_tool_dotdir(tool_name, &home_rel_raw);
+    let target = install_root.join(&home_rel);
     write_atomic(&target, &bytes)?;
     Ok(())
 }
@@ -478,9 +489,16 @@ pub struct ApplyToRepoOpts {
 /// Non-`ToRepo` actions short-circuit to `Ok(())` so callers can sweep
 /// a plan through one loop. Idempotent for byte-identical home content
 /// — git's own "nothing to commit" is treated as success.
+///
+/// `install_root` + `tool_name` carry the same meaning here as in
+/// [`apply_to_home`]: the per-tool home root (e.g.
+/// `install_root_for("claude") = ~/.claude`) plus the tool name used to
+/// shave the leading `.<tool>/` from `target_layout.home` so the join
+/// does not double-prefix (bead `agents-in-a-box-bsi`).
 pub fn apply_to_repo(
     action: &SyncAction,
-    tool_home: &Path,
+    install_root: &Path,
+    tool_name: &str,
     source: &SourceEntry,
     unit_path: &Path,
     opts: &ApplyToRepoOpts,
@@ -498,12 +516,13 @@ pub fn apply_to_repo(
     // first finishes its commit + push.
     let _lock = acquire_sync_lock(&opts.repo_cache_dir)?;
 
-    let (home_rel, repo_rel) = resolve_pair(source, unit_path)
+    let (home_rel_raw, repo_rel) = resolve_pair(source, unit_path)
         .ok_or_else(|| SyncEngineError::LayoutNoMatch(path_lossy(unit_path)))?;
+    let home_rel = crate::mapping::strip_tool_dotdir(tool_name, &home_rel_raw);
 
     // Read the home-side bytes — surface a clean error when the home
     // file is missing (caller's plan must have desynced from disk).
-    let home_file = tool_home.join(&home_rel);
+    let home_file = install_root.join(&home_rel);
     let bytes = fs::read(&home_file).map_err(|e| {
         SyncEngineError::Io(std::io::Error::new(
             e.kind(),

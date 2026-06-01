@@ -71,10 +71,14 @@ fn fake_source() -> SourceEntry {
     }
 }
 
-fn seed_home_file(tool_home: &Path) -> PathBuf {
+fn seed_home_file(install_root: &Path) -> PathBuf {
+    // tool_home arg to apply_to_repo plays install_root's role (its
+    // .claude/ embedment is stripped from the layout home by the
+    // executor); seed the file at the install-root-relative path the
+    // layout actually resolves to.
     let unit_rel = PathBuf::from("skills/commit/SKILL.md");
     let body = b"---\nname: commit\n---\nedited\n";
-    let home_file = tool_home.join(".claude").join("skills/commit/SKILL.md");
+    let home_file = install_root.join("skills/commit/SKILL.md");
     std::fs::create_dir_all(home_file.parent().unwrap()).unwrap();
     std::fs::write(&home_file, body).unwrap();
     unit_rel
@@ -117,7 +121,7 @@ fn apply_to_repo_returns_sync_in_progress_when_lock_held() {
     };
 
     let result = with_skip_push(|| {
-        apply_to_repo(&action, tool_home.path(), &source, &unit_rel, &opts)
+        apply_to_repo(&action, tool_home.path(), "claude", &source, &unit_rel, &opts)
     });
 
     match result {
@@ -135,7 +139,7 @@ fn apply_to_repo_returns_sync_in_progress_when_lock_held() {
     drop(lock_file);
 
     let result_after = with_skip_push(|| {
-        apply_to_repo(&action, tool_home.path(), &source, &unit_rel, &opts)
+        apply_to_repo(&action, tool_home.path(), "claude", &source, &unit_rel, &opts)
     });
     assert!(
         result_after.is_ok(),
@@ -164,12 +168,12 @@ fn apply_to_repo_releases_lock_on_return() {
     };
 
     with_skip_push(|| {
-        apply_to_repo(&action, tool_home.path(), &source, &unit_rel, &opts)
+        apply_to_repo(&action, tool_home.path(), "claude", &source, &unit_rel, &opts)
             .expect("first apply must succeed");
         // Second call: same bytes, nothing to commit, but it MUST still
         // acquire + release the lock cleanly. If the lock leaked, this
         // would surface as SyncInProgress.
-        apply_to_repo(&action, tool_home.path(), &source, &unit_rel, &opts)
+        apply_to_repo(&action, tool_home.path(), "claude", &source, &unit_rel, &opts)
             .expect("second apply must succeed (lock released after first)");
     });
 }
@@ -237,6 +241,7 @@ fn two_threads_contend_exactly_one_wins() {
             let r = apply_to_repo(
                 &action_c,
                 &tool_home_p,
+                "claude",
                 &source_c,
                 &unit_rel_c,
                 &opts_c,

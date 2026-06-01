@@ -87,7 +87,10 @@ fn apply_to_repo_copies_commits_and_advances_head() {
 
     // Seed the home-side file (the local edit we want to publish).
     let body = b"---\nname: commit\n---\nedited\n";
-    let home_file = tool_home.path().join(".claude/skills/commit/SKILL.md");
+    // tool_home now plays install_root's role (the .claude/-prefix is
+    // stripped from the layout's home by apply_to_repo); seed the file
+    // at the install-root-relative path the layout resolves to.
+    let home_file = tool_home.path().join("skills/commit/SKILL.md");
     std::fs::create_dir_all(home_file.parent().unwrap()).unwrap();
     std::fs::write(&home_file, body).unwrap();
 
@@ -103,7 +106,7 @@ fn apply_to_repo_copies_commits_and_advances_head() {
     };
 
     with_skip_push(|| {
-        apply_to_repo(&action, tool_home.path(), &source, &unit_path, &opts).expect("apply");
+        apply_to_repo(&action, tool_home.path(), "claude", &source, &unit_path, &opts).expect("apply");
     });
 
     let head_after = rev_parse_head(repo_dir.path());
@@ -127,7 +130,10 @@ fn apply_to_repo_is_idempotent_when_bytes_unchanged() {
     init_repo(repo_dir.path());
 
     let body = b"body bytes\n";
-    let home_file = tool_home.path().join(".claude/skills/commit/SKILL.md");
+    // tool_home now plays install_root's role (the .claude/-prefix is
+    // stripped from the layout's home by apply_to_repo); seed the file
+    // at the install-root-relative path the layout resolves to.
+    let home_file = tool_home.path().join("skills/commit/SKILL.md");
     std::fs::create_dir_all(home_file.parent().unwrap()).unwrap();
     std::fs::write(&home_file, body).unwrap();
 
@@ -143,13 +149,13 @@ fn apply_to_repo_is_idempotent_when_bytes_unchanged() {
     };
 
     with_skip_push(|| {
-        apply_to_repo(&action, tool_home.path(), &source, &unit_path, &opts).expect("apply 1");
+        apply_to_repo(&action, tool_home.path(), "claude", &source, &unit_path, &opts).expect("apply 1");
     });
     let head_first = rev_parse_head(repo_dir.path());
 
     // Re-apply with identical bytes — should NOT create a new commit.
     with_skip_push(|| {
-        apply_to_repo(&action, tool_home.path(), &source, &unit_path, &opts).expect("apply 2");
+        apply_to_repo(&action, tool_home.path(), "claude", &source, &unit_path, &opts).expect("apply 2");
     });
     let head_second = rev_parse_head(repo_dir.path());
     assert_eq!(
@@ -176,7 +182,7 @@ fn apply_to_repo_skips_non_to_repo_directions() {
         repo_cache_dir: repo_dir.path().to_path_buf(),
     };
     with_skip_push(|| {
-        apply_to_repo(&action, tool_home.path(), &source, &unit_path, &opts).expect("noop");
+        apply_to_repo(&action, tool_home.path(), "claude", &source, &unit_path, &opts).expect("noop");
     });
     let head_after = rev_parse_head(repo_dir.path());
     assert_eq!(head_before, head_after, "NoOp must leave HEAD untouched");
@@ -220,7 +226,10 @@ fn apply_to_repo_pushes_to_real_local_bare_remote() {
     };
 
     let body = b"---\nname: commit\n---\npublished via sync\n";
-    let home_file = tool_home.path().join(".claude/skills/commit/SKILL.md");
+    // tool_home now plays install_root's role (the .claude/-prefix is
+    // stripped from the layout's home by apply_to_repo); seed the file
+    // at the install-root-relative path the layout resolves to.
+    let home_file = tool_home.path().join("skills/commit/SKILL.md");
     std::fs::create_dir_all(home_file.parent().unwrap()).unwrap();
     std::fs::write(&home_file, body).unwrap();
 
@@ -235,7 +244,7 @@ fn apply_to_repo_pushes_to_real_local_bare_remote() {
         repo_cache_dir: repo_dir.path().to_path_buf(),
     };
 
-    apply_to_repo(&action, tool_home.path(), &source, &unit_path, &opts).expect("apply");
+    apply_to_repo(&action, tool_home.path(), "claude", &source, &unit_path, &opts).expect("apply");
 
     let bare_head_after = {
         let out = git(&["rev-parse", "main"], bare.path());
@@ -265,7 +274,10 @@ fn apply_to_repo_rejects_argv_smuggled_ref() {
     init_repo(repo_dir.path());
 
     let body = b"body\n";
-    let home_file = tool_home.path().join(".claude/skills/commit/SKILL.md");
+    // tool_home now plays install_root's role (the .claude/-prefix is
+    // stripped from the layout's home by apply_to_repo); seed the file
+    // at the install-root-relative path the layout resolves to.
+    let home_file = tool_home.path().join("skills/commit/SKILL.md");
     std::fs::create_dir_all(home_file.parent().unwrap()).unwrap();
     std::fs::write(&home_file, body).unwrap();
 
@@ -281,7 +293,7 @@ fn apply_to_repo_rejects_argv_smuggled_ref() {
     let opts = ApplyToRepoOpts {
         repo_cache_dir: repo_dir.path().to_path_buf(),
     };
-    let err = apply_to_repo(&action, tool_home.path(), &source, &unit_path, &opts)
+    let err = apply_to_repo(&action, tool_home.path(), "claude", &source, &unit_path, &opts)
         .expect_err("argv-smuggled ref must be refused");
     let msg = err.to_string().to_lowercase();
     assert!(
@@ -307,7 +319,7 @@ fn apply_to_repo_errors_when_home_file_missing() {
         repo_cache_dir: repo_dir.path().to_path_buf(),
     };
     with_skip_push(|| {
-        let err = apply_to_repo(&action, tool_home.path(), &source, &unit_path, &opts).unwrap_err();
+        let err = apply_to_repo(&action, tool_home.path(), "claude", &source, &unit_path, &opts).unwrap_err();
         let msg = err.to_string().to_lowercase();
         assert!(
             msg.contains("home") || msg.contains("not found") || msg.contains("no such file"),
