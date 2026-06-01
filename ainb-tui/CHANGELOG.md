@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-06-01
+### Added
+- Merge pull request #189 from stevengonsalvez/fix/stats
+- Merge pull request #194 from stevengonsalvez/worktree-notify-install-prompt
+- **burndown**: adjustable columns and row copy in zoom tables
+- **notifyd**: first-run prompt to install notification hooks + drift detection
+
+### Fixed
+- **burndown**: correct copy-flash lifecycle
+- **burndown**: resolve zoom detail drawer through filtered records
+- **burndown**: wire zoom-table fuzzy-search text input
+- **notifyd**: rustfmt wraps + seed install.json in inbox tripwire
+
+### Documentation
+- Merge pull request #193 from stevengonsalvez/docs/plugin-screenshots
+- add real in-ainb screenshots to the plugin + inbox pages
+
+
 ## [1.2.2] - 2026-06-01
 ### Added
 - Merge pull request #159 from stevengonsalvez/feat/witr-plugin
