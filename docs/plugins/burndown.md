@@ -5,6 +5,10 @@ description: "Owns the Analytics screen and the ainb usage CLI — renders usage
 
 `burndown` is the in-tree **screen-owner** reference plugin: it paints the full Analytics dashboard and owns the `ainb usage` CLI tree. It is also the consumer half of the event-bus **publish/subscribe** pattern — it does not scan any session files itself, it renders the snapshots `session-reader` publishes.
 
+![The burndown Analytics dashboard inside ainb](../assets/screenshots/burndown-dashboard.png)
+
+*Press `i` in ainb to open the Analytics dashboard — cost/token burndown, per-project and per-model breakdowns, a live session ticker, and optimization hints.*
+
 ## How it works
 
 ![burndown plugin — how it works](../assets/diagrams/burndown.svg)
