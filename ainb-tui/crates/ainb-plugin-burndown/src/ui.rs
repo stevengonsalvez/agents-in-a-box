@@ -5856,6 +5856,38 @@ mod zoom_table_tests {
             .expect("render_zoom_table must not panic on a narrow frame");
     }
 
+    #[test]
+    fn empty_rows_with_stale_focus_row_does_not_panic() {
+        // Reproduces: zoom in, navigate down, then a search query empties
+        // the row set while `focus_row` is still large. The clamp +
+        // scroll-window math must yield a valid (empty) slice, never an
+        // out-of-range index.
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut state = UsageViewState::default();
+        state.zoom = Some(UsagePanel::TopSessions);
+        state.focus_row = 99;
+
+        let backend = TestBackend::new(120, 20);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|frame| {
+                let area = frame.size();
+                let cols = zoom_cols(UsagePanel::TopSessions);
+                let rows: Vec<Vec<String>> = Vec::new();
+                render_zoom_table(
+                    frame.buffer_mut(),
+                    area,
+                    &cols,
+                    &rows,
+                    &state,
+                    UsagePanel::TopSessions,
+                );
+            })
+            .expect("render_zoom_table must not panic on an empty row set");
+        // Header still paints.
+        assert!(flatten(terminal.backend().buffer()).contains("Provider"));
+    }
+
     // ── state methods ────────────────────────────────────────────────
 
     #[test]
