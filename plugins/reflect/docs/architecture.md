@@ -3,6 +3,11 @@
 > **Audience**: Engineers joining the project with no prior context on reflect.
 > **Date**: 2026-04-25
 > **Repos**: `ai-coder-rules` (toolkit) · `reflect-kb` (standalone CLI + KB)
+>
+> **v4.0.0 update (cost rearchitecture)**: the auto-drain is now gated + sliced
+> + capped and runs on **Sonnet** by default — see [`../CHANGELOG.md`](../CHANGELOG.md)
+> for the full diff. §5.4–§5.5 below reflect v4; the rest of this doc predates it
+> and stays accurate for everything outside the drain.
 
 ---
 
@@ -431,7 +436,8 @@ sequenceDiagram
     participant DRN as reflect-drain-bg.sh
     participant LCK as ~/.reflect/drain.lock
     participant Q as ~/.reflect/pending_reflections.jsonl
-    participant CP as claude -p "/reflect $T" --max-turns 25
+    participant CASC as reflect_cascade.py (gate+slice, $0)
+    participant CP as claude -p "/reflect $SLICE" --model sonnet --max-turns 8
     participant DOC as ~/.learnings/documents/<slug>.md
     participant SC as <slug>.entities.yaml
     participant IDX as reflect reindex --incremental
@@ -439,27 +445,37 @@ sequenceDiagram
 
     CC->>H: SessionStart fires
     H->>DRN: ( nohup ./drain.sh & ) — detach, return in <100ms
-    DRN->>LCK: PID-based lock (skip if held; reclaim if stale)
+    DRN->>LCK: atomic mkdir lock (skip if held; reclaim if stale) + debounce
     DRN->>Q: read up to REFLECT_DRAIN_MAX entries (default 3)
-    loop per entry (cap REFLECT_DRAIN_DAILY_MAX/day, default 20)
+    loop per entry (cap REFLECT_DRAIN_DAILY_MAX/day, sums $0 skips out)
         alt transcript missing on disk
             DRN-->>Q: archive as "stale", drop from queue
         else transcript present
-            DRN->>CP: subscription auth, --permission-mode bypassPermissions
-            alt exit 0 (success)
-                CP->>DOC: write learning markdown
-                CP->>SC: write entity sidecar YAML
-                CP-->>DRN: result envelope (cost, turns)
-                DRN->>Q: archive entry to .processed-YYYYMMDD
-            else exit non-zero AND envelope says "max_turns"
-                Note over DRN: partial work; retry++; poison after 3
-                DRN-->>Q: keep entry, increment retry-count.jsonl
-            else hard error
-                DRN-->>Q: log + leave in queue
+            DRN->>CASC: prepare(transcript) — gate + slice (no model)
+            alt cascade verdict = skip (reflect-on-reflect / no-signal / dup)
+                CASC-->>DRN: {action: skip} — $0, entries=0
+                DRN-->>Q: drop from queue (never spent a token)
+            else cascade verdict = reflect
+                CASC-->>DRN: {action: reflect, slice_path} (~10x smaller input)
+                DRN->>CP: --model sonnet, bypassPermissions, neutral cwd ($HOME)
+                alt exit 0 (success, tokens <= REFLECT_DRAIN_TOKEN_MAX)
+                    CP->>DOC: write learning markdown
+                    CP->>SC: write entity sidecar YAML
+                    CP-->>DRN: result envelope (cost, turns, token split)
+                    DRN->>Q: archive entry to .processed-YYYYMMDD
+                else terminal_reason = max_turns
+                    Note over DRN: partial work; retry++; poison after 3
+                    DRN-->>Q: keep entry, increment retry-count.jsonl
+                else tokens > REFLECT_DRAIN_TOKEN_MAX (budget poison)
+                    Note over DRN: completed-but-expensive; poison so no retry
+                    DRN-->>Q: archive to poison-reflections.jsonl
+                else hard error
+                    DRN-->>Q: log + leave in queue
+                end
             end
         end
     end
-    DRN->>IDX: reflect reindex --incremental
+    DRN->>IDX: graphml_repair.py (self-heal) then reflect reindex --incremental
     IDX->>GR: update graphml + vdb_entities + kv_store_full_docs
     DRN-->>LCK: release on EXIT/INT/TERM trap
 ```
@@ -468,23 +484,48 @@ sequenceDiagram
 
 - **Non-blocking**: hook returns in milliseconds; drain runs detached
   (`(nohup ... &) >/dev/null 2>&1`).
-- **Idempotent**: PID-based lock with stale-lock reclaim — concurrent
-  sessions don't multi-drain.
+- **Idempotent**: atomic `mkdir` lock with stale-lock reclaim (v4 —
+  replaced the racy check-then-write PID file that let two concurrent
+  spawns each pass the daily cap), plus a debounce
+  (`REFLECT_DRAIN_DEBOUNCE_SEC`, default 600) so a burst of session
+  starts collapses to one drain.
+- **Gated + sliced (v4)**: before any model spend, `reflect_cascade.py`
+  gates the transcript ($0 regex via `reflect_gate.py` — skips
+  reflect-on-reflect / no-signal / already-captured) and slices it to the
+  signal-bearing windows (~10x smaller) so `/reflect` runs cheap. Default
+  on (`REFLECT_DRAIN_CASCADE=1`).
+- **Sonnet by default (v4)**: `REFLECT_DRAIN_MODEL` defaults to `sonnet`;
+  Opus is reserved for rare escalation and the weekly synthesis pass.
 - **Cost-capped**: per-run cap (`REFLECT_DRAIN_MAX`, default 3) and
-  per-day cap (`REFLECT_DRAIN_DAILY_MAX`, default 20). At ~$0.20–0.75
-  per `/reflect` call (Opus 4.7 + cached system prompt), worst case
-  ≈ $15/day.
+  per-day cap (`REFLECT_DRAIN_DAILY_MAX`, default 20). The daily cap sums
+  the `entries` field, so $0 gated skips never consume budget.
+- **Circuit-breaker (v4, defence in depth)**: turn cap
+  (`REFLECT_DRAIN_MAX_TURNS`, **8** — was 25), wall-clock cap
+  (`REFLECT_DRAIN_TIMEOUT`, **180s** — was 600s), and a post-hoc
+  token-budget poison (`REFLECT_DRAIN_TOKEN_MAX`, default 2M) so a
+  completed-but-expensive run can never be retried. `REFLECT_DISABLED=1`
+  is a hard kill switch.
 - **Poison-resistant**: each transcript tracked in
   `~/.reflect/retry-count.jsonl`; entries with `retry > 3` get archived
   with a marker so they don't infinite-loop.
 - **Stale-transcript safe**: if the transcript JSONL no longer exists on
   disk (old worktrees, deleted files), drop it cleanly instead of
   failing.
-- **Auto-reindex**: after the drain processes its batch, runs
-  `reflect reindex --incremental` so new docs land in
-  GraphRAG (`graphml` + `vdb_entities`) **and** QMD without manual
-  intervention. Recall in the *next* session sees the freshly-captured
-  learnings.
+- **Self-healing reindex (v4)**: before reindex, `graphml_repair.py`
+  validates and repairs the GraphRAG `graphml` (a doubled-close-tag
+  corruption is what the incident agent spent ~200 turns chasing — here
+  it's a cheap batch step). Then runs `reflect reindex --incremental` so
+  new docs land in GraphRAG (`graphml` + `vdb_entities`) **and** QMD
+  without manual intervention. Recall in the *next* session sees the
+  freshly-captured learnings.
+- **Neutral cwd (v4)**: the drain runs `/reflect` in `REFLECT_DRAIN_CWD`
+  (default `$HOME`), not whatever repo triggered it, so it can't touch a
+  random project tree.
+- **Sole queue consumer (v4)**: the SessionStart surfacer
+  (`sessionstart_drain_reflections.py`) is retired to a no-op; the
+  background drainer is now the only consumer of the pending queue (ends
+  the dual-consumer queue pollution where transcripts got reflected
+  twice).
 - **Cross-tool universal**: the drain script reads the shared
   `~/.reflect/pending_reflections.jsonl`. Any tool's session-init hook
   can fire it. Today only the Claude adapter wires it; Codex and Copilot
@@ -495,19 +536,29 @@ sequenceDiagram
 | Env var | Default | Purpose |
 |---|---|---|
 | `REFLECT_DRAIN_MAX` | `3` | Max transcripts processed per session-start fire |
-| `REFLECT_DRAIN_DAILY_MAX` | `20` | Hard daily cost cap (~$15/day at default rate) |
-| `REFLECT_DRAIN_MAX_TURNS` | `25` | Per-`/reflect` LLM turn limit |
-| `REFLECT_DRAIN_DRY_RUN` | unset | Set `1` to log intent without spending |
+| `REFLECT_DRAIN_DAILY_MAX` | `20` | Hard daily entry cap (sums `entries`; $0 skips excluded) |
+| `REFLECT_DRAIN_MODEL` | `sonnet` | Model alias for `claude -p` (Opus reserved for escalation/synthesis) |
+| `REFLECT_DRAIN_MAX_TURNS` | `8` | Per-`/reflect` LLM turn limit (was 25 pre-v4) |
+| `REFLECT_DRAIN_TIMEOUT` | `180` | Per-entry `claude -p` wall-clock cap, seconds (was 600 pre-v4) |
+| `REFLECT_DRAIN_TOKEN_MAX` | `2000000` | Post-hoc poison: archive a run reporting more total tokens than this |
+| `REFLECT_DRAIN_CASCADE` | `1` | Gate + slice the transcript before `/reflect` (set `0` to disable) |
+| `REFLECT_DRAIN_DEBOUNCE_SEC` | `600` | Min seconds between drain runs (collapse session-start bursts) |
+| `REFLECT_DRAIN_CWD` | `$HOME` | Neutral cwd for the `claude -p` call |
+| `REFLECT_DISABLED` | unset | Set `1` for a hard kill switch — drainer is a no-op |
+| `REFLECT_DRAIN_SKIP_REINDEX` | unset | Set `1` to skip the post-drain reindex (tests) |
+| `REFLECT_DRAIN_DRY_RUN` | unset | Set `1` to log intent without spending (side-effect-free) |
 
 **Files**:
 
 | Path | Purpose |
 |---|---|
-| `~/.claude/scripts/reflect-drain-bg.sh` | The drain script |
-| `~/.reflect/drain.lock` | PID lock (single drain at a time) |
+| `${CLAUDE_PLUGIN_ROOT}/hooks/reflect-drain-bg.sh` | The drain script (wired in `plugin.json`) |
+| `~/.reflect/drain.lock.d/` | Atomic mkdir lock dir (single drain at a time) |
+| `~/.reflect/drain.last-run` | Debounce marker (epoch of last drain start) |
 | `~/.reflect/drain.log` | Run log, rotates at 10 MB |
-| `~/.reflect/drain-cost.jsonl` | Daily-cap accounting |
+| `~/.reflect/drain-cost.jsonl` | Daily-cap accounting + per-run token/cost envelope (read by `reflect cost`) |
 | `~/.reflect/retry-count.jsonl` | Per-transcript retry counters |
+| `~/.reflect/poison-reflections.jsonl` | Transcripts archived as poison (retry/budget exceeded) |
 | `~/.reflect/pending_reflections.jsonl.processed-YYYYMMDD` | Archive of successful drains |
 
 ---
@@ -660,6 +711,13 @@ Team KB repos provisioned via `reflect team init/clone` include a `.pre-commit-c
 | `REFLECT_AUTO_APPROVE` | `0.8` | Confidence threshold for auto-approval |
 | `REFLECT_CONFIG_PATH` | `~/.learnings/config.toml` | Override dashboard config path |
 | `REFLECT_RECALL_DEBUG` | (unset) | Print recall errors to stderr for debugging |
+
+The background drain (`reflect-drain-bg.sh`) reads a separate set of
+cost-control env vars (`REFLECT_DRAIN_MODEL`, `REFLECT_DRAIN_MAX_TURNS`,
+`REFLECT_DRAIN_TIMEOUT`, `REFLECT_DRAIN_TOKEN_MAX`, `REFLECT_DRAIN_CASCADE`,
+`REFLECT_DRAIN_DEBOUNCE_SEC`, `REFLECT_DRAIN_CWD`, `REFLECT_DISABLED`,
+`REFLECT_DRAIN_SKIP_REINDEX`). See the §5.5 configuration surface for
+defaults and purpose.
 
 ---
 

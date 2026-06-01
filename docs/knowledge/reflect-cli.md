@@ -43,6 +43,7 @@ reflect --version   # prints 0.1.x
 | `reflect critical-patterns` | Surface high-confidence, widely-applicable patterns. Filter with `--language/-l`, `--domain/-d`. |
 | `reflect generate-sidecars` | Backfill missing `.entities.yaml` sidecars heuristically (no LLM). `--force` regenerates all. |
 | `reflect metrics stats` | Aggregate the recall-metrics JSONL log (total events, hit rate, p50/p95 latency, top tags). Supports `--format json` and `--window-days`. |
+| `reflect cost` | Report background-drain spend from `~/.reflect/drain-cost.jsonl` (plugin 4.0.0+). Groups by `--by day\|transcript\|model\|outcome`, shows the cached-vs-uncached token split with outlier flagging and a per-model `$` estimate. Flags: `--since 30d`, `--top N`, `--json`, `--state-dir`. Backed by `plugins/reflect/scripts/reflect_cost.py`. |
 | `reflect timeline --explain <ROW>` | Drill down on a statusline dashboard row (`REC`, `MEM`, `ING`, `DRN`, `TOK`, `ERR`, `COM`, `AGT`, or `all`). Shells out to the reflect plugin's helper. |
 
 The Python `console_scripts` entry point is `reflect = reflect_kb.cli.main:main` ([`pyproject.toml`](https://github.com/stevengonsalvez/agents-in-a-box/blob/main/reflect-kb/pyproject.toml)).
@@ -60,6 +61,8 @@ reflect timeline --explain TOK
 ## Content directory
 
 The CLI is the data layer; it knows nothing about Claude Code. Knowledge content lives in a separate directory at `~/.claude/global-learnings/` (override with `$GLOBAL_LEARNINGS_PATH`), holding `documents/*.md`, `documents/*.entities.yaml` sidecars, the gitignored `nano_graphrag_cache/` index, and the rotated `metrics.jsonl` telemetry log.
+
+> **Note:** the plugin-side recall/reflect/drain code (`recall.py`, `graphml_repair.py`, `reflect_synthesis.py`) canonically reads from `~/.learnings/` and treats `~/.claude/global-learnings/` as a legacy/deprecated fallback (the self-heal and synthesis scripts glob **both** paths). Both resolve in practice; `~/.learnings/` is the current canonical root in the plugin's architecture docs. The `reflect init` default above describes the `reflect-kb` CLI's own behaviour — verify with `reflect --help` for your installed version.
 
 ## Plugin: skills, adapters and hooks
 
@@ -82,11 +85,27 @@ The `reflect` plugin (version `3.6.0`) wires the CLI into the agent harness. It 
 
 | Hook | Action |
 |---|---|
-| `SessionStart` | Runs `recall` and kicks off the background ingest drainer. |
+| `SessionStart` | Runs `recall` and kicks off the background drain (`reflect-drain-bg.sh`) — the sole consumer of the pending-reflections queue as of plugin 4.0.0. |
 | `UserPromptSubmit` | Runs `recall` against the prompt. |
 | `PostToolUse` | Arms low-cost mini-learning capture. |
-| `Stop` | Enqueues short-session reflection. |
-| `PreCompact` | Runs `precompact_reflect.py --auto --verbose` — **auto-installed**, so reflection fires before context compaction without manual setup. |
+| `Stop` | Gates ($0) and **queues** a short-session transcript for the bg-drain cascade — does not reflect synchronously. |
+| `PreCompact` | Runs `precompact_reflect.py --auto --verbose` — **auto-installed**. Hook scripts can't run an LLM, so it gates ($0) and **queues** the transcript for the bg-drain cascade rather than reflecting inline. |
+
+The producer hooks (`Stop`, `PreCompact`) only enqueue; reflection itself runs later in the background drain. As of plugin 4.0.0 the drain gates + slices each transcript and invokes `/reflect` on **Sonnet** by default under hard caps. Cost-control env vars consumed by the drain:
+
+| Env var | Default | Effect |
+|---|---|---|
+| `REFLECT_DRAIN_MODEL` | `sonnet` | Drain model (Opus reserved for escalation + weekly synthesis). |
+| `REFLECT_DRAIN_MAX_TURNS` | `8` | Per-`/reflect` turn cap (was 25 pre-4.0.0). |
+| `REFLECT_DRAIN_TIMEOUT` | `180` | Per-entry `claude -p` wall-clock cap, seconds (was 600 pre-4.0.0). |
+| `REFLECT_DRAIN_TOKEN_MAX` | `2000000` | Post-hoc poison: archive a run reporting more total tokens than this. |
+| `REFLECT_DRAIN_CASCADE` | `1` | Gate + slice the transcript before `/reflect` (set `0` to disable). |
+| `REFLECT_DRAIN_DEBOUNCE_SEC` | `600` | Min seconds between drain runs. |
+| `REFLECT_DRAIN_CWD` | `$HOME` | Neutral cwd for the `claude -p` call. |
+| `REFLECT_DISABLED` | unset | Set `1` for a hard kill switch (drain is a no-op). |
+| `REFLECT_DRAIN_SKIP_REINDEX` | unset | Set `1` to skip the post-drain reindex (tests). |
+
+Inspect drain spend with `reflect cost`. See the plugin [`CHANGELOG.md`](https://github.com/stevengonsalvez/agents-in-a-box/blob/main/plugins/reflect/CHANGELOG.md) for the 4.0.0 cost rearchitecture.
 
 ## See also
 
