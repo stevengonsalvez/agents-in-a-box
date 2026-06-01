@@ -128,6 +128,52 @@ fn normalise(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+/// Strip a leading dot-prefixed segment (`.<X>/`) from `home_rel` so
+/// callers that already pass an install-root that embeds the tool's
+/// dotdir (e.g. `install_root_for("claude") = ~/.claude`) do not
+/// double-prefix when joining.
+///
+/// Both source-declared `target_layout` and [`BOOTSTRAP_DEFAULT_MAPPINGS`]
+/// author paths as `.claude/skills/...` (i.e. "relative to `$HOME`") so a
+/// human reading the manifest can tell at a glance where files live. But
+/// the executors ([`crate::sync::apply_to_home`], [`crate::sync::apply_to_repo`])
+/// receive `install_root` (which already ends in the tool's dotdir) as
+/// their base. Joining the raw layout `home` onto that base would land
+/// at `<install_root>/.claude/skills/...` — a real, file-not-found bug
+/// surfaced by sandbox testing (`AINB_TOOL_HOME_CLAUDE=/tmp/x/.claude`,
+/// bead `agents-in-a-box-bsi`).
+///
+/// The strip is **first-segment-only** and triggers on any leading
+/// component whose name starts with `.` and has length > 1. Tool-name
+/// agnostic — `.claude/skills/foo` and `.codex/agents/x.md` are both
+/// handled by the same one-segment-shave. Authoring a layout where
+/// `home` does **not** begin with a dotdir (e.g. `skills` directly) is
+/// a no-op for this helper.
+///
+/// Examples:
+/// - `.claude/skills/foo/SKILL.md` → `skills/foo/SKILL.md`
+/// - `.codex/agents/x.md`          → `agents/x.md`
+/// - `agents/x.md`                 → `agents/x.md` (no-op, no leading dot)
+/// - `.git/hooks/pre-commit`       → `hooks/pre-commit` (still no-op-safe;
+///   no caller should pass `.git/*`)
+///
+/// `_tool_name` is currently unused (the first-dotdir-shave is enough
+/// for every v1 adapter); it is kept in the signature so a future
+/// per-tool special-case (e.g. `amazonq` whose real-home root is
+/// `.aws/amazonq`, not a single dotdir) can be added without a breaking
+/// API change.
+pub fn strip_tool_dotdir(_tool_name: &str, home_rel: &Path) -> PathBuf {
+    let mut comps = home_rel.components();
+    if let Some(std::path::Component::Normal(os)) = comps.next() {
+        if let Some(s) = os.to_str() {
+            if s.starts_with('.') && s.len() > 1 {
+                return comps.as_path().to_path_buf();
+            }
+        }
+    }
+    home_rel.to_path_buf()
+}
+
 /// Join `tail` onto `base`, treating an empty tail as "base itself"
 /// (a fully-literal glob points directly at one location).
 fn join_tail(base: &Path, tail: &str) -> PathBuf {

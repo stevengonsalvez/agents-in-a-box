@@ -33,7 +33,7 @@ use ainb_skill_core::drift::{
 };
 use ainb_skill_core::lockfile::{LockedUnit, Lockfile};
 use ainb_skill_core::manifest::{Manifest, SourceEntry};
-use ainb_skill_core::mapping::resolve_pair;
+use ainb_skill_core::mapping::{resolve_pair, strip_tool_dotdir};
 use ainb_skill_core::paths::{cache_dir_in, lockfile_path_in, manifest_path_in};
 use ainb_skill_core::sync::{
     apply_to_home, apply_to_repo, ApplyToRepoOpts, ContentFetcher, FetchError as SyncFetchError,
@@ -783,7 +783,14 @@ fn bidirectional_content_sync(
                             home: home.to_path_buf(),
                             source: source.clone(),
                         };
-                        apply_to_home(&action, &install_root, &source, &unit_path, &fetcher)
+                        apply_to_home(
+                            &action,
+                            &install_root,
+                            tool_name,
+                            &source,
+                            &unit_path,
+                            &fetcher,
+                        )
                             .with_context(|| {
                                 format!("apply_to_home {}/{rel_str}", unit.declared_uri)
                             })?;
@@ -794,7 +801,14 @@ fn bidirectional_content_sync(
                         let opts = ApplyToRepoOpts {
                             repo_cache_dir: cache_dir,
                         };
-                        apply_to_repo(&action, &install_root, &source, &unit_path, &opts)
+                        apply_to_repo(
+                            &action,
+                            &install_root,
+                            tool_name,
+                            &source,
+                            &unit_path,
+                            &opts,
+                        )
                             .with_context(|| {
                                 format!("apply_to_repo {}/{rel_str}", unit.declared_uri)
                             })?;
@@ -1209,45 +1223,6 @@ fn remap_dst(
     let (home_rel, _repo_rel) = resolve_pair(source, rel)?;
     let stripped = strip_tool_dotdir(tool_name, &home_rel);
     Some(install_root.join(&stripped))
-}
-
-/// Strip a leading dot-prefixed segment (`.<X>/`) from `home_rel`
-/// since `install_root_for(tool)` already points at the tool home.
-///
-/// The layout's `home` paths conventionally start with the tool's
-/// dotdir (`.claude/...`, `.codex/...`) so a manifest authored with
-/// "home is relative to the user `$HOME`" semantics still works. But
-/// `install_root_for` already resolves *to* the tool home (it embeds
-/// `.claude` / `.codex` for real-home mode, or points at the sandbox
-/// for `AINB_TOOL_HOME_<TOOL>`). Joining the layout's `home` onto it
-/// would double-count the dotdir.
-///
-/// Both the source's own explicit `target_layout` AND the bootstrap
-/// defaults — which are always rooted at `.claude/...` regardless of
-/// the active tool (they're claude-flavored, see
-/// `BOOTSTRAP_DEFAULT_MAPPINGS` in `ainb-skill-core::mapping`) — go
-/// through this strip. So a `.claude/skills` default applied to a
-/// non-claude tool (amazonq, gemini, …) ends up at the tool's
-/// `<install_root>/skills/...` rather than the absurd
-/// `<install_root>/.claude/skills/...`.
-///
-/// We strip the **first** segment when it begins with `.`. Examples:
-///   `.claude/skills/foo/SKILL.md` → `skills/foo/SKILL.md`
-///   `.codex/agents/x.md`          → `agents/x.md`
-///   `agents/x.md`                 → `agents/x.md` (no-op)
-///
-/// The `_tool_name` arg is kept for clarity / future per-tool needs
-/// (e.g. `claude-desktop` whose real-home root isn't a dotdir).
-fn strip_tool_dotdir(_tool_name: &str, home_rel: &Path) -> PathBuf {
-    let mut comps = home_rel.components();
-    if let Some(std::path::Component::Normal(os)) = comps.next() {
-        if let Some(s) = os.to_str() {
-            if s.starts_with('.') && s.len() > 1 {
-                return comps.as_path().to_path_buf();
-            }
-        }
-    }
-    home_rel.to_path_buf()
 }
 
 /// Derive the unit's install-path (the directory the lockfile will
