@@ -7,6 +7,7 @@ pub mod repo_lookup;
 pub mod session;
 pub mod skills;
 pub mod usage;
+pub mod usage_dir_watcher;
 pub mod workspace;
 
 pub use other_tmux::OtherTmuxSession;

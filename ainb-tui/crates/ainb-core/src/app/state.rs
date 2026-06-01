@@ -8311,6 +8311,12 @@ pub struct App {
     /// on `state.plugin_runtime` so dispatchers reach it without needing
     /// access to `App`.
     plugin_runtime_owner: Option<ainb_plugin_runtime::Runtime>,
+    /// Filesystem watcher that keeps the burndown usage snapshot live by
+    /// nudging session-reader to rescan on provider-dir changes. Held by
+    /// `App` so the watch (and its debounce task) stops when `App` drops.
+    /// `None` until [`App::init`] runs, or when no provider dir is
+    /// watchable — the burndown then keeps its press-`r` refresh behaviour.
+    usage_dir_watcher: Option<crate::models::usage_dir_watcher::UsageDirWatcher>,
 }
 
 impl App {
@@ -8318,6 +8324,7 @@ impl App {
         Self {
             state: AppState::new(),
             plugin_runtime_owner: None,
+            usage_dir_watcher: None,
         }
     }
 
@@ -8441,7 +8448,13 @@ impl App {
                     warn!(plugin = %name, error = %err, "plugin failed to load");
                 }
                 self.plugin_runtime_owner = Some(runtime);
-                self.state.plugin_runtime = Some(handle);
+                self.state.plugin_runtime = Some(handle.clone());
+                // Keep the burndown usage snapshot live: watch provider
+                // session dirs and nudge session-reader to rescan on
+                // change, so "today" appears without the user pressing
+                // `r`. Best-effort — `None` when no dir is watchable.
+                self.usage_dir_watcher =
+                    crate::models::usage_dir_watcher::UsageDirWatcher::start(handle);
             }
             Err(e) => {
                 warn!(error = %e, "plugin runtime init failed — running plugin-free");
