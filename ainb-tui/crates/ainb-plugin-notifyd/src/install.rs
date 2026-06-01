@@ -660,7 +660,10 @@ mod tests {
         assert_eq!(parse_semver("0.2.0"), (0, 2, 0));
         assert_eq!(parse_semver("v1.2.3"), (1, 2, 3));
         assert_eq!(parse_semver("0.10.0"), (0, 10, 0));
-        assert!(parse_semver("0.9.0") < parse_semver("0.10.0"), "numeric, not lexical");
+        assert!(
+            parse_semver("0.9.0") < parse_semver("0.10.0"),
+            "numeric, not lexical"
+        );
         assert_eq!(parse_semver("1.0.0-rc1"), (1, 0, 0));
         assert_eq!(parse_semver("garbage"), (0, 0, 0));
     }
@@ -705,7 +708,10 @@ mod tests {
         rec.plugin_version = Some("0.0.1".to_string());
         rec.save(&p).unwrap();
         match prompt_state(&p) {
-            InstallPrompt::OfferUpdate { installed, embedded } => {
+            InstallPrompt::OfferUpdate {
+                installed,
+                embedded,
+            } => {
                 assert_eq!(installed, "0.0.1");
                 assert_eq!(embedded, embedded_plugin_version());
             }
@@ -725,7 +731,10 @@ mod tests {
             r#"{"agents":["claude"],"hook_script":"/x/notify.sh"}"#,
         )
         .unwrap();
-        assert!(matches!(prompt_state(&p), InstallPrompt::OfferUpdate { .. }));
+        assert!(matches!(
+            prompt_state(&p),
+            InstallPrompt::OfferUpdate { .. }
+        ));
     }
 
     #[test]
