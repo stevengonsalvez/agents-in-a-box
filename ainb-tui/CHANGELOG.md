@@ -7,6 +7,142 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-06-01
+### Added
+- Merge pull request #159 from stevengonsalvez/feat/witr-plugin
+- Merge pull request #176 from stevengonsalvez/worktree-hangar-standup-brief
+- Merge pull request #177 from stevengonsalvez/worktree-hangar-resilience
+- Merge pull request #183 from deepaks7n/feat/new-session-picker-show-path
+- Merge pull request #188 from stevengonsalvez/worktree-inbox-actionable-only
+- Merge pull request #192 from stevengonsalvez/worktree-burndown-filewatch
+- **ainb-fleet**: hangar retries transient agent failures + surfaces read errors
+- **ainb-fleet**: standup verb returns per-workspace briefing
+- **notifyd**: only surface events that need the user; drop telemetry
+- **reflect**: add /reflect:cost sub-skill for drain spend reporting
+- **reflect**: cascade gate+slice before /reflect (W4)
+- **reflect**: circuit breaker in drain script (W1)
+- **reflect**: cost observability — envelope + reflect cost + backfill (W3)
+- **reflect**: enqueue skip-gate + dedup (W2)
+- **reflect**: structural rebuild — surfacer retire, graphml heal, re-gate, synthesis (W5)
+- **tui**: live-refresh burndown usage snapshot on provider-dir changes
+- **tui**: show repo path in new-session picker
+- **witr**: add a Witr tile to the home sidebar
+- **witr**: cfx.5 - main 4-tab TUI + key handling + LRU cache
+- **witr**: detect.rs - which witr + version parse + min-version gate
+- **witr**: embed witr's interactive browser instead of a plugin screen
+- **witr**: event-bus publisher - witr.snapshot topic
+- **witr**: model.rs + exec.rs - JSON parse + subprocess exec with timeout
+- **witr**: register + navigate to the witr plugin screen in the host
+- **witr**: render/detail.rs - process detail overlay
+- **witr**: render/empty.rs - missing-witr + outdated empty state
+- **witr**: scaffold ainb-plugin-witr crate + manifest
+- **witr**: slash.rs + cli.rs - /witr + ainb witr CLI namespace
+
+### Fixed
+- Merge pull request #186 from stevengonsalvez/worktree-inbox-shortcut-rebind-to-b
+- Merge pull request #187 from stevengonsalvez/worktree-ainb-notifyd-subcommand
+- **cli**: add hidden 'ainb notifyd' subcommand for hook lazy-spawn
+- **nav**: accept witr in is_known_screen_id
+- **plugins**: let focused plugin screens receive the `:` key
+- **plugins**: re-render plugin screens when their viewport changes
+- **reflect**: build drain JSONL log lines with json.dumps
+- **reflect**: gate reflect-on-reflect via machine markers, wider scan
+- **tui**: rebind Inbox shortcut from Shift+I to plain 'b'
+- **witr**: decode real witr output — non-zero-with-JSON exit + Go null slices
+- **witr**: kill the witr child process on exec/detect timeout
+- **witr**: target-prompt cancel hint says Backspace, not host-reserved Esc
+
+### Documentation
+- Merge pull request #173 from stevengonsalvez/docs/resync-audit
+- Merge pull request #181 from stevengonsalvez/docs/per-plugin-docsite-pages
+- Merge pull request #182 from stevengonsalvez/docs/fix-duplicate-titles
+- Merge pull request #184 from stevengonsalvez/docs/claude-code-plugins
+- **ainb-tui**: add project intro to README
+- **ainb-tui**: correct architecture diagram to crates workspace layout
+- **ainb-tui**: document ainb fleet subcommand family in README
+- **ainb-tui**: fix component/widget paths to crates/ainb-core/src
+- **contributing**: unfold ci-cd stub with the four real workflows
+- **knowledge**: document reflect plugin skills and wiring in CLI reference
+- **knowledge**: replace reflect-cli stub with real CLI reference
+- **plugins**: add notifyd to reference plugins in README
+- **plugins**: add v2 plugin architecture diagram + two-render-paths brief
+- **plugins**: add witr to the bundled reference plugins
+- **plugins**: dedicated per-plugin docsite pages + diagrams
+- **plugins**: disambiguation lists all three Claude Code plugins
+- **plugins**: document notifyd reference plugin in overview
+- **plugins**: fix stale witr framing + link per-plugin pages + render images
+- **plugins**: note cts-v2 and testkit crates in conformance section
+- **product**: correct toolkit deploy-target count to 11 in what-is-ainb
+- **product**: fix 'nine AI tools' deploy count to 11 in value 'what it costs'
+- **product**: fix 'nine targets' deploy count to 11 in value 'what you get'
+- **readme**: add ainb-fleet plugin and ainb-hooks to plugins/ in architecture tree
+- **readme**: add deploy-pages workflow to architecture tree
+- **readme**: add published website link to Links section
+- **readme**: correct Skills section heading count to 91
+- **readme**: correct skill count in What's Inside table to 91
+- **readme**: correct skill count in header badge line to 91
+- **readme**: correct toolkit skills/agents counts in architecture tree
+- **readme**: fix CLI command count from 15 to 20 and list all subcommands
+- **readme**: fix ainb-tui source tree to reflect Cargo workspace under crates/
+- **readme**: fix stale Homebrew tap link in Links section
+- **readme**: remove non-existent claude-developer-platform from Agent Architecture skill group
+- **reference**: add knowledge-base terms to glossary
+- **reference**: add tmux and runtime terms to glossary
+- **reference**: add v2 plugin contract terms to glossary
+- **reference**: replace glossary stub with core agent and toolkit terms
+- **reflect**: add errors-ack to sub-skills table
+- **reflect**: bump version refs in README to 3.6.0
+- **reflect**: correct PreCompact auto-install claim to match plugin.json
+- **reflect**: document all five lifecycle hooks in hooks README
+- **reflect**: lock cost re-architecture decisions via interview
+- **reflect**: plan cost re-architecture after 41M-token drain incident
+- **reflect**: record W1-W5 implementation status in spec
+- **reflect**: rich v4.0.0 cost-rearchitecture explainer + arch diagram
+- **reflect**: show all five wired lifecycle hooks in architecture diagram
+- **reflect**: update docs for v4.0.0 cost rearchitecture
+- **reflect-kb**: nest 'metrics stats' under metrics group in subcommands table
+- **site**: drop duplicate page titles (Starlight renders frontmatter title)
+- **toolkit**: Claude Code plugins section with per-plugin pages + diagrams
+- **toolkit**: add claude-langfuse and langfuse-setup to Security & Observability group
+- **toolkit**: add explain-to-me to Research & Knowledge group
+- **toolkit**: add git-history-surgery to Coding & GitHub group
+- **toolkit**: add make-a-goal to Planning & Workflow group
+- **toolkit**: add standup and tmux-message to Dev infra & tooling group
+- **toolkit**: correct skill count in packages tree to 91
+- **toolkit**: correct skill count in skills-at-a-glance heading to 91
+- **toolkit**: document catalog.yaml in References
+- **toolkit**: fix Design & UI group count to 13
+- **toolkit**: fix Session & Learning group count to 8
+- **toolkit**: fix skills count in title and intro
+- **toolkit**: replace agents stub body with real category breakdown
+- **toolkit**: replace bootstrap stub with sourced content
+- **toolkit**: replace overview stub with sourced content
+- **toolkit**: replace skills stub body with real grouped catalog
+- **tui**: add ainb-core module tree to architecture
+- **tui**: add claudecode, plugin, and fleet to command-reference TOC
+- **tui**: add plugin runtime and testing sections to architecture
+- **tui**: bump documented ainb version to 1.2.0
+- **tui**: document the claudecode subcommand
+- **tui**: document the fleet subcommand
+- **tui**: document the plugin subcommand
+- **tui**: replace architecture stub with crates workspace scaffold
+- **tui**: replace install stub with curl and cargo methods
+- **tui**: replace keyboard-shortcuts stub with verified keymap
+- **tui**: replace overview stub with screen tour and session model
+- **tui**: replace quickstart stub with first-session walkthrough
+- mark legacy-layout migration complete in docs index
+- move notifyd/Inbox out of Plugins → TUI (it's host code, not a plugin)
+
+### Other
+- Merge pull request #185 from deepaks7n/chore/ci-fmt-and-unused-deps
+- **reflect**: bump to 4.0.0 + CHANGELOG for cost rearchitecture
+- cargo fmt --all
+- cargo fmt --all (post-merge)
+- remove unused dependencies; ignore SDK false positives
+- **tui**: cache home lookup, return Cow, native path separators
+- **notifyd**: extract shared CLI bodies; dedupe two entrypoints
+
+
 ## [1.2.1] - 2026-05-29
 ### Added
 - Merge pull request #172 from stevengonsalvez/worktree-hangar-enrich-model
