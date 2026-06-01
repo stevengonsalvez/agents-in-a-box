@@ -1,0 +1,31 @@
+# Light, fast pre-commit gate: surface the cheap CI failures BEFORE push.
+# Heavy compile/test stays in CI (the authority) — keeping commits quick so
+# nobody reaches for `--no-verify`.
+#
+#   one-time setup:  pip install pre-commit && pre-commit install
+#   run manually:    pre-commit run --all-files
+#
+# The Rust workspace lives in ainb-tui/; rust-toolchain.toml there pins the
+# rustfmt version so the fmt hook matches CI exactly.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ['--maxkb=1024']
+      - id: check-toml
+
+  - repo: local
+    hooks:
+      # Mirror CI's `cargo fmt --all --check` (working-directory: ainb-tui).
+      # Fails the commit on any formatting drift; ~1s. Run from the
+      # workspace root so rust-toolchain.toml pins the rustfmt version.
+      - id: cargo-fmt-check
+        name: cargo fmt --check (ainb-tui)
+        entry: bash -c 'cd ainb-tui && cargo fmt --all --check'
+        language: system
+        files: '^ainb-tui/.*\.rs$'
+        pass_filenames: false
