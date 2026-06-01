@@ -1776,9 +1776,7 @@ fn render_zoom_breadcrumb(buf: &mut Buffer, area: Rect, state: &UsageViewState, 
         spans.push(Span::styled("  ", Style::default()));
         spans.push(Span::styled(
             msg.clone(),
-            Style::default()
-                .fg(SELECTION_GREEN)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
         ));
     }
     ratatui::widgets::Widget::render(Paragraph::new(Line::from(spans)), area, buf);
@@ -2071,26 +2069,24 @@ fn zoom_named<'a>(rows: &'a [NamedUsage], query: &str) -> Vec<&'a NamedUsage> {
 
 pub fn zoom_rows(data: &UsageData, panel: UsagePanel, query: &str) -> Vec<Vec<String>> {
     match panel {
-        UsagePanel::ByProject | UsagePanel::Leaderboard => {
-            zoom_projects(data, query)
-                .iter()
-                .enumerate()
-                .map(|(idx, project)| {
-                    let b = &project.bucket;
-                    let (first, last) = project_seen_window(data, &project.name);
-                    vec![
-                        format!("{}", idx + 1),
-                        project.path.clone(),
-                        format_cost(b.cost_usd),
-                        format_tokens_short(b.total()),
-                        b.call_count.to_string(),
-                        b.session_count.to_string(),
-                        first,
-                        last,
-                    ]
-                })
-                .collect()
-        }
+        UsagePanel::ByProject | UsagePanel::Leaderboard => zoom_projects(data, query)
+            .iter()
+            .enumerate()
+            .map(|(idx, project)| {
+                let b = &project.bucket;
+                let (first, last) = project_seen_window(data, &project.name);
+                vec![
+                    format!("{}", idx + 1),
+                    project.path.clone(),
+                    format_cost(b.cost_usd),
+                    format_tokens_short(b.total()),
+                    b.call_count.to_string(),
+                    b.session_count.to_string(),
+                    first,
+                    last,
+                ]
+            })
+            .collect(),
         UsagePanel::ByBranch => zoom_branches(data, query)
             .iter()
             .enumerate()
@@ -2104,10 +2100,9 @@ pub fn zoom_rows(data: &UsageData, panel: UsagePanel, query: &str) -> Vec<Vec<St
                 ]
             })
             .collect(),
-        UsagePanel::TopSessions | UsagePanel::Live => {
-            zoom_sessions(data, query)
-                .iter()
-                .map(|sess| {
+        UsagePanel::TopSessions | UsagePanel::Live => zoom_sessions(data, query)
+            .iter()
+            .map(|sess| {
                 let b = &sess.bucket;
                 let dur = (sess.last_timestamp - sess.first_timestamp).num_seconds().max(0);
                 vec![
@@ -2124,8 +2119,7 @@ pub fn zoom_rows(data: &UsageData, panel: UsagePanel, query: &str) -> Vec<Vec<St
                         .to_string(),
                 ]
             })
-            .collect()
-        }
+            .collect(),
         UsagePanel::ByModel => zoom_models(data, query)
             .iter()
             .map(|m| {
@@ -2151,38 +2145,34 @@ pub fn zoom_rows(data: &UsageData, panel: UsagePanel, query: &str) -> Vec<Vec<St
                 ]
             })
             .collect(),
-        UsagePanel::ByActivity => {
-            zoom_activities(data, query)
-                .iter()
-                .map(|a| {
-                    let b = &a.bucket;
-                    vec![
-                        a.category.label().to_string(),
-                        a.turns.to_string(),
-                        a.edit_turns.to_string(),
-                        a.one_shot_turns.to_string(),
-                        a.retries.to_string(),
-                        format_tokens_short(b.total()),
-                        format_cost(b.cost_usd),
-                    ]
-                })
-                .collect()
-        }
-        UsagePanel::DailyActivity => {
-            zoom_daily(data, query)
-                .iter()
-                .map(|(date, b)| {
-                    vec![
-                        date.format("%Y-%m-%d").to_string(),
-                        b.call_count.to_string(),
-                        b.session_count.to_string(),
-                        b.project_count.to_string(),
-                        format_tokens_short(b.total()),
-                        format_cost(b.cost_usd),
-                    ]
-                })
-                .collect()
-        }
+        UsagePanel::ByActivity => zoom_activities(data, query)
+            .iter()
+            .map(|a| {
+                let b = &a.bucket;
+                vec![
+                    a.category.label().to_string(),
+                    a.turns.to_string(),
+                    a.edit_turns.to_string(),
+                    a.one_shot_turns.to_string(),
+                    a.retries.to_string(),
+                    format_tokens_short(b.total()),
+                    format_cost(b.cost_usd),
+                ]
+            })
+            .collect(),
+        UsagePanel::DailyActivity => zoom_daily(data, query)
+            .iter()
+            .map(|(date, b)| {
+                vec![
+                    date.format("%Y-%m-%d").to_string(),
+                    b.call_count.to_string(),
+                    b.session_count.to_string(),
+                    b.project_count.to_string(),
+                    format_tokens_short(b.total()),
+                    format_cost(b.cost_usd),
+                ]
+            })
+            .collect(),
         UsagePanel::CoreTools => named_zoom_rows(&data.tools, query),
         UsagePanel::ShellCommands => named_zoom_rows(&data.shell_commands, query),
         UsagePanel::McpServers => named_zoom_rows(&data.mcp_servers, query),
@@ -2235,9 +2225,7 @@ fn solve_zoom_widths(total_width: u16, cols: &[ZoomCol], deltas: &[i16], spacing
     // running consumed total so the last flex column soaks up any
     // integer-division remainder (no dropped pixels on the right edge).
     let mut flex_assigned: u16 = 0;
-    let last_flex_idx = cols
-        .iter()
-        .rposition(|c| matches!(c.sizing, ColSizing::Flex { .. }));
+    let last_flex_idx = cols.iter().rposition(|c| matches!(c.sizing, ColSizing::Flex { .. }));
 
     let mut widths: Vec<u16> = cols
         .iter()
@@ -2296,9 +2284,7 @@ fn render_zoom_table(
     let visible_rows = area.height.saturating_sub(2) as usize;
 
     // Clamp focus_row locally (state is shared/immutable here).
-    let focus_row = state
-        .focus_row
-        .min(rows.len().saturating_sub(1));
+    let focus_row = state.focus_row.min(rows.len().saturating_sub(1));
 
     // Scroll window: keep the focused row on screen. `start` is the
     // smallest offset such that `focus_row` falls inside the
@@ -2313,13 +2299,12 @@ fn render_zoom_table(
     // Use the manual deltas only when they belong to this panel and
     // match the column count; otherwise treat as pure auto-fit.
     let empty_deltas: Vec<i16> = Vec::new();
-    let deltas: &[i16] = if state.zoom_cols_panel == Some(panel)
-        && state.zoom_col_deltas.len() == cols.len()
-    {
-        &state.zoom_col_deltas
-    } else {
-        &empty_deltas
-    };
+    let deltas: &[i16] =
+        if state.zoom_cols_panel == Some(panel) && state.zoom_col_deltas.len() == cols.len() {
+            &state.zoom_col_deltas
+        } else {
+            &empty_deltas
+        };
     let widths = solve_zoom_widths(area.width, cols, deltas, 1);
 
     let focus_col = state.zoom_focus_col.min(cols.len().saturating_sub(1));

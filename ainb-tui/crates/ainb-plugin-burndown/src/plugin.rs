@@ -874,11 +874,7 @@ impl BurndownPlugin {
 
         // Column count of the zoomed panel (0 when not zoomed / on a
         // non-table panel). Used to clamp the column-nav/resize keys.
-        let zoom_n_cols = self
-            .ui
-            .zoom
-            .map(crate::ui::zoom_col_count)
-            .unwrap_or(0);
+        let zoom_n_cols = self.ui.zoom.map(crate::ui::zoom_col_count).unwrap_or(0);
 
         match *code {
             KeyCode::Char { ch: '1' } => self.ui.set_period(UsagePeriod::Today),
@@ -1231,9 +1227,15 @@ mod handle_key_dispatch_tests {
     fn zoomed_bracket_advances_focus_col() {
         let mut p = zoomed_plugin();
         assert_eq!(p.ui.zoom_focus_col, 0);
-        assert!(p.dispatch_key_pure(&ch(']')), "] must be handled when zoomed");
+        assert!(
+            p.dispatch_key_pure(&ch(']')),
+            "] must be handled when zoomed"
+        );
         assert_eq!(p.ui.zoom_focus_col, 1, "] advances column focus");
-        assert!(p.dispatch_key_pure(&ch('[')), "[ must be handled when zoomed");
+        assert!(
+            p.dispatch_key_pure(&ch('[')),
+            "[ must be handled when zoomed"
+        );
         assert_eq!(p.ui.zoom_focus_col, 0, "[ retreats column focus");
     }
 
@@ -1242,7 +1244,10 @@ mod handle_key_dispatch_tests {
         let mut p = zoomed_plugin();
         // Focus col 1, then grow it.
         assert!(p.dispatch_key_pure(&ch(']')));
-        assert!(p.dispatch_key_pure(&ch('>')), "> must be handled when zoomed");
+        assert!(
+            p.dispatch_key_pure(&ch('>')),
+            "> must be handled when zoomed"
+        );
         assert_eq!(
             p.ui.zoom_col_deltas[1], 4,
             "> widens the focused column by COL_RESIZE_STEP (4)"
@@ -1259,7 +1264,10 @@ mod handle_key_dispatch_tests {
         assert!(p.dispatch_key_pure(&KeyCode::Up), "Up handled when zoomed");
         assert_eq!(p.ui.focus_row, 3, "Up moves focus row up in zoom");
         // Down moves it back.
-        assert!(p.dispatch_key_pure(&KeyCode::Down), "Down handled when zoomed");
+        assert!(
+            p.dispatch_key_pure(&KeyCode::Down),
+            "Down handled when zoomed"
+        );
         assert_eq!(p.ui.focus_row, 4, "Down moves focus row down in zoom");
     }
 
@@ -1301,8 +1309,14 @@ mod handle_key_dispatch_tests {
             assert!(p.dispatch_key_pure(&KeyCode::Backspace));
         }
         assert_eq!(p.ui.zoom_search_query, "");
-        assert!(p.ui.zoom_search_active, "still active while query non-empty path drains");
-        assert!(p.dispatch_key_pure(&KeyCode::Backspace), "empty-query Backspace cancels");
+        assert!(
+            p.ui.zoom_search_active,
+            "still active while query non-empty path drains"
+        );
+        assert!(
+            p.dispatch_key_pure(&KeyCode::Backspace),
+            "empty-query Backspace cancels"
+        );
         assert!(!p.ui.zoom_search_active, "search cancelled once empty");
     }
 
