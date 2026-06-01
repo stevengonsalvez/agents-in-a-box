@@ -839,6 +839,34 @@ impl BurndownPlugin {
         // never routes here, so we can clear unconditionally.)
         self.ui.copy_flash = None;
 
+        // Zoom fuzzy-search text entry. While the `/` overlay is active,
+        // printable keys build the query, Backspace deletes (or cancels
+        // once the query is empty), and Enter commits — captured here so
+        // they don't fall through to period/navigation binds. Arrows fall
+        // through so the user can move the row cursor over filtered hits
+        // while the query bar is up.
+        if self.ui.zoom_search_active {
+            match *code {
+                KeyCode::Char { ch } => {
+                    self.ui.zoom_search_char(ch);
+                    return true;
+                }
+                KeyCode::Backspace => {
+                    if self.ui.zoom_search_query.is_empty() {
+                        self.ui.zoom_cancel_search();
+                    } else {
+                        self.ui.zoom_search_backspace();
+                    }
+                    return true;
+                }
+                KeyCode::Enter => {
+                    self.ui.zoom_commit_search();
+                    return true;
+                }
+                _ => {}
+            }
+        }
+
         // Column count of the zoomed panel (0 when not zoomed / on a
         // non-table panel). Used to clamp the column-nav/resize keys.
         let zoom_n_cols = self
@@ -873,11 +901,13 @@ impl BurndownPlugin {
             KeyCode::Char { ch: '/' } if self.ui.is_zoomed() => self.ui.zoom_begin_search(),
             KeyCode::Char { ch: 'd' } if self.ui.is_zoomed() => self.ui.toggle_zoom_detail(),
 
-            // ── Zoom-table column focus / resize (zoomed only). Guarded
-            // with `!zoom_search_active` so these printable keys feed the
-            // `/` search box rather than the resize handler while typing.
-            // When NOT zoomed they fall through (return false), leaving
-            // `[ ] < > =` unbound on the dashboard.
+            // ── Zoom-table column focus / resize (zoomed only). The
+            // `!zoom_search_active` guard is belt-and-suspenders: the
+            // search intercept above already consumes every printable key
+            // into the query while `/` is open, so these arms are only
+            // reached when not searching. When NOT zoomed they fall
+            // through (return false), leaving `[ ] < > =` unbound on the
+            // dashboard.
             KeyCode::Char { ch: '[' } if self.ui.is_zoomed() && !self.ui.zoom_search_active => {
                 self.ui.zoom_focus_col_prev()
             }
@@ -1244,6 +1274,43 @@ mod handle_key_dispatch_tests {
         // anything on the dashboard).
         assert!(!p.dispatch_key_pure(&KeyCode::Up));
         assert!(!p.dispatch_key_pure(&KeyCode::Down));
+    }
+
+    #[test]
+    fn zoom_search_input_builds_query_and_captures_keys() {
+        let mut p = zoomed_plugin();
+        assert!(p.dispatch_key_pure(&ch('/')), "`/` opens search");
+        assert!(p.ui.zoom_search_active);
+
+        // Printable keys (incl. ones that are period/resize binds when
+        // not searching) build the query instead of firing those binds.
+        for c in ['m', '4', '>', '['] {
+            assert!(p.dispatch_key_pure(&ch(c)), "`{c}` captured into query");
+        }
+        assert_eq!(p.ui.zoom_search_query, "m4>[");
+        // The captured `m`/`4` must NOT have changed the period.
+        assert!(matches!(p.ui.period, crate::data::usage::UsagePeriod::Week));
+
+        // Backspace deletes a char; once empty it cancels the search.
+        for _ in 0..4 {
+            assert!(p.dispatch_key_pure(&KeyCode::Backspace));
+        }
+        assert_eq!(p.ui.zoom_search_query, "");
+        assert!(p.ui.zoom_search_active, "still active while query non-empty path drains");
+        assert!(p.dispatch_key_pure(&KeyCode::Backspace), "empty-query Backspace cancels");
+        assert!(!p.ui.zoom_search_active, "search cancelled once empty");
+    }
+
+    #[test]
+    fn zoom_search_enter_commits_and_keeps_query() {
+        let mut p = zoomed_plugin();
+        assert!(p.dispatch_key_pure(&ch('/')));
+        for c in ['p', 'r', 'o', 'j'] {
+            assert!(p.dispatch_key_pure(&ch(c)));
+        }
+        assert!(p.dispatch_key_pure(&KeyCode::Enter), "Enter commits search");
+        assert!(!p.ui.zoom_search_active, "input mode closed");
+        assert_eq!(p.ui.zoom_search_query, "proj", "committed query survives");
     }
 }
 
