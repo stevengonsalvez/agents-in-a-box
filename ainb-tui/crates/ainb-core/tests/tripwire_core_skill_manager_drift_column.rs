@@ -63,6 +63,8 @@ fn units_table_renders_in_sync_glyph_for_in_sync_unit() {
         banner: Default::default(),
         walker_cache: None,
         drift_cache,
+        input: None,
+        search: None,
     };
 
     let rendered = render_data(&data);
@@ -92,6 +94,8 @@ fn units_table_renders_warning_glyph_for_outdated_unit() {
         banner: Default::default(),
         walker_cache: None,
         drift_cache,
+        input: None,
+        search: None,
     };
 
     let rendered = render_data(&data);
@@ -115,6 +119,8 @@ fn units_table_renders_ahead_glyph_for_ahead_unit() {
         banner: Default::default(),
         walker_cache: None,
         drift_cache,
+        input: None,
+        search: None,
     };
 
     let rendered = render_data(&data);
@@ -139,6 +145,8 @@ fn units_table_renders_diverged_glyph_for_diverged_unit() {
         banner: Default::default(),
         walker_cache: None,
         drift_cache,
+        input: None,
+        search: None,
     };
 
     let rendered = render_data(&data);
@@ -161,6 +169,8 @@ fn units_table_renders_placeholder_when_cache_missing() {
         banner: Default::default(),
         walker_cache: None,
         drift_cache,
+        input: None,
+        search: None,
     };
 
     let rendered = render_data(&data);
