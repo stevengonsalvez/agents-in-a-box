@@ -22,6 +22,7 @@ thiserror = { workspace = true }
 [dev-dependencies]
 fs2 = { workspace = true }
 proptest = "1"
+serde_json = { workspace = true }
 tempfile = "3"
 # Self-dev-dep with `test-fixtures` flipped on. Cargo treats this as a
 # separate dependency edge — production builds keep the default feature

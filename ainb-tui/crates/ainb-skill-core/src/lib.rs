@@ -4,6 +4,7 @@
 //! resolution for the on-disk state under `$AINB_HOME`. Higher layers
 //! (`ainb-cli`, `ainb-fetch`, adapters) compose these primitives.
 
+pub mod catalog;
 pub mod drift;
 pub mod error;
 pub mod kind;
@@ -15,6 +16,10 @@ pub mod paths;
 pub mod sync;
 pub mod uri;
 
+pub use catalog::{
+    is_blank_query, rank_by_stars, CatalogBackend, CatalogError, CatalogHit, SkillsShUrlBuilder,
+    SKILLS_SH_DEFAULT_BASE,
+};
 pub use drift::{detect_all, detect_drift, DriftBackend, DriftStatus, GitLsRemoteBackend};
 pub use error::CoreError;
 pub use kind::UnitKind;
