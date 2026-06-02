@@ -102,6 +102,45 @@ pub struct SkillsScreenData {
     /// rows whose URI is missing from the cache render a "…" placeholder
     /// in the status column until the poll lands. See [`drift_status_glyph`].
     pub drift_cache: BTreeMap<String, DriftStatus>,
+    /// Active text-input prompt (add-source URI or search filter).
+    /// `None` in the steady state. When `Some`, the SkillManager key
+    /// handler routes every keystroke into the buffer until Enter /
+    /// Esc. Rendered as a centered overlay (see [`render_input_prompt`]).
+    pub input: Option<InputState>,
+    /// Applied search filter (lower-cased substring). When `Some`,
+    /// the Units table only renders rows whose name / source / kind
+    /// contains it. Cleared by submitting an empty search or `[/]`
+    /// then Esc.
+    pub search: Option<String>,
+}
+
+/// Which kind of text the active input prompt is collecting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputKind {
+    /// `gh:owner/repo` source URI for `ainb source add`.
+    AddSource,
+    /// Substring to filter the Units table.
+    Search,
+}
+
+/// State of the active text-input prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputState {
+    pub kind: InputKind,
+    pub buffer: String,
+}
+
+impl InputState {
+    pub fn new(kind: InputKind) -> Self {
+        Self { kind, buffer: String::new() }
+    }
+    /// Prompt label shown in the overlay border.
+    pub fn title(&self) -> &'static str {
+        match self.kind {
+            InputKind::AddSource => " Add source — gh:owner/repo ",
+            InputKind::Search => " Search units ",
+        }
+    }
 }
 
 /// Discovery banner state machine.
@@ -176,6 +215,53 @@ pub fn render(frame: &mut Frame, area: Rect, data: &SkillsScreenData) {
         let detailed = matches!(data.banner, DiscoveryBannerState::Details(_));
         render_discovery_banner(frame, area, counts, detailed);
     }
+
+    // Input prompt overlay (add-source / search) — drawn on top of
+    // everything, including the banner, since it's the active modal.
+    if let Some(input) = &data.input {
+        render_input_prompt(frame, area, input);
+    }
+}
+
+/// Render the active text-input prompt as a centered single-line
+/// overlay with a blinking-style caret. Used for both `[i] add source`
+/// and `[/] search`.
+fn render_input_prompt(frame: &mut Frame, area: Rect, input: &InputState) {
+    let width = BANNER_WIDTH.min(area.width.saturating_sub(4)).max(20);
+    let height = 5;
+    let rect = centered_rect(area, width, height);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(GOLD))
+        .title(Span::styled(
+            input.title(),
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ));
+
+    let hint = match input.kind {
+        InputKind::AddSource => "e.g. gh:owner/repo   [Enter] add  [Esc] cancel",
+        InputKind::Search => "type to filter   [Enter] apply  [Esc] cancel",
+    };
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" ▌ ", Style::default().fg(CORNFLOWER_BLUE)),
+            Span::styled(
+                format!("{}█", input.buffer),
+                Style::default().fg(SOFT_WHITE),
+            ),
+        ]),
+        Line::from(Span::styled(
+            format!("   {hint}"),
+            Style::default().fg(MUTED_GRAY),
+        )),
+    ];
+
+    frame.render_widget(Clear, rect);
+    let para = Paragraph::new(lines).block(block);
+    frame.render_widget(para, rect);
 }
 
 fn render_sources_panel(frame: &mut Frame, area: Rect, data: &SkillsScreenData) {
@@ -269,9 +355,14 @@ fn render_units_table(frame: &mut Frame, area: Rect, data: &SkillsScreenData) {
     ])
     .style(Style::default().fg(GOLD).add_modifier(Modifier::BOLD));
 
-    let rows: Vec<Row> = data
-        .units
+    // Apply the active search filter: only rows whose index is in
+    // `visible_indices()` are shown. The cursor highlight is mapped
+    // from the absolute `selected` index to its position within the
+    // visible slice further down.
+    let visible = data.visible_indices();
+    let rows: Vec<Row> = visible
         .iter()
+        .filter_map(|&i| data.units.get(i))
         .map(|u| {
             let targets = u.targets.join(" ");
             let (glyph, glyph_color) =
@@ -317,9 +408,14 @@ fn render_units_table(frame: &mut Frame, area: Rect, data: &SkillsScreenData) {
         )
         .highlight_symbol("▶ ");
 
+    // Map the absolute `selected` index to its position within the
+    // visible (filtered) slice so the highlight tracks the cursor.
     let mut table_state = TableState::default();
-    let last = data.units.len().saturating_sub(1);
-    table_state.select(Some(data.selected.min(last)));
+    let highlight_pos = visible
+        .iter()
+        .position(|&i| i == data.selected)
+        .unwrap_or(0);
+    table_state.select(Some(highlight_pos));
     frame.render_stateful_widget(table, area, &mut table_state);
 }
 
@@ -635,6 +731,43 @@ pub fn maybe_show_discovery_banner(
     data.walker_cache = Some(walker);
 }
 
+/// Force the discovery banner to show whenever the walkers find
+/// candidates — used by the explicit `[m] refresh discovery`
+/// keybind. Unlike [`maybe_show_discovery_banner`], this **ignores**
+/// the skip-marker: the user pressed the refresh key on purpose, so
+/// a prior `[s] skip` should not suppress it. It also clears the
+/// on-disk skip-marker so the banner keeps appearing on subsequent
+/// screen-opens until the user imports or skips again.
+///
+/// Still respects a non-empty manifest (nothing to discover when
+/// units already exist) and an already-active banner (idempotent).
+pub fn force_show_discovery_banner(
+    data: &mut SkillsScreenData,
+    ainb_home: &Path,
+    walker: WalkerOutput,
+) {
+    if data.banner.is_active() {
+        return;
+    }
+    // Clear any prior skip-marker — the explicit refresh overrides it.
+    let skip_path = ainb_home.join(SKIP_MARKER_FILE);
+    let _ = std::fs::remove_file(&skip_path);
+
+    let counts = compute_counts(&walker);
+    let total = counts.marketplace_plugins + counts.orphan_units_total;
+    tracing::info!(
+        total,
+        class_a = walker.class_a.len(),
+        class_c = walker.class_c.len(),
+        "discovery banner: forced refresh"
+    );
+    if total == 0 {
+        return;
+    }
+    data.banner = DiscoveryBannerState::Visible(counts);
+    data.walker_cache = Some(walker);
+}
+
 /// Apply `[Enter] import all` — calls the reconciler on the cached
 /// walker output, merges the patch into the on-disk manifest, and
 /// refreshes the screen view-model so the Units / Sources panels
@@ -890,6 +1023,28 @@ impl SkillsScreenData {
         refresh_view_model_from_manifest(self, &manifest);
         self.detail = compute_detail_for_selected(self, &lockfile);
     }
+
+    /// Indices into [`Self::units`] that match the active [`Self::search`]
+    /// filter (every index when no filter). Render, selection
+    /// movement, and the action keybinds all resolve through this so
+    /// the visible rows and the cursor stay consistent. Matches on
+    /// name / source / kind, case-insensitively.
+    pub fn visible_indices(&self) -> Vec<usize> {
+        match &self.search {
+            None => (0..self.units.len()).collect(),
+            Some(q) => self
+                .units
+                .iter()
+                .enumerate()
+                .filter(|(_, u)| {
+                    u.name.to_lowercase().contains(q)
+                        || u.source.to_lowercase().contains(q)
+                        || u.kind.to_lowercase().contains(q)
+                })
+                .map(|(i, _)| i)
+                .collect(),
+        }
+    }
 }
 
 /// Direction of selection-cursor movement on the Units panel.
@@ -902,32 +1057,40 @@ pub enum SelectionMove {
 }
 
 /// Move the Units-panel selection cursor and recompute the Detail
-/// pane so the right-hand view stays in sync. Wraps at list ends.
-/// No-op when units list is empty.
+/// pane so the right-hand view stays in sync. Steps through the
+/// *visible* (search-filtered) rows so the cursor never lands on a
+/// hidden row. Wraps at the ends. No-op when nothing is visible.
 pub fn move_selection(data: &mut SkillsScreenData, home: &Path, dir: SelectionMove) {
-    if data.units.is_empty() {
+    let visible = data.visible_indices();
+    if visible.is_empty() {
         return;
     }
-    let last = data.units.len() - 1;
-    let cur = data.selected.min(last);
-    data.selected = match dir {
+    let vlast = visible.len() - 1;
+    // Current cursor position within the visible slice (default to the
+    // first visible row when the absolute `selected` is filtered out).
+    let cur_pos = visible
+        .iter()
+        .position(|&i| i == data.selected)
+        .unwrap_or(0);
+    let new_pos = match dir {
         SelectionMove::Prev => {
-            if cur == 0 {
-                last
+            if cur_pos == 0 {
+                vlast
             } else {
-                cur - 1
+                cur_pos - 1
             }
         }
         SelectionMove::Next => {
-            if cur == last {
+            if cur_pos == vlast {
                 0
             } else {
-                cur + 1
+                cur_pos + 1
             }
         }
         SelectionMove::First => 0,
-        SelectionMove::Last => last,
+        SelectionMove::Last => vlast,
     };
+    data.selected = visible[new_pos];
     let lockfile = Lockfile::load_from(&lockfile_path_in(home)).unwrap_or_default();
     data.detail = compute_detail_for_selected(data, &lockfile);
 }

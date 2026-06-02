@@ -225,6 +225,34 @@ pub enum AppEvent {
     SkillManagerSelectFirst,
     /// Units panel: jump selection to last row (G / End).
     SkillManagerSelectLast,
+    /// `[m]` on the SkillManager screen — re-run the discovery
+    /// walkers and force the banner to re-appear (ignores any prior
+    /// skip-marker). Fixes the empty-state "press [m] to refresh"
+    /// hint that previously did nothing.
+    SkillManagerRefreshDiscovery,
+    /// `[c]` — re-trigger the background drift scan so the Units
+    /// status column refreshes (✓ / ⚠ / ▲ / ⟷).
+    SkillManagerCheck,
+    /// `[u]` — update the selected unit: re-fetch its source, diff,
+    /// apply. Runs the `ainb skill update <uri>` flow in-process and
+    /// surfaces the result as a notification.
+    SkillManagerUpdate,
+    /// `[r]` — remove (uninstall) the selected unit from its target
+    /// tools via the `ainb skill remove <uri>` flow.
+    SkillManagerRemove,
+    /// `[i]` — open the add-source input prompt (type a `gh:owner/repo`
+    /// URI). On submit, runs `ainb source add` then re-discovers.
+    SkillManagerOpenAddSource,
+    /// `[/]` — open the search/filter input prompt.
+    SkillManagerOpenSearch,
+    /// A character typed while an input prompt is active.
+    SkillManagerInputChar(char),
+    /// Backspace in the active input prompt.
+    SkillManagerInputBackspace,
+    /// Enter — submit the active input prompt.
+    SkillManagerInputSubmit,
+    /// Esc — cancel the active input prompt.
+    SkillManagerInputCancel,
     GoToRecovery,            // Navigate to session recovery view
     GoToInbox,               // Navigate to ainb-hooks notification inbox
     InboxMoveUp,             // Inbox: move selection up one row
@@ -766,6 +794,15 @@ impl EventHandler {
         // (e.g. publish on `host.input_mode`) and read it here.
         let skills_text_active =
             state.current_screen == screen_ids::SKILLS && state.skills_state.search_active;
+        // SkillManager add-source / search prompt — when its input
+        // overlay is open the user is typing a URI or filter, which
+        // routinely contains `:` (e.g. `gh:owner/repo`,
+        // `git:file://…`). Without this, the global `:` slash-command
+        // palette would open mid-URI and swallow the rest of the
+        // keystrokes — exactly the bug that made `[i] add source`
+        // appear broken.
+        let skill_manager_input_active = state.current_screen == screen_ids::SKILL_MANAGER
+            && state.skill_manager_state.input.is_some();
         let git_view_text_active = state.current_screen == screen_ids::GIT_VIEW
             && state.git_view_state.as_ref().map(|gv| gv.is_in_commit_mode()).unwrap_or(false);
 
@@ -793,6 +830,7 @@ impl EventHandler {
             || config_text_active
             || state.auth_provider_popup_state.show_popup
             || skills_text_active
+            || skill_manager_input_active
             || git_view_text_active
     }
 
@@ -1109,6 +1147,20 @@ impl EventHandler {
 
         // Handle skill-manager view (spec §10.1)
         if state.current_screen == screen_ids::SKILL_MANAGER {
+            // Text-input prompt (add-source URI or search) takes
+            // priority over every other key — while it's open the
+            // user is typing, so chars must reach the buffer rather
+            // than trigger shortcuts.
+            if state.skill_manager_state.input.is_some() {
+                return match key_event.code {
+                    KeyCode::Enter => Some(AppEvent::SkillManagerInputSubmit),
+                    KeyCode::Esc => Some(AppEvent::SkillManagerInputCancel),
+                    KeyCode::Backspace => Some(AppEvent::SkillManagerInputBackspace),
+                    KeyCode::Char(c) => Some(AppEvent::SkillManagerInputChar(c)),
+                    _ => None,
+                };
+            }
+
             // Discovery banner (spec §User Flow 1 / P5): when the
             // overlay is visible, Enter/d/s drive its state machine
             // instead of the normal Skills shortcuts. Esc/q still
@@ -1122,7 +1174,7 @@ impl EventHandler {
                     _ => None,
                 };
             }
-            tracing::debug!("In skill-manager view, handling nav/s/q");
+            tracing::debug!("In skill-manager view, handling full keymap");
             return match key_event.code {
                 KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::SkillManagerBack),
                 // Units panel `[s]` — dual-purpose:
@@ -1141,6 +1193,16 @@ impl EventHandler {
                         Some(AppEvent::SkillManagerSync)
                     }
                 }
+                // Help-bar shortcuts — now wired (were advertised but
+                // dropped before this change):
+                KeyCode::Char('i') => Some(AppEvent::SkillManagerOpenAddSource),
+                KeyCode::Char('u') => Some(AppEvent::SkillManagerUpdate),
+                KeyCode::Char('c') => Some(AppEvent::SkillManagerCheck),
+                KeyCode::Char('r') => Some(AppEvent::SkillManagerRemove),
+                KeyCode::Char('/') => Some(AppEvent::SkillManagerOpenSearch),
+                // `[m]` re-runs discovery (the empty-state hint
+                // finally tells the truth).
+                KeyCode::Char('m') => Some(AppEvent::SkillManagerRefreshDiscovery),
                 // Selection navigation — arrows + vim-style j/k +
                 // Home/End/g/G. Wraps at list ends. Detail pane
                 // recomputed on every move so the right-hand pane
@@ -3660,6 +3722,173 @@ impl EventHandler {
                     tracing::warn!(error = %e, "conflict flip failed");
                 }
             }
+            AppEvent::SkillManagerRefreshDiscovery => {
+                // `[m]` — explicit discovery refresh. Re-walk the tool
+                // homes + force the banner even past a prior skip-marker.
+                tracing::info!("SkillManager: refresh discovery (m)");
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                state.skill_manager_state.reload_from_disk(&ainb_home);
+                let claude_home = std::env::var_os("HOME")
+                    .map(std::path::PathBuf::from)
+                    .map(|h| h.join(".claude"))
+                    .unwrap_or_else(|| std::path::PathBuf::from(".claude"));
+                let walker = crate::components::skill_manager_screen::run_discovery_walkers(
+                    &claude_home,
+                );
+                crate::components::skill_manager_screen::force_show_discovery_banner(
+                    &mut state.skill_manager_state,
+                    &ainb_home,
+                    walker,
+                );
+                if !state.skill_manager_state.banner.is_active() {
+                    state.add_info_notification(
+                        "discovery: no un-adopted units found".to_string(),
+                    );
+                }
+            }
+            AppEvent::SkillManagerCheck => {
+                // `[c]` — re-run the background drift scan so the Units
+                // status column (✓ / ⚠ / ▲ / ⟷) refreshes.
+                tracing::info!("SkillManager: check drift (c)");
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                let backend: std::sync::Arc<
+                    dyn ainb_skill_core::drift::DriftBackend + Send + Sync,
+                > = std::sync::Arc::new(
+                    ainb_skill_core::drift::GitLsRemoteBackend::new(),
+                );
+                state.start_background_drift_load(&ainb_home, backend);
+                state.add_info_notification(
+                    "drift check running — status column refreshes shortly".to_string(),
+                );
+            }
+            AppEvent::SkillManagerUpdate => {
+                // `[u]` — re-fetch + apply for the selected unit.
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                let uri = state
+                    .skill_manager_state
+                    .units
+                    .get(state.skill_manager_state.selected)
+                    .map(|u| u.declared_uri.clone());
+                match uri {
+                    None => {
+                        state.add_warning_notification(
+                            "update: no unit selected".to_string(),
+                        );
+                    }
+                    Some(uri) => {
+                        let cmd = ainb_cli::SkillCommand::Update(ainb_cli::UpdateArgs {
+                            uri: Some(uri.clone()),
+                            all: false,
+                            check: false,
+                            yes: true,
+                            dry_run: false,
+                        });
+                        let (ok, msg) = run_skill_cli(&ainb_home, cmd);
+                        state.skill_manager_state.reload_from_disk(&ainb_home);
+                        if ok {
+                            state.add_success_notification(format!("updated: {msg}"));
+                        } else {
+                            state.add_error_notification(format!("update failed: {msg}"));
+                        }
+                    }
+                }
+            }
+            AppEvent::SkillManagerRemove => {
+                // `[r]` — uninstall the selected unit from its tools.
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                let uri = state
+                    .skill_manager_state
+                    .units
+                    .get(state.skill_manager_state.selected)
+                    .map(|u| u.declared_uri.clone());
+                match uri {
+                    None => {
+                        state.add_warning_notification(
+                            "remove: no unit selected".to_string(),
+                        );
+                    }
+                    Some(uri) => {
+                        let cmd = ainb_cli::SkillCommand::Remove(ainb_cli::RemoveSkillArgs {
+                            uri: uri.clone(),
+                            targets: None,
+                            yes: true,
+                            dry_run: false,
+                        });
+                        let (ok, msg) = run_skill_cli(&ainb_home, cmd);
+                        state.skill_manager_state.reload_from_disk(&ainb_home);
+                        if ok {
+                            state.add_success_notification(format!("removed: {msg}"));
+                        } else {
+                            state.add_error_notification(format!("remove failed: {msg}"));
+                        }
+                    }
+                }
+            }
+            AppEvent::SkillManagerOpenAddSource => {
+                state.skill_manager_state.input = Some(
+                    crate::components::skill_manager_screen::InputState::new(
+                        crate::components::skill_manager_screen::InputKind::AddSource,
+                    ),
+                );
+            }
+            AppEvent::SkillManagerOpenSearch => {
+                // Pre-fill the prompt with the current filter so the
+                // user can edit rather than retype.
+                let mut input = crate::components::skill_manager_screen::InputState::new(
+                    crate::components::skill_manager_screen::InputKind::Search,
+                );
+                if let Some(existing) = &state.skill_manager_state.search {
+                    input.buffer = existing.clone();
+                }
+                state.skill_manager_state.input = Some(input);
+            }
+            AppEvent::SkillManagerInputChar(c) => {
+                if let Some(input) = state.skill_manager_state.input.as_mut() {
+                    input.buffer.push(c);
+                }
+            }
+            AppEvent::SkillManagerInputBackspace => {
+                if let Some(input) = state.skill_manager_state.input.as_mut() {
+                    input.buffer.pop();
+                }
+            }
+            AppEvent::SkillManagerInputCancel => {
+                state.skill_manager_state.input = None;
+            }
+            AppEvent::SkillManagerInputSubmit => {
+                let Some(input) = state.skill_manager_state.input.take() else {
+                    return;
+                };
+                use crate::components::skill_manager_screen::InputKind;
+                match input.kind {
+                    InputKind::Search => {
+                        let q = input.buffer.trim().to_lowercase();
+                        state.skill_manager_state.search =
+                            if q.is_empty() { None } else { Some(q) };
+                    }
+                    InputKind::AddSource => {
+                        let uri = input.buffer.trim().to_string();
+                        tracing::info!(uri = %uri, "SkillManager: add-source submit");
+                        if uri.is_empty() {
+                            return;
+                        }
+                        let ainb_home = ainb_skill_core::default_ainb_home();
+                        let cmd = ainb_cli::SourceCommand::Add(ainb_cli::AddArgs {
+                            uri: uri.clone(),
+                            name: None,
+                            kind: None,
+                        });
+                        let (ok, msg) = run_source_cli(&ainb_home, cmd);
+                        tracing::info!(ok, msg = %msg, "SkillManager: add-source result");
+                        state.skill_manager_state.reload_from_disk(&ainb_home);
+                        if ok {
+                            state.add_success_notification(format!("source added: {msg}"));
+                        } else {
+                            state.add_error_notification(format!("add source failed: {msg}"));
+                        }
+                    }
+                }
+            }
             AppEvent::SkillManagerSelectPrev => {
                 let ainb_home = ainb_skill_core::default_ainb_home();
                 crate::components::skill_manager_screen::move_selection(
@@ -5050,6 +5279,48 @@ impl EventHandler {
 /// all resolve to "no conflict peer" so the keybind falls through to
 /// sync — that's the conservative default since the legacy
 /// flip-on-no-pair behaviour was a silent no-op.
+/// Run an `ainb skill ...` command in-process against `ainb_home`,
+/// capturing its stdout. Returns `(success, message)` where `message`
+/// is the last non-empty line of output (or the error string). Used by
+/// the SkillManager update / remove keybinds so the TUI can surface a
+/// notification without shelling out.
+///
+/// NOTE: these calls run synchronously on the UI thread. For a local
+/// `file://` source (and the sandbox) they're instant; a real network
+/// source could briefly block. The git no-prompt env (set inside the
+/// skill-core git helpers) makes an unreachable remote fail fast rather
+/// than hang, so the worst case is a short stall + an error toast.
+fn run_skill_cli(ainb_home: &std::path::Path, cmd: ainb_cli::SkillCommand) -> (bool, String) {
+    let mut buf: Vec<u8> = Vec::new();
+    match ainb_cli::skill::dispatch(ainb_home, cmd, &mut buf) {
+        Ok(()) => (true, last_meaningful_line(&buf)),
+        Err(e) => (false, format!("{e}")),
+    }
+}
+
+/// Same shape as [`run_skill_cli`] for `ainb source ...` commands.
+fn run_source_cli(ainb_home: &std::path::Path, cmd: ainb_cli::SourceCommand) -> (bool, String) {
+    let mut buf: Vec<u8> = Vec::new();
+    match ainb_cli::source::dispatch(ainb_home, cmd, &mut buf) {
+        Ok(()) => (true, last_meaningful_line(&buf)),
+        Err(e) => (false, format!("{e}")),
+    }
+}
+
+/// Last non-empty, non-comment line of captured CLI output — the most
+/// useful one-liner for a notification (CLI flows print a trailing
+/// summary like `installed ... → 1 tool(s)`). Falls back to a generic
+/// "done" when output is empty.
+fn last_meaningful_line(buf: &[u8]) -> String {
+    let text = String::from_utf8_lossy(buf);
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .next_back()
+        .map(|l| l.to_string())
+        .unwrap_or_else(|| "done".to_string())
+}
+
 fn selected_unit_has_conflict_peer(
     state: &AppState,
     ainb_home: &std::path::Path,
