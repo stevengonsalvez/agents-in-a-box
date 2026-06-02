@@ -1334,7 +1334,7 @@ pub fn run_check(
 
     // Tabular default: fixed-width columns for unit + status, no
     // external table dep.
-    writeln!(out, "{:<60}  {}", "unit", "status")?;
+    writeln!(out, "{:<60}  status", "unit")?;
     writeln!(out, "{:-<60}  {:-<24}", "", "")?;
     for unit in &scoped_lockfile.units {
         let status_str =
