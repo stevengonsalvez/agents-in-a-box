@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.2] - 2026-06-02
+### Added
+- Merge pull request #202 from stevengonsalvez/fix/config-popup-paste-hint
+- Merge pull request #203 from stevengonsalvez/feat/idle-waiting-marker
+- **marketplace**: publish ainb-hooks as an installable plugin
+- **tui**: show [?] on any waiting session, not just box prompts
+- **tui**: show greyed 'Ctrl+V to paste' hint in config text popups
+
+### Fixed
+- Merge pull request #201 from stevengonsalvez/fix/config-popup-ctrl-v-paste
+- Merge pull request #204 from stevengonsalvez/feat/publish-ainb-hooks-plugin
+- **tui**: add Ctrl+V clipboard paste to config text popups
+
+### Other
+- **tui**: reuse is_text_entry() for the paste-hint guard
+
+
 ## [1.3.1] - 2026-06-02
 ### Added
 - Merge pull request #198 from stevengonsalvez/feat/session-alert-markers
