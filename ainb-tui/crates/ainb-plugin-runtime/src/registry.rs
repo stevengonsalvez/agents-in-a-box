@@ -26,11 +26,17 @@ pub struct RegisteredPlugin {
     pub binary_path: PathBuf,
     /// Original manifest path (passed back through `plugin/init`).
     pub manifest_path: PathBuf,
+    /// Resolved per-plugin config (the host's `[plugins.<name>]` table as JSON),
+    /// forwarded verbatim into `PluginInitParams.config` at `plugin/init`.
+    /// Defaults to JSON `null` — an unconfigured plugin and an ABI-2 peer that
+    /// predates config injection both keep working. Set via [`Self::with_config`].
+    pub config: serde_json::Value,
 }
 
 impl RegisteredPlugin {
     /// Construct a [`RegisteredPlugin`] from already-parsed metadata.
-    /// Used by the test harness to skip filesystem discovery.
+    /// Used by the test harness to skip filesystem discovery. `config`
+    /// defaults to JSON `null`; the host stamps it via [`Self::with_config`].
     #[must_use]
     pub fn new(manifest: Manifest, binary_path: PathBuf, manifest_path: PathBuf) -> Self {
         Self {
@@ -38,7 +44,18 @@ impl RegisteredPlugin {
             manifest,
             binary_path,
             manifest_path,
+            config: serde_json::Value::Null,
         }
+    }
+
+    /// Attach the host-resolved per-plugin config (the `[plugins.<name>]`
+    /// table as JSON). The runtime forwards this into `PluginInitParams.config`
+    /// at `plugin/init`. Consuming-self builder so the host can stamp config
+    /// onto a freshly discovered plugin before registration.
+    #[must_use]
+    pub fn with_config(mut self, config: serde_json::Value) -> Self {
+        self.config = config;
+        self
     }
 }
 

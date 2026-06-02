@@ -335,43 +335,77 @@ impl RuntimeHandle {
     where
         F: Fn(&RegisteredPlugin) -> bool,
     {
+        self.discover_filtered_with_config(root, filter, |_| serde_json::Value::Null)
+    }
+
+    /// Like [`Self::discover_filtered`], but resolves each kept plugin's
+    /// per-plugin config via `config_for` (the host maps `plugins.values[id]`
+    /// → JSON) and stamps it onto the [`RegisteredPlugin`] before registration.
+    /// The runtime forwards that config into `PluginInitParams.config` at
+    /// `plugin/init`. Plugins for which `config_for` returns JSON `null` behave
+    /// exactly as before — this is a strict superset of `discover_filtered`.
+    pub fn discover_filtered_with_config<F, C>(
+        &self,
+        root: &Path,
+        filter: F,
+        mut config_for: C,
+    ) -> Result<Vec<RegisteredPlugin>, RuntimeError>
+    where
+        F: Fn(&RegisteredPlugin) -> bool,
+        C: FnMut(&RegisteredPlugin) -> serde_json::Value,
+    {
         let discovered = crate::registry::discover(root)?;
-        let kept: Vec<RegisteredPlugin> = discovered.into_iter().filter(&filter).collect();
+        let kept: Vec<RegisteredPlugin> = discovered
+            .into_iter()
+            .filter(&filter)
+            .map(|p| {
+                let config = config_for(&p);
+                p.with_config(config)
+            })
+            .collect();
         for p in &kept {
-            self.inner.channels.register(p.clone());
-            let arc = Arc::new(p.clone());
-            let eager = matches!(
-                arc.manifest.lifecycle.spawn,
-                ainb_plugin_protocol::manifest::SpawnMode::Eager
-            );
-            let (inbox, key_inbox, cache, state) = crate::plugin_task::spawn(
-                arc.clone(),
-                self.inner.snapshots.clone(),
-                self.inner.inboxes.clone(),
-                self.inner.dirty.clone(),
-                self.inner.config,
-                &self.inner.tokio,
-            );
-            if eager {
-                let _ = inbox.send(crate::plugin_task::Command::EnsureSpawned);
-            }
-            self.inner.inboxes.write().insert(arc.id.clone(), inbox.clone());
-            // Start dirty so the first paint after registration kicks a render.
-            let render_dirty = Arc::new(std::sync::atomic::AtomicBool::new(true));
-            self.inner.dirty.write().insert(arc.id.clone(), render_dirty.clone());
-            self.inner.plugins.write().insert(
-                arc.id.clone(),
-                Arc::new(PluginHandle {
-                    inbox,
-                    key_inbox,
-                    cache,
-                    state,
-                    plugin: arc,
-                    render_dirty,
-                }),
-            );
+            self.register_kept(p.clone());
         }
         Ok(kept)
+    }
+
+    /// Register one already-discovered (and config-stamped) plugin: route its
+    /// actions, spawn its per-plugin task, wire its inbox + dirty flag, and
+    /// store its [`PluginHandle`]. Shared by every discovery entry point so the
+    /// registration contract has a single definition.
+    fn register_kept(&self, plugin: RegisteredPlugin) {
+        self.inner.channels.register(plugin.clone());
+        let arc = Arc::new(plugin);
+        let eager = matches!(
+            arc.manifest.lifecycle.spawn,
+            ainb_plugin_protocol::manifest::SpawnMode::Eager
+        );
+        let (inbox, key_inbox, cache, state) = crate::plugin_task::spawn(
+            arc.clone(),
+            self.inner.snapshots.clone(),
+            self.inner.inboxes.clone(),
+            self.inner.dirty.clone(),
+            self.inner.config,
+            &self.inner.tokio,
+        );
+        if eager {
+            let _ = inbox.send(crate::plugin_task::Command::EnsureSpawned);
+        }
+        self.inner.inboxes.write().insert(arc.id.clone(), inbox.clone());
+        // Start dirty so the first paint after registration kicks a render.
+        let render_dirty = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        self.inner.dirty.write().insert(arc.id.clone(), render_dirty.clone());
+        self.inner.plugins.write().insert(
+            arc.id.clone(),
+            Arc::new(PluginHandle {
+                inbox,
+                key_inbox,
+                cache,
+                state,
+                plugin: arc,
+                render_dirty,
+            }),
+        );
     }
 
     /// Reload (clear quarantine + failure history).

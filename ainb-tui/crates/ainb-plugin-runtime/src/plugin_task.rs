@@ -482,8 +482,9 @@ impl PluginTask {
             manifest_path: self.plugin.manifest_path.to_string_lossy().into_owned(),
             granted_capabilities: granted,
             abi_version: ABI_VERSION,
-            // Host-side config resolution (plugins.values → JSON) lands in P1.
-            config: serde_json::Value::Null,
+            // Host-resolved `[plugins.<name>]` table (JSON), stamped onto the
+            // RegisteredPlugin at discovery; JSON null when unconfigured.
+            config: self.plugin.config.clone(),
         })
         .expect("PluginInitParams serializable");
         let id = self.ids.allocate();
