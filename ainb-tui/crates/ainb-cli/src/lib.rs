@@ -12,6 +12,7 @@ use clap::{Args, Parser, Subcommand};
 
 pub mod discovery;
 pub mod doctor;
+pub mod library;
 pub mod migrate;
 pub mod promote;
 pub mod scan;
@@ -155,6 +156,49 @@ pub enum SkillCommand {
     /// from: marketplace / external repo / toolkit / adopted / local).
     /// Read-only; never mutates the manifest, lockfile, or any unit.
     Scan(ScanArgs),
+    /// Manage the own-skill library — skills the user authored locally,
+    /// tracked in `library.yaml` (sibling to the manifest). `list` shows
+    /// owned units, `add <path>` ingests an existing on-disk skill folder
+    /// (must live under a tool home), `new <name>` scaffolds a fresh
+    /// `SKILL.md` and registers it.
+    Library {
+        #[command(subcommand)]
+        cmd: LibraryCmd,
+    },
+}
+
+/// `ainb skill library ...` subcommand tree — bead ai-lgk.
+#[derive(Subcommand, Debug)]
+pub enum LibraryCmd {
+    /// List every owned unit registered in `library.yaml`.
+    List {
+        /// Emit machine-readable JSON (`[{name, kind, path, created,
+        /// promoted_uri?}, …]`) instead of the default table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Ingest an existing on-disk skill folder into the library. The
+    /// path must live under one of the sandbox tool homes (refused
+    /// otherwise — safety belt against registering arbitrary paths).
+    Add {
+        /// Path to the skill folder (e.g. `~/.claude/skills/my-skill`).
+        path: std::path::PathBuf,
+
+        /// Tool whose home the path is expected under (`claude`,
+        /// `codex`, …). Defaults to `claude`.
+        #[arg(long)]
+        tool: Option<String>,
+    },
+    /// Scaffold a fresh `SKILL.md` under the tool's skills dir and
+    /// register it as an owned unit.
+    New {
+        /// New skill name (used for the folder + frontmatter `name`).
+        name: String,
+
+        /// Tool whose home to scaffold under. Defaults to `claude`.
+        #[arg(long)]
+        tool: Option<String>,
+    },
 }
 
 #[derive(Args, Debug)]

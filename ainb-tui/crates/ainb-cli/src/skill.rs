@@ -64,6 +64,7 @@ pub fn dispatch(home: &Path, action: SkillCommand, out: &mut dyn io::Write) -> R
             run_check(home, args, &backend, out)
         }
         SkillCommand::Scan(args) => crate::scan::dispatch(home, args, out),
+        SkillCommand::Library { cmd } => crate::library::dispatch(home, cmd, out),
     }
 }
 
