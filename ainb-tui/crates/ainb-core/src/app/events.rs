@@ -2777,23 +2777,42 @@ impl EventHandler {
                                     Some(AsyncAction::KillWorkspaceShell(workspace_idx));
                             }
                             crate::app::state::ConfirmAction::InstallNotifyHooks => {
-                                // Install the ainb-hooks plugin for both agents
-                                // in-process (ainb-core links ainb-plugin-notifyd).
-                                // Sync + fast — writes a few small files. The
-                                // daemon lazy-spawns on the first hook event.
+                                // Install the ainb-hooks plugin for both agents.
+                                // Codex + the canonical hook script are written
+                                // in-process; Claude is registered by shelling
+                                // out to `claude plugin install`. The daemon
+                                // lazy-spawns on the first hook event.
+                                use ainb_plugin_notifyd::ClaudeRegister;
                                 match ainb_plugin_notifyd::Paths::from_home().and_then(|p| {
                                     ainb_plugin_notifyd::install_for(
                                         &p,
                                         ainb_plugin_notifyd::Agent::ALL,
                                     )
                                 }) {
-                                    Ok(record) => {
-                                        state.add_info_notification(format!(
-                                            "Notifications enabled for {:?} — the Inbox (b) \
-                                             will light up when a session needs you.",
-                                            record.agents
-                                        ));
-                                    }
+                                    Ok(report) => match &report.claude {
+                                        Some(ClaudeRegister::Failed(e)) => {
+                                            state.add_error_notification(format!(
+                                                "Codex hooks installed, but the Claude plugin \
+                                                 failed to register: {e}"
+                                            ));
+                                        }
+                                        Some(ClaudeRegister::ClaudeCliMissing) => {
+                                            state.add_error_notification(
+                                                "Codex hooks installed, but `claude` CLI was not \
+                                                 found — Claude notifications not enabled. Install \
+                                                 it, then re-run."
+                                                    .to_string(),
+                                            );
+                                        }
+                                        _ => {
+                                            state.add_info_notification(
+                                                "Notifications enabled (Claude + Codex). Restart \
+                                                 your agent sessions to load the hooks; the Inbox \
+                                                 (b) lights up when a session needs you."
+                                                    .to_string(),
+                                            );
+                                        }
+                                    },
                                     Err(e) => {
                                         state.add_error_notification(format!(
                                             "Failed to install notification hooks: {e}"
