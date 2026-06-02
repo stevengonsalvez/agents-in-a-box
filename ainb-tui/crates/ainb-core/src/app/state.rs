@@ -1797,10 +1797,24 @@ impl ConfigScreenState {
                             } else {
                                 std::path::PathBuf::from(path)
                             };
-                            // Add to scan paths if not already present
-                            if !config.workspace_defaults.workspace_scan_paths.contains(&expanded) {
-                                config.workspace_defaults.workspace_scan_paths.push(expanded);
-                            }
+                            // "Default Workspace" is surfaced as
+                            // `workspace_scan_paths.first()` in `from_app_config`,
+                            // so it must be written back as the *primary* entry.
+                            // The old code pushed to the end, leaving `first()`
+                            // pointing at the stale path — editing the field then
+                            // appeared to do nothing on reopen.
+                            //
+                            // Rebuild as: edited path first, then every other
+                            // distinct scan dir. This replaces the old primary
+                            // (index 0), de-dups the edited path, and — crucially
+                            // — preserves the remaining scan dirs even on a no-op
+                            // confirm (drop the old primary, never the tail).
+                            let paths = &mut config.workspace_defaults.workspace_scan_paths;
+                            let tail: Vec<std::path::PathBuf> =
+                                paths.iter().skip(1).filter(|p| *p != &expanded).cloned().collect();
+                            paths.clear();
+                            paths.push(expanded);
+                            paths.extend(tail);
                         }
                     }
                     "branch_prefix" => {
