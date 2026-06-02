@@ -428,12 +428,12 @@ impl SessionListComponent {
                     };
 
                     // ainb-hooks attention marker for this session row.
-                    // Live attention marker, derived from the session's
-                    // tmux pane each refresh (NOT notification history):
-                    // `[?]` amber when the agent is parked at an
-                    // interactive prompt and needs the user. Working /
-                    // idle sessions carry no marker — that's already the
-                    // `●` / `○` status indicator.
+                    // Live "needs you" marker, recomputed from the
+                    // session's generating-state each refresh (NOT
+                    // notification history): amber `[?]` on any session
+                    // that is not actively generating (idle / turn-ended /
+                    // at a prompt) and is therefore waiting on the user.
+                    // Clears the instant generation resumes.
                     let session_alert = session.live_attention;
 
                     let mut session_spans = vec![

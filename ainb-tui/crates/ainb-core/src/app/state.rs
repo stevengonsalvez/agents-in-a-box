@@ -8150,31 +8150,25 @@ impl AppState {
         }
     }
 
-    /// Update preview content for all tmux sessions (called from main update loop)
-    /// Derive a session's live attention marker from its tmux pane.
+    /// Derive a session's live "needs you" marker from whether its agent
+    /// is actively generating.
     ///
-    /// Returns `Some(WaitingOnUser)` only when the agent is parked at an
-    /// interactive prompt — i.e. it is NOT actively generating
-    /// (`claude_running == false`) AND the visible screen tail shows a
-    /// box-drawn prompt panel containing a `?` (the AskUserQuestion /
-    /// interview / permission UI). Working and plain-idle sessions
-    /// return `None`: those states are already conveyed by the row's
-    /// `●` / `○` status indicator, so a marker there would be redundant
-    /// noise. Only the last ~30 lines are inspected so boxed scrollback
-    /// doesn't trigger a false "waiting".
-    fn live_attention_from_pane(
-        pane: &str,
-        claude_running: bool,
-    ) -> Option<ainb_plugin_notifyd::AlertKind> {
+    /// Returns `Some(WaitingOnUser)` whenever the agent is NOT generating
+    /// (`claude_running == false`) — the session has ended its turn /
+    /// gone idle / parked at a prompt and is waiting on the user. It
+    /// clears the instant generation resumes. Intentionally broad: every
+    /// parked session reads as "needs you", which — with the `●` running
+    /// dot marking the busy ones — gives an at-a-glance view of exactly
+    /// which sessions are waiting for you across the fleet.
+    const fn live_attention_for(claude_running: bool) -> Option<ainb_plugin_notifyd::AlertKind> {
         if claude_running {
-            return None;
+            None
+        } else {
+            Some(ainb_plugin_notifyd::AlertKind::WaitingOnUser)
         }
-        let tail: String = pane.lines().rev().take(30).collect::<Vec<_>>().join("\n");
-        let at_prompt =
-            tail.contains('?') && tail.contains('│') && tail.contains('┌') && tail.contains('└');
-        at_prompt.then_some(ainb_plugin_notifyd::AlertKind::WaitingOnUser)
     }
 
+    /// Update preview content for all tmux sessions (called from main update loop)
     pub async fn update_tmux_previews(&mut self) -> anyhow::Result<()> {
         use crate::tmux::ClaudeProcessDetector;
         use crate::tmux::capture::{CaptureOptions, capture_pane};
@@ -8227,7 +8221,7 @@ impl AppState {
                 match capture_pane(tmux_session.name(), opts).await {
                     Ok(content) => {
                         let claude_running = detector.has_claude_status_bar(&content);
-                        let attention = Self::live_attention_from_pane(&content, claude_running);
+                        let attention = Self::live_attention_for(claude_running);
                         updates.push((*session_id, content, claude_running, attention));
                     }
                     Err(e) => {
@@ -8240,7 +8234,7 @@ impl AppState {
                 match tmux_session.capture_pane_content().await {
                     Ok(content) => {
                         let claude_running = detector.has_claude_status_bar(&content);
-                        let attention = Self::live_attention_from_pane(&content, claude_running);
+                        let attention = Self::live_attention_for(claude_running);
                         status_updates.push((*session_id, claude_running, attention));
                     }
                     Err(e) => {

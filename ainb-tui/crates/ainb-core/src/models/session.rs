@@ -479,12 +479,11 @@ pub struct Session {
     pub preview_content: Option<String>,   // Cached preview content for display
     pub is_attached: bool,                 // Whether user is currently attached to the session
 
-    /// Live attention state derived from the tmux pane on each preview
-    /// refresh: `Some(WaitingOnUser)` when the agent is sitting at an
-    /// interactive prompt (AskUserQuestion / interview / permission),
-    /// `None` while working or idle (those are already conveyed by the
-    /// `status` indicator). Transient — never persisted; recomputed in
-    /// `AppState::update_tmux_previews`.
+    /// Live "needs you" marker, recomputed every preview refresh:
+    /// `Some(WaitingOnUser)` whenever the agent is **not generating**
+    /// (turn ended / idle / parked at a prompt), `None` while it is
+    /// actively generating. Drives the amber `[?]` in the session list.
+    /// Transient — never persisted; set in `AppState::update_tmux_previews`.
     #[serde(skip)]
     pub live_attention: Option<ainb_plugin_notifyd::AlertKind>,
 }
