@@ -808,10 +808,12 @@ pub fn force_show_discovery_banner(
     data.walker_cache = Some(walker);
 }
 
-/// Apply `[Enter] import all` — calls the reconciler on the cached
-/// walker output, merges the patch into the on-disk manifest, and
-/// refreshes the screen view-model so the Units / Sources panels
-/// show the just-imported entries.
+/// Apply `[Enter] import all`.
+///
+/// Calls the provenance-aware reconciler on the cached walker output,
+/// merges the patch into the on-disk manifest, and refreshes the
+/// screen view-model so the Units / Sources panels show the
+/// just-imported entries.
 ///
 /// Best-effort: returns `Err` only on filesystem failures during
 /// the manifest write. On success the banner is dismissed (no
