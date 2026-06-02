@@ -3808,16 +3808,31 @@ impl EventHandler {
                         );
                     }
                     Some(uri) => {
+                        // Two-step uninstall:
+                        //   1. `skill remove --yes` tears down any deployed
+                        //      tool files recorded in the lockfile.
+                        //   2. drop the unit from the *manifest* so the
+                        //      Units table (which is manifest-driven) loses
+                        //      the row.
+                        // A manifest-declared unit that was never installed
+                        // has no lockfile entry, so step 1 reports "not in
+                        // the lockfile" — that's not a user-facing failure,
+                        // the unit still vanishes from the table. We only
+                        // surface an error when neither step removed anything.
                         let cmd = ainb_cli::SkillCommand::Remove(ainb_cli::RemoveSkillArgs {
                             uri: uri.clone(),
                             targets: None,
                             yes: true,
                             dry_run: false,
                         });
-                        let (ok, msg) = run_skill_cli(&ainb_home, cmd);
+                        let (lockfile_ok, msg) = run_skill_cli(&ainb_home, cmd);
+                        let manifest_dropped =
+                            drop_unit_from_manifest(&ainb_home, &uri);
                         state.skill_manager_state.reload_from_disk(&ainb_home);
-                        if ok {
+                        if lockfile_ok {
                             state.add_success_notification(format!("removed: {msg}"));
+                        } else if manifest_dropped {
+                            state.add_success_notification(format!("removed: {uri}"));
                         } else {
                             state.add_error_notification(format!("remove failed: {msg}"));
                         }
@@ -5296,6 +5311,28 @@ fn run_skill_cli(ainb_home: &std::path::Path, cmd: ainb_cli::SkillCommand) -> (b
         Ok(()) => (true, last_meaningful_line(&buf)),
         Err(e) => (false, format!("{e}")),
     }
+}
+
+/// Remove the unit whose `declared_uri` matches `uri` from the manifest
+/// under `ainb_home`, persisting the change. Returns `true` when a unit
+/// was found and the rewrite succeeded. Best-effort: a missing /
+/// malformed manifest, or a save failure, returns `false` rather than
+/// panicking — the caller surfaces the appropriate notification.
+///
+/// The Units table is rendered from the manifest, so this is what makes
+/// the row vanish after `[r] remove`.
+fn drop_unit_from_manifest(ainb_home: &std::path::Path, uri: &str) -> bool {
+    use ainb_skill_core::manifest::Manifest;
+    let manifest_path = ainb_home.join("manifest.yaml");
+    let Ok(mut manifest) = Manifest::load_from(&manifest_path) else {
+        return false;
+    };
+    let before = manifest.units.len();
+    manifest.units.retain(|u| u.uri != uri);
+    if manifest.units.len() == before {
+        return false; // nothing matched — leave the file untouched
+    }
+    manifest.save_to(&manifest_path).is_ok()
 }
 
 /// Same shape as [`run_skill_cli`] for `ainb source ...` commands.
