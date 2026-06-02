@@ -76,22 +76,23 @@ env:
 # ── launch ────────────────────────────────────────────────────────
 
 # Launch the TUI against the sandbox.
-tui:
-    # HOME is inlined here only (not exported globally) so cargo's
-    # ~/.cargo cache + ~/.cargo/config.toml resolution stay against
-    # the user's real $HOME.
-    cd ainb-tui && HOME={{sandbox_root}} cargo run
+tui: build
+    # Build under the real $HOME (rustup needs ~/.rustup/, cargo needs
+    # ~/.cargo/) then exec the built binary with HOME redirected to
+    # the sandbox. Doing `HOME=sandbox cargo run` breaks rustup's
+    # toolchain resolution.
+    HOME={{sandbox_root}} ainb-tui/target/debug/ainb
 
 # Convenience: full bring-up — sandbox + launch TUI in one go.
 run tier="minimal": (up tier) tui
 
 # Drive the CLI against the sandbox (passes args through to ainb).
-cli *args:
+cli *args: build
     # Examples:
     #   just skill-manager cli skill check
     #   just skill-manager cli skill sync --to-repo --yes
     #   just skill-manager cli source list
-    cd ainb-tui && HOME={{sandbox_root}} cargo run -- {{args}}
+    HOME={{sandbox_root}} ainb-tui/target/debug/ainb {{args}}
 
 # ── tests ─────────────────────────────────────────────────────────
 
