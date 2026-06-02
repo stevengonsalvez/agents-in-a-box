@@ -19,6 +19,12 @@ const LIST_HIGHLIGHT_BG: Color = Color::Rgb(40, 40, 60);
 const SOFT_WHITE: Color = Color::Rgb(220, 220, 230);
 const MUTED_GRAY: Color = Color::Rgb(120, 120, 140);
 const SUBDUED_BORDER: Color = Color::Rgb(60, 60, 80);
+// ainb-hooks per-session attention markers: `[?]` waiting on a user
+// answer, `[!]` blocked on permission/approval, `[✓]` finished.
+const ALERT_WAITING_AMBER: Color = Color::Rgb(230, 180, 80);
+const ALERT_PERMISSION_RED: Color = Color::Rgb(220, 90, 90);
+
+use ainb_plugin_notifyd::AlertKind;
 
 use crate::app::AppState;
 use crate::models::{SessionMode, SessionStatus, ShellSessionStatus, Workspace};
@@ -237,12 +243,12 @@ impl SessionListComponent {
         // Load favorites to check which workspaces are starred
         let favorites = crate::config::FavoritesStore::load();
 
-        // ainb-hooks unread counts, grouped by notification cwd. We
+        // ainb-hooks unread state, grouped by notification cwd. We
         // query once per render (cheap with SQLite WAL + the indexed
         // `unread` partial index) and look up per session/workspace
-        // path below to render a `●N` badge. Empty map when the
-        // store isn't open or no rows are unread.
-        let unread_by_cwd = state.inbox_state.unread_by_cwd_map();
+        // path below to render a coloured `[?]N` / `[!]N` / `[✓]N`
+        // marker. Empty map when the store isn't open or nothing unread.
+        let alert_by_cwd = state.inbox_state.alert_by_cwd_map();
 
         // Must stay in lockstep with AppState::attachable_items_in_order;
         // divergence would attach the wrong session for a given digit.
@@ -428,14 +434,16 @@ impl SessionListComponent {
                         Span::styled("[ ]", Style::default().fg(MUTED_GRAY))
                     };
 
-                    // ainb-hooks unread badge for this session row.
+                    // ainb-hooks attention marker for this session row.
                     // Match by session.workspace_path against the
                     // notification cwd map (exact or prefix-with-/);
                     // a session whose host agent fired a hook from
-                    // anywhere inside its workspace root gets a `●N`.
-                    let session_unread =
-                        crate::components::inbox::InboxState::unread_for_workspace_path(
-                            &unread_by_cwd,
+                    // anywhere inside its workspace root gets a coloured
+                    // `[?]N` / `[!]N` / `[✓]N` tag reflecting its latest
+                    // unread event.
+                    let session_alert =
+                        crate::components::inbox::InboxState::alert_for_workspace_path(
+                            &alert_by_cwd,
                             &session.workspace_path,
                         );
 
@@ -462,11 +470,16 @@ impl SessionListComponent {
                         ),
                         Span::styled(changes_text, Style::default().fg(WARNING_ORANGE)),
                     ];
-                    if session_unread > 0 {
+                    if let Some((count, kind)) = session_alert {
+                        let (tag, color) = match kind {
+                            AlertKind::NeedsPermission => ("[!]", ALERT_PERMISSION_RED),
+                            AlertKind::WaitingOnUser => ("[?]", ALERT_WAITING_AMBER),
+                            AlertKind::Finished => ("[✓]", SELECTION_GREEN),
+                        };
                         session_spans.push(Span::raw("  "));
                         session_spans.push(Span::styled(
-                            format!("● {session_unread}"),
-                            Style::default().fg(WARNING_ORANGE).add_modifier(Modifier::BOLD),
+                            format!("{tag}{count}"),
+                            Style::default().fg(color).add_modifier(Modifier::BOLD),
                         ));
                     }
                     let session_line = Line::from(session_spans);

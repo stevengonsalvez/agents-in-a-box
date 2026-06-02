@@ -284,6 +284,41 @@ impl Store {
         Ok(out)
     }
 
+    /// Per-`cwd` unread *state*: the unread count, plus the `raw_event`
+    /// and `ts` of the most-recent unread row for that cwd. Lets the
+    /// session list render a per-session marker that reflects the
+    /// agent's current attention state (waiting / needs-permission /
+    /// finished), not just a flat count.
+    ///
+    /// Relies on SQLite's documented "bare column" semantics: when a
+    /// query has a single `MAX(ts)` aggregate, the other non-aggregated
+    /// columns (`raw_event`) take their values from the row that holds
+    /// that maximum. So `raw_event` here is the latest unread event's,
+    /// not an arbitrary row's. Returns `(cwd, count, latest_event,
+    /// latest_ts)` tuples.
+    pub fn unread_state_by_cwd(&self) -> Result<Vec<(String, u64, String, i64)>, StoreError> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT cwd, COUNT(*), raw_event, MAX(ts)
+             FROM notifications
+             WHERE read = 0 AND dismissed = 0 AND cwd != ''
+             GROUP BY cwd",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, u64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     /// Look up the most-recent notification whose `cwd` matches
     /// `target_cwd`. Used by the Inbox screen when the user presses
     /// Enter on a row: from the row's `cwd` we resolve back to ainb's
