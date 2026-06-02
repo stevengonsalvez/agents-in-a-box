@@ -41,6 +41,7 @@ pub use install::{
     install as install_for, install_under_home, prompt_state, status, uninstall,
 };
 pub use listener::{RunConfig, run_daemon};
+pub use osnotify::{AlertKind, classify_event};
 pub use paths::Paths;
 pub use pid::PidFile;
 pub use store::{NotificationRecord, RetentionPolicy, Store, StoreError};
