@@ -56,23 +56,25 @@ may ride the Phase 0 dep PR to keep dep churn in one place).
 
 ## Phase 0 — Dependency upgrade (gated prerequisite PR, NO feature code)
 
-**Nature:** high-VOLUME, compiler-guided, MECHANICAL migration on a STABLE target
-(ratatui 0.30.0, vt100 0.16.2, portable-pty 0.9.0, tui-term 0.3.4). Genuinely uncertain
-bit = transitive **crossterm 0.27→0.28** touching the event/key/mouse loop. Do NOT
-re-plan the event-loop decouple (already 33ms/250ms) or bracketed paste (already on).
+**Nature (MEASURED — trial `cargo check` on bumped deps, 2026-06-02):** SMALL, not the
+big rock first estimated. Bumping the 5 coupled deps (ratatui 0.30.0, crossterm 0.29.0,
+vt100 0.16.2, portable-pty 0.9.0, ansi-to-tui 8.0.1; tui-term 0.3.4 added in P2) yields
+exactly **2 hard errors + 9 deprecation renames**. crossterm 0.27→0.29 (the bit flagged
+as uncertain) compiled CLEAN. Do NOT re-plan the event-loop decouple (already 33ms/250ms)
+or bracketed paste (already on).
 
 TDD here = "the existing suite is the test; keep it green."
 
 | Step | Action |
 |------|--------|
-| RED | Bump the 4 deps in `ainb-tui/Cargo.toml` + ainb-core; run `cargo test --workspace`. The failing state = compile errors + any behavioural test breaks. Enumerate + bucket them (mechanical rename vs crossterm-semantic). |
-| GREEN | Mechanical sweep: `inner(&Margin)`→`inner(Margin)` (~56), `frame.size()`→`frame.area()`, `layout::Alignment`→`HorizontalAlignment` (if no alias), `block::Title` type users, `Rect::area()` u16→u32. Then the crossterm 0.28 event/key/mouse fixes. Iterate to green. |
+| RED | Bump deps in `ainb-tui/Cargo.toml [workspace.dependencies]`: ratatui 0.30, crossterm 0.29, vt100 0.16, portable-pty 0.9, ansi-to-tui 8.0.1. Run `cargo check --workspace --all-targets`. (Trial already enumerated the failing state.) |
+| GREEN | The 2 hard fixes: `area.inner(&Margin{..})`→`area.inner(Margin{..})` at `components/claude_chat.rs:42` and `components/tmux_preview.rs:232`. The 9 clippy-gate renames: `frame.size()`→`frame.area()` in `components/layout.rs` (lines 67,96,143,150,155,161,166,170 + 1). Then re-run `--all-targets` to surface any TEST-only breaks (residual unknown: vt100 0.16 moved `set_size` Parser→Screen — `tests/helpers/vt100_helper.rs` may need it; possible TestBackend tweaks) and fix those. |
 | + new test | `render-buf` smoke: render `tui_term::widget::PseudoTerminal::new(&parser.screen())` of a trivial `vt100::Parser` into a `TestBackend` and assert the buffer shows the expected glyphs — proves tui-term integrates with ratatui 0.30. |
-| REFACTOR | none beyond the sweep; keep the diff mechanical. |
-| GATE | `cargo test --workspace` green + `cargo clippy -- -D warnings` clean. **Merge this PR before any feature code.** |
+| REFACTOR | none beyond the ~11 edits; keep the diff mechanical. |
+| GATE | `cargo test --workspace` green + `cargo clippy -- -D warnings` clean. Can be the first commit of the feature PR (no longer needs to be a separate gated PR, given the measured size). |
 
 Acceptance: full pre-existing suite green on the new deps; clippy clean; tui-term smoke
-render passes. crossterm event/key/mouse behavioural tests still green (the real risk).
+render passes. (Measured non-risk: crossterm event/key/mouse compiled clean.)
 
 ---
 

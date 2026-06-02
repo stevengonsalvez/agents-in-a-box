@@ -187,7 +187,7 @@ against current origin/main — **all core findings hold; two items REDUCE scope
 
 | Risk | Impact | Likelihood | Mitigation |
 |------|--------|------------|------------|
-| ratatui 0.26→0.30 migration breaks every component | High | High | Phase 0 standalone gated PR; full test pass before any embed code |
+| ratatui 0.26→0.30 migration | Low (MEASURED) | Low | Trial `cargo check` 2026-06-02: only 2 hard errors (`inner(&Margin)`→`inner(Margin)`) + 9 `frame.size()`→`area()` renames; crossterm 0.27→0.29 clean; deps co-resolve. Residual: test-target breakage (check after the 2 lib fixes) |
 | Leaked `tmux attach` clients | Med | Med | PtyWrapper owns Child + kill/Drop + registry drained by panic hook + `detach-client` belt-and-suspenders |
 | window reflow churn / Claude repaint | Med | Med | expand pane on focus, size embed to expanded rect; revert on release |
 | live render lag or CPU spin | Low | Med | reader task + dirty flag; rides the existing 33ms poll loop (already split from the 250ms heavy-work tick) |
@@ -246,7 +246,9 @@ against current origin/main — **all core findings hold; two items REDUCE scope
 - deps: upgrade (user choice) → Phase 0.
 
 ### Technical Debt Accepted
-- ratatui 0.30 migration is large but one-time and isolated to Phase 0.
+- ratatui 0.30 migration — MEASURED small (2 errors + 9 renames; crossterm clean),
+  one-time, isolated to Phase 0. (Earlier "large/biggest-risk" framing was an estimate,
+  falsified by the trial `cargo check`.)
 
 ## Open Questions
 - [ ] Exact ainb key bound to "navigate away" that should trigger auto-release (covered
