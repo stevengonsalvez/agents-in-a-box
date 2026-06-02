@@ -99,24 +99,6 @@ pub enum AlertKind {
     Finished,
 }
 
-/// Classify a raw hook event string into an [`AlertKind`], or `None`
-/// for telemetry / lifecycle events that don't map to a user-facing
-/// session state. The grouping is kept in lockstep with
-/// [`render_title`] so the OS-notification title and the session-list
-/// marker can never disagree about what an event means.
-pub fn classify_event(raw_event: &str) -> Option<AlertKind> {
-    let head = raw_event.split(':').next().unwrap_or(raw_event);
-    match head {
-        "PermissionRequest"
-        | "exec_approval_request"
-        | "apply_patch_approval_request"
-        | "permission_request" => Some(AlertKind::NeedsPermission),
-        "Notification" | "request_user_input" | "wait_for_user" => Some(AlertKind::WaitingOnUser),
-        "Stop" | "agent-turn-complete" | "task_complete" => Some(AlertKind::Finished),
-        _ => None,
-    }
-}
-
 /// Render a short, human-readable title from an envelope.
 pub fn render_title(env: &Envelope) -> String {
     let head = env.raw_event.split(':').next().unwrap_or(&env.raw_event);
@@ -259,46 +241,6 @@ mod tests {
         assert!(is_user_facing(&env("agent-turn-complete", "codex")));
         assert!(is_user_facing(&env("request_user_input", "codex")));
         assert!(is_user_facing(&env("exec_approval_request", "codex")));
-    }
-
-    #[test]
-    fn classify_event_groups_match_render_title() {
-        // Permission / approval family → NeedsPermission.
-        assert_eq!(
-            classify_event("PermissionRequest"),
-            Some(AlertKind::NeedsPermission)
-        );
-        assert_eq!(
-            classify_event("exec_approval_request"),
-            Some(AlertKind::NeedsPermission)
-        );
-        assert_eq!(
-            classify_event("apply_patch_approval_request"),
-            Some(AlertKind::NeedsPermission)
-        );
-        // Question / idle family → WaitingOnUser (matcher suffix stripped).
-        assert_eq!(
-            classify_event("Notification:idle_prompt"),
-            Some(AlertKind::WaitingOnUser)
-        );
-        assert_eq!(
-            classify_event("request_user_input"),
-            Some(AlertKind::WaitingOnUser)
-        );
-        assert_eq!(
-            classify_event("wait_for_user"),
-            Some(AlertKind::WaitingOnUser)
-        );
-        // Turn-finished family → Finished.
-        assert_eq!(classify_event("Stop"), Some(AlertKind::Finished));
-        assert_eq!(
-            classify_event("agent-turn-complete"),
-            Some(AlertKind::Finished)
-        );
-        assert_eq!(classify_event("task_complete"), Some(AlertKind::Finished));
-        // Telemetry → None.
-        assert_eq!(classify_event("SessionStart"), None);
-        assert_eq!(classify_event("PostToolUse"), None);
     }
 
     #[test]

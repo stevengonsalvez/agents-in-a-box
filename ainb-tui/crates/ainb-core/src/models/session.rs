@@ -478,6 +478,15 @@ pub struct Session {
     pub tmux_session_name: Option<String>, // Name of the tmux session if using tmux backend
     pub preview_content: Option<String>,   // Cached preview content for display
     pub is_attached: bool,                 // Whether user is currently attached to the session
+
+    /// Live attention state derived from the tmux pane on each preview
+    /// refresh: `Some(WaitingOnUser)` when the agent is sitting at an
+    /// interactive prompt (AskUserQuestion / interview / permission),
+    /// `None` while working or idle (those are already conveyed by the
+    /// `status` indicator). Transient — never persisted; recomputed in
+    /// `AppState::update_tmux_previews`.
+    #[serde(skip)]
+    pub live_attention: Option<ainb_plugin_notifyd::AlertKind>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -703,6 +712,7 @@ impl Session {
             tmux_session_name: None,
             preview_content: None,
             is_attached: false,
+            live_attention: None,
         }
     }
 
@@ -731,6 +741,7 @@ impl Session {
             tmux_session_name: None,
             preview_content: None,
             is_attached: false,
+            live_attention: None,
         }
     }
 

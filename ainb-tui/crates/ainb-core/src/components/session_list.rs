@@ -243,13 +243,6 @@ impl SessionListComponent {
         // Load favorites to check which workspaces are starred
         let favorites = crate::config::FavoritesStore::load();
 
-        // ainb-hooks unread state, grouped by notification cwd. We
-        // query once per render (cheap with SQLite WAL + the indexed
-        // `unread` partial index) and look up per session/workspace
-        // path below to render a coloured `[?]N` / `[!]N` / `[✓]N`
-        // marker. Empty map when the store isn't open or nothing unread.
-        let alert_by_cwd = state.inbox_state.alert_by_cwd_map();
-
         // Must stay in lockstep with AppState::attachable_items_in_order;
         // divergence would attach the wrong session for a given digit.
         let mut attach_no: usize = 0;
@@ -435,17 +428,13 @@ impl SessionListComponent {
                     };
 
                     // ainb-hooks attention marker for this session row.
-                    // Match by session.workspace_path against the
-                    // notification cwd map (exact or prefix-with-/);
-                    // a session whose host agent fired a hook from
-                    // anywhere inside its workspace root gets a coloured
-                    // `[?]N` / `[!]N` / `[✓]N` tag reflecting its latest
-                    // unread event.
-                    let session_alert =
-                        crate::components::inbox::InboxState::alert_for_workspace_path(
-                            &alert_by_cwd,
-                            &session.workspace_path,
-                        );
+                    // Live attention marker, derived from the session's
+                    // tmux pane each refresh (NOT notification history):
+                    // `[?]` amber when the agent is parked at an
+                    // interactive prompt and needs the user. Working /
+                    // idle sessions carry no marker — that's already the
+                    // `●` / `○` status indicator.
+                    let session_alert = session.live_attention;
 
                     let mut session_spans = vec![
                         next_badge(&mut attach_no),
@@ -470,7 +459,7 @@ impl SessionListComponent {
                         ),
                         Span::styled(changes_text, Style::default().fg(WARNING_ORANGE)),
                     ];
-                    if let Some((count, kind)) = session_alert {
+                    if let Some(kind) = session_alert {
                         let (tag, color) = match kind {
                             AlertKind::NeedsPermission => ("[!]", ALERT_PERMISSION_RED),
                             AlertKind::WaitingOnUser => ("[?]", ALERT_WAITING_AMBER),
@@ -478,7 +467,7 @@ impl SessionListComponent {
                         };
                         session_spans.push(Span::raw("  "));
                         session_spans.push(Span::styled(
-                            format!("{tag}{count}"),
+                            tag.to_string(),
                             Style::default().fg(color).add_modifier(Modifier::BOLD),
                         ));
                     }
