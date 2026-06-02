@@ -696,6 +696,19 @@ mod tests {
     }
 
     #[test]
+    fn delete_forward_removes_whole_multibyte_char() {
+        // Forward-delete must remove the entire codepoint under the cursor;
+        // a byte-only remove would panic on a non-boundary index.
+        let mut s = ConfigPopupState::new();
+        s.open_text("t", "d", "k", "é/x"); // 'é' is 2 bytes
+        s.cursor_home();
+        s.delete_forward(); // removes whole 'é'
+        assert_eq!(text_value(&s), ("/x", 0));
+        s.delete_forward(); // removes '/'
+        assert_eq!(text_value(&s), ("x", 0));
+    }
+
+    #[test]
     fn number_input_paste_keeps_only_digits() {
         let mut s = ConfigPopupState::new();
         s.open_number("Max", "d", "max_repositories", 500);
