@@ -253,6 +253,12 @@ pub enum AppEvent {
     ConfigPopupCancel,          // Cancel popup (Esc)
     ConfigPopupInputChar(char), // Input character in text/number input
     ConfigPopupBackspace,       // Backspace in text/number input
+    ConfigPopupPaste(String),   // Insert clipboard text at cursor (bracketed paste)
+    ConfigPopupDelete,          // Forward-delete char under cursor (Delete)
+    ConfigPopupCursorLeft,      // Move cursor left in text input
+    ConfigPopupCursorRight,     // Move cursor right in text input
+    ConfigPopupCursorHome,      // Move cursor to start (Home)
+    ConfigPopupCursorEnd,       // Move cursor to end (End)
     // Log history viewer events
     LogHistoryBack,          // Return to home screen (Esc)
     LogHistoryNextSession,   // Navigate to next session
@@ -654,7 +660,15 @@ impl EventHandler {
     /// Configure prompt textarea. Both own their own paste handling via the
     /// component-local `handle_key` arms, so paste events never need to be
     /// dispatched at the host event-router level.
-    pub fn handle_paste_event(_text: String, _state: &AppState) -> Option<AppEvent> {
+    ///
+    /// The Config screen text popups (e.g. Default Workspace) are the
+    /// exception — they live behind the host router, so a bracketed paste
+    /// has to be forwarded here or it gets dropped silently (the bug where
+    /// you couldn't paste a path into the workspace folder field).
+    pub fn handle_paste_event(text: String, state: &AppState) -> Option<AppEvent> {
+        if state.config_popup_state.is_text_entry() {
+            return Some(AppEvent::ConfigPopupPaste(text));
+        }
         None
     }
 
@@ -2097,11 +2111,19 @@ impl EventHandler {
                 }
             }
             ConfigPopupType::TextInput { .. } | ConfigPopupType::NumberInput { .. } => {
-                // Text/Number input mode
+                // Text/Number input mode. Cursor-movement keys are no-ops on
+                // NumberInput (handled at the state layer) but let the text
+                // field behave like a normal editable line: arrows to move,
+                // Delete to forward-delete, paste handled via Event::Paste.
                 match key_event.code {
                     KeyCode::Esc => Some(AppEvent::ConfigPopupCancel),
                     KeyCode::Enter => Some(AppEvent::ConfigPopupConfirm),
                     KeyCode::Backspace => Some(AppEvent::ConfigPopupBackspace),
+                    KeyCode::Delete => Some(AppEvent::ConfigPopupDelete),
+                    KeyCode::Left => Some(AppEvent::ConfigPopupCursorLeft),
+                    KeyCode::Right => Some(AppEvent::ConfigPopupCursorRight),
+                    KeyCode::Home => Some(AppEvent::ConfigPopupCursorHome),
+                    KeyCode::End => Some(AppEvent::ConfigPopupCursorEnd),
                     KeyCode::Char(c) => Some(AppEvent::ConfigPopupInputChar(c)),
                     _ => None,
                 }
@@ -4105,6 +4127,24 @@ impl EventHandler {
             }
             AppEvent::ConfigPopupBackspace => {
                 state.config_popup_state.backspace();
+            }
+            AppEvent::ConfigPopupPaste(text) => {
+                state.config_popup_state.insert_str(&text);
+            }
+            AppEvent::ConfigPopupDelete => {
+                state.config_popup_state.delete_forward();
+            }
+            AppEvent::ConfigPopupCursorLeft => {
+                state.config_popup_state.cursor_left();
+            }
+            AppEvent::ConfigPopupCursorRight => {
+                state.config_popup_state.cursor_right();
+            }
+            AppEvent::ConfigPopupCursorHome => {
+                state.config_popup_state.cursor_home();
+            }
+            AppEvent::ConfigPopupCursorEnd => {
+                state.config_popup_state.cursor_end();
             }
             // Log history viewer events
             AppEvent::LogHistoryBack => {
