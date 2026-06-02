@@ -116,6 +116,25 @@ scripts/skill-manager-sandbox.sh down
   path.
 - `down` on a missing root is a no-op (exit 0).
 
+These four guards are the riskiest surface in the toolchain (the
+script is a pure-bash `rm -rf` machine), so they have an automated
+regression test that shells out to the real script:
+
+```bash
+cd ainb-tui
+cargo test -p ainb --test sandbox_script_safety_guards
+```
+
+The test (`crates/ainb-core/tests/sandbox_script_safety_guards.rs`)
+pins all four behaviours: `down --root /` refused, `up --root $HOME`
+refused (with the child's `HOME` pointed at a throwaway `/tmp` path so
+even a broken guard can't touch a real home), `down` without the
+sentinel refused (with a decoy file proving user data survives), and a
+clean `up`/`down` round-trip at a `/tmp` root that is idempotent on a
+second `down`. It needs only `bash` + `git` on PATH (no tmux) and runs
+in CI under the `ainb-hooks` job on both Linux and macOS
+(`.github/workflows/ci.yml`).
+
 ## Rust API (integration tests)
 
 ```rust
@@ -150,6 +169,7 @@ launcher writes to `env.sh` — identical contract.
 | Drift InSync/Outdated round-trip vs bare   | `crates/ainb-skill-core/tests/drift_tests_integration.rs`                                                 |
 | TestBackend render of SkillsScreenData     | `crates/ainb-core/tests/tripwire_core_skill_manager_sandbox_loads.rs`                                     |
 | Live tmux: press `m`, see SkillManager     | `crates/ainb-core/tests/tripwire_core_skill_manager_sandbox_e2e.rs`                                       |
+| Bash `up`/`down` safety guards (rm -rf belts) | `crates/ainb-core/tests/sandbox_script_safety_guards.rs` — 4 tests against the real script               |
 
 ## Prod-binary isolation
 
