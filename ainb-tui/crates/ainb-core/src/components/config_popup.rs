@@ -410,10 +410,9 @@ impl ConfigPopupComponent {
             Span::styled("  ", Style::default()),
             Span::styled(&state.description, Style::default().fg(MUTED_GRAY)),
         ])];
-        if matches!(
-            state.popup_type,
-            ConfigPopupType::TextInput { .. } | ConfigPopupType::NumberInput { .. }
-        ) {
+        // `is_text_entry()` already encodes "text or number popup" (show_popup
+        // is guaranteed true here, past the early return above).
+        if state.is_text_entry() {
             desc_lines.push(Line::from(vec![Span::styled(
                 "  Ctrl+V to paste",
                 Style::default().fg(MUTED_GRAY),
