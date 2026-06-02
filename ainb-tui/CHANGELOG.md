@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-06-02
+### Added
+- Merge pull request #198 from stevengonsalvez/feat/session-alert-markers
+- **notifyd**: classify hook events into AlertKind + per-cwd unread-state query
+- **tui**: auto-save config edits to config.toml on popup confirm
+- **tui**: color-coded per-session attention markers in session list
+- **tui**: drive per-session marker from live pane state, not notifications
+
+### Fixed
+- Merge pull request #196 from stevengonsalvez/worktree-config-popup-paste-edit
+- Merge pull request #197 from stevengonsalvez/fix/config-default-workspace-persist
+- Merge pull request #199 from stevengonsalvez/feat/live-session-markers
+- **tui**: enable paste and cursor editing in config text popups
+- **tui**: write Default Workspace edit as primary scan path
+
+### Other
+- Merge pull request #195 from stevengonsalvez/chore/precommit-fmt-gate
+- add pre-commit config (cargo fmt check + hygiene hooks)
+- **notifyd**: drop superseded classify_event + unread_state_by_cwd
+
+
 ## [1.3.0] - 2026-06-01
 ### Added
 - Merge pull request #189 from stevengonsalvez/fix/stats
