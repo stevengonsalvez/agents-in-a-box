@@ -19,7 +19,7 @@
 // All rendering follows the ainb-tui style guide (rounded borders,
 // gold titles, cornflower-blue panels, selection-green indicator).
 
-use ainb_plugin_notifyd::{NotificationRecord, Paths, Store};
+use ainb_plugin_notifyd::{AlertKind, NotificationRecord, Paths, Store, classify_event};
 use chrono::{DateTime, Local, TimeZone};
 use ratatui::{
     prelude::*,
@@ -263,46 +263,52 @@ impl InboxState {
         self.refresh();
     }
 
-    /// Return unread counts grouped by notification `cwd`. Used by
-    /// the session_list to render a per-session `●N` badge: ainb's
-    /// `Session.workspace_path` is matched against this map (exact
-    /// equality OR prefix-with-trailing-slash for worktree sessions
-    /// whose cwd is a subdir of their workspace root).
+    /// Per-`cwd` attention summary used to render the coloured
+    /// per-session marker: maps each cwd to `(unread_count, latest
+    /// AlertKind, latest_ts)`. The kind is derived from the most-recent
+    /// unread event for that cwd; events that don't classify (telemetry)
+    /// fall back to [`AlertKind::Finished`] so the count still shows.
     ///
     /// Returns an empty map when the store is not open.
-    pub fn unread_by_cwd_map(&self) -> std::collections::HashMap<String, u64> {
+    pub fn alert_by_cwd_map(&self) -> std::collections::HashMap<String, (u64, AlertKind, i64)> {
         let mut out = std::collections::HashMap::new();
         if let Some(store) = self.store.as_ref() {
-            if let Ok(rows) = store.unread_by_cwd() {
-                for (cwd, n) in rows {
-                    out.insert(cwd, n);
+            if let Ok(rows) = store.unread_state_by_cwd() {
+                for (cwd, n, latest_event, latest_ts) in rows {
+                    let kind = classify_event(&latest_event).unwrap_or(AlertKind::Finished);
+                    out.insert(cwd, (n, kind, latest_ts));
                 }
             }
         }
         out
     }
 
-    /// Sum unread counts whose `cwd` equals `workspace_path` or sits
-    /// underneath it (e.g. worktree subdirs). The session_list calls
-    /// this once per session row.
-    pub fn unread_for_workspace_path(
-        unread_by_cwd: &std::collections::HashMap<String, u64>,
+    /// Resolve the attention marker for a session whose root is
+    /// `workspace_path`: sums unread counts across every matching cwd
+    /// (exact or subdir) and returns the [`AlertKind`] of the
+    /// most-recent matching event — so a session shows its *current*
+    /// state, and a pending question/permission isn't masked by an
+    /// older "finished". `None` when the session has no unread rows.
+    pub fn alert_for_workspace_path(
+        alert_by_cwd: &std::collections::HashMap<String, (u64, AlertKind, i64)>,
         workspace_path: &str,
-    ) -> u64 {
+    ) -> Option<(u64, AlertKind)> {
         if workspace_path.is_empty() {
-            return 0;
+            return None;
         }
         let prefix_with_slash = format!("{workspace_path}/");
-        unread_by_cwd
-            .iter()
-            .filter_map(|(cwd, n)| {
-                if cwd == workspace_path || cwd.starts_with(&prefix_with_slash) {
-                    Some(*n)
-                } else {
-                    None
+        let mut total: u64 = 0;
+        let mut latest: Option<(i64, AlertKind)> = None;
+        for (cwd, (n, kind, ts)) in alert_by_cwd {
+            if cwd == workspace_path || cwd.starts_with(&prefix_with_slash) {
+                total += *n;
+                match latest {
+                    Some((best_ts, _)) if *ts <= best_ts => {}
+                    _ => latest = Some((*ts, *kind)),
                 }
-            })
-            .sum()
+            }
+        }
+        latest.map(|(_, kind)| (total, kind))
     }
 }
 
@@ -616,45 +622,55 @@ mod tests {
     }
 
     #[test]
-    fn unread_for_workspace_path_matches_exact_and_prefix() {
+    fn alert_for_workspace_path_matches_exact_and_prefix() {
         use std::collections::HashMap;
-        let mut map: HashMap<String, u64> = HashMap::new();
-        map.insert("/home/x/repo".to_string(), 3);
-        map.insert("/home/x/repo/worktrees/branch-a".to_string(), 2);
-        map.insert("/home/x/other".to_string(), 5);
+        // (count, kind, ts). The root bucket's event is older than the
+        // worktree bucket's, so the rolled-up marker must take the
+        // worktree's (more recent) kind while summing both counts.
+        let mut map: HashMap<String, (u64, AlertKind, i64)> = HashMap::new();
+        map.insert("/home/x/repo".to_string(), (3, AlertKind::Finished, 100));
+        map.insert(
+            "/home/x/repo/worktrees/branch-a".to_string(),
+            (2, AlertKind::WaitingOnUser, 200),
+        );
+        map.insert(
+            "/home/x/other".to_string(),
+            (5, AlertKind::NeedsPermission, 50),
+        );
 
         // Exact match on the workspace path returns just that bucket;
-        // prefix-with-/ also rolls up any worktree under it.
+        // prefix-with-/ also rolls up any worktree under it, and the
+        // kind reflects the most-recent matching event.
         assert_eq!(
-            InboxState::unread_for_workspace_path(&map, "/home/x/repo"),
-            5,
-            "expected 3 (root) + 2 (worktree under) = 5"
+            InboxState::alert_for_workspace_path(&map, "/home/x/repo"),
+            Some((5, AlertKind::WaitingOnUser)),
+            "expected 3 (root) + 2 (worktree) = 5, kind from latest ts (worktree)"
         );
         assert_eq!(
-            InboxState::unread_for_workspace_path(&map, "/home/x/other"),
-            5
+            InboxState::alert_for_workspace_path(&map, "/home/x/other"),
+            Some((5, AlertKind::NeedsPermission))
         );
         assert_eq!(
-            InboxState::unread_for_workspace_path(&map, "/home/x/missing"),
-            0
+            InboxState::alert_for_workspace_path(&map, "/home/x/missing"),
+            None
         );
         assert_eq!(
-            InboxState::unread_for_workspace_path(&map, ""),
-            0,
-            "empty workspace path must short-circuit to 0"
+            InboxState::alert_for_workspace_path(&map, ""),
+            None,
+            "empty workspace path must short-circuit to None"
         );
     }
 
     #[test]
-    fn unread_for_workspace_path_does_not_substring_match() {
+    fn alert_for_workspace_path_does_not_substring_match() {
         // /home/x/rep would otherwise prefix-match /home/x/repo if we
         // weren't careful to append the trailing slash. Verify.
         use std::collections::HashMap;
-        let mut map: HashMap<String, u64> = HashMap::new();
-        map.insert("/home/x/repo".to_string(), 4);
+        let mut map: HashMap<String, (u64, AlertKind, i64)> = HashMap::new();
+        map.insert("/home/x/repo".to_string(), (4, AlertKind::Finished, 1));
         assert_eq!(
-            InboxState::unread_for_workspace_path(&map, "/home/x/rep"),
-            0,
+            InboxState::alert_for_workspace_path(&map, "/home/x/rep"),
+            None,
             "must not substring-match shorter prefixes"
         );
     }
