@@ -63,6 +63,7 @@ pub fn dispatch(home: &Path, action: SkillCommand, out: &mut dyn io::Write) -> R
             let backend = GitLsRemoteBackend::new();
             run_check(home, args, &backend, out)
         }
+        SkillCommand::Scan(args) => crate::scan::dispatch(home, args, out),
     }
 }
 

@@ -14,6 +14,7 @@ pub mod discovery;
 pub mod doctor;
 pub mod migrate;
 pub mod promote;
+pub mod scan;
 pub mod search;
 pub mod skill;
 pub mod source;
@@ -149,6 +150,11 @@ pub enum SkillCommand {
     /// source's current upstream tip. Read-only; never mutates the
     /// lockfile or any on-disk unit.
     Check(CheckArgs),
+    /// Walk every tool home + the Claude Code plugin cache and print a
+    /// provenance tree (which real source each discovered unit came
+    /// from: marketplace / external repo / toolkit / adopted / local).
+    /// Read-only; never mutates the manifest, lockfile, or any unit.
+    Scan(ScanArgs),
 }
 
 #[derive(Args, Debug)]
@@ -259,6 +265,29 @@ pub struct CheckArgs {
     /// instead of the default tabular output. Useful for scripting.
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Args, Debug, Default)]
+pub struct ScanArgs {
+    /// Restrict the tree to one provenance kind:
+    /// `marketplace` | `external` | `toolkit` | `adopted` | `local`.
+    #[arg(long)]
+    pub provenance: Option<String>,
+
+    /// Restrict the tree to units discovered under one tool home
+    /// (`claude`, `codex`, …). Marketplace plugins are claude-deployed.
+    #[arg(long)]
+    pub tool: Option<String>,
+
+    /// Emit machine-readable JSON instead of the default tree.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Override the `external-dependencies.yaml` path used to resolve
+    /// external-clone provenance. Defaults to `$HOME/external-dependencies.yaml`
+    /// then the current working directory. Mainly for tests.
+    #[arg(long = "ext-deps", value_name = "PATH")]
+    pub ext_deps: Option<std::path::PathBuf>,
 }
 
 #[derive(Args, Debug, Default)]
