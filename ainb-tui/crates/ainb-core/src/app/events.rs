@@ -253,6 +253,17 @@ pub enum AppEvent {
     SkillManagerInputSubmit,
     /// Esc — cancel the active input prompt.
     SkillManagerInputCancel,
+    /// `[l]` — open the own-skill Library view, sourced from
+    /// `library.yaml` (bead ai-lgk).
+    SkillManagerOpenLibrary,
+    /// Move the Library-view selection up one row.
+    SkillManagerLibrarySelectPrev,
+    /// Move the Library-view selection down one row.
+    SkillManagerLibrarySelectNext,
+    /// Enter — expand the selected Library row into its Detail band.
+    SkillManagerLibraryEnter,
+    /// Esc/q — close the Library view, returning to the Units screen.
+    SkillManagerLibraryClose,
     GoToRecovery,            // Navigate to session recovery view
     GoToInbox,               // Navigate to ainb-hooks notification inbox
     InboxMoveUp,             // Inbox: move selection up one row
@@ -1161,6 +1172,28 @@ impl EventHandler {
                 };
             }
 
+            // Own-skill Library overlay (`[l]`, bead ai-lgk): when
+            // open, arrows / j-k move the selection, Enter expands the
+            // selected row's Detail band, and Esc/q closes the overlay
+            // (back to the Units screen — NOT home, so the user doesn't
+            // lose the SkillManager context). Intercepts before the
+            // banner + normal keymap.
+            if state.skill_manager_state.library.is_some() {
+                return match key_event.code {
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        Some(AppEvent::SkillManagerLibrarySelectPrev)
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        Some(AppEvent::SkillManagerLibrarySelectNext)
+                    }
+                    KeyCode::Enter => Some(AppEvent::SkillManagerLibraryEnter),
+                    KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('l') => {
+                        Some(AppEvent::SkillManagerLibraryClose)
+                    }
+                    _ => None,
+                };
+            }
+
             // Discovery banner (spec §User Flow 1 / P5): when the
             // overlay is visible, Enter/d/s drive its state machine
             // instead of the normal Skills shortcuts. Esc/q still
@@ -1199,6 +1232,7 @@ impl EventHandler {
                 KeyCode::Char('u') => Some(AppEvent::SkillManagerUpdate),
                 KeyCode::Char('c') => Some(AppEvent::SkillManagerCheck),
                 KeyCode::Char('r') => Some(AppEvent::SkillManagerRemove),
+                KeyCode::Char('l') => Some(AppEvent::SkillManagerOpenLibrary),
                 KeyCode::Char('/') => Some(AppEvent::SkillManagerOpenSearch),
                 // `[m]` re-runs discovery (the empty-state hint
                 // finally tells the truth).
@@ -3935,6 +3969,40 @@ impl EventHandler {
                     &ainb_home,
                     crate::components::skill_manager_screen::SelectionMove::Last,
                 );
+            }
+            AppEvent::SkillManagerOpenLibrary => {
+                // `[l]` — open the own-skill Library view, sourced from
+                // `library.yaml` (bead ai-lgk). Built fresh on open so
+                // out-of-band `ainb skill library` edits are reflected.
+                tracing::info!("SkillManager: open own-skill Library (l)");
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                state.skill_manager_state.library = Some(
+                    crate::components::skill_manager_screen::LibraryViewState::load_from_disk(
+                        &ainb_home,
+                    ),
+                );
+            }
+            AppEvent::SkillManagerLibrarySelectPrev => {
+                if let Some(lib) = state.skill_manager_state.library.as_mut() {
+                    lib.select_prev();
+                }
+            }
+            AppEvent::SkillManagerLibrarySelectNext => {
+                if let Some(lib) = state.skill_manager_state.library.as_mut() {
+                    lib.select_next();
+                }
+            }
+            AppEvent::SkillManagerLibraryEnter => {
+                // Enter expands the selected own-skill into its Detail
+                // band (idempotent — pressing again keeps it open).
+                if let Some(lib) = state.skill_manager_state.library.as_mut() {
+                    if lib.selected_row().is_some() {
+                        lib.show_detail = true;
+                    }
+                }
+            }
+            AppEvent::SkillManagerLibraryClose => {
+                state.skill_manager_state.library = None;
             }
             AppEvent::GoToInbox => {
                 tracing::info!("Navigating to Inbox");

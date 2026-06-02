@@ -113,6 +113,94 @@ pub struct SkillsScreenData {
     /// contains it. Cleared by submitting an empty search or `[/]`
     /// then Esc.
     pub search: Option<String>,
+    /// Own-skill Library view (`[l]`). `None` in the steady state;
+    /// `Some` while the Library overlay is open. Sourced from
+    /// `library.yaml`, not the manifest units (bead ai-lgk).
+    pub library: Option<LibraryViewState>,
+}
+
+/// One owned-skill row in the Library view, projected from a
+/// [`ainb_skill_core::OwnedUnit`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibraryRow {
+    pub name: String,
+    pub kind: String,
+    /// Tool-home-relative path (`.claude/skills/<name>`).
+    pub path: String,
+    pub created: String,
+    /// Deploy status — `promoted` once a `promoted_uri` is set, else
+    /// `local`. Mirrors the column the CLI `list` prints.
+    pub deploy: String,
+}
+
+/// State of the `[l]` own-skill Library overlay. Rendered on top of the
+/// Sources/Units/Detail panels; reuses the same table chrome as the
+/// Units panel but sourced from `library.yaml`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LibraryViewState {
+    pub rows: Vec<LibraryRow>,
+    pub selected: usize,
+    /// When `true`, `[Enter]` has expanded the selected row into a
+    /// "Library Detail" panel beneath the list.
+    pub show_detail: bool,
+}
+
+impl LibraryViewState {
+    /// Build the view-model from the on-disk `library.yaml` under
+    /// `ainb_home`. Missing / malformed file yields an empty view (the
+    /// overlay renders its empty-state hint).
+    pub fn load_from_disk(ainb_home: &Path) -> Self {
+        use ainb_skill_core::library::{library_path_in, Library};
+        let lib = Library::load_from(&library_path_in(ainb_home)).unwrap_or_default();
+        let rows = lib
+            .owned
+            .iter()
+            .map(|u| LibraryRow {
+                name: u.name.clone(),
+                kind: u.kind.to_string(),
+                path: u.path.clone(),
+                created: u.created.clone(),
+                deploy: if u.promoted_uri.is_some() {
+                    "promoted".to_string()
+                } else {
+                    "local".to_string()
+                },
+            })
+            .collect();
+        Self {
+            rows,
+            selected: 0,
+            show_detail: false,
+        }
+    }
+
+    /// Move the selection cursor, wrapping at the ends. No-op when the
+    /// list is empty. Clears `show_detail` so the detail panel always
+    /// reflects the freshly-selected row on the next `[Enter]`.
+    pub fn select_prev(&mut self) {
+        if self.rows.is_empty() {
+            return;
+        }
+        self.selected = if self.selected == 0 {
+            self.rows.len() - 1
+        } else {
+            self.selected - 1
+        };
+        self.show_detail = false;
+    }
+
+    pub fn select_next(&mut self) {
+        if self.rows.is_empty() {
+            return;
+        }
+        self.selected = (self.selected + 1) % self.rows.len();
+        self.show_detail = false;
+    }
+
+    /// The currently-selected row, if any.
+    pub fn selected_row(&self) -> Option<&LibraryRow> {
+        self.rows.get(self.selected)
+    }
 }
 
 /// Which kind of text the active input prompt is collecting.
@@ -217,11 +305,113 @@ pub fn render(frame: &mut Frame, area: Rect, data: &SkillsScreenData) {
         render_discovery_banner(frame, area, counts, detailed);
     }
 
+    // Own-skill Library overlay (`[l]`) — drawn above the panels +
+    // banner so it's the active modal when open. Sits below the input
+    // prompt (which is never open at the same time).
+    if let Some(library) = &data.library {
+        render_library_view(frame, area, library);
+    }
+
     // Input prompt overlay (add-source / search) — drawn on top of
     // everything, including the banner, since it's the active modal.
     if let Some(input) = &data.input {
         render_input_prompt(frame, area, input);
     }
+}
+
+/// Render the own-skill Library overlay (`[l]`, bead ai-lgk). A
+/// centered panel titled "Own-Skill Library" listing the
+/// `library.yaml`-registered owned units, with a deploy-status column.
+/// `[Enter]` expands the selected row into a "Library Detail" band
+/// beneath the list (name + kind + path + created + deploy).
+fn render_library_view(frame: &mut Frame, area: Rect, library: &LibraryViewState) {
+    let width = area.width.saturating_sub(8).clamp(40, 100);
+    // Body = header + one line per row (+ detail band when expanded),
+    // bounded by the available height.
+    let detail_lines: u16 = if library.show_detail { 7 } else { 0 };
+    let list_lines = (library.rows.len() as u16).max(1);
+    let height = (list_lines + detail_lines + 4)
+        .min(area.height.saturating_sub(2))
+        .max(8);
+    let rect = centered_rect(area, width, height);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(GOLD))
+        .title(Span::styled(
+            " Own-Skill Library ",
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ));
+
+    let mut lines: Vec<Line> = Vec::new();
+    if library.rows.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  No owned skills yet.",
+            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  Run `ainb skill library new <name>` to author one.",
+            Style::default().fg(SOFT_WHITE),
+        )));
+    } else {
+        // Column header.
+        lines.push(Line::from(vec![Span::styled(
+            format!(" {:<24} {:<8} {:<28} {}", "name", "kind", "path", "deploy"),
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        )]));
+        for (i, row) in library.rows.iter().enumerate() {
+            let selected = i == library.selected;
+            let marker = if selected { "▶ " } else { "  " };
+            let style = if selected {
+                Style::default()
+                    .bg(LIST_HIGHLIGHT_BG)
+                    .fg(SELECTION_GREEN)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(SOFT_WHITE)
+            };
+            lines.push(Line::from(vec![Span::styled(
+                format!(
+                    "{marker}{:<24} {:<8} {:<28} {}",
+                    row.name, row.kind, row.path, row.deploy
+                ),
+                style,
+            )]));
+        }
+    }
+
+    // Expanded detail band on `[Enter]`.
+    if library.show_detail {
+        if let Some(row) = library.selected_row() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                " ── Library Detail ──",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            )));
+            lines.push(line_kv("Name", &row.name));
+            lines.push(line_kv("Kind", &row.kind));
+            lines.push(line_kv("Path", &row.path));
+            lines.push(line_kv("Created", &row.created));
+            lines.push(line_kv("Deploy", &row.deploy));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::raw(" "),
+        key_span("↑↓"),
+        Span::styled(" move  ", Style::default().fg(MUTED_GRAY)),
+        key_span("Enter"),
+        Span::styled(" detail  ", Style::default().fg(MUTED_GRAY)),
+        key_span("Esc"),
+        Span::styled(" close", Style::default().fg(MUTED_GRAY)),
+    ]));
+
+    frame.render_widget(Clear, rect);
+    let para = Paragraph::new(lines).block(block);
+    frame.render_widget(para, rect);
 }
 
 /// Render the active text-input prompt as a centered single-line
@@ -485,6 +675,8 @@ fn render_help_bar(frame: &mut Frame, area: Rect) {
         Span::styled("emove  ", Style::default().fg(MUTED_GRAY)),
         key_span("s"),
         Span::styled("ync  ", Style::default().fg(MUTED_GRAY)),
+        key_span("l"),
+        Span::styled("ibrary  ", Style::default().fg(MUTED_GRAY)),
         key_span("/"),
         Span::styled("search  ", Style::default().fg(MUTED_GRAY)),
         key_span("?"),
