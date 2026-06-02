@@ -1,15 +1,22 @@
 //! Tripwire: the SkillManager help-bar keys are actually wired —
-//! `[i] add source`, `[/] search`, `[c] check`, `[m] refresh` all
-//! produce a real effect in the live binary. Before this work they
-//! were advertised in the help bar but dropped on the floor.
+//! before this work they were advertised in the help bar but dropped
+//! on the floor. Drives the real `ainb` binary against the sandbox
+//! fixture via tmux.
 //!
-//! Drives the real `ainb` binary against the sandbox fixture via
-//! tmux. Two assertions that prove wiring end-to-end:
+//! Coverage in THIS file (two assertions that prove wiring
+//! end-to-end):
 //!   1. `[i]` opens the add-source prompt; typing a `git:file://` URI
 //!      (which contains `:` — the char that used to hijack the global
 //!      slash-command palette) and pressing Enter actually writes the
 //!      source into manifest.yaml.
 //!   2. `[/]` opens the search prompt and filters the Units table.
+//!
+//! The other help-bar keys have their own live tripwires so each file
+//! stays focused:
+//!   * `[c] check`  → `tripwire_core_skill_manager_check_live.rs`
+//!     (asserts the "drift check running" info toast surfaces).
+//!   * `[m] refresh` → `tripwire_core_skill_manager_sandbox_e2e.rs`
+//!     (presses `m` and asserts the SkillManager screen renders).
 //!
 //! Bead: skill-manager key wiring (follow-up to ai-e7t). Skips when
 //! tmux is unavailable.
