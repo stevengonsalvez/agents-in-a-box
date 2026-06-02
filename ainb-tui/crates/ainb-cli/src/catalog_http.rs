@@ -34,11 +34,22 @@ pub const ENV_API_KEY: &str = "AINB_SKILLS_API_KEY";
 pub const ENV_API_BASE: &str = "AINB_SKILLS_API_BASE";
 /// Env var forcing canned data with zero network (tripwire flag).
 pub const ENV_MOCK: &str = "AINB_CATALOG_MOCK";
+/// Env var letting a tripwire point the first canned hit's `install_uri`
+/// at a LOCAL unit (e.g. the sandbox bare remote `git:file://…`) so the
+/// `[b]` → Enter install path fetches locally — never the network.
+pub const ENV_MOCK_INSTALL_URI: &str = "AINB_CATALOG_MOCK_INSTALL_URI";
 
 /// Production catalog backend hitting skills.sh over HTTP.
+///
+/// The reqwest client is built **lazily** inside the network branch of
+/// `search`, NOT in the constructor. This matters because the TUI builds
+/// this backend on the event-loop thread (a tokio runtime context), and
+/// constructing a `reqwest::blocking::Client` inside a tokio runtime
+/// panics. In mock mode (`AINB_CATALOG_MOCK=1`) `search` returns before
+/// ever touching reqwest, so the TUI's `[b]` browse modal stays panic-
+/// free and offline.
 pub struct SkillsShHttpBackend {
     builder: SkillsShUrlBuilder,
-    client: reqwest::blocking::Client,
     /// When `true` (driven by `AINB_CATALOG_MOCK=1`), `search` returns
     /// canned hits without any network call.
     mock_mode: bool,
@@ -47,7 +58,8 @@ pub struct SkillsShHttpBackend {
 impl SkillsShHttpBackend {
     /// Build the backend from the ambient environment + the config under
     /// `ainb_home`. Reads the API key (env → config) and honours the
-    /// `AINB_SKILLS_API_BASE` / `AINB_CATALOG_MOCK` test hooks.
+    /// `AINB_SKILLS_API_BASE` / `AINB_CATALOG_MOCK` test hooks. Builds NO
+    /// network client — see the type docs for why.
     pub fn from_env(ainb_home: &Path) -> Self {
         let api_key = resolve_api_key(ainb_home);
         let builder = match std::env::var(ENV_API_BASE) {
@@ -57,14 +69,7 @@ impl SkillsShHttpBackend {
             _ => SkillsShUrlBuilder::new(api_key),
         };
         let mock_mode = std::env::var(ENV_MOCK).as_deref() == Ok("1");
-        Self {
-            builder,
-            client: reqwest::blocking::Client::builder()
-                .user_agent(concat!("ainb-cli/", env!("CARGO_PKG_VERSION")))
-                .build()
-                .expect("reqwest client"),
-            mock_mode,
-        }
+        Self { builder, mock_mode }
     }
 }
 
@@ -73,13 +78,23 @@ impl CatalogBackend for SkillsShHttpBackend {
         if is_blank_query(query) {
             return Ok(Vec::new());
         }
-        // Tripwire / offline escape hatch — canned data, never a socket.
+        // Tripwire / offline escape hatch — canned data, never a socket,
+        // never a reqwest client. This is the only branch the TUI ever
+        // reaches (it always sets AINB_CATALOG_MOCK=1).
         if self.mock_mode {
             return Ok(canned_hits(query));
         }
 
+        // Lazily build the blocking client — only when a real request is
+        // actually needed. The CLI dispatch path is NOT inside a tokio
+        // runtime, so this is safe there.
+        let client = reqwest::blocking::Client::builder()
+            .user_agent(concat!("ainb-cli/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .map_err(|e| CatalogError::Backend(format!("build http client: {e}")))?;
+
         let url = self.builder.search_url(query);
-        let mut req = self.client.get(&url);
+        let mut req = client.get(&url);
         if let Some(header) = self.builder.auth_header() {
             req = req.header(reqwest::header::AUTHORIZATION, header);
         }
@@ -160,14 +175,24 @@ fn read_config_api_key(path: &Path) -> Option<String> {
 /// Canned hits for `AINB_CATALOG_MOCK=1`. Deterministic + ranked so the
 /// live tmux tripwire's pane assertions are stable. Distinct, obvious
 /// names so substring checks on the captured pane are unambiguous.
+///
+/// When `AINB_CATALOG_MOCK_INSTALL_URI` is set, the highest-ranked hit's
+/// `install_uri` is replaced with that value — a tripwire points it at
+/// the sandbox bare remote so `[b]` → Enter installs from a LOCAL repo
+/// (zero network).
 fn canned_hits(_query: &str) -> Vec<CatalogHit> {
+    let top_install_uri = std::env::var(ENV_MOCK_INSTALL_URI)
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| {
+            "gh:stevengonsalvez/agents-in-a-box@main/skills/catalog-demo-skill".to_string()
+        });
     let mut hits = vec![
         CatalogHit {
             name: "catalog-demo-skill".to_string(),
             repo: "stevengonsalvez/agents-in-a-box".to_string(),
             stars: 4242,
-            install_uri: "gh:stevengonsalvez/agents-in-a-box@main/skills/catalog-demo-skill"
-                .to_string(),
+            install_uri: top_install_uri,
             description: "Canned catalog hit for offline tripwire mode.".to_string(),
         },
         CatalogHit {
