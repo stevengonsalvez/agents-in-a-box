@@ -8151,6 +8151,30 @@ impl AppState {
     }
 
     /// Update preview content for all tmux sessions (called from main update loop)
+    /// Derive a session's live attention marker from its tmux pane.
+    ///
+    /// Returns `Some(WaitingOnUser)` only when the agent is parked at an
+    /// interactive prompt — i.e. it is NOT actively generating
+    /// (`claude_running == false`) AND the visible screen tail shows a
+    /// box-drawn prompt panel containing a `?` (the AskUserQuestion /
+    /// interview / permission UI). Working and plain-idle sessions
+    /// return `None`: those states are already conveyed by the row's
+    /// `●` / `○` status indicator, so a marker there would be redundant
+    /// noise. Only the last ~30 lines are inspected so boxed scrollback
+    /// doesn't trigger a false "waiting".
+    fn live_attention_from_pane(
+        pane: &str,
+        claude_running: bool,
+    ) -> Option<ainb_plugin_notifyd::AlertKind> {
+        if claude_running {
+            return None;
+        }
+        let tail: String = pane.lines().rev().take(30).collect::<Vec<_>>().join("\n");
+        let at_prompt =
+            tail.contains('?') && tail.contains('│') && tail.contains('┌') && tail.contains('└');
+        at_prompt.then_some(ainb_plugin_notifyd::AlertKind::WaitingOnUser)
+    }
+
     pub async fn update_tmux_previews(&mut self) -> anyhow::Result<()> {
         use crate::tmux::ClaudeProcessDetector;
         use crate::tmux::capture::{CaptureOptions, capture_pane};
@@ -8166,9 +8190,9 @@ impl AppState {
         }
         self.last_preview_update = Some(now);
 
-        // updates: (session_id, content, claude_running) for the selected session
+        // updates: (session_id, content, claude_running, live_attention) for the selected session
         let mut updates = Vec::new();
-        // status_updates: (session_id, claude_running) for non-selected sessions (status only)
+        // status_updates: (session_id, claude_running, live_attention) for non-selected sessions
         let mut status_updates = Vec::new();
         let detector = ClaudeProcessDetector::new();
 
@@ -8203,7 +8227,8 @@ impl AppState {
                 match capture_pane(tmux_session.name(), opts).await {
                     Ok(content) => {
                         let claude_running = detector.has_claude_status_bar(&content);
-                        updates.push((*session_id, content, claude_running));
+                        let attention = Self::live_attention_from_pane(&content, claude_running);
+                        updates.push((*session_id, content, claude_running, attention));
                     }
                     Err(e) => {
                         debug!("Failed to capture selected session {}: {}", session_id, e);
@@ -8215,7 +8240,8 @@ impl AppState {
                 match tmux_session.capture_pane_content().await {
                     Ok(content) => {
                         let claude_running = detector.has_claude_status_bar(&content);
-                        status_updates.push((*session_id, claude_running));
+                        let attention = Self::live_attention_from_pane(&content, claude_running);
+                        status_updates.push((*session_id, claude_running, attention));
                     }
                     Err(e) => {
                         trace!("Non-selected session {} capture skipped: {}", session_id, e);
@@ -8225,7 +8251,11 @@ impl AppState {
         }
 
         // Apply status-only updates for non-selected sessions
-        for (session_id, claude_running) in status_updates {
+        for (session_id, claude_running, attention) in status_updates {
+            // Accumulate the change flag inside the session borrow, then
+            // touch `self.ui_needs_refresh` only after it ends (avoids a
+            // borrow conflict between `find_session_mut` and `self`).
+            let mut changed = false;
             if let Some(session) = self.find_session_mut(session_id) {
                 use crate::models::SessionStatus;
                 let new_status = if claude_running {
@@ -8235,13 +8265,21 @@ impl AppState {
                 };
                 if session.status != new_status {
                     session.set_status(new_status);
-                    self.ui_needs_refresh = true;
+                    changed = true;
                 }
+                if session.live_attention != attention {
+                    session.live_attention = attention;
+                    changed = true;
+                }
+            }
+            if changed {
+                self.ui_needs_refresh = true;
             }
         }
 
-        // Apply updates for the selected session
-        for (session_id, content, claude_running) in updates {
+        // Apply updates for the selected session (preview always changes,
+        // so this loop unconditionally requests a refresh).
+        for (session_id, content, claude_running, attention) in updates {
             if let Some(session) = self.find_session_mut(session_id) {
                 session.set_preview(content);
 
@@ -8255,9 +8293,10 @@ impl AppState {
                 if session.status != new_status {
                     session.set_status(new_status);
                 }
-
-                self.ui_needs_refresh = true;
+                session.live_attention = attention;
             }
+
+            self.ui_needs_refresh = true;
         }
 
         // Update shell session preview (only the selected workspace's shell)

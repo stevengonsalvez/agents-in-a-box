@@ -705,4 +705,46 @@ mod tests {
             .count();
         assert_eq!(dupes, 1, "edited path must not be duplicated");
     }
+
+    // ========================================================================
+    // Live per-session attention marker (derived from the tmux pane)
+    // ========================================================================
+
+    #[test]
+    fn live_attention_marks_waiting_at_prompt_only() {
+        use ainb_plugin_notifyd::AlertKind;
+
+        // Box-drawn prompt panel containing '?' while the agent is NOT
+        // generating (no status bar → claude_running=false) → the user
+        // is needed.
+        let prompt_pane = "\
+some earlier output line
+┌──────────────────────────────┐
+│ What do you want to do next?  │
+│ ❯ 1. Plan                     │
+│   2. Submit                   │
+└──────────────────────────────┘";
+        assert_eq!(
+            AppState::live_attention_from_pane(prompt_pane, false),
+            Some(AlertKind::WaitingOnUser),
+            "box prompt + not generating must mark waiting-on-user"
+        );
+
+        // Same pane, but the agent is actively generating (status bar
+        // present). It's working, not waiting → no marker.
+        assert_eq!(
+            AppState::live_attention_from_pane(prompt_pane, true),
+            None,
+            "actively-generating session must not show a waiting marker"
+        );
+
+        // Plain finished/idle output with no prompt box → no marker
+        // (idle is conveyed by the row's `○` status indicator).
+        let idle_pane = "task complete.\nno box here\n$ ";
+        assert_eq!(
+            AppState::live_attention_from_pane(idle_pane, false),
+            None,
+            "idle output without a prompt box must not show a marker"
+        );
+    }
 }
