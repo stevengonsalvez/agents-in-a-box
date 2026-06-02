@@ -403,12 +403,23 @@ impl ConfigPopupComponent {
             ])
             .split(inner);
 
-        // Description
-        let desc = Paragraph::new(Line::from(vec![
+        // Description, plus a greyed paste hint on the second line for
+        // text-entry popups so the Ctrl+V clipboard paste is discoverable
+        // in the popup itself — not only in the bottom help bar.
+        let mut desc_lines = vec![Line::from(vec![
             Span::styled("  ", Style::default()),
             Span::styled(&state.description, Style::default().fg(MUTED_GRAY)),
-        ]))
-        .style(Style::default().bg(PANEL_BG));
+        ])];
+        if matches!(
+            state.popup_type,
+            ConfigPopupType::TextInput { .. } | ConfigPopupType::NumberInput { .. }
+        ) {
+            desc_lines.push(Line::from(vec![Span::styled(
+                "  Ctrl+V to paste",
+                Style::default().fg(MUTED_GRAY),
+            )]));
+        }
+        let desc = Paragraph::new(desc_lines).style(Style::default().bg(PANEL_BG));
         frame.render_widget(desc, layout[0]);
 
         // Content based on type
@@ -724,5 +735,65 @@ mod tests {
             }
             other => panic!("expected NumberInput, got {other:?}"),
         }
+    }
+
+    fn render_to_text(state: &ConfigPopupState, w: u16, h: u16) -> String {
+        let component = ConfigPopupComponent::new();
+        let backend = ratatui::backend::TestBackend::new(w, h);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| component.render(f, Rect::new(0, 0, w, h), state)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer.get(x, y).symbol().chars().next().unwrap_or(' '))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn text_popup_renders_ctrl_v_paste_hint() {
+        let mut s = ConfigPopupState::new();
+        s.open_text(
+            "Default Workspace",
+            "Default directory for new sessions",
+            "default_workspace",
+            "/Users/me/git",
+        );
+        let text = render_to_text(&s, 60, 14);
+        assert!(
+            text.contains("Ctrl+V to paste"),
+            "text popup must show the greyed paste hint:\n{text}"
+        );
+    }
+
+    #[test]
+    fn number_popup_renders_ctrl_v_paste_hint() {
+        let mut s = ConfigPopupState::new();
+        s.open_number("Max Repositories", "Maximum repos", "max_repositories", 500);
+        let text = render_to_text(&s, 60, 14);
+        assert!(
+            text.contains("Ctrl+V to paste"),
+            "number popup must show the greyed paste hint:\n{text}"
+        );
+    }
+
+    #[test]
+    fn choice_popup_has_no_paste_hint() {
+        let mut s = ConfigPopupState::new();
+        s.open_choice(
+            "Theme",
+            "Pick a theme",
+            "theme",
+            vec!["Dark".to_string(), "Light".to_string()],
+            0,
+        );
+        let text = render_to_text(&s, 60, 14);
+        assert!(
+            !text.contains("Ctrl+V to paste"),
+            "choice popup must NOT show the paste hint:\n{text}"
+        );
     }
 }
