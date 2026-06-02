@@ -707,44 +707,26 @@ mod tests {
     }
 
     // ========================================================================
-    // Live per-session attention marker (derived from the tmux pane)
+    // Live per-session attention marker (waiting = not generating)
     // ========================================================================
 
     #[test]
-    fn live_attention_marks_waiting_at_prompt_only() {
+    fn live_attention_marks_any_idle_session() {
         use ainb_plugin_notifyd::AlertKind;
 
-        // Box-drawn prompt panel containing '?' while the agent is NOT
-        // generating (no status bar → claude_running=false) → the user
-        // is needed.
-        let prompt_pane = "\
-some earlier output line
-┌──────────────────────────────┐
-│ What do you want to do next?  │
-│ ❯ 1. Plan                     │
-│   2. Submit                   │
-└──────────────────────────────┘";
+        // Not generating (turn ended / idle / parked at a prompt) →
+        // waiting on the user.
         assert_eq!(
-            AppState::live_attention_from_pane(prompt_pane, false),
+            AppState::live_attention_for(false),
             Some(AlertKind::WaitingOnUser),
-            "box prompt + not generating must mark waiting-on-user"
+            "a not-generating session must show the waiting marker"
         );
 
-        // Same pane, but the agent is actively generating (status bar
-        // present). It's working, not waiting → no marker.
+        // Actively generating → no marker; the `●` running dot covers it.
         assert_eq!(
-            AppState::live_attention_from_pane(prompt_pane, true),
+            AppState::live_attention_for(true),
             None,
-            "actively-generating session must not show a waiting marker"
-        );
-
-        // Plain finished/idle output with no prompt box → no marker
-        // (idle is conveyed by the row's `○` status indicator).
-        let idle_pane = "task complete.\nno box here\n$ ";
-        assert_eq!(
-            AppState::live_attention_from_pane(idle_pane, false),
-            None,
-            "idle output without a prompt box must not show a marker"
+            "an actively-generating session must not show a waiting marker"
         );
     }
 }
