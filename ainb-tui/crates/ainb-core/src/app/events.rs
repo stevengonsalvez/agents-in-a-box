@@ -4115,6 +4115,24 @@ impl EventHandler {
                             }
                         }
                     }
+
+                    // Auto-persist: apply the edited settings to the live
+                    // config and write config.toml immediately, so the change
+                    // *becomes* the config (and survives a reopen/restart)
+                    // without the user having to remember `S` save-all. `S`
+                    // remains as an explicit save-all; `Esc` still cancels the
+                    // single edit before it reaches here.
+                    state.config_screen_state.apply_to_app_config(&mut state.app_config);
+                    match state.app_config.save() {
+                        Ok(()) => {
+                            state.add_success_notification(
+                                "Setting saved to config.toml".to_string(),
+                            );
+                        }
+                        Err(e) => {
+                            state.add_error_notification(format!("Failed to save setting: {}", e));
+                        }
+                    }
                 }
                 state.config_popup_state.close();
             }
