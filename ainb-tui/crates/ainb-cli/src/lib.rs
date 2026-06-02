@@ -10,6 +10,7 @@ use std::io;
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 
+pub mod catalog_http;
 pub mod discovery;
 pub mod doctor;
 pub mod library;
@@ -156,6 +157,11 @@ pub enum SkillCommand {
     /// from: marketplace / external repo / toolkit / adopted / local).
     /// Read-only; never mutates the manifest, lockfile, or any unit.
     Scan(ScanArgs),
+    /// Browse a remote skill catalog (skills.sh) before installing.
+    /// Prints ranked hits (name, repo, stars, install-uri). Read-only.
+    /// The API key is optional — read from `[skills].api_key` in
+    /// config.toml or the `AINB_SKILLS_API_KEY` env var.
+    Browse(BrowseArgs),
     /// Manage the own-skill library — skills the user authored locally,
     /// tracked in `library.yaml` (sibling to the manifest). `list` shows
     /// owned units, `add <path>` ingests an existing on-disk skill folder
@@ -297,6 +303,19 @@ pub struct UsageArgs {
     /// Print each unit's invocation count + last-used as it is refreshed.
     #[arg(long, short)]
     pub verbose: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct BrowseArgs {
+    /// Catalog search query (matched against unit names / descriptions
+    /// server-side). An empty / whitespace-only query is a no-op that
+    /// prints a hint rather than hitting the API.
+    pub query: String,
+
+    /// Emit machine-readable JSON (`[{name, repo, stars, install_uri,
+    /// description}, …]`) instead of the default ranked table.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Debug)]

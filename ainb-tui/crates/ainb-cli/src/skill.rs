@@ -28,6 +28,7 @@ use ainb_adapters_tool::{
     AcceptDecision, ToolAdapter, adapter_by_name, all_adapters,
     install_root_for, plan::{InstallPlan, PlanOp}, read_root_for,
 };
+use ainb_skill_core::catalog::{rank_by_stars, CatalogBackend};
 use ainb_skill_core::drift::{
     detect_all as drift_detect_all, DriftBackend, DriftStatus, GitLsRemoteBackend,
 };
@@ -43,9 +44,11 @@ use ainb_skill_core::uri::Uri;
 use ainb_skill_core::{DeployedRef, SourceType, UnitKind};
 use ainb_usage::{InvocationRecord, detect_invocations};
 
+use crate::catalog_http::SkillsShHttpBackend;
 use crate::source::run_fetcher;
 use crate::{
-    CheckArgs, InstallArgs, RemoveSkillArgs, SkillCommand, SyncArgs, UpdateArgs, UsageArgs,
+    BrowseArgs, CheckArgs, InstallArgs, RemoveSkillArgs, SkillCommand, SyncArgs, UpdateArgs,
+    UsageArgs,
 };
 
 pub fn dispatch(home: &Path, action: SkillCommand, out: &mut dyn io::Write) -> Result<()> {
@@ -65,6 +68,14 @@ pub fn dispatch(home: &Path, action: SkillCommand, out: &mut dyn io::Write) -> R
         }
         SkillCommand::Scan(args) => crate::scan::dispatch(home, args, out),
         SkillCommand::Library { cmd } => crate::library::dispatch(home, cmd, out),
+        SkillCommand::Browse(args) => {
+            // Production backend: HTTP to skills.sh, key from env/config,
+            // honouring the AINB_CATALOG_MOCK / AINB_SKILLS_API_BASE test
+            // hooks. Tests bypass this dispatch and call `browse` directly
+            // with a `MockCatalogBackend`.
+            let backend = SkillsShHttpBackend::from_env(home);
+            browse(home, args, &backend, out)
+        }
     }
 }
 
@@ -1344,6 +1355,70 @@ pub fn run_check(
         writeln!(out, "{:<60}  {}", unit.declared_uri, status_str)?;
     }
     writeln!(out, "# {} unit(s) checked", scoped_lockfile.units.len())?;
+    Ok(())
+}
+
+/// `ainb skill browse <query> [--json]`: search a remote skill catalog
+/// (skills.sh) and print ranked hits. Read-only — never mutates the
+/// manifest, lockfile, or any unit. Results are ephemeral (NO SQLite).
+///
+/// `backend` is the [`CatalogBackend`] used to resolve hits — the
+/// top-level dispatch passes a [`SkillsShHttpBackend`]; tests inject a
+/// `MockCatalogBackend` so they stay offline. Exactly the same
+/// dependency-injection shape as [`run_check`].
+///
+/// Output:
+/// - default: a ranked table (`name  stars  repo  install-uri`).
+/// - `--json`: the `Vec<CatalogHit>` array, ranked stars-desc.
+/// - empty / whitespace query: a one-line hint, no API call, no error.
+pub fn browse(
+    home: &Path,
+    args: BrowseArgs,
+    backend: &dyn CatalogBackend,
+    out: &mut dyn io::Write,
+) -> Result<()> {
+    let _ = home; // reserved for future per-home catalog config; key
+                  // resolution happens in the backend constructor.
+
+    if args.query.trim().is_empty() {
+        // Empty-query contract: a no-op hint, not an error. JSON mode
+        // still emits an empty array so scripts get valid JSON.
+        if args.json {
+            writeln!(out, "[]")?;
+        } else {
+            writeln!(out, "# empty query — type a query to browse the catalog")?;
+        }
+        return Ok(());
+    }
+
+    let mut hits = backend
+        .search(args.query.trim())
+        .with_context(|| format!("searching catalog for `{}`", args.query.trim()))?;
+    // Re-rank defensively — the contract says backends rank, but a
+    // misbehaving backend shouldn't produce an unordered table.
+    rank_by_stars(&mut hits);
+
+    if args.json {
+        writeln!(out, "{}", serde_json::to_string_pretty(&hits)?)?;
+        return Ok(());
+    }
+
+    if hits.is_empty() {
+        writeln!(out, "# no catalog results for `{}`", args.query.trim())?;
+        return Ok(());
+    }
+
+    // Tabular default: fixed-width columns, no external table dep.
+    writeln!(out, "{:<28}  {:>7}  {:<32}  install-uri", "name", "stars", "repo")?;
+    writeln!(out, "{:-<28}  {:->7}  {:-<32}  {:-<40}", "", "", "", "")?;
+    for h in &hits {
+        writeln!(
+            out,
+            "{:<28}  {:>7}  {:<32}  {}",
+            h.name, h.stars, h.repo, h.install_uri
+        )?;
+    }
+    writeln!(out, "# {} result(s) for `{}`", hits.len(), args.query.trim())?;
     Ok(())
 }
 
