@@ -23,6 +23,7 @@ use std::collections::BTreeMap;
 use ainb_cli::discovery::{
     class_a,
     class_c,
+    provenance::{parse_external_dependencies, parse_installed_plugins, ProvenanceSources},
     reconcile::{self, WalkerOutput},
 };
 use ainb_skill_core::drift::DriftStatus;
@@ -673,6 +674,45 @@ pub fn run_discovery_walkers(claude_home: &Path) -> WalkerOutput {
     }
 }
 
+/// Load the three parsed source manifests the provenance matcher
+/// needs, so the `[Enter] import all` path can attribute each orphan
+/// to its real source (external clones resolve to `gh:`, not
+/// `local:`). Best-effort: a missing / malformed file degrades to an
+/// empty view, which makes the import fall back to the legacy
+/// (byte-identical) reconcile.
+///
+/// Lookups (all rooted at `$HOME`, matching how the discovery
+/// walkers resolve `claude_home` in `app::events`):
+/// - `installed_plugins.json` at `$HOME/.claude/plugins/`.
+/// - `external-dependencies.yaml` at `$HOME` (the bootstrap writes it
+///   there; the sandbox fixture seeds it at the sandbox root).
+/// - already-adopted units from `<ainb_home>/manifest.yaml`.
+fn load_provenance_sources(ainb_home: &Path) -> ProvenanceSources {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+
+    let installed_plugins_json = home
+        .as_ref()
+        .map(|h| h.join(".claude").join("plugins").join("installed_plugins.json"))
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .unwrap_or_default();
+
+    let ext_yaml = home
+        .as_ref()
+        .map(|h| h.join("external-dependencies.yaml"))
+        .filter(|p| p.is_file())
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .unwrap_or_default();
+
+    let manifest = Manifest::load_from(&manifest_path_in(ainb_home)).unwrap_or_default();
+
+    ProvenanceSources {
+        installed_plugins: parse_installed_plugins(&installed_plugins_json),
+        external_deps: parse_external_dependencies(&ext_yaml),
+        manifest_units: manifest.units,
+        toolkit_bundled: Vec::new(),
+    }
+}
+
 /// Flip `data.banner` to `Visible` when:
 /// - the manifest under `ainb_home` is empty AND
 /// - the user has not already pressed `[s]` in a prior open
@@ -786,7 +826,14 @@ pub fn apply_discovery_import(
         data.banner = DiscoveryBannerState::Hidden;
         return Ok(());
     };
-    let patch = reconcile::reconcile(&walker);
+    // Provenance-aware reconcile: an orphan that name-matches an
+    // `agent-skills[]` entry in `external-dependencies.yaml` is
+    // imported as its `gh:` upstream, not a bare `local:` orphan, so
+    // the Units source column reflects its real source. With no
+    // provenance data this is byte-identical to the legacy reconcile
+    // (v1.2 round-trip unaffected).
+    let sources = load_provenance_sources(ainb_home);
+    let patch = reconcile::reconcile_with_sources(&walker, &sources);
 
     let manifest_path = ainb_home.join("manifest.yaml");
     let mut manifest = Manifest::load_from(&manifest_path).unwrap_or_default();
