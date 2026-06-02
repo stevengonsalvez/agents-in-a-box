@@ -254,6 +254,7 @@ pub enum AppEvent {
     ConfigPopupInputChar(char), // Input character in text/number input
     ConfigPopupBackspace,       // Backspace in text/number input
     ConfigPopupPaste(String),   // Insert clipboard text at cursor (bracketed paste)
+    ConfigPopupPasteClipboard,  // Read OS clipboard and insert (Ctrl+V; no bracketed paste needed)
     ConfigPopupDelete,          // Forward-delete char under cursor (Delete)
     ConfigPopupCursorLeft,      // Move cursor left in text input
     ConfigPopupCursorRight,     // Move cursor right in text input
@@ -2114,8 +2115,21 @@ impl EventHandler {
                 // Text/Number input mode. Cursor-movement keys are no-ops on
                 // NumberInput (handled at the state layer) but let the text
                 // field behave like a normal editable line: arrows to move,
-                // Delete to forward-delete, paste handled via Event::Paste.
+                // Delete to forward-delete.
+                //
+                // Two paste routes: Cmd+V arrives as a bracketed-paste
+                // `Event::Paste` (handled in the main loop) when the terminal
+                // delivers it; Ctrl+V is a real keystroke we always receive, so
+                // it reads the OS clipboard directly via arboard. The second
+                // route works even when bracketed paste isn't passed through
+                // (e.g. some tmux / mouse-capture setups), which is why the
+                // Cmd+V-only path appeared to "do nothing".
                 match key_event.code {
+                    KeyCode::Char('v' | 'V')
+                        if key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        Some(AppEvent::ConfigPopupPasteClipboard)
+                    }
                     KeyCode::Esc => Some(AppEvent::ConfigPopupCancel),
                     KeyCode::Enter => Some(AppEvent::ConfigPopupConfirm),
                     KeyCode::Backspace => Some(AppEvent::ConfigPopupBackspace),
@@ -4149,6 +4163,17 @@ impl EventHandler {
             AppEvent::ConfigPopupPaste(text) => {
                 state.config_popup_state.insert_str(&text);
             }
+            AppEvent::ConfigPopupPasteClipboard => {
+                // Ctrl+V: read the OS clipboard directly (works regardless of
+                // whether the terminal delivers bracketed-paste events).
+                match Self::get_clipboard_text() {
+                    Ok(text) => state.config_popup_state.insert_str(&text),
+                    Err(e) => {
+                        tracing::warn!("Clipboard paste failed: {}", e);
+                        state.add_error_notification(format!("Could not read clipboard: {}", e));
+                    }
+                }
+            }
             AppEvent::ConfigPopupDelete => {
                 state.config_popup_state.delete_forward();
             }
@@ -5053,6 +5078,32 @@ mod text_input_guard_tests {
         let evt = EventHandler::handle_key_event(char_key('H'), &mut state)
             .expect("Shift+H in Config navigation must dispatch ToggleHelp");
         assert!(matches!(evt, AppEvent::ToggleHelp));
+    }
+
+    /// Ctrl+V in a Config text popup must route to the direct-clipboard
+    /// paste (arboard), not type a literal `v`. This is the reliable paste
+    /// path that does not depend on the terminal delivering bracketed
+    /// `Event::Paste` — the reason Cmd+V "did nothing" in some setups.
+    #[test]
+    fn ctrl_v_in_config_text_popup_routes_to_clipboard_paste() {
+        let mut state = AppState::default();
+        state.current_screen = screen_ids::CONFIG.to_string();
+        state.config_popup_state.open_text(
+            "Default Workspace",
+            "Default directory for new sessions",
+            "default_workspace",
+            "/Users/me/git",
+        );
+
+        let ctrl_v = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL);
+        let evt = EventHandler::handle_key_event(ctrl_v, &mut state)
+            .expect("Ctrl+V in a text popup must dispatch a paste event");
+        assert!(matches!(evt, AppEvent::ConfigPopupPasteClipboard));
+
+        // A bare `v` (no modifier) must still type normally.
+        let evt = EventHandler::handle_key_event(char_key('v'), &mut state)
+            .expect("plain 'v' must dispatch a char input");
+        assert!(matches!(evt, AppEvent::ConfigPopupInputChar('v')));
     }
 
     /// Esc inside a text input while help is visible must close help,

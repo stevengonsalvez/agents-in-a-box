@@ -557,7 +557,12 @@ impl ConfigPopupComponent {
                 vec![("↑↓", "select"), ("Enter", "confirm"), ("Esc", "cancel")]
             }
             ConfigPopupType::TextInput { .. } => {
-                vec![("←→", "move"), ("Enter", "save"), ("Esc", "cancel")]
+                vec![
+                    ("←→", "move"),
+                    ("^V", "paste"),
+                    ("Enter", "save"),
+                    ("Esc", "cancel"),
+                ]
             }
             ConfigPopupType::NumberInput { .. } => {
                 vec![("Enter", "save"), ("Esc", "cancel")]
