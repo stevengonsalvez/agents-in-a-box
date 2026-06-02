@@ -178,28 +178,20 @@ fn tool_home_relative_path(tool: &str, subdir: &str, name: &str) -> String {
 
 /// Stable tool → home-dotdir mapping. Matches `real_home_for` in
 /// `ainb-adapters-tool` so the canonical relative path lines up with the
-/// real on-disk layout.
-fn tool_dotdir(tool: &str) -> &'static str {
+/// real on-disk layout. Unknown tools fall back to a dotted name
+/// (`.{tool}`) so the path stays informative without a hard failure.
+fn tool_dotdir(tool: &str) -> String {
     match tool {
-        "claude" => ".claude",
-        "codex" => ".codex",
-        "copilot" => ".copilot",
-        "gemini" => ".gemini",
-        "cursor" => ".cursor",
-        "amazonq" => ".aws/amazonq",
-        "cline" => ".cline",
-        "roo" => ".roo",
-        // Unknown tools fall back to a dotted name; keeps the path
-        // informative without a hard failure.
-        _ => leak_dotted(tool),
+        "claude" => ".claude".to_string(),
+        "codex" => ".codex".to_string(),
+        "copilot" => ".copilot".to_string(),
+        "gemini" => ".gemini".to_string(),
+        "cursor" => ".cursor".to_string(),
+        "amazonq" => ".aws/amazonq".to_string(),
+        "cline" => ".cline".to_string(),
+        "roo" => ".roo".to_string(),
+        other => format!(".{other}"),
     }
-}
-
-/// Leak a `".{tool}"` string for the unknown-tool fallback so the return
-/// type stays `&'static str`. Only hit for tools outside the known set,
-/// so the (tiny, bounded-by-tool-name-variety) leak is acceptable.
-fn leak_dotted(tool: &str) -> &'static str {
-    Box::leak(format!(".{tool}").into_boxed_str())
 }
 
 fn canonical_or_self(p: &Path) -> PathBuf {
