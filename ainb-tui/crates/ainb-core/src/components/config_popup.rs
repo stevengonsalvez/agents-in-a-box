@@ -189,11 +189,35 @@ impl ConfigPopupState {
                 cursor_position,
             } => {
                 value.insert(*cursor_position, c);
-                *cursor_position += 1;
+                *cursor_position += c.len_utf8();
             }
             ConfigPopupType::NumberInput { input_buffer, .. } => {
                 if c.is_ascii_digit() || (c == '-' && input_buffer.is_empty()) {
                     input_buffer.push(c);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Insert a string at the cursor (paste). Newlines and other control
+    /// characters are stripped because these popups are single-line fields —
+    /// a pasted path with a trailing `\n` should not break the layout.
+    pub fn insert_str(&mut self, s: &str) {
+        match &mut self.popup_type {
+            ConfigPopupType::TextInput {
+                value,
+                cursor_position,
+            } => {
+                let cleaned: String = s.chars().filter(|c| !c.is_control()).collect();
+                value.insert_str(*cursor_position, &cleaned);
+                *cursor_position += cleaned.len();
+            }
+            ConfigPopupType::NumberInput { input_buffer, .. } => {
+                for c in s.chars() {
+                    if c.is_ascii_digit() || (c == '-' && input_buffer.is_empty()) {
+                        input_buffer.push(c);
+                    }
                 }
             }
             _ => {}
@@ -208,14 +232,88 @@ impl ConfigPopupState {
                 cursor_position,
             } => {
                 if *cursor_position > 0 {
-                    *cursor_position -= 1;
-                    value.remove(*cursor_position);
+                    // Step back to the previous char boundary so multibyte
+                    // characters are removed whole.
+                    let mut new_pos = *cursor_position - 1;
+                    while new_pos > 0 && !value.is_char_boundary(new_pos) {
+                        new_pos -= 1;
+                    }
+                    value.remove(new_pos);
+                    *cursor_position = new_pos;
                 }
             }
             ConfigPopupType::NumberInput { input_buffer, .. } => {
                 input_buffer.pop();
             }
             _ => {}
+        }
+    }
+
+    /// Forward-delete the character under the cursor (Delete key).
+    pub fn delete_forward(&mut self) {
+        if let ConfigPopupType::TextInput {
+            value,
+            cursor_position,
+        } = &mut self.popup_type
+        {
+            if *cursor_position < value.len() {
+                value.remove(*cursor_position);
+            }
+        }
+    }
+
+    /// Move the cursor one character left (text input only).
+    pub fn cursor_left(&mut self) {
+        if let ConfigPopupType::TextInput {
+            value,
+            cursor_position,
+        } = &mut self.popup_type
+        {
+            if *cursor_position > 0 {
+                let mut new_pos = *cursor_position - 1;
+                while new_pos > 0 && !value.is_char_boundary(new_pos) {
+                    new_pos -= 1;
+                }
+                *cursor_position = new_pos;
+            }
+        }
+    }
+
+    /// Move the cursor one character right (text input only).
+    pub fn cursor_right(&mut self) {
+        if let ConfigPopupType::TextInput {
+            value,
+            cursor_position,
+        } = &mut self.popup_type
+        {
+            if *cursor_position < value.len() {
+                let mut new_pos = *cursor_position + 1;
+                while new_pos < value.len() && !value.is_char_boundary(new_pos) {
+                    new_pos += 1;
+                }
+                *cursor_position = new_pos;
+            }
+        }
+    }
+
+    /// Move the cursor to the start of the field (Home).
+    pub fn cursor_home(&mut self) {
+        if let ConfigPopupType::TextInput {
+            cursor_position, ..
+        } = &mut self.popup_type
+        {
+            *cursor_position = 0;
+        }
+    }
+
+    /// Move the cursor to the end of the field (End).
+    pub fn cursor_end(&mut self) {
+        if let ConfigPopupType::TextInput {
+            value,
+            cursor_position,
+        } = &mut self.popup_type
+        {
+            *cursor_position = value.len();
         }
     }
 
@@ -458,7 +556,10 @@ impl ConfigPopupComponent {
             ConfigPopupType::Choice { .. } | ConfigPopupType::Boolean { .. } => {
                 vec![("↑↓", "select"), ("Enter", "confirm"), ("Esc", "cancel")]
             }
-            ConfigPopupType::TextInput { .. } | ConfigPopupType::NumberInput { .. } => {
+            ConfigPopupType::TextInput { .. } => {
+                vec![("←→", "move"), ("Enter", "save"), ("Esc", "cancel")]
+            }
+            ConfigPopupType::NumberInput { .. } => {
                 vec![("Enter", "save"), ("Esc", "cancel")]
             }
         };
@@ -486,5 +587,124 @@ impl ConfigPopupComponent {
 impl Default for ConfigPopupComponent {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text_value(state: &ConfigPopupState) -> (&str, usize) {
+        match &state.popup_type {
+            ConfigPopupType::TextInput {
+                value,
+                cursor_position,
+            } => (value.as_str(), *cursor_position),
+            other => panic!("expected TextInput, got {other:?}"),
+        }
+    }
+
+    fn open_path() -> ConfigPopupState {
+        let mut s = ConfigPopupState::new();
+        s.open_text(
+            "Default Workspace",
+            "dir",
+            "default_workspace",
+            "/Users/me/git",
+        );
+        s
+    }
+
+    #[test]
+    fn open_text_places_cursor_at_end() {
+        let s = open_path();
+        let (value, cursor) = text_value(&s);
+        assert_eq!(value, "/Users/me/git");
+        assert_eq!(cursor, value.len());
+    }
+
+    #[test]
+    fn paste_inserts_at_cursor() {
+        let mut s = open_path();
+        // Cursor is at end; paste appends.
+        s.insert_str("/extra");
+        let (value, cursor) = text_value(&s);
+        assert_eq!(value, "/Users/me/git/extra");
+        assert_eq!(cursor, value.len());
+    }
+
+    #[test]
+    fn paste_in_the_middle_after_cursor_move() {
+        let mut s = open_path();
+        s.cursor_home();
+        s.insert_str("~"); // user replaces leading segment manually later
+        let (value, cursor) = text_value(&s);
+        assert_eq!(value, "~/Users/me/git");
+        assert_eq!(cursor, 1);
+    }
+
+    #[test]
+    fn paste_strips_newlines_and_control_chars() {
+        let mut s = ConfigPopupState::new();
+        s.open_text("Default Workspace", "dir", "default_workspace", "");
+        s.insert_str("/Users/me/projects\n");
+        s.insert_str("\t/more");
+        let (value, _) = text_value(&s);
+        assert_eq!(value, "/Users/me/projects/more");
+    }
+
+    #[test]
+    fn cursor_left_right_home_end() {
+        let mut s = open_path();
+        let end = "/Users/me/git".len();
+        s.cursor_home();
+        assert_eq!(text_value(&s).1, 0);
+        s.cursor_right();
+        assert_eq!(text_value(&s).1, 1);
+        s.cursor_end();
+        assert_eq!(text_value(&s).1, end);
+        s.cursor_left();
+        assert_eq!(text_value(&s).1, end - 1);
+    }
+
+    #[test]
+    fn backspace_and_delete_at_cursor() {
+        let mut s = ConfigPopupState::new();
+        s.open_text("t", "d", "k", "abc");
+        s.cursor_home();
+        s.delete_forward(); // removes 'a'
+        assert_eq!(text_value(&s), ("bc", 0));
+        s.cursor_end();
+        s.backspace(); // removes 'c'
+        assert_eq!(text_value(&s), ("b", 1));
+    }
+
+    #[test]
+    fn editing_respects_multibyte_chars() {
+        let mut s = ConfigPopupState::new();
+        s.open_text("t", "d", "k", "");
+        s.input_char('é'); // 2 bytes
+        s.input_char('x');
+        let (value, cursor) = text_value(&s);
+        assert_eq!(value, "éx");
+        assert_eq!(cursor, value.len());
+        s.cursor_home();
+        s.cursor_right(); // should land after 'é', not mid-codepoint
+        assert_eq!(text_value(&s).1, "é".len());
+        s.backspace(); // removes whole 'é'
+        assert_eq!(text_value(&s), ("x", 0));
+    }
+
+    #[test]
+    fn number_input_paste_keeps_only_digits() {
+        let mut s = ConfigPopupState::new();
+        s.open_number("Max", "d", "max_repositories", 500);
+        s.insert_str("12ab3");
+        match &s.popup_type {
+            ConfigPopupType::NumberInput { input_buffer, .. } => {
+                assert_eq!(input_buffer, "500123");
+            }
+            other => panic!("expected NumberInput, got {other:?}"),
+        }
     }
 }
