@@ -47,5 +47,5 @@ pub use uri::{MarketplaceUri, SourceType, Uri};
 pub mod fixtures;
 #[cfg(feature = "test-fixtures")]
 pub use fixtures::{
-    build_skill_manager_sandbox, SandboxLayout, SandboxTier, SANDBOX_MARKER_FILE,
+    build_skill_manager_sandbox, SandboxLayout, SandboxTier, OWN_SKILL_NAME, SANDBOX_MARKER_FILE,
 };

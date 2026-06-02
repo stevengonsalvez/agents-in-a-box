@@ -394,8 +394,37 @@ fn seed_full(layout: &SandboxLayout) -> std::io::Result<()> {
         EXTERNAL_DEPENDENCIES_YAML,
     )?;
 
+    // Own-skill library (bead ai-lgk): a hand-authored skill on disk
+    // under the claude home, registered in `library.yaml` so the
+    // SkillManager's `[l]` Library view has a row to render. The skill
+    // folder + a matching `library.yaml` entry together are the
+    // tripwire's seed.
+    seed_dir_skill(
+        &layout.claude_home,
+        OWN_SKILL_NAME,
+        "Hand-authored own-skill seeded by the sandbox fixture — the \
+         Library view ([l]) renders this row.",
+    )?;
+    fs::write(
+        layout.ainb_home.join("library.yaml"),
+        format!(
+            "schema_version: 1\nowned:\n  \
+             - name: {name}\n    \
+             kind: skill\n    \
+             path: .claude/skills/{name}\n    \
+             created: \"2026-06-02T00:00:00+00:00\"\n",
+            name = OWN_SKILL_NAME,
+        ),
+    )?;
+
     Ok(())
 }
+
+/// Name of the own-skill the Full tier seeds into `library.yaml`. The
+/// `[l]` Library-view tripwire asserts this row renders. Distinct from
+/// every Minimal/Full marketplace + orphan name so substring checks on
+/// the captured pane are unambiguous.
+pub const OWN_SKILL_NAME: &str = "my-own-skill";
 
 /// Path under `<root>` for each tool, matching what
 /// `read_root_for()` falls back to when no env override is set.
