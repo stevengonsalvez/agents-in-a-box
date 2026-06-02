@@ -203,6 +203,140 @@ pub fn reconcile(walker_out: &WalkerOutput) -> ManifestPatch {
     ManifestPatch { new_sources, new_units }
 }
 
+/// Provenance-aware reconcile (skill-manager v1.3, bead `ai-ya9`).
+///
+/// Runs the legacy [`reconcile`] to build the base patch, then —
+/// **only when `sources` carries provenance data** — rewrites any
+/// `local:` orphan unit whose [`provenance::attribute`] resolves to
+/// [`provenance::Provenance::ExternalRepo`] so it is tracked as its
+/// `gh:` upstream rather than a local orphan.
+///
+/// ## v1.2 byte-stability guarantee
+///
+/// With an empty [`provenance::ProvenanceSources`] (the v1.2 caller
+/// shape — no `external-dependencies.yaml`, no `installed_plugins.json`,
+/// no manifest units) this function is **byte-identical** to
+/// [`reconcile`]: `attribute()` returns no `ExternalRepo` matches, so
+/// the post-process is a no-op. v1.2 lockfiles therefore round-trip
+/// unchanged — the provenance gate is the only behavioural fork.
+///
+/// Pure / total / deterministic, same as [`reconcile`].
+pub fn reconcile_with_sources(
+    walker_out: &WalkerOutput,
+    sources: &super::provenance::ProvenanceSources,
+) -> ManifestPatch {
+    let mut patch = reconcile(walker_out);
+
+    // Attribute the class-C orphans; we only act on ExternalRepo.
+    let attributed = super::provenance::attribute(&[], &walker_out.class_c, sources);
+    let external: HashMap<&str, &super::provenance::AttributedUnit> = attributed
+        .iter()
+        .filter(|u| matches!(u.provenance, super::provenance::Provenance::ExternalRepo { .. }))
+        .map(|u| (u.name.as_str(), u))
+        .collect();
+
+    if external.is_empty() {
+        // Fast path = v1.2 byte-stable. No rewriting whatsoever.
+        return patch;
+    }
+
+    rewrite_external_local_units(&mut patch, &external);
+    patch
+}
+
+/// Rewrite `local:` orphan units in `patch` whose name resolves to an
+/// `ExternalRepo` provenance into `gh:<repo-without-scheme>@<ref>/<path>`
+/// URIs, dropping any now-orphaned `local:` source and adding the
+/// matching `gh:` source. Mirrors the URI shape produced by
+/// [`crate::migrate::apply_legacy_yaml_match`] so the two import paths
+/// stay consistent.
+fn rewrite_external_local_units(
+    patch: &mut ManifestPatch,
+    external: &HashMap<&str, &super::provenance::AttributedUnit>,
+) {
+    use super::provenance::Provenance;
+
+    let mut new_gh_sources: Vec<SourceEntry> = Vec::new();
+    let mut gh_sources_seen: BTreeSet<String> = BTreeSet::new();
+    let mut local_source_uris_drained: BTreeSet<String> = BTreeSet::new();
+
+    let mut rewritten: Vec<UnitEntry> = Vec::with_capacity(patch.new_units.len());
+    for unit in patch.new_units.drain(..) {
+        if !unit.uri.starts_with("local:") {
+            rewritten.push(unit);
+            continue;
+        }
+        let Some(name) = unit.uri.rsplit('/').next() else {
+            rewritten.push(unit);
+            continue;
+        };
+        let Some(att) = external.get(name) else {
+            rewritten.push(unit);
+            continue;
+        };
+        let Provenance::ExternalRepo { repo, version, .. } = &att.provenance else {
+            rewritten.push(unit);
+            continue;
+        };
+
+        // Track the local source so we can drop it if now dangling.
+        if let Some((local_src_uri, _)) = unit.uri.split_once('@') {
+            local_source_uris_drained.insert(local_src_uri.to_string());
+        }
+
+        let repo_locator = repo_to_gh_locator(repo);
+        let git_ref = version.clone().unwrap_or_else(|| "main".to_string());
+        let new_uri = format!("gh:{repo_locator}@{git_ref}/skills/{name}");
+
+        let source_uri = format!("gh:{repo_locator}");
+        if gh_sources_seen.insert(source_uri.clone()) {
+            new_gh_sources.push(SourceEntry {
+                name: format!("gh-{}", repo_locator.replace('/', "-")),
+                kind: Some("gh".into()),
+                uri: source_uri,
+                r#ref: git_ref.clone(),
+                enabled: true,
+                read_only: false,
+                target_layout: Vec::new(),
+            });
+        }
+
+        rewritten.push(UnitEntry {
+            uri: new_uri,
+            targets: unit.targets,
+            shadowed_by: unit.shadowed_by,
+        });
+    }
+    patch.new_units = rewritten;
+
+    // Drop now-orphaned local: sources.
+    if !local_source_uris_drained.is_empty() {
+        let still_used: BTreeSet<String> = patch
+            .new_units
+            .iter()
+            .filter_map(|u| u.uri.split_once('@').map(|(src, _)| src.to_string()))
+            .collect();
+        patch
+            .new_sources
+            .retain(|s| !local_source_uris_drained.contains(&s.uri) || still_used.contains(&s.uri));
+    }
+
+    patch.new_sources.extend(new_gh_sources);
+}
+
+/// Reduce an `external-dependencies.yaml` `repo` value to the
+/// `owner/repo` locator a `gh:` URI expects, stripping a
+/// `https://github.com/` prefix and a trailing `.git` when present.
+/// A non-GitHub URL is passed through verbatim (still a valid `gh:`
+/// locator string, just not shortened).
+fn repo_to_gh_locator(repo: &str) -> String {
+    let trimmed = repo
+        .trim_start_matches("https://github.com/")
+        .trim_start_matches("http://github.com/")
+        .trim_start_matches("git@github.com:");
+    trimmed.trim_end_matches(".git").to_string()
+}
+
 /// Per-tool canonical home prefix used to build `local:` URIs.
 /// Returns `None` for unknown tools so callers skip emitting
 /// nonsense rather than guess.
