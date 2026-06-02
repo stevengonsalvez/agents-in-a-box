@@ -117,6 +117,100 @@ pub struct SkillsScreenData {
     /// `Some` while the Library overlay is open. Sourced from
     /// `library.yaml`, not the manifest units (bead ai-lgk).
     pub library: Option<LibraryViewState>,
+    /// Catalog browse modal (`[b]`). `None` in the steady state; `Some`
+    /// while the browse overlay is open. Holds the query buffer + the
+    /// ephemeral search results (NO SQLite — discarded on close). Sourced
+    /// from a `CatalogBackend`, not the manifest (bead ai-a20).
+    pub browse: Option<BrowseViewState>,
+}
+
+/// One catalog hit row in the browse modal, projected from a
+/// [`ainb_skill_core::CatalogHit`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowseRow {
+    pub name: String,
+    pub repo: String,
+    pub stars: u64,
+    /// Full unit URI to feed the install flow.
+    pub install_uri: String,
+    pub description: String,
+}
+
+/// Which phase the browse modal is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BrowseMode {
+    /// Typing the query — keystrokes go into the buffer; Enter searches.
+    #[default]
+    Query,
+    /// Browsing the result list — arrows select; Enter installs.
+    Results,
+}
+
+/// State of the `[b]` catalog browse overlay. Rendered on top of the
+/// Sources/Units/Detail panels. Results are ephemeral.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BrowseViewState {
+    pub mode: BrowseMode,
+    /// The query being typed (Query mode) or the query that produced the
+    /// current results (Results mode).
+    pub query: String,
+    pub results: Vec<BrowseRow>,
+    pub selected: usize,
+    /// Optional status line (e.g. an error or "no results") shown beneath
+    /// the input. `None` in the happy path.
+    pub status: Option<String>,
+}
+
+impl BrowseViewState {
+    /// A fresh modal in Query mode with an empty buffer.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Replace the result list (e.g. after a search) and switch to
+    /// Results mode, resetting the cursor to the top. Records a status
+    /// hint when the result set is empty.
+    pub fn set_results(&mut self, rows: Vec<BrowseRow>) {
+        self.status = if rows.is_empty() {
+            Some(format!("no results for `{}`", self.query.trim()))
+        } else {
+            None
+        };
+        self.results = rows;
+        self.selected = 0;
+        self.mode = BrowseMode::Results;
+    }
+
+    /// Record an error status and stay/return to Query mode so the user
+    /// can edit + retry.
+    pub fn set_error(&mut self, message: impl Into<String>) {
+        self.status = Some(message.into());
+        self.results.clear();
+        self.mode = BrowseMode::Query;
+    }
+
+    pub fn select_prev(&mut self) {
+        if self.results.is_empty() {
+            return;
+        }
+        self.selected = if self.selected == 0 {
+            self.results.len() - 1
+        } else {
+            self.selected - 1
+        };
+    }
+
+    pub fn select_next(&mut self) {
+        if self.results.is_empty() {
+            return;
+        }
+        self.selected = (self.selected + 1) % self.results.len();
+    }
+
+    /// The currently-selected result row, if any.
+    pub fn selected_row(&self) -> Option<&BrowseRow> {
+        self.results.get(self.selected)
+    }
 }
 
 /// One owned-skill row in the Library view, projected from a
@@ -312,6 +406,13 @@ pub fn render(frame: &mut Frame, area: Rect, data: &SkillsScreenData) {
         render_library_view(frame, area, library);
     }
 
+    // Catalog browse overlay (`[b]`, bead ai-a20) — drawn above the
+    // panels + banner. Never open at the same time as the Library
+    // overlay or the input prompt.
+    if let Some(browse) = &data.browse {
+        render_browse_view(frame, area, browse);
+    }
+
     // Input prompt overlay (add-source / search) — drawn on top of
     // everything, including the banner, since it's the active modal.
     if let Some(input) = &data.input {
@@ -408,6 +509,116 @@ fn render_library_view(frame: &mut Frame, area: Rect, library: &LibraryViewState
         key_span("Esc"),
         Span::styled(" close", Style::default().fg(MUTED_GRAY)),
     ]));
+
+    frame.render_widget(Clear, rect);
+    let para = Paragraph::new(lines).block(block);
+    frame.render_widget(para, rect);
+}
+
+/// Render the catalog browse overlay (`[b]`, bead ai-a20). A centered
+/// modal with a query input line on top and the ranked result list
+/// below. In Query mode the input is the active focus (type → Enter
+/// searches); in Results mode the list is focused (arrows → Enter
+/// installs the selected hit).
+fn render_browse_view(frame: &mut Frame, area: Rect, browse: &BrowseViewState) {
+    let width = area.width.saturating_sub(6).clamp(50, 110);
+    let list_lines = (browse.results.len() as u16).max(1);
+    let height = (list_lines + 8)
+        .min(area.height.saturating_sub(2))
+        .max(10);
+    let rect = centered_rect(area, width, height);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(GOLD))
+        .title(Span::styled(
+            " Browse Catalog (skills.sh) ",
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ));
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    // ── Query input line. A caret marks Query mode.
+    let caret = if browse.mode == BrowseMode::Query { "_" } else { "" };
+    lines.push(Line::from(vec![
+        Span::styled(" Query: ", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!("{}{caret}", browse.query),
+            Style::default().fg(SOFT_WHITE),
+        ),
+    ]));
+
+    // ── Status / hint line.
+    if let Some(status) = &browse.status {
+        lines.push(Line::from(Span::styled(
+            format!("  {status}"),
+            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::BOLD),
+        )));
+    }
+    lines.push(Line::from(""));
+
+    // ── Results list.
+    if browse.results.is_empty() {
+        let hint = if browse.mode == BrowseMode::Query {
+            "  Type a query and press Enter to search."
+        } else {
+            "  No results."
+        };
+        lines.push(Line::from(Span::styled(
+            hint,
+            Style::default().fg(MUTED_GRAY),
+        )));
+    } else {
+        lines.push(Line::from(vec![Span::styled(
+            format!(" {:<26} {:>7}  {:<28} {}", "name", "stars", "repo", "install-uri"),
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        )]));
+        for (i, row) in browse.results.iter().enumerate() {
+            let selected = browse.mode == BrowseMode::Results && i == browse.selected;
+            let marker = if selected { "▶ " } else { "  " };
+            let style = if selected {
+                Style::default()
+                    .bg(LIST_HIGHLIGHT_BG)
+                    .fg(SELECTION_GREEN)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(SOFT_WHITE)
+            };
+            lines.push(Line::from(vec![Span::styled(
+                format!(
+                    "{marker}{:<26} {:>7}  {:<28} {}",
+                    row.name, row.stars, row.repo, row.install_uri
+                ),
+                style,
+            )]));
+        }
+    }
+
+    // ── Help footer — phase-aware.
+    lines.push(Line::from(""));
+    let footer = if browse.mode == BrowseMode::Query {
+        vec![
+            Span::raw(" "),
+            key_span("Enter"),
+            Span::styled(" search  ", Style::default().fg(MUTED_GRAY)),
+            key_span("Esc"),
+            Span::styled(" close", Style::default().fg(MUTED_GRAY)),
+        ]
+    } else {
+        vec![
+            Span::raw(" "),
+            key_span("↑↓"),
+            Span::styled(" select  ", Style::default().fg(MUTED_GRAY)),
+            key_span("Enter"),
+            Span::styled(" install  ", Style::default().fg(MUTED_GRAY)),
+            key_span("/"),
+            Span::styled(" new search  ", Style::default().fg(MUTED_GRAY)),
+            key_span("Esc"),
+            Span::styled(" close", Style::default().fg(MUTED_GRAY)),
+        ]
+    };
+    lines.push(Line::from(footer));
 
     frame.render_widget(Clear, rect);
     let para = Paragraph::new(lines).block(block);
@@ -675,6 +886,8 @@ fn render_help_bar(frame: &mut Frame, area: Rect) {
         Span::styled("emove  ", Style::default().fg(MUTED_GRAY)),
         key_span("s"),
         Span::styled("ync  ", Style::default().fg(MUTED_GRAY)),
+        key_span("b"),
+        Span::styled("rowse  ", Style::default().fg(MUTED_GRAY)),
         key_span("l"),
         Span::styled("ibrary  ", Style::default().fg(MUTED_GRAY)),
         key_span("/"),

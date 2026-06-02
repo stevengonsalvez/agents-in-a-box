@@ -264,6 +264,27 @@ pub enum AppEvent {
     SkillManagerLibraryEnter,
     /// Esc/q — close the Library view, returning to the Units screen.
     SkillManagerLibraryClose,
+    /// `[b]` — open the catalog browse modal (bead ai-a20). Starts in
+    /// Query mode; type a query then Enter to search via a
+    /// `CatalogBackend` (mock under `AINB_CATALOG_MOCK=1`).
+    SkillManagerOpenBrowse,
+    /// A character typed into the browse query buffer (Query mode).
+    SkillManagerBrowseInputChar(char),
+    /// Backspace in the browse query buffer (Query mode).
+    SkillManagerBrowseInputBackspace,
+    /// Enter in Query mode — run the catalog search.
+    SkillManagerBrowseSearch,
+    /// Move the browse result selection up (Results mode).
+    SkillManagerBrowseSelectPrev,
+    /// Move the browse result selection down (Results mode).
+    SkillManagerBrowseSelectNext,
+    /// Enter on a selected result (Results mode) — install it through the
+    /// existing install flow (add source + skill install).
+    SkillManagerBrowseInstall,
+    /// `/` in Results mode — return to Query mode to refine the search.
+    SkillManagerBrowseEditQuery,
+    /// Esc — close the browse modal, discarding the ephemeral results.
+    SkillManagerBrowseClose,
     GoToRecovery,            // Navigate to session recovery view
     GoToInbox,               // Navigate to ainb-hooks notification inbox
     InboxMoveUp,             // Inbox: move selection up one row
@@ -813,7 +834,10 @@ impl EventHandler {
         // keystrokes — exactly the bug that made `[i] add source`
         // appear broken.
         let skill_manager_input_active = state.current_screen == screen_ids::SKILL_MANAGER
-            && state.skill_manager_state.input.is_some();
+            && (state.skill_manager_state.input.is_some()
+                || state.skill_manager_state.browse.as_ref().is_some_and(|b| {
+                    b.mode == crate::components::skill_manager_screen::BrowseMode::Query
+                }));
         let git_view_text_active = state.current_screen == screen_ids::GIT_VIEW
             && state.git_view_state.as_ref().map(|gv| gv.is_in_commit_mode()).unwrap_or(false);
 
@@ -1172,6 +1196,40 @@ impl EventHandler {
                 };
             }
 
+            // Catalog browse overlay (`[b]`, bead ai-a20): two phases.
+            //   * Query mode — every char goes into the query buffer
+            //     (so `/`, `:`, spaces all reach it); Enter searches.
+            //   * Results mode — arrows select; Enter installs the
+            //     selected hit; `/` returns to Query mode to refine.
+            // Esc closes from either mode. Intercepts before the banner
+            // + normal keymap, just like the Library overlay.
+            if let Some(browse) = &state.skill_manager_state.browse {
+                use crate::components::skill_manager_screen::BrowseMode;
+                return match browse.mode {
+                    BrowseMode::Query => match key_event.code {
+                        KeyCode::Enter => Some(AppEvent::SkillManagerBrowseSearch),
+                        KeyCode::Esc => Some(AppEvent::SkillManagerBrowseClose),
+                        KeyCode::Backspace => Some(AppEvent::SkillManagerBrowseInputBackspace),
+                        KeyCode::Char(c) => Some(AppEvent::SkillManagerBrowseInputChar(c)),
+                        _ => None,
+                    },
+                    BrowseMode::Results => match key_event.code {
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            Some(AppEvent::SkillManagerBrowseSelectPrev)
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            Some(AppEvent::SkillManagerBrowseSelectNext)
+                        }
+                        KeyCode::Enter => Some(AppEvent::SkillManagerBrowseInstall),
+                        KeyCode::Char('/') => Some(AppEvent::SkillManagerBrowseEditQuery),
+                        KeyCode::Esc | KeyCode::Char('q') => {
+                            Some(AppEvent::SkillManagerBrowseClose)
+                        }
+                        _ => None,
+                    },
+                };
+            }
+
             // Own-skill Library overlay (`[l]`, bead ai-lgk): when
             // open, arrows / j-k move the selection, Enter expands the
             // selected row's Detail band, and Esc/q closes the overlay
@@ -1232,6 +1290,7 @@ impl EventHandler {
                 KeyCode::Char('u') => Some(AppEvent::SkillManagerUpdate),
                 KeyCode::Char('c') => Some(AppEvent::SkillManagerCheck),
                 KeyCode::Char('r') => Some(AppEvent::SkillManagerRemove),
+                KeyCode::Char('b') => Some(AppEvent::SkillManagerOpenBrowse),
                 KeyCode::Char('l') => Some(AppEvent::SkillManagerOpenLibrary),
                 KeyCode::Char('/') => Some(AppEvent::SkillManagerOpenSearch),
                 // `[m]` re-runs discovery (the empty-state hint
@@ -4004,6 +4063,101 @@ impl EventHandler {
             AppEvent::SkillManagerLibraryClose => {
                 state.skill_manager_state.library = None;
             }
+            AppEvent::SkillManagerOpenBrowse => {
+                // `[b]` — open the catalog browse modal in Query mode.
+                tracing::info!("SkillManager: open catalog browse (b)");
+                state.skill_manager_state.browse = Some(
+                    crate::components::skill_manager_screen::BrowseViewState::new(),
+                );
+            }
+            AppEvent::SkillManagerBrowseInputChar(c) => {
+                if let Some(b) = state.skill_manager_state.browse.as_mut() {
+                    b.query.push(c);
+                    b.status = None;
+                }
+            }
+            AppEvent::SkillManagerBrowseInputBackspace => {
+                if let Some(b) = state.skill_manager_state.browse.as_mut() {
+                    b.query.pop();
+                    b.status = None;
+                }
+            }
+            AppEvent::SkillManagerBrowseSearch => {
+                // Enter in Query mode — run the catalog search via the
+                // production backend (mock under AINB_CATALOG_MOCK=1, so
+                // the live tmux tripwire stays offline).
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                let query = state
+                    .skill_manager_state
+                    .browse
+                    .as_ref()
+                    .map(|b| b.query.clone())
+                    .unwrap_or_default();
+                if query.trim().is_empty() {
+                    if let Some(b) = state.skill_manager_state.browse.as_mut() {
+                        b.set_error("type a query to search the catalog");
+                    }
+                } else {
+                    let result = run_catalog_search(&ainb_home, query.trim());
+                    if let Some(b) = state.skill_manager_state.browse.as_mut() {
+                        match result {
+                            Ok(rows) => b.set_results(rows),
+                            Err(msg) => b.set_error(msg),
+                        }
+                    }
+                }
+            }
+            AppEvent::SkillManagerBrowseSelectPrev => {
+                if let Some(b) = state.skill_manager_state.browse.as_mut() {
+                    b.select_prev();
+                }
+            }
+            AppEvent::SkillManagerBrowseSelectNext => {
+                if let Some(b) = state.skill_manager_state.browse.as_mut() {
+                    b.select_next();
+                }
+            }
+            AppEvent::SkillManagerBrowseEditQuery => {
+                // `/` in Results mode — back to Query mode to refine.
+                if let Some(b) = state.skill_manager_state.browse.as_mut() {
+                    b.mode = crate::components::skill_manager_screen::BrowseMode::Query;
+                    b.status = None;
+                }
+            }
+            AppEvent::SkillManagerBrowseInstall => {
+                // Enter on a selected result — route the hit's install_uri
+                // through the existing install flow (add source + skill
+                // install), exactly like the CLI does.
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                let install_uri = state
+                    .skill_manager_state
+                    .browse
+                    .as_ref()
+                    .and_then(|b| b.selected_row().map(|r| r.install_uri.clone()));
+                match install_uri {
+                    None => {
+                        state.add_warning_notification(
+                            "browse: no result selected".to_string(),
+                        );
+                    }
+                    Some(uri) => {
+                        let (ok, msg) = install_catalog_hit(&ainb_home, &uri);
+                        state.skill_manager_state.reload_from_disk(&ainb_home);
+                        if ok {
+                            // Close the modal on a successful install so
+                            // the user lands back on the (now-updated)
+                            // Units table.
+                            state.skill_manager_state.browse = None;
+                            state.add_success_notification(format!("installed: {msg}"));
+                        } else {
+                            state.add_error_notification(format!("install failed: {msg}"));
+                        }
+                    }
+                }
+            }
+            AppEvent::SkillManagerBrowseClose => {
+                state.skill_manager_state.browse = None;
+            }
             AppEvent::GoToInbox => {
                 tracing::info!("Navigating to Inbox");
                 state.previous_screen = Some(state.current_screen.clone());
@@ -5379,6 +5533,70 @@ fn run_skill_cli(ainb_home: &std::path::Path, cmd: ainb_cli::SkillCommand) -> (b
         Ok(()) => (true, last_meaningful_line(&buf)),
         Err(e) => (false, format!("{e}")),
     }
+}
+
+/// Run a catalog search via the production [`SkillsShHttpBackend`]
+/// (mock under `AINB_CATALOG_MOCK=1`) and project the hits into the
+/// TUI's `BrowseRow` view-model. Returns `Err(msg)` on a backend error
+/// so the modal can surface it without panicking. Bead ai-a20.
+fn run_catalog_search(
+    ainb_home: &std::path::Path,
+    query: &str,
+) -> Result<Vec<crate::components::skill_manager_screen::BrowseRow>, String> {
+    use ainb_skill_core::catalog::CatalogBackend;
+    let backend = ainb_cli::catalog_http::SkillsShHttpBackend::from_env(ainb_home);
+    let hits = backend.search(query).map_err(|e| e.to_string())?;
+    Ok(hits
+        .into_iter()
+        .map(|h| crate::components::skill_manager_screen::BrowseRow {
+            name: h.name,
+            repo: h.repo,
+            stars: h.stars,
+            install_uri: h.install_uri,
+            description: h.description,
+        })
+        .collect())
+}
+
+/// Install a catalog hit by its unit URI, routing through the existing
+/// install flow: derive the source URI from the unit URI, `ainb source
+/// add` it (idempotent — "already exists" is not a failure), then `ainb
+/// skill install <uri> --yes`. Returns `(ok, last_line)`. Bead ai-a20.
+fn install_catalog_hit(ainb_home: &std::path::Path, install_uri: &str) -> (bool, String) {
+    use ainb_skill_core::Uri;
+    let Ok(uri) = Uri::parse(install_uri) else {
+        return (false, format!("invalid install URI `{install_uri}`"));
+    };
+    if !uri.is_unit() {
+        return (false, format!("`{install_uri}` is not a unit URI"));
+    }
+    // Source URI = `<type>:<locator>[@<ref>]` with NO `/path`.
+    let mut source_uri = format!("{}:{}", uri.source_type, uri.locator);
+    if let Some(r) = &uri.ref_ {
+        source_uri.push('@');
+        source_uri.push_str(r);
+    }
+
+    // 1. Add the source. "already exists" is fine — the source may have
+    //    been added by a previous browse / `source add`.
+    let add_cmd = ainb_cli::SourceCommand::Add(ainb_cli::AddArgs {
+        uri: source_uri.clone(),
+        name: None,
+        kind: None,
+    });
+    let (add_ok, add_msg) = run_source_cli(ainb_home, add_cmd);
+    if !add_ok && !add_msg.contains("already exists") {
+        return (false, format!("add source `{source_uri}`: {add_msg}"));
+    }
+
+    // 2. Install the unit (non-interactive).
+    let install_cmd = ainb_cli::SkillCommand::Install(ainb_cli::InstallArgs {
+        uri: install_uri.to_string(),
+        targets: None,
+        dry_run: false,
+        yes: true,
+    });
+    run_skill_cli(ainb_home, install_cmd)
 }
 
 /// Remove the unit whose `declared_uri` matches `uri` from the manifest
