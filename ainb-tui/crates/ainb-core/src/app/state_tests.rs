@@ -590,4 +590,119 @@ mod tests {
             "invalidation must drop the cached entry"
         );
     }
+
+    // ========================================================================
+    // Config "Default Workspace" round-trip
+    //
+    // Regression: editing Default Workspace appended to `workspace_scan_paths`
+    // while the field is displayed from `first()`, so the edit never showed on
+    // reopen ("back to the same folder"). It must replace the primary entry.
+    // ========================================================================
+
+    use crate::app::state::{ConfigCategory, ConfigScreenState, ConfigValue};
+    use crate::config::AppConfig;
+
+    fn set_default_workspace(screen: &mut ConfigScreenState, value: &str) {
+        let settings = screen
+            .settings
+            .get_mut(&ConfigCategory::Workspace)
+            .expect("Workspace category present");
+        let setting = settings
+            .iter_mut()
+            .find(|s| s.key == "default_workspace")
+            .expect("default_workspace setting present");
+        setting.value = ConfigValue::Text(value.to_string());
+    }
+
+    fn displayed_default_workspace(screen: &ConfigScreenState) -> String {
+        screen
+            .settings
+            .get(&ConfigCategory::Workspace)
+            .unwrap()
+            .iter()
+            .find(|s| s.key == "default_workspace")
+            .unwrap()
+            .value
+            .display()
+    }
+
+    #[test]
+    fn default_workspace_edit_replaces_primary_and_round_trips() {
+        let mut config = AppConfig::default();
+        config.workspace_defaults.workspace_scan_paths = vec![PathBuf::from("/a/git")];
+
+        let mut screen = ConfigScreenState::from_app_config(&config);
+        set_default_workspace(&mut screen, "/a/projects");
+        screen.apply_to_app_config(&mut config);
+
+        // Primary scan path is the edited value, not appended to the tail.
+        assert_eq!(
+            config.workspace_defaults.workspace_scan_paths.first(),
+            Some(&PathBuf::from("/a/projects"))
+        );
+        // Reopening the screen now shows the saved value.
+        let reopened = ConfigScreenState::from_app_config(&config);
+        assert_eq!(displayed_default_workspace(&reopened), "/a/projects");
+    }
+
+    #[test]
+    fn default_workspace_edit_preserves_other_scan_dirs() {
+        let mut config = AppConfig::default();
+        config.workspace_defaults.workspace_scan_paths =
+            vec![PathBuf::from("/a/git"), PathBuf::from("/a/work")];
+
+        let mut screen = ConfigScreenState::from_app_config(&config);
+        set_default_workspace(&mut screen, "/a/projects");
+        screen.apply_to_app_config(&mut config);
+
+        // Old primary replaced; the secondary scan dir is kept.
+        assert_eq!(
+            config.workspace_defaults.workspace_scan_paths,
+            vec![PathBuf::from("/a/projects"), PathBuf::from("/a/work")]
+        );
+    }
+
+    #[test]
+    fn default_workspace_noop_confirm_keeps_secondary_dirs() {
+        // Opening the popup and confirming without changing the value must NOT
+        // drop other configured scan dirs (regression: a de-dup that stripped
+        // the unchanged primary then overwrote slot 0 lost the secondary).
+        let mut config = AppConfig::default();
+        config.workspace_defaults.workspace_scan_paths =
+            vec![PathBuf::from("/a/git"), PathBuf::from("/a/work")];
+
+        let mut screen = ConfigScreenState::from_app_config(&config);
+        // first() is /a/git — re-confirm it unchanged.
+        set_default_workspace(&mut screen, "/a/git");
+        screen.apply_to_app_config(&mut config);
+
+        assert_eq!(
+            config.workspace_defaults.workspace_scan_paths,
+            vec![PathBuf::from("/a/git"), PathBuf::from("/a/work")]
+        );
+    }
+
+    #[test]
+    fn default_workspace_edit_does_not_duplicate_existing_path() {
+        let mut config = AppConfig::default();
+        config.workspace_defaults.workspace_scan_paths =
+            vec![PathBuf::from("/a/git"), PathBuf::from("/a/work")];
+
+        let mut screen = ConfigScreenState::from_app_config(&config);
+        // Promote an already-present path to primary.
+        set_default_workspace(&mut screen, "/a/work");
+        screen.apply_to_app_config(&mut config);
+
+        assert_eq!(
+            config.workspace_defaults.workspace_scan_paths.first(),
+            Some(&PathBuf::from("/a/work"))
+        );
+        let dupes = config
+            .workspace_defaults
+            .workspace_scan_paths
+            .iter()
+            .filter(|p| *p == &PathBuf::from("/a/work"))
+            .count();
+        assert_eq!(dupes, 1, "edited path must not be duplicated");
+    }
 }
