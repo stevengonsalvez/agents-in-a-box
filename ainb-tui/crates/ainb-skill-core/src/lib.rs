@@ -7,6 +7,7 @@
 pub mod drift;
 pub mod error;
 pub mod kind;
+pub mod library;
 pub mod lockfile;
 pub mod manifest;
 pub mod mapping;
@@ -17,6 +18,9 @@ pub mod uri;
 pub use drift::{detect_all, detect_drift, DriftBackend, DriftStatus, GitLsRemoteBackend};
 pub use error::CoreError;
 pub use kind::UnitKind;
+pub use library::{
+    default_library_path, library_path_in, Library, OwnedUnit, LIBRARY_SCHEMA_VERSION,
+};
 pub use lockfile::{
     DeployedRef, LockedSource, LockedUnit, Lockfile, UsageRecord, LOCKFILE_SCHEMA_VERSION,
 };
