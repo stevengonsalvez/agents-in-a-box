@@ -292,6 +292,7 @@ impl Harness {
             manifest_path: "/in-process/manifest.toml".into(),
             granted_capabilities: Vec::new(),
             abi_version: 2,
+            config: serde_json::Value::Null,
         };
         self.send_request(methods::PLUGIN_INIT, params).await
     }

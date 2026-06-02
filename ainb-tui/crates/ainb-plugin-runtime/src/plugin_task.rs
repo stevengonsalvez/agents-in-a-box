@@ -482,6 +482,8 @@ impl PluginTask {
             manifest_path: self.plugin.manifest_path.to_string_lossy().into_owned(),
             granted_capabilities: granted,
             abi_version: ABI_VERSION,
+            // Host-side config resolution (plugins.values → JSON) lands in P1.
+            config: serde_json::Value::Null,
         })
         .expect("PluginInitParams serializable");
         let id = self.ids.allocate();
@@ -872,6 +874,9 @@ fn collect_granted_capabilities(m: &ainb_plugin_protocol::manifest::Manifest) ->
     if c.read_codex_logs.is_granted() {
         out.push("read_codex_logs".into());
     }
+    if c.read_paths.is_granted() {
+        out.push("read_paths".into());
+    }
     out
 }
 
@@ -951,9 +956,50 @@ mod tests {
     //! the keyword (or reorders the branches) trips a unit-level
     //! regression rather than a TUI freeze observed in production.
 
-    use super::HandleKeyParams;
+    use super::{HandleKeyParams, collect_granted_capabilities};
+    use ainb_plugin_protocol::manifest::{
+        Capabilities, CapabilityGrant, Lifecycle, Manifest, PluginMeta, Provides, Subscribes,
+    };
     use ainb_plugin_protocol::params::{KeyCode, KeyEvent, KeyKind};
     use tokio::sync::mpsc;
+
+    fn manifest_with_caps(capabilities: Capabilities) -> Manifest {
+        Manifest {
+            plugin: PluginMeta {
+                name: "p".into(),
+                version: "0.1.0".into(),
+                abi_version: 2,
+                description: String::new(),
+            },
+            capabilities,
+            provides: Provides::default(),
+            subscribes: Subscribes::default(),
+            lifecycle: Lifecycle::default(),
+            config: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_collect_granted_includes_read_paths() {
+        // Manifest granting read_paths → collector lists "read_paths".
+        let granted = manifest_with_caps(Capabilities {
+            read_paths: CapabilityGrant::List(vec!["/x".into()]),
+            ..Capabilities::default()
+        });
+        let caps = collect_granted_capabilities(&granted);
+        assert!(
+            caps.contains(&"read_paths".to_string()),
+            "expected read_paths in {caps:?}"
+        );
+
+        // Absent (default Bool(false)) → not listed.
+        let ungranted = manifest_with_caps(Capabilities::default());
+        let caps = collect_granted_capabilities(&ungranted);
+        assert!(
+            !caps.contains(&"read_paths".to_string()),
+            "did not expect read_paths in {caps:?}"
+        );
+    }
 
     #[test]
     fn biased_select_drains_key_inbox_before_command_inbox() {

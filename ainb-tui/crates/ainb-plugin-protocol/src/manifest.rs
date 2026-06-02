@@ -48,6 +48,49 @@ pub struct Manifest {
     /// Spawn timing + idle reap policy.
     #[serde(default)]
     pub lifecycle: Lifecycle,
+    /// User-configurable variables (flat scalars), declared via `[[config]]`.
+    /// Resolved values land in config.toml `[plugins.<name>]` and are injected
+    /// at `plugin/init` (see [`crate::params::PluginInitParams::config`]).
+    #[serde(default)]
+    pub config: Vec<ConfigField>,
+}
+
+/// The value type of a `[[config]]` field — drives which Settings widget the
+/// host renders and how the plugin parses the injected value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ConfigKind {
+    /// Filesystem path (text input, `~`-expansion done by the plugin).
+    Path,
+    /// Free-form string (text input).
+    String,
+    /// Boolean toggle (choice widget).
+    Bool,
+    /// One of an enumerated `choices` set (choice widget).
+    Enum,
+    /// Integer (number input).
+    Int,
+}
+
+/// One user-configurable variable declared by a plugin's `[[config]]` block.
+///
+/// All fields are flat scalars (no nested tables / lists of records) — the
+/// host renders one Settings row per field and persists the resolved value to
+/// config.toml `[plugins.<name>].<key>`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigField {
+    /// Config key. Stored verbatim under `[plugins.<name>]`.
+    pub key: String,
+    /// Value type — selects the Settings widget + plugin-side parse.
+    pub kind: ConfigKind,
+    /// Human-readable label shown in the Settings screen.
+    pub label: String,
+    /// Default value (as a string; the plugin parses per `kind`).
+    #[serde(default)]
+    pub default: String,
+    /// Allowed values when `kind == Enum`. Empty for other kinds.
+    #[serde(default)]
+    pub choices: Vec<String>,
 }
 
 /// `[plugin]` section.
@@ -128,6 +171,11 @@ pub struct Capabilities {
     /// Read the Codex session log directory specifically.
     #[serde(default)]
     pub read_codex_logs: CapabilityGrant,
+    /// Path-scoped filesystem read grant. List form is the allow-list of path
+    /// prefixes the plugin may read under (the outer envelope; config paths
+    /// are a choice within it).
+    #[serde(default)]
+    pub read_paths: CapabilityGrant,
 }
 
 /// `[provides]` — what the plugin contributes to the host's UX.
@@ -211,6 +259,7 @@ mod tests {
                 spawn_subprocess: CapabilityGrant::Bool(false),
                 read_claude_logs: CapabilityGrant::Bool(false),
                 read_codex_logs: CapabilityGrant::Bool(false),
+                read_paths: CapabilityGrant::List(vec!["~/.learnings".into()]),
             },
             provides: Provides {
                 screens: vec!["analytics".into()],
@@ -225,6 +274,13 @@ mod tests {
                 spawn: SpawnMode::Lazy,
                 idle_reap_secs: 600,
             },
+            config: vec![ConfigField {
+                key: "learnings_dir".into(),
+                kind: ConfigKind::Path,
+                label: "Learnings notes directory".into(),
+                default: "~/.learnings/documents/learnings".into(),
+                choices: vec![],
+            }],
         }
     }
 
@@ -288,5 +344,152 @@ abi_version = 2
 read_sessions = true
 ";
         assert!(toml::from_str::<Manifest>(toml_src).is_err());
+    }
+
+    // ===================================================================
+    // P0 — read_paths capability + [config] schema
+    // ===================================================================
+
+    #[test]
+    fn test_read_paths_capability_parses_list() {
+        // List form: `read_paths = ["~/.learnings"]` → List(["~/.learnings"]), granted.
+        let toml_src = r#"
+[plugin]
+name = "learnings"
+version = "0.1.0"
+abi_version = 2
+
+[capabilities]
+read_paths = ["~/.learnings"]
+"#;
+        let m: Manifest = toml::from_str(toml_src).unwrap();
+        assert_eq!(
+            m.capabilities.read_paths.allow_list().unwrap(),
+            ["~/.learnings"]
+        );
+        assert!(m.capabilities.read_paths.is_granted());
+
+        // Absent → defaults to Bool(false), not granted (ABI back-compat).
+        let toml_no_paths = r#"
+[plugin]
+name = "x"
+version = "1.0.0"
+abi_version = 2
+
+[capabilities]
+read_sessions = true
+"#;
+        let m2: Manifest = toml::from_str(toml_no_paths).unwrap();
+        assert!(matches!(
+            m2.capabilities.read_paths,
+            CapabilityGrant::Bool(false)
+        ));
+        assert!(!m2.capabilities.read_paths.is_granted());
+    }
+
+    #[test]
+    fn test_config_schema_roundtrip() {
+        // [[config]] entries parse into Manifest.config: Vec<ConfigField>.
+        let toml_src = r#"
+[plugin]
+name = "learnings"
+version = "0.1.0"
+abi_version = 2
+
+[[config]]
+key = "learnings_dir"
+kind = "path"
+label = "Learnings notes directory"
+default = "~/.learnings/documents/learnings"
+
+[[config]]
+key = "spawn_mode"
+kind = "enum"
+label = "Spawn mode"
+default = "lazy"
+choices = ["lazy", "eager"]
+"#;
+        let m: Manifest = toml::from_str(toml_src).unwrap();
+        assert_eq!(m.config.len(), 2);
+        assert_eq!(m.config[0].key, "learnings_dir");
+        assert_eq!(m.config[0].kind, ConfigKind::Path);
+        assert_eq!(m.config[0].label, "Learnings notes directory");
+        assert_eq!(m.config[0].default, "~/.learnings/documents/learnings");
+        assert!(m.config[0].choices.is_empty());
+        assert_eq!(m.config[1].kind, ConfigKind::Enum);
+        assert_eq!(m.config[1].choices, ["lazy", "eager"]);
+
+        // serialize → parse is identity.
+        let s = toml::to_string(&m).unwrap();
+        let back: Manifest = toml::from_str(&s).unwrap();
+        assert_eq!(m, back);
+
+        // Unknown kind errors.
+        let bad = r#"
+[plugin]
+name = "x"
+version = "1.0.0"
+abi_version = 2
+
+[[config]]
+key = "k"
+kind = "wormhole"
+label = "l"
+default = "d"
+"#;
+        assert!(toml::from_str::<Manifest>(bad).is_err());
+    }
+
+    #[test]
+    fn test_config_kind_variants() {
+        // Each `kind` token deserializes to the matching ConfigKind.
+        let toml_src = r#"
+[plugin]
+name = "x"
+version = "1.0.0"
+abi_version = 2
+
+[[config]]
+key = "a"
+kind = "path"
+label = "a"
+default = ""
+
+[[config]]
+key = "b"
+kind = "string"
+label = "b"
+default = ""
+
+[[config]]
+key = "c"
+kind = "bool"
+label = "c"
+default = "false"
+
+[[config]]
+key = "d"
+kind = "enum"
+label = "d"
+default = ""
+
+[[config]]
+key = "e"
+kind = "int"
+label = "e"
+default = "0"
+"#;
+        let m: Manifest = toml::from_str(toml_src).unwrap();
+        let kinds: Vec<ConfigKind> = m.config.iter().map(|f| f.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                ConfigKind::Path,
+                ConfigKind::String,
+                ConfigKind::Bool,
+                ConfigKind::Enum,
+                ConfigKind::Int,
+            ]
+        );
     }
 }

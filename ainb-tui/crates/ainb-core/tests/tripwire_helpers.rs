@@ -64,6 +64,7 @@ pub fn register_plugin(rt: &Runtime, name: &str, bin_path: PathBuf) -> PluginId 
             spawn: SpawnMode::Lazy,
             idle_reap_secs: 600,
         },
+        config: Vec::new(),
     };
     let plugin =
         RegisteredPlugin::new(manifest, bin_path, PathBuf::from("/dev/null/manifest.toml"));

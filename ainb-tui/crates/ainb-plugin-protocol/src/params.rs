@@ -37,6 +37,11 @@ pub struct PluginInitParams {
     /// Wire ABI version the host speaks. Plugin MUST refuse to init
     /// if it can't speak this revision.
     pub abi_version: u32,
+    /// Resolved per-plugin config (the `[plugins.<name>]` table) the host
+    /// injects at init. Defaults to JSON `null` so ABI-2 peers that omit it
+    /// keep decoding. The plugin parses this into its typed config struct.
+    #[serde(default)]
+    pub config: serde_json::Value,
 }
 
 /// `plugin/init` result: plugin echoes its name + version so the host
@@ -537,6 +542,7 @@ mod tests {
             manifest_path: "/x/manifest.toml".into(),
             granted_capabilities: vec!["read_sessions".into()],
             abi_version: 2,
+            config: serde_json::Value::Null,
         });
         rt(&PluginInitResult {
             name: "burndown".into(),
@@ -686,6 +692,31 @@ mod tests {
         assert_eq!(all, 0b1111);
         assert_eq!(KEY_MOD_SHIFT & KEY_MOD_CTRL, 0);
         assert_eq!(KEY_MOD_ALT & KEY_MOD_SUPER, 0);
+    }
+
+    #[test]
+    fn test_init_params_config_defaults_empty() {
+        // ABI-2 back-compat: an init payload WITHOUT `config` still decodes,
+        // and `config` defaults to JSON null.
+        let legacy = r#"{
+            "manifest_path": "/x/manifest.toml",
+            "granted_capabilities": ["read_sessions"],
+            "abi_version": 2
+        }"#;
+        let p: PluginInitParams = serde_json::from_str(legacy).unwrap();
+        assert_eq!(p.config, serde_json::Value::Null);
+
+        // With `config` present it round-trips byte-stably.
+        let with_config = PluginInitParams {
+            manifest_path: "/x/manifest.toml".into(),
+            granted_capabilities: vec!["read_paths".into()],
+            abi_version: 2,
+            config: serde_json::json!({ "learnings_dir": "~/.learnings" }),
+        };
+        let json = serde_json::to_string(&with_config).unwrap();
+        let back: PluginInitParams = serde_json::from_str(&json).unwrap();
+        assert_eq!(with_config, back);
+        assert_eq!(back.config["learnings_dir"], "~/.learnings");
     }
 
     #[test]
