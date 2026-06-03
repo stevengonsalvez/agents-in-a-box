@@ -177,6 +177,8 @@ against current origin/main — **all core findings hold; two items REDUCE scope
 | Focused pane visual | distinct border + `● INTERACTIVE — Ctrl+Q release` title badge |
 | Mouse event while focused | forwarded to inner PTY; ainb owns mouse when not focused |
 | Multi-line paste while focused | bracketed paste ESC[200~…ESC[201~ (no premature submit) |
+| Scroll history while focused | wheel→tmux, `prefix+[` copy-mode (tmux's own); ainb adds none |
+| Copy text out while focused | mouse-drag→tmux selection→tmux clipboard (config/tmux.conf) |
 
 ## Constraints & Dependencies
 
@@ -230,6 +232,19 @@ against current origin/main — **all core findings hold; two items REDUCE scope
 - **Capture poll while focused**: leave the existing 5s capture-pane poll UNCHANGED for
   all sessions, including the focused one. *Rationale:* honors "don't change anything";
   the redundant 5s capture is harmless (two clients on one session is fine).
+- **Scrollback while interactive**: none added by ainb — it IS a real tmux client, so
+  wheel forwards to tmux and `prefix+[` enters tmux copy-mode for history; Ctrl+Q out to
+  use ainb's read-only scroll-mode. *Rationale:* consistent, zero extra code, respects
+  the locked mouse→PTY routing.
+- **Enter render**: rely on tmux's attach full-repaint to fill the pane — accept a brief
+  (<~100ms) blank/partial frame on enter rather than priming with a capture-pane
+  snapshot. *Rationale:* zero extra code; the flicker is negligible.
+- **Copy text out**: rely on tmux's own clipboard — mouse-drag selection forwards to
+  tmux, which copies via set-clipboard/OSC52 (already enabled in config/tmux.conf). No
+  ainb-level selection. *Rationale:* reuses the clipboard the user already has.
+- **Footer discoverability**: add `i interactive` to the read-only preview footer beside
+  the existing `a attach`; while focused, the border badge shows `Ctrl+Q release`.
+  *Rationale:* both flows advertised; keybinding hint sits on the control.
 
 ### Deferred Decisions
 - Alternate detach key if Ctrl+Q/XON overlap proves annoying — defer until observed.
