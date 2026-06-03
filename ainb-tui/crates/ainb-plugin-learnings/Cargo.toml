@@ -30,6 +30,17 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 async-trait = "0.1"
 
+# Data layer (P4):
+#   serde_yaml — parse the `.md` frontmatter + the `.entities.yaml` sidecar.
+#   quick-xml  — stream-parse the nano_graphrag `*.graphml` (XML) into
+#                entities + typed edges.
+#   thiserror  — typed `DataError` (malformed graphml/json → error, not panic).
+#   dirs       — `~`-expansion of the configured KB paths.
+serde_yaml = { workspace = true }
+quick-xml = "0.38"
+thiserror = { workspace = true }
+dirs = { workspace = true }
+
 # UI: ratatui without termion/crossterm backends — we paint into a
 # ratatui Buffer and convert to a WireBuffer cell stream for the host.
 # Mirrors burndown's render path.
@@ -41,3 +52,7 @@ ainb-plugin-protocol = { path = "../ainb-plugin-protocol" }
 # In-process render/key harness — drive Plugin without a subprocess.
 ainb-plugin-testkit = { path = "../ainb-plugin-testkit" }
 toml = { workspace = true }
+# Data-layer tests: temp dirs for malformed-input cases; `dirs` for the
+# tilde-expansion assertion (also a runtime dep above, restated for the
+# test target's clarity).
+tempfile = { workspace = true }
