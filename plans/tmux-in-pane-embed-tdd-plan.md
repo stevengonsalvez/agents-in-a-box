@@ -76,6 +76,29 @@ TDD here = "the existing suite is the test; keep it green."
 Acceptance: full pre-existing suite green on the new deps; clippy clean; tui-term smoke
 render passes. (Measured non-risk: crossterm event/key/mouse compiled clean.)
 
+### Phase 0 render-parity proof (tmux-ui-tripwire) — "fully proven" gate
+
+A dep bump can compile + pass units yet silently break rendering. Phase 0 is NOT done
+until the real TUI is proven to render unchanged. Per `ainb-tui/.claude/skills/
+tmux-ui-tripwire/SKILL.md` (obey its HARD RULES):
+
+- **Coverage = BROAD (all major screens):** home, session-list, tmux preview pane, git
+  view, logs viewer, burndown/usage plugin, new-session, inbox.
+- **Existing + new:** every current `tests/tripwire_*.rs` must pass on 0.30 (regression
+  gate) AND add new tripwires for any major screen not yet covered (esp. session-list +
+  tmux preview pane). Each: positive chrome marker + negative placeholder, forward+return
+  nav pair, poll-don't-sleep, single-char nav keys (no `Enter`).
+- **Golden-baseline capture-diff:** capture each screen's pane on v1.3.3 BEFORE the bump
+  (baseline under `tests/tapes/` or a baseline dir), diff AFTER; classify every mismatch
+  in the progress log as intended cosmetic-0.30-change or fixed-regression — none
+  unexplained. Markers are the HARD gate; the golden diff is the review tripwire.
+- **CI gate:** `cargo test --workspace` + `clippy -- -D warnings` + tui-term smoke + the
+  FULL tripwire sweep all gated in CI (tmux required on the runner, as for existing
+  tripwires).
+
+Autonomous-run mega-prompt for this expanded Phase 0:
+`.agents/goals/phase0-ratatui-030-tripwire-proven.md` (local-only, gitignored).
+
 ---
 
 ## Phase 1 — PtyWrapper rewrite + lifecycle/registry/panic-hook
