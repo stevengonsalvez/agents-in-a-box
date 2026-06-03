@@ -3,8 +3,10 @@
 **Generated from:** research/2026-06-02_11-07-19_tmux-pane-in-tui.md + DE critique
 **Interview date:** 2026-06-02
 **Branch:** feat/tmux-in-pane-2 (fresh off origin/main; stale feat/tmux-in-pane retired)
-**Re-grounded:** 2026-06-02 on origin/main @ v1.3.1 (Cargo workspace — code now under
-`ainb-tui/crates/ainb-core/src/`, not `ainb-tui/src/`)
+**Re-grounded:** 2026-06-02 on v1.3.1, then rebased + re-verified 2026-06-03 on v1.3.3.
+Code under `ainb-tui/crates/ainb-core/src/`. Deps unchanged across both; preview poll
+(5s capture) unchanged; the 2 `inner(&Margin)` + ~8 `frame.size()` P0 sites unchanged;
+events.rs/state.rs churned (line refs are approximate — re-grep at implementation time).
 **Version:** 1.1
 
 ## Executive Summary
@@ -36,7 +38,7 @@ against current origin/main — **all core findings hold; two items REDUCE scope
 | Code moved to `ainb-tui/crates/ainb-core/src/` (workspace, v1.3.1) | all paths re-pointed in Code References |
 | Poll loop already 33ms, heavy work 250ms (`main.rs:250,260`) | DE perf-decouple concern mostly FREE — live PTY render rides the 33ms poll + a dirty flag; no new loop split needed |
 | Bracketed paste on + `Event::Paste` handled (`main.rs:19,609`) | paste capture exists; embed only needs to FORWARD paste to the PTY + push keyboard-enhancement flags |
-| `'i'`/`'I'` already bound at `events.rs:1587` (other context) | VERIFY `'i'` is free in the session-list/preview context before binding; else pick another key |
+| `'i'` CONFIRMED free in the session-list handler `handle_key_event` (events.rs ~824-1324; taken keys: q c f n s a r e d x g p o) | bind `'i'`=interactive there; the other `'i'` bindings (onboarding ~1636, home-screen→GoToStats ~1989) are separate contexts. Ctrl+Q also free. Phase-3 tripwire guards regression. |
 | `attached_terminal.rs` exists = Docker full-screen info+logs view (NOT a terminal emulator) | unrelated; avoid naming/UX collision with the new embed |
 | `DetachTmuxSession` event still present (`events.rs:156`) | repurpose as the focus-release handler as planned |
 | Deps unchanged on main (ratatui 0.26 etc.) | the 0.30 upgrade gap + Phase 0 plan still valid |
