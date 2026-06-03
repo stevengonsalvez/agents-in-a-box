@@ -32,6 +32,7 @@ use std::collections::HashMap;
 use crate::app::state::TextEditor;
 use crate::config::presets::{PresetManager, RepositoryPreset, SessionMode};
 use crate::config::session_defaults::SessionDefaults;
+use crate::git::branch_list::BranchEntry;
 use crate::git::branch_namer::derive_branch_name;
 use crate::git::repo_source::RepoSource;
 
@@ -78,6 +79,111 @@ impl CustomOverrides {
             agent_model: preset.agent_model.clone(),
             mode: preset.mode,
             skip_all: preset.permissions.skip_all,
+        }
+    }
+}
+
+/// Which segment of the Branch row (`source → worktree`) is targeted when
+/// the row is focused. ←/→ toggles; Enter acts on the targeted segment —
+/// Source opens the base-branch picker popup, Worktree opens the inline
+/// name edit (2026-06 base-picker feature).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchSegment {
+    Source,
+    Worktree,
+}
+
+/// How a picked base ref is applied at launch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BaseMode {
+    /// Cut a fresh `agents/xxx` branch off the picked ref (default).
+    BaseOff,
+    /// Check out the picked branch itself in the worktree (local tracking
+    /// branch for remote picks). No generated branch name.
+    Checkout,
+}
+
+/// The user's pick from the base-branch popup. Threaded through `LaunchSpec`
+/// into `create_session_from_configure`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseSelection {
+    /// Display ref — `origin/feature-x` for remote entries, `feature-x` for
+    /// local ones. Doubles as the git start-point (revparse-able).
+    pub display: String,
+    /// Local short name (`feature-x`) — the branch a Checkout selection
+    /// creates / checks out.
+    pub short_name: String,
+    /// True when the pick came from the remote section.
+    pub is_remote: bool,
+    pub mode: BaseMode,
+}
+
+/// One row in the base-branch popup: the git entry plus the live-worktree
+/// collision flag (drives the `⚠ in use` marker and blocks Checkout picks).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickerBranchEntry {
+    pub entry: BranchEntry,
+    pub in_use: bool,
+}
+
+/// State for the base-branch popup. `None` on `ConfigureState.branch_picker`
+/// when closed. Entries are seeded from cached refs at open (instant) and
+/// replaced in place when the background fetch lands (`loading` spinner).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchPickerState {
+    pub filter: String,
+    pub entries: Vec<PickerBranchEntry>,
+    /// Index into `filtered_indices()` — NOT into `entries`.
+    pub selected: usize,
+    /// True while the background fetch/ls-remote refresh is in flight.
+    pub loading: bool,
+    /// Inline error line (e.g. Checkout pick on an in-use branch).
+    pub error: Option<String>,
+    /// Action applied on Enter; Tab toggles.
+    pub mode: BaseMode,
+}
+
+impl BranchPickerState {
+    #[must_use]
+    pub fn new(entries: Vec<PickerBranchEntry>, loading: bool) -> Self {
+        Self {
+            filter: String::new(),
+            entries,
+            selected: 0,
+            loading,
+            error: None,
+            mode: BaseMode::BaseOff,
+        }
+    }
+
+    /// Indices into `entries` that match the filter (case-insensitive
+    /// substring on the display ref). Empty filter matches everything.
+    #[must_use]
+    pub fn filtered_indices(&self) -> Vec<usize> {
+        let needle = self.filter.to_lowercase();
+        self.entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| needle.is_empty() || e.entry.display.to_lowercase().contains(&needle))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// The entry currently under the selection cursor, if any.
+    #[must_use]
+    pub fn selected_entry(&self) -> Option<&PickerBranchEntry> {
+        let filtered = self.filtered_indices();
+        filtered.get(self.selected).map(|&i| &self.entries[i])
+    }
+
+    /// Re-clamp `selected` after the entry set or filter changed (also used
+    /// by the app layer when the background refresh replaces `entries`).
+    pub fn clamp_selection(&mut self) {
+        let len = self.filtered_indices().len();
+        if len == 0 {
+            self.selected = 0;
+        } else if self.selected >= len {
+            self.selected = len - 1;
         }
     }
 }
@@ -153,6 +259,13 @@ pub struct ConfigureState {
     /// `derive_branch_name` so collision-disambiguation actually fires
     /// (finding #16).
     pub existing_branches: Vec<String>,
+    /// Which segment of the Branch row Enter acts on (←/→ toggles).
+    pub branch_segment: BranchSegment,
+    /// The user's base-branch pick, when they used the popup. `None` keeps
+    /// the legacy behavior (HEAD for local repos, origin/HEAD for remote).
+    pub base_selection: Option<BaseSelection>,
+    /// Base-branch popup state — `Some` while the popup is open.
+    pub branch_picker: Option<BranchPickerState>,
 }
 
 impl ConfigureState {
@@ -239,6 +352,9 @@ impl ConfigureState {
             presets_cache,
             branch_prefix: branch_prefix.to_string(),
             existing_branches,
+            branch_segment: BranchSegment::Source,
+            base_selection: None,
+            branch_picker: None,
         }
     }
 
@@ -312,13 +428,26 @@ impl ConfigureState {
         }
     }
 
+    /// True when the user picked "checkout the branch itself" in the base
+    /// popup — the worktree lands ON the picked branch, no generated name.
+    #[must_use]
+    pub fn is_checkout(&self) -> bool {
+        self.base_selection.as_ref().is_some_and(|b| b.mode == BaseMode::Checkout)
+    }
+
     /// The branch name that will actually be used for the worktree. Priority:
+    ///   0. checkout-direct pick — the picked branch IS the session branch;
     ///   1. in-progress inline edit buffer (so the collision warning updates
     ///      live as the user types — Stevie 2026-05-27);
     ///   2. committed manual override;
     ///   3. auto-derived random name.
     #[must_use]
     pub fn effective_branch(&self) -> String {
+        if let Some(base) = self.base_selection.as_ref() {
+            if base.mode == BaseMode::Checkout {
+                return base.short_name.clone();
+            }
+        }
         if let Some(ref buf) = self.branch_edit {
             return buf.clone();
         }
@@ -430,6 +559,10 @@ pub enum ConfigureOutcome {
     Launch(LaunchSpec),
     /// `^P` — open the preset manager overlay (stub for Phase 5; Phase 7).
     OpenPresetManager,
+    /// Enter on the Branch row's Source segment — the dispatcher must list
+    /// branches (git stays out of components/ — finding #9), seed
+    /// `branch_picker`, and kick the background refresh.
+    OpenBranchPicker,
 }
 
 /// Launch payload built by the Configure component and threaded all the way
@@ -448,6 +581,9 @@ pub struct LaunchSpec {
     /// Persisted to `session-defaults.per_repo[].last_branch_override` so the
     /// next launch can pre-fill the textarea.
     pub branch_override: Option<String>,
+    /// The base-branch popup pick, when used. `None` = legacy base policy
+    /// (HEAD for local repos, origin/HEAD for remote/star launches).
+    pub base: Option<BaseSelection>,
     pub prompt: Option<String>,
 }
 
@@ -554,6 +690,11 @@ pub fn render(f: &mut Frame, state: &ConfigureState, area: Rect) {
     // Modal overlay for save-preset, if open.
     if let Some(ref name_buf) = state.save_preset_modal {
         render_save_preset_modal(f, area, name_buf);
+    }
+
+    // Base-branch popup, if open. Rendered last so it overlays the form.
+    if let Some(ref picker) = state.branch_picker {
+        render_branch_picker_modal(f, area, picker);
     }
 }
 
@@ -900,20 +1041,66 @@ fn render_branch_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused:
         }
         return;
     }
+    // Checkout-direct pick: the picked branch IS the session branch — no
+    // `source → worktree` arrow, no generated name.
+    if state.is_checkout() {
+        let line = Line::from(vec![
+            focus_indicator(focused),
+            label_span("Branch:  "),
+            Span::styled(
+                state.effective_branch(),
+                Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "  (checkout)",
+                Style::default().fg(GOLD).add_modifier(Modifier::ITALIC),
+            ),
+            Span::styled(
+                "   [Enter to pick base]",
+                Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+            ),
+        ]);
+        f.render_widget(Paragraph::new(line), area);
+        return;
+    }
+
     let worktree = state.effective_branch();
     let collision = state.branch_collision();
 
+    // Segment targeting (2026-06 base picker): when the row is focused the
+    // targeted segment renders underlined; ←/→ toggles, Enter acts on it.
+    let source_targeted = focused && state.branch_segment == BranchSegment::Source;
+    let worktree_targeted = focused && state.branch_segment == BranchSegment::Worktree;
+
+    let mut source_style = Style::default().fg(SOFT_WHITE);
+    if source_targeted {
+        source_style = source_style.add_modifier(Modifier::UNDERLINED | Modifier::BOLD);
+    }
+
     // Branch worktree name renders red when it collides with a live worktree,
     // green otherwise. The collision is only reachable via manual override.
-    let worktree_style = if collision {
+    let mut worktree_style = if collision {
         Style::default().fg(ALERT_RED).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD)
     };
+    if worktree_targeted {
+        worktree_style = worktree_style.add_modifier(Modifier::UNDERLINED);
+    }
     let trailing = if collision {
         Span::styled(
             "   \u{26a0} in use",
             Style::default().fg(ALERT_RED).add_modifier(Modifier::BOLD),
+        )
+    } else if source_targeted {
+        Span::styled(
+            "   [Enter to pick base \u{00b7} \u{2192} name]",
+            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+        )
+    } else if worktree_targeted {
+        Span::styled(
+            "   [Enter to edit \u{00b7} \u{2190} base]",
+            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
         )
     } else {
         Span::styled(
@@ -924,7 +1111,7 @@ fn render_branch_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused:
     let branch_line = Line::from(vec![
         focus_indicator(focused),
         label_span("Branch:  "),
-        Span::styled(state.branch_source.clone(), Style::default().fg(SOFT_WHITE)),
+        Span::styled(state.branch_source.clone(), source_style),
         Span::styled(" \u{2192} ", Style::default().fg(MUTED_GRAY)),
         Span::styled(worktree, worktree_style),
         trailing,
@@ -1228,6 +1415,165 @@ fn render_save_preset_modal(f: &mut Frame, area: Rect, name_buf: &str) {
     f.render_widget(para, inner);
 }
 
+/// Centered base-branch popup. Filter line, sectioned scrollable list
+/// (remote first, default on top, `⚠ in use` markers), mode-aware footer.
+fn render_branch_picker_modal(f: &mut Frame, area: Rect, picker: &BranchPickerState) {
+    let width = 62.min(area.width.saturating_sub(4));
+    let height = 16.min(area.height.saturating_sub(2));
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let modal = Rect::new(x, y, width, height);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(GOLD))
+        .title(Span::styled(
+            " Pick base branch ",
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ))
+        .title_alignment(Alignment::Center)
+        .style(Style::default().bg(DARK_BG));
+    let inner = block.inner(modal);
+    f.render_widget(ratatui::widgets::Clear, modal);
+    f.render_widget(block, modal);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // Filter line, with the refresh spinner while the background fetch runs.
+    let mut filter_spans = vec![
+        Span::styled("> ", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+        Span::styled(picker.filter.clone(), Style::default().fg(SOFT_WHITE)),
+        Span::styled("_", Style::default().fg(MUTED_GRAY)),
+    ];
+    if picker.loading {
+        filter_spans.push(Span::styled(
+            "   \u{27f3} refreshing\u{2026}",
+            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+        ));
+    }
+    lines.push(Line::from(filter_spans));
+
+    // Error line (e.g. checkout pick on an in-use branch), else spacer.
+    if let Some(ref err) = picker.error {
+        lines.push(Line::from(Span::styled(
+            format!("\u{26a0} {err}"),
+            Style::default().fg(ALERT_RED).add_modifier(Modifier::BOLD),
+        )));
+    } else {
+        lines.push(Line::raw(""));
+    }
+
+    // Build the display list: section headers interleaved with entries.
+    enum Item {
+        Header(&'static str),
+        Entry(usize, usize), // (entries idx, filtered position)
+    }
+    let filtered = picker.filtered_indices();
+    let mut items: Vec<Item> = Vec::new();
+    let mut last_remote: Option<bool> = None;
+    for (pos, &idx) in filtered.iter().enumerate() {
+        let is_remote = picker.entries[idx].entry.is_remote;
+        if last_remote != Some(is_remote) {
+            items.push(Item::Header(if is_remote { "remote" } else { "local" }));
+            last_remote = Some(is_remote);
+        }
+        items.push(Item::Entry(idx, pos));
+    }
+
+    // 2 lines used above + 1 footer line below.
+    let list_height = (inner.height as usize).saturating_sub(3).max(1);
+
+    if items.is_empty() {
+        let msg = if picker.entries.is_empty() && picker.loading {
+            "loading branches\u{2026}"
+        } else {
+            "no branches match"
+        };
+        lines.push(Line::from(Span::styled(
+            format!("  {msg}"),
+            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+        )));
+    } else {
+        // Scroll the window so the selected entry stays visible.
+        let sel_display = items
+            .iter()
+            .position(|i| matches!(i, Item::Entry(_, pos) if *pos == picker.selected))
+            .unwrap_or(0);
+        let start = sel_display.saturating_sub(list_height.saturating_sub(1));
+        for item in items.iter().skip(start).take(list_height) {
+            match item {
+                Item::Header(name) => lines.push(Line::from(Span::styled(
+                    format!("\u{2500}\u{2500} {name} \u{2500}\u{2500}"),
+                    Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+                ))),
+                Item::Entry(idx, pos) => {
+                    let e = &picker.entries[*idx];
+                    let selected = *pos == picker.selected;
+                    let mut spans: Vec<Span<'static>> = Vec::new();
+                    if selected {
+                        spans.push(Span::styled(
+                            "\u{25b8} ",
+                            Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
+                        ));
+                    } else {
+                        spans.push(Span::raw("  "));
+                    }
+                    let name_style = if selected {
+                        Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(SOFT_WHITE)
+                    };
+                    spans.push(Span::styled(e.entry.display.clone(), name_style));
+                    if e.entry.is_default {
+                        spans.push(Span::styled(
+                            "  (default)",
+                            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+                        ));
+                    }
+                    if e.in_use {
+                        spans.push(Span::styled(
+                            "  \u{26a0} in use",
+                            Style::default().fg(ALERT_RED).add_modifier(Modifier::BOLD),
+                        ));
+                    }
+                    lines.push(Line::from(spans));
+                }
+            }
+        }
+    }
+
+    // Pad so the footer sits on the last inner line.
+    while (lines.len() as u16) < inner.height.saturating_sub(1) {
+        lines.push(Line::raw(""));
+    }
+
+    // Mode-aware footer: Enter's action follows the Tab-toggled mode.
+    let (enter_action, tab_action) = match picker.mode {
+        BaseMode::BaseOff => ("=New branch off pick  ", "=Checkout mode  "),
+        BaseMode::Checkout => ("=Checkout branch  ", "=Base-off mode  "),
+    };
+    lines.push(Line::from(vec![
+        Span::styled(
+            "Enter",
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(enter_action, Style::default().fg(MUTED_GRAY)),
+        Span::styled(
+            "Tab",
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(tab_action, Style::default().fg(MUTED_GRAY)),
+        Span::styled(
+            "Esc",
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("=Close", Style::default().fg(MUTED_GRAY)),
+    ]));
+
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
 /// Render-side adapter: parse `ssh://user@host:port` into (user, host, port)
 /// strings for the SSH variant.
 fn parse_ssh_session(url: &str) -> (String, String, String) {
@@ -1267,6 +1613,11 @@ pub fn handle_key(state: &mut ConfigureState, key: KeyEvent) -> ConfigureOutcome
         return handle_modal_key(state, key);
     }
 
+    // Base-branch popup interception — mirrors the save-preset modal.
+    if state.branch_picker.is_some() {
+        return handle_branch_picker_key(state, key);
+    }
+
     // Inline branch edit takes priority over the row machinery — every key
     // either commits / cancels the edit or extends the buffer.
     if state.branch_edit.is_some() {
@@ -1303,13 +1654,25 @@ pub fn handle_key(state: &mut ConfigureState, key: KeyEvent) -> ConfigureOutcome
             ConfigureOutcome::Stay
         }
         KeyCode::Enter => match state.focused_row {
-            ConfigureRow::Branch => {
-                // Open inline branch edit. Seed buffer from override or auto.
-                let buf =
-                    state.branch_override.clone().unwrap_or_else(|| state.branch_worktree.clone());
-                state.branch_edit = Some(buf);
-                ConfigureOutcome::Stay
-            }
+            ConfigureRow::Branch => match state.branch_segment {
+                // Source segment: open the base-branch picker popup. The
+                // dispatcher lists branches (git stays out of components/).
+                BranchSegment::Source => ConfigureOutcome::OpenBranchPicker,
+                BranchSegment::Worktree => {
+                    // Checkout-direct pick: no generated name to edit — route
+                    // to the picker instead so Enter never dead-ends.
+                    if state.is_checkout() {
+                        return ConfigureOutcome::OpenBranchPicker;
+                    }
+                    // Open inline branch edit. Seed buffer from override or auto.
+                    let buf = state
+                        .branch_override
+                        .clone()
+                        .unwrap_or_else(|| state.branch_worktree.clone());
+                    state.branch_edit = Some(buf);
+                    ConfigureOutcome::Stay
+                }
+            },
             ConfigureRow::Prompt => {
                 // Inside Prompt textarea — Enter = newline. Ctrl+Enter is
                 // the launch shortcut from anywhere.
@@ -1385,17 +1748,22 @@ fn launch_outcome(state: &mut ConfigureState) -> ConfigureOutcome {
     }
     let preset = state.effective_preset();
     let prompt = state.prompt.to_non_empty_string();
+    // Checkout-direct pick: the session branch IS the picked branch — the
+    // generated `agents/xxx` name (and any manual override) doesn't apply.
+    let branch_worktree = if state.is_checkout() {
+        state.effective_branch()
+    } else {
+        state.branch_override.clone().unwrap_or_else(|| state.branch_worktree.clone())
+    };
     ConfigureOutcome::Launch(LaunchSpec {
         repo_label: state.repo_label.clone(),
         repo_source: state.repo_source.clone(),
         preset_name: preset.name.clone(),
         preset,
-        branch_worktree: state
-            .branch_override
-            .clone()
-            .unwrap_or_else(|| state.branch_worktree.clone()),
+        branch_worktree,
         branch_source: state.branch_source.clone(),
         branch_override: state.branch_override.clone(),
+        base: state.base_selection.clone(),
         prompt,
     })
 }
@@ -1425,8 +1793,18 @@ fn cycle_value_in_focused_row(state: &mut ConfigureState, delta: i32) {
                 cycle_yolo(state);
             }
         }
-        ConfigureRow::Branch
-        | ConfigureRow::Prompt
+        ConfigureRow::Branch => {
+            // ←/→ on the Branch row toggles the targeted segment
+            // (source ⇄ worktree). Checkout mode pins Source — there's no
+            // editable worktree name to target.
+            if !state.is_checkout() {
+                state.branch_segment = match state.branch_segment {
+                    BranchSegment::Source => BranchSegment::Worktree,
+                    BranchSegment::Worktree => BranchSegment::Source,
+                };
+            }
+        }
+        ConfigureRow::Prompt
         | ConfigureRow::Host
         | ConfigureRow::User
         | ConfigureRow::Port
@@ -1604,6 +1982,85 @@ fn handle_branch_edit_key(state: &mut ConfigureState, key: KeyEvent) -> Configur
     }
 }
 
+/// Base-branch popup key handler. Chars/Backspace edit the fuzzy filter,
+/// ↑/↓ move the selection, Tab toggles the action mode (base-off ⇄ checkout),
+/// Enter commits the pick, Esc closes without changes.
+///
+/// `c` from the interview mock was dropped as the checkout shortcut — plain
+/// chars feed the filter, so a bare-letter action key would corrupt typing.
+/// Tab-toggle + Enter keeps per-branch action choice without the conflict.
+fn handle_branch_picker_key(state: &mut ConfigureState, key: KeyEvent) -> ConfigureOutcome {
+    let picker = state.branch_picker.as_mut().expect("guard checked");
+    match key.code {
+        KeyCode::Esc => {
+            state.branch_picker = None;
+            ConfigureOutcome::Stay
+        }
+        KeyCode::Tab | KeyCode::BackTab => {
+            picker.mode = match picker.mode {
+                BaseMode::BaseOff => BaseMode::Checkout,
+                BaseMode::Checkout => BaseMode::BaseOff,
+            };
+            picker.error = None;
+            ConfigureOutcome::Stay
+        }
+        KeyCode::Up => {
+            picker.selected = picker.selected.saturating_sub(1);
+            ConfigureOutcome::Stay
+        }
+        KeyCode::Down => {
+            let len = picker.filtered_indices().len();
+            if len > 0 && picker.selected + 1 < len {
+                picker.selected += 1;
+            }
+            ConfigureOutcome::Stay
+        }
+        KeyCode::Backspace => {
+            picker.filter.pop();
+            picker.clamp_selection();
+            picker.error = None;
+            ConfigureOutcome::Stay
+        }
+        KeyCode::Enter => {
+            let Some(picked) = picker.selected_entry().cloned() else {
+                return ConfigureOutcome::Stay;
+            };
+            let mode = picker.mode;
+            // Checkout of an in-use branch is a hard `git worktree add`
+            // failure — block here with the inline error (interview pick:
+            // mark + block, never silently degrade to base-off).
+            if mode == BaseMode::Checkout && picked.in_use {
+                picker.error = Some(
+                    "checked out by a live session — base a new branch off it instead".to_string(),
+                );
+                return ConfigureOutcome::Stay;
+            }
+            state.base_selection = Some(BaseSelection {
+                display: picked.entry.display.clone(),
+                short_name: picked.entry.short_name.clone(),
+                is_remote: picked.entry.is_remote,
+                mode,
+            });
+            state.branch_source = picked.entry.display;
+            if state.is_checkout() {
+                // No generated name in checkout mode — drop the stale edit
+                // buffer and pin the segment back on Source.
+                state.branch_edit = None;
+                state.branch_segment = BranchSegment::Source;
+            }
+            state.branch_picker = None;
+            ConfigureOutcome::Stay
+        }
+        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            picker.filter.push(c);
+            picker.clamp_selection();
+            picker.error = None;
+            ConfigureOutcome::Stay
+        }
+        _ => ConfigureOutcome::Stay,
+    }
+}
+
 /// Save-preset modal key handler. Backspace removes from the name buffer;
 /// Enter calls `PresetManager::save_preset` and closes the modal; Esc cancels.
 fn handle_modal_key(state: &mut ConfigureState, key: KeyEvent) -> ConfigureOutcome {
@@ -1694,6 +2151,9 @@ mod tests {
             presets_cache,
             branch_prefix: "agents/".into(),
             existing_branches: Vec::new(),
+            branch_segment: BranchSegment::Source,
+            base_selection: None,
+            branch_picker: None,
         }
     }
 
@@ -1981,6 +2441,146 @@ mod tests {
         cycle_value_in_focused_row(&mut s, 1);
         // First step from SystemDefault → Gpt55 → "gpt-5.5".
         assert_eq!(s.custom_overrides.as_ref().unwrap().agent_model, "gpt-5.5");
+    }
+
+    // --- 2026-06: base-branch picker ---------------------------------------
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn mk_entries() -> Vec<PickerBranchEntry> {
+        let mk = |display: &str, short: &str, remote: bool, default: bool, in_use: bool| {
+            PickerBranchEntry {
+                entry: BranchEntry {
+                    display: display.into(),
+                    short_name: short.into(),
+                    is_remote: remote,
+                    is_default: default,
+                },
+                in_use,
+            }
+        };
+        vec![
+            mk("origin/main", "main", true, true, false),
+            mk("origin/feature-x", "feature-x", true, false, false),
+            mk("origin/fix/login", "fix/login", true, false, true),
+            mk("local-only", "local-only", false, false, false),
+        ]
+    }
+
+    #[test]
+    fn enter_on_source_segment_opens_picker() {
+        let mut s = mk_state();
+        s.focused_row = ConfigureRow::Branch;
+        assert_eq!(s.branch_segment, BranchSegment::Source, "Source is default");
+        let outcome = handle_key(&mut s, key(KeyCode::Enter));
+        assert_eq!(outcome, ConfigureOutcome::OpenBranchPicker);
+    }
+
+    #[test]
+    fn arrows_toggle_segment_and_enter_edits_worktree_name() {
+        let mut s = mk_state();
+        s.focused_row = ConfigureRow::Branch;
+        handle_key(&mut s, key(KeyCode::Right));
+        assert_eq!(s.branch_segment, BranchSegment::Worktree);
+        let outcome = handle_key(&mut s, key(KeyCode::Enter));
+        assert_eq!(outcome, ConfigureOutcome::Stay);
+        assert!(
+            s.branch_edit.is_some(),
+            "Worktree segment Enter = inline edit"
+        );
+    }
+
+    #[test]
+    fn picker_enter_commits_base_off_pick() {
+        let mut s = mk_state();
+        s.branch_picker = Some(BranchPickerState::new(mk_entries(), false));
+        // Move to origin/feature-x and commit.
+        handle_key(&mut s, key(KeyCode::Down));
+        handle_key(&mut s, key(KeyCode::Enter));
+        assert!(s.branch_picker.is_none(), "popup closes on commit");
+        let base = s.base_selection.clone().expect("pick recorded");
+        assert_eq!(base.display, "origin/feature-x");
+        assert_eq!(base.short_name, "feature-x");
+        assert_eq!(base.mode, BaseMode::BaseOff);
+        assert_eq!(s.branch_source, "origin/feature-x", "row shows the pick");
+        // Worktree name still the generated one — base-off keeps it.
+        assert_eq!(s.effective_branch(), s.branch_worktree);
+    }
+
+    #[test]
+    fn picker_tab_toggles_to_checkout_and_picked_branch_becomes_session_branch() {
+        let mut s = mk_state();
+        s.branch_picker = Some(BranchPickerState::new(mk_entries(), false));
+        handle_key(&mut s, key(KeyCode::Down)); // origin/feature-x
+        handle_key(&mut s, key(KeyCode::Tab)); // checkout mode
+        handle_key(&mut s, key(KeyCode::Enter));
+        assert!(s.is_checkout());
+        assert_eq!(s.effective_branch(), "feature-x");
+        // Launch spec carries the pick and uses the picked branch name.
+        s.focused_row = ConfigureRow::Launch;
+        let outcome = launch_outcome(&mut s);
+        let ConfigureOutcome::Launch(spec) = outcome else {
+            panic!("expected launch");
+        };
+        assert_eq!(spec.branch_worktree, "feature-x");
+        assert_eq!(spec.base.unwrap().mode, BaseMode::Checkout);
+    }
+
+    #[test]
+    fn picker_blocks_checkout_of_in_use_branch() {
+        let mut s = mk_state();
+        s.branch_picker = Some(BranchPickerState::new(mk_entries(), false));
+        handle_key(&mut s, key(KeyCode::Down));
+        handle_key(&mut s, key(KeyCode::Down)); // origin/fix/login (in use)
+        handle_key(&mut s, key(KeyCode::Tab)); // checkout mode
+        handle_key(&mut s, key(KeyCode::Enter));
+        let picker = s.branch_picker.as_ref().expect("popup stays open");
+        assert!(picker.error.is_some(), "inline error shown");
+        assert!(s.base_selection.is_none(), "no pick recorded");
+        // Base-off of the same branch is fine — Tab back and commit.
+        handle_key(&mut s, key(KeyCode::Tab));
+        handle_key(&mut s, key(KeyCode::Enter));
+        assert_eq!(s.base_selection.unwrap().mode, BaseMode::BaseOff);
+    }
+
+    #[test]
+    fn picker_filter_narrows_and_esc_closes_without_pick() {
+        let mut s = mk_state();
+        s.branch_picker = Some(BranchPickerState::new(mk_entries(), false));
+        for c in "feat".chars() {
+            handle_key(&mut s, key(KeyCode::Char(c)));
+        }
+        {
+            let picker = s.branch_picker.as_ref().unwrap();
+            assert_eq!(picker.filtered_indices().len(), 1);
+            assert_eq!(
+                picker.selected_entry().unwrap().entry.display,
+                "origin/feature-x"
+            );
+        }
+        handle_key(&mut s, key(KeyCode::Esc));
+        assert!(s.branch_picker.is_none());
+        assert!(s.base_selection.is_none());
+        assert_eq!(s.branch_source, "main", "Esc leaves the source untouched");
+    }
+
+    #[test]
+    fn checkout_pick_pins_segment_and_reroutes_enter_to_picker() {
+        let mut s = mk_state();
+        s.branch_segment = BranchSegment::Worktree;
+        s.branch_picker = Some(BranchPickerState::new(mk_entries(), false));
+        handle_key(&mut s, key(KeyCode::Tab)); // checkout mode
+        handle_key(&mut s, key(KeyCode::Enter)); // pick origin/main
+        assert_eq!(s.branch_segment, BranchSegment::Source, "segment pinned");
+        // ←/→ must not move the segment off Source in checkout mode.
+        s.focused_row = ConfigureRow::Branch;
+        handle_key(&mut s, key(KeyCode::Right));
+        assert_eq!(s.branch_segment, BranchSegment::Source);
+        // Enter re-opens the picker (no generated name to edit).
+        let outcome = handle_key(&mut s, key(KeyCode::Enter));
+        assert_eq!(outcome, ConfigureOutcome::OpenBranchPicker);
     }
 
     #[test]

@@ -2439,6 +2439,19 @@ pub struct AppState {
     /// Present only while a scan is in flight; `tick()` drains it.
     pub skills_load_receiver: Option<mpsc::UnboundedReceiver<crate::models::SkillsData>>,
 
+    /// Background base-branch refresh for the Configure picker. The fetch +
+    /// re-list runs on `spawn_blocking`; the result lands here and is applied
+    /// by `check_branch_refresh_complete` on the next tick. The `u64` is a
+    /// generation guard — results from a closed/reopened picker are dropped.
+    pub branch_refresh_receiver: Option<
+        mpsc::UnboundedReceiver<(
+            u64,
+            Result<Vec<crate::git::branch_list::BranchEntry>, String>,
+        )>,
+    >,
+    /// Current branch-refresh generation (bumped on every picker open).
+    pub branch_refresh_seq: u64,
+
     // Periodic session snapshot tracking
     pub last_snapshot_time: Option<Instant>,
 
@@ -2674,6 +2687,9 @@ struct ConfigureLaunchSnapshot {
     /// Codex model for Codex-agent sessions. Same omit-on-default semantics
     /// as `session_model`. Set only when `agent_type == Codex`.
     codex_model: Option<crate::models::CodexModel>,
+    /// The base-branch popup pick (2026-06). `None` = legacy base policy:
+    /// HEAD for local repos, origin/HEAD for remote/star launches.
+    base: Option<crate::components::new_session::configure::BaseSelection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2853,6 +2869,10 @@ impl Default for AppState {
             // Skills browser state
             skills_state: crate::components::skills::SkillsViewState::default(),
             skills_load_receiver: None,
+
+            // Configure base-branch picker background refresh
+            branch_refresh_receiver: None,
+            branch_refresh_seq: 0,
 
             // Periodic session snapshot tracking
             last_snapshot_time: None,
@@ -3797,6 +3817,150 @@ impl AppState {
         } else {
             false
         }
+    }
+
+    /// Open the Configure screen's base-branch popup: seed entries from
+    /// cached refs (disk-only — instant, offline-safe), then kick a
+    /// background fetch + re-list whose result is applied by
+    /// `check_branch_refresh_complete` on a later tick (interview pick
+    /// 2026-06-03: cached-first, async refresh).
+    pub fn open_branch_picker(&mut self) {
+        use crate::components::new_session::configure::{BranchPickerState, PickerBranchEntry};
+        use crate::git::branch_list::{self, BranchEntry};
+        use crate::git::repo_source::RepoSource;
+
+        let Some(cfg) = self.new_session_state.as_mut().and_then(|ns| ns.configure_state.as_mut())
+        else {
+            return;
+        };
+
+        // Where do cached refs live? The repo itself for local picks; the
+        // clone cache for remote/star sources (when already cloned). A
+        // not-yet-cloned remote has no cached refs — the popup opens empty
+        // with the spinner and the ls-remote refresh fills it.
+        let source = cfg.repo_source.clone();
+        let list_path: Option<std::path::PathBuf> = match &source {
+            RepoSource::LocalPath(p) => Some(p.clone()),
+            RepoSource::HttpsUrl(_)
+            | RepoSource::SshUrl(_)
+            | RepoSource::GithubShorthand { .. } => {
+                crate::git::RemoteRepoManager::new().ok().and_then(|m| {
+                    source
+                        .parse_components()
+                        .ok()
+                        .filter(|parsed| m.is_cached(parsed))
+                        .map(|parsed| m.get_cache_path(&parsed))
+                })
+            }
+            // SshSession / Filter never show the Branch row.
+            _ => None,
+        };
+
+        let existing = cfg.existing_branches.clone();
+        let mark_in_use = |entries: Vec<BranchEntry>| -> Vec<PickerBranchEntry> {
+            entries
+                .into_iter()
+                .map(|e| PickerBranchEntry {
+                    in_use: existing.iter().any(|b| b == &e.short_name),
+                    entry: e,
+                })
+                .collect()
+        };
+
+        let cached = list_path.as_deref().map(branch_list::list_repo_branches).unwrap_or_default();
+        cfg.branch_picker = Some(BranchPickerState::new(mark_in_use(cached), true));
+
+        // Background refresh — generation-guarded so a stale result can't
+        // repopulate a closed/reopened picker.
+        self.branch_refresh_seq += 1;
+        let seq = self.branch_refresh_seq;
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.branch_refresh_receiver = Some(rx);
+        tokio::spawn(async move {
+            let join = tokio::task::spawn_blocking(move || -> Result<Vec<BranchEntry>, String> {
+                match list_path {
+                    Some(p) => Ok(branch_list::fetch_and_list(&p)),
+                    None => {
+                        // Remote source with no cache yet: ls-remote.
+                        let manager =
+                            crate::git::RemoteRepoManager::new().map_err(|e| e.to_string())?;
+                        let remote =
+                            manager.list_remote_branches(&source).map_err(|e| e.to_string())?;
+                        Ok(remote
+                            .into_iter()
+                            .map(|b| BranchEntry {
+                                display: format!("origin/{}", b.name),
+                                short_name: b.name,
+                                is_remote: true,
+                                is_default: b.is_default,
+                            })
+                            .collect())
+                    }
+                }
+            })
+            .await;
+            let payload = match join {
+                Ok(r) => r,
+                Err(join_err) => Err(format!("branch refresh task panicked: {join_err}")),
+            };
+            let _ = tx.send((seq, payload));
+        });
+    }
+
+    /// Poll the background branch refresh. Applies the fresh list to the
+    /// popup (if still open) and stops the spinner. Refresh errors keep the
+    /// cached entries — offline-safe — and surface a non-blocking warning.
+    /// Returns true when state changed this tick.
+    pub fn check_branch_refresh_complete(&mut self) -> bool {
+        use crate::components::new_session::configure::PickerBranchEntry;
+
+        let Some(ref mut receiver) = self.branch_refresh_receiver else {
+            return false;
+        };
+        let (seq, result) = match receiver.try_recv() {
+            Ok(payload) => payload,
+            Err(mpsc::error::TryRecvError::Empty) => return false,
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                self.branch_refresh_receiver = None;
+                return false;
+            }
+        };
+        self.branch_refresh_receiver = None;
+        if seq != self.branch_refresh_seq {
+            // A newer picker session superseded this refresh.
+            return false;
+        }
+
+        let mut warn_msg: Option<String> = None;
+        if let Some(cfg) =
+            self.new_session_state.as_mut().and_then(|ns| ns.configure_state.as_mut())
+        {
+            let existing = cfg.existing_branches.clone();
+            if let Some(picker) = cfg.branch_picker.as_mut() {
+                picker.loading = false;
+                match result {
+                    Ok(entries) => {
+                        picker.entries = entries
+                            .into_iter()
+                            .map(|e| PickerBranchEntry {
+                                in_use: existing.iter().any(|b| b == &e.short_name),
+                                entry: e,
+                            })
+                            .collect();
+                        picker.clamp_selection();
+                    }
+                    Err(msg) => {
+                        // Keep the cached list usable; just warn.
+                        warn_msg = Some(msg);
+                    }
+                }
+            }
+        }
+        if let Some(msg) = warn_msg {
+            warn!("branch refresh failed: {msg}");
+            self.add_warning_notification(format!("Branch refresh failed: {msg}"));
+        }
+        true
     }
 
     /// Load Boss mode sessions from Docker containers
@@ -5765,7 +5929,19 @@ impl AppState {
             agent_type,
             session_model,
             codex_model,
+            base: spec.base.clone(),
         };
+
+        // Boss mode builds its own Docker workspace from `repo_path` and
+        // doesn't consume the worktree machinery — a picked base can't be
+        // honored there yet. Be honest about it rather than silently using
+        // the default.
+        if snapshot.base.is_some() && snapshot.mode == SessionMode::Boss {
+            self.add_warning_notification(
+                "Base-branch pick is not applied in Boss mode yet — session uses the default base"
+                    .to_string(),
+            );
+        }
 
         // ONLY check authentication for Boss mode (Docker-based sessions)
         if snapshot.mode == SessionMode::Boss {
@@ -5873,20 +6049,32 @@ impl AppState {
         // `existing_worktree`. Boss mode (`create_boss_session`) ignores it and
         // builds its own Docker request from `repo_path`, so preparing a worktree
         // there would orphan it on disk and leave a stray cache branch.
+        // Checkout-direct picks from the remote flow can land on a suffixed
+        // branch (`feature-x-ab12cd34`) when the branch already has a
+        // worktree — track the branch the worktree actually got.
+        let mut effective_branch = snapshot.branch_name.clone();
         let existing_worktree =
             if snapshot.repo_source.is_remote() && snapshot.mode == SessionMode::Interactive {
                 match self.prepare_remote_worktree(session_id, &repo_path, &snapshot).await {
-                    Ok(ew) => Some(ew),
+                    Ok((worktree_path, source_repo, branch)) => {
+                        effective_branch = branch;
+                        Some((worktree_path, source_repo))
+                    }
                     Err(()) => return, // already notified + cancelled
                 }
             } else {
                 None
             };
 
+        // Local repos: hand the picked base ref (if any) to the worktree
+        // machinery. The display form is revparse-able for both kinds —
+        // `origin/feature-x` (remote pick) or `feature-x` (local pick).
+        let base_start_point = snapshot.base.as_ref().map(|b| b.display.clone());
+
         let result = self
             .create_session_with_logs(
                 &repo_path,
-                &snapshot.branch_name,
+                &effective_branch,
                 session_id,
                 snapshot.skip_permissions,
                 snapshot.mode,
@@ -5895,6 +6083,7 @@ impl AppState {
                 snapshot.session_model,
                 snapshot.codex_model,
                 existing_worktree,
+                base_start_point,
             )
             .await;
 
@@ -5918,9 +6107,14 @@ impl AppState {
         }
     }
 
-    /// Build a worktree for a remote/star launch, branched off the remote's
-    /// default branch (`origin/HEAD`) of the freshly-fetched cache. Returns
-    /// `(worktree_path, source_repo_path)` for the `existing_worktree` arg of
+    /// Build a worktree for a remote/star launch. Base policy:
+    ///   * no pick — NEW branch off the remote's default (`origin/HEAD`),
+    ///     freshly fetched (legacy star policy);
+    ///   * base-off pick — NEW branch off `origin/<picked>`;
+    ///   * checkout pick — the picked branch itself, as a local tracking
+    ///     branch (suffixed when the branch already has a worktree).
+    ///
+    /// Returns `(worktree_path, source_repo_path, effective_branch)` for
     /// `create_session_with_logs`. On failure: notifies + cancels the
     /// new-session flow and returns `Err(())`.
     ///
@@ -5930,15 +6124,17 @@ impl AppState {
         session_id: uuid::Uuid,
         cache_path: &std::path::Path,
         snapshot: &ConfigureLaunchSnapshot,
-    ) -> Result<(std::path::PathBuf, std::path::PathBuf), ()> {
+    ) -> Result<(std::path::PathBuf, std::path::PathBuf, String), ()> {
+        use crate::components::new_session::configure::BaseMode;
         use crate::git::{RemoteRepoManager, WorktreeManager};
 
         let cache = cache_path.to_path_buf();
         let branch = snapshot.branch_name.clone();
         let source = snapshot.repo_source.clone();
+        let base = snapshot.base.clone();
 
         let join = tokio::task::spawn_blocking(
-            move || -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
+            move || -> Result<(std::path::PathBuf, std::path::PathBuf, String), String> {
                 let wt_manager =
                     WorktreeManager::new().map_err(|e| format!("worktree manager init: {e}"))?;
                 let worktree_path = wt_manager
@@ -5946,10 +6142,49 @@ impl AppState {
                     .map_err(|e| format!("worktree path: {e}"))?;
                 let remote_manager =
                     RemoteRepoManager::new().map_err(|e| format!("remote manager init: {e}"))?;
-                remote_manager
-                    .create_worktree_off_remote_default(&cache, &worktree_path, &branch, &source)
-                    .map_err(|e| format!("{e}"))?;
-                Ok((worktree_path, cache))
+                match base {
+                    Some(b) if b.mode == BaseMode::Checkout => {
+                        // `clone_repo` already fetched on cache reuse, so
+                        // origin/<branch> is fresh. Suffix-collision handling
+                        // lives inside checkout_existing_branch_worktree.
+                        match remote_manager
+                            .checkout_existing_branch_worktree(
+                                &cache,
+                                &worktree_path,
+                                &b.short_name,
+                            )
+                            .map_err(|e| format!("{e}"))?
+                        {
+                            Some((suffixed_path, suffixed_branch)) => {
+                                Ok((suffixed_path, cache, suffixed_branch))
+                            }
+                            None => Ok((worktree_path, cache, b.short_name.clone())),
+                        }
+                    }
+                    Some(b) => {
+                        remote_manager
+                            .create_worktree_off_remote_branch(
+                                &cache,
+                                &worktree_path,
+                                &branch,
+                                Some(&b.short_name),
+                                &source,
+                            )
+                            .map_err(|e| format!("{e}"))?;
+                        Ok((worktree_path, cache, branch))
+                    }
+                    None => {
+                        remote_manager
+                            .create_worktree_off_remote_default(
+                                &cache,
+                                &worktree_path,
+                                &branch,
+                                &source,
+                            )
+                            .map_err(|e| format!("{e}"))?;
+                        Ok((worktree_path, cache, branch))
+                    }
+                }
             },
         )
         .await;
@@ -6338,6 +6573,7 @@ impl AppState {
         model: Option<crate::models::ClaudeModel>,
         codex_model: Option<crate::models::CodexModel>,
         existing_worktree: Option<(std::path::PathBuf, std::path::PathBuf)>,
+        base_start_point: Option<String>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Branch based on session mode
         match mode {
@@ -6351,6 +6587,7 @@ impl AppState {
                     model,
                     codex_model,
                     existing_worktree,
+                    base_start_point,
                 )
                 .await
             }
@@ -6377,6 +6614,9 @@ impl AppState {
     /// * `agent_type` - Type of agent (Claude, Shell, etc.)
     /// * `model` - Claude model to use
     /// * `existing_worktree` - For remote repos: (worktree_path, source_repo_path)
+    /// * `base_start_point` - For local repos: revparse-able ref the new
+    ///   branch is cut from (`origin/feature-x` / `feature-x`); `None` keeps
+    ///   the legacy default-branch policy
     async fn create_interactive_session(
         &mut self,
         repo_path: &std::path::Path,
@@ -6387,6 +6627,7 @@ impl AppState {
         model: Option<crate::models::ClaudeModel>,
         codex_model: Option<crate::models::CodexModel>,
         existing_worktree: Option<(std::path::PathBuf, std::path::PathBuf)>,
+        base_start_point: Option<String>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         use crate::interactive::InteractiveSessionManager;
 
@@ -6457,7 +6698,7 @@ impl AppState {
                     workspace_name.clone(),
                     repo_path.to_path_buf(),
                     branch_name.to_string(),
-                    None, // base_branch
+                    base_start_point,
                     skip_permissions,
                     agent_type,
                     model,
@@ -8977,6 +9218,11 @@ impl App {
 
         // Check for completed background skills scan
         if self.state.check_skills_load_complete() {
+            self.state.ui_needs_refresh = true;
+        }
+
+        // Check for a completed base-branch refresh (Configure picker)
+        if self.state.check_branch_refresh_complete() {
             self.state.ui_needs_refresh = true;
         }
 
