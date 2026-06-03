@@ -1,10 +1,14 @@
 // ABOUTME: Persistent storage for repository favorites
-// Stores favorites in ~/.claude/favorites.yaml for quick access to frequently-used repos
+// Stores favorites in ~/.agents-in-a-box/favorites.yaml for quick access to
+// frequently-used repos. A favorite ALWAYS records a remote indicator (an
+// HTTPS/SSH URL or `owner/repo` shorthand) — never a local path. Local-path
+// entries from older versions are rewritten to their `origin` remote (or
+// dropped) by `migrate_local_to_remote`.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Source type for a favorite repository
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -257,11 +261,262 @@ impl FavoritesStore {
     pub fn total_uses(&self) -> u64 {
         self.favorites.iter().map(|f| f.stats.use_count).sum()
     }
+
+    /// Rewrite any legacy `LocalPath` favorites to their `origin` remote
+    /// indicator, dropping the ones whose path has no resolvable remote.
+    ///
+    /// Idempotent: a store that already contains only remote entries returns an
+    /// empty [`MigrationReport`] and is left untouched. The caller is
+    /// responsible for persisting (`save`) when the returned report is
+    /// non-empty.
+    pub fn migrate_local_to_remote(&mut self) -> MigrationReport {
+        let mut report = MigrationReport::default();
+        let mut keep: Vec<Favorite> = Vec::with_capacity(self.favorites.len());
+
+        for fav in std::mem::take(&mut self.favorites) {
+            if fav.source_type != SourceType::LocalPath {
+                keep.push(fav);
+                continue;
+            }
+            match favorite_from_local_repo(fav.alias.clone(), Path::new(&fav.source)) {
+                Ok(remote) => {
+                    // Preserve user-facing metadata + stats; only the source
+                    // pointer changes.
+                    let migrated = Favorite {
+                        alias: fav.alias.clone(),
+                        source_type: remote.source_type,
+                        source: remote.source.clone(),
+                        display_name: fav.display_name,
+                        description: fav.description,
+                        tags: fav.tags,
+                        metadata: fav.metadata,
+                        stats: fav.stats,
+                    };
+                    report.migrated.push((fav.alias, remote.source));
+                    keep.push(migrated);
+                }
+                Err(_) => {
+                    report.dropped.push(fav.alias);
+                }
+            }
+        }
+
+        self.favorites = keep;
+        report
+    }
+}
+
+/// Why deriving a remote favorite from a local repo failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeriveFavoriteError {
+    /// The path is not a git repository (or could not be opened).
+    NotAGitRepo,
+    /// The repository has no `origin` remote.
+    NoRemote,
+    /// The remote URL could not be classified as a clonable remote source.
+    Unparseable(String),
+}
+
+impl std::fmt::Display for DeriveFavoriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotAGitRepo => write!(f, "not a git repository"),
+            Self::NoRemote => write!(f, "no git remote (origin) found"),
+            Self::Unparseable(url) => write!(f, "unrecognised remote URL: {url}"),
+        }
+    }
+}
+
+/// Summary of a `migrate_local_to_remote` pass.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MigrationReport {
+    /// `(alias, new_source)` for each local-path favorite rewritten to remote.
+    pub migrated: Vec<(String, String)>,
+    /// Aliases of local-path favorites dropped for having no resolvable remote.
+    pub dropped: Vec<String>,
+}
+
+impl MigrationReport {
+    /// True when nothing was migrated or dropped (store left untouched).
+    pub fn is_empty(&self) -> bool {
+        self.migrated.is_empty() && self.dropped.is_empty()
+    }
+}
+
+/// Derive a remote [`Favorite`] from a local repository path by reading its
+/// `origin` remote. Returns an error (and stores nothing) when the path is not
+/// a git repo, has no `origin`, or whose remote URL can't be classified.
+///
+/// This is the single source of truth for the "a star is always a remote
+/// indicator" rule — both star entry points and the startup migration call it.
+pub fn favorite_from_local_repo(
+    alias: String,
+    local_path: &Path,
+) -> Result<Favorite, DeriveFavoriteError> {
+    let repo = crate::git::RepositoryManager::open(local_path)
+        .map_err(|_| DeriveFavoriteError::NotAGitRepo)?;
+    let url = match repo.get_remote_url() {
+        Ok(Some(url)) if !url.trim().is_empty() => url,
+        _ => return Err(DeriveFavoriteError::NoRemote),
+    };
+    let (source, source_type) =
+        classify_remote_url(&url).ok_or_else(|| DeriveFavoriteError::Unparseable(url.clone()))?;
+    Ok(Favorite::new(alias, source, source_type))
+}
+
+/// Classify an `origin` URL into a `(source_string, SourceType)` pair, or
+/// `None` if it isn't a shareable remote (e.g. a bare local path origin).
+///
+/// GitHub hosts collapse to `owner/repo` shorthand for nicer display; every
+/// other host keeps its full URL. SSH (`git@host:` / `ssh://`) maps to
+/// `SshUrl`, anything else with a scheme maps to `HttpsUrl`.
+fn classify_remote_url(url: &str) -> Option<(String, SourceType)> {
+    use crate::git::RepoSource;
+
+    let is_ssh = url.starts_with("git@") || url.starts_with("ssh://");
+    let source = if is_ssh {
+        RepoSource::SshUrl(url.to_string())
+    } else if url.contains("://") {
+        RepoSource::HttpsUrl(url.to_string())
+    } else {
+        // No scheme and not SSH shorthand → a local/path origin, not shareable.
+        return None;
+    };
+
+    // Prefer GitHub shorthand when the host resolves to github.com.
+    if let Ok(parsed) = source.parse_components() {
+        if parsed.host == "github.com" && !parsed.owner.is_empty() {
+            return Some((
+                format!("{}/{}", parsed.owner, parsed.repo_name),
+                SourceType::GithubShorthand,
+            ));
+        }
+    }
+
+    match source {
+        RepoSource::HttpsUrl(u) => Some((u, SourceType::HttpsUrl)),
+        RepoSource::SshUrl(u) => Some((u, SourceType::SshUrl)),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Create a git repo at `dir` with `origin` pointing at `url`.
+    fn init_repo_with_remote(dir: &Path, url: &str) {
+        let repo = git2::Repository::init(dir).expect("git init");
+        repo.remote("origin", url).expect("add origin");
+    }
+
+    #[test]
+    fn favorite_from_local_repo_github_https_becomes_shorthand() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo_with_remote(tmp.path(), "https://github.com/anthropics/claude-code.git");
+        let fav = favorite_from_local_repo("cc".into(), tmp.path()).unwrap();
+        assert_eq!(fav.source_type, SourceType::GithubShorthand);
+        assert_eq!(fav.source, "anthropics/claude-code");
+    }
+
+    #[test]
+    fn favorite_from_local_repo_github_ssh_becomes_shorthand() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo_with_remote(tmp.path(), "git@github.com:anthropics/claude-code.git");
+        let fav = favorite_from_local_repo("cc".into(), tmp.path()).unwrap();
+        assert_eq!(fav.source_type, SourceType::GithubShorthand);
+        assert_eq!(fav.source, "anthropics/claude-code");
+    }
+
+    #[test]
+    fn favorite_from_local_repo_non_github_keeps_url() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo_with_remote(tmp.path(), "https://gitlab.com/group/proj.git");
+        let fav = favorite_from_local_repo("p".into(), tmp.path()).unwrap();
+        assert_eq!(fav.source_type, SourceType::HttpsUrl);
+        assert_eq!(fav.source, "https://gitlab.com/group/proj.git");
+    }
+
+    #[test]
+    fn favorite_from_local_repo_no_origin_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        git2::Repository::init(tmp.path()).unwrap(); // repo, but no origin
+        assert!(matches!(
+            favorite_from_local_repo("x".into(), tmp.path()),
+            Err(DeriveFavoriteError::NoRemote)
+        ));
+    }
+
+    #[test]
+    fn favorite_from_local_repo_not_a_repo_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            favorite_from_local_repo("x".into(), tmp.path()),
+            Err(DeriveFavoriteError::NotAGitRepo)
+        ));
+    }
+
+    #[test]
+    fn migrate_noop_when_all_remote() {
+        let mut store = FavoritesStore::default();
+        store
+            .add(Favorite::new(
+                "cc".into(),
+                "anthropics/claude-code".into(),
+                SourceType::GithubShorthand,
+            ))
+            .unwrap();
+        let report = store.migrate_local_to_remote();
+        assert!(report.is_empty());
+        assert_eq!(store.len(), 1);
+        assert_eq!(
+            store.get("cc").unwrap().source_type,
+            SourceType::GithubShorthand
+        );
+    }
+
+    #[test]
+    fn migrate_rewrites_localpath_with_origin() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo_with_remote(tmp.path(), "https://github.com/anthropics/claude-code.git");
+
+        let mut store = FavoritesStore::default();
+        let mut fav = Favorite::new(
+            "cc".into(),
+            tmp.path().display().to_string(),
+            SourceType::LocalPath,
+        );
+        fav.tags = vec!["keep-me".into()];
+        fav.stats.use_count = 7;
+        store.add(fav).unwrap();
+
+        let report = store.migrate_local_to_remote();
+        assert_eq!(report.dropped.len(), 0);
+        assert_eq!(report.migrated.len(), 1);
+
+        let migrated = store.get("cc").unwrap();
+        assert_eq!(migrated.source_type, SourceType::GithubShorthand);
+        assert_eq!(migrated.source, "anthropics/claude-code");
+        // Metadata + stats preserved across the rewrite.
+        assert_eq!(migrated.tags, vec!["keep-me".to_string()]);
+        assert_eq!(migrated.stats.use_count, 7);
+    }
+
+    #[test]
+    fn migrate_drops_localpath_without_remote() {
+        let tmp = tempfile::tempdir().unwrap(); // not a git repo
+        let mut store = FavoritesStore::default();
+        store
+            .add(Favorite::new(
+                "orphan".into(),
+                tmp.path().display().to_string(),
+                SourceType::LocalPath,
+            ))
+            .unwrap();
+        let report = store.migrate_local_to_remote();
+        assert_eq!(report.dropped, vec!["orphan".to_string()]);
+        assert!(store.is_empty());
+    }
 
     #[test]
     fn test_favorite_creation() {
