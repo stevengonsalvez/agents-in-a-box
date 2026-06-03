@@ -146,21 +146,35 @@ async fn main() -> Result<()> {
                 let mut favorites = config::FavoritesStore::load();
                 let report = favorites.migrate_local_to_remote();
                 if !report.is_empty() {
-                    if let Err(e) = favorites.save() {
-                        tracing::error!(error = %e, "failed to persist migrated favorites");
+                    // Back up the original (pre-migration) store once before the
+                    // destructive overwrite so dropped favorites are recoverable.
+                    if let Err(e) = config::FavoritesStore::load().write_migration_backup() {
+                        tracing::warn!(error = %e, "failed to back up favorites before migration");
                     }
-                    if !report.migrated.is_empty() {
-                        app_state.state.add_info_notification(format!(
-                            "⭐ Migrated {} favorite(s) to remote",
-                            report.migrated.len()
-                        ));
-                    }
-                    if !report.dropped.is_empty() {
-                        app_state.state.add_error_notification(format!(
-                            "★ Removed {} local-only favorite(s) with no remote: {}",
-                            report.dropped.len(),
-                            report.dropped.join(", ")
-                        ));
+                    match favorites.save() {
+                        Ok(()) => {
+                            // Only claim success once the migrated store is on disk;
+                            // otherwise the migration would silently re-run next launch.
+                            if !report.migrated.is_empty() {
+                                app_state.state.add_info_notification(format!(
+                                    "⭐ Migrated {} favorite(s) to remote",
+                                    report.migrated.len()
+                                ));
+                            }
+                            if !report.dropped.is_empty() {
+                                app_state.state.add_error_notification(format!(
+                                    "★ Removed {} local-only favorite(s) with no remote: {}",
+                                    report.dropped.len(),
+                                    report.dropped.join(", ")
+                                ));
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "failed to persist migrated favorites");
+                            app_state.state.add_error_notification(format!(
+                                "Could not migrate favorites to remote: {e}"
+                            ));
+                        }
                     }
                 }
             }
