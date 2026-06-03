@@ -11,12 +11,36 @@
 //! default.
 
 use async_trait::async_trait;
+use serde_json::Value;
 
 use crate::{HostClient, Result};
 use ainb_plugin_protocol::{
     params::{HandleEventParams, HandleKeyParams, RenderParams},
     wire_buffer::WireBuffer,
 };
+
+/// Resolved one-shot init data the host hands the plugin on
+/// [`PLUGIN_INIT`](ainb_plugin_protocol::methods::PLUGIN_INIT).
+///
+/// Bundles the granted-capability set and the resolved per-plugin config
+/// table so [`Plugin::on_init`] receives both without a growing list of
+/// positional parameters. Future init-time data (locale, theme, ...) adds
+/// a field here rather than another `on_init` arg.
+///
+/// Borrows from the decoded [`PluginInitParams`](ainb_plugin_protocol::params::PluginInitParams)
+/// — it lives only for the duration of the `on_init` call.
+#[derive(Debug, Clone, Copy)]
+pub struct InitContext<'a> {
+    /// Capabilities the host granted, by canonical capability key. A
+    /// subset of the manifest `[capabilities]`. A plugin may refuse to
+    /// start (return [`crate::SdkError::plugin`]) if a required capability
+    /// was withheld.
+    pub granted_capabilities: &'a [String],
+    /// Resolved `[plugins.<name>]` config table the host injected, as a
+    /// JSON value. `null` when the host omitted config (ABI-2 back-compat).
+    /// Plugins parse this into their typed config struct.
+    pub config: &'a Value,
+}
 
 /// Captured stdout / stderr / exit code from a CLI dispatch.
 ///
@@ -125,12 +149,13 @@ pub trait Plugin: Send + 'static {
     /// [`PLUGIN_INIT`](ainb_plugin_protocol::methods::PLUGIN_INIT).
     ///
     /// Default is a no-op. Plugins are free to override for one-shot
-    /// setup (open caches, subscribe to topics via `host`, ...). The
-    /// granted-capabilities list is supplied so the plugin can refuse
-    /// to start if a required capability was withheld — return
-    /// [`crate::SdkError::plugin`] in that case.
-    async fn on_init(&mut self, host: &HostClient, granted_capabilities: &[String]) -> Result<()> {
-        let _ = (host, granted_capabilities);
+    /// setup (open caches, subscribe to topics via `host`, parse the
+    /// injected config, ...). The [`InitContext`] carries the granted
+    /// capabilities (so the plugin can refuse to start if a required one
+    /// was withheld — return [`crate::SdkError::plugin`] in that case)
+    /// and the resolved per-plugin `config` table the host injected.
+    async fn on_init(&mut self, host: &HostClient, ctx: InitContext<'_>) -> Result<()> {
+        let _ = (host, ctx);
         Ok(())
     }
 

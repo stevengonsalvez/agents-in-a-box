@@ -40,6 +40,7 @@ use ainb_plugin_protocol::{
 };
 
 use crate::host_client::{Pending, RpcOutcome};
+use crate::plugin::InitContext;
 use crate::{HostClient, Plugin, Result, SdkError};
 
 /// Outbound mpsc channel buffer. Tuned for "many small frames". Bigger
@@ -50,13 +51,27 @@ const FRAMES_CHANNEL_CAPACITY: usize = 64;
 
 /// JSON-RPC server that hosts a [`Plugin`] over stdio.
 pub struct Server<P: Plugin> {
-    plugin: P,
+    plugin: Arc<Mutex<P>>,
 }
 
 impl<P: Plugin> Server<P> {
     /// Build a server around `plugin`. No I/O yet — call [`Self::run_stdio`]
     /// or [`Self::run`] to start the dispatcher.
-    pub const fn new(plugin: P) -> Self {
+    pub fn new(plugin: P) -> Self {
+        Self {
+            plugin: Arc::new(Mutex::new(plugin)),
+        }
+    }
+
+    /// Build a server around a *shared* `Arc<Mutex<P>>` so the caller can
+    /// retain a handle to the plugin's state while the server runs.
+    ///
+    /// The runtime always uses [`Self::new`]; this exists for in-process
+    /// test harnesses (e.g. `ainb-plugin-testkit`) that want to assert a
+    /// plugin's internal state after an init/render round-trip without
+    /// threading it back over the wire.
+    #[must_use]
+    pub const fn from_shared(plugin: Arc<Mutex<P>>) -> Self {
         Self { plugin }
     }
 
@@ -77,7 +92,6 @@ impl<P: Plugin> Server<P> {
         W: AsyncWrite + Send + Unpin + 'static,
     {
         let Self { plugin } = self;
-        let plugin = Arc::new(Mutex::new(plugin));
 
         let (frames_tx, frames_rx) = mpsc::channel::<Vec<u8>>(FRAMES_CHANNEL_CAPACITY);
         let (host_client, pending) = HostClient::new(frames_tx.clone());
@@ -367,7 +381,11 @@ async fn handle_method<P: Plugin>(
             let p: PluginInitParams = decode_params(params)?;
             let manifest_str = {
                 let mut guard = plugin.lock().await;
-                guard.on_init(host, &p.granted_capabilities).await?;
+                let ctx = InitContext {
+                    granted_capabilities: &p.granted_capabilities,
+                    config: &p.config,
+                };
+                guard.on_init(host, ctx).await?;
                 guard.manifest()
             };
             let manifest: Manifest = toml::from_str(manifest_str).map_err(|e| {

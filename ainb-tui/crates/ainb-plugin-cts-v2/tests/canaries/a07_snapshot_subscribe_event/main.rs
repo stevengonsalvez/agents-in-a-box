@@ -1,6 +1,6 @@
 use ainb_plugin_sdk::{
-    Cell, CliOutput, Coord, HandleEventParams, HostClient, Plugin, RenderParams, Result, Server,
-    WireBuffer,
+    Cell, CliOutput, Coord, HandleEventParams, HostClient, InitContext, Plugin, RenderParams,
+    Result, Server, WireBuffer,
 };
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -18,7 +18,7 @@ impl Plugin for A07 {
         "[plugin]\nname = \"cts-a07\"\nversion = \"0.0.1\"\nabi_version = 2\n[subscribes]\nsnapshots = [\"cts.a07\"]\n"
     }
 
-    async fn on_init(&mut self, host: &HostClient, _caps: &[String]) -> Result<()> {
+    async fn on_init(&mut self, host: &HostClient, _ctx: InitContext<'_>) -> Result<()> {
         host.snapshot_subscribe("cts.a07").await?;
         Ok(())
     }

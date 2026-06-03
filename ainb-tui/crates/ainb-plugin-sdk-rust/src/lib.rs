@@ -29,7 +29,7 @@ pub mod server;
 
 pub use error::{Result, SdkError};
 pub use host_client::HostClient;
-pub use plugin::{CliOutput, Plugin};
+pub use plugin::{CliOutput, InitContext, Plugin};
 pub use server::Server;
 
 // Re-export wire types so plugin authors only need this crate.

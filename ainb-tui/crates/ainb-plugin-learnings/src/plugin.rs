@@ -11,7 +11,9 @@
 
 use async_trait::async_trait;
 
-use ainb_plugin_sdk::{Cell, Color, Coord, HostClient, Plugin, RenderParams, Result, WireBuffer};
+use ainb_plugin_sdk::{
+    Cell, Color, Coord, HostClient, InitContext, Plugin, RenderParams, Result, WireBuffer,
+};
 use ratatui::buffer::Buffer as RBuffer;
 use ratatui::layout::Rect as RRect;
 use ratatui::style::{Color as RColor, Modifier as RModifier, Style};
@@ -46,9 +48,8 @@ const MUTED_GRAY: RColor = RColor::Rgb(120, 120, 140);
 /// record store, and per-tab UI state arrive in P4+.
 #[derive(Debug, Default)]
 pub struct LearningsPlugin {
-    /// Resolved config injected at `plugin/init`. Defaults until the host
-    /// wire delivers the `[plugins.learnings]` table (see [`Self::on_init`]
-    /// docs for the current ABI limitation).
+    /// Resolved config injected at `plugin/init` and applied in
+    /// [`Self::on_init`]. Holds the schema defaults until init runs.
     config: LearningsConfig,
 }
 
@@ -63,10 +64,10 @@ impl LearningsPlugin {
     /// Replace the resolved config from an injected
     /// `PluginInitParams.config` JSON value.
     ///
-    /// This is the parse path `on_init` consumes once the SDK forwards
-    /// `config` to it. Kept as a `&mut self` method (rather than inline in
-    /// `on_init`) so unit tests can drive it without the SDK `Server`,
-    /// and so the future SDK wiring is a one-line call.
+    /// This is the parse path [`Self::on_init`] consumes via
+    /// [`InitContext::config`]. Kept as a `&mut self` method (rather than
+    /// inline in `on_init`) so unit tests can drive it without the SDK
+    /// `Server`.
     pub fn apply_init_config(&mut self, value: &serde_json::Value) {
         self.config = LearningsConfig::from_init_config(value);
     }
@@ -80,18 +81,13 @@ impl Plugin for LearningsPlugin {
 
     /// One-shot init.
     ///
-    /// The resolved `[plugins.learnings]` table is injected by the host on
-    /// `PluginInitParams.config` (P1). The current SDK `on_init` signature
-    /// forwards only `granted_capabilities`, not `config`, so the typed
-    /// parse lives in [`Self::apply_init_config`] /
-    /// [`LearningsConfig::from_init_config`] and is unit-tested directly.
-    /// When the SDK forwards `config` to `on_init`, wiring it is a single
-    /// `self.apply_init_config(&config)` call here.
-    async fn on_init(
-        &mut self,
-        _host: &HostClient,
-        _granted_capabilities: &[String],
-    ) -> Result<()> {
+    /// The host resolves the `[plugins.learnings]` table (project → user →
+    /// system, P1) and injects it on `PluginInitParams.config`; the SDK
+    /// forwards it via [`InitContext::config`]. We parse it into the typed
+    /// [`LearningsConfig`] (defaulting any absent key) and stash it on the
+    /// plugin so the data layer (P4) can locate the KB dirs.
+    async fn on_init(&mut self, _host: &HostClient, ctx: InitContext<'_>) -> Result<()> {
+        self.apply_init_config(ctx.config);
         Ok(())
     }
 
