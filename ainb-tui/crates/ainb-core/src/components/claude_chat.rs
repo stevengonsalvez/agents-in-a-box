@@ -39,7 +39,7 @@ impl ClaudeChatComponent {
         frame.render_widget(popup_block, area);
 
         // Split the chat area into messages and input (with margin for border)
-        let inner_area = area.inner(&ratatui::layout::Margin {
+        let inner_area = area.inner(ratatui::layout::Margin {
             horizontal: 1,
             vertical: 1,
         });

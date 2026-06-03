@@ -345,14 +345,15 @@ impl Screen for PluginScreen {
             if coord.x >= area.width || coord.y >= area.height {
                 continue;
             }
-            let target = buf.get_mut(area.x + coord.x, area.y + coord.y);
-            target.set_symbol(&cell.symbol);
-            target.set_fg(rgb_to_color(cell.fg));
-            target.set_bg(rgb_to_color(cell.bg));
-            target.set_style(
-                ratatui::style::Style::default()
-                    .add_modifier(modifier_bits_to_modifiers(cell.modifier)),
-            );
+            if let Some(target) = buf.cell_mut((area.x + coord.x, area.y + coord.y)) {
+                target.set_symbol(&cell.symbol);
+                target.set_fg(rgb_to_color(cell.fg));
+                target.set_bg(rgb_to_color(cell.bg));
+                target.set_style(
+                    ratatui::style::Style::default()
+                        .add_modifier(modifier_bits_to_modifiers(cell.modifier)),
+                );
+            }
         }
     }
 

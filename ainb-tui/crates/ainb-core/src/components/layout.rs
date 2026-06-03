@@ -64,7 +64,7 @@ impl LayoutComponent {
         // owns its component(s) and renders any screen-specific overlays
         // (e.g. Config's auth-provider/config popups). Help overlay is
         // rendered post-screen as it's universal across full-screen views.
-        let frame_size = frame.size();
+        let frame_size = frame.area();
         if let Some(screen) = self.screens.get_mut(&state.current_screen) {
             tracing::debug!("Rendering screen via registry: {}", state.current_screen);
             screen.render(frame, frame_size, state);
@@ -93,7 +93,7 @@ impl LayoutComponent {
                 Constraint::Length(3), // Session info (single line + borders)
                 Constraint::Length(4), // Bottom menu bar (2 lines + borders)
             ])
-            .split(frame.size());
+            .split(frame.area());
 
         // Render top status bar
         self.render_status_bar(frame, main_layout[0], state);
@@ -140,34 +140,34 @@ impl LayoutComponent {
 
         // Render help overlay if visible
         if state.help_visible {
-            self.help.render(frame, frame.size());
+            self.help.render(frame, frame.area());
         }
 
         // Render new session overlay if visible
         if state.current_screen == screen_ids::NEW_SESSION
             || state.current_screen == screen_ids::SEARCH_WORKSPACE
         {
-            self.new_session.render(frame, frame.size(), state);
+            self.new_session.render(frame, frame.area(), state);
         }
 
         // Render Claude chat popup if visible
         if state.current_screen == screen_ids::CLAUDE_CHAT {
-            let popup_area = centered_rect(80, 80, frame.size());
+            let popup_area = centered_rect(80, 80, frame.area());
             self.claude_chat.render(frame, popup_area, state);
         }
 
         // Render confirmation dialog if visible (highest priority overlay)
         if state.confirmation_dialog.is_some() {
-            self.confirmation_dialog.render(frame, frame.size(), state);
+            self.confirmation_dialog.render(frame, frame.area(), state);
         }
 
         // Render quick commit dialog if visible
         if state.is_in_quick_commit_mode() {
-            self.render_quick_commit_dialog(frame, frame.size(), state);
+            self.render_quick_commit_dialog(frame, frame.area(), state);
         }
 
         // Render notifications (top-right corner)
-        self.render_notifications(frame, frame.size(), state);
+        self.render_notifications(frame, frame.area(), state);
     }
 
     /// Get mutable reference to live logs component for scroll handling

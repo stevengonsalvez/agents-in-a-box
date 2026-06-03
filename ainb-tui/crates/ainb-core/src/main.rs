@@ -71,7 +71,10 @@ fn cleanup_terminal() {
 /// Unified terminal cleanup that works with a terminal instance
 fn cleanup_terminal_with_instance<B: Backend + std::io::Write>(
     terminal: &mut Terminal<B>,
-) -> Result<()> {
+) -> Result<()>
+where
+    <B as ratatui::backend::Backend>::Error: std::error::Error + Send + Sync + 'static,
+{
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),

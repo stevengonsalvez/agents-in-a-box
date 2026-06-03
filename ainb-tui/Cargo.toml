@@ -29,8 +29,8 @@ repository = "https://github.com/stevengonsalvez/agents-in-a-box"
 [workspace.dependencies]
 # Core
 tokio = { version = "1.36", features = ["full"] }
-ratatui = "0.26"
-crossterm = "0.27"
+ratatui = "0.30"
+crossterm = "0.29"
 
 # Docker
 bollard = "0.16"
@@ -38,7 +38,9 @@ futures-util = "0.3"
 tar = "0.4"
 
 # Tmux/PTY support
-portable-pty = "0.8"
+portable-pty = "0.9"
+vt100 = "0.16"
+tui-term = "0.3.4"
 
 # Git operations (vendored-openssl for cross-compilation support)
 git2 = { version = "0.18", features = ["vendored-openssl"] }
@@ -79,7 +81,7 @@ url = "2.5"
 # Markdown and syntax highlighting
 pulldown-cmark = "0.9"
 syntect = "5.0"
-ansi-to-tui = "4"
+ansi-to-tui = "8.0.1"
 
 # Persistent usage analytics cache
 rusqlite = { version = "0.31", features = ["bundled", "blob"] }
@@ -99,7 +101,7 @@ notify = "6.1"
 mockall = "0.12"
 pretty_assertions = "1.4"
 rexpect = "0.5"
-vt100 = "0.15"
+proptest = "1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
