@@ -257,21 +257,42 @@ impl RemoteRepoManager {
         new_branch: &str,
         source: &RepoSource,
     ) -> Result<PathBuf, RemoteRepoError> {
+        // Resolve the default lazily inside the shared impl so the fetch
+        // happens first (origin/HEAD may move).
+        self.create_worktree_off_remote_branch(cache_path, worktree_path, new_branch, None, source)
+    }
+
+    /// Create a worktree for a NEW branch cut from an arbitrary remote branch
+    /// (`origin/<base_branch>`), after a fresh fetch. `base_branch = None`
+    /// resolves the remote's default (the star-launch policy). This is the
+    /// base-branch-picker path (2026-06): the picked entry's short name comes
+    /// straight through as `base_branch`.
+    pub fn create_worktree_off_remote_branch(
+        &self,
+        cache_path: &Path,
+        worktree_path: &Path,
+        new_branch: &str,
+        base_branch: Option<&str>,
+        source: &RepoSource,
+    ) -> Result<PathBuf, RemoteRepoError> {
         if let Some(parent) = worktree_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
-        // Refresh remote refs so origin/<default> reflects upstream. Defensive:
+        // Refresh remote refs so origin/<base> reflects upstream. Defensive:
         // clone_repo already fetches on cache reuse, but a directly-supplied
         // cache may be stale. Non-fatal — we can still branch off whatever
-        // origin/<default> currently points at.
+        // origin/<base> currently points at.
         let _ = Command::new("git")
             .args(["fetch", "origin", "--prune"])
             .current_dir(cache_path)
             .output();
 
-        let default_branch = self.resolve_default_branch(cache_path, source)?;
-        let start_point = format!("origin/{default_branch}");
+        let base = match base_branch {
+            Some(b) => b.to_string(),
+            None => self.resolve_default_branch(cache_path, source)?,
+        };
+        let start_point = format!("origin/{base}");
         info!(
             "Creating worktree at {} for new branch '{}' off {}",
             worktree_path.display(),
