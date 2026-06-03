@@ -136,6 +136,35 @@ async fn main() -> Result<()> {
 
             let mut app_state = App::new();
             app_state.init().await;
+
+            // Migrate legacy local-path favorites to their remote indicator. A
+            // star is always a remote pointer now; local-path entries from
+            // older versions are rewritten to their `origin` remote, or dropped
+            // when there is none. One-time per launch; idempotent once all
+            // entries are remote. Non-fatal — failure just leaves the store as-is.
+            {
+                let mut favorites = config::FavoritesStore::load();
+                let report = favorites.migrate_local_to_remote();
+                if !report.is_empty() {
+                    if let Err(e) = favorites.save() {
+                        tracing::error!(error = %e, "failed to persist migrated favorites");
+                    }
+                    if !report.migrated.is_empty() {
+                        app_state.state.add_info_notification(format!(
+                            "⭐ Migrated {} favorite(s) to remote",
+                            report.migrated.len()
+                        ));
+                    }
+                    if !report.dropped.is_empty() {
+                        app_state.state.add_error_notification(format!(
+                            "★ Removed {} local-only favorite(s) with no remote: {}",
+                            report.dropped.len(),
+                            report.dropped.join(", ")
+                        ));
+                    }
+                }
+            }
+
             let mut layout = LayoutComponent::new();
 
             // Check if first-time setup is needed
