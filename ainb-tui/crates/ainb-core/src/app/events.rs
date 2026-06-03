@@ -360,6 +360,9 @@ pub enum AppEvent {
     ConfigureLaunch(crate::components::new_session::configure::LaunchSpec),
     ConfigureBack,              // Esc on Configure → return to PickRepo
     ConfigureOpenPresetManager, // ^P stub until Phase 7 polish
+    /// Enter on the Branch row's Source segment → seed the base-branch
+    /// popup from cached refs + kick the background fetch refresh.
+    ConfigureOpenBranchPicker,
 }
 
 /// Translate a `RepoSource` variant into the `(SourceType, source_string)`
@@ -1360,6 +1363,7 @@ impl EventHandler {
                 ConfigureOutcome::BackToPickRepo => Some(AppEvent::ConfigureBack),
                 ConfigureOutcome::Launch(spec) => Some(AppEvent::ConfigureLaunch(spec)),
                 ConfigureOutcome::OpenPresetManager => Some(AppEvent::ConfigureOpenPresetManager),
+                ConfigureOutcome::OpenBranchPicker => Some(AppEvent::ConfigureOpenBranchPicker),
             };
         }
 
@@ -1479,11 +1483,23 @@ impl EventHandler {
                     // top-level dirs and misses every modern by-name worktree.
                     // The latter returned empty → collision never detected
                     // (Stevie 2026-05-27: feat/blog re-launch slipped through).
-                    let existing_branches: Vec<String> = WorktreeManager::new()
+                    let mut existing_branches: Vec<String> = WorktreeManager::new()
                         .ok()
                         .and_then(|m| m.list_all_worktrees().ok())
                         .map(|infos| infos.into_iter().map(|(_, i)| i.branch_name).collect())
                         .unwrap_or_default();
+                    // The session list alone can't see the repo's OWN checkout
+                    // (or a manually-added worktree) — `git worktree list` can.
+                    // Without this, a checkout-direct pick of the repo's
+                    // current branch passes the picker guard and dies at
+                    // `git worktree add` (review P1, PR #211).
+                    if let crate::git::repo_source::RepoSource::LocalPath(p) = &source {
+                        for b in crate::git::branch_list::checked_out_branches(p) {
+                            if !existing_branches.contains(&b) {
+                                existing_branches.push(b);
+                            }
+                        }
+                    }
                     let cfg = ConfigureState::from_pick_repo(
                         source.clone(),
                         label,
@@ -2410,6 +2426,12 @@ impl EventHandler {
             AppEvent::ConfigureOpenPresetManager => {
                 // Phase 7 polish — stub for now.
                 tracing::warn!("ConfigureOpenPresetManager — stub until Phase 7");
+            }
+            AppEvent::ConfigureOpenBranchPicker => {
+                // Seed from cached refs (instant), kick background refresh.
+                // Git stays in the app layer — components/ never touch git2
+                // (finding #9).
+                state.open_branch_picker();
             }
             AppEvent::ShowNotification(message) => {
                 tracing::info!("Event: ShowNotification - {}", message);
