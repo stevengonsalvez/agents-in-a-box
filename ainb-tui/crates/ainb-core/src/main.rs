@@ -146,9 +146,9 @@ async fn main() -> Result<()> {
                 let mut favorites = config::FavoritesStore::load();
                 let report = favorites.migrate_local_to_remote();
                 if !report.is_empty() {
-                    // Back up the original (pre-migration) store once before the
+                    // Back up the original (pre-migration) file once before the
                     // destructive overwrite so dropped favorites are recoverable.
-                    if let Err(e) = config::FavoritesStore::load().write_migration_backup() {
+                    if let Err(e) = config::FavoritesStore::write_migration_backup() {
                         tracing::warn!(error = %e, "failed to back up favorites before migration");
                     }
                     match favorites.save() {

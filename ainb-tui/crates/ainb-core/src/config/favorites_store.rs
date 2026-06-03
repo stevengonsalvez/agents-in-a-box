@@ -194,22 +194,23 @@ impl FavoritesStore {
         })
     }
 
-    /// Write a one-time backup of the current store before the destructive
-    /// local→remote migration overwrites `favorites.yaml`. No-op if a backup
-    /// already exists (idempotent across restarts), so the original is never
-    /// clobbered by a second migration pass.
-    pub fn write_migration_backup(&self) -> Result<(), std::io::Error> {
-        if let Some(path) = Self::migration_backup_path() {
-            if path.exists() {
-                return Ok(());
-            }
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            let content = serde_yaml::to_string(self)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-            fs::write(path, content)?;
+    /// Write a one-time backup of the on-disk store before the destructive
+    /// local→remote migration overwrites `favorites.yaml`. Copies the raw file
+    /// (preserving comments/formatting) rather than re-serializing. No-op if a
+    /// backup already exists (idempotent across restarts) or there is nothing
+    /// on disk yet, so the original is never clobbered by a later pass.
+    pub fn write_migration_backup() -> Result<(), std::io::Error> {
+        let (src, dst) = match (Self::storage_path(), Self::migration_backup_path()) {
+            (Some(s), Some(d)) => (s, d),
+            _ => return Ok(()),
+        };
+        if dst.exists() || !src.exists() {
+            return Ok(());
         }
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(&src, &dst)?;
         Ok(())
     }
 
