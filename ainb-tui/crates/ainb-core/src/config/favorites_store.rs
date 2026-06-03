@@ -185,6 +185,34 @@ impl FavoritesStore {
         Ok(())
     }
 
+    /// Path of the one-time pre-migration backup (`favorites.yaml.pre-remote-migration.bak`).
+    fn migration_backup_path() -> Option<PathBuf> {
+        Self::storage_path().map(|p| {
+            let mut s = p.into_os_string();
+            s.push(".pre-remote-migration.bak");
+            PathBuf::from(s)
+        })
+    }
+
+    /// Write a one-time backup of the current store before the destructive
+    /// local→remote migration overwrites `favorites.yaml`. No-op if a backup
+    /// already exists (idempotent across restarts), so the original is never
+    /// clobbered by a second migration pass.
+    pub fn write_migration_backup(&self) -> Result<(), std::io::Error> {
+        if let Some(path) = Self::migration_backup_path() {
+            if path.exists() {
+                return Ok(());
+            }
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let content = serde_yaml::to_string(self)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            fs::write(path, content)?;
+        }
+        Ok(())
+    }
+
     /// Get a favorite by alias
     pub fn get(&self, alias: &str) -> Option<&Favorite> {
         self.favorites.iter().find(|f| f.alias == alias)
@@ -365,21 +393,24 @@ pub fn favorite_from_local_repo(
 }
 
 /// Classify an `origin` URL into a `(source_string, SourceType)` pair, or
-/// `None` if it isn't a shareable remote (e.g. a bare local path origin).
+/// `None` if it isn't a shareable remote.
 ///
 /// GitHub hosts collapse to `owner/repo` shorthand for nicer display; every
 /// other host keeps its full URL. SSH (`git@host:` / `ssh://`) maps to
-/// `SshUrl`, anything else with a scheme maps to `HttpsUrl`.
+/// `SshUrl`; `http(s)://` maps to `HttpsUrl`. Anything else — a bare local
+/// path, or a non-shareable scheme such as `file://` — returns `None` so the
+/// caller refuses the favorite.
 fn classify_remote_url(url: &str) -> Option<(String, SourceType)> {
     use crate::git::RepoSource;
 
     let is_ssh = url.starts_with("git@") || url.starts_with("ssh://");
+    let is_https = url.starts_with("http://") || url.starts_with("https://");
     let source = if is_ssh {
         RepoSource::SshUrl(url.to_string())
-    } else if url.contains("://") {
+    } else if is_https {
         RepoSource::HttpsUrl(url.to_string())
     } else {
-        // No scheme and not SSH shorthand → a local/path origin, not shareable.
+        // Bare local path, `file://`, or any other non-shareable scheme.
         return None;
     };
 
@@ -435,6 +466,17 @@ mod tests {
         let fav = favorite_from_local_repo("p".into(), tmp.path()).unwrap();
         assert_eq!(fav.source_type, SourceType::HttpsUrl);
         assert_eq!(fav.source, "https://gitlab.com/group/proj.git");
+    }
+
+    #[test]
+    fn favorite_from_local_repo_file_url_refused() {
+        // A `file://` origin is machine-local, not a shareable remote → refused.
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo_with_remote(tmp.path(), "file:///srv/git/proj.git");
+        assert!(matches!(
+            favorite_from_local_repo("p".into(), tmp.path()),
+            Err(DeriveFavoriteError::Unparseable(_))
+        ));
     }
 
     #[test]
