@@ -31,6 +31,10 @@ The render side lives in `ainb-core`. The **Inbox** screen (`components/inbox.rs
 
 The Inbox is the full history; the **status marker** is the at-a-glance signal. Every session row in the Sessions screen shows one marker (or nothing), recomputed from the same hook events so you can see across the whole fleet which sessions need you without opening the Inbox. It is **sparse by design** — a session with no pending event shows nothing.
 
+![Per-session status markers in the session list](../assets/screenshots/session-status-markers.png)
+
+*Live markers: a Codex session that just finished its turn shows `[✓]`; a Claude session awaiting input shows `[?]`. Idle sessions with nothing pending stay blank.*
+
 Both agents register the same two hooks (`Notification`, `Stop`), so in practice you see `[?]` and `[✓]`. The mapping (identical for Claude and Codex):
 
 ### Claude Code
@@ -70,6 +74,10 @@ Because this is host code, there is **no manifest and no capability declaration*
 | `osascript` / `notify-send` (subprocess) | Emit the native OS notification for user-facing events. |
 
 ## Using it
+
+![The home screen — Inbox in the sidebar](../assets/screenshots/home-inbox-sidebar.png)
+
+*The Inbox is a first-class home-screen surface — `b` from anywhere, or `Enter` on the sidebar tile.*
 
 - **Discoverability surfaces** — three places advertise the Inbox so users don't have to memorise a hidden shortcut:
   - The home screen sidebar lists `📥 Inbox  [b]` between Sessions and Recovery — press `Enter` on the tile, or `b` globally, to open it. (`b` for "in-**B**ox" — picked to avoid the case-pair confusion between `i` Stats and the earlier `I` Inbox binding.)
