@@ -172,7 +172,9 @@ against current origin/main — **all core findings hold; two items REDUCE scope
 | Quit ainb while focused | drain registry: kill embed client, then quit |
 | ainb panic while focused | panic hook kills embed child before terminal restore |
 | Focus a session with no tmux session | no-op / stay read-only (guard) |
-| Embed client dies (agent exits) | revert pane to read-only preview |
+| `tmux attach` fails on enter (session gone) | flash brief notice, stay read-only (don't enter focus) |
+| Embed session dies / agent exits while focused | auto-release, flash brief notice, revert to read-only preview (then shows empty/gone state) |
+| Focused pane visual | distinct border + `● INTERACTIVE — Ctrl+Q release` title badge |
 | Mouse event while focused | forwarded to inner PTY; ainb owns mouse when not focused |
 | Multi-line paste while focused | bracketed paste ESC[200~…ESC[201~ (no premature submit) |
 
@@ -216,6 +218,18 @@ against current origin/main — **all core findings hold; two items REDUCE scope
   one-time migration blast radius — isolated to Phase 0.
 - **On switch/quit/panic**: auto-release (kill client, not session), cleanup wired into
   panic hook. *Rationale:* no leaks, fluid.
+- **Embed source**: `tmux attach-session -t <name>` (the same session ainb manages) —
+  NOT a direct-PTY run of the agent. *Rationale:* preserves detach/reattach persistence
+  across ainb restart; keeps tmux working exactly as today.
+- **Focus cue**: distinct border color + title badge `● INTERACTIVE — Ctrl+Q release`
+  on the pane while focused (read-only preview keeps its dim border). *Rationale:*
+  unmistakable mode signal; keybinding hint sits on the control, not a global help bar.
+- **Embed death** (attach fails / session dies while focused): auto-release, flash a
+  brief notice in the pane, revert to the read-only preview (which then shows the
+  empty/gone state). *Rationale:* graceful, never a stuck dead pane.
+- **Capture poll while focused**: leave the existing 5s capture-pane poll UNCHANGED for
+  all sessions, including the focused one. *Rationale:* honors "don't change anything";
+  the redundant 5s capture is harmless (two clients on one session is fine).
 
 ### Deferred Decisions
 - Alternate detach key if Ctrl+Q/XON overlap proves annoying — defer until observed.
