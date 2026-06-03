@@ -95,6 +95,12 @@ export default defineConfig({
           ],
         },
         {
+          label: 'Hangar',
+          items: [
+            { label: 'Architecture & features', slug: 'hangar/architecture' },
+          ],
+        },
+        {
           label: 'Reference',
           items: [
             { label: 'Architecture deep-dive', slug: 'reference/architecture' },
