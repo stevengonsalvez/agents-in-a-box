@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.3] - 2026-06-03
+### Added
+- Merge pull request #205 from stevengonsalvez/feat/claude-plugin-install
+- Merge pull request #209 from stevengonsalvez/worktree-star-remote-main-base
+- **favorites**: derive remote indicator from origin + migrate legacy local stars
+- **git**: branch worktree off remote default (origin/HEAD)
+- **notifyd**: expose classify_attention + Store::recent_since
+- **notifyd**: register Claude plugin via the claude CLI on install
+- **session**: launch remote/star sessions off the remote default branch
+- **tui**: enforce remote-or-refuse on both star entry points
+- **tui**: first-run prompt states notifications work with Claude today
+- **tui**: migrate legacy favorites at startup + worktree-base tests
+
+### Fixed
+- Merge pull request #206 from stevengonsalvez/feat/session-attention-marker
+- Merge pull request #207 from stevengonsalvez/fix/new-session-pickrepo-paste
+- Merge pull request #210 from stevengonsalvez/fix/attention-marker-launch-floor
+- **favorites**: copy raw file for pre-migration backup
+- **favorites**: reject non-shareable origins + back up before migration
+- **git**: force-create branch on worktree checkout retry
+- **session**: skip remote-worktree prep outside Interactive mode
+- **tui**: correct star toggle matching + confirm only on success
+- **tui**: drive session marker from hook events, not idle state
+- **tui**: enable paste in the New Session repo picker
+- **tui**: report favorite migration success only after it persists
+- **tui**: surface pre-launch waiters — drop the marker app-start floor
+
+### Documentation
+- Merge pull request #208 from stevengonsalvez/feat/notifications-docs-claude-callout
+- **plans**: add star-remote + main-base implementation plan
+- **plugins**: correct ainb-hooks install to the claude CLI / marketplace
+- **tui**: make inbox-notifications the full notifications reference
+- **tui**: marker window is 6h, not floored at app start
+
+
 ## [1.3.2] - 2026-06-02
 ### Added
 - Merge pull request #202 from stevengonsalvez/fix/config-popup-paste-hint
