@@ -5,7 +5,7 @@ description: "How ainb captures Claude Code / Codex hook events into the Inbox a
 
 The **Inbox** screen, the per-session **status markers** (`[!]` / `[?]` / `[✓]`), and the **`ainb-notifyd`** daemon are all part of the `ainb` host binary — **not** an ainb plugin. This page is the single reference for how notifications work: the daemon captures Claude Code / Codex lifecycle hook events into SQLite, and `ainb-tui` renders them two ways — the Inbox screen (full history) and a live per-session marker (the one row glyph that tells you a session needs you).
 
-> **Claude Code today.** Notifications and status markers are wired and verified for **Claude Code** (registered through the `claude` plugin CLI). Codex hooks are installed too, but Codex end-to-end delivery is **experimental** — treat the Inbox and markers as a Claude feature for now.
+> **Agent support.** Claude Code is the primary, most-tested path (registered through the `claude` plugin CLI). Codex is wired via `~/.codex/hooks.json` and verified end-to-end too — its `Stop` / `Notification` events flow into the Inbox and mark Codex sessions (`[✓]` / `[?]`) — though Claude remains the better-exercised integration.
 
 > **Why it's not a plugin.** The crate is *named* `ainb-plugin-notifyd` (it lives alongside the example plugin crates), but it has no `manifest.toml`, no JSON-RPC boundary, and is never spawned as a subprocess. `ainb-core` links it as an ordinary Rust path-dependency and compiles it straight into the host. Contrast with the real v2 subprocess plugins — `burndown`, `session-reader`, `witr` — which run as spawned child processes over stdio JSON-RPC and are governed by the capability gate. The **only** plugin in this feature is [`ainb-hooks`](../toolkit/plugins/ainb-hooks.md), and that is a plugin of the *host agent* (Claude Code / Codex), installed into their config dirs — not a plugin of `ainb`.
 
@@ -46,7 +46,7 @@ Both agents register the same two hooks (`Notification`, `Stop`), so in practice
 | *(none — Claude has no permission hook)* | `[!]` red | "blocked on approval" | **never shows today** — Claude folds permission into `Notification`, so a permission-block reads as `[?]` |
 | `SessionStart` · `UserPromptSubmit` · `PostToolUse` · `PreCompact` | *(none)* | telemetry — deliberately not hooked | — |
 
-### Codex (experimental)
+### Codex
 
 | Hook fired | Marker | Means | Shows until |
 |------------|--------|-------|-------------|
