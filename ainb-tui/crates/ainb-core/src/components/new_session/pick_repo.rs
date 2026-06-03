@@ -92,6 +92,11 @@ pub enum PickRepoOutcome {
     /// Source needs an async clone before advancing. Phase 5 wires the
     /// spinner display; Phase 4 stops here.
     StartClone(RepoSource),
+    /// Ctrl+V pressed — the caller (events.rs) reads the OS clipboard and
+    /// appends it to the filter via `append_filter`. Clipboard access lives
+    /// in the app layer (`EventHandler::get_clipboard_text`), keeping this
+    /// component pure and testable.
+    PasteFromClipboard,
 }
 
 /// Persistent state for the picker. Constructed once per new-session
@@ -146,6 +151,19 @@ impl PickRepoState {
     pub fn highlighted(&self) -> Option<&PickRepoRow> {
         let idx = *self.filtered_indices.get(self.selected)?;
         self.rows.get(idx)
+    }
+
+    /// Append pasted text to the filter (clipboard paste — Ctrl+V or
+    /// bracketed `Event::Paste`). Control characters are stripped because the
+    /// filter is a single-line field; a pasted `owner/repo\n` should filter,
+    /// not submit. Refilters so the list (and Enter's smart-parse) reflect it.
+    pub fn append_filter(&mut self, text: &str) {
+        let cleaned: String = text.chars().filter(|c| !c.is_control()).collect();
+        if cleaned.is_empty() {
+            return;
+        }
+        self.filter.push_str(&cleaned);
+        self.refilter();
     }
 
     /// Recompute `filtered_indices` when filter or rows change. Preserves
@@ -543,6 +561,13 @@ pub fn handle_key(state: &mut PickRepoState, key: KeyEvent) -> PickRepoOutcome {
                 }
                 return PickRepoOutcome::Stay;
             }
+            KeyCode::Char('v' | 'V') => {
+                // Ctrl+V: ask the caller to read the OS clipboard and append
+                // it (Cmd+V / bracketed paste isn't delivered to this field
+                // in some terminals — tmux, mouse-capture).
+                tracing::debug!("pick_repo: ^V clipboard paste");
+                return PickRepoOutcome::PasteFromClipboard;
+            }
             _ => {}
         }
     }
@@ -863,5 +888,48 @@ mod tests {
         assert_eq!(abbreviate_home(&home), "~");
         let outside = Path::new("/opt/elsewhere/Rosetta");
         assert_eq!(abbreviate_home(outside), outside.display().to_string());
+    }
+
+    fn one_row() -> Vec<PickRepoRow> {
+        vec![PickRepoRow {
+            id: "shotclubhouse".into(),
+            label: "shotclubhouse".into(),
+            source: RepoSource::Filter("shotclubhouse".into()),
+            kind: RowKind::Favorite,
+        }]
+    }
+
+    #[test]
+    fn ctrl_v_requests_clipboard_paste() {
+        let mut s = mk_state_with_rows(one_row());
+        let ctrl_v = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL);
+        assert_eq!(
+            handle_key(&mut s, ctrl_v),
+            PickRepoOutcome::PasteFromClipboard
+        );
+        // The keystroke must NOT also type a literal 'v' into the filter.
+        assert_eq!(s.filter, "");
+    }
+
+    #[test]
+    fn plain_v_still_types_into_filter() {
+        let mut s = mk_state_with_rows(one_row());
+        let v = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE);
+        assert_eq!(handle_key(&mut s, v), PickRepoOutcome::Stay);
+        assert_eq!(s.filter, "v");
+    }
+
+    #[test]
+    fn append_filter_strips_control_chars_and_refilters() {
+        let mut s = mk_state_with_rows(one_row());
+        // Simulate a pasted "owner/repo" with a trailing newline.
+        s.append_filter("shotclub\n");
+        assert_eq!(s.filter, "shotclub");
+        // The single row still matches the prefix, so it stays visible.
+        assert_eq!(s.filtered_indices.len(), 1);
+        // A non-matching paste empties the filtered list.
+        s.append_filter("zzz");
+        assert_eq!(s.filter, "shotclubzzz");
+        assert_eq!(s.filtered_indices.len(), 0);
     }
 }

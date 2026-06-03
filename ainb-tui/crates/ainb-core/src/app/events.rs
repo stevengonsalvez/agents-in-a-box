@@ -91,6 +91,7 @@ pub enum AppEvent {
     // the legacy 13-step variants; only `NewSessionCancel` survives as the
     // host-level Esc handler for the `Creating` step.
     NewSessionCancel,
+    PickRepoPaste(String), // Append bracketed-paste text to the repo-picker filter (Cmd+V)
     // Notification events
     ShowNotification(String), // Display a notification message to the user
     // File finder events for @ symbol trigger
@@ -669,6 +670,18 @@ impl EventHandler {
     pub fn handle_paste_event(text: String, state: &AppState) -> Option<AppEvent> {
         if state.config_popup_state.is_text_entry() {
             return Some(AppEvent::ConfigPopupPaste(text));
+        }
+        // New Session repo picker: the filter field accepts pasted
+        // owner/repo, URLs and paths. Like the config popup it lives behind
+        // the host router, so a bracketed paste must be forwarded here or it
+        // is dropped (Cmd+V appeared to do nothing).
+        let on_pick_repo = state
+            .new_session_state
+            .as_ref()
+            .map(|s| s.step == crate::app::state::NewSessionStep::PickRepo)
+            .unwrap_or(false);
+        if on_pick_repo {
+            return Some(AppEvent::PickRepoPaste(text));
         }
         None
     }
@@ -1365,6 +1378,27 @@ impl EventHandler {
 
             return match outcome {
                 PickRepoOutcome::Stay => None,
+                PickRepoOutcome::PasteFromClipboard => {
+                    // Ctrl+V on the picker: read the OS clipboard here (app
+                    // layer owns clipboard access) and append to the filter.
+                    match Self::get_clipboard_text() {
+                        Ok(text) => {
+                            if let Some(pick) = state
+                                .new_session_state
+                                .as_mut()
+                                .and_then(|s| s.pick_repo_state.as_mut())
+                            {
+                                pick.append_filter(&text);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("PickRepo clipboard paste failed: {}", e);
+                            state
+                                .add_error_notification(format!("Could not read clipboard: {}", e));
+                        }
+                    }
+                    None
+                }
                 PickRepoOutcome::BackToHome => {
                     // Persist session-defaults at the screen boundary
                     // (finding #3) so arrow/Esc no longer write on every
@@ -2274,6 +2308,13 @@ impl EventHandler {
             }
             AppEvent::NewSessionCancel => {
                 state.cancel_new_session();
+            }
+            AppEvent::PickRepoPaste(text) => {
+                if let Some(pick) =
+                    state.new_session_state.as_mut().and_then(|s| s.pick_repo_state.as_mut())
+                {
+                    pick.append_filter(&text);
+                }
             }
             AppEvent::ConfigureBack => {
                 // Phase 5: Esc on Configure persists the half-typed prompt to
@@ -5104,6 +5145,23 @@ mod text_input_guard_tests {
         let evt = EventHandler::handle_key_event(char_key('v'), &mut state)
             .expect("plain 'v' must dispatch a char input");
         assert!(matches!(evt, AppEvent::ConfigPopupInputChar('v')));
+    }
+
+    /// A bracketed paste (Cmd+V) on the New Session repo picker must be
+    /// forwarded to the filter, not dropped. Regression: `handle_paste_event`
+    /// only routed the config popup, so Cmd+V on PickRepo did nothing.
+    #[test]
+    fn bracketed_paste_on_pick_repo_routes_to_filter() {
+        let mut state = AppState::default();
+        state.current_screen = screen_ids::NEW_SESSION.to_string();
+        state.new_session_state = Some(NewSessionState {
+            step: NewSessionStep::PickRepo,
+            ..NewSessionState::default()
+        });
+
+        let evt = EventHandler::handle_paste_event("owner/repo".to_string(), &state)
+            .expect("paste on PickRepo must dispatch a filter paste");
+        assert!(matches!(evt, AppEvent::PickRepoPaste(ref t) if t == "owner/repo"));
     }
 
     /// Esc inside a text input while help is visible must close help,
