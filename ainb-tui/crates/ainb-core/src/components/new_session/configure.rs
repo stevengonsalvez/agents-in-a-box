@@ -1614,6 +1614,10 @@ pub fn handle_key(state: &mut ConfigureState, key: KeyEvent) -> ConfigureOutcome
     }
 
     // Base-branch popup interception — mirrors the save-preset modal.
+    // INVARIANT: the two modals are mutually exclusive (the picker handler
+    // exposes no ^S path and vice versa). If that ever changes, align this
+    // precedence with the render order in `render()` — the picker draws on
+    // top, so it must also win the key race.
     if state.branch_picker.is_some() {
         return handle_branch_picker_key(state, key);
     }
