@@ -10,7 +10,7 @@
 use anyhow::{Context, Result};
 use tracing::warn;
 
-use crate::install::Agent;
+use crate::install::{Agent, ClaudeRegister};
 use crate::{Paths, RunConfig, install_for, run_daemon, status, uninstall};
 
 /// Resolve the agent set from the three CLI flags. Empty selection or
@@ -64,14 +64,22 @@ pub fn cmd_stop() -> Result<()> {
 /// print the resolved on-disk paths.
 pub fn cmd_install(agents: &[Agent]) -> Result<()> {
     let paths = Paths::from_home()?;
-    let record = install_for(&paths, agents)?;
+    let report = install_for(&paths, agents)?;
+    let record = &report.record;
     println!("installed for: {:?}", record.agents);
     println!("hook script:   {}", record.hook_script.display());
-    if let Some(p) = &record.claude_plugin_dir {
-        println!("claude plugin: {}", p.display());
-    }
     if let Some(p) = &record.codex_hooks_json {
         println!("codex hooks:   {}", p.display());
+    }
+    match &report.claude {
+        Some(ClaudeRegister::Registered) => println!(
+            "claude plugin: registered (ainb-hooks@agents-in-a-box) — restart Claude to load it"
+        ),
+        Some(ClaudeRegister::ClaudeCliMissing) => {
+            println!("claude plugin: SKIPPED — `claude` CLI not found on PATH")
+        }
+        Some(ClaudeRegister::Failed(e)) => println!("claude plugin: FAILED — {e}"),
+        None => {}
     }
     Ok(())
 }
