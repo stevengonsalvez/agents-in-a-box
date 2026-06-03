@@ -79,6 +79,7 @@ itself in the worktree.
 | Scenario | Expected Behavior |
 |----------|-------------------|
 | Picked branch checked out in another worktree, `c` pressed | Inline error in popup, no action |
+| Picked branch checked out in the repo's OWN working copy (or a manual worktree) | `⚠ in use` via `git worktree list --porcelain`, checkout blocked (review P1, PR #211) |
 | Picked branch checked out elsewhere, Enter pressed | Fine — base-off creates new branch |
 | Checkout-direct of remote branch with no local counterpart | Create local tracking branch in worktree |
 | Checkout-direct where local branch exists and is behind origin | Check out local branch as-is (no auto-ff) — user's branch state preserved |
