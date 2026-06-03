@@ -158,9 +158,20 @@ impl PickRepoState {
     /// filter is a single-line field; a pasted `owner/repo\n` should filter,
     /// not submit. Refilters so the list (and Enter's smart-parse) reflect it.
     pub fn append_filter(&mut self, text: &str) {
-        let cleaned: String = text.chars().filter(|c| !c.is_control()).collect();
+        // Cap total filter length so a pathological clipboard payload can't
+        // bloat the field / stall refilter. A repo URL or path is well under
+        // this; anything larger is not a sensible picker query.
+        const MAX_FILTER_LEN: usize = 4096;
+        let mut cleaned: String = text.chars().filter(|c| !c.is_control()).collect();
         if cleaned.is_empty() {
             return;
+        }
+        let room = MAX_FILTER_LEN.saturating_sub(self.filter.chars().count());
+        if room == 0 {
+            return;
+        }
+        if cleaned.chars().count() > room {
+            cleaned = cleaned.chars().take(room).collect();
         }
         self.filter.push_str(&cleaned);
         self.refilter();

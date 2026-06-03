@@ -674,12 +674,16 @@ impl EventHandler {
         // New Session repo picker: the filter field accepts pasted
         // owner/repo, URLs and paths. Like the config popup it lives behind
         // the host router, so a bracketed paste must be forwarded here or it
-        // is dropped (Cmd+V appeared to do nothing).
-        let on_pick_repo = state
-            .new_session_state
-            .as_ref()
-            .map(|s| s.step == crate::app::state::NewSessionStep::PickRepo)
-            .unwrap_or(false);
+        // is dropped (Cmd+V appeared to do nothing). Gate on the visible
+        // screen too — `new_session_state` can linger after navigating away
+        // (e.g. via the sidebar), and a paste must not leak into a hidden
+        // picker.
+        let on_pick_repo = state.current_screen == crate::app::screens::ids::NEW_SESSION
+            && state
+                .new_session_state
+                .as_ref()
+                .map(|s| s.step == crate::app::state::NewSessionStep::PickRepo)
+                .unwrap_or(false);
         if on_pick_repo {
             return Some(AppEvent::PickRepoPaste(text));
         }
