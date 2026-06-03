@@ -5356,11 +5356,11 @@ impl AppState {
         let (title, message, install_label) = match prompt_state(&paths) {
             InstallPrompt::OfferInstall => (
                 "Get notified when a session needs you?".to_string(),
-                "Install ainb-hooks into Claude Code + Codex so the Inbox \
-                 (press b) and per-session badges light up when an agent is \
-                 awaiting input or has finished. Only actionable events are \
-                 captured — no activity-log noise. Writes ~/.claude/plugins \
-                 and ~/.codex/hooks.json."
+                "Install ainb-hooks so the Inbox (press b) and the per-session \
+                 badges light up when an agent is awaiting input ([?]) or has \
+                 finished ([✓]). Only actionable events are captured — no \
+                 activity-log noise. Works with Claude Code today (registered \
+                 via the claude CLI); Codex support is experimental."
                     .to_string(),
                 "Install",
             ),
