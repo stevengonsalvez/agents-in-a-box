@@ -1,4 +1,7 @@
-# Catalog Browse (v1.3)
+---
+title: Catalog browse
+description: Search the skills catalog and install from the TUI or CLI.
+---
 
 > Browse a remote skill catalog (skills.sh) before installing — the
 > single biggest UX gap vs other skill managers. See

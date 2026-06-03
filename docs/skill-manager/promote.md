@@ -1,4 +1,7 @@
-# `ainb skill promote` (v1.1)
+---
+title: Promote
+description: Turn a local orphan skill into a git-backed source with `ainb skill promote`.
+---
 
 > One-shot command that turns a hand-edited orphan into a
 > git-backed source. Bridges the gap between adopting a `local:`

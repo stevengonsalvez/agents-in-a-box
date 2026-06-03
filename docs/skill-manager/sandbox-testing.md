@@ -1,4 +1,7 @@
-# Sandbox Testing
+---
+title: Sandbox testing
+description: Run the skill manager against a throwaway sandbox home — never your real ~/.claude.
+---
 
 > Reproducible test harness for the SkillManager — drives the TUI +
 > CLI against a seeded fake `~/.claude` / `~/.codex` without touching
