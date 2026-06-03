@@ -82,6 +82,33 @@ pub fn fetch_and_list(repo_path: &Path) -> Vec<BranchEntry> {
     list_repo_branches(repo_path)
 }
 
+/// Branch short names checked out in ANY worktree of `repo_path` — including
+/// the repo's own main working copy. Parsed from `git worktree list
+/// --porcelain`.
+///
+/// The ainb session list alone can't see the repo's own checkout (or a
+/// manually-added worktree); without this, a checkout-direct pick of the
+/// repo's current branch passes the picker guard and dies at
+/// `git worktree add` with "already used by worktree" (review P1, PR #211).
+#[must_use]
+pub fn checked_out_branches(repo_path: &Path) -> Vec<String> {
+    let Ok(output) = Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(repo_path)
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|l| l.strip_prefix("branch refs/heads/"))
+        .map(str::to_string)
+        .collect()
+}
+
 /// Pure assembly: dedup remote-vs-local, tag the default, sort sections.
 /// Split out for testability without a fixture repo.
 fn build_entries(
@@ -202,5 +229,48 @@ mod tests {
     fn list_repo_branches_empty_for_non_repo() {
         let tmp = tempfile::TempDir::new().unwrap();
         assert!(list_repo_branches(tmp.path()).is_empty());
+    }
+
+    #[test]
+    fn checked_out_branches_empty_for_non_repo() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        assert!(checked_out_branches(tmp.path()).is_empty());
+    }
+
+    #[test]
+    fn checked_out_branches_sees_main_checkout_and_added_worktrees() {
+        // Real repo: the main checkout's branch must be reported even with
+        // zero ainb-managed worktrees — that's the review-P1 regression
+        // (checkout-direct pick of the repo's current branch must be
+        // markable as in-use).
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir(&repo_path).unwrap();
+        let git = |args: &[&str], cwd: &Path| {
+            let out = Command::new("git").args(args).current_dir(cwd).output().unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-b", "main"], &repo_path);
+        git(&["config", "user.email", "t@t"], &repo_path);
+        git(&["config", "user.name", "t"], &repo_path);
+        git(&["commit", "--allow-empty", "-m", "init"], &repo_path);
+        git(&["branch", "feature-x"], &repo_path);
+
+        let checked = checked_out_branches(&repo_path);
+        assert_eq!(checked, vec!["main".to_string()], "main checkout reported");
+
+        // A second worktree's branch shows up too.
+        let wt = tmp.path().join("wt");
+        git(
+            &["worktree", "add", wt.to_str().unwrap(), "feature-x"],
+            &repo_path,
+        );
+        let checked = checked_out_branches(&repo_path);
+        assert!(checked.contains(&"main".to_string()));
+        assert!(checked.contains(&"feature-x".to_string()));
     }
 }

@@ -1483,11 +1483,23 @@ impl EventHandler {
                     // top-level dirs and misses every modern by-name worktree.
                     // The latter returned empty → collision never detected
                     // (Stevie 2026-05-27: feat/blog re-launch slipped through).
-                    let existing_branches: Vec<String> = WorktreeManager::new()
+                    let mut existing_branches: Vec<String> = WorktreeManager::new()
                         .ok()
                         .and_then(|m| m.list_all_worktrees().ok())
                         .map(|infos| infos.into_iter().map(|(_, i)| i.branch_name).collect())
                         .unwrap_or_default();
+                    // The session list alone can't see the repo's OWN checkout
+                    // (or a manually-added worktree) — `git worktree list` can.
+                    // Without this, a checkout-direct pick of the repo's
+                    // current branch passes the picker guard and dies at
+                    // `git worktree add` (review P1, PR #211).
+                    if let crate::git::repo_source::RepoSource::LocalPath(p) = &source {
+                        for b in crate::git::branch_list::checked_out_branches(p) {
+                            if !existing_branches.contains(&b) {
+                                existing_branches.push(b);
+                            }
+                        }
+                    }
                     let cfg = ConfigureState::from_pick_repo(
                         source.clone(),
                         label,
