@@ -21,7 +21,10 @@ pub mod session_defaults;
 pub mod ssh_display_names;
 
 pub use container::{ContainerTemplate, ContainerTemplateConfig};
-pub use favorites_store::{Favorite, FavoritesStore, SourceType as FavoriteSourceType};
+pub use favorites_store::{
+    DeriveFavoriteError, Favorite, FavoritesStore, MigrationReport,
+    SourceType as FavoriteSourceType, favorite_from_local_repo,
+};
 pub use mcp::{McpInitStrategy, McpServerConfig};
 pub use mcp_init::{McpInitResult, McpInitializer, apply_mcp_init_result};
 pub use onboarding::OnboardingConfig;

@@ -136,6 +136,49 @@ async fn main() -> Result<()> {
 
             let mut app_state = App::new();
             app_state.init().await;
+
+            // Migrate legacy local-path favorites to their remote indicator. A
+            // star is always a remote pointer now; local-path entries from
+            // older versions are rewritten to their `origin` remote, or dropped
+            // when there is none. One-time per launch; idempotent once all
+            // entries are remote. Non-fatal — failure just leaves the store as-is.
+            {
+                let mut favorites = config::FavoritesStore::load();
+                let report = favorites.migrate_local_to_remote();
+                if !report.is_empty() {
+                    // Back up the original (pre-migration) file once before the
+                    // destructive overwrite so dropped favorites are recoverable.
+                    if let Err(e) = config::FavoritesStore::write_migration_backup() {
+                        tracing::warn!(error = %e, "failed to back up favorites before migration");
+                    }
+                    match favorites.save() {
+                        Ok(()) => {
+                            // Only claim success once the migrated store is on disk;
+                            // otherwise the migration would silently re-run next launch.
+                            if !report.migrated.is_empty() {
+                                app_state.state.add_info_notification(format!(
+                                    "⭐ Migrated {} favorite(s) to remote",
+                                    report.migrated.len()
+                                ));
+                            }
+                            if !report.dropped.is_empty() {
+                                app_state.state.add_error_notification(format!(
+                                    "★ Removed {} local-only favorite(s) with no remote: {}",
+                                    report.dropped.len(),
+                                    report.dropped.join(", ")
+                                ));
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "failed to persist migrated favorites");
+                            app_state.state.add_error_notification(format!(
+                                "Could not migrate favorites to remote: {e}"
+                            ));
+                        }
+                    }
+                }
+            }
+
             let mut layout = LayoutComponent::new();
 
             // Check if first-time setup is needed

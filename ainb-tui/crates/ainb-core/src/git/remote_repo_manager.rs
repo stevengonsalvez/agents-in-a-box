@@ -241,184 +241,216 @@ impl RemoteRepoManager {
         Ok(())
     }
 
-    /// Create a worktree from a cached standard clone
+    /// Create a worktree for a NEW branch cut from the remote's **default**
+    /// branch (`origin/HEAD`), after a fresh fetch.
     ///
-    /// For standard clones, refs are in refs/remotes/origin/{branch},
-    /// so we use origin/{base_branch} to create the new branch.
-    pub fn create_worktree_from_cache(
+    /// This is the base-branch policy for sessions launched from a star (a
+    /// remote source): the agent branch (`agents/...`) is always based on the
+    /// freshly-fetched default ref — never a stale local branch and never the
+    /// cache's currently-checked-out HEAD. Handles `main`/`master`/`develop`
+    /// defaults transparently and retries with a filter bypass when transcrypt
+    /// (or any smudge/clean filter) aborts the checkout.
+    pub fn create_worktree_off_remote_default(
         &self,
         cache_path: &Path,
         worktree_path: &Path,
-        branch_name: &str,
-        base_branch: &str,
-    ) -> Result<(), RemoteRepoError> {
-        info!(
-            "Creating worktree at {} for branch {} (base: {})",
-            worktree_path.display(),
-            branch_name,
-            base_branch
-        );
-
-        // Create parent directory for worktree
+        new_branch: &str,
+        source: &RepoSource,
+    ) -> Result<PathBuf, RemoteRepoError> {
         if let Some(parent) = worktree_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
-        // Check if the new branch already exists locally
+        // Refresh remote refs so origin/<default> reflects upstream. Defensive:
+        // clone_repo already fetches on cache reuse, but a directly-supplied
+        // cache may be stale. Non-fatal — we can still branch off whatever
+        // origin/<default> currently points at.
+        let _ = Command::new("git")
+            .args(["fetch", "origin", "--prune"])
+            .current_dir(cache_path)
+            .output();
+
+        let default_branch = self.resolve_default_branch(cache_path, source)?;
+        let start_point = format!("origin/{default_branch}");
+        info!(
+            "Creating worktree at {} for new branch '{}' off {}",
+            worktree_path.display(),
+            new_branch,
+            start_point
+        );
+
+        // Guard against an existing local branch of the same name. Agent branch
+        // names are freshly derived, so this should not happen; fail loudly
+        // rather than silently reusing a stale local branch.
         let branch_exists = Command::new("git")
-            .args(["rev-parse", "--verify", branch_name])
+            .args(["rev-parse", "--verify", "--quiet", new_branch])
             .current_dir(cache_path)
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false);
-
-        if !branch_exists {
-            // Standard clone has refs in refs/remotes/origin/{branch}
-            // Use origin/{base_branch} shorthand
-            let base_ref = format!("origin/{}", base_branch);
-
-            // Verify the remote branch exists
-            let ref_check = Command::new("git")
-                .args(["rev-parse", "--verify", &base_ref])
-                .current_dir(cache_path)
-                .output()?;
-
-            if !ref_check.status.success() {
-                // Get list of available remote branches for better error message
-                let branches_output = Command::new("git")
-                    .args(["branch", "-r"])
-                    .current_dir(cache_path)
-                    .output()
-                    .ok();
-                let available = branches_output
-                    .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-                    .unwrap_or_default();
-                let branch_list: Vec<&str> = available
-                    .lines()
-                    .map(|s| s.trim())
-                    .filter(|s| !s.is_empty() && !s.contains("->"))
-                    .collect();
-
-                return Err(RemoteRepoError::InvalidRepo(format!(
-                    "Base branch 'origin/{}' not found. Available branches: {}",
-                    base_branch,
-                    if branch_list.is_empty() {
-                        "(none)".to_string()
-                    } else {
-                        branch_list.join(", ")
-                    }
-                )));
-            }
-
-            // Create new local branch from the remote tracking branch
-            let output = Command::new("git")
-                .args(["branch", branch_name, &base_ref])
-                .current_dir(cache_path)
-                .output()?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                // Branch might already exist, which is okay
-                if !stderr.contains("already exists") {
-                    return Err(RemoteRepoError::InvalidRepo(format!(
-                        "Failed to create branch '{}': {}",
-                        branch_name, stderr
-                    )));
-                }
-            }
+        if branch_exists {
+            return Err(RemoteRepoError::InvalidRepo(format!(
+                "branch '{}' already exists in cache {}",
+                new_branch,
+                cache_path.display()
+            )));
         }
 
-        // Create the worktree - try normal first, fallback to --no-checkout if filters fail
-        let output = Command::new("git")
-            .args([
-                "worktree",
-                "add",
-                worktree_path.to_string_lossy().as_ref(),
-                branch_name,
-            ])
-            .current_dir(cache_path)
-            .output()?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-
-            // Check if failure is due to smudge/clean filter (e.g., transcrypt)
-            if stderr.contains("smudge filter") || stderr.contains("clean filter") {
-                warn!(
-                    "Worktree creation failed due to filter issue, retrying with --no-checkout: {}",
-                    stderr
-                );
-
-                // Clean up any partial worktree that might have been created
-                if worktree_path.exists() {
-                    let _ = std::fs::remove_dir_all(worktree_path);
-                }
-
-                // Retry with --no-checkout to skip the problematic filter
-                let retry_output = Command::new("git")
-                    .args([
-                        "worktree",
-                        "add",
-                        "--no-checkout",
-                        worktree_path.to_string_lossy().as_ref(),
-                        branch_name,
-                    ])
-                    .current_dir(cache_path)
-                    .output()?;
-
-                if !retry_output.status.success() {
-                    let retry_stderr = String::from_utf8_lossy(&retry_output.stderr);
-                    return Err(RemoteRepoError::CloneFailed(format!(
-                        "Failed to create worktree (even with --no-checkout): {}",
-                        retry_stderr
-                    )));
-                }
-
-                // Checkout files with filter bypass (transcrypt uses 'crypt' filter)
-                let checkout_output = Command::new("git")
-                    .args([
-                        "-c",
-                        "filter.crypt.smudge=cat",
-                        "-c",
-                        "filter.crypt.clean=cat",
-                        "checkout",
-                        "--force",
-                    ])
-                    .current_dir(worktree_path)
-                    .output()?;
-
-                if !checkout_output.status.success() {
-                    let checkout_stderr = String::from_utf8_lossy(&checkout_output.stderr);
-                    warn!(
-                        "Checkout with filter bypass had issues: {}",
-                        checkout_stderr
-                    );
-                    // Continue anyway - the worktree exists, files just might not be checked out
-                }
-
-                info!(
-                    "Created worktree with filter bypass at: {}",
-                    worktree_path.display()
-                );
-            } else {
-                return Err(RemoteRepoError::CloneFailed(format!(
-                    "Failed to create worktree: {}",
-                    stderr
-                )));
-            }
-        }
-
+        self.worktree_add_new_branch(cache_path, worktree_path, new_branch, &start_point)?;
         info!(
             "Successfully created worktree at: {}",
             worktree_path.display()
         );
+        Ok(worktree_path.to_path_buf())
+    }
+
+    /// Resolve the remote's default branch name (no `origin/` prefix) for a
+    /// cached clone. Order: the cache's `origin/HEAD` symbolic-ref (set by
+    /// `git clone`), then the remote's advertised HEAD (`ls-remote --symref`),
+    /// then a probe of `origin/main` / `origin/master`.
+    fn resolve_default_branch(
+        &self,
+        cache_path: &Path,
+        source: &RepoSource,
+    ) -> Result<String, RemoteRepoError> {
+        // 1. Cache-local origin/HEAD symbolic-ref (offline, reflects the clone).
+        if let Ok(out) = Command::new("git")
+            .args(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+            .current_dir(cache_path)
+            .output()
+        {
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if let Some(branch) = s.strip_prefix("origin/") {
+                    if !branch.is_empty() {
+                        return Ok(branch.to_string());
+                    }
+                }
+            }
+        }
+
+        // 2. Remote-advertised HEAD (authoritative, but needs connectivity).
+        if let Some(branch) = self.get_default_branch_name(source) {
+            if !branch.is_empty() {
+                return Ok(branch);
+            }
+        }
+
+        // 3. Probe the common defaults in the cache.
+        for cand in ["main", "master"] {
+            let ok = Command::new("git")
+                .args([
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    &format!("origin/{cand}"),
+                ])
+                .current_dir(cache_path)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            if ok {
+                return Ok(cand.to_string());
+            }
+        }
+
+        Err(RemoteRepoError::InvalidRepo(format!(
+            "could not resolve default branch (origin/HEAD) in cache {}",
+            cache_path.display()
+        )))
+    }
+
+    /// `git worktree add -b <new_branch> <path> <start_point>` in `cache_path`,
+    /// retrying with `--no-checkout` + filter bypass when a smudge/clean filter
+    /// (e.g. transcrypt) aborts the checkout.
+    fn worktree_add_new_branch(
+        &self,
+        cache_path: &Path,
+        worktree_path: &Path,
+        new_branch: &str,
+        start_point: &str,
+    ) -> Result<(), RemoteRepoError> {
+        let wt = worktree_path.to_string_lossy();
+        let output = Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                new_branch,
+                wt.as_ref(),
+                start_point,
+            ])
+            .current_dir(cache_path)
+            .output()?;
+        if output.status.success() {
+            return Ok(());
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        if !(stderr.contains("smudge filter") || stderr.contains("clean filter")) {
+            return Err(RemoteRepoError::CloneFailed(format!(
+                "Failed to create worktree: {stderr}"
+            )));
+        }
+
+        warn!(
+            "Worktree creation failed due to filter issue, retrying with --no-checkout: {}",
+            stderr
+        );
+        if worktree_path.exists() {
+            let _ = std::fs::remove_dir_all(worktree_path);
+        }
+        let _ = Command::new("git").args(["worktree", "prune"]).current_dir(cache_path).output();
+
+        // Use `-B` (force create/reset) on retry: the first `-b` attempt may have
+        // already created `new_branch` before failing at the checkout stage, so a
+        // second `-b` would abort with "already exists".
+        let retry = Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "--no-checkout",
+                "-B",
+                new_branch,
+                wt.as_ref(),
+                start_point,
+            ])
+            .current_dir(cache_path)
+            .output()?;
+        if !retry.status.success() {
+            return Err(RemoteRepoError::CloneFailed(format!(
+                "Failed to create worktree (even with --no-checkout): {}",
+                String::from_utf8_lossy(&retry.stderr)
+            )));
+        }
+
+        // Checkout files with filter bypass (transcrypt uses the 'crypt' filter).
+        let checkout = Command::new("git")
+            .args([
+                "-c",
+                "filter.crypt.smudge=cat",
+                "-c",
+                "filter.crypt.clean=cat",
+                "checkout",
+                "--force",
+            ])
+            .current_dir(worktree_path)
+            .output()?;
+        if !checkout.status.success() {
+            warn!(
+                "Checkout with filter bypass had issues: {}",
+                String::from_utf8_lossy(&checkout.stderr)
+            );
+            // Non-fatal — the worktree exists, files may just not be checked out.
+        }
         Ok(())
     }
 
     /// Checkout an existing remote branch into a worktree
     ///
-    /// Unlike create_worktree_from_cache which creates a new local branch,
-    /// this creates a local tracking branch for an existing remote branch.
+    /// Unlike `create_worktree_off_remote_default`, which cuts a NEW branch from
+    /// the remote default, this creates a local tracking branch for an existing
+    /// remote branch.
     /// Uses -B flag to handle the case where the branch is already checked
     /// out in the cache (standard clone has default branch checked out).
     /// Returns `Ok(None)` if worktree was created at the provided path,

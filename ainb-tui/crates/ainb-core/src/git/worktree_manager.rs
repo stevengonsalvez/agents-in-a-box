@@ -715,7 +715,12 @@ impl WorktreeManager {
         Ok(final_repo_path)
     }
 
-    fn generate_worktree_path(
+    /// Compute the on-disk worktree path (`<base>/by-name/{repo}--{branch}--{uuid8}`)
+    /// without creating anything. Public so the remote/star launch flow can
+    /// generate a path, build the worktree off `origin/<default>` via
+    /// `RemoteRepoManager`, then hand the same path to
+    /// `create_session_with_worktree`.
+    pub fn generate_worktree_path(
         &self,
         session_id: Uuid,
         repository_path: &Path,
