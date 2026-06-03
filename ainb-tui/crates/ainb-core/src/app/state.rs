@@ -2453,15 +2453,11 @@ pub struct AppState {
     pub workspace_load_receiver: Option<mpsc::UnboundedReceiver<WorkspaceLoadResult>>,
 
     /// Per-session "cleared up to" timestamp (epoch ms). A hook event
-    /// only marks a session if its `ts` is newer than this. Bumped to
-    /// "now" while the user is attached, so re-marking only happens for
-    /// activity that arrives after they look away. Defaults to
-    /// [`AppState::app_started_ms`] for sessions never attached.
+    /// only marks a session if its `ts` is newer than this. Defaults to
+    /// `0` (any event in the lookback window can mark); bumped to "now"
+    /// while the user is attached, so re-marking only happens for
+    /// activity that arrives after they look away.
     pub attention_baseline: HashMap<Uuid, i64>,
-    /// Epoch ms captured at app start. Floors the attention query so
-    /// pre-existing notification history never lights up markers on
-    /// launch.
-    pub app_started_ms: i64,
 }
 
 /// Result of background workspace loading
@@ -2872,7 +2868,6 @@ impl Default for AppState {
 
             // Per-session attention markers, driven by ainb-hooks events.
             attention_baseline: HashMap::new(),
-            app_started_ms: chrono::Utc::now().timestamp_millis(),
         }
     }
 }
@@ -8313,11 +8308,18 @@ impl AppState {
     /// (~5s), and keeps the daemon as the DB's sole long-lived owner.
     /// The `exists()` guard avoids `Store::open` creating an empty DB on
     /// machines where notifications were never set up.
+    ///
+    /// The window is purely time-based (`now − LOOKBACK`), **not** floored
+    /// at app start — so opening ainb immediately surfaces sessions that
+    /// were already waiting before launch. Stale `[✓]` turns don't pile up
+    /// because the `Finished` marker self-retires on its own short TTL (see
+    /// [`Self::attention_for_session`]); only genuinely-pending `[?]` / `[!]`
+    /// from the window survive.
     fn recent_attention_events(
         &self,
         now_ms: i64,
     ) -> Option<Vec<ainb_plugin_notifyd::NotificationRecord>> {
-        // Ignore events older than this regardless of when the app started.
+        // Only events within this rolling window can mark a session.
         const LOOKBACK_MS: i64 = 6 * 60 * 60 * 1000;
         // Bounds query cost; ample for any realistic active fleet.
         const QUERY_LIMIT: u32 = 500;
@@ -8327,7 +8329,7 @@ impl AppState {
             return None;
         }
         let store = ainb_plugin_notifyd::Store::open(&db).ok()?;
-        let floor = (now_ms - LOOKBACK_MS).max(self.app_started_ms);
+        let floor = now_ms - LOOKBACK_MS;
         match store.recent_since(floor, QUERY_LIMIT) {
             Ok(rows) => Some(rows),
             Err(e) => {
@@ -8355,8 +8357,10 @@ impl AppState {
                     continue;
                 }
                 let generating = matches!(s.status, crate::models::SessionStatus::Running);
-                let baseline =
-                    self.attention_baseline.get(&s.id).copied().unwrap_or(self.app_started_ms);
+                // Default 0: with no per-session clear point yet, any event in
+                // the lookback window can mark — so pre-launch waiters show up.
+                // Attaching advances this to "now" (see below).
+                let baseline = self.attention_baseline.get(&s.id).copied().unwrap_or(0);
                 let kind = Self::attention_for_session(
                     &s.workspace_path,
                     Self::agent_hook_name(s.agent_type),

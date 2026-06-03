@@ -55,7 +55,7 @@ While a session is **actively generating**, the marker is suppressed (the busy s
 
 **Does it clear when I answer?** Yes — answering a session (typing a prompt, or approving a permission) makes the agent start responding, and the marker clears on the next ~5 s refresh once it does. It clears via *the agent resuming*, not the keystroke itself, so there's a ≤5 s window between hitting enter and the marker disappearing. **Attaching** to a session clears it immediately and advances a per-session baseline to "now", so it won't re-mark until *new* activity arrives after you look away.
 
-Markers are matched to sessions by **working directory + agent**: each hook event carries the `cwd` it fired in, joined to the ainb session whose `workspace_path` matches (trailing-slash tolerant). Events older than the app's start are ignored, so pre-existing history never lights up markers on launch.
+Markers are matched to sessions by **working directory + agent**: each hook event carries the `cwd` it fired in, joined to the ainb session whose `workspace_path` matches (trailing-slash tolerant). Only events within a rolling **6-hour window** count — so opening ainb immediately surfaces sessions that were already waiting before you launched it (the `[✓]` TTL keeps long-finished turns from piling up, so only genuinely-pending `[?]` / `[!]` survive).
 
 ## Host resources it touches
 
