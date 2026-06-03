@@ -3359,50 +3359,70 @@ impl EventHandler {
                         ) {
                             Ok(fav) => {
                                 // Toggle off if already favorited — match on the
-                                // derived remote source, the alias, or a legacy
-                                // local-path entry for the same repo.
+                                // derived remote source, or a legacy local-path
+                                // entry for the same repo. NOT on alias: the alias
+                                // is folder-derived, so two distinct repos sharing
+                                // a folder name must not toggle each other off.
                                 let local_path_str = workspace_path.display().to_string();
                                 let existing = favorites_store
                                     .favorites
                                     .iter()
-                                    .find(|f| {
-                                        f.source == fav.source
-                                            || f.alias == alias
-                                            || f.source == local_path_str
-                                    })
+                                    .find(|f| f.source == fav.source || f.source == local_path_str)
                                     .map(|f| f.alias.clone());
 
                                 if let Some(existing_alias) = existing {
                                     favorites_store.remove(&existing_alias);
                                     if let Err(e) = favorites_store.save() {
                                         tracing::error!("Failed to save favorites: {}", e);
+                                        state.add_error_notification(format!(
+                                            "Could not update favorites: {e}"
+                                        ));
+                                    } else {
+                                        tracing::info!(
+                                            "Removed from favorites: {}",
+                                            existing_alias
+                                        );
+                                        state.add_success_notification(format!(
+                                            "★ Removed '{}' from favorites",
+                                            workspace_name
+                                        ));
                                     }
-                                    tracing::info!("Removed from favorites: {}", existing_alias);
-                                    state.add_success_notification(format!(
-                                        "★ Removed '{}' from favorites",
-                                        workspace_name
-                                    ));
                                 } else {
                                     let display_source = fav.source.clone();
                                     // Suffix the alias on collision so distinct
                                     // repos with the same folder name coexist.
-                                    if favorites_store.add(fav.clone()).is_err() {
+                                    let added = if favorites_store.add(fav.clone()).is_ok() {
+                                        true
+                                    } else {
                                         let mut suffixed = fav;
                                         suffixed.alias = format!(
                                             "{}-{}",
                                             alias,
                                             chrono::Utc::now().timestamp() % 1000
                                         );
-                                        let _ = favorites_store.add(suffixed);
-                                    }
-                                    if let Err(e) = favorites_store.save() {
+                                        favorites_store.add(suffixed).is_ok()
+                                    };
+                                    if !added {
+                                        tracing::warn!(
+                                            alias = %alias,
+                                            "could not add favorite (alias collision)"
+                                        );
+                                        state.add_error_notification(format!(
+                                            "★ Could not favorite '{}': alias already in use",
+                                            workspace_name
+                                        ));
+                                    } else if let Err(e) = favorites_store.save() {
                                         tracing::error!("Failed to save favorites: {}", e);
+                                        state.add_error_notification(format!(
+                                            "Could not save favorite: {e}"
+                                        ));
+                                    } else {
+                                        tracing::info!("Added to favorites: {}", display_source);
+                                        state.add_success_notification(format!(
+                                            "⭐ Added '{}' to favorites",
+                                            display_source
+                                        ));
                                     }
-                                    tracing::info!("Added to favorites: {}", display_source);
-                                    state.add_success_notification(format!(
-                                        "⭐ Added '{}' to favorites",
-                                        display_source
-                                    ));
                                 }
                             }
                             Err(e) => {
