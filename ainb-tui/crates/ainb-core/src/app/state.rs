@@ -5853,6 +5853,20 @@ impl AppState {
             snapshot.mode
         );
 
+        // Remote sources (every star is now remote, plus typed URLs / shorthand)
+        // branch their worktree off the remote's DEFAULT branch (origin/HEAD),
+        // freshly fetched — never a stale local `main` or the cache's checked-out
+        // HEAD. Local-path picks keep the legacy `get_default_branch` flow
+        // (`existing_worktree = None`).
+        let existing_worktree = if snapshot.repo_source.is_remote() {
+            match self.prepare_remote_worktree(session_id, &repo_path, &snapshot).await {
+                Ok(ew) => Some(ew),
+                Err(()) => return, // already notified + cancelled
+            }
+        } else {
+            None
+        };
+
         let result = self
             .create_session_with_logs(
                 &repo_path,
@@ -5864,7 +5878,7 @@ impl AppState {
                 snapshot.agent_type,
                 snapshot.session_model,
                 snapshot.codex_model,
-                None, // existing_worktree — local-only path for now
+                existing_worktree,
             )
             .await;
 
@@ -5884,6 +5898,59 @@ impl AppState {
             Err(e) => {
                 error!("Failed to create session via configure flow: {}", e);
                 self.cancel_new_session();
+            }
+        }
+    }
+
+    /// Build a worktree for a remote/star launch, branched off the remote's
+    /// default branch (`origin/HEAD`) of the freshly-fetched cache. Returns
+    /// `(worktree_path, source_repo_path)` for the `existing_worktree` arg of
+    /// `create_session_with_logs`. On failure: notifies + cancels the
+    /// new-session flow and returns `Err(())`.
+    ///
+    /// Runs on `spawn_blocking` because the `git` CLI calls are synchronous.
+    async fn prepare_remote_worktree(
+        &mut self,
+        session_id: uuid::Uuid,
+        cache_path: &std::path::Path,
+        snapshot: &ConfigureLaunchSnapshot,
+    ) -> Result<(std::path::PathBuf, std::path::PathBuf), ()> {
+        use crate::git::{RemoteRepoManager, WorktreeManager};
+
+        let cache = cache_path.to_path_buf();
+        let branch = snapshot.branch_name.clone();
+        let source = snapshot.repo_source.clone();
+
+        let join = tokio::task::spawn_blocking(
+            move || -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
+                let wt_manager =
+                    WorktreeManager::new().map_err(|e| format!("worktree manager init: {e}"))?;
+                let worktree_path = wt_manager
+                    .generate_worktree_path(session_id, &cache, &branch)
+                    .map_err(|e| format!("worktree path: {e}"))?;
+                let remote_manager =
+                    RemoteRepoManager::new().map_err(|e| format!("remote manager init: {e}"))?;
+                remote_manager
+                    .create_worktree_off_remote_default(&cache, &worktree_path, &branch, &source)
+                    .map_err(|e| format!("{e}"))?;
+                Ok((worktree_path, cache))
+            },
+        )
+        .await;
+
+        match join {
+            Ok(Ok(paths)) => Ok(paths),
+            Ok(Err(msg)) => {
+                tracing::error!(error = %msg, "prepare_remote_worktree failed");
+                self.add_error_notification(format!("Could not prepare worktree off main: {msg}"));
+                self.cancel_new_session();
+                Err(())
+            }
+            Err(join_err) => {
+                tracing::error!(error = %join_err, "prepare_remote_worktree task panicked");
+                self.add_error_notification(format!("Worktree task panicked: {join_err}"));
+                self.cancel_new_session();
+                Err(())
             }
         }
     }
