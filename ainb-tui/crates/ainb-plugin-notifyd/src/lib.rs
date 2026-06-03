@@ -42,7 +42,7 @@ pub use install::{
     uninstall,
 };
 pub use listener::{RunConfig, run_daemon};
-pub use osnotify::AlertKind;
+pub use osnotify::{AlertKind, classify_attention};
 pub use paths::Paths;
 pub use pid::PidFile;
 pub use store::{NotificationRecord, RetentionPolicy, Store, StoreError};
