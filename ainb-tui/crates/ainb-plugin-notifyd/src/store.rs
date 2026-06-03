@@ -438,6 +438,47 @@ impl Store {
         )?;
         Ok(n as u64)
     }
+
+    /// Every non-dismissed notification with `ts > since_ms`, newest
+    /// first, capped at `limit`. Backs the ainb-tui per-session
+    /// attention marker: the TUI pulls recent hook activity in one
+    /// cheap read (the `ts` filter keeps it off the full table) and
+    /// classifies each row via
+    /// [`classify_attention`](crate::classify_attention) to decide the
+    /// `[!]` / `[?]` / `[✓]` marker for the originating session.
+    pub fn recent_since(
+        &self,
+        since_ms: i64,
+        limit: u32,
+    ) -> Result<Vec<NotificationRecord>, StoreError> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, ts, agent, session_id, cwd, project, raw_event, payload, read, dismissed
+             FROM notifications
+             WHERE ts > ?1 AND dismissed = 0
+             ORDER BY ts DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![since_ms, limit], |r| {
+            Ok(NotificationRecord {
+                id: r.get(0)?,
+                ts: r.get(1)?,
+                agent: r.get(2)?,
+                session_id: r.get(3)?,
+                cwd: r.get(4)?,
+                project: r.get(5)?,
+                raw_event: r.get(6)?,
+                payload_json: r.get(7)?,
+                read: r.get::<_, i64>(8)? != 0,
+                dismissed: r.get::<_, i64>(9)? != 0,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -522,6 +563,26 @@ mod tests {
         store.dismiss(&id).unwrap();
         assert_eq!(store.list(false, None, None, 10).unwrap().len(), 0);
         assert_eq!(store.list(true, None, None, 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn recent_since_filters_by_ts_and_skips_dismissed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("a.db")).unwrap();
+        store.insert(&env("claude", "Stop", 100)).unwrap();
+        store.insert(&env("claude", "Notification", 200)).unwrap();
+        let dismissed = store.insert(&env("claude", "PermissionRequest", 300)).unwrap();
+        store.dismiss(&dismissed).unwrap();
+
+        // `since` is exclusive: ts=100 is excluded, 200 included, 300 dismissed.
+        let rows = store.recent_since(100, 10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].ts, 200);
+        assert_eq!(rows[0].raw_event, "Notification");
+
+        // Newest-first ordering across the window.
+        let all = store.recent_since(0, 10).unwrap();
+        assert_eq!(all.iter().map(|r| r.ts).collect::<Vec<_>>(), vec![200, 100]);
     }
 
     #[test]

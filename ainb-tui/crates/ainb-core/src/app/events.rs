@@ -91,6 +91,7 @@ pub enum AppEvent {
     // the legacy 13-step variants; only `NewSessionCancel` survives as the
     // host-level Esc handler for the `Creating` step.
     NewSessionCancel,
+    PickRepoPaste(String), // Append bracketed-paste text to the repo-picker filter (Cmd+V)
     // Notification events
     ShowNotification(String), // Display a notification message to the user
     // File finder events for @ symbol trigger
@@ -669,6 +670,22 @@ impl EventHandler {
     pub fn handle_paste_event(text: String, state: &AppState) -> Option<AppEvent> {
         if state.config_popup_state.is_text_entry() {
             return Some(AppEvent::ConfigPopupPaste(text));
+        }
+        // New Session repo picker: the filter field accepts pasted
+        // owner/repo, URLs and paths. Like the config popup it lives behind
+        // the host router, so a bracketed paste must be forwarded here or it
+        // is dropped (Cmd+V appeared to do nothing). Gate on the visible
+        // screen too — `new_session_state` can linger after navigating away
+        // (e.g. via the sidebar), and a paste must not leak into a hidden
+        // picker.
+        let on_pick_repo = state.current_screen == crate::app::screens::ids::NEW_SESSION
+            && state
+                .new_session_state
+                .as_ref()
+                .map(|s| s.step == crate::app::state::NewSessionStep::PickRepo)
+                .unwrap_or(false);
+        if on_pick_repo {
+            return Some(AppEvent::PickRepoPaste(text));
         }
         None
     }
@@ -1372,6 +1389,27 @@ impl EventHandler {
                         state.add_error_notification(message);
                     } else {
                         state.add_info_notification(message);
+                    }
+                    None
+                }
+                PickRepoOutcome::PasteFromClipboard => {
+                    // Ctrl+V on the picker: read the OS clipboard here (app
+                    // layer owns clipboard access) and append to the filter.
+                    match Self::get_clipboard_text() {
+                        Ok(text) => {
+                            if let Some(pick) = state
+                                .new_session_state
+                                .as_mut()
+                                .and_then(|s| s.pick_repo_state.as_mut())
+                            {
+                                pick.append_filter(&text);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("PickRepo clipboard paste failed: {}", e);
+                            state
+                                .add_error_notification(format!("Could not read clipboard: {}", e));
+                        }
                     }
                     None
                 }
@@ -2285,6 +2323,13 @@ impl EventHandler {
             AppEvent::NewSessionCancel => {
                 state.cancel_new_session();
             }
+            AppEvent::PickRepoPaste(text) => {
+                if let Some(pick) =
+                    state.new_session_state.as_mut().and_then(|s| s.pick_repo_state.as_mut())
+                {
+                    pick.append_filter(&text);
+                }
+            }
             AppEvent::ConfigureBack => {
                 // Phase 5: Esc on Configure persists the half-typed prompt to
                 // session-defaults so it's restored on re-entry, then routes
@@ -2787,23 +2832,42 @@ impl EventHandler {
                                     Some(AsyncAction::KillWorkspaceShell(workspace_idx));
                             }
                             crate::app::state::ConfirmAction::InstallNotifyHooks => {
-                                // Install the ainb-hooks plugin for both agents
-                                // in-process (ainb-core links ainb-plugin-notifyd).
-                                // Sync + fast — writes a few small files. The
-                                // daemon lazy-spawns on the first hook event.
+                                // Install the ainb-hooks plugin for both agents.
+                                // Codex + the canonical hook script are written
+                                // in-process; Claude is registered by shelling
+                                // out to `claude plugin install`. The daemon
+                                // lazy-spawns on the first hook event.
+                                use ainb_plugin_notifyd::ClaudeRegister;
                                 match ainb_plugin_notifyd::Paths::from_home().and_then(|p| {
                                     ainb_plugin_notifyd::install_for(
                                         &p,
                                         ainb_plugin_notifyd::Agent::ALL,
                                     )
                                 }) {
-                                    Ok(record) => {
-                                        state.add_info_notification(format!(
-                                            "Notifications enabled for {:?} — the Inbox (b) \
-                                             will light up when a session needs you.",
-                                            record.agents
-                                        ));
-                                    }
+                                    Ok(report) => match &report.claude {
+                                        Some(ClaudeRegister::Failed(e)) => {
+                                            state.add_error_notification(format!(
+                                                "Codex hooks installed, but the Claude plugin \
+                                                 failed to register: {e}"
+                                            ));
+                                        }
+                                        Some(ClaudeRegister::ClaudeCliMissing) => {
+                                            state.add_error_notification(
+                                                "Codex hooks installed, but `claude` CLI was not \
+                                                 found — Claude notifications not enabled. Install \
+                                                 it, then re-run."
+                                                    .to_string(),
+                                            );
+                                        }
+                                        _ => {
+                                            state.add_info_notification(
+                                                "Notifications enabled (Claude + Codex). Restart \
+                                                 your agent sessions to load the hooks; the Inbox \
+                                                 (b) lights up when a session needs you."
+                                                    .to_string(),
+                                            );
+                                        }
+                                    },
                                     Err(e) => {
                                         state.add_error_notification(format!(
                                             "Failed to install notification hooks: {e}"
@@ -5050,6 +5114,23 @@ mod text_input_guard_tests {
         let evt = EventHandler::handle_key_event(char_key('v'), &mut state)
             .expect("plain 'v' must dispatch a char input");
         assert!(matches!(evt, AppEvent::ConfigPopupInputChar('v')));
+    }
+
+    /// A bracketed paste (Cmd+V) on the New Session repo picker must be
+    /// forwarded to the filter, not dropped. Regression: `handle_paste_event`
+    /// only routed the config popup, so Cmd+V on PickRepo did nothing.
+    #[test]
+    fn bracketed_paste_on_pick_repo_routes_to_filter() {
+        let mut state = AppState::default();
+        state.current_screen = screen_ids::NEW_SESSION.to_string();
+        state.new_session_state = Some(NewSessionState {
+            step: NewSessionStep::PickRepo,
+            ..NewSessionState::default()
+        });
+
+        let evt = EventHandler::handle_paste_event("owner/repo".to_string(), &state)
+            .expect("paste on PickRepo must dispatch a filter paste");
+        assert!(matches!(evt, AppEvent::PickRepoPaste(ref t) if t == "owner/repo"));
     }
 
     /// Esc inside a text input while help is visible must close help,

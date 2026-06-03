@@ -2451,6 +2451,17 @@ pub struct AppState {
     pub workspace_load_started: Option<Instant>,
     /// Channel receiver for background workspace loading results
     pub workspace_load_receiver: Option<mpsc::UnboundedReceiver<WorkspaceLoadResult>>,
+
+    /// Per-session "cleared up to" timestamp (epoch ms). A hook event
+    /// only marks a session if its `ts` is newer than this. Bumped to
+    /// "now" while the user is attached, so re-marking only happens for
+    /// activity that arrives after they look away. Defaults to
+    /// [`AppState::app_started_ms`] for sessions never attached.
+    pub attention_baseline: HashMap<Uuid, i64>,
+    /// Epoch ms captured at app start. Floors the attention query so
+    /// pre-existing notification history never lights up markers on
+    /// launch.
+    pub app_started_ms: i64,
 }
 
 /// Result of background workspace loading
@@ -2858,6 +2869,10 @@ impl Default for AppState {
             workspace_load_error: None,
             workspace_load_started: None,
             workspace_load_receiver: None,
+
+            // Per-session attention markers, driven by ainb-hooks events.
+            attention_baseline: HashMap::new(),
+            app_started_ms: chrono::Utc::now().timestamp_millis(),
         }
     }
 }
@@ -5341,11 +5356,11 @@ impl AppState {
         let (title, message, install_label) = match prompt_state(&paths) {
             InstallPrompt::OfferInstall => (
                 "Get notified when a session needs you?".to_string(),
-                "Install ainb-hooks into Claude Code + Codex so the Inbox \
-                 (press b) and per-session badges light up when an agent is \
-                 awaiting input or has finished. Only actionable events are \
-                 captured — no activity-log noise. Writes ~/.claude/plugins \
-                 and ~/.codex/hooks.json."
+                "Install ainb-hooks so the Inbox (press b) and the per-session \
+                 badges light up when an agent is awaiting input ([?]) or has \
+                 finished ([✓]). Only actionable events are captured — no \
+                 activity-log noise. Works with Claude Code today (registered \
+                 via the claude CLI); Codex support is experimental."
                     .to_string(),
                 "Install",
             ),
@@ -8217,21 +8232,153 @@ impl AppState {
         }
     }
 
-    /// Derive a session's live "needs you" marker from whether its agent
-    /// is actively generating.
+    /// The ainb-hooks `agent` string a session's events are recorded
+    /// under, or `None` for session types that don't emit hook events
+    /// (plain shell / SSH, and the not-yet-wired Gemini/Copilot/Kiro).
+    const fn agent_hook_name(agent: SessionAgentType) -> Option<&'static str> {
+        match agent {
+            SessionAgentType::Claude => Some("claude"),
+            SessionAgentType::Codex => Some("codex"),
+            _ => None,
+        }
+    }
+
+    /// Decide a single session's attention marker from recent hook
+    /// events. Pure + deterministic (no clock / IO) so it is directly
+    /// unit-testable.
     ///
-    /// Returns `Some(WaitingOnUser)` whenever the agent is NOT generating
-    /// (`claude_running == false`) — the session has ended its turn /
-    /// gone idle / parked at a prompt and is waiting on the user. It
-    /// clears the instant generation resumes. Intentionally broad: every
-    /// parked session reads as "needs you", which — with the `●` running
-    /// dot marking the busy ones — gives an at-a-glance view of exactly
-    /// which sessions are waiting for you across the fleet.
-    const fn live_attention_for(claude_running: bool) -> Option<ainb_plugin_notifyd::AlertKind> {
-        if claude_running {
-            None
-        } else {
-            Some(ainb_plugin_notifyd::AlertKind::WaitingOnUser)
+    /// `recent` MUST be newest-first (as [`Store::recent_since`] returns
+    /// it). The marker is the kind implied by the newest user-facing
+    /// event for this session's `(cwd, agent)` whose `ts` is strictly
+    /// newer than `baseline_ms` — unless the agent is currently
+    /// `generating` (suppressed; the `●` busy dot covers it) or the only
+    /// match is a `Finished` turn past its short TTL. Returns `None`
+    /// (blank — no marker) when nothing qualifies, which is the common
+    /// case for an idle session with no pending hook event.
+    fn attention_for_session(
+        session_cwd: &str,
+        agent: Option<&str>,
+        generating: bool,
+        baseline_ms: i64,
+        now_ms: i64,
+        recent: &[ainb_plugin_notifyd::NotificationRecord],
+    ) -> Option<ainb_plugin_notifyd::AlertKind> {
+        use ainb_plugin_notifyd::{AlertKind, classify_attention};
+        // A `[✓]` Finished marker is informational; retire it after this.
+        const FINISHED_TTL_MS: i64 = 5 * 60 * 1000;
+
+        if generating {
+            return None;
+        }
+        let agent = agent?;
+        let cwd = session_cwd.trim_end_matches('/');
+
+        for rec in recent {
+            // `recent` is newest-first and `ts`-sorted globally, so the
+            // first row at/under the baseline means none remain newer.
+            if rec.ts <= baseline_ms {
+                break;
+            }
+            if rec.agent != agent || rec.cwd.trim_end_matches('/') != cwd {
+                continue;
+            }
+            let Some(kind) = classify_attention(&rec.raw_event) else {
+                continue;
+            };
+            // Newest qualifying event wins. A long-finished turn isn't
+            // worth a marker — and it supersedes any older question, so
+            // we stop rather than fall back to a staler event.
+            if kind == AlertKind::Finished && now_ms.saturating_sub(rec.ts) > FINISHED_TTL_MS {
+                return None;
+            }
+            return Some(kind);
+        }
+        None
+    }
+
+    /// Recent user-facing hook events across the fleet, newest-first, or
+    /// `None` when the notifications store doesn't exist yet (daemon
+    /// never ran) or can't be read. Floored at app start so pre-existing
+    /// history never marks, and windowed so a long-lived TUI doesn't
+    /// accrue stale markers.
+    ///
+    /// Opens the store per call rather than holding a handle: the read
+    /// is microseconds, runs at most every preview-refresh interval
+    /// (~5s), and keeps the daemon as the DB's sole long-lived owner.
+    /// The `exists()` guard avoids `Store::open` creating an empty DB on
+    /// machines where notifications were never set up.
+    fn recent_attention_events(
+        &self,
+        now_ms: i64,
+    ) -> Option<Vec<ainb_plugin_notifyd::NotificationRecord>> {
+        // Ignore events older than this regardless of when the app started.
+        const LOOKBACK_MS: i64 = 6 * 60 * 60 * 1000;
+        // Bounds query cost; ample for any realistic active fleet.
+        const QUERY_LIMIT: u32 = 500;
+
+        let db = ainb_plugin_notifyd::Paths::from_home().ok()?.db;
+        if !db.exists() {
+            return None;
+        }
+        let store = ainb_plugin_notifyd::Store::open(&db).ok()?;
+        let floor = (now_ms - LOOKBACK_MS).max(self.app_started_ms);
+        match store.recent_since(floor, QUERY_LIMIT) {
+            Ok(rows) => Some(rows),
+            Err(e) => {
+                debug!("attention: notifications store read failed: {e}");
+                None
+            }
+        }
+    }
+
+    /// Recompute every session's attention marker (`[!]`/`[?]`/`[✓]`)
+    /// from recent ainb-hooks events. Attached sessions never nag and
+    /// have their baseline advanced to "now", so re-marking only happens
+    /// for activity that arrives after the user looks away.
+    fn refresh_attention_markers(&mut self, now_ms: i64) {
+        let Some(recent) = self.recent_attention_events(now_ms) else {
+            return;
+        };
+
+        // Phase 1 — read-only compute (no mutable borrow of self).
+        let mut marks: Vec<(Uuid, Option<ainb_plugin_notifyd::AlertKind>, bool)> = Vec::new();
+        for ws in &self.workspaces {
+            for s in &ws.sessions {
+                if s.is_attached {
+                    marks.push((s.id, None, true));
+                    continue;
+                }
+                let generating = matches!(s.status, crate::models::SessionStatus::Running);
+                let baseline =
+                    self.attention_baseline.get(&s.id).copied().unwrap_or(self.app_started_ms);
+                let kind = Self::attention_for_session(
+                    &s.workspace_path,
+                    Self::agent_hook_name(s.agent_type),
+                    generating,
+                    baseline,
+                    now_ms,
+                    &recent,
+                );
+                marks.push((s.id, kind, false));
+            }
+        }
+
+        // Phase 2 — apply. Bumping an attached session's baseline and
+        // writing its marker are separate self borrows, taken in turn.
+        let mut changed = false;
+        for (id, kind, attached) in marks {
+            if attached {
+                self.attention_baseline.insert(id, now_ms);
+            }
+            if let Some(s) = self.find_session_mut(id) {
+                if s.live_attention != kind {
+                    s.live_attention = kind;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.ui_needs_refresh = true;
         }
     }
 
@@ -8251,9 +8398,11 @@ impl AppState {
         }
         self.last_preview_update = Some(now);
 
-        // updates: (session_id, content, claude_running, live_attention) for the selected session
+        // updates: (session_id, content, claude_running) for the selected session.
+        // Attention markers are derived separately from hook events in
+        // `refresh_attention_markers`, not from live pane state.
         let mut updates = Vec::new();
-        // status_updates: (session_id, claude_running, live_attention) for non-selected sessions
+        // status_updates: (session_id, claude_running) for non-selected sessions
         let mut status_updates = Vec::new();
         let detector = ClaudeProcessDetector::new();
 
@@ -8288,8 +8437,7 @@ impl AppState {
                 match capture_pane(tmux_session.name(), opts).await {
                     Ok(content) => {
                         let claude_running = detector.has_claude_status_bar(&content);
-                        let attention = Self::live_attention_for(claude_running);
-                        updates.push((*session_id, content, claude_running, attention));
+                        updates.push((*session_id, content, claude_running));
                     }
                     Err(e) => {
                         debug!("Failed to capture selected session {}: {}", session_id, e);
@@ -8301,8 +8449,7 @@ impl AppState {
                 match tmux_session.capture_pane_content().await {
                     Ok(content) => {
                         let claude_running = detector.has_claude_status_bar(&content);
-                        let attention = Self::live_attention_for(claude_running);
-                        status_updates.push((*session_id, claude_running, attention));
+                        status_updates.push((*session_id, claude_running));
                     }
                     Err(e) => {
                         trace!("Non-selected session {} capture skipped: {}", session_id, e);
@@ -8312,7 +8459,7 @@ impl AppState {
         }
 
         // Apply status-only updates for non-selected sessions
-        for (session_id, claude_running, attention) in status_updates {
+        for (session_id, claude_running) in status_updates {
             // Accumulate the change flag inside the session borrow, then
             // touch `self.ui_needs_refresh` only after it ends (avoids a
             // borrow conflict between `find_session_mut` and `self`).
@@ -8328,10 +8475,6 @@ impl AppState {
                     session.set_status(new_status);
                     changed = true;
                 }
-                if session.live_attention != attention {
-                    session.live_attention = attention;
-                    changed = true;
-                }
             }
             if changed {
                 self.ui_needs_refresh = true;
@@ -8340,7 +8483,7 @@ impl AppState {
 
         // Apply updates for the selected session (preview always changes,
         // so this loop unconditionally requests a refresh).
-        for (session_id, content, claude_running, attention) in updates {
+        for (session_id, content, claude_running) in updates {
             if let Some(session) = self.find_session_mut(session_id) {
                 session.set_preview(content);
 
@@ -8354,11 +8497,16 @@ impl AppState {
                 if session.status != new_status {
                     session.set_status(new_status);
                 }
-                session.live_attention = attention;
             }
 
             self.ui_needs_refresh = true;
         }
+
+        // Now that per-session running/idle status is current, recompute
+        // each session's attention marker (`[!]`/`[?]`/`[✓]`) from recent
+        // ainb-hooks events. Independent of pane capture, so it also
+        // covers sessions with no live pane (stopped / never-captured).
+        self.refresh_attention_markers(chrono::Utc::now().timestamp_millis());
 
         // Update shell session preview (only the selected workspace's shell)
         let selected_workspace_idx = self.selected_workspace_index;

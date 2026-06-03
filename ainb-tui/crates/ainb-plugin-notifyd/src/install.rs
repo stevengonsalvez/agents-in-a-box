@@ -19,6 +19,7 @@
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -144,12 +145,100 @@ pub fn extract_hook_script(paths: &Paths) -> Result<PathBuf> {
     Ok(dest)
 }
 
+/// Marketplace + plugin identifiers ainb-hooks is published under.
+const CLAUDE_PLUGIN_REF: &str = "ainb-hooks@agents-in-a-box";
+const CLAUDE_MARKETPLACE: &str = "agents-in-a-box";
+/// GitHub source used to register the marketplace on machines that don't
+/// already know it (e.g. a brew install with no repo checkout).
+const CLAUDE_MARKETPLACE_SOURCE: &str = "stevengonsalvez/agents-in-a-box";
+
+/// Outcome of registering the Claude plugin through the `claude` CLI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaudeRegister {
+    /// `claude plugin install` succeeded, or the plugin was already installed.
+    Registered,
+    /// The `claude` CLI is not on `PATH` — Claude wiring was skipped.
+    ClaudeCliMissing,
+    /// The CLI ran but failed; carries a short single-line reason.
+    Failed(String),
+}
+
+/// Report returned by [`install`]: the on-disk record, plus — when Claude
+/// was among the requested agents — the outcome of registering its plugin
+/// through the `claude` CLI (`None` when Claude was not requested).
+#[derive(Debug, Clone)]
+pub struct InstallReport {
+    /// The persisted install record (canonical script, codex wiring, etc.).
+    pub record: InstallRecord,
+    /// Claude marketplace-registration outcome, if Claude was targeted.
+    pub claude: Option<ClaudeRegister>,
+}
+
+/// First non-empty line of `stderr` (preferred) or `stdout`, trimmed and
+/// length-capped — for a tidy one-line status message.
+fn first_line(stderr: &[u8], stdout: &[u8]) -> String {
+    let pick = |b: &[u8]| {
+        String::from_utf8_lossy(b)
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .map(|l| l.chars().take(160).collect::<String>())
+    };
+    pick(stderr).or_else(|| pick(stdout)).unwrap_or_else(|| "unknown error".into())
+}
+
+/// Register the ainb-hooks plugin with Claude Code via its `claude plugin`
+/// CLI. Modern Claude only loads plugins from a registered marketplace, so
+/// dropping files under `~/.claude/plugins/` is inert — registration must
+/// go through the CLI. Best-effort + non-interactive; never panics.
+fn register_claude_plugin() -> ClaudeRegister {
+    // Probe for the CLI by listing marketplaces. A spawn error means
+    // `claude` is not on PATH.
+    let list = match Command::new("claude").args(["plugin", "marketplace", "list"]).output() {
+        Ok(o) => o,
+        Err(_) => return ClaudeRegister::ClaudeCliMissing,
+    };
+    // Register the marketplace only when Claude doesn't already know it —
+    // a local-directory source (a dev's repo checkout) must not be
+    // clobbered by adding the GitHub one.
+    let known = String::from_utf8_lossy(&list.stdout);
+    if !known.contains(CLAUDE_MARKETPLACE) {
+        let _ = Command::new("claude")
+            .args(["plugin", "marketplace", "add", CLAUDE_MARKETPLACE_SOURCE])
+            .output();
+    }
+    // Install (idempotent: an already-installed plugin counts as success).
+    match Command::new("claude").args(["plugin", "install", CLAUDE_PLUGIN_REF]).output() {
+        Ok(o) if o.status.success() => ClaudeRegister::Registered,
+        Ok(o) => {
+            let msg = first_line(&o.stderr, &o.stdout);
+            if msg.to_lowercase().contains("already") {
+                ClaudeRegister::Registered
+            } else {
+                ClaudeRegister::Failed(msg)
+            }
+        }
+        Err(e) => ClaudeRegister::Failed(e.to_string()),
+    }
+}
+
+/// Unregister the ainb-hooks plugin from Claude (mirror of
+/// [`register_claude_plugin`]). Best-effort; ignores all errors.
+fn unregister_claude_plugin() {
+    let _ = Command::new("claude").args(["plugin", "uninstall", CLAUDE_PLUGIN_REF]).output();
+}
+
 /// Install for one or more agents under the user's real `$HOME`.
-/// Idempotent — running install twice produces the same on-disk
-/// state. Tests use [`install_under_home`] with an explicit base.
-pub fn install(paths: &Paths, agents: &[Agent]) -> Result<InstallRecord> {
+///
+/// Does the file-based wiring (canonical hook script + Codex managed
+/// block + install record) via [`install_under_home`], then — if Claude
+/// was requested — registers the Claude plugin through the `claude` CLI
+/// and reports the outcome. Idempotent.
+pub fn install(paths: &Paths, agents: &[Agent]) -> Result<InstallReport> {
     let home = dirs::home_dir().context("resolving home dir")?;
-    install_under_home(paths, &home, agents)
+    let record = install_under_home(paths, &home, agents)?;
+    let claude = agents.contains(&Agent::Claude).then(register_claude_plugin);
+    Ok(InstallReport { record, claude })
 }
 
 /// Install variant that takes an explicit `$HOME` root. Lets tests
@@ -173,8 +262,12 @@ pub fn install_under_home(paths: &Paths, home: &Path, agents: &[Agent]) -> Resul
     for agent in agents {
         match agent {
             Agent::Claude => {
-                let plugin_dir = install_claude(home, &hook_script)?;
-                record.claude_plugin_dir = Some(plugin_dir);
+                // Claude is wired through its plugin marketplace (see
+                // `register_claude_plugin`, invoked by `install`), NOT by
+                // dropping a plugin directory — modern Claude Code ignores
+                // unregistered dirs. Here we only record the agent and
+                // clear any legacy hand-dropped dir reference.
+                record.claude_plugin_dir = None;
                 push_unique(&mut record.agents, Agent::Claude);
             }
             Agent::Codex => {
@@ -274,36 +367,6 @@ fn push_unique<T: PartialEq>(v: &mut Vec<T>, item: T) {
     if !v.contains(&item) {
         v.push(item);
     }
-}
-
-/// Install Claude plugin: drop plugin.json + hook script into
-/// `<home>/.claude/plugins/ainb-hooks/`.
-fn install_claude(home: &Path, hook_script_canonical: &Path) -> Result<PathBuf> {
-    let plugin_dir = home.join(".claude").join("plugins").join("ainb-hooks");
-    let claude_plugin_meta = plugin_dir.join(".claude-plugin");
-    let claude_hooks_dir = plugin_dir.join("hooks");
-    std::fs::create_dir_all(&claude_plugin_meta)?;
-    std::fs::create_dir_all(&claude_hooks_dir)?;
-
-    // Drop the manifest verbatim — it references `${CLAUDE_PLUGIN_ROOT}`
-    // which Claude resolves at runtime.
-    std::fs::write(claude_plugin_meta.join("plugin.json"), CLAUDE_PLUGIN_JSON)?;
-
-    // Symlink the hook script into the plugin dir so a single edit to
-    // notify.sh propagates. On platforms where symlink fails (rare on
-    // POSIX) we fall back to a copy.
-    let claude_hook = claude_hooks_dir.join("notify.sh");
-    if claude_hook.exists() {
-        std::fs::remove_file(&claude_hook)?;
-    }
-    if std::os::unix::fs::symlink(hook_script_canonical, &claude_hook).is_err() {
-        std::fs::copy(hook_script_canonical, &claude_hook)?;
-        let mut perms = std::fs::metadata(&claude_hook)?.permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&claude_hook, perms)?;
-    }
-    info!(plugin_dir = %plugin_dir.display(), "installed claude plugin");
-    Ok(plugin_dir)
 }
 
 /// Install Codex hooks: merge our managed block into
@@ -418,10 +481,15 @@ pub fn uninstall(paths: &Paths, agents: &[Agent]) -> Result<()> {
     for agent in agents {
         match agent {
             Agent::Claude => {
+                // Mirror of install: unregister the marketplace plugin via
+                // the `claude` CLI (best-effort).
+                unregister_claude_plugin();
+                // Legacy cleanup: remove a hand-dropped plugin dir left by
+                // older installs, if one is still recorded / present.
                 if let Some(dir) = record.claude_plugin_dir.take() {
                     if dir.exists() {
                         std::fs::remove_dir_all(&dir).with_context(|| {
-                            format!("removing claude plugin dir {}", dir.display())
+                            format!("removing legacy claude plugin dir {}", dir.display())
                         })?;
                     }
                 }
@@ -548,16 +616,23 @@ mod tests {
     }
 
     #[test]
-    fn install_claude_creates_plugin_dir_with_manifest() {
+    fn install_under_home_records_claude_without_dropping_a_dir() {
+        // Claude is wired via the marketplace CLI (done in `install`),
+        // not by dropping a plugin dir — so install_under_home must record
+        // the agent but leave `claude_plugin_dir` unset and create nothing
+        // under ~/.claude/plugins/.
         let dir = fake_home();
         let p = paths_under_home(dir.path());
         let record = install_under_home(&p, dir.path(), &[Agent::Claude]).unwrap();
-        let plugin_json =
-            record.claude_plugin_dir.as_ref().unwrap().join(".claude-plugin/plugin.json");
-        assert!(plugin_json.exists(), "missing: {}", plugin_json.display());
-        let manifest: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&plugin_json).unwrap()).unwrap();
-        assert_eq!(manifest["name"], "ainb-hooks");
+        assert!(record.agents.contains(&Agent::Claude));
+        assert!(
+            record.claude_plugin_dir.is_none(),
+            "must not drop a plugin dir"
+        );
+        assert!(
+            !dir.path().join(".claude/plugins/ainb-hooks").exists(),
+            "no hand-dropped plugin dir should be created"
+        );
     }
 
     #[test]
