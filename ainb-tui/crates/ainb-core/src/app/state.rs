@@ -5873,14 +5873,20 @@ impl AppState {
         // freshly fetched — never a stale local `main` or the cache's checked-out
         // HEAD. Local-path picks keep the legacy `get_default_branch` flow
         // (`existing_worktree = None`).
-        let existing_worktree = if snapshot.repo_source.is_remote() {
-            match self.prepare_remote_worktree(session_id, &repo_path, &snapshot).await {
-                Ok(ew) => Some(ew),
-                Err(()) => return, // already notified + cancelled
-            }
-        } else {
-            None
-        };
+        //
+        // Gated to Interactive mode: only `create_interactive_session` consumes
+        // `existing_worktree`. Boss mode (`create_boss_session`) ignores it and
+        // builds its own Docker request from `repo_path`, so preparing a worktree
+        // there would orphan it on disk and leave a stray cache branch.
+        let existing_worktree =
+            if snapshot.repo_source.is_remote() && snapshot.mode == SessionMode::Interactive {
+                match self.prepare_remote_worktree(session_id, &repo_path, &snapshot).await {
+                    Ok(ew) => Some(ew),
+                    Err(()) => return, // already notified + cancelled
+                }
+            } else {
+                None
+            };
 
         let result = self
             .create_session_with_logs(
