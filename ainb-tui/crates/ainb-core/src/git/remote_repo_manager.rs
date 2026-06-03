@@ -402,12 +402,15 @@ impl RemoteRepoManager {
         }
         let _ = Command::new("git").args(["worktree", "prune"]).current_dir(cache_path).output();
 
+        // Use `-B` (force create/reset) on retry: the first `-b` attempt may have
+        // already created `new_branch` before failing at the checkout stage, so a
+        // second `-b` would abort with "already exists".
         let retry = Command::new("git")
             .args([
                 "worktree",
                 "add",
                 "--no-checkout",
-                "-b",
+                "-B",
                 new_branch,
                 wt.as_ref(),
                 start_point,
@@ -445,8 +448,9 @@ impl RemoteRepoManager {
 
     /// Checkout an existing remote branch into a worktree
     ///
-    /// Unlike create_worktree_from_cache which creates a new local branch,
-    /// this creates a local tracking branch for an existing remote branch.
+    /// Unlike `create_worktree_off_remote_default`, which cuts a NEW branch from
+    /// the remote default, this creates a local tracking branch for an existing
+    /// remote branch.
     /// Uses -B flag to handle the case where the branch is already checked
     /// out in the cache (standard clone has default branch checked out).
     /// Returns `Ok(None)` if worktree was created at the provided path,
