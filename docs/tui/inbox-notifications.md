@@ -91,6 +91,7 @@ Because this is host code, there is **no manifest and no capability declaration*
   - `ainb-notifyd uninstall --claude --codex` (or `--all`) — reverse the install; preserves user-authored Codex hooks.
   - `ainb-notifyd status` — report per-agent install state, hook-script health, socket liveness, last event, and daemon PID liveness.
   - `ainb-notifyd stop` — send `SIGTERM` to a running daemon via its PID file.
+  - Every verb accepts `--format text|json|csv|markdown` (default `text`) for scripting — e.g. `ainb notifyd status --format json`.
 - **Snapshot topics** — none. `notifyd` does not publish or subscribe on the event bus; the Inbox reads SQLite directly. There is no slash command.
 
 ## Source
