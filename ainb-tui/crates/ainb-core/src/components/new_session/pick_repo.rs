@@ -92,6 +92,20 @@ pub enum PickRepoOutcome {
     /// Source needs an async clone before advancing. Phase 5 wires the
     /// spinner display; Phase 4 stops here.
     StartClone(RepoSource),
+    /// Surface a transient message to the user (favorite added/removed, or a
+    /// refusal) and stay on the picker. The dispatcher maps `is_error` to an
+    /// error vs. info notification.
+    Notice { message: String, is_error: bool },
+}
+
+/// Result of toggling a favorite — drives the `^F` notification.
+enum FavoriteToggle {
+    /// Newly favorited; carries the stored remote source for display.
+    Added(String),
+    /// Un-favorited; carries the row label for display.
+    Removed(String),
+    /// Refused because the row has no remote repository indicator.
+    Refused(String),
 }
 
 /// Persistent state for the picker. Constructed once per new-session
@@ -537,9 +551,28 @@ pub fn handle_key(state: &mut PickRepoState, key: KeyEvent) -> PickRepoOutcome {
             KeyCode::Char('f' | 'F') => {
                 tracing::debug!("pick_repo: ^F toggle favorite on highlighted row");
                 if let Some(row) = state.highlighted().cloned() {
-                    toggle_favorite(state, &row);
-                    let local_repos = collect_local_repo_paths(state);
-                    state.rebuild_rows(&local_repos);
+                    return match toggle_favorite(state, &row) {
+                        FavoriteToggle::Refused(reason) => PickRepoOutcome::Notice {
+                            message: format!("★ Can't favorite: {reason}"),
+                            is_error: true,
+                        },
+                        FavoriteToggle::Added(display) => {
+                            let local_repos = collect_local_repo_paths(state);
+                            state.rebuild_rows(&local_repos);
+                            PickRepoOutcome::Notice {
+                                message: format!("⭐ Added '{display}' to favorites"),
+                                is_error: false,
+                            }
+                        }
+                        FavoriteToggle::Removed(display) => {
+                            let local_repos = collect_local_repo_paths(state);
+                            state.rebuild_rows(&local_repos);
+                            PickRepoOutcome::Notice {
+                                message: format!("★ Removed '{display}' from favorites"),
+                                is_error: false,
+                            }
+                        }
+                    };
                 }
                 return PickRepoOutcome::Stay;
             }
@@ -636,37 +669,58 @@ fn resolve_outcome(source: RepoSource) -> PickRepoOutcome {
 /// (mutating `state.favorites`) AND the on-disk YAML so the change survives
 /// across TUI restarts.
 ///
-/// Finding #1 sub-issue: refuses to persist when the row's source is
-/// `Filter` — writing `SourceType::LocalPath` with the alias-string as the
-/// path silently corrupts `favorites.yaml`. Pre-fix this only mattered for
-/// recents (which used Filter as a leaky "unknown provenance" carrier);
-/// post-fix the picker always reconstructs a real variant via
-/// `recent_source`, so a Filter source here is genuinely unparseable input
-/// that should not be persisted.
-fn toggle_favorite(state: &mut PickRepoState, row: &PickRepoRow) {
+/// A favorite ALWAYS records a remote indicator. Remote rows store directly;
+/// a `LocalPath` row is resolved to its `origin` remote via
+/// [`favorite_from_local_repo`] (refused if it has none). `SshSession`
+/// (interactive, not a repo) and `Filter` (unparseable text) rows are refused
+/// outright — never persisted.
+fn toggle_favorite(state: &mut PickRepoState, row: &PickRepoRow) -> FavoriteToggle {
     if state.favorites.has_alias(&row.id) {
         state.favorites.remove(&row.id);
-    } else {
-        let (source_str, source_type) = match &row.source {
-            RepoSource::HttpsUrl(u) => (u.clone(), SourceType::HttpsUrl),
-            RepoSource::SshUrl(u) => (u.clone(), SourceType::SshUrl),
-            RepoSource::GithubShorthand { owner, repo } => {
-                (format!("{owner}/{repo}"), SourceType::GithubShorthand)
-            }
-            RepoSource::LocalPath(p) => (p.display().to_string(), SourceType::LocalPath),
-            RepoSource::SshSession(s) => (s.clone(), SourceType::SshUrl),
-            RepoSource::Filter(s) => {
-                tracing::warn!(
-                    alias = %row.id,
-                    text = %s,
-                    "pick_repo: refusing to favorite a Filter row — no real source provenance",
-                );
-                return;
-            }
-        };
-        let fav = Favorite::new(row.id.clone(), source_str, source_type);
-        state.favorites.set(fav);
+        persist_favorites(state);
+        return FavoriteToggle::Removed(row.label.clone());
     }
+
+    let fav = match &row.source {
+        RepoSource::HttpsUrl(u) => Favorite::new(row.id.clone(), u.clone(), SourceType::HttpsUrl),
+        RepoSource::SshUrl(u) => Favorite::new(row.id.clone(), u.clone(), SourceType::SshUrl),
+        RepoSource::GithubShorthand { owner, repo } => Favorite::new(
+            row.id.clone(),
+            format!("{owner}/{repo}"),
+            SourceType::GithubShorthand,
+        ),
+        RepoSource::LocalPath(p) => {
+            match crate::config::favorite_from_local_repo(row.id.clone(), p) {
+                Ok(fav) => fav,
+                Err(e) => {
+                    tracing::warn!(
+                        alias = %row.id,
+                        path = %p.display(),
+                        error = %e,
+                        "pick_repo: refusing to favorite local row — no remote indicator",
+                    );
+                    return FavoriteToggle::Refused(e.to_string());
+                }
+            }
+        }
+        RepoSource::SshSession(s) | RepoSource::Filter(s) => {
+            tracing::warn!(
+                alias = %row.id,
+                text = %s,
+                "pick_repo: refusing to favorite — not a remote repository indicator",
+            );
+            return FavoriteToggle::Refused("not a remote repository".to_string());
+        }
+    };
+
+    let display = fav.source.clone();
+    state.favorites.set(fav);
+    persist_favorites(state);
+    FavoriteToggle::Added(display)
+}
+
+/// Persist the favorites store to disk, logging (but not failing) on error.
+fn persist_favorites(state: &PickRepoState) {
     if let Err(err) = state.favorites.save() {
         tracing::warn!(error = %err, "pick_repo: failed to persist favorites");
     }
