@@ -1,0 +1,43 @@
+[package]
+name = "ainb-plugin-learnings"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Browse, search & graph your learnings knowledge base — subprocess plugin (ABI v2)"
+
+# cargo-machete matches the package name, but the SDK's [lib] name is
+# `ainb_plugin_sdk`; the rename hides real usage.
+[package.metadata.cargo-machete]
+ignored = ["ainb-plugin-sdk-rust"]
+
+[lib]
+name = "ainb_plugin_learnings"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ainb-plugin-learnings"
+path = "src/main.rs"
+
+[dependencies]
+ainb-plugin-sdk-rust = { path = "../ainb-plugin-sdk-rust" }
+
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+async-trait = "0.1"
+
+# UI: ratatui without termion/crossterm backends — we paint into a
+# ratatui Buffer and convert to a WireBuffer cell stream for the host.
+# Mirrors burndown's render path.
+ratatui = { version = "0.26", default-features = false }
+
+[dev-dependencies]
+# Schema-contract gate: decode manifest.toml into the protocol shape.
+ainb-plugin-protocol = { path = "../ainb-plugin-protocol" }
+# In-process render/key harness — drive Plugin without a subprocess.
+ainb-plugin-testkit = { path = "../ainb-plugin-testkit" }
+toml = { workspace = true }

@@ -195,6 +195,7 @@ pub enum AppEvent {
     GoToSessionList,         // Navigate to session list view
     GoToStats,               // Navigate to stats view
     GoToWitr,                // Navigate to the witr (process causality) plugin screen
+    GoToLearnings,           // Navigate to the learnings (knowledge-base) plugin screen
     GoToSkills,              // Navigate to skills view
     GoToRecovery,            // Navigate to session recovery view
     GoToInbox,               // Navigate to ainb-hooks notification inbox
@@ -1940,6 +1941,11 @@ impl EventHandler {
             KeyCode::Char('s') => return Some(AppEvent::GoToSessionList),
             KeyCode::Char('i') => return Some(AppEvent::GoToStats),
             KeyCode::Char('w') => return Some(AppEvent::GoToWitr),
+            // `m` for "memory" — opens the learnings KB browser. The
+            // plugin also advertises `/recall` + `/memory` slash commands
+            // (wired in P9); this global shortcut is the host's sidebar/
+            // keybinding open path the P3 tripwire drives.
+            KeyCode::Char('m') => return Some(AppEvent::GoToLearnings),
             KeyCode::Char('k') => return Some(AppEvent::GoToSkills),
             KeyCode::Char('R') => return Some(AppEvent::GoToRecovery),
             KeyCode::Char('v') => return Some(AppEvent::ShowChangelog),
@@ -3470,6 +3476,13 @@ impl EventHandler {
                 // slash; only the screen is the embedded binary.
                 state.pending_async_action = Some(AsyncAction::AttachWitr);
             }
+            AppEvent::GoToLearnings => {
+                tracing::info!("Navigating to Learnings (knowledge-base browser)");
+                // Generic plugin-rendered screen (same plumbing as
+                // analytics). The learnings plugin owns its own data load
+                // + render; the host only routes the screen.
+                state.current_screen = screen_ids::LEARNINGS.to_string();
+            }
             AppEvent::GoToSkills => {
                 tracing::info!("Navigating to Skills");
                 state.current_screen = screen_ids::SKILLS.to_string();
@@ -4871,6 +4884,7 @@ fn is_known_screen_id(id: &str) -> bool {
             | ids::CATALOG
             | ids::ANALYTICS
             | ids::WITR
+            | ids::LEARNINGS
             | ids::SESSION_LIST
             | ids::LOGS
             | ids::LOG_HISTORY

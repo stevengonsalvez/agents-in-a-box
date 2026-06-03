@@ -8494,6 +8494,7 @@ impl App {
         const PLUGIN_SCREENS: &[(&str, &str)] = &[
             (crate::app::screens::ids::ANALYTICS, "burndown"),
             (crate::app::screens::ids::WITR, "witr"),
+            (crate::app::screens::ids::LEARNINGS, "learnings"),
         ];
 
         for (screen_id, plugin_id) in PLUGIN_SCREENS {
