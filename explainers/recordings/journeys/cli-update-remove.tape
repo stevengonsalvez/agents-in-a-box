@@ -5,12 +5,12 @@ Set Width 1400
 Set Height 760
 Set Padding 20
 Set Shell bash
-Type "source /tmp/sm-rec-cupd/env.sh; export PATH=/Users/stevengonsalvez/.agents-in-a-box/worktrees/stevengonsalvez_agents-in-a-box_feat_skill-manager/ainb-tui/target/debug:$PATH;  clear"
+Type "source /tmp/sm-rr-cur/env.sh; export PATH=/Users/stevengonsalvez/.agents-in-a-box/worktrees/stevengonsalvez_agents-in-a-box_feat_skill-manager/ainb-tui/target/debug:$PATH;  clear"
 Enter
 Sleep 1s
 Type "ainb skill check"
 Enter
 Sleep 3s
-Type "ainb skill remove git:file:///tmp/sm-rec-cupd/sandbox-remote.git@main/skills/initial-skill --yes"
+Type "ainb skill remove git:file:///tmp/sm-rr-cur/sandbox-remote.git@main/skills/initial-skill --yes"
 Enter
 Sleep 4s

@@ -63,18 +63,24 @@ down "$R"
 R=$SBX_BASE-brow; up full "$R"
 MOCKURI="git:file://$R/sandbox-remote.git@main/skills/initial-skill"
 tui_tape tui-browse-install "$R" "AINB_CATALOG_MOCK=1 AINB_CATALOG_MOCK_INSTALL_URI='$MOCKURI'" \
-  'Type "m"' 'Sleep 3s' 'Type "b"' 'Sleep 2s' 'Type "react"' 'Sleep 2s' 'Enter' 'Sleep 3s' 'Enter' 'Sleep 3s' 'Type "q"' 'Sleep 2s'
+  'Type "m"' 'Sleep 3s' 'Type "b"' 'Sleep 2s' 'Type "react"' 'Sleep 2s' 'Enter' 'Sleep 3s' 'Enter' 'Sleep 4s' 'Type "q"' 'Sleep 2s'
 down "$R"
 
-# 3. own library (full tier seeds a library.yaml own-skill)
+# 3. own library — seed two own-skills so the Library view is populated
 R=$SBX_BASE-lib; up full "$R"
+( source "$R/env.sh"; "$BIN" skill library new my-helper >/dev/null 2>&1; "$BIN" skill library new commit-helper >/dev/null 2>&1 )
 tui_tape tui-own-library "$R" "" \
   'Type "m"' 'Sleep 3s' 'Type "l"' 'Sleep 4s' 'Type "q"' 'Sleep 2s'
 down "$R"
 
-# 4. sync an edit (full tier; edit a deployed file first)
+# 4. sync an edit — install + edit deployed file + drop the conflict shadow so
+#    [s] routes to Sync (not the dual-purpose conflict-flip) and shows the toast
 R=$SBX_BASE-sync; up full "$R"
-echo "Local tweak $(date)" >> "$R/.claude/skills/initial-skill/SKILL.md" 2>/dev/null
+( source "$R/env.sh"; "$BIN" skill install "git:file://$R/sandbox-remote.git@main/skills/initial-skill" --targets claude --yes >/dev/null 2>&1 )
+echo "Local tweak $(date)" >> "$R/.claude/skills/initial-skill/SKILL.md"
+python3 - "$R/.agents-in-a-box/manifest.yaml" <<'PY'
+import sys,re; p=sys.argv[1]; t=open(p).read(); open(p,'w').write(re.sub(r'\n\s*shadowed_by:.*','',t))
+PY
 tui_tape tui-sync-edit "$R" "" \
   'Type "m"' 'Sleep 3s' 'Type "s"' 'Sleep 4s' 'Type "q"' 'Sleep 2s'
 down "$R"
@@ -113,16 +119,20 @@ cli_tape cli-own-library "$R" "" \
   'Type "ainb skill library list"' 'Enter' 'Sleep 3s'
 down "$R"
 
-# 10. sync edit CLI
+# 10. sync edit CLI — pre-install + edit the deployed file (invisible, avoids vhs
+#     quote-escaping traps); tape shows sync -> new remote commit
 R=$SBX_BASE-csync; up full "$R"
-echo "Local tweak $(date)" >> "$R/.claude/skills/initial-skill/SKILL.md" 2>/dev/null
+( source "$R/env.sh"; "$BIN" skill install "git:file://$R/sandbox-remote.git@main/skills/initial-skill" --targets claude --yes >/dev/null 2>&1 )
+sleep 1  # ensure the edit's mtime is strictly newer than the fetched cache (sync uses mtime)
+echo "# local edit $(date)" >> "$R/.claude/skills/initial-skill/SKILL.md"
 cli_tape cli-sync-edit "$R" "" \
   'Type "ainb skill sync --to-repo --yes"' 'Enter' 'Sleep 4s' \
   "Type \"git -C $R/sandbox-remote.git log --oneline | head -3\"" 'Enter' 'Sleep 3s'
 down "$R"
 
-# 11. update + remove CLI
+# 11. update + remove CLI — pre-install so check/remove act on a real installed unit
 R=$SBX_BASE-cupd; up full "$R"
+( source "$R/env.sh"; "$BIN" skill install "git:file://$R/sandbox-remote.git@main/skills/initial-skill" --targets claude --yes >/dev/null 2>&1 )
 cli_tape cli-update-remove "$R" "" \
   'Type "ainb skill check"' 'Enter' 'Sleep 3s' \
   "Type \"ainb skill remove git:file://$R/sandbox-remote.git@main/skills/initial-skill --yes\"" 'Enter' 'Sleep 4s'

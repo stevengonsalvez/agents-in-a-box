@@ -6,7 +6,7 @@ Set Height 800
 Set Padding 20
 Set Shell bash
 Hide
-Type "HOME=/tmp/sm-rec-sync AINB_HOME=/tmp/sm-rec-sync/.agents-in-a-box AINB_TOOL_HOME_CLAUDE=/tmp/sm-rec-sync/.claude AINB_TOOL_HOME_CODEX=/tmp/sm-rec-sync/.codex GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/true  /Users/stevengonsalvez/.agents-in-a-box/worktrees/stevengonsalvez_agents-in-a-box_feat_skill-manager/ainb-tui/target/debug/ainb"
+Type "HOME=/tmp/sm-rr-tse AINB_HOME=/tmp/sm-rr-tse/.agents-in-a-box AINB_TOOL_HOME_CLAUDE=/tmp/sm-rr-tse/.claude AINB_TOOL_HOME_CODEX=/tmp/sm-rr-tse/.codex GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/true  /Users/stevengonsalvez/.agents-in-a-box/worktrees/stevengonsalvez_agents-in-a-box_feat_skill-manager/ainb-tui/target/debug/ainb"
 Enter
 Sleep 22s
 Show

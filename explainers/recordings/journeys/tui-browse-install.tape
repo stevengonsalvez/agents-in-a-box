@@ -6,7 +6,7 @@ Set Height 800
 Set Padding 20
 Set Shell bash
 Hide
-Type "HOME=/tmp/sm-rec-brow AINB_HOME=/tmp/sm-rec-brow/.agents-in-a-box AINB_TOOL_HOME_CLAUDE=/tmp/sm-rec-brow/.claude AINB_TOOL_HOME_CODEX=/tmp/sm-rec-brow/.codex GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/true AINB_CATALOG_MOCK=1 AINB_CATALOG_MOCK_INSTALL_URI='git:file:///tmp/sm-rec-brow/sandbox-remote.git@main/skills/initial-skill' /Users/stevengonsalvez/.agents-in-a-box/worktrees/stevengonsalvez_agents-in-a-box_feat_skill-manager/ainb-tui/target/debug/ainb"
+Type "HOME=/tmp/sm-rr-tbi AINB_HOME=/tmp/sm-rr-tbi/.agents-in-a-box AINB_TOOL_HOME_CLAUDE=/tmp/sm-rr-tbi/.claude AINB_TOOL_HOME_CODEX=/tmp/sm-rr-tbi/.codex GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/true AINB_CATALOG_MOCK=1 AINB_CATALOG_MOCK_INSTALL_URI='git:file:///tmp/sm-rr-tbi/sandbox-remote.git@main/skills/initial-skill' /Users/stevengonsalvez/.agents-in-a-box/worktrees/stevengonsalvez_agents-in-a-box_feat_skill-manager/ainb-tui/target/debug/ainb"
 Enter
 Sleep 22s
 Show
@@ -20,6 +20,6 @@ Sleep 2s
 Enter
 Sleep 3s
 Enter
-Sleep 3s
+Sleep 4s
 Type "q"
 Sleep 2s
