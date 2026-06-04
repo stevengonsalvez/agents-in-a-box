@@ -1274,6 +1274,59 @@ impl ConfigValue {
     }
 }
 
+/// Render a TOML scalar from a `[plugins.<name>]` value table as the plain
+/// string the Settings widgets edit. Non-scalar values (tables/arrays) can't
+/// appear under the flat-scalars-only plugin config schema, so they fall back
+/// to their TOML debug form rather than panicking.
+fn toml_scalar_to_string(value: &toml::Value) -> String {
+    match value {
+        toml::Value::String(s) => s.clone(),
+        toml::Value::Integer(i) => i.to_string(),
+        toml::Value::Boolean(b) => b.to_string(),
+        toml::Value::Float(f) => f.to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Map a plugin's [`ConfigField`](ainb_plugin_protocol::manifest::ConfigField)
+/// to the [`ConfigValue`] widget the Settings screen renders, seeding it from
+/// `saved` (the persisted `[plugins.<name>].<key>` value) when present, else
+/// the schema `default`. The kind drives the widget:
+/// `path`/`string` → [`ConfigValue::Text`], `bool` → [`ConfigValue::Bool`],
+/// `enum` → [`ConfigValue::Choice`], `int` → [`ConfigValue::Number`].
+fn config_value_for_field(
+    field: &ainb_plugin_protocol::manifest::ConfigField,
+    saved: Option<&str>,
+) -> ConfigValue {
+    use ainb_plugin_protocol::manifest::ConfigKind;
+
+    let raw = saved.unwrap_or(field.default.as_str());
+    match field.kind {
+        ConfigKind::Path | ConfigKind::String => ConfigValue::Text(raw.to_string()),
+        ConfigKind::Bool => ConfigValue::Bool(raw.eq_ignore_ascii_case("true")),
+        ConfigKind::Int => ConfigValue::Number(raw.trim().parse().unwrap_or(0)),
+        ConfigKind::Enum => {
+            let idx = field.choices.iter().position(|c| c == raw).unwrap_or(0);
+            ConfigValue::Choice(field.choices.clone(), idx)
+        }
+    }
+}
+
+/// Convert an edited [`ConfigValue`] back into the TOML scalar persisted under
+/// `[plugins.<name>].<key>`. Bool/enum/int keep their native TOML type;
+/// `Text`/`Secret` serialize as strings. (`Secret` never appears in a plugin
+/// `[[config]]` schema today, but is handled for totality.)
+fn config_value_to_toml(value: &ConfigValue) -> toml::Value {
+    match value {
+        ConfigValue::Text(s) | ConfigValue::Secret(s) => toml::Value::String(s.clone()),
+        ConfigValue::Bool(b) => toml::Value::Boolean(*b),
+        ConfigValue::Number(n) => toml::Value::Integer(*n),
+        ConfigValue::Choice(options, idx) => {
+            toml::Value::String(options.get(*idx).cloned().unwrap_or_default())
+        }
+    }
+}
+
 /// Tracks which pane has focus in the config screen
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ConfigPane {
@@ -1782,6 +1835,72 @@ impl ConfigScreenState {
         state
     }
 
+    /// Prefix that marks a [`ConfigCategory::Plugins`] row as a per-plugin
+    /// `[[config]]` field (vs. the static enable/disable placeholder rows).
+    /// The row key is `plugin:<plugin_name>:<field_key>` — unique across
+    /// plugins that share a field name, and reversible in
+    /// [`apply_to_app_config`](Self::apply_to_app_config) so the edit lands
+    /// under `plugins.values[plugin_name][field_key]`.
+    const PLUGIN_ROW_PREFIX: &'static str = "plugin:";
+
+    /// Compose the Plugins-category row key for a plugin's config field.
+    fn plugin_row_key(plugin: &str, field_key: &str) -> String {
+        format!("{}{plugin}:{field_key}", Self::PLUGIN_ROW_PREFIX)
+    }
+
+    /// Split a Plugins-category row key back into `(plugin_name, field_key)`,
+    /// or `None` for the static placeholder rows. The plugin name and the
+    /// field key are joined by the *first* `:` after the prefix, so plugin
+    /// names never contain `:` but field keys may.
+    fn parse_plugin_row_key(key: &str) -> Option<(&str, &str)> {
+        let rest = key.strip_prefix(Self::PLUGIN_ROW_PREFIX)?;
+        rest.split_once(':')
+    }
+
+    /// Append per-plugin `[[config]]` rows to the Plugins category from the
+    /// loaded plugin manifests, keeping the existing enable/disable rows.
+    ///
+    /// One [`ConfigSetting`] is produced per [`ConfigField`], mapping the
+    /// field `kind` to the matching [`ConfigValue`] widget
+    /// (`path`/`string` → `Text`, `bool` → `Bool`, `enum` → `Choice`,
+    /// `int` → `Number`). The displayed value defaults from
+    /// `plugins.values[plugin][key]` when present, else the schema `default`.
+    ///
+    /// Idempotent: re-invoking it (e.g. after the plugin runtime finishes
+    /// discovery) rebuilds the per-plugin rows from scratch rather than
+    /// duplicating them — only the static placeholder rows are retained.
+    pub fn apply_plugin_manifests(
+        &mut self,
+        manifests: &[ainb_plugin_protocol::manifest::Manifest],
+        plugins_cfg: &crate::config::PluginsConfig,
+    ) {
+        let rows = self.settings.entry(ConfigCategory::Plugins).or_default();
+        // Drop any previously-appended plugin rows so repeated calls are
+        // idempotent; keep the static enable/disable placeholders.
+        rows.retain(|s| Self::parse_plugin_row_key(&s.key).is_none());
+
+        for manifest in manifests {
+            let plugin = manifest.plugin.name.as_str();
+            // The resolved [plugins.<name>] value table, if the user has set
+            // any keys — drives the displayed default ahead of the schema's.
+            let saved = plugins_cfg.values.get(plugin).and_then(toml::Value::as_table);
+
+            for field in &manifest.config {
+                // Saved string value (config.toml only stores TOML scalars; we
+                // render every kind from its string form for the widget).
+                let saved_str = saved.and_then(|t| t.get(&field.key)).map(toml_scalar_to_string);
+                let value = config_value_for_field(field, saved_str.as_deref());
+
+                rows.push(ConfigSetting {
+                    key: Self::plugin_row_key(plugin, &field.key),
+                    label: field.label.clone(),
+                    value,
+                    description: format!("{} · plugin: {}", field.label, plugin),
+                });
+            }
+        }
+    }
+
     /// Convert ConfigScreenState back to AppConfig for saving
     pub fn apply_to_app_config(&self, config: &mut AppConfig) {
         // Apply Workspace settings
@@ -1914,6 +2033,34 @@ impl ConfigScreenState {
                         // These would be added to AppConfig in future
                     }
                     _ => {}
+                }
+            }
+        }
+
+        // Apply per-plugin [[config]] edits. Each Plugins-category row whose
+        // key is `plugin:<name>:<field_key>` (see `plugin_row_key`) routes its
+        // current value into `plugins.values[<name>][<field_key>]` — NOT a
+        // top-level field. The static enable/disable placeholder rows have no
+        // such prefix and are skipped. The serialized `[plugins.<name>]` table
+        // round-trips through the existing `AppConfig::save()` pipeline.
+        if let Some(settings) = self.settings.get(&ConfigCategory::Plugins) {
+            for setting in settings {
+                let Some((plugin, field_key)) = Self::parse_plugin_row_key(&setting.key) else {
+                    continue;
+                };
+                let toml_value = config_value_to_toml(&setting.value);
+                let entry = config
+                    .plugins
+                    .values
+                    .entry(plugin.to_string())
+                    .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+                // Coerce a non-table entry (shouldn't happen for a well-formed
+                // config) into a table so the write always lands somewhere sane.
+                if !entry.is_table() {
+                    *entry = toml::Value::Table(toml::value::Table::new());
+                }
+                if let Some(table) = entry.as_table_mut() {
+                    table.insert(field_key.to_string(), toml_value);
                 }
             }
         }
@@ -8578,6 +8725,21 @@ impl App {
                 }
                 self.plugin_runtime_owner = Some(runtime);
                 self.state.plugin_runtime = Some(handle.clone());
+
+                // Surface each loaded plugin's `[[config]]` schema in the
+                // Settings ▸ Plugins category. `from_app_config` built the
+                // config screen before discovery ran (the handle is `None` at
+                // `AppState` construction), so we backfill the per-plugin rows
+                // here now that the manifests are known. Defaults resolve from
+                // the persisted `[plugins.<name>]` table first, else the
+                // schema default. Idempotent — only the plugin rows are
+                // rebuilt; the static enable/disable rows are kept.
+                let manifests: Vec<ainb_plugin_protocol::manifest::Manifest> =
+                    handle.registered_plugins().iter().map(|p| p.manifest.clone()).collect();
+                self.state
+                    .config_screen_state
+                    .apply_plugin_manifests(&manifests, &self.state.app_config.plugins);
+
                 // Keep the burndown usage snapshot live: watch provider
                 // session dirs and nudge session-reader to rescan on
                 // change, so "today" appears without the user pressing
