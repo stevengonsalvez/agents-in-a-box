@@ -269,3 +269,39 @@ fn sync_without_yes_or_dry_run_errors_when_work_pending() {
         );
     });
 }
+
+#[test]
+fn sync_skips_non_installable_local_orphan_units() {
+    // Regression: a `local:` orphan unit in the manifest (already in place,
+    // no source to install from) must be SKIPPED by sync's reconcile — not
+    // fed to install() which bails "is not a unit URI" and dead-ends the
+    // whole sync.
+    let home = tmp_home();
+    let _src = seed_source(home.path(), "fixture");
+
+    // Inject a bare local orphan unit: NOT an installable <source>@<ref>/<path>.
+    let mut manifest = Manifest::load_from(&manifest_path_in(home.path())).unwrap();
+    manifest.units.push(UnitEntry {
+        uri: "local:.claude/skills/orphan".to_string(),
+        targets: Some(vec!["claude".to_string()]),
+        shadowed_by: None,
+    });
+    manifest.save_to(&manifest_path_in(home.path())).unwrap();
+
+    let base = tempfile::tempdir().unwrap();
+    with_all_tool_homes_under(base.path(), || {
+        let (out, res) = run(
+            home.path(),
+            SkillCommand::Sync(SyncArgs {
+                yes: true,
+                to_repo: true,
+                ..Default::default()
+            }),
+        );
+        res.expect("sync must not error on a local orphan unit");
+        assert!(
+            out.contains("skip (not an installable unit)"),
+            "expected the local orphan to be skipped, got: {out}"
+        );
+    });
+}

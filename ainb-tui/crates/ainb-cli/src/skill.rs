@@ -32,7 +32,7 @@ use ainb_skill_core::catalog::{rank_by_stars, CatalogBackend};
 use ainb_skill_core::drift::{
     detect_all as drift_detect_all, DriftBackend, DriftStatus, GitLsRemoteBackend,
 };
-use ainb_skill_core::lockfile::{LockedUnit, Lockfile};
+use ainb_skill_core::lockfile::{LockedSource, LockedUnit, Lockfile};
 use ainb_skill_core::manifest::{Manifest, SourceEntry};
 use ainb_skill_core::mapping::{resolve_pair, strip_tool_dotdir};
 use ainb_skill_core::paths::{cache_dir_in, lockfile_path_in, manifest_path_in};
@@ -103,24 +103,54 @@ fn install(home: &Path, args: InstallArgs, out: &mut dyn io::Write) -> Result<()
                 )
             })?;
 
-    // Find the fetched checkout via lockfile.
+    // Find the fetched checkout via lockfile. If the source has never been
+    // fetched (or its cache dir is gone — e.g. the manifest was authored by
+    // `migrate --discover`, hand-edited, or shared without a lockfile),
+    // fetch it on demand so `install <unit-uri>` is self-sufficient and
+    // never dead-ends on "not yet fetched".
     let mut lockfile = Lockfile::load_from(&lockfile_path_in(home))?;
-    let locked = lockfile
+    let already_fetched = lockfile
         .sources
         .iter()
         .find(|s| s.name == source.name)
-        .ok_or_else(|| anyhow!("source `{}` not yet fetched", source.name))?;
-    let fetched_path: PathBuf = locked
-        .fetched_path
-        .as_deref()
-        .ok_or_else(|| anyhow!("source `{}` has no fetched_path", source.name))?
-        .into();
-    if !fetched_path.exists() {
-        bail!(
-            "fetched source dir `{}` is missing — re-run `ainb source add` to refresh",
-            fetched_path.display()
-        );
-    }
+        .and_then(|s| s.fetched_path.clone())
+        .map(PathBuf::from)
+        .filter(|p| p.exists());
+    let fetched_path: PathBuf = match already_fetched {
+        Some(p) => p,
+        None => {
+            let source_uri_full = Uri::parse(&format!("{}@{}", source.uri, source.r#ref))
+                .with_context(|| {
+                    format!("parsing source URI `{}@{}`", source.uri, source.r#ref)
+                })?;
+            let cache_root = cache_dir_in(home);
+            let fetched = run_fetcher(&source_uri_full, &source.name, &cache_root)
+                .with_context(|| format!("fetching source `{}`", source.name))?;
+            // Upsert the lockfile entry so later runs skip the fetch.
+            if let Some(ls) = lockfile.sources.iter_mut().find(|s| s.name == source.name) {
+                ls.resolved_sha = Some(fetched.resolved_sha.clone());
+                ls.fetched_at = Some(fetched.fetched_at.clone());
+                ls.fetched_path = Some(fetched.path.to_string_lossy().to_string());
+            } else {
+                lockfile.sources.push(LockedSource {
+                    name: source.name.clone(),
+                    uri: source.uri.clone(),
+                    declared_ref: source.r#ref.clone(),
+                    resolved_sha: Some(fetched.resolved_sha.clone()),
+                    fetched_at: Some(fetched.fetched_at.clone()),
+                    fetched_path: Some(fetched.path.to_string_lossy().to_string()),
+                });
+            }
+            lockfile.save_to(&lockfile_path_in(home))?;
+            fetched.path
+        }
+    };
+    // The lockfile now has a fetched entry for this source either way.
+    let source_sha = lockfile
+        .sources
+        .iter()
+        .find(|s| s.name == source.name)
+        .and_then(|s| s.resolved_sha.clone());
 
     // Resolve the unit and pick a source adapter for it.
     let adapter = pick_adapter(&fetched_path)
@@ -213,7 +243,7 @@ fn install(home: &Path, args: InstallArgs, out: &mut dyn io::Write) -> Result<()
         uri: args.uri.clone(),
         declared_uri: args.uri.clone(),
         kind: kind.to_string(),
-        sha: locked.resolved_sha.clone(),
+        sha: source_sha.clone(),
         deployed: deployed_map,
         usage: Default::default(),
     });
@@ -637,6 +667,17 @@ fn sync(home: &Path, args: SyncArgs, out: &mut dyn io::Write) -> Result<()> {
     // honoring the manifest's per-unit `targets` override.
     let mut install_count = 0;
     for uri in &missing {
+        // `local:` orphan units (already-in-place skills discovered on disk)
+        // and any non-unit URI are not installable — there is no source to
+        // fetch from. Skip them so one local orphan can't dead-end the whole
+        // sync (`install` bails with "is not a unit URI").
+        match Uri::parse(uri) {
+            Ok(parsed) if parsed.is_unit() => {}
+            _ => {
+                writeln!(out, "    ~ skip (not an installable unit): {uri}")?;
+                continue;
+            }
+        }
         let targets = manifest.units.iter().find(|u| u.uri == *uri).and_then(|u| u.targets.clone());
         let install_args = InstallArgs {
             uri: uri.clone(),
@@ -877,6 +918,23 @@ fn bidirectional_content_sync(
 /// [`plan_sync`] because the planner's per-unit `deployed_sha` model
 /// does not carry per-file SHA precision; for content sync we want
 /// "whichever side is byte-different and newer wins".
+/// Unix timestamp of the most recent commit touching `repo_rel` in the cloned
+/// repo. Stable across re-clones, unlike the checked-out file's filesystem
+/// mtime. Returns `None` on any git error so the caller can fall back.
+fn repo_file_commit_unix(clone: &Path, repo_rel: &Path) -> Option<i64> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(clone)
+        .args(["log", "-1", "--format=%ct", "--"])
+        .arg(repo_rel)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8(out.stdout).ok()?.trim().parse::<i64>().ok()
+}
+
 fn plan_file_action_via_clone(
     home: &Path,
     source: &SourceEntry,
@@ -905,7 +963,14 @@ fn plan_file_action_via_clone(
         (Some(h), Some(r)) if h == r => act(SyncDirection::NoOp, "home and repo bytes match"),
         (Some(_), Some(_)) => {
             let home_mtime = file_mtime_unix(home_file);
-            let repo_mtime = file_mtime_unix(&repo_file);
+            // Use the repo file's last *commit* time, not the checked-out
+            // file's filesystem mtime: `ensure_repo_clone` clones/pulls at
+            // sync time, so the working-copy mtime is always "now" and would
+            // make the repo spuriously look newer than a local edit (sending
+            // genuine edits to ToHome, which `--to-repo` then drops — the edit
+            // is silently lost). The commit time is stable across re-clones.
+            let repo_mtime =
+                repo_file_commit_unix(&clone, repo_rel).or_else(|| file_mtime_unix(&repo_file));
             match (home_mtime, repo_mtime) {
                 (Some(h), Some(r)) if h >= r => {
                     act(SyncDirection::ToRepo, "home newer than repo by mtime")

@@ -368,3 +368,122 @@ fn sync_dry_run_does_not_mutate() {
         }
     });
 }
+
+/// Regression: a local edit must publish to the repo (ToRepo) even when the
+/// sync's working clone is created *after* the edit — `ensure_repo_clone`
+/// clones/pulls at sync time, so the checked-out file's filesystem mtime is
+/// "now" and would spuriously beat an earlier local edit, sending it ToHome
+/// (which `--to-repo` drops, silently losing the edit). The direction must be
+/// decided against the repo's *commit* time, not the freshly-cloned file mtime.
+#[test]
+fn sync_to_repo_publishes_local_edit_even_when_repo_reclone_is_newer() {
+    let ainb_home = tmp_home();
+    let bare_repo = tempfile::tempdir().unwrap();
+    let working = tempfile::tempdir().unwrap();
+    let tool_homes = tempfile::tempdir().unwrap();
+
+    init_bare_repo(bare_repo.path());
+    let bare_url = format!("file://{}", bare_repo.path().display());
+    init_working_clone(&bare_url, working.path());
+
+    // Seed the skill with an OLD commit date so the repo's commit time is well
+    // before the (later) local edit — the realistic state for "I installed a
+    // while ago, edited today".
+    let p = working.path().join("skills/commit/SKILL.md");
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(&p, b"---\nname: commit\n---\ninitial body\n").unwrap();
+    git(&["add", "skills/commit/SKILL.md"], working.path());
+    let old_date = "2020-01-01T00:00:00";
+    let commit = Command::new("git")
+        .arg("-C")
+        .arg(working.path())
+        .args(["commit", "-m", "seed commit skill"])
+        .env("GIT_AUTHOR_DATE", old_date)
+        .env("GIT_COMMITTER_DATE", old_date)
+        .output()
+        .expect("dated seed commit");
+    assert!(commit.status.success(), "dated commit: {commit:?}");
+    git(&["push", "origin", "main"], working.path());
+
+    let source_uri = format!("git:{}", bare_url);
+
+    with_skip_push_and_homes(tool_homes.path(), || {
+        let mut out = Vec::new();
+        dispatch(
+            ainb_home.path(),
+            Cmd::Source {
+                action: SourceCommand::Add(AddArgs {
+                    uri: source_uri.clone(),
+                    name: Some("upstream".into()),
+                    kind: None,
+                }),
+            },
+            &mut out,
+        )
+        .expect("add source");
+
+        let mut manifest = Manifest::load_from(&manifest_path_in(ainb_home.path())).unwrap();
+        manifest
+            .sources
+            .iter_mut()
+            .find(|s| s.name == "upstream")
+            .unwrap()
+            .target_layout = vec![TargetMapping {
+            glob: "skills/*/SKILL.md".into(),
+            home: PathBuf::from("skills"),
+            repo: PathBuf::from("skills"),
+        }];
+        manifest.save_to(&manifest_path_in(ainb_home.path())).unwrap();
+
+        let unit_uri = format!("{source_uri}@main/skills/commit");
+        run(
+            ainb_home.path(),
+            SkillCommand::Install(InstallArgs {
+                uri: unit_uri.clone(),
+                targets: Some("claude".into()),
+                dry_run: false,
+                yes: true,
+            }),
+        )
+        .1
+        .expect("install");
+
+        let mut manifest = Manifest::load_from(&manifest_path_in(ainb_home.path())).unwrap();
+        manifest.units.push(UnitEntry {
+            uri: unit_uri.clone(),
+            targets: Some(vec!["claude".into()]),
+            shadowed_by: None,
+        });
+        manifest.save_to(&manifest_path_in(ainb_home.path())).unwrap();
+
+        // Edit the deployed file, then back-date its mtime to 2021 — AFTER the
+        // 2020 seed commit but BEFORE the clone the sync makes at "now". Under
+        // the old fs-mtime logic the clone (now) beats the edit (2021) → ToHome
+        // → no publish. Against commit time (2020) the edit (2021) wins → ToRepo.
+        let home_file = tool_homes.path().join("claude/skills/commit/SKILL.md");
+        assert!(home_file.exists(), "install must place file: {}", home_file.display());
+        std::fs::write(&home_file, b"---\nname: commit\n---\nhome-edited\n").unwrap();
+        let touch = Command::new("touch")
+            .args(["-t", "202101010000"])
+            .arg(&home_file)
+            .status()
+            .expect("touch");
+        assert!(touch.success(), "back-date home file");
+
+        let (out, res) = run(
+            ainb_home.path(),
+            SkillCommand::Sync(SyncArgs {
+                yes: true,
+                dry_run: false,
+                to_repo: true,
+                to_home: false,
+                source_or_unit: None,
+            }),
+        );
+        res.expect("sync --to-repo");
+        assert!(
+            out.contains("content sync applied 1 action(s)"),
+            "local edit must publish ToRepo (decided by commit time, not clone mtime); got: {out}"
+        );
+    });
+}
