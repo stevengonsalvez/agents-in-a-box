@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-06-04
+### Added
+- Merge pull request #211 from stevengonsalvez/feat/new-session-base-branch-picker
+- Merge pull request #217 from stevengonsalvez/worktree-reflect-one-step-install
+- **ainb**: add doctor + reflect bootstrap one-step installer
+- **git**: list repo branches and cut worktrees off explicit base refs
+- **reflect-kb**: expose errors count/ack/append on the reflect CLI
+- **tui**: base-branch picker on the Configure Branch row
+
+### Fixed
+- **ainb**: print the full plan in reflect bootstrap --print-only when uv missing
+- **ainb**: require the reflect binary for reflect-kb detection
+- **statusline**: gtimeout fallback + drop unpublished uv-with fallback
+- **statusline**: self-bootstrap reflect error callers off bare python3 -m
+- **tui**: mark the repo's own checked-out branches in-use in the base picker
+
+### Documentation
+- Merge pull request #212 from stevengonsalvez/docs/notifications-screenshots
+- **reflect**: one-step install on the plugin docsite page
+- **reflect**: rewrite install section for the one-step flow
+- **reflect-kb**: document the `reflect errors` subcommand
+- **tui**: assert modal exclusivity invariant in configure key routing
+- **tui**: current screenshots — live markers, home sidebar, refreshed inbox
+- **tui**: document `ainb doctor` and `ainb reflect` commands
+- **tui**: document notifyd --format output option (text/json/csv/markdown)
+- **tui**: embed the live-marker and home-screen screenshots
+- **tui**: record own-checkout in-use edge in the base picker spec
+- **tui**: spec for the new-session base-branch picker
+- Codex notifications verified end-to-end — update agent-support wording
+
+
 ## [1.3.3] - 2026-06-03
 ### Added
 - Merge pull request #205 from stevengonsalvez/feat/claude-plugin-install
