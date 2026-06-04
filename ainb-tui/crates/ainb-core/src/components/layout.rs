@@ -98,8 +98,15 @@ impl LayoutComponent {
         // Render top status bar
         self.render_status_bar(frame, main_layout[0], state);
 
-        // Simple 2-panel layout: session list | logs (Claude chat is now a popup)
-        let sessions_width = state.sessions_pane_state.effective_width(main_layout[1].width);
+        // Simple 2-panel layout: session list | logs (Claude chat is now a popup).
+        // While the interactive embed is focused, collapse the session list to a
+        // thin rail so the embed gets near-full width (locked decision: pane
+        // expands while interactive; reverts on Ctrl+Q release).
+        let sessions_width = if state.is_interactive_pane() {
+            crate::app::state::COLLAPSED_SESSIONS_SIDEBAR_WIDTH
+        } else {
+            state.sessions_pane_state.effective_width(main_layout[1].width)
+        };
         let content_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
@@ -110,7 +117,7 @@ impl LayoutComponent {
         state.sessions_pane_state.set_layout(content_chunks[0], content_chunks[1]);
 
         // Pass focus information to components
-        if state.sessions_pane_state.collapsed {
+        if state.sessions_pane_state.collapsed || state.is_interactive_pane() {
             self.render_collapsed_sessions_rail(frame, content_chunks[0], state);
         } else {
             self.session_list.render(frame, content_chunks[0], state);

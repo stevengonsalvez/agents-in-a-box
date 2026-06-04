@@ -10,7 +10,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use ainb::app::state::AppState;
-use ainb::components::TmuxPreviewPane;
+use ainb::components::{LayoutComponent, TmuxPreviewPane};
 use ainb::models::OtherTmuxSession;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -110,4 +110,40 @@ fn interactive_embed_renders_badge_and_live_input_then_release_keeps_session() {
     assert!(found, "typed input never rendered live in the embed pane:\n{last_frame}");
     assert!(released, "release_interactive_pane should drop focus + the embed client");
     assert!(alive, "releasing the embed must NOT kill the tmux session (it survives)");
+}
+
+/// B7: while interactive, the session list collapses and the embed expands to
+/// near-full width. Driving the full LayoutComponent render resizes the embed to
+/// the pane interior, so the embed's cell width reflects the expanded pane.
+#[test]
+fn interactive_embed_expands_to_near_full_width() {
+    if !tmux_available() {
+        eprintln!("SKIP: tmux unavailable");
+        return;
+    }
+    let session = new_session("expand");
+    let mut state = AppState::new();
+    // session_list is a split-pane (non-registry) screen, so layout takes the
+    // split path that renders the preview/embed pane.
+    state.current_screen = "session_list".to_string();
+    state.other_tmux_sessions = vec![OtherTmuxSession::new(session.clone(), false, 1)];
+    state.selected_other_tmux_index = Some(0);
+    assert!(state.enter_interactive_pane(28, 80), "enter_interactive_pane");
+
+    let mut layout = LayoutComponent::new();
+    let mut term = Terminal::new(TestBackend::new(120, 30)).expect("test terminal");
+    // Render the full layout — the interactive branch collapses the list to a rail
+    // and resizes the embed to the (now near-full-width) preview pane.
+    term.draw(|f| layout.render(f, &mut state)).expect("draw");
+
+    let (_, cols) = state.embed.as_ref().expect("embed").size();
+    state.release_interactive_pane();
+    kill_session(&session);
+
+    // In a 120-col terminal the read-only split gives the preview ~60% (~70 cols);
+    // expansion (list collapsed to a 5-col rail) should give it >100.
+    assert!(
+        cols > 100,
+        "interactive pane should expand to near-full width in a 120-col terminal; got {cols}"
+    );
 }
