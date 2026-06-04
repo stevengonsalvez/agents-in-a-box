@@ -3,7 +3,7 @@ title: "Code Review (git diff)"
 description: "The Warp-style Code Review surface in ainb-tui — file sidebar, per-file collapsible diff blocks, Dracula syntax highlighting, word-level intra-line emphasis, line-number gutter with change bars, expandable context, and hunk navigation. Press g in a session, or run ainb diff-review."
 ---
 
-The **Code Review** surface is how `ainb` shows a session's git changes. Press **`g`** on a session to open it, or run **`ainb diff-review [path]`** to review any repository directly — no session required. It replaces the old line-prefixed diff with a cohesive review surface: a left **file sidebar** plus **per-file collapsible diff blocks** in one continuous scroll, full **Dracula syntax highlighting**, **word-level intra-line emphasis** (the exact changed substring glows brighter inside the muted row tint), a **line-number gutter** with solid green/red change bars, **expandable context**, and **hunk navigation**.
+The **Code Review** surface is how `ainb` shows a session's git changes. Press **`g`** on a session to open it, or run **`ainb diff-review [path]`** to review any repository directly — no session required. It replaces the old line-prefixed diff with a cohesive review surface: a left **hierarchical file tree** (folders, chevrons, nested files) plus **per-file collapsible diff blocks** in one continuous scroll, full **Dracula syntax highlighting**, **word-level intra-line emphasis** (the exact changed substring glows brighter inside the muted row tint), a **line-number gutter** with solid green/red change bars, **expandable context**, and **hunk navigation**. It is fully **mouse-driven** too.
 
 ![ainb Code Review surface — file sidebar, per-file diff blocks, syntax highlighting, green/red row tints, word-level emphasis, and a line-number gutter](../assets/screenshots/code-review-diff.gif)
 
@@ -14,11 +14,14 @@ The **Code Review** surface is how `ainb` shows a session's git changes. Press *
 | Key | Action |
 |-----|--------|
 | `g` | Open the Code Review surface for the selected session |
-| `j` / `k` (or `↓` / `↑`) | Scroll the diff |
+| `↑` / `↓` | Move the selection across the file tree (landing on a file scrolls the body to it) |
+| `j` / `k` | Scroll the diff body |
 | `n` / `N` | Jump to the next / previous hunk (with a `Hunk x/y` counter) |
-| `[` / `]` | Select the previous / next file (scrolls its block to the top) |
-| `Space` / `Enter` | Collapse / expand the selected file's diff block |
+| `Space` / `Enter` | Toggle a folder, or collapse/expand the selected file's diff block |
+| `e` / `E` | Expand / collapse all folders |
 | `z` | Reveal more hidden context at the nearest gap |
+| `[` / `]` | Select the previous / next file |
+| **Mouse** | Wheel scrolls the diff; click a tree row to select a file or toggle a folder |
 | `Tab` | Cycle Review → Commits → Markdown |
 | `Esc` / `q` | Back |
 
