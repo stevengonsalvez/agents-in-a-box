@@ -10,6 +10,7 @@
 
 pub mod capture;
 pub mod embed_client;
+pub mod embed_input;
 pub mod process_detection;
 pub mod pty_wrapper;
 pub mod session;
@@ -250,6 +251,7 @@ pub use capture::CaptureOptions;
 pub use process_detection::ClaudeProcessDetector;
 #[allow(unused_imports)]
 pub use embed_client::EmbedClient;
+pub use embed_input::encode_key_event;
 pub use pty_wrapper::PtyWrapper;
 #[allow(unused_imports)]
 pub use session::{AttachState, TmuxSession};
