@@ -97,6 +97,8 @@ impl CommandRegistry {
         r.register(GitCommand);
         r.register(FavoritesCommand);
         r.register(InitCommand);
+        r.register(DoctorCommand);
+        r.register(ReflectCommand);
         r.register(PresetsCommand);
         r.register(UsageCommand);
         r.register(StatuslineCommand);
@@ -391,6 +393,51 @@ impl CliCommand for InitCommand {
     fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
         match crate::cli::init::InitArgs::from_arg_matches(matches) {
             Ok(args) => Box::pin(async move { crate::cli::init::execute(args, ctx.format).await }),
+            Err(e) => boxed_err(e),
+        }
+    }
+}
+
+pub struct DoctorCommand;
+impl CliCommand for DoctorCommand {
+    fn name(&self) -> &'static str {
+        "doctor"
+    }
+    fn build(&self, app: Command) -> Command {
+        app.subcommand(
+            <crate::cli::doctor::DoctorArgs as clap::Args>::augment_args(
+                Command::new(self.name())
+                    .about("Classified dependency check for the reflect / statusline toolchain"),
+            ),
+        )
+    }
+    fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
+        match crate::cli::doctor::DoctorArgs::from_arg_matches(matches) {
+            Ok(args) => {
+                Box::pin(async move { crate::cli::doctor::execute(args, ctx.format).await })
+            }
+            Err(e) => boxed_err(e),
+        }
+    }
+}
+
+pub struct ReflectCommand;
+impl CliCommand for ReflectCommand {
+    fn name(&self) -> &'static str {
+        "reflect"
+    }
+    fn build(&self, app: Command) -> Command {
+        app.subcommand(
+            <crate::cli::reflect::ReflectCommands as Subcommand>::augment_subcommands(
+                Command::new(self.name())
+                    .about("Reflect plugin lifecycle: bootstrap installer + dependency check")
+                    .subcommand_required(true),
+            ),
+        )
+    }
+    fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
+        match crate::cli::reflect::ReflectCommands::from_arg_matches(matches) {
+            Ok(c) => Box::pin(async move { crate::cli::reflect::execute(c, ctx.format).await }),
             Err(e) => boxed_err(e),
         }
     }
@@ -1215,13 +1262,14 @@ mod tests {
     }
 
     #[test]
-    fn built_ins_registers_twenty_one_commands() {
+    fn built_ins_registers_twenty_three_commands() {
         let r = CommandRegistry::built_ins();
         let names = r.names();
-        // 16 user-facing built-ins + claudecode namespace + tmux namespace
-        // + plugin stub + fleet + hidden notifyd = 21. The TUI is NOT in
-        // the registry — main.rs handles `tui` / no-subcommand inline.
-        assert_eq!(names.len(), 21, "expected 21 entries, got {names:?}");
+        // 16 user-facing built-ins + doctor + reflect + claudecode namespace
+        // + tmux namespace + plugin stub + fleet + hidden notifyd = 23. The
+        // TUI is NOT in the registry — main.rs handles `tui` / no-subcommand
+        // inline.
+        assert_eq!(names.len(), 23, "expected 23 entries, got {names:?}");
         for required in [
             "run",
             "list",
@@ -1235,6 +1283,8 @@ mod tests {
             "git",
             "favorites",
             "init",
+            "doctor",
+            "reflect",
             "presets",
             "usage",
             "statusline",
