@@ -112,6 +112,33 @@ where
     None
 }
 
+/// Like [`poll_capture`], but re-sends `key` on each iteration until `ok`
+/// holds. The single-shot `send_key` + poll pattern is racy for the
+/// screen-open step: under cold/tmux-contention load the first `m` can land
+/// before the host's first paint and get dropped, leaving the open step to
+/// time out (~50s flake seen across P5/P6/P7 regression runs). Re-pressing `m`
+/// is safe because it's idempotent once the screen is open (a no-op nav).
+fn poll_capture_resending<F>(
+    session: &str,
+    key: &str,
+    deadline: Instant,
+    mut ok: F,
+) -> Option<String>
+where
+    F: FnMut(&str) -> bool,
+{
+    send_key(session, key);
+    while Instant::now() < deadline {
+        let cap = capture_pane(session);
+        if ok(&cap) {
+            return Some(cap);
+        }
+        thread::sleep(Duration::from_millis(400));
+        send_key(session, key);
+    }
+    None
+}
+
 fn send_key(session: &str, key: &str) {
     Command::new("tmux")
         .args(["send-keys", "-t", session, key])
@@ -178,13 +205,15 @@ fn learnings_screen_opens_and_renders_title() {
     );
 
     // Open learnings via the global `m` ("memory") shortcut. Single-char
-    // nav — NO Enter (skill hard-rule 3).
-    send_key(&session, "m");
-
+    // nav — NO Enter (skill hard-rule 3). Re-press `m` each poll until the
+    // title token paints: the first `m` can land before the host's first paint
+    // and be dropped under cold/tmux-contention load, and `m` is idempotent
+    // once the screen is open (mirrors the P5/P6/P7 open step).
+    //
     // The plugin lazy-spawns on first render. Poll for the EXACT title
     // token — never a substring-OR (skill hard-rule 2).
     let open_deadline = Instant::now() + Duration::from_secs(45);
-    let opened = poll_capture(&session, open_deadline, |c| c.contains(TITLE_TOKEN));
+    let opened = poll_capture_resending(&session, "m", open_deadline, |c| c.contains(TITLE_TOKEN));
     let Some(opened_cap) = opened else {
         let last = capture_pane(&session);
         kill_session(&session);
