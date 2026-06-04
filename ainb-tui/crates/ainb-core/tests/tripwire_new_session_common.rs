@@ -168,9 +168,7 @@ pub fn send_key(session: &str, key: &str) {
 
 /// Idempotent cleanup — never panics on a missing session.
 pub fn kill_session(session: &str) {
-    let _ = Command::new("tmux")
-        .args(["kill-session", "-t", session])
-        .status();
+    let _ = Command::new("tmux").args(["kill-session", "-t", session]).status();
 }
 
 /// Send a multi-character string by issuing a single `send-keys -l` (literal)
@@ -198,11 +196,7 @@ pub fn seed_local_git_repo(home: &Path) -> PathBuf {
     let repo = home.join("projects").join("seeded-repo");
     fs::create_dir_all(&repo).unwrap();
     let status = Command::new("git")
-        .args([
-            "-c",
-            "init.defaultBranch=main",
-            "init",
-        ])
+        .args(["-c", "init.defaultBranch=main", "init"])
         .current_dir(&repo)
         .status()
         .expect("git init");
@@ -210,7 +204,14 @@ pub fn seed_local_git_repo(home: &Path) -> PathBuf {
     // Make a first commit so HEAD resolves cleanly for branch_namer / git2.
     fs::write(repo.join("README.md"), "seeded\n").unwrap();
     let _ = Command::new("git")
-        .args(["-c", "user.email=trip@example.com", "-c", "user.name=trip", "add", "README.md"])
+        .args([
+            "-c",
+            "user.email=trip@example.com",
+            "-c",
+            "user.name=trip",
+            "add",
+            "README.md",
+        ])
         .current_dir(&repo)
         .status();
     let _ = Command::new("git")

@@ -73,3 +73,4 @@ build_plugin() {
 
 build_plugin ainb-plugin-burndown burndown
 build_plugin ainb-plugin-session-reader session-reader
+build_plugin ainb-plugin-witr witr

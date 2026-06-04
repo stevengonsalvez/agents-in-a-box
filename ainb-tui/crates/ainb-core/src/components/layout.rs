@@ -80,6 +80,16 @@ impl LayoutComponent {
                 tracing::debug!("Rendering help overlay on {}", state.current_screen);
                 self.help.render(frame, frame_size);
             }
+            // The confirmation dialog is a universal, highest-priority
+            // overlay — it must paint on registry-backed screens too
+            // (HomeScreen, Inbox, …), not just the split-pane views.
+            // Key handling already runs pre-screen in `app::events`, so
+            // without this the dialog could be live + interactive but
+            // invisible (e.g. the first-run notify-install prompt fired
+            // on the HomeScreen).
+            if state.confirmation_dialog.is_some() {
+                self.confirmation_dialog.render(frame, frame_size, state);
+            }
             return;
         }
 
@@ -328,7 +338,7 @@ impl LayoutComponent {
             ));
         }
         line2_spans.push(Span::styled(
-            "I",
+            "b",
             Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
         ));
         line2_spans.push(Span::styled(" inbox", Style::default().fg(MUTED_GRAY)));

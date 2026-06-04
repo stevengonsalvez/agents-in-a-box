@@ -146,9 +146,17 @@ All of these flow through ONE pipeline and land in ONE place: `~/.learnings/docu
 |---|---|
 | You type something the agent finds important | Writer A creates a `feedback_*.md` in your project's memory dir. Silent. Always. |
 | You explicitly run `/reflect` | Writer B reads the *current conversation*, writes a knowledge note in `docs/solutions/<cat>/` + indexes it. One transcript at a time. |
-| PreCompact fires (auto) | Drain queues the transcript → child session runs `/reflect` (Writer B') on it. Same outputs. Background. |
+| PreCompact / Stop fires (auto) | Transcript is **queued**, then a background drain runs `/reflect` (Writer B') on it. Same outputs. Background. |
 | You explicitly run `/reflect:ingest` | Harvester reads everything Writer A ever made + similar across other tools, batch-indexes them all. Periodic. |
 | You run `/recall` | Searches the unified KB built by all of the above. |
+
+> **v4.0.0 — the auto-drain is cheap by default.** Before spending a single
+> token, the drain gates the queued transcript ($0 regex) and skips
+> reflect-on-reflect, clean, and no-signal sessions; for anything worth
+> reflecting it slices the transcript down to just the signal-bearing windows
+> (~10x smaller) and runs `/reflect` on **Sonnet** under hard caps (8 turns,
+> 180s, 2M-token budget poison). Inspect spend with `reflect cost` and see
+> [CHANGELOG.md](./CHANGELOG.md) for the full rearchitecture.
 
 ### Worked example — one fact, full trip
 
@@ -244,27 +252,69 @@ clicks always show fresh data.
 | `reflect:ingest` | Bulk-index existing memories from any tool (Claude/Codex/Copilot/Gemini) into the global KB |
 | `reflect:consolidate` | Project-level memory consolidation — merges orphaned worktree memory dirs into a single `.agents/MEMORY.md` |
 | `reflect:errors-ack` | Triage and acknowledge entries in the reflect errors sink (`~/.reflect/errors.json`) — drain poison, parser crashes, ingest failures, hook timeouts. Invoked from the statusline ⚠N badge. |
+| `reflect:cost` | Drain spend report over a window (default 1 day) — tokens split by cached / uncached writes / io, with a $ estimate and outlier flagging, grouped by day / outcome / model / transcript. |
 | `reflect-status` | Read-only metrics: pending reviews, sidecar coverage, GraphRAG health. Approve/reject low-confidence items. |
 
 ---
 
 ## Install
 
-### Claude Code (recommended)
+Reflect is **two layers**: the plugin (hooks + skills, installed by Claude Code)
+and the `reflect-kb` CLI (recall/ingest/search + qmd + nano-graphrag, installed
+via `uv`). `claude plugin install` only does the first — so install both, then
+verify.
+
+### One-step (recommended, via ainb)
 
 ```bash
+# 1. plugin: SessionStart/UserPromptSubmit/Stop/PreCompact hooks + skills
 claude plugin marketplace add stevengonsalvez/agents-in-a-box
 claude plugin install reflect@agents-in-a-box
 
-# install the underlying CLI (provides nano-graphrag + qmd)
-uv tool install --force --upgrade 'git+https://github.com/stevengonsalvez/agents-in-a-box.git#subdirectory=reflect-kb[graph]'
+# 2. everything else in one shot: auto-installs the reflect-kb CLI (full
+#    GraphRAG stack) and prints any missing system tools for you to install
+ainb reflect bootstrap
+
+# 3. verify — dependency check classified by what needs each tool
+ainb doctor
 ```
 
-That's it. The next session you open, the SessionStart hook fires `recall` automatically.
+`ainb reflect bootstrap` is **hybrid** by design: it *auto-installs* the
+reflect-owned layer (`reflect-kb[graph]` via `uv`) after one confirm, and only
+*prints* the commands for system tools (bash, coreutils, jq) so it never
+touches your OS or PATH without you.
+
+### Manual (what bootstrap runs, annotated)
+
+```bash
+# Prerequisite: uv — runs every reflect hook AND installs the CLI below.
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# The reflect-kb CLI + full retrieval stack. The [graph] extra pulls:
+#   · qmd                   — BM25 / lexical retrieval
+#   · nano-graphrag         — GraphRAG (entity + community retrieval)
+#   · sentence-transformers — embeddings (~2GB incl. torch)
+uv tool install --force --upgrade \
+  'git+https://github.com/stevengonsalvez/agents-in-a-box.git#subdirectory=reflect-kb[graph]'
+
+# If the install chokes on nano-graphrag (graspologic → numba → llvmlite wants
+# py<3.10), install the base then inject nano-graphrag without its deps:
+#   uv tool install --force reflect-kb
+#   uv tool run --from reflect-kb pip install --no-deps nano-graphrag
+
+# System tools the STATUSLINE needs (macOS; skip any you already have):
+#   · bash >=4   — the 4-row reflect timeline dashboard (macOS ships 3.2)
+#   · coreutils  — `timeout`, which guards every statusline shell-out
+#   · jq         — parses statusline JSON + counts reflect errors (badge)
+brew install bash coreutils jq
+#   then put Homebrew bash ahead of /bin/bash and coreutils' gnubin on PATH:
+#   echo 'export PATH="$(brew --prefix)/bin:$(brew --prefix coreutils)/libexec/gnubin:$PATH"' >> ~/.zshrc
+```
 
 ### Codex CLI / GitHub Copilot
 
-These harnesses don't have a native plugin runtime yet. Use the python adapter:
+These harnesses don't have a native plugin runtime yet. Use the python adapter,
+then install the same CLI (annotated notes above):
 
 ```bash
 git clone https://github.com/stevengonsalvez/agents-in-a-box.git
@@ -275,7 +325,8 @@ python3 plugins/reflect/adapters/codex/codex_adapter.py install
 python3 plugins/reflect/adapters/copilot/copilot_adapter.py install
 
 # same CLI prerequisite
-uv tool install --force --upgrade 'git+https://github.com/stevengonsalvez/agents-in-a-box.git#subdirectory=reflect-kb[graph]'
+uv tool install --force --upgrade \
+  'git+https://github.com/stevengonsalvez/agents-in-a-box.git#subdirectory=reflect-kb[graph]'
 ```
 
 ---

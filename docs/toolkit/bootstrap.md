@@ -2,8 +2,6 @@
 title: "Bootstrap engine"
 ---
 
-# Bootstrap engine
-
 `toolkit/bootstrap.js` deploys packages from `toolkit/packages/` into each supported tool's home directory. It is driven by a `TOOL_CONFIG` map (13 entries) plus an `external-dependencies.yaml` manifest.
 
 ## Per-tool home directories

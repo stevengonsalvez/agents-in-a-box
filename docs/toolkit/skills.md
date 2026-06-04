@@ -2,8 +2,6 @@
 title: "Skills (91)"
 ---
 
-# Skills (91)
-
 All 91 skills grouped by purpose. Each links to its SKILL.md source.
 
 ## Planning & Workflow (14)

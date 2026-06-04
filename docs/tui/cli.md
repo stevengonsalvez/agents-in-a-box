@@ -2,8 +2,6 @@
 title: "ainb CLI Reference"
 ---
 
-# ainb CLI Reference
-
 `ainb` is both an interactive terminal UI and a scriptable CLI. Every session operation the TUI can perform is also exposed as a subcommand, so agents and automation can drive it end-to-end without opening the UI.
 
 Run `ainb` with no arguments to launch the TUI, or use any subcommand below for non-interactive work.
@@ -34,6 +32,8 @@ Run `ainb` with no arguments to launch the TUI, or use any subcommand below for 
   - [`git`](#ainb-git) — worktree operations
   - [`favorites`](#ainb-favorites) — saved repositories
   - [`init`](#ainb-init) — first-time setup & factory reset
+  - [`doctor`](#ainb-doctor) — classified dependency check
+  - [`reflect`](#ainb-reflect) — reflect toolchain bootstrap installer
   - [`presets`](#ainb-presets) — session presets
   - [`claudecode`](#ainb-claudecode) — Claude Code provider-specific commands (statusline)
   - [`completion`](#ainb-completion) — shell completions
@@ -442,6 +442,34 @@ ainb init --check                   # CI-friendly prereq check
 ainb init --status --format json    # What's configured?
 ainb init --reset --force           # Factory reset (dangerous)
 ```
+
+---
+
+### `ainb doctor`
+
+Classified dependency check for the reflect / statusline toolchain. Reports every dependency grouped by what needs it (core / reflect / statusline / beads / usage), with version/variant detection (bash >= 4, `timeout` or `gtimeout`, `reflect-kb` via the `reflect` binary or a system import) and the exact install command for anything missing.
+
+```bash
+ainb doctor                 # text report, grouped by consumer
+ainb doctor --format json   # machine-readable for scripts / CI
+```
+
+Read-only; installs nothing. Use `ainb reflect bootstrap` to act on what it reports.
+
+---
+
+### `ainb reflect`
+
+Reflect plugin lifecycle. Today: `bootstrap`, the one-step installer for the reflect toolchain.
+
+```bash
+ainb reflect bootstrap          # install reflect-kb[graph]; print missing system tools
+ainb reflect bootstrap --yes    # don't prompt before installing the reflect-owned layer
+ainb reflect bootstrap --print-only   # detect + print every command, install nothing
+ainb reflect check              # dependency check (reflect-focused; same engine as `ainb doctor`)
+```
+
+`bootstrap` is **hybrid**: it auto-installs the reflect-owned layer (`reflect-kb[graph]` — the `reflect` CLI plus qmd + nano-graphrag — via `uv`) after one confirm, and only *prints* the `brew`/`apt` commands for system tools (bash >= 4, coreutils, jq) so it never touches your OS or PATH. If `uv` is missing it prints the uv installer line and stops. Verify the result with `ainb doctor`.
 
 ---
 

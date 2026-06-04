@@ -75,17 +75,18 @@ pub struct SendMessageRes {
 
 pub async fn broker_health() -> bool {
     let url = format!("{}/health", base());
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
-        .build()
-        .ok();
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(2)).build().ok();
     let Some(client) = client else { return false };
     client.get(&url).send().await.is_ok_and(|r| r.status().is_success())
 }
 
 pub async fn broker_send(from_id: &str, to_id: &str, text: &str) -> Result<SendMessageRes> {
     let url = format!("{}/send-message", base());
-    let req = SendMessageReq { from_id, to_id, text };
+    let req = SendMessageReq {
+        from_id,
+        to_id,
+        text,
+    };
     let client = BrokerClient::new();
     let res = client
         .http

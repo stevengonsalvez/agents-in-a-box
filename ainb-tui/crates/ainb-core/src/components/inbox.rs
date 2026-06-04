@@ -262,48 +262,6 @@ impl InboxState {
         self.agent_filter = self.agent_filter.next();
         self.refresh();
     }
-
-    /// Return unread counts grouped by notification `cwd`. Used by
-    /// the session_list to render a per-session `●N` badge: ainb's
-    /// `Session.workspace_path` is matched against this map (exact
-    /// equality OR prefix-with-trailing-slash for worktree sessions
-    /// whose cwd is a subdir of their workspace root).
-    ///
-    /// Returns an empty map when the store is not open.
-    pub fn unread_by_cwd_map(&self) -> std::collections::HashMap<String, u64> {
-        let mut out = std::collections::HashMap::new();
-        if let Some(store) = self.store.as_ref() {
-            if let Ok(rows) = store.unread_by_cwd() {
-                for (cwd, n) in rows {
-                    out.insert(cwd, n);
-                }
-            }
-        }
-        out
-    }
-
-    /// Sum unread counts whose `cwd` equals `workspace_path` or sits
-    /// underneath it (e.g. worktree subdirs). The session_list calls
-    /// this once per session row.
-    pub fn unread_for_workspace_path(
-        unread_by_cwd: &std::collections::HashMap<String, u64>,
-        workspace_path: &str,
-    ) -> u64 {
-        if workspace_path.is_empty() {
-            return 0;
-        }
-        let prefix_with_slash = format!("{workspace_path}/");
-        unread_by_cwd
-            .iter()
-            .filter_map(|(cwd, n)| {
-                if cwd == workspace_path || cwd.starts_with(&prefix_with_slash) {
-                    Some(*n)
-                } else {
-                    None
-                }
-            })
-            .sum()
-    }
 }
 
 /// Convert an epoch-ms timestamp to a local `HH:MM:SS` clock label,
@@ -613,50 +571,6 @@ mod tests {
         let s = fmt_ts(0);
         let parts: Vec<&str> = s.split(':').collect();
         assert_eq!(parts.len(), 3, "expected HH:MM:SS, got {s}");
-    }
-
-    #[test]
-    fn unread_for_workspace_path_matches_exact_and_prefix() {
-        use std::collections::HashMap;
-        let mut map: HashMap<String, u64> = HashMap::new();
-        map.insert("/home/x/repo".to_string(), 3);
-        map.insert("/home/x/repo/worktrees/branch-a".to_string(), 2);
-        map.insert("/home/x/other".to_string(), 5);
-
-        // Exact match on the workspace path returns just that bucket;
-        // prefix-with-/ also rolls up any worktree under it.
-        assert_eq!(
-            InboxState::unread_for_workspace_path(&map, "/home/x/repo"),
-            5,
-            "expected 3 (root) + 2 (worktree under) = 5"
-        );
-        assert_eq!(
-            InboxState::unread_for_workspace_path(&map, "/home/x/other"),
-            5
-        );
-        assert_eq!(
-            InboxState::unread_for_workspace_path(&map, "/home/x/missing"),
-            0
-        );
-        assert_eq!(
-            InboxState::unread_for_workspace_path(&map, ""),
-            0,
-            "empty workspace path must short-circuit to 0"
-        );
-    }
-
-    #[test]
-    fn unread_for_workspace_path_does_not_substring_match() {
-        // /home/x/rep would otherwise prefix-match /home/x/repo if we
-        // weren't careful to append the trailing slash. Verify.
-        use std::collections::HashMap;
-        let mut map: HashMap<String, u64> = HashMap::new();
-        map.insert("/home/x/repo".to_string(), 4);
-        assert_eq!(
-            InboxState::unread_for_workspace_path(&map, "/home/x/rep"),
-            0,
-            "must not substring-match shorter prefixes"
-        );
     }
 
     #[test]

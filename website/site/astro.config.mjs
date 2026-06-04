@@ -54,6 +54,7 @@ export default defineConfig({
             { label: 'Quickstart', slug: 'tui/quickstart' },
             { label: 'CLI reference', slug: 'tui/cli' },
             { label: 'Keyboard shortcuts', slug: 'tui/keyboard-shortcuts' },
+            { label: 'Inbox & notifications', slug: 'tui/inbox-notifications' },
             { label: 'Architecture', slug: 'tui/architecture' },
             { label: 'FAQ', slug: 'tui/faq' },
           ],
@@ -78,6 +79,15 @@ export default defineConfig({
             { label: 'Skills', slug: 'toolkit/skills' },
             { label: 'Agents', slug: 'toolkit/agents' },
             { label: 'Bootstrap engine', slug: 'toolkit/bootstrap' },
+            {
+              label: 'Claude Code plugins',
+              items: [
+                { label: 'Overview', slug: 'toolkit/plugins/overview' },
+                { label: 'reflect', slug: 'toolkit/plugins/reflect' },
+                { label: 'ainb-fleet', slug: 'toolkit/plugins/ainb-fleet' },
+                { label: 'ainb-hooks', slug: 'toolkit/plugins/ainb-hooks' },
+              ],
+            },
           ],
         },
         {
@@ -88,6 +98,14 @@ export default defineConfig({
             { label: 'User guide', slug: 'plugins/user-guide' },
             { label: 'Authoring guide', slug: 'plugins/authoring' },
             { label: 'Wire spec v2', slug: 'plugins/spec-v2' },
+            {
+              label: 'In-tree plugins',
+              items: [
+                { label: 'burndown', slug: 'plugins/burndown' },
+                { label: 'session-reader', slug: 'plugins/session-reader' },
+                { label: 'witr', slug: 'plugins/witr' },
+              ],
+            },
             { label: 'Changelog', slug: 'plugins/changelog' },
           ],
         },

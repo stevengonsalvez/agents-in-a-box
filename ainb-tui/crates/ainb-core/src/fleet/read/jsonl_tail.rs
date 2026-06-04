@@ -143,11 +143,8 @@ fn scan_for_turn_end(path: &Path, last_offset: &mut u64) -> Result<Option<bool>>
 
         if let Ok(row) = serde_json::from_str::<TranscriptRow>(buf.trim()) {
             let is_assistant = row.row_type.as_deref() == Some("assistant");
-            let ended = row
-                .message
-                .as_ref()
-                .and_then(|m| m.stop_reason.as_deref())
-                == Some("end_turn");
+            let ended =
+                row.message.as_ref().and_then(|m| m.stop_reason.as_deref()) == Some("end_turn");
             if is_assistant && ended {
                 found_end = true;
                 break;
@@ -238,10 +235,7 @@ fn find_ask_user_question(rows: &[String]) -> Option<AskUserQuestionData> {
                     .and_then(Value::as_str)
                     .unwrap_or("(no question text)")
                     .to_string(),
-                header: first
-                    .get("header")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
+                header: first.get("header").and_then(Value::as_str).map(str::to_string),
                 options: first
                     .get("options")
                     .and_then(Value::as_array)
@@ -259,10 +253,7 @@ fn find_ask_user_question(rows: &[String]) -> Option<AskUserQuestionData> {
                             .collect()
                     })
                     .unwrap_or_default(),
-                multi_select: first
-                    .get("multiSelect")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
+                multi_select: first.get("multiSelect").and_then(Value::as_bool).unwrap_or(false),
             });
         }
         // No tool_use in this assistant row — keep searching older rows.
@@ -293,14 +284,10 @@ pub fn last_assistant_info(path: &Path) -> Option<LastAssistantInfo> {
             continue;
         }
         let ts_ms = parse_ts_ms(v.get("timestamp").and_then(Value::as_str).unwrap_or(""));
-        let stop_reason = v
-            .pointer("/message/stop_reason")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        let text_snippet = v
-            .pointer("/message/content")
-            .and_then(Value::as_array)
-            .and_then(|arr| {
+        let stop_reason =
+            v.pointer("/message/stop_reason").and_then(Value::as_str).map(str::to_string);
+        let text_snippet =
+            v.pointer("/message/content").and_then(Value::as_array).and_then(|arr| {
                 let mut buf = String::new();
                 for b in arr {
                     if b.get("type").and_then(Value::as_str) == Some("text") {
@@ -334,9 +321,7 @@ fn read_lines(path: &Path) -> Option<Vec<String>> {
 }
 
 fn parse_ts_ms(s: &str) -> Option<i64> {
-    chrono::DateTime::parse_from_rfc3339(s)
-        .ok()
-        .map(|dt| dt.timestamp_millis())
+    chrono::DateTime::parse_from_rfc3339(s).ok().map(|dt| dt.timestamp_millis())
 }
 
 /// Synthesise a one-line "what is this session doing right now" string from
@@ -463,9 +448,7 @@ mod tests {
     fn slugs_dots_and_underscores() {
         // `.` and `_` both collapse to `-`. `/.` → `--`.
         assert_eq!(
-            cwd_to_project_slug(
-                "/Users/stevengonsalvez/.agents-in-a-box/worktrees/foo_bar_baz"
-            ),
+            cwd_to_project_slug("/Users/stevengonsalvez/.agents-in-a-box/worktrees/foo_bar_baz"),
             "-Users-stevengonsalvez--agents-in-a-box-worktrees-foo-bar-baz"
         );
     }
@@ -493,9 +476,7 @@ mod tests {
 
     #[test]
     fn synth_skips_user_rows() {
-        let rows = vec![
-            r#"{"type":"user","message":{"content":"hello"}}"#.to_string(),
-        ];
+        let rows = vec![r#"{"type":"user","message":{"content":"hello"}}"#.to_string()];
         assert!(synthesize_from_rows(&rows).is_none());
     }
 }

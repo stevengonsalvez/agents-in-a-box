@@ -2,8 +2,6 @@
 title: "Release process"
 ---
 
-# Release process
-
 > **Status:** stub. Authoritative content currently lives at `ainb-tui/CHANGELOG.md + .github/workflows/release.yml`.
 > Migration of that file into this path is gated on Stevie's approval.
 

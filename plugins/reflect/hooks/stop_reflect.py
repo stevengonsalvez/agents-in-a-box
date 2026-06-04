@@ -120,9 +120,24 @@ def _main_body() -> None:
         return
 
     qf = queue_file()
+    cf = state_dir() / "drain-cost.jsonl"
+
+    # Session-id fast-path dedup (long sessions: PreCompact enqueued first).
     if session_already_queued(qf, session_id):
         forensics_log(_HOOK_NAME, f"skip (already queued by PreCompact): session={session_id[:8]}")
         return
+
+    # Enqueue gate + transcript-path dedup ($0 regex). Skip reflect-on-reflect
+    # / clean / no-signal transcripts and anything already queued/processed.
+    # Fail-open: a gate error must never block a genuine enqueue.
+    try:
+        from reflect_gate import should_enqueue  # noqa: E402
+        ok, reason = should_enqueue(transcript_path, qf, cf)
+        if not ok:
+            forensics_log(_HOOK_NAME, f"gate skip ({reason}): session={session_id[:8]}")
+            return
+    except Exception:  # noqa: BLE001
+        pass
 
     try:
         qf.parent.mkdir(parents=True, exist_ok=True)

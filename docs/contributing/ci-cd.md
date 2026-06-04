@@ -2,8 +2,6 @@
 title: "CI / CD"
 ---
 
-# CI / CD
-
 Four GitHub Actions workflows live under `.github/workflows/`. Each is path-filtered so it only runs when the area it covers changes.
 
 ## `ci.yml` — Rust CI

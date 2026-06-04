@@ -71,13 +71,33 @@ pub struct Session {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Signal {
-    TurnEnd { at: i64 },
-    TurnActive { at: i64 },
-    AskUserQuestion { at: i64, raw: String },
-    WaitingSummary { at: i64, summary: String },
-    NeedsInputMarker { at: i64, source: String },
-    ApiError { at: i64, pattern: String, raw: String },
-    Idle { at: i64, since_ms: i64 },
+    TurnEnd {
+        at: i64,
+    },
+    TurnActive {
+        at: i64,
+    },
+    AskUserQuestion {
+        at: i64,
+        raw: String,
+    },
+    WaitingSummary {
+        at: i64,
+        summary: String,
+    },
+    NeedsInputMarker {
+        at: i64,
+        source: String,
+    },
+    ApiError {
+        at: i64,
+        pattern: String,
+        raw: String,
+    },
+    Idle {
+        at: i64,
+        since_ms: i64,
+    },
 }
 
 /// Coarse liveness derived from signals.

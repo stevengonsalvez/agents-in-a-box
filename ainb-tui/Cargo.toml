@@ -18,6 +18,7 @@ members = [
     "crates/ainb-diff",
     "crates/ainb-cli",
     "crates/ainb-usage",
+    "crates/ainb-plugin-witr",
     "xtask",
 ]
 default-members = ["crates/ainb-core"]
@@ -26,7 +27,7 @@ default-members = ["crates/ainb-core"]
 # parallel under agents-in-a-box-4is.
 
 [workspace.package]
-version = "1.2.1"
+version = "1.4.0"
 edition = "2021"
 authors = ["Agents-in-a-Box Team"]
 license = "MIT"

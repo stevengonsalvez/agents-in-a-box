@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 700" width="960" height="700">
+  <defs>
+    <marker id="arrowA" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#d97757"/>
+    </marker>
+    <marker id="arrowB" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#7b8b5c"/>
+    </marker>
+    <marker id="arrowC" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#8c6f5a"/>
+    </marker>
+    <marker id="arrowE" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#b45309"/>
+    </marker>
+    <marker id="arrowF" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#9a6fb0"/>
+    </marker>
+    <marker id="arrowG" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#d97757"/>
+    </marker>
+    <marker id="arrowH" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#8f8a80"/>
+    </marker>
+    <style>
+    text { font-family: 'Helvetica Neue', Helvetica, Arial, 'PingFang SC', 'Microsoft YaHei', sans-serif; }
+    .title { font-size: 24px; font-weight: 700; fill: #141413; }
+    .subtitle { font-size: 13px; font-weight: 500; fill: #8f8a80; }
+    .section { font-size: 13px; font-weight: 700; fill: #8b7355; letter-spacing: 1.4px; }
+    .section-sub { font-size: 12px; font-weight: 500; fill: #b4aba0; }
+    .node-title { font-size: 18px; font-weight: 700; fill: #141413; }
+    .node-sub { font-size: 12px; font-weight: 500; fill: #6b6257; }
+    .node-type { font-size: 11px; font-weight: 700; fill: #a29a8f; letter-spacing: 0.08em; }
+    .arrow-label { font-size: 12px; font-weight: 600; fill: #6b6257; }
+    .legend { font-size: 12px; font-weight: 500; fill: #6b6257; }
+    .footnote { font-size: 12px; font-weight: 500; fill: #a29a8f; }
+    </style>
+  </defs>
+  <rect width="960.0" height="700.0" fill="#f8f6f3"/>
+  <text x="48.0" y="48" text-anchor="start" class="title">burndown — screen-owner reference plugin</text>
+  <text x="48.0" y="72" text-anchor="start" class="subtitle">subscribes to the data plane, owns the Analytics screen and the `ainb usage` CLI</text>
+  <line x1="48" y1="100" x2="912.0" y2="100" stroke="#ded8cf" stroke-width="1"/>
+  <path d="M 300.0,198.0 L 375.0,198.0" fill="none" stroke="#b45309" stroke-width="2.0" marker-end="url(#arrowE)"/>
+  <path d="M 585.0,198.0 L 660.0,198.0" fill="none" stroke="#b45309" stroke-width="2.0" marker-end="url(#arrowE)"/>
+  <path d="M 775.0,130.0 L 775.0,129.6 L 480.0,129.6 L 480.0,150.0" fill="none" stroke="#d97757" stroke-width="2.0" marker-end="url(#arrowA)" stroke-dasharray="6,4"/>
+  <path d="M 775.0,266.0 L 775.0,286.4 L 635.4,455.0 L 615.0,455.0" fill="none" stroke="#8c6f5a" stroke-width="2.0" marker-end="url(#arrowC)"/>
+  <path d="M 775.0,266.0 L 775.0,286.4 L 790.0,389.6 L 790.0,410.0" fill="none" stroke="#8c6f5a" stroke-width="2.0" marker-end="url(#arrowC)"/>
+  <rect x="70.0" y="150.0" width="230.0" height="96.0" rx="10.0" fill="#fffcf7" stroke="#d9d0c3" stroke-width="1.8"/>
+  <text x="185.0" y="168.0" text-anchor="middle" class="node-type">PUBLISHER PLUGIN</text>
+  <text x="185.0" y="204.0" text-anchor="middle" class="node-title">session-reader</text>
+  <text x="185.0" y="226.0" text-anchor="middle" class="node-sub">scans ~/.claude + ~/.codex</text>
+  <rect x="375.0" y="150.0" width="210.0" height="96.0" rx="10.0" fill="#fffcf7" stroke="#d9d0c3" stroke-width="2.0"/>
+  <rect x="381.0" y="156.0" width="198.0" height="84.0" rx="7.0" fill="none" stroke="#d9d0c3" stroke-width="1.2" opacity="0.65"/>
+  <text x="480.0" y="168.0" text-anchor="middle" class="node-type">AINB-CORE HOST</text>
+  <text x="480.0" y="204.0" text-anchor="middle" class="node-title">host event bus</text>
+  <text x="480.0" y="226.0" text-anchor="middle" class="node-sub">snapshot store (last publish)</text>
+  <rect x="660.0" y="130.0" width="230.0" height="136.0" rx="10.0" fill="#fffcf7" stroke="#d9d0c3" stroke-width="1.8"/>
+  <text x="775.0" y="148.0" text-anchor="middle" class="node-type">SCREEN-OWNER PLUGIN</text>
+  <text x="775.0" y="204.0" text-anchor="middle" class="node-title">burndown</text>
+  <text x="775.0" y="226.0" text-anchor="middle" class="node-sub">chunk accumulator + filter cache</text>
+  <rect x="375.0" y="400.0" width="240.0" height="110.0" rx="10.0" fill="#fffcf7" stroke="#d9d0c3" stroke-width="2.0"/>
+  <rect x="375.0" y="400.0" width="240.0" height="18" rx="10.0" fill="#1f2937" opacity="0.95"/>
+  <circle cx="391.0" cy="409.0" r="4" fill="#ef4444"/>
+  <circle cx="405.0" cy="409.0" r="4" fill="#f59e0b"/>
+  <circle cx="419.0" cy="409.0" r="4" fill="#10b981"/>
+  <text x="393.0" y="444.0" font-size="28" font-weight="700" fill="#10b981">$</text>
+  <text x="413.0" y="444.0" font-size="22" font-weight="500" fill="#6b6257">_</text>
+  <text x="495.0" y="418.0" text-anchor="middle" class="node-type">TUI</text>
+  <text x="495.0" y="496.0" text-anchor="middle" class="node-title">Analytics screen</text>
+  <text x="495.0" y="530.0" text-anchor="middle" class="node-sub">WireBuffer / frame</text>
+  <path d="M 690.0 410.0 L 872.0 410.0 L 890.0 428.0 L 890.0 510.0 L 690.0 510.0 Z" fill="#fffcf7" stroke="#d9d0c3" stroke-width="2.0"/>
+  <path d="M 872.0 410.0 L 872.0 428.0 L 890.0 428.0" fill="none" stroke="#d9d0c3" stroke-width="2.0"/>
+  <line x1="708.0" y1="436.0" x2="862.0" y2="436.0" stroke="#c4b5fd" stroke-width="1.2"/>
+  <line x1="708.0" y1="450.0" x2="862.0" y2="450.0" stroke="#c4b5fd" stroke-width="1.2"/>
+  <line x1="708.0" y1="464.0" x2="862.0" y2="464.0" stroke="#c4b5fd" stroke-width="1.2"/>
+  <line x1="708.0" y1="478.0" x2="862.0" y2="478.0" stroke="#c4b5fd" stroke-width="1.2"/>
+  <text x="790.0" y="428.0" text-anchor="middle" class="node-type">CLI TREE</text>
+  <text x="790.0" y="536.0" text-anchor="middle" class="node-title">ainb usage ...</text>
+  <text x="790.0" y="554.0" text-anchor="middle" class="node-sub">report · today · export</text>
+  <rect x="281.5" y="184.0" width="112" height="20" rx="6" fill="#f8f6f3" opacity="0.96"/>
+  <text x="337.5" y="198.0" text-anchor="middle" class="arrow-label">publish chunks</text>
+  <rect x="549.0" y="184.0" width="147" height="20" rx="6" fill="#f8f6f3" opacity="0.96"/>
+  <text x="622.5" y="198.0" text-anchor="middle" class="arrow-label">sessions.usage_data</text>
+  <rect x="568.0" y="99.6" width="119" height="20" rx="6" fill="#f8f6f3" opacity="0.96"/>
+  <text x="627.5" y="113.6" text-anchor="middle" class="arrow-label">refresh_request</text>
+  <rect x="652.7" y="340.7" width="105" height="20" rx="6" fill="#f8f6f3" opacity="0.96"/>
+  <text x="705.2" y="354.7" text-anchor="middle" class="arrow-label">plugin/render</text>
+  <rect x="709.0" y="308.0" width="147" height="20" rx="6" fill="#f8f6f3" opacity="0.96"/>
+  <text x="782.5" y="322.0" text-anchor="middle" class="arrow-label">plugin/cli_dispatch</text>
+  <line x1="42.0" y1="600.0" x2="72.0" y2="600.0" stroke="#b45309" stroke-width="2.0" marker-end="url(#arrowE)"/>
+  <text x="82.0" y="604.0" class="legend">data (msgpack snapshot)</text>
+  <line x1="42.0" y1="622.0" x2="72.0" y2="622.0" stroke="#d97757" stroke-width="2.0" marker-end="url(#arrowA)"/>
+  <text x="82.0" y="626.0" class="legend">control (publish trigger)</text>
+  <line x1="42.0" y1="644.0" x2="72.0" y2="644.0" stroke="#8c6f5a" stroke-width="2.0" marker-end="url(#arrowC)"/>
+  <text x="82.0" y="648.0" class="legend">render / dispatch</text>
+  <text x="42.0" y="684.0" class="footnote">burndown holds no scanner — it renders what session-reader publishes.</text>
+</svg>

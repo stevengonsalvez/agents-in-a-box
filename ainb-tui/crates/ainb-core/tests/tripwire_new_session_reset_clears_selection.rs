@@ -5,7 +5,6 @@
 //!
 //! Phase 4 of `plans/new-session-redesign-spec.md`.
 
-
 #[allow(dead_code)]
 mod tripwire_new_session_common;
 use tripwire_new_session_common::*;
@@ -47,16 +46,7 @@ per_repo:
     let ainb = ainb_bin();
 
     Command::new("tmux")
-        .args([
-            "new-session",
-            "-d",
-            "-s",
-            &session,
-            "-x",
-            "180",
-            "-y",
-            "50",
-        ])
+        .args(["new-session", "-d", "-s", &session, "-x", "180", "-y", "50"])
         .status()
         .expect("tmux new-session");
 
@@ -132,9 +122,7 @@ per_repo:
     });
 
     // YAML check: poll for last_repo removal.
-    let yaml_path = home_path
-        .join(".agents-in-a-box")
-        .join("session-defaults.yaml");
+    let yaml_path = home_path.join(".agents-in-a-box").join("session-defaults.yaml");
     let yaml_deadline = Instant::now() + Duration::from_secs(5);
     let mut yaml_after = String::new();
     while Instant::now() < yaml_deadline {

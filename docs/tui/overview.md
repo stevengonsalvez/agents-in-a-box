@@ -2,8 +2,6 @@
 title: "ainb TUI — overview"
 ---
 
-# ainb TUI — overview
-
 `ainb` is the terminal UI and CLI for Agents-in-a-Box: a Rust + ratatui app that spawns and manages AI coding sessions (Claude Code, Codex, Gemini, Copilot) in isolated git worktrees, each driven inside its own tmux session.
 
 Run `ainb` with no arguments to launch the TUI. Every operation the TUI performs is also exposed as a subcommand, so agents and automation can drive it headlessly. See the [CLI reference](cli.md) for the full subcommand list.

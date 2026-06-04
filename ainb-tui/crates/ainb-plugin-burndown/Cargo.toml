@@ -7,6 +7,11 @@ license.workspace = true
 repository.workspace = true
 description = "Daily/weekly/project usage burndown analytics — subprocess plugin (ABI v2)"
 
+# cargo-machete matches the package name, but the SDK's [lib] name is
+# `ainb_plugin_sdk`; the rename hides real usage.
+[package.metadata.cargo-machete]
+ignored = ["ainb-plugin-sdk-rust"]
+
 [lib]
 name = "ainb_plugin_burndown"
 path = "src/lib.rs"
@@ -34,6 +39,7 @@ toml = { workspace = true }
 async-trait = "0.1"
 nucleo-matcher = "0.3"
 dirs = { workspace = true }
+arboard = { workspace = true }
 
 # UI: ratatui without termion/crossterm backends — we paint into a
 # ratatui Buffer and convert to a WireBuffer cell stream for the host.

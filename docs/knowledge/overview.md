@@ -2,8 +2,6 @@
 title: "Knowledge & Memory System"
 ---
 
-# Knowledge & Memory System
-
 > "Correct once, never again. Solve once, never re-research."
 
 This document explains the complete knowledge capture, storage, indexing, and

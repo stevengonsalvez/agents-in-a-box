@@ -157,12 +157,62 @@ async fn tokio_main() -> Result<()> {
 
             let mut app_state = App::new();
             app_state.init().await;
+
+            // Migrate legacy local-path favorites to their remote indicator. A
+            // star is always a remote pointer now; local-path entries from
+            // older versions are rewritten to their `origin` remote, or dropped
+            // when there is none. One-time per launch; idempotent once all
+            // entries are remote. Non-fatal — failure just leaves the store as-is.
+            {
+                let mut favorites = config::FavoritesStore::load();
+                let report = favorites.migrate_local_to_remote();
+                if !report.is_empty() {
+                    // Back up the original (pre-migration) file once before the
+                    // destructive overwrite so dropped favorites are recoverable.
+                    if let Err(e) = config::FavoritesStore::write_migration_backup() {
+                        tracing::warn!(error = %e, "failed to back up favorites before migration");
+                    }
+                    match favorites.save() {
+                        Ok(()) => {
+                            // Only claim success once the migrated store is on disk;
+                            // otherwise the migration would silently re-run next launch.
+                            if !report.migrated.is_empty() {
+                                app_state.state.add_info_notification(format!(
+                                    "⭐ Migrated {} favorite(s) to remote",
+                                    report.migrated.len()
+                                ));
+                            }
+                            if !report.dropped.is_empty() {
+                                app_state.state.add_error_notification(format!(
+                                    "★ Removed {} local-only favorite(s) with no remote: {}",
+                                    report.dropped.len(),
+                                    report.dropped.join(", ")
+                                ));
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "failed to persist migrated favorites");
+                            app_state.state.add_error_notification(format!(
+                                "Could not migrate favorites to remote: {e}"
+                            ));
+                        }
+                    }
+                }
+            }
+
             let mut layout = LayoutComponent::new();
 
             // Check if first-time setup is needed
             if app::state::AppState::needs_onboarding() {
                 tracing::info!("First-time setup detected - starting onboarding wizard");
                 app_state.state.start_onboarding(false, None);
+            } else {
+                // Existing user (no onboarding to run): offer to install /
+                // update the ainb-hooks notification plugin if it's absent
+                // or stale. New users get this same prompt at the end of
+                // onboarding instead (see `complete_onboarding`). No-op
+                // when already up to date or previously declined.
+                app_state.state.maybe_prompt_notify_install();
             }
 
             // Always clear pending async actions after init to ensure clean startup
@@ -322,22 +372,29 @@ async fn run_tui_loop(
                     // keypresses go to the palette. Plugin-contributed slash
                     // commands hook in here in Phase 4.
                     //
-                    // Text-input contexts (filter prompts, prompt textareas,
-                    // URL inputs) MUST consume `:` themselves — otherwise
-                    // typing an `ssh://...` URL into the new-session picker
-                    // is swallowed mid-word. The palette is still reachable
-                    // from non-text contexts.
-                    let palette_swallowed_by_text_input = matches!(
-                        key_event.code,
-                        KeyCode::Char(':')
-                    ) && !slash_palette.is_open()
-                        && crate::app::events::EventHandler::is_in_text_input_context(
-                            &app.state,
-                        );
-                    if !palette_swallowed_by_text_input
-                        && (slash_palette.is_open()
-                            || matches!(key_event.code, KeyCode::Char(':')))
-                    {
+                    // Don't let the palette steal `:` when the key belongs
+                    // to someone else's text input. Two cases:
+                    //  - A focused plugin screen owns every non-reserved key
+                    //    (the `forward_key_to_focused_plugin` contract);
+                    //    witr addresses targets as `port:5432` / `pid:4242`
+                    //    / `file:/x` / `container:abc`, all needing a
+                    //    literal `:`.
+                    //  - Host text-input contexts (new-session URL/prompt
+                    //    fields, filter prompts) must keep `:` too — e.g.
+                    //    typing an `ssh://...` URL.
+                    // An already-open palette still consumes keys, so it can
+                    // always be closed.
+                    let colon = matches!(key_event.code, KeyCode::Char(':'));
+                    let palette_open_suppressed = colon
+                        && !slash_palette.is_open()
+                        && (crate::app::screens::builtin::plugin_id_for_screen(
+                            &app.state.current_screen,
+                        )
+                        .is_some()
+                            || crate::app::events::EventHandler::is_in_text_input_context(
+                                &app.state,
+                            ));
+                    if !palette_open_suppressed && (slash_palette.is_open() || colon) {
                         match slash_palette.handle_key(key_event) {
                             SlashAction::Execute(cmd) => {
                                 tracing::info!(
@@ -680,6 +737,60 @@ async fn run_tui_loop(
                         app.state.ui_needs_refresh = true;
                     }
 
+                    AsyncAction::AttachWitr => {
+                        use crate::app::AttachHandler;
+                        use tokio::process::Command;
+
+                        const WITR_SESSION: &str = "ainb-witr";
+                        info!(
+                            "[ACTION] Launching witr -i in tmux session '{}'",
+                            WITR_SESSION
+                        );
+
+                        // Atomic create-or-reuse: `-A` attaches if the session exists,
+                        // creates it otherwise; `-d` keeps it detached so we drive the
+                        // attach (with TUI suspend/resume) ourselves below. tmux runs
+                        // the command in its OWN pty, so `witr -i` gets a real TTY even
+                        // though ainb owns the alternate screen. The command is passed as
+                        // a single string so tmux doesn't parse `-i` as one of its flags.
+                        let created = Command::new("tmux")
+                            .args(["new-session", "-A", "-d", "-s", WITR_SESSION, "witr -i"])
+                            .status()
+                            .await;
+                        match created {
+                            Ok(s) if s.success() => {
+                                let mut attach_handler =
+                                    AttachHandler::new_from_terminal(terminal)?;
+                                if let Err(e) = attach_handler.attach_to_session(WITR_SESSION).await
+                                {
+                                    error!("[ACTION] witr attach failed: {}", e);
+                                    app.state.add_error_notification(format!(
+                                        "Failed to open the witr browser: {}",
+                                        e
+                                    ));
+                                }
+                            }
+                            Ok(s) => {
+                                error!(
+                                    "[ACTION] failed to create witr tmux session (exit {:?})",
+                                    s.code()
+                                );
+                                app.state.add_error_notification(
+                                    "Could not start the witr browser — is `witr` installed and on PATH?"
+                                        .to_string(),
+                                );
+                            }
+                            Err(e) => {
+                                error!("[ACTION] tmux new-session for witr errored: {}", e);
+                                app.state.add_error_notification(format!(
+                                    "Failed to open the witr browser: {}",
+                                    e
+                                ));
+                            }
+                        }
+                        app.state.ui_needs_refresh = true;
+                    }
+
                     AsyncAction::KillOtherTmux(session_name) => {
                         use tokio::process::Command;
 
@@ -754,8 +865,7 @@ async fn run_tui_loop(
                                     let stderr = String::from_utf8_lossy(&o.stderr);
                                     warn!(
                                         "Failed to kill tmux session '{}': {}",
-                                        session_name,
-                                        stderr
+                                        session_name, stderr
                                     );
                                     failed += 1;
                                 }
