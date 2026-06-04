@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use ainb_plugin_protocol::manifest::{
-    Capabilities, Lifecycle, Manifest, PluginMeta, Provides, SpawnMode, Subscribes,
+    Capabilities, CapabilityGrant, Lifecycle, Manifest, PluginMeta, Provides, SpawnMode, Subscribes,
 };
 use ainb_plugin_runtime::registry::RegisteredPlugin;
 use ainb_plugin_runtime::types::{
@@ -449,6 +449,229 @@ fn a14_cli_dispatch_stdout_capture() {
         CliOutcome::Ok(r) => {
             assert_eq!(&r.stdout[..], b"hello\n");
             assert_eq!(r.exit_code, 0);
+        }
+        other => panic!("expected CliOutcome::Ok, got {other:?}"),
+    }
+}
+
+// =====================================================================
+// read_paths + [config] axis — host/fs read enforcement + config inject
+// =====================================================================
+//
+// The runtime's `host/fs/read_file` guard must allow a read whose target is
+// under a granted `read_paths` prefix and DENY one that is not (`-32001`).
+// A separate test asserts the host injects the resolved `[plugins.<name>]`
+// config table into the plugin at `plugin/init`.
+//
+// DISK SAFETY: every path here lives under `CARGO_TARGET_TMPDIR`
+// (`target/tmp/...`, repo-local). Nothing touches the real home dir.
+
+/// Per-run temp dir under `target/tmp/<pkg>` (repo-local; never `~`).
+/// `CARGO_TARGET_TMPDIR` is set by cargo for integration-test binaries.
+fn run_tmp(tag: &str) -> PathBuf {
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "rpc-{tag}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&base).expect("create temp dir");
+    base
+}
+
+/// Register the read_paths/[config] canary with a custom `read_paths`
+/// allow-list, a `[config]` schema, and a stamped resolved config table.
+fn register_read_paths_canary(
+    rt: &Runtime,
+    read_paths: Vec<String>,
+    config: serde_json::Value,
+) -> PluginId {
+    let mut m = manifest("cts-read-paths-config");
+    m.capabilities = Capabilities {
+        read_paths: CapabilityGrant::List(read_paths),
+        ..Capabilities::default()
+    };
+    m.provides.cli_namespaces = vec!["rpc".into()];
+
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-read-paths-config"));
+    let plugin =
+        RegisteredPlugin::new(m, bin, PathBuf::from("/dev/null/manifest.toml")).with_config(config);
+    let id = plugin.id.clone();
+    rt.register(plugin);
+    id
+}
+
+#[test]
+fn axis_read_paths_grant_honored() {
+    let (rt, handle) = build_runtime();
+
+    // Allowed envelope: a per-run temp dir with one file inside it.
+    let allowed = run_tmp("allowed");
+    let in_envelope = allowed.join("note.md");
+    std::fs::write(&in_envelope, b"hello-in-envelope").expect("write in-envelope file");
+
+    let id = register_read_paths_canary(
+        &rt,
+        vec![allowed.to_string_lossy().into_owned()],
+        serde_json::Value::Null,
+    );
+
+    let outcome = block_cli(
+        &rt,
+        &handle,
+        &id,
+        "rpc",
+        vec!["read".into(), in_envelope.to_string_lossy().into_owned()],
+    );
+    match outcome {
+        CliOutcome::Ok(r) => {
+            let stdout = String::from_utf8_lossy(&r.stdout);
+            assert_eq!(
+                stdout.trim(),
+                "OK:17",
+                "in-envelope read should succeed (17 bytes), got {stdout:?}"
+            );
+        }
+        other => panic!("expected CliOutcome::Ok, got {other:?}"),
+    }
+}
+
+#[test]
+fn axis_read_paths_denied_out_of_envelope() {
+    let (rt, handle) = build_runtime();
+
+    // Granted envelope.
+    let allowed = run_tmp("allowed");
+    std::fs::write(allowed.join("note.md"), b"in").expect("write in-envelope file");
+
+    // A sibling dir NOT under the grant — must be denied.
+    let denied = run_tmp("denied");
+    let out_of_envelope = denied.join("secret.md");
+    std::fs::write(&out_of_envelope, b"secret").expect("write out-of-envelope file");
+
+    let id = register_read_paths_canary(
+        &rt,
+        vec![allowed.to_string_lossy().into_owned()],
+        serde_json::Value::Null,
+    );
+
+    let outcome = block_cli(
+        &rt,
+        &handle,
+        &id,
+        "rpc",
+        vec![
+            "read".into(),
+            out_of_envelope.to_string_lossy().into_owned(),
+        ],
+    );
+    match outcome {
+        CliOutcome::Ok(r) => {
+            let stdout = String::from_utf8_lossy(&r.stdout);
+            assert_eq!(
+                stdout.trim(),
+                format!("DENIED:{}", ainb_plugin_protocol::errors::CAPABILITY_DENIED),
+                "out-of-envelope read must be denied with -32001, got {stdout:?}"
+            );
+        }
+        other => panic!("expected CliOutcome::Ok, got {other:?}"),
+    }
+}
+
+/// A non-existent in-envelope read under a *symlinked* grant must NOT be denied
+/// as out-of-envelope. On macOS (and many Linux setups) the grant's resolved
+/// path differs from its literal path because an ancestor is a symlink
+/// (`/tmp -> /private/tmp`, a symlinked `$HOME`, etc.). The guard canonicalizes
+/// the granted prefix (it exists) but, for a target that does *not* yet exist,
+/// must resolve it against the same on-disk anchor — otherwise a legitimate
+/// in-envelope read of a not-yet-existing file (write-then-read-back, probe for
+/// an optional file) gets a spurious `-32001`.
+///
+/// This axis stages a symlinked grant entirely under `CARGO_TARGET_TMPDIR`
+/// (repo-local): `grant -> real`, grants `read_paths = [grant]`, and reads a
+/// GHOST (non-existent) file under `grant`. The host must NOT return
+/// `CAPABILITY_DENIED`; it surfaces the real `ENOENT` read error
+/// (`INVALID_PARAMS`) instead.
+#[test]
+fn axis_read_paths_nonexistent_in_envelope_under_symlink_grant() {
+    let (rt, handle) = build_runtime();
+
+    // Stage `grant -> real` under the repo-local temp dir so an ancestor of the
+    // granted prefix is a symlink (mirrors macOS `/tmp -> /private/tmp`).
+    let base = run_tmp("symlink-grant");
+    let real = base.join("real");
+    std::fs::create_dir_all(&real).expect("create real grant dir");
+    let grant = base.join("grant");
+    std::os::unix::fs::symlink(&real, &grant).expect("symlink grant -> real");
+
+    // The target is a not-yet-existing file *inside* the granted (symlinked)
+    // prefix — i.e. genuinely in-envelope, just not on disk yet.
+    let ghost = grant.join("ghost.md");
+    assert!(!ghost.exists(), "ghost must not exist for this axis");
+
+    let id = register_read_paths_canary(
+        &rt,
+        vec![grant.to_string_lossy().into_owned()],
+        serde_json::Value::Null,
+    );
+
+    let outcome = block_cli(
+        &rt,
+        &handle,
+        &id,
+        "rpc",
+        vec!["read".into(), ghost.to_string_lossy().into_owned()],
+    );
+    match outcome {
+        CliOutcome::Ok(r) => {
+            let stdout = String::from_utf8_lossy(&r.stdout);
+            let trimmed = stdout.trim();
+            // Must NOT be denied as out-of-envelope: the read passed the guard
+            // and failed at the filesystem with a real ENOENT.
+            assert_ne!(
+                trimmed,
+                format!("DENIED:{}", ainb_plugin_protocol::errors::CAPABILITY_DENIED),
+                "in-envelope NON-existent read under a symlinked grant was wrongly \
+                 denied -32001 (symlink-prefix asymmetry over-denial), got {stdout:?}"
+            );
+            assert_eq!(
+                trimmed,
+                format!("DENIED:{}", ainb_plugin_protocol::errors::INVALID_PARAMS),
+                "expected the real ENOENT read error (-32602), got {stdout:?}"
+            );
+        }
+        other => panic!("expected CliOutcome::Ok, got {other:?}"),
+    }
+}
+
+#[test]
+fn axis_config_injected_at_init() {
+    let (rt, handle) = build_runtime();
+
+    let allowed = run_tmp("allowed");
+    let injected = serde_json::json!({
+        "learnings_dir": "/tmp/learnings",
+        "qmd_collection": "learnings",
+    });
+
+    let id = register_read_paths_canary(
+        &rt,
+        vec![allowed.to_string_lossy().into_owned()],
+        injected.clone(),
+    );
+
+    let outcome = block_cli(&rt, &handle, &id, "rpc", vec!["config".into()]);
+    match outcome {
+        CliOutcome::Ok(r) => {
+            let stdout = String::from_utf8_lossy(&r.stdout);
+            let reported: serde_json::Value =
+                serde_json::from_str(stdout.trim()).expect("canary echoed valid JSON config");
+            assert_eq!(
+                reported, injected,
+                "canary must report the config the host injected"
+            );
         }
         other => panic!("expected CliOutcome::Ok, got {other:?}"),
     }

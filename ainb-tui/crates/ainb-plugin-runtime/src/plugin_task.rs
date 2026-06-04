@@ -18,10 +18,11 @@ use std::time::{Duration, Instant};
 use ainb_plugin_protocol::errors::RpcError;
 use ainb_plugin_protocol::methods;
 use ainb_plugin_protocol::params::{
-    ActionInvokeParams, ActionInvokeResult, CliDispatchParams, CliDispatchResult,
-    HandleEventParams, HandleKeyParams, LogParams, PluginInitParams, PluginInitResult,
-    PluginShutdownParams, RenderParams, RenderResult, SnapshotGetParams, SnapshotGetResult,
-    SnapshotPublishParams, SnapshotSubscribeParams, SnapshotSubscribeResult, Viewport,
+    ActionInvokeParams, ActionInvokeResult, CliDispatchParams, CliDispatchResult, FsDirEntry,
+    FsReadDirParams, FsReadDirResult, FsReadFileParams, FsReadFileResult, HandleEventParams,
+    HandleKeyParams, LogParams, PluginInitParams, PluginInitResult, PluginShutdownParams,
+    RenderParams, RenderResult, SnapshotGetParams, SnapshotGetResult, SnapshotPublishParams,
+    SnapshotSubscribeParams, SnapshotSubscribeResult, Viewport,
 };
 use ainb_plugin_protocol::wire_buffer::WireBuffer;
 use bytes::Bytes;
@@ -609,6 +610,8 @@ impl PluginTask {
         let result = match method {
             methods::HOST_SNAPSHOT_GET => self.host_snapshot_get(params),
             methods::HOST_SNAPSHOT_SUBSCRIBE => self.host_snapshot_subscribe(params),
+            methods::HOST_FS_READ_FILE => self.host_fs_read_file(params),
+            methods::HOST_FS_READ_DIR => self.host_fs_read_dir(params),
             // host/action/invoke arriving FROM the plugin would be cross-plugin
             // routing — out of scope for the per-plugin task; rejected.
             other => Err(RpcError::method_not_found(other)),
@@ -660,6 +663,89 @@ impl PluginTask {
         self.snapshots.subscribe(Topic::from(p.topic), self.plugin.id.clone());
         Ok(serde_json::to_value(SnapshotSubscribeResult::default())
             .expect("SnapshotSubscribeResult serializable"))
+    }
+
+    /// `host/fs/read_file` — read a file the plugin requested, gated by the
+    /// plugin's `read_paths` capability. The target must resolve under one of
+    /// the granted path prefixes (the security envelope); otherwise the read
+    /// is denied with [`CAPABILITY_DENIED`](ainb_plugin_protocol::errors::CAPABILITY_DENIED).
+    fn host_fs_read_file(&self, params: Value) -> Result<Value, RpcError> {
+        let p: FsReadFileParams =
+            serde_json::from_value(params).map_err(|e| RpcError::invalid_params(e.to_string()))?;
+        let resolved = self.guard_read_path(&p.path)?;
+        let bytes = std::fs::read(&resolved)
+            .map_err(|e| RpcError::invalid_params(format!("read {}: {e}", p.path)))?;
+        let res = FsReadFileResult {
+            bytes: bytes.into(),
+        };
+        Ok(serde_json::to_value(res).expect("FsReadFileResult serializable"))
+    }
+
+    /// `host/fs/read_dir` — enumerate a directory the plugin requested, gated
+    /// by the plugin's `read_paths` capability (same envelope as
+    /// [`host_fs_read_file`](Self::host_fs_read_file)).
+    fn host_fs_read_dir(&self, params: Value) -> Result<Value, RpcError> {
+        let p: FsReadDirParams =
+            serde_json::from_value(params).map_err(|e| RpcError::invalid_params(e.to_string()))?;
+        let resolved = self.guard_read_path(&p.path)?;
+        let mut entries = Vec::new();
+        let read = std::fs::read_dir(&resolved)
+            .map_err(|e| RpcError::invalid_params(format!("read_dir {}: {e}", p.path)))?;
+        for entry in read.flatten() {
+            let meta = entry.metadata();
+            let is_dir = meta.as_ref().map(std::fs::Metadata::is_dir).unwrap_or(false);
+            let size = if is_dir {
+                0
+            } else {
+                meta.map(|m| m.len()).unwrap_or(0)
+            };
+            entries.push(FsDirEntry {
+                name: entry.file_name().to_string_lossy().into_owned(),
+                is_dir,
+                size,
+            });
+        }
+        let res = FsReadDirResult { entries };
+        Ok(serde_json::to_value(res).expect("FsReadDirResult serializable"))
+    }
+
+    /// Resolve `requested` and enforce the `read_paths` capability envelope.
+    ///
+    /// A read is allowed iff the resolved target path is under one of the
+    /// granted `read_paths` prefixes. `~` in grant prefixes is expanded to
+    /// `$HOME`; **both** target and prefixes are resolved against a real
+    /// on-disk anchor (see [`resolve_against_existing_ancestor`]) so `..`
+    /// traversal cannot escape the envelope *and* a symlinked ancestor
+    /// (`/tmp -> /private/tmp`, a symlinked `$HOME`) does not split the two
+    /// operands — which would otherwise over-deny a legitimate in-envelope
+    /// read of a not-yet-existing file. Returns the resolved path on success,
+    /// or a [`CAPABILITY_DENIED`](ainb_plugin_protocol::errors::CAPABILITY_DENIED)
+    /// error otherwise.
+    fn guard_read_path(&self, requested: &str) -> Result<std::path::PathBuf, RpcError> {
+        let grant = &self.plugin.manifest.capabilities.read_paths;
+        let allow_list = grant.allow_list().filter(|l| !l.is_empty()).ok_or_else(|| {
+            RpcError::capability_denied("read_paths (no path-scoped fs read granted)")
+        })?;
+
+        // Resolve the target symmetrically with the prefixes: canonicalize the
+        // deepest existing ancestor (resolving any symlinks in the on-disk
+        // portion) and re-append the non-existent lexical tail. This keeps a
+        // `/tmp` target from diverging from a `/private/tmp` prefix when the
+        // file does not yet exist, while still defeating `..` escapes (the tail
+        // is `..`-collapsed before the existing-ancestor walk).
+        let resolved = resolve_against_existing_ancestor(std::path::Path::new(requested));
+
+        for prefix in allow_list {
+            let expanded = expand_tilde(prefix);
+            let prefix_resolved = resolve_against_existing_ancestor(&expanded);
+            if resolved.starts_with(&prefix_resolved) {
+                return Ok(resolved);
+            }
+        }
+
+        Err(RpcError::capability_denied(format!(
+            "read_paths: {requested} is outside the granted envelope"
+        )))
     }
 
     fn handle_host_notification(&self, method: &str, params: Value) {
@@ -851,6 +937,89 @@ impl PluginTask {
     }
 }
 
+/// Expand a leading `~` / `~/` to `$HOME`. Other paths pass through. Unix-only
+/// home resolution via `$HOME`, consistent with the project's platform stance.
+fn expand_tilde(path: &str) -> std::path::PathBuf {
+    if path == "~" {
+        if let Ok(home) = std::env::var("HOME") {
+            return std::path::PathBuf::from(home);
+        }
+    } else if let Some(rest) = path.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return std::path::Path::new(&home).join(rest);
+        }
+    }
+    std::path::PathBuf::from(path)
+}
+
+/// Lexically normalize a path without touching the filesystem: collapse `.`
+/// and resolve `..` against earlier components. Used as a fallback when a path
+/// can't be canonicalized (doesn't yet exist) so the `read_paths` guard still
+/// rejects `..` traversal out of the envelope.
+fn normalize_lexical(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut out = std::path::PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// Resolve `path` against a real on-disk anchor so the `read_paths` guard can
+/// compare a target and a granted prefix *symmetrically*, even when the target
+/// does not exist yet.
+///
+/// Strategy:
+/// 1. Lexically collapse `.`/`..` first ([`normalize_lexical`]) — so a `..`
+///    escape (`/grant/../../etc/passwd`) is flattened before anything touches
+///    the filesystem and can never re-enter the envelope.
+/// 2. Walk up to the deepest *existing* ancestor and `canonicalize` it
+///    (resolving every symlink in the on-disk portion, e.g. `/tmp ->
+///    /private/tmp`).
+/// 3. Re-append the remaining non-existent lexical tail verbatim.
+///
+/// Because the granted prefix (which always exists) is resolved the same way,
+/// a `/tmp` target and a `/private/tmp` prefix no longer diverge when the file
+/// is not yet on disk — fixing the spurious `-32001` over-denial — while a
+/// `..`-traversal to a real file still canonicalizes outside the envelope and
+/// is correctly denied.
+fn resolve_against_existing_ancestor(path: &std::path::Path) -> std::path::PathBuf {
+    let normalized = normalize_lexical(path);
+
+    // Find the deepest existing ancestor of `normalized`, canonicalize it, then
+    // re-append the tail of components that don't (yet) exist on disk.
+    let mut anchor = normalized.as_path();
+    let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
+    loop {
+        if let Ok(canon) = std::fs::canonicalize(anchor) {
+            let mut out = canon;
+            for comp in tail.iter().rev() {
+                out.push(comp);
+            }
+            return out;
+        }
+        match anchor.parent() {
+            // Push the leaf component onto the tail and try the parent.
+            Some(parent) => {
+                if let Some(name) = anchor.file_name() {
+                    tail.push(name);
+                }
+                anchor = parent;
+            }
+            // No existing ancestor at all (e.g. a bare relative name, or a root
+            // that can't be canonicalized): fall back to the lexical form so the
+            // guard still has a deterministic, `..`-free path to compare.
+            None => return normalized,
+        }
+    }
+}
+
 fn collect_granted_capabilities(m: &ainb_plugin_protocol::manifest::Manifest) -> Vec<String> {
     let c = &m.capabilities;
     let mut out = Vec::new();
@@ -957,7 +1126,7 @@ mod tests {
     //! the keyword (or reorders the branches) trips a unit-level
     //! regression rather than a TUI freeze observed in production.
 
-    use super::{HandleKeyParams, collect_granted_capabilities};
+    use super::{HandleKeyParams, collect_granted_capabilities, resolve_against_existing_ancestor};
     use ainb_plugin_protocol::manifest::{
         Capabilities, CapabilityGrant, Lifecycle, Manifest, PluginMeta, Provides, Subscribes,
     };
@@ -1000,6 +1169,82 @@ mod tests {
             !caps.contains(&"read_paths".to_string()),
             "did not expect read_paths in {caps:?}"
         );
+    }
+
+    /// A unique, repo-local scratch dir under the crate's `target/` (never the
+    /// home dir, `~/.cargo`, or the OS temp). The caller creates a *symlink*
+    /// inside it, which supplies the symlink asymmetry the guard fix targets —
+    /// so we don't need a symlinked OS temp dir to exercise it.
+    fn repo_local_tmp(tag: &str) -> std::path::PathBuf {
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("rt-guard-tests")
+            .join(format!(
+                "{tag}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        std::fs::create_dir_all(&base).expect("create repo-local scratch dir");
+        base
+    }
+
+    #[test]
+    fn resolve_existing_ancestor_resolves_symlink_for_nonexistent_tail() {
+        // A grant whose ancestor is a symlink, with a NOT-yet-existing target
+        // under it, must resolve to the same on-disk root as the canonicalized
+        // grant — so `starts_with` stays true (no spurious deny).
+        let base = repo_local_tmp("resolve");
+        let real = base.join("real");
+        std::fs::create_dir_all(&real).expect("create real dir");
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink link -> real");
+
+        // Prefix (the grant) exists → canonicalizes to `.../real`.
+        let prefix = resolve_against_existing_ancestor(&link);
+        // Target is a non-existent file under the symlinked grant.
+        let ghost = link.join("ghost.md");
+        let target = resolve_against_existing_ancestor(&ghost);
+
+        assert!(
+            target.starts_with(&prefix),
+            "in-envelope non-existent target {target:?} must resolve under prefix {prefix:?}"
+        );
+        // The tail is preserved verbatim on the canonical root.
+        assert_eq!(
+            target.file_name().and_then(|s| s.to_str()),
+            Some("ghost.md")
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn resolve_existing_ancestor_denies_parent_dir_escape() {
+        // A `..`-escape to a real file outside the grant must NOT resolve under
+        // the grant prefix (the headline security claim — preserved by the
+        // `..`-collapse-before-anchor step).
+        let base = repo_local_tmp("escape");
+        let grant = base.join("grant");
+        let secret_dir = base.join("secret");
+        std::fs::create_dir_all(&grant).expect("create grant");
+        std::fs::create_dir_all(&secret_dir).expect("create secret");
+        let secret = secret_dir.join("passwd");
+        std::fs::write(&secret, b"x").expect("write secret");
+
+        let prefix = resolve_against_existing_ancestor(&grant);
+        // `grant/../secret/passwd` escapes to the sibling `secret` dir.
+        let escape = grant.join("..").join("secret").join("passwd");
+        let target = resolve_against_existing_ancestor(&escape);
+
+        assert!(
+            !target.starts_with(&prefix),
+            "`..`-escape {target:?} must NOT resolve under grant prefix {prefix:?}"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]

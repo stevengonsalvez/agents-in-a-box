@@ -33,6 +33,7 @@ async-trait = "0.1"
 ainb-plugin-protocol = { path = "../ainb-plugin-protocol" }
 ainb-plugin-runtime = { path = "../ainb-plugin-runtime" }
 tokio = { workspace = true }
+serde_json = { workspace = true }
 
 # --- Canary binaries ---
 # Each canary is a tiny plugin that speaks JSON-RPC over stdio.
@@ -122,7 +123,13 @@ path = "tests/canaries/a14_cli_dispatch_capture/main.rs"
 test = false
 doc = false
 
-# --- Host-side test harness (all 14 axes) ---
+[[bin]]
+name = "cts-read-paths-config"
+path = "tests/canaries/read_paths_config/main.rs"
+test = false
+doc = false
+
+# --- Host-side test harness (all 14 axes + read_paths/[config]) ---
 
 [[test]]
 name = "axes"

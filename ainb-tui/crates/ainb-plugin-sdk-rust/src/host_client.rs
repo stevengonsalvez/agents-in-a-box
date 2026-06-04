@@ -33,8 +33,9 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use ainb_plugin_protocol::{
     RpcError, framing, methods,
     params::{
-        ActionInvokeParams, ActionInvokeResult, LogLevel, LogParams, SnapshotGetParams,
-        SnapshotGetResult, SnapshotPublishParams, SnapshotSubscribeParams, SnapshotSubscribeResult,
+        ActionInvokeParams, ActionInvokeResult, FsReadDirParams, FsReadDirResult, FsReadFileParams,
+        FsReadFileResult, LogLevel, LogParams, SnapshotGetParams, SnapshotGetResult,
+        SnapshotPublishParams, SnapshotSubscribeParams, SnapshotSubscribeResult,
     },
 };
 
@@ -202,6 +203,24 @@ impl HostClient {
         let result: ActionInvokeResult =
             self.send_request(methods::HOST_ACTION_INVOKE, &params).await?;
         Ok(result.payload)
+    }
+
+    /// Read a file through the host, subject to the plugin's `read_paths`
+    /// capability. The host's path guard resolves `path` and denies the read
+    /// with [`CAPABILITY_DENIED`](ainb_plugin_protocol::errors::CAPABILITY_DENIED)
+    /// (`-32001`) when the target is not under a granted `read_paths` prefix.
+    pub async fn read_file(&self, path: impl Into<String>) -> Result<FsReadFileResult> {
+        let params = FsReadFileParams { path: path.into() };
+        self.send_request(methods::HOST_FS_READ_FILE, &params).await
+    }
+
+    /// Enumerate a directory through the host, subject to the plugin's
+    /// `read_paths` capability. Denied with
+    /// [`CAPABILITY_DENIED`](ainb_plugin_protocol::errors::CAPABILITY_DENIED)
+    /// (`-32001`) when the target is not under a granted `read_paths` prefix.
+    pub async fn read_dir(&self, path: impl Into<String>) -> Result<FsReadDirResult> {
+        let params = FsReadDirParams { path: path.into() };
+        self.send_request(methods::HOST_FS_READ_DIR, &params).await
     }
 
     /// Emit a structured log line through the host. Notification.
