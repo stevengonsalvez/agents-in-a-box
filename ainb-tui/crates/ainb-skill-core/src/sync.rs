@@ -43,6 +43,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use fs2::FileExt;
+
 use crate::manifest::{SourceEntry, TargetMapping};
 use crate::mapping::resolve_pair;
 
@@ -266,7 +268,7 @@ fn decide_both_present(
 //      succeed (the action would never have been planned otherwise; we
 //      re-check so misuse can't silently write to the wrong place).
 //   3. Ask the [`ContentFetcher`] for the bytes at `repo_rel`@ref.
-//   4. Write atomically (tmp + rename) under `tool_home/home_rel`,
+//   4. Write atomically (tmp + rename) under `install_root/home_rel`,
 //      creating parents as needed. Idempotent: re-applying the same
 //      action with the same fetched bytes leaves the file at byte-for-
 //      byte equal content.
@@ -293,6 +295,15 @@ pub enum SyncEngineError {
     /// Filesystem I/O while writing the home file.
     #[error(transparent)]
     Io(#[from] std::io::Error),
+
+    /// Another `ainb skill sync` (in this process or another) already
+    /// holds the per-source advisory lock at
+    /// `<repo_cache_dir>/.ainb-sync.lock`. Carries the lock path so the
+    /// caller can surface "sync in progress on <path>" rather than the
+    /// inscrutable git-stderr error that would otherwise emerge from the
+    /// underlying `.git/index.lock` race.
+    #[error("sync already in progress (lock held at `{0}`)")]
+    SyncInProgress(String),
 }
 
 /// Errors raised by a [`ContentFetcher`] implementation.
@@ -319,7 +330,7 @@ pub trait ContentFetcher {
 }
 
 /// Apply one [`SyncDirection::ToHome`] action: write the upstream file
-/// bytes to the mapped home path under `tool_home`.
+/// bytes to the mapped home path under `install_root`.
 ///
 /// Non-`ToHome` actions short-circuit to `Ok(())` so callers can sweep
 /// a full plan through one loop without dispatching on direction.
@@ -333,9 +344,19 @@ pub trait ContentFetcher {
 /// and the git `ref` to pass into the fetcher. `unit_path` is the
 /// repo-relative path of the unit being synced; the caller usually
 /// gets it from the [`UnitSnapshot`] that fed `plan_sync`.
+///
+/// `install_root` is the per-tool home root — the same value the install
+/// path receives from `install_root_for(tool_name)` and that
+/// `apply_to_home` previously called `tool_home`. `tool_name` is passed
+/// alongside so the executor can strip the leading `.<tool>/` segment
+/// the layout `home` conventionally carries, mirroring the install
+/// path's existing `strip_tool_dotdir` shave. Without that strip the
+/// join would land at `<install_root>/.claude/skills/...` (the bug fixed
+/// here — bead `agents-in-a-box-bsi`).
 pub fn apply_to_home(
     action: &SyncAction,
-    tool_home: &Path,
+    install_root: &Path,
+    tool_name: &str,
     source: &SourceEntry,
     unit_path: &Path,
     fetcher: &dyn ContentFetcher,
@@ -344,11 +365,12 @@ pub fn apply_to_home(
         return Ok(());
     }
 
-    let (home_rel, repo_rel) = resolve_pair(source, unit_path)
+    let (home_rel_raw, repo_rel) = resolve_pair(source, unit_path)
         .ok_or_else(|| SyncEngineError::LayoutNoMatch(path_lossy(unit_path)))?;
 
     let bytes = fetcher.fetch_content(&source.r#ref, &repo_rel)?;
-    let target = tool_home.join(&home_rel);
+    let home_rel = crate::mapping::strip_tool_dotdir(tool_name, &home_rel_raw);
+    let target = install_root.join(&home_rel);
     write_atomic(&target, &bytes)?;
     Ok(())
 }
@@ -407,6 +429,49 @@ fn write_atomic(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// hitting the network.
 pub const SYNC_SKIP_PUSH_ENV: &str = "AINB_SYNC_SKIP_PUSH";
 
+/// Path of the per-source advisory lock held for the duration of
+/// [`apply_to_repo`], relative to `<repo_cache_dir>`. Lives inside the
+/// repo's `.git/` so git treats it as metadata (never shows up in
+/// `git status`, never gets accidentally staged or pushed) while still
+/// being a stable inode shared by every `ainb skill sync` invocation
+/// against the same promote-cache.
+pub const SYNC_LOCK_FILENAME: &str = ".git/ainb-sync.lock";
+
+/// RAII guard for the per-source advisory lock. Holding the guard keeps
+/// the kernel lock alive; dropping it releases the lock by closing the
+/// underlying file descriptor (fs2 does not separate unlock from close
+/// in its `flock`-backed implementation, and we rely on Drop to release
+/// rather than calling `unlock_*` explicitly so a panic inside
+/// `apply_to_repo` still hands the lock back).
+struct SyncLockGuard {
+    _file: fs::File,
+}
+
+/// Acquire the per-source advisory lock at
+/// `<repo_cache_dir>/.ainb-sync.lock`. Non-blocking: if another holder
+/// already owns the lock, returns
+/// [`SyncEngineError::SyncInProgress`] immediately rather than waiting
+/// — the TUI must not freeze on a sister process's git operation.
+fn acquire_sync_lock(repo_cache_dir: &Path) -> std::result::Result<SyncLockGuard, SyncEngineError> {
+    let lock_path = repo_cache_dir.join(SYNC_LOCK_FILENAME);
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)?;
+    match FileExt::try_lock_exclusive(&file) {
+        Ok(()) => Ok(SyncLockGuard { _file: file }),
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            Err(SyncEngineError::SyncInProgress(lock_path.display().to_string()))
+        }
+        Err(e) => Err(SyncEngineError::Io(e)),
+    }
+}
+
 /// Configuration for [`apply_to_repo`].
 #[derive(Debug, Clone)]
 pub struct ApplyToRepoOpts {
@@ -424,9 +489,16 @@ pub struct ApplyToRepoOpts {
 /// Non-`ToRepo` actions short-circuit to `Ok(())` so callers can sweep
 /// a plan through one loop. Idempotent for byte-identical home content
 /// — git's own "nothing to commit" is treated as success.
+///
+/// `install_root` + `tool_name` carry the same meaning here as in
+/// [`apply_to_home`]: the per-tool home root (e.g.
+/// `install_root_for("claude") = ~/.claude`) plus the tool name used to
+/// shave the leading `.<tool>/` from `target_layout.home` so the join
+/// does not double-prefix (bead `agents-in-a-box-bsi`).
 pub fn apply_to_repo(
     action: &SyncAction,
-    tool_home: &Path,
+    install_root: &Path,
+    tool_name: &str,
     source: &SourceEntry,
     unit_path: &Path,
     opts: &ApplyToRepoOpts,
@@ -435,12 +507,22 @@ pub fn apply_to_repo(
         return Ok(());
     }
 
-    let (home_rel, repo_rel) = resolve_pair(source, unit_path)
+    // Acquire the per-source advisory lock BEFORE any cache mutation.
+    // Two concurrent `ainb skill sync` invocations against the same
+    // source would otherwise race on `.git/index.lock` — corruption-
+    // safe (git protects itself) but UX-hostile, surfacing as
+    // "another git process running" stderr noise. Holding `_lock` for
+    // the lifetime of this call keeps the second caller out until the
+    // first finishes its commit + push.
+    let _lock = acquire_sync_lock(&opts.repo_cache_dir)?;
+
+    let (home_rel_raw, repo_rel) = resolve_pair(source, unit_path)
         .ok_or_else(|| SyncEngineError::LayoutNoMatch(path_lossy(unit_path)))?;
+    let home_rel = crate::mapping::strip_tool_dotdir(tool_name, &home_rel_raw);
 
     // Read the home-side bytes — surface a clean error when the home
     // file is missing (caller's plan must have desynced from disk).
-    let home_file = tool_home.join(&home_rel);
+    let home_file = install_root.join(&home_rel);
     let bytes = fs::read(&home_file).map_err(|e| {
         SyncEngineError::Io(std::io::Error::new(
             e.kind(),

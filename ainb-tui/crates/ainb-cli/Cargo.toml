@@ -12,8 +12,15 @@ ainb-fetch = { path = "../ainb-fetch" }
 ainb-usage = { path = "../ainb-usage" }
 anyhow = { workspace = true }
 clap = { workspace = true }
+reqwest = { workspace = true, features = ["blocking"] }
 serde_json = { workspace = true }
 serde_yaml_ng = { workspace = true }
+toml = { workspace = true }
 
 [dev-dependencies]
+serde_json = { workspace = true }
 tempfile = "3"
+# Self-edge: enable skill-core's `test-fixtures` so integration tests see
+# `MockCatalogBackend`. Production build keeps the default feature set
+# (mock absent). Standard tokio/serde pattern.
+ainb-skill-core = { path = "../ainb-skill-core", features = ["test-fixtures"] }

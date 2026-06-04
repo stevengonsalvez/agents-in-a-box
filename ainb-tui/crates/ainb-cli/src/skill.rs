@@ -28,12 +28,13 @@ use ainb_adapters_tool::{
     AcceptDecision, ToolAdapter, adapter_by_name, all_adapters,
     install_root_for, plan::{InstallPlan, PlanOp}, read_root_for,
 };
+use ainb_skill_core::catalog::{rank_by_stars, CatalogBackend};
 use ainb_skill_core::drift::{
     detect_all as drift_detect_all, DriftBackend, DriftStatus, GitLsRemoteBackend,
 };
-use ainb_skill_core::lockfile::{LockedUnit, Lockfile};
+use ainb_skill_core::lockfile::{LockedSource, LockedUnit, Lockfile};
 use ainb_skill_core::manifest::{Manifest, SourceEntry};
-use ainb_skill_core::mapping::resolve_pair;
+use ainb_skill_core::mapping::{resolve_pair, strip_tool_dotdir};
 use ainb_skill_core::paths::{cache_dir_in, lockfile_path_in, manifest_path_in};
 use ainb_skill_core::sync::{
     apply_to_home, apply_to_repo, ApplyToRepoOpts, ContentFetcher, FetchError as SyncFetchError,
@@ -43,9 +44,11 @@ use ainb_skill_core::uri::Uri;
 use ainb_skill_core::{DeployedRef, SourceType, UnitKind};
 use ainb_usage::{InvocationRecord, detect_invocations};
 
+use crate::catalog_http::SkillsShHttpBackend;
 use crate::source::run_fetcher;
 use crate::{
-    CheckArgs, InstallArgs, RemoveSkillArgs, SkillCommand, SyncArgs, UpdateArgs, UsageArgs,
+    BrowseArgs, CheckArgs, InstallArgs, RemoveSkillArgs, SkillCommand, SyncArgs, UpdateArgs,
+    UsageArgs,
 };
 
 pub fn dispatch(home: &Path, action: SkillCommand, out: &mut dyn io::Write) -> Result<()> {
@@ -62,6 +65,16 @@ pub fn dispatch(home: &Path, action: SkillCommand, out: &mut dyn io::Write) -> R
             // with a `MockBackend`.
             let backend = GitLsRemoteBackend::new();
             run_check(home, args, &backend, out)
+        }
+        SkillCommand::Scan(args) => crate::scan::dispatch(home, args, out),
+        SkillCommand::Library { cmd } => crate::library::dispatch(home, cmd, out),
+        SkillCommand::Browse(args) => {
+            // Production backend: HTTP to skills.sh, key from env/config,
+            // honouring the AINB_CATALOG_MOCK / AINB_SKILLS_API_BASE test
+            // hooks. Tests bypass this dispatch and call `browse` directly
+            // with a `MockCatalogBackend`.
+            let backend = SkillsShHttpBackend::from_env(home);
+            browse(home, args, &backend, out)
         }
     }
 }
@@ -90,24 +103,54 @@ fn install(home: &Path, args: InstallArgs, out: &mut dyn io::Write) -> Result<()
                 )
             })?;
 
-    // Find the fetched checkout via lockfile.
+    // Find the fetched checkout via lockfile. If the source has never been
+    // fetched (or its cache dir is gone — e.g. the manifest was authored by
+    // `migrate --discover`, hand-edited, or shared without a lockfile),
+    // fetch it on demand so `install <unit-uri>` is self-sufficient and
+    // never dead-ends on "not yet fetched".
     let mut lockfile = Lockfile::load_from(&lockfile_path_in(home))?;
-    let locked = lockfile
+    let already_fetched = lockfile
         .sources
         .iter()
         .find(|s| s.name == source.name)
-        .ok_or_else(|| anyhow!("source `{}` not yet fetched", source.name))?;
-    let fetched_path: PathBuf = locked
-        .fetched_path
-        .as_deref()
-        .ok_or_else(|| anyhow!("source `{}` has no fetched_path", source.name))?
-        .into();
-    if !fetched_path.exists() {
-        bail!(
-            "fetched source dir `{}` is missing — re-run `ainb source add` to refresh",
-            fetched_path.display()
-        );
-    }
+        .and_then(|s| s.fetched_path.clone())
+        .map(PathBuf::from)
+        .filter(|p| p.exists());
+    let fetched_path: PathBuf = match already_fetched {
+        Some(p) => p,
+        None => {
+            let source_uri_full = Uri::parse(&format!("{}@{}", source.uri, source.r#ref))
+                .with_context(|| {
+                    format!("parsing source URI `{}@{}`", source.uri, source.r#ref)
+                })?;
+            let cache_root = cache_dir_in(home);
+            let fetched = run_fetcher(&source_uri_full, &source.name, &cache_root)
+                .with_context(|| format!("fetching source `{}`", source.name))?;
+            // Upsert the lockfile entry so later runs skip the fetch.
+            if let Some(ls) = lockfile.sources.iter_mut().find(|s| s.name == source.name) {
+                ls.resolved_sha = Some(fetched.resolved_sha.clone());
+                ls.fetched_at = Some(fetched.fetched_at.clone());
+                ls.fetched_path = Some(fetched.path.to_string_lossy().to_string());
+            } else {
+                lockfile.sources.push(LockedSource {
+                    name: source.name.clone(),
+                    uri: source.uri.clone(),
+                    declared_ref: source.r#ref.clone(),
+                    resolved_sha: Some(fetched.resolved_sha.clone()),
+                    fetched_at: Some(fetched.fetched_at.clone()),
+                    fetched_path: Some(fetched.path.to_string_lossy().to_string()),
+                });
+            }
+            lockfile.save_to(&lockfile_path_in(home))?;
+            fetched.path
+        }
+    };
+    // The lockfile now has a fetched entry for this source either way.
+    let source_sha = lockfile
+        .sources
+        .iter()
+        .find(|s| s.name == source.name)
+        .and_then(|s| s.resolved_sha.clone());
 
     // Resolve the unit and pick a source adapter for it.
     let adapter = pick_adapter(&fetched_path)
@@ -200,7 +243,7 @@ fn install(home: &Path, args: InstallArgs, out: &mut dyn io::Write) -> Result<()
         uri: args.uri.clone(),
         declared_uri: args.uri.clone(),
         kind: kind.to_string(),
-        sha: locked.resolved_sha.clone(),
+        sha: source_sha.clone(),
         deployed: deployed_map,
         usage: Default::default(),
     });
@@ -624,6 +667,17 @@ fn sync(home: &Path, args: SyncArgs, out: &mut dyn io::Write) -> Result<()> {
     // honoring the manifest's per-unit `targets` override.
     let mut install_count = 0;
     for uri in &missing {
+        // `local:` orphan units (already-in-place skills discovered on disk)
+        // and any non-unit URI are not installable — there is no source to
+        // fetch from. Skip them so one local orphan can't dead-end the whole
+        // sync (`install` bails with "is not a unit URI").
+        match Uri::parse(uri) {
+            Ok(parsed) if parsed.is_unit() => {}
+            _ => {
+                writeln!(out, "    ~ skip (not an installable unit): {uri}")?;
+                continue;
+            }
+        }
         let targets = manifest.units.iter().find(|u| u.uri == *uri).and_then(|u| u.targets.clone());
         let install_args = InstallArgs {
             uri: uri.clone(),
@@ -783,7 +837,14 @@ fn bidirectional_content_sync(
                             home: home.to_path_buf(),
                             source: source.clone(),
                         };
-                        apply_to_home(&action, &install_root, &source, &unit_path, &fetcher)
+                        apply_to_home(
+                            &action,
+                            &install_root,
+                            tool_name,
+                            &source,
+                            &unit_path,
+                            &fetcher,
+                        )
                             .with_context(|| {
                                 format!("apply_to_home {}/{rel_str}", unit.declared_uri)
                             })?;
@@ -794,7 +855,14 @@ fn bidirectional_content_sync(
                         let opts = ApplyToRepoOpts {
                             repo_cache_dir: cache_dir,
                         };
-                        apply_to_repo(&action, &install_root, &source, &unit_path, &opts)
+                        apply_to_repo(
+                            &action,
+                            &install_root,
+                            tool_name,
+                            &source,
+                            &unit_path,
+                            &opts,
+                        )
                             .with_context(|| {
                                 format!("apply_to_repo {}/{rel_str}", unit.declared_uri)
                             })?;
@@ -817,7 +885,16 @@ fn bidirectional_content_sync(
                 SyncDirection::ToRepo => "->",
                 SyncDirection::NoOp => "==",
             };
-            writeln!(out, "    {arrow} {uri}/{file}  ({reason})")?;
+            // `file` is the repo-relative path (e.g. skills/x/SKILL.md) and
+            // already contains the unit's subpath, so don't re-join it onto
+            // `uri` (which ends at that same subpath) — that double-printed
+            // the unit dir. Show the unit URI for source identity + the file
+            // name being synced.
+            let fname = std::path::Path::new(file)
+                .file_name()
+                .map(|f| f.to_string_lossy().into_owned())
+                .unwrap_or_else(|| file.clone());
+            writeln!(out, "    {arrow} {uri}  [{fname}]  ({reason})")?;
         }
         if args.dry_run {
             writeln!(out, "# dry-run: not applying")?;
@@ -850,6 +927,23 @@ fn bidirectional_content_sync(
 /// [`plan_sync`] because the planner's per-unit `deployed_sha` model
 /// does not carry per-file SHA precision; for content sync we want
 /// "whichever side is byte-different and newer wins".
+/// Unix timestamp of the most recent commit touching `repo_rel` in the cloned
+/// repo. Stable across re-clones, unlike the checked-out file's filesystem
+/// mtime. Returns `None` on any git error so the caller can fall back.
+fn repo_file_commit_unix(clone: &Path, repo_rel: &Path) -> Option<i64> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(clone)
+        .args(["log", "-1", "--format=%ct", "--"])
+        .arg(repo_rel)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8(out.stdout).ok()?.trim().parse::<i64>().ok()
+}
+
 fn plan_file_action_via_clone(
     home: &Path,
     source: &SourceEntry,
@@ -878,7 +972,14 @@ fn plan_file_action_via_clone(
         (Some(h), Some(r)) if h == r => act(SyncDirection::NoOp, "home and repo bytes match"),
         (Some(_), Some(_)) => {
             let home_mtime = file_mtime_unix(home_file);
-            let repo_mtime = file_mtime_unix(&repo_file);
+            // Use the repo file's last *commit* time, not the checked-out
+            // file's filesystem mtime: `ensure_repo_clone` clones/pulls at
+            // sync time, so the working-copy mtime is always "now" and would
+            // make the repo spuriously look newer than a local edit (sending
+            // genuine edits to ToHome, which `--to-repo` then drops — the edit
+            // is silently lost). The commit time is stable across re-clones.
+            let repo_mtime =
+                repo_file_commit_unix(&clone, repo_rel).or_else(|| file_mtime_unix(&repo_file));
             match (home_mtime, repo_mtime) {
                 (Some(h), Some(r)) if h >= r => {
                     act(SyncDirection::ToRepo, "home newer than repo by mtime")
@@ -1211,45 +1312,6 @@ fn remap_dst(
     Some(install_root.join(&stripped))
 }
 
-/// Strip a leading dot-prefixed segment (`.<X>/`) from `home_rel`
-/// since `install_root_for(tool)` already points at the tool home.
-///
-/// The layout's `home` paths conventionally start with the tool's
-/// dotdir (`.claude/...`, `.codex/...`) so a manifest authored with
-/// "home is relative to the user `$HOME`" semantics still works. But
-/// `install_root_for` already resolves *to* the tool home (it embeds
-/// `.claude` / `.codex` for real-home mode, or points at the sandbox
-/// for `AINB_TOOL_HOME_<TOOL>`). Joining the layout's `home` onto it
-/// would double-count the dotdir.
-///
-/// Both the source's own explicit `target_layout` AND the bootstrap
-/// defaults — which are always rooted at `.claude/...` regardless of
-/// the active tool (they're claude-flavored, see
-/// `BOOTSTRAP_DEFAULT_MAPPINGS` in `ainb-skill-core::mapping`) — go
-/// through this strip. So a `.claude/skills` default applied to a
-/// non-claude tool (amazonq, gemini, …) ends up at the tool's
-/// `<install_root>/skills/...` rather than the absurd
-/// `<install_root>/.claude/skills/...`.
-///
-/// We strip the **first** segment when it begins with `.`. Examples:
-///   `.claude/skills/foo/SKILL.md` → `skills/foo/SKILL.md`
-///   `.codex/agents/x.md`          → `agents/x.md`
-///   `agents/x.md`                 → `agents/x.md` (no-op)
-///
-/// The `_tool_name` arg is kept for clarity / future per-tool needs
-/// (e.g. `claude-desktop` whose real-home root isn't a dotdir).
-fn strip_tool_dotdir(_tool_name: &str, home_rel: &Path) -> PathBuf {
-    let mut comps = home_rel.components();
-    if let Some(std::path::Component::Normal(os)) = comps.next() {
-        if let Some(s) = os.to_str() {
-            if s.starts_with('.') && s.len() > 1 {
-                return comps.as_path().to_path_buf();
-            }
-        }
-    }
-    home_rel.to_path_buf()
-}
-
 /// Derive the unit's install-path (the directory the lockfile will
 /// store as `deployed.path`) after the layout remap.
 ///
@@ -1359,7 +1421,7 @@ pub fn run_check(
 
     // Tabular default: fixed-width columns for unit + status, no
     // external table dep.
-    writeln!(out, "{:<60}  {}", "unit", "status")?;
+    writeln!(out, "{:<60}  status", "unit")?;
     writeln!(out, "{:-<60}  {:-<24}", "", "")?;
     for unit in &scoped_lockfile.units {
         let status_str =
@@ -1367,6 +1429,70 @@ pub fn run_check(
         writeln!(out, "{:<60}  {}", unit.declared_uri, status_str)?;
     }
     writeln!(out, "# {} unit(s) checked", scoped_lockfile.units.len())?;
+    Ok(())
+}
+
+/// `ainb skill browse <query> [--json]`: search a remote skill catalog
+/// (skills.sh) and print ranked hits. Read-only — never mutates the
+/// manifest, lockfile, or any unit. Results are ephemeral (NO SQLite).
+///
+/// `backend` is the [`CatalogBackend`] used to resolve hits — the
+/// top-level dispatch passes a [`SkillsShHttpBackend`]; tests inject a
+/// `MockCatalogBackend` so they stay offline. Exactly the same
+/// dependency-injection shape as [`run_check`].
+///
+/// Output:
+/// - default: a ranked table (`name  stars  repo  install-uri`).
+/// - `--json`: the `Vec<CatalogHit>` array, ranked stars-desc.
+/// - empty / whitespace query: a one-line hint, no API call, no error.
+pub fn browse(
+    home: &Path,
+    args: BrowseArgs,
+    backend: &dyn CatalogBackend,
+    out: &mut dyn io::Write,
+) -> Result<()> {
+    let _ = home; // reserved for future per-home catalog config; key
+                  // resolution happens in the backend constructor.
+
+    if args.query.trim().is_empty() {
+        // Empty-query contract: a no-op hint, not an error. JSON mode
+        // still emits an empty array so scripts get valid JSON.
+        if args.json {
+            writeln!(out, "[]")?;
+        } else {
+            writeln!(out, "# empty query — type a query to browse the catalog")?;
+        }
+        return Ok(());
+    }
+
+    let mut hits = backend
+        .search(args.query.trim())
+        .with_context(|| format!("searching catalog for `{}`", args.query.trim()))?;
+    // Re-rank defensively — the contract says backends rank, but a
+    // misbehaving backend shouldn't produce an unordered table.
+    rank_by_stars(&mut hits);
+
+    if args.json {
+        writeln!(out, "{}", serde_json::to_string_pretty(&hits)?)?;
+        return Ok(());
+    }
+
+    if hits.is_empty() {
+        writeln!(out, "# no catalog results for `{}`", args.query.trim())?;
+        return Ok(());
+    }
+
+    // Tabular default: fixed-width columns, no external table dep.
+    writeln!(out, "{:<28}  {:>7}  {:<32}  install-uri", "name", "stars", "repo")?;
+    writeln!(out, "{:-<28}  {:->7}  {:-<32}  {:-<40}", "", "", "", "")?;
+    for h in &hits {
+        writeln!(
+            out,
+            "{:<28}  {:>7}  {:<32}  {}",
+            h.name, h.stars, h.repo, h.install_uri
+        )?;
+    }
+    writeln!(out, "# {} result(s) for `{}`", hits.len(), args.query.trim())?;
     Ok(())
 }
 

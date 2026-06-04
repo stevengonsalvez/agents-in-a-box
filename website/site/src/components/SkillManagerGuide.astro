@@ -1,0 +1,263 @@
+---
+// Skill manager guide — same layout as the standalone explainer, recolored to
+// the docsite CRT theme (tokens.css). Gifs bundled via Astro asset pipeline
+// (plain import keeps them animated; <Image> would flatten the gif).
+const gifs = import.meta.glob('../assets/skill-manager/journeys/*.gif', { eager: true, import: 'default' });
+const gif = (name) => gifs[`../assets/skill-manager/journeys/${name}.gif`].src;
+---
+<div class="smg not-content">
+<div class="tabs">
+    <button class="tab on" data-t="user">User</button>
+    <button class="tab" data-t="demos">Demos</button>
+    <button class="tab" data-t="internals">Internals</button>
+  </div>
+
+  <!-- ============================== USER ============================== -->
+  <section class="panel on" id="user">
+    <p class="lede">One screen to keep the <b>skills, agents, commands and plugins</b> for all your AI coding tools — Claude Code, Codex, Cursor, Copilot, Gemini — in sync. Install from a repo or the catalog, adopt what's already on your machine, keep your own skills in a library, and push your edits back upstream — <b>across every tool at once</b>.</p>
+
+    <h2><span class="n">1</span>Getting in &amp; what you see</h2>
+    <p>Run <code>ainb</code>, then press <span class="key">m</span> (or pick <b>Skills (manager)</b> in the sidebar). You get three panes:</p>
+    <div class="panes">
+      <div class="pane"><h3>Sources</h3><p>Where your skills come from — repos you added, the catalog, your own machine.</p></div>
+      <div class="pane"><h3>Units</h3><p>The actual skills / agents / commands / plugins, each with a status glyph on the right.</p></div>
+      <div class="pane"><h3>Detail</h3><p>Info on the selected unit — its URI, where it deployed, how often you've used it.</p></div>
+    </div>
+
+    <h2><span class="n">2</span>The keys, in plain words</h2>
+    <table>
+      <thead><tr><th>Press</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td class="k"><span class="key">m</span></td><td>Open the Skill Manager (from home) · press again to re-scan for new skills</td></tr>
+        <tr><td class="k"><span class="key">i</span></td><td>Add a <b>source</b> — paste a repo like <code>gh:owner/repo</code></td></tr>
+        <tr><td class="k"><span class="key">b</span></td><td><b>Browse the catalog</b> — search for new skills online, Enter to install</td></tr>
+        <tr><td class="k"><span class="key">l</span></td><td>Your <b>library</b> — skills you wrote yourself</td></tr>
+        <tr><td class="k"><span class="key">u</span></td><td><b>Update</b> the selected skill to latest</td></tr>
+        <tr><td class="k"><span class="key">c</span></td><td><b>Check</b> which skills are behind upstream</td></tr>
+        <tr><td class="k"><span class="key">r</span></td><td><b>Remove</b> the selected skill</td></tr>
+        <tr><td class="k"><span class="key">s</span></td><td><b>Sync</b> — push your local edits back upstream</td></tr>
+        <tr><td class="k"><span class="key">/</span></td><td>Search / filter the list</td></tr>
+        <tr><td class="k"><span class="key">↑↓</span> <span class="key">j</span> <span class="key">k</span></td><td>Move the cursor · <span class="key">g</span>/<span class="key">G</span> first/last</td></tr>
+        <tr><td class="k"><span class="key">q</span> <span class="key">Esc</span></td><td>Leave</td></tr>
+      </tbody>
+    </table>
+
+    <h2><span class="n">3</span>The status glyphs</h2>
+    <div class="glyphs">
+      <div class="gl"><span class="s s-green">✓</span> up to date</div>
+      <div class="gl"><span class="s s-gold">⚠</span> behind — press <span class="key">u</span></div>
+      <div class="gl"><span class="s s-blue">▲</span> you're ahead</div>
+      <div class="gl"><span class="s s-red">⟷</span> diverged</div>
+      <div class="gl"><span class="s s-muted">…</span> checking</div>
+    </div>
+
+    <h2><span class="n">4</span>The things you'll actually do</h2>
+    <div class="sub">Each one recorded — what you press, what you see. (CLI equivalent under each.)</div>
+
+    <div class="journey">
+      <div class="jh"><h3>① Adopt what's already installed</h3><div class="do">Press <span class="key">m</span> → the discovery banner appears → press <span class="key">Enter</span>. <span class="see">You see: Sources + Units fill with the skills &amp; plugins you already had.</span></div></div>
+      <figure><img src={gif("tui-discover-import")} alt="discover and import" loading="lazy" /></figure>
+      <div class="jcli">CLI: <code>ainb migrate --discover</code></div>
+    </div>
+
+    <div class="journey">
+      <div class="jh"><h3>② Find &amp; install a new skill</h3><div class="do">Press <span class="key">b</span> → type a query → <span class="key">Enter</span> to search → <span class="key">Enter</span> to install the pick. <span class="see">You see: catalog results, then the skill installs into your tools.</span></div></div>
+      <figure><img src={gif("tui-browse-install")} alt="browse and install" loading="lazy" /></figure>
+      <div class="jcli">CLI: <code>ainb skill browse &lt;query&gt;</code> → <code>ainb skill install &lt;uri&gt;</code></div>
+    </div>
+
+    <div class="journey">
+      <div class="jh"><h3>③ Keep your own skills</h3><div class="do">Press <span class="key">l</span>. <span class="see">You see: your hand-written skills in one Library view.</span></div></div>
+      <figure><img src={gif("tui-own-library")} alt="own library" loading="lazy" /></figure>
+      <div class="jcli">CLI: <code>ainb skill library new &lt;name&gt;</code> · <code>ainb skill library list</code></div>
+    </div>
+
+    <div class="journey">
+      <div class="jh"><h3>④ Push an edit back upstream</h3><div class="do">Edit a deployed skill file → press <span class="key">m</span> → select it → <span class="key">s</span>. <span class="see">You see: a <code>sync:</code> notification; your change is committed + pushed.</span></div></div>
+      <figure><img src={gif("tui-sync-edit")} alt="sync an edit" loading="lazy" /></figure>
+      <div class="jcli">CLI: <code>ainb skill sync --to-repo</code></div>
+    </div>
+
+    <div class="journey">
+      <div class="jh"><h3>⑤ Update &amp; remove</h3><div class="do">Select a unit → <span class="key">u</span> to update, <span class="key">r</span> to remove. <span class="see">You see: an update notification, then the unit leaves the list.</span></div></div>
+      <figure><img src={gif("tui-update-remove")} alt="update and remove" loading="lazy" /></figure>
+      <div class="jcli">CLI: <code>ainb skill check</code> · <code>ainb skill update &lt;uri&gt;</code> · <code>ainb skill remove &lt;uri&gt;</code></div>
+    </div>
+
+    <div class="journey">
+      <div class="jh"><h3>⑥ Search &amp; navigate</h3><div class="do">Arrow / <span class="key">j</span><span class="key">k</span> to move; <span class="key">/</span> then type to filter. <span class="see">You see: the cursor + Detail track each row; the list narrows as you type.</span></div></div>
+      <figure><img src={gif("tui-search-nav")} alt="search and navigate" loading="lazy" /></figure>
+      <div class="jcli">CLI: this one is interactive-only — use <code>ainb skill check --source &lt;name&gt;</code> to scope on the terminal.</div>
+    </div>
+
+    <div class="callout">
+      <span class="i">⬡</span>
+      <div><b>It manages plugins too.</b> Unlike other skill managers, ainb understands Claude marketplace plugins — the discovery banner counts them separately and manages them like any other unit.</div>
+    </div>
+  </section>
+
+  <!-- ============================== DEMOS ============================== -->
+  <section class="panel" id="demos">
+    <p class="sub">Every journey, recorded both ways — the TUI keypresses and the equivalent CLI commands. (Recorded with <code>vhs</code>.)</p>
+    <div class="gallery">
+      <div class="demo"><div class="dh">Discover &amp; import <span class="tag tui">TUI</span></div><img src={gif("tui-discover-import")} alt="" loading="lazy" /></div>
+      <div class="demo"><div class="dh">Discover &amp; import <span class="tag cli">CLI</span></div><img src={gif("cli-discover-import")} alt="" loading="lazy" /></div>
+      <div class="demo"><div class="dh">Browse &amp; install <span class="tag tui">TUI</span></div><img src={gif("tui-browse-install")} alt="" loading="lazy" /></div>
+      <div class="demo"><div class="dh">Browse &amp; install <span class="tag cli">CLI</span></div><img src={gif("cli-browse-install")} alt="" loading="lazy" /></div>
+      <div class="demo"><div class="dh">Own library <span class="tag tui">TUI</span></div><img src={gif("tui-own-library")} alt="" loading="lazy" /></div>
+      <div class="demo"><div class="dh">Own library <span class="tag cli">CLI</span></div><img src={gif("cli-own-library")} alt="" loading="lazy" /></div>
+      <div class="demo"><div class="dh">Sync an edit <span class="tag tui">TUI</span></div><img src={gif("tui-sync-edit")} alt="" loading="lazy" /></div>
+      <div class="demo"><div class="dh">Sync an edit <span class="tag cli">CLI</span></div><img src={gif("cli-sync-edit")} alt="" loading="lazy" /></div>
+      <div class="demo"><div class="dh">Update &amp; remove <span class="tag tui">TUI</span></div><img src={gif("tui-update-remove")} alt="" loading="lazy" /></div>
+      <div class="demo"><div class="dh">Update &amp; remove <span class="tag cli">CLI</span></div><img src={gif("cli-update-remove")} alt="" loading="lazy" /></div>
+      <div class="demo"><div class="dh">Search &amp; navigate <span class="tag tui">TUI</span></div><img src={gif("tui-search-nav")} alt="" loading="lazy" /></div>
+    </div>
+  </section>
+
+  <!-- ============================== INTERNALS ============================== -->
+  <section class="panel" id="internals">
+    <p class="lede">A reconciler for <b>units</b> (skills, agents, commands, mcp-servers, hooks, and Claude plugins) across many tool homes and source repos. State lives in <b>three YAML files</b> — no database. Every key maps to an event and a real on-disk effect.</p>
+
+    <h2>The data model — three YAML files, no DB</h2>
+    <table>
+      <thead><tr><th>File</th><th>What it holds</th></tr></thead>
+      <tbody>
+        <tr><td class="f">manifest.yaml</td><td class="note">Your source of truth: <code>sources</code> (each with a <code>target_layout</code>) + the <code>units</code> you manage. User-authored, git-diffable.</td></tr>
+        <tr><td class="f">lock.yaml</td><td class="note">Resolved state: each unit's pinned SHA, deploy paths per tool, usage telemetry.</td></tr>
+        <tr><td class="f">library.yaml</td><td class="note">Your own authored skills — a first-class personal library.</td></tr>
+      </tbody>
+    </table>
+    <p>All under <code>~/.agents-in-a-box/</code>. Plain serde load/save — reviewable in a PR, never an opaque store.</p>
+
+    <h2>Discovery — two walkers + a provenance matcher</h2>
+    <pre><span class="c"># Class-A — Claude marketplace plugins</span>
+~/.claude/plugins/cache/&lt;mp&gt;/&lt;plugin&gt;/&lt;ver&gt;/.claude-plugin/plugin.json
+   <span class="k">→</span> marketplace:&lt;plugin&gt;@&lt;mp&gt;
+
+<span class="c"># Class-C — orphan units across 9 tool homes</span>
+~/.&#123;claude,codex,copilot,gemini,cursor,amazonq,claude-desktop,cline,roo&#125;/&#123;skills,agents,commands,...&#125;/
+
+<span class="c"># Provenance matcher (pure) — attribute each finding to its real source</span>
+attribute(classA, classC, sources) <span class="k">→</span> Vec&lt;AttributedUnit&gt;
+   Marketplace | ExternalRepo (external-dependencies.yaml) | Toolkit | AlreadyAdopted | Local</pre>
+    <div class="callout win"><span class="i">⬡</span><div><b>Plugins are first-class.</b> Class-A reads <code>plugin.json</code> and treats a plugin as a bundle of skills — the exact layout other skill managers deliberately filter out. The matcher resolves an externally-cloned skill to its <code>gh:</code> upstream instead of mislabelling it <code>local:</code>.</div></div>
+
+    <h2>Sources &amp; target_layout — the fan-out</h2>
+    <pre>sources:
+  - name: my-skills
+    uri: gh:owner/repo
+    target_layout:
+      - glob: <span class="o">"skills/*/SKILL.md"</span>
+        home: <span class="o">".claude/skills"</span>   <span class="c"># where it lands on your machine</span>
+        repo: <span class="o">"skills"</span>           <span class="c"># where it lives in the repo</span></pre>
+    <p>The pure <code>resolve_pair(source, unit_path)</code> translates each unit's path into its <code>(home, repo)</code> pair (first-glob-wins); an empty layout falls back to bootstrap defaults.</p>
+
+    <h2>Sync — pure planner, IO executors, bidirectional</h2>
+    <pre>plan_sync(source, mappings, units)  <span class="c"># pure: direction per unit</span>
+  <span class="k">→</span> ToHome <span class="k">→</span> apply_to_home()   <span class="c"># fetch upstream, atomic write</span>
+    ToRepo <span class="k">→</span> apply_to_repo()   <span class="c"># copy, git add/commit/push (per-source lock)</span></pre>
+    <p>Unlike one-way installers, ainb does <b>push-back</b>: edit a deployed file, press <code>s</code>, and your change is committed + pushed to the source. A per-source lock at <code>.git/ainb-sync.lock</code> stops two syncs racing.</p>
+
+    <h2>Drift &amp; catalog — both behind a mockable trait</h2>
+    <table>
+      <thead><tr><th>Subsystem</th><th>Production</th><th>Tests</th></tr></thead>
+      <tbody>
+        <tr><td class="f">Drift</td><td class="note"><code>GitLsRemoteBackend</code> — <code>git ls-remote</code> → ✓/⚠/▲/⟷, background poll on open</td><td class="note"><code>MockBackend</code></td></tr>
+        <tr><td class="f">Catalog</td><td class="note"><code>SkillsShHttpBackend</code> — skills.sh; key from <code>config.toml [skills].api_key</code> or <code>AINB_SKILLS_API_KEY</code></td><td class="note"><code>MockCatalogBackend</code> (zero network)</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Every key → event → effect</h2>
+    <table>
+      <thead><tr><th>Key</th><th>Effect</th></tr></thead>
+      <tbody>
+        <tr><td class="f">m</td><td class="note">reload from disk · drift poll · run walkers · (re-)show banner, clearing any skip-marker</td></tr>
+        <tr><td class="f">Enter (banner)</td><td class="note">reconcile walker output → write manifest</td></tr>
+        <tr><td class="f">i</td><td class="note"><code>ainb source add &lt;uri&gt;</code> in-process → reload</td></tr>
+        <tr><td class="f">b</td><td class="note">CatalogBackend.search → results modal → install selected</td></tr>
+        <tr><td class="f">l</td><td class="note">render library.yaml owned skills</td></tr>
+        <tr><td class="f">u / r</td><td class="note"><code>ainb skill update/remove</code> on the selected unit → toast + reload</td></tr>
+        <tr><td class="f">c</td><td class="note">re-trigger background drift scan → glyphs refresh</td></tr>
+        <tr><td class="f">s</td><td class="note">no peer → sync intent + toast; conflict pair → flip <code>shadowed_by</code></td></tr>
+        <tr><td class="f">/</td><td class="note">filter Units (name / source / kind)</td></tr>
+      </tbody>
+    </table>
+
+    <h2>How it's tested</h2>
+    <p>A feature-gated <b>sandbox fixture</b> seeds a fake <code>~/.claude</code>/<code>~/.codex</code> + a bare git remote, used by both in-process tests and a <code>scripts/skill-manager-sandbox.sh</code> launcher for manual testing. Three tiers: pure unit tests, CLI integration tests, and <b>live tmux tripwires</b> that spawn the real binary, press keys, and assert the captured pane — every keybind proven end-to-end against the actual program. (The Demos tab gifs above were recorded the same way, with <code>vhs</code>.)</p>
+  </section>
+</div>
+
+<style>
+  /* Recolored to docsite CRT tokens; layout identical to the standalone guide. */
+  .smg{
+    --bg:#0F0F18; --panel:#191923; --raised:#1F1F2D; --hl:#28283C;
+    --border:#6495ED; --gold:#FFD700; --green:#64C864; --blue:#6495ED;
+    --red:#E0606A; --text:#DCDCE6; --muted:#78788C; --faint:#4A4A5C;
+    --line:color-mix(in srgb,#6495ED 28%,transparent);
+    --mono:'JetBrains Mono','SF Mono',Menlo,monospace;
+    --display:'IBM Plex Mono','JetBrains Mono',monospace;
+    font-family:var(--mono); color:var(--text); line-height:1.62;
+  }
+  .smg *{box-sizing:border-box}
+  /* tabs */
+  .smg .tabs{display:flex;gap:6px;border-bottom:1.5px solid var(--line);margin:0 0 30px}
+  .smg .tab{appearance:none;border:none;background:none;font-family:var(--mono);font-size:13px;color:var(--muted);padding:11px 18px;cursor:pointer;border-bottom:2.5px solid transparent;margin-bottom:-1.5px;letter-spacing:.02em}
+  .smg .tab:hover{color:var(--text)}
+  .smg .tab.on{color:var(--gold);border-bottom-color:var(--gold);font-weight:700}
+  .smg .panel{display:none}.smg .panel.on{display:block}
+  .smg h2{font-family:var(--display);font-weight:600;font-size:23px;color:var(--border);margin:42px 0 8px;letter-spacing:-.01em}
+  .smg h2:first-child{margin-top:0}
+  .smg h2 .n{font-family:var(--mono);font-size:15px;color:var(--gold);margin-right:10px}
+  .smg .sub{font-size:13px;color:var(--muted);margin-bottom:14px;max-width:820px}
+  .smg p{margin:0 0 12px;max-width:820px}
+  .smg .lede{font-size:16px;color:var(--text);max-width:800px}.smg .lede b{color:var(--gold);font-weight:600}
+  .smg .key{display:inline-block;min-width:24px;text-align:center;padding:2px 8px;border-radius:6px;background:var(--hl);color:var(--gold);font-family:var(--mono);font-size:13px;font-weight:700;border:1px solid var(--line)}
+  .smg code{font-family:var(--mono);font-size:.9em;background:var(--hl);color:var(--green);padding:1px 6px;border-radius:4px}
+  .smg pre{background:#0A0A12;color:#DCDCE6;border:1px solid var(--line);border-radius:12px;padding:16px 20px;overflow-x:auto;font-family:var(--mono);font-size:12.5px;line-height:1.55;margin:14px 0}
+  .smg pre .c{color:var(--muted)}.smg pre .k{color:var(--gold)}.smg pre .o{color:var(--green)}
+  .smg table{border-collapse:collapse;width:100%;font-size:13.5px;margin:14px 0}
+  .smg th,.smg td{border:1px solid var(--line);padding:9px 13px;text-align:left;vertical-align:top}
+  .smg th{background:var(--panel);font-family:var(--mono);font-size:11px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+  .smg td.k{width:120px;white-space:nowrap}.smg td.f{font-weight:600;color:var(--gold);white-space:nowrap}.smg td.note{color:var(--muted);font-size:12.5px}
+  .smg .panes{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;margin:16px 0}
+  @media(max-width:760px){.smg .panes{grid-template-columns:1fr}}
+  .smg .pane{background:var(--panel);border:1.5px solid var(--line);border-radius:10px;padding:16px 18px}
+  .smg .pane h3{font-family:var(--display);font-size:16px;color:var(--border);font-weight:600;margin:0 0 4px}.smg .pane p{font-size:13.5px;color:var(--muted);margin:0}
+  /* journey */
+  .smg .journey{background:var(--panel);border:1.5px solid var(--line);border-radius:14px;padding:0;margin:20px 0;overflow:hidden}
+  .smg .journey .jh{padding:16px 20px;border-bottom:1.5px solid var(--raised)}
+  .smg .journey .jh h3{font-family:var(--display);font-size:19px;color:var(--gold);font-weight:600;margin:0 0 6px}
+  .smg .journey .jh .do{font-size:14px}.smg .journey .jh .do .see{color:var(--green)}
+  .smg .journey figure{margin:0;background:#0A0A12}
+  .smg .journey figure img{display:block;width:100%}
+  .smg .journey .jcli{padding:12px 20px;border-top:1.5px solid var(--raised);font-size:13px;color:var(--muted)}
+  .smg .journey .jcli code{color:var(--green)}
+  .smg .glyphs{display:flex;flex-wrap:wrap;gap:10px;margin:12px 0}
+  .smg .gl{display:flex;gap:8px;align-items:center;background:var(--panel);border:1.5px solid var(--line);border-radius:8px;padding:7px 12px;font-size:13px}.smg .gl .s{font-size:16px;font-weight:700}
+  .smg .s-green{color:var(--green)}.smg .s-gold{color:var(--gold)}.smg .s-blue{color:var(--blue)}.smg .s-red{color:var(--red)}.smg .s-muted{color:var(--muted)}
+  .smg .callout{display:flex;gap:12px;border:1.5px solid var(--line);background:color-mix(in srgb,var(--border) 8%,transparent);border-radius:12px;padding:16px 18px;margin:18px 0;font-size:14px}
+  .smg .callout.win{border-color:color-mix(in srgb,var(--green) 50%,transparent);background:color-mix(in srgb,var(--green) 8%,transparent)}
+  .smg .callout .i{color:var(--gold);font-weight:700;font-size:18px}.smg .callout b{color:var(--gold)}
+  /* gallery */
+  .smg .gallery{display:grid;grid-template-columns:1fr 1fr;gap:22px;margin-top:8px}
+  @media(max-width:760px){.smg .gallery{grid-template-columns:1fr}}
+  .smg .demo{background:var(--panel);border:1.5px solid var(--line);border-radius:12px;overflow:hidden}
+  .smg .demo .dh{padding:11px 16px;font-family:var(--mono);font-size:12px;color:var(--text);border-bottom:1.5px solid var(--raised);display:flex;justify-content:space-between;align-items:center}
+  .smg .demo .dh .tag{font-size:10px;letter-spacing:.05em;text-transform:uppercase;padding:2px 7px;border-radius:5px}
+  .smg .tag.tui{background:color-mix(in srgb,var(--gold) 18%,transparent);color:var(--gold)}
+  .smg .tag.cli{background:color-mix(in srgb,var(--green) 18%,transparent);color:var(--green)}
+  .smg .demo img{display:block;width:100%;background:#0A0A12}
+</style>
+
+<script>
+document.querySelectorAll('.tab').forEach(function(btn){
+  btn.addEventListener('click', function(){
+    document.querySelectorAll('.tab').forEach(function(b){b.classList.remove('on')});
+    document.querySelectorAll('.panel').forEach(function(p){p.classList.remove('on')});
+    btn.classList.add('on');
+    document.getElementById(btn.dataset.t).classList.add('on');
+    window.scrollTo(0,0);
+  });
+});
+</script>

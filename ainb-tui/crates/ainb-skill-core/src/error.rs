@@ -19,6 +19,9 @@ pub enum CoreError {
     #[error("lockfile at {path:?} is invalid: {message}")]
     InvalidLockfile { path: PathBuf, message: String },
 
+    #[error("library at {path:?} is invalid: {message}")]
+    InvalidLibrary { path: PathBuf, message: String },
+
     #[error("source `{0}` not found in manifest")]
     SourceNotFound(String),
 

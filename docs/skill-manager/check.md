@@ -1,4 +1,7 @@
-# Skill Drift Check (v1.2)
+---
+title: Drift check
+description: Detect units that have drifted ahead of or behind their upstream source.
+---
 
 > Per-unit drift detection between each locked unit's pinned SHA
 > and its source's current upstream tip. See

@@ -1,4 +1,7 @@
-# Skill Discovery (v1.1)
+---
+title: Discovery & import
+description: Detect existing skills, agents, commands and marketplace plugins on disk and adopt them into the manifest.
+---
 
 > Read-only adoption flow for users with pre-populated tool homes
 > and Claude-Code-installed marketplace plugins. Layers on top of

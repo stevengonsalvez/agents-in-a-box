@@ -10,10 +10,13 @@ use std::io;
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 
+pub mod catalog_http;
 pub mod discovery;
 pub mod doctor;
+pub mod library;
 pub mod migrate;
 pub mod promote;
+pub mod scan;
 pub mod search;
 pub mod skill;
 pub mod source;
@@ -149,6 +152,59 @@ pub enum SkillCommand {
     /// source's current upstream tip. Read-only; never mutates the
     /// lockfile or any on-disk unit.
     Check(CheckArgs),
+    /// Walk every tool home + the Claude Code plugin cache and print a
+    /// provenance tree (which real source each discovered unit came
+    /// from: marketplace / external repo / toolkit / adopted / local).
+    /// Read-only; never mutates the manifest, lockfile, or any unit.
+    Scan(ScanArgs),
+    /// Browse a remote skill catalog (skills.sh) before installing.
+    /// Prints ranked hits (name, repo, stars, install-uri). Read-only.
+    /// The API key is optional — read from `[skills].api_key` in
+    /// config.toml or the `AINB_SKILLS_API_KEY` env var.
+    Browse(BrowseArgs),
+    /// Manage the own-skill library — skills the user authored locally,
+    /// tracked in `library.yaml` (sibling to the manifest). `list` shows
+    /// owned units, `add <path>` ingests an existing on-disk skill folder
+    /// (must live under a tool home), `new <name>` scaffolds a fresh
+    /// `SKILL.md` and registers it.
+    Library {
+        #[command(subcommand)]
+        cmd: LibraryCmd,
+    },
+}
+
+/// `ainb skill library ...` subcommand tree — bead ai-lgk.
+#[derive(Subcommand, Debug)]
+pub enum LibraryCmd {
+    /// List every owned unit registered in `library.yaml`.
+    List {
+        /// Emit machine-readable JSON (`[{name, kind, path, created,
+        /// promoted_uri?}, …]`) instead of the default table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Ingest an existing on-disk skill folder into the library. The
+    /// path must live under one of the sandbox tool homes (refused
+    /// otherwise — safety belt against registering arbitrary paths).
+    Add {
+        /// Path to the skill folder (e.g. `~/.claude/skills/my-skill`).
+        path: std::path::PathBuf,
+
+        /// Tool whose home the path is expected under (`claude`,
+        /// `codex`, …). Defaults to `claude`.
+        #[arg(long)]
+        tool: Option<String>,
+    },
+    /// Scaffold a fresh `SKILL.md` under the tool's skills dir and
+    /// register it as an owned unit.
+    New {
+        /// New skill name (used for the folder + frontmatter `name`).
+        name: String,
+
+        /// Tool whose home to scaffold under. Defaults to `claude`.
+        #[arg(long)]
+        tool: Option<String>,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -250,6 +306,19 @@ pub struct UsageArgs {
 }
 
 #[derive(Args, Debug)]
+pub struct BrowseArgs {
+    /// Catalog search query (matched against unit names / descriptions
+    /// server-side). An empty / whitespace-only query is a no-op that
+    /// prints a hint rather than hitting the API.
+    pub query: String,
+
+    /// Emit machine-readable JSON (`[{name, repo, stars, install_uri,
+    /// description}, …]`) instead of the default ranked table.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug)]
 pub struct CheckArgs {
     /// Optional source name to scope the report to a single source.
     /// Without it, every locked unit's source is checked.
@@ -259,6 +328,29 @@ pub struct CheckArgs {
     /// instead of the default tabular output. Useful for scripting.
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Args, Debug, Default)]
+pub struct ScanArgs {
+    /// Restrict the tree to one provenance kind:
+    /// `marketplace` | `external` | `toolkit` | `adopted` | `local`.
+    #[arg(long)]
+    pub provenance: Option<String>,
+
+    /// Restrict the tree to units discovered under one tool home
+    /// (`claude`, `codex`, …). Marketplace plugins are claude-deployed.
+    #[arg(long)]
+    pub tool: Option<String>,
+
+    /// Emit machine-readable JSON instead of the default tree.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Override the `external-dependencies.yaml` path used to resolve
+    /// external-clone provenance. Defaults to `$HOME/external-dependencies.yaml`
+    /// then the current working directory. Mainly for tests.
+    #[arg(long = "ext-deps", value_name = "PATH")]
+    pub ext_deps: Option<std::path::PathBuf>,
 }
 
 #[derive(Args, Debug, Default)]

@@ -529,6 +529,12 @@ pub struct UiPreferences {
     #[serde(default)]
     pub sessions_sidebar_collapsed: Option<bool>,
 
+    /// Preferred SkillManager screen Sources-panel width in terminal
+    /// columns. `None` falls back to the 32-column default. Persisted
+    /// on divider-drag / `[`-`]` resize-finish.
+    #[serde(default)]
+    pub skill_manager_sources_width: Option<u16>,
+
     /// User's response to the "wire up Claude Code statusline" prompt.
     /// `Unset` means we'll prompt again (init wizard) and surface the
     /// CTA in the Budget panel. `Declined` suppresses the top-bar CTA
@@ -582,6 +588,7 @@ impl Default for UiPreferences {
             home_sidebar_width: None,
             sessions_sidebar_width: None,
             sessions_sidebar_collapsed: None,
+            skill_manager_sources_width: None,
             statusline_decision: StatuslineDecision::default(),
             tmux_decision: TmuxDecision::default(),
         }
@@ -808,6 +815,10 @@ impl AppConfig {
         if other.ui_preferences.sessions_sidebar_collapsed.is_some() {
             self.ui_preferences.sessions_sidebar_collapsed =
                 other.ui_preferences.sessions_sidebar_collapsed;
+        }
+        if other.ui_preferences.skill_manager_sources_width.is_some() {
+            self.ui_preferences.skill_manager_sources_width =
+                other.ui_preferences.skill_manager_sources_width;
         }
         // Decision fields: always trust on-disk, even when the value equals
         // the default. "Unset" is itself a meaningful decision (means: prompt
@@ -1209,6 +1220,7 @@ mod old_config_tests {
                 home_sidebar_width: None,
                 sessions_sidebar_width: None,
                 sessions_sidebar_collapsed: None,
+                skill_manager_sources_width: None,
                 statusline_decision: StatuslineDecision::default(),
                 tmux_decision: TmuxDecision::default(),
             },
@@ -1253,6 +1265,7 @@ mod old_config_tests {
                 home_sidebar_width: Some(38),
                 sessions_sidebar_width: Some(46),
                 sessions_sidebar_collapsed: Some(true),
+                skill_manager_sources_width: None,
                 statusline_decision: StatuslineDecision::default(),
                 tmux_decision: TmuxDecision::default(),
             },

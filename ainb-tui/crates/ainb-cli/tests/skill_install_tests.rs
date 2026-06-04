@@ -370,3 +370,48 @@ fn install_skips_unsupported_kinds_per_matrix() {
         },
     );
 }
+
+#[test]
+fn install_fetches_source_on_demand_when_not_locked() {
+    // Regression: a manifest source with NO lockfile entry (authored by
+    // `migrate --discover`, hand-edited, or shared without a lockfile) must
+    // NOT dead-end install with "source not yet fetched" — install fetches
+    // the source on demand and repopulates the lockfile.
+    let home = tmp_home();
+    let (_src, unit_uri) = add_local_skill_source(home.path(), "fixture");
+
+    // Simulate "manifest has the source, lockfile does not".
+    let mut lock = Lockfile::load_from(&lockfile_path_in(home.path())).unwrap();
+    lock.sources.clear();
+    lock.save_to(&lockfile_path_in(home.path())).unwrap();
+
+    let base = tempfile::tempdir().unwrap();
+    with_all_tool_homes_under(base.path(), |tool_paths| {
+        let (out, res) = run(
+            home.path(),
+            SkillCommand::Install(InstallArgs {
+                uri: unit_uri.clone(),
+                targets: None,
+                dry_run: false,
+                yes: true,
+            }),
+        );
+        res.expect("install must fetch-on-demand, not error 'not yet fetched'");
+        assert!(out.contains("installed"), "got: {out}");
+        for (tool, dir) in tool_paths {
+            if *tool == "claude" {
+                assert!(
+                    dir.join("skills/commit/SKILL.md").exists(),
+                    "skill not deployed under claude: {dir:?}"
+                );
+            }
+        }
+        // The on-demand fetch repopulated the lockfile source entry.
+        let lock = Lockfile::load_from(&lockfile_path_in(home.path())).unwrap();
+        assert_eq!(
+            lock.sources.len(),
+            1,
+            "source should be re-fetched into the lockfile"
+        );
+    });
+}

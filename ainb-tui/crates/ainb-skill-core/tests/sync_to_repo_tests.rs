@@ -20,6 +20,34 @@ use ainb_skill_core::manifest::{SourceEntry, TargetMapping};
 use ainb_skill_core::sync::{
     apply_to_repo, ApplyToRepoOpts, SyncAction, SyncDirection,
 };
+use ainb_skill_core::{build_skill_manager_sandbox, SandboxLayout, SandboxTier};
+
+/// Wraps a `TempDir` + the `SandboxLayout` it backs so callers can
+/// hold one binding (keeping the tempdir alive) and reach the layout
+/// paths through Deref. The fixture's `claude_home` plays
+/// `install_root_for("claude")`'s role — `apply_to_repo` reads + writes
+/// under it after the dot-dir strip.
+struct SandboxGuard {
+    _tempdir: tempfile::TempDir,
+    layout: SandboxLayout,
+}
+
+impl SandboxGuard {
+    fn new() -> Self {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let layout = build_skill_manager_sandbox(tempdir.path(), SandboxTier::Minimal)
+            .expect("sandbox fixture");
+        Self { _tempdir: tempdir, layout }
+    }
+
+    fn claude_home(&self) -> &Path {
+        &self.layout.claude_home
+    }
+
+    fn bare_remote(&self) -> &Path {
+        &self.layout.bare_remote
+    }
+}
 
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -80,14 +108,18 @@ fn with_skip_push<R>(body: impl FnOnce() -> R) -> R {
 
 #[test]
 fn apply_to_repo_copies_commits_and_advances_head() {
-    let tool_home = tempfile::tempdir().unwrap();
+    let sb = SandboxGuard::new();
+    let tool_home = sb.claude_home();
     let repo_dir = tempfile::tempdir().unwrap();
     init_repo(repo_dir.path());
     let head_before = rev_parse_head(repo_dir.path());
 
     // Seed the home-side file (the local edit we want to publish).
     let body = b"---\nname: commit\n---\nedited\n";
-    let home_file = tool_home.path().join(".claude/skills/commit/SKILL.md");
+    // tool_home now plays install_root's role (the .claude/-prefix is
+    // stripped from the layout's home by apply_to_repo); seed the file
+    // at the install-root-relative path the layout resolves to.
+    let home_file = tool_home.join("skills/commit/SKILL.md");
     std::fs::create_dir_all(home_file.parent().unwrap()).unwrap();
     std::fs::write(&home_file, body).unwrap();
 
@@ -103,7 +135,7 @@ fn apply_to_repo_copies_commits_and_advances_head() {
     };
 
     with_skip_push(|| {
-        apply_to_repo(&action, tool_home.path(), &source, &unit_path, &opts).expect("apply");
+        apply_to_repo(&action, tool_home, "claude", &source, &unit_path, &opts).expect("apply");
     });
 
     let head_after = rev_parse_head(repo_dir.path());
@@ -122,12 +154,16 @@ fn apply_to_repo_copies_commits_and_advances_head() {
 
 #[test]
 fn apply_to_repo_is_idempotent_when_bytes_unchanged() {
-    let tool_home = tempfile::tempdir().unwrap();
+    let sb = SandboxGuard::new();
+    let tool_home = sb.claude_home();
     let repo_dir = tempfile::tempdir().unwrap();
     init_repo(repo_dir.path());
 
     let body = b"body bytes\n";
-    let home_file = tool_home.path().join(".claude/skills/commit/SKILL.md");
+    // tool_home now plays install_root's role (the .claude/-prefix is
+    // stripped from the layout's home by apply_to_repo); seed the file
+    // at the install-root-relative path the layout resolves to.
+    let home_file = tool_home.join("skills/commit/SKILL.md");
     std::fs::create_dir_all(home_file.parent().unwrap()).unwrap();
     std::fs::write(&home_file, body).unwrap();
 
@@ -143,13 +179,13 @@ fn apply_to_repo_is_idempotent_when_bytes_unchanged() {
     };
 
     with_skip_push(|| {
-        apply_to_repo(&action, tool_home.path(), &source, &unit_path, &opts).expect("apply 1");
+        apply_to_repo(&action, tool_home, "claude", &source, &unit_path, &opts).expect("apply 1");
     });
     let head_first = rev_parse_head(repo_dir.path());
 
     // Re-apply with identical bytes — should NOT create a new commit.
     with_skip_push(|| {
-        apply_to_repo(&action, tool_home.path(), &source, &unit_path, &opts).expect("apply 2");
+        apply_to_repo(&action, tool_home, "claude", &source, &unit_path, &opts).expect("apply 2");
     });
     let head_second = rev_parse_head(repo_dir.path());
     assert_eq!(
@@ -160,7 +196,8 @@ fn apply_to_repo_is_idempotent_when_bytes_unchanged() {
 
 #[test]
 fn apply_to_repo_skips_non_to_repo_directions() {
-    let tool_home = tempfile::tempdir().unwrap();
+    let sb = SandboxGuard::new();
+    let tool_home = sb.claude_home();
     let repo_dir = tempfile::tempdir().unwrap();
     init_repo(repo_dir.path());
     let head_before = rev_parse_head(repo_dir.path());
@@ -176,7 +213,7 @@ fn apply_to_repo_skips_non_to_repo_directions() {
         repo_cache_dir: repo_dir.path().to_path_buf(),
     };
     with_skip_push(|| {
-        apply_to_repo(&action, tool_home.path(), &source, &unit_path, &opts).expect("noop");
+        apply_to_repo(&action, tool_home, "claude", &source, &unit_path, &opts).expect("noop");
     });
     let head_after = rev_parse_head(repo_dir.path());
     assert_eq!(head_before, head_after, "NoOp must leave HEAD untouched");
@@ -193,34 +230,34 @@ fn apply_to_repo_pushes_to_real_local_bare_remote() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::remove_var("AINB_SYNC_SKIP_PUSH");
 
-    let bare = tempfile::tempdir().unwrap();
-    let bare_init = git(&["init", "--bare", "-b", "main"], bare.path());
-    assert!(bare_init.status.success(), "bare init: {bare_init:?}");
+    // Use the fixture-built bare remote — already initialised with one
+    // seed commit on main (`skills/initial-skill/SKILL.md`). No more
+    // hand-rolled `git init --bare` + initial-push dance in the test.
+    let sb = SandboxGuard::new();
+    let tool_home = sb.claude_home();
+    let bare = sb.bare_remote();
 
-    let tool_home = tempfile::tempdir().unwrap();
+    // Clone the bare into a working tree we can commit + push against.
     let repo_dir = tempfile::tempdir().unwrap();
     let clone_out = Command::new("git")
-        .args(["clone", "--", bare.path().to_str().unwrap(), repo_dir.path().to_str().unwrap()])
+        .args(["clone", "--", bare.to_str().unwrap(), repo_dir.path().to_str().unwrap()])
         .env("GIT_TERMINAL_PROMPT", "0")
         .output()
         .expect("git clone");
     assert!(clone_out.status.success(), "git clone: {clone_out:?}");
     git(&["config", "user.email", "ainb-test@example.invalid"], repo_dir.path());
     git(&["config", "user.name", "ainb-test"], repo_dir.path());
-    std::fs::write(repo_dir.path().join("README.md"), "seed\n").unwrap();
-    git(&["add", "README.md"], repo_dir.path());
-    let seed = git(&["commit", "-m", "seed"], repo_dir.path());
-    assert!(seed.status.success(), "seed commit: {seed:?}");
-    let initial_push = git(&["push", "--", "origin", "main"], repo_dir.path());
-    assert!(initial_push.status.success(), "initial push: {initial_push:?}");
     let bare_head_before = {
-        let out = git(&["rev-parse", "main"], bare.path());
+        let out = git(&["rev-parse", "main"], bare);
         assert!(out.status.success(), "bare rev-parse: {out:?}");
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     };
 
     let body = b"---\nname: commit\n---\npublished via sync\n";
-    let home_file = tool_home.path().join(".claude/skills/commit/SKILL.md");
+    // tool_home now plays install_root's role (the .claude/-prefix is
+    // stripped from the layout's home by apply_to_repo); seed the file
+    // at the install-root-relative path the layout resolves to.
+    let home_file = tool_home.join("skills/commit/SKILL.md");
     std::fs::create_dir_all(home_file.parent().unwrap()).unwrap();
     std::fs::write(&home_file, body).unwrap();
 
@@ -235,10 +272,10 @@ fn apply_to_repo_pushes_to_real_local_bare_remote() {
         repo_cache_dir: repo_dir.path().to_path_buf(),
     };
 
-    apply_to_repo(&action, tool_home.path(), &source, &unit_path, &opts).expect("apply");
+    apply_to_repo(&action, tool_home, "claude", &source, &unit_path, &opts).expect("apply");
 
     let bare_head_after = {
-        let out = git(&["rev-parse", "main"], bare.path());
+        let out = git(&["rev-parse", "main"], bare);
         assert!(out.status.success(), "bare rev-parse after: {out:?}");
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     };
@@ -247,7 +284,7 @@ fn apply_to_repo_pushes_to_real_local_bare_remote() {
         "bare remote HEAD must advance after push"
     );
 
-    let subj = git(&["log", "-1", "--pretty=%s", "main"], bare.path());
+    let subj = git(&["log", "-1", "--pretty=%s", "main"], bare);
     assert!(subj.status.success(), "bare log: {subj:?}");
     let msg = String::from_utf8_lossy(&subj.stdout).trim().to_string();
     assert_eq!(msg, "sync: commit", "bare remote commit subject");
@@ -260,12 +297,16 @@ fn apply_to_repo_rejects_argv_smuggled_ref() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::remove_var("AINB_SYNC_SKIP_PUSH");
 
-    let tool_home = tempfile::tempdir().unwrap();
+    let sb = SandboxGuard::new();
+    let tool_home = sb.claude_home();
     let repo_dir = tempfile::tempdir().unwrap();
     init_repo(repo_dir.path());
 
     let body = b"body\n";
-    let home_file = tool_home.path().join(".claude/skills/commit/SKILL.md");
+    // tool_home now plays install_root's role (the .claude/-prefix is
+    // stripped from the layout's home by apply_to_repo); seed the file
+    // at the install-root-relative path the layout resolves to.
+    let home_file = tool_home.join("skills/commit/SKILL.md");
     std::fs::create_dir_all(home_file.parent().unwrap()).unwrap();
     std::fs::write(&home_file, body).unwrap();
 
@@ -281,7 +322,7 @@ fn apply_to_repo_rejects_argv_smuggled_ref() {
     let opts = ApplyToRepoOpts {
         repo_cache_dir: repo_dir.path().to_path_buf(),
     };
-    let err = apply_to_repo(&action, tool_home.path(), &source, &unit_path, &opts)
+    let err = apply_to_repo(&action, tool_home, "claude", &source, &unit_path, &opts)
         .expect_err("argv-smuggled ref must be refused");
     let msg = err.to_string().to_lowercase();
     assert!(
@@ -292,22 +333,26 @@ fn apply_to_repo_rejects_argv_smuggled_ref() {
 
 #[test]
 fn apply_to_repo_errors_when_home_file_missing() {
-    let tool_home = tempfile::tempdir().unwrap();
+    let sb = SandboxGuard::new();
+    let tool_home = sb.claude_home();
     let repo_dir = tempfile::tempdir().unwrap();
     init_repo(repo_dir.path());
 
+    // The fixture pre-seeds `skills/commit/SKILL.md` for other tests;
+    // pick a unit name the fixture does NOT seed so the home-file-
+    // missing path actually exercises.
     let action = SyncAction {
-        unit_name: "commit".into(),
+        unit_name: "missing-skill".into(),
         direction: SyncDirection::ToRepo,
         reason: "first publish".into(),
     };
     let source = fake_source();
-    let unit_path = PathBuf::from("skills/commit/SKILL.md");
+    let unit_path = PathBuf::from("skills/missing-skill/SKILL.md");
     let opts = ApplyToRepoOpts {
         repo_cache_dir: repo_dir.path().to_path_buf(),
     };
     with_skip_push(|| {
-        let err = apply_to_repo(&action, tool_home.path(), &source, &unit_path, &opts).unwrap_err();
+        let err = apply_to_repo(&action, tool_home, "claude", &source, &unit_path, &opts).unwrap_err();
         let msg = err.to_string().to_lowercase();
         assert!(
             msg.contains("home") || msg.contains("not found") || msg.contains("no such file"),

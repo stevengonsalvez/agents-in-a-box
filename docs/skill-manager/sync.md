@@ -1,4 +1,7 @@
-# Skill Sync (v1.2)
+---
+title: Sync
+description: Bidirectional sync between deployed units and their source repos.
+---
 
 > Bidirectional reconciliation between a unit's deployed copies on
 > tool homes and the source-of-truth in its declared repo. Layers

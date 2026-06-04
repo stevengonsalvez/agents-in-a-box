@@ -125,6 +125,13 @@ rexpect = { workspace = true }
 vt100 = { workspace = true }
 insta = { version = "1.40", features = ["json"] }
 bytes = "1.6"
+# Skill-core's sandbox fixture for the SkillManager tripwires that drive
+# the screen against a seeded $HOME (see tripwire_core_skill_manager_
+# sandbox_*.rs). Production binary stays unaffected since this is a
+# dev-only dep edge — see also crates/ainb-skill-core/Cargo.toml where
+# the same self-dev-dep enables tests in skill-core itself.
+ainb-skill-core = { path = "../ainb-skill-core", version = "0.1.0", features = ["test-fixtures"] }
+tempfile = "3"
 
 [lints]
 workspace = true

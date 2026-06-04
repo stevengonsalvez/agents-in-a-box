@@ -1,4 +1,7 @@
-# Skill Usage Tracking (v1.2)
+---
+title: Usage tracking
+description: How the skill manager records and surfaces per-unit usage.
+---
 
 > Per-unit invocation counts + last-used timestamps surfaced in the
 > SkillManager Detail pane. Layers on top of v1 (manifest +
