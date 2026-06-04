@@ -778,4 +778,56 @@ mod tests {
         assert_eq!(model.files[0].hunks[0].rows[0].new_lineno, Some(40));
         assert_eq!(model.files[0].hunks[0].rows[0].raw, "line 40");
     }
+
+    #[test]
+    fn renders_large_diff_within_budget() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use std::time::Instant;
+
+        let mut files = Vec::new();
+        for fi in 0..10 {
+            let rows: Vec<DiffRow> = (0..200)
+                .map(|i| DiffRow {
+                    kind: if i % 5 == 0 {
+                        RowKind::Added
+                    } else {
+                        RowKind::Context
+                    },
+                    old_lineno: Some(i + 1),
+                    new_lineno: Some(i + 1),
+                    raw: format!("let value_{i} = compute({i});"),
+                    emphasis: if i % 5 == 0 { vec![(4, 9)] } else { vec![] },
+                })
+                .collect();
+            let h = Hunk {
+                old_start: 1,
+                old_len: 200,
+                new_start: 1,
+                new_len: 200,
+                gap_before: 0,
+                gap_after: 0,
+                expanded_before: 0,
+                expanded_after: 0,
+                rows,
+            };
+            let mut f = file(&format!("src/file_{fi}.rs"), false, vec![h]);
+            f.language = Some("rust");
+            files.push(f);
+        }
+        let model = ReviewModel { files };
+        let ui = CodeReviewUi::default();
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+
+        // 20 frames over a 2000-row diff. Viewport-only rendering keeps this fast.
+        let start = Instant::now();
+        for _ in 0..20 {
+            term.draw(|fr| render(fr, fr.size(), &model, &ui)).unwrap();
+        }
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_millis() < 1500,
+            "20 frames of a 2000-row diff took {elapsed:?} (budget 1500ms)"
+        );
+    }
 }

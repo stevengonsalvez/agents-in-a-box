@@ -34,6 +34,10 @@ pub const BAR_ADD: Color = Color::Rgb(80, 250, 123);
 pub const BAR_DEL: Color = Color::Rgb(255, 85, 85);
 /// Muted gutter line-number color (Dracula comment gray).
 pub const GUTTER_FG: Color = Color::Rgb(98, 114, 164);
+/// Plain foreground (Dracula foreground) used when syntax highlighting is skipped.
+const PLAIN_FG: Color = Color::Rgb(248, 248, 242);
+/// Lines longer than this skip syntax highlighting and word-emphasis to stay responsive.
+const MAX_HIGHLIGHT_LEN: usize = 2000;
 
 /// Syntax-highlight a single line into syntect `(style, text)` runs using the
 /// Dracula theme. Falls back to plain text for unknown languages.
@@ -67,6 +71,16 @@ pub fn highlight_row(
     emphasis: &[(usize, usize)],
     kind: RowKind,
 ) -> Vec<Span<'static>> {
+    // Pathologically long lines (minified bundles, data blobs) skip the syntect +
+    // word-diff work and render as a single plain, row-tinted span.
+    if raw.len() > MAX_HIGHLIGHT_LEN {
+        return vec![make_span(
+            raw.to_string(),
+            PLAIN_FG,
+            Modifier::empty(),
+            bg_for(kind, false),
+        )];
+    }
     merge(&highlight_line(raw, language), emphasis, kind)
 }
 
@@ -207,5 +221,15 @@ mod tests {
     fn unknown_language_does_not_panic() {
         let ranges = highlight_line("@@@ not real code", Some("nonsense-lang-xyz"));
         assert!(!ranges.is_empty());
+    }
+
+    #[test]
+    fn long_line_skips_highlight_and_emphasis() {
+        let long = "x".repeat(MAX_HIGHLIGHT_LEN + 100);
+        let spans = highlight_row(&long, Some("rust"), &[(0, 50)], RowKind::Added);
+        // A single plain span: no syntax split, no brighter emphasis segment.
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].style.bg, Some(ADD_TINT));
+        assert!(spans.iter().all(|s| s.style.bg != Some(ADD_TINT_BRIGHT)));
     }
 }
