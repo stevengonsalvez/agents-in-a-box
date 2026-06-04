@@ -254,6 +254,11 @@ impl LayoutComponent {
             ),
             Span::styled("ttach ", Style::default().fg(MUTED_GRAY)),
             Span::styled(
+                "i",
+                Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("nteractive ", Style::default().fg(MUTED_GRAY)),
+            Span::styled(
                 restart_key,
                 Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
             ),
