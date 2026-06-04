@@ -1672,7 +1672,7 @@ impl SkillsScreenData {
             .iter()
             .enumerate()
             .filter(|(_, u)| match source {
-                Some(src) => u.source == src,
+                Some(src) => unit_owning_source_uri(u) == src,
                 None => true,
             })
             .filter(|(_, u)| match search {
@@ -1909,6 +1909,24 @@ fn refresh_view_model_from_manifest(data: &mut SkillsScreenData, manifest: &Mani
         .enumerate()
         .map(|(i, u)| unit_row_from_entry(i + 1, u))
         .collect();
+}
+
+/// The URI of the source a unit belongs to, matching the convention of
+/// [`SourceRow::uri`].
+///
+/// Most units encode their source as `<type>:<locator>` (e.g. a local
+/// skill's source is `local:~/.claude/skills`), which is exactly what
+/// [`UnitRow::source`] holds. **Marketplace units are the exception**: a
+/// unit URI is `marketplace:<plugin>@<marketplace>/<path>`, so its
+/// `<type>:<locator>` is `marketplace:<plugin>` — but the *source* is the
+/// whole marketplace, `marketplace:<marketplace>` (the marketplace name
+/// lives in the `@ref`, captured as [`UnitRow::git_ref`]). Without this
+/// the Sources filter never matches a marketplace plugin's skills.
+fn unit_owning_source_uri(u: &UnitRow) -> String {
+    if u.source.starts_with("marketplace:") && !u.git_ref.is_empty() {
+        return format!("marketplace:{}", u.git_ref);
+    }
+    u.source.clone()
 }
 
 fn unit_row_from_entry(idx: usize, u: &UnitEntry) -> UnitRow {
@@ -2327,6 +2345,41 @@ mod tests {
         // Filter to beta → only bravo (idx 1).
         data.source_filter = Some("gh:org/beta".to_string());
         assert_eq!(data.visible_indices(), vec![1]);
+    }
+
+    #[test]
+    fn visible_indices_filters_marketplace_units_by_marketplace() {
+        // Regression: selecting a marketplace source showed no skills because
+        // a marketplace unit `marketplace:<plugin>@<marketplace>/...` has a
+        // `<type>:<locator>` of `marketplace:<plugin>`, but its source is the
+        // whole marketplace, `marketplace:<marketplace>`.
+        let mk = |idx, name: &str, plugin: &str, marketplace: &str| UnitRow {
+            idx,
+            name: name.to_string(),
+            kind: "skill".to_string(),
+            source: format!("marketplace:{plugin}"),
+            git_ref: marketplace.to_string(),
+            targets: vec!["claude".to_string()],
+            declared_uri: format!("marketplace:{plugin}@{marketplace}/skills/{name}"),
+        };
+        let mut data = SkillsScreenData {
+            sources: vec![
+                src("marketplace-beads-marketplace", "marketplace:beads-marketplace"),
+                src("local-claude-skills", "local:~/.claude/skills"),
+            ],
+            units: vec![
+                mk(1, "beads", "beads", "beads-marketplace"),
+                mk(2, "task-agent", "beads", "beads-marketplace"),
+                unit_in(3, "commit", "local:~/.claude/skills"),
+            ],
+            ..Default::default()
+        };
+        // The marketplace source now surfaces the plugin's two skills.
+        data.source_filter = Some("marketplace:beads-marketplace".to_string());
+        assert_eq!(data.visible_indices(), vec![0, 1]);
+        // Local sources still match on `<type>:<locator>`.
+        data.source_filter = Some("local:~/.claude/skills".to_string());
+        assert_eq!(data.visible_indices(), vec![2]);
     }
 
     #[test]
