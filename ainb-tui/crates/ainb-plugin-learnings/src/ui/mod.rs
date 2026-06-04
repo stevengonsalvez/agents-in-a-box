@@ -13,6 +13,7 @@
 //! render generation).
 
 mod browse;
+mod detail;
 
 use ratatui::buffer::Buffer as RBuffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect as RRect};
@@ -25,6 +26,7 @@ use ainb_plugin_sdk::KeyCode;
 use crate::data::LearningRecord;
 
 use browse::BrowseState;
+use detail::DetailState;
 
 /// TUI palette — see `../.claude/skills/tui-screen/SKILL.md`.
 pub(crate) const GOLD: RColor = RColor::Rgb(255, 215, 0);
@@ -84,6 +86,10 @@ pub struct LearningsUi {
     failed_count: usize,
     /// Browse-tab UI state (selection + active filter cursor).
     browse: BrowseState,
+    /// Detail / read-pane open-state. When open it renders over the active
+    /// tab's body and consumes keys until closed (`Backspace`). Tab-agnostic —
+    /// any tab opens it the same way via [`Self::open_detail_for_selection`].
+    detail: DetailState,
 }
 
 /// Wrapper so [`Tab`] can derive a sensible [`Default`] (Browse) without
@@ -118,22 +124,67 @@ impl LearningsUi {
     }
 
     /// Route one key. Returns `true` when state changed (so the plugin bumps
-    /// its render generation). Host-reserved keys (Esc, etc.) are NOT handled
-    /// here — the host consumes them before forwarding, so a return of `false`
-    /// for an unhandled key is correct.
+    /// its render generation). Host-reserved keys (Esc, etc.) are NOT forwarded
+    /// by the host, so a return of `false` for an unhandled key is correct.
+    ///
+    /// Routing precedence:
+    /// 1. **Detail pane open** — it consumes the key (`Backspace`/`Esc` close;
+    ///    everything else is swallowed so the list behind can't move). The
+    ///    pane is modal over the whole shell, so this short-circuits `Tab` too.
+    /// 2. **`Enter`** — opens the Detail pane on the active tab's selected row.
+    /// 3. **`Tab`** — switches the top-level tab.
+    /// 4. **Per-tab routing** — Browse handles its own keys; Search/Graph are
+    ///    P7/P8 placeholders.
     pub fn handle_key(&mut self, code: &KeyCode) -> bool {
-        // `Tab` switches the top-level tab regardless of which tab is active.
+        // 1. Modal Detail pane takes precedence over everything.
+        if self.detail.is_open() {
+            return self.detail.handle_key(code);
+        }
+
+        // 2. `Enter` opens the Detail pane on the selected record.
+        if matches!(code, KeyCode::Enter) {
+            return self.open_detail_for_selection();
+        }
+
+        // 3. `Tab` switches the top-level tab.
         if matches!(code, KeyCode::Tab) {
             self.tab.0 = self.tab.0.next();
             return true;
         }
-        // Per-tab routing. `/` (search) and `g` (graph) are reserved for P7/P8
-        // and are intentionally inert here so a stray press is a clean no-op
-        // rather than a swallowed key.
+
+        // 4. Per-tab routing. `/` (search) and `g` (graph) are reserved for
+        // P7/P8 and are intentionally inert here so a stray press is a clean
+        // no-op rather than a swallowed key.
         match self.tab.0 {
             Tab::Browse => self.browse.handle_key(code, &self.records),
             Tab::Search | Tab::Graph => false,
         }
+    }
+
+    /// Open the Detail pane on the active tab's currently-selected record.
+    /// Returns `true` when a record was selectable (pane opened), `false` when
+    /// the list is empty (nothing to open — a clean no-op). The Browse
+    /// selection is left untouched so closing the pane returns to the same row.
+    fn open_detail_for_selection(&mut self) -> bool {
+        // Only Browse exposes a selection today; Search/Graph (P7/P8) wire
+        // their own selectors behind their arms when they land.
+        let selected = match self.tab.0 {
+            Tab::Browse => self.browse.selected_record(&self.records),
+            Tab::Search | Tab::Graph => None,
+        };
+        match selected {
+            Some(record) => {
+                self.detail.open(record);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// `true` while the Detail pane is open (exposed for tests).
+    #[must_use]
+    pub fn detail_open(&self) -> bool {
+        self.detail.is_open()
     }
 }
 
@@ -156,6 +207,13 @@ pub fn render(buf: &mut RBuffer, area: RRect, ui: &LearningsUi) {
     let inner = outer.inner(area);
     outer.render(area, buf);
     if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    // Detail pane is modal: when open it takes the whole inner region (over the
+    // tab strip + body) for a clean, full-width read view (design mock C3).
+    if ui.detail.is_open() {
+        detail::render(buf, inner, &ui.detail);
         return;
     }
 

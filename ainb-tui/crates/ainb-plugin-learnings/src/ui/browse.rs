@@ -53,6 +53,15 @@ impl BrowseState {
         }
     }
 
+    /// The record under the selection in the *filtered* list, if any. Used by
+    /// the shell to open the Detail pane (`Enter`) on the highlighted row.
+    /// Returns `None` when the filtered list is empty.
+    #[must_use]
+    pub fn selected_record<'a>(&self, records: &'a [LearningRecord]) -> Option<&'a LearningRecord> {
+        let filtered = self.filter().apply(records);
+        filtered.get(self.selected).copied()
+    }
+
     /// Clamp the selection to the current visible row count (called after a
     /// filter change or a fresh scan shrinks the list).
     pub fn clamp_selection(&mut self, visible: usize) {
@@ -191,19 +200,21 @@ fn render_chip_bar(buf: &mut RBuffer, area: RRect, state: &BrowseState) {
 /// pattern; design mock C3 shows it verbatim).
 ///
 /// Mirrors the burndown footer-span shape — `<key> <description>` pairs — and
-/// stays **honest**: only the keys P5 actually wires (`↑↓ move`, `f filter`,
-/// `Tab pane`) are gold (live); the keys deferred to P6–P8 (`⏎ open`,
-/// `/ search`, `g graph`) render fully muted so the bar reflects the mock
-/// without implying an affordance that does nothing yet. As each later phase
-/// lands its key it promotes the token from [`help_disabled`] to [`help_key`].
+/// stays **honest**: only the keys actually wired (`↑↓ move`, `f filter`,
+/// `Tab pane`, and now `⏎ open` — P6) are gold (live); the keys still deferred
+/// to P7–P8 (`/ search`, `g graph`) render fully muted so the bar reflects the
+/// mock without implying an affordance that does nothing yet. As each later
+/// phase lands its key it promotes the token from [`help_disabled`] to
+/// [`help_key`].
 fn render_help_bar(buf: &mut RBuffer, area: RRect) {
     let mut spans = vec![Span::raw(" ")];
     // Live keys (gold key + muted description).
     spans.extend(help_key("↑↓", "move"));
     spans.extend(help_key("f", "filter"));
     spans.extend(help_key("Tab", "pane"));
-    // Deferred keys (fully muted until P6–P8 wire them).
-    spans.extend(help_disabled("⏎", "open"));
+    // `⏎ open` is live now (P6): Enter opens the Detail pane on the selected row.
+    spans.extend(help_key("⏎", "open"));
+    // Deferred keys (fully muted until P7–P8 wire them).
     spans.extend(help_disabled("/", "search"));
     spans.extend(help_disabled("g", "graph"));
     Paragraph::new(Line::from(spans)).render(area, buf);
