@@ -2,5 +2,6 @@
 // Structured diff model + git2/similar parser (this phase); Dracula syntax
 // highlighting and the unified render surface are added in later phases.
 
+pub mod highlight;
 pub mod model;
 pub mod parse;
