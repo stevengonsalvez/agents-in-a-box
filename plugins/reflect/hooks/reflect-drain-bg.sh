@@ -99,14 +99,30 @@ log() {
     printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$LOG_FILE"
 }
 
+# Run a reflect_kb.errors subcommand via the best available path. Prefer the
+# installed `reflect` CLI (`uv tool install reflect-kb`), then an ephemeral
+# `uv run --with reflect-kb` (self-bootstrapping, no global install), and only
+# then bare system `python3 -m` (works only if reflect_kb is pip-installed into
+# system python — usually it isn't). Background path, so the uv cold-start is fine.
+_reflect_errors_run() {
+    if command -v reflect >/dev/null 2>&1; then
+        reflect errors "$@"
+    elif command -v uv >/dev/null 2>&1; then
+        uv run --with reflect-kb python -m reflect_kb.errors "$@"
+    else
+        python3 -m reflect_kb.errors "$@"
+    fi
+}
+
 emit_error() {
     # emit_error <severity> <kind> <message> [transcript_path]
     local severity="$1" kind="$2" message="$3" transcript="${4:-}"
     # Build the context JSON with json.dumps so a transcript path containing a
     # quote or backslash can't produce a malformed --context argument.
+    # (Pure stdlib json — does NOT need reflect_kb.)
     local context
     context=$(python3 -c 'import json,sys; print(json.dumps({"transcript_path": sys.argv[1]}))' "$transcript" 2>/dev/null || printf '{}')
-    python3 -m reflect_kb.errors append \
+    _reflect_errors_run append \
         --severity "$severity" --source drain --kind "$kind" \
         --message "$message" \
         --context "$context" \

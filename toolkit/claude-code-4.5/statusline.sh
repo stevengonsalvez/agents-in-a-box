@@ -73,8 +73,30 @@ _bar() {
   printf "${col}[${bar}] ${pct}%%${RESET}"
 }
 
+# ── Count un-acked reflect errors ─────────────────────────────────────────────
+# Ladder, fastest → most self-bootstrapping. Replaces the old bare
+# `python3 -m reflect_kb.errors count`, which only worked when reflect_kb was
+# importable by *system* python3 — it usually isn't (it lives in the uv tool
+# venv from `uv tool install reflect-kb`), so the badge was dead on every box.
+#   1. jq-direct read of the sink   — no python, no reflect_kb needed (hot path)
+#   2. installed `reflect errors count` — from `uv tool install reflect-kb`
+#   3. `uv run --with reflect-kb …`  — ephemeral self-bootstrap, no global install
+#   4. give up → 0
+_reflect_err_count() {
+  local f="$HOME/.reflect/errors.json"
+  if [[ -f "$f" ]] && command -v jq >/dev/null 2>&1; then
+    jq -r '[.errors[]? | select(.acked != true)] | length' "$f" 2>/dev/null && return
+  fi
+  if command -v reflect >/dev/null 2>&1; then
+    reflect errors count 2>/dev/null && return
+  fi
+  if command -v uv >/dev/null 2>&1; then
+    uv run --with reflect-kb python -m reflect_kb.errors count 2>/dev/null && return
+  fi
+  echo 0
+}
+
 # ── Reflect error indicator ───────────────────────────────────────────────────
-# Reads ~/.reflect/errors.json via `python -m reflect_kb.errors count`.
 # Output: empty when 0, "⚠N" in red when >0. Cached 10s.
 _reflect_errors() {
   local cached_val cached_age
@@ -85,7 +107,7 @@ _reflect_errors() {
     return
   fi
   local count
-  count=$(timeout 0.4 python3 -m reflect_kb.errors count 2>/dev/null || echo 0)
+  count=$(_reflect_err_count)
   count=${count:-0}
   local out=""
   if [[ "$count" =~ ^[0-9]+$ ]] && [[ "$count" -gt 0 ]]; then
@@ -461,7 +483,7 @@ fi
 if (( CACHE_AGE < CACHE_TTL )); then
   REFLECT_ERR_COUNT=$(_cache_get "reflect_err_count")
 else
-  REFLECT_ERR_COUNT=$(timeout 0.4 python3 -m reflect_kb.errors count 2>/dev/null || echo 0)
+  REFLECT_ERR_COUNT=$(_reflect_err_count)
   _cache_set "reflect_err_count" "${REFLECT_ERR_COUNT:-0}"
 fi
 REFLECT_ERR_COUNT=${REFLECT_ERR_COUNT:-0}
