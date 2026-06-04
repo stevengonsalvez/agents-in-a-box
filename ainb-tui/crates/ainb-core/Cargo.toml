@@ -30,6 +30,7 @@ tar = { workspace = true }
 
 # Tmux/PTY support
 portable-pty = { workspace = true }
+vt100 = { workspace = true }
 
 # Git operations
 git2 = { workspace = true }
@@ -109,7 +110,6 @@ tmux-tests = ["cli-tests"]
 mockall = { workspace = true }
 pretty_assertions = { workspace = true }
 rexpect = { workspace = true }
-vt100 = { workspace = true }
 tui-term = { workspace = true }
 proptest = { workspace = true }
 insta = { version = "1.40", features = ["json"] }

@@ -65,14 +65,20 @@ impl std::fmt::Debug for PtyWrapper {
 }
 
 impl PtyWrapper {
-    /// Start a new PTY running `cmd`, retaining the child so it can be killed.
+    /// Start a new PTY running `cmd` at the default 24×80 size.
     pub fn start(cmd: CommandBuilder) -> Result<Self> {
+        Self::start_with_size(cmd, 24, 80)
+    }
+
+    /// Start a new PTY running `cmd` at the given size, retaining the child so
+    /// it can be killed. The embed opens at the pane's cell size so the inner
+    /// program lays out correctly from the first frame.
+    pub fn start_with_size(cmd: CommandBuilder, rows: u16, cols: u16) -> Result<Self> {
         let pty_system = portable_pty::native_pty_system();
 
-        // Default size; the embed resizes to the pane rect once focused.
         let pair = pty_system.openpty(PtySize {
-            rows: 24,
-            cols: 80,
+            rows: rows.max(1),
+            cols: cols.max(1),
             pixel_width: 0,
             pixel_height: 0,
         })?;
