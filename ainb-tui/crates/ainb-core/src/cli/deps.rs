@@ -275,13 +275,14 @@ fn detect_one(spec: &DepSpec, env: &dyn Env) -> DepState {
                 DepState::Missing
             }
         }
-        // reflect-kb is "installed" if the `reflect` binary is on PATH
-        // (uv tool install) OR system python3 can import it (pip install).
+        // reflect-kb counts as installed only when the `reflect` binary is on
+        // PATH (`uv tool install reflect-kb`). A bare system-python import is
+        // NOT enough: the recall/ingest/reflect-status skills shell out to the
+        // `reflect` binary, so reporting "ok" on an import-only machine would
+        // mislead — bootstrap should still install the CLI.
         "reflect-kb" => {
             if env.which("reflect") {
                 DepState::Ok(Some("reflect CLI on PATH".to_string()))
-            } else if env.run("python3", &["-c", "import reflect_kb"]).is_some() {
-                DepState::Ok(Some("importable by system python3".to_string()))
             } else {
                 DepState::Missing
             }
@@ -490,12 +491,17 @@ mod tests {
     }
 
     #[test]
-    fn reflect_kb_via_system_python_import() {
+    fn reflect_kb_import_only_without_binary_is_not_satisfied() {
+        // reflect_kb importable by system python3 but no `reflect` binary on
+        // PATH — the skills need the binary, so this must NOT read as installed.
         let env = MockEnv {
             present: vec![],
             runs: HashMap::from([("python3 -c import reflect_kb".to_string(), String::new())]),
         };
-        assert!(find(&detect(&env), "reflect-kb").satisfied);
+        let reports = detect(&env);
+        let rk = find(&reports, "reflect-kb");
+        assert!(!rk.satisfied);
+        assert!(rk.is_blocking());
     }
 
     #[test]
