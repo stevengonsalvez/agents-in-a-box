@@ -211,6 +211,47 @@ impl GitViewState {
         self.review_ui.scroll = self.review_ui.scroll.saturating_sub(n);
     }
 
+    /// Toggle collapse of the sidebar-selected review file.
+    pub fn review_toggle_collapse(&mut self) {
+        code_review::render::toggle_collapse(&mut self.review, &self.review_ui);
+    }
+
+    /// Select the next review file and scroll its header to the top.
+    pub fn review_next_file(&mut self) {
+        code_review::render::select_file(&self.review, &mut self.review_ui, true);
+    }
+
+    /// Select the previous review file and scroll its header to the top.
+    pub fn review_prev_file(&mut self) {
+        code_review::render::select_file(&self.review, &mut self.review_ui, false);
+    }
+
+    /// Jump to the next hunk (`n`).
+    pub fn review_next_hunk(&mut self) {
+        code_review::render::jump_hunk(&self.review, &mut self.review_ui, true);
+    }
+
+    /// Jump to the previous hunk (`N`).
+    pub fn review_prev_hunk(&mut self) {
+        code_review::render::jump_hunk(&self.review, &mut self.review_ui, false);
+    }
+
+    /// Reveal more context at the nearest collapsed gap (`z`).
+    pub fn review_expand_context(&mut self) {
+        code_review::render::expand_context(&mut self.review, &self.review_ui);
+    }
+
+    /// `(current_hunk + 1, total_hunks)` for the `Hunk x/y` counter.
+    pub fn review_hunk_counter(&self) -> (usize, usize) {
+        let total = code_review::render::hunk_anchors(&code_review::render::flatten(&self.review)).len();
+        let current = if total == 0 {
+            0
+        } else {
+            (self.review_ui.current_hunk + 1).min(total)
+        };
+        (current, total)
+    }
+
     pub fn refresh_git_status(&mut self) -> Result<()> {
         debug!(
             "Refreshing git status for worktree: {:?}",
@@ -1271,7 +1312,9 @@ impl GitViewComponent {
 
         // Render content based on active tab
         match git_state.active_tab {
-            GitTab::Review => code_review::render::render(frame, chunks[1], git_state),
+            GitTab::Review => {
+                code_review::render::render(frame, chunks[1], &git_state.review, &git_state.review_ui);
+            }
             GitTab::Files => Self::render_files_tab(frame, chunks[1], git_state),
             GitTab::Diff => Self::render_diff_tab(frame, chunks[1], git_state),
             GitTab::Commits => Self::render_commits_tab(frame, chunks[1], git_state),

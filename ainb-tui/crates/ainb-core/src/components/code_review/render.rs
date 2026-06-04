@@ -9,8 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
 use super::highlight::{self, BAR_ADD, BAR_DEL, GUTTER_FG};
-use super::model::{ReviewModel, RowKind};
-use crate::components::git_view::GitViewState;
+use super::model::{DiffRow, ReviewFile, ReviewModel, RowKind};
 
 // Chrome palette (mirrors the ainb TUI style guide used across git_view.rs).
 const CORNFLOWER_BLUE: Color = Color::Rgb(100, 149, 237);
@@ -134,17 +133,170 @@ pub fn file_header_indices(rows: &[VRow]) -> Vec<usize> {
         .collect()
 }
 
-/// Render the Code Review surface into `area`.
-pub fn render(frame: &mut Frame, area: Rect, git_state: &GitViewState) {
-    let model = &git_state.review;
-    let ui = &git_state.review_ui;
+/// Virtual-row index of the first code row of each hunk, in document order,
+/// paired with the file the hunk belongs to. Drives `n`/`N` hunk navigation.
+pub fn hunk_anchors(rows: &[VRow]) -> Vec<usize> {
+    let mut anchors = Vec::new();
+    let mut seen: Option<(usize, usize)> = None;
+    for (i, r) in rows.iter().enumerate() {
+        if let VRow::Code { file, hunk, .. } = r {
+            if seen != Some((*file, *hunk)) {
+                anchors.push(i);
+                seen = Some((*file, *hunk));
+            }
+        }
+    }
+    anchors
+}
 
+/// How many lines a single expand action reveals.
+const EXPAND_STEP: usize = 10;
+
+/// Toggle the collapse state of the sidebar-selected file.
+pub fn toggle_collapse(model: &mut ReviewModel, ui: &CodeReviewUi) {
+    if let Some(file) = model.files.get_mut(ui.selected_file) {
+        file.collapsed = !file.collapsed;
+    }
+}
+
+/// Move the sidebar selection to the next/previous file and scroll its header
+/// to the top of the body.
+pub fn select_file(model: &ReviewModel, ui: &mut CodeReviewUi, forward: bool) {
+    if model.files.is_empty() {
+        return;
+    }
+    let last = model.files.len() - 1;
+    ui.selected_file = if forward {
+        (ui.selected_file + 1).min(last)
+    } else {
+        ui.selected_file.saturating_sub(1)
+    };
+    let rows = flatten(model);
+    let headers = file_header_indices(&rows);
+    if let Some(&idx) = headers.get(ui.selected_file) {
+        ui.scroll = idx;
+    }
+}
+
+/// Jump to the next/previous hunk, scrolling it to the top and following the
+/// sidebar selection. Updates `current_hunk`.
+pub fn jump_hunk(model: &ReviewModel, ui: &mut CodeReviewUi, forward: bool) {
+    let rows = flatten(model);
+    let anchors = hunk_anchors(&rows);
+    if anchors.is_empty() {
+        return;
+    }
+    let last = anchors.len() - 1;
+    ui.current_hunk = if forward {
+        (ui.current_hunk + 1).min(last)
+    } else {
+        ui.current_hunk.saturating_sub(1)
+    };
+    let idx = anchors[ui.current_hunk];
+    ui.scroll = idx;
+    ui.selected_file = rows[idx].file();
+}
+
+/// Expand the nearest collapsed context gap at or below the current scroll.
+pub fn expand_context(model: &mut ReviewModel, ui: &CodeReviewUi) {
+    let rows = flatten(model);
+    let target = rows
+        .iter()
+        .enumerate()
+        .skip(ui.scroll)
+        .find_map(|(_, r)| expand_target(r))
+        .or_else(|| rows.iter().find_map(expand_target));
+    if let Some((file, hunk, before)) = target {
+        if before {
+            expand_before(&mut model.files[file], hunk, EXPAND_STEP);
+        } else {
+            expand_after(&mut model.files[file], hunk, EXPAND_STEP);
+        }
+    }
+}
+
+const fn expand_target(row: &VRow) -> Option<(usize, usize, bool)> {
+    match *row {
+        VRow::ExpandBefore { file, hunk, .. } => Some((file, hunk, true)),
+        VRow::ExpandAfter { file, hunk, .. } => Some((file, hunk, false)),
+        _ => None,
+    }
+}
+
+fn expand_before(file: &mut ReviewFile, hunk_idx: usize, step: usize) {
+    let h = &mut file.hunks[hunk_idx];
+    let hidden = h.gap_before.saturating_sub(h.expanded_before);
+    let reveal = hidden.min(step);
+    if reveal == 0 {
+        return;
+    }
+    let Some(top) = h.rows.iter().filter_map(|r| r.new_lineno).min() else {
+        return;
+    };
+    let delta = line_delta(h.new_start, h.old_start);
+    let mut added = Vec::new();
+    for n in top.saturating_sub(reveal)..top {
+        if n == 0 {
+            continue;
+        }
+        added.push(context_row(&file.new_lines, n, delta));
+    }
+    added.append(&mut h.rows);
+    h.rows = added;
+    h.expanded_before += reveal;
+}
+
+fn expand_after(file: &mut ReviewFile, hunk_idx: usize, step: usize) {
+    let h = &mut file.hunks[hunk_idx];
+    let hidden = h.gap_after.saturating_sub(h.expanded_after);
+    let reveal = hidden.min(step);
+    if reveal == 0 {
+        return;
+    }
+    let Some(bottom) = h.rows.iter().filter_map(|r| r.new_lineno).max() else {
+        return;
+    };
+    let delta = line_delta(h.new_start, h.old_start);
+    for n in (bottom + 1)..=(bottom + reveal) {
+        h.rows.push(context_row(&file.new_lines, n, delta));
+    }
+    h.expanded_after += reveal;
+}
+
+/// Signed `new - old` line-number offset across an unchanged region.
+fn line_delta(new_start: usize, old_start: usize) -> isize {
+    isize::try_from(new_start).unwrap_or(0) - isize::try_from(old_start).unwrap_or(0)
+}
+
+fn context_row(new_lines: &[String], new_lineno: usize, delta: isize) -> DiffRow {
+    let raw = new_lines.get(new_lineno - 1).cloned().unwrap_or_default();
+    let old = isize::try_from(new_lineno)
+        .ok()
+        .map(|n| n - delta)
+        .and_then(|o| usize::try_from(o).ok());
+    DiffRow {
+        kind: RowKind::Context,
+        old_lineno: old,
+        new_lineno: Some(new_lineno),
+        raw,
+        emphasis: Vec::new(),
+    }
+}
+
+/// Render the Code Review surface into `area`.
+pub fn render(frame: &mut Frame, area: Rect, model: &ReviewModel, ui: &CodeReviewUi) {
+    let total_hunks = hunk_anchors(&flatten(model)).len();
+    let cur_hunk = if total_hunks == 0 {
+        0
+    } else {
+        (ui.current_hunk + 1).min(total_hunks)
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(CORNFLOWER_BLUE))
         .style(Style::default().bg(DARK_BG))
-        .title(title_line(model))
+        .title(title_line(model, cur_hunk, total_hunks))
         .title_bottom(help_line());
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -167,11 +319,11 @@ pub fn render(frame: &mut Frame, area: Rect, git_state: &GitViewState) {
         .split(inner);
 
     render_sidebar(frame, cols[0], model, ui);
-    render_body(frame, cols[1], git_state);
+    render_body(frame, cols[1], model, ui);
 }
 
-fn title_line(model: &ReviewModel) -> Line<'static> {
-    Line::from(vec![
+fn title_line(model: &ReviewModel, cur_hunk: usize, total_hunks: usize) -> Line<'static> {
+    let mut spans = vec![
         Span::styled(" 📋 ", Style::default().fg(GOLD)),
         Span::styled(
             "Code Review ",
@@ -190,7 +342,14 @@ fn title_line(model: &ReviewModel) -> Line<'static> {
             format!("-{} ", model.total_deletions()),
             Style::default().fg(DEL_FG),
         ),
-    ])
+    ];
+    if total_hunks > 0 {
+        spans.push(Span::styled(
+            format!(" Hunk {cur_hunk}/{total_hunks} "),
+            Style::default().fg(MUTED_GRAY),
+        ));
+    }
+    Line::from(spans)
 }
 
 fn help_line() -> Line<'static> {
@@ -253,9 +412,7 @@ fn render_sidebar(frame: &mut Frame, area: Rect, model: &ReviewModel, ui: &CodeR
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-fn render_body(frame: &mut Frame, area: Rect, git_state: &GitViewState) {
-    let model = &git_state.review;
-    let ui = &git_state.review_ui;
+fn render_body(frame: &mut Frame, area: Rect, model: &ReviewModel, ui: &CodeReviewUi) {
     let rows = flatten(model);
     let height = area.height as usize;
     let start = ui.scroll.min(rows.len().saturating_sub(1));
@@ -354,7 +511,7 @@ fn truncate_end(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::components::code_review::model::{DiffRow, Hunk, ReviewFile};
+    use crate::components::code_review::model::Hunk;
     use crate::components::git_view::GitFileStatus;
 
     fn file(path: &str, collapsed: bool, hunks: Vec<Hunk>) -> ReviewFile {
@@ -367,6 +524,7 @@ mod tests {
             collapsed,
             binary: false,
             hunks,
+            new_lines: Vec::new(),
         }
     }
 
@@ -433,5 +591,191 @@ mod tests {
         };
         let rows = flatten(&model);
         assert!(!rows.iter().any(|r| matches!(r, VRow::ExpandBefore { .. })));
+    }
+
+    #[test]
+    fn surface_renders_title_gutter_bar_and_tints() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let drows = vec![
+            DiffRow {
+                kind: RowKind::Removed,
+                old_lineno: Some(10),
+                new_lineno: None,
+                raw: "let x = 1;".into(),
+                emphasis: vec![(8, 9)],
+            },
+            DiffRow {
+                kind: RowKind::Added,
+                old_lineno: None,
+                new_lineno: Some(10),
+                raw: "let x = 2;".into(),
+                emphasis: vec![(8, 9)],
+            },
+            DiffRow {
+                kind: RowKind::Context,
+                old_lineno: Some(11),
+                new_lineno: Some(11),
+                raw: "ok".into(),
+                emphasis: vec![],
+            },
+        ];
+        let h = Hunk {
+            old_start: 10,
+            old_len: 2,
+            new_start: 10,
+            new_len: 2,
+            gap_before: 5,
+            gap_after: 0,
+            expanded_before: 0,
+            expanded_after: 0,
+            rows: drows,
+        };
+        let mut f = file("src/demo.rs", false, vec![h]);
+        f.language = Some("rust");
+        f.deletions = 1;
+        let model = ReviewModel { files: vec![f] };
+        let ui = CodeReviewUi::default();
+
+        let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        term.draw(|fr| render(fr, fr.size(), &model, &ui)).unwrap();
+        let buf = term.backend().buffer();
+
+        let mut text = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                text.push_str(buf.get(x, y).symbol());
+            }
+            text.push('\n');
+        }
+        assert!(text.contains("Code Review"), "missing title");
+        assert!(text.contains("src/demo.rs"), "missing file path");
+        assert!(text.contains('▌'), "missing change bar");
+        assert!(text.contains("expand"), "missing expand-context row");
+        assert!(text.contains("10"), "missing gutter line number");
+
+        let mut has_add_bg = false;
+        let mut has_del_bg = false;
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                let bg = buf.get(x, y).bg;
+                if bg == highlight::ADD_TINT || bg == highlight::ADD_TINT_BRIGHT {
+                    has_add_bg = true;
+                }
+                if bg == highlight::DEL_TINT || bg == highlight::DEL_TINT_BRIGHT {
+                    has_del_bg = true;
+                }
+            }
+        }
+        assert!(has_add_bg, "no added-row green tint rendered");
+        assert!(has_del_bg, "no removed-row red tint rendered");
+    }
+
+    #[test]
+    fn toggle_collapse_flips_selected_file_and_hides_code() {
+        let mut model = ReviewModel {
+            files: vec![
+                file("a.rs", false, vec![hunk(0, 0, 2)]),
+                file("b.rs", false, vec![hunk(0, 0, 2)]),
+            ],
+        };
+        let ui = CodeReviewUi {
+            selected_file: 1,
+            ..Default::default()
+        };
+        toggle_collapse(&mut model, &ui);
+        assert!(model.files[1].collapsed);
+        assert!(!model.files[0].collapsed);
+        let rows = flatten(&model);
+        assert!(!rows
+            .iter()
+            .any(|r| matches!(r, VRow::Code { file: 1, .. })));
+    }
+
+    #[test]
+    fn jump_hunk_advances_scrolls_and_clamps() {
+        let model = ReviewModel {
+            files: vec![
+                file("a.rs", false, vec![hunk(0, 0, 2)]),
+                file("b.rs", false, vec![hunk(0, 0, 2)]),
+            ],
+        };
+        let mut ui = CodeReviewUi::default();
+        let anchors = hunk_anchors(&flatten(&model));
+        assert_eq!(anchors.len(), 2);
+
+        jump_hunk(&model, &mut ui, true);
+        assert_eq!(ui.current_hunk, 1);
+        assert_eq!(ui.scroll, anchors[1]);
+        assert_eq!(ui.selected_file, 1);
+        // Clamps at the last hunk.
+        jump_hunk(&model, &mut ui, true);
+        assert_eq!(ui.current_hunk, 1);
+        // Goes back.
+        jump_hunk(&model, &mut ui, false);
+        assert_eq!(ui.current_hunk, 0);
+        assert_eq!(ui.scroll, anchors[0]);
+    }
+
+    #[test]
+    fn select_file_moves_and_scrolls_to_header() {
+        let model = ReviewModel {
+            files: vec![
+                file("a.rs", false, vec![hunk(0, 0, 2)]),
+                file("b.rs", false, vec![hunk(0, 0, 2)]),
+            ],
+        };
+        let mut ui = CodeReviewUi::default();
+        let headers = file_header_indices(&flatten(&model));
+        select_file(&model, &mut ui, true);
+        assert_eq!(ui.selected_file, 1);
+        assert_eq!(ui.scroll, headers[1]);
+        select_file(&model, &mut ui, false);
+        assert_eq!(ui.selected_file, 0);
+        assert_eq!(ui.scroll, headers[0]);
+    }
+
+    #[test]
+    fn expand_context_reveals_lines_and_drops_hidden() {
+        let mut f = file("a.rs", false, vec![]);
+        f.new_lines = (1..=100).map(|i| format!("line {i}")).collect();
+        f.hunks = vec![Hunk {
+            old_start: 50,
+            old_len: 2,
+            new_start: 50,
+            new_len: 3,
+            gap_before: 49,
+            gap_after: 0,
+            expanded_before: 0,
+            expanded_after: 0,
+            rows: vec![
+                DiffRow {
+                    kind: RowKind::Context,
+                    old_lineno: Some(50),
+                    new_lineno: Some(50),
+                    raw: "line 50".into(),
+                    emphasis: vec![],
+                },
+                DiffRow {
+                    kind: RowKind::Added,
+                    old_lineno: None,
+                    new_lineno: Some(51),
+                    raw: "line 51 new".into(),
+                    emphasis: vec![],
+                },
+            ],
+        }];
+        let mut model = ReviewModel { files: vec![f] };
+        let ui = CodeReviewUi::default();
+
+        let before = model.files[0].hunks[0].rows.len();
+        expand_context(&mut model, &ui);
+        let after = model.files[0].hunks[0].rows.len();
+        assert!(after > before, "expand must reveal rows ({before} -> {after})");
+        assert_eq!(model.files[0].hunks[0].expanded_before, 10);
+        // Revealed rows come from new_lines (line 40..49 precede the hunk top at 50).
+        assert_eq!(model.files[0].hunks[0].rows[0].new_lineno, Some(40));
+        assert_eq!(model.files[0].hunks[0].rows[0].raw, "line 40");
     }
 }

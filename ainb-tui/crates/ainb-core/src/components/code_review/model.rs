@@ -42,6 +42,9 @@ pub struct ReviewFile {
     pub binary: bool,
     /// Diff hunks in file order.
     pub hunks: Vec<Hunk>,
+    /// The new-side file content split into lines, used to reveal context lines
+    /// when the user expands a collapsed gap. Empty for binary/deleted files.
+    pub new_lines: Vec<String>,
 }
 
 /// A contiguous run of changed + surrounding-context lines.

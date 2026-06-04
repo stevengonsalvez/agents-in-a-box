@@ -152,6 +152,13 @@ pub enum AppEvent {
     GitViewToggleFolder, // Toggle folder expand/collapse
     GitViewExpandAll,    // Expand all folders
     GitViewCollapseAll,  // Collapse all folders
+    // Code Review surface events (Review tab)
+    GitReviewToggleCollapse,  // Space/Enter — collapse/expand the selected file
+    GitReviewExpandContext,   // z — reveal more context at the nearest gap
+    GitReviewNextHunk,        // n — jump to next hunk
+    GitReviewPrevHunk,        // N — jump to previous hunk
+    GitReviewNextReviewFile,  // ] — select next file
+    GitReviewPrevReviewFile,  // [ — select previous file
     // Tmux integration events
     AttachTmuxSession, // Attach to tmux session
     DetachTmuxSession, // Detach from tmux session
@@ -1747,9 +1754,20 @@ impl EventHandler {
             }
         } else {
             // Normal git view navigation
+            let on_review = state
+                .git_view_state
+                .as_ref()
+                .is_some_and(|g| g.active_tab == crate::components::git_view::GitTab::Review);
             match key_event.code {
                 KeyCode::Esc => Some(AppEvent::GitViewBack),
                 KeyCode::Tab => Some(AppEvent::GitViewSwitchTab),
+                KeyCode::Char('n') if on_review => Some(AppEvent::GitReviewNextHunk),
+                KeyCode::Char('N') if on_review => Some(AppEvent::GitReviewPrevHunk),
+                KeyCode::Char(']') if on_review => Some(AppEvent::GitReviewNextReviewFile),
+                KeyCode::Char('[') if on_review => Some(AppEvent::GitReviewPrevReviewFile),
+                KeyCode::Char(' ') if on_review => Some(AppEvent::GitReviewToggleCollapse),
+                KeyCode::Char('z') if on_review => Some(AppEvent::GitReviewExpandContext),
+                KeyCode::Enter if on_review => Some(AppEvent::GitReviewToggleCollapse),
                 KeyCode::Char('j') | KeyCode::Down => {
                     if let Some(ref git_state) = state.git_view_state {
                         match git_state.active_tab {
@@ -3078,6 +3096,36 @@ impl EventHandler {
                         }
                         _ => {}
                     }
+                }
+            }
+            AppEvent::GitReviewToggleCollapse => {
+                if let Some(ref mut git_state) = state.git_view_state {
+                    git_state.review_toggle_collapse();
+                }
+            }
+            AppEvent::GitReviewExpandContext => {
+                if let Some(ref mut git_state) = state.git_view_state {
+                    git_state.review_expand_context();
+                }
+            }
+            AppEvent::GitReviewNextHunk => {
+                if let Some(ref mut git_state) = state.git_view_state {
+                    git_state.review_next_hunk();
+                }
+            }
+            AppEvent::GitReviewPrevHunk => {
+                if let Some(ref mut git_state) = state.git_view_state {
+                    git_state.review_prev_hunk();
+                }
+            }
+            AppEvent::GitReviewNextReviewFile => {
+                if let Some(ref mut git_state) = state.git_view_state {
+                    git_state.review_next_file();
+                }
+            }
+            AppEvent::GitReviewPrevReviewFile => {
+                if let Some(ref mut git_state) = state.git_view_state {
+                    git_state.review_prev_file();
                 }
             }
             AppEvent::GitViewNextCommit => {

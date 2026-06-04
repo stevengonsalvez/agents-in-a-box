@@ -53,12 +53,14 @@ pub fn build_review_model(worktree: &Path) -> Result<ReviewModel> {
             collapsed: false,
             binary,
             hunks: Vec::new(),
+            new_lines: Vec::new(),
         };
         if !binary {
             let (hunks, insertions, deletions) = diff_to_hunks(&old, &new);
             file.hunks = hunks;
             file.insertions = insertions;
             file.deletions = deletions;
+            file.new_lines = new.lines().map(String::from).collect();
         }
         files.push(file);
     }
