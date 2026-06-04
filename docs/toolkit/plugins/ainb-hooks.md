@@ -44,7 +44,7 @@ Deliberately **not** registered (telemetry / activity noise — would bury the s
 
 ## Install
 
-`ainb-hooks` is **not** installed via the marketplace the normal way (it is absent from the root `marketplace.json` plugins list). It is wired by the `ainb-notifyd` binary's installer, which handles the plugin manifest, the Codex config merge, and the notifyd lifecycle:
+`ainb-hooks` is published in the `agents-in-a-box` plugin marketplace, but you don't install it by hand — the `ainb-notifyd` binary's installer wires it for the chosen agents and manages the notifyd lifecycle:
 
 ```bash
 ainb-notifyd install --claude --codex
@@ -52,7 +52,7 @@ ainb-notifyd status
 ainb-notifyd uninstall --all
 ```
 
-The installer drops `plugin.json` at `~/.claude/plugins/ainb-hooks/` (Claude), merges `codex/hooks.json` into `~/.codex/hooks.json` as a managed block (Codex), extracts `notify.sh` to `~/.agents-in-a-box/hooks/notify.sh` and rewrites the `__AINB_HOOK_SCRIPT__` placeholder to that absolute path, and records the install method in `~/.agents-in-a-box/install.json` so uninstall is fully reversible.
+For **Claude**, the installer shells out to the `claude` plugin CLI — ensuring the `agents-in-a-box` marketplace is known, then `claude plugin install ainb-hooks@agents-in-a-box` (idempotent; "already installed" counts as success) — so Claude resolves and runs the plugin's bundled `notify.sh`. For **Codex**, it merges `codex/hooks.json` into `~/.codex/hooks.json` as a managed block, extracts `notify.sh` to `~/.agents-in-a-box/hooks/notify.sh`, and rewrites the `__AINB_HOOK_SCRIPT__` placeholder to that absolute path. The install method is recorded in `~/.agents-in-a-box/install.json` so uninstall is fully reversible (`claude plugin uninstall` for Claude, managed-block removal for Codex). **Both paths are verified end-to-end; Claude remains the primary, most-exercised integration.**
 
 > The plugin's README recommends a higher-level `ainb hooks install` wrapper; that `ainb hooks` CLI is planned but not yet on `main`, so use `ainb-notifyd install` (above) today.
 

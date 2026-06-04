@@ -92,6 +92,25 @@ pub enum PickRepoOutcome {
     /// Source needs an async clone before advancing. Phase 5 wires the
     /// spinner display; Phase 4 stops here.
     StartClone(RepoSource),
+    /// Ctrl+V pressed — the caller (events.rs) reads the OS clipboard and
+    /// appends it to the filter via `append_filter`. Clipboard access lives
+    /// in the app layer (`EventHandler::get_clipboard_text`), keeping this
+    /// component pure and testable.
+    PasteFromClipboard,
+    /// Surface a transient message to the user (favorite added/removed, or a
+    /// refusal) and stay on the picker. The dispatcher maps `is_error` to an
+    /// error vs. info notification.
+    Notice { message: String, is_error: bool },
+}
+
+/// Result of toggling a favorite — drives the `^F` notification.
+enum FavoriteToggle {
+    /// Newly favorited; carries the stored remote source for display.
+    Added(String),
+    /// Un-favorited; carries the row label for display.
+    Removed(String),
+    /// Refused because the row has no remote repository indicator.
+    Refused(String),
 }
 
 /// Persistent state for the picker. Constructed once per new-session
@@ -146,6 +165,30 @@ impl PickRepoState {
     pub fn highlighted(&self) -> Option<&PickRepoRow> {
         let idx = *self.filtered_indices.get(self.selected)?;
         self.rows.get(idx)
+    }
+
+    /// Append pasted text to the filter (clipboard paste — Ctrl+V or
+    /// bracketed `Event::Paste`). Control characters are stripped because the
+    /// filter is a single-line field; a pasted `owner/repo\n` should filter,
+    /// not submit. Refilters so the list (and Enter's smart-parse) reflect it.
+    pub fn append_filter(&mut self, text: &str) {
+        // Cap total filter length so a pathological clipboard payload can't
+        // bloat the field / stall refilter. A repo URL or path is well under
+        // this; anything larger is not a sensible picker query.
+        const MAX_FILTER_LEN: usize = 4096;
+        let mut cleaned: String = text.chars().filter(|c| !c.is_control()).collect();
+        if cleaned.is_empty() {
+            return;
+        }
+        let room = MAX_FILTER_LEN.saturating_sub(self.filter.chars().count());
+        if room == 0 {
+            return;
+        }
+        if cleaned.chars().count() > room {
+            cleaned = cleaned.chars().take(room).collect();
+        }
+        self.filter.push_str(&cleaned);
+        self.refilter();
     }
 
     /// Recompute `filtered_indices` when filter or rows change. Preserves
@@ -537,11 +580,37 @@ pub fn handle_key(state: &mut PickRepoState, key: KeyEvent) -> PickRepoOutcome {
             KeyCode::Char('f' | 'F') => {
                 tracing::debug!("pick_repo: ^F toggle favorite on highlighted row");
                 if let Some(row) = state.highlighted().cloned() {
-                    toggle_favorite(state, &row);
-                    let local_repos = collect_local_repo_paths(state);
-                    state.rebuild_rows(&local_repos);
+                    return match toggle_favorite(state, &row) {
+                        FavoriteToggle::Refused(reason) => PickRepoOutcome::Notice {
+                            message: format!("★ Can't favorite: {reason}"),
+                            is_error: true,
+                        },
+                        FavoriteToggle::Added(display) => {
+                            let local_repos = collect_local_repo_paths(state);
+                            state.rebuild_rows(&local_repos);
+                            PickRepoOutcome::Notice {
+                                message: format!("⭐ Added '{display}' to favorites"),
+                                is_error: false,
+                            }
+                        }
+                        FavoriteToggle::Removed(display) => {
+                            let local_repos = collect_local_repo_paths(state);
+                            state.rebuild_rows(&local_repos);
+                            PickRepoOutcome::Notice {
+                                message: format!("★ Removed '{display}' from favorites"),
+                                is_error: false,
+                            }
+                        }
+                    };
                 }
                 return PickRepoOutcome::Stay;
+            }
+            KeyCode::Char('v' | 'V') => {
+                // Ctrl+V: ask the caller to read the OS clipboard and append
+                // it (Cmd+V / bracketed paste isn't delivered to this field
+                // in some terminals — tmux, mouse-capture).
+                tracing::debug!("pick_repo: ^V clipboard paste");
+                return PickRepoOutcome::PasteFromClipboard;
             }
             _ => {}
         }
@@ -636,37 +705,58 @@ fn resolve_outcome(source: RepoSource) -> PickRepoOutcome {
 /// (mutating `state.favorites`) AND the on-disk YAML so the change survives
 /// across TUI restarts.
 ///
-/// Finding #1 sub-issue: refuses to persist when the row's source is
-/// `Filter` — writing `SourceType::LocalPath` with the alias-string as the
-/// path silently corrupts `favorites.yaml`. Pre-fix this only mattered for
-/// recents (which used Filter as a leaky "unknown provenance" carrier);
-/// post-fix the picker always reconstructs a real variant via
-/// `recent_source`, so a Filter source here is genuinely unparseable input
-/// that should not be persisted.
-fn toggle_favorite(state: &mut PickRepoState, row: &PickRepoRow) {
+/// A favorite ALWAYS records a remote indicator. Remote rows store directly;
+/// a `LocalPath` row is resolved to its `origin` remote via
+/// [`favorite_from_local_repo`] (refused if it has none). `SshSession`
+/// (interactive, not a repo) and `Filter` (unparseable text) rows are refused
+/// outright — never persisted.
+fn toggle_favorite(state: &mut PickRepoState, row: &PickRepoRow) -> FavoriteToggle {
     if state.favorites.has_alias(&row.id) {
         state.favorites.remove(&row.id);
-    } else {
-        let (source_str, source_type) = match &row.source {
-            RepoSource::HttpsUrl(u) => (u.clone(), SourceType::HttpsUrl),
-            RepoSource::SshUrl(u) => (u.clone(), SourceType::SshUrl),
-            RepoSource::GithubShorthand { owner, repo } => {
-                (format!("{owner}/{repo}"), SourceType::GithubShorthand)
-            }
-            RepoSource::LocalPath(p) => (p.display().to_string(), SourceType::LocalPath),
-            RepoSource::SshSession(s) => (s.clone(), SourceType::SshUrl),
-            RepoSource::Filter(s) => {
-                tracing::warn!(
-                    alias = %row.id,
-                    text = %s,
-                    "pick_repo: refusing to favorite a Filter row — no real source provenance",
-                );
-                return;
-            }
-        };
-        let fav = Favorite::new(row.id.clone(), source_str, source_type);
-        state.favorites.set(fav);
+        persist_favorites(state);
+        return FavoriteToggle::Removed(row.label.clone());
     }
+
+    let fav = match &row.source {
+        RepoSource::HttpsUrl(u) => Favorite::new(row.id.clone(), u.clone(), SourceType::HttpsUrl),
+        RepoSource::SshUrl(u) => Favorite::new(row.id.clone(), u.clone(), SourceType::SshUrl),
+        RepoSource::GithubShorthand { owner, repo } => Favorite::new(
+            row.id.clone(),
+            format!("{owner}/{repo}"),
+            SourceType::GithubShorthand,
+        ),
+        RepoSource::LocalPath(p) => {
+            match crate::config::favorite_from_local_repo(row.id.clone(), p) {
+                Ok(fav) => fav,
+                Err(e) => {
+                    tracing::warn!(
+                        alias = %row.id,
+                        path = %p.display(),
+                        error = %e,
+                        "pick_repo: refusing to favorite local row — no remote indicator",
+                    );
+                    return FavoriteToggle::Refused(e.to_string());
+                }
+            }
+        }
+        RepoSource::SshSession(s) | RepoSource::Filter(s) => {
+            tracing::warn!(
+                alias = %row.id,
+                text = %s,
+                "pick_repo: refusing to favorite — not a remote repository indicator",
+            );
+            return FavoriteToggle::Refused("not a remote repository".to_string());
+        }
+    };
+
+    let display = fav.source.clone();
+    state.favorites.set(fav);
+    persist_favorites(state);
+    FavoriteToggle::Added(display)
+}
+
+/// Persist the favorites store to disk, logging (but not failing) on error.
+fn persist_favorites(state: &PickRepoState) {
     if let Err(err) = state.favorites.save() {
         tracing::warn!(error = %err, "pick_repo: failed to persist favorites");
     }
@@ -863,5 +953,48 @@ mod tests {
         assert_eq!(abbreviate_home(&home), "~");
         let outside = Path::new("/opt/elsewhere/Rosetta");
         assert_eq!(abbreviate_home(outside), outside.display().to_string());
+    }
+
+    fn one_row() -> Vec<PickRepoRow> {
+        vec![PickRepoRow {
+            id: "shotclubhouse".into(),
+            label: "shotclubhouse".into(),
+            source: RepoSource::Filter("shotclubhouse".into()),
+            kind: RowKind::Favorite,
+        }]
+    }
+
+    #[test]
+    fn ctrl_v_requests_clipboard_paste() {
+        let mut s = mk_state_with_rows(one_row());
+        let ctrl_v = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL);
+        assert_eq!(
+            handle_key(&mut s, ctrl_v),
+            PickRepoOutcome::PasteFromClipboard
+        );
+        // The keystroke must NOT also type a literal 'v' into the filter.
+        assert_eq!(s.filter, "");
+    }
+
+    #[test]
+    fn plain_v_still_types_into_filter() {
+        let mut s = mk_state_with_rows(one_row());
+        let v = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE);
+        assert_eq!(handle_key(&mut s, v), PickRepoOutcome::Stay);
+        assert_eq!(s.filter, "v");
+    }
+
+    #[test]
+    fn append_filter_strips_control_chars_and_refilters() {
+        let mut s = mk_state_with_rows(one_row());
+        // Simulate a pasted "owner/repo" with a trailing newline.
+        s.append_filter("shotclub\n");
+        assert_eq!(s.filter, "shotclub");
+        // The single row still matches the prefix, so it stays visible.
+        assert_eq!(s.filtered_indices.len(), 1);
+        // A non-matching paste empties the filtered list.
+        s.append_filter("zzz");
+        assert_eq!(s.filter, "shotclubzzz");
+        assert_eq!(s.filtered_indices.len(), 0);
     }
 }

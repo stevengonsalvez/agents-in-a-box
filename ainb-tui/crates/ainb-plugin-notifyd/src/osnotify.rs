@@ -64,25 +64,9 @@ impl Debouncer {
 ///
 /// Returns `false` for telemetry / lifecycle events; `true` for
 /// events that signal "human attention needed" or "session ended".
+/// Equivalent to [`classify_attention`] returning `Some`.
 pub fn is_user_facing(env: &Envelope) -> bool {
-    // Codex variants and Claude variants for the same semantic
-    // event share the substring at the start of the raw event.
-    let evt = env.raw_event.as_str();
-    // Strip any matcher suffix (e.g. `Notification:idle_prompt`).
-    let head = evt.split(':').next().unwrap_or(evt);
-    matches!(
-        head,
-        "Stop"
-            | "Notification"
-            | "PermissionRequest"
-            | "agent-turn-complete"
-            | "task_complete"
-            | "request_user_input"
-            | "exec_approval_request"
-            | "apply_patch_approval_request"
-            | "wait_for_user"
-            | "permission_request"
-    )
+    classify_attention(&env.raw_event).is_some()
 }
 
 /// The attention state a hook event implies for the session that
@@ -97,6 +81,33 @@ pub enum AlertKind {
     WaitingOnUser,
     /// Agent finished its turn — informational, no action required.
     Finished,
+}
+
+/// Map a host agent's `raw_event` to the attention state it implies,
+/// or `None` for telemetry / lifecycle events that don't warrant a
+/// marker. This is the single source of truth for which hook events
+/// are "user-facing" — both [`is_user_facing`] (OS notifications) and
+/// the ainb-tui per-session marker classify through here so the two
+/// surfaces never drift apart.
+///
+/// Codex and Claude name the same semantic event differently; both
+/// variants map to the same [`AlertKind`]. A matcher suffix
+/// (e.g. `Notification:idle_prompt`) is stripped before matching.
+pub fn classify_attention(raw_event: &str) -> Option<AlertKind> {
+    let head = raw_event.split(':').next().unwrap_or(raw_event);
+    Some(match head {
+        // Blocked on an approval — most urgent.
+        "PermissionRequest"
+        | "permission_request"
+        | "exec_approval_request"
+        | "apply_patch_approval_request" => AlertKind::NeedsPermission,
+        // Asked the user something / idle awaiting input.
+        "Notification" | "request_user_input" | "wait_for_user" => AlertKind::WaitingOnUser,
+        // Turn ended — informational.
+        "Stop" | "agent-turn-complete" | "task_complete" => AlertKind::Finished,
+        // Telemetry / lifecycle (PreToolUse, PostToolUse, UserPromptSubmit, …).
+        _ => return None,
+    })
 }
 
 /// Render a short, human-readable title from an envelope.
@@ -241,6 +252,46 @@ mod tests {
         assert!(is_user_facing(&env("agent-turn-complete", "codex")));
         assert!(is_user_facing(&env("request_user_input", "codex")));
         assert!(is_user_facing(&env("exec_approval_request", "codex")));
+    }
+
+    #[test]
+    fn classify_attention_maps_each_kind() {
+        // Permission / approval (Claude + Codex) → NeedsPermission.
+        for e in [
+            "PermissionRequest",
+            "permission_request",
+            "exec_approval_request",
+            "apply_patch_approval_request",
+        ] {
+            assert_eq!(
+                classify_attention(e),
+                Some(AlertKind::NeedsPermission),
+                "{e}"
+            );
+        }
+        // Asked / awaiting input → WaitingOnUser.
+        for e in [
+            "Notification",
+            "Notification:idle_prompt",
+            "request_user_input",
+            "wait_for_user",
+        ] {
+            assert_eq!(classify_attention(e), Some(AlertKind::WaitingOnUser), "{e}");
+        }
+        // Turn ended → Finished.
+        for e in ["Stop", "agent-turn-complete", "task_complete"] {
+            assert_eq!(classify_attention(e), Some(AlertKind::Finished), "{e}");
+        }
+        // Telemetry / lifecycle → no marker.
+        for e in [
+            "PreToolUse",
+            "PostToolUse",
+            "UserPromptSubmit",
+            "SessionStart",
+            "",
+        ] {
+            assert_eq!(classify_attention(e), None, "{e}");
+        }
     }
 
     #[test]

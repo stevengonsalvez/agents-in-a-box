@@ -910,44 +910,165 @@ mod tests {
     }
 
     // ========================================================================
-    // Live per-session attention marker (derived from the tmux pane)
+    // Per-session attention marker — derived from real ainb-hooks events
+    // (NeedsPermission `[!]` / WaitingOnUser `[?]` / Finished `[✓]`), not
+    // from "is the pane generating right now".
     // ========================================================================
 
+    /// Build a notification record for the marker tests. `recent` slices
+    /// passed to `attention_for_session` must be newest-first.
+    fn rec(
+        agent: &str,
+        cwd: &str,
+        raw_event: &str,
+        ts: i64,
+    ) -> ainb_plugin_notifyd::NotificationRecord {
+        ainb_plugin_notifyd::NotificationRecord {
+            id: format!("id-{ts}"),
+            ts,
+            agent: agent.into(),
+            session_id: format!("s-{ts}"),
+            cwd: cwd.into(),
+            project: cwd.rsplit('/').next().unwrap_or("").into(),
+            raw_event: raw_event.into(),
+            payload_json: "{}".into(),
+            read: false,
+            dismissed: false,
+        }
+    }
+
+    const NOW: i64 = 1_000_000_000;
+    const CWD: &str = "/work/feat-x";
+
     #[test]
-    fn live_attention_marks_waiting_at_prompt_only() {
+    fn attention_permission_event_marks_needs_permission() {
         use ainb_plugin_notifyd::AlertKind;
-
-        // Box-drawn prompt panel containing '?' while the agent is NOT
-        // generating (no status bar → claude_running=false) → the user
-        // is needed.
-        let prompt_pane = "\
-some earlier output line
-┌──────────────────────────────┐
-│ What do you want to do next?  │
-│ ❯ 1. Plan                     │
-│   2. Submit                   │
-└──────────────────────────────┘";
+        let recent = vec![rec("claude", CWD, "PermissionRequest", NOW - 1000)];
         assert_eq!(
-            AppState::live_attention_from_pane(prompt_pane, false),
+            AppState::attention_for_session(CWD, Some("claude"), false, 0, NOW, &recent),
+            Some(AlertKind::NeedsPermission),
+        );
+    }
+
+    #[test]
+    fn attention_notification_event_marks_waiting() {
+        use ainb_plugin_notifyd::AlertKind;
+        let recent = vec![rec("claude", CWD, "Notification:idle_prompt", NOW - 1000)];
+        assert_eq!(
+            AppState::attention_for_session(CWD, Some("claude"), false, 0, NOW, &recent),
             Some(AlertKind::WaitingOnUser),
-            "box prompt + not generating must mark waiting-on-user"
         );
+    }
 
-        // Same pane, but the agent is actively generating (status bar
-        // present). It's working, not waiting → no marker.
+    #[test]
+    fn attention_fresh_stop_marks_finished_stale_stop_clears() {
+        use ainb_plugin_notifyd::AlertKind;
+        let fresh = vec![rec("claude", CWD, "Stop", NOW - 1000)];
         assert_eq!(
-            AppState::live_attention_from_pane(prompt_pane, true),
-            None,
-            "actively-generating session must not show a waiting marker"
+            AppState::attention_for_session(CWD, Some("claude"), false, 0, NOW, &fresh),
+            Some(AlertKind::Finished),
         );
+        // Older than the 5-minute Finished TTL → retired, no marker.
+        let stale = vec![rec("claude", CWD, "Stop", NOW - 6 * 60 * 1000)];
+        assert_eq!(
+            AppState::attention_for_session(CWD, Some("claude"), false, 0, NOW, &stale),
+            None,
+        );
+    }
 
-        // Plain finished/idle output with no prompt box → no marker
-        // (idle is conveyed by the row's `○` status indicator).
-        let idle_pane = "task complete.\nno box here\n$ ";
+    #[test]
+    fn attention_suppressed_while_generating() {
+        let recent = vec![rec("claude", CWD, "PermissionRequest", NOW - 1000)];
         assert_eq!(
-            AppState::live_attention_from_pane(idle_pane, false),
+            AppState::attention_for_session(CWD, Some("claude"), true, 0, NOW, &recent),
             None,
-            "idle output without a prompt box must not show a marker"
+            "a generating session shows the busy dot, not an attention marker",
         );
+    }
+
+    #[test]
+    fn attention_blank_without_a_matching_event() {
+        // No events at all → blank (this is the common idle case the old
+        // "[?] on everything" behaviour got wrong).
+        assert_eq!(
+            AppState::attention_for_session(CWD, Some("claude"), false, 0, NOW, &[]),
+            None,
+        );
+        // Events exist, but for a different cwd or a different agent —
+        // must not bleed across sessions.
+        let other = vec![
+            rec("codex", CWD, "Notification", NOW - 50),
+            rec("claude", "/work/other", "Notification", NOW - 100),
+        ];
+        assert_eq!(
+            AppState::attention_for_session(CWD, Some("claude"), false, 0, NOW, &other),
+            None,
+        );
+    }
+
+    #[test]
+    fn attention_ignores_events_at_or_before_baseline() {
+        use ainb_plugin_notifyd::AlertKind;
+        let recent = vec![rec("claude", CWD, "Notification", 500)];
+        // Baseline at/after the event (e.g. user just attached) → cleared.
+        assert_eq!(
+            AppState::attention_for_session(CWD, Some("claude"), false, 500, NOW, &recent),
+            None,
+        );
+        // Baseline just before the event → still marks.
+        assert_eq!(
+            AppState::attention_for_session(CWD, Some("claude"), false, 499, NOW, &recent),
+            Some(AlertKind::WaitingOnUser),
+        );
+    }
+
+    #[test]
+    fn attention_newest_event_wins() {
+        use ainb_plugin_notifyd::AlertKind;
+        // Question asked, then the turn finished — newest (Stop) supersedes
+        // the older Notification.
+        let recent = vec![
+            rec("claude", CWD, "Stop", NOW - 1000),
+            rec("claude", CWD, "Notification", NOW - 5000),
+        ];
+        assert_eq!(
+            AppState::attention_for_session(CWD, Some("claude"), false, 0, NOW, &recent),
+            Some(AlertKind::Finished),
+        );
+    }
+
+    #[test]
+    fn attention_none_agent_never_marks() {
+        // Shell / SSH session (no hook agent) → never a marker, even with
+        // a permission event sitting in the same cwd.
+        let recent = vec![rec("claude", CWD, "PermissionRequest", NOW - 1000)];
+        assert_eq!(
+            AppState::attention_for_session(CWD, None, false, 0, NOW, &recent),
+            None,
+        );
+    }
+
+    #[test]
+    fn attention_matches_cwd_ignoring_trailing_slash() {
+        use ainb_plugin_notifyd::AlertKind;
+        let recent = vec![rec("claude", "/work/feat-x/", "Notification", NOW - 100)];
+        assert_eq!(
+            AppState::attention_for_session("/work/feat-x", Some("claude"), false, 0, NOW, &recent),
+            Some(AlertKind::WaitingOnUser),
+        );
+    }
+
+    #[test]
+    fn agent_hook_name_maps_claude_and_codex_only() {
+        assert_eq!(
+            AppState::agent_hook_name(SessionAgentType::Claude),
+            Some("claude")
+        );
+        assert_eq!(
+            AppState::agent_hook_name(SessionAgentType::Codex),
+            Some("codex")
+        );
+        assert_eq!(AppState::agent_hook_name(SessionAgentType::Shell), None);
+        assert_eq!(AppState::agent_hook_name(SessionAgentType::Gemini), None);
     }
 }

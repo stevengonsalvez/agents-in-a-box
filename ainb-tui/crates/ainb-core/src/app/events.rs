@@ -91,6 +91,7 @@ pub enum AppEvent {
     // the legacy 13-step variants; only `NewSessionCancel` survives as the
     // host-level Esc handler for the `Creating` step.
     NewSessionCancel,
+    PickRepoPaste(String), // Append bracketed-paste text to the repo-picker filter (Cmd+V)
     // Notification events
     ShowNotification(String), // Display a notification message to the user
     // File finder events for @ symbol trigger
@@ -360,6 +361,9 @@ pub enum AppEvent {
     ConfigureLaunch(crate::components::new_session::configure::LaunchSpec),
     ConfigureBack,              // Esc on Configure → return to PickRepo
     ConfigureOpenPresetManager, // ^P stub until Phase 7 polish
+    /// Enter on the Branch row's Source segment → seed the base-branch
+    /// popup from cached refs + kick the background fetch refresh.
+    ConfigureOpenBranchPicker,
 }
 
 /// Translate a `RepoSource` variant into the `(SourceType, source_string)`
@@ -687,6 +691,22 @@ impl EventHandler {
     pub fn handle_paste_event(text: String, state: &AppState) -> Option<AppEvent> {
         if state.config_popup_state.is_text_entry() {
             return Some(AppEvent::ConfigPopupPaste(text));
+        }
+        // New Session repo picker: the filter field accepts pasted
+        // owner/repo, URLs and paths. Like the config popup it lives behind
+        // the host router, so a bracketed paste must be forwarded here or it
+        // is dropped (Cmd+V appeared to do nothing). Gate on the visible
+        // screen too — `new_session_state` can linger after navigating away
+        // (e.g. via the sidebar), and a paste must not leak into a hidden
+        // picker.
+        let on_pick_repo = state.current_screen == crate::app::screens::ids::NEW_SESSION
+            && state
+                .new_session_state
+                .as_ref()
+                .map(|s| s.step == crate::app::state::NewSessionStep::PickRepo)
+                .unwrap_or(false);
+        if on_pick_repo {
+            return Some(AppEvent::PickRepoPaste(text));
         }
         None
     }
@@ -1361,6 +1381,7 @@ impl EventHandler {
                 ConfigureOutcome::BackToPickRepo => Some(AppEvent::ConfigureBack),
                 ConfigureOutcome::Launch(spec) => Some(AppEvent::ConfigureLaunch(spec)),
                 ConfigureOutcome::OpenPresetManager => Some(AppEvent::ConfigureOpenPresetManager),
+                ConfigureOutcome::OpenBranchPicker => Some(AppEvent::ConfigureOpenBranchPicker),
             };
         }
 
@@ -1383,6 +1404,37 @@ impl EventHandler {
 
             return match outcome {
                 PickRepoOutcome::Stay => None,
+                PickRepoOutcome::Notice { message, is_error } => {
+                    // Favorite added/removed or a refusal (e.g. starring a repo
+                    // with no remote). Surface it and stay on the picker.
+                    if is_error {
+                        state.add_error_notification(message);
+                    } else {
+                        state.add_info_notification(message);
+                    }
+                    None
+                }
+                PickRepoOutcome::PasteFromClipboard => {
+                    // Ctrl+V on the picker: read the OS clipboard here (app
+                    // layer owns clipboard access) and append to the filter.
+                    match Self::get_clipboard_text() {
+                        Ok(text) => {
+                            if let Some(pick) = state
+                                .new_session_state
+                                .as_mut()
+                                .and_then(|s| s.pick_repo_state.as_mut())
+                            {
+                                pick.append_filter(&text);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("PickRepo clipboard paste failed: {}", e);
+                            state
+                                .add_error_notification(format!("Could not read clipboard: {}", e));
+                        }
+                    }
+                    None
+                }
                 PickRepoOutcome::BackToHome => {
                     // Persist session-defaults at the screen boundary
                     // (finding #3) so arrow/Esc no longer write on every
@@ -1449,11 +1501,23 @@ impl EventHandler {
                     // top-level dirs and misses every modern by-name worktree.
                     // The latter returned empty → collision never detected
                     // (Stevie 2026-05-27: feat/blog re-launch slipped through).
-                    let existing_branches: Vec<String> = WorktreeManager::new()
+                    let mut existing_branches: Vec<String> = WorktreeManager::new()
                         .ok()
                         .and_then(|m| m.list_all_worktrees().ok())
                         .map(|infos| infos.into_iter().map(|(_, i)| i.branch_name).collect())
                         .unwrap_or_default();
+                    // The session list alone can't see the repo's OWN checkout
+                    // (or a manually-added worktree) — `git worktree list` can.
+                    // Without this, a checkout-direct pick of the repo's
+                    // current branch passes the picker guard and dies at
+                    // `git worktree add` (review P1, PR #211).
+                    if let crate::git::repo_source::RepoSource::LocalPath(p) = &source {
+                        for b in crate::git::branch_list::checked_out_branches(p) {
+                            if !existing_branches.contains(&b) {
+                                existing_branches.push(b);
+                            }
+                        }
+                    }
                     let cfg = ConfigureState::from_pick_repo(
                         source.clone(),
                         label,
@@ -2298,6 +2362,13 @@ impl EventHandler {
             AppEvent::NewSessionCancel => {
                 state.cancel_new_session();
             }
+            AppEvent::PickRepoPaste(text) => {
+                if let Some(pick) =
+                    state.new_session_state.as_mut().and_then(|s| s.pick_repo_state.as_mut())
+                {
+                    pick.append_filter(&text);
+                }
+            }
             AppEvent::ConfigureBack => {
                 // Phase 5: Esc on Configure persists the half-typed prompt to
                 // session-defaults so it's restored on re-entry, then routes
@@ -2378,6 +2449,12 @@ impl EventHandler {
             AppEvent::ConfigureOpenPresetManager => {
                 // Phase 7 polish — stub for now.
                 tracing::warn!("ConfigureOpenPresetManager — stub until Phase 7");
+            }
+            AppEvent::ConfigureOpenBranchPicker => {
+                // Seed from cached refs (instant), kick background refresh.
+                // Git stays in the app layer — components/ never touch git2
+                // (finding #9).
+                state.open_branch_picker();
             }
             AppEvent::ShowNotification(message) => {
                 tracing::info!("Event: ShowNotification - {}", message);
@@ -2800,23 +2877,42 @@ impl EventHandler {
                                     Some(AsyncAction::KillWorkspaceShell(workspace_idx));
                             }
                             crate::app::state::ConfirmAction::InstallNotifyHooks => {
-                                // Install the ainb-hooks plugin for both agents
-                                // in-process (ainb-core links ainb-plugin-notifyd).
-                                // Sync + fast — writes a few small files. The
-                                // daemon lazy-spawns on the first hook event.
+                                // Install the ainb-hooks plugin for both agents.
+                                // Codex + the canonical hook script are written
+                                // in-process; Claude is registered by shelling
+                                // out to `claude plugin install`. The daemon
+                                // lazy-spawns on the first hook event.
+                                use ainb_plugin_notifyd::ClaudeRegister;
                                 match ainb_plugin_notifyd::Paths::from_home().and_then(|p| {
                                     ainb_plugin_notifyd::install_for(
                                         &p,
                                         ainb_plugin_notifyd::Agent::ALL,
                                     )
                                 }) {
-                                    Ok(record) => {
-                                        state.add_info_notification(format!(
-                                            "Notifications enabled for {:?} — the Inbox (b) \
-                                             will light up when a session needs you.",
-                                            record.agents
-                                        ));
-                                    }
+                                    Ok(report) => match &report.claude {
+                                        Some(ClaudeRegister::Failed(e)) => {
+                                            state.add_error_notification(format!(
+                                                "Codex hooks installed, but the Claude plugin \
+                                                 failed to register: {e}"
+                                            ));
+                                        }
+                                        Some(ClaudeRegister::ClaudeCliMissing) => {
+                                            state.add_error_notification(
+                                                "Codex hooks installed, but `claude` CLI was not \
+                                                 found — Claude notifications not enabled. Install \
+                                                 it, then re-run."
+                                                    .to_string(),
+                                            );
+                                        }
+                                        _ => {
+                                            state.add_info_notification(
+                                                "Notifications enabled (Claude + Codex). Restart \
+                                                 your agent sessions to load the hooks; the Inbox \
+                                                 (b) lights up when a session needs you."
+                                                    .to_string(),
+                                            );
+                                        }
+                                    },
                                     Err(e) => {
                                         state.add_error_notification(format!(
                                             "Failed to install notification hooks: {e}"
@@ -3289,144 +3385,100 @@ impl EventHandler {
             AppEvent::StarSelectedWorkspace => {
                 tracing::info!("StarSelectedWorkspace event triggered");
                 if let Some(workspace_idx) = state.selected_workspace_index {
-                    if let Some(workspace) = state.workspaces.get(workspace_idx) {
-                        let workspace_name = workspace.name.clone();
-
-                        // Load favorites store
+                    // Clone the bits we need so the immutable borrow of `state`
+                    // ends before we notify (which borrows `state` mutably).
+                    if let Some((workspace_name, workspace_path)) = state
+                        .workspaces
+                        .get(workspace_idx)
+                        .map(|w| (w.name.clone(), w.path.clone()))
+                    {
                         let mut favorites_store = crate::config::FavoritesStore::load();
+                        let alias = workspace_name.to_lowercase().replace(' ', "-");
 
-                        // Try to get the remote URL from the git repository
-                        // This allows favoriting the REMOTE repo, not just the local path
-                        let (source, source_type, display_source) = if let Ok(git_repo) =
-                            crate::git::RepositoryManager::open(&workspace.path)
-                        {
-                            if let Ok(Some(remote_url)) = git_repo.get_remote_url() {
-                                // Parse the remote URL to get owner/repo.
-                                // `from_input` is deprecated for new
-                                // free-form input (finding #14), but the
-                                // URL here is already validated by
-                                // `get_remote_url()` so the legacy
-                                // fallible contract is fine.
-                                #[allow(deprecated)]
-                                if let Ok(repo_source) =
-                                    crate::git::RepoSource::from_input(&remote_url)
-                                {
-                                    if let Ok(parsed) = repo_source.parse_components() {
-                                        // Use GitHub shorthand if it's a GitHub repo
-                                        if parsed.host == "github.com" {
-                                            let shorthand =
-                                                format!("{}/{}", parsed.owner, parsed.repo_name);
-                                            (
-                                                shorthand.clone(),
-                                                crate::config::FavoriteSourceType::GithubShorthand,
-                                                shorthand,
-                                            )
-                                        } else {
-                                            // For other hosts, use the full URL
-                                            let source_type = if remote_url.starts_with("git@") {
-                                                crate::config::FavoriteSourceType::SshUrl
-                                            } else {
-                                                crate::config::FavoriteSourceType::HttpsUrl
-                                            };
-                                            let display =
-                                                format!("{}/{}", parsed.owner, parsed.repo_name);
-                                            (remote_url, source_type, display)
-                                        }
+                        // A star ALWAYS records the remote indicator. Derive it
+                        // from the repo's `origin`; refuse (no local-path
+                        // fallback) when there is no resolvable remote.
+                        match crate::config::favorite_from_local_repo(
+                            alias.clone(),
+                            &workspace_path,
+                        ) {
+                            Ok(fav) => {
+                                // Toggle off if already favorited — match on the
+                                // derived remote source, or a legacy local-path
+                                // entry for the same repo. NOT on alias: the alias
+                                // is folder-derived, so two distinct repos sharing
+                                // a folder name must not toggle each other off.
+                                let local_path_str = workspace_path.display().to_string();
+                                let existing = favorites_store
+                                    .favorites
+                                    .iter()
+                                    .find(|f| f.source == fav.source || f.source == local_path_str)
+                                    .map(|f| f.alias.clone());
+
+                                if let Some(existing_alias) = existing {
+                                    favorites_store.remove(&existing_alias);
+                                    if let Err(e) = favorites_store.save() {
+                                        tracing::error!("Failed to save favorites: {}", e);
+                                        state.add_error_notification(format!(
+                                            "Could not update favorites: {e}"
+                                        ));
                                     } else {
-                                        // Couldn't parse, use raw URL
-                                        let source_type = if remote_url.starts_with("git@") {
-                                            crate::config::FavoriteSourceType::SshUrl
-                                        } else {
-                                            crate::config::FavoriteSourceType::HttpsUrl
-                                        };
-                                        (remote_url.clone(), source_type, remote_url)
+                                        tracing::info!(
+                                            "Removed from favorites: {}",
+                                            existing_alias
+                                        );
+                                        state.add_success_notification(format!(
+                                            "★ Removed '{}' from favorites",
+                                            workspace_name
+                                        ));
                                     }
                                 } else {
-                                    // Fallback to local path
-                                    let path_str = workspace.path.display().to_string();
-                                    (
-                                        path_str.clone(),
-                                        crate::config::FavoriteSourceType::LocalPath,
-                                        path_str,
-                                    )
+                                    let display_source = fav.source.clone();
+                                    // Suffix the alias on collision so distinct
+                                    // repos with the same folder name coexist.
+                                    let added = if favorites_store.add(fav.clone()).is_ok() {
+                                        true
+                                    } else {
+                                        let mut suffixed = fav;
+                                        suffixed.alias = format!(
+                                            "{}-{}",
+                                            alias,
+                                            chrono::Utc::now().timestamp() % 1000
+                                        );
+                                        favorites_store.add(suffixed).is_ok()
+                                    };
+                                    if !added {
+                                        tracing::warn!(
+                                            alias = %alias,
+                                            "could not add favorite (alias collision)"
+                                        );
+                                        state.add_error_notification(format!(
+                                            "★ Could not favorite '{}': alias already in use",
+                                            workspace_name
+                                        ));
+                                    } else if let Err(e) = favorites_store.save() {
+                                        tracing::error!("Failed to save favorites: {}", e);
+                                        state.add_error_notification(format!(
+                                            "Could not save favorite: {e}"
+                                        ));
+                                    } else {
+                                        tracing::info!("Added to favorites: {}", display_source);
+                                        state.add_success_notification(format!(
+                                            "⭐ Added '{}' to favorites",
+                                            display_source
+                                        ));
+                                    }
                                 }
-                            } else {
-                                // No remote, use local path
-                                let path_str = workspace.path.display().to_string();
-                                (
-                                    path_str.clone(),
-                                    crate::config::FavoriteSourceType::LocalPath,
-                                    path_str,
-                                )
                             }
-                        } else {
-                            // Not a git repo, use local path
-                            let path_str = workspace.path.display().to_string();
-                            (
-                                path_str.clone(),
-                                crate::config::FavoriteSourceType::LocalPath,
-                                path_str,
-                            )
-                        };
-
-                        // Toggle: remove if exists, add if not
-                        // Check both source and local path for existing favorites
-                        let local_path_str = workspace.path.display().to_string();
-                        let existing = favorites_store
-                            .favorites
-                            .iter()
-                            .find(|f| f.source == source || f.source == local_path_str);
-
-                        if let Some(existing) = existing {
-                            let alias = existing.alias.clone();
-                            let removed_source = existing.source.clone();
-                            favorites_store.remove(&alias);
-                            if let Err(e) = favorites_store.save() {
-                                tracing::error!("Failed to save favorites: {}", e);
-                            }
-                            tracing::info!("Removed from favorites: {}", removed_source);
-                            state.add_success_notification(format!(
-                                "★ Removed '{}' from favorites",
-                                workspace_name
-                            ));
-                        } else {
-                            // Generate alias from workspace name
-                            let alias = workspace_name.to_lowercase().replace(' ', "-");
-                            let favorite = crate::config::Favorite::new(
-                                alias.clone(),
-                                source.clone(),
-                                source_type.clone(),
-                            );
-                            if favorites_store.add(favorite).is_ok() {
-                                if let Err(e) = favorites_store.save() {
-                                    tracing::error!("Failed to save favorites: {}", e);
-                                }
-                                tracing::info!("Added to favorites: {} as {}", source, alias);
-                                state.add_success_notification(format!(
-                                    "⭐ Added '{}' to favorites",
-                                    display_source
-                                ));
-                            } else {
-                                // Alias already exists, try with a suffix
-                                let alias_with_suffix =
-                                    format!("{}-{}", alias, chrono::Utc::now().timestamp() % 1000);
-                                let favorite = crate::config::Favorite::new(
-                                    alias_with_suffix.clone(),
-                                    source.clone(),
-                                    source_type,
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    path = %workspace_path.display(),
+                                    "refusing to favorite: no remote indicator"
                                 );
-                                let _ = favorites_store.add(favorite);
-                                if let Err(e) = favorites_store.save() {
-                                    tracing::error!("Failed to save favorites: {}", e);
-                                }
-                                tracing::info!(
-                                    "Added to favorites: {} as {}",
-                                    source,
-                                    alias_with_suffix
-                                );
-                                state.add_success_notification(format!(
-                                    "⭐ Added '{}' to favorites",
-                                    display_source
+                                state.add_error_notification(format!(
+                                    "★ Can't favorite '{}': {}",
+                                    workspace_name, e
                                 ));
                             }
                         }
@@ -5135,6 +5187,23 @@ mod text_input_guard_tests {
         let evt = EventHandler::handle_key_event(char_key('v'), &mut state)
             .expect("plain 'v' must dispatch a char input");
         assert!(matches!(evt, AppEvent::ConfigPopupInputChar('v')));
+    }
+
+    /// A bracketed paste (Cmd+V) on the New Session repo picker must be
+    /// forwarded to the filter, not dropped. Regression: `handle_paste_event`
+    /// only routed the config popup, so Cmd+V on PickRepo did nothing.
+    #[test]
+    fn bracketed_paste_on_pick_repo_routes_to_filter() {
+        let mut state = AppState::default();
+        state.current_screen = screen_ids::NEW_SESSION.to_string();
+        state.new_session_state = Some(NewSessionState {
+            step: NewSessionStep::PickRepo,
+            ..NewSessionState::default()
+        });
+
+        let evt = EventHandler::handle_paste_event("owner/repo".to_string(), &state)
+            .expect("paste on PickRepo must dispatch a filter paste");
+        assert!(matches!(evt, AppEvent::PickRepoPaste(ref t) if t == "owner/repo"));
     }
 
     /// Esc inside a text input while help is visible must close help,
