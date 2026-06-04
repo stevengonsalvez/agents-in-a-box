@@ -529,6 +529,130 @@ pub fn wait_for_terminal(home: &Path, prefix: &str, want: usize, deadline: Insta
     })
 }
 
+/// Seed one cron-scheduled autopilot (`daily-triage`, `0 9 * * *`, enabled)
+/// into an already-seeded `{home}/.ainb/hangar.db` so the autopilot-manager
+/// screen (`5`) has a live row to render.
+///
+/// Inserts via the P7.2 [`AutopilotRepo::create`] path — the same path the
+/// daemon's create flow uses — so the row carries a properly-computed,
+/// strictly-future `next_tick_at` and is returned by the `hangar/autopilots_list`
+/// RPC the screen pulls. It targets the fixture's `default`-slug workspace
+/// ([`WS_ID`]) and `agent-1`, so the workspace-scoped snapshot finds it.
+///
+/// # Why this is its own helper (not part of `seed_p4_fixture`)
+///
+/// The spawned daemon runs the **real** autopilot scheduler on a
+/// [`SystemClock`](ainb_hangar_core::clock::SystemClock). Seeding the autopilot
+/// here (in *this* tripwire's RPC-only pipeline) rather than in the shared
+/// fixture keeps it out of every other tripwire — and `create` computes
+/// `next_tick_at` strictly after *now* for `0 9 * * *` (next 09:00 UTC, up to a
+/// day away), so the scheduler parks until that future instant and never fires
+/// the autopilot inside the test window. The fixture's other screens (issue
+/// list, Kanban, daemon health, the autopilot-fires scheduler tripwire — which
+/// seeds its OWN autopilots) are therefore untouched.
+///
+/// Must run after [`prepare_pipeline`] (which seeds `agent-1` + the workspace)
+/// and against the same isolated `$HOME`. Panics on any insert failure (the
+/// caller is already gated by [`can_run_tripwire`]).
+pub fn seed_autopilot(home: &Path) {
+    use ainb_hangar_core::clock::SystemClock;
+    use ainb_hangar_core::ids::{AgentId, WorkspaceId};
+    use ainb_hangar_store::repo::autopilot::{AutopilotRepo, NewAutopilot};
+
+    let hangar_dir = home.join(".ainb");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("autopilot-seed runtime");
+    rt.block_on(async {
+        let store = ainb_hangar_store::Store::open_in(&hangar_dir)
+            .await
+            .expect("open autopilot-seed store");
+        let ws = WorkspaceId::from_str(ainb_hangar_daemon::seed::WS_ID).expect("non-empty ws id");
+        let agent = AgentId::from_str("agent-1").expect("non-empty agent id");
+        AutopilotRepo::create(
+            store.pool(),
+            &SystemClock,
+            &NewAutopilot {
+                workspace_id: ws,
+                agent_id: agent,
+                name: "daily-triage".into(),
+                instructions: Some("triage new issues".into()),
+                // Daily at 09:00 UTC — `create` parks the scheduler on the next
+                // future 09:00, so it never fires inside the test window.
+                cron_expr: "0 9 * * *".into(),
+                max_concurrent_runs: 1,
+            },
+        )
+        .await
+        .expect("seed daily-triage autopilot");
+    });
+}
+
+/// A greppable marker embedded in the seeded log line's message, distinctive
+/// enough that it can never collide with a real daemon log message.
+pub const LOGS_TRIPWIRE_MARKER: &str = "LOGS_TRIPWIRE_MARKER_42";
+
+/// Seed three known structured-log lines (one `INFO` carrying
+/// [`LOGS_TRIPWIRE_MARKER`], one `WARN`, one `ERROR`) into the daemon's rolling
+/// JSONL log file so the Logs screen (`L`) has deterministic, level-diverse
+/// content to render.
+///
+/// The Logs screen reads the **newest** `daemon.*` file in
+/// `{home}/.ainb/hangar/logs` by mtime ([`ainb_hangar_core::logs::read_tail`]).
+/// The spawned daemon already writes its own `daemon.<utc-date>` file on boot;
+/// this **appends** the marker lines to that same dated file (creating it if the
+/// daemon hasn't flushed yet), in the exact P8.1 wire shape (top-level `level`,
+/// event message + custom fields nested under `fields`). Appending — rather than
+/// writing a second file — both keeps the daemon's own lines and guarantees the
+/// markers live in the newest file (the append bumps its mtime).
+///
+/// Must run after [`prepare_pipeline`] (which sets the isolated `$HOME` + spawns
+/// the daemon). Panics on an IO failure (the caller is gated by
+/// [`can_run_tripwire`]).
+pub fn seed_logs(home: &Path) {
+    use std::io::Write as _;
+
+    let log_dir = home.join(".ainb").join("hangar").join("logs");
+    std::fs::create_dir_all(&log_dir).expect("create logs dir");
+
+    // Match the daemon's daily-rotated filename: `daemon.<YYYY-MM-DD>` in UTC
+    // (`tracing_appender::rolling` with `Rotation::DAILY`). Appending to the
+    // same dated file keeps the daemon's `ready` line and lands our markers in
+    // the newest file the screen reads.
+    let date = chrono::Utc::now().format("%Y-%m-%d");
+    let file = log_dir.join(format!("daemon.{date}"));
+
+    // The P8.1 wire shape: top-level timestamp/level/target, the event message
+    // and every custom field nested under `fields`. One INFO (carrying the
+    // marker), one WARN, one ERROR so every level chip has something to surface.
+    let now = chrono::Utc::now().to_rfc3339();
+    let lines = [
+        format!(
+            "{{\"timestamp\":\"{now}\",\"level\":\"INFO\",\"target\":\"ainb_hangar_daemon\",\
+             \"fields\":{{\"message\":\"daemon ready {LOGS_TRIPWIRE_MARKER}\",\"task_id\":\"t-seed-1\"}}}}"
+        ),
+        format!(
+            "{{\"timestamp\":\"{now}\",\"level\":\"WARN\",\"target\":\"ainb_hangar_daemon::run_loop\",\
+             \"fields\":{{\"message\":\"claim slot retry\",\"attempts\":2}}}}"
+        ),
+        format!(
+            "{{\"timestamp\":\"{now}\",\"level\":\"ERROR\",\"target\":\"ainb_hangar_daemon::runner\",\
+             \"fields\":{{\"message\":\"provider error\",\"code\":7}}}}"
+        ),
+    ];
+
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&file)
+        .expect("open daemon log file for append");
+    for line in &lines {
+        writeln!(f, "{line}").expect("append seeded log line");
+    }
+    f.flush().expect("flush seeded log lines");
+}
+
 /// A uniquely-named tmux session that kills itself by **exact name** on drop.
 pub struct TuiSession {
     name: String,
