@@ -166,4 +166,14 @@ fn code_review_surface_renders_real_diff_and_responds_to_keys() {
             "n did not advance the hunk counter:\n{jumped_text}"
         );
     }
+
+    // 5) Tab traversal (in-session): Review is default; Tab cycles Review -> Commits
+    //    -> Review (Markdown only appears when a .md file is selected). The legacy
+    //    Files/Diff tabs are retired from the cycle.
+    use ainb::components::git_view::GitTab;
+    assert_eq!(state.active_tab, GitTab::Review);
+    state.switch_tab();
+    assert_eq!(state.active_tab, GitTab::Commits);
+    state.switch_tab();
+    assert_eq!(state.active_tab, GitTab::Review);
 }
