@@ -885,7 +885,16 @@ fn bidirectional_content_sync(
                 SyncDirection::ToRepo => "->",
                 SyncDirection::NoOp => "==",
             };
-            writeln!(out, "    {arrow} {uri}/{file}  ({reason})")?;
+            // `file` is the repo-relative path (e.g. skills/x/SKILL.md) and
+            // already contains the unit's subpath, so don't re-join it onto
+            // `uri` (which ends at that same subpath) — that double-printed
+            // the unit dir. Show the unit URI for source identity + the file
+            // name being synced.
+            let fname = std::path::Path::new(file)
+                .file_name()
+                .map(|f| f.to_string_lossy().into_owned())
+                .unwrap_or_else(|| file.clone());
+            writeln!(out, "    {arrow} {uri}  [{fname}]  ({reason})")?;
         }
         if args.dry_run {
             writeln!(out, "# dry-run: not applying")?;
