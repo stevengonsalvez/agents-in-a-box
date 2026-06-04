@@ -45,7 +45,7 @@ typing `/reflect:errors-ack` lands here.
      others visible (e.g. ack all `drain_poison` after fixing the parser)
    - **Show details** — print the full message + traceback for an entry
    - **Leave alone** — exit without changes
-5. Run `python -m reflect_kb.errors ack [ids...]` and report the count
+5. Run `reflect errors ack [ids...]` and report the count
    of records flipped to `acked: true`
 
 ## Triage table format
@@ -64,19 +64,24 @@ Group repeats by kind in the prompt: "4 drain_poison + 1 drain_no_output
 
 ## Backend commands
 
+Use the installed `reflect` CLI (from `uv tool install reflect-kb`). If `reflect`
+isn't on `$PATH`, self-bootstrap with `uv run --with reflect-kb python -m
+reflect_kb.errors <args>` — the bare `python3 -m reflect_kb.errors` form only
+works when reflect_kb is importable by *system* python3, which it usually isn't.
+
 ```bash
-# Count of unacked entries (what the statusline calls)
-python3 -m reflect_kb.errors count
+# Count of unacked entries (what the statusline badge reads)
+reflect errors count
 
 # Ack all unacked entries
-python3 -m reflect_kb.errors ack
+reflect errors ack
 
 # Ack specific entries by ID
-python3 -m reflect_kb.errors ack err-b177eb err-614742
+reflect errors ack err-b177eb err-614742
 
 # Append a new error (used by hooks/scripts, not user)
-python3 -m reflect_kb.errors append \
-  --source drain --kind drain_poison --message "…" --transcript "…"
+reflect errors append \
+  --source drain --kind drain_poison --message "…" --context '{}'
 ```
 
 The store at `~/.reflect/errors.json` is locked via `fcntl` so it's
@@ -89,7 +94,7 @@ When invoked:
 
 ```bash
 # 1. show the count + table
-python3 -m reflect_kb.errors count
+reflect errors count
 python3 <<'PY'
 import json, datetime
 with open('/Users/stevengonsalvez/.reflect/errors.json') as f:
@@ -107,7 +112,7 @@ PY
 # 2. ask user via AskUserQuestion (ack all / ack by kind / show detail / leave)
 
 # 3. run ack
-python3 -m reflect_kb.errors ack [optional-ids]
+reflect errors ack [optional-ids]
 ```
 
 After ack the badge disappears on next statusline refresh (10s cache).
