@@ -1304,9 +1304,32 @@ fn config_value_for_field(
     match field.kind {
         ConfigKind::Path | ConfigKind::String => ConfigValue::Text(raw.to_string()),
         ConfigKind::Bool => ConfigValue::Bool(raw.eq_ignore_ascii_case("true")),
-        ConfigKind::Int => ConfigValue::Number(raw.trim().parse().unwrap_or(0)),
+        ConfigKind::Int => {
+            // A non-numeric stored value (corrupt config.toml) would otherwise be
+            // silently coerced to 0; warn so the bad value surfaces in the logs
+            // rather than vanishing on reset.
+            let n = raw.trim().parse().unwrap_or_else(|_| {
+                warn!(
+                    field = %field.key,
+                    value = %raw,
+                    "non-integer value for int config field; falling back to 0"
+                );
+                0
+            });
+            ConfigValue::Number(n)
+        }
         ConfigKind::Enum => {
-            let idx = field.choices.iter().position(|c| c == raw).unwrap_or(0);
+            // An unknown stored choice (corrupt config.toml or a renamed enum
+            // variant) would otherwise be silently coerced to the first choice;
+            // warn so the bad value surfaces in the logs.
+            let idx = field.choices.iter().position(|c| c == raw).unwrap_or_else(|| {
+                warn!(
+                    field = %field.key,
+                    value = %raw,
+                    "unknown choice for enum config field; falling back to first option"
+                );
+                0
+            });
             ConfigValue::Choice(field.choices.clone(), idx)
         }
     }
@@ -1903,62 +1926,9 @@ impl ConfigScreenState {
 
     /// Convert ConfigScreenState back to AppConfig for saving
     pub fn apply_to_app_config(&self, config: &mut AppConfig) {
-        // Apply Workspace settings
-        if let Some(settings) = self.settings.get(&ConfigCategory::Workspace) {
-            for setting in settings {
-                match setting.key.as_str() {
-                    "default_workspace" => {
-                        if let ConfigValue::Text(path) = &setting.value {
-                            let expanded = if path.starts_with("~/") {
-                                dirs::home_dir()
-                                    .map(|h| h.join(&path[2..]))
-                                    .unwrap_or_else(|| std::path::PathBuf::from(path))
-                            } else {
-                                std::path::PathBuf::from(path)
-                            };
-                            // "Default Workspace" is surfaced as
-                            // `workspace_scan_paths.first()` in `from_app_config`,
-                            // so it must be written back as the *primary* entry.
-                            // The old code pushed to the end, leaving `first()`
-                            // pointing at the stale path — editing the field then
-                            // appeared to do nothing on reopen.
-                            //
-                            // Rebuild as: edited path first, then every other
-                            // distinct scan dir. This replaces the old primary
-                            // (index 0), de-dups the edited path, and — crucially
-                            // — preserves the remaining scan dirs even on a no-op
-                            // confirm (drop the old primary, never the tail).
-                            let paths = &mut config.workspace_defaults.workspace_scan_paths;
-                            let tail: Vec<std::path::PathBuf> =
-                                paths.iter().skip(1).filter(|p| *p != &expanded).cloned().collect();
-                            paths.clear();
-                            paths.push(expanded);
-                            paths.extend(tail);
-                        }
-                    }
-                    "branch_prefix" => {
-                        if let ConfigValue::Text(prefix) = &setting.value {
-                            config.workspace_defaults.branch_prefix = prefix.clone();
-                        }
-                    }
-                    "exclude_paths" => {
-                        if let ConfigValue::Text(paths) = &setting.value {
-                            config.workspace_defaults.exclude_paths = paths
-                                .split(',')
-                                .map(|s| s.trim().to_string())
-                                .filter(|s| !s.is_empty())
-                                .collect();
-                        }
-                    }
-                    "max_repositories" => {
-                        if let ConfigValue::Number(max) = &setting.value {
-                            config.workspace_defaults.max_repositories = *max as usize;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
+        // Apply Workspace settings (extracted to keep this method under the
+        // clippy `too_many_lines` threshold).
+        self.apply_workspace_rows(config);
 
         // Apply Docker settings
         if let Some(settings) = self.settings.get(&ConfigCategory::Docker) {
@@ -2037,31 +2007,99 @@ impl ConfigScreenState {
             }
         }
 
-        // Apply per-plugin [[config]] edits. Each Plugins-category row whose
-        // key is `plugin:<name>:<field_key>` (see `plugin_row_key`) routes its
-        // current value into `plugins.values[<name>][<field_key>]` — NOT a
-        // top-level field. The static enable/disable placeholder rows have no
-        // such prefix and are skipped. The serialized `[plugins.<name>]` table
-        // round-trips through the existing `AppConfig::save()` pipeline.
-        if let Some(settings) = self.settings.get(&ConfigCategory::Plugins) {
-            for setting in settings {
-                let Some((plugin, field_key)) = Self::parse_plugin_row_key(&setting.key) else {
-                    continue;
-                };
-                let toml_value = config_value_to_toml(&setting.value);
-                let entry = config
-                    .plugins
-                    .values
-                    .entry(plugin.to_string())
-                    .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
-                // Coerce a non-table entry (shouldn't happen for a well-formed
-                // config) into a table so the write always lands somewhere sane.
-                if !entry.is_table() {
-                    *entry = toml::Value::Table(toml::value::Table::new());
+        // Apply per-plugin [[config]] edits (extracted to keep this method under
+        // the clippy `too_many_lines` threshold).
+        self.apply_plugin_rows(config);
+    }
+
+    /// Route the Workspace-category rows (`default_workspace`, `branch_prefix`,
+    /// `exclude_paths`, `max_repositories`) back into `config.workspace_defaults`.
+    fn apply_workspace_rows(&self, config: &mut AppConfig) {
+        let Some(settings) = self.settings.get(&ConfigCategory::Workspace) else {
+            return;
+        };
+        for setting in settings {
+            match setting.key.as_str() {
+                "default_workspace" => {
+                    if let ConfigValue::Text(path) = &setting.value {
+                        let expanded = if path.starts_with("~/") {
+                            dirs::home_dir()
+                                .map(|h| h.join(&path[2..]))
+                                .unwrap_or_else(|| std::path::PathBuf::from(path))
+                        } else {
+                            std::path::PathBuf::from(path)
+                        };
+                        // "Default Workspace" is surfaced as
+                        // `workspace_scan_paths.first()` in `from_app_config`, so
+                        // it must be written back as the *primary* entry. The old
+                        // code pushed to the end, leaving `first()` pointing at the
+                        // stale path — editing the field then appeared to do
+                        // nothing on reopen.
+                        //
+                        // Rebuild as: edited path first, then every other distinct
+                        // scan dir. This replaces the old primary (index 0),
+                        // de-dups the edited path, and — crucially — preserves the
+                        // remaining scan dirs even on a no-op confirm (drop the old
+                        // primary, never the tail).
+                        let paths = &mut config.workspace_defaults.workspace_scan_paths;
+                        let tail: Vec<std::path::PathBuf> =
+                            paths.iter().skip(1).filter(|p| *p != &expanded).cloned().collect();
+                        paths.clear();
+                        paths.push(expanded);
+                        paths.extend(tail);
+                    }
                 }
-                if let Some(table) = entry.as_table_mut() {
-                    table.insert(field_key.to_string(), toml_value);
+                "branch_prefix" => {
+                    if let ConfigValue::Text(prefix) = &setting.value {
+                        config.workspace_defaults.branch_prefix = prefix.clone();
+                    }
                 }
+                "exclude_paths" => {
+                    if let ConfigValue::Text(paths) = &setting.value {
+                        config.workspace_defaults.exclude_paths = paths
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                    }
+                }
+                "max_repositories" => {
+                    if let ConfigValue::Number(max) = &setting.value {
+                        config.workspace_defaults.max_repositories = *max as usize;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Route every Plugins-category row whose key is `plugin:<name>:<field_key>`
+    /// (see [`Self::plugin_row_key`]) into `config.plugins.values[<name>]
+    /// [<field_key>]` — NOT a top-level field. The static enable/disable
+    /// placeholder rows have no such prefix and are skipped. The serialized
+    /// `[plugins.<name>]` table round-trips through the existing
+    /// `AppConfig::save()` pipeline.
+    fn apply_plugin_rows(&self, config: &mut AppConfig) {
+        let Some(settings) = self.settings.get(&ConfigCategory::Plugins) else {
+            return;
+        };
+        for setting in settings {
+            let Some((plugin, field_key)) = Self::parse_plugin_row_key(&setting.key) else {
+                continue;
+            };
+            let toml_value = config_value_to_toml(&setting.value);
+            let entry = config
+                .plugins
+                .values
+                .entry(plugin.to_string())
+                .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+            // Coerce a non-table entry (shouldn't happen for a well-formed
+            // config) into a table so the write always lands somewhere sane.
+            if !entry.is_table() {
+                *entry = toml::Value::Table(toml::value::Table::new());
+            }
+            if let Some(table) = entry.as_table_mut() {
+                table.insert(field_key.to_string(), toml_value);
             }
         }
     }

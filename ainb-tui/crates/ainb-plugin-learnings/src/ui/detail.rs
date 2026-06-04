@@ -262,6 +262,11 @@ fn render_help_bar(buf: &mut RBuffer, area: RRect) {
 /// Char-based — never byte-slices — so a multibyte title can't panic on a char
 /// boundary (the Rust UTF-8 truncate trap). Used for the pane title chrome.
 fn truncate_chars(s: &str, max: usize) -> String {
+    // A zero budget has no room even for the ellipsis, so emit nothing rather
+    // than a bare "…" that wouldn't fit anyway.
+    if max == 0 {
+        return String::new();
+    }
     if s.chars().count() <= max {
         return s.to_string();
     }
@@ -346,5 +351,12 @@ mod tests {
         let out = truncate_chars(&s, 4);
         assert_eq!(out.chars().count(), 4);
         assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn truncate_chars_zero_budget_is_empty_not_bare_ellipsis() {
+        // A zero budget has no room even for the ellipsis — emit nothing.
+        assert_eq!(truncate_chars("anything", 0), "");
+        assert_eq!(truncate_chars("", 0), "");
     }
 }

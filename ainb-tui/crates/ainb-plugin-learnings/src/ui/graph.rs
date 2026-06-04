@@ -14,11 +14,14 @@
 //! **Why aggregate record relationships, not the graphml edges?** (P4 field
 //! finding, load-bearing.) The live nano_graphrag graphml carries UNTYPED edges
 //! — only a free-text `description` and a numeric `weight`; the relationship
-//! *type* lives in the per-record `.entities.yaml` sidecars. So the neighborhood
-//! is built from the union of every scanned record's `relationships[]`, keyed by
-//! entity name. Those are typed AND connect entities across learnings via shared
-//! entity names. The graphml may supplement the node set in a later phase, but
-//! it is NOT the edge-type source.
+//! *type* lives in the per-record `.entities.yaml` sidecars. (The committed
+//! test fixture's graphml happens to add a `rel_type` key, but the neighborhood
+//! deliberately does NOT read graphml edges at all — it reads the record
+//! `relationships[]`. So the fixture's extra key is irrelevant to this path.)
+//! The neighborhood is built from the union of every scanned record's
+//! `relationships[]`, keyed by entity name. Those are typed AND connect entities
+//! across learnings via shared entity names. The graphml may supplement the node
+//! set in a later phase, but it is NOT the edge-type source.
 //!
 //! Navigation: `↑↓` / `jk` move the selection within the active view; `c`
 //! toggles entity ⇄ community. Focus is entered from the shell with `g`; the
@@ -37,12 +40,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Widget};
 use ainb_plugin_sdk::KeyCode;
 
 use super::{CORNFLOWER_BLUE, GOLD, LIST_HIGHLIGHT_BG, MUTED_GRAY, SELECTION_GREEN, SOFT_WHITE};
-use crate::data::{Community, LearningRecord};
-
-/// Default relationship type for an aggregated edge that carried no typed
-/// `rel_type` in its sidecar — mirrors the data layer's `DEFAULT_REL_TYPE` so a
-/// record relationship with an empty `type` still renders a typed arrow.
-const DEFAULT_REL_TYPE: &str = "relates_to";
+use crate::data::{Community, DEFAULT_REL_TYPE, LearningRecord};
 
 /// Which graph view is active. `c` toggles between them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

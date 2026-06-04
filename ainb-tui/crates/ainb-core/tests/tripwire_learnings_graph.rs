@@ -7,8 +7,11 @@
 //! list, and asserts an EXACT real entity name plus a TYPED edge token render.
 //! It then presses `c` and asserts a community-cluster title renders.
 //!
-//! GRAPH-SPECIFIC (load-bearing): the nano_graphrag graphml edges are UNTYPED —
-//! the relationship type lives in the `.entities.yaml` sidecars. So the entity
+//! GRAPH-SPECIFIC (load-bearing): the REAL nano_graphrag graphml edges are
+//! UNTYPED — the relationship type lives in the `.entities.yaml` sidecars. (The
+//! committed fixture's graphml happens to carry a `rel_type` key, but the
+//! neighborhood deliberately does NOT read graphml edges — it reads the record
+//! `relationships[]` — so that key is never consulted here.) So the entity
 //! neighborhood is built from the AGGREGATED record relationships (typed:
 //! `solves`/`caused_by`/…), and the community view reads
 //! `kv_store_community_reports.json`. Because the Graph reads committed fixture

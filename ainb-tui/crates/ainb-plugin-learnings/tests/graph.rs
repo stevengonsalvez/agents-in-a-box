@@ -8,13 +8,16 @@
 //! built from) and the `kv_store_community_reports.json` the community view
 //! lists.
 //!
-//! GRAPH-SPECIFIC (load-bearing): the nano_graphrag graphml edges are UNTYPED —
-//! the relationship type lives in the per-record `.entities.yaml` sidecars. So
-//! the entity neighborhood is built from the AGGREGATED record relationships
-//! (the union of every scanned record's `relationships[]`, keyed by entity
-//! name). Those are TYPED (`solves` / `caused_by` / `causes` / `relates_to`) and
-//! connect entities across learnings via shared entity names. The community view
-//! reads `parse_community_reports`.
+//! GRAPH-SPECIFIC (load-bearing): the REAL nano_graphrag graphml edges are
+//! UNTYPED — the relationship type lives in the per-record `.entities.yaml`
+//! sidecars. (This fixture's graphml happens to carry a `rel_type` key, but the
+//! neighborhood deliberately does NOT read graphml edges — it reads the record
+//! `relationships[]` — so that key is never consulted on this path.) So the
+//! entity neighborhood is built from the AGGREGATED record relationships (the
+//! union of every scanned record's `relationships[]`, keyed by entity name).
+//! Those are TYPED (`solves` / `caused_by` / `causes` / `relates_to`) and connect
+//! entities across learnings via shared entity names. The community view reads
+//! `parse_community_reports`.
 //!
 //! Asserted EXACT unique tokens (never substring-OR), each locked by a
 //! deliberately-wrong run reading the real render first:
@@ -249,8 +252,13 @@ async fn c_toggles_to_community_view_and_lists_clusters() {
 
 #[tokio::test]
 async fn backspace_exits_graph_focus_back_to_tab_dispatch() {
-    // `g` enters graph focus; Backspace exits it (Esc is host-reserved). After
-    // exiting, `Tab` once must move OFF Graph (proving focus released routing).
+    // `g` enters graph focus; Backspace exits it (Esc is host-reserved). The
+    // STRONG signal that Backspace actually blurred is that a subsequent
+    // graph-nav key (`Down`) is now INERT — a blurred graph ignores its own
+    // navigation keys, so the `▶` selection stays on the first entity. (A
+    // regression where Backspace stops blurring would let `Down` move the
+    // selection and fail here; the later `Tab → Browse` check alone can't catch
+    // that, since `Tab` switches tabs regardless of graph focus.)
     let mut h = init_over_fixture().await;
     enter_graph(&mut h).await;
 
@@ -259,11 +267,38 @@ async fn backspace_exits_graph_focus_back_to_tab_dispatch() {
         focused.contains(ENTITY_TOKEN),
         "precondition: graph focused and entity painted:\n{focused}"
     );
+    // Precondition: focused, so the `▶` row is the first entity.
+    let sel_line = focused
+        .lines()
+        .find(|l| l.contains('▶'))
+        .expect("a selected (▶) entity row present while focused");
+    assert!(
+        sel_line.contains(ENTITY_TOKEN),
+        "precondition: first entity selected while focused:\n{focused}"
+    );
 
     // Backspace exits graph focus (still on the Graph tab, but focus released).
     h.send_notification(methods::PLUGIN_HANDLE_KEY, key_params(KeyCode::Backspace))
         .await
         .expect("send Backspace");
+
+    // A graph-nav key is now inert: focus released means `Down` does NOT move the
+    // selection. The `▶` must still mark the first entity. This is the assertion
+    // that actually proves Backspace blurred (not just that `Tab` works).
+    h.send_notification(methods::PLUGIN_HANDLE_KEY, key_params(KeyCode::Down))
+        .await
+        .expect("send Down after blur");
+    let after_blur = buffer_text(&h.render(VIEWPORT).await.expect("render after blur+Down"));
+    let sel_line = after_blur
+        .lines()
+        .find(|l| l.contains('▶'))
+        .expect("a selected (▶) entity row still present after blur");
+    assert!(
+        sel_line.contains(ENTITY_TOKEN),
+        "after Backspace blurs the graph, a graph-nav key (Down) must be inert — \
+         the selection must stay on the first entity:\n{after_blur}"
+    );
+
     // A Tab now cycles to Browse (Graph → Browse wraps).
     h.send_notification(methods::PLUGIN_HANDLE_KEY, key_params(KeyCode::Tab))
         .await

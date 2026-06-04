@@ -314,6 +314,12 @@ pub fn render(buf: &mut RBuffer, area: RRect, ui: &LearningsUi) {
 }
 
 /// Paint the `Browse │ Search │ Graph` tab strip with the active tab in gold.
+///
+/// The active-tab visual is owned **entirely** by the per-title styling above
+/// (gold + bold + underline on the matching `Line`). `Tabs::select` is
+/// deliberately NOT called: without a `highlight_style` it's a no-op, and
+/// adding one would split the active-tab cue across two sources of truth. The
+/// per-title styling stays the single source.
 fn render_tab_strip(buf: &mut RBuffer, area: RRect, active: Tab) {
     let titles: Vec<Line> = Tab::ALL
         .iter()
@@ -326,9 +332,6 @@ fn render_tab_strip(buf: &mut RBuffer, area: RRect, active: Tab) {
             Line::from(Span::styled(t.label(), style))
         })
         .collect();
-    let idx = Tab::ALL.iter().position(|t| *t == active).unwrap_or(0);
-    let tabs = Tabs::new(titles)
-        .select(idx)
-        .divider(Span::styled(" │ ", Style::default().fg(MUTED_GRAY)));
+    let tabs = Tabs::new(titles).divider(Span::styled(" │ ", Style::default().fg(MUTED_GRAY)));
     tabs.render(area, buf);
 }

@@ -77,8 +77,9 @@ impl BrowseState {
         match code {
             // `f`: cycle the scope chip through `* → values… → *`.
             KeyCode::Char { ch: 'f' } => {
+                // `cycle_scope` resets `selected = 0` on every cycle, which is
+                // always in-bounds, so no follow-up `clamp_selection` is needed.
                 self.cycle_scope(records);
-                self.clamp_selection(self.filter().apply(records).len());
                 true
             }
             // Selection down.
@@ -242,6 +243,17 @@ fn chip_span(name: &str, value: &str, active: bool) -> Span<'static> {
     Span::styled(format!("{name}[{value}]"), style)
 }
 
+/// Round a confidence to one decimal place using round-half-**away-from-zero**,
+/// so `0.85` renders as `0.9` (the design mock value) rather than `0.8`.
+///
+/// `f64`'s default `{:.1}` formatting rounds half-to-even (banker's rounding),
+/// which turns `0.85 → "0.8"`. The mock shows `0.9`, so we pre-round with
+/// `(c * 10).round() / 10` — `f64::round` is half-away-from-zero — before the
+/// one-dp format pins it.
+fn round_half_up_1dp(c: f64) -> f64 {
+    (c * 10.0).round() / 10.0
+}
+
 /// Render the (filtered) record list as a 3-column table: selection marker,
 /// id, confidence. The selected row carries a `▶` marker + highlight.
 fn render_list(buf: &mut RBuffer, area: RRect, filtered: &[&LearningRecord], selected: usize) {
@@ -271,7 +283,7 @@ fn render_list(buf: &mut RBuffer, area: RRect, filtered: &[&LearningRecord], sel
             Row::new(vec![
                 Span::styled(marker, style),
                 Span::styled(rec.id.clone(), style),
-                Span::styled(format!("{:.1}", rec.confidence), style),
+                Span::styled(format!("{:.1}", round_half_up_1dp(rec.confidence)), style),
             ])
         })
         .collect();
@@ -303,4 +315,21 @@ fn render_status(buf: &mut RBuffer, area: RRect, failed_count: usize, visible: u
         ));
     }
     Paragraph::new(Line::from(spans)).render(area, buf);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::round_half_up_1dp;
+
+    #[test]
+    fn confidence_rounds_half_away_from_zero() {
+        // The motivating case: `0.85` must render as `0.9` (design mock), not the
+        // `0.8` that `f64`'s default round-half-to-even produces.
+        assert_eq!(format!("{:.1}", round_half_up_1dp(0.85)), "0.9");
+        // A clean tenth is unchanged; a value already below the half rounds down.
+        assert_eq!(format!("{:.1}", round_half_up_1dp(0.8)), "0.8");
+        assert_eq!(format!("{:.1}", round_half_up_1dp(0.84)), "0.8");
+        // The boundary above the half still rounds up.
+        assert_eq!(format!("{:.1}", round_half_up_1dp(0.95)), "1.0");
+    }
 }

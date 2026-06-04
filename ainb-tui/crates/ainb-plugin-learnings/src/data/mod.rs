@@ -28,7 +28,9 @@ use std::path::{Path, PathBuf};
 
 pub use error::DataError;
 pub use filter::{Filter, FilterField};
-pub use graph::{Community, Edge, Graph, GraphEntity, parse_community_reports, parse_graphml};
+pub use graph::{
+    Community, DEFAULT_REL_TYPE, Edge, Graph, GraphEntity, parse_community_reports, parse_graphml,
+};
 pub use record::{
     Entity, LearningRecord, Provenance, Relationship, ScanReport, parse_learning_record,
     scan_learnings_dir, scan_learnings_dir_report,
