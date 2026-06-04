@@ -9,6 +9,7 @@
 pub mod attach;
 pub mod auth;
 pub mod config_cmd;
+pub mod diff_review;
 pub mod favorites;
 pub mod fleet;
 pub mod git_cmd;

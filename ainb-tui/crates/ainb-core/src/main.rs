@@ -101,6 +101,16 @@ async fn main() -> Result<()> {
     app = app.subcommand(
         clap::Command::new("tui").about("Launch the TUI (default if no command given)"),
     );
+    // `diff-review` is also handled inline (owns the alternate screen, like `tui`).
+    app = app.subcommand(
+        clap::Command::new("diff-review")
+            .about("Review a repository's uncommitted changes in the Code Review surface")
+            .arg(
+                clap::Arg::new("path")
+                    .help("Repository path (default: current directory)")
+                    .default_value("."),
+            ),
+    );
     app = registry.build_clap(app);
     let matches = app.get_matches();
     let format = matches.get_one::<cli::OutputFormat>("format").copied().unwrap_or_default();
@@ -216,6 +226,16 @@ async fn main() -> Result<()> {
             }
 
             tui_result
+        }
+
+        // diff-review: interactive Code Review surface for a repo path (owns the
+        // alternate screen, so it is handled inline rather than via the registry).
+        Some(("diff-review", sub)) => {
+            entered_tui = true;
+            let path = sub
+                .get_one::<String>("path")
+                .map_or_else(|| std::path::PathBuf::from("."), std::path::PathBuf::from);
+            cli::diff_review::run(path)
         }
 
         // Every other subcommand routes through the registry.
