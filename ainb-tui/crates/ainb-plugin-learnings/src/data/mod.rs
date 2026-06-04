@@ -30,7 +30,8 @@ pub use error::DataError;
 pub use filter::{Filter, FilterField};
 pub use graph::{Community, Edge, Graph, GraphEntity, parse_community_reports, parse_graphml};
 pub use record::{
-    Entity, LearningRecord, Provenance, Relationship, parse_learning_record, scan_learnings_dir,
+    Entity, LearningRecord, Provenance, Relationship, ScanReport, parse_learning_record,
+    scan_learnings_dir, scan_learnings_dir_report,
 };
 pub use search::{QmdCli, QmdSearch, SearchHit, parse_qmd_json, search};
 

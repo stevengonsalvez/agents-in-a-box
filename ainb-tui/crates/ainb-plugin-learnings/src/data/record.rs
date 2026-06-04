@@ -167,20 +167,56 @@ pub fn parse_learning_record(md_path: &Path) -> Result<LearningRecord, DataError
     })
 }
 
+/// Outcome of a directory scan: the parsed records plus a count of `.md`
+/// files that *looked like* records but failed to parse (corrupt notes).
+///
+/// The count deliberately excludes non-record `.md` files (a `README.md` with
+/// no frontmatter is expected in a real KB and is not an error) — only a note
+/// that opened a frontmatter block but whose YAML / sidecar was malformed is
+/// counted, so the Browse status line can honestly report `N notes failed to
+/// parse` without crying wolf over every README.
+#[derive(Debug, Clone, Default)]
+pub struct ScanReport {
+    /// Successfully parsed records, sorted stably by `id`.
+    pub records: Vec<LearningRecord>,
+    /// Number of `.md` files that were records (had a frontmatter block) but
+    /// failed to parse — corrupt frontmatter YAML or an unreadable sidecar.
+    pub failed_count: usize,
+}
+
 /// Scan a learnings directory, parsing every `*.md` into a [`LearningRecord`].
 ///
-/// Non-`.md` files (and the `.entities.yaml` sidecars themselves) are ignored.
-/// A `.md` file that is **not** a learning record — no frontmatter block, e.g.
-/// a stray `README.md` — is skipped (logged at `debug`) rather than aborting
-/// the whole scan; real KB dirs carry such files. A malformed record (bad
-/// frontmatter YAML, unreadable sidecar) is also skipped so one corrupt note
-/// can't blank the entire Browse list. Records are returned sorted by `id` so
-/// the list is stable across runs (the OS directory order is not). A
-/// non-existent / unreadable *directory* is a typed [`DataError::Io`].
+/// Thin wrapper over [`scan_learnings_dir_report`] that discards the
+/// corrupt-note count — kept for callers that only want the records (the P4
+/// data-layer tests, simple consumers). See that function for the full
+/// skip/count semantics.
 pub fn scan_learnings_dir(dir: &Path) -> Result<Vec<LearningRecord>, DataError> {
+    Ok(scan_learnings_dir_report(dir)?.records)
+}
+
+/// Scan a learnings directory, returning the parsed records **and** a count of
+/// corrupt notes.
+///
+/// Non-`.md` files (and the `.entities.yaml` sidecars themselves) are ignored
+/// by extension. For the `.md` files, two distinct skip paths are
+/// distinguished (the P4-review carry-in):
+///
+/// - **Not a record** — no frontmatter block at all (e.g. a stray `README.md`).
+///   Surfaced as [`DataError::Frontmatter`]; skipped at `debug` and **not**
+///   counted, because real KB dirs carry such files and they are not data loss.
+/// - **Corrupt record** — a frontmatter block opened but its YAML, the file
+///   read, or the `.entities.yaml` sidecar was malformed
+///   ([`DataError::Yaml`] / [`DataError::Io`]). Skipped at `warn` and counted
+///   in [`ScanReport::failed_count`] so the UI can surface soft data loss.
+///
+/// One corrupt note never blanks the whole list. Records come back sorted by
+/// `id` (the OS directory order is not stable). A non-existent / unreadable
+/// *directory* is still a hard [`DataError::Io`].
+pub fn scan_learnings_dir_report(dir: &Path) -> Result<ScanReport, DataError> {
     let entries = std::fs::read_dir(dir).map_err(|e| io_err(dir, e))?;
 
     let mut records = Vec::new();
+    let mut failed_count = 0usize;
     for entry in entries {
         let entry = entry.map_err(|e| io_err(dir, e))?;
         let path = entry.path();
@@ -191,15 +227,24 @@ pub fn scan_learnings_dir(dir: &Path) -> Result<Vec<LearningRecord>, DataError> 
         }
         match parse_learning_record(&path) {
             Ok(rec) => records.push(rec),
+            // Non-record `.md` (no frontmatter delimiters) — expected in real
+            // KB dirs (README etc.). Skip quietly; do NOT count as data loss.
+            Err(err @ DataError::Frontmatter { .. }) => {
+                tracing::debug!(path = %path.display(), %err, "skipping non-record .md (no frontmatter)");
+            }
+            // Corrupt record: a real note that failed to parse. Surface it as
+            // soft data loss so the UI can report a count.
             Err(err) => {
-                // Tolerate non-record `.md` files (e.g. README) and corrupt
-                // notes — skip, don't fail the scan.
-                tracing::debug!(path = %path.display(), %err, "skipping non-record .md");
+                failed_count += 1;
+                tracing::warn!(path = %path.display(), %err, "skipping corrupt learning note");
             }
         }
     }
     records.sort_by(|a, b| a.id.cmp(&b.id));
-    Ok(records)
+    Ok(ScanReport {
+        records,
+        failed_count,
+    })
 }
 
 /// Split a `.md` body into `(frontmatter_yaml, markdown_body)`.

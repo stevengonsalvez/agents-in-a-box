@@ -1,9 +1,11 @@
 //! ABI v2 [`Plugin`] implementation for the learnings browser.
 //!
-//! P3 (scaffold) ships the empty-state shell only: a titled panel that
-//! renders the `🧠 Learnings` header + an empty-state hint. The data
-//! layer (P4) and the Browse / Detail / Search / Graph tabs (P5–P8) hang
-//! off this struct in later phases.
+//! P5 replaces the P3 empty-state shell with the tabbed Browse UI: on
+//! `plugin/init` the plugin scans the configured `learnings_dir` for `.md`
+//! records (tolerating non-record + corrupt notes per the data layer), loads
+//! them into the [`LearningsUi`] view, and renders a tabbed shell
+//! (Browse | Search | Graph) with Browse active. Search/Graph are P7/P8
+//! placeholders.
 //!
 //! Render mirrors burndown: paint locally into a ratatui `Buffer`, then
 //! convert to a sparse [`WireBuffer`] cell stream for the host
@@ -12,64 +14,92 @@
 use async_trait::async_trait;
 
 use ainb_plugin_sdk::{
-    Cell, Color, Coord, HostClient, InitContext, Plugin, RenderParams, Result, WireBuffer,
+    Cell, Color, Coord, HandleKeyParams, HostClient, InitContext, Plugin, RenderParams, Result,
+    WireBuffer,
 };
 use ratatui::buffer::Buffer as RBuffer;
 use ratatui::layout::Rect as RRect;
-use ratatui::style::{Color as RColor, Modifier as RModifier, Style};
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Widget};
+use ratatui::style::{Color as RColor, Modifier as RModifier};
 
 use crate::config::LearningsConfig;
+use crate::data::{resolve_config_path, scan_learnings_dir_report};
+use crate::ui::{LearningsUi, render as render_ui};
 
 /// Static manifest TOML compiled into the binary. The SDK `Server` uses
 /// this on `plugin/init` to echo `name`/`version` back to the host.
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 /// Title token painted in the panel header. Unique + stable so the
-/// tmux-ui-tripwire can assert an exact match (never a substring-OR).
+/// tmux-ui-tripwire can assert an exact match (never a substring-OR). The UI
+/// shell pads this (` 🧠 Learnings `); this bare token is the substring the
+/// P3 tripwire asserts, kept here so a UI-side rename is caught by the
+/// scaffold test too.
 pub const TITLE_TOKEN: &str = "🧠 Learnings";
-
-/// Empty-state body shown until the data layer (P4) + tabs (P5–P8) land.
-const EMPTY_HINT: &str = "No learnings loaded yet.";
 
 /// Fallback viewport if the host sends a degenerate 0×0 — matches the
 /// historical 80×24 baseline used across the in-tree plugins.
 const FALLBACK_VIEWPORT: (u16, u16) = (80, 24);
 
-/// TUI palette (see `../.claude/skills/tui-screen/SKILL.md`). Gold title,
-/// cornflower borders.
-const GOLD: RColor = RColor::Rgb(255, 215, 0);
-const CORNFLOWER_BLUE: RColor = RColor::Rgb(100, 149, 237);
-const MUTED_GRAY: RColor = RColor::Rgb(120, 120, 140);
-
 /// Learnings plugin state.
 ///
-/// P3 holds only the resolved [`LearningsConfig`]; the snapshot caches,
-/// record store, and per-tab UI state arrive in P4+.
+/// Holds the resolved [`LearningsConfig`] (injected at `plugin/init`) plus the
+/// [`LearningsUi`] view populated from the scanned KB. A render generation
+/// counter is bumped on every state-mutating key so the host's next render
+/// sees fresh state.
 #[derive(Debug, Default)]
 pub struct LearningsPlugin {
-    /// Resolved config injected at `plugin/init` and applied in
-    /// [`Self::on_init`]. Holds the schema defaults until init runs.
+    /// Resolved config injected at `plugin/init`.
     config: LearningsConfig,
+    /// Tabbed UI view (records + per-tab state).
+    ui: LearningsUi,
+    /// Freshness witness, bumped once per state-mutating `handle_key`.
+    generation: u64,
 }
 
 impl LearningsPlugin {
-    /// Borrow the resolved config. Used by the data layer (P4) to locate
-    /// the KB dirs; exposed now so tests can assert the parse landed.
+    /// Borrow the resolved config. Used by tests to assert the parse landed.
     #[must_use]
     pub const fn config(&self) -> &LearningsConfig {
         &self.config
     }
 
+    /// Borrow the UI view (for tests).
+    #[must_use]
+    pub const fn ui(&self) -> &LearningsUi {
+        &self.ui
+    }
+
     /// Replace the resolved config from an injected
-    /// `PluginInitParams.config` JSON value.
+    /// `PluginInitParams.config` JSON value, then (re)scan the KB into the UI.
     ///
-    /// This is the parse path [`Self::on_init`] consumes via
-    /// [`InitContext::config`]. Kept as a `&mut self` method (rather than
-    /// inline in `on_init`) so unit tests can drive it without the SDK
-    /// `Server`.
+    /// Kept as a `&mut self` method so unit tests can drive it without the SDK
+    /// `Server`. A scan error (e.g. the configured dir does not exist) leaves
+    /// the UI empty rather than failing init — the Browse list then shows its
+    /// empty state, which is the correct user-visible behaviour for a missing
+    /// KB.
     pub fn apply_init_config(&mut self, value: &serde_json::Value) {
         self.config = LearningsConfig::from_init_config(value);
+        self.rescan();
+    }
+
+    /// Scan the configured `learnings_dir` and load the records + corrupt-note
+    /// count into the UI. Best-effort: a read error logs and leaves the view
+    /// empty.
+    fn rescan(&mut self) {
+        let dir = resolve_config_path(&self.config.learnings_dir);
+        match scan_learnings_dir_report(&dir) {
+            Ok(report) => {
+                self.ui.set_records(report.records, report.failed_count);
+            }
+            Err(err) => {
+                tracing::warn!(
+                    dir = %dir.display(),
+                    %err,
+                    "learnings scan failed — Browse will show the empty state"
+                );
+                self.ui.set_records(Vec::new(), 0);
+            }
+        }
     }
 }
 
@@ -79,13 +109,8 @@ impl Plugin for LearningsPlugin {
         MANIFEST_TOML
     }
 
-    /// One-shot init.
-    ///
-    /// The host resolves the `[plugins.learnings]` table (project → user →
-    /// system, P1) and injects it on `PluginInitParams.config`; the SDK
-    /// forwards it via [`InitContext::config`]. We parse it into the typed
-    /// [`LearningsConfig`] (defaulting any absent key) and stash it on the
-    /// plugin so the data layer (P4) can locate the KB dirs.
+    /// One-shot init: parse the injected `[plugins.learnings]` table into the
+    /// typed config, then scan the KB into the Browse view.
     async fn on_init(&mut self, _host: &HostClient, ctx: InitContext<'_>) -> Result<()> {
         self.apply_init_config(ctx.config);
         Ok(())
@@ -103,31 +128,18 @@ impl Plugin for LearningsPlugin {
             height: h,
         };
         let mut rbuf = RBuffer::empty(area);
-        render_empty_state(&mut rbuf, area);
+        render_ui(&mut rbuf, area, &self.ui);
         Ok(buffer_to_wire(&rbuf, area))
     }
-}
 
-/// Paint the P3 empty-state shell: a rounded, cornflower-bordered panel
-/// titled `🧠 Learnings` (gold, bold) with a muted hint line in the body.
-fn render_empty_state(buf: &mut RBuffer, area: RRect) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(CORNFLOWER_BLUE))
-        .title(TITLE_TOKEN)
-        .title_style(Style::default().fg(GOLD).add_modifier(RModifier::BOLD));
-
-    let inner = block.inner(area);
-    block.render(area, buf);
-
-    if inner.width > 0 && inner.height > 0 {
-        Paragraph::new(EMPTY_HINT)
-            .style(Style::default().fg(MUTED_GRAY))
-            .render(inner, buf);
+    /// Route a forwarded key into the UI. The host reserves global nav (Esc,
+    /// etc.) and only forwards keys it hasn't consumed, so a no-op here for an
+    /// unhandled key is correct.
+    async fn handle_key(&mut self, _host: &HostClient, params: HandleKeyParams) -> Result<()> {
+        if self.ui.handle_key(&params.key.code) {
+            self.generation = self.generation.wrapping_add(1);
+        }
+        Ok(())
     }
 }
 
@@ -209,18 +221,19 @@ fn ratatui_modifiers(m: RModifier) -> u16 {
 mod tests {
     use super::*;
 
+    /// The UI shell paints the padded title token in the panel header. The
+    /// bare `TITLE_TOKEN` (`🧠 Learnings`) must appear in the first row.
     #[test]
     fn render_paints_title_into_buffer() {
-        // Pure render path (no Server): the title token must appear in the
-        // first row's cells.
         let area = RRect {
             x: 0,
             y: 0,
             width: 40,
-            height: 6,
+            height: 8,
         };
         let mut rbuf = RBuffer::empty(area);
-        render_empty_state(&mut rbuf, area);
+        let ui = LearningsUi::default();
+        render_ui(&mut rbuf, area, &ui);
         let wire = buffer_to_wire(&rbuf, area);
         let row0: String = wire
             .cells
@@ -229,8 +242,8 @@ mod tests {
             .map(|(_, cell)| cell.symbol.as_str())
             .collect();
         assert!(
-            row0.contains("Learnings"),
-            "title row must contain the Learnings token, got: {row0:?}"
+            row0.contains(TITLE_TOKEN),
+            "title row must contain the {TITLE_TOKEN:?} token, got: {row0:?}"
         );
     }
 

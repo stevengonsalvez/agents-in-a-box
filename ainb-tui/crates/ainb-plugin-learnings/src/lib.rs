@@ -14,6 +14,7 @@
 pub mod config;
 pub mod data;
 pub mod plugin;
+pub mod ui;
 
 pub use config::LearningsConfig;
 pub use plugin::{LearningsPlugin, TITLE_TOKEN};
