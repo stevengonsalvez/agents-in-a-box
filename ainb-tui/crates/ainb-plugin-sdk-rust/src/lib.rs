@@ -12,6 +12,7 @@
 //! - [`plugin`]      — the [`Plugin`] trait every plugin implements
 //! - [`host_client`] — [`HostClient`] is the plugin's outbound JSON-RPC client
 //! - [`server`]      — [`Server`] runs the dispatcher loop over an [`AsyncRead`]/[`AsyncWrite`] pair
+//! - [`parent_watch`] — macOS parent-death backstop that self-exits an orphaned plugin
 //!
 //! [`AsyncRead`]: tokio::io::AsyncRead
 //! [`AsyncWrite`]: tokio::io::AsyncWrite
@@ -24,6 +25,7 @@
 
 pub mod error;
 pub mod host_client;
+pub mod parent_watch;
 pub mod plugin;
 pub mod server;
 
