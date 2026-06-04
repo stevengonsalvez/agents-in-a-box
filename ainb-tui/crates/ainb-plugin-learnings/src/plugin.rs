@@ -22,8 +22,8 @@ use ratatui::layout::Rect as RRect;
 use ratatui::style::{Color as RColor, Modifier as RModifier};
 
 use crate::config::LearningsConfig;
-use crate::data::{resolve_config_path, scan_learnings_dir_report};
-use crate::ui::{LearningsUi, render as render_ui};
+use crate::data::{QmdCli, QmdSearch, resolve_config_path, scan_learnings_dir_report};
+use crate::ui::{LearningsUi, SearchContext, render as render_ui};
 
 /// Static manifest TOML compiled into the binary. The SDK `Server` uses
 /// this on `plugin/init` to echo `name`/`version` back to the host.
@@ -46,17 +46,57 @@ const FALLBACK_VIEWPORT: (u16, u16) = (80, 24);
 /// [`LearningsUi`] view populated from the scanned KB. A render generation
 /// counter is bumped on every state-mutating key so the host's next render
 /// sees fresh state.
-#[derive(Debug, Default)]
+///
+/// The `qmd` search runner is held behind a [`QmdSearch`] trait object so it's
+/// injectable: production uses [`QmdCli`] (the default), and tests pass a fake
+/// returning a captured payload via [`Self::with_search_runner`] so the Search
+/// tab's ranked-result rendering is deterministic without spawning `qmd`.
 pub struct LearningsPlugin {
     /// Resolved config injected at `plugin/init`.
     config: LearningsConfig,
     /// Tabbed UI view (records + per-tab state).
     ui: LearningsUi,
+    /// Injected `qmd` runner — `QmdCli` in production, a fake in tests.
+    search_runner: Box<dyn QmdSearch + Send + Sync>,
     /// Freshness witness, bumped once per state-mutating `handle_key`.
     generation: u64,
 }
 
+impl Default for LearningsPlugin {
+    fn default() -> Self {
+        Self {
+            config: LearningsConfig::default(),
+            ui: LearningsUi::default(),
+            search_runner: Box::new(QmdCli::default()),
+            generation: 0,
+        }
+    }
+}
+
+impl std::fmt::Debug for LearningsPlugin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The boxed trait object isn't `Debug`; omit it (it carries no state
+        // worth printing — just the binary name).
+        f.debug_struct("LearningsPlugin")
+            .field("config", &self.config)
+            .field("ui", &self.ui)
+            .field("generation", &self.generation)
+            .finish_non_exhaustive()
+    }
+}
+
 impl LearningsPlugin {
+    /// Construct with an injected [`QmdSearch`] runner. Production builds use
+    /// [`Self::default`] (the real [`QmdCli`]); tests pass a fake so the Search
+    /// tab renders ranked results deterministically without a live `qmd` index.
+    #[must_use]
+    pub fn with_search_runner(runner: Box<dyn QmdSearch + Send + Sync>) -> Self {
+        Self {
+            search_runner: runner,
+            ..Self::default()
+        }
+    }
+
     /// Borrow the resolved config. Used by tests to assert the parse landed.
     #[must_use]
     pub const fn config(&self) -> &LearningsConfig {
@@ -136,7 +176,14 @@ impl Plugin for LearningsPlugin {
     /// etc.) and only forwards keys it hasn't consumed, so a no-op here for an
     /// unhandled key is correct.
     async fn handle_key(&mut self, _host: &HostClient, params: HandleKeyParams) -> Result<()> {
-        if self.ui.handle_key(&params.key.code) {
+        // Build the Search context fresh from the resolved config: the injected
+        // `qmd` runner + the collection/index the Search tab queries against.
+        let ctx = SearchContext {
+            runner: self.search_runner.as_ref(),
+            collection: &self.config.qmd_collection,
+            index: &self.config.qmd_index,
+        };
+        if self.ui.handle_key(&params.key.code, &ctx) {
             self.generation = self.generation.wrapping_add(1);
         }
         Ok(())

@@ -2,9 +2,9 @@
 //!
 //! Owns the tab state ([`Tab`]: Browse | Search | Graph), the parsed-record
 //! store, and the key routing that the plugin's `handle_key` delegates to.
-//! Browse is implemented here (P5); Search (P7) and Graph (P8) render a
-//! "coming soon" placeholder behind their stable [`Tab`] arms so this
-//! dispatch table never has to change when they land.
+//! Browse (P5), the Detail read-pane (P6), and Search (P7) are live; only Graph
+//! (P8) still renders a "coming soon" placeholder behind its stable [`Tab`] arm
+//! so this dispatch table never has to change when it lands.
 //!
 //! Render path mirrors burndown: paint locally into a ratatui `Buffer`
 //! through [`render`], then the plugin converts the buffer to a `WireBuffer`
@@ -14,6 +14,7 @@
 
 mod browse;
 mod detail;
+mod search;
 
 use ratatui::buffer::Buffer as RBuffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect as RRect};
@@ -27,6 +28,8 @@ use crate::data::LearningRecord;
 
 use browse::BrowseState;
 use detail::DetailState;
+pub use search::SearchContext;
+use search::SearchState;
 
 /// TUI palette — see `../.claude/skills/tui-screen/SKILL.md`.
 pub(crate) const GOLD: RColor = RColor::Rgb(255, 215, 0);
@@ -41,14 +44,14 @@ pub(crate) const LIST_HIGHLIGHT_BG: RColor = RColor::Rgb(40, 40, 60);
 /// emoji so the P3 tripwire's exact `🧠 Learnings` token still matches.
 pub(crate) const TITLE_TOKEN: &str = " 🧠 Learnings ";
 
-/// The three top-level tabs. Browse is live (P5); Search (P7) and Graph (P8)
-/// render a placeholder until their phases land — the arms exist now so their
-/// modules slot in behind a stable enum without touching this dispatch.
+/// The three top-level tabs. Browse (P5) and Search (P7) are live; only Graph
+/// (P8) renders a placeholder until its phase lands — its arm exists now so the
+/// module slots in behind a stable enum without touching this dispatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     /// Scrollable record list + filter chips (P5).
     Browse,
-    /// Semantic search via `qmd` (P7 — placeholder for now).
+    /// Semantic search via `qmd` — live query box + ranked results (P7).
     Search,
     /// Entity / community graph explorer (P8 — placeholder for now).
     Graph,
@@ -86,6 +89,8 @@ pub struct LearningsUi {
     failed_count: usize,
     /// Browse-tab UI state (selection + active filter cursor).
     browse: BrowseState,
+    /// Search-tab UI state (query box + ranked results + selection).
+    search: SearchState,
     /// Detail / read-pane open-state. When open it renders over the active
     /// tab's body and consumes keys until closed (`Backspace`). Tab-agnostic —
     /// any tab opens it the same way via [`Self::open_detail_for_selection`].
@@ -127,23 +132,36 @@ impl LearningsUi {
     /// its render generation). Host-reserved keys (Esc, etc.) are NOT forwarded
     /// by the host, so a return of `false` for an unhandled key is correct.
     ///
+    /// `ctx` carries the injected `qmd` runner + the resolved collection/index
+    /// the Search tab needs to actually run a query (the plugin builds it fresh
+    /// from its config each call so the UI stays pure view state).
+    ///
     /// Routing precedence:
     /// 1. **Detail pane open** — it consumes the key (`Backspace`/`Esc` close;
-    ///    everything else is swallowed so the list behind can't move). The
-    ///    pane is modal over the whole shell, so this short-circuits `Tab` too.
-    /// 2. **`Enter`** — opens the Detail pane on the active tab's selected row.
+    ///    everything else is swallowed so the list behind can't move). The pane
+    ///    is modal over the whole shell, so this short-circuits `Tab` too.
+    /// 2. **`/`** — switch to the Search tab and focus its query box (a global
+    ///    shortcut, available from any tab, mirroring the design mock footer).
     /// 3. **`Tab`** — switches the top-level tab.
-    /// 4. **Per-tab routing** — Browse handles its own keys; Search/Graph are
-    ///    P7/P8 placeholders.
-    pub fn handle_key(&mut self, code: &KeyCode) -> bool {
+    /// 4. **Per-tab routing**:
+    ///    - **Search** — the query box / results consume keys (incl. `Enter`,
+    ///      which submits a query or opens a resolved result's Detail pane).
+    ///    - **Browse** — `Enter` opens the Detail pane on the selected row;
+    ///      otherwise Browse handles its own keys.
+    ///    - **Graph** — P8 placeholder.
+    pub fn handle_key(&mut self, code: &KeyCode, ctx: &SearchContext<'_>) -> bool {
         // 1. Modal Detail pane takes precedence over everything.
         if self.detail.is_open() {
             return self.detail.handle_key(code);
         }
 
-        // 2. `Enter` opens the Detail pane on the selected record.
-        if matches!(code, KeyCode::Enter) {
-            return self.open_detail_for_selection();
+        // 2. `/` is a global shortcut to the Search tab + query box, from any
+        // tab (design mock footer: `/ search`). It does NOT type a literal `/`
+        // into the query — that's the focus action.
+        if matches!(code, KeyCode::Char { ch: '/' }) {
+            self.tab.0 = Tab::Search;
+            self.search.focus();
+            return true;
         }
 
         // 3. `Tab` switches the top-level tab.
@@ -152,27 +170,33 @@ impl LearningsUi {
             return true;
         }
 
-        // 4. Per-tab routing. `/` (search) and `g` (graph) are reserved for
-        // P7/P8 and are intentionally inert here so a stray press is a clean
-        // no-op rather than a swallowed key.
+        // 4. Per-tab routing.
         match self.tab.0 {
-            Tab::Browse => self.browse.handle_key(code, &self.records),
-            Tab::Search | Tab::Graph => false,
+            Tab::Search => {
+                let outcome = self.search.handle_key(code, ctx, &self.records);
+                if let Some(record) = outcome.open_record {
+                    self.detail.open(&record);
+                }
+                outcome.changed
+            }
+            Tab::Browse => {
+                if matches!(code, KeyCode::Enter) {
+                    return self.open_detail_for_selection();
+                }
+                self.browse.handle_key(code, &self.records)
+            }
+            // `g` (graph) is reserved for P8 and is intentionally inert here so
+            // a stray press is a clean no-op rather than a swallowed key.
+            Tab::Graph => false,
         }
     }
 
-    /// Open the Detail pane on the active tab's currently-selected record.
+    /// Open the Detail pane on the Browse tab's currently-selected record.
     /// Returns `true` when a record was selectable (pane opened), `false` when
     /// the list is empty (nothing to open — a clean no-op). The Browse
     /// selection is left untouched so closing the pane returns to the same row.
     fn open_detail_for_selection(&mut self) -> bool {
-        // Only Browse exposes a selection today; Search/Graph (P7/P8) wire
-        // their own selectors behind their arms when they land.
-        let selected = match self.tab.0 {
-            Tab::Browse => self.browse.selected_record(&self.records),
-            Tab::Search | Tab::Graph => None,
-        };
-        match selected {
+        match self.browse.selected_record(&self.records) {
             Some(record) => {
                 self.detail.open(record);
                 true
@@ -231,7 +255,7 @@ pub fn render(buf: &mut RBuffer, area: RRect, ui: &LearningsUi) {
         Tab::Browse => {
             browse::render(buf, rows[1], &ui.records, ui.failed_count, &ui.browse);
         }
-        Tab::Search => render_placeholder(buf, rows[1], "Search", "P7"),
+        Tab::Search => search::render(buf, rows[1], &ui.search),
         Tab::Graph => render_placeholder(buf, rows[1], "Graph", "P8"),
     }
 }

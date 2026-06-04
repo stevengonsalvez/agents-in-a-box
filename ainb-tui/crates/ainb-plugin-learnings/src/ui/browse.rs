@@ -201,8 +201,8 @@ fn render_chip_bar(buf: &mut RBuffer, area: RRect, state: &BrowseState) {
 ///
 /// Mirrors the burndown footer-span shape — `<key> <description>` pairs — and
 /// stays **honest**: only the keys actually wired (`↑↓ move`, `f filter`,
-/// `Tab pane`, and now `⏎ open` — P6) are gold (live); the keys still deferred
-/// to P7–P8 (`/ search`, `g graph`) render fully muted so the bar reflects the
+/// `Tab pane`, `⏎ open` — P6, and now `/ search` — P7) are gold (live); the key
+/// still deferred to P8 (`g graph`) renders fully muted so the bar reflects the
 /// mock without implying an affordance that does nothing yet. As each later
 /// phase lands its key it promotes the token from [`help_disabled`] to
 /// [`help_key`].
@@ -212,10 +212,11 @@ fn render_help_bar(buf: &mut RBuffer, area: RRect) {
     spans.extend(help_key("↑↓", "move"));
     spans.extend(help_key("f", "filter"));
     spans.extend(help_key("Tab", "pane"));
-    // `⏎ open` is live now (P6): Enter opens the Detail pane on the selected row.
+    // `⏎ open` is live (P6): Enter opens the Detail pane on the selected row.
     spans.extend(help_key("⏎", "open"));
-    // Deferred keys (fully muted until P7–P8 wire them).
-    spans.extend(help_disabled("/", "search"));
+    // `/ search` is live now (P7): `/` jumps to the Search tab + query box.
+    spans.extend(help_key("/", "search"));
+    // Deferred key (fully muted until P8 wires it).
     spans.extend(help_disabled("g", "graph"));
     Paragraph::new(Line::from(spans)).render(area, buf);
 }
