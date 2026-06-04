@@ -3,9 +3,10 @@
 //! P5 replaces the P3 empty-state shell with the tabbed Browse UI: on
 //! `plugin/init` the plugin scans the configured `learnings_dir` for `.md`
 //! records (tolerating non-record + corrupt notes per the data layer), loads
-//! them into the [`LearningsUi`] view, and renders a tabbed shell
-//! (Browse | Search | Graph) with Browse active. Search/Graph are P7/P8
-//! placeholders.
+//! them into the [`LearningsUi`] view, and renders a tabbed shell with all
+//! three tabs live: Browse (list + filter chips + detail), Search (`qmd`
+//! query + ranked results), and Graph (typed entity neighbourhood from the
+//! `.entities.yaml` relationships + community clusters).
 //!
 //! Render mirrors burndown: paint locally into a ratatui `Buffer`, then
 //! convert to a sparse [`WireBuffer`] cell stream for the host
@@ -22,12 +23,18 @@ use ratatui::layout::Rect as RRect;
 use ratatui::style::{Color as RColor, Modifier as RModifier};
 
 use crate::config::LearningsConfig;
-use crate::data::{QmdCli, QmdSearch, resolve_config_path, scan_learnings_dir_report};
+use crate::data::{
+    QmdCli, QmdSearch, parse_community_reports, resolve_config_path, scan_learnings_dir_report,
+};
 use crate::ui::{LearningsUi, SearchContext, render as render_ui};
 
 /// Static manifest TOML compiled into the binary. The SDK `Server` uses
 /// this on `plugin/init` to echo `name`/`version` back to the host.
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+
+/// nano_graphrag community-reports filename inside `graph_cache`. The Graph
+/// tab's community-cluster view parses this JSON ([`parse_community_reports`]).
+const COMMUNITY_REPORTS_FILE: &str = "kv_store_community_reports.json";
 
 /// Title token painted in the panel header. Unique + stable so the
 /// tmux-ui-tripwire can assert an exact match (never a substring-OR). The UI
@@ -58,6 +65,9 @@ pub struct LearningsPlugin {
     ui: LearningsUi,
     /// Injected `qmd` runner — `QmdCli` in production, a fake in tests.
     search_runner: Box<dyn QmdSearch + Send + Sync>,
+    /// `true` once the Graph tab's community clusters have been lazily loaded
+    /// from `graph_cache` (memoized so re-entry doesn't re-read).
+    communities_loaded: bool,
     /// Freshness witness, bumped once per state-mutating `handle_key`.
     generation: u64,
 }
@@ -68,6 +78,7 @@ impl Default for LearningsPlugin {
             config: LearningsConfig::default(),
             ui: LearningsUi::default(),
             search_runner: Box::new(QmdCli::default()),
+            communities_loaded: false,
             generation: 0,
         }
     }
@@ -125,6 +136,12 @@ impl LearningsPlugin {
     /// Scan the configured `learnings_dir` and load the records + corrupt-note
     /// count into the UI. Best-effort: a read error logs and leaves the view
     /// empty.
+    ///
+    /// The Graph tab's community clusters are NOT loaded here — they're loaded
+    /// lazily the first time the user reaches the Graph tab
+    /// ([`Self::ensure_communities_loaded`]). Lazy-loading keeps the `graph_cache`
+    /// read off the init path so a session that never opens the Graph tab never
+    /// touches the (potentially large) nano_graphrag cache.
     fn rescan(&mut self) {
         let dir = resolve_config_path(&self.config.learnings_dir);
         match scan_learnings_dir_report(&dir) {
@@ -138,6 +155,34 @@ impl LearningsPlugin {
                     "learnings scan failed — Browse will show the empty state"
                 );
                 self.ui.set_records(Vec::new(), 0);
+            }
+        }
+    }
+
+    /// Load the Graph tab's community clusters from
+    /// `<graph_cache>/kv_store_community_reports.json` the first time the user
+    /// reaches the Graph tab, then memoize (`communities_loaded`) so a later
+    /// re-entry doesn't re-read.
+    ///
+    /// Best-effort: a missing or malformed file logs and leaves the community
+    /// view in its empty state (the correct user-visible behaviour for a KB
+    /// without a built graph). Lazy by design so the `graph_cache` read only
+    /// happens for a user who actually opens the Graph tab.
+    fn ensure_communities_loaded(&mut self) {
+        if self.communities_loaded {
+            return;
+        }
+        self.communities_loaded = true;
+        let path = resolve_config_path(&self.config.graph_cache).join(COMMUNITY_REPORTS_FILE);
+        match parse_community_reports(&path) {
+            Ok(communities) => self.ui.set_communities(communities),
+            Err(err) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    %err,
+                    "community reports unreadable — Graph community view will be empty"
+                );
+                self.ui.set_communities(Vec::new());
             }
         }
     }
@@ -185,6 +230,12 @@ impl Plugin for LearningsPlugin {
         };
         if self.ui.handle_key(&params.key.code, &ctx) {
             self.generation = self.generation.wrapping_add(1);
+        }
+        // Lazily load the Graph tab's community clusters the first time the user
+        // reaches the Graph tab (keeps the `graph_cache` read off init + off any
+        // session that never opens the graph).
+        if self.ui.tab() == crate::ui::Tab::Graph {
+            self.ensure_communities_loaded();
         }
         Ok(())
     }

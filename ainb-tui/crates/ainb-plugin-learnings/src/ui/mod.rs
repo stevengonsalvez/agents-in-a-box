@@ -2,9 +2,8 @@
 //!
 //! Owns the tab state ([`Tab`]: Browse | Search | Graph), the parsed-record
 //! store, and the key routing that the plugin's `handle_key` delegates to.
-//! Browse (P5), the Detail read-pane (P6), and Search (P7) are live; only Graph
-//! (P8) still renders a "coming soon" placeholder behind its stable [`Tab`] arm
-//! so this dispatch table never has to change when it lands.
+//! Browse (P5), the Detail read-pane (P6), Search (P7), and the Graph explorer
+//! (P8) are all live.
 //!
 //! Render path mirrors burndown: paint locally into a ratatui `Buffer`
 //! through [`render`], then the plugin converts the buffer to a `WireBuffer`
@@ -14,20 +13,22 @@
 
 mod browse;
 mod detail;
+mod graph;
 mod search;
 
 use ratatui::buffer::Buffer as RBuffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect as RRect};
 use ratatui::style::{Color as RColor, Modifier as RModifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Tabs, Widget};
+use ratatui::widgets::{Block, BorderType, Borders, Tabs, Widget};
 
 use ainb_plugin_sdk::KeyCode;
 
-use crate::data::LearningRecord;
+use crate::data::{Community, LearningRecord};
 
 use browse::BrowseState;
 use detail::DetailState;
+use graph::GraphState;
 pub use search::SearchContext;
 use search::SearchState;
 
@@ -44,16 +45,15 @@ pub(crate) const LIST_HIGHLIGHT_BG: RColor = RColor::Rgb(40, 40, 60);
 /// emoji so the P3 tripwire's exact `🧠 Learnings` token still matches.
 pub(crate) const TITLE_TOKEN: &str = " 🧠 Learnings ";
 
-/// The three top-level tabs. Browse (P5) and Search (P7) are live; only Graph
-/// (P8) renders a placeholder until its phase lands — its arm exists now so the
-/// module slots in behind a stable enum without touching this dispatch.
+/// The three top-level tabs. Browse (P5), Search (P7), and Graph (P8) are all
+/// live.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     /// Scrollable record list + filter chips (P5).
     Browse,
     /// Semantic search via `qmd` — live query box + ranked results (P7).
     Search,
-    /// Entity / community graph explorer (P8 — placeholder for now).
+    /// Entity-neighborhood / community-cluster graph explorer (P8).
     Graph,
 }
 
@@ -91,6 +91,9 @@ pub struct LearningsUi {
     browse: BrowseState,
     /// Search-tab UI state (query box + ranked results + selection).
     search: SearchState,
+    /// Graph-tab UI state (typed entity adjacency + community clusters +
+    /// selection + focus).
+    graph: GraphState,
     /// Detail / read-pane open-state. When open it renders over the active
     /// tab's body and consumes keys until closed (`Backspace`). Tab-agnostic —
     /// any tab opens it the same way via [`Self::open_detail_for_selection`].
@@ -111,10 +114,23 @@ impl Default for TabState {
 impl LearningsUi {
     /// Load the parsed records + corrupt-note count into the view. Called by
     /// the plugin after it scans the configured `learnings_dir`.
+    ///
+    /// Also rebuilds the Graph tab's typed entity adjacency from the records'
+    /// aggregated `relationships[]` so the Graph view stays in lock-step with
+    /// the scanned KB.
     pub fn set_records(&mut self, records: Vec<LearningRecord>, failed_count: usize) {
         self.records = records;
         self.failed_count = failed_count;
         self.browse.clamp_selection(self.visible_count());
+        self.graph.set_records(&self.records);
+    }
+
+    /// Load the parsed community clusters (from `kv_store_community_reports.json`)
+    /// into the Graph tab's community view. Called by the plugin after it reads
+    /// the configured `graph_cache`. A read failure simply leaves the community
+    /// view empty (its honest empty state) rather than failing the screen.
+    pub fn set_communities(&mut self, communities: Vec<Community>) {
+        self.graph.set_communities(communities);
     }
 
     /// The currently-active tab (exposed for the plugin's debug / tests).
@@ -140,22 +156,48 @@ impl LearningsUi {
     /// 1. **Detail pane open** — it consumes the key (`Backspace`/`Esc` close;
     ///    everything else is swallowed so the list behind can't move). The pane
     ///    is modal over the whole shell, so this short-circuits `Tab` too.
-    /// 2. **`/`** — switch to the Search tab and focus its query box (a global
+    /// 2. **Graph focused** — when `g` has focused the Graph tab, `Backspace`
+    ///    releases focus (the in-plugin "back"; Esc is host-reserved) and the
+    ///    graph claims `↑↓`/`jk`/`c` for navigation + the entity⇄community
+    ///    toggle. `Tab` and `/` still fall through (they switch tab / view), so
+    ///    a focused graph never traps the user on the screen.
+    /// 3. **`/`** — switch to the Search tab and focus its query box (a global
     ///    shortcut, available from any tab, mirroring the design mock footer).
-    /// 3. **`Tab`** — switches the top-level tab.
-    /// 4. **Per-tab routing**:
+    /// 4. **`g`** — switch to the Graph tab and focus it (a global shortcut,
+    ///    available from any tab; the design mock footer: `g graph`). Suppressed
+    ///    while the Search query box is focused so a user can type `g` into a
+    ///    query (search for `git`, `golang`, …) — the same rule that keeps
+    ///    `j`/`k` typeable in the Search box.
+    /// 5. **`Tab`** — switches the top-level tab.
+    /// 6. **Per-tab routing**:
     ///    - **Search** — the query box / results consume keys (incl. `Enter`,
     ///      which submits a query or opens a resolved result's Detail pane).
     ///    - **Browse** — `Enter` opens the Detail pane on the selected row;
     ///      otherwise Browse handles its own keys.
-    ///    - **Graph** — P8 placeholder.
+    ///    - **Graph** — when not focused, navigation keys are inert (press `g`
+    ///      to focus first).
     pub fn handle_key(&mut self, code: &KeyCode, ctx: &SearchContext<'_>) -> bool {
         // 1. Modal Detail pane takes precedence over everything.
         if self.detail.is_open() {
             return self.detail.handle_key(code);
         }
 
-        // 2. `/` is a global shortcut to the Search tab + query box, from any
+        // 2. Graph focus: `Backspace` releases focus; the graph claims its own
+        // navigation keys. `Tab`/`/`/`g` fall through to the global shortcuts
+        // below so the user can always leave a focused graph.
+        if self.tab.0 == Tab::Graph && self.graph.is_focused() {
+            if matches!(code, KeyCode::Backspace) {
+                self.graph.blur();
+                return true;
+            }
+            if !matches!(code, KeyCode::Tab | KeyCode::Char { ch: '/' | 'g' })
+                && self.graph.handle_key(code)
+            {
+                return true;
+            }
+        }
+
+        // 3. `/` is a global shortcut to the Search tab + query box, from any
         // tab (design mock footer: `/ search`). It does NOT type a literal `/`
         // into the query — that's the focus action.
         if matches!(code, KeyCode::Char { ch: '/' }) {
@@ -164,13 +206,24 @@ impl LearningsUi {
             return true;
         }
 
-        // 3. `Tab` switches the top-level tab.
+        // 4. `g` is a global shortcut to the Graph tab + entity focus, from any
+        // tab (design mock footer: `g graph`) — EXCEPT while the Search query
+        // box is focused, where `g` must type into the query (so a user can
+        // search for `git`, `golang`, …). Same rationale as the `j`/`k` guard.
+        let search_box_focused = self.tab.0 == Tab::Search && self.search.is_focused();
+        if matches!(code, KeyCode::Char { ch: 'g' }) && !search_box_focused {
+            self.tab.0 = Tab::Graph;
+            self.graph.focus();
+            return true;
+        }
+
+        // 5. `Tab` switches the top-level tab.
         if matches!(code, KeyCode::Tab) {
             self.tab.0 = self.tab.0.next();
             return true;
         }
 
-        // 4. Per-tab routing.
+        // 6. Per-tab routing.
         match self.tab.0 {
             Tab::Search => {
                 let outcome = self.search.handle_key(code, ctx, &self.records);
@@ -185,8 +238,8 @@ impl LearningsUi {
                 }
                 self.browse.handle_key(code, &self.records)
             }
-            // `g` (graph) is reserved for P8 and is intentionally inert here so
-            // a stray press is a clean no-op rather than a swallowed key.
+            // Graph navigation only fires while focused (handled in step 2);
+            // an unfocused Graph press is a clean no-op (press `g` to focus).
             Tab::Graph => false,
         }
     }
@@ -256,7 +309,7 @@ pub fn render(buf: &mut RBuffer, area: RRect, ui: &LearningsUi) {
             browse::render(buf, rows[1], &ui.records, ui.failed_count, &ui.browse);
         }
         Tab::Search => search::render(buf, rows[1], &ui.search),
-        Tab::Graph => render_placeholder(buf, rows[1], "Graph", "P8"),
+        Tab::Graph => graph::render(buf, rows[1], &ui.graph),
     }
 }
 
@@ -278,16 +331,4 @@ fn render_tab_strip(buf: &mut RBuffer, area: RRect, active: Tab) {
         .select(idx)
         .divider(Span::styled(" │ ", Style::default().fg(MUTED_GRAY)));
     tabs.render(area, buf);
-}
-
-/// A "coming in P7/P8" placeholder for the not-yet-implemented tabs.
-fn render_placeholder(buf: &mut RBuffer, area: RRect, name: &str, phase: &str) {
-    let line = Line::from(vec![
-        Span::styled(format!("  {name} "), Style::default().fg(SOFT_WHITE)),
-        Span::styled(
-            format!("— coming in {phase}"),
-            Style::default().fg(MUTED_GRAY).add_modifier(RModifier::ITALIC),
-        ),
-    ]);
-    Paragraph::new(line).render(area, buf);
 }

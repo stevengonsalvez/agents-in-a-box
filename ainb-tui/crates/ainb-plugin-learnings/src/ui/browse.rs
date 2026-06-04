@@ -200,12 +200,9 @@ fn render_chip_bar(buf: &mut RBuffer, area: RRect, state: &BrowseState) {
 /// pattern; design mock C3 shows it verbatim).
 ///
 /// Mirrors the burndown footer-span shape — `<key> <description>` pairs — and
-/// stays **honest**: only the keys actually wired (`↑↓ move`, `f filter`,
-/// `Tab pane`, `⏎ open` — P6, and now `/ search` — P7) are gold (live); the key
-/// still deferred to P8 (`g graph`) renders fully muted so the bar reflects the
-/// mock without implying an affordance that does nothing yet. As each later
-/// phase lands its key it promotes the token from [`help_disabled`] to
-/// [`help_key`].
+/// stays **honest**: every key here is now wired, so all render gold (live):
+/// `↑↓ move`, `f filter`, `Tab pane`, `⏎ open` (P6), `/ search` (P7), and
+/// `g graph` (P8 — `g` jumps to the Graph tab + focuses the entity view).
 fn render_help_bar(buf: &mut RBuffer, area: RRect) {
     let mut spans = vec![Span::raw(" ")];
     // Live keys (gold key + muted description).
@@ -214,10 +211,10 @@ fn render_help_bar(buf: &mut RBuffer, area: RRect) {
     spans.extend(help_key("Tab", "pane"));
     // `⏎ open` is live (P6): Enter opens the Detail pane on the selected row.
     spans.extend(help_key("⏎", "open"));
-    // `/ search` is live now (P7): `/` jumps to the Search tab + query box.
+    // `/ search` is live (P7): `/` jumps to the Search tab + query box.
     spans.extend(help_key("/", "search"));
-    // Deferred key (fully muted until P8 wires it).
-    spans.extend(help_disabled("g", "graph"));
+    // `g graph` is live now (P8): `g` jumps to the Graph tab + entity focus.
+    spans.extend(help_key("g", "graph"));
     Paragraph::new(Line::from(spans)).render(area, buf);
 }
 
@@ -231,24 +228,6 @@ fn help_key(key: &str, desc: &str) -> [Span<'static>; 3] {
             Style::default().fg(GOLD).add_modifier(RModifier::BOLD),
         ),
         Span::styled(format!(" {desc}"), Style::default().fg(MUTED_GRAY)),
-        Span::styled("  ", Style::default().fg(MUTED_GRAY)),
-    ]
-}
-
-/// A deferred (not-yet-wired) help-bar entry: both the key glyph and the
-/// description are muted, signalling the affordance is shown-but-inert until
-/// its phase lands. Keeps the exact `<key> <desc>` token shape so the bar
-/// matches the design mock while staying honest about what works today.
-fn help_disabled(key: &str, desc: &str) -> [Span<'static>; 3] {
-    [
-        Span::styled(
-            key.to_string(),
-            Style::default().fg(MUTED_GRAY).add_modifier(RModifier::DIM),
-        ),
-        Span::styled(
-            format!(" {desc}"),
-            Style::default().fg(MUTED_GRAY).add_modifier(RModifier::DIM),
-        ),
         Span::styled("  ", Style::default().fg(MUTED_GRAY)),
     ]
 }
