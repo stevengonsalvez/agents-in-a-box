@@ -1498,6 +1498,12 @@ fn setup_panic_handler() {
     use tracing::error;
 
     std::panic::set_hook(Box::new(|panic_info| {
+        // Kill any live embedded tmux-attach client before restoring the
+        // terminal, so a panic while an interactive pane is focused doesn't
+        // leak the ephemeral client. Killing the client never kills the
+        // tmux session — tmux owns that.
+        crate::tmux::pty_wrapper::kill_all_embed_children();
+
         // Ensure terminal is restored before logging the panic
         cleanup_terminal();
 
