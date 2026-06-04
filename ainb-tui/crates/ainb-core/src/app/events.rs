@@ -1756,13 +1756,12 @@ impl EventHandler {
                             crate::components::git_view::GitTab::Files => {
                                 Some(AppEvent::GitViewNextFile)
                             }
-                            crate::components::git_view::GitTab::Diff => {
-                                Some(AppEvent::GitViewScrollDown)
-                            }
                             crate::components::git_view::GitTab::Commits => {
                                 Some(AppEvent::GitViewNextCommit)
                             }
-                            crate::components::git_view::GitTab::Markdown => {
+                            crate::components::git_view::GitTab::Review
+                            | crate::components::git_view::GitTab::Diff
+                            | crate::components::git_view::GitTab::Markdown => {
                                 Some(AppEvent::GitViewScrollDown)
                             }
                         }
@@ -1776,13 +1775,12 @@ impl EventHandler {
                             crate::components::git_view::GitTab::Files => {
                                 Some(AppEvent::GitViewPrevFile)
                             }
-                            crate::components::git_view::GitTab::Diff => {
-                                Some(AppEvent::GitViewScrollUp)
-                            }
                             crate::components::git_view::GitTab::Commits => {
                                 Some(AppEvent::GitViewPrevCommit)
                             }
-                            crate::components::git_view::GitTab::Markdown => {
+                            crate::components::git_view::GitTab::Review
+                            | crate::components::git_view::GitTab::Diff
+                            | crate::components::git_view::GitTab::Markdown => {
                                 Some(AppEvent::GitViewScrollUp)
                             }
                         }
@@ -3061,6 +3059,7 @@ impl EventHandler {
             AppEvent::GitViewScrollUp => {
                 if let Some(ref mut git_state) = state.git_view_state {
                     match git_state.active_tab {
+                        crate::components::git_view::GitTab::Review => git_state.review_scroll_up(1),
                         crate::components::git_view::GitTab::Diff => git_state.scroll_diff_up(),
                         crate::components::git_view::GitTab::Markdown => {
                             git_state.scroll_markdown_up()
@@ -3072,6 +3071,7 @@ impl EventHandler {
             AppEvent::GitViewScrollDown => {
                 if let Some(ref mut git_state) = state.git_view_state {
                     match git_state.active_tab {
+                        crate::components::git_view::GitTab::Review => git_state.review_scroll_down(1),
                         crate::components::git_view::GitTab::Diff => git_state.scroll_diff_down(),
                         crate::components::git_view::GitTab::Markdown => {
                             git_state.scroll_markdown_down()

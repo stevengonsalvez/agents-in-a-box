@@ -5,3 +5,6 @@
 pub mod highlight;
 pub mod model;
 pub mod parse;
+pub mod render;
+
+pub use render::CodeReviewUi;

@@ -36,6 +36,8 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use tracing::{debug, error};
 
+use super::code_review;
+
 #[derive(Debug, Clone)]
 pub struct GitViewState {
     pub active_tab: GitTab,
@@ -58,6 +60,9 @@ pub struct GitViewState {
     // Commits tab state
     pub commits: Vec<crate::git::operations::CommitInfo>,
     pub selected_commit_index: usize,
+    // Warp-style Code Review surface (Review tab)
+    pub review: code_review::model::ReviewModel,
+    pub review_ui: code_review::render::CodeReviewUi,
 }
 
 /// Represents an item in the file tree (either a folder or file)
@@ -99,8 +104,9 @@ pub enum MarkdownStyle {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum GitTab {
-    Files,
-    Diff,
+    Review,   // Warp-style unified code review (default surface)
+    Files,    // Legacy file tree — retired from the tab cycle, kept for compatibility
+    Diff,     // Legacy per-file diff — retired from the tab cycle
     Commits,  // Branch commits since diverging from main
     Markdown, // Preview for .md files
 }
@@ -147,7 +153,7 @@ impl GitFileStatus {
 impl GitViewState {
     pub fn new(worktree_path: PathBuf) -> Self {
         let mut state = Self {
-            active_tab: GitTab::Files,
+            active_tab: GitTab::Review,
             changed_files: Vec::new(),
             selected_file_index: 0,
             diff_content: Vec::new(),
@@ -167,10 +173,42 @@ impl GitViewState {
             // Commits tab state
             commits: Vec::new(),
             selected_commit_index: 0,
+            // Code Review surface
+            review: code_review::model::ReviewModel::default(),
+            review_ui: code_review::render::CodeReviewUi::default(),
         };
         // Expand root by default
         state.expanded_folders.insert(String::new());
         state
+    }
+
+    /// Rebuild the structured Code Review model from the worktree's open changes.
+    /// On error the model is cleared so the surface shows an empty state.
+    pub fn refresh_review(&mut self) {
+        match code_review::parse::build_review_model(&self.worktree_path) {
+            Ok(model) => {
+                self.review = model;
+                if self.review_ui.selected_file >= self.review.files.len() {
+                    self.review_ui.selected_file = 0;
+                }
+            }
+            Err(e) => {
+                error!("Failed to build code review model: {e}");
+                self.review = code_review::model::ReviewModel::default();
+            }
+        }
+    }
+
+    /// Scroll the review body down by `n` rows (clamped to the last row).
+    pub fn review_scroll_down(&mut self, n: usize) {
+        let rows = code_review::render::flatten(&self.review).len();
+        let max = rows.saturating_sub(1);
+        self.review_ui.scroll = self.review_ui.scroll.saturating_add(n).min(max);
+    }
+
+    /// Scroll the review body up by `n` rows (saturating at the top).
+    pub const fn review_scroll_up(&mut self, n: usize) {
+        self.review_ui.scroll = self.review_ui.scroll.saturating_sub(n);
     }
 
     pub fn refresh_git_status(&mut self) -> Result<()> {
@@ -1098,18 +1136,19 @@ impl GitViewState {
     }
 
     pub fn switch_tab(&mut self) {
+        // Cycle Review → Commits → (Markdown if applicable) → Review.
+        // The legacy Files/Diff tabs are retired from the cycle.
         self.active_tab = match self.active_tab {
-            GitTab::Files => GitTab::Diff,
-            GitTab::Diff => GitTab::Commits,
             GitTab::Commits => {
-                // Only show Markdown tab if current file is a markdown file
                 if self.is_selected_markdown() && !self.markdown_content.is_empty() {
                     GitTab::Markdown
                 } else {
-                    GitTab::Files
+                    GitTab::Review
                 }
             }
-            GitTab::Markdown => GitTab::Files,
+            GitTab::Markdown => GitTab::Review,
+            // Review (and the retired Files/Diff) advance to Commits.
+            _ => GitTab::Commits,
         };
     }
 
@@ -1211,18 +1250,17 @@ impl GitViewComponent {
         // Render raised tab style - dynamically include Markdown tab if applicable
         let tab_titles: Vec<&str> =
             if git_state.is_selected_markdown() && !git_state.markdown_content.is_empty() {
-                vec!["Files", "Diff", "Commits", "Markdown"]
+                vec!["Review", "Commits", "Markdown"]
             } else {
-                vec!["Files", "Diff", "Commits"]
+                vec!["Review", "Commits"]
             };
 
         let selected_tab = match git_state.active_tab {
-            GitTab::Files => 0,
-            GitTab::Diff => 1,
-            GitTab::Commits => 2,
+            GitTab::Review | GitTab::Files | GitTab::Diff => 0,
+            GitTab::Commits => 1,
             GitTab::Markdown => {
-                if tab_titles.len() > 3 {
-                    3
+                if tab_titles.len() > 2 {
+                    2
                 } else {
                     0
                 }
@@ -1233,6 +1271,7 @@ impl GitViewComponent {
 
         // Render content based on active tab
         match git_state.active_tab {
+            GitTab::Review => code_review::render::render(frame, chunks[1], git_state),
             GitTab::Files => Self::render_files_tab(frame, chunks[1], git_state),
             GitTab::Diff => Self::render_diff_tab(frame, chunks[1], git_state),
             GitTab::Commits => Self::render_commits_tab(frame, chunks[1], git_state),
