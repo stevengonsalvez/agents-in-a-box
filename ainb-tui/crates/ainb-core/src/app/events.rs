@@ -3806,13 +3806,27 @@ impl EventHandler {
             AppEvent::SkillManagerConflictFlip => {
                 tracing::info!("Units panel: flip shadowed_by on selected unit");
                 let ainb_home = ainb_skill_core::default_ainb_home();
-                if let Err(e) =
-                    crate::components::skill_manager_screen::apply_conflict_flip(
-                        &mut state.skill_manager_state,
-                        &ainb_home,
-                    )
-                {
-                    tracing::warn!(error = %e, "conflict flip failed");
+                let unit_name = state
+                    .skill_manager_state
+                    .units
+                    .get(state.skill_manager_state.selected)
+                    .map(|u| u.name.clone());
+                match crate::components::skill_manager_screen::apply_conflict_flip(
+                    &mut state.skill_manager_state,
+                    &ainb_home,
+                ) {
+                    // `[s]` on a conflict-peer unit flips which side wins.
+                    // Surface a toast so the keystroke isn't a silent no-op
+                    // (the alternative, non-conflict, branch fires Sync).
+                    Ok(()) => {
+                        if let Some(name) = unit_name {
+                            state.add_info_notification(format!("shadow flipped: {name}"));
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "conflict flip failed");
+                        state.add_error_notification(format!("conflict flip failed: {e}"));
+                    }
                 }
             }
             AppEvent::SkillManagerRefreshDiscovery => {
@@ -5544,8 +5558,20 @@ fn run_catalog_search(
     query: &str,
 ) -> Result<Vec<crate::components::skill_manager_screen::BrowseRow>, String> {
     use ainb_skill_core::catalog::CatalogBackend;
-    let backend = ainb_cli::catalog_http::SkillsShHttpBackend::from_env(ainb_home);
-    let hits = backend.search(query).map_err(|e| e.to_string())?;
+    // The HTTP backend uses `reqwest::blocking`, which builds its own runtime
+    // and PANICS when constructed on a thread that is already inside a tokio
+    // runtime. The TUI event loop runs under `#[tokio::main]`, so run the
+    // (synchronous) search on a dedicated OS thread — the blocking client is
+    // then built off the runtime thread. The mock path returns before ever
+    // touching reqwest, so this is a no-op cost in tests.
+    let ainb_home = ainb_home.to_path_buf();
+    let query = query.to_string();
+    let hits = std::thread::spawn(move || {
+        let backend = ainb_cli::catalog_http::SkillsShHttpBackend::from_env(&ainb_home);
+        backend.search(&query).map_err(|e| e.to_string())
+    })
+    .join()
+    .map_err(|_| "catalog search thread panicked".to_string())??;
     Ok(hits
         .into_iter()
         .map(|h| crate::components::skill_manager_screen::BrowseRow {
@@ -5556,6 +5582,45 @@ fn run_catalog_search(
             description: h.description,
         })
         .collect())
+}
+
+#[cfg(test)]
+mod catalog_search_tokio_guard {
+    use super::run_catalog_search;
+
+    // Serialize env mutation against other env-touching tests in this binary.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Regression: `run_catalog_search` must run the `reqwest::blocking`
+    /// search off the runtime thread. Building a blocking client inside a
+    /// tokio runtime panics — before the thread-offload fix this test aborted
+    /// with that panic instead of returning a network error.
+    #[tokio::test]
+    async fn search_from_tokio_context_does_not_panic() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev_mock = std::env::var_os("AINB_CATALOG_MOCK");
+        let prev_base = std::env::var_os("AINB_SKILLS_API_BASE");
+        // Force the real (non-mock) path at an unreachable endpoint so the
+        // search fails fast with a connection error rather than hitting a
+        // real catalog.
+        std::env::remove_var("AINB_CATALOG_MOCK");
+        std::env::set_var("AINB_SKILLS_API_BASE", "http://127.0.0.1:1/nope");
+
+        let res = run_catalog_search(std::path::Path::new("/nonexistent-ainb-home"), "react");
+
+        match prev_mock {
+            Some(v) => std::env::set_var("AINB_CATALOG_MOCK", v),
+            None => std::env::remove_var("AINB_CATALOG_MOCK"),
+        }
+        match prev_base {
+            Some(v) => std::env::set_var("AINB_SKILLS_API_BASE", v),
+            None => std::env::remove_var("AINB_SKILLS_API_BASE"),
+        }
+
+        // The assertion that matters is "the call returned at all" (no panic
+        // unwind). A connect to a dead port yields Err.
+        assert!(res.is_err(), "expected a connection error, got: {res:?}");
+    }
 }
 
 /// Install a catalog hit by its unit URI, routing through the existing
