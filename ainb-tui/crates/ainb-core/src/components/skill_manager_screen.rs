@@ -77,12 +77,61 @@ pub struct UnitDetail {
     pub upstream_status: String,
 }
 
+/// Which of the two top panels owns keyboard focus.
+///
+/// Drives both the render path (focused panel gets the bright/gold
+/// border + active cursor) and the key-dispatch path (Up/Down/j/k move
+/// the focused panel's cursor; `Tab` toggles between them). Defaults to
+/// [`FocusedSkillPane::Units`] so existing behaviour — arrows drive the
+/// Units table — is unchanged when nothing has touched focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FocusedSkillPane {
+    /// Left "Sources" panel. Up/Down move the source cursor; Enter (or a
+    /// click) applies that source as the Units filter.
+    Sources,
+    /// Right "Units" table — the default. Up/Down move the unit cursor.
+    #[default]
+    Units,
+}
+
+/// Default width (terminal columns) of the left Sources panel. Matches
+/// the pre-resize hard-coded `Constraint::Length(32)`.
+pub const DEFAULT_SOURCES_WIDTH: u16 = 32;
+/// Minimum draggable width of the Sources panel (keeps the glyph +
+/// short name legible).
+pub const MIN_SOURCES_WIDTH: u16 = 18;
+/// Columns reserved for the Units table when the Sources panel is at
+/// its maximum width — the panel can never grow past
+/// `term_w - SOURCES_UNITS_RESERVE`.
+pub const SOURCES_UNITS_RESERVE: u16 = 40;
+
+/// Clamp a requested Sources-panel width to `[MIN_SOURCES_WIDTH,
+/// term_w - SOURCES_UNITS_RESERVE]`. Mirrors
+/// [`crate::app::state::SessionsPaneState::clamp_width`] but for the
+/// skill-manager layout. Degrades gracefully on tiny terminals.
+pub fn clamp_sources_width(width: u16, term_w: u16) -> u16 {
+    if term_w <= MIN_SOURCES_WIDTH {
+        return term_w.max(1);
+    }
+    let max = term_w.saturating_sub(SOURCES_UNITS_RESERVE);
+    if max < MIN_SOURCES_WIDTH {
+        return term_w.saturating_sub(1).max(1);
+    }
+    width.clamp(MIN_SOURCES_WIDTH, max)
+}
+
 /// Aggregate view-model the screen renders.
 ///
 /// Hand-populated for tests; the production runtime will assemble
 /// this from `ainb_skill_core::Manifest` + `ainb_skill_core::Lockfile` +
 /// `ainb_usage::UsageCache`.
-#[derive(Debug, Clone, Default)]
+///
+/// NOTE: `Default` is implemented by hand (NOT derived) so the
+/// resize/focus fields get sane non-zero defaults — `sources_width`
+/// must default to [`DEFAULT_SOURCES_WIDTH`] (32), not 0, and
+/// `focused_pane` to [`FocusedSkillPane::Units`]. A derived `Default`
+/// would zero `sources_width` and collapse the Sources panel.
+#[derive(Debug, Clone)]
 pub struct SkillsScreenData {
     pub sources: Vec<SourceRow>,
     pub units: Vec<UnitRow>,
@@ -122,6 +171,52 @@ pub struct SkillsScreenData {
     /// ephemeral search results (NO SQLite — discarded on close). Sourced
     /// from a `CatalogBackend`, not the manifest (bead ai-a20).
     pub browse: Option<BrowseViewState>,
+    /// Width (terminal columns) of the left Sources panel. Resizable by
+    /// dragging the Sources/Units divider or via `[`/`]`. Persisted to
+    /// `ui_preferences.skill_manager_sources_width` on resize-finish and
+    /// re-applied on screen-open. Defaults to [`DEFAULT_SOURCES_WIDTH`].
+    pub sources_width: u16,
+    /// Which top panel owns keyboard focus (`Tab` toggles). The focused
+    /// panel renders a bright/gold border + active cursor; the other is
+    /// muted. Defaults to [`FocusedSkillPane::Units`].
+    pub focused_pane: FocusedSkillPane,
+    /// Cursor row in the Sources panel (index into [`Self::sources`]).
+    /// Independent of [`Self::selected`] (the Units cursor). Bounded by
+    /// the source nav helpers; ignored when `sources` is empty.
+    pub source_selected: usize,
+    /// Active source filter: when `Some(uri)`, the Units list only shows
+    /// rows whose `source` matches that source's URI (ANDed with the
+    /// text `search`). Set by selecting a Source; cleared by `Esc` or
+    /// the "All sources" affordance. Keyed on `SourceRow.uri` because
+    /// that's what `UnitRow.source` is built from.
+    pub source_filter: Option<String>,
+    /// True while a Sources/Units divider drag is in flight (between
+    /// `MouseClick` on the edge and `MouseDragEnd`). Drives the bright
+    /// edge highlight and gates `drag_resize`.
+    pub resize_active: bool,
+}
+
+impl Default for SkillsScreenData {
+    fn default() -> Self {
+        Self {
+            sources: Vec::new(),
+            units: Vec::new(),
+            selected: 0,
+            detail: None,
+            banner: DiscoveryBannerState::default(),
+            walker_cache: None,
+            drift_cache: BTreeMap::new(),
+            input: None,
+            search: None,
+            library: None,
+            browse: None,
+            sources_width: DEFAULT_SOURCES_WIDTH,
+            focused_pane: FocusedSkillPane::default(),
+            source_selected: 0,
+            source_filter: None,
+            resize_active: false,
+        }
+    }
 }
 
 /// One catalog hit row in the browse modal, projected from a
@@ -380,10 +475,14 @@ pub fn render(frame: &mut Frame, area: Rect, data: &SkillsScreenData) {
         ])
         .split(area);
 
-    // Top row horizontal split: 32 cols for sources, rest for units.
+    // Top row horizontal split: resizable `sources_width` cols for the
+    // Sources panel, rest for Units. Width is normalized against the
+    // actual draw width so a stale/oversized persisted value can never
+    // starve the Units table.
+    let sources_w = clamp_sources_width(data.sources_width, outer[0].width);
     let top = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(32), Constraint::Min(40)])
+        .constraints([Constraint::Length(sources_w), Constraint::Min(40)])
         .split(outer[0]);
 
     render_sources_panel(frame, top[0], data);
@@ -667,10 +766,19 @@ fn render_input_prompt(frame: &mut Frame, area: Rect, input: &InputState) {
 }
 
 fn render_sources_panel(frame: &mut Frame, area: Rect, data: &SkillsScreenData) {
+    let focused = data.focused_pane == FocusedSkillPane::Sources;
+    // Focused panel = bright/gold border; unfocused = muted cornflower.
+    // The edge brightens further while a resize drag is in flight so the
+    // divider is obvious mid-drag.
+    let border_color = if focused || data.resize_active {
+        GOLD
+    } else {
+        CORNFLOWER_BLUE
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(CORNFLOWER_BLUE))
+        .border_style(Style::default().fg(border_color))
         .title(Span::styled(
             " Sources ",
             Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
@@ -683,19 +791,63 @@ fn render_sources_panel(frame: &mut Frame, area: Rect, data: &SkillsScreenData) 
             Style::default().fg(MUTED_GRAY),
         )));
     } else {
-        for source in &data.sources {
+        // "All sources" affordance — selecting it (Esc / click) clears
+        // the source filter. Highlighted when no source filter is active.
+        // `▶` is the keyboard cursor (only on a focused, selected source);
+        // `●` marks the active filter location. They never collide because
+        // "All sources" isn't keyboard-selectable (cleared via Esc/click).
+        let all_active = data.source_filter.is_none();
+        let all_marker = if all_active { "● " } else { "  " };
+        let all_style = if all_active {
+            Style::default()
+                .fg(SELECTION_GREEN)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(MUTED_GRAY)
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{all_marker}All sources"),
+            all_style,
+        )));
+
+        for (i, source) in data.sources.iter().enumerate() {
+            let selected = focused && i == data.source_selected;
+            // A source is "filtered-on" when its uri is the active
+            // filter — shown even when the panel is unfocused so the
+            // user can see which source the Units list is pinned to.
+            let active_filter = data.source_filter.as_deref() == Some(source.uri.as_str());
+            let marker = if selected {
+                "▶ "
+            } else if active_filter {
+                "● "
+            } else {
+                "  "
+            };
             let glyph = if source.enabled { "✓" } else { "✗" };
             let glyph_style = if source.enabled {
                 Style::default().fg(GOLD)
             } else {
                 Style::default().fg(MUTED_GRAY)
             };
+            let (name_color, name_mods) = if selected {
+                (SELECTION_GREEN, Modifier::BOLD)
+            } else if active_filter {
+                (SELECTION_GREEN, Modifier::empty())
+            } else {
+                (SOFT_WHITE, Modifier::empty())
+            };
             let name = Span::styled(
                 format!(" {:<12} ", source.name),
-                Style::default().fg(SOFT_WHITE),
+                Style::default().fg(name_color).add_modifier(name_mods),
             );
             let uri = Span::styled(format!("({})", source.uri), Style::default().fg(MUTED_GRAY));
             lines.push(Line::from(vec![
+                Span::styled(
+                    marker,
+                    Style::default()
+                        .fg(SELECTION_GREEN)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(glyph, glyph_style),
                 name,
                 uri,
@@ -707,12 +859,29 @@ fn render_sources_panel(frame: &mut Frame, area: Rect, data: &SkillsScreenData) 
 }
 
 fn render_units_table(frame: &mut Frame, area: Rect, data: &SkillsScreenData) {
+    let focused = data.focused_pane == FocusedSkillPane::Units;
+    let border_color = if focused { GOLD } else { CORNFLOWER_BLUE };
+    // Title reflects the active source filter so the user always knows
+    // which source the list is pinned to. The source's short `name` is
+    // friendlier than its `uri`, so look it up; fall back to the uri.
+    let title = match data.source_filter.as_deref() {
+        Some(uri) => {
+            let label = data
+                .sources
+                .iter()
+                .find(|s| s.uri == uri)
+                .map(|s| s.name.as_str())
+                .unwrap_or(uri);
+            format!(" Units (filtered: {label}) ")
+        }
+        None => " Units ".to_string(),
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(CORNFLOWER_BLUE))
+        .border_style(Style::default().fg(border_color))
         .title(Span::styled(
-            " Units ",
+            title,
             Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
         ));
 
@@ -876,6 +1045,10 @@ fn render_detail_pane(frame: &mut Frame, area: Rect, data: &SkillsScreenData) {
 
 fn render_help_bar(frame: &mut Frame, area: Rect) {
     let spans = vec![
+        key_span("Tab"),
+        Span::styled(" focus  ", Style::default().fg(MUTED_GRAY)),
+        key_span("[ ]"),
+        Span::styled(" resize  ", Style::default().fg(MUTED_GRAY)),
         key_span("i"),
         Span::styled("nstall  ", Style::default().fg(MUTED_GRAY)),
         key_span("u"),
@@ -892,8 +1065,8 @@ fn render_help_bar(frame: &mut Frame, area: Rect) {
         Span::styled("ibrary  ", Style::default().fg(MUTED_GRAY)),
         key_span("/"),
         Span::styled("search  ", Style::default().fg(MUTED_GRAY)),
-        key_span("?"),
-        Span::styled("help    ", Style::default().fg(MUTED_GRAY)),
+        key_span("Esc"),
+        Span::styled(" clear  ", Style::default().fg(MUTED_GRAY)),
         key_span("q"),
         Span::styled(" quit", Style::default().fg(MUTED_GRAY)),
     ];
@@ -1478,26 +1651,123 @@ impl SkillsScreenData {
         self.detail = compute_detail_for_selected(self, &lockfile);
     }
 
-    /// Indices into [`Self::units`] that match the active [`Self::search`]
-    /// filter (every index when no filter). Render, selection
-    /// movement, and the action keybinds all resolve through this so
-    /// the visible rows and the cursor stay consistent. Matches on
-    /// name / source / kind, case-insensitively.
+    /// Indices into [`Self::units`] that match BOTH the active
+    /// [`Self::search`] text filter AND the active [`Self::source_filter`]
+    /// (every index when neither is set). Render, selection movement,
+    /// and the action keybinds all resolve through this so the visible
+    /// rows and the cursor stay consistent.
+    ///
+    /// * Source filter: `unit.source == <selected source's uri>`. This
+    ///   is the canonical filter key — `UnitRow.source` is built from
+    ///   the same `gh:org/repo`-style locator that `SourceRow.uri`
+    ///   holds (see `unit_row_from_entry` / `refresh_view_model_from_manifest`).
+    /// * Text filter: case-insensitive substring on name / source / kind.
+    ///
+    /// The two filters are ANDed: a source filter narrows to one
+    /// source, then the search box narrows further within it.
     pub fn visible_indices(&self) -> Vec<usize> {
-        match &self.search {
-            None => (0..self.units.len()).collect(),
-            Some(q) => self
-                .units
-                .iter()
-                .enumerate()
-                .filter(|(_, u)| {
+        let search = self.search.as_deref();
+        let source = self.source_filter.as_deref();
+        self.units
+            .iter()
+            .enumerate()
+            .filter(|(_, u)| match source {
+                Some(src) => u.source == src,
+                None => true,
+            })
+            .filter(|(_, u)| match search {
+                Some(q) => {
                     u.name.to_lowercase().contains(q)
                         || u.source.to_lowercase().contains(q)
                         || u.kind.to_lowercase().contains(q)
-                })
-                .map(|(i, _)| i)
-                .collect(),
+                }
+                None => true,
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Toggle keyboard focus between the Sources and Units panels
+    /// (`Tab` / `Shift-Tab`). Symmetric, so Shift-Tab routes here too.
+    pub fn toggle_focus(&mut self) {
+        self.focused_pane = match self.focused_pane {
+            FocusedSkillPane::Sources => FocusedSkillPane::Units,
+            FocusedSkillPane::Units => FocusedSkillPane::Sources,
+        };
+    }
+
+    /// Move the Sources-panel cursor by one row in `dir`, wrapping at
+    /// the ends. No-op when there are no sources. Does NOT apply the
+    /// filter — the caller applies it on Enter / click so arrow-keying
+    /// through sources stays cheap and reversible.
+    pub fn move_source_selection(&mut self, dir: SelectionMove) {
+        if self.sources.is_empty() {
+            self.source_selected = 0;
+            return;
         }
+        let last = self.sources.len() - 1;
+        let cur = self.source_selected.min(last);
+        self.source_selected = match dir {
+            SelectionMove::Prev => {
+                if cur == 0 {
+                    last
+                } else {
+                    cur - 1
+                }
+            }
+            SelectionMove::Next => {
+                if cur == last {
+                    0
+                } else {
+                    cur + 1
+                }
+            }
+            SelectionMove::First => 0,
+            SelectionMove::Last => last,
+        };
+    }
+
+    /// Apply the currently-selected Source as the Units filter and move
+    /// keyboard focus to the Units panel (the user just narrowed the
+    /// list and will want to navigate it). Resets the Units cursor to
+    /// the first visible row so the selection never lands on a
+    /// now-hidden unit. No-op when there are no sources.
+    pub fn apply_selected_source_filter(&mut self) {
+        let Some(src) = self.sources.get(self.source_selected) else {
+            return;
+        };
+        self.source_filter = Some(src.uri.clone());
+        self.focused_pane = FocusedSkillPane::Units;
+        // Snap the Units cursor onto the first row that survives the new
+        // filter so the highlight + detail pane stay consistent.
+        self.selected = self.visible_indices().first().copied().unwrap_or(0);
+    }
+
+    /// Clear the active Source filter (Esc / "All sources"). Returns
+    /// `true` when a filter was actually cleared, so the key handler can
+    /// decide whether Esc was consumed (clear filter) or should fall
+    /// through to its existing behaviour (return Home).
+    pub fn clear_source_filter(&mut self) -> bool {
+        if self.source_filter.take().is_some() {
+            // Keep the Units cursor valid against the now-wider list.
+            self.selected = self.visible_indices().first().copied().unwrap_or(0);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Grow the Sources panel by `delta` columns, clamped to the legal
+    /// range for `term_w`. Used by the `]` keybind.
+    pub fn grow_sources(&mut self, delta: u16, term_w: u16) {
+        self.sources_width =
+            clamp_sources_width(self.sources_width.saturating_add(delta), term_w);
+    }
+
+    /// Shrink the Sources panel by `delta` columns, clamped. Used by `[`.
+    pub fn shrink_sources(&mut self, delta: u16, term_w: u16) {
+        self.sources_width =
+            clamp_sources_width(self.sources_width.saturating_sub(delta), term_w);
     }
 }
 
@@ -1545,6 +1815,15 @@ pub fn move_selection(data: &mut SkillsScreenData, home: &Path, dir: SelectionMo
         SelectionMove::Last => vlast,
     };
     data.selected = visible[new_pos];
+    recompute_detail(data, home);
+}
+
+/// Rebuild the Detail pane for the current `data.selected` against the
+/// on-disk lockfile. Shared by [`move_selection`] and the mouse / source
+/// filter handlers so the detail pane stays in sync after any change to
+/// the Units cursor, without each call site re-loading the lockfile by
+/// hand.
+pub fn recompute_detail(data: &mut SkillsScreenData, home: &Path) {
     let lockfile = Lockfile::load_from(&lockfile_path_in(home)).unwrap_or_default();
     data.detail = compute_detail_for_selected(data, &lockfile);
 }
@@ -1985,5 +2264,220 @@ mod tests {
         assert!(joined.contains("[Enter]"), "help: Enter missing: {joined}");
         assert!(joined.contains("[d]"), "help: d missing: {joined}");
         assert!(joined.contains("[s]"), "help: s missing: {joined}");
+    }
+
+    // -----------------------------------------------------------------
+    // Resizable / focusable / filterable Sources panel (this change)
+    // -----------------------------------------------------------------
+
+    fn src(name: &str, uri: &str) -> SourceRow {
+        SourceRow {
+            name: name.to_string(),
+            uri: uri.to_string(),
+            enabled: true,
+        }
+    }
+
+    fn unit_in(idx: usize, name: &str, source: &str) -> UnitRow {
+        UnitRow {
+            idx,
+            name: name.to_string(),
+            kind: "skill".to_string(),
+            source: source.to_string(),
+            git_ref: "main".to_string(),
+            targets: vec!["claude".to_string()],
+            declared_uri: format!("{source}@main/{name}"),
+        }
+    }
+
+    /// Two sources, three units (2 from acme, 1 from beta). The fixture
+    /// the filter / nav tests below share.
+    fn two_source_fixture() -> SkillsScreenData {
+        SkillsScreenData {
+            sources: vec![src("acme", "gh:org/acme"), src("beta", "gh:org/beta")],
+            units: vec![
+                unit_in(1, "alpha", "gh:org/acme"),
+                unit_in(2, "bravo", "gh:org/beta"),
+                unit_in(3, "charlie", "gh:org/acme"),
+            ],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn default_has_sane_resize_and_focus_state() {
+        // TRAP guard: a derived Default would zero `sources_width`.
+        let data = SkillsScreenData::default();
+        assert_eq!(data.sources_width, DEFAULT_SOURCES_WIDTH);
+        assert_eq!(data.focused_pane, FocusedSkillPane::Units);
+        assert!(data.source_filter.is_none());
+        assert!(!data.resize_active);
+    }
+
+    #[test]
+    fn visible_indices_filters_by_source() {
+        let mut data = two_source_fixture();
+        // No filter → all three units visible.
+        assert_eq!(data.visible_indices(), vec![0, 1, 2]);
+
+        // Filter to acme → only the two acme units (idx 0 + 2).
+        data.source_filter = Some("gh:org/acme".to_string());
+        assert_eq!(data.visible_indices(), vec![0, 2]);
+
+        // Filter to beta → only bravo (idx 1).
+        data.source_filter = Some("gh:org/beta".to_string());
+        assert_eq!(data.visible_indices(), vec![1]);
+    }
+
+    #[test]
+    fn visible_indices_ands_source_and_search_filters() {
+        let mut data = two_source_fixture();
+        data.source_filter = Some("gh:org/acme".to_string());
+        // Search "charlie" within the acme-only slice → just charlie.
+        data.search = Some("charlie".to_string());
+        assert_eq!(data.visible_indices(), vec![2]);
+        // A search that matches a beta-only unit yields nothing because
+        // the source filter excludes it first.
+        data.search = Some("bravo".to_string());
+        assert!(data.visible_indices().is_empty());
+    }
+
+    #[test]
+    fn toggle_focus_flips_between_panes() {
+        let mut data = SkillsScreenData::default();
+        assert_eq!(data.focused_pane, FocusedSkillPane::Units);
+        data.toggle_focus();
+        assert_eq!(data.focused_pane, FocusedSkillPane::Sources);
+        data.toggle_focus();
+        assert_eq!(data.focused_pane, FocusedSkillPane::Units);
+    }
+
+    #[test]
+    fn source_nav_wraps_and_apply_filters_units_then_focuses_units() {
+        let mut data = two_source_fixture();
+        data.focused_pane = FocusedSkillPane::Sources;
+        // Start at 0 (acme); Prev wraps to last (beta).
+        data.move_source_selection(SelectionMove::Prev);
+        assert_eq!(data.source_selected, 1);
+        // Next wraps back to 0.
+        data.move_source_selection(SelectionMove::Next);
+        assert_eq!(data.source_selected, 0);
+
+        // Apply acme → filter pinned, focus jumps to Units, cursor snaps
+        // onto the first visible (acme) row.
+        data.apply_selected_source_filter();
+        assert_eq!(data.source_filter.as_deref(), Some("gh:org/acme"));
+        assert_eq!(data.focused_pane, FocusedSkillPane::Units);
+        assert_eq!(data.selected, 0);
+        assert_eq!(data.visible_indices(), vec![0, 2]);
+    }
+
+    #[test]
+    fn clear_source_filter_returns_true_only_when_set() {
+        let mut data = two_source_fixture();
+        // Nothing to clear → false (so Esc falls through to "go home").
+        assert!(!data.clear_source_filter());
+
+        data.source_filter = Some("gh:org/beta".to_string());
+        data.selected = 1;
+        // Clearing returns true and re-snaps the cursor to the first row
+        // of the now-wider list.
+        assert!(data.clear_source_filter());
+        assert!(data.source_filter.is_none());
+        assert_eq!(data.selected, 0);
+    }
+
+    #[test]
+    fn resize_helpers_clamp_within_bounds() {
+        let term_w = 120u16;
+        let mut data = SkillsScreenData::default();
+        assert_eq!(data.sources_width, 32);
+
+        // Shrinking past the floor clamps at MIN_SOURCES_WIDTH.
+        for _ in 0..50 {
+            data.shrink_sources(2, term_w);
+        }
+        assert_eq!(data.sources_width, MIN_SOURCES_WIDTH);
+
+        // Growing past the ceiling clamps at term_w - reserve.
+        for _ in 0..200 {
+            data.grow_sources(2, term_w);
+        }
+        assert_eq!(data.sources_width, term_w - SOURCES_UNITS_RESERVE);
+    }
+
+    #[test]
+    fn render_focused_units_shows_filtered_title() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut data = two_source_fixture();
+        data.source_filter = Some("gh:org/acme".to_string());
+        data.focused_pane = FocusedSkillPane::Units;
+
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, f.size(), &data)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let mut joined = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                joined.push_str(buf.get(x, y).symbol());
+            }
+            joined.push('\n');
+        }
+        // Filtered title surfaces the source's short name.
+        assert!(
+            joined.contains("Units (filtered: acme)"),
+            "filtered title missing: {joined}"
+        );
+        // "All sources" affordance is always present in the Sources panel.
+        assert!(
+            joined.contains("All sources"),
+            "All sources affordance missing: {joined}"
+        );
+        // Both acme units visible; the beta unit is filtered out.
+        assert!(joined.contains("alpha"), "alpha (acme) should show: {joined}");
+        assert!(
+            joined.contains("charlie"),
+            "charlie (acme) should show: {joined}"
+        );
+        assert!(
+            !joined.contains("bravo"),
+            "bravo (beta) should be filtered out: {joined}"
+        );
+    }
+
+    #[test]
+    fn render_sources_focus_paints_gold_border_on_sources() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut data = two_source_fixture();
+        data.focused_pane = FocusedSkillPane::Sources;
+
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, f.size(), &data)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+
+        // The Sources panel occupies columns [0, sources_width). Its top
+        // border cells should carry the GOLD focus colour. Probe a cell
+        // on the left vertical border (mid-height) — clear of the gold
+        // " Sources " title that sits on the top border row.
+        let sources_border = buf.get(0, 5);
+        assert_eq!(
+            sources_border.style().fg,
+            Some(GOLD),
+            "focused Sources panel should have a GOLD border"
+        );
+        // The Units panel's left vertical border sits at the divider
+        // column (== sources_width); probe it clear of the title row.
+        let units_border = buf.get(DEFAULT_SOURCES_WIDTH, 5);
+        assert_eq!(
+            units_border.style().fg,
+            Some(CORNFLOWER_BLUE),
+            "unfocused Units panel should keep its CORNFLOWER border"
+        );
     }
 }

@@ -225,6 +225,36 @@ pub enum AppEvent {
     SkillManagerSelectFirst,
     /// Units panel: jump selection to last row (G / End).
     SkillManagerSelectLast,
+    /// `Tab` / `Shift-Tab` — toggle keyboard focus between the Sources
+    /// and Units panels.
+    SkillManagerToggleFocus,
+    /// Sources panel focused: move the source cursor up one row
+    /// (k / Up). Does not apply the filter (Enter does).
+    SkillManagerSourceSelectPrev,
+    /// Sources panel focused: move the source cursor down one row
+    /// (j / Down).
+    SkillManagerSourceSelectNext,
+    /// Sources panel focused: apply the highlighted source as the Units
+    /// filter and move focus to the Units panel (Enter).
+    SkillManagerApplySourceFilter,
+    /// `Esc` — clear the active source filter (if any). Falls through to
+    /// [`Self::SkillManagerBack`] when no filter is set.
+    SkillManagerClearSourceFilter,
+    /// `[` — shrink the Sources panel by one column (clamped). Persists
+    /// the new width.
+    SkillManagerShrinkSources,
+    /// `]` — grow the Sources panel by one column (clamped). Persists
+    /// the new width.
+    SkillManagerGrowSources,
+    /// A Source row was clicked: focus the Sources panel, move its
+    /// cursor to row `index`, and apply that source as the filter.
+    SkillManagerSourceClick { index: usize },
+    /// A Unit row was clicked: focus the Units panel and move the unit
+    /// cursor to the visible-row `position`.
+    SkillManagerUnitClick { position: usize },
+    /// A Sources/Units divider drag finished — persist the resized
+    /// Sources-panel width to config.
+    SkillManagerPersistSourcesWidth,
     /// `[m]` on the SkillManager screen — re-run the discovery
     /// walkers and force the banner to re-appear (ignores any prior
     /// skip-marker). Fixes the empty-state "press [m] to refresh"
@@ -595,6 +625,87 @@ impl EventHandler {
         }
     }
 
+    /// Apply the persisted SkillManager Sources-panel width to the live
+    /// screen state on screen-open. `None` keeps the in-memory default
+    /// (32). The width is clamped against the current terminal so a
+    /// stale oversized value can never starve the Units table.
+    fn apply_skill_manager_sources_width(state: &mut AppState) {
+        if let Some(width) = state.app_config.ui_preferences.skill_manager_sources_width {
+            let term_w = crossterm::terminal::size().unwrap_or((80, 24)).0;
+            state.skill_manager_state.sources_width =
+                crate::components::skill_manager_screen::clamp_sources_width(width, term_w);
+        }
+    }
+
+    /// Persist the current SkillManager Sources-panel width to config.
+    /// Called on `[`/`]` resize and on divider-drag-end.
+    fn persist_skill_manager_sources_width(state: &mut AppState) {
+        state.app_config.ui_preferences.skill_manager_sources_width =
+            Some(state.skill_manager_state.sources_width);
+        if let Err(e) = state.app_config.save() {
+            tracing::warn!("Failed to persist SkillManager Sources width: {}", e);
+        }
+    }
+
+    /// True when a SkillManager overlay (banner / input prompt / library
+    /// / browse modal) is open OR the help overlay is visible — i.e. the
+    /// underlying Sources/Units panels are NOT the active surface. Mouse
+    /// hit-testing on the panels is suppressed in that case so a click
+    /// meant for the modal doesn't leak through.
+    fn skill_manager_overlay_open(state: &AppState) -> bool {
+        let s = &state.skill_manager_state;
+        state.help_visible
+            || s.banner.is_active()
+            || s.input.is_some()
+            || s.library.is_some()
+            || s.browse.is_some()
+    }
+
+    /// Recompute the SkillManager top-row rects (Sources panel + Units
+    /// table) from the current terminal size + persisted `sources_width`,
+    /// mirroring the deterministic layout in `skill_manager_screen::render`:
+    ///
+    /// ```text
+    /// outer (vertical):  [ Min(8) top ][ Length(8) detail ][ Length(1) help ]
+    /// top   (horizontal):[ Length(sources_w) ][ Min(40) units ]
+    /// ```
+    ///
+    /// The render path always draws into the full terminal Rect
+    /// `(0,0,w,h)`, so we reconstruct that here rather than threading a
+    /// Rect through the immutable render. Returns `(sources_rect,
+    /// units_rect, sources_w)` or `None` when the terminal is too small
+    /// to host the top row.
+    fn skill_manager_top_rects(
+        state: &AppState,
+    ) -> Option<(ratatui::layout::Rect, ratatui::layout::Rect, u16)> {
+        use ratatui::layout::Rect;
+        let (term_w, term_h) = crossterm::terminal::size().unwrap_or((80, 24));
+        // Vertical layout: the top row is everything above the 8-row
+        // detail pane + 1-row help bar. Mirror `Constraint::Min(8)`.
+        let top_h = term_h.saturating_sub(9);
+        if term_w == 0 || top_h == 0 {
+            return None;
+        }
+        let sources_w = crate::components::skill_manager_screen::clamp_sources_width(
+            state.skill_manager_state.sources_width,
+            term_w,
+        );
+        let sources_rect = Rect::new(0, 0, sources_w, top_h);
+        let units_x = sources_w;
+        let units_w = term_w.saturating_sub(sources_w);
+        let units_rect = Rect::new(units_x, 0, units_w, top_h);
+        Some((sources_rect, units_rect, sources_w))
+    }
+
+    /// True when `(x, y)` falls inside `rect` (half-open on the far
+    /// edges, matching ratatui's Rect convention).
+    fn point_in_rect(x: u16, y: u16, rect: ratatui::layout::Rect) -> bool {
+        x >= rect.x
+            && x < rect.x.saturating_add(rect.width)
+            && y >= rect.y
+            && y < rect.y.saturating_add(rect.height)
+    }
+
     /// Handle mouse events and convert to appropriate app events
     pub fn handle_mouse_event(event: AppEvent, state: &mut AppState) -> Option<AppEvent> {
         match event {
@@ -612,6 +723,71 @@ impl EventHandler {
                         }
                     }
 
+                    return None;
+                }
+
+                // SkillManager: divider-drag-resize + click-to-select on
+                // Sources / Units. Guarded so clicks meant for an open
+                // overlay (banner / input / library / browse / help)
+                // don't leak through to the panels.
+                if state.current_screen == screen_ids::SKILL_MANAGER
+                    && !Self::skill_manager_overlay_open(state)
+                {
+                    if let Some((sources_rect, units_rect, sources_w)) =
+                        Self::skill_manager_top_rects(state)
+                    {
+                        // Resize edge = the Sources panel's right border
+                        // column. Begin a drag (consumed on subsequent
+                        // MouseDragging events).
+                        let edge_x = sources_w.saturating_sub(1);
+                        let on_edge = x == edge_x
+                            && y >= sources_rect.y
+                            && y < sources_rect.y.saturating_add(sources_rect.height);
+                        if on_edge {
+                            state.skill_manager_state.resize_active = true;
+                            return None;
+                        }
+
+                        // Click inside the Sources panel body → focus +
+                        // select that source (applies the filter). Source
+                        // rows start at `rect.y + 1` (after the top
+                        // border); row 0 is the "All sources" affordance,
+                        // rows 1.. map onto `sources[index]`.
+                        if Self::point_in_rect(x, y, sources_rect) {
+                            let row = y.saturating_sub(sources_rect.y).saturating_sub(1);
+                            if row == 0 {
+                                // "All sources" → clear the filter.
+                                return Some(AppEvent::SkillManagerClearSourceFilter);
+                            }
+                            let index = usize::from(row.saturating_sub(1));
+                            if index < state.skill_manager_state.sources.len() {
+                                return Some(AppEvent::SkillManagerSourceClick { index });
+                            }
+                            // Empty area inside the panel → just focus it.
+                            state.skill_manager_state.focused_pane =
+                                crate::components::skill_manager_screen::FocusedSkillPane::Sources;
+                            return None;
+                        }
+
+                        // Click inside the Units table → focus + select
+                        // the clicked unit. Unit data rows start at
+                        // `rect.y + 2` (top border + header row); map y
+                        // onto a position within `visible_indices()`.
+                        if Self::point_in_rect(x, y, units_rect) {
+                            let data_y = sources_rect.y.saturating_add(2);
+                            if y >= data_y {
+                                let position = usize::from(y - data_y);
+                                let visible_len =
+                                    state.skill_manager_state.visible_indices().len();
+                                if position < visible_len {
+                                    return Some(AppEvent::SkillManagerUnitClick { position });
+                                }
+                            }
+                            state.skill_manager_state.focused_pane =
+                                crate::components::skill_manager_screen::FocusedSkillPane::Units;
+                            return None;
+                        }
+                    }
                     return None;
                 }
 
@@ -687,6 +863,21 @@ impl EventHandler {
                     return None;
                 }
 
+                // SkillManager divider drag: the new Sources width is the
+                // pointer's x + 1 (the panel spans columns 0..=x). Clamped
+                // by `grow`/`shrink`'s shared clamp via the setter below.
+                if state.current_screen == screen_ids::SKILL_MANAGER
+                    && state.skill_manager_state.resize_active
+                {
+                    let term_w = crossterm::terminal::size().unwrap_or((80, 24)).0;
+                    let requested = x.saturating_add(1);
+                    state.skill_manager_state.sources_width =
+                        crate::components::skill_manager_screen::clamp_sources_width(
+                            requested, term_w,
+                        );
+                    return None;
+                }
+
                 // Update selection during drag
                 if state.focused_pane == crate::app::state::FocusedPane::LiveLogs {
                     // This will be handled in Phase 2
@@ -712,6 +903,15 @@ impl EventHandler {
                     state.sessions_pane_state.update_hover(x, y);
                     if state.sessions_pane_state.finish_resize() {
                         Self::persist_sessions_pane_preferences(state);
+                    }
+                    return None;
+                }
+
+                if state.current_screen == screen_ids::SKILL_MANAGER {
+                    let _ = (x, y);
+                    if state.skill_manager_state.resize_active {
+                        state.skill_manager_state.resize_active = false;
+                        return Some(AppEvent::SkillManagerPersistSourcesWidth);
                     }
                     return None;
                 }
@@ -1266,8 +1466,41 @@ impl EventHandler {
                 };
             }
             tracing::debug!("In skill-manager view, handling full keymap");
+            use crate::components::skill_manager_screen::FocusedSkillPane;
+            let sources_focused =
+                state.skill_manager_state.focused_pane == FocusedSkillPane::Sources;
             return match key_event.code {
-                KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::SkillManagerBack),
+                // `q` always returns home. `Esc` first clears an active
+                // source filter (if any) before returning home, so it
+                // doubles as the "back to All sources" affordance.
+                KeyCode::Char('q') => Some(AppEvent::SkillManagerBack),
+                KeyCode::Esc => {
+                    if state.skill_manager_state.source_filter.is_some() {
+                        Some(AppEvent::SkillManagerClearSourceFilter)
+                    } else {
+                        Some(AppEvent::SkillManagerBack)
+                    }
+                }
+                // Tab / Shift-Tab toggle focus between Sources and Units.
+                KeyCode::Tab | KeyCode::BackTab => {
+                    Some(AppEvent::SkillManagerToggleFocus)
+                }
+                // `[` / `]` resize the Sources panel regardless of focus.
+                KeyCode::Char('[') => Some(AppEvent::SkillManagerShrinkSources),
+                KeyCode::Char(']') => Some(AppEvent::SkillManagerGrowSources),
+                // Navigation + Enter are focus-aware. When the Sources
+                // panel is focused, arrows/jk step the source cursor and
+                // Enter applies the filter; otherwise they drive the
+                // Units table as before.
+                KeyCode::Up | KeyCode::Char('k') if sources_focused => {
+                    Some(AppEvent::SkillManagerSourceSelectPrev)
+                }
+                KeyCode::Down | KeyCode::Char('j') if sources_focused => {
+                    Some(AppEvent::SkillManagerSourceSelectNext)
+                }
+                KeyCode::Enter if sources_focused => {
+                    Some(AppEvent::SkillManagerApplySourceFilter)
+                }
                 // Units panel `[s]` — dual-purpose:
                 //   * if the selected unit is part of a conflict pair,
                 //     flip the shadowed_by edge (legacy behaviour);
@@ -3363,6 +3596,7 @@ impl EventHandler {
                         HomeTile::SkillManager => {
                             tracing::info!("Navigating to SkillManager view (spec §10.1)");
                             state.current_screen = screen_ids::SKILL_MANAGER.to_string();
+                            Self::apply_skill_manager_sources_width(state);
                         }
                         HomeTile::Catalog | HomeTile::Stats => {
                             tracing::info!("Tile {:?} - Coming Soon", tile);
@@ -3452,6 +3686,7 @@ impl EventHandler {
                     SidebarItem::SkillManager => {
                         tracing::info!("Navigating to SkillManager from sidebar (spec §10.1)");
                         state.current_screen = screen_ids::SKILL_MANAGER.to_string();
+                        Self::apply_skill_manager_sources_width(state);
                         // Mirror the discovery flow from the `m` keybind
                         // handler (AppEvent::GoToSkillManager) — sidebar entry
                         // must trigger the same hdt.9 live-data rehydrate +
@@ -3698,6 +3933,7 @@ impl EventHandler {
             AppEvent::GoToSkillManager => {
                 tracing::info!("Navigating to SkillManager (spec §10.1)");
                 state.current_screen = screen_ids::SKILL_MANAGER.to_string();
+                Self::apply_skill_manager_sources_width(state);
                 let ainb_home = ainb_skill_core::default_ainb_home();
                 // P8 live-data binding (hdt.9): rehydrate Sources /
                 // Units / Detail panels from $AINB_HOME/manifest.yaml
@@ -4042,6 +4278,71 @@ impl EventHandler {
                     &ainb_home,
                     crate::components::skill_manager_screen::SelectionMove::Last,
                 );
+            }
+            AppEvent::SkillManagerToggleFocus => {
+                state.skill_manager_state.toggle_focus();
+            }
+            AppEvent::SkillManagerSourceSelectPrev => {
+                state.skill_manager_state.move_source_selection(
+                    crate::components::skill_manager_screen::SelectionMove::Prev,
+                );
+            }
+            AppEvent::SkillManagerSourceSelectNext => {
+                state.skill_manager_state.move_source_selection(
+                    crate::components::skill_manager_screen::SelectionMove::Next,
+                );
+            }
+            AppEvent::SkillManagerApplySourceFilter => {
+                state.skill_manager_state.apply_selected_source_filter();
+                // Refresh the detail pane against the newly-selected unit.
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                crate::components::skill_manager_screen::recompute_detail(
+                    &mut state.skill_manager_state,
+                    &ainb_home,
+                );
+            }
+            AppEvent::SkillManagerClearSourceFilter => {
+                state.skill_manager_state.clear_source_filter();
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                crate::components::skill_manager_screen::recompute_detail(
+                    &mut state.skill_manager_state,
+                    &ainb_home,
+                );
+            }
+            AppEvent::SkillManagerShrinkSources => {
+                let term_w = crossterm::terminal::size().unwrap_or((80, 24)).0;
+                state.skill_manager_state.shrink_sources(2, term_w);
+                Self::persist_skill_manager_sources_width(state);
+            }
+            AppEvent::SkillManagerGrowSources => {
+                let term_w = crossterm::terminal::size().unwrap_or((80, 24)).0;
+                state.skill_manager_state.grow_sources(2, term_w);
+                Self::persist_skill_manager_sources_width(state);
+            }
+            AppEvent::SkillManagerSourceClick { index } => {
+                state.skill_manager_state.source_selected = index;
+                state.skill_manager_state.apply_selected_source_filter();
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                crate::components::skill_manager_screen::recompute_detail(
+                    &mut state.skill_manager_state,
+                    &ainb_home,
+                );
+            }
+            AppEvent::SkillManagerUnitClick { position } => {
+                use crate::components::skill_manager_screen::FocusedSkillPane;
+                state.skill_manager_state.focused_pane = FocusedSkillPane::Units;
+                let visible = state.skill_manager_state.visible_indices();
+                if let Some(&abs) = visible.get(position) {
+                    state.skill_manager_state.selected = abs;
+                    let ainb_home = ainb_skill_core::default_ainb_home();
+                    crate::components::skill_manager_screen::recompute_detail(
+                        &mut state.skill_manager_state,
+                        &ainb_home,
+                    );
+                }
+            }
+            AppEvent::SkillManagerPersistSourcesWidth => {
+                Self::persist_skill_manager_sources_width(state);
             }
             AppEvent::SkillManagerOpenLibrary => {
                 // `[l]` — open the own-skill Library view, sourced from
