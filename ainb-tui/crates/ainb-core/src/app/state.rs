@@ -442,8 +442,7 @@ impl AppState {
         if self.embed.is_some() {
             return true; // already interactive
         }
-        let Some(name) = self.get_selected_session().and_then(|s| s.tmux_session_name.clone())
-        else {
+        let Some(name) = self.selected_tmux_name() else {
             return false;
         };
         match crate::tmux::EmbedClient::attach(&name, rows, cols) {
@@ -467,6 +466,25 @@ impl AppState {
         }
         if self.focused_pane == FocusedPane::Preview {
             self.focused_pane = FocusedPane::Sessions;
+        }
+    }
+
+    /// Resolve the tmux session name for whatever is currently selected, across
+    /// session kinds (Claude session, other-tmux, SSH, workspace shell). Mirrors
+    /// the resolution in the `a` (AttachTmuxSession) handler so `i` attaches the
+    /// same target `a` would.
+    pub fn selected_tmux_name(&self) -> Option<String> {
+        if self.is_ssh_session_selected() {
+            self.selected_ssh_session().and_then(|s| s.tmux_session_name.clone())
+        } else if self.is_other_tmux_selected() {
+            self.selected_other_tmux_session().map(|s| s.name.clone())
+        } else if self.shell_selected {
+            self.selected_workspace_index
+                .and_then(|i| self.workspaces.get(i))
+                .and_then(|w| w.shell_session.as_ref())
+                .map(|sh| sh.tmux_session_name.clone())
+        } else {
+            self.get_selected_session().and_then(|s| s.tmux_session_name.clone())
         }
     }
 
