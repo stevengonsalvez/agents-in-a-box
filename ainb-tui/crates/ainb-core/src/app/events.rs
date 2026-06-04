@@ -504,6 +504,23 @@ impl EventHandler {
         }
     }
 
+    /// Map a slash-command name (leading `/` already stripped by the
+    /// palette) to the host `AppEvent` it dispatches, or `None` if no host
+    /// mapping exists (e.g. a plugin-owned or unknown command — the caller
+    /// falls back to its log-only stub).
+    ///
+    /// P9: the `learnings` plugin advertises `/recall` + `/memory` in its
+    /// manifest `provides.commands`. Both open the learnings screen via the
+    /// SAME path the global `m` shortcut uses — `AppEvent::GoToLearnings`
+    /// (handler at the `GoToLearnings` arm of `process_event`). No open
+    /// logic is duplicated here; this is purely the name→event lookup.
+    pub fn slash_command_event(cmd: &str) -> Option<AppEvent> {
+        match cmd {
+            "recall" | "memory" => Some(AppEvent::GoToLearnings),
+            _ => None,
+        }
+    }
+
     /// Handle mouse events and convert to appropriate app events
     pub fn handle_mouse_event(event: AppEvent, state: &mut AppState) -> Option<AppEvent> {
         match event {
@@ -5339,6 +5356,75 @@ mod text_input_guard_tests {
         assert!(
             !EventHandler::is_text_input_context(&state),
             "Creating is render-only, not a text input"
+        );
+    }
+}
+
+#[cfg(test)]
+mod slash_command_dispatch_tests {
+    //! P9: the learnings plugin advertises `/recall` + `/memory` slash
+    //! commands (manifest `provides.commands`). Both must route to the SAME
+    //! screen-open path the global `m` shortcut uses — i.e. emit
+    //! `AppEvent::GoToLearnings`, whose handler sets
+    //! `current_screen = "learnings"`.
+    //!
+    //! `slash_command_event` is the pure name→event mapping the main loop
+    //! calls when the slash palette emits `SlashAction::Execute(cmd)`. The
+    //! palette already strips the leading `/`, so the input here is the bare
+    //! command name (`"recall"`, not `"/recall"`).
+
+    use super::*;
+    use crate::app::screens::ids as screen_ids;
+
+    #[test]
+    fn slash_recall_opens_learnings_screen() {
+        // `/recall` → GoToLearnings.
+        let evt = EventHandler::slash_command_event("recall")
+            .expect("/recall must map to a GoToLearnings event");
+        assert!(
+            matches!(evt, AppEvent::GoToLearnings),
+            "/recall must emit GoToLearnings, got {evt:?}"
+        );
+
+        // …and processing that event actually opens the learnings screen
+        // (same end-state the `m` shortcut produces).
+        let mut state = AppState::default();
+        state.current_screen = screen_ids::HOME.to_string();
+        EventHandler::process_event(evt, &mut state);
+        assert_eq!(
+            state.current_screen,
+            screen_ids::LEARNINGS,
+            "dispatching /recall must set current_screen to learnings"
+        );
+    }
+
+    #[test]
+    fn slash_memory_opens_learnings_screen() {
+        // `/memory` → GoToLearnings (the second manifest alias).
+        let evt = EventHandler::slash_command_event("memory")
+            .expect("/memory must map to a GoToLearnings event");
+        assert!(
+            matches!(evt, AppEvent::GoToLearnings),
+            "/memory must emit GoToLearnings, got {evt:?}"
+        );
+
+        let mut state = AppState::default();
+        state.current_screen = screen_ids::HOME.to_string();
+        EventHandler::process_event(evt, &mut state);
+        assert_eq!(
+            state.current_screen,
+            screen_ids::LEARNINGS,
+            "dispatching /memory must set current_screen to learnings"
+        );
+    }
+
+    #[test]
+    fn unknown_slash_command_is_not_routed() {
+        // A command name with no host mapping returns None — the main loop
+        // leaves it to the existing log-only fallback (no panic, no nav).
+        assert!(
+            EventHandler::slash_command_event("definitely-not-a-command").is_none(),
+            "unknown slash commands must not map to an event"
         );
     }
 }
