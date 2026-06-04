@@ -58,8 +58,22 @@ Keys verified against the in-app help overlay (`?`) and the event handlers in `c
 
 | Key | Action |
 |-----|--------|
-| `g` | Show git view |
+| `g` | Open the [Code Review](code-review.md) diff for the selected session |
 | `p` | Commit & push |
+
+### Within the Code Review diff
+
+| Key | Action |
+|-----|--------|
+| `j` / `k` (or `↓` / `↑`) | Scroll |
+| `n` / `N` | Next / previous hunk (`Hunk x/y` counter) |
+| `[` / `]` | Previous / next file |
+| `Space` / `Enter` | Collapse / expand the selected file |
+| `z` | Reveal more context at the nearest gap |
+| `Tab` | Cycle Review → Commits → Markdown |
+| `Esc` / `q` | Back |
+
+> The same surface is available standalone: `ainb diff-review [path]`.
 
 ## Usage / Stats screen
 
