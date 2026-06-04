@@ -73,20 +73,25 @@ async fn bootstrap(args: BootstrapArgs) -> Result<()> {
     // --- The auto step: install the reflect-owned layer via uv. -------------
     if reflect_kb_ok {
         println!("\n\u{2713} reflect-kb already installed — nothing to auto-install.");
-    } else if !uv_ok {
-        println!(
-            "\n\u{2717} `uv` is not installed (required to install reflect-kb).\n  \
-             Install it yourself first (it modifies your shell profile):\n    \
-             curl -LsSf https://astral.sh/uv/install.sh | sh\n  \
-             Then re-run:  ainb reflect bootstrap"
-        );
     } else {
+        // Always show the reflect-owned commands (so --print-only and the
+        // uv-missing case both surface the full plan, not just a uv note).
         println!("\nReflect-owned layer to install (full GraphRAG stack — qmd + nano-graphrag):");
+        if !uv_ok {
+            println!(
+                "  # `uv` is required first (it modifies your shell profile — run it yourself):\n  \
+                 curl -LsSf https://astral.sh/uv/install.sh | sh"
+            );
+        }
         println!("  uv tool install --force --upgrade {REFLECT_KB_URL}");
         println!("  (sentence-transformers/torch ~2GB — this can take a few minutes)");
 
         if args.print_only {
-            println!("\n--print-only: nothing installed. Copy the command above to run it.");
+            println!("\n--print-only: nothing installed. Copy the command(s) above to run them.");
+        } else if !uv_ok {
+            println!(
+                "\n\u{2717} Can't auto-install without `uv`. Install it (above), then re-run: ainb reflect bootstrap"
+            );
         } else if args.yes || confirm("\nProceed with the install above?")? {
             run_reflect_kb_install()?;
             println!("\n\u{2713} reflect-kb installed.");
