@@ -2,6 +2,9 @@
 // per-file collapsible diff blocks in one continuous scroll, with a line-number
 // gutter, solid green/red change bars, muted row tints, and expand-context rows.
 
+use std::cell::Cell;
+use std::collections::{BTreeMap, HashSet};
+
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -28,14 +31,25 @@ const SIDEBAR_WIDTH: u16 = 26;
 /// Transient UI state for the review surface (selection + scroll).
 #[derive(Debug, Clone, Default)]
 pub struct CodeReviewUi {
-    /// Index of the sidebar-selected file.
+    /// Index of the sidebar-selected file (mirrors the highlighted tree file).
     pub selected_file: usize,
-    /// First visible virtual-row index (vertical scroll offset).
+    /// Selected row in the flattened sidebar tree (files and folders).
+    pub sidebar_selected: usize,
+    /// Directory paths the user has collapsed in the sidebar tree.
+    pub collapsed_dirs: HashSet<String>,
+    /// First visible virtual-row index (diff body vertical scroll offset).
     pub scroll: usize,
     /// Index of the hunk the `n`/`N` cursor is on (0-based, across all files).
     pub current_hunk: usize,
     /// Height of the diff body in rows, captured from the last render for clamping.
     pub viewport_height: usize,
+    /// First visible sidebar tree row, recomputed during render (interior mutability
+    /// so `render` can take `&self`).
+    sidebar_window: Cell<usize>,
+    /// Screen rect of the sidebar list region from the last render (mouse hit-testing).
+    sidebar_rect: Cell<Rect>,
+    /// Screen rect of the diff body from the last render (mouse hit-testing).
+    body_rect: Cell<Rect>,
 }
 
 /// A row in the flattened, scrollable view of the model.
@@ -162,20 +176,22 @@ pub fn toggle_collapse(model: &mut ReviewModel, ui: &CodeReviewUi) {
 /// Move the sidebar selection to the next/previous file and scroll its header
 /// to the top of the body.
 pub fn select_file(model: &ReviewModel, ui: &mut CodeReviewUi, forward: bool) {
-    if model.files.is_empty() {
+    let tree = build_sidebar(model, &ui.collapsed_dirs);
+    let file_rows: Vec<usize> = tree
+        .iter()
+        .enumerate()
+        .filter_map(|(i, r)| matches!(r, SidebarRow::File { .. }).then_some(i))
+        .collect();
+    if file_rows.is_empty() {
         return;
     }
-    let last = model.files.len() - 1;
-    ui.selected_file = if forward {
-        (ui.selected_file + 1).min(last)
-    } else {
-        ui.selected_file.saturating_sub(1)
+    let next = match file_rows.iter().position(|&i| i == ui.sidebar_selected) {
+        Some(p) if forward => (p + 1).min(file_rows.len() - 1),
+        Some(p) => p.saturating_sub(1),
+        None => 0,
     };
-    let rows = flatten(model);
-    let headers = file_header_indices(&rows);
-    if let Some(&idx) = headers.get(ui.selected_file) {
-        ui.scroll = idx;
-    }
+    ui.sidebar_selected = file_rows[next];
+    sync_body_to_sidebar(model, ui, &tree);
 }
 
 /// Jump to the next/previous hunk, scrolling it to the top and following the
@@ -195,6 +211,8 @@ pub fn jump_hunk(model: &ReviewModel, ui: &mut CodeReviewUi, forward: bool) {
     let idx = anchors[ui.current_hunk];
     ui.scroll = idx;
     ui.selected_file = rows[idx].file();
+    let tree = build_sidebar(model, &ui.collapsed_dirs);
+    select_sidebar_file(ui, &tree, ui.selected_file);
 }
 
 /// Expand the nearest collapsed context gap at or below the current scroll.
@@ -283,7 +301,233 @@ fn context_row(new_lines: &[String], new_lineno: usize, delta: isize) -> DiffRow
     }
 }
 
-/// Render the Code Review surface into `area`.
+// ───────────────────────── sidebar file tree ─────────────────────────
+
+/// A row in the flattened sidebar file tree.
+#[derive(Debug, Clone)]
+pub enum SidebarRow {
+    /// A directory node.
+    Dir {
+        /// Full repo-relative directory path (the collapse key).
+        path: String,
+        /// Display name (last path component).
+        name: String,
+        /// Nesting depth.
+        depth: usize,
+        /// Number of changed files under it.
+        count: usize,
+        /// Whether the folder is collapsed.
+        collapsed: bool,
+    },
+    /// A changed file (index into `ReviewModel::files`).
+    File {
+        /// Index into `ReviewModel::files`.
+        file: usize,
+        /// Display name (filename).
+        name: String,
+        /// Nesting depth.
+        depth: usize,
+    },
+}
+
+#[derive(Default)]
+struct TreeNode {
+    dirs: BTreeMap<String, Self>,
+    files: Vec<(String, usize)>,
+}
+
+impl TreeNode {
+    fn insert(&mut self, parts: &[&str], idx: usize) {
+        match parts {
+            [] => {}
+            [name] => self.files.push(((*name).to_string(), idx)),
+            [dir, rest @ ..] => self
+                .dirs
+                .entry((*dir).to_string())
+                .or_default()
+                .insert(rest, idx),
+        }
+    }
+
+    fn count(&self) -> usize {
+        self.files.len() + self.dirs.values().map(Self::count).sum::<usize>()
+    }
+}
+
+/// Build the flattened sidebar tree from the model, honoring collapsed dirs.
+/// Directories sort before files at each level; folders come first.
+#[allow(clippy::implicit_hasher)]
+pub fn build_sidebar(model: &ReviewModel, collapsed: &HashSet<String>) -> Vec<SidebarRow> {
+    let mut root = TreeNode::default();
+    for (i, f) in model.files.iter().enumerate() {
+        let parts: Vec<&str> = f.path.split('/').filter(|p| !p.is_empty()).collect();
+        root.insert(&parts, i);
+    }
+    let mut out = Vec::new();
+    flatten_tree(&root, "", 0, collapsed, &mut out);
+    out
+}
+
+fn flatten_tree(
+    node: &TreeNode,
+    prefix: &str,
+    depth: usize,
+    collapsed: &HashSet<String>,
+    out: &mut Vec<SidebarRow>,
+) {
+    for (name, child) in &node.dirs {
+        let path = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        let is_collapsed = collapsed.contains(&path);
+        out.push(SidebarRow::Dir {
+            path: path.clone(),
+            name: name.clone(),
+            depth,
+            count: child.count(),
+            collapsed: is_collapsed,
+        });
+        if !is_collapsed {
+            flatten_tree(child, &path, depth + 1, collapsed, out);
+        }
+    }
+    for (name, idx) in &node.files {
+        out.push(SidebarRow::File {
+            file: *idx,
+            name: name.clone(),
+            depth,
+        });
+    }
+}
+
+/// All directory paths in the model (every prefix of every file).
+fn all_dirs(model: &ReviewModel) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for f in &model.files {
+        let parts: Vec<&str> = f.path.split('/').filter(|p| !p.is_empty()).collect();
+        for d in 1..parts.len() {
+            out.insert(parts[..d].join("/"));
+        }
+    }
+    out
+}
+
+/// Move the sidebar tree selection up/down; when it lands on a file, scroll the
+/// body to that file and update `selected_file`.
+pub fn sidebar_nav(model: &ReviewModel, ui: &mut CodeReviewUi, down: bool) {
+    let tree = build_sidebar(model, &ui.collapsed_dirs);
+    if tree.is_empty() {
+        return;
+    }
+    let last = tree.len() - 1;
+    ui.sidebar_selected = if down {
+        (ui.sidebar_selected + 1).min(last)
+    } else {
+        ui.sidebar_selected.saturating_sub(1)
+    };
+    sync_body_to_sidebar(model, ui, &tree);
+}
+
+fn sync_body_to_sidebar(model: &ReviewModel, ui: &mut CodeReviewUi, tree: &[SidebarRow]) {
+    if let Some(SidebarRow::File { file, .. }) = tree.get(ui.sidebar_selected) {
+        ui.selected_file = *file;
+        let body = flatten(model);
+        if let Some(pos) = body
+            .iter()
+            .position(|r| matches!(r, VRow::FileHeader { file: f } if f == file))
+        {
+            ui.scroll = pos;
+        }
+    }
+}
+
+/// Move the sidebar selection to the tree row of `file` (keeps the highlight in
+/// sync when the body is driven by hunk/file jumps).
+fn select_sidebar_file(ui: &mut CodeReviewUi, tree: &[SidebarRow], file: usize) {
+    if let Some(i) = tree
+        .iter()
+        .position(|r| matches!(r, SidebarRow::File { file: f, .. } if *f == file))
+    {
+        ui.sidebar_selected = i;
+    }
+}
+
+/// Activate the selected sidebar row: toggle a folder, or collapse/expand a
+/// file's diff block.
+pub fn sidebar_activate(model: &mut ReviewModel, ui: &mut CodeReviewUi) {
+    let tree = build_sidebar(model, &ui.collapsed_dirs);
+    match tree.get(ui.sidebar_selected) {
+        Some(SidebarRow::Dir { path, .. }) => {
+            let path = path.clone();
+            if !ui.collapsed_dirs.remove(&path) {
+                ui.collapsed_dirs.insert(path);
+            }
+            let n = build_sidebar(model, &ui.collapsed_dirs).len();
+            if ui.sidebar_selected >= n {
+                ui.sidebar_selected = n.saturating_sub(1);
+            }
+        }
+        Some(SidebarRow::File { file, .. }) => {
+            let file = *file;
+            ui.selected_file = file;
+            if let Some(f) = model.files.get_mut(file) {
+                f.collapsed = !f.collapsed;
+            }
+        }
+        None => {}
+    }
+}
+
+/// Collapse or expand every directory in the tree.
+pub fn sidebar_set_all_collapsed(model: &ReviewModel, ui: &mut CodeReviewUi, collapsed: bool) {
+    ui.collapsed_dirs = if collapsed {
+        all_dirs(model)
+    } else {
+        HashSet::new()
+    };
+    let n = build_sidebar(model, &ui.collapsed_dirs).len();
+    if ui.sidebar_selected >= n {
+        ui.sidebar_selected = n.saturating_sub(1);
+    }
+}
+
+/// Hit-test a mouse position against the last-rendered sidebar; returns the
+/// tree-row index under `(x, y)`, if any.
+pub fn sidebar_row_at(ui: &CodeReviewUi, x: u16, y: u16) -> Option<usize> {
+    let r = ui.sidebar_rect.get();
+    if r.width > 0 && x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height {
+        Some(ui.sidebar_window.get() + usize::from(y - r.y))
+    } else {
+        None
+    }
+}
+
+/// Select (and act on) a sidebar row, e.g. from a mouse click.
+pub fn sidebar_click(model: &mut ReviewModel, ui: &mut CodeReviewUi, row: usize) {
+    let tree = build_sidebar(model, &ui.collapsed_dirs);
+    if row >= tree.len() {
+        return;
+    }
+    ui.sidebar_selected = row;
+    if matches!(tree[row], SidebarRow::Dir { .. }) {
+        sidebar_activate(model, ui);
+    } else {
+        sync_body_to_sidebar(model, ui, &tree);
+    }
+}
+
+/// Whether `(x, y)` falls inside the last-rendered diff body.
+pub const fn in_body(ui: &CodeReviewUi, x: u16, y: u16) -> bool {
+    let r = ui.body_rect.get();
+    r.width > 0 && x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
+}
+
+// ───────────────────────────── rendering ─────────────────────────────
+
+/// Render the Code Review surface into `area`. Records sidebar/body geometry on
+/// `ui` (via interior mutability) for mouse hit-testing.
 pub fn render(frame: &mut Frame, area: Rect, model: &ReviewModel, ui: &CodeReviewUi) {
     let total_hunks = hunk_anchors(&flatten(model)).len();
     let cur_hunk = if total_hunks == 0 {
@@ -302,6 +546,8 @@ pub fn render(frame: &mut Frame, area: Rect, model: &ReviewModel, ui: &CodeRevie
     frame.render_widget(block, area);
 
     if model.files.is_empty() {
+        ui.sidebar_rect.set(Rect::default());
+        ui.body_rect.set(inner);
         let empty = Paragraph::new(Line::from(Span::styled(
             "  No changes in this worktree.",
             Style::default().fg(MUTED_GRAY),
@@ -312,13 +558,38 @@ pub fn render(frame: &mut Frame, area: Rect, model: &ReviewModel, ui: &CodeRevie
 
     let cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(SIDEBAR_WIDTH),
-            Constraint::Min(0),
-        ])
+        .constraints([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(0)])
         .split(inner);
 
-    render_sidebar(frame, cols[0], model, ui);
+    // Sidebar inner = column minus its RIGHT border; line 0 is the header.
+    let sidebar_inner = Rect::new(
+        cols[0].x,
+        cols[0].y,
+        cols[0].width.saturating_sub(1),
+        cols[0].height,
+    );
+    let list_area = Rect::new(
+        sidebar_inner.x,
+        sidebar_inner.y.saturating_add(1),
+        sidebar_inner.width,
+        sidebar_inner.height.saturating_sub(1),
+    );
+
+    let tree = build_sidebar(model, &ui.collapsed_dirs);
+    let sel = ui.sidebar_selected.min(tree.len().saturating_sub(1));
+    // Keep the selected row inside the visible window.
+    let vis = list_area.height as usize;
+    let mut window = ui.sidebar_window.get().min(tree.len().saturating_sub(1));
+    if sel < window {
+        window = sel;
+    } else if vis > 0 && sel >= window + vis {
+        window = sel + 1 - vis;
+    }
+    ui.sidebar_window.set(window);
+    ui.sidebar_rect.set(list_area);
+    ui.body_rect.set(cols[1]);
+
+    render_sidebar(frame, cols[0], sidebar_inner, list_area, model, sel, window, &tree);
     render_body(frame, cols[1], model, ui);
 }
 
@@ -356,16 +627,18 @@ fn help_line() -> Line<'static> {
     let key = Style::default().fg(GOLD).add_modifier(Modifier::BOLD);
     let dim = Style::default().fg(MUTED_GRAY);
     Line::from(vec![
-        Span::styled(" j/k", key),
+        Span::styled(" ↑/↓", key),
+        Span::styled(" files ", dim),
+        Span::styled("j/k", key),
         Span::styled(" scroll ", dim),
         Span::styled("n/N", key),
         Span::styled(" hunk ", dim),
-        Span::styled("[ ]", key),
-        Span::styled(" file ", dim),
         Span::styled("Space", key),
-        Span::styled(" collapse ", dim),
+        Span::styled(" toggle ", dim),
         Span::styled("z", key),
         Span::styled(" expand ", dim),
+        Span::styled("e/E", key),
+        Span::styled(" folders ", dim),
         Span::styled("Tab", key),
         Span::styled(" tabs ", dim),
         Span::styled("Esc", key),
@@ -373,43 +646,106 @@ fn help_line() -> Line<'static> {
     ])
 }
 
-fn render_sidebar(frame: &mut Frame, area: Rect, model: &ReviewModel, ui: &CodeReviewUi) {
+#[allow(clippy::too_many_arguments)]
+fn render_sidebar(
+    frame: &mut Frame,
+    block_area: Rect,
+    inner: Rect,
+    list_area: Rect,
+    model: &ReviewModel,
+    sel: usize,
+    window: usize,
+    tree: &[SidebarRow],
+) {
     let block = Block::default()
         .borders(Borders::RIGHT)
         .border_style(Style::default().fg(Color::Rgb(60, 60, 80)))
         .style(Style::default().bg(PANEL_BG));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    frame.render_widget(block, block_area);
 
-    let name_w = inner.width.saturating_sub(10) as usize;
-    let mut lines = Vec::new();
-    for (fi, file) in model.files.iter().enumerate() {
-        let selected = fi == ui.selected_file;
-        let marker = if selected { "▶ " } else { "  " };
-        let marker_style = if selected {
-            Style::default().fg(SELECTION_GREEN)
-        } else {
-            Style::default().fg(MUTED_GRAY)
-        };
-        let path = truncate_end(&file.path, name_w);
-        let path_style = if selected {
-            Style::default().fg(SOFT_WHITE).bg(LIST_HIGHLIGHT_BG)
-        } else {
-            Style::default().fg(SOFT_WHITE)
-        };
-        lines.push(Line::from(vec![
-            Span::styled(marker, marker_style),
-            Span::styled(file.status.symbol().to_string(), Style::default().fg(file.status.color())),
-            Span::styled(format!(" {path}"), path_style),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("    +", Style::default().fg(MUTED_GRAY)),
-            Span::styled(file.insertions.to_string(), Style::default().fg(ADD_FG)),
-            Span::styled(" -", Style::default().fg(MUTED_GRAY)),
-            Span::styled(file.deletions.to_string(), Style::default().fg(DEL_FG)),
-        ]));
+    // Header: 📁 Changed Files (N)
+    let header = Line::from(vec![
+        Span::styled(
+            " 📁 Changed Files ",
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("({})", model.files.len()),
+            Style::default().fg(CORNFLOWER_BLUE),
+        ),
+    ]);
+    frame.render_widget(
+        Paragraph::new(header),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+
+    let start = window.min(tree.len());
+    let end = (start + list_area.height as usize).min(tree.len());
+    let name_w = (list_area.width as usize).saturating_sub(6);
+    let lines: Vec<Line> = tree[start..end]
+        .iter()
+        .enumerate()
+        .map(|(i, row)| sidebar_line(model, row, start + i == sel, name_w))
+        .collect();
+    frame.render_widget(Paragraph::new(lines), list_area);
+}
+
+fn indent(depth: usize) -> String {
+    if depth == 0 {
+        String::new()
+    } else {
+        format!("{}└ ", "  ".repeat(depth - 1))
     }
-    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn sidebar_line(model: &ReviewModel, row: &SidebarRow, selected: bool, name_w: usize) -> Line<'static> {
+    let marker = if selected { "▶" } else { " " };
+    let row_style = if selected {
+        Style::default().bg(LIST_HIGHLIGHT_BG)
+    } else {
+        Style::default()
+    };
+    match row {
+        SidebarRow::Dir {
+            name,
+            depth,
+            count,
+            collapsed,
+            ..
+        } => {
+            let chevron = if *collapsed { "▶" } else { "▼" };
+            Line::from(vec![
+                Span::styled(format!("{marker} "), Style::default().fg(SELECTION_GREEN)),
+                Span::raw(indent(*depth)),
+                Span::styled(
+                    format!("{chevron} 📁 "),
+                    Style::default().fg(CORNFLOWER_BLUE),
+                ),
+                Span::styled(
+                    truncate_end(name, name_w.saturating_sub(2 * depth)),
+                    Style::default().fg(CORNFLOWER_BLUE).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(format!(" ({count})"), Style::default().fg(MUTED_GRAY)),
+            ])
+            .style(row_style)
+        }
+        SidebarRow::File { file, name, depth } => {
+            let f = &model.files[*file];
+            Line::from(vec![
+                Span::styled(format!("{marker} "), Style::default().fg(SELECTION_GREEN)),
+                Span::raw(indent(*depth)),
+                Span::styled(
+                    format!("[{}] ", f.status.symbol()),
+                    Style::default().fg(f.status.color()),
+                ),
+                Span::styled(
+                    truncate_end(name, name_w.saturating_sub(2 * depth)),
+                    Style::default().fg(SOFT_WHITE),
+                ),
+            ])
+            .style(row_style)
+        }
+    }
 }
 
 fn render_body(frame: &mut Frame, area: Rect, model: &ReviewModel, ui: &CodeReviewUi) {
@@ -829,5 +1165,65 @@ mod tests {
             elapsed.as_millis() < 1500,
             "20 frames of a 2000-row diff took {elapsed:?} (budget 1500ms)"
         );
+    }
+
+    #[test]
+    fn sidebar_tree_nests_files_under_folders() {
+        let model = ReviewModel {
+            files: vec![
+                file("README.md", false, vec![]),
+                file("src/a.rs", false, vec![]),
+                file("src/b.rs", false, vec![]),
+            ],
+        };
+        let tree = build_sidebar(&model, &HashSet::new());
+        assert!(
+            matches!(&tree[0], SidebarRow::Dir { name, count, .. } if name == "src" && *count == 2),
+            "first row should be the src folder with 2 files"
+        );
+        let files = tree
+            .iter()
+            .filter(|r| matches!(r, SidebarRow::File { .. }))
+            .count();
+        assert_eq!(files, 3);
+        // Collapsing src hides its files (only README.md remains visible).
+        let collapsed: HashSet<String> = ["src".to_string()].into_iter().collect();
+        let tree2 = build_sidebar(&model, &collapsed);
+        let files2 = tree2
+            .iter()
+            .filter(|r| matches!(r, SidebarRow::File { .. }))
+            .count();
+        assert_eq!(files2, 1);
+    }
+
+    #[test]
+    fn sidebar_nav_lands_on_file_and_scrolls_body() {
+        let model = ReviewModel {
+            files: vec![file("src/a.rs", false, vec![hunk(0, 0, 2)])],
+        };
+        let mut ui = CodeReviewUi::default();
+        // Row 0 is the src folder; ↓ lands on the nested file and selects it.
+        sidebar_nav(&model, &mut ui, true);
+        assert_eq!(ui.sidebar_selected, 1);
+        assert_eq!(ui.selected_file, 0);
+    }
+
+    #[test]
+    fn sidebar_activate_toggles_folder() {
+        let mut model = ReviewModel {
+            files: vec![file("src/a.rs", false, vec![])],
+        };
+        let mut ui = CodeReviewUi::default(); // row 0 = src folder
+        sidebar_activate(&mut model, &mut ui);
+        assert!(ui.collapsed_dirs.contains("src"));
+        sidebar_activate(&mut model, &mut ui);
+        assert!(!ui.collapsed_dirs.contains("src"));
+    }
+
+    #[test]
+    fn sidebar_click_selects_and_hit_tests() {
+        // Rect math: a click outside the recorded sidebar rect returns None.
+        let ui = CodeReviewUi::default();
+        assert_eq!(sidebar_row_at(&ui, 5, 5), None);
     }
 }

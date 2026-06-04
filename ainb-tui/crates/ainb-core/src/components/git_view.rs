@@ -211,9 +211,41 @@ impl GitViewState {
         self.review_ui.scroll = self.review_ui.scroll.saturating_sub(n);
     }
 
-    /// Toggle collapse of the sidebar-selected review file.
+    /// Activate the sidebar-selected row: toggle a folder, or collapse a file's diff.
     pub fn review_toggle_collapse(&mut self) {
-        code_review::render::toggle_collapse(&mut self.review, &self.review_ui);
+        code_review::render::sidebar_activate(&mut self.review, &mut self.review_ui);
+    }
+
+    /// Move the sidebar tree selection down (↓).
+    pub fn review_sidebar_down(&mut self) {
+        code_review::render::sidebar_nav(&self.review, &mut self.review_ui, true);
+    }
+
+    /// Move the sidebar tree selection up (↑).
+    pub fn review_sidebar_up(&mut self) {
+        code_review::render::sidebar_nav(&self.review, &mut self.review_ui, false);
+    }
+
+    /// Collapse every folder in the sidebar tree (`E`).
+    pub fn review_collapse_all_folders(&mut self) {
+        code_review::render::sidebar_set_all_collapsed(&self.review, &mut self.review_ui, true);
+    }
+
+    /// Expand every folder in the sidebar tree (`e`).
+    pub fn review_expand_all_folders(&mut self) {
+        code_review::render::sidebar_set_all_collapsed(&self.review, &mut self.review_ui, false);
+    }
+
+    /// Handle a mouse click at screen `(x, y)` over the review sidebar.
+    pub fn review_sidebar_click(&mut self, x: u16, y: u16) {
+        if let Some(row) = code_review::render::sidebar_row_at(&self.review_ui, x, y) {
+            code_review::render::sidebar_click(&mut self.review, &mut self.review_ui, row);
+        }
+    }
+
+    /// Whether screen `(x, y)` is over the review diff body (for wheel scrolling).
+    pub fn review_point_in_body(&self, x: u16, y: u16) -> bool {
+        code_review::render::in_body(&self.review_ui, x, y)
     }
 
     /// Select the next review file and scroll its header to the top.

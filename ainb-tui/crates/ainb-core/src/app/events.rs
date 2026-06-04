@@ -153,12 +153,16 @@ pub enum AppEvent {
     GitViewExpandAll,    // Expand all folders
     GitViewCollapseAll,  // Collapse all folders
     // Code Review surface events (Review tab)
-    GitReviewToggleCollapse,  // Space/Enter — collapse/expand the selected file
-    GitReviewExpandContext,   // z — reveal more context at the nearest gap
-    GitReviewNextHunk,        // n — jump to next hunk
-    GitReviewPrevHunk,        // N — jump to previous hunk
-    GitReviewNextReviewFile,  // ] — select next file
-    GitReviewPrevReviewFile,  // [ — select previous file
+    GitReviewToggleCollapse,     // Space/Enter — toggle folder or file's diff block
+    GitReviewExpandContext,      // z — reveal more context at the nearest gap
+    GitReviewNextHunk,           // n — jump to next hunk
+    GitReviewPrevHunk,           // N — jump to previous hunk
+    GitReviewNextReviewFile,     // ] — select next file
+    GitReviewPrevReviewFile,     // [ — select previous file
+    GitReviewSidebarUp,          // ↑ — move sidebar tree selection up
+    GitReviewSidebarDown,        // ↓ — move sidebar tree selection down
+    GitReviewExpandAllFolders,   // e — expand all folders
+    GitReviewCollapseAllFolders, // E — collapse all folders
     // Tmux integration events
     AttachTmuxSession, // Attach to tmux session
     DetachTmuxSession, // Detach from tmux session
@@ -1761,12 +1765,16 @@ impl EventHandler {
             match key_event.code {
                 KeyCode::Esc => Some(AppEvent::GitViewBack),
                 KeyCode::Tab => Some(AppEvent::GitViewSwitchTab),
+                KeyCode::Up if on_review => Some(AppEvent::GitReviewSidebarUp),
+                KeyCode::Down if on_review => Some(AppEvent::GitReviewSidebarDown),
                 KeyCode::Char('n') if on_review => Some(AppEvent::GitReviewNextHunk),
                 KeyCode::Char('N') if on_review => Some(AppEvent::GitReviewPrevHunk),
                 KeyCode::Char(']') if on_review => Some(AppEvent::GitReviewNextReviewFile),
                 KeyCode::Char('[') if on_review => Some(AppEvent::GitReviewPrevReviewFile),
                 KeyCode::Char(' ') if on_review => Some(AppEvent::GitReviewToggleCollapse),
                 KeyCode::Char('z') if on_review => Some(AppEvent::GitReviewExpandContext),
+                KeyCode::Char('e') if on_review => Some(AppEvent::GitReviewExpandAllFolders),
+                KeyCode::Char('E') if on_review => Some(AppEvent::GitReviewCollapseAllFolders),
                 KeyCode::Enter if on_review => Some(AppEvent::GitReviewToggleCollapse),
                 KeyCode::Char('j') | KeyCode::Down => {
                     if let Some(ref git_state) = state.git_view_state {
@@ -3126,6 +3134,26 @@ impl EventHandler {
             AppEvent::GitReviewPrevReviewFile => {
                 if let Some(ref mut git_state) = state.git_view_state {
                     git_state.review_prev_file();
+                }
+            }
+            AppEvent::GitReviewSidebarUp => {
+                if let Some(ref mut git_state) = state.git_view_state {
+                    git_state.review_sidebar_up();
+                }
+            }
+            AppEvent::GitReviewSidebarDown => {
+                if let Some(ref mut git_state) = state.git_view_state {
+                    git_state.review_sidebar_down();
+                }
+            }
+            AppEvent::GitReviewExpandAllFolders => {
+                if let Some(ref mut git_state) = state.git_view_state {
+                    git_state.review_expand_all_folders();
+                }
+            }
+            AppEvent::GitReviewCollapseAllFolders => {
+                if let Some(ref mut git_state) = state.git_view_state {
+                    git_state.review_collapse_all_folders();
                 }
             }
             AppEvent::GitViewNextCommit => {

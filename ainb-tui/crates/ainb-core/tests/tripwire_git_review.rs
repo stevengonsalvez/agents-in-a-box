@@ -139,11 +139,17 @@ fn code_review_surface_renders_real_diff_and_responds_to_keys() {
     assert!(has_green, "no added-row green tint rendered");
     assert!(has_red, "no removed-row red tint rendered");
 
-    // 3) Collapse the selected file -> its code rows disappear from the surface.
-    state.review_ui.selected_file = model
+    // 3) Collapse the selected file's diff block -> its code rows disappear.
+    use ainb::components::code_review::render::{SidebarRow, build_sidebar};
+    let app_idx = model
         .files
         .iter()
         .position(|f| f.path == "src/app.py")
+        .unwrap();
+    let tree = build_sidebar(&state.review, &state.review_ui.collapsed_dirs);
+    state.review_ui.sidebar_selected = tree
+        .iter()
+        .position(|r| matches!(r, SidebarRow::File { file, .. } if *file == app_idx))
         .unwrap();
     state.review_toggle_collapse();
     let (collapsed_text, _) = render_to_text(&state);
