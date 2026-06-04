@@ -124,8 +124,19 @@ impl LayoutComponent {
             .is_some()
             || state.selected_shell_session().is_some();
 
-        if selected_has_tmux {
-            // Render tmux preview pane
+        if state.is_interactive_pane() {
+            // Live interactive embed occupies the right pane. Resize the embed to
+            // the pane interior (minus the border) so the inner program reflows,
+            // then render the live terminal in place of the read-only preview.
+            let area = content_chunks[1];
+            let rows = area.height.saturating_sub(2);
+            let cols = area.width.saturating_sub(2);
+            if let Some(e) = state.embed.as_mut() {
+                let _ = e.resize(rows, cols);
+            }
+            self.tmux_preview.render_interactive(frame, area, state);
+        } else if selected_has_tmux {
+            // Render tmux preview pane (read-only capture)
             self.tmux_preview.render(frame, content_chunks[1], state);
         } else {
             // Render traditional live logs stream

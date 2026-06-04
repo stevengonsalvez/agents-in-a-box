@@ -424,6 +424,7 @@ impl Notification {
 pub enum FocusedPane {
     Sessions, // Left pane - workspace/session list
     LiveLogs, // Right pane - live logs
+    Preview,  // Right pane - interactive embedded tmux attach (in-place)
 }
 
 pub const DEFAULT_SESSIONS_SIDEBAR_WIDTH: u16 = 40;
@@ -431,6 +432,57 @@ pub const MIN_SESSIONS_SIDEBAR_WIDTH: u16 = 24;
 pub const SESSIONS_PREVIEW_RESERVE: u16 = 50;
 pub const COLLAPSED_SESSIONS_SIDEBAR_WIDTH: u16 = 5;
 pub const SESSIONS_ROW_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(300);
+
+impl AppState {
+    /// Enter interactive mode: attach a live embed client to the selected
+    /// session's tmux session and focus the preview pane. Returns false (no-op)
+    /// if the selection has no tmux session or the attach fails — the pane stays
+    /// on the read-only preview.
+    pub fn enter_interactive_pane(&mut self, rows: u16, cols: u16) -> bool {
+        if self.embed.is_some() {
+            return true; // already interactive
+        }
+        let Some(name) = self.get_selected_session().and_then(|s| s.tmux_session_name.clone())
+        else {
+            return false;
+        };
+        match crate::tmux::EmbedClient::attach(&name, rows, cols) {
+            Ok(client) => {
+                self.embed = Some(client);
+                self.focused_pane = FocusedPane::Preview;
+                true
+            }
+            Err(e) => {
+                tracing::warn!("failed to attach interactive embed to {name}: {e}");
+                false
+            }
+        }
+    }
+
+    /// Release interactive mode: kill the ephemeral embed client (NEVER the tmux
+    /// session) and return focus to the session list.
+    pub fn release_interactive_pane(&mut self) {
+        if let Some(mut client) = self.embed.take() {
+            client.shutdown();
+        }
+        if self.focused_pane == FocusedPane::Preview {
+            self.focused_pane = FocusedPane::Sessions;
+        }
+    }
+
+    /// True while an interactive embed is focused.
+    pub fn is_interactive_pane(&self) -> bool {
+        self.embed.is_some() && self.focused_pane == FocusedPane::Preview
+    }
+
+    /// If the embed has ended (detach / session gone / EOF), auto-release so the
+    /// pane reverts to the read-only preview rather than a dead screen.
+    pub fn poll_embed_exit(&mut self) {
+        if self.embed.as_ref().is_some_and(|e| e.has_exited()) {
+            self.release_interactive_pane();
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionListRowTarget {
@@ -2273,6 +2325,10 @@ pub struct AppState {
 
     // Focus management for panes
     pub focused_pane: FocusedPane,
+    // Live interactive embedded tmux-attach client for the focused preview pane.
+    // Some(_) only while focused_pane == Preview. Dropping it kills the ephemeral
+    // tmux client (never the session). TODO(tmux-in-pane #P4): pane expansion.
+    pub embed: Option<crate::tmux::EmbedClient>,
     // Mouse/layout state for the Sessions split pane.
     pub sessions_pane_state: SessionsPaneState,
     // Track if current directory is a git repository
@@ -2770,6 +2826,7 @@ impl Default for AppState {
             ui_needs_refresh: false,
             claude_chat_visible: false,
             focused_pane: FocusedPane::Sessions,
+            embed: None,
             sessions_pane_state,
             is_current_dir_git_repo: false,
             last_logs_session_id: None,

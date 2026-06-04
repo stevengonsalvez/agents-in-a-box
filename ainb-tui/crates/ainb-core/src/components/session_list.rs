@@ -85,7 +85,7 @@ impl SessionListComponent {
         use crate::app::state::FocusedPane;
         let (border_color, is_focused) = match state.focused_pane {
             FocusedPane::Sessions => (SELECTION_GREEN, true),
-            FocusedPane::LiveLogs => (SUBDUED_BORDER, false),
+            FocusedPane::LiveLogs | FocusedPane::Preview => (SUBDUED_BORDER, false),
         };
         let border_color = if state.sessions_pane_state.edge_highlighted() {
             GOLD

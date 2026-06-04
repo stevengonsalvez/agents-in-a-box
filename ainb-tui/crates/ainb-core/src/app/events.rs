@@ -153,8 +153,9 @@ pub enum AppEvent {
     GitViewExpandAll,    // Expand all folders
     GitViewCollapseAll,  // Collapse all folders
     // Tmux integration events
-    AttachTmuxSession, // Attach to tmux session
-    DetachTmuxSession, // Detach from tmux session
+    AttachTmuxSession,     // Attach to tmux session (full-screen)
+    EnterInteractivePane,  // Attach in-place: interactive embedded tmux pane
+    DetachTmuxSession,     // Detach from tmux session
     EnterScrollMode,   // Enter scroll mode in tmux preview
     ExitScrollMode,    // Exit scroll mode in tmux preview
     ScrollPreviewUp,   // Scroll tmux preview up
@@ -1150,6 +1151,12 @@ impl EventHandler {
                 tracing::info!("[ACTION] 'a' key pressed - AttachTmuxSession requested");
                 Some(AppEvent::AttachTmuxSession)
             }
+            KeyCode::Char('i') => {
+                // In-place interactive embed. Only meaningful if the selection
+                // has a tmux session; the handler in the loop no-ops otherwise.
+                tracing::info!("[ACTION] 'i' key pressed - EnterInteractivePane requested");
+                Some(AppEvent::EnterInteractivePane)
+            }
             // The badge-to-position mapping is recomputed on every render —
             // digit N attaches to whatever is at that position *now*, not a
             // fixed session ID.
@@ -1260,7 +1267,7 @@ impl EventHandler {
                         tracing::debug!("Sessions pane focused, triggering NextSession");
                         Some(AppEvent::NextSession)
                     }
-                    FocusedPane::LiveLogs => {
+                    FocusedPane::LiveLogs | FocusedPane::Preview => {
                         tracing::debug!("LiveLogs pane focused, triggering ScrollLogsDown");
                         Some(AppEvent::ScrollLogsDown)
                     }
@@ -1273,7 +1280,7 @@ impl EventHandler {
                         tracing::debug!("Sessions pane focused, triggering PreviousSession");
                         Some(AppEvent::PreviousSession)
                     }
-                    FocusedPane::LiveLogs => {
+                    FocusedPane::LiveLogs | FocusedPane::Preview => {
                         tracing::debug!("LiveLogs pane focused, triggering ScrollLogsUp");
                         Some(AppEvent::ScrollLogsUp)
                     }
@@ -1286,7 +1293,7 @@ impl EventHandler {
                         tracing::debug!("Sessions pane focused, triggering PreviousWorkspace");
                         Some(AppEvent::PreviousWorkspace)
                     }
-                    FocusedPane::LiveLogs => {
+                    FocusedPane::LiveLogs | FocusedPane::Preview => {
                         tracing::debug!("LiveLogs pane focused, no left/right scrolling");
                         None // No left/right scrolling in logs
                     }
@@ -1299,7 +1306,7 @@ impl EventHandler {
                         tracing::debug!("Sessions pane focused, triggering NextWorkspace");
                         Some(AppEvent::NextWorkspace)
                     }
-                    FocusedPane::LiveLogs => {
+                    FocusedPane::LiveLogs | FocusedPane::Preview => {
                         tracing::debug!("LiveLogs pane focused, no left/right scrolling");
                         None // No left/right scrolling in logs
                     }
@@ -1307,15 +1314,15 @@ impl EventHandler {
             }
             KeyCode::Home => match state.focused_pane {
                 FocusedPane::Sessions => Some(AppEvent::GoToTop),
-                FocusedPane::LiveLogs => Some(AppEvent::ScrollLogsToTop),
+                FocusedPane::LiveLogs | FocusedPane::Preview => Some(AppEvent::ScrollLogsToTop),
             },
             KeyCode::End => match state.focused_pane {
                 FocusedPane::Sessions => Some(AppEvent::GoToBottom),
-                FocusedPane::LiveLogs => Some(AppEvent::ScrollLogsToBottom),
+                FocusedPane::LiveLogs | FocusedPane::Preview => Some(AppEvent::ScrollLogsToBottom),
             },
             KeyCode::Char(' ') => match state.focused_pane {
                 FocusedPane::Sessions => None, // Space does nothing in sessions pane
-                FocusedPane::LiveLogs => Some(AppEvent::ToggleAutoScroll),
+                FocusedPane::LiveLogs | FocusedPane::Preview => Some(AppEvent::ToggleAutoScroll),
             },
             _ => None,
         }
@@ -2203,6 +2210,9 @@ impl EventHandler {
             AppEvent::ToggleHelp => state.toggle_help(),
             AppEvent::ToggleClaudeChat => state.toggle_claude_chat(),
             AppEvent::ToggleExpandAll => state.toggle_expand_all_workspaces(),
+            // Entering the interactive embed is handled in the main loop (it needs
+            // the terminal size and the embed lives in the event loop) — no-op here.
+            AppEvent::EnterInteractivePane => {}
             // Other tmux rename events
             AppEvent::OtherTmuxStartRename => state.start_other_tmux_rename(),
             AppEvent::OtherTmuxRenameChar(c) => state.other_tmux_rename_char(c),
@@ -2752,7 +2762,10 @@ impl EventHandler {
                 let old_pane = state.focused_pane.clone();
                 state.focused_pane = match state.focused_pane {
                     FocusedPane::Sessions => FocusedPane::LiveLogs,
-                    FocusedPane::LiveLogs => FocusedPane::Sessions,
+                    // Preview is entered via 'i' / exited via Ctrl+Q, not Tab —
+                    // Tab while focused is intercepted upstream, so this is only a
+                    // safe fallback.
+                    FocusedPane::LiveLogs | FocusedPane::Preview => FocusedPane::Sessions,
                 };
                 tracing::debug!(
                     "Switched focus from {:?} to {:?}",

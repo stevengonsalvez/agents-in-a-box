@@ -63,6 +63,44 @@ impl TmuxPreviewPane {
         }
     }
 
+    /// Render the live interactive embed (the pane that IS the tmux session).
+    /// Draws the embedded vt100 screen via tui-term inside a focus-cued block
+    /// (distinct border + `● INTERACTIVE — Ctrl+Q release` badge). Falls back to
+    /// a placeholder if the embed/screen is momentarily unavailable.
+    pub fn render_interactive(&self, frame: &mut Frame, area: Rect, state: &AppState) {
+        let title = Line::from(vec![
+            Span::styled(" ● ", Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "INTERACTIVE ",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("— ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("Ctrl+Q", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(" release ", Style::default().fg(MUTED_GRAY)),
+        ]);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(SELECTION_GREEN))
+            .style(Style::default().bg(DARK_BG))
+            .title(title);
+
+        match state.embed.as_ref() {
+            Some(embed) => {
+                let parser = embed.parser();
+                let guard = parser.read();
+                match guard {
+                    Ok(g) => {
+                        let term = tui_term::widget::PseudoTerminal::new(g.screen()).block(block);
+                        frame.render_widget(term, area);
+                    }
+                    Err(_) => frame.render_widget(block, area),
+                }
+            }
+            None => frame.render_widget(block, area),
+        }
+    }
+
     /// Render the preview pane
     ///
     /// # Arguments

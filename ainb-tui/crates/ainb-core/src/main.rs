@@ -322,6 +322,10 @@ async fn run_tui_loop(
         // directly.
         app.tick_plugin_renders();
 
+        // If the interactive embed ended (detach / session gone / EOF), auto-
+        // release so the pane reverts to the read-only preview, not a dead screen.
+        app.state.poll_embed_exit();
+
         terminal.draw(|frame| {
             layout.render(frame, &mut app.state);
         })?;
@@ -385,6 +389,26 @@ async fn run_tui_loop(
                                 );
                             }
                             SlashAction::Opened | SlashAction::Closed | SlashAction::None => {}
+                        }
+                        continue;
+                    }
+
+                    // Interactive embed has highest input precedence: while a
+                    // session is focused in-place, every key is forwarded to the
+                    // embedded tmux client EXCEPT Ctrl+Q, which ainb intercepts
+                    // to release focus (it never reaches the inner program).
+                    if app.state.is_interactive_pane() {
+                        use crossterm::event::KeyModifiers;
+                        if key_event.code == KeyCode::Char('q')
+                            && key_event.modifiers.contains(KeyModifiers::CONTROL)
+                        {
+                            app.state.release_interactive_pane();
+                            continue;
+                        }
+                        if let Some(client) = app.state.embed.as_ref() {
+                            if let Some(bytes) = crate::tmux::encode_key_event(&key_event) {
+                                let _ = client.write_input(&bytes);
+                            }
                         }
                         continue;
                     }
@@ -462,6 +486,23 @@ async fn run_tui_loop(
                             }
                             AppEvent::ExitScrollMode => {
                                 layout.tmux_preview_mut().exit_scroll_mode();
+                            }
+                            AppEvent::EnterInteractivePane => {
+                                // Size the embed roughly to the right pane; the
+                                // render path resizes it precisely each frame.
+                                let sz = terminal.size().unwrap_or(ratatui::layout::Size {
+                                    width: 80,
+                                    height: 24,
+                                });
+                                let rows = sz.height.saturating_sub(10).max(1);
+                                let cols = (((sz.width as u32) * 60 / 100) as u16)
+                                    .saturating_sub(2)
+                                    .max(1);
+                                if !app.state.enter_interactive_pane(rows, cols) {
+                                    tracing::debug!(
+                                        "EnterInteractivePane: no tmux session on selection / attach failed"
+                                    );
+                                }
                             }
                             AppEvent::NewSession
                             | AppEvent::SearchWorkspace
@@ -653,7 +694,19 @@ async fn run_tui_loop(
                 Event::FocusGained => {}
                 Event::FocusLost => {}
                 Event::Paste(text) => {
-                    if let Some(app_event) = EventHandler::handle_paste_event(text, &app.state) {
+                    if app.state.is_interactive_pane() {
+                        // Forward as a bracketed paste so the inner program
+                        // doesn't submit multi-line content line-by-line.
+                        if let Some(client) = app.state.embed.as_ref() {
+                            let mut bytes = Vec::with_capacity(text.len() + 12);
+                            bytes.extend_from_slice(b"\x1b[200~");
+                            bytes.extend_from_slice(text.as_bytes());
+                            bytes.extend_from_slice(b"\x1b[201~");
+                            let _ = client.write_input(&bytes);
+                        }
+                    } else if let Some(app_event) =
+                        EventHandler::handle_paste_event(text, &app.state)
+                    {
                         EventHandler::process_event(app_event, &mut app.state);
                     }
                 }
