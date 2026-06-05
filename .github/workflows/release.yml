@@ -186,9 +186,12 @@ jobs:
             os: macos-latest
             ext: ""
             archive: tar.gz
-          # macOS Intel (native build on the Intel macos-13 runner)
+          # macOS Intel (x86_64) — cross-compiled on the ARM runner. Dedicated
+          # macos-13 Intel runners queue indefinitely in this org, and Apple's
+          # macOS SDK is universal, so `--target x86_64-apple-darwin` on the ARM
+          # runner produces a valid Intel binary.
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-latest
             ext: ""
             archive: tar.gz
           # Linux glibc (works on most distributions)
