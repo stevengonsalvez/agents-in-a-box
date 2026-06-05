@@ -186,6 +186,11 @@ jobs:
             os: macos-latest
             ext: ""
             archive: tar.gz
+          # macOS Intel (native build on the Intel macos-13 runner)
+          - target: x86_64-apple-darwin
+            os: macos-13
+            ext: ""
+            archive: tar.gz
           # Linux glibc (works on most distributions)
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
@@ -269,17 +274,19 @@ jobs:
             2. Extract: `tar -xzf ainb-*.tar.gz`
             3. Move to PATH: `sudo mv ainb /usr/local/bin/`
 
-            ### With Cargo (requires Rust)
+            ### From Source (requires Rust)
+            The `ainb` package lives in the `ainb-tui/` workspace (no manifest at
+            the repo root), so install it by path from a clone:
             ```bash
-            cargo install --git https://github.com/stevengonsalvez/agents-in-a-box --branch main --root ~/.local ainb
+            git clone https://github.com/stevengonsalvez/agents-in-a-box
+            cargo install --path agents-in-a-box/ainb-tui/crates/ainb-core
             ```
 
             ## Supported Platforms
             - macOS Apple Silicon (M1/M2/M3)
+            - macOS Intel (x86_64)
             - Linux x86_64
             - Windows: use WSL2 + the Linux binary (native Windows is not supported)
-
-            *Intel Mac users: Use `cargo install` or run the Linux binary via Rosetta 2*
 
   homebrew:
     name: Update Homebrew Tap
@@ -310,8 +317,9 @@ jobs:
           VERSION="${{ needs.prepare.outputs.version }}"
 
           MAC_SHA=$(cat artifacts/aarch64-apple-darwin/*.sha256 | awk '{print $1}')
+          INTEL_SHA=$(cat artifacts/x86_64-apple-darwin/*.sha256 | awk '{print $1}')
           LINUX_SHA=$(cat artifacts/x86_64-unknown-linux-gnu/*.sha256 | awk '{print $1}')
-          if [ -z "$MAC_SHA" ] || [ -z "$LINUX_SHA" ]; then
+          if [ -z "$MAC_SHA" ] || [ -z "$INTEL_SHA" ] || [ -z "$LINUX_SHA" ]; then
             echo "Error: Failed to extract SHA256 values"
             exit 1
           fi
@@ -328,6 +336,9 @@ jobs:
               if Hardware::CPU.arm?
                 url "https://github.com/stevengonsalvez/agents-in-a-box/releases/download/vVERSION_PLACEHOLDER/ainb-VERSION_PLACEHOLDER-aarch64-apple-darwin.tar.gz"
                 sha256 "MAC_SHA_PLACEHOLDER"
+              else
+                url "https://github.com/stevengonsalvez/agents-in-a-box/releases/download/vVERSION_PLACEHOLDER/ainb-VERSION_PLACEHOLDER-x86_64-apple-darwin.tar.gz"
+                sha256 "INTEL_SHA_PLACEHOLDER"
               end
             end
 
@@ -350,6 +361,7 @@ jobs:
 
           sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" tap/Formula/ainb.rb
           sed -i "s/MAC_SHA_PLACEHOLDER/${MAC_SHA}/g" tap/Formula/ainb.rb
+          sed -i "s/INTEL_SHA_PLACEHOLDER/${INTEL_SHA}/g" tap/Formula/ainb.rb
           sed -i "s/LINUX_SHA_PLACEHOLDER/${LINUX_SHA}/g" tap/Formula/ainb.rb
 
           echo "Updated tap/Formula/ainb.rb to version ${VERSION}"

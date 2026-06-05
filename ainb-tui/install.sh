@@ -124,14 +124,7 @@ main() {
     # Build target name
     local target
     case "${os}-${arch}" in
-        darwin-x86_64)
-            warn "Intel Mac binaries are not pre-built."
-            warn "Please install via cargo:"
-            echo ""
-            echo "  cargo install --git https://github.com/${REPO} --branch main ainb"
-            echo ""
-            exit 0
-            ;;
+        darwin-x86_64)  target="x86_64-apple-darwin" ;;
         darwin-aarch64) target="aarch64-apple-darwin" ;;
         linux-x86_64)   target="x86_64-unknown-linux-gnu" ;;
         linux-aarch64)
