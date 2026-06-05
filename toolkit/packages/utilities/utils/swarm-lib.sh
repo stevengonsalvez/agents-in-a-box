@@ -38,12 +38,49 @@ fi
 # Creates a new swarm team directory structure
 # isolation_mode: "shared" (default) or "worktree"
 # Returns: team_id
+# Generate a descriptive team_id like `swarm-<branch-slug>-<rand4>`
+# so panes are recognisable when many swarms run in parallel.
+# Falls back to legacy `swarm-<epoch>` when branch can't be read.
+swarm_generate_team_id() {
+    local branch
+    branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+    if [[ -z "$branch" || "$branch" == "HEAD" ]]; then
+        echo "swarm-$(date +%s)"
+        return
+    fi
+    # Strip common prefixes
+    branch="${branch#feat/}"
+    branch="${branch#fix/}"
+    branch="${branch#chore/}"
+    branch="${branch#docs/}"
+    branch="${branch#test/}"
+    branch="${branch#refactor/}"
+    # Lowercase, replace `/_.` with `-`, drop other non-alnum
+    branch=$(echo "$branch" | tr '[:upper:]' '[:lower:]' | tr '/_.' '---' | sed 's/[^a-z0-9-]//g')
+    # Collapse repeated `-` and trim leading/trailing
+    branch=$(echo "$branch" | sed -E 's/-+/-/g; s/^-+//; s/-+$//')
+    # Truncate to 18 chars so the full session name stays under ~32
+    branch="${branch:0:18}"
+    branch="${branch%-}"
+    # 4-char hex random (RANDOM is 15-bit, mod-distrib OK here)
+    local rand
+    rand=$(printf "%04x" $((RANDOM % 65536)))
+    if [[ -z "$branch" ]]; then
+        echo "swarm-$(date +%s)"
+    else
+        echo "swarm-${branch}-${rand}"
+    fi
+}
+
 swarm_create_team() {
     local epic_id="$1"
     local max_agents="${2:-4}"
     local isolation_mode="${3:-shared}"  # "shared" or "worktree"
 
-    local team_id="swarm-$(date +%s)"
+    # Descriptive ID: swarm-<branch>-<rand>. Falls back to swarm-<epoch>
+    # when git context can't be read. See swarm_generate_team_id().
+    local team_id
+    team_id=$(swarm_generate_team_id)
     local team_dir="${SWARM_BASE_DIR}/${team_id}"
     local base_branch
     base_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
