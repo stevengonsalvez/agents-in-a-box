@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-06-05
+
 ## [1.4.0] - 2026-06-04
 ### Added
 - Merge pull request #211 from stevengonsalvez/feat/new-session-base-branch-picker
