@@ -1,0 +1,12 @@
+# Dependencies
+node_modules/
+
+# Build artifacts
+*.bun-build
+.*.bun-build
+bun.lockb
+bun.lock
+
+# Logs
+logs/
+*.log

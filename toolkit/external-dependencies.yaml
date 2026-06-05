@@ -76,6 +76,14 @@ bundled-skills:
       - Verification-code and magic-link extractors
       - Tool-neutral state file under .agents/agentmail/
 
+  - name: webapp-testing
+    path: packages/skills/webapp-testing
+    purpose: "Playwright-based web app testing and browser automation"
+    features:
+      - Browser screenshot capture
+      - UI element interaction
+      - End-to-end testing workflows
+
   - name: crypto-research
     path: packages/skills/crypto-research
     purpose: "Multi-agent cryptocurrency market analysis"

@@ -107,6 +107,7 @@ components:
     - tui-style-guide
     - ui-ux-pro-max
     - validate
+    - webapp-testing
     - workflow
 
   workflows:
