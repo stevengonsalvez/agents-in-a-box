@@ -9,7 +9,9 @@
 pub mod attach;
 pub mod auth;
 pub mod config_cmd;
+pub mod deps;
 pub mod diff_review;
+pub mod doctor;
 pub mod favorites;
 pub mod fleet;
 pub mod git_cmd;
@@ -19,6 +21,7 @@ pub mod logs;
 pub mod plugin;
 pub mod presets;
 pub mod recover;
+pub mod reflect;
 pub mod registry;
 pub mod run;
 pub mod status;

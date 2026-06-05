@@ -99,14 +99,38 @@ log() {
     printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$LOG_FILE"
 }
 
+# timeout wrapper: prefer `timeout`, fall back to coreutils' `gtimeout`, else
+# run with no limit. macOS Homebrew installs coreutils' timeout as `gtimeout`
+# and doesn't symlink `timeout` unless gnubin is on PATH.
+_to() {
+    if command -v timeout >/dev/null 2>&1; then timeout "$@"
+    elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$@"
+    else shift; "$@"; fi
+}
+
+# Run a reflect_kb.errors subcommand via the best available path: the installed
+# `reflect` CLI (`uv tool install reflect-kb`) first, else bare system
+# `python3 -m` (works only if reflect_kb is importable by system python3).
+# We deliberately do NOT use `uv run --with reflect-kb` — that resolves the
+# name from PyPI, where reflect-kb is NOT published (it ships from the monorepo
+# via git), so it would fail or fetch an unrelated package.
+_reflect_errors_run() {
+    if command -v reflect >/dev/null 2>&1; then
+        reflect errors "$@"
+    else
+        python3 -m reflect_kb.errors "$@"
+    fi
+}
+
 emit_error() {
     # emit_error <severity> <kind> <message> [transcript_path]
     local severity="$1" kind="$2" message="$3" transcript="${4:-}"
     # Build the context JSON with json.dumps so a transcript path containing a
     # quote or backslash can't produce a malformed --context argument.
+    # (Pure stdlib json — does NOT need reflect_kb.)
     local context
     context=$(python3 -c 'import json,sys; print(json.dumps({"transcript_path": sys.argv[1]}))' "$transcript" 2>/dev/null || printf '{}')
-    python3 -m reflect_kb.errors append \
+    _reflect_errors_run append \
         --severity "$severity" --source drain --kind "$kind" \
         --message "$message" \
         --context "$context" \
@@ -422,7 +446,7 @@ Extract any HIGH-confidence corrections, MEDIUM-confidence approved approaches, 
     # triggered it, so reflect used to run inside a random repo (the incident
     # ran in research-tech while analysing a cochilli transcript). Pin it to a
     # neutral dir so reflect can't accidentally touch a project tree.
-    out_json=$(cd "$DRAIN_CWD" && timeout "$ENTRY_TIMEOUT" "$CLAUDE_BIN" \
+    out_json=$(cd "$DRAIN_CWD" && _to "$ENTRY_TIMEOUT" "$CLAUDE_BIN" \
         -p "$prompt" \
         --model "$DRAIN_MODEL" \
         --output-format json \
@@ -614,7 +638,7 @@ main() {
                 fi
             fi
             log "running reflect reindex (incremental)"
-            if timeout 300 reflect reindex >>"$LOG_FILE" 2>&1; then
+            if _to 300 reflect reindex >>"$LOG_FILE" 2>&1; then
                 log "reindex OK"
             else
                 log "reindex returned non-zero (continuing; not fatal)"

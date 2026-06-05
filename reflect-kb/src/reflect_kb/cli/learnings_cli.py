@@ -716,11 +716,53 @@ def timeline(explain_row):
     raise click.exceptions.Exit(rc)
 
 
+@click.group("errors")
+def errors_group():
+    """Triage the reflect error sink (~/.reflect/errors.json).
+
+    Exposed on the installed `reflect` binary so callers (statusline badge,
+    drain hook, errors-ack skill) get a fast hot-path instead of bare
+    `python3 -m reflect_kb.errors`, which only works when reflect_kb is
+    importable by *system* python3 (it usually isn't — it lives in the uv
+    tool venv). The legacy `python -m reflect_kb.errors` entrypoint keeps
+    working for back-compat.
+    """
+
+
+@errors_group.command("count")
+def errors_count():
+    """Print the number of un-acked errors (drives the statusline badge)."""
+    click.echo(_err.count_unacked())
+
+
+@errors_group.command("ack")
+@click.argument("ids", nargs=-1)
+def errors_ack(ids):
+    """Acknowledge errors by id (all un-acked if none given); prints the count acked."""
+    click.echo(_err.ack(list(ids) or None))
+
+
+@errors_group.command("append")
+@click.option("--severity", default="error", type=click.Choice(["error", "warn", "info"]))
+@click.option("--source", required=True)
+@click.option("--kind", required=True)
+@click.option("--message", required=True)
+@click.option("--context", default="{}", help="JSON object string")
+def errors_append(severity, source, kind, message, context):
+    """Append an error record; prints the (deduped) error id."""
+    try:
+        ctx = json.loads(context)
+    except Exception:
+        ctx = {}
+    click.echo(_err.append(severity, source, kind, message, ctx))
+
+
 # Register subcommand groups. Import here (after `cli` exists) to keep
 # circular-import risk at zero.
 from reflect_kb.cli.metrics_cli import metrics_group as _metrics_group  # noqa: E402
 
 cli.add_command(_metrics_group)
+cli.add_command(errors_group)
 
 
 if __name__ == "__main__":

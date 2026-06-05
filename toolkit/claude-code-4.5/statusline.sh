@@ -73,8 +73,37 @@ _bar() {
   printf "${col}[${bar}] ${pct}%%${RESET}"
 }
 
+# ── timeout wrapper ───────────────────────────────────────────────────────────
+# Prefer `timeout`, fall back to coreutils' `gtimeout`, else run with no limit.
+# macOS Homebrew installs coreutils' timeout as `gtimeout` and doesn't symlink
+# `timeout` unless gnubin is on PATH — without this the guarded segments below
+# would silently blank on a stock mac.
+_to() {
+  if command -v timeout >/dev/null 2>&1; then timeout "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$@"
+  else shift; "$@"; fi
+}
+
+# ── Count un-acked reflect errors ─────────────────────────────────────────────
+# Ladder, fastest → installed CLI. Replaces the old bare
+# `python3 -m reflect_kb.errors count`, which only worked when reflect_kb was
+# importable by *system* python3 — it usually isn't (it lives in the uv tool
+# venv from `uv tool install reflect-kb`), so the badge was dead on every box.
+#   1. jq-direct read of the sink       — no python, no reflect_kb needed (hot path)
+#   2. installed `reflect errors count`  — from `uv tool install reflect-kb`
+#   3. give up → 0
+_reflect_err_count() {
+  local f="$HOME/.reflect/errors.json"
+  if [[ -f "$f" ]] && command -v jq >/dev/null 2>&1; then
+    jq -r '[.errors[]? | select(.acked != true)] | length' "$f" 2>/dev/null && return
+  fi
+  if command -v reflect >/dev/null 2>&1; then
+    reflect errors count 2>/dev/null && return
+  fi
+  echo 0
+}
+
 # ── Reflect error indicator ───────────────────────────────────────────────────
-# Reads ~/.reflect/errors.json via `python -m reflect_kb.errors count`.
 # Output: empty when 0, "⚠N" in red when >0. Cached 10s.
 _reflect_errors() {
   local cached_val cached_age
@@ -85,7 +114,7 @@ _reflect_errors() {
     return
   fi
   local count
-  count=$(timeout 0.4 python3 -m reflect_kb.errors count 2>/dev/null || echo 0)
+  count=$(_reflect_err_count)
   count=${count:-0}
   local out=""
   if [[ "$count" =~ ^[0-9]+$ ]] && [[ "$count" -gt 0 ]]; then
@@ -184,12 +213,12 @@ GIT_AHEAD_BEHIND=""
 GIT_CHANGES=""
 
 if git -C "$CWD" rev-parse --git-dir &>/dev/null 2>&1; then
-  GIT_BRANCH=$(timeout 0.5 git -C "$CWD" symbolic-ref --short HEAD 2>/dev/null \
-    || timeout 0.5 git -C "$CWD" rev-parse --short HEAD 2>/dev/null \
+  GIT_BRANCH=$(_to 0.5 git -C "$CWD" symbolic-ref --short HEAD 2>/dev/null \
+    || _to 0.5 git -C "$CWD" rev-parse --short HEAD 2>/dev/null \
     || true)
 
   if [[ -n "$GIT_BRANCH" ]]; then
-    REMOTE_INFO=$(timeout 0.5 git -C "$CWD" rev-list --left-right --count \
+    REMOTE_INFO=$(_to 0.5 git -C "$CWD" rev-list --left-right --count \
       "@{upstream}...HEAD" 2>/dev/null || true)
     if [[ -n "$REMOTE_INFO" ]]; then
       BEHIND=$(awk '{print $1}' <<< "$REMOTE_INFO")
@@ -198,7 +227,7 @@ if git -C "$CWD" rev-parse --git-dir &>/dev/null 2>&1; then
     fi
   fi
 
-  STATUS_OUTPUT=$(timeout 0.5 git -C "$CWD" status --porcelain 2>/dev/null || true)
+  STATUS_OUTPUT=$(_to 0.5 git -C "$CWD" status --porcelain 2>/dev/null || true)
   if [[ -n "$STATUS_OUTPUT" ]]; then
     # Staged: lines where col1 is not space or '?'
     STAGED=$(printf '%s\n' "$STATUS_OUTPUT" | awk '$0 !~ /^[ ?]/ {n++} END {print n+0}')
@@ -219,7 +248,7 @@ MSG_COUNT=0
 if [[ -n "$TRANSCRIPT_PATH" && -f "$TRANSCRIPT_PATH" ]]; then
   # Count real user turns: role=user AND content is not a tool_result.
   # Falls back to grep if jq fails.
-  MSG_COUNT=$(timeout 0.5 jq -r --slurp '
+  MSG_COUNT=$(_to 0.5 jq -r --slurp '
     [.[] | select(
       (.message.role // .role) == "user"
       and ((.message.content // .content | tostring) | contains("tool_result") | not)
@@ -241,7 +270,7 @@ BD_DISPLAY=""
 if (( CACHE_AGE < CACHE_TTL )); then
   BD_COUNT=$(_cache_get "bd")
 else
-  BD_COUNT=$(timeout 0.5 bash -c 'bd ready --json 2>/dev/null | jq "length" 2>/dev/null' || true)
+  BD_COUNT=$(_to 0.5 bash -c 'bd ready --json 2>/dev/null | jq "length" 2>/dev/null' || true)
   [[ -n "$BD_COUNT" ]] && _cache_set "bd" "$BD_COUNT"
 fi
 if [[ "$BD_COUNT" =~ ^[0-9]+$ ]] && (( BD_COUNT > 0 )); then
@@ -315,7 +344,7 @@ if [[ -z "$FIVE_HR_PCT" ]]; then
   if (( CACHE_AGE < CACHE_TTL )); then
     FIVE_HR_PCT=$(_cache_get "five_hr")
   else
-    BLOCKS_JSON=$(timeout 0.5 bash -c 'ccusage blocks --active --json 2>/dev/null' || true)
+    BLOCKS_JSON=$(_to 0.5 bash -c 'ccusage blocks --active --json 2>/dev/null' || true)
     if [[ -n "$BLOCKS_JSON" ]]; then
       FIVE_HR_PCT=$(printf '%s' "$BLOCKS_JSON" \
         | jq -r '.[0].burnPercent // empty' 2>/dev/null || true)
@@ -461,7 +490,7 @@ fi
 if (( CACHE_AGE < CACHE_TTL )); then
   REFLECT_ERR_COUNT=$(_cache_get "reflect_err_count")
 else
-  REFLECT_ERR_COUNT=$(timeout 0.4 python3 -m reflect_kb.errors count 2>/dev/null || echo 0)
+  REFLECT_ERR_COUNT=$(_reflect_err_count)
   _cache_set "reflect_err_count" "${REFLECT_ERR_COUNT:-0}"
 fi
 REFLECT_ERR_COUNT=${REFLECT_ERR_COUNT:-0}

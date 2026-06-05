@@ -219,6 +219,21 @@ fn print_report_text(report: &PrereqReport) {
     }
 }
 
+/// Surface the reflect / statusline toolchain (bash>=4, uv, reflect-kb, qmd +
+/// nano-graphrag, …) during setup — classified by what needs each tool —
+/// without blocking onboarding. Full breakdown: `ainb doctor`; install:
+/// `ainb reflect bootstrap`. Shares the catalog in [`crate::cli::deps`].
+fn print_reflect_deps_summary() {
+    let reports = crate::cli::deps::detect(&crate::cli::deps::RealEnv);
+    println!("\n{}", crate::cli::deps::reflect_summary_line(&reports));
+    if reports.iter().any(|r| !r.satisfied) {
+        println!(
+            "  \u{2192} `ainb doctor` for the full classified breakdown · \
+             `ainb reflect bootstrap` to install the reflect toolchain."
+        );
+    }
+}
+
 // --- Subcommand implementations ---------------------------------------------
 
 /// `ainb init --check`
@@ -236,6 +251,10 @@ fn cmd_check(format: OutputFormat) -> Result<()> {
         }
     }
 
+    if matches!(format, OutputFormat::Text) {
+        print_reflect_deps_summary();
+    }
+
     if !report.all_required_present {
         return Err(anyhow!("Required prerequisites missing"));
     }
@@ -249,6 +268,7 @@ fn cmd_setup(format: OutputFormat) -> Result<()> {
 
     if matches!(format, OutputFormat::Text) {
         print_report_text(&report);
+        print_reflect_deps_summary();
         println!();
     }
 
