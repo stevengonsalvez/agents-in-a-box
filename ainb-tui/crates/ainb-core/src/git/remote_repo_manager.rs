@@ -221,6 +221,20 @@ impl RemoteRepoManager {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            // `git clone` can leave a partially-initialised directory behind on
+            // failure (e.g. auth rejected mid-transfer). `is_cached()` only
+            // checks for a `.git` entry, so a broken partial would be treated as
+            // a warm cache on the next attempt and never re-cloned after the
+            // user fixes credentials. Remove it so the retry starts clean.
+            if cache_path.exists() {
+                if let Err(e) = std::fs::remove_dir_all(&cache_path) {
+                    warn!(
+                        "Failed to remove partial clone at {}: {}",
+                        cache_path.display(),
+                        e
+                    );
+                }
+            }
             return Err(classify_git_error(&stderr, &url));
         }
 
