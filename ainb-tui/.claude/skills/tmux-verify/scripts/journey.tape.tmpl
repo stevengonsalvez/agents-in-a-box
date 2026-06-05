@@ -1,0 +1,23 @@
+# vhs tape for one ainb journey. Rendered by verify-journey.sh (do not run directly).
+# Render-time tokens: OUT, NAME, WIDTH, HEIGHT, AINB_HOME, AINB_BIN, plus the keys block.
+# WIDTH/HEIGHT are PIXELS (vhs sizes the pty from these + FontSize). Quote absolute paths.
+Output "{{OUT}}/{{NAME}}.gif"
+Output "{{OUT}}/{{NAME}}.mp4"
+
+Set Shell "bash"
+Set FontSize 16
+Set Width {{WIDTH}}
+Set Height {{HEIGHT}}
+Set Padding 0
+
+# --- launch ainb in an isolated, wizard-seeded HOME (hidden) ---
+Hide
+Type "export HOME={{AINB_HOME}} && exec {{AINB_BIN}}"
+Enter
+Sleep 3s
+Show
+
+# --- journey keys (Sleep to settle before every Screenshot; quote screenshot paths) ---
+{{KEYS}}
+
+Sleep 1s

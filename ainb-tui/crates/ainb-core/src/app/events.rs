@@ -152,6 +152,17 @@ pub enum AppEvent {
     GitViewToggleFolder, // Toggle folder expand/collapse
     GitViewExpandAll,    // Expand all folders
     GitViewCollapseAll,  // Collapse all folders
+    // Code Review surface events (Review tab)
+    GitReviewToggleCollapse, // Space/Enter — toggle folder or file's diff block
+    GitReviewExpandContext,  // z — reveal more context at the nearest gap
+    GitReviewNextHunk,       // n — jump to next hunk
+    GitReviewPrevHunk,       // N — jump to previous hunk
+    GitReviewNextReviewFile, // ] — select next file
+    GitReviewPrevReviewFile, // [ — select previous file
+    GitReviewSidebarUp,      // ↑ — move sidebar tree selection up
+    GitReviewSidebarDown,    // ↓ — move sidebar tree selection down
+    GitReviewExpandAllFolders, // e — expand all folders
+    GitReviewCollapseAllFolders, // E — collapse all folders
     // Tmux integration events
     AttachTmuxSession, // Attach to tmux session
     DetachTmuxSession, // Detach from tmux session
@@ -1747,22 +1758,36 @@ impl EventHandler {
             }
         } else {
             // Normal git view navigation
+            let on_review = state
+                .git_view_state
+                .as_ref()
+                .is_some_and(|g| g.active_tab == crate::components::git_view::GitTab::Review);
             match key_event.code {
                 KeyCode::Esc => Some(AppEvent::GitViewBack),
                 KeyCode::Tab => Some(AppEvent::GitViewSwitchTab),
+                KeyCode::Up if on_review => Some(AppEvent::GitReviewSidebarUp),
+                KeyCode::Down if on_review => Some(AppEvent::GitReviewSidebarDown),
+                KeyCode::Char('n') if on_review => Some(AppEvent::GitReviewNextHunk),
+                KeyCode::Char('N') if on_review => Some(AppEvent::GitReviewPrevHunk),
+                KeyCode::Char(']') if on_review => Some(AppEvent::GitReviewNextReviewFile),
+                KeyCode::Char('[') if on_review => Some(AppEvent::GitReviewPrevReviewFile),
+                KeyCode::Char(' ') if on_review => Some(AppEvent::GitReviewToggleCollapse),
+                KeyCode::Char('z') if on_review => Some(AppEvent::GitReviewExpandContext),
+                KeyCode::Char('e') if on_review => Some(AppEvent::GitReviewExpandAllFolders),
+                KeyCode::Char('E') if on_review => Some(AppEvent::GitReviewCollapseAllFolders),
+                KeyCode::Enter if on_review => Some(AppEvent::GitReviewToggleCollapse),
                 KeyCode::Char('j') | KeyCode::Down => {
                     if let Some(ref git_state) = state.git_view_state {
                         match git_state.active_tab {
                             crate::components::git_view::GitTab::Files => {
                                 Some(AppEvent::GitViewNextFile)
                             }
-                            crate::components::git_view::GitTab::Diff => {
-                                Some(AppEvent::GitViewScrollDown)
-                            }
                             crate::components::git_view::GitTab::Commits => {
                                 Some(AppEvent::GitViewNextCommit)
                             }
-                            crate::components::git_view::GitTab::Markdown => {
+                            crate::components::git_view::GitTab::Review
+                            | crate::components::git_view::GitTab::Diff
+                            | crate::components::git_view::GitTab::Markdown => {
                                 Some(AppEvent::GitViewScrollDown)
                             }
                         }
@@ -1776,13 +1801,12 @@ impl EventHandler {
                             crate::components::git_view::GitTab::Files => {
                                 Some(AppEvent::GitViewPrevFile)
                             }
-                            crate::components::git_view::GitTab::Diff => {
-                                Some(AppEvent::GitViewScrollUp)
-                            }
                             crate::components::git_view::GitTab::Commits => {
                                 Some(AppEvent::GitViewPrevCommit)
                             }
-                            crate::components::git_view::GitTab::Markdown => {
+                            crate::components::git_view::GitTab::Review
+                            | crate::components::git_view::GitTab::Diff
+                            | crate::components::git_view::GitTab::Markdown => {
                                 Some(AppEvent::GitViewScrollUp)
                             }
                         }
@@ -3061,6 +3085,9 @@ impl EventHandler {
             AppEvent::GitViewScrollUp => {
                 if let Some(ref mut git_state) = state.git_view_state {
                     match git_state.active_tab {
+                        crate::components::git_view::GitTab::Review => {
+                            git_state.review_scroll_up(1)
+                        }
                         crate::components::git_view::GitTab::Diff => git_state.scroll_diff_up(),
                         crate::components::git_view::GitTab::Markdown => {
                             git_state.scroll_markdown_up()
@@ -3072,12 +3099,65 @@ impl EventHandler {
             AppEvent::GitViewScrollDown => {
                 if let Some(ref mut git_state) = state.git_view_state {
                     match git_state.active_tab {
+                        crate::components::git_view::GitTab::Review => {
+                            git_state.review_scroll_down(1)
+                        }
                         crate::components::git_view::GitTab::Diff => git_state.scroll_diff_down(),
                         crate::components::git_view::GitTab::Markdown => {
                             git_state.scroll_markdown_down()
                         }
                         _ => {}
                     }
+                }
+            }
+            AppEvent::GitReviewToggleCollapse => {
+                if let Some(ref mut git_state) = state.git_view_state {
+                    git_state.review_toggle_collapse();
+                }
+            }
+            AppEvent::GitReviewExpandContext => {
+                if let Some(ref mut git_state) = state.git_view_state {
+                    git_state.review_expand_context();
+                }
+            }
+            AppEvent::GitReviewNextHunk => {
+                if let Some(ref mut git_state) = state.git_view_state {
+                    git_state.review_next_hunk();
+                }
+            }
+            AppEvent::GitReviewPrevHunk => {
+                if let Some(ref mut git_state) = state.git_view_state {
+                    git_state.review_prev_hunk();
+                }
+            }
+            AppEvent::GitReviewNextReviewFile => {
+                if let Some(ref mut git_state) = state.git_view_state {
+                    git_state.review_next_file();
+                }
+            }
+            AppEvent::GitReviewPrevReviewFile => {
+                if let Some(ref mut git_state) = state.git_view_state {
+                    git_state.review_prev_file();
+                }
+            }
+            AppEvent::GitReviewSidebarUp => {
+                if let Some(ref mut git_state) = state.git_view_state {
+                    git_state.review_sidebar_up();
+                }
+            }
+            AppEvent::GitReviewSidebarDown => {
+                if let Some(ref mut git_state) = state.git_view_state {
+                    git_state.review_sidebar_down();
+                }
+            }
+            AppEvent::GitReviewExpandAllFolders => {
+                if let Some(ref mut git_state) = state.git_view_state {
+                    git_state.review_expand_all_folders();
+                }
+            }
+            AppEvent::GitReviewCollapseAllFolders => {
+                if let Some(ref mut git_state) = state.git_view_state {
+                    git_state.review_collapse_all_folders();
                 }
             }
             AppEvent::GitViewNextCommit => {

@@ -8273,6 +8273,8 @@ impl AppState {
                 tracing::error!("Failed to refresh git status: {}", e);
                 return;
             }
+            // Build the Warp-style Code Review model for the default Review tab.
+            git_state.refresh_review();
 
             self.git_view_state = Some(git_state);
             // Store current view so we can return to it
