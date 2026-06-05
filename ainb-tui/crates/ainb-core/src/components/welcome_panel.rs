@@ -22,65 +22,26 @@ const SUBDUED_BORDER: Color = Color::Rgb(60, 60, 80);
 const ACCENT_CYAN: Color = Color::Rgb(80, 200, 220);
 
 /// Default markdown content for the welcome panel
-pub const DEFAULT_WELCOME_CONTENT: &str = r#"# Welcome to AINB
+pub const DEFAULT_WELCOME_CONTENT: &str = r#"# Agents in a Box
 
-**AI-powered development environment manager** for Claude Code agents
-running in isolated git worktrees.
-
----
-
-## Quick Start
-
-1. **Select an Agent** `[a]` - Configure your Claude instance
-2. **Browse Catalog** `[c]` - Find project templates
-3. **Launch Sessions** `[s]` - Start working in isolated worktrees
-
-Press **Enter** to activate selection, **↑↓** to navigate the sidebar.
+You're on the **Sessions** screen. Start an agent session, or open Setup.
 
 ---
 
-## Architecture
+## Start here
 
-```
-┌─────────────┐         ┌──────────────┐
-│    AINB     │────────▶│   Worktree   │
-│     TUI     │         │   + tmux     │
-└─────────────┘         └──────────────┘
-       │                       │
-       ▼                       ▼
-┌─────────────┐         ┌──────────────┐
-│   Config    │         │    Claude    │
-│   Presets   │         │     Code     │
-└─────────────┘         └──────────────┘
-```
+- `n`         **New session** — pick a repo and launch an agent
+- `Enter`     Open / attach the selected session
+- `1`–`9`     Jump straight to a session by number
+- `?`         Help — every key for this screen
+- `q`         Quit
 
-Each session runs in an **isolated git worktree** with its own:
-- Branch for changes
-- tmux session for terminal access
-- Claude Code instance
+Each session runs in its own git worktree + tmux + agent, fully isolated.
 
 ---
 
-## Key Features
-
-- **Multi-Agent Support** - Run multiple Claude sessions in parallel
-- **Git Worktrees** - Each session gets its own branch
-- **tmux Integration** - Full terminal access to sessions
-- **Session Management** - Start, stop, attach, and monitor
-
----
-
-## Tips
-
-💡 **Tip:** Press `?` anytime for context-sensitive help
-
-💡 **Tip:** Use `s` to jump directly to Sessions
-
-💡 **Tip:** Each worktree is completely isolated - experiment freely!
-
----
-
-*Press Tab to switch focus • ↑↓ to scroll • q to quit*
+💡 Re-run first-time setup any time from the setup menu (`Esc` from the wizard
+returns you here). Press `?` for the full keymap.
 "#;
 
 /// Welcome panel state with scroll position
