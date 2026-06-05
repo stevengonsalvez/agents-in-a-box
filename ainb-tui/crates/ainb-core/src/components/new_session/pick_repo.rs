@@ -513,6 +513,11 @@ pub fn render(f: &mut Frame, state: &PickRepoState, area: Rect) {
                             ]));
                         }
                         GitAuthStatus::NotAuthenticated => {
+                            // The `gh`-specific copy is intentional: the auth
+                            // pre-check only fires for GitHub sources (see
+                            // `is_github_host` gating in events.rs StartClone),
+                            // so this branch never renders for GitLab /
+                            // self-hosted HTTPS remotes.
                             let amber = Color::Rgb(255, 191, 0);
                             lines.push(Line::from(vec![
                                 Span::raw("    "),
@@ -532,11 +537,20 @@ pub fn render(f: &mut Frame, state: &PickRepoState, area: Rect) {
                             ]));
                             lines.push(Line::from(vec![
                                 Span::raw("    "),
-                                Span::styled("Enter", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                                Span::styled(
+                                    "Enter",
+                                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                                ),
                                 Span::styled("=Retry  ", Style::default().fg(MUTED_GRAY)),
-                                Span::styled("s", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                                Span::styled(
+                                    "s",
+                                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                                ),
                                 Span::styled("=Skip auth  ", Style::default().fg(MUTED_GRAY)),
-                                Span::styled("Esc", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                                Span::styled(
+                                    "Esc",
+                                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                                ),
                                 Span::styled("=Back", Style::default().fg(MUTED_GRAY)),
                             ]));
                         }
@@ -898,6 +912,8 @@ mod tests {
             filtered_indices,
             selected: 0,
             clone_progress: None,
+            git_auth_status: None,
+            pending_clone_source: None,
             defaults: SessionDefaults::default(),
             favorites: FavoritesStore::default(),
         }
@@ -1105,5 +1121,143 @@ mod tests {
         s.append_filter("zzz");
         assert_eq!(s.filter, "shotclubzzz");
         assert_eq!(s.filtered_indices.len(), 0);
+    }
+
+    // ── GitHub auth pre-check: prompt UI + key FSM ──────────────────────────
+    //
+    // These exercise the inline "auth required" prompt entirely from in-memory
+    // state — no `gh`, no network, no real GitHub credentials. That's the
+    // sandbox harness for verifying the prompt renders and reacts correctly
+    // when `gh auth status` would have failed (the dispatcher sets
+    // `NotAuthenticated`; here we set it directly and assert behaviour).
+
+    fn github_source() -> RepoSource {
+        RepoSource::GithubShorthand {
+            owner: "stevengonsalvez".into(),
+            repo: "agents-in-a-box".into(),
+        }
+    }
+
+    /// Render the picker and flatten the terminal buffer to a single string so
+    /// tests can assert on visible copy without a real terminal.
+    fn render_to_string(state: &PickRepoState, w: u16, h: u16) -> String {
+        let backend = ratatui::backend::TestBackend::new(w, h);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.size();
+                render(f, state, area);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer.get(x, y).symbol().chars().next().unwrap_or(' '))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn auth_prompt_renders_instructions_without_invoking_gh() {
+        let mut s = mk_state_with_rows(one_row());
+        s.git_auth_status = Some(GitAuthStatus::NotAuthenticated);
+        s.pending_clone_source = Some(github_source());
+
+        let text = render_to_string(&s, 100, 24);
+
+        // The amber instruction line + the exact remediation command.
+        assert!(
+            text.contains("auth required"),
+            "missing auth prompt in:\n{text}"
+        );
+        assert!(
+            text.contains("gh auth login"),
+            "missing gh remediation command in:\n{text}"
+        );
+        // The three key hints the user can act on.
+        assert!(text.contains("Retry"), "missing Retry hint in:\n{text}");
+        assert!(text.contains("Skip"), "missing Skip hint in:\n{text}");
+        assert!(text.contains("Back"), "missing Back hint in:\n{text}");
+    }
+
+    #[test]
+    fn checking_state_renders_spinner_line() {
+        let mut s = mk_state_with_rows(one_row());
+        s.git_auth_status = Some(GitAuthStatus::Checking);
+        let text = render_to_string(&s, 100, 24);
+        assert!(
+            text.contains("Checking GitHub auth"),
+            "missing checking spinner in:\n{text}"
+        );
+    }
+
+    #[test]
+    fn not_authenticated_enter_retries_the_check() {
+        let mut s = mk_state_with_rows(one_row());
+        s.git_auth_status = Some(GitAuthStatus::NotAuthenticated);
+        s.pending_clone_source = Some(github_source());
+
+        let out = handle_key(&mut s, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        // Enter flips back to Checking so the dispatcher re-runs `gh auth status`.
+        assert_eq!(out, PickRepoOutcome::Stay);
+        assert_eq!(s.git_auth_status, Some(GitAuthStatus::Checking));
+        // The source is preserved across the retry.
+        assert_eq!(s.pending_clone_source, Some(github_source()));
+    }
+
+    #[test]
+    fn not_authenticated_skip_starts_the_clone_anyway() {
+        let mut s = mk_state_with_rows(one_row());
+        s.git_auth_status = Some(GitAuthStatus::NotAuthenticated);
+        s.pending_clone_source = Some(github_source());
+
+        let out = handle_key(
+            &mut s,
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        );
+
+        // `s` bypasses the gate and proceeds to clone with the pending source.
+        assert_eq!(out, PickRepoOutcome::StartClone(github_source()));
+        assert_eq!(s.git_auth_status, None);
+        assert_eq!(s.pending_clone_source, None);
+    }
+
+    #[test]
+    fn not_authenticated_esc_cancels_the_prompt() {
+        let mut s = mk_state_with_rows(one_row());
+        s.git_auth_status = Some(GitAuthStatus::NotAuthenticated);
+        s.pending_clone_source = Some(github_source());
+
+        let out = handle_key(&mut s, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        // Esc dismisses the prompt and clears the pending source.
+        assert_eq!(out, PickRepoOutcome::Stay);
+        assert_eq!(s.git_auth_status, None);
+        assert_eq!(s.pending_clone_source, None);
+    }
+
+    #[test]
+    fn checking_state_swallows_keys_except_esc() {
+        let mut s = mk_state_with_rows(one_row());
+        s.git_auth_status = Some(GitAuthStatus::Checking);
+        s.pending_clone_source = Some(github_source());
+
+        // A stray keypress while the check is in flight is ignored, state holds.
+        let out = handle_key(
+            &mut s,
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+        );
+        assert_eq!(out, PickRepoOutcome::Stay);
+        assert_eq!(s.git_auth_status, Some(GitAuthStatus::Checking));
+
+        // Esc aborts the in-flight check and drops the pending source.
+        let out = handle_key(&mut s, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(out, PickRepoOutcome::Stay);
+        assert_eq!(s.git_auth_status, None);
+        assert_eq!(s.pending_clone_source, None);
     }
 }
