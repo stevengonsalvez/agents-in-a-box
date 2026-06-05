@@ -27,6 +27,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 - **release**: prepare v1.4.1
+- **release**: prepare v1.4.2
+- **skills**: add tmux-verify TUI proof-loop skill
+- **diff**: cap highlighting on pathological lines + large-diff render test
+
+
+## [1.4.2] - 2026-06-05
+### Added
+- Merge pull request #216 from stevengonsalvez/feat/diff
+- **diff**: add 'ainb diff-review [path]' subcommand
+- **diff**: add Code Review interactions — collapse, expand, hunk jump, file nav
+- **diff**: add Dracula syntax-highlight bridge with word-emphasis merge
+- **diff**: add structured Code Review diff model + git/similar parser
+- **diff**: render unified Code Review surface as the default G view
+- **diff**: tree-structured sidebar with arrow-key nav and mouse
+
+### Fixed
+- **code-review**: harden context expansion, drop dead code, fix docs
+
+### Documentation
+- **readme**: showcase the Warp-style Code Review diff
+- **tui**: add Code Review page with diff GIFs
+- **tui**: document tree sidebar, arrow nav, and mouse in Code Review
+
+### Other
+- **release**: prepare v1.4.1
 - **skills**: add tmux-verify TUI proof-loop skill
 - **diff**: cap highlighting on pathological lines + large-diff render test
 
