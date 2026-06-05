@@ -40,8 +40,7 @@ Each session runs in its own git worktree + tmux + agent, fully isolated.
 
 ---
 
-💡 Re-run first-time setup any time from the setup menu (`Esc` from the wizard
-returns you here). Press `?` for the full keymap.
+💡 `Esc` in the setup wizard returns here. Press `?` for the full keymap.
 "#;
 
 /// Welcome panel state with scroll position
