@@ -1647,7 +1647,7 @@ impl EventHandler {
                 }
                 OnboardingStep::DependencyCheck => {
                     match key_event.code {
-                        KeyCode::Enter => {
+                        KeyCode::Enter | KeyCode::Right => {
                             // If deps not checked yet, check them; otherwise advance
                             if onboarding_state.dependency_status.is_none() {
                                 Some(AppEvent::OnboardingCheckDeps)
@@ -1667,7 +1667,7 @@ impl EventHandler {
                     }
                 }
                 OnboardingStep::Authentication => match key_event.code {
-                    KeyCode::Enter => Some(AppEvent::OnboardingNext),
+                    KeyCode::Enter | KeyCode::Right => Some(AppEvent::OnboardingNext),
                     KeyCode::Esc => Some(AppEvent::OnboardingCancel),
                     KeyCode::Left | KeyCode::Backspace | KeyCode::Up => {
                         Some(AppEvent::OnboardingBack)
@@ -1676,7 +1676,7 @@ impl EventHandler {
                     _ => None,
                 },
                 OnboardingStep::EditorSelection => match key_event.code {
-                    KeyCode::Enter => Some(AppEvent::OnboardingNext),
+                    KeyCode::Enter | KeyCode::Right => Some(AppEvent::OnboardingNext),
                     KeyCode::Esc => Some(AppEvent::OnboardingCancel),
                     KeyCode::Left | KeyCode::Backspace => Some(AppEvent::OnboardingBack),
                     KeyCode::Up => Some(AppEvent::OnboardingEditorUp),
@@ -1686,7 +1686,7 @@ impl EventHandler {
                     _ => None,
                 },
                 OnboardingStep::Summary => match key_event.code {
-                    KeyCode::Enter => Some(AppEvent::OnboardingFinish),
+                    KeyCode::Enter | KeyCode::Right => Some(AppEvent::OnboardingFinish),
                     KeyCode::Esc => Some(AppEvent::OnboardingCancel),
                     KeyCode::Left | KeyCode::Backspace | KeyCode::Up => {
                         Some(AppEvent::OnboardingBack)
