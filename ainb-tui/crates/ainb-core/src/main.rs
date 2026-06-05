@@ -527,7 +527,8 @@ async fn run_tui_loop(
                             } else if app.state.current_screen == crate::app::screens::ids::GIT_VIEW
                                 && app.state.git_view_state.as_ref().is_some_and(|g| {
                                     g.active_tab == crate::components::git_view::GitTab::Review
-                                }) {
+                                })
+                            {
                                 // Code Review sidebar: click a file/folder row to select/toggle.
                                 if let Some(ref mut git_state) = app.state.git_view_state {
                                     git_state.review_sidebar_click(col, row);

@@ -153,15 +153,15 @@ pub enum AppEvent {
     GitViewExpandAll,    // Expand all folders
     GitViewCollapseAll,  // Collapse all folders
     // Code Review surface events (Review tab)
-    GitReviewToggleCollapse,     // Space/Enter — toggle folder or file's diff block
-    GitReviewExpandContext,      // z — reveal more context at the nearest gap
-    GitReviewNextHunk,           // n — jump to next hunk
-    GitReviewPrevHunk,           // N — jump to previous hunk
-    GitReviewNextReviewFile,     // ] — select next file
-    GitReviewPrevReviewFile,     // [ — select previous file
-    GitReviewSidebarUp,          // ↑ — move sidebar tree selection up
-    GitReviewSidebarDown,        // ↓ — move sidebar tree selection down
-    GitReviewExpandAllFolders,   // e — expand all folders
+    GitReviewToggleCollapse, // Space/Enter — toggle folder or file's diff block
+    GitReviewExpandContext,  // z — reveal more context at the nearest gap
+    GitReviewNextHunk,       // n — jump to next hunk
+    GitReviewPrevHunk,       // N — jump to previous hunk
+    GitReviewNextReviewFile, // ] — select next file
+    GitReviewPrevReviewFile, // [ — select previous file
+    GitReviewSidebarUp,      // ↑ — move sidebar tree selection up
+    GitReviewSidebarDown,    // ↓ — move sidebar tree selection down
+    GitReviewExpandAllFolders, // e — expand all folders
     GitReviewCollapseAllFolders, // E — collapse all folders
     // Tmux integration events
     AttachTmuxSession, // Attach to tmux session
@@ -3085,7 +3085,9 @@ impl EventHandler {
             AppEvent::GitViewScrollUp => {
                 if let Some(ref mut git_state) = state.git_view_state {
                     match git_state.active_tab {
-                        crate::components::git_view::GitTab::Review => git_state.review_scroll_up(1),
+                        crate::components::git_view::GitTab::Review => {
+                            git_state.review_scroll_up(1)
+                        }
                         crate::components::git_view::GitTab::Diff => git_state.scroll_diff_up(),
                         crate::components::git_view::GitTab::Markdown => {
                             git_state.scroll_markdown_up()
@@ -3097,7 +3099,9 @@ impl EventHandler {
             AppEvent::GitViewScrollDown => {
                 if let Some(ref mut git_state) = state.git_view_state {
                     match git_state.active_tab {
-                        crate::components::git_view::GitTab::Review => git_state.review_scroll_down(1),
+                        crate::components::git_view::GitTab::Review => {
+                            git_state.review_scroll_down(1)
+                        }
                         crate::components::git_view::GitTab::Diff => git_state.scroll_diff_down(),
                         crate::components::git_view::GitTab::Markdown => {
                             git_state.scroll_markdown_down()

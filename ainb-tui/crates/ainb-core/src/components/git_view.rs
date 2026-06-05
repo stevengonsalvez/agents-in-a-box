@@ -273,7 +273,8 @@ impl GitViewState {
 
     /// `(current_hunk + 1, total_hunks)` for the `Hunk x/y` counter.
     pub fn review_hunk_counter(&self) -> (usize, usize) {
-        let total = code_review::render::hunk_anchors(&code_review::render::flatten(&self.review)).len();
+        let total =
+            code_review::render::hunk_anchors(&code_review::render::flatten(&self.review)).len();
         let current = if total == 0 {
             0
         } else {
@@ -1343,7 +1344,12 @@ impl GitViewComponent {
         // Render content based on active tab
         match git_state.active_tab {
             GitTab::Review => {
-                code_review::render::render(frame, chunks[1], &git_state.review, &git_state.review_ui);
+                code_review::render::render(
+                    frame,
+                    chunks[1],
+                    &git_state.review,
+                    &git_state.review_ui,
+                );
             }
             GitTab::Files => Self::render_files_tab(frame, chunks[1], git_state),
             GitTab::Diff => Self::render_diff_tab(frame, chunks[1], git_state),

@@ -39,7 +39,11 @@ pub fn run(path: PathBuf) -> Result<()> {
 
     // Always restore the terminal, even on error.
     let _ = disable_raw_mode();
-    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture);
+    let _ = execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    );
     let _ = terminal.show_cursor();
     result
 }

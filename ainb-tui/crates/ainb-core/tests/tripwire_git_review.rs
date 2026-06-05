@@ -13,7 +13,9 @@
 use std::path::Path;
 use std::process::Command;
 
-use ainb::components::code_review::highlight::{ADD_TINT, ADD_TINT_BRIGHT, DEL_TINT, DEL_TINT_BRIGHT};
+use ainb::components::code_review::highlight::{
+    ADD_TINT, ADD_TINT_BRIGHT, DEL_TINT, DEL_TINT_BRIGHT,
+};
 use ainb::components::code_review::model::RowKind;
 use ainb::components::code_review::{parse, render};
 use ainb::components::git_view::{GitFileStatus, GitViewState};
@@ -22,11 +24,7 @@ use ratatui::backend::TestBackend;
 use ratatui::style::Color;
 
 fn git(repo: &Path, args: &[&str]) {
-    let status = Command::new("git")
-        .current_dir(repo)
-        .args(args)
-        .status()
-        .expect("run git");
+    let status = Command::new("git").current_dir(repo).args(args).status().expect("run git");
     assert!(status.success(), "git {args:?} failed");
 }
 
@@ -96,9 +94,20 @@ fn code_review_surface_renders_real_diff_and_responds_to_keys() {
     // 1) The parser produces the right model from real git data.
     let model = parse::build_review_model(repo).expect("build model");
     let by_path = |p: &str| model.files.iter().find(|f| f.path == p);
-    assert_eq!(model.files.len(), 3, "files: {:?}", model.files.iter().map(|f| &f.path).collect::<Vec<_>>());
-    assert_eq!(by_path("src/app.py").unwrap().status, GitFileStatus::Modified);
-    assert_eq!(by_path("notes.txt").unwrap().status, GitFileStatus::Untracked);
+    assert_eq!(
+        model.files.len(),
+        3,
+        "files: {:?}",
+        model.files.iter().map(|f| &f.path).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        by_path("src/app.py").unwrap().status,
+        GitFileStatus::Modified
+    );
+    assert_eq!(
+        by_path("notes.txt").unwrap().status,
+        GitFileStatus::Untracked
+    );
     assert_eq!(by_path("old.txt").unwrap().status, GitFileStatus::Deleted);
 
     // Word-level emphasis on the changed line ('red' -> 'green'), not the whole line.
@@ -111,7 +120,10 @@ fn code_review_surface_renders_real_diff_and_responds_to_keys() {
         .expect("an added row");
     assert!(!added.emphasis.is_empty(), "expected intra-line emphasis");
     let emph_len: usize = added.emphasis.iter().map(|(s, e)| e - s).sum();
-    assert!(emph_len < added.raw.len(), "emphasis must be a subset of the line");
+    assert!(
+        emph_len < added.raw.len(),
+        "emphasis must be a subset of the line"
+    );
 
     // 2) The surface renders via the real GitViewState refresh + render path.
     let mut state = GitViewState::new(repo.to_path_buf());
@@ -119,17 +131,28 @@ fn code_review_surface_renders_real_diff_and_responds_to_keys() {
     let (text, bgs) = render_to_text(&state);
 
     assert!(text.contains("Code Review"), "missing title:\n{text}");
-    assert!(text.contains("src/app.py"), "missing modified path:\n{text}");
-    assert!(text.contains("notes.txt"), "missing untracked path:\n{text}");
+    assert!(
+        text.contains("src/app.py"),
+        "missing modified path:\n{text}"
+    );
+    assert!(
+        text.contains("notes.txt"),
+        "missing untracked path:\n{text}"
+    );
     assert!(text.contains('▌'), "missing change bar:\n{text}");
     assert!(text.contains("Hunk 1/"), "missing hunk counter:\n{text}");
     // The diff body shows the REAL changed code — both the removed and added lines.
-    assert!(text.contains("'red'"), "removed line content missing:\n{text}");
-    assert!(text.contains("'green'"), "added line content missing:\n{text}");
+    assert!(
+        text.contains("'red'"),
+        "removed line content missing:\n{text}"
+    );
+    assert!(
+        text.contains("'green'"),
+        "added line content missing:\n{text}"
+    );
     // A code row carries both a gutter line number and the change bar.
     assert!(
-        text.lines()
-            .any(|l| l.contains('▌') && l.chars().any(|c| c.is_ascii_digit())),
+        text.lines().any(|l| l.contains('▌') && l.chars().any(|c| c.is_ascii_digit())),
         "missing gutter line numbers next to a change bar:\n{text}"
     );
 
@@ -141,11 +164,7 @@ fn code_review_surface_renders_real_diff_and_responds_to_keys() {
 
     // 3) Collapse the selected file's diff block -> its code rows disappear.
     use ainb::components::code_review::render::{SidebarRow, build_sidebar};
-    let app_idx = model
-        .files
-        .iter()
-        .position(|f| f.path == "src/app.py")
-        .unwrap();
+    let app_idx = model.files.iter().position(|f| f.path == "src/app.py").unwrap();
     let tree = build_sidebar(&state.review, &state.review_ui.collapsed_dirs);
     state.review_ui.sidebar_selected = tree
         .iter()
@@ -160,7 +179,10 @@ fn code_review_surface_renders_real_diff_and_responds_to_keys() {
     // Expand again restores it.
     state.review_toggle_collapse();
     let (reopened_text, _) = render_to_text(&state);
-    assert!(reopened_text.contains("style.color"), "re-expand did not restore code");
+    assert!(
+        reopened_text.contains("style.color"),
+        "re-expand did not restore code"
+    );
 
     // 4) Hunk jump advances the counter.
     state.review_next_hunk();
