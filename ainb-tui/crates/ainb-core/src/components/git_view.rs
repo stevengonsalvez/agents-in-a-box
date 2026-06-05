@@ -188,9 +188,12 @@ impl GitViewState {
         match code_review::parse::build_review_model(&self.worktree_path) {
             Ok(model) => {
                 self.review = model;
-                if self.review_ui.selected_file >= self.review.files.len() {
-                    self.review_ui.selected_file = 0;
-                }
+                // The file list and row layout changed — reset navigation to the top
+                // so no index dangles past the new tree. Folder collapse prefs persist.
+                self.review_ui.selected_file = 0;
+                self.review_ui.sidebar_selected = 0;
+                self.review_ui.current_hunk = 0;
+                self.review_ui.scroll = 0;
             }
             Err(e) => {
                 error!("Failed to build code review model: {e}");
@@ -241,11 +244,6 @@ impl GitViewState {
         if let Some(row) = code_review::render::sidebar_row_at(&self.review_ui, x, y) {
             code_review::render::sidebar_click(&mut self.review, &mut self.review_ui, row);
         }
-    }
-
-    /// Whether screen `(x, y)` is over the review diff body (for wheel scrolling).
-    pub fn review_point_in_body(&self, x: u16, y: u16) -> bool {
-        code_review::render::in_body(&self.review_ui, x, y)
     }
 
     /// Select the next review file and scroll its header to the top.

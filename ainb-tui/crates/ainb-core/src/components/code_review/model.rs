@@ -1,5 +1,6 @@
 // ABOUTME: Structured diff model for the Warp-style Code Review surface.
-// A ReviewModel is files -> hunks -> rows, with word-level emphasis ranges per row.
+// A ReviewModel is files -> hunks -> rows, with word-level emphasis ranges per
+// row.
 
 use crate::components::git_view::GitFileStatus;
 
@@ -52,15 +53,13 @@ pub struct ReviewFile {
 pub struct Hunk {
     /// 1-based first old (pre-image) line number in this hunk; 0 if none.
     pub old_start: usize,
-    /// Number of old lines covered (context + removed).
-    pub old_len: usize,
     /// 1-based first new (post-image) line number in this hunk; 0 if none.
     pub new_start: usize,
-    /// Number of new lines covered (context + added).
-    pub new_len: usize,
-    /// Hidden context lines between the previous hunk (or file head) and this one.
+    /// Hidden context lines between the previous hunk (or file head) and this
+    /// one.
     pub gap_before: usize,
-    /// Hidden context lines after this hunk (only set on the final hunk → file tail).
+    /// Hidden context lines after this hunk (only set on the final hunk → file
+    /// tail).
     pub gap_after: usize,
     /// How many of `gap_before` are currently revealed by the user.
     pub expanded_before: usize,
@@ -92,6 +91,7 @@ pub struct DiffRow {
     pub new_lineno: Option<usize>,
     /// Full line text with the trailing newline stripped (no diff marker).
     pub raw: String,
-    /// Byte ranges within `raw` that changed at the word level (brighter highlight).
+    /// Byte ranges within `raw` that changed at the word level (brighter
+    /// highlight).
     pub emphasis: Vec<(usize, usize)>,
 }

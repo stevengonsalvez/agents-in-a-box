@@ -1,6 +1,7 @@
-// ABOUTME: Unified Warp-style Code Review render surface — a left file sidebar plus
-// per-file collapsible diff blocks in one continuous scroll, with a line-number
-// gutter, solid green/red change bars, muted row tints, and expand-context rows.
+// ABOUTME: Unified Warp-style Code Review render surface — a left file sidebar
+// plus per-file collapsible diff blocks in one continuous scroll, with a
+// line-number gutter, solid green/red change bars, muted row tints, and
+// expand-context rows.
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashSet};
@@ -41,15 +42,12 @@ pub struct CodeReviewUi {
     pub scroll: usize,
     /// Index of the hunk the `n`/`N` cursor is on (0-based, across all files).
     pub current_hunk: usize,
-    /// Height of the diff body in rows, captured from the last render for clamping.
-    pub viewport_height: usize,
-    /// First visible sidebar tree row, recomputed during render (interior mutability
-    /// so `render` can take `&self`).
+    /// First visible sidebar tree row, recomputed during render (interior
+    /// mutability so `render` can take `&self`).
     sidebar_window: Cell<usize>,
-    /// Screen rect of the sidebar list region from the last render (mouse hit-testing).
+    /// Screen rect of the sidebar list region from the last render, used to map
+    /// a mouse click back to a tree-row index.
     sidebar_rect: Cell<Rect>,
-    /// Screen rect of the diff body from the last render (mouse hit-testing).
-    body_rect: Cell<Rect>,
 }
 
 /// A row in the flattened, scrollable view of the model.
@@ -139,14 +137,6 @@ pub fn flatten(model: &ReviewModel) -> Vec<VRow> {
     rows
 }
 
-/// The virtual-row index of each file's header (used for `n`/`N` and file nav).
-pub fn file_header_indices(rows: &[VRow]) -> Vec<usize> {
-    rows.iter()
-        .enumerate()
-        .filter_map(|(i, r)| matches!(r, VRow::FileHeader { .. }).then_some(i))
-        .collect()
-}
-
 /// Virtual-row index of the first code row of each hunk, in document order,
 /// paired with the file the hunk belongs to. Drives `n`/`N` hunk navigation.
 pub fn hunk_anchors(rows: &[VRow]) -> Vec<usize> {
@@ -165,13 +155,6 @@ pub fn hunk_anchors(rows: &[VRow]) -> Vec<usize> {
 
 /// How many lines a single expand action reveals.
 const EXPAND_STEP: usize = 10;
-
-/// Toggle the collapse state of the sidebar-selected file.
-pub fn toggle_collapse(model: &mut ReviewModel, ui: &CodeReviewUi) {
-    if let Some(file) = model.files.get_mut(ui.selected_file) {
-        file.collapsed = !file.collapsed;
-    }
-}
 
 /// Move the sidebar selection to the next/previous file and scroll its header
 /// to the top of the body.
@@ -244,41 +227,47 @@ const fn expand_target(row: &VRow) -> Option<(usize, usize, bool)> {
 fn expand_before(file: &mut ReviewFile, hunk_idx: usize, step: usize) {
     let h = &mut file.hunks[hunk_idx];
     let hidden = h.gap_before.saturating_sub(h.expanded_before);
-    let reveal = hidden.min(step);
-    if reveal == 0 {
-        return;
-    }
     let Some(top) = h.rows.iter().filter_map(|r| r.new_lineno).min() else {
         return;
     };
+    // `gap_before` counts old lines; never reveal past the new file's head.
+    let reveal = hidden.min(step).min(top.saturating_sub(1));
+    if reveal == 0 {
+        return;
+    }
     let delta = line_delta(h.new_start, h.old_start);
     let mut added = Vec::new();
-    for n in top.saturating_sub(reveal)..top {
-        if n == 0 {
-            continue;
-        }
+    for n in (top - reveal)..top {
         added.push(context_row(&file.new_lines, n, delta));
     }
     added.append(&mut h.rows);
     h.rows = added;
     h.expanded_before += reveal;
+    if top - reveal <= 1 {
+        h.expanded_before = h.gap_before; // reached the file head
+    }
 }
 
 fn expand_after(file: &mut ReviewFile, hunk_idx: usize, step: usize) {
     let h = &mut file.hunks[hunk_idx];
     let hidden = h.gap_after.saturating_sub(h.expanded_after);
-    let reveal = hidden.min(step);
-    if reveal == 0 {
-        return;
-    }
     let Some(bottom) = h.rows.iter().filter_map(|r| r.new_lineno).max() else {
         return;
     };
+    // `gap_after` counts old lines; never reveal past the new file's tail.
+    let avail = file.new_lines.len().saturating_sub(bottom);
+    let reveal = hidden.min(step).min(avail);
+    if reveal == 0 {
+        return;
+    }
     let delta = line_delta(h.new_start, h.old_start);
     for n in (bottom + 1)..=(bottom + reveal) {
         h.rows.push(context_row(&file.new_lines, n, delta));
     }
     h.expanded_after += reveal;
+    if bottom + reveal >= file.new_lines.len() {
+        h.expanded_after = h.gap_after; // reached the file tail
+    }
 }
 
 /// Signed `new - old` line-number offset across an unchanged region.
@@ -341,11 +330,7 @@ impl TreeNode {
         match parts {
             [] => {}
             [name] => self.files.push(((*name).to_string(), idx)),
-            [dir, rest @ ..] => self
-                .dirs
-                .entry((*dir).to_string())
-                .or_default()
-                .insert(rest, idx),
+            [dir, rest @ ..] => self.dirs.entry((*dir).to_string()).or_default().insert(rest, idx),
         }
     }
 
@@ -434,9 +419,8 @@ fn sync_body_to_sidebar(model: &ReviewModel, ui: &mut CodeReviewUi, tree: &[Side
     if let Some(SidebarRow::File { file, .. }) = tree.get(ui.sidebar_selected) {
         ui.selected_file = *file;
         let body = flatten(model);
-        if let Some(pos) = body
-            .iter()
-            .position(|r| matches!(r, VRow::FileHeader { file: f } if f == file))
+        if let Some(pos) =
+            body.iter().position(|r| matches!(r, VRow::FileHeader { file: f } if f == file))
         {
             ui.scroll = pos;
         }
@@ -518,12 +502,6 @@ pub fn sidebar_click(model: &mut ReviewModel, ui: &mut CodeReviewUi, row: usize)
     }
 }
 
-/// Whether `(x, y)` falls inside the last-rendered diff body.
-pub const fn in_body(ui: &CodeReviewUi, x: u16, y: u16) -> bool {
-    let r = ui.body_rect.get();
-    r.width > 0 && x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
-}
-
 // ───────────────────────────── rendering ─────────────────────────────
 
 /// Render the Code Review surface into `area`. Records sidebar/body geometry on
@@ -547,7 +525,6 @@ pub fn render(frame: &mut Frame, area: Rect, model: &ReviewModel, ui: &CodeRevie
 
     if model.files.is_empty() {
         ui.sidebar_rect.set(Rect::default());
-        ui.body_rect.set(inner);
         let empty = Paragraph::new(Line::from(Span::styled(
             "  No changes in this worktree.",
             Style::default().fg(MUTED_GRAY),
@@ -587,9 +564,17 @@ pub fn render(frame: &mut Frame, area: Rect, model: &ReviewModel, ui: &CodeRevie
     }
     ui.sidebar_window.set(window);
     ui.sidebar_rect.set(list_area);
-    ui.body_rect.set(cols[1]);
 
-    render_sidebar(frame, cols[0], sidebar_inner, list_area, model, sel, window, &tree);
+    render_sidebar(
+        frame,
+        cols[0],
+        sidebar_inner,
+        list_area,
+        model,
+        sel,
+        window,
+        &tree,
+    );
     render_body(frame, cols[1], model, ui);
 }
 
@@ -698,7 +683,12 @@ fn indent(depth: usize) -> String {
     }
 }
 
-fn sidebar_line(model: &ReviewModel, row: &SidebarRow, selected: bool, name_w: usize) -> Line<'static> {
+fn sidebar_line(
+    model: &ReviewModel,
+    row: &SidebarRow,
+    selected: bool,
+    name_w: usize,
+) -> Line<'static> {
     let marker = if selected { "▶" } else { " " };
     let row_style = if selected {
         Style::default().bg(LIST_HIGHLIGHT_BG)
@@ -817,7 +807,10 @@ fn expand_line(hidden: usize, width: usize) -> Line<'static> {
     let dash: String = "┄".repeat(dashes);
     Line::from(vec![
         Span::styled(format!(" {dash}"), Style::default().fg(MUTED_GRAY)),
-        Span::styled(label, Style::default().fg(MUTED_GRAY).add_modifier(Modifier::DIM)),
+        Span::styled(
+            label,
+            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::DIM),
+        ),
         Span::styled(dash, Style::default().fg(MUTED_GRAY)),
     ])
 }
@@ -867,9 +860,7 @@ mod tests {
     fn hunk(gap_before: usize, gap_after: usize, rows: usize) -> Hunk {
         Hunk {
             old_start: 1,
-            old_len: rows,
             new_start: 1,
-            new_len: rows,
             gap_before,
             gap_after,
             expanded_before: 0,
@@ -896,15 +887,9 @@ mod tests {
         };
         let rows = flatten(&model);
         // Two headers, code rows only for the expanded file (2).
-        let headers = rows
-            .iter()
-            .filter(|r| matches!(r, VRow::FileHeader { .. }))
-            .count();
+        let headers = rows.iter().filter(|r| matches!(r, VRow::FileHeader { .. })).count();
         assert_eq!(headers, 2);
-        let code = rows
-            .iter()
-            .filter(|r| matches!(r, VRow::Code { .. }))
-            .count();
+        let code = rows.iter().filter(|r| matches!(r, VRow::Code { .. })).count();
         assert_eq!(code, 2, "collapsed file must not contribute code rows");
     }
 
@@ -959,9 +944,7 @@ mod tests {
         ];
         let h = Hunk {
             old_start: 10,
-            old_len: 2,
             new_start: 10,
-            new_len: 2,
             gap_before: 5,
             gap_after: 0,
             expanded_before: 0,
@@ -1009,24 +992,27 @@ mod tests {
     }
 
     #[test]
-    fn toggle_collapse_flips_selected_file_and_hides_code() {
+    fn sidebar_activate_collapses_file_and_hides_code() {
         let mut model = ReviewModel {
             files: vec![
                 file("a.rs", false, vec![hunk(0, 0, 2)]),
                 file("b.rs", false, vec![hunk(0, 0, 2)]),
             ],
         };
-        let ui = CodeReviewUi {
-            selected_file: 1,
-            ..Default::default()
-        };
-        toggle_collapse(&mut model, &ui);
+        let mut ui = CodeReviewUi::default();
+        // Point the sidebar at b.rs's row, then activate it (the production toggle
+        // path).
+        let tree = build_sidebar(&model, &ui.collapsed_dirs);
+        ui.sidebar_selected = tree
+            .iter()
+            .position(|r| matches!(r, SidebarRow::File { file: 1, .. }))
+            .expect("b.rs file row");
+        sidebar_activate(&mut model, &mut ui);
         assert!(model.files[1].collapsed);
         assert!(!model.files[0].collapsed);
+        assert_eq!(ui.selected_file, 1);
         let rows = flatten(&model);
-        assert!(!rows
-            .iter()
-            .any(|r| matches!(r, VRow::Code { file: 1, .. })));
+        assert!(!rows.iter().any(|r| matches!(r, VRow::Code { file: 1, .. })));
     }
 
     #[test]
@@ -1063,7 +1049,12 @@ mod tests {
             ],
         };
         let mut ui = CodeReviewUi::default();
-        let headers = file_header_indices(&flatten(&model));
+        let rows = flatten(&model);
+        let headers: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| matches!(r, VRow::FileHeader { .. }).then_some(i))
+            .collect();
         select_file(&model, &mut ui, true);
         assert_eq!(ui.selected_file, 1);
         assert_eq!(ui.scroll, headers[1]);
@@ -1078,9 +1069,7 @@ mod tests {
         f.new_lines = (1..=100).map(|i| format!("line {i}")).collect();
         f.hunks = vec![Hunk {
             old_start: 50,
-            old_len: 2,
             new_start: 50,
-            new_len: 3,
             gap_before: 49,
             gap_after: 0,
             expanded_before: 0,
@@ -1108,7 +1097,10 @@ mod tests {
         let before = model.files[0].hunks[0].rows.len();
         expand_context(&mut model, &ui);
         let after = model.files[0].hunks[0].rows.len();
-        assert!(after > before, "expand must reveal rows ({before} -> {after})");
+        assert!(
+            after > before,
+            "expand must reveal rows ({before} -> {after})"
+        );
         assert_eq!(model.files[0].hunks[0].expanded_before, 10);
         // Revealed rows come from new_lines (line 40..49 precede the hunk top at 50).
         assert_eq!(model.files[0].hunks[0].rows[0].new_lineno, Some(40));
@@ -1117,9 +1109,10 @@ mod tests {
 
     #[test]
     fn renders_large_diff_within_budget() {
+        use std::time::Instant;
+
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
-        use std::time::Instant;
 
         let mut files = Vec::new();
         for fi in 0..10 {
@@ -1138,9 +1131,7 @@ mod tests {
                 .collect();
             let h = Hunk {
                 old_start: 1,
-                old_len: 200,
                 new_start: 1,
-                new_len: 200,
                 gap_before: 0,
                 gap_after: 0,
                 expanded_before: 0,
@@ -1181,18 +1172,12 @@ mod tests {
             matches!(&tree[0], SidebarRow::Dir { name, count, .. } if name == "src" && *count == 2),
             "first row should be the src folder with 2 files"
         );
-        let files = tree
-            .iter()
-            .filter(|r| matches!(r, SidebarRow::File { .. }))
-            .count();
+        let files = tree.iter().filter(|r| matches!(r, SidebarRow::File { .. })).count();
         assert_eq!(files, 3);
         // Collapsing src hides its files (only README.md remains visible).
         let collapsed: HashSet<String> = ["src".to_string()].into_iter().collect();
         let tree2 = build_sidebar(&model, &collapsed);
-        let files2 = tree2
-            .iter()
-            .filter(|r| matches!(r, SidebarRow::File { .. }))
-            .count();
+        let files2 = tree2.iter().filter(|r| matches!(r, SidebarRow::File { .. })).count();
         assert_eq!(files2, 1);
     }
 
@@ -1221,9 +1206,61 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_click_selects_and_hit_tests() {
-        // Rect math: a click outside the recorded sidebar rect returns None.
+    fn sidebar_row_at_maps_clicks_after_render() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        // Before any render the sidebar rect is empty → every click misses.
         let ui = CodeReviewUi::default();
         assert_eq!(sidebar_row_at(&ui, 5, 5), None);
+
+        let model = ReviewModel {
+            files: vec![file("src/a.rs", false, vec![hunk(0, 0, 2)])],
+        };
+        let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        term.draw(|f| render(f, f.size(), &model, &ui)).unwrap();
+
+        // render() recorded the sidebar list rect; clicks inside map to tree rows.
+        let r = ui.sidebar_rect.get();
+        assert!(r.width > 0 && r.height > 0);
+        assert_eq!(sidebar_row_at(&ui, r.x, r.y), Some(0)); // src folder
+        assert_eq!(sidebar_row_at(&ui, r.x + 1, r.y + 1), Some(1)); // a.rs
+        assert_eq!(sidebar_row_at(&ui, r.x + r.width + 3, r.y), None); // outside
+    }
+
+    #[test]
+    fn expand_after_caps_at_new_file_tail() {
+        // gap_after claims 50 hidden (old lines) but the new side has only 8 lines.
+        let mut f = file("a.rs", false, vec![]);
+        f.new_lines = (1..=8).map(|i| format!("L{i}")).collect();
+        f.hunks = vec![Hunk {
+            old_start: 1,
+            new_start: 1,
+            gap_before: 0,
+            gap_after: 50,
+            expanded_before: 0,
+            expanded_after: 0,
+            rows: (1..=3)
+                .map(|i| DiffRow {
+                    kind: RowKind::Context,
+                    old_lineno: Some(i),
+                    new_lineno: Some(i),
+                    raw: format!("L{i}"),
+                    emphasis: vec![],
+                })
+                .collect(),
+        }];
+        let mut model = ReviewModel { files: vec![f] };
+        let ui = CodeReviewUi::default();
+        expand_context(&mut model, &ui);
+        let h = &model.files[0].hunks[0];
+        // Only lines 4..=8 (the 5 available) are revealed — never past the tail.
+        assert_eq!(h.rows.iter().filter_map(|r| r.new_lineno).max(), Some(8));
+        assert!(
+            h.rows.iter().all(|r| !r.raw.is_empty()),
+            "no blank context rows"
+        );
+        // The affordance closes once the new content is exhausted.
+        assert_eq!(h.expanded_after, h.gap_after);
     }
 }

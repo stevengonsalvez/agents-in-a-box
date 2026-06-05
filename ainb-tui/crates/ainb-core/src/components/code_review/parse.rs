@@ -1,6 +1,7 @@
-// ABOUTME: Build a structured ReviewModel from git changes using git2 + similar.
-// git2 enumerates changed files and supplies old (HEAD) / new (workdir) content;
-// similar re-diffs each file to produce hunks with word-level emphasis.
+// ABOUTME: Build a structured ReviewModel from git changes using git2 +
+// similar. git2 enumerates changed files and supplies old (HEAD) / new
+// (workdir) content; similar re-diffs each file to produce hunks with
+// word-level emphasis.
 
 use std::path::Path;
 
@@ -17,8 +18,12 @@ const CONTEXT_RADIUS: usize = 3;
 /// Bytes scanned when sniffing for a NUL (binary marker).
 const BINARY_SNIFF: usize = 8192;
 
-/// Build a [`ReviewModel`] of the working directory's open changes (HEAD vs workdir,
-/// staged and unstaged, plus untracked files).
+/// Build a [`ReviewModel`] of the working directory's open changes.
+///
+/// The diff is HEAD-vs-workdir (the file as committed vs the file on disk), so
+/// it shows the net of staged + unstaged edits, plus untracked and deleted
+/// files. A change that is staged then reverted in the working tree therefore
+/// shows nothing.
 pub fn build_review_model(worktree: &Path) -> Result<ReviewModel> {
     let repo = Repository::open(worktree)?;
 
@@ -96,8 +101,9 @@ fn map_status(s: Status) -> Option<GitFileStatus> {
     None
 }
 
-/// Fetch `(old, new, is_binary)` content for a path. Old comes from the HEAD blob
-/// (empty for added/untracked); new from the workdir file (empty for deleted).
+/// Fetch `(old, new, is_binary)` content for a path. Old comes from the HEAD
+/// blob (empty for added/untracked); new from the workdir file (empty for
+/// deleted).
 fn file_contents(
     repo: &Repository,
     worktree: &Path,
@@ -111,12 +117,8 @@ fn file_contents(
         std::fs::read(worktree.join(path)).ok()
     };
     let binary = is_binary(old_bytes.as_deref()) || is_binary(new_bytes.as_deref());
-    let old = old_bytes
-        .map(|b| String::from_utf8_lossy(&b).into_owned())
-        .unwrap_or_default();
-    let new = new_bytes
-        .map(|b| String::from_utf8_lossy(&b).into_owned())
-        .unwrap_or_default();
+    let old = old_bytes.map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+    let new = new_bytes.map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
     (old, new, binary)
 }
 
@@ -135,11 +137,7 @@ fn is_binary(bytes: Option<&[u8]>) -> bool {
 
 /// Number of text lines (a trailing newline does not add an empty final line).
 fn count_lines(s: &str) -> usize {
-    if s.is_empty() {
-        0
-    } else {
-        s.lines().count()
-    }
+    if s.is_empty() { 0 } else { s.lines().count() }
 }
 
 /// Re-diff `old` vs `new` into hunks (with word-level emphasis) and return the
@@ -203,8 +201,6 @@ fn diff_to_hunks(old: &str, new: &str) -> (Vec<Hunk>, usize, usize) {
         let old_first = rows.iter().find_map(|r| r.old_lineno).unwrap_or(0);
         let new_first = rows.iter().find_map(|r| r.new_lineno).unwrap_or(0);
         let old_last = rows.iter().filter_map(|r| r.old_lineno).next_back();
-        let old_len = rows.iter().filter(|r| r.old_lineno.is_some()).count();
-        let new_len = rows.iter().filter(|r| r.new_lineno.is_some()).count();
         let gap_before = old_first.saturating_sub(prev_old_end + 1);
         if let Some(last) = old_last {
             prev_old_end = last;
@@ -212,9 +208,7 @@ fn diff_to_hunks(old: &str, new: &str) -> (Vec<Hunk>, usize, usize) {
 
         hunks.push(Hunk {
             old_start: old_first,
-            old_len,
             new_start: new_first,
-            new_len,
             gap_before,
             gap_after: 0,
             expanded_before: 0,
@@ -246,18 +240,10 @@ mod tests {
         assert!(kinds.contains(&RowKind::Removed));
         assert!(kinds.contains(&RowKind::Added));
         // The removed row is old line 2, the added row is new line 2.
-        let removed = hunks[0]
-            .rows
-            .iter()
-            .find(|r| r.kind == RowKind::Removed)
-            .unwrap();
+        let removed = hunks[0].rows.iter().find(|r| r.kind == RowKind::Removed).unwrap();
         assert_eq!(removed.old_lineno, Some(2));
         assert_eq!(removed.new_lineno, None);
-        let added = hunks[0]
-            .rows
-            .iter()
-            .find(|r| r.kind == RowKind::Added)
-            .unwrap();
+        let added = hunks[0].rows.iter().find(|r| r.kind == RowKind::Added).unwrap();
         assert_eq!(added.new_lineno, Some(2));
     }
 
@@ -266,11 +252,7 @@ mod tests {
         let old = "use a::{X};\n";
         let new = "use a::{Y, X};\n";
         let (hunks, _, _) = diff_to_hunks(old, new);
-        let added = hunks
-            .iter()
-            .flat_map(|h| &h.rows)
-            .find(|r| r.kind == RowKind::Added)
-            .unwrap();
+        let added = hunks.iter().flat_map(|h| &h.rows).find(|r| r.kind == RowKind::Added).unwrap();
         assert!(!added.emphasis.is_empty(), "expected word emphasis");
         // The emphasized span must be a strict subset of the line, not the whole line.
         let total: usize = added.emphasis.iter().map(|(s, e)| e - s).sum();
@@ -281,11 +263,7 @@ mod tests {
             added.raw
         );
         // And the emphasized text should include the inserted token `Y`.
-        let emphasized: String = added
-            .emphasis
-            .iter()
-            .map(|&(s, e)| &added.raw[s..e])
-            .collect();
+        let emphasized: String = added.emphasis.iter().map(|&(s, e)| &added.raw[s..e]).collect();
         assert!(emphasized.contains('Y'), "emphasized was {emphasized:?}");
     }
 

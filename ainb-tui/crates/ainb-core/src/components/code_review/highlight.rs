@@ -34,9 +34,11 @@ pub const BAR_ADD: Color = Color::Rgb(80, 250, 123);
 pub const BAR_DEL: Color = Color::Rgb(255, 85, 85);
 /// Muted gutter line-number color (Dracula comment gray).
 pub const GUTTER_FG: Color = Color::Rgb(98, 114, 164);
-/// Plain foreground (Dracula foreground) used when syntax highlighting is skipped.
+/// Plain foreground (Dracula foreground) used when syntax highlighting is
+/// skipped.
 const PLAIN_FG: Color = Color::Rgb(248, 248, 242);
-/// Lines longer than this skip syntax highlighting and word-emphasis to stay responsive.
+/// Lines longer than this many bytes skip syntax highlighting and word-emphasis
+/// to stay responsive (minified bundles, data blobs).
 const MAX_HIGHLIGHT_LEN: usize = 2000;
 
 /// Syntax-highlight a single line into syntect `(style, text)` runs using the
@@ -49,11 +51,10 @@ pub fn highlight_line(line: &str, language: Option<&str>) -> Vec<(SyntectStyle, 
         .and_then(|lang| SYNTAXES.find_syntax_by_token(lang))
         .unwrap_or_else(|| SYNTAXES.find_syntax_plain_text());
     let mut highlighter = HighlightLines::new(syntax, &DRACULA);
-    // Some grammars require the trailing newline to terminate a line; add then strip.
+    // Some grammars require the trailing newline to terminate a line; add then
+    // strip.
     let with_nl = format!("{line}\n");
-    let ranges = highlighter
-        .highlight_line(&with_nl, &SYNTAXES)
-        .unwrap_or_default();
+    let ranges = highlighter.highlight_line(&with_nl, &SYNTAXES).unwrap_or_default();
     ranges
         .into_iter()
         .map(|(style, text)| (style, text.trim_end_matches('\n').to_string()))
@@ -61,10 +62,12 @@ pub fn highlight_line(line: &str, language: Option<&str>) -> Vec<(SyntectStyle, 
         .collect()
 }
 
-/// Highlight a diff row and layer the diff-tint background under the syntax foreground.
+/// Highlight a diff row and layer the diff-tint background under the syntax
+/// foreground.
 ///
-/// The row tint (and a brighter tint over the `emphasis` byte ranges) becomes the
-/// background while syntect's foreground is preserved; context rows get no background.
+/// The row tint (and a brighter tint over the `emphasis` byte ranges) becomes
+/// the background while syntect's foreground is preserved; context rows get no
+/// background.
 pub fn highlight_row(
     raw: &str,
     language: Option<&str>,
@@ -231,5 +234,19 @@ mod tests {
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].style.bg, Some(ADD_TINT));
         assert!(spans.iter().all(|s| s.style.bg != Some(ADD_TINT_BRIGHT)));
+    }
+
+    #[test]
+    fn long_multibyte_line_skips_highlight_without_panicking() {
+        // The cap is on bytes, but a multi-byte char must never be sliced
+        // mid-codepoint. 700 euro signs = 2100 bytes (3 each) >
+        // MAX_HIGHLIGHT_LEN, with no ASCII boundary.
+        let long = "€".repeat(700);
+        assert!(long.len() > MAX_HIGHLIGHT_LEN);
+        let spans = highlight_row(&long, Some("rust"), &[(0, 9)], RowKind::Removed);
+        // Single plain, row-tinted span; the multibyte content survives intact.
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].style.bg, Some(DEL_TINT));
+        assert_eq!(spans[0].content.as_ref(), long);
     }
 }
