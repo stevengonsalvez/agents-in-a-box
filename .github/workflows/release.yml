@@ -210,6 +210,14 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # The build runs in ainb-tui, which pins the toolchain via
+      # rust-toolchain.toml (not the `stable` dtolnay installed the target for).
+      # Add the target's std to the *pinned* toolchain so cross-compiling
+      # x86_64-apple-darwin on the ARM runner can find `core` (no-op for native
+      # targets). Runs in ${{ env.WORKING_DIR }} via the job-level default.
+      - name: Add target std to the pinned toolchain
+        run: rustup target add ${{ matrix.target }}
+
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
