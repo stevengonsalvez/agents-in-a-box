@@ -67,13 +67,14 @@ bundled-skills:
       - ACP/Discord auto-notify patterns for completion tracking
       - References /cloud-coding-agent for long-running cloud tasks
 
-  - name: webapp-testing
-    path: packages/skills/webapp-testing
-    purpose: "Playwright-based web app testing and browser automation"
+  - name: agentmail
+    path: packages/skills/agentmail
+    purpose: "Disposable email inboxes via myagentinbox.com for tests, signup/OTP/magic-link capture (REST-first, no MCP)"
     features:
-      - Browser screenshot capture
-      - UI element interaction
-      - End-to-end testing workflows
+      - 24h-lifetime disposable inboxes via plain REST
+      - Polling helpers with timeout
+      - Verification-code and magic-link extractors
+      - Tool-neutral state file under .agents/agentmail/
 
   - name: crypto-research
     path: packages/skills/crypto-research
@@ -657,12 +658,18 @@ nanoclaw-skills:
       purpose: "Continuous self-improvement through structured reflection and memory"
     - name: build-tracker
       purpose: "Recurring build tracker cron for stale PRs, issues, and phase progress (Discord notifications)"
+    - name: self-customize
+      purpose: "Customize NanoClaw agent behavior and persona configuration"
+    - name: welcome
+      purpose: "NanoClaw onboarding / welcome flow for new agent sessions"
 
     # --- Coding agents (NanoClaw-native Task-vs-tmux delegation patterns) ---
     - name: cloud-coding-agent
       purpose: "Run long-running coding tasks in cloud environments (Claude Code or Codex), with session teleporting and automatic PR creation"
     - name: oracle
       purpose: "Best practices for the oracle CLI (prompt + file bundling, engines, sessions, attachments)"
+    - name: frontend-engineer
+      purpose: "Frontend engineering subagent — build and optimize web UIs (delegated to by vercel-cli)"
 
     # --- Notes & productivity ---
     - name: apple-notes
@@ -703,6 +710,13 @@ nanoclaw-skills:
     - name: bitwarden
       homepage: "https://bitwarden.com/help/cli/"
       purpose: "Manage secrets via Bitwarden CLI (bw) — load into memory on demand, die with shell session"
+    - name: onecli-gateway
+      purpose: "Transparent HTTPS proxy that injects stored credentials into outbound API calls (no OAuth CLIs)"
+
+    # --- Deployment ---
+    - name: vercel-cli
+      homepage: "https://vercel.com/docs/cli"
+      purpose: "Deploy apps to Vercel; manage projects, domains, and environment variables"
 
     # --- Media ---
     - name: video-frames

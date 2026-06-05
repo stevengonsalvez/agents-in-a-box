@@ -34,6 +34,27 @@ fi
 expect-cli --version
 ```
 
+### First-run Playwright browser install (gotcha)
+
+expect-cli ships with its OWN pinned `playwright-core` version. The system-wide `npx playwright install` installs whatever's LATEST, which expect-cli won't find. First-run symptom:
+
+```
+Failed to launch browser: ... Executable doesn't exist at
+.../chromium_headless_shell-1217/...
+```
+
+**Fix** — install via expect-cli's bundled playwright:
+
+```bash
+# Headed mode (uses chromium)
+node $(npm root -g)/expect-cli/node_modules/playwright-core/cli.js install chromium
+
+# Headless mode (uses chromium-headless-shell)
+node $(npm root -g)/expect-cli/node_modules/playwright-core/cli.js install chromium-headless-shell
+```
+
+That downloads the exact version expect-cli pins. **Without this, the TUI's LLM-driven planner will detect the missing binary and wander into setup/install tangents that burn 2-3 minutes of tokens on `npx playwright install` + `ls node_modules` + project introspection BEFORE running any actual browser step.**
+
 ## Usage
 
 ### Auto-detect changes and test
@@ -154,6 +175,63 @@ expect-cli close
 
 These atomic commands don't need tmux (they return immediately), don't require a mission
 string, and don't block on the install prompt.
+
+### Scripted-walkthrough pattern (RECOMMENDED for agent flows)
+
+**This is the most reliable agent mode** — fully deterministic, no LLM planning step, no token burn on irrelevant tangents. Drive the whole flow via `expect-cli playwright <code>` atomic commands.
+
+```bash
+# 1) Open browser to starting URL
+expect-cli open http://localhost:5160/login --browser chromium --headed --wait-until domcontentloaded
+
+# 2) Drive interactions via raw playwright code
+expect-cli playwright "await page.fill('input[type=email]', 'coach1@shot.com'); \
+  await page.fill('input[type=password]', 'th3SHOT123'); \
+  await page.click('button[type=submit]'); \
+  await page.waitForURL(/\/home|\/perform/, {timeout: 15000})" \
+  --description "Login coach1"
+
+# 3) Navigate + assert via page.evaluate (must use page.evaluate — NOT bare document.x)
+expect-cli playwright "await page.goto('http://localhost:5160/perform?tab=team', {waitUntil: 'domcontentloaded'}); \
+  await page.waitForTimeout(2500); \
+  return await page.evaluate(() => ({ \
+    title: document.title, \
+    bodyText: (document.body.innerText || '').slice(0, 200), \
+    playerCount: (document.body.innerText.match(/Player /gi) || []).length \
+  }));"
+
+# 4) Capture screenshot
+expect-cli screenshot --full-page
+
+# 5) Inspect what happened
+expect-cli console_logs
+expect-cli network_requests --url supabase
+
+# 6) Close at end
+expect-cli close
+```
+
+**Why this beats the TUI mission flow:**
+
+| Concern | TUI mission flow | Scripted atomic flow |
+|---|---|---|
+| Token cost | High (LLM plans + executes + reports) | Low (deterministic shell) |
+| Reproducibility | Variable (LLM may classify failures differently) | Exact (same script same result) |
+| Time-to-first-action | 2-5 min (planner reads SKILL.md, greps source) | <10s (instant) |
+| Failure mode clarity | Opaque (`category=app-bug` with no detail) | Direct (you control the assertion) |
+| Browser install drama | LLM may try `npx playwright install` mid-test | Solved upfront (see prerequisite) |
+
+**Critical gotchas in `expect-cli playwright <code>`:**
+
+1. **MUST use `page.evaluate(() => {...})`** to access DOM — bare `document.x` outside `evaluate` errors with `document is not defined` (the code runs in Node, not the page).
+2. **Return value must be JSON-serialisable** — pass arrays/objects, not DOM nodes or Promises.
+3. **For text matching, use `document.body.innerText`** then regex against the string. Selector-based existence checks via `document.querySelector` work too.
+4. **Anchor-or-button discovery**: many SHOT UI elements are `<button>` not `<a>` (per perform-redesign walk 2026-05-19). Probe for BOTH before assuming click target shape:
+   ```js
+   const anchors = Array.from(document.querySelectorAll('a[href]')).filter(a => a.offsetParent !== null);
+   const buttons = Array.from(document.querySelectorAll('button')).filter(b => b.offsetParent !== null);
+   ```
+5. **`networkidle` is flaky against apps with realtime sockets** (Supabase, Firebase live queries) — they keep the network busy indefinitely. Use `domcontentloaded` + `waitForTimeout(2500)` or wait for a specific element instead.
 
 ## CLI Reference
 
@@ -363,6 +441,20 @@ Results include:
 - Session recording URL for replay
 - Specific failure descriptions (e.g., "element not found", "wrong color value")
 
+### Failure classification taxonomy (TUI mode)
+
+The TUI agent attaches a `category=...; domain=...` label to each ✘ failure. Decoded:
+
+| Category | Meaning | Examples | Agent action |
+|---|---|---|---|
+| `app-bug` | Real application behavior mismatch | Element missing, wrong nav target, broken render | File a bead; this is the test's job |
+| `env-issue` | Infrastructure / setup / auth problem | Dev server down, login failed, network 5xx, fixture data absent | Fix the env, don't blame the app |
+| `timeout` | Assertion timeout | Element never appeared, page never settled | Often = data not loading; check the env first |
+
+When you see `env-issue` consecutively across early steps (login + landing), it almost always means **the test infrastructure isn't ready** (dev server pointing at wrong DB, missing test users, missing test data). Fix the env before chasing `app-bug` reports.
+
+**The scripted atomic-flow pattern (above) sidesteps this entirely** — you control the assertions so failure classification is just your shell exit code + the returned object.
+
 ## Limitations
 
 - Early stage tool (v0.0.x) — may crash on complex scenarios
@@ -370,6 +462,9 @@ Results include:
 - Requires a running dev server on localhost
 - No custom Playwright config — browser is fully managed
 - Interactive TUI — must use `-y` flag or run in tmux for automation
+- **Headed mode steals window focus** — when the user has Chrome open for other work, prefer `--browser-mode headless` (TUI) or `expect-cli open … --browser chromium` without `--headed` (atomic). Only use `--headed` when the user explicitly wants to watch.
+- **Per-step screenshots NOT saved to disk by default** — `expect-cli screenshot` saves under `/tmp/expect-artifacts/screenshot-{n}.png`, but mid-`expect-cli playwright` steps don't auto-capture. Use the `.webm` video + ffmpeg, OR call `expect-cli screenshot` explicitly between steps in scripted flows.
+- **TUI mission planner can wander 2-5 min on first run** — bundled Playwright browser install + project introspection. Pre-install via the Prerequisites section's command, or skip the TUI entirely and use the scripted atomic-flow pattern.
 
 ## Environment
 
