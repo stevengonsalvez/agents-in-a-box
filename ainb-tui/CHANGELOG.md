@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.3] - 2026-06-05
+### Added
+- **skills**: add agentmail disposable-inbox skill
+- **skills**: add test-ainb 5-layer ainb test runner
+- **skills**: swarm v2 watchdog, cross-provider, and attach-watchdog
+- **statusline**: show reasoning effort and fast-mode on line 2
+- **tui**: simplify the session-screen starter content
+
+### Fixed
+- Merge pull request #223 from stevengonsalvez/fix-onboarding-ux
+- **tui**: advance the onboarding wizard with the right arrow on every step
+- **tui**: keep the starter tip on one line for the per-line markdown styler
+
+### Other
+- Merge pull request #221 from stevengonsalvez/worktree-sync-learnings
+- **bootstrap**: drop webapp-testing browser-tools compile step
+- **deps**: track skill inventory changes
+- **skills**: remove compound-docs
+- **skills**: sync skill updates from user-level
+- remove webapp-testing skill and stray agent yamls
+
+
 ## [1.4.2] - 2026-06-05
 ### Added
 - Merge pull request #216 from stevengonsalvez/feat/diff
