@@ -735,6 +735,12 @@ fn build_live_widget_spans(live: &crate::models::live_window::LiveWindow) -> Vec
             format!(" {pct}%"),
             Style::default().fg(bar_color_5h(pct)).add_modifier(Modifier::BOLD),
         ));
+        if let Some(reset) = live.five_hour_resets_at {
+            out.push(Span::styled(
+                format!(" ↻ {}", format_reset_at(reset)),
+                Style::default().fg(MUTED_GRAY),
+            ));
+        }
     }
     if let Some(pct) = live.seven_day_pct {
         if !out.is_empty() {
@@ -749,19 +755,20 @@ fn build_live_widget_spans(live: &crate::models::live_window::LiveWindow) -> Vec
             format!(" {pct}%"),
             Style::default().fg(bar_color_7d(pct)).add_modifier(Modifier::BOLD),
         ));
+        if let Some(reset) = live.seven_day_resets_at {
+            out.push(Span::styled(
+                format!(" ↻ {}", format_reset_at(reset)),
+                Style::default().fg(MUTED_GRAY),
+            ));
+        }
     }
     // today_cost_usd intentionally not rendered: Claude Code's
     // /cost/total_cost_usd is the lifetime cost of a *single* session
     // (whichever invoked the statusline most recently), not today's
     // total. Misleading at a glance — keep the field on the cache
-    // schema but don't surface it.
-    if let Some(d) = live.resets_in {
-        if !out.is_empty() {
-            out.push(Span::styled(" · ", Style::default().fg(SUBDUED_BORDER)));
-        }
-        out.push(Span::styled("⏱ ", Style::default().fg(SOFT_WHITE)));
-        out.push(Span::styled(format_hms(d), Style::default().fg(SOFT_WHITE)));
-    }
+    // schema but don't surface it. The old combined "⏱ Xh Ym" countdown
+    // was likewise dropped in favour of the absolute per-window reset
+    // instants ("↻ <date> <time>") rendered next to each bar above.
     out
 }
 
@@ -809,15 +816,11 @@ fn bar_color_7d(pct: u8) -> Color {
     }
 }
 
-fn format_hms(d: std::time::Duration) -> String {
-    let total = d.as_secs();
-    let h = total / 3600;
-    let m = (total % 3600) / 60;
-    if h > 0 {
-        format!("{h}h {m:02}m")
-    } else {
-        format!("{m}m")
-    }
+/// Format an absolute quota-reset instant for the top bar, in the
+/// viewer's local timezone: e.g. `Jun 8 05:00`. Date + time so both the
+/// 5-hour (same/next-day) and weekly (days-out) windows read unambiguously.
+fn format_reset_at(reset: chrono::DateTime<chrono::Utc>) -> String {
+    reset.with_timezone(&chrono::Local).format("%b %-d %H:%M").to_string()
 }
 
 #[cfg(test)]
@@ -843,11 +846,14 @@ mod live_widget_tests {
 
     #[test]
     fn live_widget_renders_5h_7d_and_reset() {
+        use chrono::{TimeZone, Utc};
         let live = LiveWindow {
             five_hour_pct: Some(40),
             seven_day_pct: Some(8),
             today_cost_usd: Some(1.5),
             resets_in: Some(Duration::from_secs(2 * 3600)),
+            five_hour_resets_at: Some(Utc.with_ymd_and_hms(2026, 6, 8, 5, 0, 0).unwrap()),
+            seven_day_resets_at: Some(Utc.with_ymd_and_hms(2026, 6, 12, 5, 0, 0).unwrap()),
             context_pct: None,
             model: None,
             source: Source::Tier1Cache,
@@ -862,7 +868,10 @@ mod live_widget_tests {
         // it's a single session's lifetime cost, not today's total.
         assert!(!text.contains("$"));
         assert!(!text.contains("today"));
-        assert!(text.contains("2h 00m"));
+        // The combined "⏱ Xh Ym" countdown is gone; each window now carries
+        // its own absolute reset stamp prefixed by ↻ (local-tz date+time).
+        assert!(!text.contains("⏱"));
+        assert_eq!(text.matches('↻').count(), 2, "one reset stamp per window");
     }
 
     #[test]
@@ -872,6 +881,8 @@ mod live_widget_tests {
             seven_day_pct: None,
             today_cost_usd: None,
             resets_in: None,
+            five_hour_resets_at: None,
+            seven_day_resets_at: None,
             context_pct: None,
             model: None,
             source: Source::Tier1Cache,
@@ -882,6 +893,7 @@ mod live_widget_tests {
         assert!(!text.contains("wk"));
         assert!(!text.contains("$"));
         assert!(!text.contains("⏱"));
+        assert!(!text.contains("↻"), "no reset stamp when instants absent");
     }
 
     #[test]
@@ -912,10 +924,54 @@ mod live_widget_tests {
     }
 
     #[test]
-    fn format_hms_smoke() {
-        assert_eq!(format_hms(Duration::ZERO), "0m");
-        assert_eq!(format_hms(Duration::from_secs(45 * 60)), "45m");
-        assert_eq!(format_hms(Duration::from_secs(3600)), "1h 00m");
+    fn format_reset_at_is_local_date_and_time() {
+        use chrono::{TimeZone, Utc};
+        let reset = Utc.with_ymd_and_hms(2026, 6, 8, 5, 0, 0).unwrap();
+        let s = format_reset_at(reset);
+        // Host-local tz varies, but the rendered shape is fixed:
+        // "<Mon> <D> <HH>:<MM>" — three space-separated parts.
+        let parts: Vec<&str> = s.split(' ').collect();
+        assert_eq!(parts.len(), 3, "expected `Mon D HH:MM`, got {s:?}");
+        // Month: 3-letter English abbreviation (chrono's %b, locale-independent).
+        assert_eq!(parts[0].len(), 3, "month abbrev: {s:?}");
+        assert!(
+            parts[0].chars().all(|c| c.is_ascii_alphabetic()),
+            "month abbrev: {s:?}"
+        );
+        // Day: 1–2 digits, no zero-pad (%-d).
+        assert!(
+            (1..=2).contains(&parts[1].len()) && parts[1].chars().all(|c| c.is_ascii_digit()),
+            "day numeral: {s:?}"
+        );
+        // Clock: zero-padded HH:MM.
+        let clock: Vec<&str> = parts[2].split(':').collect();
+        assert_eq!(clock.len(), 2, "HH:MM: {s:?}");
+        assert!(
+            clock[0].len() == 2 && clock[0].bytes().all(|b| b.is_ascii_digit()),
+            "HH: {s:?}"
+        );
+        assert!(
+            clock[1].len() == 2 && clock[1].bytes().all(|b| b.is_ascii_digit()),
+            "MM: {s:?}"
+        );
+    }
+
+    // format_reset_at runs in the per-frame render path, so it must never
+    // panic regardless of the instant handed to it. Exercise the extremes
+    // of chrono's representable range plus the epoch boundary; the test
+    // passing at all (no panic/unwind) is the assertion.
+    #[test]
+    fn format_reset_at_never_panics_on_extreme_instants() {
+        use chrono::{TimeZone, Utc};
+        let cases = [
+            Utc.timestamp_opt(0, 0).unwrap(),
+            Utc.with_ymd_and_hms(1, 1, 1, 0, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(1970, 1, 1, 0, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(9999, 12, 31, 23, 59, 59).unwrap(),
+        ];
+        for c in cases {
+            assert!(!format_reset_at(c).is_empty(), "non-empty for {c}");
+        }
     }
 }
 
