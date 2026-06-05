@@ -6272,18 +6272,13 @@ impl AppState {
     ///
     /// Transition from PickRepo → Configure for a given source. Extracted so
     /// both the events.rs dispatcher and the async auth-check handler can call it.
-    pub fn advance_pick_repo_to_configure(
-        &mut self,
-        source: crate::git::repo_source::RepoSource,
-    ) {
+    pub fn advance_pick_repo_to_configure(&mut self, source: crate::git::repo_source::RepoSource) {
         use crate::components::new_session::configure::ConfigureState;
         use crate::config::session_defaults::SessionDefaults;
         use crate::git::repo_source::head_branch;
 
-        if let Some(pick) = self
-            .new_session_state
-            .as_ref()
-            .and_then(|ns| ns.pick_repo_state.as_ref())
+        if let Some(pick) =
+            self.new_session_state.as_ref().and_then(|ns| ns.pick_repo_state.as_ref())
         {
             let path = SessionDefaults::default_path();
             if let Err(err) = pick.defaults.save_to(&path) {
@@ -6342,7 +6337,11 @@ impl AppState {
     async fn check_git_auth(&mut self) {
         use crate::components::new_session::pick_repo::GitAuthStatus;
 
-        let auth_ok = tokio::task::spawn_blocking(|| {
+        // Bound the probe: a hung `gh` (network stall, credential helper
+        // wedged) must not leave the picker stuck in `Checking` forever.
+        // Timeout and task-panic both fail closed → NotAuthenticated, with a
+        // warning so the cause is visible in the logs.
+        let auth_check = tokio::task::spawn_blocking(|| {
             std::process::Command::new("gh")
                 .args(["auth", "status", "--hostname", "github.com"])
                 .env("GIT_TERMINAL_PROMPT", "0")
@@ -6351,14 +6350,21 @@ impl AppState {
                 .status()
                 .map(|s| s.success())
                 .unwrap_or(false)
-        })
-        .await
-        .unwrap_or(false);
+        });
+        let auth_ok = match tokio::time::timeout(Duration::from_secs(5), auth_check).await {
+            Ok(Ok(ok)) => ok,
+            Ok(Err(join_err)) => {
+                tracing::warn!(error = %join_err, "GitHub auth check task panicked");
+                false
+            }
+            Err(_) => {
+                tracing::warn!("GitHub auth check timed out after 5s");
+                false
+            }
+        };
 
-        if let Some(pick) = self
-            .new_session_state
-            .as_mut()
-            .and_then(|ns| ns.pick_repo_state.as_mut())
+        if let Some(pick) =
+            self.new_session_state.as_mut().and_then(|ns| ns.pick_repo_state.as_mut())
         {
             if auth_ok {
                 tracing::info!("GitHub auth check passed");
