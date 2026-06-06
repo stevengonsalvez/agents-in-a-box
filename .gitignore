@@ -27,7 +27,7 @@ logs/
 .idea/
 .code/
 
-# Claude local state (keep the canonical skills symlink tracked)
+# Claude local state (keep the canonical skills dir tracked)
 .claude/*
 !.claude/skills
 
