@@ -43,10 +43,10 @@ Thumbs.db
 # Override parent .gitignore's blanket `.claude/` ignore so project-local
 # skills travel with the repo. Re-include the directory FIRST (git can't
 # unignore children if the parent is excluded), then ignore everything
-# inside it except `skills/`.
+# inside it except `skills` (a symlink to the repo-root .claude/skills).
 !.claude/
 .claude/*
-!.claude/skills/
+!.claude/skills
 worktrees/
 
 # Testing
@@ -65,3 +65,8 @@ AmazonQ.md
 test-logs/
 tests/recordings/
 ainb-tui/crates/ainb-plugin-burndown/target/
+
+# Agent/session output scratch (local-only, not tracked)
+/plans/
+/research/
+/HANDOVER.md

@@ -44,8 +44,19 @@ pub struct LiveWindow {
     pub five_hour_pct: Option<u8>,
     pub seven_day_pct: Option<u8>,
     pub today_cost_usd: Option<f64>,
-    /// Time until the active window resets, when known.
+    /// Time until the soonest active window resets, when known. Currently
+    /// unused within ainb-core — the top bar renders the absolute per-window
+    /// instants (`five_hour_resets_at` / `seven_day_resets_at`) instead —
+    /// but kept on the struct for potential countdown consumers. NB: the
+    /// burndown plugin has its own separate `LiveWindow` and does not read
+    /// this field.
     pub resets_in: Option<Duration>,
+    /// Absolute instant the 5-hour window resets, when known. Drives the
+    /// top bar's "↻ <date> <time>" affordance for the 5h quota.
+    pub five_hour_resets_at: Option<DateTime<Utc>>,
+    /// Absolute instant the 7-day window resets, when known. Drives the
+    /// top bar's "↻ <date> <time>" affordance for the weekly quota.
+    pub seven_day_resets_at: Option<DateTime<Utc>>,
     pub context_pct: Option<u8>,
     pub model: Option<String>,
     pub source: Source,
@@ -112,6 +123,18 @@ fn cache_is_fresh(cache: &LiveCache) -> bool {
 fn window_from_cache(cache: LiveCache) -> LiveWindow {
     // Pick the soonest reset (5h is almost always the visible one, but
     // honour 7d if 5h is missing).
+    let five_hour_resets_at = cache
+        .five_hour
+        .as_ref()
+        .and_then(|w| w.resets_at.as_deref())
+        .and_then(instant_from_iso8601);
+    let seven_day_resets_at = cache
+        .seven_day
+        .as_ref()
+        .and_then(|w| w.resets_at.as_deref())
+        .and_then(instant_from_iso8601);
+
+    // Soonest reset, for the countdown-style `resets_in` consumers.
     let resets_in = cache
         .five_hour
         .as_ref()
@@ -130,10 +153,21 @@ fn window_from_cache(cache: LiveCache) -> LiveWindow {
         seven_day_pct: cache.seven_day.as_ref().map(|w| w.pct),
         today_cost_usd: cache.today_cost_usd,
         resets_in,
+        five_hour_resets_at,
+        seven_day_resets_at,
         context_pct: cache.context_pct,
         model: cache.model,
         source: Source::Tier1Cache,
     }
+}
+
+/// Parse an ISO8601 `resets_at` into an absolute UTC instant. Returns
+/// `None` when the timestamp is unparseable. Unlike
+/// [`duration_until_iso8601`], a past instant is preserved so callers can
+/// decide how to render it — though the Tier 1 freshness gate (≤120s)
+/// means the cache's reset instants are effectively always in the future.
+pub fn instant_from_iso8601(s: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(s).ok().map(|dt| dt.with_timezone(&Utc))
 }
 
 /// Convert an ISO8601 `resets_at` into a `Duration` from now. Returns
@@ -165,6 +199,11 @@ fn current_tier2() -> Option<LiveWindow> {
         seven_day_pct: None,
         today_cost_usd: block.total_cost_usd,
         resets_in: Some(time_until_block_end(&block, Utc::now())),
+        // Checked add so a corrupt/extreme block start can never panic the
+        // render path — on overflow it degrades to "no reset shown".
+        five_hour_resets_at: block.start.checked_add_signed(chrono::Duration::hours(5)),
+        // Tier 2 has only local data — the weekly window isn't derivable.
+        seven_day_resets_at: None,
         context_pct: None,
         model: None,
         source: Source::Tier2Local,
@@ -238,9 +277,14 @@ pub fn current_active_block(calls: &[ProviderCall], now: DateTime<Utc>) -> Optio
 
     let block = block?;
     // Block is active iff `now` falls within (start, start + 5h] AND
-    // we've seen activity in the last 5h.
-    let block_end = block.start + chrono::Duration::hours(5);
-    let now_in_block = now > block.start && now <= block_end;
+    // we've seen activity in the last 5h. Checked add so a corrupt/extreme
+    // block start can never panic the render path; on overflow block.start
+    // is already near the representable max, so `now` is always within it.
+    let now_in_block = now > block.start
+        && match block.start.checked_add_signed(chrono::Duration::hours(5)) {
+            Some(block_end) => now <= block_end,
+            None => true,
+        };
     let recent_activity = now.signed_duration_since(block.last_entry).num_hours() < 5;
     if now_in_block && recent_activity {
         Some(block)
@@ -265,7 +309,11 @@ fn floor_to_hour(t: DateTime<Utc>) -> DateTime<Utc> {
 }
 
 fn time_until_block_end(block: &ActiveBlock, now: DateTime<Utc>) -> Duration {
-    let end = block.start + chrono::Duration::hours(5);
+    // Checked add so a corrupt/extreme block start can never panic the
+    // render path; overflow falls back to ZERO (no countdown shown).
+    let Some(end) = block.start.checked_add_signed(chrono::Duration::hours(5)) else {
+        return Duration::ZERO;
+    };
     let secs = end.signed_duration_since(now).num_seconds();
     if secs <= 0 {
         Duration::ZERO
@@ -461,5 +509,36 @@ mod tests {
         assert_eq!(w.context_pct, Some(40));
         assert_eq!(w.model.as_deref(), Some("Opus"));
         assert!(w.resets_in.unwrap().as_secs() > 0);
+        // 5h had a resets_at → absolute instant in the future; 7d didn't.
+        let five = w.five_hour_resets_at.expect("5h reset instant");
+        assert!(five > Utc::now());
+        assert!(w.seven_day_resets_at.is_none());
+    }
+
+    #[test]
+    fn instant_from_iso8601_parses_and_rejects_garbage() {
+        let ts = "2026-06-08T05:00:00Z";
+        let parsed = instant_from_iso8601(ts).expect("valid rfc3339");
+        assert_eq!(parsed, Utc.with_ymd_and_hms(2026, 6, 8, 5, 0, 0).unwrap());
+        assert!(instant_from_iso8601("not a date").is_none());
+    }
+
+    #[test]
+    fn time_until_block_end_does_not_panic_on_max_instant() {
+        // A corrupt/extreme block start at the top of chrono's range would
+        // overflow `+ 5h`; the checked add must fall back to ZERO, not panic
+        // the render path.
+        let start = DateTime::<Utc>::from_naive_utc_and_offset(chrono::NaiveDateTime::MAX, Utc);
+        let block = ActiveBlock {
+            start,
+            last_entry: start,
+            total_tokens: 0,
+            total_cost_usd: None,
+        };
+        assert_eq!(time_until_block_end(&block, Utc::now()), Duration::ZERO);
+        // current_active_block walks calls, but the same near-max instant
+        // must not panic its block-end check either.
+        let call = call_at(start, 1000);
+        let _ = current_active_block(&[call], Utc::now());
     }
 }

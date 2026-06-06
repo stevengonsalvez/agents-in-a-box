@@ -10,6 +10,7 @@ pub mod attach;
 pub mod auth;
 pub mod config_cmd;
 pub mod deps;
+pub mod diff_review;
 pub mod doctor;
 pub mod favorites;
 pub mod fleet;

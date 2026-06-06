@@ -122,6 +122,16 @@ async fn tokio_main() -> Result<()> {
     app = app.subcommand(
         clap::Command::new("tui").about("Launch the TUI (default if no command given)"),
     );
+    // `diff-review` is also handled inline (owns the alternate screen, like `tui`).
+    app = app.subcommand(
+        clap::Command::new("diff-review")
+            .about("Review a repository's uncommitted changes in the Code Review surface")
+            .arg(
+                clap::Arg::new("path")
+                    .help("Repository path (default: current directory)")
+                    .default_value("."),
+            ),
+    );
     app = registry.build_clap(app);
     let matches = app.get_matches();
     let format = matches.get_one::<cli::OutputFormat>("format").copied().unwrap_or_default();
@@ -237,6 +247,16 @@ async fn tokio_main() -> Result<()> {
             }
 
             tui_result
+        }
+
+        // diff-review: interactive Code Review surface for a repo path (owns the
+        // alternate screen, so it is handled inline rather than via the registry).
+        Some(("diff-review", sub)) => {
+            entered_tui = true;
+            let path = sub
+                .get_one::<String>("path")
+                .map_or_else(|| std::path::PathBuf::from("."), std::path::PathBuf::from);
+            cli::diff_review::run(path)
         }
 
         // Every other subcommand routes through the registry.
@@ -525,6 +545,15 @@ async fn run_tui_loop(
                             if app.state.current_screen == crate::app::screens::ids::LOG_HISTORY {
                                 // Log history viewer takes full screen, starts at (0, 0)
                                 app.state.log_history_state.handle_click(col, row, 0, 0);
+                            } else if app.state.current_screen == crate::app::screens::ids::GIT_VIEW
+                                && app.state.git_view_state.as_ref().is_some_and(|g| {
+                                    g.active_tab == crate::components::git_view::GitTab::Review
+                                })
+                            {
+                                // Code Review sidebar: click a file/folder row to select/toggle.
+                                if let Some(ref mut git_state) = app.state.git_view_state {
+                                    git_state.review_sidebar_click(col, row);
+                                }
                             } else if let Some(app_event) = EventHandler::handle_mouse_event(
                                 AppEvent::MouseClick { x: col, y: row },
                                 &mut app.state,
@@ -562,6 +591,13 @@ async fn run_tui_loop(
                                 // Scroll git view content (markdown or diff)
                                 if let Some(ref mut git_state) = app.state.git_view_state {
                                     match git_state.active_tab {
+                                        crate::components::git_view::GitTab::Review => {
+                                            if is_down {
+                                                git_state.review_scroll_down(SCROLL_LINES);
+                                            } else {
+                                                git_state.review_scroll_up(SCROLL_LINES);
+                                            }
+                                        }
                                         crate::components::git_view::GitTab::Diff => {
                                             if is_down {
                                                 git_state.scroll_diff_down_by(SCROLL_LINES);

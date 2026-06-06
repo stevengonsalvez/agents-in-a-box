@@ -171,6 +171,27 @@ fi
 MODEL_SHORT="${MODEL_SHORT}${CTX_VARIANT}"
 
 # ════════════════════════════════════════════════════════════════════════════
+# SIGNAL 1b — Reasoning effort + fast mode (native Claude Code stdin fields)
+#   .effort.level ∈ low|medium|high|xhigh   ·   .fast_mode bool   ·   .thinking.enabled bool
+# Rendered compactly on Line 2 next to the model. Empty if field absent.
+# ════════════════════════════════════════════════════════════════════════════
+EFFORT_DISPLAY=""
+EFFORT_LEVEL=$(_jq '.effort.level')
+if [[ -n "$EFFORT_LEVEL" ]]; then
+  case "$EFFORT_LEVEL" in
+    low)    EFFORT_TAG="lo"   ; EFFORT_FG=$FG_GREY   ;;
+    medium) EFFORT_TAG="med"  ; EFFORT_FG=$FG_GREEN  ;;
+    high)   EFFORT_TAG="high" ; EFFORT_FG=$FG_YELLOW ;;
+    xhigh)  EFFORT_TAG="xhi"  ; EFFORT_FG=$FG_MAGENTA;;
+    *)      EFFORT_TAG="$EFFORT_LEVEL" ; EFFORT_FG=$FG_CYAN ;;
+  esac
+  # ⚡ appended when fast-mode is on (Opus faster-output toggle).
+  FAST_FLAG=""
+  [[ "$(_jq '.fast_mode')" == "true" ]] && FAST_FLAG="⚡"
+  EFFORT_DISPLAY="eff ${EFFORT_FG}${BOLD}${EFFORT_TAG}${RESET}${FAST_FLAG}"
+fi
+
+# ════════════════════════════════════════════════════════════════════════════
 # SIGNAL 2 — Working directory (~ collapsed)
 # ════════════════════════════════════════════════════════════════════════════
 CWD=$(_jq '.workspace.current_dir')
@@ -517,6 +538,7 @@ case "$HEALTH_EMOJI" in
 esac
 
 L2="${BOLD}${FG_MAGENTA}${MODEL_SHORT}${RESET}"
+[[ -n "$EFFORT_DISPLAY" ]] && L2+=" ${SEP} ${EFFORT_DISPLAY}"
 L2+=" ${SEP} ${HEALTH_FG}${HEALTH_EMOJI} ${MSG_COUNT}/50${RESET}"
 L2+=" ${SEP} ctx ${CTX_BAR}"
 [[ -n "$FIVE_HR_BAR" ]] && L2+=" ${SEP} 5h ${FIVE_HR_BAR}"

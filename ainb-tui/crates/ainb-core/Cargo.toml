@@ -69,6 +69,9 @@ url = { workspace = true }
 pulldown-cmark = { workspace = true }
 syntect = { workspace = true }
 ansi-to-tui = { workspace = true }
+# Code Review diff surface
+similar = { workspace = true }
+two-face = { workspace = true }
 
 # Persistent usage analytics cache
 rusqlite = { workspace = true }
