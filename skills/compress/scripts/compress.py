@@ -47,6 +47,10 @@ def call_claude(prompt: str) -> str:
         return result.stdout.strip()
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"Claude call failed:\n{e.stderr}")
+    except OSError as e:
+        raise RuntimeError(
+            "Claude CLI not found. Install it or set ANTHROPIC_API_KEY."
+        ) from e
 
 
 def build_compress_prompt(original: str) -> str:
@@ -133,30 +137,37 @@ def compress_file(filepath: Path) -> bool:
     filepath.write_text(compressed)
 
     # Step 2: Validate + Retry
-    for attempt in range(MAX_RETRIES):
-        print(f"\nValidation attempt {attempt + 1}")
+    try:
+        for attempt in range(MAX_RETRIES):
+            print(f"\nValidation attempt {attempt + 1}")
 
-        result = validate(backup_path, filepath)
+            result = validate(backup_path, filepath)
 
-        if result.is_valid:
-            print("Validation passed")
-            break
+            if result.is_valid:
+                print("Validation passed")
+                break
 
-        print("❌ Validation failed:")
-        for err in result.errors:
-            print(f"   - {err}")
+            print("❌ Validation failed:")
+            for err in result.errors:
+                print(f"   - {err}")
 
-        if attempt == MAX_RETRIES - 1:
-            # Restore original on failure
-            filepath.write_text(original_text)
-            backup_path.unlink(missing_ok=True)
-            print("❌ Failed after retries — original restored")
-            return False
+            if attempt == MAX_RETRIES - 1:
+                # Restore original on failure
+                filepath.write_text(original_text)
+                backup_path.unlink(missing_ok=True)
+                print("❌ Failed after retries — original restored")
+                return False
 
-        print("Fixing with Claude...")
-        compressed = call_claude(
-            build_fix_prompt(original_text, compressed, result.errors)
-        )
-        filepath.write_text(compressed)
+            print("Fixing with Claude...")
+            compressed = call_claude(
+                build_fix_prompt(original_text, compressed, result.errors)
+            )
+            filepath.write_text(compressed)
 
-    return True
+        return True
+    except BaseException:
+        # Interrupted or unexpected error mid-process — restore the
+        # original so the file is never left as unvalidated compressed text.
+        filepath.write_text(original_text)
+        backup_path.unlink(missing_ok=True)
+        raise
