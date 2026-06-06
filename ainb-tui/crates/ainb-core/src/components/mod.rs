@@ -7,6 +7,7 @@ pub mod auth_provider_popup;
 pub mod auth_setup;
 pub mod changelog;
 pub mod claude_chat;
+pub mod code_review;
 pub mod config_popup;
 pub mod config_screen;
 pub mod confirmation_dialog;

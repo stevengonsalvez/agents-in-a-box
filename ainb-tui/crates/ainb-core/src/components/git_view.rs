@@ -36,6 +36,8 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use tracing::{debug, error};
 
+use super::code_review;
+
 #[derive(Debug, Clone)]
 pub struct GitViewState {
     pub active_tab: GitTab,
@@ -58,6 +60,9 @@ pub struct GitViewState {
     // Commits tab state
     pub commits: Vec<crate::git::operations::CommitInfo>,
     pub selected_commit_index: usize,
+    // Warp-style Code Review surface (Review tab)
+    pub review: code_review::model::ReviewModel,
+    pub review_ui: code_review::render::CodeReviewUi,
 }
 
 /// Represents an item in the file tree (either a folder or file)
@@ -99,8 +104,9 @@ pub enum MarkdownStyle {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum GitTab {
-    Files,
-    Diff,
+    Review,   // Warp-style unified code review (default surface)
+    Files,    // Legacy file tree — retired from the tab cycle, kept for compatibility
+    Diff,     // Legacy per-file diff — retired from the tab cycle
     Commits,  // Branch commits since diverging from main
     Markdown, // Preview for .md files
 }
@@ -147,7 +153,7 @@ impl GitFileStatus {
 impl GitViewState {
     pub fn new(worktree_path: PathBuf) -> Self {
         let mut state = Self {
-            active_tab: GitTab::Files,
+            active_tab: GitTab::Review,
             changed_files: Vec::new(),
             selected_file_index: 0,
             diff_content: Vec::new(),
@@ -167,10 +173,114 @@ impl GitViewState {
             // Commits tab state
             commits: Vec::new(),
             selected_commit_index: 0,
+            // Code Review surface
+            review: code_review::model::ReviewModel::default(),
+            review_ui: code_review::render::CodeReviewUi::default(),
         };
         // Expand root by default
         state.expanded_folders.insert(String::new());
         state
+    }
+
+    /// Rebuild the structured Code Review model from the worktree's open changes.
+    /// On error the model is cleared so the surface shows an empty state.
+    pub fn refresh_review(&mut self) {
+        match code_review::parse::build_review_model(&self.worktree_path) {
+            Ok(model) => {
+                self.review = model;
+                // The file list and row layout changed — reset navigation to the top
+                // so no index dangles past the new tree. Folder collapse prefs persist.
+                self.review_ui.selected_file = 0;
+                self.review_ui.sidebar_selected = 0;
+                self.review_ui.current_hunk = 0;
+                self.review_ui.scroll = 0;
+            }
+            Err(e) => {
+                error!("Failed to build code review model: {e}");
+                self.review = code_review::model::ReviewModel::default();
+            }
+        }
+    }
+
+    /// Scroll the review body down by `n` rows (clamped to the last row).
+    pub fn review_scroll_down(&mut self, n: usize) {
+        let rows = code_review::render::flatten(&self.review).len();
+        let max = rows.saturating_sub(1);
+        self.review_ui.scroll = self.review_ui.scroll.saturating_add(n).min(max);
+    }
+
+    /// Scroll the review body up by `n` rows (saturating at the top).
+    pub const fn review_scroll_up(&mut self, n: usize) {
+        self.review_ui.scroll = self.review_ui.scroll.saturating_sub(n);
+    }
+
+    /// Activate the sidebar-selected row: toggle a folder, or collapse a file's diff.
+    pub fn review_toggle_collapse(&mut self) {
+        code_review::render::sidebar_activate(&mut self.review, &mut self.review_ui);
+    }
+
+    /// Move the sidebar tree selection down (↓).
+    pub fn review_sidebar_down(&mut self) {
+        code_review::render::sidebar_nav(&self.review, &mut self.review_ui, true);
+    }
+
+    /// Move the sidebar tree selection up (↑).
+    pub fn review_sidebar_up(&mut self) {
+        code_review::render::sidebar_nav(&self.review, &mut self.review_ui, false);
+    }
+
+    /// Collapse every folder in the sidebar tree (`E`).
+    pub fn review_collapse_all_folders(&mut self) {
+        code_review::render::sidebar_set_all_collapsed(&self.review, &mut self.review_ui, true);
+    }
+
+    /// Expand every folder in the sidebar tree (`e`).
+    pub fn review_expand_all_folders(&mut self) {
+        code_review::render::sidebar_set_all_collapsed(&self.review, &mut self.review_ui, false);
+    }
+
+    /// Handle a mouse click at screen `(x, y)` over the review sidebar.
+    pub fn review_sidebar_click(&mut self, x: u16, y: u16) {
+        if let Some(row) = code_review::render::sidebar_row_at(&self.review_ui, x, y) {
+            code_review::render::sidebar_click(&mut self.review, &mut self.review_ui, row);
+        }
+    }
+
+    /// Select the next review file and scroll its header to the top.
+    pub fn review_next_file(&mut self) {
+        code_review::render::select_file(&self.review, &mut self.review_ui, true);
+    }
+
+    /// Select the previous review file and scroll its header to the top.
+    pub fn review_prev_file(&mut self) {
+        code_review::render::select_file(&self.review, &mut self.review_ui, false);
+    }
+
+    /// Jump to the next hunk (`n`).
+    pub fn review_next_hunk(&mut self) {
+        code_review::render::jump_hunk(&self.review, &mut self.review_ui, true);
+    }
+
+    /// Jump to the previous hunk (`N`).
+    pub fn review_prev_hunk(&mut self) {
+        code_review::render::jump_hunk(&self.review, &mut self.review_ui, false);
+    }
+
+    /// Reveal more context at the nearest collapsed gap (`z`).
+    pub fn review_expand_context(&mut self) {
+        code_review::render::expand_context(&mut self.review, &self.review_ui);
+    }
+
+    /// `(current_hunk + 1, total_hunks)` for the `Hunk x/y` counter.
+    pub fn review_hunk_counter(&self) -> (usize, usize) {
+        let total =
+            code_review::render::hunk_anchors(&code_review::render::flatten(&self.review)).len();
+        let current = if total == 0 {
+            0
+        } else {
+            (self.review_ui.current_hunk + 1).min(total)
+        };
+        (current, total)
     }
 
     pub fn refresh_git_status(&mut self) -> Result<()> {
@@ -1098,18 +1208,19 @@ impl GitViewState {
     }
 
     pub fn switch_tab(&mut self) {
+        // Cycle Review → Commits → (Markdown if applicable) → Review.
+        // The legacy Files/Diff tabs are retired from the cycle.
         self.active_tab = match self.active_tab {
-            GitTab::Files => GitTab::Diff,
-            GitTab::Diff => GitTab::Commits,
             GitTab::Commits => {
-                // Only show Markdown tab if current file is a markdown file
                 if self.is_selected_markdown() && !self.markdown_content.is_empty() {
                     GitTab::Markdown
                 } else {
-                    GitTab::Files
+                    GitTab::Review
                 }
             }
-            GitTab::Markdown => GitTab::Files,
+            GitTab::Markdown => GitTab::Review,
+            // Review (and the retired Files/Diff) advance to Commits.
+            _ => GitTab::Commits,
         };
     }
 
@@ -1211,18 +1322,17 @@ impl GitViewComponent {
         // Render raised tab style - dynamically include Markdown tab if applicable
         let tab_titles: Vec<&str> =
             if git_state.is_selected_markdown() && !git_state.markdown_content.is_empty() {
-                vec!["Files", "Diff", "Commits", "Markdown"]
+                vec!["Review", "Commits", "Markdown"]
             } else {
-                vec!["Files", "Diff", "Commits"]
+                vec!["Review", "Commits"]
             };
 
         let selected_tab = match git_state.active_tab {
-            GitTab::Files => 0,
-            GitTab::Diff => 1,
-            GitTab::Commits => 2,
+            GitTab::Review | GitTab::Files | GitTab::Diff => 0,
+            GitTab::Commits => 1,
             GitTab::Markdown => {
-                if tab_titles.len() > 3 {
-                    3
+                if tab_titles.len() > 2 {
+                    2
                 } else {
                     0
                 }
@@ -1233,6 +1343,14 @@ impl GitViewComponent {
 
         // Render content based on active tab
         match git_state.active_tab {
+            GitTab::Review => {
+                code_review::render::render(
+                    frame,
+                    chunks[1],
+                    &git_state.review,
+                    &git_state.review_ui,
+                );
+            }
             GitTab::Files => Self::render_files_tab(frame, chunks[1], git_state),
             GitTab::Diff => Self::render_diff_tab(frame, chunks[1], git_state),
             GitTab::Commits => Self::render_commits_tab(frame, chunks[1], git_state),

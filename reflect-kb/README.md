@@ -75,6 +75,7 @@ reflect timeline --explain TOK
 | [`reflect generate-sidecars`](docs/usage.md#reflect-generate-sidecars) | Backfill missing `.entities.yaml` sidecars (heuristic, no LLM) |
 | [`reflect metrics`](docs/usage.md#reflect-metrics) | Command group for recall-metrics aggregation (subcommands below) |
 | &nbsp;&nbsp;↳ [`reflect metrics stats`](docs/usage.md#reflect-metrics-stats) | Aggregate the recall-metrics JSONL log: total events, hit rate, p50/p95 latency, top tags |
+| `reflect errors` | Triage the error sink (`~/.reflect/errors.json`): `count` (un-acked, drives the statusline badge), `ack [ids…]`, `append`. Lets callers use the installed binary instead of bare `python3 -m reflect_kb.errors`. |
 | [`reflect timeline`](docs/usage.md#reflect-timeline) | Drill down on statusline dashboard rows (REC/MEM/ING/DRN/TOK/ERR/COM/AGT) |
 
 See [docs/usage.md](docs/usage.md) for per-subcommand synopsis, all flags, examples, and common errors.

@@ -7,6 +7,110 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.3] - 2026-06-05
+### Added
+- **skills**: add agentmail disposable-inbox skill
+- **skills**: add test-ainb 5-layer ainb test runner
+- **skills**: swarm v2 watchdog, cross-provider, and attach-watchdog
+- **statusline**: show reasoning effort and fast-mode on line 2
+- **tui**: simplify the session-screen starter content
+
+### Fixed
+- Merge pull request #223 from stevengonsalvez/fix-onboarding-ux
+- **tui**: advance the onboarding wizard with the right arrow on every step
+- **tui**: keep the starter tip on one line for the per-line markdown styler
+
+### Other
+- Merge pull request #221 from stevengonsalvez/worktree-sync-learnings
+- **bootstrap**: drop webapp-testing browser-tools compile step
+- **deps**: track skill inventory changes
+- **skills**: remove compound-docs
+- **skills**: sync skill updates from user-level
+- remove webapp-testing skill and stray agent yamls
+
+
+## [1.4.2] - 2026-06-05
+### Added
+- Merge pull request #216 from stevengonsalvez/feat/diff
+- **diff**: add 'ainb diff-review [path]' subcommand
+- **diff**: add Code Review interactions — collapse, expand, hunk jump, file nav
+- **diff**: add Dracula syntax-highlight bridge with word-emphasis merge
+- **diff**: add structured Code Review diff model + git/similar parser
+- **diff**: render unified Code Review surface as the default G view
+- **diff**: tree-structured sidebar with arrow-key nav and mouse
+
+### Fixed
+- **code-review**: harden context expansion, drop dead code, fix docs
+
+### Documentation
+- **readme**: showcase the Warp-style Code Review diff
+- **tui**: add Code Review page with diff GIFs
+- **tui**: document tree sidebar, arrow nav, and mouse in Code Review
+
+### Other
+- **release**: prepare v1.4.1
+- **release**: prepare v1.4.2
+- **skills**: add tmux-verify TUI proof-loop skill
+- **diff**: cap highlighting on pathological lines + large-diff render test
+
+
+## [1.4.2] - 2026-06-05
+### Added
+- Merge pull request #216 from stevengonsalvez/feat/diff
+- **diff**: add 'ainb diff-review [path]' subcommand
+- **diff**: add Code Review interactions — collapse, expand, hunk jump, file nav
+- **diff**: add Dracula syntax-highlight bridge with word-emphasis merge
+- **diff**: add structured Code Review diff model + git/similar parser
+- **diff**: render unified Code Review surface as the default G view
+- **diff**: tree-structured sidebar with arrow-key nav and mouse
+
+### Fixed
+- **code-review**: harden context expansion, drop dead code, fix docs
+
+### Documentation
+- **readme**: showcase the Warp-style Code Review diff
+- **tui**: add Code Review page with diff GIFs
+- **tui**: document tree sidebar, arrow nav, and mouse in Code Review
+
+### Other
+- **release**: prepare v1.4.1
+- **skills**: add tmux-verify TUI proof-loop skill
+- **diff**: cap highlighting on pathological lines + large-diff render test
+
+
+## [1.4.1] - 2026-06-05
+
+## [1.4.0] - 2026-06-04
+### Added
+- Merge pull request #211 from stevengonsalvez/feat/new-session-base-branch-picker
+- Merge pull request #217 from stevengonsalvez/worktree-reflect-one-step-install
+- **ainb**: add doctor + reflect bootstrap one-step installer
+- **git**: list repo branches and cut worktrees off explicit base refs
+- **reflect-kb**: expose errors count/ack/append on the reflect CLI
+- **tui**: base-branch picker on the Configure Branch row
+
+### Fixed
+- **ainb**: print the full plan in reflect bootstrap --print-only when uv missing
+- **ainb**: require the reflect binary for reflect-kb detection
+- **statusline**: gtimeout fallback + drop unpublished uv-with fallback
+- **statusline**: self-bootstrap reflect error callers off bare python3 -m
+- **tui**: mark the repo's own checked-out branches in-use in the base picker
+
+### Documentation
+- Merge pull request #212 from stevengonsalvez/docs/notifications-screenshots
+- **reflect**: one-step install on the plugin docsite page
+- **reflect**: rewrite install section for the one-step flow
+- **reflect-kb**: document the `reflect errors` subcommand
+- **tui**: assert modal exclusivity invariant in configure key routing
+- **tui**: current screenshots — live markers, home sidebar, refreshed inbox
+- **tui**: document `ainb doctor` and `ainb reflect` commands
+- **tui**: document notifyd --format output option (text/json/csv/markdown)
+- **tui**: embed the live-marker and home-screen screenshots
+- **tui**: record own-checkout in-use edge in the base picker spec
+- **tui**: spec for the new-session base-branch picker
+- Codex notifications verified end-to-end — update agent-support wording
+
+
 ## [1.3.3] - 2026-06-03
 ### Added
 - Merge pull request #205 from stevengonsalvez/feat/claude-plugin-install

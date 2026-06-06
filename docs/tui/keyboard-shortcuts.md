@@ -58,8 +58,25 @@ Keys verified against the in-app help overlay (`?`) and the event handlers in `c
 
 | Key | Action |
 |-----|--------|
-| `g` | Show git view |
+| `g` | Open the [Code Review](code-review.md) diff for the selected session |
 | `p` | Commit & push |
+
+### Within the Code Review diff
+
+| Key | Action |
+|-----|--------|
+| `↑` / `↓` | Move across the file tree (file → scroll body) |
+| `j` / `k` | Scroll the diff body |
+| `n` / `N` | Next / previous hunk (`Hunk x/y` counter) |
+| `Space` / `Enter` | Toggle a folder, or collapse/expand a file's diff block |
+| `e` / `E` | Expand / collapse all folders |
+| `z` | Reveal more context at the nearest gap |
+| `[` / `]` | Previous / next file |
+| Mouse | Wheel scrolls the diff; click a tree row to select/toggle |
+| `Tab` | Cycle Review → Commits → Markdown |
+| `Esc` / `q` | Back |
+
+> The same surface is available standalone: `ainb diff-review [path]`.
 
 ## Usage / Stats screen
 
