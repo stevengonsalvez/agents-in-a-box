@@ -129,9 +129,15 @@ pub fn checked_out_branches(repo_path: &Path) -> Vec<String> {
 /// checkout + manual worktrees from the guard.
 #[must_use]
 pub fn in_use_branch_names(repo_path: Option<&Path>) -> Vec<String> {
+    use std::collections::HashSet;
+
     use super::worktree_manager::WorktreeManager;
 
-    let mut names: Vec<String> = WorktreeManager::new()
+    // A set: the only consumers (`branch_collision`, the picker `in_use`
+    // mark, `derive_branch_name`'s collision-avoidance) do membership checks,
+    // never ordered display — so dedup is free and `main`/`master` appearing
+    // across many sessions collapses to one entry.
+    let mut names: HashSet<String> = WorktreeManager::new()
         .ok()
         .and_then(|m| m.list_all_worktrees().ok())
         .map(|infos| infos.into_iter().map(|(_, i)| i.branch_name).collect())
@@ -139,13 +145,11 @@ pub fn in_use_branch_names(repo_path: Option<&Path>) -> Vec<String> {
 
     if let Some(path) = repo_path {
         for b in checked_out_branches(path) {
-            if !names.contains(&b) {
-                names.push(b);
-            }
+            names.insert(b);
         }
     }
 
-    names
+    names.into_iter().collect()
 }
 
 /// Pure assembly: dedup remote-vs-local, tag the default, sort sections.
