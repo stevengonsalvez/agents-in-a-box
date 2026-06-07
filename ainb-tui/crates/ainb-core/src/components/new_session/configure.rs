@@ -103,6 +103,20 @@ pub enum BaseMode {
     Checkout,
 }
 
+/// Why the chosen worktree branch name would make launch fail — surfaced
+/// inline on the Branch row so the user fixes it BEFORE pressing Launch
+/// (Stevie 2026-06-07: feat/ota off main died only at launch).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchProblem {
+    /// Already checked out in a live worktree — `git worktree add` rejects it.
+    InUse,
+    /// Already exists as a branch (local or remote). Harmless in Checkout
+    /// mode (that's the point), but in base-off mode we'd try to create a
+    /// NEW branch with that name and fail (`worktree add -b` errors; the
+    /// remote cache pre-check rejects "already exists in cache").
+    Exists,
+}
+
 /// The user's pick from the base-branch popup. Threaded through `LaunchSpec`
 /// into `create_session_from_configure`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -257,8 +271,15 @@ pub struct ConfigureState {
     pub branch_prefix: String,
     /// Snapshot of existing worktree branch names — passed to
     /// `derive_branch_name` so collision-disambiguation actually fires
-    /// (finding #16).
+    /// (finding #16). These are branches *in use by a worktree*.
     pub existing_branches: Vec<String>,
+    /// All branch short names that exist in the repo (local heads +
+    /// remote-tracking), regardless of whether a worktree holds them. Seeded
+    /// for local repos at construction and refreshed from the base-branch
+    /// picker (which lists/fetches them). Drives the base-off "⚠ exists"
+    /// guard — creating a NEW branch over an existing name fails
+    /// (Stevie 2026-06-07: feat/ota off main).
+    pub repo_branch_names: Vec<String>,
     /// Which segment of the Branch row Enter acts on (←/→ toggles).
     pub branch_segment: BranchSegment,
     /// The user's base-branch pick, when they used the popup. `None` keeps
@@ -279,6 +300,7 @@ impl ConfigureState {
         branch_source: Option<String>,
         branch_prefix: &str,
         existing_branches: Vec<String>,
+        repo_branch_names: Vec<String>,
     ) -> Self {
         // Build the presets cache ONCE here (finding #4). Tab/Shift-Tab
         // cycling consults the cache, not the disk.
@@ -352,6 +374,7 @@ impl ConfigureState {
             presets_cache,
             branch_prefix: branch_prefix.to_string(),
             existing_branches,
+            repo_branch_names,
             branch_segment: BranchSegment::Source,
             base_selection: None,
             branch_picker: None,
@@ -454,15 +477,33 @@ impl ConfigureState {
         self.branch_override.clone().unwrap_or_else(|| self.branch_worktree.clone())
     }
 
-    /// True when the effective branch is already checked out in a live
-    /// worktree (a hard `git worktree add` failure if we launched). Only
-    /// reachable via a manual override — the auto default avoids
-    /// `existing_branches` at derivation time. Drives the inline "⚠ in use"
-    /// warning on the Branch row (Stevie 2026-05-27).
+    /// Why the effective worktree branch name would make launch fail, if at
+    /// all. Drives the inline Branch-row warning and the pre-launch block.
+    /// Only reachable via a manual override / picked name — the auto default
+    /// is a fresh random 8-hex that avoids every existing branch.
+    ///
+    /// `InUse` (checked out by a live worktree) applies in BOTH modes — git
+    /// rejects a second worktree on the same branch. `Exists` (the name is a
+    /// branch but not in a worktree) applies ONLY in base-off mode, where we
+    /// create a NEW branch off the base; in Checkout mode an existing branch
+    /// is exactly what's wanted (Stevie 2026-06-07: feat/ota off main).
+    #[must_use]
+    pub fn branch_problem(&self) -> Option<BranchProblem> {
+        let b = self.effective_branch();
+        if self.existing_branches.iter().any(|x| x == &b) {
+            return Some(BranchProblem::InUse);
+        }
+        if !self.is_checkout() && self.repo_branch_names.iter().any(|x| x == &b) {
+            return Some(BranchProblem::Exists);
+        }
+        None
+    }
+
+    /// True when the chosen branch name would fail at `git worktree add` —
+    /// the pre-launch chokepoint reads this to block + refocus the Branch row.
     #[must_use]
     pub fn branch_collision(&self) -> bool {
-        let b = self.effective_branch();
-        self.existing_branches.iter().any(|x| x == &b)
+        self.branch_problem().is_some()
     }
 
     /// Recompute `branch_worktree`. After the 2026-05-27 refactor branch
@@ -1000,13 +1041,28 @@ fn render_yolo_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: b
     f.render_widget(Paragraph::new(line), area);
 }
 
+/// Inline marker + guidance sub-line for a Branch-row problem. Returns
+/// `(trailing marker, guidance text)`; the caller styles them red / muted.
+const fn branch_problem_text(problem: BranchProblem) -> (&'static str, &'static str) {
+    match problem {
+        BranchProblem::InUse => (
+            "   \u{26a0} in use",
+            "\u{2514} already checked out by a session \u{2014} pick another name, or Esc \u{2192} menu \u{2192} Recovery to respawn it",
+        ),
+        BranchProblem::Exists => (
+            "   \u{26a0} exists",
+            "\u{2514} a branch with this name already exists \u{2014} pick another name, or Enter on Branch \u{2192} check it out as the base",
+        ),
+    }
+}
+
 fn render_branch_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: bool) {
     if let Some(ref buf) = state.branch_edit {
-        // Inline edit mode. Collision evaluates live against the edit buffer
+        // Inline edit mode. The problem evaluates live against the edit buffer
         // (effective_branch() prefers branch_edit), so the ⚠ warning appears
-        // as the user types a name that's already checked out.
-        let collide = state.branch_collision();
-        let buf_style = if collide {
+        // as the user types a name that's already in use or already exists.
+        let problem = state.branch_problem();
+        let buf_style = if problem.is_some() {
             Style::default().fg(ALERT_RED).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD)
@@ -1018,20 +1074,21 @@ fn render_branch_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused:
             Span::styled(" \u{2192} ", Style::default().fg(MUTED_GRAY)),
             Span::styled(buf.clone(), buf_style),
             Span::styled("_", Style::default().fg(MUTED_GRAY)),
-            if collide {
-                Span::styled(
-                    "   \u{26a0} in use",
-                    Style::default().fg(ALERT_RED).add_modifier(Modifier::BOLD),
-                )
-            } else {
-                Span::raw("")
-            },
+            problem.map_or_else(
+                || Span::raw(""),
+                |p| {
+                    Span::styled(
+                        branch_problem_text(p).0,
+                        Style::default().fg(ALERT_RED).add_modifier(Modifier::BOLD),
+                    )
+                },
+            ),
         ]);
-        if collide {
+        if let Some(p) = problem {
             let guide = Line::from(vec![
                 Span::raw("           "),
                 Span::styled(
-                    "\u{2514} already checked out by a session \u{2014} pick another name, or Esc \u{2192} menu \u{2192} Recovery to respawn it",
+                    branch_problem_text(p).1,
                     Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
                 ),
             ]);
@@ -1065,7 +1122,7 @@ fn render_branch_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused:
     }
 
     let worktree = state.effective_branch();
-    let collision = state.branch_collision();
+    let problem = state.branch_problem();
 
     // Segment targeting (2026-06 base picker): when the row is focused the
     // targeted segment renders underlined; ←/→ toggles, Enter acts on it.
@@ -1077,9 +1134,9 @@ fn render_branch_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused:
         source_style = source_style.add_modifier(Modifier::UNDERLINED | Modifier::BOLD);
     }
 
-    // Branch worktree name renders red when it collides with a live worktree,
-    // green otherwise. The collision is only reachable via manual override.
-    let mut worktree_style = if collision {
+    // Branch worktree name renders red on a problem (in-use OR an existing
+    // base-off name), green otherwise. Only reachable via a manual override.
+    let mut worktree_style = if problem.is_some() {
         Style::default().fg(ALERT_RED).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD)
@@ -1087,27 +1144,28 @@ fn render_branch_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused:
     if worktree_targeted {
         worktree_style = worktree_style.add_modifier(Modifier::UNDERLINED);
     }
-    let trailing = if collision {
-        Span::styled(
-            "   \u{26a0} in use",
-            Style::default().fg(ALERT_RED).add_modifier(Modifier::BOLD),
-        )
-    } else if source_targeted {
-        Span::styled(
-            "   [Enter to pick base \u{00b7} \u{2192} name]",
-            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
-        )
-    } else if worktree_targeted {
-        Span::styled(
-            "   [Enter to edit \u{00b7} \u{2190} base]",
-            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
-        )
-    } else {
-        Span::styled(
-            "   [Enter to edit]",
-            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
-        )
-    };
+    let trailing = problem.map_or_else(
+        || {
+            // No problem: show the contextual targeting hint instead.
+            let hint = if source_targeted {
+                "   [Enter to pick base \u{00b7} \u{2192} name]"
+            } else if worktree_targeted {
+                "   [Enter to edit \u{00b7} \u{2190} base]"
+            } else {
+                "   [Enter to edit]"
+            };
+            Span::styled(
+                hint,
+                Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+            )
+        },
+        |p| {
+            Span::styled(
+                branch_problem_text(p).0,
+                Style::default().fg(ALERT_RED).add_modifier(Modifier::BOLD),
+            )
+        },
+    );
     let branch_line = Line::from(vec![
         focus_indicator(focused),
         label_span("Branch:  "),
@@ -1117,13 +1175,12 @@ fn render_branch_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused:
         trailing,
     ]);
 
-    if collision {
-        // Two-line block with the guidance sub-line (both paths: edit the
-        // name here, or Esc → Recovery to respawn the existing session).
+    if let Some(p) = problem {
+        // Two-line block: the worktree-name problem + the guidance sub-line.
         let guide = Line::from(vec![
             Span::raw("           "),
             Span::styled(
-                "\u{2514} already checked out by a session — edit the name (Enter), or Esc → menu → Recovery to respawn it",
+                branch_problem_text(p).1,
                 Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
             ),
         ]);
@@ -2155,6 +2212,7 @@ mod tests {
             presets_cache,
             branch_prefix: "agents/".into(),
             existing_branches: Vec::new(),
+            repo_branch_names: Vec::new(),
             branch_segment: BranchSegment::Source,
             base_selection: None,
             branch_picker: None,
@@ -2185,6 +2243,47 @@ mod tests {
         s.existing_branches = vec!["feat/blog".into()];
         s.branch_override = Some("feat/something-else".into());
         assert!(!s.branch_collision());
+    }
+
+    #[test]
+    fn branch_problem_exists_when_baseoff_name_already_a_branch() {
+        // feat/ota exists as a branch but is NOT in a worktree. Base-off would
+        // try to create it anew off main and fail → block at selection
+        // (Stevie 2026-06-07).
+        let mut s = mk_state();
+        s.repo_branch_names = vec!["main".into(), "feat/ota".into()];
+        s.branch_override = Some("feat/ota".into());
+        assert_eq!(s.branch_problem(), Some(BranchProblem::Exists));
+        assert!(
+            s.branch_collision(),
+            "existing base-off name must block launch"
+        );
+    }
+
+    #[test]
+    fn branch_problem_none_for_existing_name_in_checkout_mode() {
+        // In Checkout mode an existing branch is exactly the point — never a
+        // problem (the picker separately blocks checking out an in-use branch).
+        let mut s = mk_state();
+        s.repo_branch_names = vec!["feat/ota".into()];
+        s.base_selection = Some(BaseSelection {
+            display: "feat/ota".into(),
+            short_name: "feat/ota".into(),
+            is_remote: false,
+            mode: BaseMode::Checkout,
+        });
+        assert_eq!(s.branch_problem(), None);
+        assert!(!s.branch_collision());
+    }
+
+    #[test]
+    fn branch_problem_inuse_takes_precedence_over_exists() {
+        // A name that is both a branch AND in a worktree reports InUse.
+        let mut s = mk_state();
+        s.existing_branches = vec!["feat/ota".into()];
+        s.repo_branch_names = vec!["feat/ota".into()];
+        s.branch_override = Some("feat/ota".into());
+        assert_eq!(s.branch_problem(), Some(BranchProblem::InUse));
     }
 
     #[test]

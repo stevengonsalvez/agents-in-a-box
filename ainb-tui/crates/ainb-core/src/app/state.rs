@@ -3868,6 +3868,12 @@ impl AppState {
         };
 
         let cached = list_path.as_deref().map(branch_list::list_repo_branches).unwrap_or_default();
+        // Feed the base-off "⚠ exists" guard: every branch the picker knows
+        // about (empty for a not-yet-cached remote — the refresh below fills
+        // it via ls-remote).
+        if !cached.is_empty() {
+            cfg.repo_branch_names = cached.iter().map(|e| e.short_name.clone()).collect();
+        }
         cfg.branch_picker = Some(BranchPickerState::new(mark_in_use(cached), true));
 
         // Background refresh — generation-guarded so a stale result can't
@@ -3936,6 +3942,13 @@ impl AppState {
             self.new_session_state.as_mut().and_then(|ns| ns.configure_state.as_mut())
         {
             let existing = cfg.existing_branches.clone();
+            // Capture the fresh branch names for the base-off "⚠ exists" guard
+            // before `result` is consumed below. Only on success — a failed
+            // refresh keeps whatever the guard already had.
+            let refreshed_names: Option<Vec<String>> = match &result {
+                Ok(entries) => Some(entries.iter().map(|e| e.short_name.clone()).collect()),
+                Err(_) => None,
+            };
             if let Some(picker) = cfg.branch_picker.as_mut() {
                 picker.loading = false;
                 match result {
@@ -3954,6 +3967,9 @@ impl AppState {
                         warn_msg = Some(msg);
                     }
                 }
+            }
+            if let Some(names) = refreshed_names {
+                cfg.repo_branch_names = names;
             }
         }
         if let Some(msg) = warn_msg {
@@ -8214,6 +8230,13 @@ impl AppState {
                     let existing_branches = crate::git::branch_list::in_use_branch_names(Some(
                         workspace.path.as_path(),
                     ));
+                    // All existing branch names for the base-off "⚠ exists"
+                    // guard (restart is always a local repo path).
+                    let repo_branch_names =
+                        crate::git::branch_list::list_repo_branches(&workspace.path)
+                            .into_iter()
+                            .map(|e| e.short_name)
+                            .collect();
                     let configure_state = ConfigureState::from_pick_repo(
                         repo_source,
                         repo_label,
@@ -8221,6 +8244,7 @@ impl AppState {
                         branch_source,
                         &branch_prefix,
                         existing_branches,
+                        repo_branch_names,
                     );
 
                     self.current_screen = screen_ids::NEW_SESSION.to_string();
