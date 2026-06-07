@@ -1499,6 +1499,18 @@ impl EventHandler {
                         _ => None,
                     };
                     let existing_branches = crate::git::branch_list::in_use_branch_names(repo_path);
+                    // All existing branch names (local heads + remote-tracking)
+                    // for the base-off "⚠ exists" guard. Cheap for a local repo;
+                    // a remote pick fills this in later when the base picker
+                    // lists/fetches branches.
+                    let repo_branch_names = repo_path
+                        .map(|p| {
+                            crate::git::branch_list::list_repo_branches(p)
+                                .into_iter()
+                                .map(|e| e.short_name)
+                                .collect()
+                        })
+                        .unwrap_or_default();
                     let cfg = ConfigureState::from_pick_repo(
                         source.clone(),
                         label,
@@ -1506,6 +1518,7 @@ impl EventHandler {
                         branch_source,
                         &branch_prefix,
                         existing_branches,
+                        repo_branch_names,
                     );
                     if let Some(ns) = state.new_session_state.as_mut() {
                         ns.configure_state = Some(cfg);
