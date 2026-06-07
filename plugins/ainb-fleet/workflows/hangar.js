@@ -288,7 +288,7 @@ async function runStandup(opts) {
       activity: (e && e.activity) || (s.summary || '').slice(0, 60) || 'unknown',
       state: (e && e.state) || 'idle',
       stale: (e && e.stale) || '?',
-      routable: s.peer_id ? 'broker' : (s.tmux_session ? 'tmux' : 'none'),
+      routable: s.tmux_session ? 'tmux' : (s.peer_id ? 'broker' : 'none'),
     })
   }
 

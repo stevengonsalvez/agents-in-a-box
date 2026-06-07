@@ -168,11 +168,15 @@ pub fn classify(input: ClassifyInput) -> Option<NeedsRow> {
     None
 }
 
+/// Advisory hint for the answer-routing channel. Mirrors the default
+/// `tmux-first` send transport: prefer a live tmux pane, fall back to a broker
+/// peer only when there is no tmux session. (Actual delivery is governed by
+/// `AINB_FLEET_TRANSPORT` in the send path.)
 fn derive_route_hint(session: &Session) -> RouteHint {
-    if session.peer_id.is_some() {
-        RouteHint::Broker
-    } else if session.tmux_session.is_some() {
+    if session.tmux_session.is_some() {
         RouteHint::Tmux
+    } else if session.peer_id.is_some() {
+        RouteHint::Broker
     } else {
         RouteHint::None
     }
@@ -202,16 +206,19 @@ mod tests {
     }
 
     #[test]
-    fn route_hint_prefers_broker() {
+    fn route_hint_prefers_tmux() {
+        // A live tmux pane wins even when a broker peer is also registered.
         let mut s = mk_session("/x");
         s.peer_id = Some("p".to_string());
-        assert!(matches!(derive_route_hint(&s), RouteHint::Broker));
+        assert!(matches!(derive_route_hint(&s), RouteHint::Tmux));
     }
 
     #[test]
-    fn route_hint_tmux_fallback() {
-        let s = mk_session("/x");
-        assert!(matches!(derive_route_hint(&s), RouteHint::Tmux));
+    fn route_hint_broker_when_no_tmux() {
+        let mut s = mk_session("/x");
+        s.tmux_session = None;
+        s.peer_id = Some("p".to_string());
+        assert!(matches!(derive_route_hint(&s), RouteHint::Broker));
     }
 
     #[test]
