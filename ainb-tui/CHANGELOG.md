@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.4] - 2026-06-07
+### Added
+- Merge pull request #224 from stevengonsalvez/worktree-codex-quota-reset
+- **tui**: show per-window quota reset date/time in top bar
+
+### Fixed
+- Merge pull request #228 from stevengonsalvez/fix/statusline-resets-at-epoch
+- **compress**: harden scripts against missing CLI and interrupts
+- **tui**: parse Claude Code rate-limit resets_at as Unix epoch
+
+### Other
+- Merge pull request #225 from stevengonsalvez/chore/skills-root-and-scratch-cleanup
+- Merge pull request #226 from stevengonsalvez/worktree-skills-into-dotclaude
+- consolidate skills under repo-root .claude/skills
+- drop caveman skill family
+- drop committed scratch and ignore output dirs
+- move skills to repo root and symlink tool dirs
+- symlink ainb-tui/AGENTS.md to root AGENTS.md
+
+
 ## [1.4.3] - 2026-06-05
 ### Added
 - **skills**: add agentmail disposable-inbox skill
