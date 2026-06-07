@@ -2720,21 +2720,22 @@ pub enum AsyncAction {
     /// the dispatcher so the async path doesn't re-derive it from
     /// `configure_state` (finding #7).
     CreateSessionFromConfigure(crate::components::new_session::configure::LaunchSpec),
-    DeleteSession(Uuid),           // New - delete session with container cleanup
-    StopSession(Uuid),             // Soft-stop interactive session (kill tmux only)
+    DeleteSession(Uuid),         // New - delete session with container cleanup
+    StopSession(Uuid),           // Soft-stop interactive session (kill tmux only)
     ResumeSession(Uuid, String), // Recreate tmux for a Stopped interactive session; String is the trigger key for audit
-    BulkDeleteSessions(Vec<Uuid>), // Bulk delete multiple sessions
-    RefreshWorkspaces,           // Manual refresh of workspace data
-    FetchContainerLogs(Uuid),    // Fetch container logs for a session
-    AttachToContainer(Uuid),     // Attach to a container session
-    AttachToTmuxSession(Uuid),   // Attach to a tmux session
-    KillContainer(Uuid),         // Kill container for a session
-    AuthSetupOAuth,              // Run OAuth authentication setup
-    AuthSetupApiKey,             // Save API key authentication
-    ReauthenticateCredentials,   // Re-authenticate Claude credentials
-    RestartSession(Uuid),        // Restart a stopped session with new container
-    CleanupOrphaned,             // Clean up orphaned containers without worktrees
-    AttachToOtherTmux(String),   // Attach to a non-agents-in-a-box tmux session by name
+    BulkResumeSessions(Vec<Uuid>, String), // Resume multiple Stopped interactive sessions; String is the trigger key for audit
+    BulkDeleteSessions(Vec<Uuid>),         // Bulk delete multiple sessions
+    RefreshWorkspaces,                     // Manual refresh of workspace data
+    FetchContainerLogs(Uuid),              // Fetch container logs for a session
+    AttachToContainer(Uuid),               // Attach to a container session
+    AttachToTmuxSession(Uuid),             // Attach to a tmux session
+    KillContainer(Uuid),                   // Kill container for a session
+    AuthSetupOAuth,                        // Run OAuth authentication setup
+    AuthSetupApiKey,                       // Save API key authentication
+    ReauthenticateCredentials,             // Re-authenticate Claude credentials
+    RestartSession(Uuid),                  // Restart a stopped session with new container
+    CleanupOrphaned,                       // Clean up orphaned containers without worktrees
+    AttachToOtherTmux(String),             // Attach to a non-agents-in-a-box tmux session by name
     AttachWitr, // Launch `witr -i` (process-causality browser) in a dedicated tmux session and attach full-screen
     KillOtherTmux(String), // Kill a non-agents-in-a-box tmux session by name
     KillOtherTmuxSessions(Vec<String>), // Kill multiple non-agents-in-a-box tmux sessions by name
@@ -4550,6 +4551,33 @@ impl AppState {
         } else if self.is_other_tmux_selected() {
             self.toggle_select_other_tmux_session();
         }
+    }
+
+    /// Of the multi-selected managed sessions, return the IDs that can actually
+    /// be resumed: interactive agent sessions that are currently Stopped.
+    /// Running sessions are excluded so a bulk resume never kills+recreates a
+    /// live tmux session. Order is unspecified (sourced from a HashSet).
+    pub fn selected_resumable_session_ids(&self) -> Vec<Uuid> {
+        use crate::models::{SessionAgentType, SessionMode, SessionStatus};
+        self.selected_sessions
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.find_session(*id)
+                    .map(|s| {
+                        let is_interactive = matches!(s.mode, SessionMode::Interactive)
+                            && matches!(
+                                s.agent_type,
+                                SessionAgentType::Claude
+                                    | SessionAgentType::Codex
+                                    | SessionAgentType::Gemini
+                                    | SessionAgentType::Copilot
+                            );
+                        is_interactive && matches!(s.status, SessionStatus::Stopped)
+                    })
+                    .unwrap_or(false)
+            })
+            .collect()
     }
 
     /// Toggle multi-select for the currently highlighted "Other tmux" session.
@@ -7633,6 +7661,31 @@ impl AppState {
                         error!("Failed to resume session {}: {}", session_id, e);
                         self.add_error_notification(format!("Resume failed: {}", e));
                     }
+                }
+                AsyncAction::BulkResumeSessions(session_ids, trigger) => {
+                    let total = session_ids.len();
+                    let mut resumed = 0;
+                    let mut failed = 0;
+                    for id in session_ids {
+                        if let Err(e) = self.resume_interactive_session(id, trigger.clone()).await {
+                            error!("Failed to resume session {}: {}", id, e);
+                            failed += 1;
+                        } else {
+                            resumed += 1;
+                        }
+                    }
+                    // resume_interactive_session refreshes per-session on success;
+                    // refresh once more so a final all-failed batch still repaints.
+                    self.load_real_workspaces().await;
+                    if failed > 0 {
+                        self.add_warning_notification(format!(
+                            "Resumed {}/{} sessions ({} failed)",
+                            resumed, total, failed
+                        ));
+                    } else {
+                        self.add_success_notification(format!("Resumed {} session(s)", resumed));
+                    }
+                    self.ui_needs_refresh = true;
                 }
                 AsyncAction::BulkDeleteSessions(session_ids) => {
                     let total = session_ids.len();

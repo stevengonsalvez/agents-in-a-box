@@ -51,9 +51,10 @@ pub enum AppEvent {
     RestartSession,
     DeleteSession,
     ResumeSession(String), // Resume a Stopped interactive session (carries trigger key: "Enter" or "r")
-    OpenInEditor,          // Open selected session's workspace in preferred editor
-    OpenQuickShell,        // Open shell in selected workspace/session directory
-    CleanupOrphaned,       // Clean up orphaned containers
+    ResumeSelectedSessions(String), // Resume all multi-selected Stopped interactive sessions (carries trigger key)
+    OpenInEditor,                   // Open selected session's workspace in preferred editor
+    OpenQuickShell,                 // Open shell in selected workspace/session directory
+    CleanupOrphaned,                // Clean up orphaned containers
     SwitchToLogs,
     SwitchToTerminal,
     GoToTop,
@@ -1195,7 +1196,12 @@ impl EventHandler {
                 // Enter on a Running session = attach (mirrors 'a').
                 // Other selection types fall through to None to preserve prior behaviour.
                 use crate::models::{SessionAgentType, SessionMode, SessionStatus};
-                if let Some(session) = state.selected_session() {
+                // Checked rows win over cursor: with a multi-select active,
+                // Enter starts every selected resumable session, not just the
+                // highlighted one.
+                if !state.selected_sessions.is_empty() {
+                    Some(AppEvent::ResumeSelectedSessions("Enter".to_string()))
+                } else if let Some(session) = state.selected_session() {
                     let is_interactive = matches!(session.mode, SessionMode::Interactive)
                         && matches!(
                             session.agent_type,
@@ -1217,7 +1223,11 @@ impl EventHandler {
                 // 'r' resumes a Stopped interactive session; otherwise it falls
                 // back to the existing reauthenticate-credentials shortcut.
                 use crate::models::{SessionAgentType, SessionMode, SessionStatus};
-                if let Some(session) = state.selected_session() {
+                // Checked rows win over cursor: with a multi-select active,
+                // 'r' resumes every selected resumable session.
+                if !state.selected_sessions.is_empty() {
+                    Some(AppEvent::ResumeSelectedSessions("r".to_string()))
+                } else if let Some(session) = state.selected_session() {
                     let is_interactive = matches!(session.mode, SessionMode::Interactive)
                         && matches!(
                             session.agent_type,
@@ -2712,7 +2722,7 @@ impl EventHandler {
                     state.selected_sessions.len() + state.selected_other_tmux_sessions.len();
                 if count > 0 {
                     state.add_success_notification(format!(
-                        "{} session(s) selected — Shift+D to delete",
+                        "{} session(s) selected — Enter to start, Shift+D to delete",
                         count
                     ));
                 }
@@ -2752,6 +2762,34 @@ impl EventHandler {
                         Some(AsyncAction::ResumeSession(session_id, trigger));
                 } else {
                     state.add_warning_notification("No session selected to resume".to_string());
+                }
+            }
+            AppEvent::ResumeSelectedSessions(trigger) => {
+                // Checked rows win over cursor resume: when sessions are
+                // multi-selected, start every resumable one, not just the
+                // highlighted row. Running selections are skipped so we never
+                // kill+recreate a live tmux session.
+                let total_selected = state.selected_sessions.len();
+                let ids = state.selected_resumable_session_ids();
+                if ids.is_empty() {
+                    state.add_warning_notification(format!(
+                        "No stopped interactive sessions among {} selected to resume",
+                        total_selected
+                    ));
+                } else {
+                    tracing::info!(
+                        "[ACTION] Bulk-resuming {} of {} selected session(s) (trigger={})",
+                        ids.len(),
+                        total_selected,
+                        trigger
+                    );
+                    state.add_success_notification(format!(
+                        "Resuming {} selected session(s)...",
+                        ids.len()
+                    ));
+                    state.pending_async_action =
+                        Some(AsyncAction::BulkResumeSessions(ids, trigger));
+                    state.selected_sessions.clear();
                 }
             }
             AppEvent::OpenInEditor => {

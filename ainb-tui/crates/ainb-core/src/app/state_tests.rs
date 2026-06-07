@@ -868,4 +868,94 @@ mod tests {
         assert_eq!(AppState::agent_hook_name(SessionAgentType::Shell), None);
         assert_eq!(AppState::agent_hook_name(SessionAgentType::Gemini), None);
     }
+
+    // ---- bulk-resume selection (Enter/r on multi-selected sessions) ----
+
+    fn resumable_session(
+        name: &str,
+        mode: SessionMode,
+        agent: SessionAgentType,
+        status: crate::models::SessionStatus,
+    ) -> crate::models::Session {
+        let mut s = crate::models::Session::new(name.to_string(), "/tmp/ws".to_string());
+        s.mode = mode;
+        s.agent_type = agent;
+        s.status = status;
+        s
+    }
+
+    /// Bulk resume must start every selected *stopped interactive* session and
+    /// exclude everything else — Running interactive (would kill+recreate a live
+    /// tmux), Boss-mode, and non-agent (Shell) sessions. Regression for the bug
+    /// where Enter only resumed the highlighted row.
+    #[test]
+    fn selected_resumable_session_ids_keeps_only_stopped_interactive() {
+        use crate::models::SessionStatus;
+
+        let stopped_claude = resumable_session(
+            "stopped-claude",
+            SessionMode::Interactive,
+            SessionAgentType::Claude,
+            SessionStatus::Stopped,
+        );
+        let stopped_codex = resumable_session(
+            "stopped-codex",
+            SessionMode::Interactive,
+            SessionAgentType::Codex,
+            SessionStatus::Stopped,
+        );
+        let running_claude = resumable_session(
+            "running-claude",
+            SessionMode::Interactive,
+            SessionAgentType::Claude,
+            SessionStatus::Running,
+        );
+        let boss_stopped = resumable_session(
+            "boss-stopped",
+            SessionMode::Boss,
+            SessionAgentType::Claude,
+            SessionStatus::Stopped,
+        );
+        let shell_stopped = resumable_session(
+            "shell-stopped",
+            SessionMode::Interactive,
+            SessionAgentType::Shell,
+            SessionStatus::Stopped,
+        );
+
+        let resumable_ids = [stopped_claude.id, stopped_codex.id];
+        let all_ids = [
+            stopped_claude.id,
+            stopped_codex.id,
+            running_claude.id,
+            boss_stopped.id,
+            shell_stopped.id,
+        ];
+
+        let mut ws = crate::models::Workspace::new("ws".to_string(), PathBuf::from("/tmp/ws"));
+        ws.add_session(stopped_claude);
+        ws.add_session(stopped_codex);
+        ws.add_session(running_claude);
+        ws.add_session(boss_stopped);
+        ws.add_session(shell_stopped);
+
+        let mut state = AppState::new();
+        state.workspaces.push(ws);
+        // Mark all five as multi-selected.
+        for id in all_ids {
+            state.selected_sessions.insert(id);
+        }
+
+        let mut got = state.selected_resumable_session_ids();
+        got.sort();
+        let mut want = resumable_ids.to_vec();
+        want.sort();
+        assert_eq!(got, want, "only stopped interactive agent sessions resume");
+    }
+
+    #[test]
+    fn selected_resumable_session_ids_empty_when_nothing_selected() {
+        let state = AppState::new();
+        assert!(state.selected_resumable_session_ids().is_empty());
+    }
 }
