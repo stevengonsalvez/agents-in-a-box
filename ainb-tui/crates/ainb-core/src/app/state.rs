@@ -5863,6 +5863,11 @@ impl AppState {
     }
 
     pub fn cancel_new_session(&mut self) {
+        // INVARIANT: must NOT clear `self.notifications`. Callers post an error
+        // toast immediately before cancelling (e.g. the worktree-create failure
+        // arm in `create_session_from_configure`) and rely on it surviving the
+        // teardown — clearing here would re-introduce the silent-flash bug
+        // (Stevie 2026-06-06).
         self.new_session_state = None;
         // Return to whichever screen the user opened new-session from
         // (Home / Sessions / …). Falls back to SESSION_LIST if no
@@ -6102,6 +6107,13 @@ impl AppState {
             }
             Err(e) => {
                 error!("Failed to create session via configure flow: {}", e);
+                // Surface the real failure (e.g. "branch already used by
+                // worktree", "worktree already exists", invalid name) BEFORE
+                // tearing down the modal. Without this the error only hit the
+                // log and the modal closed silently — the user saw a flash and
+                // never learned why (Stevie 2026-06-06). cancel_new_session()
+                // leaves self.notifications intact, so the 5s toast survives.
+                self.add_error_notification(format!("Could not create session: {e}"));
                 self.cancel_new_session();
             }
         }
@@ -8194,12 +8206,14 @@ impl AppState {
                         .unwrap_or_else(|| workspace.path.display().to_string());
                     let branch_source = crate::git::repo_source::head_branch(&workspace.path);
                     let branch_prefix = self.app_config.workspace_defaults.branch_prefix.clone();
-                    let existing_branches: Vec<String> =
-                        crate::git::worktree_manager::WorktreeManager::new()
-                            .ok()
-                            .and_then(|m| m.list_worktrees().ok())
-                            .map(|infos| infos.into_iter().map(|i| i.branch_name).collect())
-                            .unwrap_or_default();
+                    // Same complete in-use list the repo-picker path uses. The
+                    // legacy `list_worktrees()` here only saw legacy UUID dirs
+                    // and missed every by-name worktree, so a re-launch onto an
+                    // already-checked-out branch slipped the collision guard and
+                    // died at `git worktree add` (Stevie 2026-06-06: feat/ota).
+                    let existing_branches = crate::git::branch_list::in_use_branch_names(Some(
+                        workspace.path.as_path(),
+                    ));
                     let configure_state = ConfigureState::from_pick_repo(
                         repo_source,
                         repo_label,
