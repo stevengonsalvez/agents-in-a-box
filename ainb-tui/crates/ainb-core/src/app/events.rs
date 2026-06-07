@@ -1472,7 +1472,6 @@ impl EventHandler {
                     use crate::components::new_session::configure::ConfigureState;
                     use crate::config::session_defaults::SessionDefaults;
                     use crate::git::repo_source::head_branch;
-                    use crate::git::worktree_manager::WorktreeManager;
                     if let Some(pick) =
                         state.new_session_state.as_ref().and_then(|ns| ns.pick_repo_state.as_ref())
                     {
@@ -1488,29 +1487,18 @@ impl EventHandler {
                         _ => None,
                     };
                     let branch_prefix = state.app_config.workspace_defaults.branch_prefix.clone();
-                    // Use `list_all_worktrees` (scans by-session symlinks →
-                    // real git branch via head.shorthand()), NOT
-                    // `list_worktrees` which only finds legacy UUID-named
-                    // top-level dirs and misses every modern by-name worktree.
-                    // The latter returned empty → collision never detected
-                    // (Stevie 2026-05-27: feat/blog re-launch slipped through).
-                    let mut existing_branches: Vec<String> = WorktreeManager::new()
-                        .ok()
-                        .and_then(|m| m.list_all_worktrees().ok())
-                        .map(|infos| infos.into_iter().map(|(_, i)| i.branch_name).collect())
-                        .unwrap_or_default();
-                    // The session list alone can't see the repo's OWN checkout
-                    // (or a manually-added worktree) — `git worktree list` can.
-                    // Without this, a checkout-direct pick of the repo's
-                    // current branch passes the picker guard and dies at
-                    // `git worktree add` (review P1, PR #211).
-                    if let crate::git::repo_source::RepoSource::LocalPath(p) = &source {
-                        for b in crate::git::branch_list::checked_out_branches(p) {
-                            if !existing_branches.contains(&b) {
-                                existing_branches.push(b);
-                            }
-                        }
-                    }
+                    // Every branch already checked out in any worktree (ainb's
+                    // by-session worktrees + the repo's own checkout + manual
+                    // worktrees). Single source of truth so the collision guard
+                    // matches what `git worktree add` will accept — the legacy
+                    // `list_worktrees()` alone missed by-name worktrees
+                    // (Stevie 2026-05-27: feat/blog re-launch slipped through;
+                    // review P1, PR #211 added the repo's own checkout).
+                    let repo_path = match &source {
+                        crate::git::repo_source::RepoSource::LocalPath(p) => Some(p.as_path()),
+                        _ => None,
+                    };
+                    let existing_branches = crate::git::branch_list::in_use_branch_names(repo_path);
                     let cfg = ConfigureState::from_pick_repo(
                         source.clone(),
                         label,

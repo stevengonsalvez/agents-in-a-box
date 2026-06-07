@@ -109,6 +109,45 @@ pub fn checked_out_branches(repo_path: &Path) -> Vec<String> {
         .collect()
 }
 
+/// Every branch short name that would make `git worktree add` fail because it
+/// is already checked out somewhere. Two sources, deduped:
+///   1. `list_all_worktrees()` — branches in ainb's own by-session worktrees
+///      (scans the by-session symlinks → real git branch), across ALL repos.
+///   2. `checked_out_branches(repo_path)` — the repo's own main checkout plus
+///      any manually-added worktree, which the ainb session list can't see.
+///
+/// This is the single source of truth for the Configure screen's collision
+/// guard (the inline "⚠ in use" marker + the pre-launch block). Both the
+/// repo-picker entry and the restart entry MUST build `existing_branches` from
+/// here — using the legacy `list_worktrees()` alone silently misses every
+/// modern by-name worktree, so an in-use branch slips the guard and dies at
+/// `git worktree add` (Stevie 2026-06-06: feat/ota re-launch slipped through).
+///
+/// `repo_path` is `None` ONLY for non-local sources (e.g. an SSH session),
+/// which have no local checkout to scan. For any `LocalPath` repo pass
+/// `Some(path)` — passing `None` there would silently drop the repo's own
+/// checkout + manual worktrees from the guard.
+#[must_use]
+pub fn in_use_branch_names(repo_path: Option<&Path>) -> Vec<String> {
+    use super::worktree_manager::WorktreeManager;
+
+    let mut names: Vec<String> = WorktreeManager::new()
+        .ok()
+        .and_then(|m| m.list_all_worktrees().ok())
+        .map(|infos| infos.into_iter().map(|(_, i)| i.branch_name).collect())
+        .unwrap_or_default();
+
+    if let Some(path) = repo_path {
+        for b in checked_out_branches(path) {
+            if !names.contains(&b) {
+                names.push(b);
+            }
+        }
+    }
+
+    names
+}
+
 /// Pure assembly: dedup remote-vs-local, tag the default, sort sections.
 /// Split out for testability without a fixture repo.
 fn build_entries(
@@ -272,5 +311,53 @@ mod tests {
         let checked = checked_out_branches(&repo_path);
         assert!(checked.contains(&"main".to_string()));
         assert!(checked.contains(&"feature-x".to_string()));
+    }
+
+    #[test]
+    fn in_use_branch_names_includes_repo_checkout_branches() {
+        // The collision guard's source of truth must include the repo's own
+        // checked-out branches (main + any added worktree). The global
+        // by-session worktree list is merged in too, so assert superset rather
+        // than equality to stay independent of the host's ainb state
+        // (Stevie 2026-06-06: feat/ota slipped a guard built from the legacy
+        // list_worktrees() alone).
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir(&repo_path).unwrap();
+        let git = |args: &[&str], cwd: &Path| {
+            let out = Command::new("git").args(args).current_dir(cwd).output().unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-b", "main"], &repo_path);
+        git(&["config", "user.email", "t@t"], &repo_path);
+        git(&["config", "user.name", "t"], &repo_path);
+        git(&["commit", "--allow-empty", "-m", "init"], &repo_path);
+        git(&["branch", "feature-x"], &repo_path);
+        let wt = tmp.path().join("wt");
+        git(
+            &["worktree", "add", wt.to_str().unwrap(), "feature-x"],
+            &repo_path,
+        );
+
+        let names = in_use_branch_names(Some(&repo_path));
+        assert!(names.contains(&"main".to_string()), "repo checkout in list");
+        assert!(
+            names.contains(&"feature-x".to_string()),
+            "added worktree branch in list"
+        );
+    }
+
+    #[test]
+    fn in_use_branch_names_none_skips_repo_scan() {
+        // The SSH/non-local path: no `repo_path`, so the helper returns only
+        // the global by-session worktree list and must NOT attempt a
+        // `git worktree list` against any path. Host-independent: we only
+        // assert it returns without panicking (the `if let Some` arm is
+        // skipped entirely).
+        let _ = in_use_branch_names(None);
     }
 }
