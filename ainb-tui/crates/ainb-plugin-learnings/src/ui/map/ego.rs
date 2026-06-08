@@ -267,8 +267,19 @@ fn ordered_neighbors(
         }
         best.entry(e.other.as_str())
             .and_modify(|cur| {
+                // Total tiebreak so the representative — and thus the rendered
+                // arrow direction — is a pure function of the edge SET, never of
+                // the order relationships happened to arrive in: strongest, then
+                // lexicographically-first rel_type, then prefer the
+                // centre-is-source orientation (`src_is_self`). Without the final
+                // discriminator, A→B and B→A at equal strength + type would let
+                // input order silently flip the arrowhead.
                 let replace = e.strength > cur.strength
-                    || (e.strength == cur.strength && e.rel_type < cur.rel_type);
+                    || (e.strength == cur.strength && e.rel_type < cur.rel_type)
+                    || (e.strength == cur.strength
+                        && e.rel_type == cur.rel_type
+                        && e.src_is_self
+                        && !cur.src_is_self);
                 if replace {
                     *cur = e;
                 }
@@ -431,6 +442,47 @@ mod tests {
         assert_eq!(leaf.ring, 2);
         // The ring-2 edge connects mid → leaf, not centre → leaf.
         assert_eq!(edge(&h2, "leaf").unwrap().from, "mid");
+    }
+
+    #[test]
+    fn multi_relationship_neighbor_picks_strongest_representative() {
+        // Same neighbour reachable via two edges of different strength → the
+        // stronger one (and its type) is the representative.
+        let rels = vec![
+            rel("centre", "peer", "relates_to", Some(2)),
+            rel("centre", "peer", "solves", Some(9)),
+        ];
+        let g = EgoSubgraph::build(&rels, "centre", 1, DEFAULT_NODE_CAP, false);
+        let e = edge(&g, "peer").unwrap();
+        assert_eq!(
+            e.rel_type, "solves",
+            "stronger edge wins the representative"
+        );
+        assert_eq!(e.arrow, Arrow::Forward);
+    }
+
+    #[test]
+    fn opposite_direction_tie_is_order_independent() {
+        // A directed edge in BOTH directions at equal strength + type. The
+        // representative must NOT depend on which relationship was listed first
+        // — the total tiebreak prefers the centre-is-source orientation, so the
+        // arrow is the same regardless of input order.
+        let forward_first = vec![
+            rel("centre", "peer", "causes", Some(5)),
+            rel("peer", "centre", "causes", Some(5)),
+        ];
+        let backward_first = vec![
+            rel("peer", "centre", "causes", Some(5)),
+            rel("centre", "peer", "causes", Some(5)),
+        ];
+        let a = EgoSubgraph::build(&forward_first, "centre", 1, DEFAULT_NODE_CAP, false);
+        let b = EgoSubgraph::build(&backward_first, "centre", 1, DEFAULT_NODE_CAP, false);
+        assert_eq!(edge(&a, "peer").unwrap().arrow, Arrow::Forward);
+        assert_eq!(
+            edge(&a, "peer").unwrap().arrow,
+            edge(&b, "peer").unwrap().arrow,
+            "arrow must be input-order independent"
+        );
     }
 
     #[test]
