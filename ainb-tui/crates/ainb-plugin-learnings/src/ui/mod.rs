@@ -162,9 +162,9 @@ impl LearningsUi {
     /// 1. **Detail pane open** — it consumes the key (`Backspace`/`Esc` close;
     ///    everything else is swallowed so the list behind can't move). The pane
     ///    is modal over the whole shell, so this short-circuits `Tab` too.
-    /// 1b. **Picker popup open** — the learnings picker (opened by `o` in the
-    ///    map) is the next modal: `↑↓` move, `⏎` opens the chosen learning's
-    ///    Detail, `Backspace` closes. It always claims the key.
+    ///    - **Picker popup** (opened by `o` in the map) is the next modal:
+    ///      `↑↓` move, `⏎` opens the chosen learning's Detail, `Backspace`
+    ///      closes. It always claims the key.
     /// 2. **Graph focused** — when `g` has focused the Graph tab, the graph
     ///    claims `↑↓`/`jk`/`c` for navigation + the entity⇄community toggle, and
     ///    `v` cycles the radial map. In the **map** sub-mode the map additionally
