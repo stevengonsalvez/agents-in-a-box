@@ -213,6 +213,27 @@ async fn o_opens_detail_for_the_entity() {
 }
 
 #[tokio::test]
+async fn o_on_the_overflow_node_is_a_clean_noop() {
+    // Centre the hub (18 neighbours → a `[+N more]` overflow), select that
+    // synthetic node (Down into the ring, then Left wraps to the last slot =
+    // overflow), and press `o`. The overflow isn't a real entity, so nothing
+    // opens — the map stays put.
+    let mut h = run_plugin(LearningsPlugin::default());
+    h.init_with_config(hub_config()).await.expect("init with hub config");
+    send_key(&mut h, KeyCode::Char { ch: 'g' }).await;
+    send_key(&mut h, KeyCode::Char { ch: 'v' }).await;
+    send_key(&mut h, KeyCode::Down).await; // first ring node
+    send_key(&mut h, KeyCode::Left).await; // wrap back to the overflow node
+    send_key(&mut h, KeyCode::Char { ch: 'o' }).await;
+    let after = buffer_text(&h.render(VIEWPORT).await.expect("render after o"));
+    assert!(
+        after.contains("centre: zzz-graph-hub"),
+        "`o` on the overflow node must not open Detail/picker — the map stays:\n{after}"
+    );
+    h.close().await.expect("clean close");
+}
+
+#[tokio::test]
 async fn hub_overflows_and_e_expands_it() {
     // Init over the hub-only KB so the lone entity is the centre on `v`.
     let mut h = run_plugin(LearningsPlugin::default());
