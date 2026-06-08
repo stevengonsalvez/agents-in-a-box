@@ -1220,8 +1220,11 @@ impl EventHandler {
                 }
             }
             KeyCode::Char('r') => {
-                // 'r' resumes a Stopped interactive session; otherwise it falls
-                // back to the existing reauthenticate-credentials shortcut.
+                // 'r' resumes a Stopped interactive session only. It no longer
+                // doubles as the reauthenticate-credentials shortcut — that
+                // moved to 'A' so the menu bar's `r resume` hint matches what
+                // the key actually does (one key, one meaning). Pressing 'r'
+                // on a non-resumable selection is a no-op.
                 use crate::models::{SessionAgentType, SessionMode, SessionStatus};
                 // Checked rows win over cursor: with a multi-select active,
                 // 'r' resumes every selected resumable session.
@@ -1239,12 +1242,15 @@ impl EventHandler {
                     if is_interactive && matches!(session.status, SessionStatus::Stopped) {
                         Some(AppEvent::ResumeSession("r".to_string()))
                     } else {
-                        Some(AppEvent::ReauthenticateCredentials)
+                        None
                     }
                 } else {
-                    Some(AppEvent::ReauthenticateCredentials)
+                    None
                 }
             }
+            // Re-authenticate agent credentials. Lives on 'A' (was 'r') so the
+            // resume affordance can own 'r' unambiguously. See restart_affordance.
+            KeyCode::Char('A') => Some(AppEvent::ReauthenticateCredentials),
             KeyCode::F(2) => {
                 // F2 for rename - works in "SSH Sessions" and "Other tmux" sections
                 if state.is_ssh_session_selected() {
@@ -1267,6 +1273,11 @@ impl EventHandler {
             KeyCode::Char('o') => Some(AppEvent::OpenInEditor), // Open in editor
             KeyCode::Char('E') => Some(AppEvent::ToggleExpandAll), // Toggle expand/collapse all workspaces
             KeyCode::Char('$') => Some(AppEvent::OpenQuickShell), // Quick shell in current workspace/session
+            // Inbox is advertised on the session-list menu bar (`b inbox`), so
+            // the key must work in this view too — not only on the home screen
+            // where `handle_home_screen_keys` also binds it. Without this arm
+            // the menu hint pointed at a dead key.
+            KeyCode::Char('b') => Some(AppEvent::GoToInbox),
 
             // Tmux preview scroll mode (Shift + Up/Down)
             KeyCode::Up if key_event.modifiers.contains(KeyModifiers::SHIFT) => {
