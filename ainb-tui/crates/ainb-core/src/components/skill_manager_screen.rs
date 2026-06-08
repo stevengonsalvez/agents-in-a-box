@@ -297,6 +297,10 @@ pub struct BrowseViewState {
     /// Optional status line (e.g. an error or "no results") shown beneath
     /// the input. `None` in the happy path.
     pub status: Option<String>,
+    /// True after the first Enter on a command-kind (npx/plugin/mcp) row —
+    /// the entry installs by RUNNING a shell command, so we require a second
+    /// Enter to confirm. Reset by any navigation / new search.
+    pub pending_command_confirm: bool,
 }
 
 impl BrowseViewState {
@@ -317,6 +321,7 @@ impl BrowseViewState {
         self.results = rows;
         self.selected = 0;
         self.mode = BrowseMode::Results;
+        self.pending_command_confirm = false;
     }
 
     /// Record an error status and stay/return to Query mode so the user
@@ -325,9 +330,11 @@ impl BrowseViewState {
         self.status = Some(message.into());
         self.results.clear();
         self.mode = BrowseMode::Query;
+        self.pending_command_confirm = false;
     }
 
     pub fn select_prev(&mut self) {
+        self.pending_command_confirm = false;
         if self.results.is_empty() {
             return;
         }
@@ -339,6 +346,7 @@ impl BrowseViewState {
     }
 
     pub fn select_next(&mut self) {
+        self.pending_command_confirm = false;
         if self.results.is_empty() {
             return;
         }
@@ -348,6 +356,13 @@ impl BrowseViewState {
     /// The currently-selected result row, if any.
     pub fn selected_row(&self) -> Option<&BrowseRow> {
         self.results.get(self.selected)
+    }
+
+    /// Arm the command-kind install confirm: surface the exact shell command
+    /// and that a second Enter runs it. ainb only ever runs commands from the
+    /// vetted curated index, and never without this explicit confirm.
+    pub fn set_status_confirm(&mut self, cmd: &str) {
+        self.status = Some(format!("⚠ runs a shell command — Enter again to run: {cmd}"));
     }
 }
 

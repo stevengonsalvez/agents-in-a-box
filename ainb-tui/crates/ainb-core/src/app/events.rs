@@ -4666,28 +4666,37 @@ impl EventHandler {
                 }
             }
             AppEvent::SkillManagerBrowseInstall => {
-                // Enter on a selected result — route the hit's install_uri
-                // through the existing install flow (add source + skill
-                // install), exactly like the CLI does.
+                // Enter on a selected result. A `skill` installs immediately
+                // via the unit flow. A command-kind (npx/plugin/mcp) RUNS a
+                // shell command, so the FIRST Enter only arms a confirm (shows
+                // the exact command); a SECOND Enter runs it.
                 let ainb_home = ainb_skill_core::default_ainb_home();
-                let install_uri = state
-                    .skill_manager_state
-                    .browse
-                    .as_ref()
-                    .and_then(|b| b.selected_row().map(|r| r.install_uri.clone()));
-                match install_uri {
+                let selected = state.skill_manager_state.browse.as_ref().and_then(|b| {
+                    b.selected_row()
+                        .map(|r| (r.install_uri.clone(), r.kind, b.pending_command_confirm))
+                });
+                match selected {
                     None => {
                         state.add_warning_notification(
                             "browse: no result selected".to_string(),
                         );
                     }
-                    Some(uri) => {
-                        let (ok, msg) = install_catalog_hit(&ainb_home, &uri);
+                    Some((uri, kind, pending)) if kind.is_command() && !pending => {
+                        // First Enter on a command-kind — arm the confirm.
+                        if let Some(b) = state.skill_manager_state.browse.as_mut() {
+                            b.pending_command_confirm = true;
+                            b.set_status_confirm(&uri);
+                        }
+                    }
+                    Some((uri, kind, _)) => {
+                        let (ok, msg) = install_catalog_hit(&ainb_home, &uri, kind);
                         state.skill_manager_state.reload_from_disk(&ainb_home);
+                        if let Some(b) = state.skill_manager_state.browse.as_mut() {
+                            b.pending_command_confirm = false;
+                        }
                         if ok {
-                            // Close the modal on a successful install so
-                            // the user lands back on the (now-updated)
-                            // Units table.
+                            // Close the modal on a successful install so the
+                            // user lands back on the (now-updated) Units table.
                             state.skill_manager_state.browse = None;
                             state.add_success_notification(format!("installed: {msg}"));
                         } else {
@@ -6201,12 +6210,23 @@ mod catalog_search_tokio_guard {
     }
 }
 
-/// Install a catalog hit by its unit URI, routing through the existing
-/// install flow: derive the source URI from the unit URI, `ainb source
-/// add` it (idempotent — "already exists" is not a failure), then `ainb
-/// skill install <uri> --yes`. Returns `(ok, last_line)`. Bead ai-a20.
-fn install_catalog_hit(ainb_home: &std::path::Path, install_uri: &str) -> (bool, String) {
+/// Install a catalog hit, routing by [`CatalogEntryKind`]:
+/// - `Skill` → the unit flow: derive the source URI, `ainb source add` it
+///   (idempotent), then `ainb skill install <uri> --yes`.
+/// - `Npx` / `Plugin` / `Mcp` → run the entry's documented install COMMAND
+///   (carried in `install_uri`) via `sh -c`, since those tools install via
+///   their own CLI. The caller gates this on an explicit confirm.
+///
+/// Returns `(ok, last_line)`. Bead ai-a20 + curated-catalog expansion.
+fn install_catalog_hit(
+    ainb_home: &std::path::Path,
+    install_uri: &str,
+    kind: ainb_skill_core::catalog::CatalogEntryKind,
+) -> (bool, String) {
     use ainb_skill_core::Uri;
+    if kind.is_command() {
+        return run_install_command(install_uri);
+    }
     let Ok(uri) = Uri::parse(install_uri) else {
         return (false, format!("invalid install URI `{install_uri}`"));
     };
@@ -6240,6 +6260,80 @@ fn install_catalog_hit(ainb_home: &std::path::Path, install_uri: &str) -> (bool,
         yes: true,
     });
     run_skill_cli(ainb_home, install_cmd)
+}
+
+#[cfg(test)]
+mod catalog_command_install {
+    use super::{install_catalog_hit, run_install_command};
+    use ainb_skill_core::catalog::CatalogEntryKind;
+
+    #[test]
+    fn run_command_reports_success_and_last_line() {
+        let (ok, msg) = run_install_command("echo hello-from-cmd");
+        assert!(ok, "echo should succeed: {msg}");
+        assert_eq!(msg, "hello-from-cmd");
+    }
+
+    #[test]
+    fn run_command_reports_failure_on_nonzero_exit() {
+        let (ok, _msg) = run_install_command("exit 3");
+        assert!(!ok, "a non-zero exit must report failure");
+    }
+
+    #[test]
+    fn command_kind_routes_to_shell_not_uri_parse() {
+        // A command-kind install never parses install_uri as a unit URI; it
+        // runs it. Prove it by having the "command" create a temp marker.
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("ran-marker");
+        let cmd = format!("touch '{}'", marker.display());
+        let (ok, _msg) = install_catalog_hit(dir.path(), &cmd, CatalogEntryKind::Npx);
+        assert!(ok, "command-kind install should run the shell command");
+        assert!(marker.exists(), "the install command did not run");
+    }
+
+    #[test]
+    fn skill_kind_rejects_a_non_uri() {
+        // A skill-kind install still parses install_uri as a unit URI, so a
+        // bare command string is rejected (not executed).
+        let dir = tempfile::tempdir().unwrap();
+        let (ok, msg) =
+            install_catalog_hit(dir.path(), "echo should-not-run", CatalogEntryKind::Skill);
+        assert!(!ok, "skill-kind must not run a shell command");
+        assert!(msg.contains("invalid install URI"), "{msg}");
+    }
+}
+
+/// Run a command-kind install (npx / plugin / mcp) by handing its documented
+/// command to `sh -c`. Inherits the ainb process env (so it installs into the
+/// active HOME). Returns `(success, last_non_blank_output_line)`. The caller
+/// must have obtained an explicit user confirm first — this shells out.
+fn run_install_command(cmd: &str) -> (bool, String) {
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .output();
+    match output {
+        Ok(out) => {
+            let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
+            combined.push_str(&String::from_utf8_lossy(&out.stderr));
+            let last = combined
+                .lines()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let ok = out.status.success();
+            let msg = if last.is_empty() {
+                format!("ran: {cmd}")
+            } else {
+                last
+            };
+            (ok, msg)
+        }
+        Err(e) => (false, format!("failed to run `{cmd}`: {e}")),
+    }
 }
 
 /// Remove the unit whose `declared_uri` matches `uri` from the manifest

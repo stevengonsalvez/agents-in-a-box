@@ -181,6 +181,29 @@ fn write_curated_index(root: &Path, local_install_uri: &str) -> PathBuf {
     path
 }
 
+/// Write a curated index with ONE command-kind (npx) entry whose install
+/// "command" just `touch`es a marker file — a harmless, offline stand-in for
+/// `npx skills add …`. Returns `(index_path, marker_path)`. The double-Enter
+/// confirm then runs the command and the marker proves it ran.
+fn write_command_index(root: &Path) -> (PathBuf, PathBuf) {
+    let marker = root.join("cmd-install-marker");
+    let index = CatalogIndex::new(
+        "v-tripwire",
+        vec![CatalogIndexEntry {
+            name: "npx-demo-skill".to_string(),
+            description: "command-kind demo (runs a shell command)".to_string(),
+            repo: "vercel-labs/agent-browser".to_string(),
+            install_uri: format!("touch '{}'", marker.display()),
+            origin: CatalogOrigin::External,
+            stars: 0,
+            kind: ainb_skill_core::catalog::CatalogEntryKind::Npx,
+        }],
+    );
+    let path = root.join("command-index.json");
+    std::fs::write(&path, index.to_json()).expect("write command index");
+    (path, marker)
+}
+
 /// Launch line: the fixture's env_vars + `AINB_CATALOG_INDEX_FILE` so the
 /// curated backend reads the LOCAL index (offline).
 fn launch_line(layout: &SandboxLayout, bin: &Path, index_file: &Path) -> String {
@@ -352,5 +375,124 @@ fn curated_browse_blank_lists_shelf_and_installs_live() {
         "[b] curated browse → Enter did not install the selected hit — manifest \
          did not gain the `{catalog_marker}` source AND a deployed \
          `curated-demo-skill` unit in lock.yaml.\nlast pane:\n{dump}"
+    );
+}
+
+#[test]
+fn curated_command_kind_install_runs_on_double_enter_live() {
+    if !tmux_available() {
+        eprintln!("SKIP: tmux not on PATH");
+        return;
+    }
+
+    let tmp = tempfile::tempdir().expect("home tempdir");
+    let layout =
+        build_skill_manager_sandbox(tmp.path(), SandboxTier::Full).expect("sandbox full");
+    seed_onboarding(&layout);
+    seed_notify_dismissed(&layout);
+    let (index_file, marker) = write_command_index(layout.root.as_path());
+
+    let session = format!("tripwire-sm-cmd-{}", std::process::id());
+    let bin = ainb_bin();
+
+    assert!(
+        Command::new("tmux")
+            .args(["new-session", "-d", "-s", &session, "-x", "200", "-y", "50"])
+            .status()
+            .expect("tmux new-session")
+            .success(),
+        "tmux new-session failed"
+    );
+    Command::new("tmux")
+        .args([
+            "send-keys",
+            "-t",
+            &session,
+            &launch_line(&layout, &bin, &index_file),
+            "Enter",
+        ])
+        .status()
+        .expect("tmux send-keys launch");
+
+    if poll(&session, Instant::now() + Duration::from_secs(120), |c| {
+        c.contains("Skills (manager)")
+    })
+    .is_none()
+    {
+        let d = capture(&session);
+        kill(&session);
+        panic!("home never rendered:\n{d}");
+    }
+    thread::sleep(Duration::from_millis(200));
+    send(&session, "m");
+    if poll(&session, Instant::now() + Duration::from_secs(90), |c| {
+        c.contains("Units") && c.contains("Detail")
+    })
+    .is_none()
+    {
+        let d = capture(&session);
+        kill(&session);
+        panic!("SkillManager never rendered:\n{d}");
+    }
+
+    // [b] → curated modal, blank Enter → the single command-kind row.
+    thread::sleep(Duration::from_millis(200));
+    send(&session, "b");
+    if poll(&session, Instant::now() + Duration::from_secs(20), |c| {
+        c.contains("Browse Catalog") && c.contains("ainb curated")
+    })
+    .is_none()
+    {
+        let d = capture(&session);
+        kill(&session);
+        panic!("[b] did not open the curated browse modal");
+    }
+    thread::sleep(Duration::from_millis(200));
+    send(&session, "Enter");
+    if poll(&session, Instant::now() + Duration::from_secs(20), |c| {
+        c.contains("npx-demo-skill") && c.contains("npx")
+    })
+    .is_none()
+    {
+        let d = capture(&session);
+        kill(&session);
+        panic!("command-kind row did not render with its npx badge:\n{d}");
+    }
+
+    // First Enter ARMS the confirm (must NOT run yet — marker absent).
+    thread::sleep(Duration::from_millis(200));
+    send(&session, "Enter");
+    if poll(&session, Instant::now() + Duration::from_secs(20), |c| {
+        c.contains("Enter again to run")
+    })
+    .is_none()
+    {
+        let d = capture(&session);
+        kill(&session);
+        panic!("first Enter did not arm the command confirm:\n{d}");
+    }
+    assert!(
+        !marker.exists(),
+        "the command ran on the FIRST Enter — the confirm gate failed"
+    );
+
+    // Second Enter RUNS the command → marker created.
+    thread::sleep(Duration::from_millis(200));
+    send(&session, "Enter");
+    let mut ran = false;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline {
+        if marker.exists() {
+            ran = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(300));
+    }
+    let dump = capture(&session);
+    kill(&session);
+    assert!(
+        ran,
+        "second Enter did not run the command-kind install (marker absent).\n\
+         last pane:\n{dump}"
     );
 }
