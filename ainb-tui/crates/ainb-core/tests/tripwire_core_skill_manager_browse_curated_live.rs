@@ -1,30 +1,32 @@
-//! Tripwire: the SkillManager `[b]` catalog browse modal — bead ai-a20.
+//! Tripwire: the SkillManager `[b]` modal browsing the CURATED (`ainb`)
+//! catalog — the toolkit-as-external-provider feature.
 //!
 //! Drives the real `ainb` binary against the Full-tier sandbox via tmux:
 //!   1. `m` → SkillManager screen.
-//!   2. `b` → the catalog browse modal opens (Query mode).
-//!   3. type a query → `Enter` → results render (the canned mock hit
-//!      `catalog-demo-skill`).
-//!   4. `Enter` on the selected hit → installs it through the existing
-//!      install flow → the manifest gains the installed source.
+//!   2. `b` → the catalog browse modal opens, defaulting to `ainb curated`.
+//!   3. `Enter` on a blank query → the WHOLE curated shelf renders, showing
+//!      BOTH an owned entry AND a vetted-external entry (success criterion
+//!      #2's "BOTH" check).
+//!   4. `Enter` on the selected (top-ranked) hit → installs it through the
+//!      existing install flow → the manifest gains the installed source and
+//!      the lockfile records the deployed unit.
 //!
-//! ZERO network: the launch sets `AINB_CATALOG_MOCK=1` so the binary's
-//! `SkillsShHttpBackend` returns canned data without a socket, and
-//! `AINB_CATALOG_MOCK_INSTALL_URI` points the top hit's install URI at
-//! the sandbox's LOCAL bare remote (`git:file://…`) so the install's
-//! fetch is a local clone — never GitHub.
+//! ZERO network: the launch sets `AINB_CATALOG_INDEX_FILE` to a LOCAL index
+//! file the test writes, so the curated backend reads it without a socket.
+//! The selected entry's `install_uri` points at the sandbox's LOCAL bare
+//! remote (`git:file://…`) so the install fetch is a local clone — never
+//! GitHub.
 //!
-//! Mirrors the EXACT launch + onboarding-seed + capture-pane pattern of
-//! `tripwire_core_skill_manager_library_live.rs` /
-//! `tripwire_core_skill_manager_keys_wired.rs`. Build the binary under
-//! the real HOME; exec with HOME set to the sandbox tempdir. Skips
-//! cleanly when `tmux` is unavailable.
+//! Mirrors the launch + onboarding-seed + capture-pane pattern of
+//! `tripwire_core_skill_manager_browse_live.rs`. Skips when `tmux` is
+//! unavailable.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use ainb_skill_core::catalog_index::{CatalogIndex, CatalogIndexEntry, CatalogOrigin};
 use ainb_skill_core::{build_skill_manager_sandbox, SandboxLayout, SandboxTier};
 
 fn ainb_bin() -> PathBuf {
@@ -39,8 +41,6 @@ fn tmux_available() -> bool {
         .unwrap_or(false)
 }
 
-/// Seed the onboarding marker so the first-run wizard doesn't steal our
-/// keystrokes. Same pattern as every other live tmux tripwire.
 fn seed_onboarding(layout: &SandboxLayout) {
     let cfg = layout.root.join(".agents-in-a-box").join("config");
     std::fs::create_dir_all(&cfg).expect("create isolated config dir");
@@ -52,8 +52,9 @@ fn seed_onboarding(layout: &SandboxLayout) {
 }
 
 /// Suppress the first-run ainb-hooks install nudge — a confirmation modal on
-/// the home screen that would otherwise intercept our `m` keystroke. Seeding
-/// an install record with `prompt_dismissed = true` makes
+/// the home screen (`InstallPrompt::OfferInstall`) that would otherwise
+/// intercept our `m` keystroke before it reaches the SkillManager shortcut.
+/// Seeding an install record with `prompt_dismissed = true` makes
 /// `ainb_plugin_notifyd::prompt_state` return `None`.
 fn seed_notify_dismissed(layout: &SandboxLayout) {
     let base = layout.root.join(".agents-in-a-box");
@@ -91,14 +92,6 @@ fn send(session: &str, keys: &str) {
         .expect("tmux send-keys");
 }
 
-/// Send a literal string (no key-name interpretation).
-fn send_literal(session: &str, text: &str) {
-    Command::new("tmux")
-        .args(["send-keys", "-t", session, "-l", text])
-        .status()
-        .expect("tmux send-keys -l");
-}
-
 fn kill(session: &str) {
     let _ = Command::new("tmux")
         .args(["kill-session", "-t", session])
@@ -128,39 +121,67 @@ fn git(args: &[&str], cwd: &Path) {
     );
 }
 
-/// Seed a SECOND local bare repo (distinct from the fixture's `sandbox`
-/// remote) holding one new skill `browse-demo-skill`, and return the
-/// full unit URI for it. This represents installing something the
-/// manifest does NOT already declare — the genuine browse-then-install
-/// flow. The repo is local (`git:file://…`) so the install fetch never
-/// hits the network.
+/// Seed a local bare repo holding one new skill `curated-demo-skill`, and
+/// return the full unit URI for it (`git:file://…`, so the install fetch is
+/// a local clone, never the network).
 fn seed_catalog_remote(root: &Path) -> String {
-    let bare = root.join("browse-catalog-remote.git");
+    let bare = root.join("curated-catalog-remote.git");
     git(&["init", "--bare", "-b", "main", bare.to_str().unwrap()], root);
 
-    let work = root.join(".browse-seed-work");
+    let work = root.join(".curated-seed-work");
     std::fs::create_dir_all(&work).expect("work dir");
     git(&["init", "-q", "-b", "main"], &work);
-    let skill_dir = work.join("skills/browse-demo-skill");
+    let skill_dir = work.join("skills/curated-demo-skill");
     std::fs::create_dir_all(&skill_dir).expect("skill dir");
     std::fs::write(
         skill_dir.join("SKILL.md"),
-        "---\nname: browse-demo-skill\nkind: skill\n---\nInstalled via the [b] browse modal.\n",
+        "---\nname: curated-demo-skill\nkind: skill\n---\nInstalled via the [b] curated browse modal.\n",
     )
     .expect("write SKILL.md");
     git(&["add", "."], &work);
-    git(&["commit", "-q", "-m", "seed: browse-demo-skill"], &work);
+    git(&["commit", "-q", "-m", "seed: curated-demo-skill"], &work);
     git(&["remote", "add", "origin", bare.to_str().unwrap()], &work);
     git(&["push", "-q", "origin", "main"], &work);
     std::fs::remove_dir_all(&work).ok();
 
-    format!("git:file://{}@main/skills/browse-demo-skill", bare.display())
+    format!("git:file://{}@main/skills/curated-demo-skill", bare.display())
 }
 
-/// Launch line: the fixture's env_vars + the two catalog-mock env knobs
-/// that keep the browse + install flow fully offline. `install_uri`
-/// points the top hit at the local catalog remote.
-fn launch_line(layout: &SandboxLayout, bin: &Path, install_uri: &str) -> String {
+/// Write a local curated index with two entries: an OWNED entry whose
+/// `install_uri` points at the local catalog remote (sorts first → selected
+/// by default), and a vetted-EXTERNAL entry (display only — proves the shelf
+/// shows BOTH classes). Returns the index file path.
+fn write_curated_index(root: &Path, local_install_uri: &str) -> PathBuf {
+    let index = CatalogIndex::new(
+        "v-tripwire",
+        vec![
+            CatalogIndexEntry {
+                // `aaa…` sorts to the top so it is the default selection.
+                name: "aaa-curated-owned".to_string(),
+                description: "owned curated demo (local install)".to_string(),
+                repo: "stevengonsalvez/agents-in-a-box".to_string(),
+                install_uri: local_install_uri.to_string(),
+                origin: CatalogOrigin::Owned,
+                stars: 0,
+            },
+            CatalogIndexEntry {
+                name: "zzz-curated-external".to_string(),
+                description: "vetted external curated demo".to_string(),
+                repo: "acme/external-skill".to_string(),
+                install_uri: "gh:acme/external-skill@main/.claude/skills".to_string(),
+                origin: CatalogOrigin::External,
+                stars: 0,
+            },
+        ],
+    );
+    let path = root.join("curated-index.json");
+    std::fs::write(&path, index.to_json()).expect("write curated index");
+    path
+}
+
+/// Launch line: the fixture's env_vars + `AINB_CATALOG_INDEX_FILE` so the
+/// curated backend reads the LOCAL index (offline).
+fn launch_line(layout: &SandboxLayout, bin: &Path, index_file: &Path) -> String {
     let mut s = String::new();
     for (k, v) in layout.env_vars() {
         s.push_str(k);
@@ -168,12 +189,8 @@ fn launch_line(layout: &SandboxLayout, bin: &Path, install_uri: &str) -> String 
         s.push_str(&sh_quote(&Path::new(&v).to_string_lossy()));
         s.push(' ');
     }
-    // Force canned catalog data (no network) and point the top hit's
-    // install URI at the local catalog remote so the install fetch is a
-    // local clone.
-    s.push_str("AINB_CATALOG_MOCK=1 ");
-    s.push_str("AINB_CATALOG_MOCK_INSTALL_URI=");
-    s.push_str(&sh_quote(install_uri));
+    s.push_str("AINB_CATALOG_INDEX_FILE=");
+    s.push_str(&sh_quote(&index_file.to_string_lossy()));
     s.push(' ');
     s.push_str("exec ");
     s.push_str(&sh_quote(&bin.to_string_lossy()));
@@ -182,23 +199,21 @@ fn launch_line(layout: &SandboxLayout, bin: &Path, install_uri: &str) -> String 
 }
 
 #[test]
-fn browse_modal_searches_and_enter_installs_live() {
+fn curated_browse_blank_lists_shelf_and_installs_live() {
     if !tmux_available() {
         eprintln!("SKIP: tmux not on PATH");
         return;
     }
 
     let tmp = tempfile::tempdir().expect("home tempdir");
-    // Full tier seeds a manifest + the bare remote with `initial-skill`.
     let layout =
         build_skill_manager_sandbox(tmp.path(), SandboxTier::Full).expect("sandbox full");
     seed_onboarding(&layout);
     seed_notify_dismissed(&layout);
-    // A SECOND local repo holding a NEW skill — the thing the browse
-    // modal installs (not already in the manifest). Local → no network.
     let install_uri = seed_catalog_remote(layout.root.as_path());
+    let index_file = write_curated_index(layout.root.as_path(), &install_uri);
 
-    let session = format!("tripwire-sm-browse-{}", std::process::id());
+    let session = format!("tripwire-sm-curated-{}", std::process::id());
     let bin = ainb_bin();
 
     assert!(
@@ -214,15 +229,14 @@ fn browse_modal_searches_and_enter_installs_live() {
             "send-keys",
             "-t",
             &session,
-            &launch_line(&layout, &bin, &install_uri),
+            &launch_line(&layout, &bin, &index_file),
             "Enter",
         ])
         .status()
         .expect("tmux send-keys launch");
 
     // Home → SkillManager. The v2 home lists a "Skills (manager)" tile;
-    // wait for it as the "booted on home" signal (the old "Welcome to AINB"
-    // banner was dropped in the home redesign).
+    // wait for it as the "booted on home" signal.
     if poll(&session, Instant::now() + Duration::from_secs(120), |c| {
         c.contains("Skills (manager)")
     })
@@ -232,10 +246,9 @@ fn browse_modal_searches_and_enter_installs_live() {
         kill(&session);
         panic!("home never rendered:\n{d}");
     }
-    thread::sleep(Duration::from_millis(200));
+    thread::sleep(Duration::from_millis(300));
     send(&session, "m");
 
-    // SkillManager renders (Full tier → units present, no banner).
     if poll(&session, Instant::now() + Duration::from_secs(90), |c| {
         c.contains("Units") && c.contains("Detail")
     })
@@ -246,7 +259,7 @@ fn browse_modal_searches_and_enter_installs_live() {
         panic!("SkillManager never rendered:\n{d}");
     }
 
-    // ── [b] → browse modal. Defaults to the curated (`ainb`) catalog…
+    // ── [b] → curated browse modal (defaults to `ainb curated`).
     thread::sleep(Duration::from_millis(200));
     send(&session, "b");
     if poll(&session, Instant::now() + Duration::from_secs(20), |c| {
@@ -259,56 +272,36 @@ fn browse_modal_searches_and_enter_installs_live() {
         panic!("[b] did not open the curated browse modal:\n{d}");
     }
 
-    // ── …Tab switches to the skills.sh catalog (this test's mock path).
+    // ── Blank Enter → the whole curated shelf renders BOTH classes.
     thread::sleep(Duration::from_millis(200));
-    send(&session, "Tab");
-    if poll(&session, Instant::now() + Duration::from_secs(20), |c| {
-        c.contains("Browse Catalog") && c.contains("skills.sh")
-    })
-    .is_none()
-    {
-        let d = capture(&session);
-        kill(&session);
-        panic!("Tab did not switch the browse modal to skills.sh:\n{d}");
-    }
-
-    // ── Type a query + Enter → results render the canned hit.
-    send_literal(&session, "demo");
-    thread::sleep(Duration::from_millis(400));
     send(&session, "Enter");
-    let results = poll(&session, Instant::now() + Duration::from_secs(20), |c| {
-        c.contains("catalog-demo-skill")
+    let shelf = poll(&session, Instant::now() + Duration::from_secs(20), |c| {
+        c.contains("aaa-curated-owned") && c.contains("zzz-curated-external")
     });
-    if results.is_none() {
+    if shelf.is_none() {
         let d = capture(&session);
         kill(&session);
         panic!(
-            "browse search did not render the canned mock hit `catalog-demo-skill`.\n\
-             last pane:\n{d}"
+            "blank Enter did not list the curated shelf with BOTH an owned \
+             and an external entry.\nlast pane:\n{d}"
         );
     }
 
-    // ── Enter on the selected (top-ranked) result → install.
+    // ── Enter on the selected (top) owned entry → install from the local
+    // remote. Prove it via manifest + lockfile, not just a transient toast.
     thread::sleep(Duration::from_millis(300));
     send(&session, "Enter");
 
-    // The manifest must gain the installed source (the NEW catalog
-    // remote, distinct from the Full-tier `sandbox` source), and the
-    // lockfile must record the deployed `browse-demo-skill` unit. Poll
-    // both files directly — that's the durable proof the install ran
-    // end-to-end, not just a transient toast.
     let manifest = layout.ainb_home.join("manifest.yaml");
     let lock = layout.ainb_home.join("lock.yaml");
-    let catalog_marker = "browse-catalog-remote.git";
+    let catalog_marker = "curated-catalog-remote.git";
     let mut installed = false;
     let deadline = Instant::now() + Duration::from_secs(40);
     while Instant::now() < deadline {
         let manifest_text = std::fs::read_to_string(&manifest).unwrap_or_default();
         let lock_text = std::fs::read_to_string(&lock).unwrap_or_default();
-        // Manifest gains the new catalog source; lockfile records the
-        // deployed new skill.
         if manifest_text.contains(catalog_marker)
-            && lock_text.contains("browse-demo-skill")
+            && lock_text.contains("curated-demo-skill")
             && lock_text.contains("deployed")
         {
             installed = true;
@@ -320,8 +313,8 @@ fn browse_modal_searches_and_enter_installs_live() {
     kill(&session);
     assert!(
         installed,
-        "[b] browse → Enter did not install the selected hit — manifest did \
-         not gain the `{catalog_marker}` source AND a deployed \
-         `browse-demo-skill` unit in lock.yaml.\nlast pane:\n{dump}"
+        "[b] curated browse → Enter did not install the selected hit — manifest \
+         did not gain the `{catalog_marker}` source AND a deployed \
+         `curated-demo-skill` unit in lock.yaml.\nlast pane:\n{dump}"
     );
 }
