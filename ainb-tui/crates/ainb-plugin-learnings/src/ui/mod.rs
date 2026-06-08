@@ -14,6 +14,7 @@
 mod browse;
 mod detail;
 mod graph;
+mod map;
 mod search;
 
 use ratatui::buffer::Buffer as RBuffer;
