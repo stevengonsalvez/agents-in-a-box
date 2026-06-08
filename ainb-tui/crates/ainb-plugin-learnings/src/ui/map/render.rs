@@ -55,8 +55,10 @@ pub fn layout_in(area: RRect, ego: &EgoSubgraph) -> (RRect, Vec<Placed>) {
 }
 
 /// Render the radial map for `ego` with `selected` highlighted (matched by node
-/// name). `hop` / overflow counts drive the header.
-pub fn render(buf: &mut RBuffer, area: RRect, ego: &EgoSubgraph, selected: &str) {
+/// name). `scale` (0.0..=1.0) drives the recentre animation: `1.0` is the
+/// settled layout; below that, ring nodes are lerped toward the centre so a
+/// recentre "grows" the new neighbourhood outward over a few frames.
+pub fn render(buf: &mut RBuffer, area: RRect, ego: &EgoSubgraph, selected: &str, scale: f64) {
     // Clip to the buffer so every downstream write is in-bounds (ratatui's
     // get_mut panics otherwise). Sub-rect callers stay safe even if their area
     // overruns the buffer (resize race, etc.).
@@ -69,7 +71,7 @@ pub fn render(buf: &mut RBuffer, area: RRect, ego: &EgoSubgraph, selected: &str)
     render_header(buf, header, ego);
 
     if canvas.width > 0 && canvas.height > 0 {
-        let placed = layout(ego, canvas.width, canvas.height);
+        let placed = scale_toward_centre(layout(ego, canvas.width, canvas.height), scale);
         // 1 + 2: edges then their decorations.
         for edge in &ego.edges {
             if let (Some(from), Some(to)) = (find(&placed, &edge.from), find(&placed, &edge.to)) {
@@ -151,6 +153,31 @@ fn find<'a>(placed: &'a [Placed], name: &str) -> Option<&'a Placed> {
     placed.iter().find(|p| p.name == name)
 }
 
+/// Lerp every ring node toward the centre by `scale` (recentre animation).
+/// `scale >= 1.0` is a no-op (the settled layout). The centre node (ring 0) is
+/// the fixed anchor. Used only for the transient render — hit-test always uses
+/// the settled geometry.
+fn scale_toward_centre(mut placed: Vec<Placed>, scale: f64) -> Vec<Placed> {
+    if scale >= 1.0 {
+        return placed;
+    }
+    let scale = scale.clamp(0.0, 1.0);
+    let Some(centre) = placed.iter().find(|p| p.ring == 0).map(|p| (p.x, p.y)) else {
+        return placed;
+    };
+    let (cx, cy) = (f64::from(centre.0), f64::from(centre.1));
+    for p in &mut placed {
+        if p.ring == 0 {
+            continue;
+        }
+        let nx = cx + (f64::from(p.x) - cx) * scale;
+        let ny = cy + (f64::from(p.y) - cy) * scale;
+        p.x = nx.round().max(0.0) as u16;
+        p.y = ny.round().max(0.0) as u16;
+    }
+    placed
+}
+
 /// The bracketed box text for a node, char-truncated to [`MAX_LABEL`].
 fn box_text(name: &str) -> String {
     format!("[{}]", truncate_chars(name, MAX_LABEL))
@@ -161,18 +188,37 @@ fn box_half(name: &str) -> u16 {
     (box_text(name).chars().count() as u16) / 2
 }
 
+/// The absolute on-screen rect a node's box occupies: `(abs_x, abs_y, len)` on a
+/// single row. Centres the `[label]` on the anchor then clamps so the box stays
+/// fully inside the canvas. Shared by [`draw_box`] and [`hit_test`] so a click
+/// resolves against the exact cells that were painted.
+#[must_use]
+pub fn box_rect(canvas: RRect, node: &Placed) -> (u16, u16, u16) {
+    let len = box_text(&node.name).chars().count() as u16;
+    let half = len / 2;
+    let rel_x = node.x.saturating_sub(half).min(canvas.width.saturating_sub(len));
+    let abs_x = canvas.x + rel_x;
+    let abs_y = canvas.y + node.y.min(canvas.height.saturating_sub(1));
+    (abs_x, abs_y, len)
+}
+
+/// Resolve an absolute `(col, row)` click to the node whose box contains it, if
+/// any. Lays the subgraph out exactly as [`render`] does, so the hit-test sees
+/// the same geometry the user clicked.
+#[must_use]
+pub fn hit_test(area: RRect, ego: &EgoSubgraph, col: u16, row: u16) -> Option<String> {
+    let (canvas, placed) = layout_in(area, ego);
+    placed.iter().find_map(|node| {
+        let (bx, by, len) = box_rect(canvas, node);
+        (row == by && col >= bx && col < bx.saturating_add(len)).then(|| node.name.clone())
+    })
+}
+
 /// Draw a node's `[label]` box centred on its anchor, clamped into the canvas.
 /// Centre = gold/bold, selected = green highlight, overflow = muted, else white.
 fn draw_box(buf: &mut RBuffer, canvas: RRect, node: &Placed, selected: &str) {
     let text = box_text(&node.name);
-    let len = text.chars().count() as u16;
-    let half = len / 2;
-    // Centre the box on the anchor, then clamp so it stays fully inside.
-    let rel_x = node.x.saturating_sub(half);
-    let max_x = canvas.width.saturating_sub(len);
-    let rel_x = rel_x.min(max_x);
-    let abs_x = canvas.x + rel_x;
-    let abs_y = canvas.y + node.y.min(canvas.height.saturating_sub(1));
+    let (abs_x, abs_y, _len) = box_rect(canvas, node);
 
     let is_centre = node.ring == 0;
     let is_selected = node.name == selected;
@@ -452,7 +498,7 @@ mod tests {
         let ego = EgoSubgraph::build(&rels, center, 1, DEFAULT_NODE_CAP, false);
         let area = RRect::new(0, 0, 80, 24);
         let mut buf = RBuffer::empty(area);
-        render(&mut buf, area, &ego, center);
+        render(&mut buf, area, &ego, center, 1.0);
         buf
     }
 
@@ -506,7 +552,7 @@ mod tests {
         let ego = EgoSubgraph::build(&rels, "c", 1, DEFAULT_NODE_CAP, false);
         let area = RRect::new(0, 0, 80, 24);
         let mut buf = RBuffer::empty(area);
-        render(&mut buf, area, &ego, "c");
+        render(&mut buf, area, &ego, "c", 1.0);
         let canvas = dump_canvas(&buf);
         let arrows = ['→', '←', '↑', '↓', '↗', '↖', '↙', '↘'];
         assert!(
@@ -526,7 +572,7 @@ mod tests {
         let ego = EgoSubgraph::build(&rels, "lonely", 1, DEFAULT_NODE_CAP, false);
         let area = RRect::new(0, 0, 80, 24);
         let mut buf = RBuffer::empty(area);
-        render(&mut buf, area, &ego, "lonely");
+        render(&mut buf, area, &ego, "lonely", 1.0);
         let screen = dump(&buf);
         assert!(screen.contains("[lonely]"), "lone centre box:\n{screen}");
         assert!(screen.contains("(no connections)"), "hint:\n{screen}");
@@ -542,7 +588,7 @@ mod tests {
         let buf_area = RRect::new(0, 0, 200, 60);
         let mut buf = RBuffer::empty(buf_area);
         let sub = RRect::new(10, 5, 80, 24);
-        render(&mut buf, sub, &ego, "audit-after-rebase");
+        render(&mut buf, sub, &ego, "audit-after-rebase", 1.0);
         assert!(dump(&buf).contains("[audit-after-rebase]"));
     }
 
@@ -558,8 +604,35 @@ mod tests {
             RRect::new(0, 0, 200, 60),
             &ego,
             "audit-after-rebase",
+            1.0,
         );
         // Reaching here without a panic is the assertion.
+    }
+
+    #[test]
+    fn hit_test_resolves_a_click_inside_a_node_box() {
+        let rels = vec![rel("audit-after-rebase", "stale plan execution", "solves")];
+        let ego = EgoSubgraph::build(&rels, "audit-after-rebase", 1, DEFAULT_NODE_CAP, false);
+        let area = RRect::new(0, 0, 80, 24);
+        // Resolve the centre box's own painted rect, then click its first cell.
+        let (canvas, placed) = layout_in(area, &ego);
+        let centre = placed.iter().find(|p| p.ring == 0).unwrap();
+        let (bx, by, len) = box_rect(canvas, centre);
+        assert_eq!(
+            hit_test(area, &ego, bx, by).as_deref(),
+            Some("audit-after-rebase")
+        );
+        // A cell just past the right end of the box is a miss.
+        assert_eq!(hit_test(area, &ego, bx.saturating_add(len), by), None);
+    }
+
+    #[test]
+    fn hit_test_on_empty_space_returns_none() {
+        let rels = vec![rel("audit-after-rebase", "stale plan execution", "solves")];
+        let ego = EgoSubgraph::build(&rels, "audit-after-rebase", 1, DEFAULT_NODE_CAP, false);
+        let area = RRect::new(0, 0, 80, 24);
+        // (0,0) is the header row — never a node box.
+        assert_eq!(hit_test(area, &ego, 0, 0), None);
     }
 
     #[test]
