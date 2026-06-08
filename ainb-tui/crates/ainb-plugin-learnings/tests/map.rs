@@ -199,6 +199,37 @@ async fn mouse_click_on_a_neighbour_recentres() {
 }
 
 #[tokio::test]
+async fn mouse_click_on_the_centre_selects_without_recentring() {
+    // The one mouse path with no animation backstop: a "select-only" click (the
+    // current centre) must move the selection but NOT recentre. Drive a
+    // neighbour selection first, then click the centre box — the centre must
+    // stay put, and a follow-up ⏎ (recentre on the now-selected centre) is a
+    // no-op, proving the click moved the selection to the centre.
+    let mut h = init_over_fixture().await;
+    enter_map(&mut h).await;
+    send_key(&mut h, KeyCode::Down).await; // select the ring neighbour
+    let map = h.render(VIEWPORT).await.expect("render map");
+    let (col, row) = find_token_xy(&map, "[audit-after-rebase]").expect("centre box on screen");
+    h.send_notification(methods::PLUGIN_HANDLE_MOUSE, click_params(col, row))
+        .await
+        .expect("send click");
+    let after = buffer_text(&h.render(VIEWPORT).await.expect("render after click"));
+    assert!(
+        after.contains("centre: audit-after-rebase"),
+        "a select-only click on the centre must NOT recentre:\n{after}"
+    );
+    // ⏎ now recentres on the selected node; if the click moved the selection to
+    // the centre, this is a no-op and the centre is unchanged.
+    send_key(&mut h, KeyCode::Enter).await;
+    let settled = buffer_text(&h.render(VIEWPORT).await.expect("render after enter"));
+    assert!(
+        settled.contains("centre: audit-after-rebase"),
+        "⏎ after a centre-click must be a no-op (selection was the centre):\n{settled}"
+    );
+    h.close().await.expect("clean close");
+}
+
+#[tokio::test]
 async fn o_opens_detail_for_the_entity() {
     let mut h = init_over_fixture().await;
     enter_map(&mut h).await;
