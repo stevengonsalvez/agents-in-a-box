@@ -48,6 +48,7 @@ fn cli_browse_prints_ranked_table() {
         home.path(),
         BrowseArgs {
             query: "diagram".to_string(),
+            catalog: "skills".to_string(),
             json: false,
         },
         &backend,
@@ -85,6 +86,7 @@ fn cli_browse_json_shape() {
         home.path(),
         BrowseArgs {
             query: "anything".to_string(),
+            catalog: "skills".to_string(),
             json: true,
         },
         &backend,
@@ -110,6 +112,7 @@ fn cli_browse_empty_query_message() {
         home.path(),
         BrowseArgs {
             query: "   ".to_string(),
+            catalog: "skills".to_string(),
             json: false,
         },
         &backend,
@@ -121,6 +124,72 @@ fn cli_browse_empty_query_message() {
         "expected an empty-query hint:\n{text}"
     );
     assert!(!text.contains("org/x"), "empty query must not return hits:\n{text}");
+}
+
+// ── Curated catalog: blank query lists the WHOLE shelf, offline ───────
+
+#[test]
+fn cli_browse_curated_blank_lists_full_shelf() {
+    use ainb_cli::catalog_curated::AinbCuratedCatalogBackend;
+    use ainb_skill_core::catalog_index::{CatalogIndex, CatalogIndexEntry, CatalogOrigin};
+
+    let home = tmp_home();
+    let index = CatalogIndex::new(
+        "v1.5.0",
+        vec![
+            CatalogIndexEntry {
+                name: "commit".to_string(),
+                description: "git commits".to_string(),
+                repo: "stevengonsalvez/agents-in-a-box".to_string(),
+                install_uri:
+                    "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/commit"
+                        .to_string(),
+                origin: CatalogOrigin::Owned,
+                stars: 0,
+            },
+            CatalogIndexEntry {
+                name: "ui-ux-pro-max".to_string(),
+                description: "UI/UX design intelligence".to_string(),
+                repo: "nextlevelbuilder/ui-ux-pro-max-skill".to_string(),
+                install_uri: "gh:nextlevelbuilder/ui-ux-pro-max-skill@2.2.1/.claude/skills"
+                    .to_string(),
+                origin: CatalogOrigin::External,
+                stars: 0,
+            },
+        ],
+    );
+    let index_path = home.path().join("catalog-index.json");
+    std::fs::write(&index_path, index.to_json()).unwrap();
+
+    // Curated backend reads the local file — zero network.
+    let backend = AinbCuratedCatalogBackend::from_index_file(&index_path);
+    let mut out = Vec::new();
+    ainb_cli::skill::browse(
+        home.path(),
+        BrowseArgs {
+            query: "   ".to_string(), // blank → full shelf for the curated catalog
+            catalog: "ainb".to_string(),
+            json: false,
+        },
+        &backend,
+        &mut out,
+    )
+    .expect("curated browse ok");
+    let text = String::from_utf8(out).expect("utf8");
+
+    // Both an owned and a vetted-external entry appear, with their real
+    // upstream install URIs — the success-criteria "BOTH" check.
+    assert!(text.contains("commit"), "missing owned entry:\n{text}");
+    assert!(
+        text.contains("gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/commit"),
+        "missing owned install_uri:\n{text}"
+    );
+    assert!(text.contains("ui-ux-pro-max"), "missing external entry:\n{text}");
+    assert!(
+        text.contains("gh:nextlevelbuilder/ui-ux-pro-max-skill@2.2.1/.claude/skills"),
+        "missing external install_uri:\n{text}"
+    );
+    assert!(text.contains("curated skill(s)"), "missing curated footer:\n{text}");
 }
 
 // ── Bonus: a backend error surfaces as a CLI error (not a panic) ──────
@@ -135,6 +204,7 @@ fn cli_browse_surfaces_backend_error() {
         home.path(),
         BrowseArgs {
             query: "q".to_string(),
+            catalog: "skills".to_string(),
             json: false,
         },
         &backend,

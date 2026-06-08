@@ -44,6 +44,7 @@ use ainb_skill_core::uri::Uri;
 use ainb_skill_core::{DeployedRef, SourceType, UnitKind};
 use ainb_usage::{InvocationRecord, detect_invocations};
 
+use crate::catalog_curated::AinbCuratedCatalogBackend;
 use crate::catalog_http::SkillsShHttpBackend;
 use crate::source::run_fetcher;
 use crate::{
@@ -69,12 +70,18 @@ pub fn dispatch(home: &Path, action: SkillCommand, out: &mut dyn io::Write) -> R
         SkillCommand::Scan(args) => crate::scan::dispatch(home, args, out),
         SkillCommand::Library { cmd } => crate::library::dispatch(home, cmd, out),
         SkillCommand::Browse(args) => {
-            // Production backend: HTTP to skills.sh, key from env/config,
-            // honouring the AINB_CATALOG_MOCK / AINB_SKILLS_API_BASE test
-            // hooks. Tests bypass this dispatch and call `browse` directly
-            // with a `MockCatalogBackend`.
-            let backend = SkillsShHttpBackend::from_env(home);
-            browse(home, args, &backend, out)
+            // Two catalogs share the `CatalogBackend` boundary:
+            //   --catalog ainb  → the toolkit's curated release index.
+            //   --catalog skills → skills.sh over HTTP (default).
+            // Both honour their own offline test hooks; tests bypass this
+            // dispatch and call `browse` directly with a `MockCatalogBackend`.
+            if args.is_curated() {
+                let backend = AinbCuratedCatalogBackend::from_env(home);
+                browse(home, args, &backend, out)
+            } else {
+                let backend = SkillsShHttpBackend::from_env(home);
+                browse(home, args, &backend, out)
+            }
         }
     }
 }
@@ -1454,7 +1461,10 @@ pub fn browse(
     let _ = home; // reserved for future per-home catalog config; key
                   // resolution happens in the backend constructor.
 
-    if args.query.trim().is_empty() {
+    // The curated catalog lists its whole shelf on a blank query (it's
+    // small + local). skills.sh keeps the no-op hint so a blank query never
+    // hits the network.
+    if args.query.trim().is_empty() && !args.is_curated() {
         // Empty-query contract: a no-op hint, not an error. JSON mode
         // still emits an empty array so scripts get valid JSON.
         if args.json {
@@ -1492,7 +1502,12 @@ pub fn browse(
             h.name, h.stars, h.repo, h.install_uri
         )?;
     }
-    writeln!(out, "# {} result(s) for `{}`", hits.len(), args.query.trim())?;
+    let query = args.query.trim();
+    if query.is_empty() {
+        writeln!(out, "# {} curated skill(s)", hits.len())?;
+    } else {
+        writeln!(out, "# {} result(s) for `{query}`", hits.len())?;
+    }
     Ok(())
 }
 

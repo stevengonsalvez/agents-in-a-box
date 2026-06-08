@@ -308,15 +308,30 @@ pub struct UsageArgs {
 
 #[derive(Args, Debug)]
 pub struct BrowseArgs {
-    /// Catalog search query (matched against unit names / descriptions
-    /// server-side). An empty / whitespace-only query is a no-op that
-    /// prints a hint rather than hitting the API.
+    /// Catalog search query (matched against unit names / descriptions).
+    /// An empty / whitespace-only query is a no-op hint for the `skills`
+    /// catalog, but lists the WHOLE shelf for the `ainb` curated catalog.
     pub query: String,
+
+    /// Which catalog to browse: `skills` (skills.sh, the default) or `ainb`
+    /// (the toolkit's curated shelf — owned skills + vetted external skills,
+    /// from the pinned GitHub release index).
+    #[arg(long, default_value = "skills")]
+    pub catalog: String,
 
     /// Emit machine-readable JSON (`[{name, repo, stars, install_uri,
     /// description}, …]`) instead of the default ranked table.
     #[arg(long)]
     pub json: bool,
+}
+
+impl BrowseArgs {
+    /// True when this targets the `ainb` curated catalog (vs skills.sh).
+    /// Accepts `ainb` / `curated` case-insensitively.
+    pub fn is_curated(&self) -> bool {
+        let c = self.catalog.trim();
+        c.eq_ignore_ascii_case("ainb") || c.eq_ignore_ascii_case("curated")
+    }
 }
 
 #[derive(Args, Debug)]
