@@ -91,7 +91,7 @@ impl LayoutComponent {
                 Constraint::Length(3), // Top status bar
                 Constraint::Min(0),    // Main content area
                 Constraint::Length(3), // Session info (single line + borders)
-                Constraint::Length(4), // Bottom menu bar (2 lines + borders)
+                Constraint::Length(5), // Bottom menu bar (3 lines + borders)
             ])
             .split(frame.size());
 
@@ -222,120 +222,107 @@ impl LayoutComponent {
         // events.rs:868 for the dispatch logic.
         let (restart_key, restart_label) = restart_affordance(state.selected_session());
 
-        // Premium styled command bar with separators - 2 lines for better readability
-        // Line 1: Navigation, Session Actions
-        let line1_spans = vec![
-            // Navigation group
-            Span::styled("n", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
-            Span::styled("ew ", Style::default().fg(MUTED_GRAY)),
-            Span::styled("E", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
-            Span::styled("xpand ", Style::default().fg(MUTED_GRAY)),
-            Span::styled(
-                "Tab",
-                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" focus", Style::default().fg(MUTED_GRAY)),
-            Span::styled(" │ ", Style::default().fg(SUBDUED_BORDER)),
-            // Session actions group
-            Span::styled(
-                "a",
-                Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("ttach ", Style::default().fg(MUTED_GRAY)),
-            Span::styled(
-                restart_key,
-                Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(restart_label, Style::default().fg(MUTED_GRAY)),
-            Span::styled(
-                "d",
-                Style::default().fg(Color::Rgb(230, 100, 100)).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("elete ", Style::default().fg(MUTED_GRAY)),
-            Span::styled("$", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
-            Span::styled(" shell ", Style::default().fg(MUTED_GRAY)),
-            Span::styled(
-                "o",
-                Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" editor", Style::default().fg(MUTED_GRAY)),
+        // Premium styled command bar with separators - 3 lines for better
+        // discoverability. Grouped: (1) navigation + selection, (2) session
+        // actions, (3) git / tools / system. Every key that the home screen
+        // actually binds is surfaced here so nothing is hidden from the user.
+        let key = |k: &'static str, color: Color| {
+            Span::styled(k, Style::default().fg(color).add_modifier(Modifier::BOLD))
+        };
+        let desc = |d: &'static str| Span::styled(d, Style::default().fg(MUTED_GRAY));
+        let sep = || Span::styled(" │ ", Style::default().fg(SUBDUED_BORDER));
+        let red = Color::Rgb(230, 100, 100);
+
+        // Line 1: Navigation + selection + inbox. The inbox shortcut lives
+        // here because line 1 has the most slack; its unread badge can grow
+        // and must not push the bar past the 80-col minimum (see the
+        // `menu_bar_keys_not_truncated_at_80_cols` test).
+        let mut line1_spans = vec![
+            key("n", GOLD),
+            desc("ew "),
+            key("E", GOLD),
+            desc("xpand "),
+            key("Tab", GOLD),
+            desc(" focus"),
+            sep(),
+            // Attach / select group
+            key("a", SELECTION_GREEN),
+            desc("ttach "),
+            key("1-9", SELECTION_GREEN),
+            desc(" quick "),
+            key("Space", SELECTION_GREEN),
+            desc(" select"),
+            sep(),
+            key("s", GOLD),
+            desc("tar"),
         ];
 
-        // Line 2: Git, Tools, System
-        let line2_spans = vec![
-            // Git group
-            Span::styled(
-                "g",
-                Style::default().fg(CORNFLOWER_BLUE).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("it ", Style::default().fg(MUTED_GRAY)),
-            Span::styled(
-                "p",
-                Style::default().fg(CORNFLOWER_BLUE).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" commit", Style::default().fg(MUTED_GRAY)),
-            Span::styled(" │ ", Style::default().fg(SUBDUED_BORDER)),
-            // Tools group
-            Span::styled(
-                "c",
-                Style::default().fg(WARNING_ORANGE).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("laude ", Style::default().fg(MUTED_GRAY)),
-            Span::styled(
-                "f",
-                Style::default().fg(WARNING_ORANGE).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" refresh ", Style::default().fg(MUTED_GRAY)),
-            Span::styled(
-                "x",
-                Style::default().fg(WARNING_ORANGE).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" cleanup", Style::default().fg(MUTED_GRAY)),
-            Span::styled(" │ ", Style::default().fg(SUBDUED_BORDER)),
-            // System group
-            Span::styled(
-                "r",
-                Style::default().fg(MUTED_GRAY).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" re-auth ", Style::default().fg(MUTED_GRAY)),
-            Span::styled(
-                "H",
-                Style::default().fg(CORNFLOWER_BLUE).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" help ", Style::default().fg(MUTED_GRAY)),
-            Span::styled(
-                "q",
-                Style::default().fg(CORNFLOWER_BLUE).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" home", Style::default().fg(MUTED_GRAY)),
-        ];
-
-        // ainb-hooks inbox shortcut on the menu bar. Always shown so
-        // users can discover the Inbox screen even on a fresh install
-        // with zero events. When the store reports unread + non-
-        // dismissed rows, a `● N` glyph is rendered alongside the
-        // `I inbox` hint to surface that there is something to read.
+        // ainb-hooks inbox shortcut on the menu bar. Always shown so users
+        // can discover the Inbox screen even on a fresh install with zero
+        // events. When the store reports unread + non-dismissed rows, a
+        // `● N` glyph is rendered alongside the `b inbox` hint. The count is
+        // capped at `99+` so a large backlog can't widen the bar unbounded.
         let inbox_unread = state
             .inbox_state
             .store
             .as_ref()
             .and_then(|s| s.unread_count().ok())
             .unwrap_or(0);
-        let mut line2_spans = line2_spans;
-        line2_spans.push(Span::styled(" │ ", Style::default().fg(SUBDUED_BORDER)));
-        if inbox_unread > 0 {
-            line2_spans.push(Span::styled(
-                format!("● {inbox_unread} "),
+        line1_spans.push(sep());
+        if let Some(badge) = inbox_unread_badge(inbox_unread) {
+            line1_spans.push(Span::styled(
+                badge,
                 Style::default().fg(WARNING_ORANGE).add_modifier(Modifier::BOLD),
             ));
         }
-        line2_spans.push(Span::styled(
-            "b",
-            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
-        ));
-        line2_spans.push(Span::styled(" inbox", Style::default().fg(MUTED_GRAY)));
+        line1_spans.push(key("b", GOLD));
+        line1_spans.push(desc(" inbox"));
 
-        let menu_lines = vec![Line::from(line1_spans), Line::from(line2_spans)];
+        // Line 2: Session actions (restart slot swaps r/resume ↔ e/recreate) + git
+        let line2_spans = vec![
+            key(restart_key, SELECTION_GREEN),
+            desc(restart_label),
+            key("d", red),
+            desc("elete "),
+            key("D", red),
+            desc(" del-sel "),
+            key("o", SELECTION_GREEN),
+            desc(" editor "),
+            key("$", GOLD),
+            desc(" shell "),
+            key("F2", SELECTION_GREEN),
+            desc(" rename"),
+            sep(),
+            key("g", CORNFLOWER_BLUE),
+            desc("it "),
+            key("p", CORNFLOWER_BLUE),
+            desc(" commit"),
+        ];
+
+        // Line 3: Tools + System
+        let line3_spans = vec![
+            key("c", WARNING_ORANGE),
+            desc("laude "),
+            key("f", WARNING_ORANGE),
+            desc(" refresh "),
+            key("F", WARNING_ORANGE),
+            desc(" filter "),
+            key("x", WARNING_ORANGE),
+            desc(" cleanup"),
+            sep(),
+            key("A", MUTED_GRAY),
+            desc(" re-auth "),
+            key("?/H", CORNFLOWER_BLUE),
+            desc(" help "),
+            key("q", CORNFLOWER_BLUE),
+            desc(" home"),
+        ];
+
+        let menu_lines = vec![
+            Line::from(line1_spans),
+            Line::from(line2_spans),
+            Line::from(line3_spans),
+        ];
 
         let menu = Paragraph::new(menu_lines)
             .block(
@@ -653,12 +640,27 @@ impl LayoutComponent {
 ///
 /// `r` resumes a Stopped Interactive (tmux) session in-place — the
 /// recoverable escape hatch added with the soft-stop feature. `e`
-/// restarts a Boss/Docker session into a fresh container.
+/// recreates a Boss/Docker session in a fresh container.
 ///
-/// Showing `e restart` for a stopped Interactive session would point
-/// users at the wrong key — pressing `e` triggers Docker restart logic
-/// that doesn't apply, while `r` is what actually resumes the tmux
-/// pane and relaunches the embedded CLI.
+/// The label deliberately reads `recreate` (not the generic `restart`)
+/// so it is obvious this is the Docker/Boss path — `e` tears down the
+/// old container and spins up a new one. Showing it for a stopped
+/// Interactive session would point users at the wrong key — pressing
+/// `e` triggers Docker logic that doesn't apply, while `r` is what
+/// actually resumes the tmux pane and relaunches the embedded CLI.
+/// Format the inbox unread badge for the menu bar, or `None` when there is
+/// nothing unread. The count is capped at `99+` so a large backlog can't
+/// widen line 1 of the bar past the 80-col minimum (the badge is the only
+/// variable-width token on that line). The widest possible badge is
+/// `"● 99+ "` (6 columns).
+fn inbox_unread_badge(unread: u64) -> Option<String> {
+    match unread {
+        0 => None,
+        1..=99 => Some(format!("● {unread} ")),
+        _ => Some("● 99+ ".to_string()),
+    }
+}
+
 fn restart_affordance(selected: Option<&crate::models::Session>) -> (&'static str, &'static str) {
     use crate::models::{SessionMode, SessionStatus};
     let stopped_interactive = matches!(
@@ -669,7 +671,7 @@ fn restart_affordance(selected: Option<&crate::models::Session>) -> (&'static st
     if stopped_interactive {
         ("r", " resume ")
     } else {
-        ("e", " restart ")
+        ("e", " recreate ")
     }
 }
 
@@ -977,8 +979,31 @@ mod live_widget_tests {
 
 #[cfg(test)]
 mod menu_bar_tests {
-    use super::restart_affordance;
+    use super::{inbox_unread_badge, restart_affordance};
     use crate::models::{Session, SessionMode, SessionStatus};
+
+    #[test]
+    fn inbox_badge_hidden_when_zero() {
+        assert_eq!(inbox_unread_badge(0), None);
+    }
+
+    #[test]
+    fn inbox_badge_shows_exact_count_up_to_99() {
+        assert_eq!(inbox_unread_badge(1).as_deref(), Some("● 1 "));
+        assert_eq!(inbox_unread_badge(99).as_deref(), Some("● 99 "));
+    }
+
+    #[test]
+    fn inbox_badge_caps_at_99_plus_and_bounds_width() {
+        // Beyond 99 the count is clamped so a huge backlog can't widen the
+        // bar. The widest badge must stay at 6 columns ("● 99+ ").
+        assert_eq!(inbox_unread_badge(100).as_deref(), Some("● 99+ "));
+        for n in [100u64, 655, 9_999, u64::MAX] {
+            let badge = inbox_unread_badge(n).expect("badge present");
+            assert_eq!(badge, "● 99+ ");
+            assert!(badge.chars().count() <= 6, "badge too wide: {badge:?}");
+        }
+    }
 
     fn stopped_interactive() -> Session {
         let mut s = Session::new("t".to_string(), "/tmp".to_string());
@@ -1008,23 +1033,96 @@ mod menu_bar_tests {
     }
 
     #[test]
-    fn running_interactive_shows_e_restart() {
-        // `r` is reauth-credentials when the session isn't stopped, so
-        // surfacing `r resume` would be wrong. Fall back to `e restart`.
+    fn running_interactive_shows_e_recreate() {
+        // `r` only resumes a *stopped* interactive session, so surfacing
+        // `r resume` for a running one would be wrong. Fall back to the
+        // Docker/Boss `e recreate` affordance.
         let s = running_interactive();
-        assert_eq!(restart_affordance(Some(&s)), ("e", " restart "));
+        assert_eq!(restart_affordance(Some(&s)), ("e", " recreate "));
     }
 
     #[test]
-    fn stopped_boss_shows_e_restart() {
-        // Boss/Docker sessions use the Docker container restart path.
+    fn stopped_boss_shows_e_recreate() {
+        // Boss/Docker sessions use the Docker container recreate path.
         let s = stopped_boss();
-        assert_eq!(restart_affordance(Some(&s)), ("e", " restart "));
+        assert_eq!(restart_affordance(Some(&s)), ("e", " recreate "));
     }
 
     #[test]
-    fn no_selection_shows_e_restart() {
-        assert_eq!(restart_affordance(None), ("e", " restart "));
+    fn no_selection_shows_e_recreate() {
+        assert_eq!(restart_affordance(None), ("e", " recreate "));
+    }
+
+    /// Render the menu bar at the conventional 80-column minimum and assert
+    /// every advertised key token survives — i.e. nothing is silently
+    /// truncated off either end of the centered three-line bar. This guards
+    /// the regression where adding keys (filter, 1-9, Space, F2, del-sel,
+    /// inbox) overflowed 80 cols and clipped the inbox shortcut.
+    #[test]
+    fn menu_bar_keys_not_truncated_at_80_cols() {
+        use crate::app::state::AppState;
+        use crate::components::layout::LayoutComponent;
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let layout = LayoutComponent::new();
+        let state = AppState::default();
+        let mut terminal = Terminal::new(TestBackend::new(80, 5)).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.size();
+                layout.render_menu_bar(f, area, &state);
+            })
+            .unwrap();
+
+        let rendered: String =
+            terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+
+        // With no session selected the restart slot shows `e recreate`.
+        for token in [
+            "ew",       // new
+            "xpand",    // expand
+            "focus",    // Tab focus
+            "ttach",    // attach
+            "1-9",      // quick attach
+            "Space",    // multi-select
+            "tar",      // star
+            "recreate", // e — Boss/Docker recreate (no selection)
+            "del-sel",  // D bulk delete
+            "editor",   // o
+            "shell",    // $
+            "F2",       // rename
+            "git",      // g (rendered as g + "it")
+            "commit",   // p
+            "laude",    // c claude
+            "refresh",  // f
+            "filter",   // F  ← the key that was missing before
+            "cleanup",  // x
+            "re-auth",  // A (moved off r)
+            "?/H",      // help
+            "home",     // q
+            "inbox",    // b
+        ] {
+            assert!(
+                rendered.contains(token),
+                "menu token {token:?} truncated at 80 cols.\nRendered:\n{rendered}"
+            );
+        }
+
+        // Stronger guard: the centered Paragraph truncates from both ends when
+        // a line is wider than the inner area. Each of the 3 content rows
+        // (rows 1..=3; rows 0 and 4 are the rounded border) must therefore
+        // keep at least one space of padding against both inner edges — if a
+        // row filled edge-to-edge it would mean content was clipped.
+        let buf = terminal.backend().buffer();
+        for y in 1..=3u16 {
+            let left = buf.get(1, y).symbol().to_string();
+            let right = buf.get(78, y).symbol().to_string();
+            assert!(
+                left == " " && right == " ",
+                "menu row {y} fills the bar edge-to-edge (clipped). \
+                 left={left:?} right={right:?}"
+            );
+        }
     }
 }
 
