@@ -57,6 +57,10 @@ pub fn layout_in(area: RRect, ego: &EgoSubgraph) -> (RRect, Vec<Placed>) {
 /// Render the radial map for `ego` with `selected` highlighted (matched by node
 /// name). `hop` / overflow counts drive the header.
 pub fn render(buf: &mut RBuffer, area: RRect, ego: &EgoSubgraph, selected: &str) {
+    // Clip to the buffer so every downstream write is in-bounds (ratatui's
+    // get_mut panics otherwise). Sub-rect callers stay safe even if their area
+    // overruns the buffer (resize race, etc.).
+    let area = area.intersection(buf.area);
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -337,11 +341,24 @@ fn put_str(buf: &mut RBuffer, area: RRect, x: u16, y: u16, s: &str, style: Style
         if cx >= right {
             break;
         }
-        let cell = buf.get_mut(cx, y);
-        cell.set_symbol(&ch.to_string());
-        cell.set_style(style);
+        // Guard against the BUFFER's own area, not just `area`: ratatui's
+        // `get_mut` panics on an out-of-buffer coord. `area` is intersected
+        // with `buf.area` in `render`, but this keeps the writer correct for
+        // any caller.
+        if in_buffer(buf, cx, y) {
+            let cell = buf.get_mut(cx, y);
+            cell.set_symbol(&ch.to_string());
+            cell.set_style(style);
+        }
         cx = cx.saturating_add(1);
     }
+}
+
+/// `true` if `(x, y)` lies inside the buffer's own area (the coordinate space
+/// `Buffer::get_mut` will accept without panicking).
+fn in_buffer(buf: &RBuffer, x: u16, y: u16) -> bool {
+    let a = buf.area;
+    x >= a.x && x < a.x.saturating_add(a.width) && y >= a.y && y < a.y.saturating_add(a.height)
 }
 
 /// Set a single cell at absolute `(x, y)` (i32 in, bounds-checked against area).
@@ -353,9 +370,11 @@ fn put_cell(buf: &mut RBuffer, area: RRect, x: i32, y: i32, glyph: &str, style: 
     if x >= area.x.saturating_add(area.width) || y >= area.y.saturating_add(area.height) {
         return;
     }
-    let cell = buf.get_mut(x, y);
-    cell.set_symbol(glyph);
-    cell.set_style(style);
+    if in_buffer(buf, x, y) {
+        let cell = buf.get_mut(x, y);
+        cell.set_symbol(glyph);
+        cell.set_style(style);
+    }
 }
 
 /// Clamp an i32 cell coord into `0..max` and return it as `u16` (canvas-relative).
@@ -511,6 +530,36 @@ mod tests {
         let screen = dump(&buf);
         assert!(screen.contains("[lonely]"), "lone centre box:\n{screen}");
         assert!(screen.contains("(no connections)"), "hint:\n{screen}");
+    }
+
+    #[test]
+    fn render_into_offset_subrect_of_larger_buffer_does_not_panic() {
+        // The prod shape: a frame-sized buffer with the map painted into an
+        // offset sub-rect. Must not panic on out-of-buffer get_mut, and the
+        // tokens must still land (inside the sub-rect).
+        let rels = vec![rel("audit-after-rebase", "stale plan execution", "solves")];
+        let ego = EgoSubgraph::build(&rels, "audit-after-rebase", 1, DEFAULT_NODE_CAP, false);
+        let buf_area = RRect::new(0, 0, 200, 60);
+        let mut buf = RBuffer::empty(buf_area);
+        let sub = RRect::new(10, 5, 80, 24);
+        render(&mut buf, sub, &ego, "audit-after-rebase");
+        assert!(dump(&buf).contains("[audit-after-rebase]"));
+    }
+
+    #[test]
+    fn render_with_area_overrunning_buffer_is_clipped_not_panicking() {
+        // Area flush to / past the buffer's right + bottom edge.
+        let rels = vec![rel("audit-after-rebase", "stale plan execution", "solves")];
+        let ego = EgoSubgraph::build(&rels, "audit-after-rebase", 1, DEFAULT_NODE_CAP, false);
+        let mut buf = RBuffer::empty(RRect::new(0, 0, 60, 18));
+        // Deliberately larger than the buffer — must be clipped, not panic.
+        render(
+            &mut buf,
+            RRect::new(0, 0, 200, 60),
+            &ego,
+            "audit-after-rebase",
+        );
+        // Reaching here without a panic is the assertion.
     }
 
     #[test]
