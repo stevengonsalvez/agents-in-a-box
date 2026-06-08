@@ -159,16 +159,19 @@ where
         if let Some(method) = value.get("method").and_then(Value::as_str) {
             // host -> plugin request or notification.
             //
-            // `plugin/handle_event` and `plugin/handle_key` MUST run in
-            // receive order — chunked publishes (e.g.
-            // `sessions.usage_data`) rely on the consumer seeing
-            // `chunk_index = 0` before any follow-on chunk, and key
-            // sequences (`1`, `2`, `Tab`, `Esc`) would lose their
-            // semantics if dispatched out of order. Spawning each
-            // notification onto its own task lets tokio re-order them
-            // through the per-plugin mutex, so we serve these inline
-            // and only spawn for other methods.
-            if method == methods::PLUGIN_HANDLE_EVENT || method == methods::PLUGIN_HANDLE_KEY {
+            // `plugin/handle_event`, `plugin/handle_key`, and
+            // `plugin/handle_mouse` MUST run in receive order — chunked
+            // publishes (e.g. `sessions.usage_data`) rely on the consumer
+            // seeing `chunk_index = 0` before any follow-on chunk, key
+            // sequences (`1`, `2`, `Tab`, `Esc`) would lose their semantics
+            // if reordered, and pointer sequences (Down → Drag → Up) must
+            // likewise stay ordered. Spawning each notification onto its own
+            // task lets tokio re-order them through the per-plugin mutex, so
+            // we serve these inline and only spawn for other methods.
+            if method == methods::PLUGIN_HANDLE_EVENT
+                || method == methods::PLUGIN_HANDLE_KEY
+                || method == methods::PLUGIN_HANDLE_MOUSE
+            {
                 dispatch_incoming(
                     plugin.clone(),
                     host_client.clone(),
