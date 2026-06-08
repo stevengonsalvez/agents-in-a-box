@@ -105,6 +105,17 @@ pub struct RenderParams {
 pub struct RenderResult {
     /// Cell grid to paint.
     pub buffer: WireBuffer,
+    /// Self-animation hint: when `true`, the plugin is mid-transition and
+    /// wants to be rendered again on the next host tick without any further
+    /// input. The runtime re-marks the plugin's render-dirty flag so the
+    /// host's render loop calls `plugin/render` again, frame-by-frame, until
+    /// the plugin returns `false`. A requestAnimationFrame analogue.
+    ///
+    /// `#[serde(default)]` (defaults to `false`) so ABI-2 peers that omit it
+    /// keep decoding — a plugin that never animates is byte-compatible with
+    /// the pre-`redraw` wire shape.
+    #[serde(default)]
+    pub redraw: bool,
 }
 
 // =====================================================================
@@ -643,7 +654,14 @@ mod tests {
             viewport: Viewport::new(80, 24),
             generation: 7,
         });
-        rt(&RenderResult { buffer: buf });
+        rt(&RenderResult {
+            buffer: buf.clone(),
+            redraw: false,
+        });
+        rt(&RenderResult {
+            buffer: buf,
+            redraw: true,
+        });
 
         rt(&HandleEventParams {
             topic: "sessions.usage_data".into(),
@@ -774,6 +792,18 @@ mod tests {
         let ev: MouseEvent = serde_json::from_str(json).unwrap();
         assert_eq!(ev.mods, 0);
         assert_eq!(ev.kind, MouseKind::Moved);
+    }
+
+    #[test]
+    fn render_result_redraw_defaults_to_false_when_absent() {
+        // Pre-`redraw` wire shape (buffer only) must still decode, with
+        // redraw defaulting to false — ABI back-compat for non-animating
+        // plugins.
+        let mut buf = WireBuffer::new(1, 1);
+        buf.push(Coord::new(0, 0), Cell::new("x"));
+        let legacy = serde_json::json!({ "buffer": buf });
+        let back: RenderResult = serde_json::from_value(legacy).unwrap();
+        assert!(!back.redraw, "absent redraw must default to false");
     }
 
     #[test]

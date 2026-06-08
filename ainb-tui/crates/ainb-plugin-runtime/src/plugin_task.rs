@@ -587,6 +587,15 @@ impl PluginTask {
                 let outcome = match result {
                     Ok(v) => match serde_json::from_value::<RenderResult>(v) {
                         Ok(rr) => {
+                            // Self-animation: the plugin asked to be painted
+                            // again next tick. Re-mark its render-dirty flag
+                            // so the host's render loop kicks another
+                            // `plugin/render` without waiting for input.
+                            if rr.redraw {
+                                if let Some(flag) = self.dirty.read().get(&self.plugin.id) {
+                                    flag.store(true, std::sync::atomic::Ordering::Release);
+                                }
+                            }
                             self.cache.put(rr.buffer.clone());
                             RenderOutcome::Ok(rr.buffer)
                         }

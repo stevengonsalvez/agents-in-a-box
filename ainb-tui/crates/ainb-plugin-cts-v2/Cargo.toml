@@ -135,6 +135,12 @@ path = "tests/canaries/mouse_forward/main.rs"
 test = false
 doc = false
 
+[[bin]]
+name = "cts-redraw-hint"
+path = "tests/canaries/redraw_hint/main.rs"
+test = false
+doc = false
+
 # --- Host-side test harness (all 14 axes + read_paths/[config] + mouse) ---
 
 [[test]]

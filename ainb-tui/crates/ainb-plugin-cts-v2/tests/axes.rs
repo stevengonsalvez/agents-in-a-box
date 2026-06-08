@@ -711,6 +711,56 @@ fn axis_handle_mouse_forwarded_to_plugin() {
     );
 }
 
+// =====================================================================
+// RenderResult.redraw axis — self-animation hint re-marks dirty
+// =====================================================================
+//
+// When a render reply sets `redraw = true`, the runtime must re-mark the
+// plugin's render-dirty flag so the host's render loop kicks another
+// `plugin/render` without further input. Once the plugin returns
+// `redraw = false`, the flag must stay clear. The canary animates for its
+// first two renders, then settles.
+
+#[test]
+fn axis_render_redraw_hint_remarks_dirty() {
+    let (rt, handle) = build_runtime();
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-redraw-hint"));
+    let id = register(&rt, bin, manifest("cts-redraw-hint"));
+
+    // Clear the registration dirty-seed so we observe only redraw-driven marks.
+    let _ = handle.take_render_dirty(&id);
+
+    // Render #0 → canary wants_redraw == true → runtime re-marks dirty.
+    match block_render(&rt, &handle, &id, 1, 1) {
+        RenderOutcome::Ok(_) => {}
+        other => panic!("render 0 failed: {other:?}"),
+    }
+    assert!(
+        handle.take_render_dirty(&id),
+        "redraw=true must re-mark the plugin dirty for another frame"
+    );
+
+    // Render #1 → still animating (count 2 < 3) → re-marks dirty again.
+    match block_render(&rt, &handle, &id, 1, 1) {
+        RenderOutcome::Ok(_) => {}
+        other => panic!("render 1 failed: {other:?}"),
+    }
+    assert!(
+        handle.take_render_dirty(&id),
+        "redraw=true on frame 1 must re-mark dirty"
+    );
+
+    // Render #2 → count now 3, wants_redraw == false → no re-mark.
+    match block_render(&rt, &handle, &id, 1, 1) {
+        RenderOutcome::Ok(_) => {}
+        other => panic!("render 2 failed: {other:?}"),
+    }
+    assert!(
+        !handle.take_render_dirty(&id),
+        "redraw=false must NOT re-mark dirty (animation settled)"
+    );
+}
+
 #[test]
 fn axis_config_injected_at_init() {
     let (rt, handle) = build_runtime();

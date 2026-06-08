@@ -407,8 +407,16 @@ async fn handle_method<P: Plugin>(
         }
         methods::PLUGIN_RENDER => {
             let p: RenderParams = decode_params(params)?;
-            let buf = plugin.lock().await.render(host, p).await?;
-            Ok(serde_json::to_value(RenderResult { buffer: buf })?)
+            // Hold the lock across render + the redraw query so the hint
+            // reflects the exact frame just painted (render advances the
+            // animation; wants_redraw reports whether frames remain).
+            let mut guard = plugin.lock().await;
+            let buf = guard.render(host, p).await?;
+            let redraw = guard.wants_redraw();
+            Ok(serde_json::to_value(RenderResult {
+                buffer: buf,
+                redraw,
+            })?)
         }
         methods::PLUGIN_HANDLE_EVENT => {
             let p: HandleEventParams = decode_params(params)?;

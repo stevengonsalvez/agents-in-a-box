@@ -144,6 +144,21 @@ pub trait Plugin: Send + 'static {
         Ok(())
     }
 
+    /// Whether the plugin wants the host to render it again on the next
+    /// tick without any further input. Queried by the [`Server`] right
+    /// after each [`render`](Self::render) call and reported to the host
+    /// via `RenderResult.redraw`; the runtime re-marks the plugin dirty
+    /// when it's `true`, so the host's render loop keeps calling `render`
+    /// frame-by-frame.
+    ///
+    /// This is the self-animation hook (a requestAnimationFrame analogue):
+    /// a plugin running a transition returns `true` while frames remain and
+    /// `false` once it settles. Default is `false` — static plugins repaint
+    /// only on input/snapshot, exactly as before.
+    fn wants_redraw(&self) -> bool {
+        false
+    }
+
     /// Dispatch a CLI subcommand the plugin advertised in its manifest's
     /// `[provides] cli_namespaces` list. Default implementation returns
     /// exit-2 (`unknown command`).

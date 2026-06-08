@@ -80,8 +80,11 @@ fn main() {
                 if let Some(id) = id {
                     let mut buf = WireBuffer::new(1, 1);
                     buf.push(Coord::new(0, 0), Cell::new("X"));
-                    let result = serde_json::to_value(RenderResult { buffer: buf })
-                        .expect("RenderResult serializable");
+                    let result = serde_json::to_value(RenderResult {
+                        buffer: buf,
+                        redraw: false,
+                    })
+                    .expect("RenderResult serializable");
                     write_response(&mut writer, id, result);
                 }
             }
