@@ -3718,6 +3718,26 @@ impl AppState {
                             }
 
                             self.add_success_notification("Workspaces loaded".to_string());
+
+                            // The fast startup loader (`load_workspaces_async`)
+                            // only surfaces LIVE boss/interactive sessions — it
+                            // skips the stopped-session second-pass that
+                            // `load_real_workspaces` runs (reading sessions.json
+                            // for dead-tmux entries whose worktree still exists).
+                            // Without this, stopped sessions stay hidden until
+                            // the user happens to trigger a full refresh (stop a
+                            // session, delete one, press `f`). Enqueue exactly one
+                            // full refresh so the complete picture (stopped
+                            // sessions included) appears right after first paint.
+                            // Fires once per launch: this branch runs a single
+                            // time (the receiver is cleared above), and
+                            // `load_real_workspaces` doesn't re-arm it — no loop.
+                            // Guard on `None` so a user-queued action is never
+                            // clobbered.
+                            if self.pending_async_action.is_none() {
+                                self.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
+                            }
+
                             return true;
                         }
                         WorkspaceLoadResult::Error(err) => {
