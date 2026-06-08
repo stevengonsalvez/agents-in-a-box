@@ -198,6 +198,40 @@ fn launch_line(layout: &SandboxLayout, bin: &Path, index_file: &Path) -> String 
     s
 }
 
+/// Journey scaffolding (NOT a test assertion — `#[ignore]` so it never runs
+/// in the suite). Materializes a PERSISTENT curated-browse sandbox under
+/// `$AINB_JOURNEY_DIR` and prints `export …` lines for the launch env, so a
+/// vhs `.tape` (the tmux-verify G2/G3 visual gate) can drive the real binary
+/// against the same offline curated shelf the tripwire above asserts.
+///
+/// Run: `AINB_JOURNEY_DIR=/path cargo test -p ainb \
+///   --test tripwire_core_skill_manager_browse_curated_live \
+///   materialize_curated_journey_sandbox -- --ignored --nocapture`
+#[test]
+#[ignore = "journey scaffolding, run on demand for vhs recording"]
+fn materialize_curated_journey_sandbox() {
+    let dir = std::env::var("AINB_JOURNEY_DIR")
+        .expect("set AINB_JOURNEY_DIR to a persistent directory");
+    let root = PathBuf::from(&dir);
+    std::fs::create_dir_all(&root).expect("create journey dir");
+    let layout =
+        build_skill_manager_sandbox(&root, SandboxTier::Full).expect("sandbox full");
+    seed_onboarding(&layout);
+    seed_notify_dismissed(&layout);
+    let install_uri = seed_catalog_remote(layout.root.as_path());
+    let index_file = write_curated_index(layout.root.as_path(), &install_uri);
+
+    // Emit the launch env so the tape can `export` it before exec-ing ainb.
+    for (k, v) in layout.env_vars() {
+        println!("export {k}={}", sh_quote(&Path::new(&v).to_string_lossy()));
+    }
+    println!(
+        "export AINB_CATALOG_INDEX_FILE={}",
+        sh_quote(&index_file.to_string_lossy())
+    );
+    println!("export AINB_JOURNEY_HOME={}", sh_quote(&layout.root.to_string_lossy()));
+}
+
 #[test]
 fn curated_browse_blank_lists_shelf_and_installs_live() {
     if !tmux_available() {
