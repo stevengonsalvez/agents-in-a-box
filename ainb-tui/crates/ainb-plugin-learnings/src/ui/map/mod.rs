@@ -15,3 +15,4 @@
 //! assert exact entity / edge-label tokens instead of fuzzy coordinates.
 
 pub mod ego;
+pub mod layout;
