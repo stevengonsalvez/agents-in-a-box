@@ -39,12 +39,43 @@
 #![allow(clippy::cast_possible_wrap)]
 
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ainb_plugin_types_sessions::ProviderCall;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use crate::fnv::fnv1a_64;
+
+/// How long a writer waits for a competing writer/checkpoint before SQLite
+/// returns `SQLITE_BUSY`. Two ainb instances share one `usage.sqlite`, so an
+/// overlapping scan's write would otherwise collide instantly and the caller
+/// falls back to a cache-less (re-parsing) scan — doubling CPU. 5s comfortably
+/// covers a scan's write burst.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Retry a SQLite op when it fails with `BUSY`/`LOCKED`. `busy_timeout` already
+/// blocks for [`BUSY_TIMEOUT`] per attempt; this is a small bounded backstop
+/// for the rare case it still surfaces (e.g. a WAL checkpoint stall under two
+/// concurrent writers). Bounded so a genuinely wedged DB still surfaces an error.
+fn with_busy_retry<T>(mut op: impl FnMut() -> rusqlite::Result<T>) -> rusqlite::Result<T> {
+    use rusqlite::ffi::ErrorCode;
+    let mut attempt: u32 = 0;
+    loop {
+        let result = op();
+        if let Err(rusqlite::Error::SqliteFailure(err, _)) = &result {
+            if matches!(
+                err.code,
+                ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked
+            ) && attempt < 3
+            {
+                attempt += 1;
+                std::thread::sleep(Duration::from_millis(50 * u64::from(attempt)));
+                continue;
+            }
+        }
+        return result;
+    }
+}
 
 /// Current on-disk schema version. Bumping this triggers the v0→vN
 /// migration block in [`UsageCache::migrate`].
@@ -97,6 +128,10 @@ impl UsageCache {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "temp_store", "MEMORY")?;
+        // Block (up to BUSY_TIMEOUT) instead of erroring when another instance
+        // holds the write lock, so concurrent scans serialize rather than
+        // dropping to a cache-less reparse.
+        conn.busy_timeout(BUSY_TIMEOUT)?;
         Self::migrate(&conn)?;
         Ok(Self { conn })
     }
@@ -112,20 +147,21 @@ impl UsageCache {
         mtime: u64,
         size: u64,
     ) -> Result<Option<Vec<ProviderCall>>, CacheError> {
-        let row: Option<(i64, i64, Vec<u8>)> = self
-            .conn
-            .query_row(
-                "SELECT mtime, size, parsed FROM file_cache WHERE path = ?1",
-                params![path],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, Vec<u8>>(2)?,
-                    ))
-                },
-            )
-            .optional()?;
+        let row: Option<(i64, i64, Vec<u8>)> = with_busy_retry(|| {
+            self.conn
+                .query_row(
+                    "SELECT mtime, size, parsed FROM file_cache WHERE path = ?1",
+                    params![path],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, Vec<u8>>(2)?,
+                        ))
+                    },
+                )
+                .optional()
+        })?;
 
         let Some((stored_mtime, stored_size, blob)) = row else {
             return Ok(None);
@@ -158,24 +194,26 @@ impl UsageCache {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        self.conn.execute(
-            "INSERT INTO file_cache (path, mtime, size, fingerprint, parsed, cached_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(path) DO UPDATE SET
-                mtime       = excluded.mtime,
-                size        = excluded.size,
-                fingerprint = excluded.fingerprint,
-                parsed      = excluded.parsed,
-                cached_at   = excluded.cached_at",
-            params![
-                path,
-                i64::try_from(mtime).unwrap_or(i64::MAX),
-                i64::try_from(size).unwrap_or(i64::MAX),
-                i64::from_ne_bytes(fingerprint.to_ne_bytes()),
-                blob,
-                cached_at,
-            ],
-        )?;
+        with_busy_retry(|| {
+            self.conn.execute(
+                "INSERT INTO file_cache (path, mtime, size, fingerprint, parsed, cached_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(path) DO UPDATE SET
+                    mtime       = excluded.mtime,
+                    size        = excluded.size,
+                    fingerprint = excluded.fingerprint,
+                    parsed      = excluded.parsed,
+                    cached_at   = excluded.cached_at",
+                params![
+                    path,
+                    i64::try_from(mtime).unwrap_or(i64::MAX),
+                    i64::try_from(size).unwrap_or(i64::MAX),
+                    i64::from_ne_bytes(fingerprint.to_ne_bytes()),
+                    blob,
+                    cached_at,
+                ],
+            )
+        })?;
         Ok(())
     }
 
@@ -421,6 +459,43 @@ mod tests {
         // Original (mtime=1, size=1) row is gone.
         let stale = cache.lookup("/tmp/a.jsonl", 1, 1).expect("lookup");
         assert!(stale.is_none());
+    }
+
+    #[test]
+    fn concurrent_writers_serialize_without_busy_error() {
+        // Two ainb instances share one usage.sqlite. With WAL + busy_timeout,
+        // overlapping writers must serialize instead of erroring SQLITE_BUSY
+        // (which would drop the scan to a cache-less reparse). Without the
+        // busy_timeout pragma this test flakes/panics under contention.
+        use std::sync::Arc;
+        let dir = TempDir::new().expect("tempdir");
+        let db = Arc::new(dir.path().join("usage.sqlite"));
+        // Seed the DB so both threads open an existing WAL file.
+        drop(UsageCache::open(&db).expect("seed open"));
+
+        let handles: Vec<_> = (0..2u64)
+            .map(|t| {
+                let db = Arc::clone(&db);
+                std::thread::spawn(move || {
+                    let mut cache = UsageCache::open(&db).expect("open under contention");
+                    for i in 0..200u64 {
+                        let path = format!("/tmp/t{t}-{i}.jsonl");
+                        cache
+                            .insert(&path, i, i, i, &[fake_call(i)])
+                            .expect("insert under contention");
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().expect("writer thread");
+        }
+
+        // Both writers' rows landed.
+        let cache = UsageCache::open(&db).expect("reopen");
+        assert!(cache.lookup("/tmp/t0-199.jsonl", 199, 199).expect("lookup").is_some());
+        assert!(cache.lookup("/tmp/t1-199.jsonl", 199, 199).expect("lookup").is_some());
     }
 
     // `default_db_path` reads `AINB_HOME` / `XDG_DATA_HOME` / `HOME`
