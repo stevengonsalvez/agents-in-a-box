@@ -326,6 +326,9 @@ pub enum AppEvent {
     SkillManagerBrowseInstall,
     /// `/` in Results mode — return to Query mode to refine the search.
     SkillManagerBrowseEditQuery,
+    /// `Tab` — switch the browse modal between the curated (`ainb`) and
+    /// `skills.sh` catalogs, re-running the search for the new source.
+    SkillManagerBrowseToggleCatalog,
     /// Esc — close the browse modal, discarding the ephemeral results.
     SkillManagerBrowseClose,
     GoToRecovery,            // Navigate to session recovery view
@@ -1442,6 +1445,11 @@ impl EventHandler {
                 use crate::components::skill_manager_screen::BrowseMode;
                 return match browse.mode {
                     BrowseMode::Query => match key_event.code {
+                        // Tab switches catalog (before Char so it doesn't
+                        // land in the query buffer).
+                        KeyCode::Tab | KeyCode::BackTab => {
+                            Some(AppEvent::SkillManagerBrowseToggleCatalog)
+                        }
                         KeyCode::Enter => Some(AppEvent::SkillManagerBrowseSearch),
                         KeyCode::Esc => Some(AppEvent::SkillManagerBrowseClose),
                         KeyCode::Backspace => Some(AppEvent::SkillManagerBrowseInputBackspace),
@@ -1454,6 +1462,9 @@ impl EventHandler {
                         }
                         KeyCode::Down | KeyCode::Char('j') => {
                             Some(AppEvent::SkillManagerBrowseSelectNext)
+                        }
+                        KeyCode::Tab | KeyCode::BackTab => {
+                            Some(AppEvent::SkillManagerBrowseToggleCatalog)
                         }
                         KeyCode::Enter => Some(AppEvent::SkillManagerBrowseInstall),
                         KeyCode::Char('/') => Some(AppEvent::SkillManagerBrowseEditQuery),
@@ -4558,7 +4569,11 @@ impl EventHandler {
                 state.skill_manager_state.library = None;
             }
             AppEvent::SkillManagerOpenBrowse => {
-                // `[b]` — open the catalog browse modal in Query mode.
+                // `[b]` — open the catalog browse modal in Query mode,
+                // defaulting to the curated (`ainb`) catalog. The fetch is
+                // user-initiated: pressing Enter (even blank, for curated)
+                // lists the shelf, so opening the modal never blocks the
+                // event loop on a network call.
                 tracing::info!("SkillManager: open catalog browse (b)");
                 state.skill_manager_state.browse = Some(
                     crate::components::skill_manager_screen::BrowseViewState::new(),
@@ -4578,26 +4593,58 @@ impl EventHandler {
             }
             AppEvent::SkillManagerBrowseSearch => {
                 // Enter in Query mode — run the catalog search via the
-                // production backend (mock under AINB_CATALOG_MOCK=1, so
-                // the live tmux tripwire stays offline).
+                // selected backend. Curated reads its release index (offline
+                // under AINB_CATALOG_INDEX_FILE); skills.sh hits HTTP (mock
+                // under AINB_CATALOG_MOCK=1) — both keep the tripwire offline.
                 let ainb_home = ainb_skill_core::default_ainb_home();
-                let query = state
+                let (query, kind) = state
                     .skill_manager_state
                     .browse
                     .as_ref()
-                    .map(|b| b.query.clone())
+                    .map(|b| (b.query.clone(), b.catalog))
                     .unwrap_or_default();
-                if query.trim().is_empty() {
+                if query.trim().is_empty() && !kind.lists_on_blank() {
                     if let Some(b) = state.skill_manager_state.browse.as_mut() {
                         b.set_error("type a query to search the catalog");
                     }
                 } else {
-                    let result = run_catalog_search(&ainb_home, query.trim());
+                    let result = run_catalog_search(&ainb_home, query.trim(), kind);
                     if let Some(b) = state.skill_manager_state.browse.as_mut() {
                         match result {
                             Ok(rows) => b.set_results(rows),
                             Err(msg) => b.set_error(msg),
                         }
+                    }
+                }
+            }
+            AppEvent::SkillManagerBrowseToggleCatalog => {
+                // `Tab` — flip catalog, then refresh: curated lists its whole
+                // shelf on a blank query; skills.sh returns to Query mode to
+                // await a typed query unless one is already buffered.
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                let next_and_query = state
+                    .skill_manager_state
+                    .browse
+                    .as_ref()
+                    .map(|b| (b.catalog.toggled(), b.query.clone()));
+                if let Some((next, query)) = next_and_query {
+                    if let Some(b) = state.skill_manager_state.browse.as_mut() {
+                        b.catalog = next;
+                        b.status = None;
+                    }
+                    if next.lists_on_blank() || !query.trim().is_empty() {
+                        let result = run_catalog_search(&ainb_home, query.trim(), next);
+                        if let Some(b) = state.skill_manager_state.browse.as_mut() {
+                            match result {
+                                Ok(rows) => b.set_results(rows),
+                                Err(msg) => b.set_error(msg),
+                            }
+                        }
+                    } else if let Some(b) = state.skill_manager_state.browse.as_mut() {
+                        // skills.sh with no query → Query mode, cleared results.
+                        b.results.clear();
+                        b.selected = 0;
+                        b.mode = crate::components::skill_manager_screen::BrowseMode::Query;
                     }
                 }
             }
@@ -6072,19 +6119,29 @@ fn run_skill_cli(ainb_home: &std::path::Path, cmd: ainb_cli::SkillCommand) -> (b
 fn run_catalog_search(
     ainb_home: &std::path::Path,
     query: &str,
+    kind: crate::components::skill_manager_screen::CatalogKind,
 ) -> Result<Vec<crate::components::skill_manager_screen::BrowseRow>, String> {
     use ainb_skill_core::catalog::CatalogBackend;
-    // The HTTP backend uses `reqwest::blocking`, which builds its own runtime
-    // and PANICS when constructed on a thread that is already inside a tokio
+    use crate::components::skill_manager_screen::CatalogKind;
+    // Both backends use `reqwest::blocking`, which builds its own runtime and
+    // PANICS when constructed on a thread that is already inside a tokio
     // runtime. The TUI event loop runs under `#[tokio::main]`, so run the
     // (synchronous) search on a dedicated OS thread — the blocking client is
-    // then built off the runtime thread. The mock path returns before ever
-    // touching reqwest, so this is a no-op cost in tests.
+    // then built off the runtime thread. The curated file path + the skills.sh
+    // mock path both return before ever touching reqwest, so this is a no-op
+    // cost in tests / the offline tripwire.
     let ainb_home = ainb_home.to_path_buf();
     let query = query.to_string();
-    let hits = std::thread::spawn(move || {
-        let backend = ainb_cli::catalog_http::SkillsShHttpBackend::from_env(&ainb_home);
-        backend.search(&query).map_err(|e| e.to_string())
+    let hits = std::thread::spawn(move || match kind {
+        CatalogKind::Curated => {
+            let backend =
+                ainb_cli::catalog_curated::AinbCuratedCatalogBackend::from_env(&ainb_home);
+            backend.search(&query).map_err(|e| e.to_string())
+        }
+        CatalogKind::SkillsSh => {
+            let backend = ainb_cli::catalog_http::SkillsShHttpBackend::from_env(&ainb_home);
+            backend.search(&query).map_err(|e| e.to_string())
+        }
     })
     .join()
     .map_err(|_| "catalog search thread panicked".to_string())??;
@@ -6122,7 +6179,11 @@ mod catalog_search_tokio_guard {
         std::env::remove_var("AINB_CATALOG_MOCK");
         std::env::set_var("AINB_SKILLS_API_BASE", "http://127.0.0.1:1/nope");
 
-        let res = run_catalog_search(std::path::Path::new("/nonexistent-ainb-home"), "react");
+        let res = run_catalog_search(
+            std::path::Path::new("/nonexistent-ainb-home"),
+            "react",
+            crate::components::skill_manager_screen::CatalogKind::SkillsSh,
+        );
 
         match prev_mock {
             Some(v) => std::env::set_var("AINB_CATALOG_MOCK", v),

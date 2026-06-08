@@ -241,11 +241,50 @@ pub enum BrowseMode {
     Results,
 }
 
+/// Which catalog the `[b]` modal is browsing. `Tab` toggles between them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CatalogKind {
+    /// The toolkit's curated shelf (owned skills + vetted external),
+    /// fetched from the pinned GitHub release index — offline-capable and
+    /// the default, since it needs no API key.
+    #[default]
+    Curated,
+    /// The public skills.sh catalog (needs network + an API key).
+    SkillsSh,
+}
+
+impl CatalogKind {
+    /// Short label shown in the modal title.
+    pub fn label(self) -> &'static str {
+        match self {
+            CatalogKind::Curated => "ainb curated",
+            CatalogKind::SkillsSh => "skills.sh",
+        }
+    }
+
+    /// The other catalog — what `Tab` switches to.
+    pub fn toggled(self) -> Self {
+        match self {
+            CatalogKind::Curated => CatalogKind::SkillsSh,
+            CatalogKind::SkillsSh => CatalogKind::Curated,
+        }
+    }
+
+    /// Whether a blank query should list the whole shelf (curated) rather
+    /// than prompt for input (skills.sh).
+    pub fn lists_on_blank(self) -> bool {
+        matches!(self, CatalogKind::Curated)
+    }
+}
+
 /// State of the `[b]` catalog browse overlay. Rendered on top of the
 /// Sources/Units/Detail panels. Results are ephemeral.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BrowseViewState {
     pub mode: BrowseMode,
+    /// Which catalog is being browsed (`Tab` toggles). Defaults to the
+    /// curated shelf.
+    pub catalog: CatalogKind,
     /// The query being typed (Query mode) or the query that produced the
     /// current results (Results mode).
     pub query: String,
@@ -632,7 +671,7 @@ fn render_browse_view(frame: &mut Frame, area: Rect, browse: &BrowseViewState) {
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(GOLD))
         .title(Span::styled(
-            " Browse Catalog (skills.sh) ",
+            format!(" Browse Catalog ({}) ", browse.catalog.label()),
             Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
         ));
 
@@ -660,7 +699,11 @@ fn render_browse_view(frame: &mut Frame, area: Rect, browse: &BrowseViewState) {
     // ── Results list.
     if browse.results.is_empty() {
         let hint = if browse.mode == BrowseMode::Query {
-            "  Type a query and press Enter to search."
+            if browse.catalog.lists_on_blank() {
+                "  Press Enter to list all curated skills, or type to filter."
+            } else {
+                "  Type a query and press Enter to search."
+            }
         } else {
             "  No results."
         };
@@ -701,6 +744,8 @@ fn render_browse_view(frame: &mut Frame, area: Rect, browse: &BrowseViewState) {
             Span::raw(" "),
             key_span("Enter"),
             Span::styled(" search  ", Style::default().fg(MUTED_GRAY)),
+            key_span("Tab"),
+            Span::styled(" switch catalog  ", Style::default().fg(MUTED_GRAY)),
             key_span("Esc"),
             Span::styled(" close", Style::default().fg(MUTED_GRAY)),
         ]
@@ -713,6 +758,8 @@ fn render_browse_view(frame: &mut Frame, area: Rect, browse: &BrowseViewState) {
             Span::styled(" install  ", Style::default().fg(MUTED_GRAY)),
             key_span("/"),
             Span::styled(" new search  ", Style::default().fg(MUTED_GRAY)),
+            key_span("Tab"),
+            Span::styled(" switch catalog  ", Style::default().fg(MUTED_GRAY)),
             key_span("Esc"),
             Span::styled(" close", Style::default().fg(MUTED_GRAY)),
         ]
