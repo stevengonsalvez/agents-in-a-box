@@ -61,6 +61,10 @@ git_directories = []
         ver = env!("CARGO_PKG_VERSION"),
     );
     fs::write(cfg.join("onboarding.toml"), onboarding).expect("seed onboarding.toml");
+    // Suppress the first-run ainb-hooks install nudge (intercepts the
+    // first key on the home screen). See build_skill_manager_sandbox.
+    fs::write(cfg.parent().unwrap().join("install.json"), "{\"agents\":[],\"hook_script\":\"\",\"prompt_dismissed\":true}\n")
+        .expect("seed install.json");
 }
 
 fn git(args: &[&str], cwd: &Path) -> std::process::Output {
@@ -223,7 +227,7 @@ fn pressing_m_renders_drift_warning_glyph_against_real_local_bare() {
         .expect("tmux send-keys launch");
 
     let home_render = poll_capture(&session, Instant::now() + Duration::from_secs(120), |c| {
-        c.contains("Agents") && c.contains("Catalog") && c.contains("Welcome to AINB")
+        c.contains("Agents") && c.contains("Catalog") && c.contains("Skills (manager)")
     });
     if home_render.is_none() {
         let dump = capture_pane(&session);

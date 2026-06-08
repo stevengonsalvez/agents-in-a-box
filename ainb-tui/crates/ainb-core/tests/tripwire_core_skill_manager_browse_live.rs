@@ -221,7 +221,7 @@ fn browse_modal_searches_and_enter_installs_live() {
         .expect("tmux send-keys launch");
 
     // Home → SkillManager. The v2 home lists a "Skills (manager)" tile;
-    // wait for it as the "booted on home" signal (the old "Welcome to AINB"
+    // wait for it as the "booted on home" signal (the old "Skills (manager)"
     // banner was dropped in the home redesign).
     if poll(&session, Instant::now() + Duration::from_secs(120), |c| {
         c.contains("Skills (manager)")

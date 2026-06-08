@@ -133,7 +133,7 @@ fn add_source_key_writes_manifest_in_live_binary() {
 
     // Home → SkillManager.
     if poll(&session, Instant::now() + Duration::from_secs(120), |c| {
-        c.contains("Welcome to AINB")
+        c.contains("Skills (manager)")
     })
     .is_none()
     {
@@ -229,7 +229,7 @@ fn search_key_filters_units_in_live_binary() {
         .expect("launch");
 
     if poll(&session, Instant::now() + Duration::from_secs(120), |c| {
-        c.contains("Welcome to AINB")
+        c.contains("Skills (manager)")
     })
     .is_none()
     {

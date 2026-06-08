@@ -187,7 +187,7 @@ fn external_clone_orphan_shows_as_gh_not_local_in_units() {
 
     // Wait for HomeScreen to render fully before keystroking.
     if poll_capture(&session, Instant::now() + Duration::from_secs(120), |c| {
-        c.contains("Agents") && c.contains("Catalog") && c.contains("Welcome to AINB")
+        c.contains("Agents") && c.contains("Catalog") && c.contains("Skills (manager)")
     })
     .is_none()
     {

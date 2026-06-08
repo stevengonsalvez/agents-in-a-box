@@ -73,6 +73,10 @@ git_directories = []
         ver = env!("CARGO_PKG_VERSION"),
     );
     fs::write(cfg.join("onboarding.toml"), onboarding).expect("seed onboarding.toml");
+    // Suppress the first-run ainb-hooks install nudge (intercepts the
+    // first key on the home screen). See build_skill_manager_sandbox.
+    fs::write(cfg.parent().unwrap().join("install.json"), "{\"agents\":[],\"hook_script\":\"\",\"prompt_dismissed\":true}\n")
+        .expect("seed install.json");
 
     // ---- class-A: one marketplace plugin in the Claude cache ----
     let claude = home.join(".claude");
@@ -190,7 +194,7 @@ fn discovery_banner_renders_then_import_populates_units() {
     // Wait for HomeScreen to render FULLY before keystroking.
     // Same boot-paint markers as `tripwire_core_skill_manager_screen_opens`.
     let home_render = poll_capture(&session, Instant::now() + Duration::from_secs(120), |c| {
-        c.contains("Agents") && c.contains("Catalog") && c.contains("Welcome to AINB")
+        c.contains("Agents") && c.contains("Catalog") && c.contains("Skills (manager)")
     });
     if home_render.is_none() {
         let dump = capture_pane(&session);

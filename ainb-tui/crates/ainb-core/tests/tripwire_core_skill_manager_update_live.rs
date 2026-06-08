@@ -137,7 +137,7 @@ fn update_key_surfaces_result_notification_in_live_binary() {
 
     // Home → SkillManager.
     if poll(&session, Instant::now() + Duration::from_secs(120), |c| {
-        c.contains("Welcome to AINB")
+        c.contains("Skills (manager)")
     })
     .is_none()
     {

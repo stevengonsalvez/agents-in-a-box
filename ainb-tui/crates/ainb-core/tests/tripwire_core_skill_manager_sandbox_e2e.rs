@@ -44,6 +44,10 @@ git_directories = []
         ver = env!("CARGO_PKG_VERSION"),
     );
     std::fs::write(cfg.join("onboarding.toml"), onboarding).expect("seed onboarding.toml");
+    // Suppress the first-run ainb-hooks install nudge (intercepts the
+    // first key on the home screen). See build_skill_manager_sandbox.
+    std::fs::write(cfg.parent().unwrap().join("install.json"), "{\"agents\":[],\"hook_script\":\"\",\"prompt_dismissed\":true}\n")
+        .expect("seed install.json");
 }
 
 fn capture_pane(session: &str) -> String {
@@ -132,7 +136,7 @@ fn pressing_m_in_real_binary_against_sandbox_renders_skill_manager() {
 
     // Wait for HomeScreen to render.
     let home_render = poll_capture(&session, Instant::now() + Duration::from_secs(120), |c| {
-        c.contains("Agents") && c.contains("Catalog") && c.contains("Welcome to AINB")
+        c.contains("Agents") && c.contains("Catalog") && c.contains("Skills (manager)")
     });
     if home_render.is_none() {
         let dump = capture_pane(&session);

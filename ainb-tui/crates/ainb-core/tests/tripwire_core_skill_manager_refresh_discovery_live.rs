@@ -165,7 +165,7 @@ fn pressing_m_clears_skip_marker_and_reshows_discovery_banner() {
 
     // Wait for HomeScreen to render fully before keystroking.
     if poll_capture(&session, Instant::now() + Duration::from_secs(120), |c| {
-        c.contains("Agents") && c.contains("Catalog") && c.contains("Welcome to AINB")
+        c.contains("Agents") && c.contains("Catalog") && c.contains("Skills (manager)")
     })
     .is_none()
     {

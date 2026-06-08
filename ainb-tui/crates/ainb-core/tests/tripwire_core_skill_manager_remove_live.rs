@@ -138,7 +138,7 @@ fn remove_key_uninstalls_unit_and_surfaces_notification_in_live_binary() {
 
     // Home → SkillManager.
     if poll(&session, Instant::now() + Duration::from_secs(120), |c| {
-        c.contains("Welcome to AINB")
+        c.contains("Skills (manager)")
     })
     .is_none()
     {

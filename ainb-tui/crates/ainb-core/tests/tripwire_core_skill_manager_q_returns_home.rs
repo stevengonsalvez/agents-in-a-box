@@ -38,6 +38,10 @@ git_directories = []
         ver = env!("CARGO_PKG_VERSION"),
     );
     fs::write(cfg.join("onboarding.toml"), onboarding).expect("seed onboarding.toml");
+    // Suppress the first-run ainb-hooks install nudge (intercepts the
+    // first key on the home screen). See build_skill_manager_sandbox.
+    fs::write(cfg.parent().unwrap().join("install.json"), "{\"agents\":[],\"hook_script\":\"\",\"prompt_dismissed\":true}\n")
+        .expect("seed install.json");
 }
 
 fn capture_pane(session: &str) -> String {
@@ -102,7 +106,7 @@ fn q_on_skill_manager_returns_to_home_screen() {
         .expect("tmux send-keys launch");
 
     if poll_capture(&session, Instant::now() + Duration::from_secs(120), |c| {
-        c.contains("Agents") && c.contains("Catalog") && c.contains("Welcome to AINB")
+        c.contains("Agents") && c.contains("Catalog") && c.contains("Skills (manager)")
     })
     .is_none()
     {
@@ -139,7 +143,7 @@ fn q_on_skill_manager_returns_to_home_screen() {
     let post = poll_capture(&session, Instant::now() + Duration::from_secs(90), |c| {
         c.contains("Agents")
             && c.contains("Catalog")
-            && c.contains("Welcome to")
+            && c.contains("Skills (manager)")
             && !c.contains("(select a unit to see details)")
     });
     let post = match post {
@@ -165,7 +169,7 @@ fn q_on_skill_manager_returns_to_home_screen() {
         "missing HomeScreen sidebar: {post}"
     );
     assert!(
-        post.contains("Welcome to"),
+        post.contains("Skills (manager)"),
         "missing HomeScreen welcome panel: {post}"
     );
     assert!(

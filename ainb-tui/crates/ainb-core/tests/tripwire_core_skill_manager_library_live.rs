@@ -131,7 +131,7 @@ fn library_view_renders_owned_skill_and_enter_shows_detail() {
 
     // Home → SkillManager.
     if poll(&session, Instant::now() + Duration::from_secs(120), |c| {
-        c.contains("Welcome to AINB")
+        c.contains("Skills (manager)")
     })
     .is_none()
     {

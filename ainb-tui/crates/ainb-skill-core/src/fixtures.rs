@@ -140,6 +140,17 @@ pub fn build_skill_manager_sandbox(
     fs::create_dir_all(&layout.claude_home)?;
     fs::create_dir_all(&layout.codex_home)?;
 
+    // Suppress the first-run ainb-hooks install nudge. It renders as a
+    // confirmation modal on the home screen that intercepts keystrokes, so
+    // every live TUI tripwire that navigates home -> SkillManager would
+    // otherwise have its first key swallowed. `ainb_plugin_notifyd`'s
+    // `prompt_state` reads `<home>/.agents-in-a-box/install.json`; a record
+    // with `prompt_dismissed = true` makes it return `None`.
+    fs::write(
+        layout.ainb_home.join("install.json"),
+        b"{\"agents\":[],\"hook_script\":\"\",\"prompt_dismissed\":true}\n",
+    )?;
+
     seed_minimal(&layout)?;
     init_bare_remote_with_seed(&layout.bare_remote)?;
 
