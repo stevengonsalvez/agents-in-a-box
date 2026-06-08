@@ -7,9 +7,13 @@
 //!   the host's `cts_runner` integration test can `include_bytes!` /
 //!   `include_str!` them without depending on cargo-build state.
 //! * `clean-canaries` — remove fixtures + the sub-workspace's `target/`.
+//! * `gen-catalog-index` — emit the enriched curated-catalog index
+//!   (`toolkit/catalog-index.json`) consumed by `AinbCuratedCatalogBackend`.
 //!
 //! No external CLI parser dependency on purpose — this binary is meant to
 //! be cheap to compile and stay out of the way.
+
+mod catalog_index_gen;
 
 use std::env;
 use std::fs;
@@ -41,12 +45,13 @@ const CANARIES: &[&str] = &[
 
 fn main() -> Result<()> {
     let mut args = env::args().skip(1);
-    let cmd = args
-        .next()
-        .ok_or_else(|| anyhow!("usage: cargo xtask <build-canaries|clean-canaries>"))?;
+    let cmd = args.next().ok_or_else(|| {
+        anyhow!("usage: cargo xtask <build-canaries|clean-canaries|gen-catalog-index>")
+    })?;
     match cmd.as_str() {
         "build-canaries" => build_canaries(),
         "clean-canaries" => clean_canaries(),
+        "gen-catalog-index" => catalog_index_gen::run(args),
         other => bail!("unknown xtask subcommand {other:?}"),
     }
 }
