@@ -15,8 +15,8 @@
 use async_trait::async_trait;
 
 use ainb_plugin_sdk::{
-    Cell, Color, Coord, HandleKeyParams, HostClient, InitContext, Plugin, RenderParams, Result,
-    WireBuffer,
+    Cell, Color, Coord, HandleKeyParams, HandleMouseParams, HostClient, InitContext, MouseButton,
+    MouseKind, Plugin, RenderParams, Result, WireBuffer,
 };
 use ratatui::buffer::Buffer as RBuffer;
 use ratatui::layout::Rect as RRect;
@@ -214,7 +214,12 @@ impl Plugin for LearningsPlugin {
         };
         let mut rbuf = RBuffer::empty(area);
         render_ui(&mut rbuf, area, &self.ui);
-        Ok(buffer_to_wire(&rbuf, area))
+        let wire = buffer_to_wire(&rbuf, area);
+        // Advance the map's recentre animation for the NEXT frame. This frame
+        // was painted at the current scale; ticking here (post-paint, under the
+        // plugin's &mut self) drives the self-animation via `wants_redraw`.
+        self.ui.tick_map_animation();
+        Ok(wire)
     }
 
     /// Route a forwarded key into the UI. The host reserves global nav (Esc,
@@ -238,6 +243,28 @@ impl Plugin for LearningsPlugin {
             self.ensure_communities_loaded();
         }
         Ok(())
+    }
+
+    /// Route a forwarded mouse click into the radial map. Only a left-button
+    /// press acts (select / recentre the clicked node); other events are
+    /// ignored. Coordinates arrive in the plugin's own viewport space.
+    async fn handle_mouse(&mut self, _host: &HostClient, params: HandleMouseParams) -> Result<()> {
+        if matches!(
+            params.mouse.kind,
+            MouseKind::Down {
+                button: MouseButton::Left
+            }
+        ) && self.ui.handle_mouse(params.mouse.col, params.mouse.row)
+        {
+            self.generation = self.generation.wrapping_add(1);
+        }
+        Ok(())
+    }
+
+    /// Surface the map's recentre animation to the host: while the transition is
+    /// running, ask to be rendered again next tick without further input.
+    fn wants_redraw(&self) -> bool {
+        self.ui.wants_redraw()
     }
 }
 

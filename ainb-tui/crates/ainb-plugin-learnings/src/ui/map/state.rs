@@ -80,16 +80,6 @@ impl MapState {
         &self.selected
     }
 
-    /// Re-centre the map on `center` (e.g. the entity selected in the Graph
-    /// list when toggling into the map). Resets selection + hop/expand state.
-    pub fn set_center(&mut self, center: impl Into<String>) {
-        self.center = center.into();
-        self.selected = self.center.clone();
-        self.hop = 1;
-        self.expanded = false;
-        self.anim_left = 0;
-    }
-
     /// Build the ego subgraph for the current centre / hop / expand state.
     #[must_use]
     pub fn subgraph(&self, rels: &[Relationship]) -> EgoSubgraph {
@@ -225,12 +215,12 @@ impl MapState {
     }
 
     /// Paint the map for the current state into `area`, building the subgraph
-    /// from `rels`. Ticks the animation forward as a side effect of painting.
-    pub fn render(&mut self, buf: &mut RBuffer, area: RRect, rels: &[Relationship]) {
+    /// from `rels`. Pure paint — the animation is advanced separately via
+    /// [`Self::tick`] (driven by the plugin's `&mut self` render so this stays
+    /// callable from an immutable render path).
+    pub fn render_view(&self, buf: &mut RBuffer, area: RRect, rels: &[Relationship]) {
         let ego = self.subgraph(rels);
-        let scale = self.anim_scale();
-        render::render(buf, area, &ego, &self.selected, scale);
-        self.tick();
+        render::render(buf, area, &ego, &self.selected, self.anim_scale());
     }
 }
 

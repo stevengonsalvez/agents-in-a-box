@@ -15,6 +15,7 @@ mod browse;
 mod detail;
 mod graph;
 mod map;
+mod picker;
 mod search;
 
 use ratatui::buffer::Buffer as RBuffer;
@@ -30,6 +31,7 @@ use crate::data::{Community, LearningRecord};
 use browse::BrowseState;
 use detail::DetailState;
 use graph::GraphState;
+use picker::{PickerItem, PickerState};
 pub use search::SearchContext;
 use search::SearchState;
 
@@ -99,6 +101,9 @@ pub struct LearningsUi {
     /// tab's body and consumes keys until closed (`Backspace`). Tab-agnostic —
     /// any tab opens it the same way via [`Self::open_detail_for_selection`].
     detail: DetailState,
+    /// Learnings picker popup — opened by `o` in the radial map when the
+    /// selected entity is cited by more than one learning.
+    picker: PickerState,
 }
 
 /// Wrapper so [`Tab`] can derive a sensible [`Default`] (Browse) without
@@ -183,11 +188,31 @@ impl LearningsUi {
             return self.detail.handle_key(code);
         }
 
-        // 2. Graph focus: `Backspace` releases focus; the graph claims its own
-        // navigation keys. `Tab`/`/`/`g` fall through to the global shortcuts
-        // below so the user can always leave a focused graph.
+        // 1b. Learnings picker popup (opened by `o` in the map) is modal next.
+        // `⏎` on a row opens its Detail; `Backspace` closes the picker.
+        if self.picker.is_open() {
+            if let Some(record_idx) = self.picker.handle_key(code) {
+                if let Some(record) = self.records.get(record_idx) {
+                    self.detail.open(record);
+                }
+                self.picker.close();
+            }
+            return true;
+        }
+
+        // 2. Graph focus: the graph claims its navigation keys. In the radial
+        // Map sub-mode `o` opens the learnings-behind-the-entity (→ picker or
+        // Detail) and `Backspace` exits the map; in the text views `Backspace`
+        // releases focus. `Tab`/`/`/`g` fall through to the global shortcuts so
+        // the user can always leave a focused graph.
         if self.tab.0 == Tab::Graph && self.graph.is_focused() {
+            if self.graph.in_map() && matches!(code, KeyCode::Char { ch: 'o' }) {
+                return self.open_detail_for_map_entity();
+            }
             if matches!(code, KeyCode::Backspace) {
+                if self.graph.in_map() {
+                    return self.graph.handle_key(code); // exits the map
+                }
                 self.graph.blur();
                 return true;
             }
@@ -259,11 +284,83 @@ impl LearningsUi {
         }
     }
 
+    /// `o` in the radial map: open the learnings behind the selected entity.
+    /// Zero citations is a clean no-op; exactly one opens Detail directly; more
+    /// than one opens the picker popup so the user chooses. Always returns `true`
+    /// (the key is claimed by the focused map either way).
+    fn open_detail_for_map_entity(&mut self) -> bool {
+        let Some(entity) = self.graph.map_selected_entity() else {
+            return true;
+        };
+        let matches: Vec<(usize, &LearningRecord)> = self
+            .records
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| record_cites_entity(r, &entity))
+            .collect();
+        match matches.as_slice() {
+            [] => true,
+            [(_, record)] => {
+                self.detail.open(record);
+                true
+            }
+            _ => {
+                let items = matches
+                    .iter()
+                    .map(|(idx, r)| PickerItem {
+                        record_idx: *idx,
+                        title: r.title.clone(),
+                    })
+                    .collect();
+                self.picker.open(entity, items);
+                true
+            }
+        }
+    }
+
+    /// Forward a mouse click (plugin-viewport coordinates) to the radial map.
+    /// Returns `true` when the click changed the map (so the plugin bumps its
+    /// render generation). A click outside the map / when not in the map is a
+    /// no-op.
+    pub fn handle_mouse(&mut self, col: u16, row: u16) -> bool {
+        if self.tab.0 == Tab::Graph && self.graph.in_map() {
+            return self.graph.handle_map_click(col, row);
+        }
+        false
+    }
+
+    /// Advance the radial map's recentre animation one frame; `true` while it's
+    /// still animating (so the plugin keeps requesting redraws). Called by the
+    /// plugin's `&mut self` render after painting.
+    pub fn tick_map_animation(&mut self) -> bool {
+        self.graph.map_tick()
+    }
+
+    /// Whether the map wants another animation frame without input — surfaced to
+    /// the host via `Plugin::wants_redraw`.
+    #[must_use]
+    pub fn wants_redraw(&self) -> bool {
+        self.graph.map_wants_redraw()
+    }
+
     /// `true` while the Detail pane is open (exposed for tests).
     #[must_use]
     pub fn detail_open(&self) -> bool {
         self.detail.is_open()
     }
+
+    /// `true` while the learnings picker popup is open (exposed for tests).
+    #[must_use]
+    pub fn picker_open(&self) -> bool {
+        self.picker.is_open()
+    }
+}
+
+/// `true` if `record` names `entity` among its entities or relationship
+/// endpoints — the "learnings behind this entity" relation the map's `o` uses.
+fn record_cites_entity(record: &LearningRecord, entity: &str) -> bool {
+    record.entities.iter().any(|e| e.name == entity)
+        || record.relationships.iter().any(|r| r.source == entity || r.target == entity)
 }
 
 /// Render the tabbed shell into `area`. Outer rounded panel titled
@@ -311,6 +408,11 @@ pub fn render(buf: &mut RBuffer, area: RRect, ui: &LearningsUi) {
         }
         Tab::Search => search::render(buf, rows[1], &ui.search),
         Tab::Graph => graph::render(buf, rows[1], &ui.graph),
+    }
+
+    // The learnings picker floats over the active body (the map shows behind it).
+    if ui.picker.is_open() {
+        ui.picker.render(buf, rows[1]);
     }
 }
 
