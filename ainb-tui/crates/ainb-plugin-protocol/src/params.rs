@@ -232,6 +232,92 @@ pub struct HandleKeyParams {
 }
 
 // =====================================================================
+// plugin/handle_mouse
+// =====================================================================
+
+/// Mouse button identity for the press/release/drag variants of
+/// [`MouseKind`]. Wire tag is `type`, variants `snake_case` —
+/// `Left` is `{"type":"left"}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MouseButton {
+    /// Left / primary button.
+    Left,
+    /// Right / secondary button.
+    Right,
+    /// Middle / wheel button.
+    Middle,
+}
+
+/// Logical mouse action. Wire tag is `type`, variants `snake_case` —
+/// `Down { button }` is `{"type":"down","button":{"type":"left"}}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MouseKind {
+    /// Button pressed.
+    Down {
+        /// Which button went down.
+        button: MouseButton,
+    },
+    /// Button released.
+    Up {
+        /// Which button came up.
+        button: MouseButton,
+    },
+    /// Pointer moved with a button held.
+    Drag {
+        /// Which button is held during the drag.
+        button: MouseButton,
+    },
+    /// Pointer moved with no button held.
+    Moved,
+    /// Wheel scrolled up.
+    ScrollUp,
+    /// Wheel scrolled down.
+    ScrollDown,
+    /// Wheel scrolled left.
+    ScrollLeft,
+    /// Wheel scrolled right.
+    ScrollRight,
+}
+
+/// Normalized mouse event delivered from host → plugin.
+///
+/// Coordinates are **plugin-viewport-relative**: the host subtracts the
+/// plugin screen's origin before forwarding, so `(0, 0)` is the top-left
+/// cell of the plugin's own buffer. This lets a plugin hit-test against
+/// the same coordinate space it painted into, without knowing where on
+/// the terminal its screen was placed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MouseEvent {
+    /// What the pointer did.
+    pub kind: MouseKind,
+    /// Column within the plugin viewport (0-based).
+    pub col: u16,
+    /// Row within the plugin viewport (0-based).
+    pub row: u16,
+    /// Bitmask of active modifiers — same bits as [`KeyEvent::mods`]
+    /// ([`KEY_MOD_SHIFT`], [`KEY_MOD_CTRL`], [`KEY_MOD_ALT`], [`KEY_MOD_SUPER`]).
+    #[serde(default)]
+    pub mods: u8,
+}
+
+/// `plugin/handle_mouse` params (notification). Host forwards mouse
+/// events to the plugin owning the currently focused screen, mirroring
+/// [`HandleKeyParams`]. The [`MouseEvent`] carries coordinates already
+/// translated into the plugin's viewport space.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandleMouseParams {
+    /// Plugin-defined screen identifier (mirrors [`HandleKeyParams::screen_id`]).
+    pub screen_id: String,
+    /// The mouse event, in plugin-viewport coordinates.
+    pub mouse: MouseEvent,
+    /// Monotonic counter the host increments per forwarded mouse event,
+    /// mirroring [`HandleKeyParams::generation`].
+    pub generation: u64,
+}
+
+// =====================================================================
 // plugin/cli_dispatch
 // =====================================================================
 
@@ -564,6 +650,19 @@ mod tests {
             payload: bytes::Bytes::from_static(b"hello"),
         });
 
+        rt(&HandleMouseParams {
+            screen_id: "learnings".into(),
+            mouse: MouseEvent {
+                kind: MouseKind::Down {
+                    button: MouseButton::Left,
+                },
+                col: 12,
+                row: 3,
+                mods: KEY_MOD_CTRL,
+            },
+            generation: 9,
+        });
+
         rt(&CliDispatchParams {
             namespace: "usage".into(),
             argv: vec!["report".into(), "--json".into()],
@@ -639,6 +738,42 @@ mod tests {
     fn log_level_lowercased_on_wire() {
         let s = serde_json::to_string(&LogLevel::Warn).unwrap();
         assert_eq!(s, "\"warn\"");
+    }
+
+    #[test]
+    fn mouse_event_wire_shape_and_viewport_coords() {
+        // Coordinates are plugin-viewport-relative; kind carries the button.
+        let ev = MouseEvent {
+            kind: MouseKind::Down {
+                button: MouseButton::Left,
+            },
+            col: 7,
+            row: 2,
+            mods: 0,
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(json.contains("\"col\":7"), "col missing: {json}");
+        assert!(json.contains("\"row\":2"), "row missing: {json}");
+        assert!(json.contains("\"kind\""), "kind missing: {json}");
+        // Snake-case tagged union for the action + button.
+        assert!(
+            json.contains("\"type\":\"down\""),
+            "down tag missing: {json}"
+        );
+        assert!(
+            json.contains("\"type\":\"left\""),
+            "left tag missing: {json}"
+        );
+        let back: MouseEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(ev, back);
+    }
+
+    #[test]
+    fn mouse_event_mods_default_to_zero_when_absent() {
+        let json = r#"{"kind":{"type":"moved"},"col":1,"row":1}"#;
+        let ev: MouseEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(ev.mods, 0);
+        assert_eq!(ev.kind, MouseKind::Moved);
     }
 
     #[test]

@@ -20,9 +20,9 @@ use ainb_plugin_protocol::methods;
 use ainb_plugin_protocol::params::{
     ActionInvokeParams, ActionInvokeResult, CliDispatchParams, CliDispatchResult, FsDirEntry,
     FsReadDirParams, FsReadDirResult, FsReadFileParams, FsReadFileResult, HandleEventParams,
-    HandleKeyParams, LogParams, PluginInitParams, PluginInitResult, PluginShutdownParams,
-    RenderParams, RenderResult, SnapshotGetParams, SnapshotGetResult, SnapshotPublishParams,
-    SnapshotSubscribeParams, SnapshotSubscribeResult, Viewport,
+    HandleKeyParams, HandleMouseParams, LogParams, PluginInitParams, PluginInitResult,
+    PluginShutdownParams, RenderParams, RenderResult, SnapshotGetParams, SnapshotGetResult,
+    SnapshotPublishParams, SnapshotSubscribeParams, SnapshotSubscribeResult, Viewport,
 };
 use ainb_plugin_protocol::wire_buffer::WireBuffer;
 use bytes::Bytes;
@@ -143,6 +143,13 @@ pub type Inbox = mpsc::UnboundedSender<Command>;
 /// responsiveness even during a multi-second chunk drain.
 pub type KeyInbox = mpsc::UnboundedSender<HandleKeyParams>;
 
+/// Priority side-channel reserved for `plugin/handle_mouse` notifications.
+///
+/// Mirrors [`KeyInbox`]: a dedicated channel drained ahead of the main
+/// [`Inbox`] in the task's `biased;` select, so a click or scroll on a
+/// plugin screen can't queue behind a backlog of `HandleEvent` chunks.
+pub type MouseInbox = mpsc::UnboundedSender<HandleMouseParams>;
+
 /// Map of `plugin_id → inbox` used by [`PluginTask`] to fan out
 /// subscriber notifications when a plugin issues `host/snapshot/publish`.
 /// Shared (clone-able `Arc`) with `Runtime`, which maintains it
@@ -176,11 +183,13 @@ pub fn spawn(
 ) -> (
     Inbox,
     KeyInbox,
+    MouseInbox,
     RenderCache,
     Arc<parking_lot::RwLock<LifecycleState>>,
 ) {
     let (tx, rx) = mpsc::unbounded_channel();
     let (key_tx, key_rx) = mpsc::unbounded_channel();
+    let (mouse_tx, mouse_rx) = mpsc::unbounded_channel();
     let cache = RenderCache::new();
     let state = Arc::new(parking_lot::RwLock::new(LifecycleState::Idle));
     let task = PluginTask {
@@ -193,6 +202,7 @@ pub fn spawn(
         state: state.clone(),
         rx,
         key_rx,
+        mouse_rx,
         ledger: HashMap::new(),
         ids: IdCounter::new(),
         failures: VecDeque::new(),
@@ -201,7 +211,7 @@ pub fn spawn(
         child: None,
     };
     handle.spawn(task.run());
-    (tx, key_tx, cache, state)
+    (tx, key_tx, mouse_tx, cache, state)
 }
 
 /// Bookkeeping for one outstanding request.
@@ -251,6 +261,11 @@ struct PluginTask {
     /// (including Esc) are dispatched ahead of any backlog of
     /// `HandleEvent` chunks.
     key_rx: mpsc::UnboundedReceiver<HandleKeyParams>,
+    /// Priority receiver for `plugin/handle_mouse` notifications. Drained
+    /// alongside `key_rx` (both ahead of the main `rx`) so mouse clicks
+    /// and scrolls on a plugin screen aren't starved by a `HandleEvent`
+    /// backlog.
+    mouse_rx: mpsc::UnboundedReceiver<HandleMouseParams>,
     ledger: HashMap<u64, Pending>,
     ids: IdCounter,
     failures: VecDeque<Instant>,
@@ -279,6 +294,10 @@ impl PluginTask {
                 biased;
                 key = self.key_rx.recv() => match key {
                     Some(params) => self.handle_key_command(params).await,
+                    None => {}
+                },
+                mouse = self.mouse_rx.recv() => match mouse {
+                    Some(params) => self.handle_mouse_command(params).await,
                     None => {}
                 },
                 cmd = self.rx.recv() => match cmd {
@@ -313,6 +332,21 @@ impl PluginTask {
         }
         let json = serde_json::to_value(params).expect("HandleKeyParams is serializable");
         let _ = self.send_notification(methods::PLUGIN_HANDLE_KEY, json).await;
+    }
+
+    /// Dispatch a `plugin/handle_mouse` notification. Mirrors
+    /// [`Self::handle_key_command`]: same idle-drop policy and wire shape,
+    /// sourced from the priority mouse channel.
+    async fn handle_mouse_command(&mut self, params: HandleMouseParams) {
+        self.last_used = Instant::now();
+        if self.child.is_none() {
+            // No process to push to — a click before the plugin spawns
+            // has no plausible destination, so drop it rather than replay.
+            debug!(plugin = %self.plugin.id, "handle_mouse dropped (idle)");
+            return;
+        }
+        let json = serde_json::to_value(params).expect("HandleMouseParams is serializable");
+        let _ = self.send_notification(methods::PLUGIN_HANDLE_MOUSE, json).await;
     }
 
     async fn handle_command(&mut self, cmd: Command) {

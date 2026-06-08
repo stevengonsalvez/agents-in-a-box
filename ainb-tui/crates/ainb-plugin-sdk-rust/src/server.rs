@@ -34,8 +34,9 @@ use tokio::task::JoinHandle;
 use ainb_plugin_protocol::{
     Manifest, RpcError, framing, methods,
     params::{
-        CliDispatchParams, CliDispatchResult, HandleEventParams, HandleKeyParams, PluginInitParams,
-        PluginInitResult, PluginShutdownParams, PluginShutdownResult, RenderParams, RenderResult,
+        CliDispatchParams, CliDispatchResult, HandleEventParams, HandleKeyParams,
+        HandleMouseParams, PluginInitParams, PluginInitResult, PluginShutdownParams,
+        PluginShutdownResult, RenderParams, RenderResult,
     },
 };
 
@@ -417,6 +418,11 @@ async fn handle_method<P: Plugin>(
         methods::PLUGIN_HANDLE_KEY => {
             let p: HandleKeyParams = decode_params(params)?;
             plugin.lock().await.handle_key(host, p).await?;
+            Ok(Value::Null)
+        }
+        methods::PLUGIN_HANDLE_MOUSE => {
+            let p: HandleMouseParams = decode_params(params)?;
+            plugin.lock().await.handle_mouse(host, p).await?;
             Ok(Value::Null)
         }
         methods::PLUGIN_CLI_DISPATCH => {

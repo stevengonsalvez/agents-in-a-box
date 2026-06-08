@@ -15,7 +15,7 @@ use serde_json::Value;
 
 use crate::{HostClient, Result};
 use ainb_plugin_protocol::{
-    params::{HandleEventParams, HandleKeyParams, RenderParams},
+    params::{HandleEventParams, HandleKeyParams, HandleMouseParams, RenderParams},
     wire_buffer::WireBuffer,
 };
 
@@ -124,6 +124,22 @@ pub trait Plugin: Send + 'static {
     /// order. Plugins MUST NOT spawn the handler body — see
     /// [`Server`](crate::Server) source for why.
     async fn handle_key(&mut self, host: &HostClient, params: HandleKeyParams) -> Result<()> {
+        let _ = (host, params);
+        Ok(())
+    }
+
+    /// Receive a single normalized mouse event the host has forwarded.
+    ///
+    /// Notification — the host does not wait on a response and ignores
+    /// errors. Default is a no-op, mirroring [`Self::handle_key`], so
+    /// plugins that don't react to the pointer get nothing on the wire
+    /// by virtue of the host only forwarding mouse events to the focused
+    /// plugin. `params.mouse.col`/`.row` are already in the plugin's own
+    /// viewport coordinate space.
+    ///
+    /// Ordering: dispatched inline on the reader-loop task, same as
+    /// `handle_key`. Plugins MUST NOT spawn the handler body.
+    async fn handle_mouse(&mut self, host: &HostClient, params: HandleMouseParams) -> Result<()> {
         let _ = (host, params);
         Ok(())
     }

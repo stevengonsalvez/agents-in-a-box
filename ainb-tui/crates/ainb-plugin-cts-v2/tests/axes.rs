@@ -646,6 +646,71 @@ fn axis_read_paths_nonexistent_in_envelope_under_symlink_grant() {
     }
 }
 
+// =====================================================================
+// plugin/handle_mouse axis — host forwards a mouse event to the plugin
+// =====================================================================
+//
+// `RuntimeHandle::send_mouse` must deliver the event over the priority
+// mouse channel as a `plugin/handle_mouse` notification, preserving the
+// wire shape (kind + button) and the (already viewport-relative)
+// coordinates. The canary records the last event and echoes it via cli.
+
+#[test]
+fn axis_handle_mouse_forwarded_to_plugin() {
+    use ainb_plugin_runtime::{MouseButton, MouseEvent, MouseKind};
+
+    let (rt, handle) = build_runtime();
+    let mut m = manifest("cts-mouse-forward");
+    m.provides.cli_namespaces = vec!["mouse".into()];
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-mouse-forward"));
+    let id = register(&rt, bin, m);
+
+    // Spawn + reach Running before forwarding (a mouse event arriving
+    // before the child exists is dropped by design).
+    drop(block_render(&rt, &handle, &id, 1, 1));
+    wait_running(&handle, &id);
+
+    // No event yet → canary reports `none`.
+    match block_cli(&rt, &handle, &id, "mouse", vec!["last".into()]) {
+        CliOutcome::Ok(r) => {
+            assert_eq!(String::from_utf8_lossy(&r.stdout).trim(), "none");
+        }
+        other => panic!("expected CliOutcome::Ok, got {other:?}"),
+    }
+
+    // Forward a left-button-down at viewport (7, 2) with no modifiers.
+    let sent = handle.send_mouse(
+        &id,
+        "cts-screen",
+        MouseEvent {
+            kind: MouseKind::Down {
+                button: MouseButton::Left,
+            },
+            col: 7,
+            row: 2,
+            mods: 0,
+        },
+    );
+    assert!(sent, "send_mouse should enqueue for a running plugin");
+
+    // Poll the read-back until the notification has been observed.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut last = String::new();
+    while std::time::Instant::now() < deadline {
+        if let CliOutcome::Ok(r) = block_cli(&rt, &handle, &id, "mouse", vec!["last".into()]) {
+            last = String::from_utf8_lossy(&r.stdout).trim().to_string();
+            if last != "none" {
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        last, "down_left:7,2:0",
+        "canary must report the forwarded mouse event verbatim"
+    );
+}
+
 #[test]
 fn axis_config_injected_at_init() {
     let (rt, handle) = build_runtime();

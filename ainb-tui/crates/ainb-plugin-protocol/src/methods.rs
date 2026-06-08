@@ -28,6 +28,11 @@ pub const PLUGIN_HANDLE_EVENT: &str = "plugin/handle_event";
 /// transport as `plugin/handle_event` so key sequences arrive in send order.
 pub const PLUGIN_HANDLE_KEY: &str = "plugin/handle_key";
 
+/// Host forwards a single mouse event to the plugin owning the focused screen.
+/// Notification — no response expected. Coordinates are plugin-viewport-relative
+/// (the host subtracts the screen origin). Mirrors `plugin/handle_key`.
+pub const PLUGIN_HANDLE_MOUSE: &str = "plugin/handle_mouse";
+
 /// Host dispatches a CLI namespace + argv to the plugin; plugin replies with stdout/stderr/exit.
 pub const PLUGIN_CLI_DISPATCH: &str = "plugin/cli_dispatch";
 
@@ -72,6 +77,7 @@ pub const ALL_METHODS: &[&str] = &[
     PLUGIN_RENDER,
     PLUGIN_HANDLE_EVENT,
     PLUGIN_HANDLE_KEY,
+    PLUGIN_HANDLE_MOUSE,
     PLUGIN_CLI_DISPATCH,
     HOST_SNAPSHOT_GET,
     HOST_SNAPSHOT_PUBLISH,
@@ -102,6 +108,7 @@ mod tests {
             PLUGIN_RENDER,
             PLUGIN_HANDLE_EVENT,
             PLUGIN_HANDLE_KEY,
+            PLUGIN_HANDLE_MOUSE,
             PLUGIN_CLI_DISPATCH,
         ] {
             assert!(m.starts_with("plugin/"), "{m} missing plugin/ namespace");
@@ -115,6 +122,15 @@ mod tests {
             "PLUGIN_HANDLE_KEY missing from ALL_METHODS registry"
         );
         assert_eq!(PLUGIN_HANDLE_KEY, "plugin/handle_key");
+    }
+
+    #[test]
+    fn all_methods_contains_plugin_handle_mouse() {
+        assert!(
+            ALL_METHODS.contains(&PLUGIN_HANDLE_MOUSE),
+            "PLUGIN_HANDLE_MOUSE missing from ALL_METHODS registry"
+        );
+        assert_eq!(PLUGIN_HANDLE_MOUSE, "plugin/handle_mouse");
     }
 
     #[test]
