@@ -958,4 +958,50 @@ mod tests {
         let state = AppState::new();
         assert!(state.selected_resumable_session_ids().is_empty());
     }
+
+    // ========================================================================
+    // Startup discovery: the fast loader must hand off to a full refresh so
+    // stopped sessions (which `load_workspaces_async` does not surface) appear
+    // without the user having to manually refresh.
+    // ========================================================================
+
+    #[test]
+    fn initial_background_load_enqueues_full_refresh_for_stopped_sessions() {
+        use crate::app::state::WorkspaceLoadResult;
+
+        let mut state = AppState::new();
+        state.pending_async_action = None;
+
+        // Simulate the startup background load completing.
+        let tx = state.start_background_workspace_loading();
+        tx.send(WorkspaceLoadResult::Success(Vec::new())).expect("send load result");
+
+        let updated = state.check_workspace_loading_complete();
+
+        assert!(updated, "applying the background result reports an update");
+        assert_eq!(
+            state.pending_async_action,
+            Some(AsyncAction::RefreshWorkspaces),
+            "fast startup load must enqueue a full refresh so stopped sessions surface"
+        );
+    }
+
+    #[test]
+    fn initial_background_load_does_not_clobber_a_queued_action() {
+        use crate::app::state::WorkspaceLoadResult;
+
+        let mut state = AppState::new();
+        // A user-queued action is already pending when the load completes.
+        state.pending_async_action = Some(AsyncAction::CleanupOrphaned);
+
+        let tx = state.start_background_workspace_loading();
+        tx.send(WorkspaceLoadResult::Success(Vec::new())).expect("send load result");
+        state.check_workspace_loading_complete();
+
+        assert_eq!(
+            state.pending_async_action,
+            Some(AsyncAction::CleanupOrphaned),
+            "an already-queued action must not be overwritten by the refresh hand-off"
+        );
+    }
 }
