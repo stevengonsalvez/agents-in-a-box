@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-06-08
+### Added
+- Merge pull request #230 from stevengonsalvez/feat/statusline-quota-reset-time
+- **statusline**: show quota reset times on the Claude Code statusline
+- **tui**: add GitHub auth pre-check for remote URLs in pick-repo
+
+### Fixed
+- Merge pull request #155 from stevengonsalvez/worktree-fix-github-auth-tui
+- Merge pull request #232 from stevengonsalvez/worktree-fix-worktree-create-error
+- Merge pull request #233 from stevengonsalvez/worktree-fix-bulk-resume-sessions
+- Merge pull request #234 from stevengonsalvez/fix/branch-exists-selection-guard
+- **tui**: block base-off onto an existing branch at selection
+- **tui**: bound the GitHub auth pre-check with a 5s timeout
+- **tui**: handle new-session onto an already-checked-out branch
+- **tui**: push ahead commits when there is nothing new to commit
+- **tui**: remove the partial clone directory on clone failure
+- **tui**: start all selected sessions on Enter/r, not just the highlighted one
+- **tui**: suppress git credential prompts on all network-facing commands
+
+### Documentation
+- Merge pull request #231 from stevengonsalvez/reflect-sync-learnings-fixes
+- **sync-learnings**: harden classification + diff guidance
+
+### Other
+- **tui**: dedup in_use_branch_names via HashSet
+
+
 ## [1.4.4] - 2026-06-07
 ### Added
 - Merge pull request #224 from stevengonsalvez/worktree-codex-quota-reset
