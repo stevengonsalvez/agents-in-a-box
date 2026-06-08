@@ -194,6 +194,7 @@ fn canned_hits(_query: &str) -> Vec<CatalogHit> {
             stars: 4242,
             install_uri: top_install_uri,
             description: "Canned catalog hit for offline tripwire mode.".to_string(),
+            kind: ainb_skill_core::catalog::CatalogEntryKind::Skill,
         },
         CatalogHit {
             name: "catalog-demo-other".to_string(),
@@ -201,6 +202,7 @@ fn canned_hits(_query: &str) -> Vec<CatalogHit> {
             stars: 99,
             install_uri: "gh:octocat/hello-skills@main/skills/catalog-demo-other".to_string(),
             description: "Second canned hit.".to_string(),
+            kind: ainb_skill_core::catalog::CatalogEntryKind::Skill,
         },
     ];
     rank_by_stars(&mut hits);

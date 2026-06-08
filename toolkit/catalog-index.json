@@ -8,7 +8,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/agent-ops",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "agentmail",
@@ -16,7 +17,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/agentmail",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "ats-resume-matcher",
@@ -24,7 +26,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/ats-resume-matcher",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "attach-agent-worktree",
@@ -32,7 +35,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/attach-agent-worktree",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "autonomous-loops",
@@ -40,7 +44,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/autonomous-loops",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "brainstorm",
@@ -48,7 +53,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/brainstorm",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "browser-verify",
@@ -56,7 +62,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/browser-verify",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "claude-langfuse",
@@ -64,7 +71,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/claude-langfuse",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "cleanup-agent-worktree",
@@ -72,7 +80,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/cleanup-agent-worktree",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "coding-agent",
@@ -80,7 +89,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/coding-agent",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "commit",
@@ -88,7 +98,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/commit",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "cost-aware-pipeline",
@@ -96,7 +107,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/cost-aware-pipeline",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "critique",
@@ -104,7 +116,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/critique",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "crypto-research",
@@ -112,7 +125,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/crypto-research",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "debug-bridge",
@@ -120,7 +134,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/debug-bridge",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "design-md",
@@ -128,7 +143,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/design-md",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "discuss",
@@ -136,7 +152,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/discuss",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "do-issues",
@@ -144,7 +161,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/do-issues",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "enhance-prompt",
@@ -152,7 +170,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/enhance-prompt",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "expect-test",
@@ -160,7 +179,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/expect-test",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "explain-to-me",
@@ -168,7 +188,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/explain-to-me",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "expose",
@@ -176,7 +197,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/expose",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "find-missing-tests",
@@ -184,7 +206,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/find-missing-tests",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "frontend-design",
@@ -192,7 +215,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/frontend-design",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "frontend-slides",
@@ -200,7 +224,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/frontend-slides",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "gh-issue",
@@ -208,7 +233,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/gh-issue",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "git-history-surgery",
@@ -216,7 +242,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/git-history-surgery",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "handover",
@@ -224,7 +251,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/handover",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "health-check",
@@ -232,7 +260,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/health-check",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "implement",
@@ -240,7 +269,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/implement",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "instincts",
@@ -248,7 +278,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/instincts",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "interview",
@@ -256,7 +287,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/interview",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "langfuse-setup",
@@ -264,7 +296,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/langfuse-setup",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "liquid-glass",
@@ -272,7 +305,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/liquid-glass",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "list-agent-worktrees",
@@ -280,7 +314,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/list-agent-worktrees",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "make-a-goal",
@@ -288,7 +323,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/make-a-goal",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "make-github-issues",
@@ -296,7 +332,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/make-github-issues",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "media-processing",
@@ -304,7 +341,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/media-processing",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "merge-agent-work",
@@ -312,7 +350,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/merge-agent-work",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "mobile-e2e-mcp",
@@ -320,7 +359,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/mobile-e2e-mcp",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "nano-banana-pro",
@@ -328,7 +368,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/nano-banana-pro",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "notebooklm",
@@ -336,7 +377,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/notebooklm",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "oracle",
@@ -344,7 +386,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/oracle",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "plan",
@@ -352,7 +395,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/plan",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "plan-gh",
@@ -360,7 +404,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/plan-gh",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "plan-tdd",
@@ -368,7 +413,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/plan-tdd",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "plugins",
@@ -376,7 +422,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/plugins",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "posthog-replay-analysis",
@@ -384,7 +431,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/posthog-replay-analysis",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "prime",
@@ -392,7 +440,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/prime",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "react:components",
@@ -400,7 +449,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/react:components",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "recover-sessions",
@@ -408,7 +458,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/recover-sessions",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "remotion",
@@ -416,7 +467,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/remotion",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "remotion-best-practices",
@@ -424,7 +476,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/remotion-best-practices",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "research",
@@ -432,7 +485,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/research",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "research-cache",
@@ -440,7 +494,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/research-cache",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "resume-formatter",
@@ -448,7 +503,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/resume-formatter",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "retro-pdf",
@@ -456,7 +512,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/retro-pdf",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "scrapling-official",
@@ -464,7 +521,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/scrapling-official",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "security-audit",
@@ -472,7 +530,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/security-audit",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "security-scan",
@@ -480,7 +539,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/security-scan",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "sentry-cli",
@@ -488,7 +548,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/sentry-cli",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "session-info",
@@ -496,7 +557,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/session-info",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "session-metrics",
@@ -504,7 +566,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/session-metrics",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "session-summary",
@@ -512,7 +575,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/session-summary",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "shadcn-ui",
@@ -520,7 +584,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/shadcn-ui",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "skill-creator",
@@ -528,7 +593,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/skill-creator",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "spawn-agent",
@@ -536,7 +602,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/spawn-agent",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "standup",
@@ -544,7 +611,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/standup",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "start-android",
@@ -552,7 +620,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/start-android",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "start-ios",
@@ -560,7 +629,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/start-ios",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "start-local",
@@ -568,7 +638,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/start-local",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "stitch-design",
@@ -576,7 +647,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/stitch-design",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "stitch-loop",
@@ -584,7 +656,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/stitch-loop",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "swarm-agent-troubleshooting",
@@ -592,7 +665,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/swarm-agent-troubleshooting",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "swarm-attach-watchdog",
@@ -600,7 +674,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/swarm-attach-watchdog",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "swarm-create",
@@ -608,7 +683,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/swarm-create",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "swarm-inbox",
@@ -616,7 +692,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/swarm-inbox",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "swarm-join",
@@ -624,7 +701,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/swarm-join",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "swarm-orchestration",
@@ -632,7 +710,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/swarm-orchestration",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "swarm-shutdown",
@@ -640,7 +719,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/swarm-shutdown",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "swarm-status",
@@ -648,7 +728,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/swarm-status",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "sync-learnings",
@@ -656,7 +737,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/sync-learnings",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "test-ainb",
@@ -664,7 +746,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/test-ainb",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "test-driven-development",
@@ -672,7 +755,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/test-driven-development",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "tmux-message",
@@ -680,7 +764,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/tmux-message",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "tmux-monitor",
@@ -688,7 +773,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/tmux-monitor",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "tmux-status",
@@ -696,7 +782,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/tmux-status",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "token-usage",
@@ -704,7 +791,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/token-usage",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "tui-style-guide",
@@ -712,7 +800,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/tui-style-guide",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "ui-ux-pro-max",
@@ -720,7 +809,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/ui-ux-pro-max",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "validate",
@@ -728,7 +818,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/validate",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "webapp-testing",
@@ -736,7 +827,8 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/webapp-testing",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "workflow",
@@ -744,7 +836,26 @@
       "repo": "stevengonsalvez/agents-in-a-box",
       "install_uri": "gh:stevengonsalvez/agents-in-a-box@v1.5.0/toolkit/packages/skills/workflow",
       "origin": "owned",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
+    },
+    {
+      "name": "agent-browser",
+      "description": "Browser automation CLI for AI agents",
+      "repo": "vercel-labs/agent-browser",
+      "install_uri": "npx skills add vercel-labs/agent-browser --yes",
+      "origin": "external",
+      "stars": 0,
+      "kind": "npx"
+    },
+    {
+      "name": "agent-skills",
+      "description": "React and Next.js optimization patterns (10+ years of best practices)",
+      "repo": "vercel-labs/agent-skills",
+      "install_uri": "npx skills add vercel-labs/agent-skills --yes",
+      "origin": "external",
+      "stars": 0,
+      "kind": "npx"
     },
     {
       "name": "architecture-diagram",
@@ -752,7 +863,143 @@
       "repo": "Cocoon-AI/architecture-diagram-generator",
       "install_uri": "gh:Cocoon-AI/architecture-diagram-generator@main/architecture-diagram",
       "origin": "external",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
+    },
+    {
+      "name": "beads",
+      "description": "Git-backed issue tracking for multi-session work",
+      "repo": "steveyegge/beads",
+      "install_uri": "claude plugin marketplace add steveyegge/beads; claude plugin install beads",
+      "origin": "external",
+      "stars": 0,
+      "kind": "plugin"
+    },
+    {
+      "name": "caveman",
+      "description": "Token-efficient caveman-speak response and review/commit/compression skill family",
+      "repo": "JuliusBrussee/caveman",
+      "install_uri": "claude plugin marketplace add JuliusBrussee/caveman; claude plugin install caveman@caveman",
+      "origin": "external",
+      "stars": 0,
+      "kind": "plugin"
+    },
+    {
+      "name": "claude-peers",
+      "description": "Cross-instance Claude Code peer discovery and messaging",
+      "repo": "louislva/claude-peers-mcp",
+      "install_uri": "git clone https://github.com/louislva/claude-peers-mcp.git ~/d/git/claude-peers-mcp; cd ~/d/git/claude-peers-mcp && bun install; claude mcp add --scope user --transport stdio claude-peers -- bun ~/d/git/claude-peers-mcp/server.ts",
+      "origin": "external",
+      "stars": 0,
+      "kind": "mcp"
+    },
+    {
+      "name": "code-review",
+      "description": "Pull request code review automation",
+      "repo": "anthropics/claude-plugins-official",
+      "install_uri": "claude plugin marketplace add anthropics/claude-plugins-official; claude plugin install code-review",
+      "origin": "external",
+      "stars": 0,
+      "kind": "plugin"
+    },
+    {
+      "name": "codex",
+      "description": "Delegate tasks to OpenAI Codex CLI from Claude Code",
+      "repo": "openai/codex-plugin-cc",
+      "install_uri": "claude plugin marketplace add openai/codex-plugin-cc; claude plugin install codex",
+      "origin": "external",
+      "stars": 0,
+      "kind": "plugin"
+    },
+    {
+      "name": "context7",
+      "description": "Documentation lookup for programming libraries",
+      "repo": "",
+      "install_uri": "claude mcp add --scope user --transport stdio context7 -- npx -y @upstash/context7-mcp",
+      "origin": "external",
+      "stars": 0,
+      "kind": "mcp"
+    },
+    {
+      "name": "debug-bridge",
+      "description": "Browser automation and inspection via WebSocket",
+      "repo": "stevengonsalvez/agent-bridge",
+      "install_uri": "claude plugin marketplace add stevengonsalvez/agent-bridge; claude plugin install debug-bridge",
+      "origin": "external",
+      "stars": 0,
+      "kind": "plugin"
+    },
+    {
+      "name": "dev-browser",
+      "description": "Browser automation skill for web testing and verification",
+      "repo": "sawyerhood/dev-browser",
+      "install_uri": "claude plugin marketplace add sawyerhood/dev-browser; claude plugin install dev-browser@sawyerhood/dev-browser",
+      "origin": "external",
+      "stars": 0,
+      "kind": "plugin"
+    },
+    {
+      "name": "impeccable",
+      "description": "Design excellence toolkit — 21 skills for UX planning, UI polish, accessibility, animation, and brand consistency",
+      "repo": "pbakaus/impeccable",
+      "install_uri": "npx skills add pbakaus/impeccable --yes",
+      "origin": "external",
+      "stars": 0,
+      "kind": "npx"
+    },
+    {
+      "name": "obsidian-skills",
+      "description": "Obsidian vault skill family — markdown, bases, canvas, CLI, web extraction",
+      "repo": "kepano/obsidian-skills",
+      "install_uri": "npx skills add https://github.com/kepano/obsidian-skills --yes",
+      "origin": "external",
+      "stars": 0,
+      "kind": "npx"
+    },
+    {
+      "name": "open-prose",
+      "description": "OpenProse programming language for AI sessions and multi-agent workflows",
+      "repo": "anthropics/prose",
+      "install_uri": "claude plugin marketplace add anthropics/prose; claude plugin install open-prose",
+      "origin": "external",
+      "stars": 0,
+      "kind": "plugin"
+    },
+    {
+      "name": "playground",
+      "description": "Interactive HTML playground generator for visual configuration",
+      "repo": "anthropics/claude-plugins-official",
+      "install_uri": "claude plugin marketplace add anthropics/claude-plugins-official; claude plugin install playground",
+      "origin": "external",
+      "stars": 0,
+      "kind": "plugin"
+    },
+    {
+      "name": "ralph-loop",
+      "description": "Iterative refinement loop for continuous improvement",
+      "repo": "anthropics/claude-plugins-official",
+      "install_uri": "claude plugin marketplace add anthropics/claude-plugins-official; claude plugin install ralph-loop",
+      "origin": "external",
+      "stars": 0,
+      "kind": "plugin"
+    },
+    {
+      "name": "reflect",
+      "description": "Agent self-improvement + retrieval (GraphRAG-backed learnings KB)",
+      "repo": "stevengonsalvez/agents-in-a-box",
+      "install_uri": "claude plugin marketplace add stevengonsalvez/agents-in-a-box; claude plugin install reflect@agents-in-a-box",
+      "origin": "external",
+      "stars": 0,
+      "kind": "plugin"
+    },
+    {
+      "name": "skill-creator",
+      "description": "Create new skills, modify existing skills, and measure skill performance",
+      "repo": "anthropics/claude-plugins-official",
+      "install_uri": "claude plugin marketplace add anthropics/claude-plugins-official; claude plugin install skill-creator",
+      "origin": "external",
+      "stars": 0,
+      "kind": "plugin"
     },
     {
       "name": "stitch-skills",
@@ -760,7 +1007,8 @@
       "repo": "google-labs-code/stitch-skills",
       "install_uri": "gh:google-labs-code/stitch-skills@main/skills",
       "origin": "external",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     },
     {
       "name": "ui-ux-pro-max",
@@ -768,7 +1016,8 @@
       "repo": "nextlevelbuilder/ui-ux-pro-max-skill",
       "install_uri": "gh:nextlevelbuilder/ui-ux-pro-max-skill@2.2.1/.claude/skills",
       "origin": "external",
-      "stars": 0
+      "stars": 0,
+      "kind": "skill"
     }
   ]
 }

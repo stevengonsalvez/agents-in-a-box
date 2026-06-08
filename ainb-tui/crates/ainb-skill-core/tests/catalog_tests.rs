@@ -17,6 +17,7 @@ fn hit(name: &str, repo: &str, stars: u64) -> CatalogHit {
         stars,
         install_uri: format!("gh:{repo}@main/skills/{name}"),
         description: format!("{name} skill"),
+        kind: ainb_skill_core::catalog::CatalogEntryKind::Skill,
     }
 }
 

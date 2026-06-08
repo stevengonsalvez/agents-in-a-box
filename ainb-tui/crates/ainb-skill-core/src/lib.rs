@@ -18,8 +18,8 @@ pub mod sync;
 pub mod uri;
 
 pub use catalog::{
-    is_blank_query, rank_by_stars, CatalogBackend, CatalogError, CatalogHit, SkillsShUrlBuilder,
-    SKILLS_SH_DEFAULT_BASE,
+    is_blank_query, rank_by_stars, CatalogBackend, CatalogEntryKind, CatalogError, CatalogHit,
+    SkillsShUrlBuilder, SKILLS_SH_DEFAULT_BASE,
 };
 pub use drift::{detect_all, detect_drift, DriftBackend, DriftStatus, GitLsRemoteBackend};
 pub use error::CoreError;

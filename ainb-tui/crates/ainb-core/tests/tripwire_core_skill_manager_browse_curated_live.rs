@@ -163,6 +163,7 @@ fn write_curated_index(root: &Path, local_install_uri: &str) -> PathBuf {
                 install_uri: local_install_uri.to_string(),
                 origin: CatalogOrigin::Owned,
                 stars: 0,
+                kind: ainb_skill_core::catalog::CatalogEntryKind::Skill,
             },
             CatalogIndexEntry {
                 name: "zzz-curated-external".to_string(),
@@ -171,6 +172,7 @@ fn write_curated_index(root: &Path, local_install_uri: &str) -> PathBuf {
                 install_uri: "gh:acme/external-skill@main/.claude/skills".to_string(),
                 origin: CatalogOrigin::External,
                 stars: 0,
+                kind: ainb_skill_core::catalog::CatalogEntryKind::Skill,
             },
         ],
     );

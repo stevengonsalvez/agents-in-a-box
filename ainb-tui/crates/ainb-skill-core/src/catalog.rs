@@ -31,6 +31,45 @@ use serde::{Deserialize, Serialize};
 /// local stub so the live binary stays offline).
 pub const SKILLS_SH_DEFAULT_BASE: &str = "https://skills.sh";
 
+/// How a catalog entry installs. A `Skill` deploys a git-backed unit via the
+/// `ainb source add` + `ainb skill install` flow; the other kinds install via
+/// their own CLI by RUNNING a shell command, because npx skills, Claude Code
+/// plugins, and MCP servers are not deployable skill files. For every
+/// non-`Skill` kind, [`CatalogHit::install_uri`] carries that shell command
+/// (not a unit URI) — the install router discriminates on this enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum CatalogEntryKind {
+    /// A git-backed skill unit (`install_uri` is a `gh:`/`git:` unit URI).
+    #[default]
+    Skill,
+    /// An npx-published skill (`install_uri` is its `npx skills add …` command).
+    Npx,
+    /// A Claude Code plugin (`install_uri` is its `claude plugin install …`).
+    Plugin,
+    /// An MCP server (`install_uri` is its `claude mcp add …` command).
+    Mcp,
+}
+
+impl CatalogEntryKind {
+    /// Whether installing this kind RUNS a shell command (vs the gh: unit
+    /// flow). True for everything except [`CatalogEntryKind::Skill`].
+    pub fn is_command(self) -> bool {
+        !matches!(self, CatalogEntryKind::Skill)
+    }
+
+    /// Short badge label for the browse shelf (`skill` / `npx` / `plugin` /
+    /// `mcp`).
+    pub fn badge(self) -> &'static str {
+        match self {
+            CatalogEntryKind::Skill => "skill",
+            CatalogEntryKind::Npx => "npx",
+            CatalogEntryKind::Plugin => "plugin",
+            CatalogEntryKind::Mcp => "mcp",
+        }
+    }
+}
+
 /// One catalog search hit. Field names are the wire contract for the
 /// `--json` CLI output, so renaming breaks scripts — keep them stable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,11 +81,16 @@ pub struct CatalogHit {
     pub repo: String,
     /// GitHub star count, used to rank results (descending).
     pub stars: u64,
-    /// Full unit URI to feed `ainb skill install` (e.g.
-    /// `gh:owner/repo@main/skills/<name>`).
+    /// For a `skill` kind: the full unit URI to feed `ainb skill install`
+    /// (e.g. `gh:owner/repo@main/skills/<name>`). For npx/plugin/mcp kinds:
+    /// the shell command that installs it.
     pub install_uri: String,
     /// One-line human description.
     pub description: String,
+    /// How this entry installs. Defaults to [`CatalogEntryKind::Skill`] so an
+    /// older index / the skills.sh backend (which omit it) stay valid.
+    #[serde(default)]
+    pub kind: CatalogEntryKind,
 }
 
 /// Errors raised by a [`CatalogBackend`]. Distinguishes a transient
@@ -243,6 +287,7 @@ mod tests {
             stars,
             install_uri: format!("gh:org/{name}@main/skills/{name}"),
             description: format!("{name} skill"),
+            kind: CatalogEntryKind::Skill,
         }
     }
 
@@ -261,6 +306,34 @@ mod tests {
         assert!(is_blank_query(""));
         assert!(is_blank_query("   "));
         assert!(!is_blank_query("x"));
+    }
+
+    #[test]
+    fn entry_kind_defaults_to_skill_and_serdes_lowercase() {
+        assert_eq!(CatalogEntryKind::default(), CatalogEntryKind::Skill);
+        assert_eq!(
+            serde_json::to_string(&CatalogEntryKind::Npx).unwrap(),
+            "\"npx\""
+        );
+        let k: CatalogEntryKind = serde_json::from_str("\"plugin\"").unwrap();
+        assert_eq!(k, CatalogEntryKind::Plugin);
+    }
+
+    #[test]
+    fn entry_kind_is_command_only_for_non_skill() {
+        assert!(!CatalogEntryKind::Skill.is_command());
+        assert!(CatalogEntryKind::Npx.is_command());
+        assert!(CatalogEntryKind::Plugin.is_command());
+        assert!(CatalogEntryKind::Mcp.is_command());
+    }
+
+    #[test]
+    fn hit_kind_defaults_to_skill_when_absent_in_json() {
+        // A pre-expansion index / skills.sh response omits `kind`.
+        let body = r#"{"name":"a","repo":"o/a","stars":1,
+            "install_uri":"gh:o/a@main/skills/a","description":"d"}"#;
+        let hit: CatalogHit = serde_json::from_str(body).unwrap();
+        assert_eq!(hit.kind, CatalogEntryKind::Skill);
     }
 
     #[test]

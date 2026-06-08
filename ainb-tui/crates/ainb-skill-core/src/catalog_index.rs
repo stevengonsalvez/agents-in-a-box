@@ -30,7 +30,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::catalog::CatalogHit;
+use crate::catalog::{CatalogEntryKind, CatalogHit};
 
 /// `owner/repo` slug of the toolkit itself — the source for every owned
 /// (toolkit-authored) catalog entry.
@@ -81,6 +81,11 @@ pub struct CatalogIndexEntry {
     /// curated insertion order is preserved by the stable sort).
     #[serde(default)]
     pub stars: u64,
+    /// How this entry installs (skill / npx / plugin / mcp). Defaults to
+    /// `skill` so a pre-expansion index stays valid. For non-skill kinds,
+    /// `install_uri` carries the shell install command.
+    #[serde(default)]
+    pub kind: CatalogEntryKind,
 }
 
 impl CatalogIndexEntry {
@@ -93,6 +98,7 @@ impl CatalogIndexEntry {
             stars: self.stars,
             install_uri: self.install_uri.clone(),
             description: self.description.clone(),
+            kind: self.kind,
         }
     }
 }
@@ -265,6 +271,7 @@ mod tests {
             install_uri: owned_install_uri("v1.0.0", name),
             origin: CatalogOrigin::Owned,
             stars: 0,
+            kind: CatalogEntryKind::Skill,
         }
     }
 
@@ -276,6 +283,7 @@ mod tests {
             install_uri: format!("gh:acme/{name}@v1/.claude/skills"),
             origin: CatalogOrigin::External,
             stars,
+            kind: CatalogEntryKind::Skill,
         }
     }
 

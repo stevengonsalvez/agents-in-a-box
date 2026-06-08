@@ -6153,6 +6153,7 @@ fn run_catalog_search(
             stars: h.stars,
             install_uri: h.install_uri,
             description: h.description,
+            kind: h.kind,
         })
         .collect())
 }

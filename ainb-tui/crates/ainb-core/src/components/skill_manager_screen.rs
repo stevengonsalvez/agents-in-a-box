@@ -226,9 +226,13 @@ pub struct BrowseRow {
     pub name: String,
     pub repo: String,
     pub stars: u64,
-    /// Full unit URI to feed the install flow.
+    /// For a `skill` kind: the unit URI fed to the install flow. For
+    /// npx/plugin/mcp kinds: the shell command that installs it.
     pub install_uri: String,
     pub description: String,
+    /// How this entry installs — drives the shelf badge and the install
+    /// routing (unit flow vs run-the-command).
+    pub kind: ainb_skill_core::catalog::CatalogEntryKind,
 }
 
 /// Which phase the browse modal is in.
@@ -713,7 +717,10 @@ fn render_browse_view(frame: &mut Frame, area: Rect, browse: &BrowseViewState) {
         )));
     } else {
         lines.push(Line::from(vec![Span::styled(
-            format!(" {:<26} {:>7}  {:<28} {}", "name", "stars", "repo", "install-uri"),
+            format!(
+                " {:<24} {:<7} {:>6}  {:<26} {}",
+                "name", "kind", "stars", "repo", "install / command"
+            ),
             Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
         )]));
         for (i, row) in browse.results.iter().enumerate() {
@@ -729,8 +736,12 @@ fn render_browse_view(frame: &mut Frame, area: Rect, browse: &BrowseViewState) {
             };
             lines.push(Line::from(vec![Span::styled(
                 format!(
-                    "{marker}{:<26} {:>7}  {:<28} {}",
-                    row.name, row.stars, row.repo, row.install_uri
+                    "{marker}{:<24} {:<7} {:>6}  {:<26} {}",
+                    row.name,
+                    row.kind.badge(),
+                    row.stars,
+                    row.repo,
+                    row.install_uri
                 ),
                 style,
             )]));

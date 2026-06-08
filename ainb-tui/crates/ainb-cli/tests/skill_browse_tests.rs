@@ -25,6 +25,7 @@ fn hit(name: &str, repo: &str, stars: u64) -> CatalogHit {
         stars,
         install_uri: format!("gh:{repo}@main/skills/{name}"),
         description: format!("{name} skill"),
+        kind: ainb_skill_core::catalog::CatalogEntryKind::Skill,
     }
 }
 
@@ -146,6 +147,7 @@ fn cli_browse_curated_blank_lists_full_shelf() {
                         .to_string(),
                 origin: CatalogOrigin::Owned,
                 stars: 0,
+                kind: ainb_skill_core::catalog::CatalogEntryKind::Skill,
             },
             CatalogIndexEntry {
                 name: "ui-ux-pro-max".to_string(),
@@ -155,6 +157,7 @@ fn cli_browse_curated_blank_lists_full_shelf() {
                     .to_string(),
                 origin: CatalogOrigin::External,
                 stars: 0,
+                kind: ainb_skill_core::catalog::CatalogEntryKind::Skill,
             },
         ],
     );

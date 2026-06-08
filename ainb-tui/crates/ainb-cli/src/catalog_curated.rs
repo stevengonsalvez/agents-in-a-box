@@ -183,6 +183,7 @@ fn read_config_catalog_release(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ainb_skill_core::catalog::CatalogEntryKind;
     use ainb_skill_core::catalog_index::{CatalogIndexEntry, CatalogOrigin};
 
     fn sample_index() -> CatalogIndex {
@@ -198,6 +199,7 @@ mod tests {
                             .to_string(),
                     origin: CatalogOrigin::Owned,
                     stars: 0,
+                    kind: CatalogEntryKind::Skill,
                 },
                 CatalogIndexEntry {
                     name: "ui-ux-pro-max".to_string(),
@@ -207,6 +209,7 @@ mod tests {
                         .to_string(),
                     origin: CatalogOrigin::External,
                     stars: 0,
+                    kind: CatalogEntryKind::Skill,
                 },
             ],
         )
