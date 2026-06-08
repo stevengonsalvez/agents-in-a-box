@@ -10,6 +10,7 @@ use std::io;
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 
+pub mod catalog_curated;
 pub mod catalog_http;
 pub mod discovery;
 pub mod doctor;
