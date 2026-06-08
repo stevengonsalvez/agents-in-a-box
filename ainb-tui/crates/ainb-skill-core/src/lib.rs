@@ -5,6 +5,7 @@
 //! (`ainb-cli`, `ainb-fetch`, adapters) compose these primitives.
 
 pub mod catalog;
+pub mod catalog_index;
 pub mod drift;
 pub mod error;
 pub mod kind;
