@@ -4645,6 +4645,7 @@ impl EventHandler {
                         b.results.clear();
                         b.selected = 0;
                         b.mode = crate::components::skill_manager_screen::BrowseMode::Query;
+                        b.pending_command_confirm = false;
                     }
                 }
             }
@@ -4659,10 +4660,13 @@ impl EventHandler {
                 }
             }
             AppEvent::SkillManagerBrowseEditQuery => {
-                // `/` in Results mode — back to Query mode to refine.
+                // `/` in Results mode — back to Query mode to refine. Disarm
+                // any pending command-install confirm (keeps the gate invariant
+                // local rather than relying on a downstream reset).
                 if let Some(b) = state.skill_manager_state.browse.as_mut() {
                     b.mode = crate::components::skill_manager_screen::BrowseMode::Query;
                     b.status = None;
+                    b.pending_command_confirm = false;
                 }
             }
             AppEvent::SkillManagerBrowseInstall => {
