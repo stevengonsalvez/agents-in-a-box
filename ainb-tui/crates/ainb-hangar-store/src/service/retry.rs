@@ -40,8 +40,10 @@ use crate::repo::task::Task;
 ///
 /// Both denote an infrastructure failure rather than an agent / user decision,
 /// so re-dispatching the same work is safe (Multica migration 055).
-const RETRYABLE_REASONS: &[FailureReason] =
-    &[FailureReason::RuntimeOffline, FailureReason::RuntimeRecovery];
+const RETRYABLE_REASONS: &[FailureReason] = &[
+    FailureReason::RuntimeOffline,
+    FailureReason::RuntimeRecovery,
+];
 
 /// The outcome of a retry evaluation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,8 +148,6 @@ impl RetryService {
         let Some(reason) = task.failure_reason.as_deref() else {
             return false;
         };
-        RETRYABLE_REASONS
-            .iter()
-            .any(|r| r.as_db_str() == reason)
+        RETRYABLE_REASONS.iter().any(|r| r.as_db_str() == reason)
     }
 }

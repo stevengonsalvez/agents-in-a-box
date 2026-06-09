@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::fleet::read::errors::detect_error_signals;
 use crate::fleet::read::jsonl_tail::{
-    last_ask_user_question, last_assistant_info, latest_transcript_for_cwd, AskUserQuestionData,
+    AskUserQuestionData, last_ask_user_question, last_assistant_info, latest_transcript_for_cwd,
 };
 use crate::fleet::types::{Session, Signal};
 

@@ -19,7 +19,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
-use ainb_hangar_core::env_policy::{apply_policy, EnvPolicy};
+use ainb_hangar_core::env_policy::{EnvPolicy, apply_policy};
 
 /// The parsed `env.allow.toml` config: the user allow set plus the original
 /// document, kept so foreign sections survive a save.
@@ -68,8 +68,7 @@ impl EnvAllowConfig {
 ///
 /// Returns an error if the home directory cannot be resolved.
 pub fn default_allow_path() -> anyhow::Result<PathBuf> {
-    let dir = match std::env::var_os(ainb_hangar_store::Store::home_env())
-        .filter(|p| !p.is_empty())
+    let dir = match std::env::var_os(ainb_hangar_store::Store::home_env()).filter(|p| !p.is_empty())
     {
         Some(p) => PathBuf::from(p),
         None => dirs::home_dir()
@@ -99,8 +98,8 @@ pub fn load_allow_at(path: &Path) -> anyhow::Result<EnvAllowConfig> {
 
     let raw = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("read {}: {e}", path.display()))?;
-    let document: toml::Value = toml::from_str(&raw)
-        .map_err(|e| anyhow::anyhow!("parse {}: {e}", path.display()))?;
+    let document: toml::Value =
+        toml::from_str(&raw).map_err(|e| anyhow::anyhow!("parse {}: {e}", path.display()))?;
 
     let allow = document
         .get(ENV_SECTION)
@@ -134,12 +133,8 @@ pub fn save_allow_at(path: &Path, cfg: &EnvAllowConfig) -> anyhow::Result<()> {
         .as_table_mut()
         .ok_or_else(|| anyhow::anyhow!("config root is not a TOML table"))?;
 
-    let allow_array = toml::Value::Array(
-        cfg.allow
-            .iter()
-            .map(|k| toml::Value::String(k.clone()))
-            .collect(),
-    );
+    let allow_array =
+        toml::Value::Array(cfg.allow.iter().map(|k| toml::Value::String(k.clone())).collect());
 
     // Upsert `[env].allow` without disturbing other keys in `[env]`.
     if let Some(env_tbl) = table.get_mut(ENV_SECTION).and_then(toml::Value::as_table_mut) {

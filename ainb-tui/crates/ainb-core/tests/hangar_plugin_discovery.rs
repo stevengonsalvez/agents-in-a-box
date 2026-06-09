@@ -62,7 +62,10 @@ fn discovery_finds_hangar_and_validates_all_four_caps() {
 
     // The two bool-form caps survive too.
     assert!(matches!(caps.event_bus, CapabilityGrant::Bool(true)));
-    assert!(matches!(caps.write_plugin_data, CapabilityGrant::Bool(true)));
+    assert!(matches!(
+        caps.write_plugin_data,
+        CapabilityGrant::Bool(true)
+    ));
 }
 
 #[test]

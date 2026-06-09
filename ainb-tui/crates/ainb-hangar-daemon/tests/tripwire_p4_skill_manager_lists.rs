@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 #[path = "tripwire_p4_common.rs"]
 mod common;
-use common::{can_run_tripwire, prepare_pipeline, skip, TuiSession};
+use common::{TuiSession, can_run_tripwire, prepare_pipeline, skip};
 
 #[test]
 fn skill_manager_lists_skills() {
@@ -33,12 +33,20 @@ fn skill_manager_lists_skills() {
     // POSITIVE: seeded skill name + filter chip. NEGATIVE: not the issue list.
     assert!(skills.contains("commit"), "seeded skill missing:\n{skills}");
     assert!(skills.contains("Used"), "Used chip missing:\n{skills}");
-    assert!(!skills.contains("Todo (3)"), "still on the issue list:\n{skills}");
+    assert!(
+        !skills.contains("Todo (3)"),
+        "still on the issue list:\n{skills}"
+    );
 
     // Return navigation.
     sess.send_key("1");
     let back = sess
-        .poll_capture(Instant::now() + Duration::from_secs(10), |c| c.contains("Refactor API"))
+        .poll_capture(Instant::now() + Duration::from_secs(10), |c| {
+            c.contains("Refactor API")
+        })
         .expect("issue list never returned from skills");
-    assert!(!back.contains("Used"), "skill chips bled into the issue list:\n{back}");
+    assert!(
+        !back.contains("Used"),
+        "skill chips bled into the issue list:\n{back}"
+    );
 }

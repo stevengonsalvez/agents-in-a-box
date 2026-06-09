@@ -253,10 +253,7 @@ impl PatRepo {
     ///
     /// Returns a [`sqlx::Error`] if the delete fails.
     pub async fn revoke(pool: &SqlitePool, id: &str) -> Result<bool, sqlx::Error> {
-        let result = sqlx::query("DELETE FROM pat WHERE id = ?")
-            .bind(id)
-            .execute(pool)
-            .await?;
+        let result = sqlx::query("DELETE FROM pat WHERE id = ?").bind(id).execute(pool).await?;
         Ok(result.rows_affected() > 0)
     }
 }

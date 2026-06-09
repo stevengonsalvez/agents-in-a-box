@@ -12,8 +12,8 @@
 //! workspace switch keys that share `state.toml`.
 
 use ainb_plugin_runtime::warnings::{
-    ack_at, is_provider_ack, provider_session_key, read_acks_at, reset_at, should_warn_first_run,
-    should_warn_provider, FIRST_RUN_KEY,
+    FIRST_RUN_KEY, ack_at, is_provider_ack, provider_session_key, read_acks_at, reset_at,
+    should_warn_first_run, should_warn_provider,
 };
 
 /// A `state.toml` path inside a fresh tempdir (never the real `~/.ainb`).
@@ -47,7 +47,10 @@ fn first_run_warning_persists_ack_to_state_toml() {
         raw.contains("first_run"),
         "state.toml missing first_run ack:\n{raw}"
     );
-    assert_eq!(read_acks_at(&path).unwrap(), vec![FIRST_RUN_KEY.to_string()]);
+    assert_eq!(
+        read_acks_at(&path).unwrap(),
+        vec![FIRST_RUN_KEY.to_string()]
+    );
 }
 
 #[test]
@@ -83,11 +86,23 @@ fn warnings_writer_preserves_foreign_state_sections() {
     ack_at(&path, FIRST_RUN_KEY).unwrap();
 
     let raw = std::fs::read_to_string(&path).unwrap();
-    assert!(raw.contains("active_workspace"), "lost active_workspace:\n{raw}");
+    assert!(
+        raw.contains("active_workspace"),
+        "lost active_workspace:\n{raw}"
+    );
     assert!(raw.contains("01ID_ACME"), "lost active id:\n{raw}");
-    assert!(raw.contains("default_workspace"), "lost default_workspace:\n{raw}");
-    assert!(raw.contains("[other_plugin]"), "lost foreign section:\n{raw}");
-    assert!(raw.contains("warnings_ack"), "did not add warnings_ack:\n{raw}");
+    assert!(
+        raw.contains("default_workspace"),
+        "lost default_workspace:\n{raw}"
+    );
+    assert!(
+        raw.contains("[other_plugin]"),
+        "lost foreign section:\n{raw}"
+    );
+    assert!(
+        raw.contains("warnings_ack"),
+        "did not add warnings_ack:\n{raw}"
+    );
 }
 
 #[test]

@@ -176,10 +176,7 @@ pub fn daemon_bin() -> PathBuf {
 
 /// Whether the `tmux` binary is on `PATH`.
 pub fn tmux_available() -> bool {
-    Command::new("tmux")
-        .arg("-V")
-        .output()
-        .is_ok_and(|o| o.status.success())
+    Command::new("tmux").arg("-V").output().is_ok_and(|o| o.status.success())
 }
 
 /// An RAII tmux session running the daemon; killed by **exact name** on drop.
@@ -237,9 +234,7 @@ impl DaemonSession {
 impl Drop for DaemonSession {
     fn drop(&mut self) {
         // Exact-name kill only — never a wildcard or kill-server.
-        let _ = Command::new("tmux")
-            .args(["kill-session", "-t", &self.name])
-            .status();
+        let _ = Command::new("tmux").args(["kill-session", "-t", &self.name]).status();
     }
 }
 

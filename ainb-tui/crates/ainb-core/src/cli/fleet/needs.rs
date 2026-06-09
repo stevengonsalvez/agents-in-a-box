@@ -10,17 +10,13 @@ use crate::cli::OutputFormat;
 use crate::fleet::discover::{
     discover_from_ainb, discover_from_jobs, discover_from_peers, merge_sessions,
 };
-use crate::fleet::read::{capture_pane, classify, ClassifyInput, NeedsRow};
+use crate::fleet::read::{ClassifyInput, NeedsRow, capture_pane, classify};
 use crate::fleet::types::Session;
 
 pub async fn execute(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
-    let idle_override: Option<i64> = matches
-        .get_one::<i64>("idle-min")
-        .copied();
+    let idle_override: Option<i64> = matches.get_one::<i64>("idle-min").copied();
 
-    let (ainb_res, jobs_res) = tokio::join!(discover_from_ainb(), async {
-        discover_from_jobs()
-    });
+    let (ainb_res, jobs_res) = tokio::join!(discover_from_ainb(), async { discover_from_jobs() });
     let ainb = ainb_res.unwrap_or_default();
     let peers = discover_from_peers().unwrap_or_default();
     let jobs = jobs_res.unwrap_or_default();
@@ -108,7 +104,11 @@ fn print_text(rows: &[NeedsRow]) {
                 }
             }
             NeedsContext::Err(e) => {
-                println!("▸ 🔴 {name} ─ {} ({})", e.pattern, truncate_line(&e.snippet, 60));
+                println!(
+                    "▸ 🔴 {name} ─ {} ({})",
+                    e.pattern,
+                    truncate_line(&e.snippet, 60)
+                );
             }
             NeedsContext::Idle(i) => {
                 println!("▸ ⚪ {name} ─ idle {}m", i.idle_minutes);

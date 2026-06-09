@@ -22,8 +22,8 @@
 //! would overflow the area is truncated rather than wrapped, keeping one entry
 //! per row at the 80×24 floor (`project_ainb_tui_width_aware_panels`).
 
-use ainb_plugin_sdk::{Cell, Color, Coord, WireBuffer};
 use ainb_hangar_proto::events::MessageKind;
+use ainb_plugin_sdk::{Cell, Color, Coord, WireBuffer};
 
 use crate::screen::task_detail::ViewEntry;
 

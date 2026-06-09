@@ -68,12 +68,7 @@ pub fn read_acks_at(path: &Path) -> anyhow::Result<Vec<String>> {
     Ok(doc
         .get(WARNINGS_KEY)
         .and_then(toml::Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(toml::Value::as_str)
-                .map(str::to_string)
-                .collect()
-        })
+        .map(|arr| arr.iter().filter_map(toml::Value::as_str).map(str::to_string).collect())
         .unwrap_or_default())
 }
 

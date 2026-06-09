@@ -12,10 +12,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, Paragraph},
 };
 
-use crate::app::{
-    AppState,
-    state::NewSessionStep,
-};
+use crate::app::{AppState, state::NewSessionStep};
 
 pub struct NewSessionComponent;
 

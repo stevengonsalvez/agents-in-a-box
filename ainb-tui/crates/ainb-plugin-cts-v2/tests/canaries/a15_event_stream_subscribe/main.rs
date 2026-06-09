@@ -18,8 +18,8 @@
 //! - `count`  → prints the number of stream events received.
 
 use ainb_plugin_sdk::{
-    Cell, CliOutput, Coord, HandleEventParams, HostClient, LogLevel, Plugin, RenderParams,
-    Result, Server, WireBuffer,
+    Cell, CliOutput, Coord, HandleEventParams, HostClient, LogLevel, Plugin, RenderParams, Result,
+    Server, WireBuffer,
 };
 use async_trait::async_trait;
 use std::sync::Arc;

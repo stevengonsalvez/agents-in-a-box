@@ -13,7 +13,7 @@ use ainb_hangar_core::clock::HangarClock;
 use ainb_hangar_core::task::state::TaskState;
 use sqlx::SqlitePool;
 
-use super::finalize::{finalize_idempotent, FinalizeError, FinalizeOutcome};
+use super::finalize::{FinalizeError, FinalizeOutcome, finalize_idempotent};
 
 /// Stateless `{queued|dispatched|running} -> cancelled` service.
 pub struct CancelTaskService;

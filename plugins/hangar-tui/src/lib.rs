@@ -21,12 +21,12 @@ pub use chrome::{render_footer, render_top_bar, Presence};
 pub use connection::{ConnState, Connection};
 pub use firstrun::{reduce_first_run, FirstRunIntent, FirstRunModal, FirstRunReduction};
 pub use plugin::{HangarPlugin, MANIFEST_TOML};
+pub use screen::autopilots::{
+    reduce_autopilots, AutopilotsEvent, AutopilotsIntent, AutopilotsReduction, AutopilotsState,
+};
 pub use screen::issue_list::{
     reduce_issue_list, FilterChip, IssueColumn, IssueListEvent, IssueListIntent, IssueListMode,
     IssueListReduction, IssueListState,
-};
-pub use screen::autopilots::{
-    reduce_autopilots, AutopilotsEvent, AutopilotsIntent, AutopilotsReduction, AutopilotsState,
 };
 pub use screen::kanban::{
     reduce_kanban, BoardColumn, CardSummary, Column, KanbanEvent, KanbanIntent, KanbanReduction,

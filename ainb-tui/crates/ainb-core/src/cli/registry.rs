@@ -563,9 +563,7 @@ async fn run_usage_via_plugin(argv: Vec<String>) -> anyhow::Result<i32> {
     let result = dispatch_inner(&handle, argv).await;
 
     // Drop the owning runtime off the async context.
-    tokio::task::spawn_blocking(move || drop(runtime))
-        .await
-        .ok();
+    tokio::task::spawn_blocking(move || drop(runtime)).await.ok();
 
     result
 }
@@ -653,12 +651,9 @@ async fn dispatch_inner(
             }
             last_trace = std::time::Instant::now();
         }
-        outcome = handle
-            .dispatch_cli(&burndown, "usage", argv.clone())
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!("burndown plugin task disconnected before replying: {e}")
-            })?;
+        outcome = handle.dispatch_cli(&burndown, "usage", argv.clone()).await.map_err(|e| {
+            anyhow::anyhow!("burndown plugin task disconnected before replying: {e}")
+        })?;
         let should_retry = matches!(
             &outcome,
             CliOutcome::Ok(r)
@@ -793,10 +788,7 @@ impl CliCommand for ClaudecodeCommand {
     }
     fn run(&self, matches: &ArgMatches, _ctx: CliContext) -> BoxFuture<'static, Result<()>> {
         let (sub_name, cache_only) = match matches.subcommand() {
-            Some(("statusline", m)) => (
-                Some("statusline".to_string()),
-                m.get_flag("cache-only"),
-            ),
+            Some(("statusline", m)) => (Some("statusline".to_string()), m.get_flag("cache-only")),
             _ => (None, false),
         };
         Box::pin(async move {
@@ -846,19 +838,24 @@ impl CliCommand for TmuxCommand {
     }
     fn run(&self, matches: &ArgMatches, ctx: CliContext) -> BoxFuture<'static, Result<()>> {
         match matches.subcommand() {
-            Some(("install", m)) => match crate::cli::tmux_install::InstallArgs::from_arg_matches(m)
-            {
-                Ok(args) => Box::pin(async move {
-                    crate::cli::tmux_install::install(args, ctx.format).await
-                }),
-                Err(e) => boxed_err(e),
-            },
-            Some(("status", m)) => match crate::cli::tmux_install::StatusArgs::from_arg_matches(m) {
-                Ok(args) => {
-                    Box::pin(async move { crate::cli::tmux_install::status(args, ctx.format).await })
+            Some(("install", m)) => {
+                match crate::cli::tmux_install::InstallArgs::from_arg_matches(m) {
+                    Ok(args) => Box::pin(async move {
+                        crate::cli::tmux_install::install(args, ctx.format).await
+                    }),
+                    Err(e) => boxed_err(e),
                 }
-                Err(e) => boxed_err(e),
-            },
+            }
+            Some(("status", m)) => {
+                match crate::cli::tmux_install::StatusArgs::from_arg_matches(m) {
+                    Ok(args) => {
+                        Box::pin(
+                            async move { crate::cli::tmux_install::status(args, ctx.format).await },
+                        )
+                    }
+                    Err(e) => boxed_err(e),
+                }
+            }
             _ => Box::pin(async move {
                 Err(anyhow::anyhow!(
                     "tmux requires a subcommand: install | status"
@@ -1056,11 +1053,7 @@ impl CliCommand for FleetCommand {
                     .long("filter")
                     .help("Regex against tmux/workspace name"),
             )
-            .arg(
-                clap::Arg::new("cwd")
-                    .long("cwd")
-                    .help("Substring against cwd"),
-            );
+            .arg(clap::Arg::new("cwd").long("cwd").help("Substring against cwd"));
         let sequence = Command::new("sequence")
             .about("Ordered prompts with ack between steps")
             .arg(
@@ -1069,11 +1062,7 @@ impl CliCommand for FleetCommand {
                     .num_args(1..)
                     .action(clap::ArgAction::Append),
             )
-            .arg(
-                clap::Arg::new("all")
-                    .long("all")
-                    .action(clap::ArgAction::SetTrue),
-            )
+            .arg(clap::Arg::new("all").long("all").action(clap::ArgAction::SetTrue))
             .arg(
                 clap::Arg::new("timeout")
                     .long("timeout")
@@ -1243,7 +1232,10 @@ mod tests {
         assert_eq!(top, "plugin");
         let (sub_name, args) = sub.subcommand().expect("plugin install");
         assert_eq!(sub_name, "install");
-        assert_eq!(args.get_one::<String>("plugin").map(String::as_str), Some("burndown"));
+        assert_eq!(
+            args.get_one::<String>("plugin").map(String::as_str),
+            Some("burndown")
+        );
         assert!(args.get_flag("yes"));
     }
 

@@ -306,16 +306,14 @@ async fn run_tui_loop(
                     // typing an `ssh://...` URL into the new-session picker
                     // is swallowed mid-word. The palette is still reachable
                     // from non-text contexts.
-                    let palette_swallowed_by_text_input = matches!(
-                        key_event.code,
-                        KeyCode::Char(':')
-                    ) && !slash_palette.is_open()
-                        && crate::app::events::EventHandler::is_in_text_input_context(
-                            &app.state,
-                        );
+                    let palette_swallowed_by_text_input =
+                        matches!(key_event.code, KeyCode::Char(':'))
+                            && !slash_palette.is_open()
+                            && crate::app::events::EventHandler::is_in_text_input_context(
+                                &app.state,
+                            );
                     if !palette_swallowed_by_text_input
-                        && (slash_palette.is_open()
-                            || matches!(key_event.code, KeyCode::Char(':')))
+                        && (slash_palette.is_open() || matches!(key_event.code, KeyCode::Char(':')))
                     {
                         match slash_palette.handle_key(key_event) {
                             SlashAction::Execute(cmd) => {
@@ -733,8 +731,7 @@ async fn run_tui_loop(
                                     let stderr = String::from_utf8_lossy(&o.stderr);
                                     warn!(
                                         "Failed to kill tmux session '{}': {}",
-                                        session_name,
-                                        stderr
+                                        session_name, stderr
                                     );
                                     failed += 1;
                                 }

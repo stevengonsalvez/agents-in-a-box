@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 #[path = "tripwire_p4_common.rs"]
 mod common;
-use common::{can_run_tripwire, prepare_pipeline, skip, TuiSession};
+use common::{TuiSession, can_run_tripwire, prepare_pipeline, skip};
 
 /// The second workspace's slug — the marker the switch is asserted against.
 const SECOND_SLUG: &str = "acme";
@@ -37,9 +37,7 @@ fn seed_second_workspace(home: &std::path::Path) {
         .build()
         .expect("seed runtime");
     rt.block_on(async {
-        let store = ainb_hangar_store::Store::open_in(&hangar_dir)
-            .await
-            .expect("open seed store");
+        let store = ainb_hangar_store::Store::open_in(&hangar_dir).await.expect("open seed store");
         // A distinct ULID-style id + the `acme` slug (id != slug, mirroring real
         // workspaces and the slug/id resolution contract).
         sqlx::query("INSERT INTO workspace (id, slug, name, created_at) VALUES (?, ?, ?, ?)")
@@ -121,8 +119,16 @@ fn workspace_switch_e2e() {
         .poll_capture(Instant::now() + Duration::from_secs(10), |c| {
             c.contains(SECOND_SLUG)
         })
-        .unwrap_or_else(|| panic!("second workspace `{SECOND_SLUG}` never listed:\n{}", sess.capture()));
-    assert!(listed.contains(SECOND_SLUG), "second workspace missing:\n{listed}");
+        .unwrap_or_else(|| {
+            panic!(
+                "second workspace `{SECOND_SLUG}` never listed:\n{}",
+                sess.capture()
+            )
+        });
+    assert!(
+        listed.contains(SECOND_SLUG),
+        "second workspace missing:\n{listed}"
+    );
 
     // 3. Select the second workspace row.
     sess.send_key("J");
@@ -152,7 +158,5 @@ fn workspace_switch_e2e() {
 /// `true` when a rendered line carries the active `▶` indicator AND the given
 /// slug — i.e. that workspace is the active one.
 fn active_marker_on_slug(capture: &str, slug: &str) -> bool {
-    capture
-        .lines()
-        .any(|line| line.contains('▶') && line.contains(slug))
+    capture.lines().any(|line| line.contains('▶') && line.contains(slug))
 }

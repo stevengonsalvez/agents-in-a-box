@@ -125,7 +125,9 @@ fn r_key_emits_retry_intent_only_when_task_finished_or_failed() {
     )
     .state;
     assert_eq!(running.lifecycle(), TaskLifecycle::Running);
-    assert!(reduce_task_detail(&running, TaskDetailEvent::Key('R')).intent.is_none());
+    assert!(reduce_task_detail(&running, TaskDetailEvent::Key('R'))
+        .intent
+        .is_none());
 
     // Finished failure: retry allowed.
     let failed = reduce_task_detail(
@@ -212,7 +214,11 @@ fn x_key_then_esc_aborts_cancel_modal() {
 fn transcript_groups_thinking_blocks_under_collapsible_when_long() {
     let mut s = state_for_task();
     // One agent line, then a long thinking run, then a tool call.
-    s = reduce_task_detail(&s, TaskDetailEvent::Event(message_event(MessageKind::Agent, "start"))).state;
+    s = reduce_task_detail(
+        &s,
+        TaskDetailEvent::Event(message_event(MessageKind::Agent, "start")),
+    )
+    .state;
     for i in 0..12 {
         s = reduce_task_detail(
             &s,
@@ -220,13 +226,20 @@ fn transcript_groups_thinking_blocks_under_collapsible_when_long() {
         )
         .state;
     }
-    s = reduce_task_detail(&s, TaskDetailEvent::Event(message_event(MessageKind::ToolCall, "run"))).state;
+    s = reduce_task_detail(
+        &s,
+        TaskDetailEvent::Event(message_event(MessageKind::ToolCall, "run")),
+    )
+    .state;
 
     // The rendered (visible) view groups the 12 thinking lines into one
     // collapsed entry, so the visible run length is far shorter than raw.
     let visible = s.visible_entries();
     let collapsed = visible.iter().filter(|e| e.is_collapsed_group()).count();
-    assert_eq!(collapsed, 1, "expected exactly one collapsed thinking group");
+    assert_eq!(
+        collapsed, 1,
+        "expected exactly one collapsed thinking group"
+    );
     // Visible should be: agent line + 1 collapsed group + tool call = 3.
     assert_eq!(visible.len(), 3);
     // Raw transcript still holds every line.
@@ -238,7 +251,11 @@ fn transcript_groups_thinking_blocks_under_collapsible_when_long() {
 #[test]
 fn comments_interleave_with_transcript_in_arrival_order() {
     let mut s = state_for_task();
-    s = reduce_task_detail(&s, TaskDetailEvent::Event(message_event(MessageKind::Agent, "msg1"))).state;
+    s = reduce_task_detail(
+        &s,
+        TaskDetailEvent::Event(message_event(MessageKind::Agent, "msg1")),
+    )
+    .state;
     s = reduce_task_detail(
         &s,
         TaskDetailEvent::Event(HangarEvent::CommentAdded(CommentRow {
@@ -250,7 +267,11 @@ fn comments_interleave_with_transcript_in_arrival_order() {
         })),
     )
     .state;
-    s = reduce_task_detail(&s, TaskDetailEvent::Event(message_event(MessageKind::ToolCall, "msg2"))).state;
+    s = reduce_task_detail(
+        &s,
+        TaskDetailEvent::Event(message_event(MessageKind::ToolCall, "msg2")),
+    )
+    .state;
 
     let bodies: Vec<&str> = s.transcript().map(TranscriptEntry::body).collect();
     assert_eq!(bodies, vec!["msg1", "a comment", "msg2"]);

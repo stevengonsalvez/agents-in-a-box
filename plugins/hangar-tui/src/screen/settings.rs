@@ -376,7 +376,10 @@ fn open_key_entry(state: &SettingsState) -> SettingsReduction {
 /// intent for the currently-selected provider section.
 fn confirm_key_entry(state: &SettingsState) -> SettingsReduction {
     let mut next = state.clone();
-    let key = next.key_entry.take().unwrap_or_else(|| KeyMaterial::new(String::new()));
+    let key = next
+        .key_entry
+        .take()
+        .unwrap_or_else(|| KeyMaterial::new(String::new()));
     // The provider is the selected key row's provider, or the first provider as a
     // sensible default when the list is empty.
     let provider = next
@@ -448,7 +451,11 @@ pub fn render_settings(
         if row >= bottom {
             break;
         }
-        let marker = if section == state.section { "▶ " } else { "  " };
+        let marker = if section == state.section {
+            "▶ "
+        } else {
+            "  "
+        };
         put(buf, 0, row, &format!("{marker}{}", section.title()), TITLE);
         row += 1;
         if row >= bottom {
@@ -460,7 +467,13 @@ pub fn render_settings(
                     ConnectionStatus::Connected => ("● connected", GREEN),
                     ConnectionStatus::Disconnected => ("○ disconnected", RED),
                 };
-                put(buf, 4, row, &format!("{} · {status}", state.health.socket_path), color);
+                put(
+                    buf,
+                    4,
+                    row,
+                    &format!("{} · {status}", state.health.socket_path),
+                    color,
+                );
                 row += 1;
             }
             SettingsSection::Providers => {
@@ -491,13 +504,11 @@ pub fn render_settings(
                     // a leading two-space gutter keeps inactive rows aligned.
                     let active_mark = if w.current { "▶ " } else { "  " };
                     let default_mark = if w.default { " [default]" } else { "" };
-                    let selected = state.section == SettingsSection::Workspaces
-                        && i == state.list_selected;
+                    let selected =
+                        state.section == SettingsSection::Workspaces && i == state.list_selected;
                     let cursor = if selected { "›" } else { " " };
-                    let line = format!(
-                        "{cursor}{active_mark}{} · {}{default_mark}",
-                        w.slug, w.name
-                    );
+                    let line =
+                        format!("{cursor}{active_mark}{} · {}{default_mark}", w.slug, w.name);
                     // The active row paints in SELECTION_GREEN; others in TEXT.
                     let color = if w.current { SELECTION_GREEN } else { TEXT };
                     put(buf, 4, row, &line, color);

@@ -148,17 +148,14 @@ pub fn verify(plaintext: &str, stored_sha256_hex: &str) -> bool {
     // ct_eq over the hex bytes: equal-length, fixed-width digests, so length
     // itself leaks nothing. `into()` collapses the `Choice` to a bool only
     // after the constant-time comparison has run.
-    computed
-        .as_bytes()
-        .ct_eq(stored_sha256_hex.as_bytes())
-        .into()
+    computed.as_bytes().ct_eq(stored_sha256_hex.as_bytes()).into()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::rngs::StdRng;
     use rand::SeedableRng;
+    use rand::rngs::StdRng;
 
     fn seeded() -> StdRng {
         StdRng::seed_from_u64(0x0A1B_0504)
@@ -175,8 +172,7 @@ mod tests {
         let body = &token.plaintext["ainb_".len()..];
         assert_eq!(body.len(), TOKEN_BODY_LEN, "body is 52 base32 chars");
         assert!(
-            body.bytes()
-                .all(|b| b.is_ascii_uppercase() || (b'2'..=b'7').contains(&b)),
+            body.bytes().all(|b| b.is_ascii_uppercase() || (b'2'..=b'7').contains(&b)),
             "body must be RFC4648 base32 [A-Z2-7]: {body}"
         );
     }

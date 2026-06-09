@@ -47,7 +47,10 @@ impl MappingKind {
         match s {
             "issue" => Ok(Self::Issue),
             "task" => Ok(Self::Task),
-            other => Err(decode_err("hangar_kind/bd_kind", &format!("unknown kind '{other}'"))),
+            other => Err(decode_err(
+                "hangar_kind/bd_kind",
+                &format!("unknown kind '{other}'"),
+            )),
         }
     }
 }
@@ -174,10 +177,7 @@ impl<'a> BeadsMappingRepo<'a> {
     ///
     /// Returns a [`sqlx::Error`] if the query fails or a stored row is malformed.
     pub async fn find_by_bd(&self, bd_id: &str) -> Result<Option<BeadsMappingRow>, sqlx::Error> {
-        let row = sqlx::query(SELECT_ALL_WHERE_BD)
-            .bind(bd_id)
-            .fetch_optional(self.pool)
-            .await?;
+        let row = sqlx::query(SELECT_ALL_WHERE_BD).bind(bd_id).fetch_optional(self.pool).await?;
         row.as_ref().map(BeadsMappingRow::from_row).transpose()
     }
 

@@ -25,26 +25,24 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::json;
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 use ainb_plugin_protocol::{
-    framing,
-    methods,
+    RpcError, framing, methods,
     params::{
         ActionInvokeParams, ActionInvokeResult, EventStreamCancelParams,
         EventStreamSubscribeParams, EventStreamSubscribeResult, LogLevel, LogParams,
         SecretStoreGetParams, SecretStoreGetResult, SnapshotGetParams, SnapshotGetResult,
         SnapshotPublishParams, SnapshotSubscribeParams, SnapshotSubscribeResult,
         SpawnManagedSubprocessParams, SpawnManagedSubprocessResult, UnixSocketCloseParams,
-        UnixSocketDialParams, UnixSocketDialResult, UnixSocketSendParams,
-        WorkspaceGetActiveParams, WorkspaceGetActiveResult, WorkspaceListParams,
-        WorkspaceListResult, WorkspaceSetActiveParams, WorkspaceSetActiveResult,
-        WorkspaceSetDefaultParams, WorkspaceSetDefaultResult,
+        UnixSocketDialParams, UnixSocketDialResult, UnixSocketSendParams, WorkspaceGetActiveParams,
+        WorkspaceGetActiveResult, WorkspaceListParams, WorkspaceListResult,
+        WorkspaceSetActiveParams, WorkspaceSetActiveResult, WorkspaceSetDefaultParams,
+        WorkspaceSetDefaultResult,
     },
-    RpcError,
 };
 
 use crate::{Result, SdkError};
@@ -178,8 +176,7 @@ impl HostClient {
             topic: topic.into(),
             payload: payload.into(),
         };
-        self.send_notification(methods::HOST_SNAPSHOT_PUBLISH, &params)
-            .await
+        self.send_notification(methods::HOST_SNAPSHOT_PUBLISH, &params).await
     }
 
     /// Subscribe to snapshot updates for a topic. The host will start
@@ -193,8 +190,7 @@ impl HostClient {
         let params = SnapshotSubscribeParams {
             topic: topic.into(),
         };
-        self.send_request(methods::HOST_SNAPSHOT_SUBSCRIBE, &params)
-            .await
+        self.send_request(methods::HOST_SNAPSHOT_SUBSCRIBE, &params).await
     }
 
     /// Invoke a remote action with a timeout. `timeout` of [`Duration::ZERO`]
@@ -258,8 +254,7 @@ impl HostClient {
             topic: topic.into(),
             since_version,
         };
-        self.send_request(methods::HOST_EVENT_STREAM_SUBSCRIBE, &params)
-            .await
+        self.send_request(methods::HOST_EVENT_STREAM_SUBSCRIBE, &params).await
     }
 
     /// Cancel a previously opened event stream. Notification —
@@ -269,8 +264,7 @@ impl HostClient {
         let params = EventStreamCancelParams {
             stream_id: stream_id.into(),
         };
-        self.send_notification(methods::HOST_EVENT_STREAM_CANCEL, &params)
-            .await
+        self.send_notification(methods::HOST_EVENT_STREAM_CANCEL, &params).await
     }
 
     /// Ask the host to spawn a host-supervised child process.
@@ -301,8 +295,7 @@ impl HostClient {
             env_allowlist,
             cwd,
         };
-        self.send_request(methods::HOST_SPAWN_MANAGED_SUBPROCESS, &params)
-            .await
+        self.send_request(methods::HOST_SPAWN_MANAGED_SUBPROCESS, &params).await
     }
 
     /// Dial a whitelisted `AF_UNIX` socket through the host.
@@ -324,13 +317,9 @@ impl HostClient {
     /// [`UnixSocketEvent`](ainb_plugin_protocol::params::UnixSocketEvent)
     /// frames until the plugin closes (see [`Self::unix_socket_close`]) or
     /// the plugin process leaves the `Running` state.
-    pub async fn unix_socket_dial(
-        &self,
-        path: impl Into<String>,
-    ) -> Result<UnixSocketDialResult> {
+    pub async fn unix_socket_dial(&self, path: impl Into<String>) -> Result<UnixSocketDialResult> {
         let params = UnixSocketDialParams { path: path.into() };
-        self.send_request(methods::HOST_UNIX_SOCKET_DIAL, &params)
-            .await
+        self.send_request(methods::HOST_UNIX_SOCKET_DIAL, &params).await
     }
 
     /// Write bytes to a previously dialled unix socket. Notification —
@@ -344,8 +333,7 @@ impl HostClient {
             stream_id: stream_id.into(),
             bytes: bytes.into(),
         };
-        self.send_notification(methods::HOST_UNIX_SOCKET_SEND, &params)
-            .await
+        self.send_notification(methods::HOST_UNIX_SOCKET_SEND, &params).await
     }
 
     /// Close a previously dialled unix socket. Notification —
@@ -355,8 +343,7 @@ impl HostClient {
         let params = UnixSocketCloseParams {
             stream_id: stream_id.into(),
         };
-        self.send_notification(methods::HOST_UNIX_SOCKET_CLOSE, &params)
-            .await
+        self.send_notification(methods::HOST_UNIX_SOCKET_CLOSE, &params).await
     }
 
     /// Read a secret from the platform secret store through the host,
@@ -389,15 +376,13 @@ impl HostClient {
             workspace_id,
             key: key.into(),
         };
-        self.send_request(methods::HOST_SECRET_STORE_GET, &params)
-            .await
+        self.send_request(methods::HOST_SECRET_STORE_GET, &params).await
     }
 
     /// List the host's workspaces with each row's active/default flags
     /// resolved from `state.toml`. Ungated read.
     pub async fn workspace_list(&self) -> Result<WorkspaceListResult> {
-        self.send_request(methods::HOST_WORKSPACE_LIST, &WorkspaceListParams {})
-            .await
+        self.send_request(methods::HOST_WORKSPACE_LIST, &WorkspaceListParams {}).await
     }
 
     /// Ask the host which workspace is currently active (effective: explicit
@@ -421,8 +406,7 @@ impl HostClient {
         let params = WorkspaceSetActiveParams {
             workspace_id: workspace_id.into(),
         };
-        self.send_request(methods::HOST_WORKSPACE_SET_ACTIVE, &params)
-            .await
+        self.send_request(methods::HOST_WORKSPACE_SET_ACTIVE, &params).await
     }
 
     /// Set the default workspace to `workspace_id`. Capability-gated by
@@ -434,8 +418,7 @@ impl HostClient {
         let params = WorkspaceSetDefaultParams {
             workspace_id: workspace_id.into(),
         };
-        self.send_request(methods::HOST_WORKSPACE_SET_DEFAULT, &params)
-            .await
+        self.send_request(methods::HOST_WORKSPACE_SET_DEFAULT, &params).await
     }
 
     /// Resolve a pending response, called by the server reader when a

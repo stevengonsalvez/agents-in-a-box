@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use ainb_hangar_daemon::rpc::{self, DaemonHealth};
 use ainb_hangar_daemon::seed::{self, WS_ID};
-use ainb_hangar_proto::{methods, RpcId, RpcRequest, RpcResponse};
+use ainb_hangar_proto::{RpcId, RpcRequest, RpcResponse, methods};
 use ainb_hangar_store::Store;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -89,22 +89,49 @@ async fn seeded_snapshots_round_trip_over_real_socket() {
     };
 
     // workspace/subscribe acks.
-    let sub = call(&mut conn, methods::WORKSPACE_SUBSCRIBE, serde_json::json!({"workspace_id": WS_ID})).await;
+    let sub = call(
+        &mut conn,
+        methods::WORKSPACE_SUBSCRIBE,
+        serde_json::json!({"workspace_id": WS_ID}),
+    )
+    .await;
     assert!(sub.error.is_none(), "subscribe rejected: {sub:?}");
 
     // issues_list returns the seeded board (incl. Refactor API).
-    let issues = call(&mut conn, methods::HANGAR_ISSUES_LIST, serde_json::json!({"workspace_id": WS_ID})).await;
+    let issues = call(
+        &mut conn,
+        methods::HANGAR_ISSUES_LIST,
+        serde_json::json!({"workspace_id": WS_ID}),
+    )
+    .await;
     let arr = issues.result.unwrap()["issues"].as_array().unwrap().clone();
     assert_eq!(arr.len(), 3, "three seeded issues");
-    assert!(arr.iter().any(|i| i["title"] == "Refactor API"), "Refactor API missing");
+    assert!(
+        arr.iter().any(|i| i["title"] == "Refactor API"),
+        "Refactor API missing"
+    );
 
     // agents_list lists claude-agent + the member.
-    let agents = call(&mut conn, methods::HANGAR_AGENTS_LIST, serde_json::json!({"workspace_id": WS_ID})).await;
+    let agents = call(
+        &mut conn,
+        methods::HANGAR_AGENTS_LIST,
+        serde_json::json!({"workspace_id": WS_ID}),
+    )
+    .await;
     let actors = agents.result.unwrap()["actors"].as_array().unwrap().clone();
-    assert!(actors.iter().any(|a| a["display_name"] == "claude-agent" && a["is_agent"] == true));
+    assert!(
+        actors
+            .iter()
+            .any(|a| a["display_name"] == "claude-agent" && a["is_agent"] == true)
+    );
 
     // skills_list lists commit (used).
-    let skills = call(&mut conn, methods::HANGAR_SKILLS_LIST, serde_json::json!({"workspace_id": WS_ID})).await;
+    let skills = call(
+        &mut conn,
+        methods::HANGAR_SKILLS_LIST,
+        serde_json::json!({"workspace_id": WS_ID}),
+    )
+    .await;
     let srows = skills.result.unwrap()["skills"].as_array().unwrap().clone();
     assert!(srows.iter().any(|s| s["name"] == "commit" && s["used"] == true));
 

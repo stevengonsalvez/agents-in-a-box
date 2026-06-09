@@ -11,7 +11,7 @@
 
 use ainb_hangar_store::Store;
 
-use crate::run_loop::{run, DaemonConfig};
+use crate::run_loop::{DaemonConfig, run};
 
 /// Beads CLI adapter — shells out to `bd` and parses `--json` (P2.2).
 ///
@@ -40,13 +40,6 @@ pub mod execenv;
 ///
 /// The rolling task-throughput ring buffer + the bounded claim-slot cache figure.
 pub mod health_stats;
-/// Daemon observability bootstrap (P8.1).
-///
-/// Installs the `tracing` subscriber with the rolling JSONL sink under
-/// `<hangar_home>/hangar/logs` and an `RUST_LOG` env filter.
-/// [`observability::install`] returns a `WorkerGuard` the daemon `main` holds
-/// for the process lifetime, and exposes an `otlp` seam for P8.2.
-pub mod observability;
 /// Dispatch-time materialisation of an agent's skills into its per-task env
 /// (P6.4).
 ///
@@ -58,6 +51,20 @@ pub mod observability;
 /// Gemini/Default/Copilot root inside `workdir`. Files are copied, never
 /// symlinked; `scripts/` files get the unix executable bit.
 pub mod materialise;
+/// Daemon observability bootstrap (P8.1).
+///
+/// Installs the `tracing` subscriber with the rolling JSONL sink under
+/// `<hangar_home>/hangar/logs` and an `RUST_LOG` env filter.
+/// [`observability::install`] returns a `WorkerGuard` the daemon `main` holds
+/// for the process lifetime, and exposes an `otlp` seam for P8.2.
+pub mod observability;
+/// The daemon's `UnixListener` JSON-RPC server (P4.10).
+///
+/// Binds `{hangar_home}/hangar.sock`, serves `workspace/subscribe`, `ping`, and
+/// the four `hangar/*` snapshot RPCs ([`rpc::snapshots`]) backed by the store
+/// repos. The plugin dials this socket through the host `unix_socket_dial` cap
+/// to populate its screens with live data.
+pub mod rpc;
 /// The daemon's claim loop + sweeper scheduler (P1.7).
 ///
 /// Polls [`ainb_hangar_store::service::claim`] for the oldest queued task bound
@@ -71,13 +78,6 @@ pub mod run_loop;
 /// first `session_id`, and enforces a runtime deadline. Returns a
 /// [`runner::RunOutcome`] the claim loop maps onto the FSM.
 pub mod runner;
-/// The daemon's `UnixListener` JSON-RPC server (P4.10).
-///
-/// Binds `{hangar_home}/hangar.sock`, serves `workspace/subscribe`, `ping`, and
-/// the four `hangar/*` snapshot RPCs ([`rpc::snapshots`]) backed by the store
-/// repos. The plugin dials this socket through the host `unix_socket_dial` cap
-/// to populate its screens with live data.
-pub mod rpc;
 /// The autopilot scheduler thread + cron tick loop (P7.3).
 ///
 /// [`scheduler::AutopilotScheduler`] is a daemon-global tokio task that wakes at
@@ -103,6 +103,11 @@ pub mod seed;
 /// [`ainb_hangar_store::repo::skill::SkillRepo::upsert_by_name`] — idempotent
 /// and all-or-nothing.
 pub mod skills_sync;
+/// TTL sweepers + stale-dispatch reclaim (P1.4).
+///
+/// The daemon's tokio runtime registers these as periodic tasks; they are also
+/// callable directly (with an injected clock) for deterministic testing.
+pub mod sweeper;
 /// `ainb hangar templates use <name>` transactional materialisation (P6.3).
 ///
 /// Turns an embedded curated [`ainb_hangar_core::template::AgentTemplate`] into a
@@ -111,11 +116,6 @@ pub mod skills_sync;
 /// a hard [`templates::TemplateUseError::SkillNotImported`] with a sync hint and
 /// nothing is written. Idempotent by agent name within the workspace.
 pub mod templates;
-/// TTL sweepers + stale-dispatch reclaim (P1.4).
-///
-/// The daemon's tokio runtime registers these as periodic tasks; they are also
-/// callable directly (with an injected clock) for deterministic testing.
-pub mod sweeper;
 /// Danger-full-access warning emission at provider invocation (P5.6).
 pub mod warnings;
 /// Git-worktree integration for per-task working dirs (P1.6).
@@ -210,7 +210,9 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
             tracing::info!(socket = %socket_path.display(), "hangar rpc listening");
             tokio::spawn(rpc::serve(listener, store.pool().clone(), health));
         }
-        Err(e) => tracing::warn!(error = %e, socket = %socket_path.display(), "hangar rpc bind failed"),
+        Err(e) => {
+            tracing::warn!(error = %e, socket = %socket_path.display(), "hangar rpc bind failed")
+        }
     }
 
     // P7.3: spawn the autopilot scheduler. It is a daemon-global cron tick loop

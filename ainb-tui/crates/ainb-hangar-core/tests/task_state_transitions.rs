@@ -88,7 +88,10 @@ fn transitions_matrix_is_exhaustive() {
     for &state in ALL_STATES {
         let appears_as_from = legal.iter().any(|&(f, _)| f == state);
         let appears_as_to = legal.iter().any(|&(_, t)| t == state);
-        assert!(appears_as_to, "{state:?} never appears as a transition target");
+        assert!(
+            appears_as_to,
+            "{state:?} never appears as a transition target"
+        );
         if state.is_terminal() {
             assert!(
                 !appears_as_from,
@@ -131,7 +134,11 @@ fn from_db_row_round_trip_all_variants() {
     ] {
         let parsed = TaskState::from_db_str(token).expect("known token parses");
         assert_eq!(parsed, state, "{token} should parse to {state:?}");
-        assert_eq!(state.as_db_str(), token, "{state:?} should render to {token}");
+        assert_eq!(
+            state.as_db_str(),
+            token,
+            "{state:?} should render to {token}"
+        );
     }
 
     // An unknown string is rejected (not silently mapped to a default).

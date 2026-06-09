@@ -32,15 +32,15 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use ainb_plugin_protocol::params::{UnixSocketEvent, UnixSocketEventKind};
 use bytes::Bytes;
 use parking_lot::Mutex;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::UnixStream;
+use tokio::net::unix::OwnedWriteHalf;
 
 use crate::error::RuntimeError;
 use crate::plugin_task::{Command, Inbox};
@@ -340,8 +340,9 @@ pub fn canonical_for_compare(path: &Path) -> PathBuf {
         return c;
     }
     match (path.parent(), path.file_name()) {
-        (Some(parent), Some(name)) => std::fs::canonicalize(parent)
-            .map_or_else(|_| path.to_path_buf(), |p| p.join(name)),
+        (Some(parent), Some(name)) => {
+            std::fs::canonicalize(parent).map_or_else(|_| path.to_path_buf(), |p| p.join(name))
+        }
         _ => path.to_path_buf(),
     }
 }
@@ -363,9 +364,7 @@ pub fn canonical_for_compare(path: &Path) -> PathBuf {
 #[must_use]
 pub fn path_allowed(allow_list: &[String], requested: &str) -> bool {
     let req = canonical_for_compare(&expand_path(requested));
-    allow_list
-        .iter()
-        .any(|entry| canonical_for_compare(&expand_path(entry)) == req)
+    allow_list.iter().any(|entry| canonical_for_compare(&expand_path(entry)) == req)
 }
 
 #[cfg(test)]
@@ -389,7 +388,10 @@ mod tests {
     #[test]
     fn expand_path_tilde() {
         std::env::set_var("HOME", "/home/cts");
-        assert_eq!(expand_path("~/.ainb/hangar.sock"), PathBuf::from("/home/cts/.ainb/hangar.sock"));
+        assert_eq!(
+            expand_path("~/.ainb/hangar.sock"),
+            PathBuf::from("/home/cts/.ainb/hangar.sock")
+        );
         assert_eq!(expand_path("~"), PathBuf::from("/home/cts"));
     }
 

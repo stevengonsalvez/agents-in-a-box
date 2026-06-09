@@ -4,7 +4,7 @@
 // to fan out. Standup-style picker is not in v1 (orchestration is invoked from
 // within an LLM session that already drives selection).
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use regex::Regex;
 
 use crate::cli::OutputFormat;
@@ -26,10 +26,7 @@ pub async fn execute(matches: &clap::ArgMatches, _format: OutputFormat) -> Resul
     }
 
     let (ainb, peers) = tokio::join!(discover_from_ainb(), async { discover_from_peers() });
-    let merged = merge_sessions(vec![
-        ainb.unwrap_or_default(),
-        peers.unwrap_or_default(),
-    ]);
+    let merged = merge_sessions(vec![ainb.unwrap_or_default(), peers.unwrap_or_default()]);
 
     let targets = filter_targets(&merged, all, filter.as_deref(), cwd.as_deref())?;
     if targets.is_empty() {
@@ -85,11 +82,7 @@ fn print_results(results: &[(Session, SendOutcome)]) {
     let total = results.len();
     println!("ainb fleet broadcast — sent to {total} target(s)");
     for (t, outcome) in results {
-        let name = t
-            .tmux_session
-            .as_deref()
-            .or(t.workspace_name.as_deref())
-            .unwrap_or(&t.id);
+        let name = t.tmux_session.as_deref().or(t.workspace_name.as_deref()).unwrap_or(&t.id);
         match outcome {
             SendOutcome::Broker { peer_id } => {
                 println!("  ✓ {name} via broker peer {peer_id}");

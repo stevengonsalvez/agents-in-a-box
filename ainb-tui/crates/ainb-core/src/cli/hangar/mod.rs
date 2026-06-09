@@ -560,10 +560,9 @@ async fn run_logs_tail(args: LogsTailArgs) -> Result<()> {
     use ainb_hangar_core::logs::{self, LogLevel};
 
     let min_level = match &args.level {
-        Some(s) => Some(
-            LogLevel::parse(s)
-                .with_context(|| format!("unknown log level `{s}` (use trace/debug/info/warn/error)"))?,
-        ),
+        Some(s) => Some(LogLevel::parse(s).with_context(|| {
+            format!("unknown log level `{s}` (use trace/debug/info/warn/error)")
+        })?),
         None => None,
     };
 
@@ -602,9 +601,9 @@ async fn follow_logs(
     const POLL: Duration = Duration::from_millis(500);
 
     let mut current = logs::log_files_newest_first(dir).into_iter().next();
-    let mut emitted = current
-        .as_deref()
-        .map_or(0, |p| std::fs::read_to_string(p).map(|c| c.lines().count()).unwrap_or(0));
+    let mut emitted = current.as_deref().map_or(0, |p| {
+        std::fs::read_to_string(p).map(|c| c.lines().count()).unwrap_or(0)
+    });
 
     loop {
         tokio::select! {
@@ -716,7 +715,10 @@ async fn run_autopilot_create(store: &Store, args: AutopilotCreateArgs) -> Resul
     let id = AutopilotRepo::create(store.pool(), &SystemClock, &req)
         .await
         .with_context(|| format!("create autopilot `{}` (cron `{}`)", args.name, args.cron))?;
-    println!("created autopilot {id} `{}` (cron `{}`)", args.name, args.cron);
+    println!(
+        "created autopilot {id} `{}` (cron `{}`)",
+        args.name, args.cron
+    );
     Ok(())
 }
 
@@ -2278,15 +2280,7 @@ mod tests {
     #[test]
     fn parses_logs_tail_with_all_flags() {
         let cmd = parse_hangar(&[
-            "ainb",
-            "hangar",
-            "logs",
-            "tail",
-            "--follow",
-            "--lines",
-            "50",
-            "--level",
-            "warn",
+            "ainb", "hangar", "logs", "tail", "--follow", "--lines", "50", "--level", "warn",
         ]);
         let HangarCommand::Logs(LogsCommand::Tail(args)) = cmd else {
             panic!("expected logs tail, got {cmd:?}");
@@ -2656,11 +2650,7 @@ mod tests {
 
     #[test]
     fn parses_autopilot_disable_enable_run_with_id() {
-        for (verb, is) in [
-            ("disable", "disable"),
-            ("enable", "enable"),
-            ("run", "run"),
-        ] {
+        for (verb, is) in [("disable", "disable"), ("enable", "enable"), ("run", "run")] {
             let cmd = parse_hangar(&["ainb", "hangar", "autopilot", verb, "ap-1"]);
             match (is, cmd) {
                 ("disable", HangarCommand::Autopilot(AutopilotCommand::Disable(a)))
@@ -2701,10 +2691,22 @@ mod tests {
         assert!(line.contains("completed"), "text missing last_run: {line}");
 
         let json = autopilot_to_json(&ap, last.as_deref());
-        assert!(json.contains("\"name\":\"daily\""), "json missing name: {json}");
-        assert!(json.contains("\"cron_expr\":\"0 9 * * *\""), "json missing cron: {json}");
-        assert!(json.contains("\"enabled\":true"), "json missing enabled: {json}");
-        assert!(json.contains("\"last_run\":\"completed\""), "json missing last_run: {json}");
+        assert!(
+            json.contains("\"name\":\"daily\""),
+            "json missing name: {json}"
+        );
+        assert!(
+            json.contains("\"cron_expr\":\"0 9 * * *\""),
+            "json missing cron: {json}"
+        );
+        assert!(
+            json.contains("\"enabled\":true"),
+            "json missing enabled: {json}"
+        );
+        assert!(
+            json.contains("\"last_run\":\"completed\""),
+            "json missing last_run: {json}"
+        );
 
         assert!(autopilot_csv_row(&ap, last.as_deref()).contains("0 9 * * *"));
         assert!(autopilot_md_row(&ap, last.as_deref()).contains("| daily |"));

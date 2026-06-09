@@ -90,9 +90,7 @@ mod tests {
 
     /// Collect a command's args (everything after the program) as owned strings.
     fn args_of(cmd: &Command) -> Vec<String> {
-        cmd.get_args()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect()
+        cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect()
     }
 
     /// A base command pinned to a dummy bin + beads dir, mirroring [`base_cmd`].
@@ -127,7 +125,14 @@ mod tests {
         assert_eq!(
             args_of(&cmd),
             vec![
-                "--json", "create", "ship it", "-d", "d", "--labels", "foo,bar", "--assignee",
+                "--json",
+                "create",
+                "ship it",
+                "-d",
+                "d",
+                "--labels",
+                "foo,bar",
+                "--assignee",
                 "stevie",
             ]
         );

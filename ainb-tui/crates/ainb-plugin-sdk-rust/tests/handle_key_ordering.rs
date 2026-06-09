@@ -17,8 +17,8 @@ use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 
 use ainb_plugin_sdk::{
-    methods, HandleEventParams, HandleKeyParams, HostClient, KeyCode, KeyEvent, Plugin,
-    RenderParams, Result, Server, WireBuffer,
+    HandleEventParams, HandleKeyParams, HostClient, KeyCode, KeyEvent, Plugin, RenderParams,
+    Result, Server, WireBuffer, methods,
 };
 
 /// Records every `handle_key` invocation in arrival order.
@@ -109,7 +109,12 @@ async fn five_sequential_handle_keys_preserve_order() {
     let _ = server_task.await.unwrap();
 
     let observed = keys.lock().await.clone();
-    assert_eq!(observed.len(), 5, "expected 5 handle_key calls, got {}", observed.len());
+    assert_eq!(
+        observed.len(),
+        5,
+        "expected 5 handle_key calls, got {}",
+        observed.len()
+    );
     let observed_codes: Vec<KeyCode> = observed.into_iter().map(|k| k.code).collect();
     assert_eq!(
         observed_codes,

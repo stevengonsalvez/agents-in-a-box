@@ -43,10 +43,7 @@ fn plugins_staged() -> Option<PathBuf> {
     for _ in 0..6 {
         let candidate = dir.join("dist").join("plugins");
         if candidate.join("burndown").join("burndown").exists()
-            && candidate
-                .join("session-reader")
-                .join("session-reader")
-                .exists()
+            && candidate.join("session-reader").join("session-reader").exists()
         {
             return Some(candidate);
         }
@@ -141,9 +138,7 @@ fn send_key(session: &str, key: &str) {
 }
 
 fn kill_session(session: &str) {
-    let _ = Command::new("tmux")
-        .args(["kill-session", "-t", session])
-        .status();
+    let _ = Command::new("tmux").args(["kill-session", "-t", session]).status();
 }
 
 #[test]
@@ -167,16 +162,7 @@ fn esc_on_burndown_returns_to_home() {
     let ainb = ainb_bin();
 
     let status = Command::new("tmux")
-        .args([
-            "new-session",
-            "-d",
-            "-s",
-            &session,
-            "-x",
-            "200",
-            "-y",
-            "50",
-        ])
+        .args(["new-session", "-d", "-s", &session, "-x", "200", "-y", "50"])
         .status()
         .expect("tmux new-session");
     assert!(status.success(), "tmux new-session failed");
@@ -222,9 +208,7 @@ fn esc_on_burndown_returns_to_home() {
     let Some(burndown_cap) = on_burndown else {
         let last = capture_pane(&session);
         kill_session(&session);
-        panic!(
-            "burndown never rendered real data after `i`; last:\n---\n{last}\n---"
-        );
+        panic!("burndown never rendered real data after `i`; last:\n---\n{last}\n---");
     };
 
     // Sanity-check we're actually on burndown.

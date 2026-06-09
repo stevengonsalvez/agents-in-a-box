@@ -10,8 +10,8 @@
 //! 3. tasks with a `NULL` `issue_id` (chat / autopilot placeholders at v1) never
 //!    collide.
 
-use ainb_hangar_store::repo::task::{NewTask, TaskRepo};
 use ainb_hangar_store::Store;
+use ainb_hangar_store::repo::task::{NewTask, TaskRepo};
 
 /// Seed the workspace + runtime + agent rows every task row's FKs require, and
 /// optionally one issue. Returns `(workspace_id, runtime_id, agent_id)`.
@@ -57,7 +57,11 @@ async fn seed_graph(store: &Store) -> (String, String, String) {
     .execute(pool)
     .await
     .expect("insert agent");
-    ("ws-1".to_string(), "rt-1".to_string(), "agent-1".to_string())
+    (
+        "ws-1".to_string(),
+        "rt-1".to_string(),
+        "agent-1".to_string(),
+    )
 }
 
 /// Seed one issue row and return its id.
@@ -110,9 +114,7 @@ async fn inserting_second_pending_task_for_same_issue_violates_unique() {
         .expect_err("second pending task for same issue must violate the partial unique index");
 
     // sqlx surfaces the SQLite UNIQUE constraint violation as a Database error.
-    let db_err = err
-        .as_database_error()
-        .expect("expected a database constraint error");
+    let db_err = err.as_database_error().expect("expected a database constraint error");
     let msg = db_err.message().to_lowercase();
     assert!(
         msg.contains("unique") || msg.contains("constraint"),

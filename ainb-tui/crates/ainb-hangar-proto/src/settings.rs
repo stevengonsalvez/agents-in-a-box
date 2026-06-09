@@ -187,7 +187,10 @@ mod tests {
         let s = serde_json::to_string(&health).unwrap();
         assert_eq!(serde_json::from_str::<HealthSnapshot>(&s).unwrap(), health);
 
-        let key = KeyRow { provider: "claude".into(), masked: "sk-…ab".into() };
+        let key = KeyRow {
+            provider: "claude".into(),
+            masked: "sk-…ab".into(),
+        };
         let s = serde_json::to_string(&key).unwrap();
         assert_eq!(serde_json::from_str::<KeyRow>(&s).unwrap(), key);
     }
@@ -196,9 +199,15 @@ mod tests {
     /// daemon owns masking, but assert the wire type carries no raw field).
     #[test]
     fn key_row_carries_only_masked() {
-        let key = KeyRow { provider: "claude".into(), masked: "sk-…ab".into() };
+        let key = KeyRow {
+            provider: "claude".into(),
+            masked: "sk-…ab".into(),
+        };
         let v = serde_json::to_value(&key).unwrap();
-        assert!(v.get("value").is_none(), "KeyRow must not carry a raw value");
+        assert!(
+            v.get("value").is_none(),
+            "KeyRow must not carry a raw value"
+        );
         assert!(v.get("masked").is_some());
     }
 }

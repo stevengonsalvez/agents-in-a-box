@@ -32,18 +32,15 @@ use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 
 use ainb_plugin_protocol::{
-    framing,
-    methods,
+    Manifest, RpcError, framing, methods,
     params::{
-        CliDispatchParams, CliDispatchResult, HandleEventParams, HandleKeyParams,
-        PluginInitParams, PluginInitResult, PluginShutdownParams, PluginShutdownResult,
-        RenderParams, RenderResult,
+        CliDispatchParams, CliDispatchResult, HandleEventParams, HandleKeyParams, PluginInitParams,
+        PluginInitResult, PluginShutdownParams, PluginShutdownResult, RenderParams, RenderResult,
     },
-    Manifest, RpcError,
 };
 
-use crate::{HostClient, Plugin, Result, SdkError};
 use crate::host_client::{Pending, RpcOutcome};
+use crate::{HostClient, Plugin, Result, SdkError};
 
 /// Outbound mpsc channel buffer. Tuned for "many small frames". Bigger
 /// values give the writer more slack on bursty publishes; smaller
@@ -108,7 +105,9 @@ impl<P: Plugin> Server<P> {
             Ok(()) => match writer_outcome {
                 Ok(Ok(())) => Ok(()),
                 Ok(Err(e)) => Err(e),
-                Err(join_err) => Err(SdkError::plugin(format!("writer task panicked: {join_err}"))),
+                Err(join_err) => Err(SdkError::plugin(format!(
+                    "writer task panicked: {join_err}"
+                ))),
             },
             Err(e) => Err(e),
         }
@@ -215,10 +214,7 @@ async fn read_frame_async<R: tokio::io::AsyncBufRead + Unpin>(
 
     loop {
         let mut line = String::new();
-        let n = reader
-            .read_line(&mut line)
-            .await
-            .map_err(ProtocolError::Transport)?;
+        let n = reader.read_line(&mut line).await.map_err(ProtocolError::Transport)?;
 
         if n == 0 {
             if any_byte_read {
@@ -268,9 +264,7 @@ async fn read_frame_async<R: tokio::io::AsyncBufRead + Unpin>(
             })?;
             content_length = Some(parsed);
         } else {
-            return Err(ProtocolError::Decode(format!(
-                "unsupported header: {name}"
-            )));
+            return Err(ProtocolError::Decode(format!("unsupported header: {name}")));
         }
     }
 }
@@ -286,14 +280,8 @@ where
 {
     tokio::spawn(async move {
         while let Some(frame) = frames_rx.recv().await {
-            writer
-                .write_all(&frame)
-                .await
-                .map_err(|e| SdkError::Protocol(e.into()))?;
-            writer
-                .flush()
-                .await
-                .map_err(|e| SdkError::Protocol(e.into()))?;
+            writer.write_all(&frame).await.map_err(|e| SdkError::Protocol(e.into()))?;
+            writer.flush().await.map_err(|e| SdkError::Protocol(e.into()))?;
         }
         Ok(())
     })
@@ -331,11 +319,7 @@ async fn dispatch_incoming<P: Plugin>(
     frames_tx: mpsc::Sender<Vec<u8>>,
     value: Value,
 ) {
-    let method = value
-        .get("method")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
+    let method = value.get("method").and_then(Value::as_str).unwrap_or_default().to_string();
     let id = value.get("id").and_then(Value::as_i64);
     let params = value.get("params").cloned().unwrap_or(Value::Null);
 
@@ -428,11 +412,7 @@ async fn handle_method<P: Plugin>(
         }
         methods::PLUGIN_CLI_DISPATCH => {
             let p: CliDispatchParams = decode_params(params)?;
-            let out = plugin
-                .lock()
-                .await
-                .cli_dispatch(host, &p.namespace, &p.argv)
-                .await?;
+            let out = plugin.lock().await.cli_dispatch(host, &p.namespace, &p.argv).await?;
             let result = CliDispatchResult {
                 stdout: out.stdout.into(),
                 stderr: out.stderr.into(),
@@ -445,9 +425,8 @@ async fn handle_method<P: Plugin>(
 }
 
 fn decode_params<T: serde::de::DeserializeOwned>(value: Value) -> Result<T> {
-    serde_json::from_value(value).map_err(|e| {
-        SdkError::Rpc(Box::new(RpcError::invalid_params(e.to_string())))
-    })
+    serde_json::from_value(value)
+        .map_err(|e| SdkError::Rpc(Box::new(RpcError::invalid_params(e.to_string()))))
 }
 
 #[cfg(test)]
@@ -456,8 +435,8 @@ mod tests {
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use ainb_plugin_protocol::wire_buffer::{Cell, Coord, WireBuffer};
     use ainb_plugin_protocol::params::{LogLevel, Viewport};
+    use ainb_plugin_protocol::wire_buffer::{Cell, Coord, WireBuffer};
 
     struct EchoPlugin {
         renders: Arc<AtomicUsize>,
@@ -468,22 +447,14 @@ mod tests {
         fn manifest(&self) -> &'static str {
             "[plugin]\nname = \"echo\"\nversion = \"0.1.0\"\nabi_version = 2\n"
         }
-        async fn render(
-            &mut self,
-            _host: &HostClient,
-            _p: RenderParams,
-        ) -> Result<WireBuffer> {
+        async fn render(&mut self, _host: &HostClient, _p: RenderParams) -> Result<WireBuffer> {
             self.renders.fetch_add(1, Ordering::SeqCst);
             let mut b = WireBuffer::new(2, 1);
             b.push(Coord::new(0, 0), Cell::new("h"));
             b.push(Coord::new(1, 0), Cell::new("i"));
             Ok(b)
         }
-        async fn handle_event(
-            &mut self,
-            host: &HostClient,
-            p: HandleEventParams,
-        ) -> Result<()> {
+        async fn handle_event(&mut self, host: &HostClient, p: HandleEventParams) -> Result<()> {
             // Echo the payload back as a notification log.
             host.log(
                 LogLevel::Info,
@@ -581,10 +552,7 @@ mod tests {
         let plugin = EchoPlugin { renders };
         let server_task = tokio::spawn(Server::new(plugin).run(plugin_read, plugin_write));
 
-        host_side
-            .write_all(&frame("plugin/nope", Some(1), Value::Null))
-            .await
-            .unwrap();
+        host_side.write_all(&frame("plugin/nope", Some(1), Value::Null)).await.unwrap();
         host_side.shutdown().await.unwrap();
 
         let mut host_read = BufReader::new(host_side);
@@ -604,9 +572,8 @@ mod tests {
         let (mut host_side, plugin_side) = tokio::io::duplex(64 * 1024);
         let (plugin_read, plugin_write) = tokio::io::split(plugin_side);
         let renders = Arc::new(AtomicUsize::new(0));
-        let server_task = tokio::spawn(
-            Server::new(EchoPlugin { renders }).run(plugin_read, plugin_write),
-        );
+        let server_task =
+            tokio::spawn(Server::new(EchoPlugin { renders }).run(plugin_read, plugin_write));
 
         // Render with missing required fields.
         host_side
@@ -635,9 +602,8 @@ mod tests {
         let (mut host_side, plugin_side) = tokio::io::duplex(64 * 1024);
         let (plugin_read, plugin_write) = tokio::io::split(plugin_side);
         let renders = Arc::new(AtomicUsize::new(0));
-        let server_task = tokio::spawn(
-            Server::new(EchoPlugin { renders }).run(plugin_read, plugin_write),
-        );
+        let server_task =
+            tokio::spawn(Server::new(EchoPlugin { renders }).run(plugin_read, plugin_write));
 
         // Notification: no id.
         host_side
@@ -673,11 +639,7 @@ mod tests {
             fn manifest(&self) -> &'static str {
                 "[plugin]\nname = \"reverse\"\nversion = \"0.0.0\"\nabi_version = 2\n"
             }
-            async fn render(
-                &mut self,
-                host: &HostClient,
-                _: RenderParams,
-            ) -> Result<WireBuffer> {
+            async fn render(&mut self, host: &HostClient, _: RenderParams) -> Result<WireBuffer> {
                 let snap = host.snapshot_get("topic.x").await?;
                 let mut b = WireBuffer::new(1, 1);
                 let label = format!("v{}", snap.version);
@@ -717,10 +679,7 @@ mod tests {
             "result": {"payload": null, "version": 7},
         });
         let response_bytes = serde_json::to_vec(&response).unwrap();
-        host_write_half
-            .write_all(&framing::encode(&response_bytes))
-            .await
-            .unwrap();
+        host_write_half.write_all(&framing::encode(&response_bytes)).await.unwrap();
 
         // Now the render response should arrive.
         let body = read_frame_async(&mut host_read).await.unwrap().unwrap();

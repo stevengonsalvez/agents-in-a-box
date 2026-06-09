@@ -23,8 +23,8 @@
 //! hook the per-plugin task calls from `kill_child`.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::RwLock;
 
@@ -121,9 +121,7 @@ impl EventStreamRegistry {
     /// events under (`stream:<id>`).
     pub fn subscribe(&self, plugin: PluginId, topic: Topic) -> StreamId {
         let id = self.ids.allocate();
-        self.inner
-            .write()
-            .insert(id.clone(), Stream { plugin, topic });
+        self.inner.write().insert(id.clone(), Stream { plugin, topic });
         id
     }
 
@@ -209,10 +207,9 @@ pub fn topic_allowed(allow_list: Option<&[String]>, topic: &str) -> bool {
 /// `prefix*` matches any topic starting with `prefix`; an exact pattern
 /// matches only itself. A bare `*` matches everything.
 fn pattern_matches(pattern: &str, topic: &str) -> bool {
-    pattern.strip_suffix('*').map_or_else(
-        || pattern == topic,
-        |prefix| topic.starts_with(prefix),
-    )
+    pattern
+        .strip_suffix('*')
+        .map_or_else(|| pattern == topic, |prefix| topic.starts_with(prefix))
 }
 
 #[cfg(test)]

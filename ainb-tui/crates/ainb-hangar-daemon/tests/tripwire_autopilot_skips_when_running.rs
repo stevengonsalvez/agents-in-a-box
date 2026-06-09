@@ -110,7 +110,10 @@ async fn autopilot_skips_tick_when_prior_run_in_flight() {
         "first tick must fire, got {ev:?}"
     );
     assert_eq!(count(&pool, "SELECT count(*) FROM autopilot_run").await, 1);
-    assert_eq!(count(&pool, "SELECT count(*) FROM agent_task_queue").await, 1);
+    assert_eq!(
+        count(&pool, "SELECT count(*) FROM agent_task_queue").await,
+        1
+    );
 
     // Capture run #1's task so we can complete it later. It stays in flight
     // (completed_at NULL) so the autopilot is at its max_concurrent_runs limit.
@@ -124,7 +127,9 @@ async fn autopilot_skips_tick_when_prior_run_in_flight() {
     clock.advance(FIVE_MIN_MS);
     let ev = next_event(&mut rx, Duration::from_secs(2)).await;
     match ev {
-        Some(SchedulerEvent::TickSkipped { reason, in_flight, .. }) => {
+        Some(SchedulerEvent::TickSkipped {
+            reason, in_flight, ..
+        }) => {
             assert_eq!(reason, "concurrency", "skip reason must be concurrency");
             assert_eq!(in_flight, 1, "one run in flight at the limit");
         }
@@ -162,7 +167,11 @@ async fn autopilot_skips_tick_when_prior_run_in_flight() {
     .await
     .expect("complete task #1");
     assert_eq!(
-        count(&pool, "SELECT count(*) FROM autopilot_run WHERE completed_at IS NULL").await,
+        count(
+            &pool,
+            "SELECT count(*) FROM autopilot_run WHERE completed_at IS NULL"
+        )
+        .await,
         0,
         "run #1 is now completed (no in-flight runs)"
     );

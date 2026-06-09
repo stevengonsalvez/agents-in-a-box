@@ -116,9 +116,8 @@ impl SessionDefaults {
     /// MUST tolerate failures here without aborting the session creation.
     pub fn save_to(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!("creating parent dir for {}", path.display())
-            })?;
+            fs::create_dir_all(parent)
+                .with_context(|| format!("creating parent dir for {}", path.display()))?;
         }
 
         let yaml = serde_yaml::to_string(self).context("serializing SessionDefaults to YAML")?;
@@ -139,13 +138,8 @@ impl SessionDefaults {
         fs::write(&tmp_path, yaml.as_bytes())
             .with_context(|| format!("writing tmp file {}", tmp_path.display()))?;
 
-        fs::rename(&tmp_path, path).with_context(|| {
-            format!(
-                "renaming {} -> {}",
-                tmp_path.display(),
-                path.display()
-            )
-        })?;
+        fs::rename(&tmp_path, path)
+            .with_context(|| format!("renaming {} -> {}", tmp_path.display(), path.display()))?;
 
         Ok(())
     }

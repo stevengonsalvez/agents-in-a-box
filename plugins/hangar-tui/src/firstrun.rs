@@ -90,7 +90,11 @@ pub fn ack_first_run(path: &Path) -> std::io::Result<()> {
     })?;
     table.insert(
         WARNINGS_KEY.to_string(),
-        toml::Value::Array(acks.iter().map(|a| toml::Value::String(a.clone())).collect()),
+        toml::Value::Array(
+            acks.iter()
+                .map(|a| toml::Value::String(a.clone()))
+                .collect(),
+        ),
     );
 
     let serialised = toml::to_string_pretty(&doc)
@@ -216,7 +220,11 @@ mod tests {
     fn other_keys_swallowed_while_showing() {
         for k in ['1', 'j', 'a', ',', '\n'] {
             let out = reduce_first_run(FirstRunModal::Showing, k);
-            assert_eq!(out.state, FirstRunModal::Showing, "key {k:?} must not dismiss");
+            assert_eq!(
+                out.state,
+                FirstRunModal::Showing,
+                "key {k:?} must not dismiss"
+            );
             assert_eq!(out.intent, None);
         }
     }
@@ -240,12 +248,18 @@ mod tests {
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(raw.contains("warnings_ack"));
         assert!(raw.contains("first_run"));
-        assert!(raw.contains("active_workspace"), "lost workspace key:\n{raw}");
+        assert!(
+            raw.contains("active_workspace"),
+            "lost workspace key:\n{raw}"
+        );
         assert!(raw.contains("[other]"), "lost foreign section:\n{raw}");
 
         // Idempotent + the recorded ack now suppresses the modal.
         ack_first_run(&path).unwrap();
         assert_eq!(read_acks(&path), vec![FIRST_RUN_KEY.to_string()]);
-        assert_eq!(FirstRunModal::from_acks(&read_acks(&path)), FirstRunModal::Dismissed);
+        assert_eq!(
+            FirstRunModal::from_acks(&read_acks(&path)),
+            FirstRunModal::Dismissed
+        );
     }
 }

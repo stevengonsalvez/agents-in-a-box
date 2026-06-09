@@ -14,8 +14,8 @@
 //! renderer) collapses the sidebar away entirely under narrow widths, so this
 //! widget assumes it has been given a usable column.
 
-use ainb_plugin_sdk::{Cell, Color, Coord, WireBuffer};
 use ainb_hangar_proto::events::IssueRow;
+use ainb_plugin_sdk::{Cell, Color, Coord, WireBuffer};
 
 /// Cornflower-blue label colour, matching the ainb-tui chrome accent.
 const LABEL: Color = Color::rgb(100, 149, 237);
@@ -121,7 +121,14 @@ mod tests {
     #[test]
     fn always_shown_rows_render() {
         let mut buf = WireBuffer::new(40, 8);
-        render_sidebar(&mut buf, 0, 0, 8, 40, &issue(None, Some("agent:claude-agent")));
+        render_sidebar(
+            &mut buf,
+            0,
+            0,
+            8,
+            40,
+            &issue(None, Some("agent:claude-agent")),
+        );
         assert!(row_text(&buf, 0, 40).contains("in_progress"));
         assert!(row_text(&buf, 1, 40).contains("agent:claude-agent"));
         assert!(row_text(&buf, 2, 40).contains("acme"));
@@ -148,7 +155,14 @@ mod tests {
     #[test]
     fn present_description_renders_notes_row() {
         let mut buf = WireBuffer::new(40, 8);
-        render_sidebar(&mut buf, 0, 0, 8, 40, &issue(Some("needs review"), Some("member:bob")));
+        render_sidebar(
+            &mut buf,
+            0,
+            0,
+            8,
+            40,
+            &issue(Some("needs review"), Some("member:bob")),
+        );
         assert!(row_text(&buf, 3, 40).contains("needs review"));
     }
 }

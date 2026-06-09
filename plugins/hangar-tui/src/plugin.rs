@@ -397,11 +397,9 @@ impl HangarPlugin {
         let Some(result) = &resp.result else {
             return;
         };
-        if let Ok(r) =
-            serde_json::from_value::<ainb_hangar_proto::snapshots::AutopilotRunsResult>(
-                result.clone(),
-            )
-        {
+        if let Ok(r) = serde_json::from_value::<ainb_hangar_proto::snapshots::AutopilotRunsResult>(
+            result.clone(),
+        ) {
             let event = crate::screen::autopilots::AutopilotsEvent::RunsLoaded {
                 autopilot_id,
                 runs: r.runs,
@@ -823,7 +821,10 @@ impl HangarPlugin {
 const fn routing_event(key: &ainb_plugin_sdk::KeyEvent, app: &AppState) -> Option<AppEvent> {
     match &key.code {
         KeyCode::Char { ch }
-            if matches!(*ch, '1' | '2' | '4' | '5' | 'K' | 'D' | 'L' | ',' | '?' | 'q') =>
+            if matches!(
+                *ch,
+                '1' | '2' | '4' | '5' | 'K' | 'D' | 'L' | ',' | '?' | 'q'
+            ) =>
         {
             Some(AppEvent::Key(*ch))
         }

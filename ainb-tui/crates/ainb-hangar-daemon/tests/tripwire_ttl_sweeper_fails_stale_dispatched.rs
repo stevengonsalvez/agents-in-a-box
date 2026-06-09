@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::{Row, SqlitePool};
-use tripwire_support::{daemon_bin, now_ms, seed_world, wait_for_db, DaemonSession};
+use tripwire_support::{DaemonSession, daemon_bin, now_ms, seed_world, wait_for_db};
 
 #[tokio::test]
 async fn ttl_sweeper_fails_stale_dispatched() {
@@ -83,9 +83,16 @@ async fn ttl_sweeper_fails_stale_dispatched() {
     drop(session);
 
     let status: String = row.get("status");
-    assert_eq!(status, "failed", "stale dispatch should be failed by the sweeper");
+    assert_eq!(
+        status, "failed",
+        "stale dispatch should be failed by the sweeper"
+    );
     let reason: Option<String> = row.get("failure_reason");
-    assert_eq!(reason.as_deref(), Some("timeout"), "failure_reason should be timeout");
+    assert_eq!(
+        reason.as_deref(),
+        Some("timeout"),
+        "failure_reason should be timeout"
+    );
 
     assert!(
         pane.contains("sweeper_stale_dispatched") || pane.contains("sweeper_swept"),
@@ -99,8 +106,5 @@ async fn open_pool(db_path: &std::path::Path) -> SqlitePool {
         .filename(db_path)
         .create_if_missing(true)
         .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
-    SqlitePoolOptions::new()
-        .connect_with(opts)
-        .await
-        .expect("open pool")
+    SqlitePoolOptions::new().connect_with(opts).await.expect("open pool")
 }

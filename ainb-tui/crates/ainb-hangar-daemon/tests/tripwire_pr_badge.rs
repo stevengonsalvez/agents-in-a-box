@@ -21,9 +21,7 @@ use std::time::{Duration, Instant};
 
 #[path = "tripwire_p4_common.rs"]
 mod common;
-use common::{
-    can_run_tripwire, prepare_pipeline, seed_completed_task_with_pr, skip, TuiSession,
-};
+use common::{TuiSession, can_run_tripwire, prepare_pipeline, seed_completed_task_with_pr, skip};
 
 /// The PR URL seeded onto the completed task — both the on-screen badge marker
 /// and the expected probe-file contents.
@@ -67,8 +65,14 @@ fn pr_badge_renders_and_o_opens_the_url() {
 
     // POSITIVE: the gold badge row carries the captured PR URL. NEGATIVE: the
     // issue-list status-group header is gone, so we genuinely left the list.
-    assert!(detail.contains(&format!("PR {PR_URL}")), "PR badge missing:\n{detail}");
-    assert!(!detail.contains("Todo (3)"), "still on the issue list:\n{detail}");
+    assert!(
+        detail.contains(&format!("PR {PR_URL}")),
+        "PR badge missing:\n{detail}"
+    );
+    assert!(
+        !detail.contains("Todo (3)"),
+        "still on the issue list:\n{detail}"
+    );
 
     // 2. Press `o` (single char, NO Enter) to open the PR. The recording opener
     //    writes the URL to the probe file.

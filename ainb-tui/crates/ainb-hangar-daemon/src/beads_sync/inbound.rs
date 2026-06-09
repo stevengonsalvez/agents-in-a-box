@@ -182,9 +182,7 @@ impl<'a> InboundSync<'a> {
         }
 
         IssueRepo::update_state(self.pool, &row.hangar_id, desired_state).await?;
-        self.mapping
-            .update_last_synced(&row.hangar_id, now)
-            .await?;
+        self.mapping.update_last_synced(&row.hangar_id, now).await?;
         tracing::info!(
             hangar_id = %row.hangar_id,
             bd_id = %bd_issue.id,
@@ -219,7 +217,7 @@ const fn hangar_state_for(status: &BdStatus) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{hangar_state_for, InboundSync, HANGAR_STATE_DONE, HANGAR_STATE_OPEN};
+    use super::{HANGAR_STATE_DONE, HANGAR_STATE_OPEN, InboundSync, hangar_state_for};
     use crate::beads_adapter::BdStatus;
 
     #[test]

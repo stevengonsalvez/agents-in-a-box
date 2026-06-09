@@ -10,12 +10,10 @@
 
 use ainb_hangar_core::clock::FixedClock;
 use ainb_hangar_core::idgen::FixedIdGen;
-use ainb_hangar_store::repo::token::{
-    mint_daemon_token, mint_pat, DaemonTokenRepo, PatRepo,
-};
 use ainb_hangar_store::Store;
-use rand::rngs::StdRng;
+use ainb_hangar_store::repo::token::{DaemonTokenRepo, PatRepo, mint_daemon_token, mint_pat};
 use rand::SeedableRng;
+use rand::rngs::StdRng;
 use sqlx::Row;
 
 const FIXED_NOW: i64 = 1_700_000_000_000;
@@ -165,18 +163,17 @@ async fn verify_accepts_minted_and_rejects_tampered() {
     let last = tampered.pop().expect("non-empty");
     tampered.push(if last == 'A' { 'B' } else { 'A' });
     assert!(
-        PatRepo::verify(store.pool(), &tampered)
-            .await
-            .expect("verify")
-            .is_none(),
+        PatRepo::verify(store.pool(), &tampered).await.expect("verify").is_none(),
         "tampered token must not verify"
     );
 
     // Unknown token entirely -> no match.
-    assert!(PatRepo::verify(store.pool(), "ainb_TOTALLYNOTAREALTOKEN")
-        .await
-        .expect("verify")
-        .is_none());
+    assert!(
+        PatRepo::verify(store.pool(), "ainb_TOTALLYNOTAREALTOKEN")
+            .await
+            .expect("verify")
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -199,10 +196,12 @@ async fn get_by_hash_finds_minted_pat() {
         .expect("row present");
     assert_eq!(found, record);
 
-    assert!(PatRepo::get_by_hash(store.pool(), &"f".repeat(64))
-        .await
-        .expect("lookup")
-        .is_none());
+    assert!(
+        PatRepo::get_by_hash(store.pool(), &"f".repeat(64))
+            .await
+            .expect("lookup")
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -219,13 +218,9 @@ async fn revoke_pat_removes_row_and_verify_returns_none() {
         .await
         .expect("mint pat");
 
-    assert!(PatRepo::revoke(store.pool(), &record.id)
-        .await
-        .expect("revoke"));
+    assert!(PatRepo::revoke(store.pool(), &record.id).await.expect("revoke"));
     // Second revoke is a no-op (already gone).
-    assert!(!PatRepo::revoke(store.pool(), &record.id)
-        .await
-        .expect("revoke"));
+    assert!(!PatRepo::revoke(store.pool(), &record.id).await.expect("revoke"));
 
     assert!(
         PatRepo::verify(store.pool(), &minted.plaintext)
@@ -252,9 +247,7 @@ async fn touch_last_used_stamps_timestamp() {
     assert_eq!(record.last_used, None);
 
     let later = FIXED_NOW + 60_000;
-    PatRepo::touch_last_used(store.pool(), &record.id, later)
-        .await
-        .expect("touch");
+    PatRepo::touch_last_used(store.pool(), &record.id, later).await.expect("touch");
 
     let refreshed = PatRepo::get_by_hash(store.pool(), &record.sha256_token)
         .await
@@ -280,9 +273,7 @@ async fn list_by_user_returns_only_owned_pats() {
         .await
         .expect("mint 2");
 
-    let listed = PatRepo::list_by_user(store.pool(), &user_id)
-        .await
-        .expect("list");
+    let listed = PatRepo::list_by_user(store.pool(), &user_id).await.expect("list");
     assert_eq!(listed.len(), 2);
     // The list must not carry a plaintext (the type has no such field — proven
     // structurally — but assert the digest is hex to confirm it is the hash).
@@ -290,10 +281,7 @@ async fn list_by_user_returns_only_owned_pats() {
         assert_eq!(rec.sha256_token.len(), 64);
     }
 
-    assert!(PatRepo::list_by_user(store.pool(), "nobody")
-        .await
-        .expect("list")
-        .is_empty());
+    assert!(PatRepo::list_by_user(store.pool(), "nobody").await.expect("list").is_empty());
 }
 
 #[tokio::test]
@@ -306,10 +294,9 @@ async fn mint_daemon_token_format_and_roundtrip() {
     let idgen = FixedIdGen::new(vec!["dt-1".into()]);
     let mut rng = seeded_rng();
 
-    let (record, minted) =
-        mint_daemon_token(store.pool(), &runtime_id, &clock, &idgen, &mut rng)
-            .await
-            .expect("mint daemon token");
+    let (record, minted) = mint_daemon_token(store.pool(), &runtime_id, &clock, &idgen, &mut rng)
+        .await
+        .expect("mint daemon token");
 
     assert!(minted.plaintext.starts_with("mdt_"));
     assert_eq!(record.sha256_token, minted.sha256_hex);
@@ -334,16 +321,15 @@ async fn revoke_daemon_token_removes_row() {
     let idgen = FixedIdGen::new(vec!["dt-1".into()]);
     let mut rng = seeded_rng();
 
-    let (record, minted) =
-        mint_daemon_token(store.pool(), &runtime_id, &clock, &idgen, &mut rng)
-            .await
-            .expect("mint daemon token");
+    let (record, minted) = mint_daemon_token(store.pool(), &runtime_id, &clock, &idgen, &mut rng)
+        .await
+        .expect("mint daemon token");
 
-    assert!(DaemonTokenRepo::revoke(store.pool(), &record.id)
-        .await
-        .expect("revoke"));
-    assert!(DaemonTokenRepo::verify(store.pool(), &minted.plaintext)
-        .await
-        .expect("verify")
-        .is_none());
+    assert!(DaemonTokenRepo::revoke(store.pool(), &record.id).await.expect("revoke"));
+    assert!(
+        DaemonTokenRepo::verify(store.pool(), &minted.plaintext)
+            .await
+            .expect("verify")
+            .is_none()
+    );
 }

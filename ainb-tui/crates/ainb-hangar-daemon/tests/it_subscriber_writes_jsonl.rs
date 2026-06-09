@@ -45,8 +45,8 @@ fn subscriber_writes_one_json_line_per_event() {
         let log_dir = home.join("hangar").join("logs");
         let log_file = find_log_file(&log_dir);
 
-        let contents = std::fs::read_to_string(&log_file)
-            .unwrap_or_else(|e| panic!("read {log_file:?}: {e}"));
+        let contents =
+            std::fs::read_to_string(&log_file).unwrap_or_else(|e| panic!("read {log_file:?}: {e}"));
 
         let boot_lines: Vec<serde_json::Value> = contents
             .lines()
@@ -55,7 +55,9 @@ fn subscriber_writes_one_json_line_per_event() {
                 serde_json::from_str::<serde_json::Value>(l)
                     .unwrap_or_else(|e| panic!("line is not valid JSON ({e}): {l:?}"))
             })
-            .filter(|v| v.pointer("/fields/task_id").and_then(serde_json::Value::as_str) == Some("t-1"))
+            .filter(|v| {
+                v.pointer("/fields/task_id").and_then(serde_json::Value::as_str) == Some("t-1")
+            })
             .collect();
 
         assert_eq!(

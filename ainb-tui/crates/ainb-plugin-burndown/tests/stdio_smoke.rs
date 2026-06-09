@@ -131,9 +131,7 @@ fn init_render_shutdown_round_trip() {
         "id": rev1_id,
         "result": {}
     });
-    stdin
-        .write_all(&encode(&rev1_reply))
-        .expect("write subscribe reply");
+    stdin.write_all(&encode(&rev1_reply)).expect("write subscribe reply");
     stdin.flush().expect("flush subscribe reply");
 
     let rev2 = read_frame(&mut stdout, deadline).expect("scan-progress subscribe");

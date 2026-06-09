@@ -295,8 +295,7 @@ async fn execute_claimed(
             // `TaskResult` serializer omits entirely — so the `result` JSON is
             // byte-identical to the pre-P9 shape and `pr_url` is NULL (no key),
             // never `""`.
-            let pr_url =
-                ainb_hangar_core::pr_url::parse_gh_pr_create_stdout(&result.stdout_tail);
+            let pr_url = ainb_hangar_core::pr_url::parse_gh_pr_create_stdout(&result.stdout_tail);
             if let Some(url) = pr_url.as_deref() {
                 tracing::info!(task_id = %task.id, pr_url = url, "captured gh pr url");
             }

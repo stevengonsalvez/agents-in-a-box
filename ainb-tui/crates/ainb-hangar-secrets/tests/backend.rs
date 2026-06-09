@@ -28,9 +28,7 @@ fn get_missing_returns_none() {
 #[test]
 fn put_then_get_roundtrips() {
     let backend = InMemoryBackend::new();
-    backend
-        .put(&Scope::Global, "k", b"v")
-        .expect("put must succeed");
+    backend.put(&Scope::Global, "k", b"v").expect("put must succeed");
     let got = backend.get(&Scope::Global, "k").expect("get must succeed");
     assert_eq!(
         got.expect("value present after put").as_bytes(),
@@ -43,12 +41,8 @@ fn put_then_get_roundtrips() {
 #[test]
 fn delete_then_get_returns_none() {
     let backend = InMemoryBackend::new();
-    backend
-        .put(&Scope::Global, "k", b"v")
-        .expect("put must succeed");
-    backend
-        .delete(&Scope::Global, "k")
-        .expect("delete must succeed");
+    backend.put(&Scope::Global, "k", b"v").expect("put must succeed");
+    backend.delete(&Scope::Global, "k").expect("delete must succeed");
     let got = backend.get(&Scope::Global, "k").expect("get must succeed");
     assert!(got.is_none(), "deleted key should be None, got {got:?}");
 }
@@ -60,12 +54,8 @@ fn scopes_are_isolated() {
     let alpha = ws("ws-alpha");
     let beta = ws("ws-beta");
 
-    backend
-        .put(&alpha, "anthropic_api_key", b"alpha-secret")
-        .expect("put alpha");
-    backend
-        .put(&beta, "anthropic_api_key", b"beta-secret")
-        .expect("put beta");
+    backend.put(&alpha, "anthropic_api_key", b"alpha-secret").expect("put alpha");
+    backend.put(&beta, "anthropic_api_key", b"beta-secret").expect("put beta");
 
     assert_eq!(
         backend
@@ -86,14 +76,8 @@ fn scopes_are_isolated() {
 
     // Deleting one scope's entry must leave the other intact.
     backend.delete(&alpha, "anthropic_api_key").expect("del alpha");
-    assert!(backend
-        .get(&alpha, "anthropic_api_key")
-        .expect("get alpha")
-        .is_none());
-    assert!(backend
-        .get(&beta, "anthropic_api_key")
-        .expect("get beta")
-        .is_some());
+    assert!(backend.get(&alpha, "anthropic_api_key").expect("get alpha").is_none());
+    assert!(backend.get(&beta, "anthropic_api_key").expect("get beta").is_some());
 
     // Global is a third, distinct scope sharing the same key name.
     backend

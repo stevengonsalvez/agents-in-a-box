@@ -25,6 +25,6 @@ pub mod sync_loop;
 pub use inbound::{InboundStats, InboundSync};
 pub use outbound::{MirrorOutcome, OutboundSync, SyncError};
 pub use reconcile::{
-    decide_winner, ConflictRecord, ConflictWinner, ReconcileOpts, ReconcileReport, ReconcileService,
+    ConflictRecord, ConflictWinner, ReconcileOpts, ReconcileReport, ReconcileService, decide_winner,
 };
 pub use sync_loop::run_inbound_loop;

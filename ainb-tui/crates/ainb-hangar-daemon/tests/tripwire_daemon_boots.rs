@@ -12,8 +12,8 @@
 use std::path::Path;
 use std::process::Command;
 
-use assert_cmd::prelude::*;
 use ainb_hangar_store::test_support::with_isolated_home;
+use assert_cmd::prelude::*;
 
 /// The 14 v1 tables every later phase plugs into. Order is the migration order;
 /// the assertion is set-membership, not order-sensitive.
@@ -103,8 +103,5 @@ fn table_names(db_path: &Path) -> Vec<String> {
         "sqlite3 query failed: {:?}",
         String::from_utf8_lossy(&output.stderr)
     );
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::to_string)
-        .collect()
+    String::from_utf8_lossy(&output.stdout).lines().map(str::to_string).collect()
 }

@@ -39,6 +39,10 @@ pub fn bd_init(home: &Path) -> PathBuf {
         .current_dir(home)
         .status()
         .expect("spawn bd init");
-    assert!(status.success(), "bd init failed in {}", beads_dir.display());
+    assert!(
+        status.success(),
+        "bd init failed in {}",
+        beads_dir.display()
+    );
     beads_dir
 }

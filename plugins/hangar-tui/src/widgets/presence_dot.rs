@@ -8,8 +8,8 @@
 //!
 //! Pure render — no state, no IO.
 
-use ainb_plugin_sdk::{Cell, Coord, WireBuffer};
 use ainb_hangar_proto::events::PresenceState;
+use ainb_plugin_sdk::{Cell, Coord, WireBuffer};
 
 pub use crate::widgets::actor_row::presence_dot;
 

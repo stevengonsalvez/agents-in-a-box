@@ -52,8 +52,8 @@ pub use types::{
 // Re-export wire types so callers don't need to depend on the protocol
 // crate directly. Single source of truth still lives in the protocol
 // crate — these are passthrough only.
-pub use ainb_plugin_protocol::wire_buffer::WireBuffer;
 pub use ainb_plugin_protocol::params::{
     HandleKeyParams, KEY_MOD_ALT, KEY_MOD_CTRL, KEY_MOD_SHIFT, KEY_MOD_SUPER, KeyCode, KeyEvent,
     KeyKind, Viewport,
 };
+pub use ainb_plugin_protocol::wire_buffer::WireBuffer;

@@ -276,15 +276,9 @@ async fn handle(
             // The mutating handler must not silently no-op on a typo'd workspace.
             let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
             let to = parse_task_status(&params.to_status)?;
-            snapshots::task_transition(
-                pool,
-                &SystemClock,
-                ws.as_str(),
-                &params.task_id,
-                to,
-            )
-            .await
-            .map_err(|e| store_err(&e))?;
+            snapshots::task_transition(pool, &SystemClock, ws.as_str(), &params.task_id, to)
+                .await
+                .map_err(|e| store_err(&e))?;
             // A foreign / unknown task id moves nothing; that is a no-op, not an
             // error (mirrors the autopilot fire-now foreign-id behaviour).
             Ok(serde_json::json!({}))
@@ -381,12 +375,10 @@ fn autopilot_id(raw: &str) -> Result<AutopilotId, RpcError> {
 /// `snake_case` [`TaskStatus`] variants.
 ///
 /// [`TaskStatus`]: ainb_hangar_core::task_status::TaskStatus
-fn parse_task_status(
-    raw: &str,
-) -> Result<ainb_hangar_core::task_status::TaskStatus, RpcError> {
-    serde_json::from_value::<ainb_hangar_core::task_status::TaskStatus>(
-        serde_json::Value::String(raw.to_string()),
-    )
+fn parse_task_status(raw: &str) -> Result<ainb_hangar_core::task_status::TaskStatus, RpcError> {
+    serde_json::from_value::<ainb_hangar_core::task_status::TaskStatus>(serde_json::Value::String(
+        raw.to_string(),
+    ))
     .map_err(|_| {
         invalid_params(&format!(
             "to_status must be one of queued/dispatched/running/done/failed/cancelled, got `{raw}`"
@@ -1157,7 +1149,10 @@ mod tests {
         // The board snapshot now reports the task in `done`.
         let tasks = snapshots::tasks_list(store.pool(), crate::seed::WS_ID).await.unwrap();
         let moved = tasks.iter().find(|t| t.id.as_str() == "task-1").unwrap();
-        assert_eq!(moved.status, "done", "transition must move the task to done");
+        assert_eq!(
+            moved.status, "done",
+            "transition must move the task to done"
+        );
     }
 
     /// A foreign workspace task-transition is rejected (`INVALID_PARAMS` on the
@@ -1198,7 +1193,10 @@ mod tests {
             &health(),
         )
         .await;
-        assert!(resp.error.is_none(), "foreign task id is a no-op, not an error");
+        assert!(
+            resp.error.is_none(),
+            "foreign task id is a no-op, not an error"
+        );
     }
 
     /// An illegal `to_status` token is rejected with `INVALID_PARAMS` before any
@@ -1249,8 +1247,7 @@ mod tests {
         )
         .await;
         assert!(resp.error.is_none(), "{resp:?}");
-        let snap: DaemonHealthSnapshot =
-            serde_json::from_value(resp.result.unwrap()).unwrap();
+        let snap: DaemonHealthSnapshot = serde_json::from_value(resp.result.unwrap()).unwrap();
 
         // The fixture seeds exactly one `running` task → concurrency 1.
         assert_eq!(snap.concurrent_tasks, 1);
@@ -1264,9 +1261,7 @@ mod tests {
         // The seeded second carries one completion + one failure somewhere in
         // the window.
         assert!(
-            snap.task_throughput_60s
-                .iter()
-                .any(|s| s.completed == 1 && s.failed == 1),
+            snap.task_throughput_60s.iter().any(|s| s.completed == 1 && s.failed == 1),
             "the seeded throughput second must appear in the window"
         );
     }
@@ -1291,8 +1286,7 @@ mod tests {
         )
         .await;
         assert!(resp.error.is_none());
-        let snap: DaemonHealthSnapshot =
-            serde_json::from_value(resp.result.unwrap()).unwrap();
+        let snap: DaemonHealthSnapshot = serde_json::from_value(resp.result.unwrap()).unwrap();
         assert!(snap.runtimes.is_empty());
         assert_eq!(snap.concurrent_tasks, 0);
         assert_eq!(snap.task_throughput_60s.len(), THROUGHPUT_WINDOW);

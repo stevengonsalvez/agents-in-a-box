@@ -16,7 +16,10 @@ pub struct ErrorPattern {
 
 lazy_static! {
     pub static ref API_ERROR_PATTERNS: Vec<ErrorPattern> = vec![
-        ErrorPattern { name: "rate_limited", re: Regex::new(r"(?i)\brate[_ ]limited\b").unwrap() },
+        ErrorPattern {
+            name: "rate_limited",
+            re: Regex::new(r"(?i)\brate[_ ]limited\b").unwrap()
+        },
         ErrorPattern {
             name: "overloaded",
             re: Regex::new(r"(?i)\boverloaded_error\b|\bModel is overloaded\b").unwrap(),
@@ -68,7 +71,11 @@ mod tests {
     fn matches_rate_limited() {
         let signals = detect_error_signals("API Error: rate_limited please retry", 0);
         // Both 'rate_limited' and 'fetch_failed' (matches "API Error") fire — that's OK.
-        assert!(signals.iter().any(|s| matches!(s, Signal::ApiError { pattern, .. } if pattern == "rate_limited")));
+        assert!(
+            signals.iter().any(
+                |s| matches!(s, Signal::ApiError { pattern, .. } if pattern == "rate_limited")
+            )
+        );
     }
 
     #[test]

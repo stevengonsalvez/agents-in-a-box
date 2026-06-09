@@ -508,19 +508,20 @@ impl<'a> ReconcileService<'a> {
 pub async fn dispatch(args: &cli::ReconcileArgs) -> anyhow::Result<()> {
     use ainb_hangar_core::clock::SystemClock;
 
-    let beads_dir = std::env::var_os("BEADS_DIR")
-        .filter(|p| !p.is_empty())
-        .ok_or_else(|| {
-            anyhow::anyhow!("BEADS_DIR is not set; export it to the beads root (required in a worktree)")
-        })?;
+    let beads_dir = std::env::var_os("BEADS_DIR").filter(|p| !p.is_empty()).ok_or_else(|| {
+        anyhow::anyhow!(
+            "BEADS_DIR is not set; export it to the beads root (required in a worktree)"
+        )
+    })?;
     let bd = BdClient::new("bd", std::path::PathBuf::from(beads_dir))?;
 
     let store = ainb_hangar_store::Store::open_default().await?;
     let pool = store.pool();
-    let workspace_id: String = sqlx::query_scalar("SELECT id FROM workspace ORDER BY created_at LIMIT 1")
-        .fetch_optional(pool)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("no workspace exists; create one before reconciling"))?;
+    let workspace_id: String =
+        sqlx::query_scalar("SELECT id FROM workspace ORDER BY created_at LIMIT 1")
+            .fetch_optional(pool)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("no workspace exists; create one before reconciling"))?;
 
     let mapping = BeadsMappingRepo::new(pool);
     let clock = SystemClock;

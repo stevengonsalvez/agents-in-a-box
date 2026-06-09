@@ -29,14 +29,14 @@
 
 use std::collections::HashMap;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::Mutex;
 use tokio::process::{Child as TokioChild, Command};
 
 use crate::error::RuntimeError;
-use crate::process::{install_leak_guard, signal_pgrp, SIGTERM};
+use crate::process::{SIGTERM, install_leak_guard, signal_pgrp};
 use crate::types::PluginId;
 
 /// Host-minted, opaque managed-subprocess handle.
@@ -173,14 +173,7 @@ impl ManagedSubprocessRegistry {
         let child = cmd.spawn().map_err(RuntimeError::Io)?;
         let pid = child.id().unwrap_or(0);
         let handle = self.ids.allocate();
-        self.inner.lock().insert(
-            handle.clone(),
-            ManagedChild {
-                plugin,
-                pid,
-                child,
-            },
-        );
+        self.inner.lock().insert(handle.clone(), ManagedChild { plugin, pid, child });
         Ok(SpawnedManaged { handle, pid })
     }
 
@@ -287,9 +280,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_registers_and_returns_handle_pid() {
         let reg = ManagedSubprocessRegistry::new();
-        let s = reg
-            .spawn(pid_id("p"), "sleep", &["30".into()], &[], None)
-            .expect("spawn sleep");
+        let s = reg.spawn(pid_id("p"), "sleep", &["30".into()], &[], None).expect("spawn sleep");
         assert!(!s.handle.is_empty());
         assert_ne!(s.pid, 0);
         assert_eq!(reg.len(), 1);
@@ -356,8 +347,14 @@ mod tests {
         }
         let out = cmd.output().await.expect("printenv");
         let text = String::from_utf8_lossy(&out.stdout);
-        assert!(text.contains("CTS_MANAGED_KEEP=keep-me"), "kept var missing: {text}");
-        assert!(!text.contains("CTS_MANAGED_DROP"), "dropped var leaked: {text}");
+        assert!(
+            text.contains("CTS_MANAGED_KEEP=keep-me"),
+            "kept var missing: {text}"
+        );
+        assert!(
+            !text.contains("CTS_MANAGED_DROP"),
+            "dropped var leaked: {text}"
+        );
         std::env::remove_var("CTS_MANAGED_KEEP");
         std::env::remove_var("CTS_MANAGED_DROP");
         let _ = reg.kill_all();

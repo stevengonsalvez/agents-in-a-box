@@ -27,7 +27,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use ainb_hangar_daemon::beads_adapter::{
-    fake_bd, BdClient, BdCreateArgs, BdError, BdId, BdListFilter, BdStatus,
+    BdClient, BdCreateArgs, BdError, BdId, BdListFilter, BdStatus, fake_bd,
 };
 use tempfile::TempDir;
 
@@ -97,7 +97,14 @@ fn test_bd_create_argv_round_trips_labels_and_assignee() {
     assert_eq!(
         argv,
         vec![
-            "--json", "create", "ship it", "-d", "d", "--labels", "foo,bar", "--assignee",
+            "--json",
+            "create",
+            "ship it",
+            "-d",
+            "d",
+            "--labels",
+            "foo,bar",
+            "--assignee",
             "stevie",
         ]
     );
@@ -149,9 +156,7 @@ fn test_bd_close_returns_closed_status() {
     );
     let client = client_with(bin, beads.path());
 
-    let issue = client
-        .close(&BdId::from("abc-123"), Some("done"))
-        .expect("close ok");
+    let issue = client.close(&BdId::from("abc-123"), Some("done")).expect("close ok");
 
     assert_eq!(issue.status, BdStatus::Closed);
 }
@@ -174,15 +179,10 @@ fn test_bd_close_argv_round_trips_reason() {
     );
     let client = client_with(bin, beads.path());
 
-    client
-        .close(&BdId::from("abc-123"), Some("done"))
-        .expect("close ok");
+    client.close(&BdId::from("abc-123"), Some("done")).expect("close ok");
 
     let argv = read_argv(&probe);
-    assert_eq!(
-        argv,
-        vec!["--json", "close", "abc-123", "--reason", "done"]
-    );
+    assert_eq!(argv, vec!["--json", "close", "abc-123", "--reason", "done"]);
 }
 
 #[test]
@@ -250,9 +250,7 @@ fn test_bd_show_not_found_maps_to_not_found_error() {
     );
     let client = client_with(bin, beads.path());
 
-    let err = client
-        .show(&BdId::from("missing"))
-        .expect_err("expected NotFound");
+    let err = client.show(&BdId::from("missing")).expect_err("expected NotFound");
     match err {
         BdError::NotFound(id) => assert_eq!(id, BdId::from("missing")),
         other => panic!("expected NotFound(missing), got {other:?}"),
@@ -295,9 +293,7 @@ fn test_bd_failure_nonzero_exit_returns_adapter_error() {
     );
     let client = client_with(bin, beads.path());
 
-    let err = client
-        .list(BdListFilter::default())
-        .expect_err("expected Cli error");
+    let err = client.list(BdListFilter::default()).expect_err("expected Cli error");
     match err {
         BdError::Cli { exit, stderr } => {
             assert_eq!(exit, Some(3));
@@ -312,8 +308,8 @@ fn test_bd_bin_missing_returns_bd_not_installed() {
     let beads = TempDir::new().expect("beads");
     let missing = PathBuf::from("/nonexistent/definitely/not/a/bd/binary");
 
-    let err = BdClient::new(missing, beads.path().to_path_buf())
-        .expect_err("expected BdNotInstalled");
+    let err =
+        BdClient::new(missing, beads.path().to_path_buf()).expect_err("expected BdNotInstalled");
     assert!(matches!(err, BdError::BdNotInstalled(_)), "got {err:?}");
 }
 

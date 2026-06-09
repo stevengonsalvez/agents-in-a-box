@@ -15,7 +15,7 @@ use ainb_hangar_core::task::state::TaskState;
 use serde::Serialize;
 use sqlx::SqlitePool;
 
-use super::finalize::{finalize_idempotent, FinalizeError, FinalizeOutcome};
+use super::finalize::{FinalizeError, FinalizeOutcome, finalize_idempotent};
 
 /// Why a task failed.
 ///

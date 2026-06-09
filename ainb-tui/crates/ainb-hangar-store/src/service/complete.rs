@@ -12,7 +12,7 @@ use ainb_hangar_core::task::state::TaskState;
 use serde_json::Value;
 use sqlx::SqlitePool;
 
-use super::finalize::{finalize_idempotent, FinalizeError, FinalizeOutcome};
+use super::finalize::{FinalizeError, FinalizeOutcome, finalize_idempotent};
 
 /// The successful-completion payload persisted onto the task row.
 #[derive(Debug, Clone)]

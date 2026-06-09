@@ -27,6 +27,7 @@ use std::sync::{Arc, Mutex};
 
 use ainb_hangar_core::clock::FixedClock;
 use ainb_hangar_core::ids::{AgentId, WorkspaceId};
+use ainb_hangar_store::Store;
 use ainb_hangar_store::repo::autopilot::{AutopilotRepo, NewAutopilot};
 use ainb_hangar_store::repo::task::{NewTask, TaskRepo};
 use ainb_hangar_store::service::cancel::CancelTaskService;
@@ -34,12 +35,11 @@ use ainb_hangar_store::service::claim::ClaimTaskService;
 use ainb_hangar_store::service::complete::{CompleteParams, CompleteTaskService};
 use ainb_hangar_store::service::fail::{FailTaskService, FailureReason};
 use ainb_hangar_store::service::start::StartTaskService;
-use ainb_hangar_store::Store;
 use tracing::field::{Field, Visit};
 use tracing::subscriber::set_default;
+use tracing_subscriber::Layer;
 use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::registry::LookupSpan;
-use tracing_subscriber::Layer;
 
 /// Fixed clock instant all tests fire at (epoch-ms, 2026-01-01T00:00:00Z).
 const T0: i64 = 1_767_225_600_000;
@@ -55,10 +55,7 @@ struct CapturedSpan {
 impl CapturedSpan {
     /// The recorded value of `key`, if the field was set.
     fn field(&self, key: &str) -> Option<&str> {
-        self.fields
-            .iter()
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| v.as_str())
+        self.fields.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
     }
 }
 
@@ -289,9 +286,7 @@ async fn store_fsm_and_autopilot_emit_named_spans_with_required_fields() {
         let claim_id = claimed.id.clone();
 
         // task.start — dispatched -> running.
-        StartTaskService::start(&pool, &claim_id, &clock)
-            .await
-            .expect("start");
+        StartTaskService::start(&pool, &claim_id, &clock).await.expect("start");
 
         // task.complete — running -> done, with an outcome.
         CompleteTaskService::complete(
@@ -313,9 +308,7 @@ async fn store_fsm_and_autopilot_emit_named_spans_with_required_fields() {
             .expect("fail");
 
         // task.cancel — queued -> cancelled.
-        CancelTaskService::cancel(&pool, &cancel_id, &clock)
-            .await
-            .expect("cancel");
+        CancelTaskService::cancel(&pool, &cancel_id, &clock).await.expect("cancel");
 
         // autopilot.tick — fire one tick.
         ainb_hangar_store::repo::autopilot_run::fire_autopilot_tick(&pool, &clock, &ap)
@@ -337,12 +330,24 @@ fn assert_spans(spans: &[CapturedSpan], autopilot_id: &str) {
         Some("task-complete"),
         "claim.task_id (the claimed row's id)"
     );
-    assert_eq!(claim.field("workspace_id"), Some("ws-1"), "claim.workspace_id");
+    assert_eq!(
+        claim.field("workspace_id"),
+        Some("ws-1"),
+        "claim.workspace_id"
+    );
 
     // task.start — task_id, workspace_id.
     let start = span_named(spans, "task.start");
-    assert_eq!(start.field("task_id"), Some("task-complete"), "start.task_id");
-    assert_eq!(start.field("workspace_id"), Some("ws-1"), "start.workspace_id");
+    assert_eq!(
+        start.field("task_id"),
+        Some("task-complete"),
+        "start.task_id"
+    );
+    assert_eq!(
+        start.field("workspace_id"),
+        Some("ws-1"),
+        "start.workspace_id"
+    );
 
     // task.complete — task_id, outcome.
     let complete = span_named(spans, "task.complete");
@@ -368,7 +373,11 @@ fn assert_spans(spans: &[CapturedSpan], autopilot_id: &str) {
 
     // task.cancel — task_id, cancel_source.
     let cancel = span_named(spans, "task.cancel");
-    assert_eq!(cancel.field("task_id"), Some("task-cancel"), "cancel.task_id");
+    assert_eq!(
+        cancel.field("task_id"),
+        Some("task-cancel"),
+        "cancel.task_id"
+    );
     assert!(
         cancel.field("cancel_source").is_some(),
         "cancel.cancel_source present: {cancel:#?}"

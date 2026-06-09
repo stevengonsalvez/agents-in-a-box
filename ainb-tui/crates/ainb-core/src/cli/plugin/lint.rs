@@ -32,7 +32,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use ainb_plugin_protocol::manifest::Manifest;
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
 
 use crate::cli::OutputFormat;
@@ -98,10 +98,7 @@ fn resolve_from_path(p: &Path, original: &str) -> Result<LintTarget> {
             .and_then(|s| s.to_str())
             .is_some_and(|s| s.eq_ignore_ascii_case("manifest.toml"))
     {
-        let dir = p
-            .parent()
-            .ok_or_else(|| anyhow!("manifest path has no parent"))?
-            .to_path_buf();
+        let dir = p.parent().ok_or_else(|| anyhow!("manifest path has no parent"))?.to_path_buf();
         return Ok(LintTarget {
             plugin_dir: dir,
             manifest_path: p.to_path_buf(),
@@ -119,10 +116,7 @@ fn resolve_from_id(id: &str) -> Result<LintTarget> {
         .ok_or_else(|| anyhow!("no plugin root discovered; set AINB_PLUGIN_ROOT"))?;
     let dir = root.join(id);
     if !dir.exists() {
-        bail!(
-            "plugin '{id}' not found under {}",
-            root.display()
-        );
+        bail!("plugin '{id}' not found under {}", root.display());
     }
     let manifest = dir.join("manifest.toml");
     if !manifest.exists() {
@@ -222,10 +216,9 @@ fn lint_target(t: &LintTarget) -> LintReport {
 }
 
 fn read_manifest(path: &Path) -> Result<Manifest> {
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("read {}", path.display()))?;
-    let manifest: Manifest = toml::from_str(&raw)
-        .with_context(|| format!("parse {} as Manifest v2", path.display()))?;
+    let raw = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let manifest: Manifest =
+        toml::from_str(&raw).with_context(|| format!("parse {} as Manifest v2", path.display()))?;
     Ok(manifest)
 }
 
@@ -238,20 +231,13 @@ fn check_abi_version(m: &Manifest, report: &mut LintReport) {
     } else {
         report.errors.push(Finding {
             check: "abi_version".into(),
-            detail: format!(
-                "abi_version={} — runtime requires 2",
-                m.plugin.abi_version
-            ),
+            detail: format!("abi_version={} — runtime requires 2", m.plugin.abi_version),
         });
     }
 }
 
 fn check_name_matches_dir(m: &Manifest, t: &LintTarget, report: &mut LintReport) {
-    let dir_name = t
-        .plugin_dir
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
+    let dir_name = t.plugin_dir.file_name().and_then(|s| s.to_str()).unwrap_or("");
     if dir_name.is_empty() {
         return;
     }
@@ -286,7 +272,8 @@ fn check_capabilities_coherent(m: &Manifest, report: &mut LintReport) {
             check: "capabilities".into(),
             detail: "read_claude_logs/read_codex_logs granted without read_sessions — \
                      log paths live under the sessions guard, the per-provider grant \
-                     has no effect on its own".into(),
+                     has no effect on its own"
+                .into(),
         });
     }
     report.successes.push(Finding {
@@ -442,10 +429,7 @@ fn emit_report(report: &LintReport, format: OutputFormat) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(report)?);
         }
         OutputFormat::Text | OutputFormat::Csv | OutputFormat::Markdown => {
-            let label = report
-                .plugin_name
-                .as_deref()
-                .unwrap_or(&report.input);
+            let label = report.plugin_name.as_deref().unwrap_or(&report.input);
             println!(
                 "lint: {label} ({} successes, {} warnings, {} errors)",
                 report.successes.len(),
@@ -535,10 +519,7 @@ description = "lint test fixture"
             report.errors
         );
         assert!(
-            report
-                .successes
-                .iter()
-                .any(|f| f.check == "manifest_parse"),
+            report.successes.iter().any(|f| f.check == "manifest_parse"),
             "manifest_parse should be among successes"
         );
     }
@@ -581,10 +562,7 @@ abi_version = 2
         });
         assert!(!report.is_clean());
         assert!(
-            report
-                .errors
-                .iter()
-                .any(|f| f.check == "name_matches_dir"),
+            report.errors.iter().any(|f| f.check == "name_matches_dir"),
             "expected name_matches_dir error: {:?}",
             report.errors
         );

@@ -13,7 +13,7 @@ use ainb_plugin_protocol::manifest::CapabilityGrant;
 use ainb_plugin_protocol::methods::ALL_METHODS;
 use ainb_plugin_protocol::params::{SecretStoreGetParams, SecretStoreGetResult};
 use ainb_plugin_runtime::secret_store::secret_store_get_logic;
-use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 
 /// A global-scope read of `key`.
 fn global_params(key: &str) -> SecretStoreGetParams {
@@ -32,9 +32,7 @@ fn plugin_without_capability_gets_32001() {
     let grant = CapabilityGrant::default();
     // Seed the backend so the ONLY thing that can deny is the cap gate.
     let backend = InMemoryBackend::new();
-    backend
-        .put(&Scope::Global, "anthropic_api_key", b"seeded")
-        .unwrap();
+    backend.put(&Scope::Global, "anthropic_api_key", b"seeded").unwrap();
 
     let err = secret_store_get_logic(&grant, &backend, &global_params("anthropic_api_key"))
         .expect_err("cap-omitted read must be denied");
@@ -51,9 +49,7 @@ fn plugin_without_capability_gets_32001() {
 fn plugin_with_capability_reads_existing_secret() {
     let secret = b"super-secret-token";
     let backend = InMemoryBackend::new();
-    backend
-        .put(&Scope::Global, "anthropic_api_key", secret)
-        .unwrap();
+    backend.put(&Scope::Global, "anthropic_api_key", secret).unwrap();
 
     // List-form grant whitelisting exactly this key.
     let grant = CapabilityGrant::List(vec!["anthropic_api_key".into()]);
@@ -64,7 +60,10 @@ fn plugin_with_capability_reads_existing_secret() {
 
     // The wire field is `value` (base64); decode and compare to the seed.
     let decoded = B64.decode(res.value.as_bytes()).expect("value must be base64");
-    assert_eq!(decoded, secret, "decoded secret must match the seeded bytes");
+    assert_eq!(
+        decoded, secret,
+        "decoded secret must match the seeded bytes"
+    );
 }
 
 /// RED 2b: a workspace-scoped read isolates by workspace — a secret seeded
@@ -72,9 +71,7 @@ fn plugin_with_capability_reads_existing_secret() {
 /// readable under the matching scope.
 #[test]
 fn plugin_reads_workspace_scoped_secret_with_isolation() {
-    let ws_a = Scope::Workspace(
-        ainb_hangar_core::ids::WorkspaceId::from_str("ws-aaa").unwrap(),
-    );
+    let ws_a = Scope::Workspace(ainb_hangar_core::ids::WorkspaceId::from_str("ws-aaa").unwrap());
     let backend = InMemoryBackend::new();
     backend.put(&ws_a, "anthropic_api_key", b"ws-a-secret").unwrap();
 

@@ -5,8 +5,8 @@
 //! `cargo test --test-threads=N` runs never leak state into each other or into
 //! the real `$HOME`. The shared `ENV_LOCK` mutex serialises the env mutation.
 
-use ainb_hangar_store::test_support::{lock_env, with_isolated_home, with_isolated_home_locked};
 use ainb_hangar_store::Store;
+use ainb_hangar_store::test_support::{lock_env, with_isolated_home, with_isolated_home_locked};
 
 #[test]
 fn home_helper_redirects_db_to_tempdir() {
@@ -14,10 +14,7 @@ fn home_helper_redirects_db_to_tempdir() {
     // before the open — capture that the redirect, not a stale file, is what we
     // observe. Also snapshot whether the real `$HOME/.ainb/hangar.db` exists so
     // the negative control can prove the open did not freshly create it.
-    let real_home_db = dirs::home_dir()
-        .expect("home dir")
-        .join(".ainb")
-        .join("hangar.db");
+    let real_home_db = dirs::home_dir().expect("home dir").join(".ainb").join("hangar.db");
     let real_home_db_existed_before = real_home_db.exists();
 
     with_isolated_home(|home| {
@@ -30,9 +27,7 @@ fn home_helper_redirects_db_to_tempdir() {
         // Build our own runtime inside the helper so the env override is held
         // for the whole async open.
         let rt = tokio::runtime::Runtime::new().expect("runtime");
-        let store = rt
-            .block_on(Store::open_default())
-            .expect("open default store");
+        let store = rt.block_on(Store::open_default()).expect("open default store");
 
         // Contract (P0.md:222 — the P0.7 daemon tripwire): when
         // `AINB_HANGAR_HOME` is set, it is the directory that DIRECTLY holds

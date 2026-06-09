@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 #[path = "tripwire_p4_common.rs"]
 mod common;
-use common::{can_run_tripwire, prepare_pipeline, skip, TuiSession};
+use common::{TuiSession, can_run_tripwire, prepare_pipeline, skip};
 
 #[test]
 fn issue_list_renders_seeded_issues() {
@@ -28,10 +28,19 @@ fn issue_list_renders_seeded_issues() {
     let (sess, landing) = TuiSession::launch_to_hangar(&bin, pipe.home());
 
     // POSITIVE: seeded title + status count. NEGATIVE: not an empty/loading state.
-    assert!(landing.contains("Refactor API"), "seeded issue missing:\n{landing}");
-    assert!(landing.contains("Todo (3)"), "Todo count missing:\n{landing}");
+    assert!(
+        landing.contains("Refactor API"),
+        "seeded issue missing:\n{landing}"
+    );
+    assert!(
+        landing.contains("Todo (3)"),
+        "Todo count missing:\n{landing}"
+    );
     assert!(!landing.contains("Loading"), "stuck on loading:\n{landing}");
-    assert!(!landing.contains("No issues"), "empty state shown:\n{landing}");
+    assert!(
+        !landing.contains("No issues"),
+        "empty state shown:\n{landing}"
+    );
 
     // Return navigation: leave to settings (`,`) then back to issue list (`1`).
     //
@@ -47,11 +56,19 @@ fn issue_list_renders_seeded_issues() {
             c.contains("Daemon") && c.contains("Providers")
         })
         .expect("settings never rendered on forward nav");
-    assert!(!settings.contains("Refactor API"), "issue list bled into settings:\n{settings}");
+    assert!(
+        !settings.contains("Refactor API"),
+        "issue list bled into settings:\n{settings}"
+    );
 
     sess.send_key("1");
     let back = sess
-        .poll_capture(Instant::now() + Duration::from_secs(10), |c| c.contains("Refactor API"))
+        .poll_capture(Instant::now() + Duration::from_secs(10), |c| {
+            c.contains("Refactor API")
+        })
         .expect("issue list never returned");
-    assert!(back.contains("Todo (3)"), "return nav lost the issue list:\n{back}");
+    assert!(
+        back.contains("Todo (3)"),
+        "return nav lost the issue list:\n{back}"
+    );
 }

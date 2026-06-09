@@ -4,7 +4,7 @@
 //! crash-on-startup hole behind, and that the discovery escape hatch
 //! (`AINB_DISABLE_PLUGINS`) still short-circuits.
 
-use ainb::plugins::{init_plugin_runtime, LoadOutcome};
+use ainb::plugins::{LoadOutcome, init_plugin_runtime};
 use std::sync::Mutex;
 
 /// Serialises process-env mutations across this file's tests so the
@@ -37,11 +37,7 @@ fn empty_root_brings_runtime_up_cleanly() {
     assert!(
         outcome.failed.is_empty(),
         "expected no failures when discovery returns empty; got {:?}",
-        outcome
-            .failed
-            .iter()
-            .map(|(n, e)| format!("{n}: {e}"))
-            .collect::<Vec<_>>()
+        outcome.failed.iter().map(|(n, e)| format!("{n}: {e}")).collect::<Vec<_>>()
     );
     assert!(
         handle.registered_plugins().is_empty(),
@@ -169,10 +165,7 @@ fn locate_dist_plugins() -> Option<std::path::PathBuf> {
     for _ in 0..6 {
         let candidate = dir.join("dist").join("plugins");
         if candidate.join("burndown").join("burndown").exists()
-            && candidate
-                .join("session-reader")
-                .join("session-reader")
-                .exists()
+            && candidate.join("session-reader").join("session-reader").exists()
         {
             return Some(candidate);
         }

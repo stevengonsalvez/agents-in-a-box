@@ -28,7 +28,7 @@ use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{Builder, Rotation};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::{fmt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt};
 
 /// The rolling appender's filename prefix. The daily rotation appends a
 /// `.<YYYY-MM-DD>` suffix, yielding `daemon.<date>` files under the log dir.
@@ -123,9 +123,7 @@ const OTLP_TRACER_NAME: &str = "ainb-hangar-daemon";
 fn build_otlp_layer<S>(
     otlp: Option<&OtlpOpts>,
 ) -> anyhow::Result<(
-    Option<
-        tracing_opentelemetry::OpenTelemetryLayer<S, opentelemetry_sdk::trace::SdkTracer>,
-    >,
+    Option<tracing_opentelemetry::OpenTelemetryLayer<S, opentelemetry_sdk::trace::SdkTracer>>,
     Option<opentelemetry_sdk::trace::SdkTracerProvider>,
 )>
 where

@@ -26,14 +26,14 @@
 
 use std::io::{BufReader, Write};
 
-use ainb_plugin_protocol::framing::{encode, MAX_BODY_BYTES};
+use ainb_plugin_protocol::framing::{MAX_BODY_BYTES, encode};
 use ainb_plugin_protocol::methods;
 use ainb_plugin_protocol::params::{
     ActionInvokeParams, ActionInvokeResult, CliDispatchResult, PluginInitResult, RenderResult,
     SnapshotPublishParams,
 };
 use ainb_plugin_protocol::wire_buffer::{Cell, Coord, WireBuffer};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 fn main() {
     let stdin = std::io::stdin();
@@ -61,10 +61,7 @@ fn main() {
             }
         };
         let id = v.get("id").and_then(serde_json::Value::as_u64);
-        let method = v
-            .get("method")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
+        let method = v.get("method").and_then(serde_json::Value::as_str).unwrap_or("");
         let params = v.get("params").cloned().unwrap_or(Value::Null);
 
         match method {
@@ -225,10 +222,7 @@ fn read_frame_sync<R: std::io::BufRead>(r: &mut R) -> std::io::Result<Option<Vec
         let trimmed = line.trim_end_matches("\r\n");
         if trimmed.is_empty() {
             let len = content_length.ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "missing Content-Length",
-                )
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "missing Content-Length")
             })?;
             if len > MAX_BODY_BYTES {
                 return Err(std::io::Error::new(
@@ -248,7 +242,10 @@ fn read_frame_sync<R: std::io::BufRead>(r: &mut R) -> std::io::Result<Option<Vec
         };
         if name.trim().eq_ignore_ascii_case("Content-Length") {
             let parsed: usize = value.trim().parse().map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, "non-numeric Content-Length")
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "non-numeric Content-Length",
+                )
             })?;
             content_length = Some(parsed);
         } else {

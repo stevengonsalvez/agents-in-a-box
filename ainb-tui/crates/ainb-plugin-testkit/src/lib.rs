@@ -69,7 +69,7 @@ pub mod error;
 pub mod harness;
 
 pub use error::{HarnessError, HarnessResult};
-pub use harness::{run_plugin, Harness, ObservedFrame};
+pub use harness::{Harness, ObservedFrame, run_plugin};
 
 // Re-export wire types from the protocol so test code only depends on
 // this crate. Mirrors the SDK's re-export surface so test authors don't

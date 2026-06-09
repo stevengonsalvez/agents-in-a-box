@@ -25,13 +25,22 @@ fn health() -> HealthSnapshot {
 
 fn providers() -> Vec<ProviderRow> {
     vec![
-        ProviderRow { name: "claude".into(), online: true },
-        ProviderRow { name: "codex".into(), online: false },
+        ProviderRow {
+            name: "claude".into(),
+            online: true,
+        },
+        ProviderRow {
+            name: "codex".into(),
+            online: false,
+        },
     ]
 }
 
 fn keys() -> Vec<KeyRow> {
-    vec![KeyRow { provider: "claude".into(), masked: "sk-…abcd".into() }]
+    vec![KeyRow {
+        provider: "claude".into(),
+        masked: "sk-…abcd".into(),
+    }]
 }
 
 fn workspaces() -> Vec<WorkspaceRow> {
@@ -105,7 +114,10 @@ fn key_entry_enter_emits_keychain_write_intent_with_masked_log() {
         Some(SettingsIntent::KeychainWrite { provider: _, key }) => {
             // The intent's loggable form must be masked, not the raw value.
             let logged = format!("{key:?}");
-            assert!(!logged.contains("sk-secret-value-1234"), "raw key leaked: {logged}");
+            assert!(
+                !logged.contains("sk-secret-value-1234"),
+                "raw key leaked: {logged}"
+            );
             assert!(logged.contains("REDACTED") || logged.contains("***") || logged.contains('…'));
             // But the real value is still retrievable for the actual keychain write.
             assert_eq!(key.expose(), "sk-secret-value-1234");
@@ -120,7 +132,10 @@ fn key_entry_enter_emits_keychain_write_intent_with_masked_log() {
 fn key_entry_value_never_appears_in_debug_repr() {
     let km = KeyMaterial::new("sk-super-secret-0000".to_string());
     let dbg = format!("{km:?}");
-    assert!(!dbg.contains("sk-super-secret-0000"), "Debug leaked key: {dbg}");
+    assert!(
+        !dbg.contains("sk-super-secret-0000"),
+        "Debug leaked key: {dbg}"
+    );
     // And it round-trips through expose for the real write.
     assert_eq!(km.expose(), "sk-super-secret-0000");
 }
@@ -134,7 +149,7 @@ fn s_sets_selected_workspace_active() {
     s = reduce_settings(&s, SettingsEvent::Key('j')).state;
     s = reduce_settings(&s, SettingsEvent::Key('j')).state;
     s = reduce_settings(&s, SettingsEvent::Key('j')).state; // Workspaces
-    // Select the non-current workspace (ws2) then press `s`.
+                                                            // Select the non-current workspace (ws2) then press `s`.
     s = reduce_settings(&s, SettingsEvent::Key('J')).state;
     let out = reduce_settings(&s, SettingsEvent::Key('s'));
     match out.intent {
@@ -176,9 +191,15 @@ fn d_n_r_emit_workspace_intents() {
 #[test]
 fn workspace_keys_inert_outside_workspace_pane() {
     let s = state(); // Daemon section
-    assert!(reduce_settings(&s, SettingsEvent::Key('s')).intent.is_none());
-    assert!(reduce_settings(&s, SettingsEvent::Key('d')).intent.is_none());
-    assert!(reduce_settings(&s, SettingsEvent::Key('r')).intent.is_none());
+    assert!(reduce_settings(&s, SettingsEvent::Key('s'))
+        .intent
+        .is_none());
+    assert!(reduce_settings(&s, SettingsEvent::Key('d'))
+        .intent
+        .is_none());
+    assert!(reduce_settings(&s, SettingsEvent::Key('r'))
+        .intent
+        .is_none());
 }
 
 /// A daemon-disconnected event flips the connection section status to red.
@@ -187,7 +208,10 @@ fn event_daemon_disconnected_flips_connection_section_status_to_red() {
     let s = state();
     assert_eq!(s.connection_status(), ConnectionStatus::Connected);
     let out = reduce_settings(&s, SettingsEvent::DaemonDisconnected);
-    assert_eq!(out.state.connection_status(), ConnectionStatus::Disconnected);
+    assert_eq!(
+        out.state.connection_status(),
+        ConnectionStatus::Disconnected
+    );
 }
 
 /// Esc aborts the key-entry modal without emitting an intent.

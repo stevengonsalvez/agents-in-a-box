@@ -29,8 +29,8 @@ use std::time::Duration;
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::{Row, SqlitePool};
 use tripwire_support::{
-    daemon_bin, fake_claude_runs_gh, fake_gh_pr_create, fake_gh_pr_create_fails, seed_world,
-    wait_for_db, DaemonSession,
+    DaemonSession, daemon_bin, fake_claude_runs_gh, fake_gh_pr_create, fake_gh_pr_create_fails,
+    seed_world, wait_for_db,
 };
 
 const FAKE_PR_URL: &str = "https://github.com/test/repo/pull/42";
@@ -133,7 +133,10 @@ async fn gh_failure_leaves_pr_url_null() {
     assert_eq!(status, "done", "task completes despite gh's non-zero exit");
 
     let captured: Option<String> = pr_url_of(&pool, task_id).await;
-    assert_eq!(captured, None, "no PR URL printed → result.pr_url is NULL (no key)");
+    assert_eq!(
+        captured, None,
+        "no PR URL printed → result.pr_url is NULL (no key)"
+    );
 
     // And the column must not be the empty string — explicit NULL/absent check.
     let raw: Option<String> = row.get("result");
@@ -187,8 +190,5 @@ async fn open_pool(db_path: &std::path::Path) -> SqlitePool {
         .filename(db_path)
         .create_if_missing(true)
         .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
-    SqlitePoolOptions::new()
-        .connect_with(opts)
-        .await
-        .expect("open pool")
+    SqlitePoolOptions::new().connect_with(opts).await.expect("open pool")
 }

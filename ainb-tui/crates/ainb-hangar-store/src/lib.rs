@@ -35,7 +35,9 @@ pub mod service;
 /// future finalizer) can reuse the exact same 0-row-UPDATE → re-read →
 /// success-or-mismatch algorithm the four P1.3 services share. Mirrors Multica
 /// `task.go:1010`.
-pub use service::finalize::{finalize_idempotent as idempotent_finalize, FinalizeError, FinalizeOutcome};
+pub use service::finalize::{
+    FinalizeError, FinalizeOutcome, finalize_idempotent as idempotent_finalize,
+};
 
 /// Test-only helpers (isolated `$HOME`, `ENV_LOCK`) for driving [`Store`].
 ///

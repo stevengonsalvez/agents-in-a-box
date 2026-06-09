@@ -65,7 +65,13 @@ fn wait_running(handle: &RuntimeHandle, id: &PluginId) {
     );
 }
 
-fn block_render(rt: &Runtime, handle: &RuntimeHandle, id: &PluginId, w: u16, h: u16) -> RenderOutcome {
+fn block_render(
+    rt: &Runtime,
+    handle: &RuntimeHandle,
+    id: &PluginId,
+    w: u16,
+    h: u16,
+) -> RenderOutcome {
     let rx = handle.render(id, Viewport::new(w, h), 0);
     rt.tokio_handle().block_on(async {
         tokio::time::timeout(Duration::from_secs(5), rx)
@@ -75,7 +81,13 @@ fn block_render(rt: &Runtime, handle: &RuntimeHandle, id: &PluginId, w: u16, h: 
     })
 }
 
-fn block_cli(rt: &Runtime, handle: &RuntimeHandle, id: &PluginId, ns: &str, argv: Vec<String>) -> CliOutcome {
+fn block_cli(
+    rt: &Runtime,
+    handle: &RuntimeHandle,
+    id: &PluginId,
+    ns: &str,
+    argv: Vec<String>,
+) -> CliOutcome {
     let rx = handle.dispatch_cli(id, ns, argv);
     rt.tokio_handle().block_on(async {
         tokio::time::timeout(Duration::from_secs(5), rx)
@@ -271,9 +283,9 @@ fn a08_action_invoke_timeout() {
     wait_running(&handle, &id);
 
     let rx = handle.dispatch_cli(&id, "a08", vec!["slow".into()]);
-    let result = rt.tokio_handle().block_on(async {
-        tokio::time::timeout(Duration::from_secs(3), rx).await
-    });
+    let result = rt
+        .tokio_handle()
+        .block_on(async { tokio::time::timeout(Duration::from_secs(3), rx).await });
     assert!(result.is_err(), "expected timeout but got a response");
 }
 
@@ -408,10 +420,7 @@ fn a13_quarantine() {
     handle.reload(&id).expect("reload");
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     while std::time::Instant::now() < deadline {
-        if matches!(
-            handle.lifecycle_state(&id),
-            Some(LifecycleState::Idle)
-        ) {
+        if matches!(handle.lifecycle_state(&id), Some(LifecycleState::Idle)) {
             return;
         }
         std::thread::sleep(Duration::from_millis(20));
@@ -450,7 +459,13 @@ fn a14_cli_dispatch_stdout_capture() {
 // =====================================================================
 
 /// Drive a CLI command and return trimmed stdout as a String.
-fn cli_stdout(rt: &Runtime, handle: &RuntimeHandle, id: &PluginId, ns: &str, argv: Vec<String>) -> String {
+fn cli_stdout(
+    rt: &Runtime,
+    handle: &RuntimeHandle,
+    id: &PluginId,
+    ns: &str,
+    argv: Vec<String>,
+) -> String {
     match block_cli(rt, handle, id, ns, argv) {
         CliOutcome::Ok(r) => String::from_utf8_lossy(&r.stdout).trim().to_string(),
         other => panic!("cli outcome: {other:?}"),
@@ -483,7 +498,10 @@ fn a15_event_stream_subscribe_delivery_and_cancel() {
 
     // Plugin subscribed during on_init; learn its unique topic.
     let topic = cli_stdout(&rt, &handle, &id, "a15", vec!["topic".into()]);
-    assert!(topic.starts_with("workspace:cts-canary-"), "unexpected topic: {topic}");
+    assert!(
+        topic.starts_with("workspace:cts-canary-"),
+        "unexpected topic: {topic}"
+    );
 
     // Publish 3 sentinel events; canary should log SENTINEL_RX_1..=3.
     for _ in 0..3 {
@@ -611,7 +629,13 @@ fn a16_spawn_managed_subprocess_cap_denied() {
     drop(block_render(&rt, &handle, &id, 1, 1));
     wait_running(&handle, &id);
 
-    let code = cli_stdout(&rt, &handle, &id, "a16", vec!["spawnerr".into(), "sleep".into()]);
+    let code = cli_stdout(
+        &rt,
+        &handle,
+        &id,
+        "a16",
+        vec!["spawnerr".into(), "sleep".into()],
+    );
     assert_eq!(
         code,
         ainb_plugin_protocol::errors::CAPABILITY_DENIED.to_string(),
@@ -629,7 +653,13 @@ fn a16_spawn_managed_subprocess_bin_not_whitelisted() {
     drop(block_render(&rt, &handle, &id, 1, 1));
     wait_running(&handle, &id);
 
-    let code = cli_stdout(&rt, &handle, &id, "a16", vec!["spawnerr".into(), "sh".into()]);
+    let code = cli_stdout(
+        &rt,
+        &handle,
+        &id,
+        "a16",
+        vec!["spawnerr".into(), "sh".into()],
+    );
     assert_eq!(
         code,
         ainb_plugin_protocol::errors::CAPABILITY_DENIED.to_string(),
@@ -652,7 +682,13 @@ fn a16_spawn_managed_subprocess_bool_true_rejected() {
     drop(block_render(&rt, &handle, &id, 1, 1));
     wait_running(&handle, &id);
 
-    let code = cli_stdout(&rt, &handle, &id, "a16", vec!["spawnerr".into(), "sleep".into()]);
+    let code = cli_stdout(
+        &rt,
+        &handle,
+        &id,
+        "a16",
+        vec!["spawnerr".into(), "sleep".into()],
+    );
     assert_eq!(
         code,
         ainb_plugin_protocol::errors::MANIFEST_VALIDATION.to_string(),
@@ -669,7 +705,11 @@ fn a16_spawn_managed_subprocess_env_allowlist_enforced() {
 
     let (rt, handle) = build_runtime();
     let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-a16-spawn-managed"));
-    let id = register(&rt, bin, a16_manifest("cts-a16-env", Some(vec!["sleep", "sh"])));
+    let id = register(
+        &rt,
+        bin,
+        a16_manifest("cts-a16-env", Some(vec!["sleep", "sh"])),
+    );
 
     drop(block_render(&rt, &handle, &id, 1, 1));
     wait_running(&handle, &id);
@@ -833,7 +873,10 @@ fn a17_unix_socket_dial_granted_bidirectional_and_sentinel() {
     );
 
     let rxbytes = cli_stdout(&rt, &handle, &id, "a17", vec!["rxbytes".into()]);
-    assert!(rxbytes.contains("HELLO"), "greeting not received: {rxbytes}");
+    assert!(
+        rxbytes.contains("HELLO"),
+        "greeting not received: {rxbytes}"
+    );
 
     // Write to the socket; the mock echoes back with an ECHO: prefix.
     let _ = cli_stdout(&rt, &handle, &id, "a17", vec!["send".into(), "ping".into()]);
@@ -928,8 +971,7 @@ fn a17_unix_socket_dial_bool_true_rejected() {
     // manifest validation with -32003 (MANIFEST_VALIDATION).
     let mut m = manifest("cts-a17-booltrue");
     m.provides.cli_namespaces = vec!["a17".into()];
-    m.capabilities.unix_socket_dial =
-        ainb_plugin_protocol::manifest::CapabilityGrant::Bool(true);
+    m.capabilities.unix_socket_dial = ainb_plugin_protocol::manifest::CapabilityGrant::Bool(true);
 
     let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-a17-unix-socket"));
     let id = register(&rt, bin, m);
@@ -1069,8 +1111,7 @@ fn a18_manifest(name: &str, grant: Option<Vec<String>>) -> Manifest {
     let mut m = manifest(name);
     m.provides.cli_namespaces = vec!["a18".into()];
     if let Some(keys) = grant {
-        m.capabilities.secrets_read =
-            ainb_plugin_protocol::manifest::CapabilityGrant::List(keys);
+        m.capabilities.secrets_read = ainb_plugin_protocol::manifest::CapabilityGrant::List(keys);
     }
     m
 }
@@ -1090,7 +1131,12 @@ fn a18_secret_store_get_cap_denied() {
         &handle,
         &id,
         "a18",
-        vec!["geterr".into(), "global".into(), "-".into(), "any_key".into()],
+        vec![
+            "geterr".into(),
+            "global".into(),
+            "-".into(),
+            "any_key".into(),
+        ],
     );
     assert_eq!(
         code,
@@ -1118,7 +1164,12 @@ fn a18_secret_store_get_key_not_whitelisted() {
         &handle,
         &id,
         "a18",
-        vec!["geterr".into(), "global".into(), "-".into(), "evil_key".into()],
+        vec![
+            "geterr".into(),
+            "global".into(),
+            "-".into(),
+            "evil_key".into(),
+        ],
     );
     assert_eq!(
         code,
@@ -1133,9 +1184,7 @@ fn a18_secret_store_get_key_not_whitelisted() {
 #[test]
 fn a18_secret_store_get_granted_reads_secret_and_sentinel() {
     let backend = Arc::new(InMemoryBackend::new());
-    backend
-        .put(&Scope::Global, "anthropic_api_key", b"super-secret-token")
-        .unwrap();
+    backend.put(&Scope::Global, "anthropic_api_key", b"super-secret-token").unwrap();
 
     let (rt, handle) = build_runtime_with_secret_backend(backend);
     let sentinels = handle.install_log_tap();
@@ -1154,7 +1203,12 @@ fn a18_secret_store_get_granted_reads_secret_and_sentinel() {
         &handle,
         &id,
         "a18",
-        vec!["get".into(), "global".into(), "-".into(), "anthropic_api_key".into()],
+        vec![
+            "get".into(),
+            "global".into(),
+            "-".into(),
+            "anthropic_api_key".into(),
+        ],
     );
     assert_eq!(out, "super-secret-token", "secret bytes mismatch: {out}");
 
@@ -1172,8 +1226,7 @@ fn a18_secret_store_get_granted_reads_secret_and_sentinel() {
 #[test]
 fn a18_secret_store_get_workspace_scope_isolation() {
     let backend = Arc::new(InMemoryBackend::new());
-    let ws_a =
-        Scope::Workspace(ainb_hangar_core::ids::WorkspaceId::from_str("ws-aaa").unwrap());
+    let ws_a = Scope::Workspace(ainb_hangar_core::ids::WorkspaceId::from_str("ws-aaa").unwrap());
     backend.put(&ws_a, "anthropic_api_key", b"ws-a-secret").unwrap();
 
     let (rt, handle) = build_runtime_with_secret_backend(backend);
@@ -1200,7 +1253,10 @@ fn a18_secret_store_get_workspace_scope_isolation() {
             "anthropic_api_key".into(),
         ],
     );
-    assert_eq!(out, "ws-a-secret", "matching workspace must read the secret");
+    assert_eq!(
+        out, "ws-a-secret",
+        "matching workspace must read the secret"
+    );
 
     // A different workspace must NOT see it.
     let code = cli_stdout(
@@ -1232,8 +1288,7 @@ fn a18_secret_store_get_bool_true_grants_any_key() {
     let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-a18-secret-store"));
     let mut m = manifest("cts-a18-bool");
     m.provides.cli_namespaces = vec!["a18".into()];
-    m.capabilities.secrets_read =
-        ainb_plugin_protocol::manifest::CapabilityGrant::Bool(true);
+    m.capabilities.secrets_read = ainb_plugin_protocol::manifest::CapabilityGrant::Bool(true);
     let id = register(&rt, bin, m);
 
     drop(block_render(&rt, &handle, &id, 1, 1));
@@ -1244,7 +1299,12 @@ fn a18_secret_store_get_bool_true_grants_any_key() {
         &handle,
         &id,
         "a18",
-        vec!["geterr".into(), "global".into(), "-".into(), "any_key".into()],
+        vec![
+            "geterr".into(),
+            "global".into(),
+            "-".into(),
+            "any_key".into(),
+        ],
     );
     assert_eq!(code, "0", "bool-true grant must read any key: {code}");
 }
@@ -1270,7 +1330,12 @@ fn a18_secret_store_get_not_found() {
         &handle,
         &id,
         "a18",
-        vec!["geterr".into(), "global".into(), "-".into(), "openai_api_key".into()],
+        vec![
+            "geterr".into(),
+            "global".into(),
+            "-".into(),
+            "openai_api_key".into(),
+        ],
     );
     assert_eq!(
         code,

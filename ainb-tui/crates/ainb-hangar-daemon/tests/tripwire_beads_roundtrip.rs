@@ -40,9 +40,9 @@ use ainb_hangar_core::clock::FixedClock;
 use ainb_hangar_daemon::beads_adapter::{BdClient, BdId, BdListFilter};
 use ainb_hangar_daemon::beads_sync::inbound::{InboundSync, SYNC_LABEL};
 use ainb_hangar_daemon::beads_sync::outbound::{MirrorOutcome, OutboundSync};
+use ainb_hangar_store::Store;
 use ainb_hangar_store::repo::beads_mapping::{BeadsMappingRepo, MappingSource};
 use ainb_hangar_store::repo::issue::{Issue, IssueRepo, NewIssue};
-use ainb_hangar_store::Store;
 
 mod common;
 use common::{bd_available, bd_init};
@@ -78,9 +78,7 @@ async fn seed_issue(store: &Store) -> Issue {
         creator: ActorRef::new(ActorKind::Member, "stevie").expect("actor"),
         created_at: T0_MS,
     };
-    IssueRepo::insert(store.pool(), &new)
-        .await
-        .expect("insert issue");
+    IssueRepo::insert(store.pool(), &new).await.expect("insert issue");
     IssueRepo::get_by_id(store.pool(), HANGAR_ID)
         .await
         .expect("get issue")
@@ -178,7 +176,10 @@ async fn tripwire_beads_roundtrip() {
         .expect("query mapping")
         .expect("mapping row present");
     assert_eq!(final_row.hangar_id, HANGAR_ID);
-    assert_eq!(final_row.bd_id, row.bd_id, "bd id stable across the round-trip");
+    assert_eq!(
+        final_row.bd_id, row.bd_id,
+        "bd id stable across the round-trip"
+    );
     assert_eq!(
         final_row.last_synced,
         Utc.timestamp_millis_opt(T0_MS).single().expect("ts"),

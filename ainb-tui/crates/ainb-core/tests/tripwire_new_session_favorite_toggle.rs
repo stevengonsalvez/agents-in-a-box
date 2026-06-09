@@ -5,7 +5,6 @@
 //!
 //! Phase 4 of `plans/new-session-redesign-spec.md`.
 
-
 #[allow(dead_code)]
 mod tripwire_new_session_common;
 use tripwire_new_session_common::*;
@@ -55,16 +54,7 @@ fn ctrl_f_toggles_favorite_on_and_off() {
     let ainb = ainb_bin();
 
     Command::new("tmux")
-        .args([
-            "new-session",
-            "-d",
-            "-s",
-            &session,
-            "-x",
-            "180",
-            "-y",
-            "50",
-        ])
+        .args(["new-session", "-d", "-s", &session, "-x", "180", "-y", "50"])
         .status()
         .expect("tmux new-session");
 
@@ -112,9 +102,9 @@ fn ctrl_f_toggles_favorite_on_and_off() {
     // Negative pre-check: NO star next to my-recent-repo before ^F.
     // The recents row marker is ⌚ (U+231A); we accept either the row
     // line still containing ⌚ OR simply the absence of ★ on the row.
-    let line_has_star_pre = pre_cap.lines().any(|line| {
-        line.contains("my-recent-repo") && line.contains('\u{2605}')
-    });
+    let line_has_star_pre = pre_cap
+        .lines()
+        .any(|line| line.contains("my-recent-repo") && line.contains('\u{2605}'));
     assert!(
         !line_has_star_pre,
         "star marker present BEFORE ^F — fixture wrong:\n---\n{pre_cap}\n---"

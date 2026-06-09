@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 #[path = "tripwire_p4_common.rs"]
 mod common;
-use common::{can_run_tripwire, prepare_pipeline, skip, TuiSession};
+use common::{TuiSession, can_run_tripwire, prepare_pipeline, skip};
 
 #[test]
 fn agent_picker_opens_with_actors() {
@@ -37,16 +37,33 @@ fn agent_picker_opens_with_actors() {
         .expect("agent picker never opened");
 
     // POSITIVE: actor + presence + agent glyph + modal title.
-    assert!(picker.contains("claude-agent"), "agent actor missing:\n{picker}");
-    assert!(picker.contains("online"), "presence label missing:\n{picker}");
-    assert!(picker.contains('⬡'), "violet agent glyph missing:\n{picker}");
-    assert!(picker.contains("Pick assignee"), "modal title missing:\n{picker}");
+    assert!(
+        picker.contains("claude-agent"),
+        "agent actor missing:\n{picker}"
+    );
+    assert!(
+        picker.contains("online"),
+        "presence label missing:\n{picker}"
+    );
+    assert!(
+        picker.contains('⬡'),
+        "violet agent glyph missing:\n{picker}"
+    );
+    assert!(
+        picker.contains("Pick assignee"),
+        "modal title missing:\n{picker}"
+    );
 
     // Return leg: Esc leaves the modal (host pops the screen). The picker title
     // must be gone — proving the `a` open round-tripped rather than wedging.
     sess.send_key("Escape");
     let post_esc = sess
-        .poll_capture(Instant::now() + Duration::from_secs(10), |c| !c.contains("Pick assignee"))
+        .poll_capture(Instant::now() + Duration::from_secs(10), |c| {
+            !c.contains("Pick assignee")
+        })
         .expect("modal never closed");
-    assert!(!post_esc.contains("Pick assignee"), "picker modal lingered:\n{post_esc}");
+    assert!(
+        !post_esc.contains("Pick assignee"),
+        "picker modal lingered:\n{post_esc}"
+    );
 }

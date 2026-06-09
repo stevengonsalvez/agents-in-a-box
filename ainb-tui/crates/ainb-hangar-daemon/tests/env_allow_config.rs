@@ -33,25 +33,23 @@ fn cli_add_writes_atomically_and_roundtrips_toml() {
     let mut expected: BTreeSet<String> = BTreeSet::new();
     expected.insert("FOO_BAR".to_string());
     expected.insert("BAZ_QUX".to_string());
-    assert_eq!(reloaded.allow, expected, "allow set round-trips with the add");
+    assert_eq!(
+        reloaded.allow, expected,
+        "allow set round-trips with the add"
+    );
 
     // Foreign-section preservation: the raw document still carries
     // `[other_plugin]` with its original contents.
     let raw = std::fs::read_to_string(&path).expect("read raw");
     let doc: toml::Value = toml::from_str(&raw).expect("parse raw");
-    let other = doc
-        .get("other_plugin")
-        .expect("[other_plugin] section survived the save");
+    let other = doc.get("other_plugin").expect("[other_plugin] section survived the save");
     assert_eq!(
         other.get("keep").and_then(toml::Value::as_str),
         Some("me"),
         "foreign scalar preserved"
     );
     assert_eq!(
-        other
-            .get("nested")
-            .and_then(|n| n.get("a"))
-            .and_then(toml::Value::as_integer),
+        other.get("nested").and_then(|n| n.get("a")).and_then(toml::Value::as_integer),
         Some(1),
         "foreign nested table preserved"
     );

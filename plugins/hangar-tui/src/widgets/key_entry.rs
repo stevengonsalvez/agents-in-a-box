@@ -49,7 +49,14 @@ pub fn render_key_entry_modal(buf: &mut WireBuffer, area_w: u16, area_h: u16, ma
     let field_w = modal_w.saturating_sub(4) as usize;
     let mask: String = std::iter::repeat_n('*', masked_len.min(field_w)).collect();
     put_str(buf, x0 + 2, y0 + 2, &mask, TEXT, x1);
-    put_str(buf, x0 + 2, y1 - 1, "Tab reveal · Enter save · Esc cancel", HINT, x1);
+    put_str(
+        buf,
+        x0 + 2,
+        y1 - 1,
+        "Tab reveal · Enter save · Esc cancel",
+        HINT,
+        x1,
+    );
 }
 
 /// Write `s` at `(x, row)` in `color`, clipping at column `right` (exclusive).
@@ -82,11 +89,7 @@ mod tests {
     fn renders_mask_chars_only() {
         let mut buf = WireBuffer::new(80, 24);
         render_key_entry_modal(&mut buf, 80, 24, 5);
-        let stars = buf
-            .cells
-            .iter()
-            .filter(|(_, c)| c.symbol == "*")
-            .count();
+        let stars = buf.cells.iter().filter(|(_, c)| c.symbol == "*").count();
         assert_eq!(stars, 5);
     }
 }

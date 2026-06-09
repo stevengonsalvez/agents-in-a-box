@@ -23,13 +23,13 @@ pub mod claim;
 /// [`crate::idempotent_finalize`] so the P1.4 retry sweeper can reuse it.
 pub mod finalize;
 
-/// `dispatched -> running`.
-pub mod start;
+/// `{queued|dispatched|running} -> cancelled`.
+pub mod cancel;
 /// `running -> done` with the structured result payload.
 pub mod complete;
 /// `{running|queued} -> failed` with a typed [`fail::FailureReason`].
 pub mod fail;
-/// `{queued|dispatched|running} -> cancelled`.
-pub mod cancel;
 /// Spawn a `parent_task_id`-chained child row for a retryable failed task.
 pub mod retry;
+/// `dispatched -> running`.
+pub mod start;

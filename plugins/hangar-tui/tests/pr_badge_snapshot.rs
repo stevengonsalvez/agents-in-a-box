@@ -105,14 +105,22 @@ fn pr_badge_renders_at_60_cols() {
 #[test]
 fn pr_badge_truncates_long_url_on_char_boundary() {
     // A deliberately long URL with a multi-byte char near the clip point.
-    let s = state(Some("https://example.com/pull/привет-very-long-branch-name-here-1234567890"));
+    let s = state(Some(
+        "https://example.com/pull/привет-very-long-branch-name-here-1234567890",
+    ));
     let mut buf = WireBuffer::new(40, 8);
     // Should not panic; the row is clipped to the 40-col width.
     render_task_detail(&mut buf, 40, 0, 8, &s);
     let line0 = badge_row(&buf, 40);
-    assert!(line0.starts_with("▶ PR https://example.com/pull/"), "got: {line0}");
+    assert!(
+        line0.starts_with("▶ PR https://example.com/pull/"),
+        "got: {line0}"
+    );
     // Clipped to the pane width by chars (≤ 40 glyphs), never split mid-codepoint.
-    assert!(line0.chars().count() <= 40, "badge row exceeded pane width: {line0}");
+    assert!(
+        line0.chars().count() <= 40,
+        "badge row exceeded pane width: {line0}"
+    );
 }
 
 /// No PR URL → NO badge row at all (the snapshot delta is a removed line, not a
@@ -123,6 +131,12 @@ fn no_pr_url_renders_no_badge_row() {
     let mut buf = WireBuffer::new(100, 8);
     render_task_detail(&mut buf, 100, 0, 8, &s);
     let map = glyph_map(&buf, 100);
-    assert!(!map.contains("PR "), "no-PR task must not render a PR badge: {map:?}");
-    assert!(!map.contains("[o] open"), "no-PR task must not render the open hint: {map:?}");
+    assert!(
+        !map.contains("PR "),
+        "no-PR task must not render a PR badge: {map:?}"
+    );
+    assert!(
+        !map.contains("[o] open"),
+        "no-PR task must not render the open hint: {map:?}"
+    );
 }

@@ -17,10 +17,7 @@ use ainb_hangar_core::env_policy::EnvPolicy;
 use ainb_hangar_daemon::dispatch::build_task_env;
 
 fn env(pairs: &[(&str, &str)]) -> HashMap<String, String> {
-    pairs
-        .iter()
-        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
-        .collect()
+    pairs.iter().map(|(k, v)| ((*k).to_string(), (*v).to_string())).collect()
 }
 
 #[test]

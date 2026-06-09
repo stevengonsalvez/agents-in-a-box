@@ -51,7 +51,10 @@ impl HangarBeadsCli {
 /// Derives [`Parser`] (standalone parse + `try_parse_from`) which also provides
 /// the [`Args`] impl letting it nest as the [`BeadsSubgroup::Beads`] payload.
 #[derive(Parser, Debug)]
-#[command(name = "beads", about = "Sync Hangar issues with the beads (bd) tracker")]
+#[command(
+    name = "beads",
+    about = "Sync Hangar issues with the beads (bd) tracker"
+)]
 pub struct BeadsCli {
     /// Which beads subcommand to run.
     #[command(subcommand)]

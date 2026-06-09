@@ -77,7 +77,10 @@ fn reduce_esc(state: &AppState) -> Reduction {
 /// [`AppState::prior_screen`] so Esc can restore it. Re-opening a modal from
 /// *within* a modal does not bury the real prior screen.
 fn open_modal(state: &AppState, modal: Screen) -> Reduction {
-    debug_assert!(modal.is_modal(), "open_modal called with a non-modal screen");
+    debug_assert!(
+        modal.is_modal(),
+        "open_modal called with a non-modal screen"
+    );
     let mut next = state.clone();
     if !state.screen.is_modal() {
         next.prior_screen = Some(state.screen.clone());

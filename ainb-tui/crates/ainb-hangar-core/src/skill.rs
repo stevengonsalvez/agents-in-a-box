@@ -164,10 +164,22 @@ mod tests {
 
     #[test]
     fn name_normalises_to_kebab_case() {
-        assert_eq!(SkillName::new("Code Reviewer").unwrap().as_str(), "code-reviewer");
-        assert_eq!(SkillName::new("code_reviewer").unwrap().as_str(), "code-reviewer");
-        assert_eq!(SkillName::new("CODE-REVIEWER").unwrap().as_str(), "code-reviewer");
-        assert_eq!(SkillName::new("find  missing   tests").unwrap().as_str(), "find-missing-tests");
+        assert_eq!(
+            SkillName::new("Code Reviewer").unwrap().as_str(),
+            "code-reviewer"
+        );
+        assert_eq!(
+            SkillName::new("code_reviewer").unwrap().as_str(),
+            "code-reviewer"
+        );
+        assert_eq!(
+            SkillName::new("CODE-REVIEWER").unwrap().as_str(),
+            "code-reviewer"
+        );
+        assert_eq!(
+            SkillName::new("find  missing   tests").unwrap().as_str(),
+            "find-missing-tests"
+        );
         assert_eq!(SkillName::new("  --commit--  ").unwrap().as_str(), "commit");
     }
 

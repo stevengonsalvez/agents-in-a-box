@@ -95,7 +95,10 @@ async fn cli_autopilot_create_list_disable_run() {
         ],
     );
     assert!(ok, "autopilot create should exit 0; out={out}");
-    assert!(out.contains("created autopilot"), "missing create ack:\n{out}");
+    assert!(
+        out.contains("created autopilot"),
+        "missing create ack:\n{out}"
+    );
     // Pull the minted autopilot id: "created autopilot <id> `smoke` ...".
     let id = out
         .split_whitespace()
@@ -108,7 +111,10 @@ async fn cli_autopilot_create_list_disable_run() {
     assert!(ok, "autopilot list should exit 0; out={out}");
     assert!(out.contains("smoke"), "list missing name:\n{out}");
     assert!(out.contains("0 9 * * *"), "list missing cron:\n{out}");
-    assert!(out.contains("enabled"), "list missing enabled badge:\n{out}");
+    assert!(
+        out.contains("enabled"),
+        "list missing enabled badge:\n{out}"
+    );
 
     // disable — then list shows the disabled badge.
     let (ok, out) = run(tmp.path(), &["hangar", "autopilot", "disable", &id]);
@@ -116,7 +122,10 @@ async fn cli_autopilot_create_list_disable_run() {
 
     let (ok, out) = run(tmp.path(), &["hangar", "autopilot", "list"]);
     assert!(ok, "autopilot list (post-disable) should exit 0; out={out}");
-    assert!(out.contains("disabled"), "list missing disabled badge:\n{out}");
+    assert!(
+        out.contains("disabled"),
+        "list missing disabled badge:\n{out}"
+    );
 
     // run — fires a task immediately (manual run, bypassing the schedule).
     let (ok, out) = run(tmp.path(), &["hangar", "autopilot", "run", &id]);
@@ -134,7 +143,10 @@ async fn cli_autopilot_create_list_disable_run() {
         .fetch_one(store.pool())
         .await
         .expect("count runs");
-    assert_eq!(run_count, 1, "manual run must create exactly one autopilot_run");
+    assert_eq!(
+        run_count, 1,
+        "manual run must create exactly one autopilot_run"
+    );
 }
 
 #[tokio::test]

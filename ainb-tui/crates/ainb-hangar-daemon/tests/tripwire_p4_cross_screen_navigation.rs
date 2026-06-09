@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 #[path = "tripwire_p4_common.rs"]
 mod common;
-use common::{can_run_tripwire, prepare_pipeline, skip, TuiSession};
+use common::{TuiSession, can_run_tripwire, prepare_pipeline, skip};
 
 /// Poll for a screen identified by a positive marker that must be absent of the
 /// `forbidden` prior-screen marker.
@@ -41,7 +41,10 @@ fn cross_screen_navigation_walks_tabs() {
     // 1 → issue list (positive: seeded issue; forbidden: skills chip `Unused`).
     sess.send_key("1");
     let issues = expect_screen(&sess, "Refactor API", "Unused");
-    assert!(issues.contains("Todo (3)"), "issue counts missing:\n{issues}");
+    assert!(
+        issues.contains("Todo (3)"),
+        "issue counts missing:\n{issues}"
+    );
 
     // 4 → skills (positive: seeded skill; forbidden: issue count).
     sess.send_key("4");
@@ -51,10 +54,16 @@ fn cross_screen_navigation_walks_tabs() {
     // , → settings (positive: Daemon; forbidden: skills chip `Unused`).
     sess.send_key(",");
     let settings = expect_screen(&sess, "Daemon", "Unused");
-    assert!(settings.contains("Providers"), "settings sections missing:\n{settings}");
+    assert!(
+        settings.contains("Providers"),
+        "settings sections missing:\n{settings}"
+    );
 
     // Return all the way back to issue list (forbidding settings chrome).
     sess.send_key("1");
     let back = expect_screen(&sess, "Refactor API", "Providers");
-    assert!(back.contains("Todo (3)"), "return nav lost the issue list:\n{back}");
+    assert!(
+        back.contains("Todo (3)"),
+        "return nav lost the issue list:\n{back}"
+    );
 }

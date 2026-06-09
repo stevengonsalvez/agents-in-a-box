@@ -50,10 +50,7 @@ fn plugins_staged() -> Option<PathBuf> {
     for _ in 0..6 {
         let candidate = dir.join("dist").join("plugins");
         if candidate.join("burndown").join("burndown").exists()
-            && candidate
-                .join("session-reader")
-                .join("session-reader")
-                .exists()
+            && candidate.join("session-reader").join("session-reader").exists()
         {
             return Some(candidate);
         }
@@ -80,18 +77,11 @@ git_directories = []
     // non-empty usage data. Empty roots are also valid (the plugin
     // still emits a format-correct skeleton) but populated data
     // exercises the same renderer path the user runs daily.
-    let proj_dir = home
-        .join(".claude")
-        .join("projects")
-        .join("-tripwire-fixture-project");
+    let proj_dir = home.join(".claude").join("projects").join("-tripwire-fixture-project");
     fs::create_dir_all(&proj_dir).unwrap();
     let session_jsonl = r#"{"type":"assistant","timestamp":"2026-05-10T12:00:00.000Z","sessionId":"fixture-session-1","cwd":"/tmp/x","message":{"model":"claude-sonnet-4-5","usage":{"input_tokens":1000,"output_tokens":500,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}
 "#;
-    fs::write(
-        proj_dir.join("fixture-session-1.jsonl"),
-        session_jsonl,
-    )
-    .unwrap();
+    fs::write(proj_dir.join("fixture-session-1.jsonl"), session_jsonl).unwrap();
 }
 
 /// Invoke `ainb usage report --period today` with the requested format
@@ -101,8 +91,7 @@ git_directories = []
 fn run_usage_report(plugin_root: &Path, home: &Path, format: &str, pre_position: bool) -> String {
     let ainb = ainb_bin();
     let mut cmd = Command::new(&ainb);
-    cmd.env("HOME", home)
-        .env("AINB_PLUGIN_ROOT", plugin_root);
+    cmd.env("HOME", home).env("AINB_PLUGIN_ROOT", plugin_root);
     if pre_position {
         cmd.args(["--format", format, "usage", "report", "--period", "today"]);
     } else {

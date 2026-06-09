@@ -68,9 +68,8 @@ impl Plugin for A16 {
     ) -> Result<CliOutput> {
         match argv.first().map(String::as_str) {
             Some("spawn") => {
-                let res = host
-                    .spawn_managed_subprocess("sleep", vec!["30".into()], vec![], None)
-                    .await?;
+                let res =
+                    host.spawn_managed_subprocess("sleep", vec!["30".into()], vec![], None).await?;
                 {
                     let mut st = self.state.lock().await;
                     st.last_pid = res.pid;
@@ -85,10 +84,7 @@ impl Plugin for A16 {
             }
             Some("spawnerr") => {
                 let bin = argv.get(1).cloned().unwrap_or_default();
-                match host
-                    .spawn_managed_subprocess(bin, vec![], vec![], None)
-                    .await
-                {
+                match host.spawn_managed_subprocess(bin, vec![], vec![], None).await {
                     Ok(_) => Ok(CliOutput::ok("0\n".to_string())),
                     Err(ainb_plugin_sdk::SdkError::Rpc(rpc)) => {
                         Ok(CliOutput::ok(format!("{}\n", rpc.code)))

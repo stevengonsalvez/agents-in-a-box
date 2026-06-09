@@ -6,7 +6,6 @@
 //!
 //! Phase 4 of `plans/new-session-redesign-spec.md`.
 
-
 #[allow(dead_code)]
 mod tripwire_new_session_common;
 use tripwire_new_session_common::*;
@@ -33,16 +32,7 @@ fn selection_persists_across_esc_then_reopen() {
     let ainb = ainb_bin();
 
     let status = Command::new("tmux")
-        .args([
-            "new-session",
-            "-d",
-            "-s",
-            &session,
-            "-x",
-            "180",
-            "-y",
-            "50",
-        ])
+        .args(["new-session", "-d", "-s", &session, "-x", "180", "-y", "50"])
         .status()
         .expect("tmux new-session");
     assert!(status.success());
@@ -123,9 +113,7 @@ fn selection_persists_across_esc_then_reopen() {
     }
 
     // Wait briefly for the persistence write to land.
-    let yaml_path = home_path
-        .join(".agents-in-a-box")
-        .join("session-defaults.yaml");
+    let yaml_path = home_path.join(".agents-in-a-box").join("session-defaults.yaml");
     let yaml_deadline = Instant::now() + Duration::from_secs(5);
     let mut yaml_content = String::new();
     while Instant::now() < yaml_deadline {
@@ -177,9 +165,7 @@ fn selection_persists_across_esc_then_reopen() {
 
     let cap = reopen_cap.unwrap_or(final_cap.clone());
     // Positive: ▸ on a line that contains "ainb-tui".
-    let on_ainb = cap.lines().any(|line| {
-        line.contains('\u{25b8}') && line.contains("ainb-tui")
-    });
+    let on_ainb = cap.lines().any(|line| line.contains('\u{25b8}') && line.contains("ainb-tui"));
     assert!(
         on_ainb,
         "▸ not on ainb-tui after re-open. Capture:\n---\n{cap}\n---"

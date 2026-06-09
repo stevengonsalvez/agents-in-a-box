@@ -119,9 +119,7 @@ pub fn listing(dir: &Path, issues: &[(&str, &str, &str)]) -> PathBuf {
 pub fn listing_with_updated(dir: &Path, issues: &[(&str, &str, &str, &str)]) -> PathBuf {
     let body: Vec<String> = issues
         .iter()
-        .map(|(id, title, status, updated)| {
-            one_issue_with_labels_at(id, title, status, updated)
-        })
+        .map(|(id, title, status, updated)| one_issue_with_labels_at(id, title, status, updated))
         .collect();
     let json = format!("[{}]", body.join(","));
     write_script(
@@ -137,7 +135,11 @@ pub fn listing_with_updated(dir: &Path, issues: &[(&str, &str, &str, &str)]) -> 
 /// Used by the outbound-sync failure-mode test (P2.3) to prove a `bd` failure is
 /// surfaced as a non-fatal sync error without corrupting Hangar state.
 pub fn failing(dir: &Path, stderr_msg: &str) -> PathBuf {
-    write_script(dir, "fake-bd.sh", &format!("echo '{stderr_msg}' >&2\nexit 1"))
+    write_script(
+        dir,
+        "fake-bd.sh",
+        &format!("echo '{stderr_msg}' >&2\nexit 1"),
+    )
 }
 
 /// Write a fake `bd` that records every argument it received (one per line) to

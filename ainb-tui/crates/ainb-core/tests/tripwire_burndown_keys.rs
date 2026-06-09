@@ -53,10 +53,7 @@ fn plugins_staged() -> Option<PathBuf> {
     for _ in 0..6 {
         let candidate = dir.join("dist").join("plugins");
         if candidate.join("burndown").join("burndown").exists()
-            && candidate
-                .join("session-reader")
-                .join("session-reader")
-                .exists()
+            && candidate.join("session-reader").join("session-reader").exists()
         {
             return Some(candidate);
         }
@@ -184,9 +181,7 @@ fn send_key_and_settle(session: &str, key: &str) -> String {
 }
 
 fn kill_session(session: &str) {
-    let _ = Command::new("tmux")
-        .args(["kill-session", "-t", session])
-        .status();
+    let _ = Command::new("tmux").args(["kill-session", "-t", session]).status();
 }
 
 /// Extract the burndown chip strip's `p filter: X` token (`All`,
@@ -251,16 +246,7 @@ fn burndown_interactive_keys_change_render() {
     let ainb = ainb_bin();
 
     let status = Command::new("tmux")
-        .args([
-            "new-session",
-            "-d",
-            "-s",
-            &session,
-            "-x",
-            "200",
-            "-y",
-            "50",
-        ])
+        .args(["new-session", "-d", "-s", &session, "-x", "200", "-y", "50"])
         .status()
         .expect("tmux new-session");
     assert!(status.success(), "tmux new-session failed");

@@ -38,9 +38,7 @@ pub static ENV_LOCK: Mutex<()> = Mutex::new(());
 ///
 /// Does not panic; a poisoned lock is recovered transparently.
 pub fn lock_env() -> MutexGuard<'static, ()> {
-    ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Run `f` with `AINB_HANGAR_HOME` pointed at a fresh tempdir, then restore the

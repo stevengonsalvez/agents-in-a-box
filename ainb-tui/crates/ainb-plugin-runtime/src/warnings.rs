@@ -39,8 +39,8 @@ use std::path::{Path, PathBuf};
 // the host (which renders the modal + persists the ack) share one source of
 // truth. Re-exported here so host-side callers have one import.
 pub use ainb_hangar_core::warnings::{
-    is_provider_ack, provider_session_key, should_warn_first_run, should_warn_provider,
-    FIRST_RUN_KEY,
+    FIRST_RUN_KEY, is_provider_ack, provider_session_key, should_warn_first_run,
+    should_warn_provider,
 };
 
 /// The `state.toml` array key holding dismissed-warning keys.
@@ -76,12 +76,7 @@ pub fn read_acks_at(path: &Path) -> std::io::Result<Vec<String>> {
     let acks = doc
         .get(WARNINGS_KEY)
         .and_then(toml::Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(toml::Value::as_str)
-                .map(str::to_string)
-                .collect()
-        })
+        .map(|arr| arr.iter().filter_map(toml::Value::as_str).map(str::to_string).collect())
         .unwrap_or_default();
     Ok(acks)
 }
@@ -110,11 +105,7 @@ pub fn write_acks_at(path: &Path, acks: &[String]) -> std::io::Result<()> {
             "state.toml root is not a table",
         )
     })?;
-    let array = toml::Value::Array(
-        acks.iter()
-            .map(|a| toml::Value::String(a.clone()))
-            .collect(),
-    );
+    let array = toml::Value::Array(acks.iter().map(|a| toml::Value::String(a.clone())).collect());
     table.insert(WARNINGS_KEY.to_string(), array);
 
     let serialised = toml::to_string_pretty(&doc)
@@ -227,7 +218,10 @@ mod tests {
         let path = dir.path().join("hangar").join("state.toml");
         assert!(ack_at(&path, FIRST_RUN_KEY).unwrap());
         assert!(!ack_at(&path, FIRST_RUN_KEY).unwrap());
-        assert_eq!(read_acks_at(&path).unwrap(), vec![FIRST_RUN_KEY.to_string()]);
+        assert_eq!(
+            read_acks_at(&path).unwrap(),
+            vec![FIRST_RUN_KEY.to_string()]
+        );
     }
 
     /// The `StateTomlWarningStore` trait double reads/writes the same file.

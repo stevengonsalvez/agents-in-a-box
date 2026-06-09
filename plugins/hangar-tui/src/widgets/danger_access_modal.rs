@@ -195,7 +195,10 @@ mod tests {
         let mut buf = WireBuffer::new(80, 24);
         render_danger_access_modal(&mut buf, 80, 24);
         let text = full_text(&buf, 80, 24);
-        assert!(text.contains("danger-full-access"), "missing marker:\n{text}");
+        assert!(
+            text.contains("danger-full-access"),
+            "missing marker:\n{text}"
+        );
         assert!(text.contains("[y]"), "missing accept hint:\n{text}");
         assert!(
             text.contains("filesystem and network"),
@@ -224,7 +227,10 @@ mod tests {
         let mut buf = WireBuffer::new(10, 2);
         render_danger_access_modal(&mut buf, 10, 2);
         let text = full_text(&buf, 10, 2);
-        assert!(text.contains("danger"), "degenerate must still warn:\n{text}");
+        assert!(
+            text.contains("danger"),
+            "degenerate must still warn:\n{text}"
+        );
     }
 
     /// Full-width: the frame's right edge tracks the viewport (minus the inset),
@@ -241,6 +247,9 @@ mod tests {
             .map(|(coord, _)| coord.x)
             .max()
             .expect("right corners present");
-        assert!(max_frame_x >= 117, "frame not full-width: right edge at {max_frame_x}");
+        assert!(
+            max_frame_x >= 117,
+            "frame not full-width: right edge at {max_frame_x}"
+        );
     }
 }

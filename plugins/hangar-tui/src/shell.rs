@@ -63,7 +63,10 @@ impl Opener for SystemOpener {
             ));
         };
 
-        std::process::Command::new(cmd).arg(url).spawn().map(|_child| ())
+        std::process::Command::new(cmd)
+            .arg(url)
+            .spawn()
+            .map(|_child| ())
     }
 }
 
@@ -118,7 +121,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let probe = dir.path().join("probe.txt");
         let opener = RecordingOpener::new(&probe);
-        opener.open("https://example.com/pr/1").expect("record open");
+        opener
+            .open("https://example.com/pr/1")
+            .expect("record open");
         let written = std::fs::read_to_string(&probe).expect("read probe");
         assert_eq!(written, "https://example.com/pr/1");
     }

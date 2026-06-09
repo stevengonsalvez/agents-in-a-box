@@ -20,10 +20,7 @@ fn ainb_bin() -> PathBuf {
 }
 
 fn tmux_available() -> bool {
-    Command::new("tmux")
-        .arg("-V")
-        .output()
-        .is_ok_and(|o| o.status.success())
+    Command::new("tmux").arg("-V").output().is_ok_and(|o| o.status.success())
 }
 
 fn capture_pane(session: &str) -> String {
@@ -50,9 +47,7 @@ where
 
 fn kill_session(session: &str) {
     // Specific session by EXACT name. Never kill-server, never wildcard.
-    let _ = Command::new("tmux")
-        .args(["kill-session", "-t", session])
-        .status();
+    let _ = Command::new("tmux").args(["kill-session", "-t", session]).status();
 }
 
 #[test]

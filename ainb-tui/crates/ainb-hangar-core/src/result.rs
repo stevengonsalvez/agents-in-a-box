@@ -65,7 +65,10 @@ mod tests {
     fn no_pr_omits_pr_url_key() {
         let r = TaskResult::new("ok".into(), Some(0), None);
         let json = serde_json::to_string(&r).expect("serialize");
-        assert!(!json.contains("pr_url"), "no-PR result must omit pr_url, got {json}");
+        assert!(
+            !json.contains("pr_url"),
+            "no-PR result must omit pr_url, got {json}"
+        );
         assert!(json.contains("\"content\":\"ok\""));
         assert!(json.contains("\"exit_code\":0"));
     }
@@ -79,7 +82,10 @@ mod tests {
             Some("https://github.com/o/r/pull/9".into()),
         );
         let json = serde_json::to_string(&r).expect("serialize");
-        assert!(json.contains("\"pr_url\":\"https://github.com/o/r/pull/9\""), "got {json}");
+        assert!(
+            json.contains("\"pr_url\":\"https://github.com/o/r/pull/9\""),
+            "got {json}"
+        );
     }
 
     /// A killed run (`exit_code = None`) omits `exit_code` too — additive,

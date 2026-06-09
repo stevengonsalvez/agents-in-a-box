@@ -4,8 +4,8 @@
 //! identically, with the `agent.runtime_id` FK (required by the Multica pattern)
 //! satisfied by a real `agent_runtime` row.
 
-use ainb_hangar_store::repo::agent::{Agent, AgentRepo};
 use ainb_hangar_store::Store;
+use ainb_hangar_store::repo::agent::{Agent, AgentRepo};
 
 /// Seed the FK chain (workspace -> user -> `agent_runtime`) that an `agent` row
 /// requires, returning `(workspace_id, runtime_id, owner_id)`.
@@ -65,9 +65,7 @@ async fn insert_and_get_agent_roundtrip() {
         owner_id,
     };
 
-    AgentRepo::insert(store.pool(), &agent)
-        .await
-        .expect("insert agent");
+    AgentRepo::insert(store.pool(), &agent).await.expect("insert agent");
 
     let got = AgentRepo::get(store.pool(), "agent-1")
         .await

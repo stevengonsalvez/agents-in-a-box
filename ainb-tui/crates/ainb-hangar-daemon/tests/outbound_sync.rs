@@ -18,13 +18,13 @@ use chrono::{TimeZone, Utc};
 
 use ainb_hangar_core::actor::{ActorKind, ActorRef};
 use ainb_hangar_core::clock::FixedClock;
-use ainb_hangar_daemon::beads_adapter::{fake_bd, BdClient};
+use ainb_hangar_daemon::beads_adapter::{BdClient, fake_bd};
 use ainb_hangar_daemon::beads_sync::outbound::{MirrorOutcome, OutboundSync};
+use ainb_hangar_store::Store;
 use ainb_hangar_store::repo::beads_mapping::{
     BeadsMappingRepo, BeadsMappingRow, MappingKind, MappingSource,
 };
 use ainb_hangar_store::repo::issue::{Issue, IssueRepo, NewIssue};
-use ainb_hangar_store::Store;
 
 /// Frozen clock value used for every test's `last_synced` stamp.
 const T0_MS: i64 = 1_700_000_000_000;
@@ -60,9 +60,7 @@ async fn seed_issue(
         creator: ActorRef::new(ActorKind::Member, "stevie").expect("actor"),
         created_at: T0_MS,
     };
-    IssueRepo::insert(store.pool(), &new)
-        .await
-        .expect("insert issue");
+    IssueRepo::insert(store.pool(), &new).await.expect("insert issue");
     IssueRepo::get_by_id(store.pool(), id)
         .await
         .expect("get issue")
@@ -176,11 +174,7 @@ async fn test_swarm_sourced_issue_skips_outbound() {
     // Zero bd calls — the probe file was never written.
     assert!(!probe.exists(), "fake-bd must not have been invoked");
     // No mapping row.
-    assert!(mapping
-        .find_by_hangar("iss_swarm")
-        .await
-        .expect("query")
-        .is_none());
+    assert!(mapping.find_by_hangar("iss_swarm").await.expect("query").is_none());
 }
 
 #[tokio::test]
@@ -206,15 +200,13 @@ async fn test_outbound_failure_does_not_block_hangar_write() {
     // Mirror surfaces the error (caller logs + continues) ...
     assert!(result.is_err(), "expected a SyncError on bd failure");
     // ... but the hangar issue is untouched and no half-written mapping row exists.
-    assert!(IssueRepo::get_by_id(store.pool(), "iss_fail")
-        .await
-        .expect("get issue")
-        .is_some());
-    assert!(mapping
-        .find_by_hangar("iss_fail")
-        .await
-        .expect("query")
-        .is_none());
+    assert!(
+        IssueRepo::get_by_id(store.pool(), "iss_fail")
+            .await
+            .expect("get issue")
+            .is_some()
+    );
+    assert!(mapping.find_by_hangar("iss_fail").await.expect("query").is_none());
 }
 
 #[tokio::test]
@@ -240,10 +232,7 @@ async fn test_polymorphic_assignee_agent_prefix() {
         .expect("mirror create");
 
     let args = probe_args(&probe);
-    let i = args
-        .iter()
-        .position(|a| a == "--assignee")
-        .expect("--assignee flag present");
+    let i = args.iter().position(|a| a == "--assignee").expect("--assignee flag present");
     assert_eq!(args[i + 1], "agent:ag_42");
 }
 
@@ -270,10 +259,7 @@ async fn test_polymorphic_assignee_user_raw() {
         .expect("mirror create");
 
     let args = probe_args(&probe);
-    let i = args
-        .iter()
-        .position(|a| a == "--assignee")
-        .expect("--assignee flag present");
+    let i = args.iter().position(|a| a == "--assignee").expect("--assignee flag present");
     assert_eq!(args[i + 1], "stevie");
 }
 
@@ -300,10 +286,7 @@ async fn test_labels_round_trip() {
 
     // `bd create` takes a single comma-joined `--labels` flag (per cli.rs).
     let args = probe_args(&probe);
-    let i = args
-        .iter()
-        .position(|a| a == "--labels")
-        .expect("--labels flag present");
+    let i = args.iter().position(|a| a == "--labels").expect("--labels flag present");
     assert_eq!(args[i + 1], "foo,bar");
 }
 
@@ -385,5 +368,8 @@ async fn test_close_skips_swarm_sourced_mapping_row() {
 
     assert!(matches!(outcome, MirrorOutcome::SkippedSwarm));
     // No `bd close` happened — the probe file was never written.
-    assert!(!probe.exists(), "fake-bd must not have been invoked for a swarm row");
+    assert!(
+        !probe.exists(),
+        "fake-bd must not have been invoked for a swarm row"
+    );
 }

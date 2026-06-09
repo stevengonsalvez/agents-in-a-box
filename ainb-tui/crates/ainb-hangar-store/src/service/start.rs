@@ -12,7 +12,7 @@ use ainb_hangar_core::clock::HangarClock;
 use ainb_hangar_core::task::state::TaskState;
 use sqlx::SqlitePool;
 
-use super::finalize::{finalize_idempotent, record_workspace_id, FinalizeError, FinalizeOutcome};
+use super::finalize::{FinalizeError, FinalizeOutcome, finalize_idempotent, record_workspace_id};
 
 /// Stateless `dispatched -> running` service over `agent_task_queue`.
 pub struct StartTaskService;

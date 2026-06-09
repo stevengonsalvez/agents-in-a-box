@@ -19,11 +19,11 @@
 
 use ainb_hangar_core::clock::FixedClock;
 use ainb_hangar_daemon::sweeper::{
+    DISPATCHED_TTL, QUEUED_TTL, RECLAIM_WINDOW, RUNNING_TTL, SweeperConfig,
     reclaim_stale_dispatched, sweep_expired_queued, sweep_stale_dispatched, sweep_stale_running,
-    SweeperConfig, DISPATCHED_TTL, QUEUED_TTL, RECLAIM_WINDOW, RUNNING_TTL,
 };
-use ainb_hangar_store::repo::task::{NewTask, TaskRepo};
 use ainb_hangar_store::Store;
+use ainb_hangar_store::repo::task::{NewTask, TaskRepo};
 use sqlx::{Row, SqlitePool};
 
 /// A frozen base "now" all the offset arithmetic hangs off.
@@ -119,12 +119,13 @@ async fn seed_task(
 
 /// Read back `(status, failure_reason, attempt, dispatched_at)` for assertions.
 async fn read_task(pool: &SqlitePool, id: &str) -> (String, Option<String>, i64, Option<i64>) {
-    let row =
-        sqlx::query("SELECT status, failure_reason, attempt, dispatched_at FROM agent_task_queue WHERE id = ?")
-            .bind(id)
-            .fetch_one(pool)
-            .await
-            .expect("read task");
+    let row = sqlx::query(
+        "SELECT status, failure_reason, attempt, dispatched_at FROM agent_task_queue WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .expect("read task");
     (
         row.try_get("status").unwrap(),
         row.try_get("failure_reason").unwrap(),
@@ -186,7 +187,14 @@ async fn queued_under_ttl_untouched() {
 async fn dispatched_ttl_5min_fails_task() {
     let (_dir, store) = open_seeded().await;
     let dispatched_at = BASE_MS;
-    seed_task(store.pool(), "d1", "dispatched", BASE_MS, Some(dispatched_at)).await;
+    seed_task(
+        store.pool(),
+        "d1",
+        "dispatched",
+        BASE_MS,
+        Some(dispatched_at),
+    )
+    .await;
     // +5min+1s past the dispatch.
     let clock = FixedClock(dispatched_at + DISPATCHED_TTL.as_millis() as i64 + 1_000);
 
@@ -214,7 +222,14 @@ async fn dispatched_ttl_5min_fails_task() {
 async fn dispatched_past_90s_window_reclaimed_not_failed() {
     let (_dir, store) = open_seeded().await;
     let dispatched_at = BASE_MS;
-    seed_task(store.pool(), "d1", "dispatched", BASE_MS, Some(dispatched_at)).await;
+    seed_task(
+        store.pool(),
+        "d1",
+        "dispatched",
+        BASE_MS,
+        Some(dispatched_at),
+    )
+    .await;
     let (_, _, attempt_before, _) = read_task(store.pool(), "d1").await;
     // 100s after dispatch — past the 90s window, well short of the 5min TTL.
     let clock = FixedClock(dispatched_at + 100_000);
@@ -227,8 +242,14 @@ async fn dispatched_past_90s_window_reclaimed_not_failed() {
     let (status, reason, attempt_after, dispatched_after) = read_task(store.pool(), "d1").await;
     assert_eq!(status, "queued", "reclaimed back to queued, not failed");
     assert_eq!(reason, None, "reclaim records no failure");
-    assert_eq!(attempt_after, attempt_before, "attempt unchanged by reclaim");
-    assert_eq!(dispatched_after, None, "dispatched_at cleared so a re-claim re-stamps it");
+    assert_eq!(
+        attempt_after, attempt_before,
+        "attempt unchanged by reclaim"
+    );
+    assert_eq!(
+        dispatched_after, None,
+        "dispatched_at cleared so a re-claim re-stamps it"
+    );
 }
 
 /// A *fresh* dispatch (inside the 90s recovery window) is NOT reclaimed — the
@@ -240,18 +261,35 @@ async fn dispatched_past_90s_window_reclaimed_not_failed() {
 async fn dispatched_within_90s_window_not_reclaimed() {
     let (_dir, store) = open_seeded().await;
     let dispatched_at = BASE_MS;
-    seed_task(store.pool(), "d1", "dispatched", BASE_MS, Some(dispatched_at)).await;
+    seed_task(
+        store.pool(),
+        "d1",
+        "dispatched",
+        BASE_MS,
+        Some(dispatched_at),
+    )
+    .await;
     // 75s after dispatch — still inside the 90s recovery window.
     let clock = FixedClock(dispatched_at + 75_000);
 
     let reclaimed = reclaim_stale_dispatched(store.pool(), &clock, &SweeperConfig::default())
         .await
         .expect("reclaim ok");
-    assert_eq!(reclaimed, 0, "fresh dispatch inside the window is left alone");
+    assert_eq!(
+        reclaimed, 0,
+        "fresh dispatch inside the window is left alone"
+    );
 
     let (status, _, _, dispatched_after) = read_task(store.pool(), "d1").await;
-    assert_eq!(status, "dispatched", "stays dispatched inside the recovery window");
-    assert_eq!(dispatched_after, Some(dispatched_at), "dispatched_at untouched");
+    assert_eq!(
+        status, "dispatched",
+        "stays dispatched inside the recovery window"
+    );
+    assert_eq!(
+        dispatched_after,
+        Some(dispatched_at),
+        "dispatched_at untouched"
+    );
 }
 
 /// Boundary: a dispatch exactly `RECLAIM_WINDOW + 1s` old is reclaimed (just
@@ -262,9 +300,23 @@ async fn reclaim_window_boundary_is_age_greater_than_window() {
     let (_dir, store) = open_seeded().await;
     let dispatched_at = BASE_MS;
     // Just inside the window: not reclaimed.
-    seed_task(store.pool(), "fresh", "dispatched", BASE_MS, Some(dispatched_at)).await;
+    seed_task(
+        store.pool(),
+        "fresh",
+        "dispatched",
+        BASE_MS,
+        Some(dispatched_at),
+    )
+    .await;
     // Just past the window: reclaimed.
-    seed_task(store.pool(), "stale", "dispatched", BASE_MS, Some(dispatched_at)).await;
+    seed_task(
+        store.pool(),
+        "stale",
+        "dispatched",
+        BASE_MS,
+        Some(dispatched_at),
+    )
+    .await;
 
     let just_inside = FixedClock(dispatched_at + RECLAIM_WINDOW.as_millis() as i64 - 1_000);
     assert_eq!(
@@ -294,7 +346,14 @@ async fn reclaim_window_boundary_is_age_greater_than_window() {
 async fn dispatched_with_started_at_not_reclaimed() {
     let (_dir, store) = open_seeded().await;
     let dispatched_at = BASE_MS;
-    seed_task(store.pool(), "d1", "dispatched", BASE_MS, Some(dispatched_at)).await;
+    seed_task(
+        store.pool(),
+        "d1",
+        "dispatched",
+        BASE_MS,
+        Some(dispatched_at),
+    )
+    .await;
     // Stamp started_at: the run is live even though status still reads dispatched.
     sqlx::query("UPDATE agent_task_queue SET started_at = ? WHERE id = ?")
         .bind(dispatched_at + 10_000)
@@ -308,10 +367,16 @@ async fn dispatched_with_started_at_not_reclaimed() {
     let reclaimed = reclaim_stale_dispatched(store.pool(), &clock, &SweeperConfig::default())
         .await
         .expect("reclaim ok");
-    assert_eq!(reclaimed, 0, "an already-started dispatch is never reclaimed");
+    assert_eq!(
+        reclaimed, 0,
+        "an already-started dispatch is never reclaimed"
+    );
 
     let (status, _, _, _) = read_task(store.pool(), "d1").await;
-    assert_eq!(status, "dispatched", "started dispatch stays dispatched, not re-queued");
+    assert_eq!(
+        status, "dispatched",
+        "started dispatch stays dispatched, not re-queued"
+    );
 }
 
 // ---- running TTL (2.5h) ---------------------------------------------------
@@ -355,14 +420,10 @@ async fn sweeper_batch_caps_at_500() {
     let cfg = SweeperConfig::default();
     assert_eq!(cfg.batch_size, 500, "default batch size matches Multica");
 
-    let first = sweep_expired_queued(store.pool(), &clock, &cfg)
-        .await
-        .expect("first pass");
+    let first = sweep_expired_queued(store.pool(), &clock, &cfg).await.expect("first pass");
     assert_eq!(first, 500, "first pass caps at the batch size");
 
-    let second = sweep_expired_queued(store.pool(), &clock, &cfg)
-        .await
-        .expect("second pass");
+    let second = sweep_expired_queued(store.pool(), &clock, &cfg).await.expect("second pass");
     assert_eq!(second, 100, "second pass takes the remainder");
 }
 

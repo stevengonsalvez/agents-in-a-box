@@ -96,16 +96,17 @@ mod tests {
         let a = derive_branch_name("agents/", &[]);
         let b = derive_branch_name("agents/", &[]);
         let c = derive_branch_name("agents/", &[]);
-        assert!(a != b || b != c, "expected at least one differing name across 3 calls");
+        assert!(
+            a != b || b != c,
+            "expected at least one differing name across 3 calls"
+        );
     }
 
     #[test]
     fn avoids_collision_when_suffix_already_exists() {
         // Force the disambiguation path by including 1000 random-looking
         // existing names. The new name must not be in the list.
-        let existing: Vec<String> = (0..1000)
-            .map(|i| format!("agents/{:08x}", i))
-            .collect();
+        let existing: Vec<String> = (0..1000).map(|i| format!("agents/{:08x}", i)).collect();
         let n = derive_branch_name("agents/", &existing);
         assert!(!existing.contains(&n), "got colliding name {n}");
     }

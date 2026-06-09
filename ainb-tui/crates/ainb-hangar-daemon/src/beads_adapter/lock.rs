@@ -54,12 +54,7 @@ impl BdLock {
         }
         let deadline = Instant::now() + ACQUIRE_TIMEOUT;
         loop {
-            match OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&self.path)
-            {
+            match OpenOptions::new().write(true).create_new(true).mode(0o600).open(&self.path) {
                 Ok(mut f) => {
                     let _ = write!(f, "{}", std::process::id());
                     return Ok(BdLockGuard {

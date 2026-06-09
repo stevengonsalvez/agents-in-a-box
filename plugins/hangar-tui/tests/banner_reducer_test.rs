@@ -133,7 +133,10 @@ fn banner_render_at_80_cols_truncates_message_not_glyphs() {
 
     // The agent label and the [X] control survive at the floor width.
     let header = row_text(&buf, 21, 80);
-    assert!(header.contains("claude-agent"), "agent label dropped: {header:?}");
+    assert!(
+        header.contains("claude-agent"),
+        "agent label dropped: {header:?}"
+    );
     assert!(header.contains("[X]"), "cancel control dropped: {header:?}");
     // No cell painted past column 80.
     assert!(buf.cells.iter().all(|(c, _)| c.x < 80));

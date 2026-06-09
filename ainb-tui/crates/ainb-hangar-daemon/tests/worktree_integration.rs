@@ -19,11 +19,7 @@ const BASE_MS: i64 = 1_700_000_000_000;
 const WS_SLUG: &str = "alpha";
 
 fn git(dir: &Path, args: &[&str]) -> std::process::Output {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .expect("spawn git");
+    let out = Command::new("git").args(args).current_dir(dir).output().expect("spawn git");
     assert!(
         out.status.success(),
         "git {args:?} failed: {}",
@@ -86,7 +82,10 @@ fn worktree_add_creates_branch_for_task() {
 
     let branch = format!("hangar/task/{}", short_id(&task.id));
     assert_eq!(wt.branch, branch);
-    assert!(wt.workdir.join(".git").exists(), "worktree checkout present");
+    assert!(
+        wt.workdir.join(".git").exists(),
+        "worktree checkout present"
+    );
 
     // Branch exists.
     let branches = git(cache.path(), &["branch", "--list", &branch]);
@@ -108,15 +107,11 @@ fn worktree_reuse_on_resume() {
     let mut task = task_fixture("01HZX0000000000000000ABCDE", Some("iss-1"));
     let env = prepare_env(&task, WS_SLUG, home.path(), &FixedClock(BASE_MS)).expect("env");
 
-    let first = prepare_worktree(&task, &env, cache.path())
-        .expect("first")
-        .expect("created");
+    let first = prepare_worktree(&task, &env, cache.path()).expect("first").expect("created");
 
     // Resume: prior_work_dir populated → reuse, no second `git worktree add`.
     task.work_dir = Some(first.workdir.to_string_lossy().into_owned());
-    let second = prepare_worktree(&task, &env, cache.path())
-        .expect("second")
-        .expect("reused");
+    let second = prepare_worktree(&task, &env, cache.path()).expect("second").expect("reused");
 
     assert_eq!(first.workdir, second.workdir);
     // Exactly one extra worktree entry beyond the cache's own root.
@@ -131,9 +126,7 @@ fn worktree_cleanup_runs_git_worktree_remove() {
     let task = task_fixture("01HZX0000000000000000ABCDE", Some("iss-1"));
     let env = prepare_env(&task, WS_SLUG, home.path(), &FixedClock(BASE_MS)).expect("env");
 
-    let wt = prepare_worktree(&task, &env, cache.path())
-        .expect("prepare")
-        .expect("created");
+    let wt = prepare_worktree(&task, &env, cache.path()).expect("prepare").expect("created");
     assert!(worktree_list(cache.path()).contains(wt.workdir.to_str().unwrap()));
 
     cleanup_worktree(&wt, cache.path()).expect("cleanup_worktree");
@@ -157,7 +150,10 @@ fn worktree_init_skipped_for_chat_task() {
     assert!(result.is_none(), "chat task (no issue) → no worktree");
     // workdir stays empty (no .git), matching Multica's lazy `repo checkout`.
     assert!(env.workdir.is_dir());
-    assert!(!env.workdir.join(".git").exists(), "no git invocation for chat task");
+    assert!(
+        !env.workdir.join(".git").exists(),
+        "no git invocation for chat task"
+    );
     let entries = std::fs::read_dir(&env.workdir).expect("read workdir").count();
     assert_eq!(entries, 0, "chat task workdir starts empty");
 }

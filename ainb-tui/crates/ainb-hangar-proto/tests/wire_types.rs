@@ -36,8 +36,7 @@ fn rpc_request_emits_jsonrpc_2_0_member() {
 fn rpc_request_defaults_jsonrpc_when_absent_in_input() {
     // A peer that omits the member (lenient decode) still yields a 2.0 envelope.
     let decoded: RpcRequest =
-        serde_json::from_str(r#"{"id":1,"method":"hangar/ping","params":null}"#)
-            .expect("decode");
+        serde_json::from_str(r#"{"id":1,"method":"hangar/ping","params":null}"#).expect("decode");
     assert_eq!(decoded.jsonrpc, "2.0");
 }
 
@@ -91,7 +90,6 @@ fn error_envelope_carries_code_and_message() {
         data: Some(serde_json::json!({"detail": "x"})),
     };
     let decoded: RpcError =
-        serde_json::from_value(serde_json::to_value(&err2).expect("encode"))
-            .expect("decode");
+        serde_json::from_value(serde_json::to_value(&err2).expect("encode")).expect("decode");
     assert_eq!(decoded, err2);
 }

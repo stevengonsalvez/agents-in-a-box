@@ -62,7 +62,9 @@ fn enter_emits_open_task_detail_intent() {
 
     assert_eq!(
         out.intent,
-        Some(IssueListIntent::OpenTaskDetail(IssueId::from_str("i1").unwrap()))
+        Some(IssueListIntent::OpenTaskDetail(
+            IssueId::from_str("i1").unwrap()
+        ))
     );
 }
 
@@ -110,7 +112,10 @@ fn event_issue_created_appears_in_todo_column() {
     let s = IssueListState::default();
     let new_row = row("i9", "open", None);
 
-    let out = reduce_issue_list(&s, IssueListEvent::Event(HangarEvent::IssueCreated(new_row)));
+    let out = reduce_issue_list(
+        &s,
+        IssueListEvent::Event(HangarEvent::IssueCreated(new_row)),
+    );
 
     let todo: Vec<&str> = out
         .state

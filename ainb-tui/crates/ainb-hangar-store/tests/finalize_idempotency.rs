@@ -18,13 +18,13 @@
 
 use ainb_hangar_core::clock::FixedClock;
 use ainb_hangar_core::task::state::TaskState;
+use ainb_hangar_store::Store;
+use ainb_hangar_store::repo::task::{NewTask, TaskRepo};
 use ainb_hangar_store::service::cancel::CancelTaskService;
 use ainb_hangar_store::service::complete::{CompleteParams, CompleteTaskService};
 use ainb_hangar_store::service::fail::{FailTaskService, FailureReason};
 use ainb_hangar_store::service::finalize::{FinalizeError, FinalizeOutcome};
 use ainb_hangar_store::service::start::StartTaskService;
-use ainb_hangar_store::repo::task::{NewTask, TaskRepo};
-use ainb_hangar_store::Store;
 
 /// Frozen "now" used for `started_at` / `finished_at` assertions.
 const NOW_MS: i64 = 1_700_000_900_000;
@@ -118,15 +118,10 @@ async fn start_dispatched_marks_running() {
     seed_task_in_state(&store, "t1", "dispatched").await;
     let clock = FixedClock(NOW_MS);
 
-    let outcome = StartTaskService::start(store.pool(), "t1", &clock)
-        .await
-        .expect("start ok");
+    let outcome = StartTaskService::start(store.pool(), "t1", &clock).await.expect("start ok");
     assert_eq!(outcome, FinalizeOutcome::Transitioned);
 
-    let row = TaskRepo::get_by_id(store.pool(), "t1")
-        .await
-        .unwrap()
-        .unwrap();
+    let row = TaskRepo::get_by_id(store.pool(), "t1").await.unwrap().unwrap();
     assert_eq!(row.status, "running");
     assert_eq!(row.started_at, Some(NOW_MS));
 }
@@ -143,10 +138,7 @@ async fn start_already_running_returns_already_started_err() {
         .expect_err("starting an already-running task must error");
     assert!(matches!(err, FinalizeError::AlreadyStarted));
 
-    let row = TaskRepo::get_by_id(store.pool(), "t1")
-        .await
-        .unwrap()
-        .unwrap();
+    let row = TaskRepo::get_by_id(store.pool(), "t1").await.unwrap().unwrap();
     assert_eq!(row.status, "running", "status must not change");
 }
 
@@ -168,10 +160,7 @@ async fn start_queued_returns_illegal_state_err() {
         "expected IllegalState{{found: Some(Queued), target: Running}}, got {err:?}"
     );
 
-    let row = TaskRepo::get_by_id(store.pool(), "t1")
-        .await
-        .unwrap()
-        .unwrap();
+    let row = TaskRepo::get_by_id(store.pool(), "t1").await.unwrap().unwrap();
     assert_eq!(row.status, "queued", "status must not change");
 }
 
@@ -227,10 +216,7 @@ async fn complete_running_marks_done_with_result() {
         .expect("complete ok");
     assert_eq!(outcome, FinalizeOutcome::Transitioned);
 
-    let row = TaskRepo::get_by_id(store.pool(), "t1")
-        .await
-        .unwrap()
-        .unwrap();
+    let row = TaskRepo::get_by_id(store.pool(), "t1").await.unwrap().unwrap();
     assert_eq!(row.status, "done");
     assert_eq!(row.session_id.as_deref(), Some("sess-9"));
     assert_eq!(row.work_dir.as_deref(), Some("/tmp/wd"));
@@ -300,10 +286,7 @@ async fn complete_dispatched_returns_illegal_state_err() {
         "expected IllegalState{{found: Some(Dispatched), target: Done}}, got {err:?}"
     );
 
-    let row = TaskRepo::get_by_id(store.pool(), "t1")
-        .await
-        .unwrap()
-        .unwrap();
+    let row = TaskRepo::get_by_id(store.pool(), "t1").await.unwrap().unwrap();
     assert_eq!(row.status, "dispatched", "status must not change");
 }
 
@@ -340,10 +323,7 @@ async fn fail_running_with_reason() {
         .expect("fail ok");
     assert_eq!(outcome, FinalizeOutcome::Transitioned);
 
-    let row = TaskRepo::get_by_id(store.pool(), "t1")
-        .await
-        .unwrap()
-        .unwrap();
+    let row = TaskRepo::get_by_id(store.pool(), "t1").await.unwrap().unwrap();
     assert_eq!(row.status, "failed");
     assert_eq!(row.failure_reason.as_deref(), Some("timeout"));
     assert_eq!(row.finished_at, Some(NOW_MS));
@@ -360,10 +340,7 @@ async fn fail_reason_serializes_snake_case() {
     FailTaskService::fail(store.pool(), "t1", FailureReason::RuntimeOffline, &clock)
         .await
         .expect("fail ok");
-    let row = TaskRepo::get_by_id(store.pool(), "t1")
-        .await
-        .unwrap()
-        .unwrap();
+    let row = TaskRepo::get_by_id(store.pool(), "t1").await.unwrap().unwrap();
     assert_eq!(row.failure_reason.as_deref(), Some("runtime_offline"));
 }
 
@@ -393,10 +370,7 @@ async fn fail_queued_via_ttl_path_marks_failed() {
         .expect("fail from queued ok");
     assert_eq!(outcome, FinalizeOutcome::Transitioned);
 
-    let row = TaskRepo::get_by_id(store.pool(), "t1")
-        .await
-        .unwrap()
-        .unwrap();
+    let row = TaskRepo::get_by_id(store.pool(), "t1").await.unwrap().unwrap();
     assert_eq!(row.status, "failed");
     assert_eq!(row.failure_reason.as_deref(), Some("timeout"));
     assert_eq!(row.finished_at, Some(NOW_MS));
@@ -418,10 +392,7 @@ async fn fail_dispatched_returns_illegal_state_err() {
         "expected IllegalState{{found: Some(Dispatched), target: Failed}}, got {err:?}"
     );
 
-    let row = TaskRepo::get_by_id(store.pool(), "t1")
-        .await
-        .unwrap()
-        .unwrap();
+    let row = TaskRepo::get_by_id(store.pool(), "t1").await.unwrap().unwrap();
     assert_eq!(row.status, "dispatched", "status must not change");
 }
 
@@ -440,10 +411,7 @@ async fn cancel_dispatched_or_running() {
             .unwrap_or_else(|e| panic!("cancel from {state} should succeed: {e}"));
         assert_eq!(outcome, FinalizeOutcome::Transitioned);
 
-        let row = TaskRepo::get_by_id(store.pool(), &id)
-            .await
-            .unwrap()
-            .unwrap();
+        let row = TaskRepo::get_by_id(store.pool(), &id).await.unwrap().unwrap();
         assert_eq!(row.status, "cancelled");
         assert_eq!(row.finished_at, Some(NOW_MS));
     }
@@ -461,10 +429,7 @@ async fn cancel_queued_also_legal() {
         .expect("cancel queued ok");
     assert_eq!(outcome, FinalizeOutcome::Transitioned);
 
-    let row = TaskRepo::get_by_id(store.pool(), "t1")
-        .await
-        .unwrap()
-        .unwrap();
+    let row = TaskRepo::get_by_id(store.pool(), "t1").await.unwrap().unwrap();
     assert_eq!(row.status, "cancelled");
 }
 

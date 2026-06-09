@@ -16,10 +16,10 @@
 //! share state, and a [`FixedClock`] so the child's `created_at` is deterministic.
 
 use ainb_hangar_core::clock::FixedClock;
+use ainb_hangar_store::Store;
 use ainb_hangar_store::repo::task::{NewTask, Task, TaskRepo};
 use ainb_hangar_store::service::fail::{FailTaskService, FailureReason};
 use ainb_hangar_store::service::retry::{RetryDecision, RetryService};
-use ainb_hangar_store::Store;
 
 /// Frozen "now" used for the retry child's `created_at` assertions.
 const NOW_MS: i64 = 1_700_001_000_000;
@@ -132,10 +132,7 @@ async fn seed_failed_task(
     FailTaskService::fail(store.pool(), id, reason, &clock)
         .await
         .expect("fail seed task");
-    TaskRepo::get_by_id(store.pool(), id)
-        .await
-        .unwrap()
-        .unwrap()
+    TaskRepo::get_by_id(store.pool(), id).await.unwrap().unwrap()
 }
 
 async fn open_seeded() -> (tempfile::TempDir, Store) {
@@ -163,7 +160,12 @@ async fn failure_reason_runtime_offline_spawns_child_row() {
     let decision = RetryService::maybe_retry_failed(store.pool(), &parent, "child-1", &clock)
         .await
         .expect("retry ok");
-    assert_eq!(decision, RetryDecision::Spawned { new_task_id: "child-1".to_string() });
+    assert_eq!(
+        decision,
+        RetryDecision::Spawned {
+            new_task_id: "child-1".to_string()
+        }
+    );
 
     let child = TaskRepo::get_by_id(store.pool(), "child-1")
         .await
@@ -223,7 +225,10 @@ async fn child_row_is_created_atomically_with_retry_columns_set() {
         .await
         .unwrap()
         .expect("child exists");
-    assert_eq!(child.attempt, 2, "child attempt set in the insert, not defaulted to 1");
+    assert_eq!(
+        child.attempt, 2,
+        "child attempt set in the insert, not defaulted to 1"
+    );
     assert_eq!(
         child.parent_task_id.as_deref(),
         Some("t1"),
@@ -261,10 +266,7 @@ async fn child_row_is_created_atomically_with_retry_columns_set() {
         .await
         .expect_err("retry insert must collide with the pending-per-issue index");
     assert!(
-        TaskRepo::get_by_id(store.pool(), "orphan-id")
-            .await
-            .unwrap()
-            .is_none(),
+        TaskRepo::get_by_id(store.pool(), "orphan-id").await.unwrap().is_none(),
         "a failed atomic insert must leave no orphan child row"
     );
 }
@@ -274,50 +276,55 @@ async fn failure_reason_agent_error_does_not_retry() {
     // agent_error is a user-facing failure (LLM mis-tooled, gave up). No retry
     // row. (Multica migration 055 behaviour.)
     let (_dir, store) = open_seeded().await;
-    let parent =
-        seed_failed_task(&store, "t1", None, None, 1, 2, FailureReason::AgentError).await;
+    let parent = seed_failed_task(&store, "t1", None, None, 1, 2, FailureReason::AgentError).await;
     let clock = FixedClock(NOW_MS);
 
     let decision = RetryService::maybe_retry_failed(store.pool(), &parent, "child-1", &clock)
         .await
         .expect("decision ok");
     assert_eq!(decision, RetryDecision::DoNotRetry);
-    assert!(TaskRepo::get_by_id(store.pool(), "child-1")
-        .await
-        .unwrap()
-        .is_none());
+    assert!(TaskRepo::get_by_id(store.pool(), "child-1").await.unwrap().is_none());
 }
 
 #[tokio::test]
 async fn failure_reason_user_cancel_does_not_retry() {
     // user_cancel is terminal-by-intent.
     let (_dir, store) = open_seeded().await;
-    let parent =
-        seed_failed_task(&store, "t1", None, None, 1, 2, FailureReason::UserCancel).await;
+    let parent = seed_failed_task(&store, "t1", None, None, 1, 2, FailureReason::UserCancel).await;
     let clock = FixedClock(NOW_MS);
 
     let decision = RetryService::maybe_retry_failed(store.pool(), &parent, "child-1", &clock)
         .await
         .expect("decision ok");
     assert_eq!(decision, RetryDecision::DoNotRetry);
-    assert!(TaskRepo::get_by_id(store.pool(), "child-1")
-        .await
-        .unwrap()
-        .is_none());
+    assert!(TaskRepo::get_by_id(store.pool(), "child-1").await.unwrap().is_none());
 }
 
 #[tokio::test]
 async fn failure_reason_runtime_recovery_retries_once() {
     // After daemon recovery via recover-orphans, eligible reasons spawn a child.
     let (_dir, store) = open_seeded().await;
-    let parent =
-        seed_failed_task(&store, "t1", None, None, 1, 2, FailureReason::RuntimeRecovery).await;
+    let parent = seed_failed_task(
+        &store,
+        "t1",
+        None,
+        None,
+        1,
+        2,
+        FailureReason::RuntimeRecovery,
+    )
+    .await;
     let clock = FixedClock(NOW_MS);
 
     let decision = RetryService::maybe_retry_failed(store.pool(), &parent, "child-1", &clock)
         .await
         .expect("retry ok");
-    assert_eq!(decision, RetryDecision::Spawned { new_task_id: "child-1".to_string() });
+    assert_eq!(
+        decision,
+        RetryDecision::Spawned {
+            new_task_id: "child-1".to_string()
+        }
+    );
 
     let child = TaskRepo::get_by_id(store.pool(), "child-1")
         .await
@@ -332,18 +339,23 @@ async fn max_attempts_caps_retry_chain() {
     // attempt=2, max_attempts=2: failing with a retryable reason yields no child
     // row; the parent stays `failed`. Chain length is bounded.
     let (_dir, store) = open_seeded().await;
-    let parent =
-        seed_failed_task(&store, "t1", None, None, 2, 2, FailureReason::RuntimeOffline).await;
+    let parent = seed_failed_task(
+        &store,
+        "t1",
+        None,
+        None,
+        2,
+        2,
+        FailureReason::RuntimeOffline,
+    )
+    .await;
     let clock = FixedClock(NOW_MS);
 
     let decision = RetryService::maybe_retry_failed(store.pool(), &parent, "child-1", &clock)
         .await
         .expect("decision ok");
     assert_eq!(decision, RetryDecision::DoNotRetry);
-    assert!(TaskRepo::get_by_id(store.pool(), "child-1")
-        .await
-        .unwrap()
-        .is_none());
+    assert!(TaskRepo::get_by_id(store.pool(), "child-1").await.unwrap().is_none());
 
     let still = TaskRepo::get_by_id(store.pool(), "t1").await.unwrap().unwrap();
     assert_eq!(still.status, "failed");
@@ -357,12 +369,25 @@ async fn retry_chain_walk_via_parent_task_id() {
     let clock = FixedClock(NOW_MS);
 
     // Root attempt fails (runtime_offline) -> spawns mid.
-    let root =
-        seed_failed_task(&store, "root", None, None, 1, 3, FailureReason::RuntimeOffline).await;
+    let root = seed_failed_task(
+        &store,
+        "root",
+        None,
+        None,
+        1,
+        3,
+        FailureReason::RuntimeOffline,
+    )
+    .await;
     let d1 = RetryService::maybe_retry_failed(store.pool(), &root, "mid", &clock)
         .await
         .expect("retry root");
-    assert_eq!(d1, RetryDecision::Spawned { new_task_id: "mid".to_string() });
+    assert_eq!(
+        d1,
+        RetryDecision::Spawned {
+            new_task_id: "mid".to_string()
+        }
+    );
 
     // Mid attempt fails -> spawns leaf. Move mid to running then fail it.
     sqlx::query("UPDATE agent_task_queue SET status='running' WHERE id='mid'")
@@ -376,7 +401,12 @@ async fn retry_chain_walk_via_parent_task_id() {
     let d2 = RetryService::maybe_retry_failed(store.pool(), &mid, "leaf", &clock)
         .await
         .expect("retry mid");
-    assert_eq!(d2, RetryDecision::Spawned { new_task_id: "leaf".to_string() });
+    assert_eq!(
+        d2,
+        RetryDecision::Spawned {
+            new_task_id: "leaf".to_string()
+        }
+    );
 
     // Walk leaf -> mid -> root via parent_task_id.
     let mut chain = Vec::new();

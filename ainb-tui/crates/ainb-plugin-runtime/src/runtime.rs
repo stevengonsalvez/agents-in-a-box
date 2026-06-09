@@ -3,8 +3,8 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use parking_lot::RwLock;
 use tokio::runtime::Runtime as TokioRuntime;
@@ -13,11 +13,11 @@ use crate::error::RuntimeError;
 use crate::event_stream::EventStreamRegistry;
 use crate::handle::{HandleInner, RuntimeHandle};
 use crate::managed_subprocess::ManagedSubprocessRegistry;
-use crate::unix_socket::UnixSocketRegistry;
 use crate::plugin_task::{self, DirtyMap, Inbox, InboxMap, KeyInbox, RenderCache};
 use crate::registry::{self, ChannelRegistry, RegisteredPlugin};
 use crate::snapshot::SnapshotStore;
 use crate::types::{LifecycleState, LogTap, PluginId, RuntimeConfig};
+use crate::unix_socket::UnixSocketRegistry;
 
 /// Per-plugin handle bundle stored inside the runtime's plugin map.
 pub(crate) struct PluginHandle {

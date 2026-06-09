@@ -26,7 +26,7 @@ use ainb_hangar_secrets::{Scope, SecretBackend, SecretError};
 use ainb_plugin_protocol::errors::RpcError;
 use ainb_plugin_protocol::manifest::CapabilityGrant;
 use ainb_plugin_protocol::params::{SecretStoreGetParams, SecretStoreGetResult};
-use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use serde_json::Value;
 
 /// A shared, thread-safe handle to the host's secret backend.
@@ -201,7 +201,10 @@ mod tests {
 
     #[test]
     fn key_allowed_exact_match_only() {
-        let allow = vec!["anthropic_api_key".to_string(), "openai_api_key".to_string()];
+        let allow = vec![
+            "anthropic_api_key".to_string(),
+            "openai_api_key".to_string(),
+        ];
         assert!(key_allowed(&allow, "anthropic_api_key"));
         assert!(key_allowed(&allow, "openai_api_key"));
         assert!(!key_allowed(&allow, "github_token"));

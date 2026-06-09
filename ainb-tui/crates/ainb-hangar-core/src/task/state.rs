@@ -124,7 +124,10 @@ impl TaskState {
         if TRANSITIONS.iter().any(|&(f, t)| f == self && t == target) {
             Ok(())
         } else {
-            Err(IllegalTransition { from: self, to: target })
+            Err(IllegalTransition {
+                from: self,
+                to: target,
+            })
         }
     }
 

@@ -6,14 +6,11 @@
 
 use std::collections::HashMap;
 
-use ainb_hangar_core::env_policy::{apply_policy, EnvPolicy, DENY};
+use ainb_hangar_core::env_policy::{DENY, EnvPolicy, apply_policy};
 
 /// Build a parent-env map from `(key, value)` pairs.
 fn env(pairs: &[(&str, &str)]) -> HashMap<String, String> {
-    pairs
-        .iter()
-        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
-        .collect()
+    pairs.iter().map(|(k, v)| ((*k).to_string(), (*v).to_string())).collect()
 }
 
 /// Test 1 — the 12 defaults pass through; nothing else does.
@@ -112,7 +109,10 @@ fn glob_pattern_lc_underscore_star_matches() {
 
     assert!(out.contains_key("LC_ALL"), "LC_* must match LC_ALL");
     assert!(out.contains_key("LC_CTYPE"), "LC_* must match LC_CTYPE");
-    assert!(out.contains_key("LC_MESSAGES"), "LC_* must match LC_MESSAGES");
+    assert!(
+        out.contains_key("LC_MESSAGES"),
+        "LC_* must match LC_MESSAGES"
+    );
     assert!(
         !out.contains_key("LCD"),
         "LC_* glob must require the underscore, not match bare LC prefix"

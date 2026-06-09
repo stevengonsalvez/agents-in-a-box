@@ -32,9 +32,8 @@ fn test_cli_invocation() {
 #[test]
 fn test_cli_full_command_path() {
     // The full `... beads reconcile ...` path as the host tree presents it.
-    let cli =
-        HangarBeadsCli::try_parse_from(["ainb-hangar", "beads", "reconcile", "--dry-run"])
-            .expect("clap parse");
+    let cli = HangarBeadsCli::try_parse_from(["ainb-hangar", "beads", "reconcile", "--dry-run"])
+        .expect("clap parse");
     let BeadsCommand::Reconcile(args) = &cli.beads().command;
     assert!(args.dry_run);
 }

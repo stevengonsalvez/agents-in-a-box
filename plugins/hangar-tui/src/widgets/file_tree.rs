@@ -8,8 +8,8 @@
 //!
 //! Reused by the P8 daemon-health log-file viewer.
 
-use ainb_plugin_sdk::{Cell, Color, Coord, WireBuffer};
 use ainb_hangar_proto::events::SkillFile;
+use ainb_plugin_sdk::{Cell, Color, Coord, WireBuffer};
 
 /// Cornflower-blue for directory segments.
 const DIR: Color = Color::rgb(100, 149, 237);
@@ -67,7 +67,14 @@ pub fn render_file_tree(
             cx = put_char(buf, cx, row, ' ', FILE, right);
         }
         cx = put_char(buf, cx, row, ' ', FILE, right);
-        put_str(buf, cx, row, name.first().copied().unwrap_or(""), FILE, right);
+        put_str(
+            buf,
+            cx,
+            row,
+            name.first().copied().unwrap_or(""),
+            FILE,
+            right,
+        );
         row += 1;
     }
 }
@@ -112,9 +119,15 @@ mod tests {
     #[test]
     fn shared_directory_header_emitted_once() {
         let files = vec![
-            SkillFile { path: "SKILL.md".into() },
-            SkillFile { path: "assets/a.md".into() },
-            SkillFile { path: "assets/b.md".into() },
+            SkillFile {
+                path: "SKILL.md".into(),
+            },
+            SkillFile {
+                path: "assets/a.md".into(),
+            },
+            SkillFile {
+                path: "assets/b.md".into(),
+            },
         ];
         let mut buf = WireBuffer::new(30, 10);
         render_file_tree(&mut buf, 0, 0, 10, 30, &files, 0);

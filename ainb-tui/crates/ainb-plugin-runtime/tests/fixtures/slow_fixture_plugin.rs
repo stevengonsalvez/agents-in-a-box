@@ -5,11 +5,11 @@
 use std::io::{BufReader, Write};
 use std::time::Duration;
 
-use ainb_plugin_protocol::framing::{encode, MAX_BODY_BYTES};
+use ainb_plugin_protocol::framing::{MAX_BODY_BYTES, encode};
 use ainb_plugin_protocol::methods;
 use ainb_plugin_protocol::params::{PluginInitResult, RenderResult};
 use ainb_plugin_protocol::wire_buffer::{Cell, Coord, WireBuffer};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 fn main() {
     let stdin = std::io::stdin();
@@ -53,8 +53,7 @@ fn main() {
                 if let Some(id) = id {
                     let mut buf = WireBuffer::new(1, 1);
                     buf.push(Coord::new(0, 0), Cell::new("S"));
-                    let result =
-                        serde_json::to_value(RenderResult { buffer: buf }).unwrap();
+                    let result = serde_json::to_value(RenderResult { buffer: buf }).unwrap();
                     write_response(&mut writer, id, &result);
                 }
             }
@@ -132,7 +131,10 @@ fn read_frame_sync<R: std::io::BufRead>(r: &mut R) -> std::io::Result<Option<Vec
         };
         if name.trim().eq_ignore_ascii_case("Content-Length") {
             let parsed: usize = value.trim().parse().map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, "non-numeric Content-Length")
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "non-numeric Content-Length",
+                )
             })?;
             content_length = Some(parsed);
         }

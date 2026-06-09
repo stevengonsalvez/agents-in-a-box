@@ -13,11 +13,11 @@
 //! the race, never both, never something else.
 
 use ainb_hangar_core::clock::FixedClock;
+use ainb_hangar_store::Store;
 use ainb_hangar_store::repo::task::{NewTask, TaskRepo};
 use ainb_hangar_store::service::cancel::CancelTaskService;
 use ainb_hangar_store::service::complete::{CompleteParams, CompleteTaskService};
 use ainb_hangar_store::service::finalize::{FinalizeError, FinalizeOutcome};
-use ainb_hangar_store::Store;
 
 const NOW_MS: i64 = 1_700_001_000_000;
 
@@ -131,13 +131,13 @@ async fn concurrent_complete_vs_cancel_first_wins_loser_resolves() {
     .into_iter()
     .filter(|l| *l)
     .count();
-    assert_eq!(losers, 1, "the loser must re-read and report TerminalMismatch");
+    assert_eq!(
+        losers, 1,
+        "the loser must re-read and report TerminalMismatch"
+    );
 
     // The row landed in exactly one terminal state, never corrupted.
-    let row = TaskRepo::get_by_id(store.pool(), "t1")
-        .await
-        .unwrap()
-        .unwrap();
+    let row = TaskRepo::get_by_id(store.pool(), "t1").await.unwrap().unwrap();
     assert!(
         row.status == "done" || row.status == "cancelled",
         "row must be done XOR cancelled, got {}",

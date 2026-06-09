@@ -29,7 +29,7 @@ use std::process::Command;
 
 use ainb_hangar_store::repo::task::Task;
 
-use crate::execenv::{short_id, ExecEnv};
+use crate::execenv::{ExecEnv, short_id};
 
 /// A registered git worktree for one task.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,10 +80,7 @@ pub fn prepare_worktree(
 
     // Resume: a recovered task already has its worktree on disk. Reuse it rather
     // than re-running `git worktree add` (which would fail — path registered).
-    let resuming = task
-        .work_dir
-        .as_deref()
-        .is_some_and(|prior| Path::new(prior) == env.workdir);
+    let resuming = task.work_dir.as_deref().is_some_and(|prior| Path::new(prior) == env.workdir);
     if resuming || env.workdir.join(".git").exists() {
         return Ok(Some(wt));
     }
@@ -145,5 +142,8 @@ fn run_git(cwd: &Path, args: &[&str]) -> io::Result<()> {
 /// Construct the error used when a workdir path is not valid UTF-8 (git args
 /// must be passed as `&str`).
 fn non_utf8_path() -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidInput, "workdir path is not valid UTF-8")
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "workdir path is not valid UTF-8",
+    )
 }

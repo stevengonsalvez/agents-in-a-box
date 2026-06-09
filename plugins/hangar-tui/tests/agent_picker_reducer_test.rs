@@ -18,11 +18,21 @@ fn issue() -> IssueId {
     IssueId::from_str("i1").unwrap()
 }
 
-fn actor(reff: &str, name: &str, is_agent: bool, presence: PresenceState, recent: Option<u32>) -> ActorRow {
+fn actor(
+    reff: &str,
+    name: &str,
+    is_agent: bool,
+    presence: PresenceState,
+    recent: Option<u32>,
+) -> ActorRow {
     ActorRow {
         actor_ref: reff.into(),
         display_name: name.into(),
-        subtitle: if is_agent { "agent · gpt5".into() } else { "backend dev".into() },
+        subtitle: if is_agent {
+            "agent · gpt5".into()
+        } else {
+            "backend dev".into()
+        },
         presence,
         is_agent,
         recent_rank: recent,
@@ -31,10 +41,28 @@ fn actor(reff: &str, name: &str, is_agent: bool, presence: PresenceState, recent
 
 fn sample() -> Vec<ActorRow> {
     vec![
-        actor("member:alice", "alice", false, PresenceState::Online, Some(0)),
+        actor(
+            "member:alice",
+            "alice",
+            false,
+            PresenceState::Online,
+            Some(0),
+        ),
         actor("member:bob", "bob", false, PresenceState::Offline, None),
-        actor("agent:claude-agent", "claude-agent", true, PresenceState::Online, Some(1)),
-        actor("agent:codex-agent", "codex-agent", true, PresenceState::Unstable, None),
+        actor(
+            "agent:claude-agent",
+            "claude-agent",
+            true,
+            PresenceState::Online,
+            Some(1),
+        ),
+        actor(
+            "agent:codex-agent",
+            "codex-agent",
+            true,
+            PresenceState::Unstable,
+            None,
+        ),
     ]
 }
 
@@ -50,7 +78,10 @@ fn enter_emits_assign_intent_with_selected_actor() {
     // First visible actor is selected by default.
     let out = reduce_agent_picker(&s, AgentPickerEvent::Key('\n'));
     match out.intent {
-        Some(AgentPickerIntent::Assign { issue_id, actor_ref }) => {
+        Some(AgentPickerIntent::Assign {
+            issue_id,
+            actor_ref,
+        }) => {
             assert_eq!(issue_id, issue());
             assert!(!actor_ref.is_empty());
         }
@@ -85,7 +116,13 @@ fn slash_filter_narrows_visible_list() {
 /// Agent rows render a violet ring on the glyph; human rows render neutral gray.
 #[test]
 fn agent_rows_render_violet_ring_human_rows_render_neutral() {
-    let agent = actor("agent:claude-agent", "claude-agent", true, PresenceState::Online, None);
+    let agent = actor(
+        "agent:claude-agent",
+        "claude-agent",
+        true,
+        PresenceState::Online,
+        None,
+    );
     let human = actor("member:alice", "alice", false, PresenceState::Online, None);
     assert_eq!(actor_glyph_color(&agent), AGENT_VIOLET);
     assert_eq!(actor_glyph_color(&human), HUMAN_NEUTRAL);
@@ -102,7 +139,10 @@ fn presence_unstable_only_when_runtime_degraded_not_just_queueing() {
     assert_eq!(presence_dot(PresenceState::Unstable).0, '◐');
     assert_eq!(presence_dot(PresenceState::Offline).0, '○');
     // The amber dot is reserved for Unstable; Online is not amber.
-    assert_ne!(presence_dot(PresenceState::Unstable).1, presence_dot(PresenceState::Online).1);
+    assert_ne!(
+        presence_dot(PresenceState::Unstable).1,
+        presence_dot(PresenceState::Online).1
+    );
 }
 
 /// Recently-used actors are pinned ahead of the alphabetical body.

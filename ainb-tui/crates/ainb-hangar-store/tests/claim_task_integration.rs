@@ -18,9 +18,9 @@
 //! - concurrent claims are race-safe: at most one claimant wins any given row.
 
 use ainb_hangar_core::clock::FixedClock;
+use ainb_hangar_store::Store;
 use ainb_hangar_store::repo::task::{NewTask, TaskRepo};
 use ainb_hangar_store::service::claim::ClaimTaskService;
-use ainb_hangar_store::Store;
 
 /// Frozen "now" used for `dispatched_at` assertions.
 const NOW_MS: i64 = 1_700_000_500_000;
@@ -78,7 +78,11 @@ async fn seed_graph(
     .execute(pool)
     .await
     .expect("insert agent");
-    ("ws-1".to_string(), runtime_id.to_string(), agent_id.to_string())
+    (
+        "ws-1".to_string(),
+        runtime_id.to_string(),
+        agent_id.to_string(),
+    )
 }
 
 /// Seed one issue row and return its id.
@@ -126,9 +130,12 @@ async fn claim_queued_task_marks_dispatched_atomic() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = Store::open_in(dir.path()).await.expect("open store");
     seed_graph(&store, "rt-1", "agent-1", 1).await;
-    TaskRepo::insert(store.pool(), &new_task("task-1", "rt-1", "agent-1", None, 1))
-        .await
-        .expect("enqueue");
+    TaskRepo::insert(
+        store.pool(),
+        &new_task("task-1", "rt-1", "agent-1", None, 1),
+    )
+    .await
+    .expect("enqueue");
 
     let clock = FixedClock(NOW_MS);
     let claimed = ClaimTaskService::claim_for_runtime(store.pool(), "rt-1", &clock)
@@ -139,7 +146,10 @@ async fn claim_queued_task_marks_dispatched_atomic() {
     assert_eq!(claimed.id, "task-1");
     assert_eq!(claimed.runtime_id, "rt-1");
     assert_eq!(claimed.agent_id, "agent-1");
-    assert_eq!(claimed.dispatched_at, NOW_MS, "dispatched_at = clock.now_ms()");
+    assert_eq!(
+        claimed.dispatched_at, NOW_MS,
+        "dispatched_at = clock.now_ms()"
+    );
 
     let row = TaskRepo::get_by_id(store.pool(), "task-1")
         .await
@@ -168,12 +178,18 @@ async fn claim_skips_tasks_for_other_runtimes() {
     let store = Store::open_in(dir.path()).await.expect("open store");
     seed_graph(&store, "rt-1", "agent-1", 1).await;
     seed_graph(&store, "rt-2", "agent-2", 1).await;
-    TaskRepo::insert(store.pool(), &new_task("task-a", "rt-1", "agent-1", None, 1))
-        .await
-        .expect("enqueue a");
-    TaskRepo::insert(store.pool(), &new_task("task-b", "rt-2", "agent-2", None, 1))
-        .await
-        .expect("enqueue b");
+    TaskRepo::insert(
+        store.pool(),
+        &new_task("task-a", "rt-1", "agent-1", None, 1),
+    )
+    .await
+    .expect("enqueue a");
+    TaskRepo::insert(
+        store.pool(),
+        &new_task("task-b", "rt-2", "agent-2", None, 1),
+    )
+    .await
+    .expect("enqueue b");
 
     let clock = FixedClock(NOW_MS);
     let a = ClaimTaskService::claim_for_runtime(store.pool(), "rt-1", &clock)
@@ -195,12 +211,18 @@ async fn claim_takes_oldest_queued_first() {
     let store = Store::open_in(dir.path()).await.expect("open store");
     seed_graph(&store, "rt-1", "agent-1", 5).await;
     // Insert newest first to prove ordering is by created_at, not insert order.
-    TaskRepo::insert(store.pool(), &new_task("task-new", "rt-1", "agent-1", None, 200))
-        .await
-        .expect("enqueue new");
-    TaskRepo::insert(store.pool(), &new_task("task-old", "rt-1", "agent-1", None, 100))
-        .await
-        .expect("enqueue old");
+    TaskRepo::insert(
+        store.pool(),
+        &new_task("task-new", "rt-1", "agent-1", None, 200),
+    )
+    .await
+    .expect("enqueue new");
+    TaskRepo::insert(
+        store.pool(),
+        &new_task("task-old", "rt-1", "agent-1", None, 100),
+    )
+    .await
+    .expect("enqueue old");
 
     let clock = FixedClock(NOW_MS);
     let claimed = ClaimTaskService::claim_for_runtime(store.pool(), "rt-1", &clock)
@@ -220,9 +242,12 @@ async fn partial_unique_index_blocks_second_pending_per_issue() {
     seed_graph(&store, "rt-1", "agent-1", 1).await;
     seed_issue(&store, "issue-1").await;
 
-    TaskRepo::insert(store.pool(), &new_task("task-1", "rt-1", "agent-1", Some("issue-1"), 1))
-        .await
-        .expect("first pending task inserts");
+    TaskRepo::insert(
+        store.pool(),
+        &new_task("task-1", "rt-1", "agent-1", Some("issue-1"), 1),
+    )
+    .await
+    .expect("first pending task inserts");
 
     let err = TaskRepo::insert(
         store.pool(),
@@ -231,9 +256,7 @@ async fn partial_unique_index_blocks_second_pending_per_issue() {
     .await
     .expect_err("second pending task for same issue must violate the partial unique index");
 
-    let db_err = err
-        .as_database_error()
-        .expect("expected a database constraint error");
+    let db_err = err.as_database_error().expect("expected a database constraint error");
     let msg = db_err.message().to_lowercase();
     assert!(
         msg.contains("unique") || msg.contains("constraint"),
@@ -249,17 +272,23 @@ async fn claim_respects_per_agent_max_concurrent() {
     let store = Store::open_in(dir.path()).await.expect("open store");
     seed_graph(&store, "rt-1", "agent-1", 1).await;
 
-    TaskRepo::insert(store.pool(), &new_task("task-running", "rt-1", "agent-1", None, 1))
-        .await
-        .expect("enqueue running");
+    TaskRepo::insert(
+        store.pool(),
+        &new_task("task-running", "rt-1", "agent-1", None, 1),
+    )
+    .await
+    .expect("enqueue running");
     sqlx::query("UPDATE agent_task_queue SET status = 'running' WHERE id = ?")
         .bind("task-running")
         .execute(store.pool())
         .await
         .expect("force running");
-    TaskRepo::insert(store.pool(), &new_task("task-queued", "rt-1", "agent-1", None, 2))
-        .await
-        .expect("enqueue queued");
+    TaskRepo::insert(
+        store.pool(),
+        &new_task("task-queued", "rt-1", "agent-1", None, 2),
+    )
+    .await
+    .expect("enqueue queued");
 
     let clock = FixedClock(NOW_MS);
     let claimed = ClaimTaskService::claim_for_runtime(store.pool(), "rt-1", &clock)
@@ -279,17 +308,23 @@ async fn claim_allows_when_under_max_concurrent() {
     let store = Store::open_in(dir.path()).await.expect("open store");
     seed_graph(&store, "rt-1", "agent-1", 2).await;
 
-    TaskRepo::insert(store.pool(), &new_task("task-running", "rt-1", "agent-1", None, 1))
-        .await
-        .expect("enqueue running");
+    TaskRepo::insert(
+        store.pool(),
+        &new_task("task-running", "rt-1", "agent-1", None, 1),
+    )
+    .await
+    .expect("enqueue running");
     sqlx::query("UPDATE agent_task_queue SET status = 'running' WHERE id = ?")
         .bind("task-running")
         .execute(store.pool())
         .await
         .expect("force running");
-    TaskRepo::insert(store.pool(), &new_task("task-queued", "rt-1", "agent-1", None, 2))
-        .await
-        .expect("enqueue queued");
+    TaskRepo::insert(
+        store.pool(),
+        &new_task("task-queued", "rt-1", "agent-1", None, 2),
+    )
+    .await
+    .expect("enqueue queued");
 
     let clock = FixedClock(NOW_MS);
     let claimed = ClaimTaskService::claim_for_runtime(store.pool(), "rt-1", &clock)
@@ -307,9 +342,12 @@ async fn concurrent_claim_only_one_wins() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = Store::open_in(dir.path()).await.expect("open store");
     seed_graph(&store, "rt-1", "agent-1", 5).await;
-    TaskRepo::insert(store.pool(), &new_task("task-1", "rt-1", "agent-1", None, 1))
-        .await
-        .expect("enqueue");
+    TaskRepo::insert(
+        store.pool(),
+        &new_task("task-1", "rt-1", "agent-1", None, 1),
+    )
+    .await
+    .expect("enqueue");
 
     let clock = FixedClock(NOW_MS);
     let p1 = store.pool().clone();

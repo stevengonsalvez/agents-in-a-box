@@ -73,11 +73,7 @@ impl ClaimTaskService {
         clock: &dyn HangarClock,
     ) -> Result<Option<ClaimedTask>, sqlx::Error> {
         let now = clock.now_ms();
-        let row = sqlx::query(CLAIM_SQL)
-            .bind(now)
-            .bind(runtime_id)
-            .fetch_optional(pool)
-            .await?;
+        let row = sqlx::query(CLAIM_SQL).bind(now).bind(runtime_id).fetch_optional(pool).await?;
         // Record the claimed identity onto the span once known. `workspace_id`
         // comes back in the RETURNING projection purely for observability (it is
         // not part of the [`ClaimedTask`] the caller consumes). An empty queue
@@ -85,7 +81,10 @@ impl ClaimTaskService {
         if let Some(r) = row.as_ref() {
             let span = tracing::Span::current();
             span.record("task_id", r.try_get::<String, _>("id")?.as_str());
-            span.record("workspace_id", r.try_get::<String, _>("workspace_id")?.as_str());
+            span.record(
+                "workspace_id",
+                r.try_get::<String, _>("workspace_id")?.as_str(),
+            );
         }
         row.map(|r| claimed_from_row(&r)).transpose()
     }

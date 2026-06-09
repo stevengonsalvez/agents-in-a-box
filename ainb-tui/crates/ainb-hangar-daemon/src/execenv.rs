@@ -253,6 +253,5 @@ fn is_older_than(dir: &Path, now_ms: i64, grace_ms: i64) -> io::Result<bool> {
 /// to 0 (no mtime in Hangar predates 1970).
 #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
 fn system_time_to_ms(t: SystemTime) -> i64 {
-    t.duration_since(SystemTime::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as i64)
+    t.duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
 }

@@ -260,9 +260,7 @@ mod tests {
                 read_claude_logs: CapabilityGrant::Bool(false),
                 read_codex_logs: CapabilityGrant::Bool(false),
                 event_stream_subscribe: CapabilityGrant::List(vec!["workspace:*".into()]),
-                spawn_managed_subprocess: CapabilityGrant::List(vec![
-                    "ainb-hangar-daemon".into()
-                ]),
+                spawn_managed_subprocess: CapabilityGrant::List(vec!["ainb-hangar-daemon".into()]),
                 unix_socket_dial: CapabilityGrant::List(vec!["~/.ainb/hangar.sock".into()]),
                 secrets_read: CapabilityGrant::List(vec!["anthropic_api_key".into()]),
                 workspace_write: CapabilityGrant::Bool(true),

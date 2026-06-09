@@ -10,11 +10,16 @@
 //! - the **latest** finished task's URL wins when more than one task ran.
 
 use ainb_hangar_daemon::rpc::snapshots::issues_list;
-use ainb_hangar_daemon::seed::{seed_p4_fixture, WS_ID};
+use ainb_hangar_daemon::seed::{WS_ID, seed_p4_fixture};
 use ainb_hangar_store::Store;
 
 /// Overwrite `task-1`'s row to a completed task carrying `result.pr_url`.
-async fn complete_task_with_pr(pool: &sqlx::SqlitePool, task_id: &str, pr_url: &str, finished_at: i64) {
+async fn complete_task_with_pr(
+    pool: &sqlx::SqlitePool,
+    task_id: &str,
+    pr_url: &str,
+    finished_at: i64,
+) {
     let result = serde_json::json!({ "content": "done", "exit_code": 0, "pr_url": pr_url });
     sqlx::query(
         "UPDATE agent_task_queue SET status = 'done', result = ?, finished_at = ? WHERE id = ?",
@@ -33,7 +38,13 @@ async fn issues_list_surfaces_completed_task_pr_url() {
     let store = Store::open_in(dir.path()).await.unwrap();
     seed_p4_fixture(store.pool()).await.unwrap();
 
-    complete_task_with_pr(store.pool(), "task-1", "https://example.com/pr/1", 1_700_000_100_000).await;
+    complete_task_with_pr(
+        store.pool(),
+        "task-1",
+        "https://example.com/pr/1",
+        1_700_000_100_000,
+    )
+    .await;
 
     let issues = issues_list(store.pool(), WS_ID).await.unwrap();
     let issue_1 = issues.iter().find(|i| i.id.as_str() == "issue-1").expect("issue-1 present");
@@ -78,7 +89,13 @@ async fn issues_list_takes_the_latest_finished_task_pr_url() {
     seed_p4_fixture(store.pool()).await.unwrap();
 
     // The fixture's task-1 finished earlier with an older PR.
-    complete_task_with_pr(store.pool(), "task-1", "https://example.com/pr/1", 1_700_000_100_000).await;
+    complete_task_with_pr(
+        store.pool(),
+        "task-1",
+        "https://example.com/pr/1",
+        1_700_000_100_000,
+    )
+    .await;
 
     // A second, later task on the same issue opens a newer PR. Insert it
     // directly (the partial-unique pending index only guards non-terminal rows,

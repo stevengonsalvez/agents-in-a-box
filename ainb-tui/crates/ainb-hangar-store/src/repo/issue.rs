@@ -132,11 +132,7 @@ impl IssueRepo {
     /// # Errors
     ///
     /// Returns a [`sqlx::Error`] if the update fails.
-    pub async fn update_state(
-        pool: &SqlitePool,
-        id: &str,
-        state: &str,
-    ) -> Result<(), sqlx::Error> {
+    pub async fn update_state(pool: &SqlitePool, id: &str, state: &str) -> Result<(), sqlx::Error> {
         sqlx::query("UPDATE issue SET state = ? WHERE id = ?")
             .bind(state)
             .bind(id)
@@ -193,13 +189,14 @@ fn actor_from_columns(
     match (kind, id) {
         (None, None) => Ok(None),
         (Some(k), Some(i)) => {
-            let kind = k
-                .parse::<ActorKind>()
-                .map_err(|e| decode_err(column, &e.to_string()))?;
+            let kind = k.parse::<ActorKind>().map_err(|e| decode_err(column, &e.to_string()))?;
             let actor = ActorRef::new(kind, i).map_err(|e| decode_err(column, &e.to_string()))?;
             Ok(Some(actor))
         }
-        _ => Err(decode_err(column, "actor type/id columns disagree on nullness")),
+        _ => Err(decode_err(
+            column,
+            "actor type/id columns disagree on nullness",
+        )),
     }
 }
 
@@ -220,9 +217,12 @@ fn issue_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Issue, sqlx::Error> {
         row.try_get("assignee_id")?,
         "assignee",
     )?;
-    let creator =
-        actor_from_columns(row.try_get("creator_type")?, row.try_get("creator_id")?, "creator")?
-            .ok_or_else(|| decode_err("creator", "creator columns must be non-null"))?;
+    let creator = actor_from_columns(
+        row.try_get("creator_type")?,
+        row.try_get("creator_id")?,
+        "creator",
+    )?
+    .ok_or_else(|| decode_err("creator", "creator columns must be non-null"))?;
     Ok(Issue {
         id: row.try_get("id")?,
         workspace_id: row.try_get("workspace_id")?,

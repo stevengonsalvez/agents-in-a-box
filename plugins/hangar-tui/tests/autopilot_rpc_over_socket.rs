@@ -95,10 +95,16 @@ fn spawn_daemon(listener: UnixListener, seen: Seen, enabled: Arc<Mutex<bool>>) {
             let Ok(req) = serde_json::from_value::<RpcRequest>(raw) else {
                 return;
             };
-            seen.lock().unwrap().push((req.method.clone(), req.params.clone()));
+            seen.lock()
+                .unwrap()
+                .push((req.method.clone(), req.params.clone()));
             // A set_enabled call flips the shared flag so the next list reflects it.
             if req.method == daemon_methods::HANGAR_AUTOPILOT_SET_ENABLED {
-                if let Some(e) = req.params.get("enabled").and_then(serde_json::Value::as_bool) {
+                if let Some(e) = req
+                    .params
+                    .get("enabled")
+                    .and_then(serde_json::Value::as_bool)
+                {
                     *enabled.lock().unwrap() = e;
                 }
             }
@@ -194,7 +200,11 @@ where
     }
 }
 
-async fn push_data<W: tokio::io::AsyncWrite + Unpin>(host_write: &mut W, stream_id: &str, reply: &[u8]) {
+async fn push_data<W: tokio::io::AsyncWrite + Unpin>(
+    host_write: &mut W,
+    stream_id: &str,
+    reply: &[u8],
+) {
     let event = UnixSocketEvent {
         kind: UnixSocketEventKind::Data,
         bytes: Some(reply.to_vec().into()),
@@ -337,7 +347,9 @@ async fn boot(
     let (daemon_read, mut daemon_write) = daemon.into_split();
     let mut daemon_reader = BufReader::new(daemon_read);
 
-    let ack = read_one_raw_frame(&mut daemon_reader).await.expect("subscribe ack");
+    let ack = read_one_raw_frame(&mut daemon_reader)
+        .await
+        .expect("subscribe ack");
     push_data(&mut host_write, stream_id, &ack).await;
     pump_snapshots(
         &mut host_write,
@@ -396,7 +408,9 @@ async fn key_r_fires_now() {
         drop(host_write);
         server.abort();
     };
-    tokio::time::timeout(BUDGET, body).await.expect("exceeded fire-now budget");
+    tokio::time::timeout(BUDGET, body)
+        .await
+        .expect("exceeded fire-now budget");
 }
 
 #[tokio::test]
@@ -449,8 +463,12 @@ async fn key_d_toggles_enabled() {
             .await;
             // The re-fetch is the second autopilots_list AFTER the set_enabled.
             let after_toggle = {
-                let snapshot: Vec<String> =
-                    seen.lock().unwrap().iter().map(|(m, _)| m.clone()).collect();
+                let snapshot: Vec<String> = seen
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|(m, _)| m.clone())
+                    .collect();
                 snapshot
                     .iter()
                     .position(|m| m == daemon_methods::HANGAR_AUTOPILOT_SET_ENABLED)
@@ -466,7 +484,10 @@ async fn key_d_toggles_enabled() {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert!(refetched, "post-toggle autopilots_list re-fetch never fired");
+        assert!(
+            refetched,
+            "post-toggle autopilots_list re-fetch never fired"
+        );
 
         // Settle: a few extra render pumps so the re-fetch reply is delivered as a
         // socket event AND folded into the plugin's row before the next keypress.
@@ -503,7 +524,9 @@ async fn key_d_toggles_enabled() {
         drop(host_write);
         server.abort();
     };
-    tokio::time::timeout(BUDGET, body).await.expect("exceeded toggle budget");
+    tokio::time::timeout(BUDGET, body)
+        .await
+        .expect("exceeded toggle budget");
 }
 
 /// Pump renders relaying sends until the daemon records a `set_enabled` with the
@@ -525,8 +548,14 @@ where
     DW: tokio::io::AsyncWrite + Unpin,
 {
     for _ in 0..60 {
-        relay_one_send_or_render(host_write, host_read, daemon_reader, daemon_write, stream_id)
-            .await;
+        relay_one_send_or_render(
+            host_write,
+            host_read,
+            daemon_reader,
+            daemon_write,
+            stream_id,
+        )
+        .await;
         let hit = seen.lock().unwrap().iter().any(|(m, p)| {
             m == daemon_methods::HANGAR_AUTOPILOT_SET_ENABLED
                 && p.get("enabled").and_then(serde_json::Value::as_bool) == want_enabled

@@ -65,7 +65,7 @@ pub async fn run_inbound_loop(
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_BACKOFF, Duration};
+    use super::{Duration, MAX_BACKOFF};
 
     #[test]
     fn backoff_doubles_and_caps() {

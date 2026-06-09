@@ -129,10 +129,9 @@ impl EnvPolicy {
 /// is an exact, case-sensitive match. No regex — `*`-suffix is the only
 /// metacharacter.
 fn matches_allow(pattern: &str, key: &str) -> bool {
-    pattern.strip_suffix('*').map_or_else(
-        || pattern == key,
-        |prefix| key.starts_with(prefix),
-    )
+    pattern
+        .strip_suffix('*')
+        .map_or_else(|| pattern == key, |prefix| key.starts_with(prefix))
 }
 
 /// Filter `parent_env` down to the keys this `policy` permits.

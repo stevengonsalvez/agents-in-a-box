@@ -20,11 +20,11 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
+    Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph, Wrap},
-    Frame,
 };
 
 use std::collections::HashMap;
@@ -171,12 +171,7 @@ impl ConfigureState {
         // cycling consults the cache, not the disk.
         let presets_cache: HashMap<String, RepositoryPreset> = PresetManager::new()
             .ok()
-            .map(|m| {
-                m.all()
-                    .iter()
-                    .map(|p| (p.name.clone(), (*p).clone()))
-                    .collect()
-            })
+            .map(|m| m.all().iter().map(|p| (p.name.clone(), (*p).clone())).collect())
             .unwrap_or_default();
 
         // Step 1: collect available preset names. Sorted for stable cycling.
@@ -204,17 +199,11 @@ impl ConfigureState {
             }
         }
         let current_preset = autoload
-            .or_else(|| {
-                available_presets
-                    .iter()
-                    .find_map(|n| presets_cache.get(n).cloned())
-            })
+            .or_else(|| available_presets.iter().find_map(|n| presets_cache.get(n).cloned()))
             .unwrap_or_default();
 
-        let selected_idx = available_presets
-            .iter()
-            .position(|n| n == &current_preset.name)
-            .unwrap_or(0);
+        let selected_idx =
+            available_presets.iter().position(|n| n == &current_preset.name).unwrap_or(0);
 
         // Pre-populate prompt from per-repo persisted state when present.
         let prompt = defaults
@@ -312,8 +301,7 @@ impl ConfigureState {
                 effective.agent_provider != self.current_preset.agent_provider
                     || effective.agent_model != self.current_preset.agent_model
                     || effective.mode != self.current_preset.mode
-                    || effective.permissions.skip_all
-                        != self.current_preset.permissions.skip_all
+                    || effective.permissions.skip_all != self.current_preset.permissions.skip_all
                     || self.custom_overrides.is_some()
             }
             PresetSelection::Named(idx) => self
@@ -334,9 +322,7 @@ impl ConfigureState {
         if let Some(ref buf) = self.branch_edit {
             return buf.clone();
         }
-        self.branch_override
-            .clone()
-            .unwrap_or_else(|| self.branch_worktree.clone())
+        self.branch_override.clone().unwrap_or_else(|| self.branch_worktree.clone())
     }
 
     /// True when the effective branch is already checked out in a live
@@ -420,10 +406,7 @@ impl ConfigureState {
         if rows.is_empty() {
             return;
         }
-        let cur = rows
-            .iter()
-            .position(|r| *r == self.focused_row)
-            .unwrap_or(0);
+        let cur = rows.iter().position(|r| *r == self.focused_row).unwrap_or(0);
         let len = rows.len() as i32;
         let next = ((cur as i32) + delta).rem_euclid(len) as usize;
         self.focused_row = rows[next];
@@ -563,7 +546,10 @@ pub fn render(f: &mut Frame, state: &ConfigureState, area: Rect) {
     let in_prompt =
         state.focused_row == ConfigureRow::Prompt && rows.contains(&ConfigureRow::Prompt);
     let help = render_help_bar(variant, in_prompt, state.branch_edit.is_some());
-    f.render_widget(Paragraph::new(help).alignment(Alignment::Center), help_chunk);
+    f.render_widget(
+        Paragraph::new(help).alignment(Alignment::Center),
+        help_chunk,
+    );
 
     // Modal overlay for save-preset, if open.
     if let Some(ref name_buf) = state.save_preset_modal {
@@ -576,9 +562,15 @@ pub fn render(f: &mut Frame, state: &ConfigureState, area: Rect) {
 fn render_help_bar(variant: Variant, in_prompt: bool, branch_editing: bool) -> Line<'static> {
     if branch_editing {
         return Line::from(vec![
-            Span::styled("Enter", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Enter",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ),
             Span::styled("=Commit  ", Style::default().fg(MUTED_GRAY)),
-            Span::styled("Esc", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Esc",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ),
             Span::styled("=Cancel branch edit", Style::default().fg(MUTED_GRAY)),
         ]);
     }
@@ -589,9 +581,15 @@ fn render_help_bar(variant: Variant, in_prompt: bool, branch_editing: bool) -> L
                 Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
             ),
             Span::styled("=Launch  ", Style::default().fg(MUTED_GRAY)),
-            Span::styled("Esc", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Esc",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ),
             Span::styled("=Back  ", Style::default().fg(MUTED_GRAY)),
-            Span::styled("Tab", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Tab",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ),
             Span::styled("=Leave  ", Style::default().fg(MUTED_GRAY)),
             Span::styled("^S", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
             Span::styled("=Save preset", Style::default().fg(MUTED_GRAY)),
@@ -608,14 +606,23 @@ fn render_help_bar(variant: Variant, in_prompt: bool, branch_editing: bool) -> L
             Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
         ),
         Span::styled("=Next field  ", Style::default().fg(MUTED_GRAY)),
-        Span::styled("Enter", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
-        Span::styled("=Launch (on [Launch] row)  ", Style::default().fg(MUTED_GRAY)),
+        Span::styled(
+            "Enter",
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "=Launch (on [Launch] row)  ",
+            Style::default().fg(MUTED_GRAY),
+        ),
         Span::styled(
             "^Enter",
             Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
         ),
         Span::styled("=Quick launch  ", Style::default().fg(MUTED_GRAY)),
-        Span::styled("Esc", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "Esc",
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ),
         Span::styled("=Back  ", Style::default().fg(MUTED_GRAY)),
     ];
     if variant != Variant::Ssh {
@@ -661,19 +668,11 @@ fn render_preset_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused:
     let sub_line = if is_custom {
         Line::from(vec![
             Span::raw("           "),
-            Span::styled(
-                "\u{2514} press ",
-                Style::default().fg(MUTED_GRAY),
-            ),
-            Span::styled(
-                "^S",
-                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
-            ),
+            Span::styled("\u{2514} press ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("^S", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
             Span::styled(
                 " to save this as a named preset",
-                Style::default()
-                    .fg(SELECTION_GREEN)
-                    .add_modifier(Modifier::ITALIC),
+                Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::ITALIC),
             ),
         ])
     } else {
@@ -697,10 +696,8 @@ fn render_agent_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: 
         other => other,
     }
     .to_string();
-    let options: Vec<String> = ["Claude", "Codex", "Shell", "SSH"]
-        .iter()
-        .map(|s| (*s).to_string())
-        .collect();
+    let options: Vec<String> =
+        ["Claude", "Codex", "Shell", "SSH"].iter().map(|s| (*s).to_string()).collect();
     let line = build_pills_line("Agent:   ", &options, &current, focused, area.width);
     f.render_widget(Paragraph::new(line), area);
 }
@@ -715,20 +712,14 @@ fn render_model_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: 
             let cur = ClaudeModel::parse(&preset.agent_model);
             (
                 cur.display_label().to_string(),
-                ClaudeModel::all()
-                    .into_iter()
-                    .map(|m| m.display_label().to_string())
-                    .collect(),
+                ClaudeModel::all().into_iter().map(|m| m.display_label().to_string()).collect(),
             )
         }
         "codex" => {
             let cur = CodexModel::parse(&preset.agent_model);
             (
                 cur.display_label().to_string(),
-                CodexModel::all()
-                    .into_iter()
-                    .map(|m| m.display_label().to_string())
-                    .collect(),
+                CodexModel::all().into_iter().map(|m| m.display_label().to_string()).collect(),
             )
         }
         _ => (preset.agent_model.clone(), vec![preset.agent_model.clone()]),
@@ -743,9 +734,7 @@ fn render_model_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: 
         // Mute "system default" so the user can tell at a glance.
         let is_default = current == "system default";
         let value_style = if is_default {
-            Style::default()
-                .fg(MUTED_GRAY)
-                .add_modifier(Modifier::ITALIC)
+            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC)
         } else {
             Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD)
         };
@@ -784,9 +773,7 @@ fn render_mode_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: b
                 label_span("Mode:    "),
                 Span::styled(
                     "Boss [alpha]",
-                    Style::default()
-                        .fg(MUTED_GRAY)
-                        .add_modifier(Modifier::ITALIC),
+                    Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
                 ),
             ];
             f.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -823,10 +810,7 @@ fn render_mode_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: b
             Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
         ));
     } else {
-        spans.push(Span::styled(
-            "Interactive",
-            Style::default().fg(MUTED_GRAY),
-        ));
+        spans.push(Span::styled("Interactive", Style::default().fg(MUTED_GRAY)));
     }
 
     spans.push(Span::styled(" \u{00b7} ", Style::default().fg(MUTED_GRAY)));
@@ -835,9 +819,7 @@ fn render_mode_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: b
     // selected). Selection still uses brackets so the user knows they picked
     // it, but the brackets + label render muted, not green-bold.
     let boss_selected = current == "Boss";
-    let boss_style = Style::default()
-        .fg(MUTED_GRAY)
-        .add_modifier(Modifier::ITALIC);
+    let boss_style = Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC);
     if boss_selected {
         spans.push(Span::styled("[", boss_style));
         spans.push(Span::styled("Boss", boss_style));
@@ -850,9 +832,7 @@ fn render_mode_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: b
     if focused {
         spans.push(Span::styled(
             "   \u{2190}/\u{2192} to change",
-            Style::default()
-                .fg(MUTED_GRAY)
-                .add_modifier(Modifier::ITALIC),
+            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
         ));
     }
 
@@ -888,9 +868,7 @@ fn render_branch_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused:
         let buf_style = if collide {
             Style::default().fg(ALERT_RED).add_modifier(Modifier::BOLD)
         } else {
-            Style::default()
-                .fg(SELECTION_GREEN)
-                .add_modifier(Modifier::BOLD)
+            Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD)
         };
         let edit_line = Line::from(vec![
             focus_indicator(focused),
@@ -913,9 +891,7 @@ fn render_branch_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused:
                 Span::raw("           "),
                 Span::styled(
                     "\u{2514} already checked out by a session \u{2014} pick another name, or Esc \u{2192} menu \u{2192} Recovery to respawn it",
-                    Style::default()
-                        .fg(MUTED_GRAY)
-                        .add_modifier(Modifier::ITALIC),
+                    Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
                 ),
             ]);
             f.render_widget(Paragraph::new(vec![edit_line, guide]), area);
@@ -932,9 +908,7 @@ fn render_branch_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused:
     let worktree_style = if collision {
         Style::default().fg(ALERT_RED).add_modifier(Modifier::BOLD)
     } else {
-        Style::default()
-            .fg(SELECTION_GREEN)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD)
     };
     let trailing = if collision {
         Span::styled(
@@ -963,9 +937,7 @@ fn render_branch_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused:
             Span::raw("           "),
             Span::styled(
                 "\u{2514} already checked out by a session — edit the name (Enter), or Esc → menu → Recovery to respawn it",
-                Style::default()
-                    .fg(MUTED_GRAY)
-                    .add_modifier(Modifier::ITALIC),
+                Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
             ),
         ]);
         f.render_widget(Paragraph::new(vec![branch_line, guide]), area);
@@ -1001,9 +973,7 @@ fn render_launch_row(f: &mut Frame, area: Rect, focused: bool) {
         (
             Span::styled("[ ", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
             Span::styled(" ]", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
-            Style::default()
-                .fg(SELECTION_GREEN)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
         )
     } else {
         (
@@ -1015,16 +985,12 @@ fn render_launch_row(f: &mut Frame, area: Rect, focused: bool) {
     let hint = if focused {
         Span::styled(
             "   press Enter",
-            Style::default()
-                .fg(MUTED_GRAY)
-                .add_modifier(Modifier::ITALIC),
+            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
         )
     } else {
         Span::styled(
             "   Tab to here, then Enter",
-            Style::default()
-                .fg(MUTED_GRAY)
-                .add_modifier(Modifier::ITALIC),
+            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
         )
     };
     let line = Line::from(vec![
@@ -1066,9 +1032,7 @@ fn focus_indicator(focused: bool) -> Span<'static> {
     if focused {
         Span::styled(
             "\u{25b8} ",
-            Style::default()
-                .fg(SELECTION_GREEN)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
         )
     } else {
         Span::raw("  ")
@@ -1076,7 +1040,10 @@ fn focus_indicator(focused: bool) -> Span<'static> {
 }
 
 fn label_span(label: &'static str) -> Span<'static> {
-    Span::styled(label, Style::default().fg(GOLD).add_modifier(Modifier::BOLD))
+    Span::styled(
+        label,
+        Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+    )
 }
 
 fn cyclable_arrow_left(focused: bool) -> Span<'static> {
@@ -1122,21 +1089,15 @@ fn build_pills_line(
         if opt == current {
             spans.push(Span::styled(
                 "[",
-                Style::default()
-                    .fg(SELECTION_GREEN)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
             ));
             spans.push(Span::styled(
                 opt.clone(),
-                Style::default()
-                    .fg(SELECTION_GREEN)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
             ));
             spans.push(Span::styled(
                 "]",
-                Style::default()
-                    .fg(SELECTION_GREEN)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
             ));
         } else {
             spans.push(Span::styled(opt.clone(), Style::default().fg(MUTED_GRAY)));
@@ -1146,9 +1107,7 @@ fn build_pills_line(
     if focused {
         spans.push(Span::styled(
             "   \u{2190}/\u{2192} to change",
-            Style::default()
-                .fg(MUTED_GRAY)
-                .add_modifier(Modifier::ITALIC),
+            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
         ));
     }
 
@@ -1225,7 +1184,11 @@ fn describe_preset(p: &RepositoryPreset) -> String {
         SessionMode::Boss => "Boss",
         SessionMode::Interactive => "Interactive",
     };
-    let perms = if p.permissions.skip_all { "Yolo" } else { "Safe" };
+    let perms = if p.permissions.skip_all {
+        "Yolo"
+    } else {
+        "Safe"
+    };
     format!("{model} \u{00b7} {mode} \u{00b7} {perms}")
 }
 
@@ -1342,10 +1305,8 @@ pub fn handle_key(state: &mut ConfigureState, key: KeyEvent) -> ConfigureOutcome
         KeyCode::Enter => match state.focused_row {
             ConfigureRow::Branch => {
                 // Open inline branch edit. Seed buffer from override or auto.
-                let buf = state
-                    .branch_override
-                    .clone()
-                    .unwrap_or_else(|| state.branch_worktree.clone());
+                let buf =
+                    state.branch_override.clone().unwrap_or_else(|| state.branch_worktree.clone());
                 state.branch_edit = Some(buf);
                 ConfigureOutcome::Stay
             }
@@ -1533,10 +1494,7 @@ const AGENTS: &[&str] = &["claude", "codex", "shell", "ssh"];
 fn cycle_agent(state: &mut ConfigureState, delta: i32) {
     let prev_provider = {
         let overrides = ensure_overrides_seed(state);
-        let cur = AGENTS
-            .iter()
-            .position(|a| *a == overrides.agent_provider)
-            .unwrap_or(0);
+        let cur = AGENTS.iter().position(|a| *a == overrides.agent_provider).unwrap_or(0);
         let len = AGENTS.len() as i32;
         let next = ((cur as i32) + delta).rem_euclid(len) as usize;
         let prev = overrides.agent_provider.clone();
@@ -1751,7 +1709,10 @@ mod tests {
         let mut s = mk_state();
         s.existing_branches = vec!["feat/blog".into(), "agents/abc123".into()];
         s.branch_override = Some("feat/blog".into());
-        assert!(s.branch_collision(), "override matching a live worktree must collide");
+        assert!(
+            s.branch_collision(),
+            "override matching a live worktree must collide"
+        );
     }
 
     #[test]

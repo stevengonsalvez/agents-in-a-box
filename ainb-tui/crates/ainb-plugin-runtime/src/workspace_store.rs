@@ -318,10 +318,15 @@ pub fn write_switch_state_at(path: &Path, state: &SwitchState) -> std::io::Resul
         toml::Value::Table(toml::map::Map::new())
     };
     let table = doc.as_table_mut().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, "state.toml root is not a table")
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "state.toml root is not a table",
+        )
     })?;
 
-    let upsert = |table: &mut toml::map::Map<String, toml::Value>, key: &str, val: &Option<String>| {
+    let upsert = |table: &mut toml::map::Map<String, toml::Value>,
+                  key: &str,
+                  val: &Option<String>| {
         match val {
             Some(v) => {
                 table.insert(key.to_string(), toml::Value::String(v.clone()));

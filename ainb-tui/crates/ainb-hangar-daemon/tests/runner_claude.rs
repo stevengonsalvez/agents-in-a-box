@@ -87,10 +87,7 @@ exit 0"#,
         ("HOME".to_string(), tmp.path().display().to_string()),
     ];
 
-    let outcome = runner
-        .run_claude(&env, overrides.iter().cloned())
-        .await
-        .expect("run");
+    let outcome = runner.run_claude(&env, overrides.iter().cloned()).await.expect("run");
     let result = outcome.result();
 
     assert!(

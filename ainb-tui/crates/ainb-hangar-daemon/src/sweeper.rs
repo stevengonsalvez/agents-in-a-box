@@ -144,17 +144,14 @@ pub async fn sweep_expired_queued(
 ) -> Result<u64, sqlx::Error> {
     let now = clock.now_ms();
     let cutoff = now - ms(cfg.queued_ttl);
-    let failed = fail_batch(
-        pool,
-        "queued",
-        "created_at",
-        cutoff,
-        now,
-        cfg.batch_size,
-    )
-    .await?;
+    let failed = fail_batch(pool, "queued", "created_at", cutoff, now, cfg.batch_size).await?;
     if failed > 0 {
-        tracing::info!(kind = "queued", outcome = "failed", count = failed, "sweeper_swept");
+        tracing::info!(
+            kind = "queued",
+            outcome = "failed",
+            count = failed,
+            "sweeper_swept"
+        );
     }
     Ok(failed)
 }
@@ -174,17 +171,14 @@ pub async fn sweep_stale_running(
 ) -> Result<u64, sqlx::Error> {
     let now = clock.now_ms();
     let cutoff = now - ms(cfg.running_ttl);
-    let failed = fail_batch(
-        pool,
-        "running",
-        "started_at",
-        cutoff,
-        now,
-        cfg.batch_size,
-    )
-    .await?;
+    let failed = fail_batch(pool, "running", "started_at", cutoff, now, cfg.batch_size).await?;
     if failed > 0 {
-        tracing::info!(kind = "running", outcome = "failed", count = failed, "sweeper_swept");
+        tracing::info!(
+            kind = "running",
+            outcome = "failed",
+            count = failed,
+            "sweeper_swept"
+        );
     }
     Ok(failed)
 }

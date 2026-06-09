@@ -76,7 +76,9 @@ pub enum SyncError {
     /// case: the pair stays drifted, the resolution is *not* applied, and the
     /// mapping's `last_synced` is deliberately left untouched so the next pass
     /// can re-detect (rather than masking the drift behind a bumped timestamp).
-    #[error("cannot repair drift for {hangar_id}/{bd_id}: Hangar issue is open but bd is closed and bd has no reopen verb")]
+    #[error(
+        "cannot repair drift for {hangar_id}/{bd_id}: Hangar issue is open but bd is closed and bd has no reopen verb"
+    )]
     Unreconcilable {
         /// The Hangar issue id of the unrepairable pair.
         hangar_id: String,
@@ -189,9 +191,7 @@ impl<'a> OutboundSync<'a> {
         }
 
         self.bd.close(&BdId::from(row.bd_id.as_str()), None)?;
-        self.mapping
-            .update_last_synced(&issue.id, self.now()?)
-            .await?;
+        self.mapping.update_last_synced(&issue.id, self.now()?).await?;
 
         tracing::info!(issue_id = %issue.id, bd_id = %row.bd_id, "mirrored issue close to bd");
         Ok(MirrorOutcome::Mirrored)

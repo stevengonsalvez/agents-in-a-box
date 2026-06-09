@@ -24,7 +24,7 @@ use ainb_plugin_sdk::{
     Cell, CliOutput, Coord, HostClient, LogLevel, Plugin, RenderParams, Result, Server, WireBuffer,
 };
 use async_trait::async_trait;
-use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 
 struct A18;
 

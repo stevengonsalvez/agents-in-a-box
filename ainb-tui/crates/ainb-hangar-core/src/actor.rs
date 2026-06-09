@@ -182,9 +182,6 @@ mod tests {
             ActorRef::new(ActorKind::Member, ""),
             Err(ActorParseError::EmptyId)
         );
-        assert_eq!(
-            "member:".parse::<ActorRef>(),
-            Err(ActorParseError::EmptyId)
-        );
+        assert_eq!("member:".parse::<ActorRef>(), Err(ActorParseError::EmptyId));
     }
 }

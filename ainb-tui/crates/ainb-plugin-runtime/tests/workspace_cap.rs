@@ -20,8 +20,8 @@ use ainb_plugin_protocol::errors;
 use ainb_plugin_protocol::manifest::CapabilityGrant;
 use ainb_plugin_protocol::params::{WorkspaceGetActiveResult, WorkspaceListResult};
 use ainb_plugin_runtime::workspace_store::{
-    get_active_logic, list_logic, read_switch_state_at, set_active_logic, set_default_logic,
-    StateTomlWorkspaceStore, WorkspaceInfo,
+    StateTomlWorkspaceStore, WorkspaceInfo, get_active_logic, list_logic, read_switch_state_at,
+    set_active_logic, set_default_logic,
 };
 
 /// A granted `workspace:write` cap (bool-true form).
@@ -119,11 +119,7 @@ fn default_workspace_used_when_active_not_set() {
     let acme = list.workspaces.iter().find(|w| w.id == "01ID_ACME").unwrap();
     assert!(acme.active, "acme is the effective active via default");
     assert!(acme.default, "acme is the default");
-    let def = list
-        .workspaces
-        .iter()
-        .find(|w| w.id == "01ID_DEFAULT")
-        .unwrap();
+    let def = list.workspaces.iter().find(|w| w.id == "01ID_DEFAULT").unwrap();
     assert!(!def.active);
     assert!(!def.default);
 }
@@ -172,7 +168,10 @@ fn set_active_preserves_foreign_state_toml_sections() {
     set_active_logic(&write_grant(), &store, "01ID_ACME").expect("set_active");
 
     let raw = std::fs::read_to_string(&path).unwrap();
-    assert!(raw.contains("active_workspace"), "active key written:\n{raw}");
+    assert!(
+        raw.contains("active_workspace"),
+        "active key written:\n{raw}"
+    );
     assert!(
         raw.contains("warnings_ack"),
         "foreign top-level key preserved:\n{raw}"

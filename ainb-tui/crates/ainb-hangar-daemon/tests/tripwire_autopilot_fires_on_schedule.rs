@@ -128,7 +128,11 @@ async fn autopilot_fires_on_schedule_after_clock_advance() {
         .await
         .unwrap()
         .get(0);
-    assert_eq!(next, Some(T0 + FIVE_MIN_MS), "next tick is the next 5-min slot");
+    assert_eq!(
+        next,
+        Some(T0 + FIVE_MIN_MS),
+        "next tick is the next 5-min slot"
+    );
 
     // Boot the scheduler on the advanceable clock + wake handle.
     let clock = AdvanceableClock::new(T0);
@@ -155,7 +159,11 @@ async fn autopilot_fires_on_schedule_after_clock_advance() {
         .await
         .expect("a fire event within 2s of advance")
         .expect("event channel open");
-    let SchedulerEvent::Fired { autopilot_id: fired_id, .. } = ev else {
+    let SchedulerEvent::Fired {
+        autopilot_id: fired_id,
+        ..
+    } = ev
+    else {
         panic!("expected Fired, got {ev:?}");
     };
     assert_eq!(fired_id, autopilot_id.as_str());

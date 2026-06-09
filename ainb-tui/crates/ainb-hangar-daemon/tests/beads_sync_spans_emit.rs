@@ -20,20 +20,20 @@ use std::sync::{Arc, Mutex};
 
 use ainb_hangar_core::actor::{ActorKind, ActorRef};
 use ainb_hangar_core::clock::FixedClock;
-use ainb_hangar_daemon::beads_adapter::{fake_bd, BdClient};
+use ainb_hangar_daemon::beads_adapter::{BdClient, fake_bd};
 use ainb_hangar_daemon::beads_sync::inbound::InboundSync;
 use ainb_hangar_daemon::beads_sync::outbound::OutboundSync;
+use ainb_hangar_store::Store;
 use ainb_hangar_store::repo::beads_mapping::{
     BeadsMappingRepo, BeadsMappingRow, MappingKind, MappingSource,
 };
 use ainb_hangar_store::repo::issue::{Issue, IssueRepo, NewIssue};
-use ainb_hangar_store::Store;
 use chrono::{TimeZone, Utc};
 use tracing::field::{Field, Visit};
 use tracing::subscriber::set_default;
+use tracing_subscriber::Layer;
 use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::registry::LookupSpan;
-use tracing_subscriber::Layer;
 
 /// Frozen clock value used for every test's `last_synced` stamp.
 const T0_MS: i64 = 1_700_000_000_000;
@@ -47,10 +47,7 @@ struct CapturedSpan {
 
 impl CapturedSpan {
     fn field(&self, key: &str) -> Option<&str> {
-        self.fields
-            .iter()
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| v.as_str())
+        self.fields.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
     }
 }
 
@@ -160,9 +157,7 @@ async fn seed_issue(store: &Store, ws: &str, id: &str, title: &str) -> Issue {
         creator: ActorRef::new(ActorKind::Member, "stevie").expect("actor"),
         created_at: T0_MS,
     };
-    IssueRepo::insert(store.pool(), &new)
-        .await
-        .expect("insert issue");
+    IssueRepo::insert(store.pool(), &new).await.expect("insert issue");
     IssueRepo::get_by_id(store.pool(), id)
         .await
         .expect("get issue")
@@ -239,7 +234,10 @@ async fn inbound_reconcile_emits_beads_pull_span() {
         let _guard = set_default(subscriber);
         let sync = InboundSync::new(&bd, &mapping, store.pool(), &clock);
         let stats = sync.reconcile_once().await.expect("reconcile");
-        assert_eq!(stats.updated, 1, "the closed bd issue should land on Hangar");
+        assert_eq!(
+            stats.updated, 1,
+            "the closed bd issue should land on Hangar"
+        );
     }
 
     let spans = snapshot(&log);

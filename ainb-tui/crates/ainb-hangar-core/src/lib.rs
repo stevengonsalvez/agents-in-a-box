@@ -10,10 +10,10 @@
 
 /// Polymorphic actor references (`member:<id>` / `agent:<id>`).
 pub mod actor;
-/// Cron-scheduled autopilots (P7): the IO-free cron parser + next-tick math.
-pub mod autopilot;
 /// Polymorphic assignee crosswalk between Hangar actors and `bd` strings (P2.3).
 pub mod assignee_crosswalk;
+/// Cron-scheduled autopilots (P7): the IO-free cron parser + next-tick math.
+pub mod autopilot;
 /// Wall-clock injection (`HangarClock` + `SystemClock` / `FixedClock`).
 pub mod clock;
 /// Environment allowlist policy (P5.3): allowlist passthrough with a hardcoded

@@ -10,8 +10,8 @@
 //! column (P4.3), and the task-detail sidebar assignee field (P4.4), so the same
 //! actor renders identically everywhere (Multica visual parity).
 
-use ainb_plugin_sdk::{Cell, Color, Coord, WireBuffer};
 use ainb_hangar_proto::events::{ActorRow, PresenceState};
+use ainb_plugin_sdk::{Cell, Color, Coord, WireBuffer};
 
 /// Violet ring colour on an agent glyph (Multica UX §12.1 differentiation).
 pub const AGENT_VIOLET: Color = Color::rgb(180, 120, 220);
@@ -36,7 +36,11 @@ const SELECTION_GREEN: Color = Color::rgb(100, 200, 100);
 /// row layout stays width-deterministic across terminals.)
 #[must_use]
 pub const fn actor_glyph(actor: &ActorRow) -> char {
-    if actor.is_agent { '⬡' } else { '@' }
+    if actor.is_agent {
+        '⬡'
+    } else {
+        '@'
+    }
 }
 
 /// The glyph colour for an actor: violet ring for agents, neutral for humans.
@@ -88,7 +92,14 @@ pub fn render_actor_row(
     cx = put_char(buf, cx, row, marker, SELECTION_GREEN, right);
     cx = put_char(buf, cx, row, ' ', NAME, right);
     // Glyph in its actor-kind colour.
-    cx = put_char(buf, cx, row, actor_glyph(actor), actor_glyph_color(actor), right);
+    cx = put_char(
+        buf,
+        cx,
+        row,
+        actor_glyph(actor),
+        actor_glyph_color(actor),
+        right,
+    );
     cx = put_char(buf, cx, row, ' ', NAME, right);
     // Name.
     cx = put_str(buf, cx, row, &actor.display_name, NAME, right);
@@ -138,7 +149,11 @@ mod tests {
 
     fn actor(is_agent: bool, presence: PresenceState) -> ActorRow {
         ActorRow {
-            actor_ref: if is_agent { "agent:a".into() } else { "member:m".into() },
+            actor_ref: if is_agent {
+                "agent:a".into()
+            } else {
+                "member:m".into()
+            },
             display_name: "name".into(),
             subtitle: "sub".into(),
             presence,
@@ -150,8 +165,14 @@ mod tests {
     /// Agent glyph is violet-ringed; human glyph is neutral.
     #[test]
     fn glyph_colour_differs_by_kind() {
-        assert_eq!(actor_glyph_color(&actor(true, PresenceState::Online)), AGENT_VIOLET);
-        assert_eq!(actor_glyph_color(&actor(false, PresenceState::Online)), HUMAN_NEUTRAL);
+        assert_eq!(
+            actor_glyph_color(&actor(true, PresenceState::Online)),
+            AGENT_VIOLET
+        );
+        assert_eq!(
+            actor_glyph_color(&actor(false, PresenceState::Online)),
+            HUMAN_NEUTRAL
+        );
     }
 
     /// The three presence states map to three distinct dots + colours.

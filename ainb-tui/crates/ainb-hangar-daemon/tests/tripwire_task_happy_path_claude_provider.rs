@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::{Row, SqlitePool};
-use tripwire_support::{daemon_bin, fake_claude_happy, seed_world, wait_for_db, DaemonSession};
+use tripwire_support::{DaemonSession, daemon_bin, fake_claude_happy, seed_world, wait_for_db};
 
 #[tokio::test]
 async fn happy_path_claude_provider_walks_fsm_to_done() {
@@ -87,10 +87,17 @@ async fn happy_path_claude_provider_walks_fsm_to_done() {
 
     let result: Option<String> = row.get("result");
     let result = result.expect("result JSON populated");
-    assert!(result.contains("ok"), "result should contain provider output 'ok', got {result}");
+    assert!(
+        result.contains("ok"),
+        "result should contain provider output 'ok', got {result}"
+    );
 
     let session_id: Option<String> = row.get("session_id");
-    assert_eq!(session_id.as_deref(), Some("trip-1"), "session_id pinned from system line");
+    assert_eq!(
+        session_id.as_deref(),
+        Some("trip-1"),
+        "session_id pinned from system line"
+    );
 
     let work_dir: Option<String> = row.get("work_dir");
     let work_dir = work_dir.expect("work_dir populated");
@@ -111,7 +118,10 @@ async fn happy_path_claude_provider_walks_fsm_to_done() {
     let logs = workdir.parent().expect("shortID root").join("logs").join("claude.jsonl");
     let jsonl = std::fs::read_to_string(&logs).unwrap_or_else(|e| panic!("read {logs:?}: {e}"));
     let lines = jsonl.lines().filter(|l| !l.trim().is_empty()).count();
-    assert_eq!(lines, 2, "claude.jsonl should have 2 lines, got {lines}: {jsonl}");
+    assert_eq!(
+        lines, 2,
+        "claude.jsonl should have 2 lines, got {lines}: {jsonl}"
+    );
 }
 
 /// Open a `SQLite` WAL pool at `db_path` (creating the file if absent).
@@ -120,8 +130,5 @@ async fn open_pool(db_path: &std::path::Path) -> SqlitePool {
         .filename(db_path)
         .create_if_missing(true)
         .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
-    SqlitePoolOptions::new()
-        .connect_with(opts)
-        .await
-        .expect("open pool")
+    SqlitePoolOptions::new().connect_with(opts).await.expect("open pool")
 }

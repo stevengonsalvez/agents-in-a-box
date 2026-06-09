@@ -112,11 +112,7 @@ impl ChannelRegistry {
     /// Look up the first plugin advertising `action`.
     #[must_use]
     pub fn route_action(&self, action: &str) -> Option<PluginId> {
-        self.inner
-            .read()
-            .actions
-            .get(action)
-            .and_then(|v| v.first().cloned())
+        self.inner.read().actions.get(action).and_then(|v| v.first().cloned())
     }
 
     /// Fetch a registered plugin by id.
@@ -168,14 +164,8 @@ mod tests {
             PathBuf::from("/bin/burndown"),
             PathBuf::from("/etc/manifest.toml"),
         ));
-        assert_eq!(
-            r.route_action("usage"),
-            Some(PluginId::from("burndown"))
-        );
-        assert_eq!(
-            r.route_action("burn"),
-            Some(PluginId::from("burndown"))
-        );
+        assert_eq!(r.route_action("usage"), Some(PluginId::from("burndown")));
+        assert_eq!(r.route_action("burn"), Some(PluginId::from("burndown")));
         assert!(r.route_action("missing").is_none());
     }
 

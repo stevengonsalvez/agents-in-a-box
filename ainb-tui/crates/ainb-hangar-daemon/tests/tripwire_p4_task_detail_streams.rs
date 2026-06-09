@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 #[path = "tripwire_p4_common.rs"]
 mod common;
-use common::{can_run_tripwire, prepare_pipeline, skip, TuiSession};
+use common::{TuiSession, can_run_tripwire, prepare_pipeline, skip};
 
 #[test]
 fn task_detail_opens_for_selected_issue() {
@@ -37,10 +37,22 @@ fn task_detail_opens_for_selected_issue() {
 
     // POSITIVE: sidebar fields bound to the seeded issue/agent. NEGATIVE: the
     // issue-list status-group header is gone, so we genuinely left the list.
-    assert!(detail.contains("Assignee"), "sidebar Assignee missing:\n{detail}");
-    assert!(detail.contains("agent:agent-1"), "seeded assignee missing:\n{detail}");
-    assert!(detail.contains("Project"), "sidebar Project missing:\n{detail}");
-    assert!(!detail.contains("Todo (3)"), "still on the issue list:\n{detail}");
+    assert!(
+        detail.contains("Assignee"),
+        "sidebar Assignee missing:\n{detail}"
+    );
+    assert!(
+        detail.contains("agent:agent-1"),
+        "seeded assignee missing:\n{detail}"
+    );
+    assert!(
+        detail.contains("Project"),
+        "sidebar Project missing:\n{detail}"
+    );
+    assert!(
+        !detail.contains("Todo (3)"),
+        "still on the issue list:\n{detail}"
+    );
 
     // Return navigation: back to the issue list. The sidebar `Project` label is a
     // task-detail-only marker (the issue list has no such field), so its absence
@@ -48,7 +60,12 @@ fn task_detail_opens_for_selected_issue() {
     // in the issue list's assignee column).
     sess.send_key("1");
     let back = sess
-        .poll_capture(Instant::now() + Duration::from_secs(10), |c| c.contains("Todo (3)"))
+        .poll_capture(Instant::now() + Duration::from_secs(10), |c| {
+            c.contains("Todo (3)")
+        })
         .expect("issue list never returned from task detail");
-    assert!(!back.contains("Project"), "task sidebar bled into the issue list:\n{back}");
+    assert!(
+        !back.contains("Project"),
+        "task sidebar bled into the issue list:\n{back}"
+    );
 }

@@ -34,9 +34,7 @@ use std::time::{Duration, Instant};
 
 #[path = "tripwire_p4_common.rs"]
 mod common;
-use common::{
-    ainb_bin, can_run_tripwire, clear_first_run_ack, prepare_pipeline, skip, TuiSession,
-};
+use common::{TuiSession, ainb_bin, can_run_tripwire, clear_first_run_ack, prepare_pipeline, skip};
 
 /// The on-screen marker the first-run modal paints (its title + body carry it).
 const WARNING_MARKER: &str = "danger-full-access";
@@ -73,7 +71,10 @@ fn warning_shown_on_first_provider_use() {
         skip("first_run_warning (modal marker never painted — P4.9 render precondition)");
         return;
     };
-    assert!(shown.contains(WARNING_MARKER), "warning not shown:\n{shown}");
+    assert!(
+        shown.contains(WARNING_MARKER),
+        "warning not shown:\n{shown}"
+    );
     // NEGATIVE: the accept hint proves it is the modal, not an incidental string.
     assert!(shown.contains("[y]"), "modal accept hint missing:\n{shown}");
 

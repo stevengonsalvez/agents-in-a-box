@@ -20,14 +20,14 @@ use chrono::{TimeZone, Utc};
 
 use ainb_hangar_core::actor::{ActorKind, ActorRef};
 use ainb_hangar_core::clock::FixedClock;
-use ainb_hangar_daemon::beads_adapter::{fake_bd, BdClient};
+use ainb_hangar_daemon::beads_adapter::{BdClient, fake_bd};
 use ainb_hangar_daemon::beads_sync::inbound::InboundSync;
 use ainb_hangar_daemon::beads_sync::sync_loop::run_inbound_loop;
+use ainb_hangar_store::Store;
 use ainb_hangar_store::repo::beads_mapping::{
     BeadsMappingRepo, BeadsMappingRow, MappingKind, MappingSource,
 };
 use ainb_hangar_store::repo::issue::{IssueRepo, NewIssue};
-use ainb_hangar_store::Store;
 use tokio_util::sync::CancellationToken;
 
 /// Frozen clock value used for every test's `last_synced` stamp.
@@ -60,9 +60,7 @@ async fn seed_issue(store: &Store, ws: &str, id: &str, title: &str) -> String {
         creator: ActorRef::new(ActorKind::Member, "stevie").expect("actor"),
         created_at: T0_MS,
     };
-    IssueRepo::insert(store.pool(), &new)
-        .await
-        .expect("insert issue");
+    IssueRepo::insert(store.pool(), &new).await.expect("insert issue");
     id.to_string()
 }
 
@@ -105,19 +103,15 @@ async fn test_bd_close_marks_hangar_done() {
     assert_eq!(stats.updated, 1);
 
     // Hangar issue moved to done.
-    let issue = IssueRepo::get_by_id(store.pool(), &hid)
-        .await
-        .expect("get")
-        .expect("present");
+    let issue = IssueRepo::get_by_id(store.pool(), &hid).await.expect("get").expect("present");
     assert_eq!(issue.state, "done");
 
     // Mapping last_synced bumped to the (later) clock value.
-    let row = mapping
-        .find_by_hangar(&hid)
-        .await
-        .expect("query")
-        .expect("row");
-    assert_eq!(row.last_synced, Utc.timestamp_millis_opt(T1_MS).single().unwrap());
+    let row = mapping.find_by_hangar(&hid).await.expect("query").expect("row");
+    assert_eq!(
+        row.last_synced,
+        Utc.timestamp_millis_opt(T1_MS).single().unwrap()
+    );
 }
 
 #[tokio::test]
@@ -132,9 +126,7 @@ async fn test_bd_status_change_updates_hangar_status() {
     let mapping = BeadsMappingRepo::new(store.pool());
     seed_mapping(&mapping, &hid, "bd-chg").await;
     // Pre-move the Hangar issue to done so the test proves a re-open lands too.
-    IssueRepo::update_state(store.pool(), &hid, "done")
-        .await
-        .expect("pre-set done");
+    IssueRepo::update_state(store.pool(), &hid, "done").await.expect("pre-set done");
 
     // bd flips back to open → Hangar should follow.
     let bin = fake_bd::listing(bin_dir.path(), &[("bd-chg", "do it", "open")]);
@@ -145,10 +137,7 @@ async fn test_bd_status_change_updates_hangar_status() {
     let stats = sync.reconcile_once().await.expect("reconcile");
     assert_eq!(stats.updated, 1);
 
-    let issue = IssueRepo::get_by_id(store.pool(), &hid)
-        .await
-        .expect("get")
-        .expect("present");
+    let issue = IssueRepo::get_by_id(store.pool(), &hid).await.expect("get").expect("present");
     assert_eq!(issue.state, "open");
 }
 
@@ -201,10 +190,7 @@ async fn test_bd_label_change_does_not_overwrite_hangar_labels() {
     let stats = sync.reconcile_once().await.expect("reconcile");
 
     assert_eq!(stats.updated, 0, "status unchanged → no update");
-    let issue = IssueRepo::get_by_id(store.pool(), &hid)
-        .await
-        .expect("get")
-        .expect("present");
+    let issue = IssueRepo::get_by_id(store.pool(), &hid).await.expect("get").expect("present");
     assert_eq!(issue.state, "open");
 }
 
@@ -268,10 +254,7 @@ async fn test_swarm_sourced_mapping_skipped() {
     assert_eq!(stats.skipped, 1);
     assert_eq!(stats.updated, 0);
     // Hangar issue untouched.
-    let issue = IssueRepo::get_by_id(store.pool(), &hid)
-        .await
-        .expect("get")
-        .expect("present");
+    let issue = IssueRepo::get_by_id(store.pool(), &hid).await.expect("get").expect("present");
     assert_eq!(issue.state, "open");
 }
 
@@ -342,5 +325,8 @@ async fn test_poll_loop_backoff_on_bd_failure() {
     tokio::time::sleep(Duration::from_millis(40)).await;
     cancel.cancel();
     let res = tokio::time::timeout(Duration::from_secs(1), handle).await;
-    assert!(res.is_ok(), "loop must survive bd failures and still honour cancel");
+    assert!(
+        res.is_ok(),
+        "loop must survive bd failures and still honour cancel"
+    );
 }

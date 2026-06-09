@@ -597,10 +597,7 @@ mod tests {
         counts.sort();
         assert_eq!(
             counts,
-            vec![
-                ("/tmp/proj-a".into(), 3),
-                ("/tmp/proj-b".into(), 2),
-            ]
+            vec![("/tmp/proj-a".into(), 3), ("/tmp/proj-b".into(), 2),]
         );
     }
 

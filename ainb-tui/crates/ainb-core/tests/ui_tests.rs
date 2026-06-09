@@ -624,8 +624,14 @@ mod tests {
         ui.press_key(KeyCode::Char('n')).unwrap();
 
         eprintln!("After key press - view: {:?}", ui.current_screen());
-        eprintln!("After key press - has_new_session_state: {}", ui.has_new_session_state());
-        eprintln!("After key press - pending_async_action: {:?}", ui.app.state.pending_async_action);
+        eprintln!(
+            "After key press - has_new_session_state: {}",
+            ui.has_new_session_state()
+        );
+        eprintln!(
+            "After key press - pending_async_action: {:?}",
+            ui.app.state.pending_async_action
+        );
 
         // Process async action
         eprintln!("\n>>> Processing async action...");
@@ -649,7 +655,10 @@ mod tests {
         // This assertion should pass if the bug is fixed
         eprintln!("\n>>> Checking assertions...");
         if ui.current_screen() != screen_ids::NEW_SESSION {
-            eprintln!("FAIL: Expected NewSession view, got: {:?}", ui.current_screen());
+            eprintln!(
+                "FAIL: Expected NewSession view, got: {:?}",
+                ui.current_screen()
+            );
             eprintln!("This is the bug we're debugging!");
         }
 
@@ -660,7 +669,13 @@ mod tests {
 
         // For now, let's not assert - just capture the output
         eprintln!("\n=== Test complete ===");
-        eprintln!("Expected view: NewSession, Actual: {:?}", ui.current_screen());
-        eprintln!("Expected new_session_state: true, Actual: {}", ui.has_new_session_state());
+        eprintln!(
+            "Expected view: NewSession, Actual: {:?}",
+            ui.current_screen()
+        );
+        eprintln!(
+            "Expected new_session_state: true, Actual: {}",
+            ui.has_new_session_state()
+        );
     }
 }

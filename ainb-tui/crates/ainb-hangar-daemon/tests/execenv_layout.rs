@@ -17,7 +17,7 @@
 use std::path::Path;
 
 use ainb_hangar_core::clock::FixedClock;
-use ainb_hangar_daemon::execenv::{cleanup, prepare_env, short_id, CleanupKind, GcMeta};
+use ainb_hangar_daemon::execenv::{CleanupKind, GcMeta, cleanup, prepare_env, short_id};
 use ainb_hangar_store::repo::task::Task;
 use tempfile::TempDir;
 
@@ -103,7 +103,10 @@ fn gc_meta_json_contents() {
 fn short_id_is_ulid_short_form() {
     // First 8 chars, deterministic (Multica shortID).
     assert_eq!(short_id("01HZX0000000000000000ABCDE"), "01HZX000");
-    assert_eq!(short_id("01HZX0000000000000000ABCDE"), short_id("01HZX0000000000000000ABCDE"));
+    assert_eq!(
+        short_id("01HZX0000000000000000ABCDE"),
+        short_id("01HZX0000000000000000ABCDE")
+    );
     // Shorter-than-8 ids return the whole string (defensive, no panic).
     assert_eq!(short_id("abc"), "abc");
 }
@@ -122,12 +125,22 @@ fn prepare_idempotent_on_existing_dir() {
     let env2 = prepare_env(&task, WS_SLUG, home.path(), &FixedClock(later)).expect("second");
 
     assert_eq!(env1.workdir, env2.workdir, "reuses same dirs");
-    assert!(sentinel.is_file(), "idempotent prepare must not clobber existing workdir");
+    assert!(
+        sentinel.is_file(),
+        "idempotent prepare must not clobber existing workdir"
+    );
 
     let raw = std::fs::read_to_string(&env2.gc_meta).expect("read meta");
     let meta: GcMeta = serde_json::from_str(&raw).expect("parse meta");
-    assert_eq!(meta.created_at, BASE_MS, "created_at preserved across re-prepare");
-    assert_eq!(meta.last_seen_at, Some(later), "last_seen_at updated on re-prepare");
+    assert_eq!(
+        meta.created_at, BASE_MS,
+        "created_at preserved across re-prepare"
+    );
+    assert_eq!(
+        meta.last_seen_at,
+        Some(later),
+        "last_seen_at updated on re-prepare"
+    );
 }
 
 #[test]
@@ -140,7 +153,10 @@ fn cleanup_full_removes_tree() {
     assert!(root.is_dir());
 
     cleanup(&env, CleanupKind::Full).expect("cleanup full");
-    assert!(!root.exists(), "full cleanup removes the whole per-task tree");
+    assert!(
+        !root.exists(),
+        "full cleanup removes the whole per-task tree"
+    );
 }
 
 #[test]
@@ -157,8 +173,14 @@ fn cleanup_artifact_only_keeps_workdir() {
     cleanup(&env, CleanupKind::ArtifactOnly).expect("cleanup artifact-only");
 
     assert!(!env.output.exists(), "artifact-only removes output/");
-    assert!(env.workdir.join(".git").is_dir(), "artifact-only keeps workdir/.git/");
-    assert!(env.logs.join("claude.jsonl").is_file(), "artifact-only keeps logs");
+    assert!(
+        env.workdir.join(".git").is_dir(),
+        "artifact-only keeps workdir/.git/"
+    );
+    assert!(
+        env.logs.join("claude.jsonl").is_file(),
+        "artifact-only keeps logs"
+    );
 }
 
 #[test]
@@ -179,9 +201,18 @@ fn cleanup_orphan_removes_dir_without_meta() {
         .expect("system time after epoch")
         .as_millis() as i64;
     let now_73h_later = real_now_ms + 73 * 3_600 * 1_000;
-    cleanup(&env, CleanupKind::OrphanScan { now_ms: now_73h_later }).expect("cleanup orphan");
+    cleanup(
+        &env,
+        CleanupKind::OrphanScan {
+            now_ms: now_73h_later,
+        },
+    )
+    .expect("cleanup orphan");
 
-    assert!(!root.exists(), "orphan (no .gc_meta.json, mtime > 72h) is removed");
+    assert!(
+        !root.exists(),
+        "orphan (no .gc_meta.json, mtime > 72h) is removed"
+    );
 }
 
 #[test]
@@ -196,5 +227,8 @@ fn cleanup_orphan_keeps_live_marked_dir() {
     let far_future = BASE_MS + 1_000 * 365 * 24 * 3_600 * 1_000;
     cleanup(&env, CleanupKind::OrphanScan { now_ms: far_future }).expect("cleanup orphan");
 
-    assert!(root.is_dir(), "a marked (live) dir is never removed by orphan scan");
+    assert!(
+        root.is_dir(),
+        "a marked (live) dir is never removed by orphan scan"
+    );
 }

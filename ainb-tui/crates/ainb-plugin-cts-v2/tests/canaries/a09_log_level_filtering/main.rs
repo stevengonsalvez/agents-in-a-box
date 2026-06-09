@@ -1,6 +1,5 @@
 use ainb_plugin_sdk::{
-    HostClient, LogLevel, Plugin, Result, Server,
-    RenderParams, WireBuffer, Cell, Coord,
+    Cell, Coord, HostClient, LogLevel, Plugin, RenderParams, Result, Server, WireBuffer,
 };
 use async_trait::async_trait;
 

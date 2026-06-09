@@ -16,11 +16,7 @@ async fn open_pool_in_tempdir_creates_db_file() {
     assert!(db_path.exists(), "hangar.db should exist at {db_path:?}");
 
     // Pool is live and usable.
-    let one: i64 = sqlx::query("SELECT 1")
-        .fetch_one(store.pool())
-        .await
-        .expect("SELECT 1")
-        .get(0);
+    let one: i64 = sqlx::query("SELECT 1").fetch_one(store.pool()).await.expect("SELECT 1").get(0);
     assert_eq!(one, 1);
 }
 

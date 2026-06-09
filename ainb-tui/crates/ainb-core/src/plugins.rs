@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ainb_plugin_runtime::workspace_store::{
-    default_state_path, StateTomlWorkspaceStore, WorkspaceInfo,
+    StateTomlWorkspaceStore, WorkspaceInfo, default_state_path,
 };
 use ainb_plugin_runtime::{Runtime, RuntimeError, RuntimeHandle};
 use tracing::{debug, info, warn};
@@ -50,10 +50,7 @@ fn build_workspace_store() -> Arc<StateTomlWorkspaceStore> {
 /// catalogue (logged at debug) — startup never fails on a missing/locked DB.
 fn load_workspace_catalogue() -> Vec<WorkspaceInfo> {
     std::thread::spawn(|| {
-        let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        else {
+        let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
             return Vec::new();
         };
         rt.block_on(async {
@@ -532,12 +529,11 @@ mod plugin_filter_tests {
     fn describe_renders_sorted_names_for_logs() {
         // Log line stability — sorting prevents iteration-order churn
         // between processes (HashSet has no order guarantee).
-        let f = resolve_plugin_filter(
-            Some("zebra,alpha,middle"),
-            None,
-            &PluginsConfig::default(),
-        );
+        let f = resolve_plugin_filter(Some("zebra,alpha,middle"), None, &PluginsConfig::default());
         let desc = f.describe().expect("Allow filter must describe");
-        assert!(desc.contains(r#"["alpha", "middle", "zebra"]"#), "got: {desc}");
+        assert!(
+            desc.contains(r#"["alpha", "middle", "zebra"]"#),
+            "got: {desc}"
+        );
     }
 }

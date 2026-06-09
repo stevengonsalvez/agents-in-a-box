@@ -24,13 +24,13 @@ use chrono::{DateTime, TimeZone, Utc};
 use ainb_hangar_core::actor::{ActorKind, ActorRef};
 use ainb_hangar_core::clock::FixedClock;
 use ainb_hangar_core::idgen::{FixedIdGen, SystemIdGen};
-use ainb_hangar_daemon::beads_adapter::{fake_bd, BdClient};
+use ainb_hangar_daemon::beads_adapter::{BdClient, fake_bd};
 use ainb_hangar_daemon::beads_sync::reconcile::{ReconcileOpts, ReconcileService};
+use ainb_hangar_store::Store;
 use ainb_hangar_store::repo::beads_mapping::{
     BeadsMappingRepo, BeadsMappingRow, MappingKind, MappingSource,
 };
 use ainb_hangar_store::repo::issue::{IssueRepo, NewIssue};
-use ainb_hangar_store::Store;
 
 /// An early instant (t0) — used as a `bd` `updated_at` strictly *before* a
 /// later `last_synced` so the Hangar-newer (`Less`) branch is actually driven.
@@ -84,14 +84,17 @@ async fn seed_issue(store: &Store, id: &str, title: &str, state: &str) -> String
         creator: ActorRef::new(ActorKind::Member, "stevie").expect("actor"),
         created_at: T1_MS,
     };
-    IssueRepo::insert(store.pool(), &new)
-        .await
-        .expect("insert issue");
+    IssueRepo::insert(store.pool(), &new).await.expect("insert issue");
     id.to_string()
 }
 
 /// Insert a `Hangar`-sourced mapping row stamped at `last_synced_ms`.
-async fn seed_mapping(mapping: &BeadsMappingRepo<'_>, hangar_id: &str, bd_id: &str, last_synced_ms: i64) {
+async fn seed_mapping(
+    mapping: &BeadsMappingRepo<'_>,
+    hangar_id: &str,
+    bd_id: &str,
+    last_synced_ms: i64,
+) {
     mapping
         .insert(&BeadsMappingRow {
             hangar_id: hangar_id.to_string(),
@@ -162,7 +165,13 @@ impl Harness {
     }
 
     fn service<'a>(&'a self, mapping: &'a BeadsMappingRepo<'a>) -> ReconcileService<'a> {
-        ReconcileService::new(&self.bd, mapping, self.store.pool(), &self.clock, &self.idgen)
+        ReconcileService::new(
+            &self.bd,
+            mapping,
+            self.store.pool(),
+            &self.clock,
+            &self.idgen,
+        )
     }
 
     /// Build a service with a caller-supplied id generator so adoption tests can
@@ -184,15 +193,14 @@ async fn test_no_drift_zero_updates() {
     let mapping = BeadsMappingRepo::new(h.store.pool());
     seed_mapping(&mapping, &hid, "bd-1", T1_MS).await;
 
-    let report = h
-        .service(&mapping)
-        .run(ReconcileOpts::default())
-        .await
-        .expect("reconcile");
+    let report = h.service(&mapping).run(ReconcileOpts::default()).await.expect("reconcile");
 
     assert_eq!(report.stats.updated, 0);
     assert_eq!(report.stats.scanned, 1, "the one bd issue was scanned");
-    assert_eq!(report.stats.in_sync, 1, "the agreeing pair counts as in_sync");
+    assert_eq!(
+        report.stats.in_sync, 1,
+        "the agreeing pair counts as in_sync"
+    );
     assert!(report.conflicts.is_empty());
     assert!(report.adopted.is_empty());
 }
@@ -206,24 +214,13 @@ async fn test_bd_newer_wins_when_bd_last_synced_gt_hangar() {
     let mapping = BeadsMappingRepo::new(h.store.pool());
     seed_mapping(&mapping, &hid, "bd-2", T1_MS).await;
 
-    let report = h
-        .service(&mapping)
-        .run(ReconcileOpts::default())
-        .await
-        .expect("reconcile");
+    let report = h.service(&mapping).run(ReconcileOpts::default()).await.expect("reconcile");
 
     assert_eq!(report.stats.updated, 1);
-    let issue = IssueRepo::get_by_id(h.store.pool(), &hid)
-        .await
-        .expect("get")
-        .expect("present");
+    let issue = IssueRepo::get_by_id(h.store.pool(), &hid).await.expect("get").expect("present");
     assert_eq!(issue.state, "done", "bd-newer should drag hangar to done");
 
-    let row = mapping
-        .find_by_hangar(&hid)
-        .await
-        .expect("query")
-        .expect("row");
+    let row = mapping.find_by_hangar(&hid).await.expect("query").expect("row");
     assert_eq!(row.last_synced, at(T2_MS));
 }
 
@@ -239,28 +236,17 @@ async fn test_hangar_newer_wins_when_hangar_last_synced_gt_bd() {
     let mapping = BeadsMappingRepo::new(h.store.pool());
     seed_mapping(&mapping, &hid, "bd-3", T1_MS).await;
 
-    let report = h
-        .service(&mapping)
-        .run(ReconcileOpts::default())
-        .await
-        .expect("reconcile");
+    let report = h.service(&mapping).run(ReconcileOpts::default()).await.expect("reconcile");
 
     assert_eq!(report.stats.updated, 1);
     // Hangar issue stays done (it was the winner).
-    let issue = IssueRepo::get_by_id(h.store.pool(), &hid)
-        .await
-        .expect("get")
-        .expect("present");
+    let issue = IssueRepo::get_by_id(h.store.pool(), &hid).await.expect("get").expect("present");
     assert_eq!(issue.state, "done");
     // The conflict record records Hangar as the winner.
     assert_eq!(report.conflicts.len(), 1);
     assert_eq!(report.conflicts[0].hangar_id, hid);
 
-    let row = mapping
-        .find_by_hangar(&hid)
-        .await
-        .expect("query")
-        .expect("row");
+    let row = mapping.find_by_hangar(&hid).await.expect("query").expect("row");
     assert_eq!(row.last_synced, at(T2_MS));
 }
 
@@ -273,17 +259,10 @@ async fn test_tie_breaker_prefers_hangar() {
     let mapping = BeadsMappingRepo::new(h.store.pool());
     seed_mapping(&mapping, &hid, "bd-4", T1_MS).await;
 
-    let report = h
-        .service(&mapping)
-        .run(ReconcileOpts::default())
-        .await
-        .expect("reconcile");
+    let report = h.service(&mapping).run(ReconcileOpts::default()).await.expect("reconcile");
 
     assert_eq!(report.stats.updated, 1);
-    let issue = IssueRepo::get_by_id(h.store.pool(), &hid)
-        .await
-        .expect("get")
-        .expect("present");
+    let issue = IssueRepo::get_by_id(h.store.pool(), &hid).await.expect("get").expect("present");
     assert_eq!(issue.state, "done", "tie resolves to Hangar's state");
 }
 
@@ -302,30 +281,25 @@ async fn test_hangar_open_wins_over_closed_bd_is_unreconcilable_not_silently_rep
     let mapping = BeadsMappingRepo::new(h.store.pool());
     seed_mapping(&mapping, &hid, "bd-reopen", T1_MS).await;
 
-    let report = h
-        .service(&mapping)
-        .run(ReconcileOpts::default())
-        .await
-        .expect("reconcile");
+    let report = h.service(&mapping).run(ReconcileOpts::default()).await.expect("reconcile");
 
     // The drift is NOT reported as resolved.
-    assert_eq!(report.stats.updated, 0, "unrepairable drift must not count as updated");
-    assert_eq!(report.stats.errors, 1, "the unrepairable pair counts as an error");
+    assert_eq!(
+        report.stats.updated, 0,
+        "unrepairable drift must not count as updated"
+    );
+    assert_eq!(
+        report.stats.errors, 1,
+        "the unrepairable pair counts as an error"
+    );
 
     // Hangar issue stays open (no write).
-    let issue = IssueRepo::get_by_id(h.store.pool(), &hid)
-        .await
-        .expect("get")
-        .expect("present");
+    let issue = IssueRepo::get_by_id(h.store.pool(), &hid).await.expect("get").expect("present");
     assert_eq!(issue.state, "open", "Hangar issue must not be touched");
 
     // last_synced must stay at t1 so the next pass can re-detect the drift
     // (bumping it to t2 would permanently suppress re-detection).
-    let row = mapping
-        .find_by_hangar(&hid)
-        .await
-        .expect("query")
-        .expect("row");
+    let row = mapping.find_by_hangar(&hid).await.expect("query").expect("row");
     assert_eq!(
         row.last_synced,
         at(T1_MS),
@@ -341,19 +315,11 @@ async fn test_dangling_mapping_row_deletes_when_both_sides_gone() {
     let mapping = BeadsMappingRepo::new(h.store.pool());
     seed_mapping(&mapping, "iss_gone", "bd-gone", T1_MS).await;
 
-    let report = h
-        .service(&mapping)
-        .run(ReconcileOpts::default())
-        .await
-        .expect("reconcile");
+    let report = h.service(&mapping).run(ReconcileOpts::default()).await.expect("reconcile");
 
     assert_eq!(report.stats.deleted, 1);
     assert!(
-        mapping
-            .find_by_hangar("iss_gone")
-            .await
-            .expect("query")
-            .is_none(),
+        mapping.find_by_hangar("iss_gone").await.expect("query").is_none(),
         "dangling mapping row should be deleted"
     );
 }
@@ -385,11 +351,7 @@ async fn test_orphan_bd_with_hangar_label_creates_hangar_issue() {
     );
     // A mapping row now correlates the orphan bd id with the new hangar issue,
     // keyed on the seeded id.
-    let row = mapping
-        .find_by_bd("bd-orphan")
-        .await
-        .expect("query")
-        .expect("row");
+    let row = mapping.find_by_bd("bd-orphan").await.expect("query").expect("row");
     assert_eq!(row.source, MappingSource::Hangar);
     assert_eq!(row.hangar_id, ADOPTED_ID);
     let issue = IssueRepo::get_by_id(h.store.pool(), ADOPTED_ID)
@@ -419,17 +381,17 @@ async fn test_dry_run_skips_writes() {
 
     // Reported but not applied.
     assert_eq!(report.conflicts.len(), 1);
-    let issue = IssueRepo::get_by_id(h.store.pool(), &hid)
-        .await
-        .expect("get")
-        .expect("present");
-    assert_eq!(issue.state, "open", "dry-run must not write the hangar issue");
-    let row = mapping
-        .find_by_hangar(&hid)
-        .await
-        .expect("query")
-        .expect("row");
-    assert_eq!(row.last_synced, at(T1_MS), "dry-run must not bump last_synced");
+    let issue = IssueRepo::get_by_id(h.store.pool(), &hid).await.expect("get").expect("present");
+    assert_eq!(
+        issue.state, "open",
+        "dry-run must not write the hangar issue"
+    );
+    let row = mapping.find_by_hangar(&hid).await.expect("query").expect("row");
+    assert_eq!(
+        row.last_synced,
+        at(T1_MS),
+        "dry-run must not bump last_synced"
+    );
 }
 
 #[tokio::test]
@@ -451,16 +413,9 @@ async fn test_swarm_sourced_mapping_skipped() {
         .await
         .expect("seed swarm mapping");
 
-    let report = h
-        .service(&mapping)
-        .run(ReconcileOpts::default())
-        .await
-        .expect("reconcile");
+    let report = h.service(&mapping).run(ReconcileOpts::default()).await.expect("reconcile");
 
     assert_eq!(report.stats.updated, 0);
-    let issue = IssueRepo::get_by_id(h.store.pool(), &hid)
-        .await
-        .expect("get")
-        .expect("present");
+    let issue = IssueRepo::get_by_id(h.store.pool(), &hid).await.expect("get").expect("present");
     assert_eq!(issue.state, "open", "swarm mapping must be left untouched");
 }

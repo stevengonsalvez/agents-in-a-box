@@ -83,7 +83,10 @@ fn issue_show_round_trips_created_issue() {
     let (ok, out) = run(tmp.path(), &["hangar", "issue", "show", &id]);
     assert!(ok, "issue show should exit 0; out={out}");
     assert!(out.contains(&id), "show output missing id:\n{out}");
-    assert!(out.contains("Showable"), "show output missing title:\n{out}");
+    assert!(
+        out.contains("Showable"),
+        "show output missing title:\n{out}"
+    );
 }
 
 #[test]
@@ -95,8 +98,14 @@ fn issue_list_json_format_emits_array() {
     );
     let (ok, out) = run(tmp.path(), &["--format", "json", "hangar", "issue", "list"]);
     assert!(ok, "json issue list should exit 0; out={out}");
-    assert!(out.trim_start().starts_with('['), "expected JSON array:\n{out}");
-    assert!(out.contains("\"title\":\"Jsonable\""), "json missing title:\n{out}");
+    assert!(
+        out.trim_start().starts_with('['),
+        "expected JSON array:\n{out}"
+    );
+    assert!(
+        out.contains("\"title\":\"Jsonable\""),
+        "json missing title:\n{out}"
+    );
 }
 
 #[test]
@@ -127,7 +136,14 @@ fn reset_cli_wipes_acks() {
 
     let (ok, out) = run(
         tmp.path(),
-        &["hangar", "config", "warnings", "reset", "--provider", "claude"],
+        &[
+            "hangar",
+            "config",
+            "warnings",
+            "reset",
+            "--provider",
+            "claude",
+        ],
     );
     assert!(ok, "warnings reset should exit 0; out={out}");
     assert!(out.contains("re-warn"), "missing re-warn ack:\n{out}");
@@ -165,7 +181,10 @@ fn reset_cli_no_flag_wipes_all() {
 
     let raw = std::fs::read_to_string(&state).unwrap();
     assert!(!raw.contains("first_run"), "first_run not wiped:\n{raw}");
-    assert!(!raw.contains("provider:claude"), "provider ack not wiped:\n{raw}");
+    assert!(
+        !raw.contains("provider:claude"),
+        "provider ack not wiped:\n{raw}"
+    );
 }
 
 #[test]
@@ -173,7 +192,10 @@ fn task_list_on_empty_db_is_clean_noop() {
     let tmp = tempfile::tempdir().unwrap();
     let (ok, out) = run(tmp.path(), &["hangar", "task", "list"]);
     assert!(ok, "task list on empty db should exit 0; out={out}");
-    assert!(out.contains("no pending tasks"), "expected empty marker:\n{out}");
+    assert!(
+        out.contains("no pending tasks"),
+        "expected empty marker:\n{out}"
+    );
 }
 
 #[test]
@@ -189,17 +211,27 @@ fn issue_list_all_four_formats_are_distinct() {
     let text = run(tmp.path(), &["hangar", "issue", "list", "--format", "text"]).1;
     let json = run(tmp.path(), &["hangar", "issue", "list", "--format", "json"]).1;
     let csv = run(tmp.path(), &["hangar", "issue", "list", "--format", "csv"]).1;
-    let md = run(tmp.path(), &["hangar", "issue", "list", "--format", "markdown"]).1;
+    let md = run(
+        tmp.path(),
+        &["hangar", "issue", "list", "--format", "markdown"],
+    )
+    .1;
 
     // Every format must produce DISTINCT output (the regression that let
     // csv/markdown silently alias text through a `_ =>` catch-all).
     let all = [&text, &json, &csv, &md];
     for (a, b) in [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)] {
-        assert_ne!(all[a], all[b], "formats {a} and {b} produced identical output");
+        assert_ne!(
+            all[a], all[b],
+            "formats {a} and {b} produced identical output"
+        );
     }
 
     // Format-specific markers.
-    assert!(json.trim_start().starts_with('['), "json not an array:\n{json}");
+    assert!(
+        json.trim_start().starts_with('['),
+        "json not an array:\n{json}"
+    );
     assert!(
         csv.contains("id,state,title,description,created_at"),
         "csv header missing:\n{csv}"
@@ -208,6 +240,9 @@ fn issue_list_all_four_formats_are_distinct() {
         csv.contains("\"Wire, up payments\""),
         "csv must quote the comma-bearing title:\n{csv}"
     );
-    assert!(md.contains("| --- |"), "markdown separator row missing:\n{md}");
+    assert!(
+        md.contains("| --- |"),
+        "markdown separator row missing:\n{md}"
+    );
     assert!(md.contains("| state |"), "markdown header missing:\n{md}");
 }

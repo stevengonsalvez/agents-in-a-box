@@ -57,11 +57,11 @@ const UNUSED_TS: i64 = i64::MIN;
 #[derive(Debug, Clone, Copy)]
 struct Bucket {
     /// Epoch-second this bucket tallies ([`UNUSED_TS`] for an unused slot).
-    ts:        i64,
+    ts: i64,
     /// Successful (`done`) terminal tasks in this second.
     completed: u32,
     /// Unsuccessful (`failed` / `cancelled`) terminal tasks in this second.
-    failed:    u32,
+    failed: u32,
 }
 
 impl Bucket {
@@ -81,7 +81,7 @@ struct Ring {
     /// The per-second buckets; `head` indexes the most-recent second.
     buckets: [Bucket; THROUGHPUT_WINDOW],
     /// Index of the most-recent (current) second's bucket.
-    head:    usize,
+    head: usize,
     /// The epoch-second `buckets[head]` currently tallies; `None` until the
     /// first record (so the very first record seeds the head without rolling).
     head_ts: Option<i64>,
@@ -91,7 +91,7 @@ impl Ring {
     const fn new() -> Self {
         Self {
             buckets: [Bucket::empty(UNUSED_TS); THROUGHPUT_WINDOW],
-            head:    0,
+            head: 0,
             head_ts: None,
         }
     }
@@ -159,7 +159,7 @@ impl Ring {
 /// the `hangar/daemon_health` handler).
 #[derive(Debug)]
 pub struct HealthStats {
-    ring:           Mutex<Ring>,
+    ring: Mutex<Ring>,
     claim_capacity: u32,
 }
 

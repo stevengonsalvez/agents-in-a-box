@@ -56,14 +56,13 @@ async fn spawn_otlp_receiver() -> (String, mpsc::Receiver<Vec<u8>>) {
                         Ok(n) => {
                             buf.extend_from_slice(&chunk[..n]);
                             if header_end.is_none() {
-                                if let Some(pos) =
-                                    buf.windows(4).position(|w| w == b"\r\n\r\n")
-                                {
+                                if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
                                     header_end = Some(pos + 4);
                                     let head = String::from_utf8_lossy(&buf[..pos]);
                                     for line in head.lines() {
-                                        if let Some(v) =
-                                            line.to_ascii_lowercase().strip_prefix("content-length:")
+                                        if let Some(v) = line
+                                            .to_ascii_lowercase()
+                                            .strip_prefix("content-length:")
                                         {
                                             content_len = v.trim().parse().ok();
                                         }
@@ -81,9 +80,7 @@ async fn spawn_otlp_receiver() -> (String, mpsc::Receiver<Vec<u8>>) {
                     }
                 }
                 // OTLP/HTTP success response: empty `200 OK`.
-                let _ = sock
-                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
-                    .await;
+                let _ = sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
                 let _ = sock.flush().await;
             });
         }
@@ -105,7 +102,9 @@ async fn otlp_layer_exports_span_to_endpoint_when_set() {
 
         let mut opts = ainb_hangar_daemon::observability::ObservabilityOpts::new(log_dir);
         opts.stderr = false;
-        opts.otlp = Some(ainb_hangar_daemon::observability::OtlpOpts::new(base.clone()));
+        opts.otlp = Some(ainb_hangar_daemon::observability::OtlpOpts::new(
+            base.clone(),
+        ));
 
         let guard =
             ainb_hangar_daemon::observability::install(opts).expect("install subscriber + otlp");

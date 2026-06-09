@@ -7,8 +7,8 @@
 //! `CHECK` constraint at the SQL boundary.
 
 use ainb_hangar_core::actor::{ActorKind, ActorRef};
-use ainb_hangar_store::repo::issue::{Issue, IssueRepo, NewIssue};
 use ainb_hangar_store::Store;
+use ainb_hangar_store::repo::issue::{Issue, IssueRepo, NewIssue};
 
 /// Seed the single `workspace` row that every `issue` row references.
 async fn seed_workspace(store: &Store) -> String {
@@ -41,9 +41,7 @@ async fn insert_issue_with_member_assignee_roundtrips() {
         created_at: 1_700_000_000_000,
     };
 
-    IssueRepo::insert(store.pool(), &new)
-        .await
-        .expect("insert issue");
+    IssueRepo::insert(store.pool(), &new).await.expect("insert issue");
 
     let got: Issue = IssueRepo::get_by_id(store.pool(), "issue-1")
         .await
@@ -80,9 +78,7 @@ async fn insert_issue_with_agent_assignee_roundtrips() {
         created_at: 1_700_000_000_001,
     };
 
-    IssueRepo::insert(store.pool(), &new)
-        .await
-        .expect("insert issue");
+    IssueRepo::insert(store.pool(), &new).await.expect("insert issue");
 
     let got = IssueRepo::get_by_id(store.pool(), "issue-2")
         .await
@@ -122,9 +118,7 @@ async fn update_state_overwrites_lifecycle_state() {
         creator: ActorRef::new(ActorKind::Member, "user-1").expect("actor"),
         created_at: 1_700_000_000_000,
     };
-    IssueRepo::insert(store.pool(), &new)
-        .await
-        .expect("insert issue");
+    IssueRepo::insert(store.pool(), &new).await.expect("insert issue");
 
     IssueRepo::update_state(store.pool(), "issue-upd", "done")
         .await

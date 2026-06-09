@@ -115,18 +115,18 @@ impl AgentPickerState {
 /// Sort actors recent-then-alpha: pinned (`recent_rank.is_some()`) ahead of the
 /// body, ties broken by rank then case-insensitive display name.
 fn sort_recent_then_alpha(actors: &mut [ActorRow]) {
-    actors.sort_by(|a, b| {
-        match (a.recent_rank, b.recent_rank) {
-            (Some(ra), Some(rb)) => ra
-                .cmp(&rb)
-                .then_with(|| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase())),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => a
-                .display_name
+    actors.sort_by(|a, b| match (a.recent_rank, b.recent_rank) {
+        (Some(ra), Some(rb)) => ra.cmp(&rb).then_with(|| {
+            a.display_name
                 .to_lowercase()
-                .cmp(&b.display_name.to_lowercase()),
-        }
+                .cmp(&b.display_name.to_lowercase())
+        }),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => a
+            .display_name
+            .to_lowercase()
+            .cmp(&b.display_name.to_lowercase()),
     });
 }
 
@@ -162,10 +162,7 @@ pub struct AgentPickerReduction {
 
 /// Fold one [`AgentPickerEvent`] into `state`. Pure: no IO, no input mutation.
 #[must_use]
-pub fn reduce_agent_picker(
-    state: &AgentPickerState,
-    ev: AgentPickerEvent,
-) -> AgentPickerReduction {
+pub fn reduce_agent_picker(state: &AgentPickerState, ev: AgentPickerEvent) -> AgentPickerReduction {
     match ev {
         AgentPickerEvent::Esc => close(state),
         AgentPickerEvent::Key(c) => reduce_key(state, c),
@@ -286,7 +283,12 @@ fn unchanged(state: &AgentPickerState) -> AgentPickerReduction {
 /// The modal is ~60% wide / ~70% tall (clamped to fit the 80×24 floor), drawn
 /// with a rounded cornflower-blue border, a gold title, an optional `RECENT`
 /// section header, and one [`render_actor_row`] per visible actor.
-pub fn render_agent_picker(buf: &mut WireBuffer, area_w: u16, area_h: u16, state: &AgentPickerState) {
+pub fn render_agent_picker(
+    buf: &mut WireBuffer,
+    area_w: u16,
+    area_h: u16,
+    state: &AgentPickerState,
+) {
     let modal_w = (area_w * 6 / 10).clamp(40, area_w);
     let modal_h = (area_h * 7 / 10).clamp(8, area_h);
     let x0 = (area_w.saturating_sub(modal_w)) / 2;

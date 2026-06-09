@@ -39,8 +39,7 @@ fn task_status_serializes_to_snake_case() {
     ] {
         let json = serde_json::to_value(status).expect("serialize");
         assert_eq!(json, serde_json::Value::String(token.to_string()));
-        let back: TaskStatus =
-            serde_json::from_value(json).expect("deserialize");
+        let back: TaskStatus = serde_json::from_value(json).expect("deserialize");
         assert_eq!(back, status);
     }
 }

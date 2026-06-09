@@ -95,11 +95,7 @@ impl TextEditor {
     #[must_use]
     pub fn to_non_empty_string(&self) -> Option<String> {
         let s = self.to_string();
-        if s.is_empty() {
-            None
-        } else {
-            Some(s)
-        }
+        if s.is_empty() { None } else { Some(s) }
     }
 
     pub fn insert_char(&mut self, ch: char) {
@@ -4110,13 +4106,9 @@ impl AppState {
             ssh_sessions.len()
         );
         self.other_tmux_sessions = other_sessions;
-        let live_other_names: HashSet<String> = self
-            .other_tmux_sessions
-            .iter()
-            .map(|session| session.name.clone())
-            .collect();
-        self.selected_other_tmux_sessions
-            .retain(|name| live_other_names.contains(name));
+        let live_other_names: HashSet<String> =
+            self.other_tmux_sessions.iter().map(|session| session.name.clone()).collect();
+        self.selected_other_tmux_sessions.retain(|name| live_other_names.contains(name));
         self.ssh_sessions = ssh_sessions;
     }
 
@@ -5812,10 +5804,7 @@ impl AppState {
             Ok(p) => p,
             Err(e) => {
                 tracing::error!(?source, error = %e, "clone_remote_for_configure: parse_components failed");
-                self.add_error_notification(format!(
-                    "Could not parse repository: {}",
-                    e
-                ));
+                self.add_error_notification(format!("Could not parse repository: {}", e));
                 self.cancel_new_session();
                 return Err(());
             }
@@ -5831,10 +5820,7 @@ impl AppState {
             Ok(m) => m,
             Err(e) => {
                 tracing::error!(error = %e, "clone_remote_for_configure: RemoteRepoManager::new failed");
-                self.add_error_notification(format!(
-                    "Could not initialise repo cache: {}",
-                    e
-                ));
+                self.add_error_notification(format!("Could not initialise repo cache: {}", e));
                 self.cancel_new_session();
                 return Err(());
             }
@@ -5844,10 +5830,9 @@ impl AppState {
         let parsed_owned = parsed.clone();
         // git2 / git CLI are synchronous — push the clone onto a blocking
         // thread so the async runtime stays responsive.
-        let clone_result = tokio::task::spawn_blocking(move || {
-            manager.clone_repo(&source_owned, &parsed_owned)
-        })
-        .await;
+        let clone_result =
+            tokio::task::spawn_blocking(move || manager.clone_repo(&source_owned, &parsed_owned))
+                .await;
 
         let cache_path = match clone_result {
             Ok(Ok(path)) => path,
@@ -5862,10 +5847,7 @@ impl AppState {
             }
             Err(join_err) => {
                 tracing::error!(error = %join_err, "clone_remote_for_configure: blocking task panicked");
-                self.add_error_notification(format!(
-                    "Clone task panicked: {}",
-                    join_err
-                ));
+                self.add_error_notification(format!("Clone task panicked: {}", join_err));
                 self.cancel_new_session();
                 return Err(());
             }
@@ -5950,10 +5932,7 @@ impl AppState {
             }
             Err(e) => {
                 tracing::error!(error = %e, "launch_ssh_session_from_configure: tmux spawn failed");
-                self.add_error_notification(format!(
-                    "Failed to spawn tmux for SSH session: {}",
-                    e
-                ));
+                self.add_error_notification(format!("Failed to spawn tmux for SSH session: {}", e));
                 self.cancel_new_session();
             }
         }
