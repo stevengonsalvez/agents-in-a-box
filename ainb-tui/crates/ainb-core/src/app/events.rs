@@ -3462,9 +3462,7 @@ impl EventHandler {
                         state.pending_async_action = Some(AsyncAction::AttachWitr);
                     }
                     SidebarItem::Abtop => {
-                        tracing::info!(
-                            "Launching abtop (top-for-agents) from sidebar"
-                        );
+                        tracing::info!("Launching abtop (top-for-agents) from sidebar");
                         // Hand the terminal to abtop's own interactive TUI
                         // (see AppEvent::GoToAbtop) rather than a
                         // plugin-rendered screen. Offer the one-time

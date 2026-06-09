@@ -193,7 +193,9 @@ fn pressing_t_offers_setup_then_embeds_abtop() {
         let last = capture_pane(&session);
         kill_session(ABTOP_SESSION);
         kill_session(&session);
-        panic!("first-launch abtop setup consent dialog never rendered after `t`:\n---\n{last}\n---");
+        panic!(
+            "first-launch abtop setup consent dialog never rendered after `t`:\n---\n{last}\n---"
+        );
     }
     assert!(
         !has_session(ABTOP_SESSION),
@@ -213,7 +215,9 @@ fn pressing_t_offers_setup_then_embeds_abtop() {
     if !spawned {
         let last = capture_pane(&session);
         kill_session(&session);
-        panic!("choosing 'Just open abtop' did not spawn the `{ABTOP_SESSION}` tmux session; ainb pane:\n---\n{last}\n---");
+        panic!(
+            "choosing 'Just open abtop' did not spawn the `{ABTOP_SESSION}` tmux session; ainb pane:\n---\n{last}\n---"
+        );
     }
 
     // The ainb-abtop pane must show abtop's real monitor, not a shell or a

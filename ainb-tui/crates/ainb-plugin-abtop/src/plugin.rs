@@ -252,9 +252,9 @@ fn platform_install_command() -> &'static str {
     match std::env::consts::OS {
         "macos" => "brew install graykode/tap/abtop",
         "linux" => {
-            "curl -sSL https://github.com/stevengonsalvez/abtop/releases/latest/download/abtop-installer.sh | sh"
+            "curl -sSL https://github.com/graykode/abtop/releases/latest/download/abtop-installer.sh | sh"
         }
-        _ => "see https://github.com/stevengonsalvez/abtop",
+        _ => "see https://github.com/graykode/abtop",
     }
 }
 

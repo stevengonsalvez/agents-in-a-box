@@ -1088,11 +1088,7 @@ impl CliCommand for AbtopCommand {
             use tokio::process::Command as ChildCommand;
             // Inherit stdio (the default) so abtop gets the user's real TTY —
             // `abtop --once` only prints + exits cleanly against a terminal.
-            let status = ChildCommand::new("abtop")
-                .arg("--once")
-                .args(&forwarded)
-                .status()
-                .await;
+            let status = ChildCommand::new("abtop").arg("--once").args(&forwarded).status().await;
             match status {
                 Ok(s) if s.success() => Ok(()),
                 Ok(s) => Err(anyhow::anyhow!(
@@ -1104,9 +1100,9 @@ impl CliCommand for AbtopCommand {
                         "abtop is not installed or not on PATH.\n\n\
                          Install it:\n  \
                          macOS:  brew install graykode/tap/abtop\n  \
-                         Linux:  curl -sSL https://github.com/stevengonsalvez/abtop/releases/latest/download/abtop-installer.sh | sh\n  \
+                         Linux:  curl -sSL https://github.com/graykode/abtop/releases/latest/download/abtop-installer.sh | sh\n  \
                          any:    cargo install abtop\n  \
-                         docs:   https://github.com/stevengonsalvez/abtop"
+                         docs:   https://github.com/graykode/abtop"
                     );
                     Err(anyhow::anyhow!("abtop not found on PATH"))
                 }

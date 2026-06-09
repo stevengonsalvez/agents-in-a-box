@@ -62,8 +62,11 @@ impl PluginScreen {
 /// authoritative list lives in one place.
 ///
 /// Keep this list in sync with `tick_plugin_renders` in `app/state.rs`.
-pub const PLUGIN_SCREENS: &[(&str, &str)] =
-    &[(ids::ANALYTICS, "burndown"), (ids::WITR, "witr"), (ids::ABTOP, "abtop")];
+pub const PLUGIN_SCREENS: &[(&str, &str)] = &[
+    (ids::ANALYTICS, "burndown"),
+    (ids::WITR, "witr"),
+    (ids::ABTOP, "abtop"),
+];
 
 /// Resolve the plugin id that owns `screen_id`, if any.
 #[must_use]

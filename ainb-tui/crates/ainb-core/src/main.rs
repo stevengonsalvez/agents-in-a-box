@@ -861,10 +861,8 @@ async fn run_tui_loop(
                             }
                             Err(e) => {
                                 error!("[ACTION] tmux new-session for abtop errored: {}", e);
-                                app.state.add_error_notification(format!(
-                                    "Failed to open abtop: {}",
-                                    e
-                                ));
+                                app.state
+                                    .add_error_notification(format!("Failed to open abtop: {}", e));
                             }
                         }
                         app.state.ui_needs_refresh = true;
@@ -881,7 +879,11 @@ async fn run_tui_loop(
                         // screen. We don't attach — it completes on its own.
                         let setup = Command::new("tmux")
                             .args([
+                                // `-A`: attach-or-create so a stale/slow
+                                // setup pane doesn't fail a retry with a
+                                // misleading "is abtop installed?" error.
                                 "new-session",
+                                "-A",
                                 "-d",
                                 "-s",
                                 "ainb-abtop-setup",

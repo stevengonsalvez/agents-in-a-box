@@ -5537,10 +5537,7 @@ impl AppState {
             return false;
         };
         let already_done = home.join(".claude").join("abtop-rate-limits.json").exists();
-        let dismissed = home
-            .join(".agents-in-a-box")
-            .join("abtop-setup-dismissed")
-            .exists();
+        let dismissed = home.join(".agents-in-a-box").join("abtop-setup-dismissed").exists();
         !already_done && !dismissed
     }
 

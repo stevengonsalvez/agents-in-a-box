@@ -39,13 +39,17 @@ use ainb_plugin_sdk::{Cell, Coord, Viewport, WireBuffer};
 const BREW_INSTALL: &str = "brew install graykode/tap/abtop";
 
 /// Linux installer-script one-liner from the abtop release pipeline.
-const LINUX_INSTALLER: &str = "curl -sSL https://github.com/stevengonsalvez/abtop/releases/latest/download/abtop-installer.sh | sh";
+/// Points at the canonical `graykode/abtop` releases — the published
+/// distribution (crates.io crate + `graykode/tap` brew formula +
+/// release installer all live there); forks carry no release assets.
+const LINUX_INSTALLER: &str =
+    "curl -sSL https://github.com/graykode/abtop/releases/latest/download/abtop-installer.sh | sh";
 
 /// Universal fallback — works anywhere a Rust toolchain is present.
 const CARGO_INSTALL: &str = "cargo install abtop";
 
 /// Public repository URL. Shown verbatim as the canonical reference.
-const REPO_URL: &str = "https://github.com/stevengonsalvez/abtop";
+const REPO_URL: &str = "https://github.com/graykode/abtop";
 
 /// One install-command hint, resolved for the current platform.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -216,7 +220,7 @@ mod tests {
     fn install_hint_linux_via_private_helper() {
         let hint = install_hint("linux");
         assert!(hint.primary.contains("abtop-installer.sh"));
-        assert!(hint.primary.contains("github.com/stevengonsalvez/abtop"));
+        assert!(hint.primary.contains("github.com/graykode/abtop"));
         assert!(hint.platform_note.contains("Linux"));
     }
 
@@ -226,7 +230,7 @@ mod tests {
         // every supported CI runner.
         let hint = install_hint("freebsd");
         assert!(
-            hint.primary.contains("github.com/stevengonsalvez/abtop"),
+            hint.primary.contains("github.com/graykode/abtop"),
             "unsupported-platform primary should be the repo link, got {}",
             hint.primary,
         );
@@ -242,7 +246,7 @@ mod tests {
         // Universal cargo fallback is always present, regardless of OS.
         assert!(buffer_contains(&buf, "cargo install abtop"));
         // Repo URL is always present.
-        assert!(buffer_contains(&buf, "github.com/stevengonsalvez/abtop"));
+        assert!(buffer_contains(&buf, "github.com/graykode/abtop"));
         assert!(buffer_contains(&buf, "press r to re-check"));
         assert_eq!(buf.width, 100);
         assert_eq!(buf.height, 20);
