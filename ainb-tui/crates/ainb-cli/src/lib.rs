@@ -306,6 +306,21 @@ pub struct UsageArgs {
     pub verbose: bool,
 }
 
+/// Which catalog `ainb skill browse` targets. A `ValueEnum` (not a free
+/// string) so clap rejects a typo at parse time instead of silently routing
+/// to skills.sh.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CatalogChoice {
+    /// The public skills.sh catalog (the default). Aliased `skills.sh`.
+    #[default]
+    #[value(name = "skills", alias = "skills.sh")]
+    Skills,
+    /// The toolkit's curated shelf — owned skills + vetted external — from the
+    /// pinned GitHub release index. Aliased `curated`.
+    #[value(name = "ainb", alias = "curated")]
+    Ainb,
+}
+
 #[derive(Args, Debug)]
 pub struct BrowseArgs {
     /// Catalog search query (matched against unit names / descriptions).
@@ -314,10 +329,9 @@ pub struct BrowseArgs {
     pub query: String,
 
     /// Which catalog to browse: `skills` (skills.sh, the default) or `ainb`
-    /// (the toolkit's curated shelf — owned skills + vetted external skills,
-    /// from the pinned GitHub release index).
-    #[arg(long, default_value = "skills")]
-    pub catalog: String,
+    /// (the toolkit's curated shelf).
+    #[arg(long, value_enum, default_value_t = CatalogChoice::Skills)]
+    pub catalog: CatalogChoice,
 
     /// Emit machine-readable JSON (`[{name, repo, stars, install_uri,
     /// description}, …]`) instead of the default ranked table.
@@ -327,10 +341,8 @@ pub struct BrowseArgs {
 
 impl BrowseArgs {
     /// True when this targets the `ainb` curated catalog (vs skills.sh).
-    /// Accepts `ainb` / `curated` case-insensitively.
     pub fn is_curated(&self) -> bool {
-        let c = self.catalog.trim();
-        c.eq_ignore_ascii_case("ainb") || c.eq_ignore_ascii_case("curated")
+        matches!(self.catalog, CatalogChoice::Ainb)
     }
 }
 

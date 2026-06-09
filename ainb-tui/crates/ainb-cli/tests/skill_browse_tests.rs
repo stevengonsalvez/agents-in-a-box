@@ -49,7 +49,7 @@ fn cli_browse_prints_ranked_table() {
         home.path(),
         BrowseArgs {
             query: "diagram".to_string(),
-            catalog: "skills".to_string(),
+            catalog: ainb_cli::CatalogChoice::Skills,
             json: false,
         },
         &backend,
@@ -87,7 +87,7 @@ fn cli_browse_json_shape() {
         home.path(),
         BrowseArgs {
             query: "anything".to_string(),
-            catalog: "skills".to_string(),
+            catalog: ainb_cli::CatalogChoice::Skills,
             json: true,
         },
         &backend,
@@ -113,7 +113,7 @@ fn cli_browse_empty_query_message() {
         home.path(),
         BrowseArgs {
             query: "   ".to_string(),
-            catalog: "skills".to_string(),
+            catalog: ainb_cli::CatalogChoice::Skills,
             json: false,
         },
         &backend,
@@ -171,7 +171,7 @@ fn cli_browse_curated_blank_lists_full_shelf() {
         home.path(),
         BrowseArgs {
             query: "   ".to_string(), // blank → full shelf for the curated catalog
-            catalog: "ainb".to_string(),
+            catalog: ainb_cli::CatalogChoice::Ainb,
             json: false,
         },
         &backend,
@@ -207,7 +207,7 @@ fn cli_browse_surfaces_backend_error() {
         home.path(),
         BrowseArgs {
             query: "q".to_string(),
-            catalog: "skills".to_string(),
+            catalog: ainb_cli::CatalogChoice::Skills,
             json: false,
         },
         &backend,
