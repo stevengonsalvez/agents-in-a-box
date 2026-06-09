@@ -20,6 +20,7 @@ export const collections = {
         '!hangar/build-plan.md',
         '!hangar/README.md',
         '!hangar/tui-keybindings.md',
+        '!hangar/verify-hangar-goal.md',
       ],
     }),
     schema: docsSchema(),
