@@ -12,6 +12,7 @@ members = [
     "crates/ainb-plugin-types-sessions",
     "crates/ainb-plugin-cts-v2",
     "crates/ainb-plugin-witr",
+    "crates/ainb-plugin-abtop",
     "xtask",
 ]
 default-members = ["crates/ainb-core"]

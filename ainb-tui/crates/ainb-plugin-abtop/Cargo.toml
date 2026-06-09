@@ -1,0 +1,43 @@
+[package]
+name = "ainb-plugin-abtop"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "top-for-agents — wraps the external abtop TUI as a native ainb plugin (ABI v2)"
+
+# cargo-machete matches the package name, but the SDK's [lib] name is
+# `ainb_plugin_sdk`; the rename hides real usage.
+[package.metadata.cargo-machete]
+ignored = ["ainb-plugin-sdk-rust"]
+
+[lib]
+name = "ainb_plugin_abtop"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ainb-plugin-abtop"
+path = "src/main.rs"
+
+[dependencies]
+ainb-plugin-sdk-rust = { path = "../ainb-plugin-sdk-rust" }
+
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+async-trait = "0.1"
+
+# Binary discovery — present/absent only (no version gate).
+which = { workspace = true }
+
+# CLI surface — `ainb abtop` subcommand parsing.
+clap = { workspace = true }
+
+[dev-dependencies]
+toml = { workspace = true }
+ainb-plugin-protocol = { path = "../ainb-plugin-protocol" }
+# Stub-abtop binaries staged in tempdirs by detect_subprocess + cli_dispatch.
+tempfile = { workspace = true }
