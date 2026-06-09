@@ -21,6 +21,7 @@ export const collections = {
         '!hangar/README.md',
         '!hangar/tui-keybindings.md',
         '!hangar/verify-hangar-goal.md',
+        '!hangar/execute-hangar-parity-goal.md',
       ],
     }),
     schema: docsSchema(),
